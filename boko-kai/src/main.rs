@@ -107,6 +107,29 @@ enum ValidateCheck {
         #[arg(long, default_value_t = 20)]
         details: usize,
     },
+
+    /// Verify visible text from spine XHTML is preserved in KFX content
+    Text {
+        epub: String,
+        kfx: String,
+        #[arg(long, default_value_t = 20)]
+        details: usize,
+    },
+
+    /// Report which CSS properties used by the EPUB boko-kai's parser drops
+    Style {
+        epub: String,
+        #[arg(long, default_value_t = 20)]
+        details: usize,
+    },
+
+    /// Run all available validations against the conversion
+    All {
+        epub: String,
+        kfx: String,
+        #[arg(long, default_value_t = 10)]
+        details: usize,
+    },
 }
 
 fn main() -> ExitCode {
@@ -151,6 +174,9 @@ fn main() -> ExitCode {
         ),
         Command::Validate { check } => match check {
             ValidateCheck::Ruby { epub, kfx, details } => validate_ruby(&epub, &kfx, details),
+            ValidateCheck::Text { epub, kfx, details } => validate_text(&epub, &kfx, details),
+            ValidateCheck::Style { epub, details } => validate_style(&epub, details),
+            ValidateCheck::All { epub, kfx, details } => validate_all(&epub, &kfx, details),
         },
     };
 
@@ -268,6 +294,96 @@ fn validate_ruby(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), 
             report.missing.iter().map(|(_, n)| n).sum::<usize>(),
             report.extra.iter().map(|(_, n)| n).sum::<usize>()
         ))
+    }
+}
+
+fn validate_text(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
+    let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
+    let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
+
+    let report = boko::validate::text::validate(&epub_bytes, &kfx_bytes)?;
+    report.print_summary();
+    if details > 0 {
+        report.print_details(details);
+    }
+    if report.is_clean() {
+        Ok(())
+    } else {
+        let total: usize = report.missing.iter().map(|(_, n)| n).sum();
+        Err(format!("{} characters missing from KFX", total))
+    }
+}
+
+fn validate_style(epub_path: &str, details: usize) -> Result<(), String> {
+    let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
+    let report = boko::validate::style::validate(&epub_bytes)?;
+    report.print_summary();
+    if details > 0 {
+        report.print_details(details);
+    }
+    if report.is_clean() {
+        Ok(())
+    } else {
+        Err(format!("{} CSS declarations dropped", report.dropped))
+    }
+}
+
+fn validate_all(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
+    let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
+    let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
+
+    let mut all_clean = true;
+
+    println!("=== Ruby ===");
+    let ruby = boko::validate::ruby::validate(&epub_bytes, &kfx_bytes)?;
+    ruby.print_summary();
+    if details > 0 {
+        ruby.print_details(details);
+    }
+    if !ruby.is_clean() {
+        all_clean = false;
+    }
+
+    println!("\n=== Text ===");
+    let text = boko::validate::text::validate(&epub_bytes, &kfx_bytes)?;
+    text.print_summary();
+    if details > 0 {
+        text.print_details(details);
+    }
+    if !text.is_clean() {
+        all_clean = false;
+    }
+
+    println!("\n=== Style ===");
+    let style = boko::validate::style::validate(&epub_bytes)?;
+    style.print_summary();
+    if details > 0 {
+        style.print_details(details);
+    }
+    if !style.is_clean() {
+        all_clean = false;
+    }
+
+    println!("\n=== Scorecard ===");
+    let ruby_pct = if ruby.epub_pairs.is_empty() {
+        100.0
+    } else {
+        ruby.matched as f64 * 100.0 / ruby.epub_pairs.len() as f64
+    };
+    println!("  Ruby pairs:   {:.2}% preserved", ruby_pct);
+    println!(
+        "  Text chars:   {:.4}% preserved",
+        text.preservation_ratio() * 100.0
+    );
+    println!(
+        "  CSS props:    {:.2}% covered",
+        style.coverage_ratio() * 100.0
+    );
+
+    if all_clean {
+        Ok(())
+    } else {
+        Err("one or more checks failed".into())
     }
 }
 

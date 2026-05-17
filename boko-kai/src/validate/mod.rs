@@ -10,3 +10,5 @@
 //! - a comparison function producing a `Report`.
 
 pub mod ruby;
+pub mod style;
+pub mod text;
