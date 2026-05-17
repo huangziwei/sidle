@@ -1,0 +1,81 @@
+[package]
+name = "boko-kai"
+version = "0.3.0+kai.1"
+edition = "2024"
+description = "Private modified (kai 改) fork of boko with extra CJK typography support; consumed only by sidle"
+license = "GPL-3.0-or-later"
+publish = false
+readme = "README.md"
+
+# Library import name is kept as `boko` so dependents continue to
+# `use boko::...` without churn.
+[lib]
+name = "boko"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:serde", "dep:serde_json"]
+wasm = ["wasm-bindgen", "console_error_panic_hook"]
+
+[dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+quick-xml = "0.39"
+zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
+percent-encoding = "2.3"
+
+# High-performance byte operations (SIMD-accelerated)
+memchr = "2.7"
+bstr = { version = "1.11", default-features = false, features = ["alloc"] }
+
+html5ever = "0.39"
+cssparser = "0.36"
+selectors = "0.35"
+precomputed-hash = "0.1"
+
+# Encoding detection and conversion (UTF-8, CP1252, etc.)
+encoding_rs = "0.8"
+
+# Base64 encoding for KFX raw media
+base64 = "0.22"
+
+# Ion binary format parsing for KFX dump tool
+ion-rs = { version = "1.0.0-rc.11", features = ["experimental-reader-writer"] }
+
+# SHA1 hashing for KFX content hashes (minimal, WASM-compatible)
+sha1_smol = { version = "1.0", features = ["std"] }
+
+# CLI argument parsing (only for binary)
+clap = { version = "4", features = ["derive"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+xml5ever = "0.39.0"
+
+# Native: use fast zlib-rs
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+
+# WASM: use pure-Rust backend
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+js-sys = "0.3"
+
+[dev-dependencies]
+tempfile = "3.14"
+proptest = "1.6"
+criterion = "0.8"
+
+[[bin]]
+name = "boko"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "kfx-dump"
+path = "src/bin/kfx-dump.rs"
+required-features = ["cli"]
+
+[[bench]]
+name = "conversion"
+harness = false

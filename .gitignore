@@ -1,0 +1,8 @@
+.claude
+.DS_Store
+
+ref/
+books/
+bench
+scripts/
+boko-kai/target/
