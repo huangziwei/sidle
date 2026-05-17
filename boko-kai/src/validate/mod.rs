@@ -11,4 +11,5 @@
 
 pub mod ruby;
 pub mod style;
+pub mod tags;
 pub mod text;

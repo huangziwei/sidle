@@ -7,8 +7,20 @@ use html5ever::LocalName;
 use crate::model::Role;
 
 /// Map an HTML element name to its semantic role.
+///
+/// Unknown element names fall through to `Role::Container` — content still
+/// flows but no semantics are preserved. Use [`element_to_role_known`] to
+/// distinguish explicit handling from the fallthrough (the tag coverage
+/// validator relies on this).
 pub fn element_to_role(local_name: &LocalName) -> Role {
-    match local_name.as_ref() {
+    element_to_role_known(local_name).unwrap_or(Role::Container)
+}
+
+/// Like `element_to_role` but returns `None` for elements not explicitly
+/// handled — the validator uses this to surface "unknown element seen in
+/// source, falling back to generic Container."
+pub fn element_to_role_known(local_name: &LocalName) -> Option<Role> {
+    Some(match local_name.as_ref() {
         // Block containers
         "div" | "section" | "article" | "nav" | "header" | "footer" | "main" | "address"
         | "details" | "summary" | "hgroup" => Role::Container,
@@ -89,7 +101,31 @@ pub fn element_to_role(local_name: &LocalName) -> Role {
 
         "label" | "legend" | "output" | "data" | "bdi" | "bdo" | "wbr" => Role::Inline,
 
-        // Default to container for unknown block elements
-        _ => Role::Container,
-    }
+        // Document roots. `transform()` treats <html>/<body> specially and
+        // attaches their children to the chapter root, so mapping them to
+        // Container here is mainly for the tag-coverage validator's sake —
+        // it acknowledges we know about these elements rather than letting
+        // them fall through to the unknown-element bucket.
+        "html" | "body" => Role::Container,
+
+        // <head> and metadata children — content here is not user-visible
+        // (title bar, stylesheet links, meta tags, etc.). Currently flows
+        // through as Container; ideally the transform would skip the entire
+        // subtree, but this mapping at least surfaces honest intent.
+        "head" | "title" | "meta" | "link" | "style" | "script" | "noscript" => Role::Container,
+
+        // SVG/MathML/embedded media — boko has no specialised handling for
+        // these yet, so they flow as generic Containers and only their text
+        // leaves (if any) survive. Listed explicitly so the validator
+        // distinguishes "known-untreated" from "unknown".
+        "svg" | "image" | "math" | "audio" | "video" | "source" | "track"
+        | "object" | "embed" | "iframe" | "canvas" => Role::Container,
+
+        // Form elements — not relevant for ebooks but recognised.
+        "form" | "input" | "button" | "select" | "option" | "optgroup" | "textarea"
+        | "fieldset" | "datalist" | "progress" | "meter" => Role::Container,
+
+        // Not explicitly handled — caller decides the fallback.
+        _ => return None,
+    })
 }

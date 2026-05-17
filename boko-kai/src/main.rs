@@ -123,6 +123,13 @@ enum ValidateCheck {
         details: usize,
     },
 
+    /// Report which HTML tag names get a semantic role vs fall through to generic Container
+    Tags {
+        epub: String,
+        #[arg(long, default_value_t = 20)]
+        details: usize,
+    },
+
     /// Run all available validations against the conversion
     All {
         epub: String,
@@ -176,6 +183,7 @@ fn main() -> ExitCode {
             ValidateCheck::Ruby { epub, kfx, details } => validate_ruby(&epub, &kfx, details),
             ValidateCheck::Text { epub, kfx, details } => validate_text(&epub, &kfx, details),
             ValidateCheck::Style { epub, details } => validate_style(&epub, details),
+            ValidateCheck::Tags { epub, details } => validate_tags(&epub, details),
             ValidateCheck::All { epub, kfx, details } => validate_all(&epub, &kfx, details),
         },
     };
@@ -328,6 +336,25 @@ fn validate_style(epub_path: &str, details: usize) -> Result<(), String> {
     }
 }
 
+fn validate_tags(epub_path: &str, details: usize) -> Result<(), String> {
+    let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
+    let report = boko::validate::tags::validate(&epub_bytes)?;
+    report.print_summary();
+    if details > 0 {
+        report.print_details(details);
+    }
+    if report.is_clean() {
+        Ok(())
+    } else {
+        let fallback = report
+            .by_bucket
+            .get(&boko::validate::tags::Bucket::Fallback)
+            .copied()
+            .unwrap_or(0);
+        Err(format!("{} elements with no role_map entry", fallback))
+    }
+}
+
 fn validate_all(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
@@ -364,6 +391,16 @@ fn validate_all(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), S
         all_clean = false;
     }
 
+    println!("\n=== Tags ===");
+    let tags = boko::validate::tags::validate(&epub_bytes)?;
+    tags.print_summary();
+    if details > 0 {
+        tags.print_details(details);
+    }
+    if !tags.is_clean() {
+        all_clean = false;
+    }
+
     println!("\n=== Scorecard ===");
     let ruby_pct = if ruby.epub_pairs.is_empty() {
         100.0
@@ -378,6 +415,10 @@ fn validate_all(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), S
     println!(
         "  CSS props:    {:.2}% covered",
         style.coverage_ratio() * 100.0
+    );
+    println!(
+        "  HTML tags:    {:.2}% semantic",
+        tags.semantic_ratio() * 100.0
     );
 
     if all_clean {
