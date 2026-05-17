@@ -45,6 +45,7 @@ pub mod style;
 pub mod epub;
 pub mod kfx;
 pub mod mobi;
+pub mod validate;
 
 pub(crate) mod util;
 

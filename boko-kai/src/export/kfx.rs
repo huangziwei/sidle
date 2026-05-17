@@ -8,7 +8,7 @@ use std::io::{self, Seek, Write};
 
 use crate::export::Exporter;
 use crate::import::ChapterId;
-use crate::kfx::auxiliary::build_auxiliary_data_fragment;
+use crate::kfx::auxiliary::{build_auxiliary_data_fragment, build_ruby_content_fragments};
 use crate::kfx::context::{ExportContext, LandmarkTarget};
 use crate::kfx::cover::{
     COVER_SECTION_NAME, build_cover_section, is_image_only_chapter, needs_standalone_cover,
@@ -354,6 +354,11 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
     // This includes the default style plus any unique styles found in the content
     let style_fragments = build_style_fragments(&mut ctx);
     fragments.extend(style_fragments);
+
+    // 2g-2. Ruby content fragments ($756) - grouped annotation tables referenced
+    // by storyline style_events via ruby_name/ruby_id pairs.
+    let ruby_fragments = build_ruby_content_fragments(&mut ctx);
+    fragments.extend(ruby_fragments);
 
     // 2h. Anchor fragments - must come after sections/storylines/content/styles
     // This matches the reference KFX entity ordering

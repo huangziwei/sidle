@@ -1,4 +1,5 @@
 # Sidle
 
-WIP. The plan is to make a KUAL app to sideload KFX to a jailbroken Kindle Oasis 2 (5.16.2.1.1) with a web server.
+WIP. The idea is to have a KUAL app on a jailbroken kindle, that can see a locally hosted EPUB book web server, click and download a KFX to the kindle directly.
+
 

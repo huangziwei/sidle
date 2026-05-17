@@ -567,6 +567,16 @@ impl<'a> RenderContext<'a> {
             Role::Container | Role::Root | Role::TableHead | Role::TableBody => {
                 self.walk_children(id);
             }
+
+            Role::Ruby => {
+                self.walk_children(id);
+            }
+
+            Role::RubyText => {
+                self.output.push('(');
+                self.walk_children(id);
+                self.output.push(')');
+            }
         }
     }
 

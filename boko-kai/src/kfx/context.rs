@@ -663,6 +663,69 @@ pub struct ExportContext {
     /// Maps section_name → set of resource short names (e.g., "e6") referenced by that section.
     /// Used to build the container_entity_map dependency graph so Kindle can locate images.
     pub section_resource_deps: BTreeMap<String, BTreeSet<String>>,
+
+    /// Ruby annotation registry. Each <ruby><rt>annotation</rt></ruby> base text
+    /// gets a (ruby_name, ruby_id) pair attached as a style_event. After all
+    /// storylines emit, this registry is drained to produce ruby_content
+    /// fragments (one per chunk of N entries).
+    pub ruby_registry: RubyContentRegistry,
+}
+
+/// Registry mapping ruby annotation strings to (ruby_name, ruby_id) pairs.
+///
+/// Calibre-produced KFX groups annotations into fragments of ~200 entries.
+/// We mirror that: each fragment is one Ion entity with `content_list` of
+/// annotation structs, and base text style_events reference them via
+/// `ruby_name` (fragment kfx_id) + `ruby_id` (1-indexed within the fragment).
+#[derive(Debug, Clone, Default)]
+pub struct RubyContentRegistry {
+    /// Annotations in the order they were registered.
+    pub annotations: Vec<String>,
+    /// Dedup index: annotation text → position in `annotations`.
+    by_text: HashMap<String, usize>,
+}
+
+impl RubyContentRegistry {
+    /// Max content_list entries per ruby_content fragment. Matches calibre's
+    /// observed grouping (10 fragments × ~220 entries for the 夏 reference).
+    pub const ENTRIES_PER_FRAGMENT: usize = 250;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register an annotation string; returns (fragment_index, ruby_id).
+    /// ruby_id is 1-indexed within the fragment.
+    pub fn register(&mut self, annotation: &str) -> (usize, u64) {
+        let idx = if let Some(&existing) = self.by_text.get(annotation) {
+            existing
+        } else {
+            let new_idx = self.annotations.len();
+            self.annotations.push(annotation.to_string());
+            self.by_text.insert(annotation.to_string(), new_idx);
+            new_idx
+        };
+        let frag_idx = idx / Self::ENTRIES_PER_FRAGMENT;
+        let ruby_id = (idx % Self::ENTRIES_PER_FRAGMENT) as u64 + 1;
+        (frag_idx, ruby_id)
+    }
+
+    /// Total fragment count needed to hold all registered annotations.
+    pub fn fragment_count(&self) -> usize {
+        if self.annotations.is_empty() {
+            0
+        } else {
+            (self.annotations.len() + Self::ENTRIES_PER_FRAGMENT - 1)
+                / Self::ENTRIES_PER_FRAGMENT
+        }
+    }
+
+    /// Annotation entries for the given fragment.
+    pub fn fragment_entries(&self, frag_idx: usize) -> &[String] {
+        let start = frag_idx * Self::ENTRIES_PER_FRAGMENT;
+        let end = (start + Self::ENTRIES_PER_FRAGMENT).min(self.annotations.len());
+        &self.annotations[start..end]
+    }
 }
 
 /// Position of a heading element for navigation.
@@ -728,6 +791,7 @@ impl ExportContext {
             content_ids_by_chapter: HashMap::new(),
             content_id_lengths: HashMap::new(),
             section_resource_deps: BTreeMap::new(),
+            ruby_registry: RubyContentRegistry::new(),
         }
     }
 

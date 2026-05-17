@@ -71,10 +71,23 @@ pub fn element_to_role(local_name: &LocalName) -> Role {
         "tr" => Role::TableRow,
         "td" | "th" => Role::TableCell,
 
-        // Other inline containers
-        "label" | "legend" | "output" | "data" | "ruby" | "rt" | "rp" | "bdi" | "bdo" | "wbr" => {
-            Role::Inline
-        }
+        // Ruby annotations (furigana). <ruby> wraps base + annotation;
+        // <rt> is the annotation text; <rb> is the explicit base. The Role::Ruby
+        // arm in kfx/storyline.rs flatten pairs siblings up so compound rubies
+        // like <ruby><rb>漢</rb><rt>かん</rt><rb>字</rb><rt>じ</rt></ruby>
+        // emit one annotation per base. <rb> must be inline (not Container)
+        // so it doesn't break the inline flow inside a ruby.
+        "ruby" => Role::Ruby,
+        "rt" => Role::RubyText,
+        "rb" => Role::Inline,
+        // <rp> contains fallback parentheses for renderers that don't support
+        // ruby — we always render ruby, so they should be skipped. None of
+        // the reference EPUBs use <rp>; if encountered as Role::Inline its
+        // text leaks into base inline content. TODO: dedicated skip role
+        // when an actual <rp>-using book shows up.
+        "rp" => Role::Inline,
+
+        "label" | "legend" | "output" | "data" | "bdi" | "bdo" | "wbr" => Role::Inline,
 
         // Default to container for unknown block elements
         _ => Role::Container,

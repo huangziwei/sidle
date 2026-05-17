@@ -248,6 +248,27 @@ bdi {
    Ruby Annotations (CJK)
    ========================================================================== */
 
+/* Real KFX ruby_content emission is pending a usable reference (.kpf SQLite
+   decoding is non-trivial outside Calibre's Python environment). For now we
+   apply a minimal-fallback UA style so <rt> annotations remain visible on
+   device as a smaller-font inline adjacent to the base text. Furigana
+   readability is preserved; positioning is approximate. */
+
+ruby {
+  display: inline;
+}
+
+rt {
+  display: inline;
+  font-size: 0.6em;
+  vertical-align: super;
+  line-height: 1;
+}
+
+rp {
+  display: none;
+}
+
 /* -webkit-ruby-position: over | before */
 /* Maps to: ruby_position_horizontal: top, ruby_position_vertical: right */
 

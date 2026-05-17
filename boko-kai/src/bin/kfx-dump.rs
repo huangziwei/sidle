@@ -101,9 +101,12 @@ fn main() -> IonResult<()> {
                 "positions" => report_positions(&data)?,
                 "content" => report_content(&data)?,
                 "dependencies" => report_dependencies(&data)?,
+                "ruby" | "ruby_content" => report_ruby_content(&data)?,
+                "raw_storylines" => report_raw_storylines(&data)?,
+                "ruby_pairs" => report_ruby_pairs(&data)?,
                 other => {
                     eprintln!(
-                        "Unknown field report: {}. Supported: anchors, container, content, dependencies, document, features, locations, metadata, navigation, positions, reading_orders, resources, sections, storylines",
+                        "Unknown field report: {}. Supported: anchors, container, content, dependencies, document, features, locations, metadata, navigation, positions, reading_orders, resources, ruby, sections, storylines",
                         other
                     );
                     std::process::exit(1);
@@ -5436,4 +5439,690 @@ fn report_dependencies(data: &[u8]) -> IonResult<()> {
 
     eprintln!("No container_entity_map found");
     Ok(())
+}
+
+/// Deep Ion value formatter for ruby_content inspection.
+///
+/// Unlike format_ion_value_simple, this does NOT truncate lists or structs —
+/// the whole point is to see the full shape of the fragment.
+fn format_ion_value_full<F>(value: &boko::kfx::ion::IonValue, indent: usize, resolve_sym: &F) -> String
+where
+    F: Fn(u64) -> String,
+{
+    use boko::kfx::ion::IonValue;
+    let pad = "  ".repeat(indent);
+    match value {
+        IonValue::Null => "null".to_string(),
+        IonValue::Bool(b) => b.to_string(),
+        IonValue::Int(i) => i.to_string(),
+        IonValue::Float(f) => format!("{}", f),
+        IonValue::Decimal(d) => d.clone(),
+        IonValue::String(s) => format!("\"{}\"", s),
+        IonValue::Symbol(s) => format!("'{}'", resolve_sym(*s)),
+        IonValue::Blob(b) => format!("<blob {} bytes>", b.len()),
+        IonValue::List(items) => {
+            if items.is_empty() {
+                return "[]".to_string();
+            }
+            let inner_pad = "  ".repeat(indent + 1);
+            let parts: Vec<String> = items
+                .iter()
+                .map(|v| format!("{}{}", inner_pad, format_ion_value_full(v, indent + 1, resolve_sym)))
+                .collect();
+            format!("[\n{}\n{}]", parts.join(",\n"), pad)
+        }
+        IonValue::Struct(fields) => {
+            if fields.is_empty() {
+                return "{}".to_string();
+            }
+            let inner_pad = "  ".repeat(indent + 1);
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|(k, v)| {
+                    format!(
+                        "{}{}: {}",
+                        inner_pad,
+                        resolve_sym(*k),
+                        format_ion_value_full(v, indent + 1, resolve_sym)
+                    )
+                })
+                .collect();
+            format!("{{\n{}\n{}}}", parts.join(",\n"), pad)
+        }
+        IonValue::Annotated(annotations, inner) => {
+            let ann_strs: Vec<String> = annotations.iter().map(|a| resolve_sym(*a)).collect();
+            format!(
+                "{}::{}",
+                ann_strs.join("::"),
+                format_ion_value_full(inner, indent, resolve_sym)
+            )
+        }
+    }
+}
+
+/// Report ruby_content fragments from a KFX container.
+///
+/// Inspects all entities of type ruby_content (symbol 756) and prints their
+/// full Ion structure. Used to reverse-engineer the on-the-wire shape so
+/// boko-kai can emit matching ruby_content fragments.
+fn report_ruby_content(data: &[u8]) -> IonResult<()> {
+    use boko::kfx::ion::IonParser;
+    use boko::kfx::symbols::KfxSymbol;
+
+    if data.len() < 18 || &data[0..4] != b"CONT" {
+        eprintln!("Not a KFX container");
+        return Ok(());
+    }
+
+    let Some(header_len) = read_u32_le(data, 6).map(|v| v as usize) else {
+        eprintln!("Failed to read header length");
+        return Ok(());
+    };
+    let Some(container_info_offset) = read_u32_le(data, 10).map(|v| v as usize) else {
+        eprintln!("Failed to read container info offset");
+        return Ok(());
+    };
+    let Some(container_info_length) = read_u32_le(data, 14).map(|v| v as usize) else {
+        eprintln!("Failed to read container info length");
+        return Ok(());
+    };
+
+    if container_info_offset + container_info_length > data.len() {
+        eprintln!("Container info out of bounds");
+        return Ok(());
+    }
+
+    let container_info_data =
+        &data[container_info_offset..container_info_offset + container_info_length];
+
+    let Some((index_offset, index_length)) = parse_container_info_for_index(container_info_data)
+    else {
+        eprintln!("Could not find index table");
+        return Ok(());
+    };
+
+    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+        parse_container_info_for_doc_symbols(container_info_data)
+    {
+        if doc_sym_offset + doc_sym_length <= data.len() {
+            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
+    let entry_size = 24;
+    let num_entries = index_length / entry_size;
+    let ruby_content_type = KfxSymbol::RubyContent as u32;
+
+    let resolve_sym = |id: u64| -> String {
+        if id < base_symbol_count {
+            KFX_SYMBOL_TABLE
+                .get(id as usize)
+                .copied()
+                .unwrap_or("?")
+                .to_string()
+        } else {
+            let ext_idx = (id as usize) - (base_symbol_count as usize);
+            extended_symbols
+                .get(ext_idx)
+                .cloned()
+                .unwrap_or_else(|| "?".to_string())
+        }
+    };
+
+    println!("=== ruby_content fragments ===\n");
+
+    let mut count = 0;
+    for i in 0..num_entries {
+        let entry_offset = index_offset + i * entry_size;
+        if entry_offset + entry_size > data.len() {
+            break;
+        }
+
+        let Some(id_idnum) = read_u32_le(data, entry_offset) else {
+            continue;
+        };
+        let Some(type_idnum) = read_u32_le(data, entry_offset + 4) else {
+            continue;
+        };
+        if type_idnum != ruby_content_type {
+            continue;
+        }
+
+        let Some(entity_offset) = read_u64_le(data, entry_offset + 8).map(|v| v as usize) else {
+            continue;
+        };
+        let Some(entity_len) = read_u32_le(data, entry_offset + 16).map(|v| v as usize) else {
+            continue;
+        };
+
+        let abs_offset = header_len + entity_offset;
+        if abs_offset + entity_len > data.len() {
+            continue;
+        }
+
+        let entity_data = &data[abs_offset..abs_offset + entity_len];
+        if entity_data.len() < 10 || &entity_data[0..4] != b"ENTY" {
+            continue;
+        }
+
+        let Some(entity_header_len) = read_u32_le(entity_data, 6).map(|v| v as usize) else {
+            continue;
+        };
+        if entity_header_len >= entity_data.len() {
+            continue;
+        }
+
+        let ion_data = &entity_data[entity_header_len..];
+        let mut parser = IonParser::new(ion_data);
+        let value = match parser.parse() {
+            Ok(v) => v,
+            Err(e) => {
+                println!("--- entry #{} id={} parse error: {:?}\n", count, id_idnum, e);
+                continue;
+            }
+        };
+
+        count += 1;
+        let id_name = resolve_sym(id_idnum as u64);
+        println!("--- ruby_content #{} (id={} '{}') ---", count, id_idnum, id_name);
+        println!("{}", format_ion_value_full(&value, 0, &resolve_sym));
+        println!();
+    }
+
+    println!("Total ruby_content fragments: {}", count);
+    Ok(())
+}
+
+/// Report raw Ion for every storyline fragment.
+///
+/// Used to inspect how ruby_id references appear in actual KP3/calibre output
+/// so boko-kai can emit matching style_events.
+fn report_raw_storylines(data: &[u8]) -> IonResult<()> {
+    use boko::kfx::ion::IonParser;
+    use boko::kfx::symbols::KfxSymbol;
+
+    if data.len() < 18 || &data[0..4] != b"CONT" {
+        eprintln!("Not a KFX container");
+        return Ok(());
+    }
+
+    let Some(header_len) = read_u32_le(data, 6).map(|v| v as usize) else {
+        return Ok(());
+    };
+    let Some(container_info_offset) = read_u32_le(data, 10).map(|v| v as usize) else {
+        return Ok(());
+    };
+    let Some(container_info_length) = read_u32_le(data, 14).map(|v| v as usize) else {
+        return Ok(());
+    };
+    let container_info_data =
+        &data[container_info_offset..container_info_offset + container_info_length];
+
+    let Some((index_offset, index_length)) = parse_container_info_for_index(container_info_data)
+    else {
+        return Ok(());
+    };
+
+    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+        parse_container_info_for_doc_symbols(container_info_data)
+    {
+        if doc_sym_offset + doc_sym_length <= data.len() {
+            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
+    let entry_size = 24;
+    let num_entries = index_length / entry_size;
+    let storyline_type = KfxSymbol::Storyline as u32;
+
+    let resolve_sym = |id: u64| -> String {
+        if id < base_symbol_count {
+            KFX_SYMBOL_TABLE
+                .get(id as usize)
+                .copied()
+                .unwrap_or("?")
+                .to_string()
+        } else {
+            let ext_idx = (id as usize) - (base_symbol_count as usize);
+            extended_symbols
+                .get(ext_idx)
+                .cloned()
+                .unwrap_or_else(|| "?".to_string())
+        }
+    };
+
+    let mut count = 0;
+    for i in 0..num_entries {
+        let entry_offset = index_offset + i * entry_size;
+        if entry_offset + entry_size > data.len() {
+            break;
+        }
+        let Some(id_idnum) = read_u32_le(data, entry_offset) else {
+            continue;
+        };
+        let Some(type_idnum) = read_u32_le(data, entry_offset + 4) else {
+            continue;
+        };
+        if type_idnum != storyline_type {
+            continue;
+        }
+        let Some(entity_offset) = read_u64_le(data, entry_offset + 8).map(|v| v as usize) else {
+            continue;
+        };
+        let Some(entity_len) = read_u32_le(data, entry_offset + 16).map(|v| v as usize) else {
+            continue;
+        };
+        let abs_offset = header_len + entity_offset;
+        if abs_offset + entity_len > data.len() {
+            continue;
+        }
+        let entity_data = &data[abs_offset..abs_offset + entity_len];
+        if entity_data.len() < 10 || &entity_data[0..4] != b"ENTY" {
+            continue;
+        }
+        let Some(entity_header_len) = read_u32_le(entity_data, 6).map(|v| v as usize) else {
+            continue;
+        };
+        if entity_header_len >= entity_data.len() {
+            continue;
+        }
+        let ion_data = &entity_data[entity_header_len..];
+        let mut parser = IonParser::new(ion_data);
+        let Ok(value) = parser.parse() else {
+            continue;
+        };
+        count += 1;
+        println!(
+            "--- storyline #{} (id={} '{}') ---",
+            count,
+            id_idnum,
+            resolve_sym(id_idnum as u64)
+        );
+        println!("{}", format_ion_value_full(&value, 0, &resolve_sym));
+        println!();
+    }
+    println!("Total storylines: {}", count);
+    Ok(())
+}
+
+/// Report ruby pairs found in the KFX as `base<TAB>annotation` lines.
+///
+/// For each storyline style_event that carries `ruby_name` + `ruby_id`,
+/// slices out the base text from the referenced content fragment using
+/// offset/length, looks up the annotation in the corresponding
+/// ruby_content fragment's content_list, and prints the pair.
+///
+/// Used to validate that boko-kai's KFX faithfully preserves every
+/// `<ruby>` element from the source EPUB — diff this output against an
+/// EPUB-side extractor to find missing or mispaired rubies.
+fn report_ruby_pairs(data: &[u8]) -> IonResult<()> {
+    use boko::kfx::ion::{IonParser, IonValue};
+    use boko::kfx::symbols::KfxSymbol;
+
+    if data.len() < 18 || &data[0..4] != b"CONT" {
+        eprintln!("Not a KFX container");
+        return Ok(());
+    }
+
+    let Some(header_len) = read_u32_le(data, 6).map(|v| v as usize) else {
+        return Ok(());
+    };
+    let Some(container_info_offset) = read_u32_le(data, 10).map(|v| v as usize) else {
+        return Ok(());
+    };
+    let Some(container_info_length) = read_u32_le(data, 14).map(|v| v as usize) else {
+        return Ok(());
+    };
+    let container_info_data =
+        &data[container_info_offset..container_info_offset + container_info_length];
+
+    let Some((index_offset, index_length)) = parse_container_info_for_index(container_info_data)
+    else {
+        return Ok(());
+    };
+
+    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+        parse_container_info_for_doc_symbols(container_info_data)
+    {
+        if doc_sym_offset + doc_sym_length <= data.len() {
+            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
+    let entry_size = 24;
+    let num_entries = index_length / entry_size;
+    let storyline_type = KfxSymbol::Storyline as u32;
+    let content_type = KfxSymbol::Content as u32;
+    let ruby_content_type = KfxSymbol::RubyContent as u32;
+
+    let resolve_sym = |id: u64| -> String {
+        if id < base_symbol_count {
+            KFX_SYMBOL_TABLE
+                .get(id as usize)
+                .copied()
+                .unwrap_or("?")
+                .to_string()
+        } else {
+            let ext_idx = (id as usize) - (base_symbol_count as usize);
+            extended_symbols
+                .get(ext_idx)
+                .cloned()
+                .unwrap_or_else(|| "?".to_string())
+        }
+    };
+
+    // Pass 1: build content_map (name → Vec<String>) and ruby_lookup
+    // (ruby_name → Vec<annotation>, indexed by ruby_id-1).
+    let mut content_map: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut ruby_lookup: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut storyline_ids: Vec<u32> = Vec::new();
+
+    for i in 0..num_entries {
+        let entry_offset = index_offset + i * entry_size;
+        if entry_offset + entry_size > data.len() {
+            break;
+        }
+        let Some(id_idnum) = read_u32_le(data, entry_offset) else {
+            continue;
+        };
+        let Some(type_idnum) = read_u32_le(data, entry_offset + 4) else {
+            continue;
+        };
+        let Some(entity_offset) = read_u64_le(data, entry_offset + 8).map(|v| v as usize) else {
+            continue;
+        };
+        let Some(entity_len) = read_u32_le(data, entry_offset + 16).map(|v| v as usize) else {
+            continue;
+        };
+
+        if type_idnum == storyline_type {
+            storyline_ids.push(id_idnum);
+        }
+
+        if type_idnum != content_type && type_idnum != ruby_content_type {
+            continue;
+        }
+
+        let abs_offset = header_len + entity_offset;
+        if abs_offset + entity_len > data.len() {
+            continue;
+        }
+        let entity_data = &data[abs_offset..abs_offset + entity_len];
+        if entity_data.len() < 10 || &entity_data[0..4] != b"ENTY" {
+            continue;
+        }
+        let Some(entity_header_len) = read_u32_le(entity_data, 6).map(|v| v as usize) else {
+            continue;
+        };
+        if entity_header_len >= entity_data.len() {
+            continue;
+        }
+        let ion_data = &entity_data[entity_header_len..];
+        let mut parser = IonParser::new(ion_data);
+        let Ok(value) = parser.parse() else {
+            continue;
+        };
+
+        if type_idnum == content_type {
+            if let Some((name, texts)) = extract_content_texts(
+                &value,
+                &extended_symbols,
+                base_symbol_count as usize,
+            ) {
+                content_map.insert(name, texts);
+            }
+        } else if type_idnum == ruby_content_type
+            && let IonValue::Struct(fields) = &value
+        {
+            let mut ruby_name = String::new();
+            let mut annotations: Vec<String> = Vec::new();
+            for (k, v) in fields {
+                let key = resolve_sym(*k);
+                match key.as_str() {
+                    "ruby_name" => {
+                        if let IonValue::Symbol(s) = v {
+                            ruby_name = resolve_sym(*s);
+                        }
+                    }
+                    "content_list" => {
+                        if let IonValue::List(items) = v {
+                            for item in items {
+                                if let IonValue::Struct(item_fields) = item {
+                                    let mut content = String::new();
+                                    let mut ruby_id: i64 = 0;
+                                    for (ik, iv) in item_fields {
+                                        let ikey = resolve_sym(*ik);
+                                        match ikey.as_str() {
+                                            "content" => {
+                                                if let IonValue::String(s) = iv {
+                                                    content = s.clone();
+                                                }
+                                            }
+                                            "ruby_id" => {
+                                                if let IonValue::Int(n) = iv {
+                                                    ruby_id = *n;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    if ruby_id > 0 {
+                                        let idx = (ruby_id - 1) as usize;
+                                        while annotations.len() <= idx {
+                                            annotations.push(String::new());
+                                        }
+                                        annotations[idx] = content;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !ruby_name.is_empty() {
+                ruby_lookup.insert(ruby_name, annotations);
+            }
+        }
+    }
+
+    // Pass 2: walk storylines, find every style_event with ruby_name+ruby_id,
+    // print base<TAB>annotation
+    let mut total_pairs: usize = 0;
+    for &storyline_id in &storyline_ids {
+        // Find storyline entity again
+        for i in 0..num_entries {
+            let entry_offset = index_offset + i * entry_size;
+            if entry_offset + entry_size > data.len() {
+                break;
+            }
+            let Some(id_idnum) = read_u32_le(data, entry_offset) else {
+                continue;
+            };
+            if id_idnum != storyline_id {
+                continue;
+            }
+            let Some(entity_offset) = read_u64_le(data, entry_offset + 8).map(|v| v as usize)
+            else {
+                continue;
+            };
+            let Some(entity_len) = read_u32_le(data, entry_offset + 16).map(|v| v as usize) else {
+                continue;
+            };
+            let abs_offset = header_len + entity_offset;
+            if abs_offset + entity_len > data.len() {
+                continue;
+            }
+            let entity_data = &data[abs_offset..abs_offset + entity_len];
+            if entity_data.len() < 10 || &entity_data[0..4] != b"ENTY" {
+                continue;
+            }
+            let Some(entity_header_len) = read_u32_le(entity_data, 6).map(|v| v as usize) else {
+                continue;
+            };
+            if entity_header_len >= entity_data.len() {
+                continue;
+            }
+            let ion_data = &entity_data[entity_header_len..];
+            let mut parser = IonParser::new(ion_data);
+            let Ok(value) = parser.parse() else {
+                continue;
+            };
+
+            walk_for_ruby_pairs(
+                &value,
+                &content_map,
+                &ruby_lookup,
+                &resolve_sym,
+                &mut total_pairs,
+            );
+            break;
+        }
+    }
+
+    eprintln!("Total ruby pairs: {}", total_pairs);
+    Ok(())
+}
+
+/// Recursively walk an Ion value looking for text elements with style_events
+/// that carry ruby_name+ruby_id; emit base<TAB>annotation for each.
+fn walk_for_ruby_pairs<F>(
+    value: &boko::kfx::ion::IonValue,
+    content_map: &std::collections::HashMap<String, Vec<String>>,
+    ruby_lookup: &std::collections::HashMap<String, Vec<String>>,
+    resolve_sym: &F,
+    total: &mut usize,
+) where
+    F: Fn(u64) -> String,
+{
+    use boko::kfx::ion::IonValue;
+    match value {
+        IonValue::Struct(fields) => {
+            // Look for a text element with style_events + content
+            let mut content_name = String::new();
+            let mut content_index: i64 = -1;
+            let mut style_events: Option<&Vec<IonValue>> = None;
+            for (k, v) in fields {
+                let key = resolve_sym(*k);
+                match key.as_str() {
+                    "content" => {
+                        if let IonValue::Struct(cfields) = v {
+                            for (ck, cv) in cfields {
+                                let ckey = resolve_sym(*ck);
+                                if ckey == "name"
+                                    && let IonValue::Symbol(s) = cv
+                                {
+                                    content_name = resolve_sym(*s);
+                                }
+                                if ckey == "index"
+                                    && let IonValue::Int(n) = cv
+                                {
+                                    content_index = *n;
+                                }
+                            }
+                        }
+                    }
+                    "style_events" => {
+                        if let IonValue::List(items) = v {
+                            style_events = Some(items);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if let (Some(events), false) = (style_events, content_name.is_empty()) {
+                if let Some(text_vec) = content_map.get(&content_name)
+                    && content_index >= 0
+                    && let Some(text) = text_vec.get(content_index as usize)
+                {
+                    let chars: Vec<char> = text.chars().collect();
+                    for evt in events {
+                        if let IonValue::Struct(evt_fields) = evt {
+                            let mut offset: i64 = -1;
+                            let mut length: i64 = -1;
+                            let mut ruby_name = String::new();
+                            let mut ruby_id: i64 = 0;
+                            for (k, v) in evt_fields {
+                                let key = resolve_sym(*k);
+                                match key.as_str() {
+                                    "offset" => {
+                                        if let IonValue::Int(n) = v {
+                                            offset = *n;
+                                        }
+                                    }
+                                    "length" => {
+                                        if let IonValue::Int(n) = v {
+                                            length = *n;
+                                        }
+                                    }
+                                    "ruby_name" => {
+                                        if let IonValue::Symbol(s) = v {
+                                            ruby_name = resolve_sym(*s);
+                                        }
+                                    }
+                                    "ruby_id" => {
+                                        if let IonValue::Int(n) = v {
+                                            ruby_id = *n;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if offset >= 0
+                                && length > 0
+                                && !ruby_name.is_empty()
+                                && ruby_id > 0
+                            {
+                                let start = offset as usize;
+                                let end = (start + length as usize).min(chars.len());
+                                if start < end {
+                                    let base: String =
+                                        chars[start..end].iter().collect();
+                                    let annotation = ruby_lookup
+                                        .get(&ruby_name)
+                                        .and_then(|v| v.get((ruby_id - 1) as usize))
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    println!("{}\t{}", base, annotation);
+                                    *total += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Recurse into fields (e.g. content_list)
+            for (_, v) in fields {
+                walk_for_ruby_pairs(v, content_map, ruby_lookup, resolve_sym, total);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                walk_for_ruby_pairs(item, content_map, ruby_lookup, resolve_sym, total);
+            }
+        }
+        IonValue::Annotated(_, inner) => {
+            walk_for_ruby_pairs(inner, content_map, ruby_lookup, resolve_sym, total);
+        }
+        _ => {}
+    }
 }

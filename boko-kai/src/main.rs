@@ -87,6 +87,26 @@ enum Command {
         #[arg(short, long)]
         depth: Option<usize>,
     },
+
+    /// Validate a converted KFX against its source EPUB
+    Validate {
+        #[command(subcommand)]
+        check: ValidateCheck,
+    },
+}
+
+#[derive(Subcommand)]
+enum ValidateCheck {
+    /// Verify every `<ruby>` pair in the EPUB is preserved in the KFX
+    Ruby {
+        /// Source EPUB
+        epub: String,
+        /// Converted KFX
+        kfx: String,
+        /// Show first N missing/extra pairs (default 20)
+        #[arg(long, default_value_t = 20)]
+        details: usize,
+    },
 }
 
 fn main() -> ExitCode {
@@ -129,6 +149,9 @@ fn main() -> ExitCode {
                 depth,
             },
         ),
+        Command::Validate { check } => match check {
+            ValidateCheck::Ruby { epub, kfx, details } => validate_ruby(&epub, &kfx, details),
+        },
     };
 
     match result {
@@ -226,6 +249,26 @@ struct LandmarkInfo {
     landmark_type: String,
     href: String,
     label: String,
+}
+
+fn validate_ruby(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
+    let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
+    let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
+
+    let report = boko::validate::ruby::validate(&epub_bytes, &kfx_bytes)?;
+    report.print_summary();
+    if details > 0 {
+        report.print_details(details);
+    }
+    if report.is_clean() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} missing, {} extra ruby pair(s)",
+            report.missing.iter().map(|(_, n)| n).sum::<usize>(),
+            report.extra.iter().map(|(_, n)| n).sum::<usize>()
+        ))
+    }
 }
 
 fn show_info(path: &str, json: bool) -> Result<(), String> {
@@ -894,6 +937,8 @@ fn role_to_string(role: Role) -> String {
         Role::DefinitionDescription => "DefinitionDescription".to_string(),
         Role::CodeBlock => "CodeBlock".to_string(),
         Role::Caption => "Caption".to_string(),
+        Role::Ruby => "Ruby".to_string(),
+        Role::RubyText => "RubyText".to_string(),
     }
 }
 

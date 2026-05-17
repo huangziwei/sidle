@@ -370,6 +370,10 @@ fn role_to_tag(role: Role) -> (&'static str, bool, bool) {
         // Inline elements
         Role::Inline => ("span", false, false),
         Role::Link => ("a", false, false),
+
+        // Ruby annotations (CJK furigana).
+        Role::Ruby => ("ruby", false, false),
+        Role::RubyText => ("rt", false, false),
     }
 }
 

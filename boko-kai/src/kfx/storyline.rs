@@ -709,10 +709,32 @@ fn walk_node_for_export(
         None => return,
     };
 
-    // Root node: just walk children
+    // Root node: walk children, but wrap any loose inline-ish child in a
+    // synthetic Paragraph. Loose inline content directly under <body> (which
+    // some EPUBs produce — e.g. a final sentence without a wrapping <p>) would
+    // otherwise emit Text/StartSpan/EndSpan tokens onto the root IonBuilder,
+    // whose build() throws away accumulated_text since it has no fields.
+    // The classic symptom: a single ruby pair silently dropped at the tail of
+    // a chapter that ends without a closing <p>.
     if node.role == Role::Root {
-        for child in chapter.children(node_id) {
-            walk_node_for_export(chapter, child, sch, ctx, stream);
+        for child_id in chapter.children(node_id) {
+            let Some(child) = chapter.node(child_id) else {
+                continue;
+            };
+            if matches!(
+                child.role,
+                Role::Text | Role::Break | Role::Inline | Role::Link | Role::Ruby
+            ) {
+                // Wrap in synthetic Paragraph so the inline emit machinery has
+                // a real element to anchor style_events to.
+                let mut wrapper = ElementStart::new(Role::Paragraph);
+                wrapper.style_symbol = Some(ctx.default_style_symbol);
+                stream.push(KfxToken::StartElement(wrapper));
+                walk_node_for_export(chapter, child_id, sch, ctx, stream);
+                stream.push(KfxToken::EndElement);
+            } else {
+                walk_node_for_export(chapter, child_id, sch, ctx, stream);
+            }
         }
         return;
     }
@@ -743,11 +765,19 @@ fn walk_node_for_export(
         return;
     }
 
-    // Inline elements (Link, Inline): use the flattening algorithm.
+    // Inline elements (Link, Inline, Ruby): use the flattening algorithm.
     // This produces non-overlapping style_events where each text segment
     // carries the accumulated state from all ancestors.
-    if node.role == Role::Link || node.role == Role::Inline {
+    if node.role == Role::Link || node.role == Role::Inline || node.role == Role::Ruby {
         emit_inline_content_flat(chapter, node_id, sch, ctx, stream);
+        return;
+    }
+
+    // RubyText is consumed by its parent Ruby during inline flattening and
+    // must not be emitted as inline text. If <rt> appears outside a <ruby>
+    // (malformed input), drop it silently rather than leaking annotation
+    // chars into the base text stream.
+    if node.role == Role::RubyText {
         return;
     }
 
@@ -865,12 +895,32 @@ struct InlineState {
     element_id: Option<String>,
     /// Active node ID (for anchor creation with GlobalNodeId)
     node_id: Option<NodeId>,
+    /// Ruby annotation text from a Ruby ancestor (the <rt> content).
+    /// When set, the base text segments get a ruby_name + ruby_id style_event
+    /// pointing at an entry in a ruby_content fragment.
+    ruby_annotation: Option<String>,
 }
 
 /// A flattened text segment with its computed state.
 struct FlatSegment {
     text: String,
     state: InlineState,
+}
+
+/// Recursively concatenate all Text descendants of a node into `out`.
+///
+/// Used by the Role::Ruby flatten arm to gather the <rt> annotation
+/// content (which may itself contain inline wrappers).
+fn collect_text_recursive(chapter: &Chapter, node_id: NodeId, out: &mut String) {
+    let Some(node) = chapter.node(node_id) else {
+        return;
+    };
+    if node.role == Role::Text && !node.text.is_empty() {
+        out.push_str(chapter.text(node.text));
+    }
+    for cid in chapter.children(node_id) {
+        collect_text_recursive(chapter, cid, out);
+    }
 }
 
 /// Flatten inline content into segments with computed state.
@@ -920,6 +970,10 @@ fn flatten_inline_content(
             .or(state.element_id),
         // Node ID: track which node has the ID (for GlobalNodeId lookup)
         node_id: if has_id { Some(node_id) } else { state.node_id },
+        // Ruby annotation: set explicitly by the Role::Ruby arm below;
+        // otherwise inherited (so a nested Inline inside a Ruby still carries
+        // the annotation down to its Text leaves).
+        ruby_annotation: state.ruby_annotation.clone(),
     };
 
     match node.role {
@@ -941,6 +995,53 @@ fn flatten_inline_content(
                 text: "\n".to_string(),
                 state: effective_state,
             });
+        }
+        // RUBY TEXT: never recursed into here. Consumed by the parent Ruby
+        // arm below — its text becomes the annotation, not inline content.
+        // If <rt> appears outside <ruby> (malformed input), drop it silently.
+        Role::RubyText => {}
+        // RUBY: pair base content with rt annotations. Handles compound rubies
+        // like <ruby><rb>漢</rb><rt>かん</rt><rb>字</rb><rt>じ</rt></ruby> by
+        // splitting children into (base_run, rt_run) pairs — each base segment
+        // gets the matching rt's text as its ruby_annotation. Mirrors how a <b>
+        // pushes font-weight into descendant Text leaves, but pair-aware.
+        Role::Ruby => {
+            let children: Vec<NodeId> = chapter.children(node_id).collect();
+            let mut i = 0;
+            while i < children.len() {
+                // Collect consecutive non-rt children as the base for the next pair.
+                let mut base_children: Vec<NodeId> = Vec::new();
+                while i < children.len() {
+                    let cid = children[i];
+                    let role = chapter.node(cid).map(|n| n.role).unwrap_or(Role::Text);
+                    if role == Role::RubyText {
+                        break;
+                    }
+                    base_children.push(cid);
+                    i += 1;
+                }
+                // Collect consecutive rt children as the annotation. Usually one,
+                // but EPUBs sometimes have multiple <rt>s in a row (e.g. two
+                // separate annotation lines); concatenate.
+                let mut annotation = String::new();
+                while i < children.len() {
+                    let cid = children[i];
+                    let role = chapter.node(cid).map(|n| n.role).unwrap_or(Role::Text);
+                    if role != Role::RubyText {
+                        break;
+                    }
+                    collect_text_recursive(chapter, cid, &mut annotation);
+                    i += 1;
+                }
+                // Recurse into base children with annotation set (if any).
+                let mut pair_state = effective_state.clone();
+                if !annotation.is_empty() {
+                    pair_state.ruby_annotation = Some(annotation);
+                }
+                for cid in base_children {
+                    flatten_inline_content(chapter, cid, pair_state.clone(), segments);
+                }
+            }
         }
         // CONTAINERS (Link, Inline, etc.): Recurse with accumulated state
         _ => {
@@ -971,7 +1072,9 @@ fn emit_flattened_segments(
     stream: &mut TokenStream,
 ) {
     for segment in segments {
-        let needs_style_event = segment.state.link_to.is_some() || segment.state.style.is_some();
+        let needs_style_event = segment.state.link_to.is_some()
+            || segment.state.style.is_some()
+            || segment.state.ruby_annotation.is_some();
 
         if needs_style_event {
             // Build span with accumulated state
@@ -1006,6 +1109,16 @@ fn emit_flattened_segments(
             {
                 // YjNote = 617
                 kfx_attrs.push((sym!(YjDisplay), "617".to_string()));
+            }
+
+            // Add ruby_name + ruby_id if this segment is base text under a <ruby>.
+            // ruby_name resolves to the kfx_id of the ruby_content fragment that
+            // holds the annotation; ruby_id is the 1-indexed entry within it.
+            if let Some(ref annotation) = segment.state.ruby_annotation {
+                let (frag_idx, ruby_id) = ctx.ruby_registry.register(annotation);
+                let ruby_name = format!("b_ruby_{}", frag_idx);
+                kfx_attrs.push((sym!(RubyName), ruby_name));
+                kfx_attrs.push((sym!(RubyId), ruby_id.to_string()));
             }
 
             span.kfx_attrs = kfx_attrs;
@@ -1688,6 +1801,15 @@ impl IonBuilder {
                 // YjDisplay value is a symbol ID (e.g., YjNote = 617)
                 if let Ok(sym_id) = value_str.parse::<u64>() {
                     event_fields.push((*field_id, IonValue::Symbol(sym_id)));
+                }
+            } else if *field_id == sym!(RubyName) {
+                // RubyName is a symbol reference to a ruby_content fragment kfx_id
+                let sym_id = ctx.symbols.get_or_intern(value_str);
+                event_fields.push((*field_id, IonValue::Symbol(sym_id)));
+            } else if *field_id == sym!(RubyId) {
+                // RubyId is a 1-indexed integer entry within the fragment
+                if let Ok(n) = value_str.parse::<i64>() {
+                    event_fields.push((*field_id, IonValue::Int(n)));
                 }
             } else {
                 event_fields.push((*field_id, IonValue::String(value_str.clone())));
