@@ -288,6 +288,9 @@ pub enum IrField {
     BorderSpacing,
     // Phase 13: Writing mode (vertical-RTL Japanese, vertical-LR Mongolian, etc.)
     WritingMode,
+    // Phase 14: Text emphasis (圏点 / sesame-dot etc.)
+    TextEmphasisStyle,
+    TextEmphasisColor,
 }
 
 /// Declarative definition for how a style property maps from IR to KFX.
@@ -656,6 +659,43 @@ impl StyleSchema {
                 ("vertical-lr".into(),   KfxValue::Symbol(KfxSymbol::VerticalLr)),
             ]),
             context: StyleContext::BlockOnly,
+        });
+
+        // ====================================================================
+        // Text emphasis marks (圏点)
+        // ====================================================================
+        // CSS text-emphasis-style → KFX text_emphasis_style symbol. The CSS
+        // value is a two-word `<fill> <shape>` pair; we render it as a single
+        // space-separated string and map each combination to its KFX glyph
+        // symbol. Inline-safe because emphasis applies to runs of text.
+        schema.register(StylePropertyRule {
+            ir_key: "text-emphasis-style",
+            ir_field: Some(IrField::TextEmphasisStyle),
+            kfx_symbol: KfxSymbol::TextEmphasisStyle,
+            transform: ValueTransform::Map(vec![
+                ("filled dot".into(),           KfxValue::Symbol(KfxSymbol::FilledDot)),
+                ("open dot".into(),             KfxValue::Symbol(KfxSymbol::OpenDot)),
+                ("filled circle".into(),        KfxValue::Symbol(KfxSymbol::FilledCircle)),
+                ("open circle".into(),          KfxValue::Symbol(KfxSymbol::OpenCircle)),
+                ("filled double-circle".into(), KfxValue::Symbol(KfxSymbol::FilledDoubleCircle)),
+                ("open double-circle".into(),   KfxValue::Symbol(KfxSymbol::OpenDoubleCircle)),
+                ("filled triangle".into(),      KfxValue::Symbol(KfxSymbol::FilledTriangle)),
+                ("open triangle".into(),        KfxValue::Symbol(KfxSymbol::OpenTriangle)),
+                ("filled sesame".into(),        KfxValue::Symbol(KfxSymbol::FilledSesame)),
+                ("open sesame".into(),          KfxValue::Symbol(KfxSymbol::OpenSesame)),
+            ]),
+            context: StyleContext::InlineSafe,
+        });
+
+        // text-emphasis-color → KFX text_emphasis_color (packed-int colour).
+        schema.register(StylePropertyRule {
+            ir_key: "text-emphasis-color",
+            ir_field: Some(IrField::TextEmphasisColor),
+            kfx_symbol: KfxSymbol::TextEmphasisColor,
+            transform: ValueTransform::ParseColor {
+                output_format: ColorFormat::PackedInt,
+            },
+            context: StyleContext::InlineSafe,
         });
 
         // ====================================================================
@@ -2147,6 +2187,21 @@ pub fn extract_ir_field(ir_style: &ir_style::ComputedStyle, field: IrField) -> O
                 None
             }
         }
+        // Phase 14: Text emphasis
+        IrField::TextEmphasisStyle => {
+            if ir_style.text_emphasis_style != default.text_emphasis_style {
+                Some(ir_style.text_emphasis_style.to_css_string())
+            } else {
+                None
+            }
+        }
+        IrField::TextEmphasisColor => {
+            if ir_style.text_emphasis_color != default.text_emphasis_color {
+                ir_style.text_emphasis_color.map(|c| c.to_css_string())
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -2676,6 +2731,27 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
                 "vertical-lr" => ir_style::WritingMode::VerticalLr,
                 _ => ir_style::WritingMode::HorizontalTb,
             };
+        }
+        // Phase 14: Text emphasis
+        IrField::TextEmphasisStyle => {
+            ir_style.text_emphasis_style = match css_value {
+                "filled dot" => ir_style::TextEmphasisStyle::FilledDot,
+                "open dot" => ir_style::TextEmphasisStyle::OpenDot,
+                "filled circle" => ir_style::TextEmphasisStyle::FilledCircle,
+                "open circle" => ir_style::TextEmphasisStyle::OpenCircle,
+                "filled double-circle" => ir_style::TextEmphasisStyle::FilledDoubleCircle,
+                "open double-circle" => ir_style::TextEmphasisStyle::OpenDoubleCircle,
+                "filled triangle" => ir_style::TextEmphasisStyle::FilledTriangle,
+                "open triangle" => ir_style::TextEmphasisStyle::OpenTriangle,
+                "filled sesame" => ir_style::TextEmphasisStyle::FilledSesame,
+                "open sesame" => ir_style::TextEmphasisStyle::OpenSesame,
+                _ => ir_style::TextEmphasisStyle::None,
+            };
+        }
+        IrField::TextEmphasisColor => {
+            if let Some((r, g, b)) = parse_css_color(css_value) {
+                ir_style.text_emphasis_color = Some(ir_style::Color::rgb(r, g, b));
+            }
         }
     }
 }

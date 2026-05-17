@@ -289,6 +289,49 @@ enum_property! {
     }
 }
 
+/// CSS text-emphasis-style — the `<fill> <shape>` pair used to mark emphasis
+/// (圏点 in Japanese) above/beside characters. Each variant maps to one of
+/// KFX's pre-baked emphasis glyph symbols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextEmphasisStyle {
+    #[default]
+    None,
+    FilledDot,
+    OpenDot,
+    FilledCircle,
+    OpenCircle,
+    FilledDoubleCircle,
+    OpenDoubleCircle,
+    FilledTriangle,
+    OpenTriangle,
+    FilledSesame,
+    OpenSesame,
+}
+
+impl TextEmphasisStyle {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TextEmphasisStyle::None => "none",
+            TextEmphasisStyle::FilledDot => "filled dot",
+            TextEmphasisStyle::OpenDot => "open dot",
+            TextEmphasisStyle::FilledCircle => "filled circle",
+            TextEmphasisStyle::OpenCircle => "open circle",
+            TextEmphasisStyle::FilledDoubleCircle => "filled double-circle",
+            TextEmphasisStyle::OpenDoubleCircle => "open double-circle",
+            TextEmphasisStyle::FilledTriangle => "filled triangle",
+            TextEmphasisStyle::OpenTriangle => "open triangle",
+            TextEmphasisStyle::FilledSesame => "filled sesame",
+            TextEmphasisStyle::OpenSesame => "open sesame",
+        }
+    }
+}
+
+impl ToCss for TextEmphasisStyle {
+    fn to_css(&self, buf: &mut String) {
+        buf.push_str(self.as_str());
+    }
+}
+
 enum_property! {
     /// CSS border-collapse values for tables.
     pub enum BorderCollapse {

@@ -18,8 +18,8 @@ use super::parse::keywords::{
     parse_break_value, parse_clear, parse_decoration_style, parse_display, parse_float,
     parse_font_style, parse_font_variant, parse_hyphens, parse_list_style_position,
     parse_list_style_shorthand, parse_list_style_type, parse_overflow_wrap, parse_text_align,
-    parse_text_transform, parse_vertical_align, parse_visibility, parse_white_space,
-    parse_word_break, parse_writing_mode,
+    parse_text_emphasis_style, parse_text_transform, parse_vertical_align, parse_visibility,
+    parse_white_space, parse_word_break, parse_writing_mode,
 };
 use super::parse::values::{
     parse_background_shorthand, parse_color, parse_integer, parse_length, parse_text_decoration,
@@ -54,6 +54,8 @@ pub enum Declaration {
     WhiteSpace(WhiteSpace),
     VerticalAlign(VerticalAlign),
     WritingMode(WritingMode),
+    TextEmphasisStyle(TextEmphasisStyle),
+    TextEmphasisColor(Color),
 
     // Text decoration
     TextDecoration(super::parse::TextDecorationValue),
@@ -251,6 +253,14 @@ impl Declaration {
             "vertical-align" => parse_vertical_align(input).map(Self::VerticalAlign),
             "writing-mode" | "-webkit-writing-mode" | "-epub-writing-mode" => {
                 parse_writing_mode(input).map(Self::WritingMode)
+            }
+            "text-emphasis-style" | "-webkit-text-emphasis-style"
+            | "-epub-text-emphasis-style" => {
+                parse_text_emphasis_style(input).map(Self::TextEmphasisStyle)
+            }
+            "text-emphasis-color" | "-webkit-text-emphasis-color"
+            | "-epub-text-emphasis-color" => {
+                parse_color(input).map(Self::TextEmphasisColor)
             }
 
             // Text decoration

@@ -63,6 +63,9 @@ fn inherit_from_parent(parent: &ComputedStyle) -> ComputedStyle {
         visibility: parent.visibility,
         language: parent.language.clone(),
         writing_mode: parent.writing_mode,
+        // Text emphasis marks (inherited per CSS spec)
+        text_emphasis_style: parent.text_emphasis_style,
+        text_emphasis_color: parent.text_emphasis_color,
         // Non-inherited properties use defaults
         ..ComputedStyle::default()
     }
@@ -197,6 +200,8 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration) {
         Declaration::WhiteSpace(ws) => style.white_space = *ws,
         Declaration::VerticalAlign(v) => style.vertical_align = *v,
         Declaration::WritingMode(w) => style.writing_mode = *w,
+        Declaration::TextEmphasisStyle(e) => style.text_emphasis_style = *e,
+        Declaration::TextEmphasisColor(c) => style.text_emphasis_color = Some(*c),
 
         // Text decoration
         Declaration::TextDecoration(d) => {

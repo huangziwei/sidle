@@ -8,7 +8,7 @@ use cssparser::Parser;
 use crate::style::properties::{
     BorderCollapse, BorderStyle, BoxSizing, BreakValue, Clear, DecorationStyle, Display, Float,
     FontStyle, FontVariant, Hyphens, ListStylePosition, ListStyleType, OverflowWrap, TextAlign,
-    TextTransform, VerticalAlign, Visibility, WhiteSpace, WordBreak, WritingMode,
+    TextEmphasisStyle, TextTransform, VerticalAlign, Visibility, WhiteSpace, WordBreak, WritingMode,
 };
 
 use crate::style::Declaration;
@@ -46,6 +46,55 @@ keyword_parser!(parse_list_style_position, ListStylePosition);
 keyword_parser!(parse_border_collapse, BorderCollapse);
 keyword_parser!(parse_vertical_align, VerticalAlign);
 keyword_parser!(parse_writing_mode, WritingMode);
+
+/// Parse `text-emphasis-style`. CSS allows one or two idents (a fill and a
+/// shape) in either order, plus the special value `none`. Idents not part of
+/// the spec are tolerated and ignored. Falls back to `filled` when only a
+/// shape is given (per CSS spec default).
+pub(crate) fn parse_text_emphasis_style(
+    input: &mut Parser<'_, '_>,
+) -> Option<TextEmphasisStyle> {
+    use TextEmphasisStyle as T;
+    let first = input.expect_ident_cloned().ok()?;
+    if first.as_ref() == "none" {
+        return Some(T::None);
+    }
+    let second = input.try_parse(|p| p.expect_ident_cloned()).ok();
+
+    enum Fill { Filled, Open }
+    enum Shape { Dot, Circle, DoubleCircle, Triangle, Sesame }
+
+    let mut fill: Option<Fill> = None;
+    let mut shape: Option<Shape> = None;
+    let mut classify = |tok: &str| match tok {
+        "filled" => fill = Some(Fill::Filled),
+        "open" => fill = Some(Fill::Open),
+        "dot" => shape = Some(Shape::Dot),
+        "circle" => shape = Some(Shape::Circle),
+        "double-circle" => shape = Some(Shape::DoubleCircle),
+        "triangle" => shape = Some(Shape::Triangle),
+        "sesame" => shape = Some(Shape::Sesame),
+        _ => {}
+    };
+    classify(first.as_ref());
+    if let Some(s) = second.as_deref() {
+        classify(s);
+    }
+    let shape = shape?; // shape is required
+    let fill = fill.unwrap_or(Fill::Filled); // CSS spec default
+    Some(match (fill, shape) {
+        (Fill::Filled, Shape::Dot) => T::FilledDot,
+        (Fill::Open, Shape::Dot) => T::OpenDot,
+        (Fill::Filled, Shape::Circle) => T::FilledCircle,
+        (Fill::Open, Shape::Circle) => T::OpenCircle,
+        (Fill::Filled, Shape::DoubleCircle) => T::FilledDoubleCircle,
+        (Fill::Open, Shape::DoubleCircle) => T::OpenDoubleCircle,
+        (Fill::Filled, Shape::Triangle) => T::FilledTriangle,
+        (Fill::Open, Shape::Triangle) => T::OpenTriangle,
+        (Fill::Filled, Shape::Sesame) => T::FilledSesame,
+        (Fill::Open, Shape::Sesame) => T::OpenSesame,
+    })
+}
 
 /// Parse break-before/break-after values with CSS aliases.
 pub(crate) fn parse_break_value(input: &mut Parser<'_, '_>) -> Option<BreakValue> {

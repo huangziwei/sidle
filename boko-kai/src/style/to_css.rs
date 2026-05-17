@@ -135,6 +135,9 @@ impl ToCss for ComputedStyle {
         // Writing mode (block-flow direction)
         emit_if_changed!(self, default, buf, writing_mode, "writing-mode");
 
+        // Text emphasis marks
+        emit_if_changed!(self, default, buf, text_emphasis_style, "text-emphasis-style");
+
         // List style
         emit_if_changed!(self, default, buf, list_style_type, "list-style-type");
 

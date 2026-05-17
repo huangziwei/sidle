@@ -48,6 +48,10 @@ pub struct ComputedStyle {
     // Writing mode (block-flow direction). Inherited per CSS spec.
     pub writing_mode: WritingMode,
 
+    // Text emphasis marks (圏点). Inherited per CSS spec.
+    pub text_emphasis_style: TextEmphasisStyle,
+    pub text_emphasis_color: Option<Color>,
+
     // List properties
     pub list_style_type: ListStyleType,
 
