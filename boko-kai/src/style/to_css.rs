@@ -134,9 +134,22 @@ impl ToCss for ComputedStyle {
 
         // Writing mode (block-flow direction)
         emit_if_changed!(self, default, buf, writing_mode, "writing-mode");
+        emit_if_changed!(self, default, buf, text_orientation, "text-orientation");
+        emit_if_changed!(self, default, buf, line_break, "line-break");
+        emit_if_changed!(self, default, buf, text_combine_upright, "text-combine-upright");
 
         // Text emphasis marks
         emit_if_changed!(self, default, buf, text_emphasis_style, "text-emphasis-style");
+        // text-emphasis-position is a structured value with two axes — emit
+        // manually rather than via emit_if_changed (which only handles single
+        // ToCss values).
+        if self.text_emphasis_position != default.text_emphasis_position {
+            buf.push_str("text-emphasis-position: ");
+            self.text_emphasis_position.vertical.to_css(buf);
+            buf.push(' ');
+            self.text_emphasis_position.horizontal.to_css(buf);
+            buf.push_str("; ");
+        }
 
         // List style
         emit_if_changed!(self, default, buf, list_style_type, "list-style-type");

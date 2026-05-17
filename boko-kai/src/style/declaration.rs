@@ -7,22 +7,25 @@ use cssparser::Parser;
 
 use super::parse::border::{
     BorderSide, parse_border_shorthand, parse_border_side_shorthand,
-    parse_border_style_shorthand_values, parse_color_shorthand_values,
+    parse_border_style_shorthand_values, parse_border_width_value, parse_color_shorthand_values,
 };
-use super::parse::box_model::parse_box_shorthand_values;
+use super::parse::box_model::{parse_box_shorthand_values, parse_box_shorthand_with};
 use super::parse::font::{
     parse_font_family, parse_font_size, parse_font_weight, parse_line_height,
 };
 use super::parse::keywords::{
     parse_border_collapse, parse_border_style_value, parse_box_sizing, parse_break_inside,
     parse_break_value, parse_clear, parse_decoration_style, parse_display, parse_float,
-    parse_font_style, parse_font_variant, parse_hyphens, parse_list_style_position,
-    parse_list_style_shorthand, parse_list_style_type, parse_overflow_wrap, parse_text_align,
-    parse_text_emphasis_style, parse_text_transform, parse_vertical_align, parse_visibility,
-    parse_white_space, parse_word_break, parse_writing_mode,
+    parse_font_style, parse_font_variant, parse_hyphens, parse_line_break,
+    parse_list_style_position, parse_list_style_shorthand, parse_list_style_type,
+    parse_overflow_wrap, parse_text_align, parse_text_combine_upright,
+    parse_text_emphasis_position, parse_text_emphasis_style, parse_text_orientation,
+    parse_text_transform, parse_vertical_align, parse_visibility, parse_white_space,
+    parse_word_break, parse_writing_mode,
 };
 use super::parse::values::{
-    parse_background_shorthand, parse_color, parse_integer, parse_length, parse_text_decoration,
+    parse_background_shorthand, parse_color, parse_integer, parse_length, parse_length_or_normal,
+    parse_text_decoration,
 };
 use super::properties::*;
 
@@ -54,8 +57,12 @@ pub enum Declaration {
     WhiteSpace(WhiteSpace),
     VerticalAlign(VerticalAlign),
     WritingMode(WritingMode),
+    TextOrientation(TextOrientation),
+    LineBreak(LineBreak),
+    TextCombineUpright(TextCombineUpright),
     TextEmphasisStyle(TextEmphasisStyle),
     TextEmphasisColor(Color),
+    TextEmphasisPosition(TextEmphasisPosition),
 
     // Text decoration
     TextDecoration(super::parse::TextDecorationValue),
@@ -139,6 +146,28 @@ pub enum Declaration {
     // Table properties
     BorderCollapse(BorderCollapse),
     BorderSpacing(Length),
+
+    /// CSS-wide keyword (`inherit` | `initial` | `unset` | `revert`) — the
+    /// property name is captured for diagnostics but the cascade no-ops on
+    /// this variant. For inherited properties this matches CSS spec (the
+    /// inherited value already flows through `inherit_from_parent`). For
+    /// non-inherited properties an explicit `inherit` is meant to copy the
+    /// parent's value, which we don't implement yet — `margin: inherit` etc.
+    /// won't behave per spec, but that case is vanishingly rare in real
+    /// EPUBs (none of the reference books use it).
+    UniversalKeyword {
+        property: String,
+        keyword: UniversalKeyword,
+    },
+}
+
+/// One of the four CSS-wide keywords that can be set on any property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UniversalKeyword {
+    Inherit,
+    Initial,
+    Unset,
+    Revert,
 }
 
 impl Declaration {
@@ -176,14 +205,16 @@ impl Declaration {
                     Self::PaddingLeft(l),
                 ]
             }),
-            "border-width" => Self::parse_length_rect(input, |t, r, b, l| {
-                [
-                    Self::BorderTopWidth(t),
-                    Self::BorderRightWidth(r),
-                    Self::BorderBottomWidth(b),
-                    Self::BorderLeftWidth(l),
-                ]
-            }),
+            "border-width" => parse_box_shorthand_with(input, parse_border_width_value)
+                .map(|(t, r, b, l)| {
+                    vec![
+                        Self::BorderTopWidth(t),
+                        Self::BorderRightWidth(r),
+                        Self::BorderBottomWidth(b),
+                        Self::BorderLeftWidth(l),
+                    ]
+                })
+                .unwrap_or_default(),
             "border-style" => parse_border_style_shorthand_values(input)
                 .map(|(t, r, b, l)| {
                     vec![
@@ -226,6 +257,26 @@ impl Declaration {
 
     /// Parse single-value properties.
     fn parse_single(name: &str, input: &mut Parser<'_, '_>) -> Option<Self> {
+        // CSS-wide keywords apply to any property. Recognise them once here
+        // so e.g. `text-indent: inherit` doesn't fall through to the
+        // property-specific parser (which would reject "inherit").
+        if let Ok(uk) = input.try_parse(|i| {
+            let ident = i.expect_ident_cloned()?;
+            match ident.as_ref() {
+                "inherit" => Ok::<UniversalKeyword, cssparser::ParseError<'_, ()>>(
+                    UniversalKeyword::Inherit,
+                ),
+                "initial" => Ok(UniversalKeyword::Initial),
+                "unset" => Ok(UniversalKeyword::Unset),
+                "revert" => Ok(UniversalKeyword::Revert),
+                _ => Err(i.new_custom_error(())),
+            }
+        }) {
+            return Some(Self::UniversalKeyword {
+                property: name.to_string(),
+                keyword: uk,
+            });
+        }
         match name {
             // Colors
             "color" => parse_color(input).map(Self::Color),
@@ -245,14 +296,31 @@ impl Declaration {
             "text-align" => parse_text_align(input).map(Self::TextAlign),
             "text-indent" => parse_length(input).map(Self::TextIndent),
             "line-height" => parse_line_height(input).map(Self::LineHeight),
-            "letter-spacing" => parse_length(input).map(Self::LetterSpacing),
-            "word-spacing" => parse_length(input).map(Self::WordSpacing),
+            "letter-spacing" => parse_length_or_normal(input).map(Self::LetterSpacing),
+            "word-spacing" => parse_length_or_normal(input).map(Self::WordSpacing),
             "text-transform" => parse_text_transform(input).map(Self::TextTransform),
-            "hyphens" => parse_hyphens(input).map(Self::Hyphens),
+            "hyphens" | "-epub-hyphens" | "-webkit-hyphens" => {
+                parse_hyphens(input).map(Self::Hyphens)
+            }
             "white-space" => parse_white_space(input).map(Self::WhiteSpace),
             "vertical-align" => parse_vertical_align(input).map(Self::VerticalAlign),
             "writing-mode" | "-webkit-writing-mode" | "-epub-writing-mode" => {
                 parse_writing_mode(input).map(Self::WritingMode)
+            }
+            "text-orientation" | "-webkit-text-orientation" | "-epub-text-orientation" => {
+                parse_text_orientation(input).map(Self::TextOrientation)
+            }
+            // CSS 3 spec name + legacy `text-combine` (epub3 + draft) — same
+            // semantics for `none` / `all`; we ignore the `digits N` legacy form.
+            "text-combine-upright"
+            | "-webkit-text-combine-upright"
+            | "text-combine"
+            | "-webkit-text-combine"
+            | "-epub-text-combine" => {
+                parse_text_combine_upright(input).map(Self::TextCombineUpright)
+            }
+            "line-break" | "-webkit-line-break" | "-epub-line-break" => {
+                parse_line_break(input).map(Self::LineBreak)
             }
             "text-emphasis-style" | "-webkit-text-emphasis-style"
             | "-epub-text-emphasis-style" => {
@@ -261,6 +329,10 @@ impl Declaration {
             "text-emphasis-color" | "-webkit-text-emphasis-color"
             | "-epub-text-emphasis-color" => {
                 parse_color(input).map(Self::TextEmphasisColor)
+            }
+            "text-emphasis-position" | "-webkit-text-emphasis-position"
+            | "-epub-text-emphasis-position" => {
+                parse_text_emphasis_position(input).map(Self::TextEmphasisPosition)
             }
 
             // Text decoration
@@ -302,8 +374,11 @@ impl Declaration {
             "widows" => parse_integer(input).map(Self::Widows),
 
             // Text wrapping
-            "word-break" => parse_word_break(input).map(Self::WordBreak),
-            "overflow-wrap" => parse_overflow_wrap(input).map(Self::OverflowWrap),
+            "word-break" | "-epub-word-break" | "-webkit-word-break" => {
+                parse_word_break(input).map(Self::WordBreak)
+            }
+            // `word-wrap` is the legacy alias for `overflow-wrap` per CSS3.
+            "overflow-wrap" | "word-wrap" => parse_overflow_wrap(input).map(Self::OverflowWrap),
 
             // Page breaks
             "break-before" | "page-break-before" => parse_break_value(input).map(Self::BreakBefore),
@@ -318,11 +393,12 @@ impl Declaration {
             "border-bottom-style" => parse_border_style_value(input).map(Self::BorderBottomStyle),
             "border-left-style" => parse_border_style_value(input).map(Self::BorderLeftStyle),
 
-            // Border width (individual sides)
-            "border-top-width" => parse_length(input).map(Self::BorderTopWidth),
-            "border-right-width" => parse_length(input).map(Self::BorderRightWidth),
-            "border-bottom-width" => parse_length(input).map(Self::BorderBottomWidth),
-            "border-left-width" => parse_length(input).map(Self::BorderLeftWidth),
+            // Border width (individual sides). Uses the keyword-aware parser so
+            // `thin`/`medium`/`thick` keywords are honoured per CSS spec.
+            "border-top-width" => parse_border_width_value(input).map(Self::BorderTopWidth),
+            "border-right-width" => parse_border_width_value(input).map(Self::BorderRightWidth),
+            "border-bottom-width" => parse_border_width_value(input).map(Self::BorderBottomWidth),
+            "border-left-width" => parse_border_width_value(input).map(Self::BorderLeftWidth),
 
             // Border color (individual sides)
             "border-top-color" => parse_color(input).map(Self::BorderTopColor),

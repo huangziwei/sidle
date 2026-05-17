@@ -11,12 +11,15 @@ use crate::style::properties::{Color, Length};
 pub struct TextDecorationValue {
     pub underline: bool,
     pub line_through: bool,
+    pub overline: bool,
 }
 
 pub(crate) fn parse_color(input: &mut Parser<'_, '_>) -> Option<Color> {
-    // Try named colors first
+    // Try named colors first. CSS idents are ASCII-case-insensitive, so we
+    // lowercase before matching to catch `currentColor`, `Red`, etc.
     if let Ok(token) = input.try_parse(|i| i.expect_ident_cloned()) {
-        let color = match token.as_ref() {
+        let lower = token.as_ref().to_ascii_lowercase();
+        let color = match lower.as_str() {
             "black" => Color::BLACK,
             "white" => Color::WHITE,
             "red" => Color::rgb(255, 0, 0),
@@ -27,7 +30,12 @@ pub(crate) fn parse_color(input: &mut Parser<'_, '_>) -> Option<Color> {
             "magenta" => Color::rgb(255, 0, 255),
             "gray" | "grey" => Color::rgb(128, 128, 128),
             "transparent" => Color::TRANSPARENT,
-            // Skip inherit/initial/unset for now
+            // `currentColor` means "the current `color` property value." We
+            // don't have access to the cascade here, so we map to BLACK as
+            // a pragmatic default — Kindle falls back to text color for
+            // borders/decorations without an explicit color anyway, and
+            // currentColor is overwhelmingly used in those shorthands.
+            "currentcolor" => Color::BLACK,
             _ => return None,
         };
         return Some(color);
@@ -214,10 +222,28 @@ pub(crate) fn parse_length(input: &mut Parser<'_, '_>) -> Option<Length> {
         Token::Number { value, .. } if *value == 0.0 => Some(Length::Px(0.0)),
         Token::Ident(ident) => match ident.as_ref() {
             "auto" => Some(Length::Auto),
+            // `none` is the initial value for max-width/max-height. Treating
+            // it as Auto here means "no constraint", which matches the spec
+            // for those properties and is a harmless no-op anywhere else.
+            "none" => Some(Length::Auto),
             _ => None,
         },
         _ => None,
     }
+}
+
+/// Parse a length value or the `normal` keyword (-> 0px).
+///
+/// Used for `letter-spacing` and `word-spacing`, where the CSS initial value
+/// is `normal` and means "browser default" — which for both properties is
+/// effectively zero additional spacing.
+pub(crate) fn parse_length_or_normal(input: &mut Parser<'_, '_>) -> Option<Length> {
+    if let Ok(ident) = input.try_parse(|i| i.expect_ident_cloned())
+        && ident.as_ref() == "normal"
+    {
+        return Some(Length::Px(0.0));
+    }
+    parse_length(input)
 }
 
 pub(crate) fn parse_integer(input: &mut Parser<'_, '_>) -> Option<u32> {
@@ -238,7 +264,8 @@ pub(crate) fn parse_text_decoration(input: &mut Parser<'_, '_>) -> Option<TextDe
         match token.as_ref() {
             "underline" => result.underline = true,
             "line-through" => result.line_through = true,
-            "none" => {}
+            "overline" => result.overline = true,
+            "none" | "blink" => {} // `blink` is deprecated but recognised
             _ => continue,
         }
         found = true;

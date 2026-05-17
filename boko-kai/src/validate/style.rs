@@ -31,6 +31,9 @@ use crate::style::Declaration;
 pub struct PropertyStats {
     pub parsed: usize,
     pub dropped: usize,
+    /// Up to a few example value strings that failed to parse, useful when
+    /// the property *name* is supported but the *value* causes the drop.
+    pub dropped_examples: Vec<String>,
 }
 
 impl PropertyStats {
@@ -82,7 +85,14 @@ impl Report {
                 limit
             );
             for (name, stats) in dropped.iter().take(limit) {
-                println!("  {:>5}×  {}", stats.dropped, name);
+                let examples = stats
+                    .dropped_examples
+                    .iter()
+                    .take(3)
+                    .map(|s| format!("\"{}\"", s))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("  {:>5}×  {:<32}  e.g. {}", stats.dropped, name, examples);
             }
             if dropped.len() > limit {
                 println!("  ... and {} more unique properties", dropped.len() - limit);
@@ -99,6 +109,7 @@ pub fn validate(epub_bytes: &[u8]) -> Result<Report, String> {
     let mut parsed = 0;
     let mut dropped = 0;
 
+    const MAX_EXAMPLES: usize = 5;
     for (name, value) in &declarations {
         total += 1;
         let stats = by_property.entry(name.clone()).or_default();
@@ -108,6 +119,11 @@ pub fn validate(epub_bytes: &[u8]) -> Result<Report, String> {
         if result.is_empty() {
             dropped += 1;
             stats.dropped += 1;
+            if stats.dropped_examples.len() < MAX_EXAMPLES
+                && !stats.dropped_examples.iter().any(|e| e == value)
+            {
+                stats.dropped_examples.push(value.clone());
+            }
         } else {
             parsed += 1;
             stats.parsed += 1;

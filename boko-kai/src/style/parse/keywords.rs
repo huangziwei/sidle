@@ -7,8 +7,10 @@ use cssparser::Parser;
 
 use crate::style::properties::{
     BorderCollapse, BorderStyle, BoxSizing, BreakValue, Clear, DecorationStyle, Display, Float,
-    FontStyle, FontVariant, Hyphens, ListStylePosition, ListStyleType, OverflowWrap, TextAlign,
-    TextEmphasisStyle, TextTransform, VerticalAlign, Visibility, WhiteSpace, WordBreak, WritingMode,
+    FontStyle, FontVariant, Hyphens, LineBreak, ListStylePosition, ListStyleType, OverflowWrap,
+    TextAlign, TextCombineUpright, TextEmphasisOver, TextEmphasisPosition, TextEmphasisRight,
+    TextEmphasisStyle, TextOrientation, TextTransform, VerticalAlign, Visibility, WhiteSpace,
+    WordBreak, WritingMode,
 };
 
 use crate::style::Declaration;
@@ -44,8 +46,59 @@ keyword_parser!(parse_overflow_wrap, OverflowWrap);
 keyword_parser!(parse_list_style_type, ListStyleType);
 keyword_parser!(parse_list_style_position, ListStylePosition);
 keyword_parser!(parse_border_collapse, BorderCollapse);
-keyword_parser!(parse_vertical_align, VerticalAlign);
+/// Parse `vertical-align`. Per spec the keyword is `middle`, but real EPUBs
+/// frequently use `center` (Word-export typo) — treat it as a synonym.
+pub(crate) fn parse_vertical_align(input: &mut Parser<'_, '_>) -> Option<VerticalAlign> {
+    let token = input.expect_ident_cloned().ok()?;
+    if token.as_ref().eq_ignore_ascii_case("center") {
+        return Some(VerticalAlign::Middle);
+    }
+    VerticalAlign::from_css(token.as_ref())
+}
 keyword_parser!(parse_writing_mode, WritingMode);
+keyword_parser!(parse_text_orientation, TextOrientation);
+keyword_parser!(parse_line_break, LineBreak);
+/// Parse `text-combine-upright` (and legacy `text-combine`). Accepts the
+/// spec values `none` / `all` plus the legacy IE/EPUB value `horizontal`,
+/// which is semantically equivalent to `all`.
+pub(crate) fn parse_text_combine_upright(
+    input: &mut Parser<'_, '_>,
+) -> Option<TextCombineUpright> {
+    let ident = input.expect_ident_cloned().ok()?;
+    match ident.as_ref() {
+        "none" => Some(TextCombineUpright::None),
+        // Legacy `text-combine: horizontal` and the spec `text-combine-upright: all`
+        // both collapse a run of characters into one upright cell.
+        "all" | "horizontal" => Some(TextCombineUpright::All),
+        _ => None,
+    }
+}
+
+/// Parse text-emphasis-position. CSS spec allows the two idents in either
+/// order: `over right`, `right over`, `under left`, `left under`, etc.
+/// `over` is the default vertical position, `right` the default horizontal.
+pub(crate) fn parse_text_emphasis_position(
+    input: &mut Parser<'_, '_>,
+) -> Option<TextEmphasisPosition> {
+    let mut vertical: Option<TextEmphasisOver> = None;
+    let mut horizontal: Option<TextEmphasisRight> = None;
+    while let Ok(ident) = input.try_parse(|i| i.expect_ident_cloned()) {
+        match ident.as_ref() {
+            "over" => vertical = Some(TextEmphasisOver::Over),
+            "under" => vertical = Some(TextEmphasisOver::Under),
+            "right" => horizontal = Some(TextEmphasisRight::Right),
+            "left" => horizontal = Some(TextEmphasisRight::Left),
+            _ => return None,
+        }
+    }
+    if vertical.is_none() && horizontal.is_none() {
+        return None;
+    }
+    Some(TextEmphasisPosition {
+        vertical: vertical.unwrap_or_default(),
+        horizontal: horizontal.unwrap_or_default(),
+    })
+}
 
 /// Parse `text-emphasis-style`. CSS allows one or two idents (a fill and a
 /// shape) in either order, plus the special value `none`. Idents not part of

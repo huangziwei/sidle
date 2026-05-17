@@ -63,9 +63,13 @@ fn inherit_from_parent(parent: &ComputedStyle) -> ComputedStyle {
         visibility: parent.visibility,
         language: parent.language.clone(),
         writing_mode: parent.writing_mode,
+        text_orientation: parent.text_orientation,
+        line_break: parent.line_break,
+        text_combine_upright: parent.text_combine_upright,
         // Text emphasis marks (inherited per CSS spec)
         text_emphasis_style: parent.text_emphasis_style,
         text_emphasis_color: parent.text_emphasis_color,
+        text_emphasis_position: parent.text_emphasis_position,
         // Non-inherited properties use defaults
         ..ComputedStyle::default()
     }
@@ -199,14 +203,25 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration) {
         Declaration::Hyphens(h) => style.hyphens = *h,
         Declaration::WhiteSpace(ws) => style.white_space = *ws,
         Declaration::VerticalAlign(v) => style.vertical_align = *v,
+        // CSS-wide keywords. For inherited properties the cascade has already
+        // copied the parent value via `inherit_from_parent`, so dropping the
+        // declaration here yields the spec-correct result. Non-inherited
+        // properties with `inherit`/`unset`/`revert` would need parent lookup
+        // to be fully correct; we no-op for now (rare in practice).
+        Declaration::UniversalKeyword { .. } => {}
         Declaration::WritingMode(w) => style.writing_mode = *w,
+        Declaration::TextOrientation(o) => style.text_orientation = *o,
+        Declaration::LineBreak(l) => style.line_break = *l,
+        Declaration::TextCombineUpright(t) => style.text_combine_upright = *t,
         Declaration::TextEmphasisStyle(e) => style.text_emphasis_style = *e,
         Declaration::TextEmphasisColor(c) => style.text_emphasis_color = Some(*c),
+        Declaration::TextEmphasisPosition(p) => style.text_emphasis_position = *p,
 
         // Text decoration
         Declaration::TextDecoration(d) => {
             style.text_decoration_underline = d.underline;
             style.text_decoration_line_through = d.line_through;
+            style.overline = d.overline;
         }
         Declaration::TextDecorationStyle(s) => style.underline_style = *s,
         Declaration::TextDecorationColor(c) => style.underline_color = Some(*c),

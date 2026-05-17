@@ -47,10 +47,17 @@ pub struct ComputedStyle {
 
     // Writing mode (block-flow direction). Inherited per CSS spec.
     pub writing_mode: WritingMode,
+    // Glyph orientation within a vertical line. Inherited.
+    pub text_orientation: TextOrientation,
+    // Japanese kinsoku line-breaking strictness. Inherited.
+    pub line_break: LineBreak,
+    // Tate-chu-yoko: combine a run of characters into one upright cell. Inherited.
+    pub text_combine_upright: TextCombineUpright,
 
     // Text emphasis marks (圏点). Inherited per CSS spec.
     pub text_emphasis_style: TextEmphasisStyle,
     pub text_emphasis_color: Option<Color>,
+    pub text_emphasis_position: TextEmphasisPosition,
 
     // List properties
     pub list_style_type: ListStyleType,

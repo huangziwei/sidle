@@ -30,9 +30,10 @@ pub trait ToCss {
 // Re-export property types
 pub use properties::{
     BorderCollapse, BorderStyle, BoxSizing, BreakValue, Clear, Color, DecorationStyle, Display,
-    Float, FontStyle, FontVariant, FontWeight, Hyphens, Length, ListStylePosition, ListStyleType,
-    OverflowWrap, TextAlign, TextEmphasisStyle, TextTransform, VerticalAlign, Visibility,
-    WhiteSpace, WordBreak, WritingMode,
+    Float, FontStyle, FontVariant, FontWeight, Hyphens, Length, LineBreak, ListStylePosition,
+    ListStyleType, OverflowWrap, TextAlign, TextCombineUpright, TextEmphasisOver,
+    TextEmphasisPosition, TextEmphasisRight, TextEmphasisStyle, TextOrientation, TextTransform,
+    VerticalAlign, Visibility, WhiteSpace, WordBreak, WritingMode,
 };
 
 // Re-export core style types

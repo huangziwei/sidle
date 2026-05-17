@@ -289,6 +289,76 @@ enum_property! {
     }
 }
 
+enum_property! {
+    /// CSS text-orientation values. Controls glyph orientation in vertical
+    /// writing modes. `mixed` is the spec initial value (CJK upright, Latin
+    /// sideways); `upright` forces everything upright; `sideways` lays the
+    /// entire line on its side. EPUBs commonly use vendor-prefixed forms.
+    pub enum TextOrientation {
+        #[default]
+        Mixed => "mixed",
+        Upright => "upright",
+        Sideways => "sideways",
+        SidewaysRight => "sideways-right",
+        UseGlyphOrientation => "use-glyph-orientation",
+    }
+}
+
+enum_property! {
+    /// CSS line-break values controlling Japanese line-breaking strictness.
+    /// `strict`/`normal`/`loose`/`auto` are kinsoku-rule selectors.
+    pub enum LineBreak {
+        #[default]
+        Auto => "auto",
+        Normal => "normal",
+        Strict => "strict",
+        Loose => "loose",
+        Anywhere => "anywhere",
+    }
+}
+
+enum_property! {
+    /// CSS text-combine-upright values (tate-chu-yoko). `all` means combine
+    /// the entire run into one upright cell in vertical text. Legacy syntax
+    /// uses `digits N` to combine N consecutive digits — not yet modelled.
+    pub enum TextCombineUpright {
+        #[default]
+        None => "none",
+        All => "all",
+    }
+}
+
+/// CSS text-emphasis-position — over/under plus optional left/right.
+/// The CSS shorthand allows the two idents in any order, e.g.
+/// `over right` == `right over`. Splits into horizontal + vertical for KFX,
+/// matching the two-symbol KFX representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TextEmphasisPosition {
+    /// Vertical axis (over/under) — maps to KFX text_emphasis_position_horizontal.
+    /// In vertical writing mode the "horizontal" KFX axis corresponds to the
+    /// emphasis sitting on top or bottom of the character cell.
+    pub vertical: TextEmphasisOver,
+    /// Horizontal axis (left/right) — maps to KFX text_emphasis_position_vertical.
+    /// Only meaningful in vertical writing modes (default: right).
+    pub horizontal: TextEmphasisRight,
+}
+
+enum_property! {
+    pub enum TextEmphasisOver {
+        #[default]
+        Over => "over",
+        Under => "under",
+    }
+}
+
+enum_property! {
+    pub enum TextEmphasisRight {
+        #[default]
+        Right => "right",
+        Left => "left",
+    }
+}
+
 /// CSS text-emphasis-style — the `<fill> <shape>` pair used to mark emphasis
 /// (圏点 in Japanese) above/beside characters. Each variant maps to one of
 /// KFX's pre-baked emphasis glyph symbols.

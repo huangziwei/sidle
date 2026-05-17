@@ -11,11 +11,24 @@ use super::values::parse_length;
 pub(crate) fn parse_box_shorthand_values(
     input: &mut Parser<'_, '_>,
 ) -> Option<(Length, Length, Length, Length)> {
+    parse_box_shorthand_with(input, parse_length)
+}
+
+/// Like `parse_box_shorthand_values` but lets the caller pick the per-value
+/// parser. Used by `border-width` shorthand, where the values can be the
+/// `thin`/`medium`/`thick` keywords as well as ordinary lengths.
+pub(crate) fn parse_box_shorthand_with<F>(
+    input: &mut Parser<'_, '_>,
+    mut parse_one: F,
+) -> Option<(Length, Length, Length, Length)>
+where
+    F: FnMut(&mut Parser<'_, '_>) -> Option<Length>,
+{
     let mut values = Vec::with_capacity(4);
 
-    // Parse up to 4 length values
+    // Parse up to 4 values
     while values.len() < 4 {
-        if let Some(len) = parse_length(input) {
+        if let Some(len) = parse_one(input) {
             values.push(len);
         } else {
             break;
