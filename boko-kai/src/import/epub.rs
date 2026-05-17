@@ -333,24 +333,25 @@ where
     F: FnMut(&Path) -> Option<String>,
 {
     let mut out = String::with_capacity(src.len());
-    let mut i = 0;
     let bytes = src.as_bytes();
+    // Index of the first byte not yet copied into `out`. Byte scans are safe
+    // because every token we look for (@, " ', ;, whitespace) is ASCII and
+    // therefore never appears as a UTF-8 continuation byte — so `i` always
+    // lands on a char boundary when we slice.
+    let mut copied = 0;
+    let mut i = 0;
     while i < bytes.len() {
-        // Look for `@import` token. Cheap byte scan; only enter slow path on match.
         if bytes[i] == b'@' && src[i..].to_ascii_lowercase().starts_with("@import") {
-            // Skip past `@import` keyword and whitespace
             let after_kw = i + "@import".len();
             let mut j = after_kw;
             while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
                 j += 1;
             }
-            // Expect either `"..."` or `'...'`
             if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
                 let quote = bytes[j];
                 let start = j + 1;
                 if let Some(end_rel) = src[start..].as_bytes().iter().position(|&b| b == quote) {
                     let url = &src[start..start + end_rel];
-                    // Skip to terminating semicolon (tolerate spaces, missing semicolon)
                     let mut k = start + end_rel + 1;
                     while k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\t') {
                         k += 1;
@@ -358,7 +359,9 @@ where
                     if k < bytes.len() && bytes[k] == b';' {
                         k += 1;
                     }
-                    // Resolve child path
+                    // Copy everything before the @import as-is, then splice in
+                    // the imported file (or drop the @import on load failure).
+                    out.push_str(&src[copied..i]);
                     let child = base
                         .parent()
                         .map(|p| p.join(url))
@@ -367,15 +370,16 @@ where
                         out.push_str(&child_css);
                         out.push('\n');
                     }
+                    copied = k;
                     i = k;
                     continue;
                 }
             }
-            // Unrecognised @import form — pass it through unchanged.
+            // Unrecognised @import form — fall through and keep scanning.
         }
-        out.push(bytes[i] as char);
         i += 1;
     }
+    out.push_str(&src[copied..]);
     out
 }
 

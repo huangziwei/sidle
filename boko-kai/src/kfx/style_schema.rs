@@ -1576,6 +1576,15 @@ fn convert_to_pixels(value: f64, unit: &str, base_font_size: f64) -> f64 {
 fn parse_css_color(s: &str) -> Option<(u8, u8, u8)> {
     let s = s.trim().to_lowercase();
 
+    // `transparent` is a valid CSS color, but it has no useful packed-int
+    // representation: KFX's color packer hardcodes alpha=0xFF, so emitting
+    // anything here would render as opaque black. Returning None makes the
+    // calling transform drop the property entirely, which is what
+    // `background: transparent` actually means — no background.
+    if s == "transparent" {
+        return None;
+    }
+
     // Named colors
     let named = match s.as_str() {
         "black" => Some((0, 0, 0)),
@@ -1601,7 +1610,6 @@ fn parse_css_color(s: &str) -> Option<(u8, u8, u8)> {
         "lime" => Some((0, 255, 0)),
         "aqua" => Some((0, 255, 255)),
         "fuchsia" => Some((255, 0, 255)),
-        "transparent" => Some((0, 0, 0)), // Treat as black
         _ => None,
     };
 
