@@ -569,6 +569,12 @@ fn register_chapter_link_targets(
 /// KFX requires every storyline element to have a style reference.
 /// This generates all collected styles from the registry, including the default.
 fn build_style_fragments(ctx: &mut ExportContext) -> Vec<KfxFragment> {
+    // Snapshot the dominant writing-mode while the registry still has the
+    // per-style values — `drain_to_ion()` empties the registry but
+    // `build_document_data_fragment` runs *after* style fragments are built
+    // and needs to read the document-level writing-mode from somewhere.
+    ctx.document_writing_mode = dominant_writing_mode(ctx);
+
     // Drain all styles from the registry to generate Ion fragments
     let style_pairs = ctx.style_registry.drain_to_ion();
 
@@ -812,6 +818,13 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
     // Calculate max_id from context (highest EID used)
     let max_id = ctx.max_eid();
 
+    // Picked up earlier by `build_style_fragments` (before the registry was
+    // drained). KOA2 reads this to decide whether to expose the vertical-text
+    // layout controls (Alignment greyed out, vertical Margins/Spacing icons).
+    // Without it, vertical books render vertically *but* the device thinks
+    // they're horizontal and shows the wrong UI affordances.
+    let document_writing_mode = ctx.document_writing_mode;
+
     let document_data = IonValue::Struct(vec![
         (
             KfxSymbol::Direction as u64,
@@ -833,7 +846,7 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
         ),
         (
             KfxSymbol::WritingMode as u64,
-            IonValue::Symbol(KfxSymbol::HorizontalTb as u64),
+            IonValue::Symbol(document_writing_mode as u64),
         ),
         (
             KfxSymbol::Selection as u64,
@@ -864,6 +877,35 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
     ]);
 
     KfxFragment::singleton(KfxSymbol::DocumentData, document_data)
+}
+
+/// Return the writing-mode that best describes the document as a whole.
+///
+/// Scans every emitted per-style writing_mode value and returns the most
+/// frequent one. Defaults to `HorizontalTb` for empty registries / books that
+/// never declare a writing-mode (matches CSS default).
+fn dominant_writing_mode(ctx: &ExportContext) -> KfxSymbol {
+    use crate::kfx::style_schema::KfxValue;
+    let mut horiz = 0usize;
+    let mut vrl = 0usize;
+    let mut vlr = 0usize;
+    for (_, style) in ctx.style_registry.styles() {
+        if let Some(KfxValue::Symbol(sym)) = style.get(KfxSymbol::WritingMode) {
+            match *sym {
+                s if s == KfxSymbol::VerticalRl => vrl += 1,
+                s if s == KfxSymbol::VerticalLr => vlr += 1,
+                s if s == KfxSymbol::HorizontalTb => horiz += 1,
+                _ => {}
+            }
+        }
+    }
+    if vrl >= vlr && vrl > horiz {
+        KfxSymbol::VerticalRl
+    } else if vlr > horiz {
+        KfxSymbol::VerticalLr
+    } else {
+        KfxSymbol::HorizontalTb
+    }
 }
 
 /// Build the book navigation fragment with resolved positions.

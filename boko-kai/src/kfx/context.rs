@@ -11,7 +11,7 @@ use crate::model::{GlobalNodeId, LandmarkType, NodeId, TocEntry};
 use crate::style::StyleId;
 
 use super::style_registry::StyleRegistry;
-use super::symbols::KFX_SYMBOL_TABLE_SIZE;
+use super::symbols::{KFX_SYMBOL_TABLE_SIZE, KfxSymbol};
 use super::transforms::encode_base32;
 
 /// Symbol table for KFX export.
@@ -669,6 +669,12 @@ pub struct ExportContext {
     /// storylines emit, this registry is drained to produce ruby_content
     /// fragments (one per chunk of N entries).
     pub ruby_registry: RubyContentRegistry,
+
+    /// Document-level writing mode symbol used in the `document_data`
+    /// fragment. Captured from the style registry *before* it is drained for
+    /// style fragment emission; defaults to `HorizontalTb`. The KOA2 reads
+    /// this to decide whether to expose the vertical-text layout controls.
+    pub document_writing_mode: KfxSymbol,
 }
 
 /// Registry mapping ruby annotation strings to (ruby_name, ruby_id) pairs.
@@ -792,6 +798,7 @@ impl ExportContext {
             content_id_lengths: HashMap::new(),
             section_resource_deps: BTreeMap::new(),
             ruby_registry: RubyContentRegistry::new(),
+            document_writing_mode: KfxSymbol::HorizontalTb,
         }
     }
 
