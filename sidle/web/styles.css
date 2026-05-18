@@ -443,16 +443,24 @@ button {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
+  table-layout: fixed;
 }
 
 .book-table thead th {
+  position: relative;
   text-align: left;
   font-weight: 600;
   color: var(--muted);
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
-  cursor: pointer;
   user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.book-table thead th[data-sort] {
+  cursor: pointer;
 }
 
 .book-table thead th.sorted::after {
@@ -462,6 +470,22 @@ button {
 
 .book-table thead th.sorted.asc::after {
   content: " ▴";
+}
+
+.resizer {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 1;
+}
+
+.resizer:hover,
+.resizer.active {
+  background: var(--border-strong);
 }
 
 .book-table tbody tr {
@@ -476,47 +500,99 @@ button {
 .book-table td {
   padding: 8px 12px;
   vertical-align: middle;
-  max-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.status-cell {
+/* Formats column */
+
+.formats {
   display: inline-flex;
+  gap: 4px;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
 }
 
-.status-cell .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--muted);
+.fmt-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  color: var(--muted);
+  background: var(--surface);
+  white-space: nowrap;
 }
 
-.status-cell.pending .dot {
-  background: #d4a957;
+.fmt-badge.epub {
+  background: #e8f1f8;
+  color: #2b6cb0;
+  border-color: #c7dbef;
 }
-.status-cell.converting .dot {
-  background: #549acb;
-  animation: pulse 1.2s ease-in-out infinite;
+
+.fmt-badge.kfx.done {
+  background: #e7f4e6;
+  color: #2c7a32;
+  border-color: #c1ddc1;
 }
-.status-cell.done .dot {
-  background: #6fb361;
+
+.fmt-badge.kfx.pending,
+.fmt-badge.kfx.converting {
+  color: #b8851b;
+  background: #fbf5e6;
+  border-color: #e8d8a7;
 }
-.status-cell.error .dot {
-  background: var(--accent);
+
+.fmt-badge.kfx.error {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+@media (prefers-color-scheme: dark) {
+  .fmt-badge.epub {
+    background: #1f3247;
+    color: #8cb4dc;
+    border-color: #2e4866;
+  }
+  .fmt-badge.kfx.done {
+    background: #1a3a22;
+    color: #92ce95;
+    border-color: #2a5731;
+  }
+  .fmt-badge.kfx.pending,
+  .fmt-badge.kfx.converting {
+    color: #d4a957;
+    background: #3c2f12;
+    border-color: #594928;
+  }
 }
 
 @keyframes pulse {
-  0%, 100% {
-    opacity: 0.6;
-  }
-  50% {
-    opacity: 1;
-  }
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+.fmt-badge.kfx.converting {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+/* On Kindle column */
+
+.on-kindle {
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.on-kindle.yes {
+  color: #6fb361;
+}
+
+.on-kindle.no {
+  color: var(--muted);
 }
 
 .row-retry {

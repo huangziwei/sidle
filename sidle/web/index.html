@@ -68,14 +68,24 @@
 
       <section id="list" class="view" aria-label="List" hidden>
         <table class="book-table">
+          <colgroup id="book-cols">
+            <col data-col="title">
+            <col data-col="author">
+            <col data-col="language">
+            <col data-col="imported_at">
+            <col data-col="file_size">
+            <col data-col="formats">
+            <col data-col="on_kindle">
+          </colgroup>
           <thead>
             <tr>
-              <th data-sort="title">Title</th>
-              <th data-sort="author">Author</th>
-              <th data-sort="language">Lang</th>
-              <th data-sort="imported_at">Date added</th>
-              <th data-sort="file_size">Size</th>
-              <th data-sort="status">Status</th>
+              <th data-col="title" data-sort="title">Title<span class="resizer"></span></th>
+              <th data-col="author" data-sort="author">Author<span class="resizer"></span></th>
+              <th data-col="language" data-sort="language">Lang<span class="resizer"></span></th>
+              <th data-col="imported_at" data-sort="imported_at">Date added<span class="resizer"></span></th>
+              <th data-col="file_size" data-sort="file_size">Size<span class="resizer"></span></th>
+              <th data-col="formats">Formats<span class="resizer"></span></th>
+              <th data-col="on_kindle" data-sort="on_kindle">On Kindle<span class="resizer"></span></th>
             </tr>
           </thead>
           <tbody id="list-body"></tbody>

@@ -9,6 +9,8 @@ const state = {
   sort: { key: "imported_at", asc: false },
   device: null, // DeviceInfo | null
   sent: [],     // Vec<DeviceBookRow>
+  sentSet: new Set(), // sha256s currently on device, derived from `sent`
+  columnWidths: {}, // { title: 280, ... } persisted px widths
 };
 
 // ---------------------------------------------------------------------------
@@ -22,6 +24,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireContextMenu();
   wireQueueDrawer();
   wireDevice();
+  wireListHeaderInteractions();
   await refresh();
   subscribeStatus();
   subscribeDeviceStatus();
@@ -37,12 +40,22 @@ async function loadPreferences() {
       state.sort = { ...state.sort, ...JSON.parse(sort) };
     } catch {}
   }
+  const cols = localStorage.getItem("columnWidths");
+  if (cols) {
+    try {
+      state.columnWidths = JSON.parse(cols) || {};
+    } catch {}
+  }
   applyView();
 }
 
 function persistPreferences() {
   localStorage.setItem("view", state.view);
   localStorage.setItem("sort", JSON.stringify(state.sort));
+}
+
+function saveColumnWidths() {
+  localStorage.setItem("columnWidths", JSON.stringify(state.columnWidths));
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +87,12 @@ function setView(v) {
   state.view = v;
   applyView();
   persistPreferences();
+  if (v === "list") {
+    requestAnimationFrame(() => {
+      ensureDefaultColumnWidths();
+      applyColumnWidths();
+    });
+  }
 }
 
 function applyView() {
@@ -151,7 +170,20 @@ async function refresh() {
     showToast(`failed to load library: ${e}`, true);
     state.books = [];
   }
+  if (state.device) {
+    try {
+      const rows = await window.api.invoke("device_list_ours");
+      setSent(rows);
+    } catch {
+      setSent([]);
+    }
+  }
   render();
+}
+
+function setSent(rows) {
+  state.sent = rows || [];
+  state.sentSet = new Set(state.sent.map((r) => r.sha256));
 }
 
 function render() {
@@ -162,20 +194,31 @@ function render() {
   updateSendUnsentButton();
   $("#gallery-empty").hidden = books.length > 0;
   $("#list-empty").hidden = books.length > 0;
+  if (state.view === "list") {
+    requestAnimationFrame(() => {
+      ensureDefaultColumnWidths();
+      applyColumnWidths();
+    });
+  }
 }
 
 function sortedBooks() {
   const { key, asc } = state.sort;
   const dir = asc ? 1 : -1;
   return [...state.books].sort((a, b) => {
-    const av = a[key];
-    const bv = b[key];
+    const av = sortValue(a, key);
+    const bv = sortValue(b, key);
     if (av == null && bv == null) return 0;
     if (av == null) return 1;
     if (bv == null) return -1;
     if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
     return String(av).localeCompare(String(bv)) * dir;
   });
+}
+
+function sortValue(b, key) {
+  if (key === "on_kindle") return state.sentSet.has(b.sha256) ? 1 : 0;
+  return b[key];
 }
 
 function renderGallery(books) {
@@ -263,28 +306,8 @@ function listRow(b) {
   tr.appendChild(cell(b.language || ""));
   tr.appendChild(cell(formatDate(b.imported_at)));
   tr.appendChild(cell(formatBytes(b.file_size)));
-
-  const statusTd = document.createElement("td");
-  const wrap = document.createElement("span");
-  wrap.className = `status-cell ${b.status}`;
-  const dot = document.createElement("span");
-  dot.className = "dot";
-  const txt = document.createElement("span");
-  txt.textContent = b.status;
-  wrap.append(dot, txt);
-  statusTd.appendChild(wrap);
-  if (b.status === "error") {
-    statusTd.title = b.error || "";
-    const retry = document.createElement("button");
-    retry.className = "row-retry";
-    retry.textContent = "Retry";
-    retry.addEventListener("click", (e) => {
-      e.stopPropagation();
-      retryConvert(b.id);
-    });
-    statusTd.appendChild(retry);
-  }
-  tr.appendChild(statusTd);
+  tr.appendChild(formatsCell(b));
+  tr.appendChild(onKindleCell(b));
 
   tr.addEventListener("dblclick", () => openInFinder(b.id));
   tr.addEventListener("contextmenu", (e) => {
@@ -294,6 +317,54 @@ function listRow(b) {
   return tr;
 }
 
+function formatsCell(b) {
+  const td = document.createElement("td");
+  const wrap = document.createElement("div");
+  wrap.className = "formats";
+
+  // EPUB is always present after import — we own the source file.
+  const epub = document.createElement("span");
+  epub.className = "fmt-badge epub";
+  epub.textContent = "EPUB";
+  wrap.appendChild(epub);
+
+  const kfx = document.createElement("span");
+  kfx.className = `fmt-badge kfx ${b.status}`;
+  if (b.status === "done") {
+    kfx.textContent = "KFX";
+  } else if (b.status === "converting") {
+    kfx.textContent = "KFX · converting";
+  } else if (b.status === "pending") {
+    kfx.textContent = "KFX · queued";
+  } else if (b.status === "error") {
+    kfx.textContent = "KFX · failed";
+    kfx.title = b.error || "";
+    kfx.addEventListener("click", (e) => {
+      e.stopPropagation();
+      retryConvert(b.id);
+    });
+    kfx.style.cursor = "pointer";
+  }
+  wrap.appendChild(kfx);
+  td.appendChild(wrap);
+  return td;
+}
+
+function onKindleCell(b) {
+  const td = document.createElement("td");
+  const span = document.createElement("span");
+  if (state.sentSet.has(b.sha256)) {
+    span.className = "on-kindle yes";
+    span.textContent = "✓";
+    td.title = "On Kindle";
+  } else {
+    span.className = "on-kindle no";
+    span.textContent = "—";
+  }
+  td.appendChild(span);
+  return td;
+}
+
 function cell(text) {
   const td = document.createElement("td");
   td.textContent = text;
@@ -301,15 +372,93 @@ function cell(text) {
   return td;
 }
 
-$$("#list th[data-sort]").forEach((th) => {
-  th.addEventListener("click", () => {
-    const key = th.dataset.sort;
-    if (state.sort.key === key) state.sort.asc = !state.sort.asc;
-    else state.sort = { key, asc: true };
-    persistPreferences();
-    render();
+function wireListHeaderInteractions() {
+  // Sort handlers: only on TH elements that declare data-sort.
+  $$("#list th[data-sort]").forEach((th) => {
+    th.addEventListener("click", (e) => {
+      // Don't trigger sort when grabbing the resizer.
+      if (e.target.classList.contains("resizer")) return;
+      const key = th.dataset.sort;
+      if (state.sort.key === key) state.sort.asc = !state.sort.asc;
+      else state.sort = { key, asc: true };
+      persistPreferences();
+      render();
+    });
   });
-});
+  // Column resize handles.
+  $$("#list .resizer").forEach((resizer, i) => {
+    resizer.addEventListener("mousedown", (e) => onResizerDown(e, resizer, i));
+  });
+}
+
+function onResizerDown(e, resizer, idx) {
+  e.preventDefault();
+  e.stopPropagation();
+  const cols = $$("#book-cols col");
+  const col = cols[idx];
+  if (!col) return;
+  const key = col.dataset.col;
+  const startX = e.clientX;
+  const startWidth = col.getBoundingClientRect().width;
+  resizer.classList.add("active");
+  document.body.style.cursor = "col-resize";
+  const onMove = (ev) => {
+    const w = Math.max(48, startWidth + ev.clientX - startX);
+    state.columnWidths[key] = w;
+    col.style.width = `${w}px`;
+  };
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    resizer.classList.remove("active");
+    document.body.style.cursor = "";
+    saveColumnWidths();
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
+function applyColumnWidths() {
+  $$("#book-cols col").forEach((col) => {
+    const key = col.dataset.col;
+    const w = state.columnWidths[key];
+    col.style.width = w ? `${w}px` : "";
+  });
+}
+
+/// Measure natural content widths and seed `state.columnWidths` once. We do
+/// this only when (a) the list view is visible (so layout is meaningful) and
+/// (b) we have books to measure. After that, widths are sticky unless the
+/// user drags or clears storage.
+function ensureDefaultColumnWidths() {
+  if (state.view !== "list") return;
+  if (state.books.length === 0) return;
+  const cols = $$("#book-cols col");
+  const missing = cols.filter((c) => !state.columnWidths[c.dataset.col]);
+  if (missing.length === 0) return;
+
+  const table = document.querySelector("#list .book-table");
+  if (!table) return;
+
+  // Switch to auto-layout briefly so the browser sizes columns to content.
+  cols.forEach((c) => (c.style.width = ""));
+  const prevLayout = table.style.tableLayout;
+  table.style.tableLayout = "auto";
+  void table.offsetWidth; // force reflow
+
+  $$("#list thead th").forEach((th, i) => {
+    const key = cols[i]?.dataset.col;
+    if (!key) return;
+    if (!state.columnWidths[key]) {
+      const measured = Math.ceil(th.getBoundingClientRect().width) + 8;
+      state.columnWidths[key] = measured;
+    }
+  });
+
+  table.style.tableLayout = prevLayout || "fixed";
+  applyColumnWidths();
+  saveColumnWidths();
+}
 
 // ---------------------------------------------------------------------------
 // Live status events
@@ -400,9 +549,8 @@ async function sendBooks(bookIds) {
 }
 
 async function sendUnsent() {
-  const sentSet = new Set(state.sent.map((s) => s.sha256));
   const unsent = state.books.filter(
-    (b) => b.status === "done" && !sentSet.has(b.sha256),
+    (b) => b.status === "done" && !state.sentSet.has(b.sha256),
   );
   if (unsent.length === 0) {
     showToast("nothing to send");
@@ -418,9 +566,8 @@ function updateSendUnsentButton() {
     btn.textContent = "Send all unsent";
     return;
   }
-  const sentSet = new Set(state.sent.map((s) => s.sha256));
   const count = state.books.filter(
-    (b) => b.status === "done" && !sentSet.has(b.sha256),
+    (b) => b.status === "done" && !state.sentSet.has(b.sha256),
   ).length;
   btn.disabled = count === 0;
   btn.textContent = count === 0 ? "Send all unsent" : `Send all unsent (${count})`;
@@ -448,7 +595,9 @@ function updateDeviceUI(info) {
       info.free_bytes != null && info.total_bytes != null
         ? `${formatBytes(info.free_bytes)} of ${formatBytes(info.total_bytes)}`
         : "—";
-    if (!$("#device-popover").hidden) refreshDeviceList();
+    // Always load sent state when device connects so the list-view "On Kindle"
+    // column reflects reality without the user having to open the popover.
+    refreshDeviceList();
   } else {
     dot.className = "device-dot disconnected";
     label.textContent = "No Kindle";
@@ -459,21 +608,29 @@ function updateDeviceUI(info) {
     $("#device-free").textContent = "—";
     $("#device-count").textContent = "—";
     $("#device-sent-list").innerHTML = "";
-    state.sent = [];
+    setSent([]);
     $("#device-empty").textContent = "Plug in a Kindle via USB.";
     $("#device-empty").hidden = false;
+    render();
   }
 }
 
 async function refreshDeviceList() {
-  if (!state.device) return;
+  if (!state.device) {
+    setSent([]);
+    renderDeviceList();
+    render();
+    return;
+  }
   try {
-    state.sent = await window.api.invoke("device_list_ours");
+    const rows = await window.api.invoke("device_list_ours");
+    setSent(rows);
   } catch (e) {
     console.error("device_list_ours failed:", e);
-    state.sent = [];
+    setSent([]);
   }
   renderDeviceList();
+  render();
 }
 
 function renderDeviceList() {
@@ -667,8 +824,7 @@ function openContextMenu(x, y, b) {
   const menu = $("#ctx-menu");
   menu.innerHTML = "";
   if (state.device && b.status === "done") {
-    const sentSet = new Set(state.sent.map((s) => s.sha256));
-    if (sentSet.has(b.sha256)) {
+    if (state.sentSet.has(b.sha256)) {
       add(menu, "Remove from Kindle", () => deleteFromDevice([b.sha256], [b.title]));
     } else {
       add(menu, "Send to Kindle", () => sendBooks([b.id]));
