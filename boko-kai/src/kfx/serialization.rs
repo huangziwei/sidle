@@ -53,12 +53,17 @@ pub fn serialize_container(
         current_offset += entity.data.len() as u64;
     }
 
-    // Calculate SHA1 of entity payloads for kfxgen_info
+    // Real SHA1 of the entity payload bytes. Amazon's KFXGEN and calibre's
+    // kfxlib emit a real 40-hex SHA1 here. boko was emitting a
+    // DefaultHasher-derived 40-char string with an obvious repeating pattern;
+    // the on-device library service appears to validate or at least sniff
+    // this field, and a malformed hash may be why the library tile and
+    // sleep-screen cover stay blank for boko KFXs.
     let mut entity_data = Vec::new();
     for entity in entities {
         entity_data.extend_from_slice(&entity.data);
     }
-    let payload_sha1 = simple_hash(&entity_data);
+    let payload_sha1 = sha1_hex(&entity_data);
 
     // Header is 18 bytes: magic(4) + version(2) + header_len(4) + ci_offset(4) + ci_len(4)
     const HEADER_SIZE: usize = 18;
@@ -113,9 +118,13 @@ pub fn serialize_container(
 
     let container_info_offset = format_caps_offset + format_caps_ion.len();
 
-    // kfxgen info JSON (matches Amazon's format)
+    // kfxgen_info Ion-text header. Amazon's KFXGEN and calibre's kfxlib emit
+    // *quoted* string values; boko was emitting unquoted Ion symbols, which
+    // the device library service parses as opaque atoms. Quoting the values
+    // makes the parser treat them as strings the way the cover-extraction
+    // routine expects.
     let kfxgen_info = format!(
-        r#"[{{key:kfxgen_package_version,value:boko-{}}},{{key:kfxgen_application_version,value:boko}},{{key:kfxgen_payload_sha1,value:{}}},{{key:kfxgen_acr,value:{}}}]"#,
+        r#"[{{key:"kfxgen_package_version",value:""}},{{key:"kfxgen_application_version",value:"boko-{}"}},{{key:"kfxgen_payload_sha1",value:"{}"}},{{key:"kfxgen_acr",value:"{}"}}]"#,
         env!("CARGO_PKG_VERSION"),
         payload_sha1,
         container_id
@@ -263,20 +272,10 @@ pub fn generate_container_id() -> String {
     id
 }
 
-/// Simple hash for kfxgen_info (not cryptographic, just informational).
-fn simple_hash(data: &[u8]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    let hash = hasher.finish();
-    format!(
-        "{:016x}{:016x}{:08x}",
-        hash,
-        hash.rotate_left(32),
-        (hash >> 32) as u32
-    )
+/// Real SHA1 digest as 40 lowercase hex characters — the form Amazon's
+/// KFXGEN and calibre's kfxlib emit for `kfxgen_payload_sha1`.
+fn sha1_hex(data: &[u8]) -> String {
+    sha1_smol::Sha1::from(data).hexdigest()
 }
 
 #[cfg(test)]

@@ -680,18 +680,34 @@ fn build_book_metadata_fragment(
         None
     };
 
+    // Mint a deterministic 32-char uppercase-alphanumeric ASIN keyed off the
+    // book's identifier. The Kindle library service uses this as the cache
+    // key for the cover thumbnail and sleep-screen art when cde_content_type
+    // is PDOC, so a stable value lets the device reuse a cached cover across
+    // re-exports of the same book.
+    let asin = if !meta.identifier.is_empty() {
+        Some(generate_asin(&meta.identifier))
+    } else {
+        None
+    };
+
     let meta_ctx = MetadataContext {
         version: Some(env!("CARGO_PKG_VERSION")),
         cover_resource_name,
         asset_id: Some(container_id),
         book_id,
+        asin,
     };
 
-    // Build each category using the schema
+    // Build each category using the schema. Order matches calibre's KFX:
+    // ebook → title → audit → capability (empty list, but its presence
+    // appears to be what makes the device library service treat the file as
+    // a complete Kindle book.)
     let categories = [
         MetadataCategory::KindleEbook,
         MetadataCategory::KindleTitle,
         MetadataCategory::KindleAudit,
+        MetadataCategory::KindleCapability,
     ];
 
     let categorised: Vec<IonValue> = categories
@@ -721,12 +737,39 @@ fn build_book_metadata_fragment(
     KfxFragment::singleton(KfxSymbol::BookMetadata, book_metadata)
 }
 
-/// Helper to create a metadata key-value struct.
-fn metadata_kv(key: &str, value: &str) -> IonValue {
+/// Helper to create a metadata key-value struct. `value` may be a string or
+/// an Ion-native boolean (Amazon and calibre both emit `is_sample` and
+/// `override_kindle_font` as bool literals).
+fn metadata_kv(key: &str, value: &crate::kfx::metadata::MetadataValue) -> IonValue {
+    let ion_value = match value {
+        crate::kfx::metadata::MetadataValue::Text(s) => IonValue::String(s.clone()),
+        crate::kfx::metadata::MetadataValue::Bool(b) => IonValue::Bool(*b),
+    };
     IonValue::Struct(vec![
         (KfxSymbol::Key as u64, IonValue::String(key.to_string())),
-        (KfxSymbol::Value as u64, IonValue::String(value.to_string())),
+        (KfxSymbol::Value as u64, ion_value),
     ])
+}
+
+/// Generate a 32-char uppercase-alphanumeric ASIN deterministically from the
+/// book's identifier. Calibre's KFX uses the same value for both `ASIN` and
+/// `content_id`; we mirror that by reading `MetadataField::ContentId` from
+/// the same context slot.
+fn generate_asin(identifier: &str) -> String {
+    let digest = sha1_smol::Sha1::from(identifier.as_bytes()).digest().bytes();
+    // Base32 (Crockford-style minus disallowed chars) is overkill; map each
+    // input nibble to one of 32 chars. SHA1 has 20 bytes = 40 nibbles, more
+    // than enough for the 32-char ASIN.
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = String::with_capacity(32);
+    for (i, byte) in digest.iter().enumerate().take(16) {
+        // Two chars per byte gives us 32 chars total — high nibble then low.
+        let _ = i;
+        out.push(ALPHABET[((byte >> 4) & 0x1F) as usize] as char);
+        out.push(ALPHABET[(byte & 0x1F) as usize] as char);
+    }
+    debug_assert_eq!(out.len(), 32);
+    out
 }
 
 /// Build the content features fragment ($585).
@@ -2369,8 +2412,10 @@ mod tests {
                     .map(|(_, v)| v);
 
                 if let Some(IonValue::List(categories)) = categorised {
-                    // Should have 3 categories
-                    assert_eq!(categories.len(), 3, "should have 3 metadata categories");
+                    // Should have 4 categories: ebook, title, audit, capability
+                    // (capability is empty but its presence appears required
+                    // for the device library cover extractor).
+                    assert_eq!(categories.len(), 4, "should have 4 metadata categories");
                 } else {
                     panic!("categorised_metadata should be a list");
                 }
@@ -2384,7 +2429,10 @@ mod tests {
 
     #[test]
     fn test_metadata_kv_helper() {
-        let kv = metadata_kv("test_key", "test_value");
+        let kv = metadata_kv(
+            "test_key",
+            &crate::kfx::metadata::MetadataValue::Text("test_value".to_string()),
+        );
 
         if let IonValue::Struct(fields) = kv {
             assert_eq!(fields.len(), 2);

@@ -15,6 +15,10 @@ pub enum MetadataCategory {
     KindleEbook,
     /// Creator/audit information
     KindleAudit,
+    /// Device-level capability flags. Calibre emits this with an empty
+    /// metadata list; the on-device library scanner appears to need the
+    /// category present to classify the file as a complete Kindle book.
+    KindleCapability,
 }
 
 impl MetadataCategory {
@@ -24,6 +28,7 @@ impl MetadataCategory {
             MetadataCategory::KindleTitle => "kindle_title_metadata",
             MetadataCategory::KindleEbook => "kindle_ebook_metadata",
             MetadataCategory::KindleAudit => "kindle_audit_metadata",
+            MetadataCategory::KindleCapability => "kindle_capability_metadata",
         }
     }
 }
@@ -44,8 +49,31 @@ pub struct MetadataRule {
 pub enum MetadataSource {
     /// Static string value.
     Static(&'static str),
+    /// Static boolean value (emitted as Ion bool, not string).
+    StaticBool(bool),
     /// Dynamic value from Metadata struct.
     Dynamic(MetadataField),
+}
+
+/// Emitted metadata value — either a string or an Ion-native bool. Calibre's
+/// `is_sample` and `override_kindle_font` use Ion booleans, not the string
+/// "false". Keeping booleans separate lets us match that exactly.
+#[derive(Debug, Clone)]
+pub enum MetadataValue {
+    Text(String),
+    Bool(bool),
+}
+
+impl PartialEq<&str> for MetadataValue {
+    fn eq(&self, other: &&str) -> bool {
+        matches!(self, MetadataValue::Text(s) if s == *other)
+    }
+}
+
+impl PartialEq<str> for MetadataValue {
+    fn eq(&self, other: &str) -> bool {
+        matches!(self, MetadataValue::Text(s) if s == other)
+    }
 }
 
 /// Fields that can be extracted from Metadata.
@@ -63,6 +91,12 @@ pub enum MetadataField {
     AssetId,
     /// Book ID - from context (derived from identifier), not Metadata.
     BookId,
+    /// ASIN - from context. For sideloaded files we mint a 32-char
+    /// uppercase-alphanumeric value; the Kindle library uses it as the
+    /// per-book key when caching the cover thumbnail and sleep-screen art.
+    Asin,
+    /// content_id - calibre uses the same value as ASIN; we mirror that.
+    ContentId,
     /// dcterms:modified timestamp
     ModifiedDate,
     /// First contributor with role="trl" (translator)
@@ -120,7 +154,11 @@ impl MetadataField {
             MetadataField::AuthorSort => meta.author_sort.as_deref(),
             MetadataField::SeriesName => meta.collection.as_ref().map(|c| c.name.as_str()),
             // These are context-driven or need special handling
-            MetadataField::AssetId | MetadataField::BookId | MetadataField::SeriesPosition => None,
+            MetadataField::AssetId
+            | MetadataField::BookId
+            | MetadataField::Asin
+            | MetadataField::ContentId
+            | MetadataField::SeriesPosition => None,
         }
     }
 }
@@ -178,9 +216,33 @@ pub fn metadata_schema() -> Vec<MetadataRule> {
             source: MetadataSource::Dynamic(MetadataField::BookId),
         },
         MetadataRule {
+            key: "ASIN",
+            category: MetadataCategory::KindleTitle,
+            source: MetadataSource::Dynamic(MetadataField::Asin),
+        },
+        MetadataRule {
+            key: "content_id",
+            category: MetadataCategory::KindleTitle,
+            source: MetadataSource::Dynamic(MetadataField::ContentId),
+        },
+        // PDOC (Personal Document) is what calibre emits for sideloaded
+        // KFX. EBOK signals an Amazon-purchased book and makes the device
+        // try an ASIN-catalog cover lookup that fails for sideloads,
+        // leaving the library tile and sleep-screen cover blank.
+        MetadataRule {
             key: "cde_content_type",
             category: MetadataCategory::KindleTitle,
-            source: MetadataSource::Static("EBOK"),
+            source: MetadataSource::Static("PDOC"),
+        },
+        MetadataRule {
+            key: "is_sample",
+            category: MetadataCategory::KindleTitle,
+            source: MetadataSource::StaticBool(false),
+        },
+        MetadataRule {
+            key: "override_kindle_font",
+            category: MetadataCategory::KindleTitle,
+            source: MetadataSource::StaticBool(false),
         },
         // Extended metadata for better round-trip fidelity
         MetadataRule {
@@ -251,6 +313,10 @@ pub struct MetadataContext<'a> {
     /// Book ID (stable per publication, derived from identifier).
     /// Format: 23-character URL-safe Base64.
     pub book_id: Option<String>,
+    /// ASIN — 32-char uppercase alphanumeric. For sideloaded files this is
+    /// what the Kindle library uses to key its on-disk cover thumbnail and
+    /// sleep-screen cover caches. content_id is mirrored from this value.
+    pub asin: Option<String>,
 }
 
 /// Generate a book ID from a publication identifier.
@@ -328,44 +394,49 @@ pub fn build_category_entries(
     category: MetadataCategory,
     meta: &Metadata,
     ctx: &MetadataContext,
-) -> Vec<(&'static str, String)> {
+) -> Vec<(&'static str, MetadataValue)> {
     let schema = metadata_schema();
     let mut entries = Vec::new();
 
     for rule in schema.iter().filter(|r| r.category == category) {
-        let value = match &rule.source {
-            MetadataSource::Static(s) => Some(s.to_string()),
+        let value: Option<MetadataValue> = match &rule.source {
+            MetadataSource::Static(s) => Some(MetadataValue::Text(s.to_string())),
+            MetadataSource::StaticBool(b) => Some(MetadataValue::Bool(*b)),
             MetadataSource::Dynamic(field) => {
                 // Special handling for fields that need transformation
                 match field {
                     MetadataField::CoverImage => {
                         // Use the resource name from context, not the path from metadata
-                        ctx.cover_resource_name.map(|s| s.to_string())
+                        ctx.cover_resource_name.map(|s| MetadataValue::Text(s.to_string()))
                     }
                     MetadataField::Date => {
                         // KFX expects YYYY-MM-DD format, not full ISO timestamp
-                        field.extract(meta).map(truncate_to_date)
+                        field.extract(meta).map(|s| MetadataValue::Text(truncate_to_date(s)))
                     }
                     MetadataField::AssetId => {
                         // Asset ID from context (same as container ID)
-                        ctx.asset_id.map(|s| s.to_string())
+                        ctx.asset_id.map(|s| MetadataValue::Text(s.to_string()))
                     }
                     MetadataField::BookId => {
                         // Book ID from context (derived from identifier)
-                        ctx.book_id.clone()
+                        ctx.book_id.clone().map(MetadataValue::Text)
+                    }
+                    MetadataField::Asin | MetadataField::ContentId => {
+                        // Both fields mirror the same generated ASIN value.
+                        ctx.asin.clone().map(MetadataValue::Text)
                     }
                     MetadataField::SeriesPosition => {
                         // Series position from collection
                         meta.collection.as_ref().and_then(|c| c.position).map(|p| {
                             // Format as integer if whole number, otherwise with decimal
                             if p.fract() == 0.0 {
-                                format!("{}", p as i64)
+                                MetadataValue::Text(format!("{}", p as i64))
                             } else {
-                                format!("{}", p)
+                                MetadataValue::Text(format!("{}", p))
                             }
                         })
                     }
-                    _ => field.extract(meta).map(|s| s.to_string()),
+                    _ => field.extract(meta).map(|s| MetadataValue::Text(s.to_string())),
                 }
             }
         };
@@ -379,7 +450,7 @@ pub fn build_category_entries(
     if category == MetadataCategory::KindleAudit
         && let Some(v) = ctx.version
     {
-        entries.push(("creator_version", v.to_string()));
+        entries.push(("creator_version", MetadataValue::Text(v.to_string())));
     }
 
     entries
@@ -573,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cde_content_type_is_ebok() {
+    fn test_cde_content_type_is_pdoc() {
         let meta = Metadata {
             title: "Test".to_string(),
             language: "en".to_string(),
@@ -586,7 +657,57 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|(k, v)| *k == "cde_content_type" && v == "EBOK")
+                .any(|(k, v)| *k == "cde_content_type" && v == "PDOC")
+        );
+    }
+
+    #[test]
+    fn test_is_sample_and_override_kindle_font_are_static_false_bools() {
+        let meta = Metadata {
+            title: "Test".to_string(),
+            language: "en".to_string(),
+            ..Default::default()
+        };
+        let ctx = MetadataContext::default();
+        let entries = build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx);
+        let is_sample = entries.iter().find(|(k, _)| *k == "is_sample");
+        let override_kf = entries.iter().find(|(k, _)| *k == "override_kindle_font");
+        assert!(matches!(is_sample, Some((_, MetadataValue::Bool(false)))));
+        assert!(matches!(override_kf, Some((_, MetadataValue::Bool(false)))));
+    }
+
+    #[test]
+    fn test_asin_and_content_id_from_context() {
+        let meta = Metadata {
+            title: "Test".to_string(),
+            language: "en".to_string(),
+            ..Default::default()
+        };
+        let ctx = MetadataContext {
+            asin: Some("ABCDEF0123456789ABCDEF0123456789".to_string()),
+            ..Default::default()
+        };
+        let entries = build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx);
+        assert!(entries
+            .iter()
+            .any(|(k, v)| *k == "ASIN" && v == "ABCDEF0123456789ABCDEF0123456789"));
+        assert!(entries
+            .iter()
+            .any(|(k, v)| *k == "content_id" && v == "ABCDEF0123456789ABCDEF0123456789"));
+
+        // Without ctx.asin, both fields should be omitted.
+        let ctx_empty = MetadataContext::default();
+        let entries_empty =
+            build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx_empty);
+        assert!(!entries_empty.iter().any(|(k, _)| *k == "ASIN"));
+        assert!(!entries_empty.iter().any(|(k, _)| *k == "content_id"));
+    }
+
+    #[test]
+    fn test_kindle_capability_category_string() {
+        assert_eq!(
+            MetadataCategory::KindleCapability.as_str(),
+            "kindle_capability_metadata"
         );
     }
 
