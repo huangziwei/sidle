@@ -22,6 +22,12 @@ pub const ION_BVM: [u8; 4] = [0xe0, 0x01, 0x00, 0xea];
 /// `IonStruct = OrderedDict`. Duplicate field names are allowed at the
 /// AST level — calibre logs an error on read but keeps the first value;
 /// our parser keeps both entries.
+///
+/// Float/Decimal/Timestamp are stored as their raw payload bytes
+/// (`type_code` is the high nibble of the Ion type descriptor: 4, 5, or 6).
+/// We never need to introspect their magnitudes during merge — calibre and
+/// Kindle parse them downstream — so round-tripping the wire bytes verbatim
+/// is faster and avoids precision drift on the format we don't otherwise use.
 #[derive(Debug, Clone)]
 pub enum IonNode {
     Null,
@@ -33,6 +39,9 @@ pub enum IonNode {
     List(Vec<IonNode>),
     Struct(Vec<(String, IonNode)>),
     Annotated(Vec<String>, Box<IonNode>),
+    /// Round-tripped opaque payload for type codes 4 (float), 5 (decimal),
+    /// 6 (timestamp). Stored as `(type_code, bytes)`.
+    Raw(u8, Vec<u8>),
 }
 
 impl IonNode {
@@ -245,11 +254,8 @@ impl<'a> Parser<'a> {
                 Ok(IonNode::Annotated(anns, Box::new(inner)))
             }
             4 | 5 | 6 => {
-                // Float / Decimal / Timestamp — not produced by KFX containers
-                // in our path. Skip the payload and return Null so loading
-                // doesn't crash on the rare appearance.
-                self.pos += len;
-                Ok(IonNode::Null)
+                let bytes = self.take(len)?.to_vec();
+                Ok(IonNode::Raw(type_code, bytes))
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -330,6 +336,7 @@ fn write_value(out: &mut Vec<u8>, value: &IonNode, symtab: &LocalSymbolTable) {
         IonNode::Blob(data) => write_typed(out, 10, data),
         IonNode::Symbol(name) => write_symbol(out, name, symtab),
         IonNode::String(s) => write_typed(out, 8, s.as_bytes()),
+        IonNode::Raw(type_code, payload) => write_typed(out, *type_code, payload),
         IonNode::List(items) => {
             let mut inner = Vec::new();
             for it in items {
