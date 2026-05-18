@@ -18,6 +18,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireToolbar();
   wireDragDrop();
   wireContextMenu();
+  wireQueueDrawer();
   await refresh();
   subscribeStatus();
 });
@@ -152,6 +153,7 @@ function render() {
   const books = sortedBooks();
   renderGallery(books);
   renderList(books);
+  renderQueue();
   $("#gallery-empty").hidden = books.length > 0;
   $("#list-empty").hidden = books.length > 0;
 }
@@ -321,6 +323,97 @@ function subscribeStatus() {
     if (status === "done") refresh();
     else render();
   });
+}
+
+// ---------------------------------------------------------------------------
+// Queue drawer
+// ---------------------------------------------------------------------------
+
+function wireQueueDrawer() {
+  $("#status-bar-toggle").addEventListener("click", () => {
+    const drawer = $("#queue-drawer");
+    drawer.hidden = !drawer.hidden;
+  });
+  $("#queue-drawer-close").addEventListener("click", () => {
+    $("#queue-drawer").hidden = true;
+  });
+}
+
+function renderQueue() {
+  const active = state.books.filter(
+    (b) => b.status === "pending" || b.status === "converting" || b.status === "error",
+  );
+
+  const counts = {
+    converting: active.filter((b) => b.status === "converting").length,
+    pending: active.filter((b) => b.status === "pending").length,
+    error: active.filter((b) => b.status === "error").length,
+    total: state.books.length,
+  };
+
+  const toggle = $("#status-bar-toggle");
+  const summary = $("#status-bar-summary");
+  toggle.classList.remove("active", "errors", "done");
+  const parts = [];
+  if (counts.converting) parts.push(`${counts.converting} converting`);
+  if (counts.pending) parts.push(`${counts.pending} queued`);
+  if (counts.error) parts.push(`${counts.error} failed`);
+  if (parts.length === 0) {
+    summary.textContent = counts.total
+      ? `Library: ${counts.total} book${counts.total === 1 ? "" : "s"}`
+      : "No conversions running";
+    toggle.classList.add("done");
+  } else {
+    summary.textContent = parts.join("  ·  ");
+    if (counts.error) toggle.classList.add("errors");
+    else if (counts.converting) toggle.classList.add("active");
+  }
+
+  const ul = $("#queue-list");
+  ul.innerHTML = "";
+  for (const b of active) ul.appendChild(queueRow(b));
+  $("#queue-empty").hidden = active.length > 0;
+}
+
+function queueRow(b) {
+  const li = document.createElement("li");
+
+  const main = document.createElement("div");
+  main.className = "queue-row-main";
+
+  const title = document.createElement("div");
+  title.className = "queue-title";
+  title.textContent = b.title || "Untitled";
+
+  const status = document.createElement("div");
+  status.className = `queue-status ${b.status}`;
+  if (b.status === "error") {
+    const label = document.createElement("span");
+    label.textContent = "Failed";
+    label.title = b.error || "";
+    status.appendChild(label);
+    const retry = document.createElement("button");
+    retry.className = "queue-retry";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", () => retryConvert(b.id));
+    status.appendChild(retry);
+  } else if (b.status === "converting") {
+    status.textContent = "Converting…";
+  } else {
+    status.textContent = "Queued";
+  }
+
+  main.append(title, status);
+
+  const meta = document.createElement("div");
+  meta.className = "queue-meta";
+  meta.textContent = b.author || "";
+
+  const bar = document.createElement("div");
+  bar.className = `queue-progress ${b.status}`;
+
+  li.append(main, meta, bar);
+  return li;
 }
 
 // ---------------------------------------------------------------------------

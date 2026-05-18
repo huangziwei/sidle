@@ -15,14 +15,17 @@ use crate::state::DbHandle;
 /// to the caller (this is a fire-and-forget worker).
 pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_id: i64) {
     let Some((sha, source)) = lookup_paths(db, book_id).await else {
+        eprintln!("[sidle/queue] book {book_id} vanished before conversion");
         return;
     };
 
+    eprintln!("[sidle/queue] book {book_id} converting: {}", source.display());
     mark_status(db, app, book_id, "converting", None).await;
 
     let paths_owned = paths.clone();
     let sha_owned = sha.clone();
     let source_owned = source.clone();
+    let started = std::time::Instant::now();
     let result = tokio::task::spawn_blocking(move || {
         convert_sync(&paths_owned, &sha_owned, &source_owned)
     })
@@ -35,14 +38,20 @@ pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_
                 let conn = db.lock().await;
                 let _ = db::set_kfx_path(&conn, book_id, &kfx_str);
             }
+            eprintln!(
+                "[sidle/queue] book {book_id} done in {:.2}s -> {kfx_str}",
+                started.elapsed().as_secs_f32()
+            );
             mark_status(db, app, book_id, "done", None).await;
         }
         Ok(Err(e)) => {
             let msg = format!("{e:#}");
+            eprintln!("[sidle/queue] book {book_id} error: {msg}");
             mark_status(db, app, book_id, "error", Some(&msg)).await;
         }
         Err(join_err) => {
             let msg = format!("worker panicked: {join_err}");
+            eprintln!("[sidle/queue] book {book_id} PANIC: {msg}");
             mark_status(db, app, book_id, "error", Some(&msg)).await;
         }
     }

@@ -139,7 +139,7 @@ button {
 /* Views */
 
 #main {
-  height: calc(100vh - 52px);
+  height: calc(100vh - 52px - 32px);
   overflow: auto;
   padding: 16px;
 }
@@ -362,6 +362,10 @@ button {
   pointer-events: none;
 }
 
+.drop-veil[hidden] {
+  display: none;
+}
+
 .drop-veil-inner {
   border: 3px dashed white;
   border-radius: 12px;
@@ -420,4 +424,211 @@ button {
 .toast.error {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* Status bar + queue drawer */
+
+.status-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 32px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: stretch;
+  z-index: 80;
+}
+
+.status-bar-toggle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 0;
+  padding: 0 16px;
+  text-align: left;
+  font: inherit;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.status-bar-toggle:hover {
+  background: var(--bg);
+}
+
+.status-bar-toggle .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: 0 0 auto;
+}
+
+.status-bar-toggle.active .dot {
+  background: #549acb;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.status-bar-toggle.errors .dot {
+  background: var(--accent);
+  animation: none;
+}
+
+.status-bar-toggle.done .dot {
+  background: #6fb361;
+  animation: none;
+}
+
+.queue-drawer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 32px;
+  max-height: 50vh;
+  background: var(--surface);
+  border-top: 1px solid var(--border-strong);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.12);
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.queue-drawer[hidden] {
+  display: none;
+}
+
+.queue-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.btn-link {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  padding: 4px 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.queue-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.queue-list li:last-child {
+  border-bottom: 0;
+}
+
+.queue-row-main {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.queue-title {
+  flex: 1;
+  font-weight: 500;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.queue-meta {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.queue-status {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.queue-status.error {
+  color: var(--accent);
+}
+
+.queue-progress {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+}
+
+.queue-progress::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--muted);
+  transform-origin: left;
+}
+
+.queue-progress.pending::after {
+  background: #d4a957;
+  width: 8%;
+}
+
+.queue-progress.converting::after {
+  background: linear-gradient(90deg, transparent, #549acb, transparent);
+  width: 35%;
+  animation: progress-slide 1.4s linear infinite;
+}
+
+.queue-progress.error::after {
+  background: var(--accent);
+  width: 100%;
+}
+
+@keyframes progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+
+.queue-empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.queue-retry {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  margin-left: 6px;
 }
