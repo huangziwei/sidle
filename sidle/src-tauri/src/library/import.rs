@@ -1,23 +1,22 @@
-//! EPUB import pipeline.
+//! Book import pipeline.
 //!
-//! Pipeline (per file):
-//! 1. sha256 the bytes
-//! 2. extract metadata (title/authors/language/ppd/date/cover) with boko
-//! 3. derive a filesystem-safe basename `[Author] Title (Year)`
-//! 4. copy EPUB to `books/<sha>/<basename>.epub`
-//! 5. save cover (if any) to `books/<sha>/cover.<ext>`
-//! 6. INSERT book row (UNIQUE(sha256) — skip if already imported)
-//! 7. decide job status:
-//!    - if `books/<sha>/<basename>.kfx` already exists → `done` (KFX reused)
-//!    - otherwise → `pending` (worker will pick it up)
+//! Two source formats are accepted:
+//!
+//! - **EPUB**: original P1 path. Copy as the canonical source, queue EPUB→KFX.
+//! - **KFX / KFX-zip**: P2b reverse path. The chain is `.kfx-zip → .kfx → .epub`:
+//!   `.kfx-zip` is first merged to a single-container `.kfx` (via boko's
+//!   `kfx::merge::merge_kfx_zip`) and persisted to disk; that on-disk `.kfx`
+//!   is then re-opened and exported to EPUB via `Book::export(Format::Epub, …)`.
+//!   `.kfx` inputs skip the merge step but follow the same on-disk-first path.
+//!   No EPUB→KFX queue work runs — we already have the KFX.
 //!
 //! Each step touches disk; callers should run this inside `spawn_blocking`.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
 use crate::library::db::{self, BookRow, NewBook};
@@ -28,21 +27,58 @@ pub fn import_file(
     paths: &LibraryPaths,
     src: &Path,
 ) -> Result<ImportOutcome> {
+    match SourceKind::detect(src) {
+        SourceKind::Epub => import_epub(conn, paths, src),
+        SourceKind::Kfx | SourceKind::KfxZip => import_kfx(conn, paths, src),
+        SourceKind::Unknown => bail!(
+            "unsupported file type: {} (expected .epub, .kfx, or .kfx-zip)",
+            src.display()
+        ),
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum SourceKind {
+    Epub,
+    Kfx,
+    KfxZip,
+    Unknown,
+}
+
+impl SourceKind {
+    fn detect(p: &Path) -> Self {
+        match p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("epub") => Self::Epub,
+            Some("kfx") => Self::Kfx,
+            Some("kfx-zip") => Self::KfxZip,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EPUB path
+// ---------------------------------------------------------------------------
+
+fn import_epub(
+    conn: &rusqlite::Connection,
+    paths: &LibraryPaths,
+    src: &Path,
+) -> Result<ImportOutcome> {
     let bytes = fs::read(src).with_context(|| format!("read {}", src.display()))?;
     let file_size = bytes.len() as i64;
-
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let sha = format!("{:x}", hasher.finalize());
+    let sha = sha256_bytes(&bytes);
 
     if let Some(existing) = db::find_by_sha(conn, &sha)? {
         return Ok(ImportOutcome::Duplicate(existing));
     }
 
-    // Parse metadata directly from the source EPUB before we copy, so we can
-    // name the destination file with title/author/year.
-    let meta = read_epub_metadata(src)
-        .with_context(|| format!("parse {}", src.display()))?;
+    let meta = read_book_metadata(src).with_context(|| format!("parse {}", src.display()))?;
     let basename = format_basename(&meta.authors, &meta.title, meta.date.as_deref());
 
     paths.ensure_sha(&sha)?;
@@ -52,35 +88,20 @@ pub fn import_file(
             .with_context(|| format!("write {}", dest_epub.display()))?;
     }
 
-    let cover_path = write_cover(paths, &sha, &dest_epub, meta.cover_image.as_deref())
-        .unwrap_or(None);
+    let cover_path =
+        write_cover_from_source(paths, &sha, src, meta.cover_image.as_deref()).unwrap_or(None);
 
     let kfx_path = paths.book_dir(&sha).join(format!("{basename}.kfx"));
     let kfx_ready = kfx_path.exists();
 
-    let dest_epub_str = dest_epub.to_string_lossy().to_string();
-    let cover_path_str = cover_path.as_ref().map(|p| p.to_string_lossy().to_string());
-    let kfx_path_str = if kfx_ready {
-        Some(kfx_path.to_string_lossy().to_string())
-    } else {
-        None
-    };
-    let authors_joined = meta.authors.join(", ");
-    let now = db::now_iso();
-    let book_id = db::insert_book(
+    let book_id = insert_row(
         conn,
-        &NewBook {
-            sha256: &sha,
-            title: &meta.title,
-            author: &authors_joined,
-            language: &meta.language,
-            ppd: meta.ppd.as_deref(),
-            source_epub_path: &dest_epub_str,
-            cover_path: cover_path_str.as_deref(),
-            kfx_path: kfx_path_str.as_deref(),
-            file_size,
-            imported_at: &now,
-        },
+        &sha,
+        &meta,
+        file_size,
+        &dest_epub,
+        cover_path.as_deref(),
+        kfx_ready.then_some(kfx_path.as_path()),
     )?;
 
     if kfx_ready {
@@ -96,12 +117,138 @@ pub fn import_file(
     })
 }
 
+// ---------------------------------------------------------------------------
+// KFX / KFX-zip path
+// ---------------------------------------------------------------------------
+
+fn import_kfx(
+    conn: &rusqlite::Connection,
+    paths: &LibraryPaths,
+    src: &Path,
+) -> Result<ImportOutcome> {
+    let kind = SourceKind::detect(src);
+
+    // Hash the original input bytes (kfx or kfx-zip) — that's our content key,
+    // so re-pulling the same `.kfx-zip` from a different Mac dedupes correctly.
+    let sha = sha256_of_file(src).with_context(|| format!("hash {}", src.display()))?;
+    let file_size = fs::metadata(src)
+        .with_context(|| format!("stat {}", src.display()))?
+        .len() as i64;
+
+    if let Some(existing) = db::find_by_sha(conn, &sha)? {
+        return Ok(ImportOutcome::Duplicate(existing));
+    }
+
+    // Step 1: `.kfx-zip` → single-container `.kfx` bytes. We call boko's
+    // explicit merge function instead of `Book::open(.kfx-zip)`, because the
+    // latter would do the merge in-memory inside a Book handle — there must
+    // be no path anywhere that converts `.kfx-zip` directly to EPUB. The
+    // intermediate `.kfx` is a real file on disk; everything downstream
+    // (metadata, EPUB synthesis, cover) reads from that file.
+    let kfx_bytes: Vec<u8> = match kind {
+        SourceKind::KfxZip => boko::kfx::merge::merge_kfx_zip(src)
+            .with_context(|| format!("merge kfx-zip {}", src.display()))?,
+        SourceKind::Kfx => fs::read(src)
+            .with_context(|| format!("read {}", src.display()))?,
+        _ => unreachable!("import_kfx called with non-KFX source"),
+    };
+
+    // Read metadata from the in-memory merged KFX so we can name the file —
+    // still no `Book::open(.kfx-zip)` involved.
+    let meta = {
+        let book = boko::Book::from_bytes(&kfx_bytes, boko::Format::Kfx)
+            .with_context(|| "read kfx metadata")?;
+        extract_meta(book.metadata(), src.file_stem().and_then(|s| s.to_str()))
+    };
+    let basename = format_basename(&meta.authors, &meta.title, meta.date.as_deref());
+
+    paths.ensure_sha(&sha)?;
+    let dest_kfx = paths.book_dir(&sha).join(format!("{basename}.kfx"));
+    let dest_epub = paths.book_dir(&sha).join(format!("{basename}.epub"));
+
+    // Persist the intermediate `.kfx`.
+    write_bytes_atomic(&dest_kfx, &kfx_bytes)?;
+
+    // Step 2: `.kfx` (on disk) → `.epub`. Reading from the persisted `.kfx`
+    // keeps the chain explicit — the EPUB exporter sees exactly the same Book
+    // a later re-open would see.
+    if !dest_epub.exists() {
+        synthesize_epub_from_kfx(&dest_kfx, &dest_epub)
+            .with_context(|| format!("export EPUB {}", dest_epub.display()))?;
+    }
+
+    let cover_path =
+        write_cover_from_source(paths, &sha, &dest_kfx, meta.cover_image.as_deref())
+            .unwrap_or(None);
+
+    let book_id = insert_row(
+        conn,
+        &sha,
+        &meta,
+        file_size,
+        &dest_epub,
+        cover_path.as_deref(),
+        Some(&dest_kfx),
+    )?;
+    // KFX already on disk — nothing for the queue to do.
+    db::upsert_job(conn, book_id, "done", None)?;
+
+    let row = db::get_book(conn, book_id)?.expect("just inserted");
+    Ok(ImportOutcome::Imported {
+        book: row,
+        reused_kfx: true,
+    })
+}
+
+/// Open a single-container `.kfx` from disk and write EPUB to `dest`.
+///
+/// Caller must guarantee `src` is `.kfx` (not `.kfx-zip`). Splitting this out
+/// from a generic `Book::open` callsite is the cheap way to keep the
+/// `.kfx-zip → .kfx → .epub` chain honest: `.kfx-zip` never reaches here.
+fn synthesize_epub_from_kfx(src_kfx: &Path, dest_epub: &Path) -> Result<()> {
+    debug_assert!(
+        !src_kfx
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("kfx-zip")),
+        "synthesize_epub_from_kfx must be called with a single-container .kfx, not .kfx-zip"
+    );
+    let mut book = boko::Book::open(src_kfx).with_context(|| "open kfx with boko")?;
+    let tmp = dest_epub.with_extension("epub.partial");
+    {
+        let mut writer = File::create(&tmp)
+            .with_context(|| format!("create {}", tmp.display()))?;
+        book.export(boko::Format::Epub, &mut writer)
+            .with_context(|| "boko export to EPUB")?;
+        writer.sync_all().ok();
+    }
+    fs::rename(&tmp, dest_epub)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), dest_epub.display()))?;
+    Ok(())
+}
+
+fn write_bytes_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = dest.with_file_name(format!(
+        "{}.partial",
+        dest.file_name()
+            .expect("dest must include a filename")
+            .to_string_lossy()
+    ));
+    fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, dest)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), dest.display()))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
 pub enum ImportOutcome {
     Imported { book: BookRow, reused_kfx: bool },
     Duplicate(BookRow),
 }
 
-struct EpubMeta {
+struct BookMeta {
     title: String,
     authors: Vec<String>,
     language: String,
@@ -110,31 +257,38 @@ struct EpubMeta {
     date: Option<String>,
 }
 
-fn read_epub_metadata(path: &Path) -> Result<EpubMeta> {
+fn read_book_metadata(path: &Path) -> Result<BookMeta> {
     let book = boko::Book::open(path).with_context(|| "open with boko")?;
-    let m = book.metadata();
+    Ok(extract_meta(
+        book.metadata(),
+        path.file_stem().and_then(|s| s.to_str()),
+    ))
+}
+
+fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
     let title = if m.title.trim().is_empty() {
-        path.file_stem()
-            .map(|s| s.to_string_lossy().to_string())
+        fallback_stem
+            .map(str::to_string)
             .unwrap_or_else(|| "Untitled".to_string())
     } else {
         m.title.clone()
     };
-    Ok(EpubMeta {
+    BookMeta {
         title,
         authors: m.authors.clone(),
         language: m.language.clone(),
         ppd: m.page_progression_direction.clone(),
         cover_image: m.cover_image.clone(),
         date: m.date.clone(),
-    })
+    }
 }
 
-/// Pull the cover image out of the EPUB and copy it into `books/<sha>/cover.<ext>`.
-fn write_cover(
+/// Pull the cover image out of the source file and copy it into
+/// `books/<sha>/cover.<ext>`. Works for any format boko can open.
+fn write_cover_from_source(
     paths: &LibraryPaths,
     sha: &str,
-    epub_path: &Path,
+    src: &Path,
     cover_ref: Option<&str>,
 ) -> Result<Option<PathBuf>> {
     let Some(cover_ref) = cover_ref else { return Ok(None) };
@@ -142,7 +296,7 @@ fn write_cover(
         return Ok(None);
     }
 
-    let mut book = boko::Book::open(epub_path).with_context(|| "reopen for cover")?;
+    let mut book = boko::Book::open(src).with_context(|| "reopen for cover")?;
     let asset_path = PathBuf::from(cover_ref);
 
     let bytes = match book.load_asset(&asset_path) {
@@ -156,7 +310,44 @@ fn write_cover(
     Ok(Some(out))
 }
 
-#[allow(dead_code)]
+fn insert_row(
+    conn: &rusqlite::Connection,
+    sha: &str,
+    meta: &BookMeta,
+    file_size: i64,
+    dest_epub: &Path,
+    cover_path: Option<&Path>,
+    kfx_path: Option<&Path>,
+) -> Result<i64> {
+    let dest_epub_str = dest_epub.to_string_lossy().to_string();
+    let cover_path_str = cover_path.map(|p| p.to_string_lossy().to_string());
+    let kfx_path_str = kfx_path.map(|p| p.to_string_lossy().to_string());
+    let authors_joined = meta.authors.join(", ");
+    let now = db::now_iso();
+    let id = db::insert_book(
+        conn,
+        &NewBook {
+            sha256: sha,
+            title: &meta.title,
+            author: &authors_joined,
+            language: &meta.language,
+            ppd: meta.ppd.as_deref(),
+            source_epub_path: &dest_epub_str,
+            cover_path: cover_path_str.as_deref(),
+            kfx_path: kfx_path_str.as_deref(),
+            file_size,
+            imported_at: &now,
+        },
+    )?;
+    Ok(id)
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
 pub fn sha256_of_file(path: &Path) -> std::io::Result<String> {
     let mut f = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -170,3 +361,4 @@ pub fn sha256_of_file(path: &Path) -> std::io::Result<String> {
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
+

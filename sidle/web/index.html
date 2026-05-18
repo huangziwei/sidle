@@ -9,7 +9,7 @@
   <body>
     <header class="toolbar">
       <div class="toolbar-group">
-        <button id="btn-add" class="btn">Add EPUB&hellip;</button>
+        <button id="btn-add" class="btn">Add&hellip;</button>
         <div class="toolbar-sep" aria-hidden="true"></div>
         <div class="seg" role="tablist" aria-label="View">
           <button id="view-gallery" class="seg-btn active" role="tab" aria-selected="true">Gallery</button>
@@ -31,6 +31,7 @@
           </header>
           <div class="device-actions">
             <button type="button" id="btn-send-unsent" class="btn-link" disabled>Send all unsent</button>
+            <button type="button" id="btn-retrieve" class="btn-link" disabled>Retrieve from Kindle</button>
             <span id="device-send-progress" class="device-send-progress" hidden></span>
           </div>
           <dl class="device-fields">
@@ -41,6 +42,17 @@
           </dl>
           <ul id="device-sent-list" class="device-sent-list" aria-label="Books on device"></ul>
           <div id="device-empty" class="device-empty">Nothing sent yet.</div>
+          <section id="device-dedrm" class="device-dedrm" hidden>
+            <header class="device-dedrm-header">
+              <strong>Retrieve from /dedrm</strong>
+              <button type="button" id="btn-dedrm-cancel" class="btn-link">Close</button>
+            </header>
+            <div id="device-dedrm-summary" class="device-dedrm-summary">Scanning…</div>
+            <ul id="device-dedrm-list" class="device-dedrm-list" aria-label="dedrm files"></ul>
+            <div class="device-dedrm-actions">
+              <button type="button" id="btn-dedrm-pull-new" class="btn-link" disabled>Pull all new</button>
+            </div>
+          </section>
         </div>
       </div>
 
@@ -50,7 +62,7 @@
       <section id="gallery" class="view active" aria-label="Gallery">
         <div id="gallery-grid" class="gallery-grid"></div>
         <div id="gallery-empty" class="empty">
-          <p>Drop an EPUB anywhere to import.</p>
+          <p>Drop an EPUB or KFX anywhere to import.</p>
         </div>
       </section>
 
@@ -79,7 +91,7 @@
           <tbody id="list-body"></tbody>
         </table>
         <div id="list-empty" class="empty">
-          <p>Drop an EPUB anywhere to import.</p>
+          <p>Drop an EPUB or KFX anywhere to import.</p>
         </div>
       </section>
     </main>

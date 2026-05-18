@@ -301,6 +301,67 @@ button {
   font-size: 12px;
 }
 
+.device-dedrm {
+  border-top: 1px solid var(--border);
+  padding: 10px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.device-dedrm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.device-dedrm-summary {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.device-dedrm-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.device-dedrm-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.device-dedrm-list li .dedrm-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.device-dedrm-list li.imported {
+  color: var(--muted);
+}
+
+.device-dedrm-list li .dedrm-tag {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.device-dedrm-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 
 /* Views */
 

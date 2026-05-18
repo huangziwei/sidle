@@ -13,6 +13,8 @@ const state = {
   columnWidths: {}, // { title: 280, ... } persisted px widths
   selected: new Set(), // book ids currently selected
   lastClicked: null,   // last single-clicked book id, anchor for shift-range
+  dedrm: [],           // Vec<DedrmRow> last scan
+  dedrmBusy: false,    // true during scan or pull
 };
 
 // ---------------------------------------------------------------------------
@@ -32,6 +34,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   subscribeStatus();
   subscribeDeviceStatus();
   subscribeSendProgress();
+  subscribePullProgress();
 });
 
 async function loadPreferences() {
@@ -115,12 +118,19 @@ function wireDragDrop() {
     } else if (t === "drop") {
       veil.hidden = true;
       const paths = event.payload.paths || [];
-      const epubs = paths.filter((p) => p.toLowerCase().endsWith(".epub"));
-      if (epubs.length === 0) {
-        showToast("only .epub files are supported", true);
+      const accepted = paths.filter((p) => {
+        const lower = p.toLowerCase();
+        return (
+          lower.endsWith(".epub") ||
+          lower.endsWith(".kfx") ||
+          lower.endsWith(".kfx-zip")
+        );
+      });
+      if (accepted.length === 0) {
+        showToast("only .epub, .kfx, .kfx-zip are supported", true);
         return;
       }
-      importPaths(epubs);
+      importPaths(accepted);
     }
   });
 }
@@ -524,6 +534,9 @@ function wireDevice() {
     if (!pop.hidden) refreshDeviceList();
   });
   $("#btn-send-unsent").addEventListener("click", () => sendUnsent());
+  $("#btn-retrieve").addEventListener("click", () => openDedrmPanel());
+  $("#btn-dedrm-cancel").addEventListener("click", () => closeDedrmPanel());
+  $("#btn-dedrm-pull-new").addEventListener("click", () => pullAllNew());
   // Clicks INSIDE the popover shouldn't close it.
   $("#device-popover").addEventListener("click", (e) => e.stopPropagation());
   document.addEventListener("click", (e) => {
@@ -627,6 +640,7 @@ function updateDeviceUI(info) {
       info.free_bytes != null && info.total_bytes != null
         ? `${formatBytes(info.free_bytes)} of ${formatBytes(info.total_bytes)}`
         : "—";
+    $("#btn-retrieve").disabled = false;
     // Always load sent state when device connects so the list-view "On Kindle"
     // column reflects reality without the user having to open the popover.
     refreshDeviceList();
@@ -643,6 +657,8 @@ function updateDeviceUI(info) {
     setSent([]);
     $("#device-empty").textContent = "Plug in a Kindle via USB.";
     $("#device-empty").hidden = false;
+    $("#btn-retrieve").disabled = true;
+    closeDedrmPanel();
     render();
   }
 }
@@ -748,6 +764,147 @@ async function deleteFromDevice(sha256s, titles) {
   if (counts.failed) parts.push(`${counts.failed} failed`);
   showToast(parts.join(" · "), counts.failed > 0);
   await refreshDeviceList();
+}
+
+// ---------------------------------------------------------------------------
+// Retrieve from Kindle (/dedrm)
+// ---------------------------------------------------------------------------
+
+async function openDedrmPanel() {
+  if (!state.device) {
+    showToast("no Kindle connected", true);
+    return;
+  }
+  $("#device-dedrm").hidden = false;
+  await scanDedrm();
+}
+
+function closeDedrmPanel() {
+  $("#device-dedrm").hidden = true;
+  state.dedrm = [];
+  $("#device-dedrm-list").innerHTML = "";
+}
+
+async function scanDedrm() {
+  state.dedrmBusy = true;
+  $("#device-dedrm-summary").textContent = "Scanning /dedrm…";
+  $("#btn-dedrm-pull-new").disabled = true;
+  try {
+    state.dedrm = await window.api.invoke("device_scan_dedrm");
+  } catch (e) {
+    state.dedrm = [];
+    showToast(`scan failed: ${e}`, true);
+  } finally {
+    state.dedrmBusy = false;
+  }
+  renderDedrm();
+}
+
+function renderDedrm() {
+  const ul = $("#device-dedrm-list");
+  ul.innerHTML = "";
+  const rows = state.dedrm || [];
+  const newCount = rows.filter((r) => !r.already_imported).length;
+  const summary = $("#device-dedrm-summary");
+  if (rows.length === 0) {
+    summary.textContent = state.dedrmBusy
+      ? "Scanning /dedrm…"
+      : "/dedrm is empty or missing.";
+  } else {
+    const dupCount = rows.length - newCount;
+    summary.textContent = `${rows.length} file${rows.length === 1 ? "" : "s"} · ${newCount} new · ${dupCount} already imported`;
+  }
+  for (const r of rows) ul.appendChild(dedrmRow(r));
+  $("#btn-dedrm-pull-new").disabled = state.dedrmBusy || newCount === 0;
+  $("#btn-dedrm-pull-new").textContent =
+    newCount === 0 ? "Pull all new" : `Pull all new (${newCount})`;
+}
+
+function dedrmRow(r) {
+  const li = document.createElement("li");
+  if (r.already_imported) li.classList.add("imported");
+
+  const name = document.createElement("span");
+  name.className = "dedrm-name";
+  name.textContent = r.filename;
+  name.title = `${r.path}\n${formatBytes(r.size)}`;
+  li.appendChild(name);
+
+  const tag = document.createElement("span");
+  tag.className = "dedrm-tag";
+  tag.textContent = r.already_imported ? "in library" : "new";
+  li.appendChild(tag);
+
+  if (!r.already_imported) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn-link";
+    btn.textContent = "Pull";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      pullPaths([r.path]);
+    });
+    li.appendChild(btn);
+  }
+
+  return li;
+}
+
+async function pullAllNew() {
+  const paths = state.dedrm
+    .filter((r) => !r.already_imported)
+    .map((r) => r.path);
+  if (paths.length === 0) {
+    showToast("nothing new to pull");
+    return;
+  }
+  await pullPaths(paths);
+}
+
+async function pullPaths(paths) {
+  if (!state.device) {
+    showToast("no Kindle connected", true);
+    return;
+  }
+  state.dedrmBusy = true;
+  $("#btn-dedrm-pull-new").disabled = true;
+  $("#device-send-progress").hidden = false;
+  $("#device-send-progress").textContent = `Pulling ${paths.length} file${paths.length === 1 ? "" : "s"}…`;
+  let results = [];
+  try {
+    results = await window.api.invoke("device_pull", { paths });
+  } catch (e) {
+    showToast(`pull failed: ${e}`, true);
+    state.dedrmBusy = false;
+    return;
+  }
+  state.dedrmBusy = false;
+  const counts = { imported: 0, duplicate: 0, failed: 0 };
+  for (const r of results) counts[r.kind] = (counts[r.kind] || 0) + 1;
+  const parts = [];
+  if (counts.imported) parts.push(`${counts.imported} imported`);
+  if (counts.duplicate) parts.push(`${counts.duplicate} already in library`);
+  if (counts.failed) parts.push(`${counts.failed} failed`);
+  showToast(parts.join(" · ") || "nothing to pull", counts.failed > 0);
+  setTimeout(() => {
+    $("#device-send-progress").hidden = true;
+  }, 2000);
+  await Promise.all([refresh(), scanDedrm()]);
+}
+
+function subscribePullProgress() {
+  window.api.listen("device:pull-progress", (e) => {
+    const r = e.payload;
+    if (!r) return;
+    const prog = $("#device-send-progress");
+    let line;
+    const name = (r.path || "").split("/").pop() || "";
+    if (r.kind === "imported") line = `imported: ${name}`;
+    else if (r.kind === "duplicate") line = `already in library: ${name}`;
+    else line = `failed: ${r.error}`;
+    prog.hidden = false;
+    prog.textContent = line;
+  });
 }
 
 // ---------------------------------------------------------------------------
