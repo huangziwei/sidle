@@ -9,6 +9,10 @@
 //!   since the format is shared with the Kindle reader anyway),
 //! - a comparison function producing a `Report`.
 
+pub mod images;
+pub mod links;
+pub mod metadata;
+pub mod nav;
 pub mod ruby;
 pub mod style;
 pub mod tags;
