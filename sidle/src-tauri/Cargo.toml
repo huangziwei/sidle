@@ -36,5 +36,8 @@ libc = "0.2"
 
 boko-kai = { path = "../../boko-kai", default-features = false }
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
