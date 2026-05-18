@@ -46,6 +46,13 @@ enum Command {
         /// Suppress output messages
         #[arg(short, long)]
         quiet: bool,
+
+        /// `.kfx-zip` → `.kfx` merge strategy. `mechanical` (default) is a
+        /// faithful port of calibre's pipeline. `fast` passes entity bodies
+        /// through verbatim — significantly faster but produces a different
+        /// (still calibre-accepted) byte stream.
+        #[arg(long = "mode", default_value = "mechanical")]
+        merge_mode: String,
     },
 
     /// Extract hierarchical section tree (JSON)
@@ -183,12 +190,14 @@ fn main() -> ExitCode {
             from_format,
             to_format,
             quiet,
+            merge_mode,
         } => convert(
             &input,
             output.as_deref(),
             from_format.as_deref(),
             to_format.as_deref(),
             quiet,
+            &merge_mode,
         ),
         Command::Dump {
             file,
@@ -839,6 +848,7 @@ fn convert(
     from_format: Option<&str>,
     to_format: Option<&str>,
     quiet: bool,
+    merge_mode: &str,
 ) -> Result<(), String> {
     // Check if reading from stdin
     let from_stdin = input == "-";
@@ -907,8 +917,16 @@ fn convert(
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx-zip"))
     {
-        let bytes = boko::kfx::merge::merge_kfx_zip(std::path::Path::new(input))
-            .map_err(|e| format!("Conversion failed: {e}"))?;
+        let mode = match merge_mode {
+            "fast" => boko::kfx::merge::MergeMode::Fast,
+            "mechanical" | "" => boko::kfx::merge::MergeMode::Mechanical,
+            other => return Err(format!("--mode must be 'mechanical' or 'fast', got '{other}'")),
+        };
+        let bytes = boko::kfx::merge::merge_kfx_zip_with_mode(
+            std::path::Path::new(input),
+            mode,
+        )
+        .map_err(|e| format!("Conversion failed: {e}"))?;
         if to_stdout {
             use std::io::Write;
             std::io::stdout()

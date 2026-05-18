@@ -1,0 +1,726 @@
+//! Fast `.kfx-zip` → `.kfx` merge — pass entity bodies through verbatim.
+//!
+//! ## Why this can be fast
+//!
+//! In Amazon-distributed `.kfx-zip` bundles, **exactly one** of the inner
+//! `.kfx` files (`metadata.kfx`) carries a `doc_symbols` Ion symbol table.
+//! The other three (`CR!*.kfx` resource containers + the main content file)
+//! are authored against that same symtab — every symbol ID inside their
+//! entity bodies resolves through `metadata.kfx`'s locals.
+//!
+//! The mechanical port treats each entity body as opaque Ion that must be
+//! parsed → walked → re-encoded. That parse + serialize is ~75% of the merge
+//! time on a typical book. Once we know we can preserve the source symtab
+//! intact, none of that work is required: every entity body's bytes are
+//! **already valid** in the merged container with the same symtab attached.
+//!
+//! So this path:
+//!  - parses only the 4 container headers (~100 bytes each),
+//!  - parses `doc_symbols` once and reuses it byte-for-byte,
+//!  - parses the source `$419` body once to keep its `$253` deps,
+//!  - **copies the other 349/350 entity bodies verbatim**,
+//!  - synthesizes a fresh `$270` container_info + `$419` entity_map.
+//!
+//! ## When this path bails out
+//!
+//! The fast path requires:
+//!  - at most one source container with `doc_symbols`, and
+//!  - the source `$419` (if any) entity-table row uses `id_idnum == $348`
+//!    (singleton form) so its body can be unwrapped cleanly.
+//!
+//! Both hold for every Amazon `.kfx-zip` we've seen. When they don't, the
+//! caller should fall back to [`crate::kfx::merge::mechanical`].
+
+use std::io::{self, Read};
+use std::path::Path;
+
+use super::node::{parse_single_value, serialize_single_value, IonNode, ION_BVM};
+use super::symtab::{LocalSymbolTable, SymbolTableImport, SYSTEM_SIZE};
+use super::trace::Trace;
+
+const CONT_SIGNATURE: &[u8] = b"CONT";
+const ENTY_SIGNATURE: &[u8] = b"ENTY";
+const CONTAINER_VERSION: u16 = 2;
+const ENTITY_VERSION: u16 = 1;
+const DEFAULT_CHUNK_SIZE: i64 = 4096;
+const KFX_CONTAINER_FORMAT_MAIN: &str = "KFX main";
+const SYM_DOLLAR_348: u32 = 348;
+const SYM_DOLLAR_419: u32 = 419;
+const SYM_DOLLAR_270: u32 = 270;
+
+/// Compact view of one source `.kfx` after the cheap parse phase.
+struct RawContainer {
+    data: Vec<u8>,
+    header_len: usize,
+    container_id: String,
+    kfxgen_app_version: String,
+    kfxgen_pkg_version: String,
+    version: i64,
+    doc_symbols_range: Option<(usize, usize)>,
+    format_capabilities_range: Option<(usize, usize)>,
+    entity_rows: Vec<RawEntityRow>,
+}
+
+#[derive(Clone, Copy)]
+struct RawEntityRow {
+    id_idnum: u32,
+    type_idnum: u32,
+    /// Absolute offset within the source container's `data`.
+    body_offset: usize,
+    body_length: usize,
+}
+
+pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
+    let trace = Trace::new("merge-fast");
+
+    // ---- 1. Read zip + sort entries.
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+    let mut kfx_names: Vec<String> = Vec::new();
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        if entry.is_file()
+            && Path::new(entry.name())
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx"))
+        {
+            kfx_names.push(entry.name().to_string());
+        }
+    }
+    kfx_names.sort();
+    if kfx_names.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kfx-zip contains no .kfx entries",
+        ));
+    }
+    trace.mark("zip + entry list");
+
+    // ---- 2. Lightweight per-container parse (header + entity table only).
+    //
+    // We have to walk container_info Ion to learn the entity-table offset
+    // and the doc_symbols byte range. We use a *fresh* symtab per container
+    // because container_info only ever references SYSTEM + YJ catalog symbols
+    // (numeric `$N` form) — no local symbols. Same logic as the mechanical
+    // path, but we don't need a shared symtab here.
+    let mut raws: Vec<RawContainer> = Vec::with_capacity(kfx_names.len());
+    for name in &kfx_names {
+        let mut entry = archive
+            .by_name(name)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut buf)?;
+        raws.push(parse_container_shallow(buf)?);
+    }
+    trace.mark("unzip + shallow parse");
+
+    // ---- 3. Build the merged symtab (parse doc_symbols once, if any).
+    //
+    // We expect exactly one source to carry doc_symbols. If multiple do
+    // and they disagree, the fast path can't help — caller falls back.
+    let mut symtab = LocalSymbolTable::new();
+    let mut doc_symbols_bytes_owned: Option<Vec<u8>> = None;
+    let mut doc_symbols_count = 0;
+    for r in &raws {
+        if let Some((off, len)) = r.doc_symbols_range {
+            doc_symbols_count += 1;
+            doc_symbols_bytes_owned = Some(r.data[off..off + len].to_vec());
+        }
+    }
+    if doc_symbols_count > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "fast path: multiple source containers carry doc_symbols",
+        ));
+    }
+    if let Some(ds_bytes) = doc_symbols_bytes_owned.as_ref() {
+        populate_symtab_from_doc_symbols(&mut symtab, ds_bytes)?;
+    }
+
+    // ---- 4. Find one format_capabilities blob to keep (verbatim).
+    let mut format_capabilities_bytes: Option<Vec<u8>> = None;
+    for r in &raws {
+        if let Some((off, len)) = r.format_capabilities_range {
+            format_capabilities_bytes = Some(r.data[off..off + len].to_vec());
+            break;
+        }
+    }
+    trace.mark("symtab + format_capabilities");
+
+    // ---- 5. Pick merged container metadata.
+    //
+    // Same rules as the mechanical path: prefer asset_id from $490, else
+    // the source with the most entity rows, else a generated id.
+    let (merged_id, app_version, pkg_version, version) =
+        pick_merged_metadata(&raws, &symtab)?;
+    trace.mark("pick metadata");
+
+    // ---- 6. Aggregate entities. Skip the source $419 entity (its content
+    //         is rebuilt from scratch). Keep its $253 deps for verbatim
+    //         re-use if present.
+    let mut merged_entities: Vec<(RawEntityRow, usize)> = Vec::new(); // (row, source_container_idx)
+    let mut existing_419_deps: Option<IonNode> = None;
+    for (c_idx, r) in raws.iter().enumerate() {
+        for row in &r.entity_rows {
+            if row.type_idnum == SYM_DOLLAR_419 {
+                let body =
+                    extract_entity_body(&r.data, row.body_offset, row.body_length)?;
+                let mut node = parse_single_value(body, &symtab)?;
+                if let IonNode::Annotated(_, inner) = node {
+                    node = *inner;
+                }
+                if let Some(deps) = node.get_field("$253") {
+                    existing_419_deps = Some(deps.clone());
+                }
+                continue;
+            }
+            merged_entities.push((*row, c_idx));
+        }
+    }
+
+    // entity_fids list = every non-singleton entity's fid (resolved through
+    // symtab) in source-walk order.
+    let mut entity_fids: Vec<String> = Vec::with_capacity(merged_entities.len() + 1);
+    let mut seen_fids: std::collections::HashSet<String> = Default::default();
+    for (row, _) in &merged_entities {
+        if row.id_idnum == SYM_DOLLAR_348 {
+            continue; // singleton — calibre encodes id_idnum=$348 and skips fid emission
+        }
+        let fid = symtab.get_symbol(row.id_idnum);
+        if seen_fids.insert(fid.clone()) {
+            entity_fids.push(fid);
+        }
+    }
+    trace.mark("aggregate entities");
+
+    // ---- 7. Build new $419 body Ion + wrap in ENTY frame.
+    let new_419_body = build_419_body(&merged_id, &entity_fids, existing_419_deps);
+    let new_419_bytes = serialize_single_value(&new_419_body, &symtab);
+    let new_419_entity = wrap_entity_body(&new_419_bytes, &symtab);
+    trace.mark("build $419");
+
+    // ---- 8. Compute layout offsets + emit container.
+    Ok(emit_container(
+        &raws,
+        &merged_entities,
+        &new_419_entity,
+        &symtab,
+        doc_symbols_bytes_owned.as_deref(),
+        format_capabilities_bytes.as_deref(),
+        &merged_id,
+        &app_version,
+        &pkg_version,
+        version,
+        &trace,
+    ))
+}
+
+// =========================================================================
+// Shallow parse
+// =========================================================================
+
+fn parse_container_shallow(data: Vec<u8>) -> io::Result<RawContainer> {
+    if data.len() < 18 || &data[0..4] != CONT_SIGNATURE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad container signature",
+        ));
+    }
+    let version = u16::from_le_bytes([data[4], data[5]]) as i64;
+    let header_len = u32_le(&data, 6) as usize;
+    let ci_off = u32_le(&data, 10) as usize;
+    let ci_len = u32_le(&data, 14) as usize;
+
+    // Container_info uses only SYSTEM + YJ catalog symbols, so a fresh
+    // (system-only) symtab resolves $409 / $413 / etc. just fine — those are
+    // all `$<id>` canonical names.
+    let probe_symtab = LocalSymbolTable::new();
+    let ci_node = parse_single_value(&data[ci_off..ci_off + ci_len], &probe_symtab)?;
+    let ci_fields = ci_node.as_struct().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "container_info is not a struct")
+    })?;
+
+    let container_id = field_string(ci_fields, "$409").unwrap_or_default();
+    let doc_symbol_offset = field_int(ci_fields, "$415");
+    let doc_symbol_length = field_int(ci_fields, "$416").unwrap_or(0);
+    let fc_offset = field_int(ci_fields, "$594");
+    let fc_length = field_int(ci_fields, "$595").unwrap_or(0);
+    let idx_offset = field_int(ci_fields, "$413");
+    let idx_length = field_int(ci_fields, "$414").unwrap_or(0);
+
+    let doc_symbols_range = match (doc_symbol_offset, doc_symbol_length) {
+        (Some(o), l) if l > 0 => Some((o as usize, l as usize)),
+        _ => None,
+    };
+    let format_capabilities_range = match (fc_offset, fc_length) {
+        (Some(o), l) if l > 0 => Some((o as usize, l as usize)),
+        _ => None,
+    };
+
+    let mut entity_rows = Vec::new();
+    if let Some(idx_off) = idx_offset {
+        let idx_off = idx_off as usize;
+        let idx_len = idx_length as usize;
+        const ROW: usize = 24;
+        let n = idx_len / ROW;
+        let table = &data[idx_off..idx_off + idx_len];
+        for i in 0..n {
+            let base = i * ROW;
+            entity_rows.push(RawEntityRow {
+                id_idnum: u32_le(table, base),
+                type_idnum: u32_le(table, base + 4),
+                body_offset: header_len + u64_le(table, base + 8) as usize,
+                body_length: u64_le(table, base + 16) as usize,
+            });
+        }
+    }
+
+    let kfxgen_info_bytes = &data[ci_off + ci_len..header_len];
+    let kfxgen_info_str = String::from_utf8_lossy(kfxgen_info_bytes);
+    let app_version = extract_kfxgen_field(&kfxgen_info_str, "kfxgen_application_version")
+        .or_else(|| extract_kfxgen_field(&kfxgen_info_str, "appVersion"))
+        .unwrap_or_default();
+    let pkg_version = extract_kfxgen_field(&kfxgen_info_str, "kfxgen_package_version")
+        .or_else(|| extract_kfxgen_field(&kfxgen_info_str, "buildVersion"))
+        .unwrap_or_default();
+
+    Ok(RawContainer {
+        data,
+        header_len,
+        container_id,
+        kfxgen_app_version: app_version,
+        kfxgen_pkg_version: pkg_version,
+        version,
+        doc_symbols_range,
+        format_capabilities_range,
+        entity_rows,
+    })
+}
+
+fn populate_symtab_from_doc_symbols(
+    symtab: &mut LocalSymbolTable,
+    bytes: &[u8],
+) -> io::Result<()> {
+    // We need to parse doc_symbols just to populate the in-memory symtab.
+    // Symbol-table parse uses only the SYSTEM symbols, so an initial empty
+    // symtab is fine.
+    let probe = LocalSymbolTable::new();
+    let mut value = parse_single_value(bytes, &probe)?;
+    if let IonNode::Annotated(_, inner) = value {
+        value = *inner;
+    }
+    let fields = value.as_struct().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "doc_symbols payload is not a struct",
+        )
+    })?;
+    let mut imports: Vec<SymbolTableImport> = Vec::new();
+    let mut locals: Vec<String> = Vec::new();
+    for (k, v) in fields {
+        match k.as_str() {
+            "imports" => {
+                if let Some(items) = v.as_list() {
+                    for item in items {
+                        let Some(f) = item.as_struct() else { continue };
+                        let name = field_string(f, "name").unwrap_or_default();
+                        let version = field_int(f, "version").unwrap_or(1) as u32;
+                        let max_id = field_int(f, "max_id").unwrap_or(0) as u32;
+                        // Calibre subtracts SYSTEM size from wire max_id.
+                        let max_id = max_id.saturating_sub(SYSTEM_SIZE);
+                        if !name.is_empty() {
+                            imports.push(SymbolTableImport {
+                                name,
+                                version,
+                                max_id,
+                            });
+                        }
+                    }
+                }
+            }
+            "symbols" => {
+                if let Some(items) = v.as_list() {
+                    for item in items {
+                        if let Some(s) = item.as_string() {
+                            locals.push(s.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    symtab.create(&imports, &locals);
+    Ok(())
+}
+
+// =========================================================================
+// Metadata picker
+// =========================================================================
+
+fn pick_merged_metadata(
+    raws: &[RawContainer],
+    symtab: &LocalSymbolTable,
+) -> io::Result<(String, String, String, i64)> {
+    let mut app_version = String::new();
+    let mut pkg_version = String::new();
+    let mut version: i64 = 2;
+    let mut largest_container: Option<(usize, &RawContainer)> = None;
+
+    for r in raws {
+        if !r.kfxgen_app_version.is_empty() {
+            app_version = r.kfxgen_app_version.clone();
+        }
+        if !r.kfxgen_pkg_version.is_empty() {
+            pkg_version = r.kfxgen_pkg_version.clone();
+        }
+        version = r.version;
+        match largest_container {
+            Some((n, _)) if n >= r.entity_rows.len() => {}
+            _ => largest_container = Some((r.entity_rows.len(), r)),
+        }
+    }
+
+    // Prefer asset_id from $490 (kindle_title_metadata). Same rule the
+    // mechanical path uses for parity.
+    let merged_id = if let Some(asset) = find_asset_id(raws, symtab)? {
+        asset
+    } else if let Some((_, r)) = largest_container {
+        if r.container_id.is_empty() {
+            super::common::generate_container_id()
+        } else {
+            r.container_id.clone()
+        }
+    } else {
+        super::common::generate_container_id()
+    };
+
+    if app_version.is_empty() {
+        app_version = format!("kfxlib-{}", env!("CARGO_PKG_VERSION"));
+    }
+    Ok((merged_id, app_version, pkg_version, version))
+}
+
+fn find_asset_id(
+    raws: &[RawContainer],
+    symtab: &LocalSymbolTable,
+) -> io::Result<Option<String>> {
+    // $490 metadata lives in metadata.kfx as an entity. We must parse it.
+    // It's small (~3 KB), so the cost is negligible.
+    for r in raws {
+        for row in &r.entity_rows {
+            if row.type_idnum != 490 {
+                continue;
+            }
+            let body = extract_entity_body(&r.data, row.body_offset, row.body_length)?;
+            let mut node = parse_single_value(body, symtab)?;
+            if let IonNode::Annotated(_, inner) = node {
+                node = *inner;
+            }
+            let Some(categories) = node.get_field("$491").and_then(|n| n.as_list()) else {
+                continue;
+            };
+            for cat in categories {
+                let cat_name = cat
+                    .get_field("$495")
+                    .and_then(|n| n.as_string())
+                    .unwrap_or("");
+                if cat_name != "kindle_title_metadata" {
+                    continue;
+                }
+                let Some(kvs) = cat.get_field("$258").and_then(|n| n.as_list()) else {
+                    continue;
+                };
+                for kv in kvs {
+                    let k = kv.get_field("$492").and_then(|n| n.as_string()).unwrap_or("");
+                    if k == "asset_id" {
+                        if let Some(v) = kv.get_field("$307").and_then(|n| n.as_string()) {
+                            return Ok(Some(v.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+// =========================================================================
+// $419 body
+// =========================================================================
+
+fn build_419_body(
+    container_id: &str,
+    entity_fids: &[String],
+    existing_deps: Option<IonNode>,
+) -> IonNode {
+    let container_contents = IonNode::Struct(vec![
+        ("$155".into(), IonNode::String(container_id.to_string())),
+        (
+            "$181".into(),
+            IonNode::List(
+                entity_fids
+                    .iter()
+                    .map(|s| IonNode::Symbol(s.clone()))
+                    .collect(),
+            ),
+        ),
+    ]);
+    let mut fields = vec![("$252".into(), IonNode::List(vec![container_contents]))];
+    if let Some(deps) = existing_deps {
+        fields.push(("$253".into(), deps));
+    }
+    IonNode::Struct(fields)
+}
+
+fn wrap_entity_body(body: &[u8], symtab: &LocalSymbolTable) -> Vec<u8> {
+    let info_node = IonNode::Struct(vec![
+        ("$410".into(), IonNode::Int(0)),
+        ("$411".into(), IonNode::Int(0)),
+    ]);
+    let mut info_bytes = Vec::from(ION_BVM);
+    info_bytes.extend_from_slice(&super::node::serialize_value(&info_node, symtab));
+    let header_len = (10 + info_bytes.len()) as u32;
+    let mut out = Vec::with_capacity(header_len as usize + body.len());
+    out.extend_from_slice(ENTY_SIGNATURE);
+    out.extend_from_slice(&ENTITY_VERSION.to_le_bytes());
+    out.extend_from_slice(&header_len.to_le_bytes());
+    out.extend_from_slice(&info_bytes);
+    out.extend_from_slice(body);
+    out
+}
+
+// =========================================================================
+// Container layout
+// =========================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn emit_container(
+    raws: &[RawContainer],
+    merged_entities: &[(RawEntityRow, usize)],
+    new_419_entity: &[u8],
+    symtab: &LocalSymbolTable,
+    doc_symbols_bytes: Option<&[u8]>,
+    format_capabilities_bytes: Option<&[u8]>,
+    merged_id: &str,
+    app_version: &str,
+    pkg_version: &str,
+    version: i64,
+    trace: &Trace,
+) -> Vec<u8> {
+    // Pre-compute total output size: header + entity table + doc_symbols
+    //   + format_capabilities + container_info (≤300 B est.) + kfxgen_info
+    //   + sum(entity bodies).
+    let n_rows = merged_entities.len() + 1; // +1 for synthesized $419
+    let entity_table_size = n_rows * 24;
+    let bodies_size: usize = merged_entities
+        .iter()
+        .map(|(r, _)| r.body_length)
+        .sum::<usize>()
+        + new_419_entity.len();
+    let ds_len = doc_symbols_bytes.map_or(0, |b| b.len());
+    let fc_len = format_capabilities_bytes.map_or(0, |b| b.len());
+    let mut out = Vec::with_capacity(
+        18 + entity_table_size + ds_len + fc_len + 512 + bodies_size,
+    );
+
+    // Fixed header (18 bytes), patched at the end.
+    out.extend_from_slice(CONT_SIGNATURE);
+    out.extend_from_slice(&CONTAINER_VERSION.to_le_bytes());
+    let header_len_pack = out.len();
+    out.extend_from_slice(&[0u8; 4]);
+    let ci_off_pack = out.len();
+    out.extend_from_slice(&[0u8; 4]);
+    let ci_len_pack = out.len();
+    out.extend_from_slice(&[0u8; 4]);
+
+    let entity_table_off = out.len();
+    // Entity-table rows. Source rows first (in source-walk order), then
+    // synthesized $419 row last.
+    let mut entity_offset: u64 = 0;
+    for (row, _) in merged_entities {
+        out.extend_from_slice(&row.id_idnum.to_le_bytes());
+        out.extend_from_slice(&row.type_idnum.to_le_bytes());
+        out.extend_from_slice(&entity_offset.to_le_bytes());
+        out.extend_from_slice(&(row.body_length as u64).to_le_bytes());
+        entity_offset += row.body_length as u64;
+    }
+    // Synthesized $419: id_idnum = $348 (singleton form).
+    out.extend_from_slice(&SYM_DOLLAR_348.to_le_bytes());
+    out.extend_from_slice(&SYM_DOLLAR_419.to_le_bytes());
+    out.extend_from_slice(&entity_offset.to_le_bytes());
+    out.extend_from_slice(&(new_419_entity.len() as u64).to_le_bytes());
+
+    // doc_symbols verbatim. Container_info captures its offset/length.
+    let doc_symbols_off = out.len();
+    if let Some(ds) = doc_symbols_bytes {
+        out.extend_from_slice(ds);
+    }
+
+    let format_caps_off = out.len();
+    if let Some(fc) = format_capabilities_bytes {
+        out.extend_from_slice(fc);
+    }
+
+    // Build container_info struct. Same field ordering as the mechanical
+    // path so calibre's deserializer sees the same shape.
+    let mut ci_fields: Vec<(String, IonNode)> = Vec::new();
+    ci_fields.push((
+        "$409".into(),
+        IonNode::String(merged_id.to_string()),
+    ));
+    ci_fields.push(("$410".into(), IonNode::Int(0)));
+    ci_fields.push(("$411".into(), IonNode::Int(0)));
+    ci_fields.push(("$413".into(), IonNode::Int(entity_table_off as i64)));
+    ci_fields.push((
+        "$414".into(),
+        IonNode::Int(entity_table_size as i64),
+    ));
+    ci_fields.push(("$415".into(), IonNode::Int(doc_symbols_off as i64)));
+    ci_fields.push(("$416".into(), IonNode::Int(ds_len as i64)));
+    ci_fields.push(("$412".into(), IonNode::Int(DEFAULT_CHUNK_SIZE)));
+    if fc_len > 0 && symtab.local_min_id() > 595 {
+        ci_fields.push(("$594".into(), IonNode::Int(format_caps_off as i64)));
+        ci_fields.push(("$595".into(), IonNode::Int(fc_len as i64)));
+    }
+    let ci_bytes = serialize_single_value(&IonNode::Struct(ci_fields), symtab);
+    let ci_off_value = out.len() as u32;
+    patch_u32_le(&mut out, ci_off_pack, ci_off_value);
+    patch_u32_le(&mut out, ci_len_pack, ci_bytes.len() as u32);
+    out.extend_from_slice(&ci_bytes);
+
+    // kfxgen_info trailer (calibre's JSON-textish form).
+    let payload_sha1 = sha1_of_bodies(merged_entities, raws, new_419_entity);
+    let kfxgen_info = format!(
+        r#"[{{key:"kfxgen_package_version",value:"{}"}},{{key:"kfxgen_application_version",value:"{}"}},{{key:"kfxgen_payload_sha1",value:"{}"}},{{key:"kfxgen_acr",value:"{}"}}]"#,
+        escape_json(pkg_version),
+        escape_json(app_version),
+        payload_sha1,
+        escape_json(merged_id),
+    );
+    out.extend_from_slice(kfxgen_info.as_bytes());
+
+    let header_len_value = out.len() as u32;
+    patch_u32_le(&mut out, header_len_pack, header_len_value);
+    trace.mark("header laid out");
+
+    // Entity bodies — copied verbatim, including the synthesized $419 at the
+    // end. This is the bulk of the output bytes.
+    for (row, c_idx) in merged_entities {
+        let src = &raws[*c_idx].data;
+        out.extend_from_slice(&src[row.body_offset..row.body_offset + row.body_length]);
+    }
+    out.extend_from_slice(new_419_entity);
+    trace.mark("entity bodies copied");
+
+    // version + format alignment with the mechanical path (we don't actually
+    // need `version` in the output; calibre reads it from the on-wire header
+    // u16). The local already has version=2 in the header.
+    let _ = version;
+
+    out
+}
+
+fn sha1_of_bodies(
+    merged_entities: &[(RawEntityRow, usize)],
+    raws: &[RawContainer],
+    new_419_entity: &[u8],
+) -> String {
+    let mut hasher = sha1_smol::Sha1::new();
+    for (row, c_idx) in merged_entities {
+        let src = &raws[*c_idx].data;
+        hasher.update(&src[row.body_offset..row.body_offset + row.body_length]);
+    }
+    hasher.update(new_419_entity);
+    hasher.digest().to_string()
+}
+
+// =========================================================================
+// Helpers
+// =========================================================================
+
+fn extract_entity_body(data: &[u8], offset: usize, length: usize) -> io::Result<&[u8]> {
+    let body = &data[offset..offset + length];
+    if body.len() < 10 || &body[0..4] != ENTY_SIGNATURE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad ENTY signature",
+        ));
+    }
+    let header_len = u32_le(body, 6) as usize;
+    Ok(&body[header_len..])
+}
+
+fn field_string(fields: &[(String, IonNode)], key: &str) -> Option<String> {
+    fields
+        .iter()
+        .find(|(k, _)| k == key)
+        .and_then(|(_, v)| match v {
+            IonNode::String(s) => Some(s.clone()),
+            _ => None,
+        })
+}
+
+fn field_int(fields: &[(String, IonNode)], key: &str) -> Option<i64> {
+    fields
+        .iter()
+        .find(|(k, _)| k == key)
+        .and_then(|(_, v)| match v {
+            IonNode::Int(n) => Some(*n),
+            _ => None,
+        })
+}
+
+fn extract_kfxgen_field(s: &str, key: &str) -> Option<String> {
+    let key_pat = format!("key:\"{}\"", key);
+    let pos = s.find(&key_pat)?;
+    let rest = &s[pos + key_pat.len()..];
+    let val_start = rest.find("value:\"")? + "value:\"".len();
+    let val_rest = &rest[val_start..];
+    let val_end = val_rest.find('"')?;
+    Some(val_rest[..val_end].to_string())
+}
+
+fn escape_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+#[inline]
+fn u32_le(d: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([d[off], d[off + 1], d[off + 2], d[off + 3]])
+}
+#[inline]
+fn u64_le(d: &[u8], off: usize) -> u64 {
+    u64::from_le_bytes([
+        d[off],
+        d[off + 1],
+        d[off + 2],
+        d[off + 3],
+        d[off + 4],
+        d[off + 5],
+        d[off + 6],
+        d[off + 7],
+    ])
+}
+
+fn patch_u32_le(buf: &mut [u8], at: usize, v: u32) {
+    buf[at..at + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+// Suppress an unused-warning for SYM_DOLLAR_270 — kept for symmetry with the
+// `$270` discussion in the module docs even though the constant isn't read
+// (we emit $270 as a synthesized container_info struct, not an entity row).
+#[allow(dead_code)]
+const _: u32 = SYM_DOLLAR_270;
