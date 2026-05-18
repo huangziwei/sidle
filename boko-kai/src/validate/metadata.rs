@@ -35,29 +35,33 @@ use crate::kfx::container::{
 use crate::kfx::ion::{IonParser, IonValue};
 use crate::kfx::symbols::{KFX_SYMBOL_TABLE, KfxSymbol};
 
+/// A field-level mismatch between EPUB and KFX. Direction-neutral: `epub` is
+/// the value seen on the EPUB side, `kfx` is the value seen on the KFX side,
+/// regardless of which one is the conversion source.
 #[derive(Debug, Clone)]
 pub struct FieldDiff {
     pub field: &'static str,
-    pub source: String,
+    pub epub: String,
     pub kfx: String,
 }
 
 #[derive(Debug, Default)]
 pub struct Report {
-    pub source_title: String,
-    pub source_language: String,
-    pub source_first_author: String,
-    pub source_identifier: String,
-    pub source_has_cover: bool,
-    pub source_ppd: Option<String>,
-    pub source_extra_authors: usize,
+    pub epub_title: String,
+    pub epub_language: String,
+    pub epub_first_author: String,
+    pub epub_identifier: String,
+    pub epub_has_cover: bool,
+    pub epub_ppd: Option<String>,
+    pub epub_extra_authors: usize,
 
     pub kfx_title: String,
     pub kfx_language: String,
     pub kfx_first_author: String,
     pub kfx_cover_image: Option<String>,
     pub kfx_ppd: Option<String>,
-    /// `book_id` field if present — derived from source identifier.
+    /// `book_id` field if present — derived from EPUB identifier in EPUB→KFX
+    /// flow, or already present from a prior conversion in KFX→EPUB flow.
     pub kfx_book_id: Option<String>,
 
     pub diffs: Vec<FieldDiff>,
@@ -68,93 +72,98 @@ impl Report {
         self.diffs.is_empty()
     }
 
-    pub fn print_summary(&self) {
+    pub fn print_summary(&self, _dir: super::Direction) {
         println!("Title:");
-        println!("  source: {:?}", self.source_title);
-        println!("  KFX:    {:?}", self.kfx_title);
+        println!("  EPUB: {:?}", self.epub_title);
+        println!("  KFX:  {:?}", self.kfx_title);
         println!("Language:");
-        println!("  source: {:?}", self.source_language);
-        println!("  KFX:    {:?}", self.kfx_language);
+        println!("  EPUB: {:?}", self.epub_language);
+        println!("  KFX:  {:?}", self.kfx_language);
         println!("Author (first):");
-        println!("  source: {:?}{}", self.source_first_author,
-            if self.source_extra_authors > 0 {
-                format!(" (+{} more, KFX stores only first by design)", self.source_extra_authors)
+        println!(
+            "  EPUB: {:?}{}",
+            self.epub_first_author,
+            if self.epub_extra_authors > 0 {
+                format!(
+                    " (+{} more; KFX stores only first by design)",
+                    self.epub_extra_authors
+                )
             } else {
                 String::new()
-            });
-        println!("  KFX:    {:?}", self.kfx_first_author);
+            }
+        );
+        println!("  KFX:  {:?}", self.kfx_first_author);
         println!("Cover image:");
-        println!("  source has cover: {}", self.source_has_cover);
-        println!("  KFX cover_image:  {:?}", self.kfx_cover_image);
+        println!("  EPUB has cover:  {}", self.epub_has_cover);
+        println!("  KFX cover_image: {:?}", self.kfx_cover_image);
         println!("Page progression direction:");
-        println!("  source: {:?}", self.source_ppd);
-        println!("  KFX:    {:?}", self.kfx_ppd);
+        println!("  EPUB: {:?}", self.epub_ppd);
+        println!("  KFX:  {:?}", self.kfx_ppd);
         println!("Identifier round-trip:");
-        println!("  source identifier: {:?}", self.source_identifier);
-        println!("  KFX book_id:       {:?}", self.kfx_book_id);
+        println!("  EPUB identifier: {:?}", self.epub_identifier);
+        println!("  KFX book_id:     {:?}", self.kfx_book_id);
         println!("Defects: {}", self.diffs.len());
     }
 
-    pub fn print_details(&self, _limit: usize) {
+    pub fn print_details(&self, _limit: usize, _dir: super::Direction) {
         if self.diffs.is_empty() {
             return;
         }
         println!("\n--- Field mismatches ---");
         for d in &self.diffs {
-            println!("  {}: source={:?}  kfx={:?}", d.field, d.source, d.kfx);
+            println!("  {}: epub={:?}  kfx={:?}", d.field, d.epub, d.kfx);
         }
     }
 }
 
 pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
-    let source = extract_source_metadata(epub_bytes)?;
+    let epub = extract_epub_metadata(epub_bytes)?;
     let kfx = extract_kfx_metadata(kfx_bytes)?;
 
     let mut diffs: Vec<FieldDiff> = Vec::new();
 
-    if !source.title.is_empty() && source.title != kfx.title {
+    if !epub.title.is_empty() && epub.title != kfx.title {
         diffs.push(FieldDiff {
             field: "title",
-            source: source.title.clone(),
+            epub: epub.title.clone(),
             kfx: kfx.title.clone(),
         });
     }
-    if !source.language.is_empty() && source.language != kfx.language {
+    if !epub.language.is_empty() && epub.language != kfx.language {
         diffs.push(FieldDiff {
             field: "language",
-            source: source.language.clone(),
+            epub: epub.language.clone(),
             kfx: kfx.language.clone(),
         });
     }
-    if !source.first_author.is_empty() && source.first_author != kfx.first_author {
+    if !epub.first_author.is_empty() && epub.first_author != kfx.first_author {
         diffs.push(FieldDiff {
             field: "author",
-            source: source.first_author.clone(),
+            epub: epub.first_author.clone(),
             kfx: kfx.first_author.clone(),
         });
     }
-    // Cover: source has cover path → KFX should have a non-empty cover_image
-    // pointing at a resource. We don't compare paths; the transformation
-    // OPF-path → KFX-resource-name is intentional.
-    if source.has_cover && kfx.cover_image.as_deref().unwrap_or("").is_empty() {
+    // Cover: EPUB declares a cover path → KFX should have a non-empty
+    // cover_image pointing at a resource. We don't compare paths; the
+    // transformation OPF-path → KFX-resource-name is intentional.
+    if epub.has_cover && kfx.cover_image.as_deref().unwrap_or("").is_empty() {
         diffs.push(FieldDiff {
             field: "cover_image",
-            source: source.cover_path.clone().unwrap_or_default(),
+            epub: epub.cover_path.clone().unwrap_or_default(),
             kfx: "(missing)".into(),
         });
     }
-    // PPD: only check when source declared one. Source "default" or absent
+    // PPD: only check when EPUB declared one. EPUB "default" or absent
     // matches KFX omission (no $rtl / $ltr emitted).
-    match (&source.ppd, &kfx.ppd) {
+    match (&epub.ppd, &kfx.ppd) {
         (Some(s), kfx_ppd) if s == "rtl" || s == "ltr" => {
-            // Source explicitly set rtl/ltr; KFX must mirror it.
             let kfx_str = kfx_ppd.clone().unwrap_or_default();
             // KFX stores it as "$rtl" or "$ltr"; normalise.
             let kfx_norm = kfx_str.trim_start_matches('$').to_string();
             if kfx_norm != *s {
                 diffs.push(FieldDiff {
                     field: "page_progression_direction",
-                    source: s.clone(),
+                    epub: s.clone(),
                     kfx: kfx_str,
                 });
             }
@@ -163,13 +172,13 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     }
 
     Ok(Report {
-        source_title: source.title,
-        source_language: source.language,
-        source_first_author: source.first_author,
-        source_identifier: source.identifier,
-        source_has_cover: source.has_cover,
-        source_ppd: source.ppd,
-        source_extra_authors: source.extra_authors,
+        epub_title: epub.title,
+        epub_language: epub.language,
+        epub_first_author: epub.first_author,
+        epub_identifier: epub.identifier,
+        epub_has_cover: epub.has_cover,
+        epub_ppd: epub.ppd,
+        epub_extra_authors: epub.extra_authors,
         kfx_title: kfx.title,
         kfx_language: kfx.language,
         kfx_first_author: kfx.first_author,
@@ -185,7 +194,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 // ============================================================================
 
 #[derive(Debug, Default)]
-struct SourceMetadata {
+struct EpubMetadata {
     title: String,
     language: String,
     first_author: String,
@@ -196,7 +205,7 @@ struct SourceMetadata {
     extra_authors: usize,
 }
 
-fn extract_source_metadata(epub_bytes: &[u8]) -> Result<SourceMetadata, String> {
+fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
     let cursor = Cursor::new(epub_bytes);
     let mut archive =
         ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
@@ -211,7 +220,7 @@ fn extract_source_metadata(epub_bytes: &[u8]) -> Result<SourceMetadata, String> 
     let opf_str = crate::util::decode_text(&opf_bytes, enc);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
 
-    Ok(SourceMetadata {
+    Ok(EpubMetadata {
         title: opf.metadata.title.clone(),
         language: opf.metadata.language.clone(),
         first_author: opf.metadata.authors.first().cloned().unwrap_or_default(),

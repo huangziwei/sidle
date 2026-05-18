@@ -45,65 +45,105 @@ impl RubyPair {
     }
 }
 
-/// Result of comparing EPUB-side and KFX-side pair sets.
+/// Result of comparing EPUB-side and KFX-side pair sets. Direction-neutral:
+/// callers interpret `only_in_epub` and `only_in_kfx` based on which side is
+/// the ground truth for the conversion direction under test (see
+/// [`crate::validate::Direction`]).
 #[derive(Debug, Default)]
 pub struct Report {
     pub epub_pairs: Vec<RubyPair>,
     pub kfx_pairs: Vec<RubyPair>,
-    /// Pairs present in EPUB but not in KFX (boko dropped them or paired wrong).
-    pub missing: Vec<(RubyPair, usize)>,
-    /// Pairs present in KFX but not in EPUB (boko fabricated or mispaired).
-    pub extra: Vec<(RubyPair, usize)>,
+    /// Pairs present in EPUB but not in KFX. In EPUB→KFX, these are pairs
+    /// boko dropped or mispaired. In KFX→EPUB, these are pairs boko fabricated.
+    pub only_in_epub: Vec<(RubyPair, usize)>,
+    /// Pairs present in KFX but not in EPUB. In EPUB→KFX, these are pairs
+    /// boko fabricated. In KFX→EPUB, these are pairs boko dropped or mispaired.
+    pub only_in_kfx: Vec<(RubyPair, usize)>,
     /// Pairs present in both, with min(epub_count, kfx_count) per unique pair.
     pub matched: usize,
 }
 
 impl Report {
     pub fn is_clean(&self) -> bool {
-        self.missing.is_empty() && self.extra.is_empty()
+        self.only_in_epub.is_empty() && self.only_in_kfx.is_empty()
     }
 
-    pub fn print_summary(&self) {
+    pub fn print_summary(&self, dir: super::Direction) {
         println!("EPUB pairs:    {}", self.epub_pairs.len());
         println!("KFX pairs:     {}", self.kfx_pairs.len());
         println!("Matched:       {}", self.matched);
-        let missing_total: usize = self.missing.iter().map(|(_, n)| n).sum();
-        let extra_total: usize = self.extra.iter().map(|(_, n)| n).sum();
+        let epub_only_total: usize = self.only_in_epub.iter().map(|(_, n)| n).sum();
+        let kfx_only_total: usize = self.only_in_kfx.iter().map(|(_, n)| n).sum();
+        let (dropped, dropped_n, fabricated, fabricated_n) = if dir.epub_is_source() {
+            // EPUB→KFX: EPUB-only = dropped by boko; KFX-only = fabricated.
+            (
+                &self.only_in_epub,
+                epub_only_total,
+                &self.only_in_kfx,
+                kfx_only_total,
+            )
+        } else {
+            // KFX→EPUB: KFX-only = dropped by boko; EPUB-only = fabricated.
+            (
+                &self.only_in_kfx,
+                kfx_only_total,
+                &self.only_in_epub,
+                epub_only_total,
+            )
+        };
         println!(
-            "Missing in KFX: {} ({} unique)",
-            missing_total,
-            self.missing.len()
+            "Dropped (missing in {}): {} ({} unique)",
+            dir.target_label(),
+            dropped_n,
+            dropped.len()
         );
         println!(
-            "Extra in KFX:   {} ({} unique)",
-            extra_total,
-            self.extra.len()
+            "Fabricated (extra in {}): {} ({} unique)",
+            dir.target_label(),
+            fabricated_n,
+            fabricated.len()
         );
     }
 
-    pub fn print_details(&self, limit: usize) {
-        if !self.missing.is_empty() {
-            println!("\n--- Missing (in EPUB, not in KFX) [first {}] ---", limit);
-            for (pair, n) in self.missing.iter().take(limit) {
+    pub fn print_details(&self, limit: usize, dir: super::Direction) {
+        let (dropped, fabricated) = if dir.epub_is_source() {
+            (&self.only_in_epub, &self.only_in_kfx)
+        } else {
+            (&self.only_in_kfx, &self.only_in_epub)
+        };
+        if !dropped.is_empty() {
+            println!(
+                "\n--- Dropped (in source {}, missing from {}) [first {}] ---",
+                dir.source_label(),
+                dir.target_label(),
+                limit
+            );
+            for (pair, n) in dropped.iter().take(limit) {
                 println!("  ({}×)  {}  →  {}", n, pair.base, pair.annotation);
             }
-            if self.missing.len() > limit {
-                println!("  ... and {} more unique pairs", self.missing.len() - limit);
+            if dropped.len() > limit {
+                println!("  ... and {} more unique pairs", dropped.len() - limit);
             }
         }
-        if !self.extra.is_empty() {
-            println!("\n--- Extra (in KFX, not in EPUB) [first {}] ---", limit);
-            for (pair, n) in self.extra.iter().take(limit) {
+        if !fabricated.is_empty() {
+            println!(
+                "\n--- Fabricated (in {}, not in source {}) [first {}] ---",
+                dir.target_label(),
+                dir.source_label(),
+                limit
+            );
+            for (pair, n) in fabricated.iter().take(limit) {
                 println!("  ({}×)  {}  →  {}", n, pair.base, pair.annotation);
             }
-            if self.extra.len() > limit {
-                println!("  ... and {} more unique pairs", self.extra.len() - limit);
+            if fabricated.len() > limit {
+                println!("  ... and {} more unique pairs", fabricated.len() - limit);
             }
         }
     }
 }
 
-/// Validate that the KFX preserves every ruby pair from the source EPUB.
+/// Compare ruby pairs across both sides. Direction-neutral — caller interprets
+/// the resulting `only_in_epub` / `only_in_kfx` per conversion direction.
 pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     let epub_pairs = extract_pairs_from_epub(epub_bytes)?;
     let kfx_pairs = extract_pairs_from_kfx(kfx_bytes)?;
@@ -118,33 +158,33 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         *kfx_counts.entry(p.clone()).or_insert(0) += 1;
     }
 
-    let mut missing: Vec<(RubyPair, usize)> = Vec::new();
-    let mut extra: Vec<(RubyPair, usize)> = Vec::new();
+    let mut only_in_epub: Vec<(RubyPair, usize)> = Vec::new();
+    let mut only_in_kfx: Vec<(RubyPair, usize)> = Vec::new();
     let mut matched: usize = 0;
 
     for (pair, ecount) in &epub_counts {
         let kcount = kfx_counts.get(pair).copied().unwrap_or(0);
         matched += ecount.min(&kcount).to_owned();
         if ecount > &kcount {
-            missing.push((pair.clone(), ecount - kcount));
+            only_in_epub.push((pair.clone(), ecount - kcount));
         }
     }
     for (pair, kcount) in &kfx_counts {
         let ecount = epub_counts.get(pair).copied().unwrap_or(0);
         if kcount > &ecount {
-            extra.push((pair.clone(), kcount - ecount));
+            only_in_kfx.push((pair.clone(), kcount - ecount));
         }
     }
 
     // Sort by frequency descending so the worst offenders surface first.
-    missing.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.base.cmp(&b.0.base)));
-    extra.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.base.cmp(&b.0.base)));
+    only_in_epub.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.base.cmp(&b.0.base)));
+    only_in_kfx.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.base.cmp(&b.0.base)));
 
     Ok(Report {
         epub_pairs,
         kfx_pairs,
-        missing,
-        extra,
+        only_in_epub,
+        only_in_kfx,
         matched,
     })
 }

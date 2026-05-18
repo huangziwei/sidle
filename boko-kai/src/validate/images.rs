@@ -42,9 +42,10 @@ use crate::kfx::container::{
 use crate::kfx::ion::{IonParser, IonValue};
 use crate::kfx::symbols::{KFX_SYMBOL_TABLE, KfxSymbol};
 
-/// A single `<img src>` from the source.
+/// A single `<img src>` from the EPUB side. May represent either the source
+/// of an EPUB→KFX conversion or boko's EPUB output in a KFX→EPUB conversion.
 #[derive(Debug, Clone)]
-pub struct SourceImage {
+pub struct EpubImage {
     pub spine_path: String,
     pub raw_src: String,
 }
@@ -68,7 +69,7 @@ pub struct DanglingResource {
 
 #[derive(Debug, Default)]
 pub struct Report {
-    pub source_images: Vec<SourceImage>,
+    pub epub_images: Vec<EpubImage>,
     pub kfx_external_resources: Vec<ExternalResource>,
     /// Names of every `bcRawMedia` entity in the container.
     pub kfx_raw_media_names: HashSet<String>,
@@ -78,11 +79,14 @@ pub struct Report {
     pub kfx_image_element_count: usize,
 
     // --- Counts ---
-    pub source_image_count: usize,
-    pub source_distinct_srcs: usize,
+    pub epub_image_count: usize,
+    pub epub_distinct_srcs: usize,
     pub kfx_image_resource_count: usize,
 
-    // --- Defects ---
+    // --- Defects (EPUB-side internal) ---
+    // (none right now — could later flag <img src> pointing at missing manifest items)
+
+    // --- Defects (KFX-side internal) ---
     /// `external_resource` entities whose `location` doesn't refer to an
     /// existing `bcRawMedia` entity.
     pub dangling_external_resources: Vec<DanglingResource>,
@@ -91,37 +95,79 @@ pub struct Report {
     /// `bcRawMedia` names that no `external_resource.location` points at.
     /// Not a user-visible defect, but signals dead bytes in the file.
     pub orphan_raw_media: Vec<String>,
-    /// `source_image_count - kfx_image_element_count`, when positive.
-    pub dropped_image_count: usize,
 }
 
 impl Report {
+    /// Whether the conversion in the given direction looks clean: no
+    /// internal defects on either side, and image counts match.
     pub fn is_clean(&self) -> bool {
         self.dangling_external_resources.is_empty()
             && self.orphan_image_refs.is_empty()
-            && self.dropped_image_count == 0
+            && self.epub_image_count == self.kfx_image_element_count
     }
 
-    pub fn preservation_ratio(&self) -> f64 {
-        if self.source_image_count == 0 {
+    /// Count of images dropped by boko's converter, given the conversion
+    /// direction. `max(0, source_count - target_count)`.
+    pub fn dropped_count(&self, dir: super::Direction) -> usize {
+        if dir.epub_is_source() {
+            self.epub_image_count.saturating_sub(self.kfx_image_element_count)
+        } else {
+            self.kfx_image_element_count.saturating_sub(self.epub_image_count)
+        }
+    }
+
+    pub fn preservation_ratio(&self, dir: super::Direction) -> f64 {
+        let source_count = if dir.epub_is_source() {
+            self.epub_image_count
+        } else {
+            self.kfx_image_element_count
+        };
+        if source_count == 0 {
             return 1.0;
         }
-        let preserved = self.source_image_count.saturating_sub(self.dropped_image_count);
-        preserved as f64 / self.source_image_count as f64
+        let preserved = source_count.saturating_sub(self.dropped_count(dir));
+        preserved as f64 / source_count as f64
     }
 
-    pub fn print_summary(&self) {
-        println!("Source images:");
-        println!("  <img>:         {} ({} distinct src values)", self.source_image_count, self.source_distinct_srcs);
+    pub fn print_summary(&self, dir: super::Direction) {
+        println!("EPUB images:");
+        println!(
+            "  <img>:         {} ({} distinct src values)",
+            self.epub_image_count, self.epub_distinct_srcs
+        );
         println!("KFX images:");
-        println!("  external_resource (image format): {}", self.kfx_image_resource_count);
-        println!("  bcRawMedia entities:              {}", self.kfx_raw_media_names.len());
-        println!("  storyline image elements:         {} ({} distinct refs)", self.kfx_image_element_count, self.kfx_image_refs_distinct.len());
+        println!(
+            "  external_resource (image format): {}",
+            self.kfx_image_resource_count
+        );
+        println!(
+            "  bcRawMedia entities:              {}",
+            self.kfx_raw_media_names.len()
+        );
+        println!(
+            "  storyline image elements:         {} ({} distinct refs)",
+            self.kfx_image_element_count,
+            self.kfx_image_refs_distinct.len()
+        );
         println!("Defects:");
-        println!("  dropped images (source - KFX): {}", self.dropped_image_count);
-        println!("  dangling external_resource:    {}", self.dangling_external_resources.len());
-        println!("  orphan storyline image refs:   {}", self.orphan_image_refs.len());
-        println!("  orphan bcRawMedia entities:    {}", self.orphan_raw_media.len());
+        println!(
+            "  dropped images ({} - {}): {}",
+            dir.source_label(),
+            dir.target_label(),
+            self.dropped_count(dir)
+        );
+        println!(
+            "  dangling external_resource:    {}",
+            self.dangling_external_resources.len()
+        );
+        println!(
+            "  orphan storyline image refs:   {}",
+            self.orphan_image_refs.len()
+        );
+        println!(
+            "  orphan bcRawMedia entities:    {}",
+            self.orphan_raw_media.len()
+        );
     }
 
     pub fn print_details(&self, limit: usize) {
@@ -156,12 +202,12 @@ impl Report {
 }
 
 pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
-    let source_images = extract_images_from_epub(epub_bytes)?;
+    let epub_images = extract_images_from_epub(epub_bytes)?;
     let kfx = extract_image_data_from_kfx(kfx_bytes)?;
 
     let distinct_srcs: usize = {
         let mut set: HashSet<&str> = HashSet::new();
-        for img in &source_images {
+        for img in &epub_images {
             set.insert(&img.raw_src);
         }
         set.len()
@@ -204,13 +250,12 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         .collect();
     orphan_image_refs.sort();
 
-    let source_image_count = source_images.len();
-    let dropped_image_count = source_image_count.saturating_sub(kfx.image_element_count);
+    let epub_image_count = epub_images.len();
 
     Ok(Report {
-        source_images,
-        source_image_count,
-        source_distinct_srcs: distinct_srcs,
+        epub_images,
+        epub_image_count,
+        epub_distinct_srcs: distinct_srcs,
         kfx_image_resource_count: kfx.external_resources.len(),
         kfx_external_resources: kfx.external_resources,
         kfx_raw_media_names: kfx.raw_media_names,
@@ -219,7 +264,6 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         dangling_external_resources,
         orphan_image_refs,
         orphan_raw_media,
-        dropped_image_count,
     })
 }
 
@@ -227,7 +271,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 // Source-side extraction
 // ============================================================================
 
-pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<SourceImage>, String> {
+pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<EpubImage>, String> {
     let cursor = Cursor::new(epub_bytes);
     let mut archive =
         ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
@@ -280,7 +324,7 @@ fn read_zip_entry<R: std::io::Read + std::io::Seek>(
 pub fn extract_images_from_xhtml(
     xhtml: &str,
     spine_path: &str,
-    out: &mut Vec<SourceImage>,
+    out: &mut Vec<EpubImage>,
 ) {
     let mut reader = Reader::from_str(xhtml);
     reader.config_mut().trim_text(false);
@@ -307,7 +351,7 @@ pub fn extract_images_from_xhtml(
                     if src.trim().is_empty() {
                         continue;
                     }
-                    out.push(SourceImage {
+                    out.push(EpubImage {
                         spine_path: spine_path.to_string(),
                         raw_src: src,
                     });

@@ -63,19 +63,19 @@ pub struct DanglingNav {
 
 #[derive(Debug, Default)]
 pub struct Report {
-    // --- Source ---
-    /// Count of `<h1>`–`<h6>` per level in the source spine (level → count).
-    pub source_headings_by_level: HashMap<u8, usize>,
-    /// Flat count of TOC entries from source NCX (recursive total).
-    pub source_toc_entry_count: usize,
+    // --- EPUB side ---
+    /// Count of `<h1>`–`<h6>` per level in the EPUB spine (level → count).
+    pub epub_headings_by_level: HashMap<u8, usize>,
+    /// Flat count of TOC entries from EPUB NCX (recursive total).
+    pub epub_toc_entry_count: usize,
     /// Count of TOC entries pointing at manifest items not in the spine.
     /// These can't be addressed by KFX position-based navigation and are
     /// excluded from the count diff.
-    pub source_non_spine_toc_entries: usize,
-    /// Whether the source has an NCX. If not, TOC checks are skipped.
-    pub source_has_ncx: bool,
+    pub epub_non_spine_toc_entries: usize,
+    /// Whether the EPUB has an NCX. If not, TOC checks are skipped.
+    pub epub_has_ncx: bool,
 
-    // --- KFX ---
+    // --- KFX side ---
     /// Count of nav_units under the KFX headings container, keyed by level.
     /// Only counts leaf entries (the inner ones with offsets), not the level
     /// group entry which `build_headings_entries` emits as a wrapper.
@@ -89,10 +89,11 @@ pub struct Report {
     // --- Defects ---
     /// Nav targets whose element_id isn't present in any storyline.
     pub dangling_nav: Vec<DanglingNav>,
-    /// Per-level heading count discrepancies (source - KFX), only listed
-    /// when non-zero. Negative values mean KFX has more than source.
+    /// Per-level heading count discrepancies (epub - kfx), only listed
+    /// when non-zero. Positive = boko's converter dropped headings (in
+    /// EPUB→KFX) or fabricated headings (in KFX→EPUB), depending on direction.
     pub heading_count_diffs: Vec<(u8, i64)>,
-    /// TOC count discrepancy (source - KFX). Only set when source has NCX.
+    /// TOC count discrepancy (epub - kfx). Only set when EPUB has NCX.
     pub toc_count_diff: Option<i64>,
 }
 
@@ -103,17 +104,17 @@ impl Report {
             && self.toc_count_diff.unwrap_or(0) == 0
     }
 
-    pub fn print_summary(&self) {
-        let src_total: usize = self.source_headings_by_level.values().sum();
+    pub fn print_summary(&self, dir: super::Direction) {
+        let epub_total: usize = self.epub_headings_by_level.values().sum();
         let kfx_total: usize = self.kfx_headings_by_level.values().sum();
-        println!("Source headings:");
+        println!("EPUB headings:");
         for level in 1..=6u8 {
-            let n = self.source_headings_by_level.get(&level).copied().unwrap_or(0);
+            let n = self.epub_headings_by_level.get(&level).copied().unwrap_or(0);
             if n > 0 {
                 println!("  h{}:  {}", level, n);
             }
         }
-        println!("  total: {}", src_total);
+        println!("  total: {}", epub_total);
         println!("KFX headings nav (h1 intentionally not navigated):");
         for level in 2..=6u8 {
             let n = self.kfx_headings_by_level.get(&level).copied().unwrap_or(0);
@@ -123,38 +124,48 @@ impl Report {
         }
         println!("  total: {}", kfx_total);
         println!("TOC entries:");
-        if self.source_has_ncx {
-            if self.source_non_spine_toc_entries > 0 {
+        if self.epub_has_ncx {
+            if self.epub_non_spine_toc_entries > 0 {
                 println!(
-                    "  source NCX:   {} ({} non-spine, can't be addressed in KFX)",
-                    self.source_toc_entry_count, self.source_non_spine_toc_entries
+                    "  EPUB NCX:    {} ({} non-spine, can't be addressed in KFX)",
+                    self.epub_toc_entry_count, self.epub_non_spine_toc_entries
                 );
             } else {
-                println!("  source NCX:   {}", self.source_toc_entry_count);
+                println!("  EPUB NCX:    {}", self.epub_toc_entry_count);
             }
         } else {
-            println!("  source NCX:   (none — TOC check skipped)");
+            println!("  EPUB NCX:    (none — TOC check skipped)");
         }
-        println!("  KFX TOC nav:  {}", self.kfx_toc_entry_count);
-        println!("Defects:");
+        println!("  KFX TOC nav: {}", self.kfx_toc_entry_count);
+        println!(
+            "Defects (source = {}, target = {}):",
+            dir.source_label(),
+            dir.target_label()
+        );
         println!("  dangling nav targets: {}", self.dangling_nav.len());
         println!("  heading level diffs:  {}", self.heading_count_diffs.len());
         if let Some(d) = self.toc_count_diff {
-            println!("  TOC count diff:       {}", d);
+            println!("  TOC count diff (epub-kfx): {}", d);
         }
     }
 
-    pub fn print_details(&self, limit: usize) {
+    pub fn print_details(&self, limit: usize, _dir: super::Direction) {
         if !self.heading_count_diffs.is_empty() {
-            println!("\n--- Heading level discrepancies (source − KFX) ---");
+            println!("\n--- Heading level discrepancies (epub − kfx) ---");
             for (level, diff) in &self.heading_count_diffs {
                 println!("  h{}:  {:+}", level, diff);
             }
         }
         if !self.dangling_nav.is_empty() {
-            println!("\n--- Nav targets pointing at missing elements [first {}] ---", limit);
+            println!(
+                "\n--- Nav targets pointing at missing elements [first {}] ---",
+                limit
+            );
             for d in self.dangling_nav.iter().take(limit) {
-                println!("  [{}]  element_id {}  +{}", d.container, d.target.element_id, d.target.offset);
+                println!(
+                    "  [{}]  element_id {}  +{}",
+                    d.container, d.target.element_id, d.target.offset
+                );
             }
             if self.dangling_nav.len() > limit {
                 println!("  ... and {} more", self.dangling_nav.len() - limit);
@@ -164,24 +175,26 @@ impl Report {
 }
 
 pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
-    let source = extract_source_nav(epub_bytes)?;
+    let epub_side = extract_epub_nav(epub_bytes)?;
     let kfx = extract_kfx_nav(kfx_bytes)?;
 
     // h1 is intentionally NOT navigated by Kindle (h1 → None in
     // export::kfx::level_to_symbol). When comparing levels we skip h1.
     let mut heading_count_diffs: Vec<(u8, i64)> = Vec::new();
     for level in 2..=6u8 {
-        let src = source.headings_by_level.get(&level).copied().unwrap_or(0) as i64;
+        let ep = epub_side.headings_by_level.get(&level).copied().unwrap_or(0) as i64;
         let kfx_c = kfx.headings_by_level.get(&level).copied().unwrap_or(0) as i64;
-        if src != kfx_c {
-            heading_count_diffs.push((level, src - kfx_c));
+        if ep != kfx_c {
+            heading_count_diffs.push((level, ep - kfx_c));
         }
     }
 
     // Exclude non-spine entries from the expected count — they can't survive
     // into KFX (position-based nav requires spine content).
-    let toc_count_diff = source.has_ncx.then(|| {
-        let expected = source.toc_entry_count.saturating_sub(source.non_spine_toc_entries);
+    let toc_count_diff = epub_side.has_ncx.then(|| {
+        let expected = epub_side
+            .toc_entry_count
+            .saturating_sub(epub_side.non_spine_toc_entries);
         expected as i64 - kfx.toc_targets.len() as i64
     });
 
@@ -204,10 +217,10 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     }
 
     Ok(Report {
-        source_headings_by_level: source.headings_by_level,
-        source_toc_entry_count: source.toc_entry_count,
-        source_non_spine_toc_entries: source.non_spine_toc_entries,
-        source_has_ncx: source.has_ncx,
+        epub_headings_by_level: epub_side.headings_by_level,
+        epub_toc_entry_count: epub_side.toc_entry_count,
+        epub_non_spine_toc_entries: epub_side.non_spine_toc_entries,
+        epub_has_ncx: epub_side.has_ncx,
         kfx_headings_by_level: kfx.headings_by_level,
         kfx_heading_targets: kfx.heading_targets,
         kfx_toc_entry_count: kfx.toc_targets.len(),
@@ -223,7 +236,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 // ============================================================================
 
 #[derive(Debug, Default)]
-struct SourceNav {
+struct EpubNav {
     headings_by_level: HashMap<u8, usize>,
     /// Flat-recursive count of every TocEntry node.
     toc_entry_count: usize,
@@ -235,7 +248,7 @@ struct SourceNav {
     has_ncx: bool,
 }
 
-fn extract_source_nav(epub_bytes: &[u8]) -> Result<SourceNav, String> {
+fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
     let cursor = Cursor::new(epub_bytes);
     let mut archive =
         ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
@@ -306,7 +319,7 @@ fn extract_source_nav(epub_bytes: &[u8]) -> Result<SourceNav, String> {
         (0, 0, false)
     };
 
-    Ok(SourceNav {
+    Ok(EpubNav {
         headings_by_level,
         toc_entry_count,
         non_spine_toc_entries,

@@ -95,11 +95,29 @@ enum Command {
         depth: Option<usize>,
     },
 
-    /// Validate a converted KFX against its source EPUB
+    /// Validate a conversion. Works in both directions: EPUB→KFX (default)
+    /// or KFX→EPUB (via `--direction kfx-to-epub`). The ground truth is
+    /// always the source format of the named direction.
     Validate {
+        /// Which conversion direction to interpret. `epub-to-kfx` (default)
+        /// treats the EPUB as ground truth; `kfx-to-epub` treats the KFX as
+        /// ground truth.
+        #[arg(long = "direction", default_value = "epub-to-kfx", global = true)]
+        direction: String,
+
         #[command(subcommand)]
         check: ValidateCheck,
     },
+}
+
+fn parse_direction(s: &str) -> Result<boko::validate::Direction, String> {
+    match s {
+        "epub-to-kfx" | "epub2kfx" | "e2k" => Ok(boko::validate::Direction::EpubToKfx),
+        "kfx-to-epub" | "kfx2epub" | "k2e" => Ok(boko::validate::Direction::KfxToEpub),
+        other => Err(format!(
+            "--direction must be 'epub-to-kfx' or 'kfx-to-epub', got '{other}'"
+        )),
+    }
 }
 
 #[derive(Subcommand)]
@@ -220,16 +238,33 @@ fn main() -> ExitCode {
                 depth,
             },
         ),
-        Command::Validate { check } => match check {
-            ValidateCheck::Ruby { epub, kfx, details } => validate_ruby(&epub, &kfx, details),
-            ValidateCheck::Text { epub, kfx, details } => validate_text(&epub, &kfx, details),
-            ValidateCheck::Style { epub, details } => validate_style(&epub, details),
-            ValidateCheck::Tags { epub, details } => validate_tags(&epub, details),
-            ValidateCheck::Links { epub, kfx, details } => validate_links(&epub, &kfx, details),
-            ValidateCheck::Images { epub, kfx, details } => validate_images(&epub, &kfx, details),
-            ValidateCheck::Nav { epub, kfx, details } => validate_nav(&epub, &kfx, details),
-            ValidateCheck::Metadata { epub, kfx, details } => validate_metadata(&epub, &kfx, details),
-            ValidateCheck::All { epub, kfx, details } => validate_all(&epub, &kfx, details),
+        Command::Validate { direction, check } => match parse_direction(&direction) {
+            Err(e) => Err(e),
+            Ok(dir) => match check {
+                ValidateCheck::Ruby { epub, kfx, details } => {
+                    validate_ruby(&epub, &kfx, details, dir)
+                }
+                ValidateCheck::Text { epub, kfx, details } => {
+                    validate_text(&epub, &kfx, details, dir)
+                }
+                ValidateCheck::Style { epub, details } => validate_style(&epub, details),
+                ValidateCheck::Tags { epub, details } => validate_tags(&epub, details),
+                ValidateCheck::Links { epub, kfx, details } => {
+                    validate_links(&epub, &kfx, details, dir)
+                }
+                ValidateCheck::Images { epub, kfx, details } => {
+                    validate_images(&epub, &kfx, details, dir)
+                }
+                ValidateCheck::Nav { epub, kfx, details } => {
+                    validate_nav(&epub, &kfx, details, dir)
+                }
+                ValidateCheck::Metadata { epub, kfx, details } => {
+                    validate_metadata(&epub, &kfx, details, dir)
+                }
+                ValidateCheck::All { epub, kfx, details } => {
+                    validate_all(&epub, &kfx, details, dir)
+                }
+            },
         },
     };
 
@@ -330,40 +365,64 @@ struct LandmarkInfo {
     label: String,
 }
 
-fn validate_ruby(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
+fn validate_ruby(
+    epub_path: &str,
+    kfx_path: &str,
+    details: usize,
+    dir: boko::validate::Direction,
+) -> Result<(), String> {
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
     let report = boko::validate::ruby::validate(&epub_bytes, &kfx_bytes)?;
-    report.print_summary();
+    report.print_summary(dir);
     if details > 0 {
-        report.print_details(details);
+        report.print_details(details, dir);
     }
     if report.is_clean() {
         Ok(())
     } else {
+        let (dropped, fabricated) = if dir.epub_is_source() {
+            (&report.only_in_epub, &report.only_in_kfx)
+        } else {
+            (&report.only_in_kfx, &report.only_in_epub)
+        };
         Err(format!(
-            "{} missing, {} extra ruby pair(s)",
-            report.missing.iter().map(|(_, n)| n).sum::<usize>(),
-            report.extra.iter().map(|(_, n)| n).sum::<usize>()
+            "{} dropped, {} fabricated ruby pair(s)",
+            dropped.iter().map(|(_, n)| n).sum::<usize>(),
+            fabricated.iter().map(|(_, n)| n).sum::<usize>()
         ))
     }
 }
 
-fn validate_text(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
+fn validate_text(
+    epub_path: &str,
+    kfx_path: &str,
+    details: usize,
+    dir: boko::validate::Direction,
+) -> Result<(), String> {
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
     let report = boko::validate::text::validate(&epub_bytes, &kfx_bytes)?;
-    report.print_summary();
+    report.print_summary(dir);
     if details > 0 {
-        report.print_details(details);
+        report.print_details(details, dir);
     }
-    if report.is_clean() {
+    if report.is_clean_for(dir) {
         Ok(())
     } else {
-        let total: usize = report.missing.iter().map(|(_, n)| n).sum();
-        Err(format!("{} characters missing from KFX", total))
+        let dropped = if dir.epub_is_source() {
+            &report.only_in_epub
+        } else {
+            &report.only_in_kfx
+        };
+        let total: usize = dropped.iter().map(|(_, n)| n).sum();
+        Err(format!(
+            "{} characters missing from {}",
+            total,
+            dir.target_label()
+        ))
     }
 }
 
@@ -400,34 +459,49 @@ fn validate_tags(epub_path: &str, details: usize) -> Result<(), String> {
     }
 }
 
-fn validate_links(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
+fn validate_links(
+    epub_path: &str,
+    kfx_path: &str,
+    details: usize,
+    dir: boko::validate::Direction,
+) -> Result<(), String> {
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
     let report = boko::validate::links::validate(&epub_bytes, &kfx_bytes)?;
-    report.print_summary();
+    report.print_summary(dir);
     if details > 0 {
-        report.print_details(details);
+        report.print_details(details, dir);
     }
     if report.is_clean() {
         Ok(())
     } else {
-        let missing: usize = report.external_missing.iter().map(|(_, n)| n).sum();
+        let dropped = if dir.epub_is_source() {
+            &report.external_only_in_epub
+        } else {
+            &report.external_only_in_kfx
+        };
+        let dropped_n: usize = dropped.iter().map(|(_, n)| n).sum();
         Err(format!(
-            "{} external missing, {} dangling anchors, {} orphan link_to",
-            missing,
+            "{} external dropped, {} dangling anchors, {} orphan link_to",
+            dropped_n,
             report.dangling_anchors.len(),
             report.orphan_link_tos.len()
         ))
     }
 }
 
-fn validate_images(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
+fn validate_images(
+    epub_path: &str,
+    kfx_path: &str,
+    details: usize,
+    dir: boko::validate::Direction,
+) -> Result<(), String> {
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
     let report = boko::validate::images::validate(&epub_bytes, &kfx_bytes)?;
-    report.print_summary();
+    report.print_summary(dir);
     if details > 0 {
         report.print_details(details);
     }
@@ -436,21 +510,26 @@ fn validate_images(epub_path: &str, kfx_path: &str, details: usize) -> Result<()
     } else {
         Err(format!(
             "{} dropped, {} dangling resources, {} orphan refs",
-            report.dropped_image_count,
+            report.dropped_count(dir),
             report.dangling_external_resources.len(),
             report.orphan_image_refs.len()
         ))
     }
 }
 
-fn validate_nav(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
+fn validate_nav(
+    epub_path: &str,
+    kfx_path: &str,
+    details: usize,
+    dir: boko::validate::Direction,
+) -> Result<(), String> {
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
     let report = boko::validate::nav::validate(&epub_bytes, &kfx_bytes)?;
-    report.print_summary();
+    report.print_summary(dir);
     if details > 0 {
-        report.print_details(details);
+        report.print_details(details, dir);
     }
     if report.is_clean() {
         Ok(())
@@ -464,14 +543,19 @@ fn validate_nav(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), S
     }
 }
 
-fn validate_metadata(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
+fn validate_metadata(
+    epub_path: &str,
+    kfx_path: &str,
+    details: usize,
+    dir: boko::validate::Direction,
+) -> Result<(), String> {
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
     let report = boko::validate::metadata::validate(&epub_bytes, &kfx_bytes)?;
-    report.print_summary();
+    report.print_summary(dir);
     if details > 0 {
-        report.print_details(details);
+        report.print_details(details, dir);
     }
     if report.is_clean() {
         Ok(())
@@ -480,17 +564,23 @@ fn validate_metadata(epub_path: &str, kfx_path: &str, details: usize) -> Result<
     }
 }
 
-fn validate_all(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
+fn validate_all(
+    epub_path: &str,
+    kfx_path: &str,
+    details: usize,
+    dir: boko::validate::Direction,
+) -> Result<(), String> {
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
+    println!("=== Direction: {} → {} ===", dir.source_label(), dir.target_label());
     let mut all_clean = true;
 
     println!("=== Ruby ===");
     let ruby = boko::validate::ruby::validate(&epub_bytes, &kfx_bytes)?;
-    ruby.print_summary();
+    ruby.print_summary(dir);
     if details > 0 {
-        ruby.print_details(details);
+        ruby.print_details(details, dir);
     }
     if !ruby.is_clean() {
         all_clean = false;
@@ -498,11 +588,11 @@ fn validate_all(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), S
 
     println!("\n=== Text ===");
     let text = boko::validate::text::validate(&epub_bytes, &kfx_bytes)?;
-    text.print_summary();
+    text.print_summary(dir);
     if details > 0 {
-        text.print_details(details);
+        text.print_details(details, dir);
     }
-    if !text.is_clean() {
+    if !text.is_clean_for(dir) {
         all_clean = false;
     }
 
@@ -528,9 +618,9 @@ fn validate_all(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), S
 
     println!("\n=== Links ===");
     let links = boko::validate::links::validate(&epub_bytes, &kfx_bytes)?;
-    links.print_summary();
+    links.print_summary(dir);
     if details > 0 {
-        links.print_details(details);
+        links.print_details(details, dir);
     }
     if !links.is_clean() {
         all_clean = false;
@@ -538,7 +628,7 @@ fn validate_all(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), S
 
     println!("\n=== Images ===");
     let images = boko::validate::images::validate(&epub_bytes, &kfx_bytes)?;
-    images.print_summary();
+    images.print_summary(dir);
     if details > 0 {
         images.print_details(details);
     }
@@ -548,9 +638,9 @@ fn validate_all(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), S
 
     println!("\n=== Nav ===");
     let nav = boko::validate::nav::validate(&epub_bytes, &kfx_bytes)?;
-    nav.print_summary();
+    nav.print_summary(dir);
     if details > 0 {
-        nav.print_details(details);
+        nav.print_details(details, dir);
     }
     if !nav.is_clean() {
         all_clean = false;
@@ -558,9 +648,9 @@ fn validate_all(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), S
 
     println!("\n=== Metadata ===");
     let metadata = boko::validate::metadata::validate(&epub_bytes, &kfx_bytes)?;
-    metadata.print_summary();
+    metadata.print_summary(dir);
     if details > 0 {
-        metadata.print_details(details);
+        metadata.print_details(details, dir);
     }
     if !metadata.is_clean() {
         all_clean = false;
@@ -575,7 +665,7 @@ fn validate_all(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), S
     println!("  Ruby pairs:   {:.2}% preserved", ruby_pct);
     println!(
         "  Text chars:   {:.4}% preserved",
-        text.preservation_ratio() * 100.0
+        text.preservation_ratio(dir) * 100.0
     );
     println!(
         "  CSS props:    {:.2}% covered",
@@ -585,17 +675,22 @@ fn validate_all(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), S
         "  HTML tags:    {:.2}% semantic",
         tags.semantic_ratio() * 100.0
     );
-    let link_score = if links.source_external_count == 0 {
+    let link_score = if links.epub_external_count == 0 {
         100.0
     } else {
-        let missing: usize = links.external_missing.iter().map(|(_, n)| n).sum();
-        let preserved = links.source_external_count.saturating_sub(missing);
-        preserved as f64 * 100.0 / links.source_external_count as f64
+        let dropped = if dir.epub_is_source() {
+            &links.external_only_in_epub
+        } else {
+            &links.external_only_in_kfx
+        };
+        let dropped_n: usize = dropped.iter().map(|(_, n)| n).sum();
+        let preserved = links.epub_external_count.saturating_sub(dropped_n);
+        preserved as f64 * 100.0 / links.epub_external_count as f64
     };
     println!("  External URLs:{:.2}% preserved", link_score);
     println!(
         "  Images:       {:.2}% preserved",
-        images.preservation_ratio() * 100.0
+        images.preservation_ratio(dir) * 100.0
     );
 
     if all_clean {

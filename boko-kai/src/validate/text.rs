@@ -26,109 +26,156 @@ use crate::kfx::ion::{IonParser, IonValue};
 use crate::kfx::symbols::{KFX_SYMBOL_TABLE, KfxSymbol};
 
 /// Comparison report: char counts on each side plus per-character defects.
+/// Direction-neutral: callers interpret `only_in_epub` / `only_in_kfx` based
+/// on which side is the conversion source (see [`super::Direction`]).
 #[derive(Debug, Default)]
 pub struct Report {
-    /// Total non-whitespace characters in source (post-normalisation).
-    pub source_chars: usize,
-    /// Total non-whitespace characters in KFX (post-normalisation).
+    /// Total non-whitespace characters in the EPUB side (post-normalisation).
+    pub epub_chars: usize,
+    /// Total non-whitespace characters in the KFX side (post-normalisation).
     pub kfx_chars: usize,
-    /// Characters with source_count > kfx_count, sorted by deficit desc.
-    pub missing: Vec<(char, usize)>,
-    /// Characters with kfx_count > source_count (boko fabricated text — rare,
-    /// usually metadata like book title appearing as both nav and content).
-    pub extra: Vec<(char, usize)>,
+    /// Characters with epub_count > kfx_count, sorted by deficit desc.
+    pub only_in_epub: Vec<(char, usize)>,
+    /// Characters with kfx_count > epub_count, sorted by deficit desc.
+    pub only_in_kfx: Vec<(char, usize)>,
 }
 
 impl Report {
-    pub fn is_clean(&self) -> bool {
-        self.missing.is_empty()
+    pub fn is_clean_for(&self, dir: super::Direction) -> bool {
+        // "Clean" means nothing was dropped from source. Fabrication in the
+        // target is reported but rarely fatal (esp. nav metadata leaking into
+        // visible text); a stricter caller can check only_in_kfx/only_in_epub
+        // directly.
+        if dir.epub_is_source() {
+            self.only_in_epub.is_empty()
+        } else {
+            self.only_in_kfx.is_empty()
+        }
     }
 
-    /// Percentage of source characters preserved in KFX.
-    pub fn preservation_ratio(&self) -> f64 {
-        if self.source_chars == 0 {
+    /// Percentage of source-side characters preserved in the target side.
+    pub fn preservation_ratio(&self, dir: super::Direction) -> f64 {
+        let (source_total, dropped) = if dir.epub_is_source() {
+            (
+                self.epub_chars,
+                self.only_in_epub.iter().map(|(_, n)| n).sum::<usize>(),
+            )
+        } else {
+            (
+                self.kfx_chars,
+                self.only_in_kfx.iter().map(|(_, n)| n).sum::<usize>(),
+            )
+        };
+        if source_total == 0 {
             return 1.0;
         }
-        let missing_total: usize = self.missing.iter().map(|(_, n)| n).sum();
-        let preserved = self.source_chars.saturating_sub(missing_total);
-        preserved as f64 / self.source_chars as f64
+        source_total.saturating_sub(dropped) as f64 / source_total as f64
     }
 
-    pub fn print_summary(&self) {
-        let missing_total: usize = self.missing.iter().map(|(_, n)| n).sum();
-        let extra_total: usize = self.extra.iter().map(|(_, n)| n).sum();
-        println!("Source chars:  {}", self.source_chars);
-        println!("KFX chars:     {}", self.kfx_chars);
+    pub fn print_summary(&self, dir: super::Direction) {
+        let (source_chars, target_chars, dropped, fabricated) = if dir.epub_is_source() {
+            (
+                self.epub_chars,
+                self.kfx_chars,
+                &self.only_in_epub,
+                &self.only_in_kfx,
+            )
+        } else {
+            (
+                self.kfx_chars,
+                self.epub_chars,
+                &self.only_in_kfx,
+                &self.only_in_epub,
+            )
+        };
+        let dropped_total: usize = dropped.iter().map(|(_, n)| n).sum();
+        let fabricated_total: usize = fabricated.iter().map(|(_, n)| n).sum();
+        println!("{} chars (source):  {}", dir.source_label(), source_chars);
+        println!("{} chars (target):  {}", dir.target_label(), target_chars);
+        println!("Preservation:  {:.4}%", self.preservation_ratio(dir) * 100.0);
         println!(
-            "Preservation:  {:.4}%",
-            self.preservation_ratio() * 100.0
+            "Dropped (missing in {}): {} ({} unique)",
+            dir.target_label(),
+            dropped_total,
+            dropped.len()
         );
         println!(
-            "Missing chars: {} ({} unique)",
-            missing_total,
-            self.missing.len()
-        );
-        println!(
-            "Extra chars:   {} ({} unique)",
-            extra_total,
-            self.extra.len()
+            "Fabricated (extra in {}): {} ({} unique)",
+            dir.target_label(),
+            fabricated_total,
+            fabricated.len()
         );
     }
 
-    pub fn print_details(&self, limit: usize) {
-        if !self.missing.is_empty() {
-            println!("\n--- Missing characters [first {}] ---", limit);
-            for (c, n) in self.missing.iter().take(limit) {
+    pub fn print_details(&self, limit: usize, dir: super::Direction) {
+        let (dropped, fabricated) = if dir.epub_is_source() {
+            (&self.only_in_epub, &self.only_in_kfx)
+        } else {
+            (&self.only_in_kfx, &self.only_in_epub)
+        };
+        if !dropped.is_empty() {
+            println!(
+                "\n--- Dropped (in {}, missing from {}) [first {}] ---",
+                dir.source_label(),
+                dir.target_label(),
+                limit
+            );
+            for (c, n) in dropped.iter().take(limit) {
                 println!("  ({}×)  {:?}  (U+{:04X})", n, c, *c as u32);
             }
-            if self.missing.len() > limit {
-                println!("  ... and {} more unique chars", self.missing.len() - limit);
+            if dropped.len() > limit {
+                println!("  ... and {} more unique chars", dropped.len() - limit);
             }
         }
-        if !self.extra.is_empty() {
-            println!("\n--- Extra characters [first {}] ---", limit);
-            for (c, n) in self.extra.iter().take(limit) {
+        if !fabricated.is_empty() {
+            println!(
+                "\n--- Fabricated (in {}, not in {}) [first {}] ---",
+                dir.target_label(),
+                dir.source_label(),
+                limit
+            );
+            for (c, n) in fabricated.iter().take(limit) {
                 println!("  ({}×)  {:?}  (U+{:04X})", n, c, *c as u32);
             }
-            if self.extra.len() > limit {
-                println!("  ... and {} more unique chars", self.extra.len() - limit);
+            if fabricated.len() > limit {
+                println!("  ... and {} more unique chars", fabricated.len() - limit);
             }
         }
     }
 }
 
 pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
-    let source = extract_text_from_epub(epub_bytes)?;
+    let epub = extract_text_from_epub(epub_bytes)?;
     let kfx = extract_text_from_kfx(kfx_bytes)?;
 
-    let source_counts = char_counts(&source);
+    let epub_counts = char_counts(&epub);
     let kfx_counts = char_counts(&kfx);
 
-    let source_total: usize = source_counts.values().sum();
+    let epub_total: usize = epub_counts.values().sum();
     let kfx_total: usize = kfx_counts.values().sum();
 
-    let mut missing: Vec<(char, usize)> = Vec::new();
-    let mut extra: Vec<(char, usize)> = Vec::new();
-    for (c, sc) in &source_counts {
+    let mut only_in_epub: Vec<(char, usize)> = Vec::new();
+    let mut only_in_kfx: Vec<(char, usize)> = Vec::new();
+    for (c, ec) in &epub_counts {
         let kc = kfx_counts.get(c).copied().unwrap_or(0);
-        if sc > &kc {
-            missing.push((*c, sc - kc));
+        if ec > &kc {
+            only_in_epub.push((*c, ec - kc));
         }
     }
     for (c, kc) in &kfx_counts {
-        let sc = source_counts.get(c).copied().unwrap_or(0);
-        if kc > &sc {
-            extra.push((*c, kc - sc));
+        let ec = epub_counts.get(c).copied().unwrap_or(0);
+        if kc > &ec {
+            only_in_kfx.push((*c, kc - ec));
         }
     }
-    missing.sort_by(|a, b| b.1.cmp(&a.1));
-    extra.sort_by(|a, b| b.1.cmp(&a.1));
+    only_in_epub.sort_by(|a, b| b.1.cmp(&a.1));
+    only_in_kfx.sort_by(|a, b| b.1.cmp(&a.1));
 
     Ok(Report {
-        source_chars: source_total,
+        epub_chars: epub_total,
         kfx_chars: kfx_total,
-        missing,
-        extra,
+        only_in_epub,
+        only_in_kfx,
     })
 }
 

@@ -59,12 +59,12 @@ pub enum HrefKind {
     Unclassifiable(String),
 }
 
-/// A single `<a href>` occurrence from the source. Spine order is preserved.
+/// A single `<a href>` occurrence from the EPUB side. Spine order preserved.
 #[derive(Debug, Clone)]
-pub struct SourceHref {
+pub struct EpubHref {
     /// Spine path the link came from (for diagnostics).
     pub spine_path: String,
-    /// Raw href value as written in the source.
+    /// Raw href value as written.
     pub raw: String,
     pub kind: HrefKind,
 }
@@ -101,16 +101,17 @@ pub struct DanglingAnchor {
 
 #[derive(Debug, Default)]
 pub struct Report {
-    pub source_hrefs: Vec<SourceHref>,
+    pub epub_hrefs: Vec<EpubHref>,
     pub kfx_anchors: Vec<KfxAnchor>,
 
-    // --- Source-side counts ---
-    pub source_external_count: usize,
-    pub source_internal_fragment_count: usize,
-    pub source_internal_chapter_count: usize,
-    /// Source-side dangling refs: `<a href="#x">` where no element has `id="x"`.
-    /// Not a boko bug — useful context.
-    pub source_dangling_refs: Vec<SourceHref>,
+    // --- EPUB-side counts ---
+    pub epub_external_count: usize,
+    pub epub_internal_fragment_count: usize,
+    pub epub_internal_chapter_count: usize,
+    /// EPUB-side dangling refs: `<a href="#x">` with no element having `id="x"`.
+    /// In EPUB→KFX, this is source data quality (not boko's fault). In
+    /// KFX→EPUB, this is a defect in boko's EPUB output.
+    pub epub_dangling_refs: Vec<EpubHref>,
 
     // --- KFX-side counts ---
     /// Number of Anchor entities with `uri` (external).
@@ -122,11 +123,13 @@ pub struct Report {
     /// Total `link_to` references (one per style_event with link_to).
     pub kfx_link_to_total: usize,
 
-    // --- Defects ---
-    /// External URLs in source missing from KFX anchor URIs.
-    pub external_missing: Vec<(String, usize)>,
-    /// External URLs in KFX with no matching source href (boko fabricated, rare).
-    pub external_extra: Vec<(String, usize)>,
+    // --- Defects (multiset diff) ---
+    /// External URLs present in EPUB but not in KFX.
+    pub external_only_in_epub: Vec<(String, usize)>,
+    /// External URLs present in KFX but not in EPUB.
+    pub external_only_in_kfx: Vec<(String, usize)>,
+
+    // --- Defects (KFX-side internal) ---
     /// KFX Anchor entities whose `position.id` doesn't resolve to a real
     /// content fragment — link goes nowhere on Kindle.
     pub dangling_anchors: Vec<DanglingAnchor>,
@@ -136,52 +139,108 @@ pub struct Report {
 
 impl Report {
     pub fn is_clean(&self) -> bool {
-        self.external_missing.is_empty()
-            && self.external_extra.is_empty()
+        self.external_only_in_epub.is_empty()
+            && self.external_only_in_kfx.is_empty()
             && self.dangling_anchors.is_empty()
             && self.orphan_link_tos.is_empty()
     }
 
-    pub fn print_summary(&self) {
-        println!("Source <a href>:");
-        println!("  external:   {}", self.source_external_count);
-        println!("  internal #: {}", self.source_internal_fragment_count);
-        println!("  chapter:    {}", self.source_internal_chapter_count);
-        println!("  dangling:   {} (source-side, not boko's fault)", self.source_dangling_refs.len());
+    pub fn print_summary(&self, dir: super::Direction) {
+        let epub_is_src = dir.epub_is_source();
+        println!("EPUB <a href>:");
+        println!("  external:   {}", self.epub_external_count);
+        println!("  internal #: {}", self.epub_internal_fragment_count);
+        println!("  chapter:    {}", self.epub_internal_chapter_count);
+        if epub_is_src {
+            println!(
+                "  dangling:   {} (source-side, not boko's fault)",
+                self.epub_dangling_refs.len()
+            );
+        } else {
+            println!(
+                "  dangling:   {} (boko's EPUB output)",
+                self.epub_dangling_refs.len()
+            );
+        }
         println!("KFX anchors:");
         println!("  external (uri):      {}", self.kfx_external_anchor_count);
         println!("  internal (position): {}", self.kfx_internal_anchor_count);
-        println!("  link_to refs:        {} ({} distinct)", self.kfx_link_to_total, self.kfx_link_to_distinct);
-        let ext_missing: usize = self.external_missing.iter().map(|(_, n)| n).sum();
-        let ext_extra: usize = self.external_extra.iter().map(|(_, n)| n).sum();
+        println!(
+            "  link_to refs:        {} ({} distinct)",
+            self.kfx_link_to_total, self.kfx_link_to_distinct
+        );
+        let (dropped, dropped_count, fabricated, fabricated_count) = if epub_is_src {
+            // EPUB→KFX: EPUB-only = dropped in KFX; KFX-only = fabricated.
+            (
+                &self.external_only_in_epub,
+                self.external_only_in_epub.iter().map(|(_, n)| n).sum::<usize>(),
+                &self.external_only_in_kfx,
+                self.external_only_in_kfx.iter().map(|(_, n)| n).sum::<usize>(),
+            )
+        } else {
+            (
+                &self.external_only_in_kfx,
+                self.external_only_in_kfx.iter().map(|(_, n)| n).sum::<usize>(),
+                &self.external_only_in_epub,
+                self.external_only_in_epub.iter().map(|(_, n)| n).sum::<usize>(),
+            )
+        };
         println!("Defects:");
-        println!("  external URLs missing in KFX: {} ({} unique)", ext_missing, self.external_missing.len());
-        println!("  external URLs extra in KFX:   {} ({} unique)", ext_extra, self.external_extra.len());
+        println!(
+            "  external URLs dropped (missing in {}):  {} ({} unique)",
+            dir.target_label(),
+            dropped_count,
+            dropped.len()
+        );
+        println!(
+            "  external URLs fabricated (extra in {}): {} ({} unique)",
+            dir.target_label(),
+            fabricated_count,
+            fabricated.len()
+        );
         println!("  dangling KFX anchors:         {}", self.dangling_anchors.len());
         println!("  orphan link_to symbols:       {}", self.orphan_link_tos.len());
     }
 
-    pub fn print_details(&self, limit: usize) {
-        if !self.external_missing.is_empty() {
-            println!("\n--- External URLs in source not in KFX [first {}] ---", limit);
-            for (url, n) in self.external_missing.iter().take(limit) {
+    pub fn print_details(&self, limit: usize, dir: super::Direction) {
+        let (dropped, fabricated) = if dir.epub_is_source() {
+            (&self.external_only_in_epub, &self.external_only_in_kfx)
+        } else {
+            (&self.external_only_in_kfx, &self.external_only_in_epub)
+        };
+        if !dropped.is_empty() {
+            println!(
+                "\n--- External URLs in {} not in {} [first {}] ---",
+                dir.source_label(),
+                dir.target_label(),
+                limit
+            );
+            for (url, n) in dropped.iter().take(limit) {
                 println!("  ({}×)  {}", n, url);
             }
-            if self.external_missing.len() > limit {
-                println!("  ... and {} more", self.external_missing.len() - limit);
+            if dropped.len() > limit {
+                println!("  ... and {} more", dropped.len() - limit);
             }
         }
-        if !self.external_extra.is_empty() {
-            println!("\n--- External URLs in KFX not in source [first {}] ---", limit);
-            for (url, n) in self.external_extra.iter().take(limit) {
+        if !fabricated.is_empty() {
+            println!(
+                "\n--- External URLs in {} not in {} [first {}] ---",
+                dir.target_label(),
+                dir.source_label(),
+                limit
+            );
+            for (url, n) in fabricated.iter().take(limit) {
                 println!("  ({}×)  {}", n, url);
             }
-            if self.external_extra.len() > limit {
-                println!("  ... and {} more", self.external_extra.len() - limit);
+            if fabricated.len() > limit {
+                println!("  ... and {} more", fabricated.len() - limit);
             }
         }
         if !self.dangling_anchors.is_empty() {
-            println!("\n--- KFX anchors pointing at missing fragments [first {}] ---", limit);
+            println!(
+                "\n--- KFX anchors pointing at missing fragments [first {}] ---",
+                limit
+            );
             for d in self.dangling_anchors.iter().take(limit) {
                 println!("  {}  →  fragment_id {}", d.anchor_name, d.fragment_id);
             }
@@ -190,7 +249,10 @@ impl Report {
             }
         }
         if !self.orphan_link_tos.is_empty() {
-            println!("\n--- KFX link_to refs with no defining Anchor [first {}] ---", limit);
+            println!(
+                "\n--- KFX link_to refs with no defining Anchor [first {}] ---",
+                limit
+            );
             for sym in self.orphan_link_tos.iter().take(limit) {
                 println!("  {}", sym);
             }
@@ -198,38 +260,44 @@ impl Report {
                 println!("  ... and {} more", self.orphan_link_tos.len() - limit);
             }
         }
-        if !self.source_dangling_refs.is_empty() {
-            println!("\n--- Source <a href> with no matching id in source [first {}] ---", limit);
-            for r in self.source_dangling_refs.iter().take(limit) {
+        if !self.epub_dangling_refs.is_empty() {
+            let header = if dir.epub_is_source() {
+                "Source-side dangling EPUB hrefs (not boko's fault)"
+            } else {
+                "Dangling hrefs in boko's EPUB output"
+            };
+            println!("\n--- {} [first {}] ---", header, limit);
+            for r in self.epub_dangling_refs.iter().take(limit) {
                 println!("  {}  →  {}", r.spine_path, r.raw);
             }
-            if self.source_dangling_refs.len() > limit {
-                println!("  ... and {} more", self.source_dangling_refs.len() - limit);
+            if self.epub_dangling_refs.len() > limit {
+                println!("  ... and {} more", self.epub_dangling_refs.len() - limit);
             }
         }
     }
 }
 
-/// Validate that links in the source EPUB round-trip to working anchors in KFX.
+/// Validate links across both sides. Direction-neutral — caller interprets
+/// the resulting fields per conversion direction.
 pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
-    let (source_hrefs, source_ids) = extract_hrefs_and_ids_from_epub(epub_bytes)?;
+    let (epub_hrefs, epub_ids) = extract_hrefs_and_ids_from_epub(epub_bytes)?;
     let kfx = extract_anchors_and_link_tos_from_kfx(kfx_bytes)?;
 
-    // --- Source-side counts ---
-    let mut source_external: HashMap<String, usize> = HashMap::new();
-    let mut source_external_count = 0;
-    let mut source_internal_fragment_count = 0;
-    let mut source_internal_chapter_count = 0;
-    let mut source_dangling_refs: Vec<SourceHref> = Vec::new();
+    // --- EPUB-side counts ---
+    let mut epub_external: HashMap<String, usize> = HashMap::new();
+    let mut epub_external_count = 0;
+    let mut epub_internal_fragment_count = 0;
+    let mut epub_internal_chapter_count = 0;
+    let mut epub_dangling_refs: Vec<EpubHref> = Vec::new();
 
-    for href in &source_hrefs {
+    for href in &epub_hrefs {
         match &href.kind {
             HrefKind::External(url) => {
-                source_external_count += 1;
-                *source_external.entry(url.clone()).or_insert(0) += 1;
+                epub_external_count += 1;
+                *epub_external.entry(url.clone()).or_insert(0) += 1;
             }
             HrefKind::InternalFragment { path, fragment } => {
-                source_internal_fragment_count += 1;
+                epub_internal_fragment_count += 1;
                 // Resolve the target spine: if path is empty, same file; else
                 // join against the link's own spine_path.
                 let target_path = if path.is_empty() {
@@ -240,16 +308,16 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
                 let target_key = format!("{}#{}", target_path, fragment);
                 let target_key_filename_only = filename_only(&target_path)
                     .map(|f| format!("{}#{}", f, fragment));
-                let has_target = source_ids.contains(&target_key)
+                let has_target = epub_ids.contains(&target_key)
                     || target_key_filename_only
                         .as_ref()
-                        .is_some_and(|k| source_ids.contains(k));
+                        .is_some_and(|k| epub_ids.contains(k));
                 if !has_target {
-                    source_dangling_refs.push(href.clone());
+                    epub_dangling_refs.push(href.clone());
                 }
             }
             HrefKind::InternalChapter(_) => {
-                source_internal_chapter_count += 1;
+                epub_internal_chapter_count += 1;
             }
             HrefKind::Unclassifiable(_) => {}
         }
@@ -292,36 +360,36 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     orphan_link_tos.sort();
 
     // --- External URL multiset diff ---
-    let mut external_missing: Vec<(String, usize)> = Vec::new();
-    let mut external_extra: Vec<(String, usize)> = Vec::new();
-    for (url, sc) in &source_external {
+    let mut external_only_in_epub: Vec<(String, usize)> = Vec::new();
+    let mut external_only_in_kfx: Vec<(String, usize)> = Vec::new();
+    for (url, ec) in &epub_external {
         let kc = kfx_external_uris.get(url).copied().unwrap_or(0);
-        if sc > &kc {
-            external_missing.push((url.clone(), sc - kc));
+        if ec > &kc {
+            external_only_in_epub.push((url.clone(), ec - kc));
         }
     }
     for (url, kc) in &kfx_external_uris {
-        let sc = source_external.get(url).copied().unwrap_or(0);
-        if kc > &sc {
-            external_extra.push((url.clone(), kc - sc));
+        let ec = epub_external.get(url).copied().unwrap_or(0);
+        if kc > &ec {
+            external_only_in_kfx.push((url.clone(), kc - ec));
         }
     }
-    external_missing.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    external_extra.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    external_only_in_epub.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    external_only_in_kfx.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     Ok(Report {
-        source_hrefs,
+        epub_hrefs,
         kfx_anchors: kfx.anchors,
-        source_external_count,
-        source_internal_fragment_count,
-        source_internal_chapter_count,
-        source_dangling_refs,
+        epub_external_count,
+        epub_internal_fragment_count,
+        epub_internal_chapter_count,
+        epub_dangling_refs,
         kfx_external_anchor_count,
         kfx_internal_anchor_count,
         kfx_link_to_distinct: kfx.link_to_distinct.len(),
         kfx_link_to_total: kfx.link_to_total,
-        external_missing,
-        external_extra,
+        external_only_in_epub,
+        external_only_in_kfx,
         dangling_anchors,
         orphan_link_tos,
     })
@@ -336,7 +404,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 /// `path#id` and also `filename#id` to handle relative path variants).
 pub fn extract_hrefs_and_ids_from_epub(
     epub_bytes: &[u8],
-) -> Result<(Vec<SourceHref>, HashSet<String>), String> {
+) -> Result<(Vec<EpubHref>, HashSet<String>), String> {
     let cursor = Cursor::new(epub_bytes);
     let mut archive =
         ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
@@ -391,7 +459,7 @@ fn read_zip_entry<R: std::io::Read + std::io::Seek>(
 pub fn extract_from_xhtml(
     xhtml: &str,
     spine_path: &str,
-    hrefs_out: &mut Vec<SourceHref>,
+    hrefs_out: &mut Vec<EpubHref>,
     ids_out: &mut HashSet<String>,
 ) {
     let mut reader = Reader::from_str(xhtml);
@@ -421,7 +489,7 @@ pub fn extract_from_xhtml(
 
                 if let Some(raw) = href_val {
                     let kind = classify_href(&raw);
-                    hrefs_out.push(SourceHref {
+                    hrefs_out.push(EpubHref {
                         spine_path: spine_path.to_string(),
                         raw,
                         kind,
