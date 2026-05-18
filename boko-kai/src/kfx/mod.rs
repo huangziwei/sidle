@@ -27,6 +27,7 @@ pub mod context;
 pub mod cover;
 pub mod fragment;
 pub mod ion;
+pub mod merge;
 pub mod metadata;
 pub mod schema;
 pub mod serialization;

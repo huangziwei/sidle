@@ -33,6 +33,10 @@ macro_rules! sym {
 }
 
 /// KFX format importer.
+///
+/// `.kfx-zip` bundles are pre-merged into a single in-memory KFX container
+/// before reaching this importer; see `Book::open_format` and `kfx::merge`.
+/// So this type only ever sees a single container.
 pub struct KfxImporter {
     /// Random-access byte source.
     source: Arc<dyn ByteSource>,
@@ -375,16 +379,9 @@ impl KfxImporter {
             element_id_map: HashMap::new(),
         };
 
-        // Parse metadata (only reads needed entities)
         importer.parse_metadata()?;
-
-        // Parse navigation (TOC)
         importer.parse_navigation()?;
-
-        // Build section→storyline map (needed for spine sizes and load_raw)
         importer.index_section_storylines()?;
-
-        // Parse spine from reading order (uses section→storyline map for sizes)
         importer.parse_spine()?;
 
         Ok(importer)
@@ -427,7 +424,9 @@ impl KfxImporter {
         if let Some(loc) = loc {
             let elem = self.parse_entity_ion(loc)?;
 
-            if let Some(fields) = elem.as_struct()
+            // Amazon's KFX wraps as `book_metadata::{...}` (annotated struct);
+            // boko's own exporter emits a plain struct. Handle both.
+            if let Some(fields) = elem.unwrap_annotated().as_struct()
                 && let Some(list) =
                     get_field(fields, sym!(CategorisedMetadata)).and_then(|m| m.as_list())
             {
@@ -906,6 +905,7 @@ impl KfxImporter {
         }
 
         // Build a lookup from resolved bcRawMedia entity names to their binary payload locations.
+        // bcRawMedia stores its name as a symbol ID in its own container's doc_symbols.
         let mut raw_media_by_name: HashMap<String, EntityLoc> = HashMap::new();
         for raw_loc in self
             .entities

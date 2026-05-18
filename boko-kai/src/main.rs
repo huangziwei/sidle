@@ -898,6 +898,32 @@ fn convert(
         );
     }
 
+    // Fast path: .kfx-zip -> .kfx merges fragments without touching the IR
+    // pipeline. This avoids storyline/section resolution (and the
+    // `document_regions` blocker) entirely. See `kfx::merge` for the design.
+    if !from_stdin
+        && output_format == Format::Kfx
+        && std::path::Path::new(input)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx-zip"))
+    {
+        let bytes = boko::kfx::merge::merge_kfx_zip(std::path::Path::new(input))
+            .map_err(|e| format!("Conversion failed: {e}"))?;
+        if to_stdout {
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(&bytes)
+                .map_err(|e| format!("Write failed: {e}"))?;
+        } else {
+            std::fs::write(output.unwrap(), &bytes)
+                .map_err(|e| format!("Failed to write output: {e}"))?;
+        }
+        if !quiet && !to_stdout {
+            eprintln!("Done.");
+        }
+        return Ok(());
+    }
+
     // Open the book (from file or stdin)
     let mut book = if from_stdin {
         use std::io::Read;

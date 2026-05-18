@@ -205,7 +205,9 @@ impl Format {
                 "epub" => Some(Format::Epub),
                 "azw3" => Some(Format::Azw3),
                 "mobi" => Some(Format::Mobi),
-                "kfx" => Some(Format::Kfx),
+                // `.kfx-zip` is Amazon's multi-container KFX bundle; the KFX
+                // importer auto-detects and dispatches it via its `open()`.
+                "kfx" | "kfx-zip" => Some(Format::Kfx),
                 "md" | "txt" => Some(Format::Markdown),
                 _ => None,
             })
@@ -240,11 +242,28 @@ impl Book {
 
     /// Open an ebook file with an explicit format.
     pub fn open_format(path: impl AsRef<Path>, format: Format) -> io::Result<Self> {
+        let path = path.as_ref();
         let backend: Box<dyn Importer> = match format {
-            Format::Epub => Box::new(EpubImporter::open(path.as_ref())?),
-            Format::Azw3 => Box::new(Azw3Importer::open(path.as_ref())?),
-            Format::Mobi => Box::new(MobiImporter::open(path.as_ref())?),
-            Format::Kfx => Box::new(KfxImporter::open(path.as_ref())?),
+            Format::Epub => Box::new(EpubImporter::open(path)?),
+            Format::Azw3 => Box::new(Azw3Importer::open(path)?),
+            Format::Mobi => Box::new(MobiImporter::open(path)?),
+            Format::Kfx => {
+                // `.kfx-zip` bundles are merged into a single in-memory KFX
+                // container before import. This unifies per-container symbol
+                // tables — without that, references that span containers (the
+                // newer-schema symbols beyond boko-kai's static table among
+                // them) fail to resolve. See `kfx::merge` for the algorithm.
+                if path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx-zip"))
+                {
+                    let bytes = crate::kfx::merge::merge_kfx_zip(path)?;
+                    let source = Arc::new(MemorySource::new(bytes));
+                    Box::new(KfxImporter::from_source(source)?)
+                } else {
+                    Box::new(KfxImporter::open(path)?)
+                }
+            }
             Format::Markdown => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
