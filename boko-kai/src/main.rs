@@ -1066,6 +1066,35 @@ fn convert(
         );
     }
 
+    // Mechanical port: .kfx -> .epub via the dedicated `kfx_to_epub` module
+    // (parallel to the generic IR pipeline). Selected automatically when the
+    // input file has a `.kfx` extension. Phase 1 of the port is in progress;
+    // see `.claude/plans/kfx-to-epub-port.md`.
+    if !from_stdin
+        && output_format == Format::Epub
+        && std::path::Path::new(input)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx"))
+    {
+        let kfx_bytes = std::fs::read(input)
+            .map_err(|e| format!("Failed to read input: {e}"))?;
+        let bytes = boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
+            .map_err(|e| format!("Conversion failed: {e}"))?;
+        if to_stdout {
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(&bytes)
+                .map_err(|e| format!("Write failed: {e}"))?;
+        } else {
+            std::fs::write(output.unwrap(), &bytes)
+                .map_err(|e| format!("Failed to write output: {e}"))?;
+        }
+        if !quiet && !to_stdout {
+            eprintln!("Done.");
+        }
+        return Ok(());
+    }
+
     // Fast path: .kfx-zip -> .kfx merges fragments without touching the IR
     // pipeline. This avoids storyline/section resolution (and the
     // `document_regions` blocker) entirely. See `kfx::merge` for the design.
