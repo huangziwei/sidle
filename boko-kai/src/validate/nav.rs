@@ -68,6 +68,10 @@ pub struct Report {
     pub source_headings_by_level: HashMap<u8, usize>,
     /// Flat count of TOC entries from source NCX (recursive total).
     pub source_toc_entry_count: usize,
+    /// Count of TOC entries pointing at manifest items not in the spine.
+    /// These can't be addressed by KFX position-based navigation and are
+    /// excluded from the count diff.
+    pub source_non_spine_toc_entries: usize,
     /// Whether the source has an NCX. If not, TOC checks are skipped.
     pub source_has_ncx: bool,
 
@@ -120,7 +124,14 @@ impl Report {
         println!("  total: {}", kfx_total);
         println!("TOC entries:");
         if self.source_has_ncx {
-            println!("  source NCX:   {}", self.source_toc_entry_count);
+            if self.source_non_spine_toc_entries > 0 {
+                println!(
+                    "  source NCX:   {} ({} non-spine, can't be addressed in KFX)",
+                    self.source_toc_entry_count, self.source_non_spine_toc_entries
+                );
+            } else {
+                println!("  source NCX:   {}", self.source_toc_entry_count);
+            }
         } else {
             println!("  source NCX:   (none — TOC check skipped)");
         }
@@ -167,8 +178,11 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         }
     }
 
+    // Exclude non-spine entries from the expected count — they can't survive
+    // into KFX (position-based nav requires spine content).
     let toc_count_diff = source.has_ncx.then(|| {
-        source.toc_entry_count as i64 - kfx.toc_targets.len() as i64
+        let expected = source.toc_entry_count.saturating_sub(source.non_spine_toc_entries);
+        expected as i64 - kfx.toc_targets.len() as i64
     });
 
     let mut dangling_nav: Vec<DanglingNav> = Vec::new();
@@ -192,6 +206,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     Ok(Report {
         source_headings_by_level: source.headings_by_level,
         source_toc_entry_count: source.toc_entry_count,
+        source_non_spine_toc_entries: source.non_spine_toc_entries,
         source_has_ncx: source.has_ncx,
         kfx_headings_by_level: kfx.headings_by_level,
         kfx_heading_targets: kfx.heading_targets,
@@ -212,6 +227,11 @@ struct SourceNav {
     headings_by_level: HashMap<u8, usize>,
     /// Flat-recursive count of every TocEntry node.
     toc_entry_count: usize,
+    /// Count of TOC entries whose href path is in the manifest but not in the
+    /// spine. KFX position-based navigation can only address spine content,
+    /// so these entries are genuinely unreachable — boko silently drops them
+    /// and the validator excludes them from the count diff.
+    non_spine_toc_entries: usize,
     has_ncx: bool,
 }
 
@@ -251,29 +271,62 @@ fn extract_source_nav(epub_bytes: &[u8]) -> Result<SourceNav, String> {
         count_headings(&xhtml, &mut headings_by_level);
     }
 
+    // Build the set of spine paths so we can identify TOC entries that
+    // point at non-spine manifest items (calibre puts a "Beginning" landmark
+    // file in manifest+guide but not spine; the NCX still references it).
+    let spine_paths: HashSet<String> = opf
+        .spine_ids
+        .iter()
+        .filter_map(|id| opf.manifest.get(id).map(|(href, _)| {
+            // NCX hrefs are relative to OPF; spine items live in manifest with the same form.
+            // Normalise to opf_base-prefixed for comparison with NCX (which is also opf_base-relative).
+            href.clone()
+        }))
+        .collect();
+
     // 2. TOC — parse NCX if present.
-    let (toc_entry_count, has_ncx) = if let Some(ncx_href) = &opf.ncx_href {
+    let (toc_entry_count, non_spine_toc_entries, has_ncx) = if let Some(ncx_href) = &opf.ncx_href {
         let ncx_path = format!("{}{}", opf_base, ncx_href);
         match read_zip_entry(&mut archive, &ncx_path) {
             Ok(ncx_bytes) => {
                 let enc = crate::util::extract_xml_encoding(&ncx_bytes);
                 let ncx_str = crate::util::decode_text(&ncx_bytes, enc);
                 match parse_ncx(&ncx_str) {
-                    Ok(entries) => (count_toc_entries(&entries), true),
-                    Err(_) => (0, false),
+                    Ok(entries) => {
+                        let total = count_toc_entries(&entries);
+                        let non_spine = count_non_spine_entries(&entries, &spine_paths);
+                        (total, non_spine, true)
+                    }
+                    Err(_) => (0, 0, false),
                 }
             }
-            Err(_) => (0, false),
+            Err(_) => (0, 0, false),
         }
     } else {
-        (0, false)
+        (0, 0, false)
     };
 
     Ok(SourceNav {
         headings_by_level,
         toc_entry_count,
+        non_spine_toc_entries,
         has_ncx,
     })
+}
+
+/// Count TOC entries whose href path (everything before `#`) isn't in the
+/// spine. These can't survive into KFX because KFX position-based navigation
+/// requires the target to be inside spine content.
+fn count_non_spine_entries(entries: &[TocEntry], spine_paths: &HashSet<String>) -> usize {
+    let mut n = 0;
+    for e in entries {
+        let path = e.href.split('#').next().unwrap_or(&e.href);
+        if !spine_paths.contains(path) {
+            n += 1;
+        }
+        n += count_non_spine_entries(&e.children, spine_paths);
+    }
+    n
 }
 
 fn count_toc_entries(entries: &[TocEntry]) -> usize {

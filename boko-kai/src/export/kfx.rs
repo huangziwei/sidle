@@ -549,8 +549,19 @@ fn register_chapter_link_targets(
         if let Some(target) = resolved.get(source) {
             match target {
                 AnchorTarget::Internal(target_node) => {
-                    ctx.anchor_registry
-                        .register_internal_target(*target_node, href);
+                    // Body-level ids (promoted to NodeId::ROOT by dom::transform)
+                    // have no element to anchor to. Register as a chapter-level
+                    // target instead — the chapter's first content fragment IS
+                    // where a body-id link should land. Without this, the link
+                    // generates an `a<N>` symbol but no Anchor entity, leaving
+                    // an orphan link_to on Kindle.
+                    if target_node.node == crate::model::NodeId::ROOT {
+                        ctx.anchor_registry
+                            .register_chapter_target(target_node.chapter, href);
+                    } else {
+                        ctx.anchor_registry
+                            .register_internal_target(*target_node, href);
+                    }
                 }
                 AnchorTarget::Chapter(target_chapter) => {
                     ctx.anchor_registry
@@ -1272,6 +1283,13 @@ fn resolve_toc_target(
             if let Some((fragment_id, _offset)) = ctx.anchor_registry.get_node_position(*gid) {
                 return Some((fragment_id, 0));
             }
+            // Body-level ids (promoted to NodeId::ROOT by dom::transform) have
+            // no element of their own to anchor to. Fall back to chapter start.
+            if gid.node == crate::model::NodeId::ROOT
+                && let Some(fragment_id) = ctx.anchor_registry.get_chapter_position(gid.chapter)
+            {
+                return Some((fragment_id, 0));
+            }
         }
         Some(AnchorTarget::Chapter(chapter_id)) => {
             // Look up chapter position
@@ -1305,10 +1323,19 @@ fn build_chapter_entities_grouped(
 ) -> (KfxFragment, KfxFragment, Option<KfxFragment>) {
     use crate::kfx::storyline::{ir_to_tokens, tokens_to_ion};
 
-    // Check if this is a cover chapter (image-only)
-    // Only treat as cover if there's no standalone cover section (c0)
-    // When ctx.cover_fragment_id is set, c0 already handles the cover
-    let is_cover = ctx.cover_fragment_id.is_none() && is_image_only_chapter(chapter);
+    // Check if this is a cover chapter (image-only).
+    // Three gates:
+    //   1. No standalone c0 — when `cover_fragment_id` is set, c0 already
+    //      handles the cover so no in-spine chapter should claim it.
+    //   2. Chapter is image-only (one Image node, no text).
+    //   3. No in-spine cover has been claimed yet. EPUBs that put SVG-wrapped
+    //      thumbnails on every section landing page (e.g. `<div id="toc-N">
+    //      <svg><image/></svg></div>`) look image-only too; without this
+    //      gate they'd all be treated as covers and lose their wrapping
+    //      `<div id>` anchors when re-emitted via build_cover_storyline.
+    let is_cover = ctx.cover_fragment_id.is_none()
+        && !ctx.inline_cover_emitted
+        && is_image_only_chapter(chapter);
 
     // =========================================================================
     // 1. SETUP: Naming for this chapter's entity triad
@@ -1332,6 +1359,7 @@ fn build_chapter_entities_grouped(
     // 2. GENERATE: Schema-driven token generation + text/structure split
     // =========================================================================
     let (storyline_content_list, content_strings) = if is_cover {
+        ctx.inline_cover_emitted = true;
         // For cover chapters, generate flat storyline with direct image
         let content_list = build_cover_storyline(chapter, ctx);
         let text = ctx.drain_text();
@@ -1465,6 +1493,13 @@ fn build_cover_storyline(chapter: &Chapter, ctx: &mut ExportContext) -> IonValue
                 ctx.record_content_id(container_id);
                 // Record length of 1 for image (per kfx_output algorithm)
                 ctx.record_content_length(container_id, 1);
+
+                // Resolve pending chapter-start anchor. The cover path doesn't
+                // go through StartElement → resolve_pending in storyline.rs,
+                // so chapters that are body-id link targets but also covers
+                // (e.g. `<body epub:type="cover" id="...">`) would otherwise
+                // leave an orphan link_to.
+                ctx.resolve_pending_chapter_anchor(container_id);
 
                 // Build the image struct directly (no container wrapper)
                 let image_struct = IonValue::Struct(vec![

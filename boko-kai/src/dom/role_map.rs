@@ -60,8 +60,13 @@ pub fn element_to_role_known(local_name: &LocalName) -> Option<Role> {
         // Links
         "a" => Role::Link,
 
-        // Images
-        "img" => Role::Image,
+        // Images. SVG `<image>` (parsed by xml5ever with the SVG namespace)
+        // also maps here so its `xlink:href` survives as a KFX image; without
+        // this, calibre-generated covers wrapped in `<svg><image/></svg>`
+        // would silently disappear from the storyline. HTML `<image>` is a
+        // deprecated alias that html5ever already rewrites to `<img>`, so this
+        // arm is effectively SVG-only in practice.
+        "img" | "image" => Role::Image,
 
         // Lists
         "ul" => Role::UnorderedList,
@@ -118,7 +123,9 @@ pub fn element_to_role_known(local_name: &LocalName) -> Option<Role> {
         // these yet, so they flow as generic Containers and only their text
         // leaves (if any) survive. Listed explicitly so the validator
         // distinguishes "known-untreated" from "unknown".
-        "svg" | "image" | "math" | "audio" | "video" | "source" | "track"
+        // (`image` is intentionally NOT here — it's handled above as Role::Image
+        //  so SVG `<image>` survives as a KFX image.)
+        "svg" | "math" | "audio" | "video" | "source" | "track"
         | "object" | "embed" | "iframe" | "canvas" => Role::Container,
 
         // Form elements — not relevant for ebooks but recognised.

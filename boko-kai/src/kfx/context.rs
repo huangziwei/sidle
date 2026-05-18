@@ -644,6 +644,13 @@ pub struct ExportContext {
     /// Content fragment ID for standalone cover.
     pub cover_content_id: Option<u64>,
 
+    /// Set once an in-spine chapter has been emitted via the cover storyline
+    /// path. Prevents subsequent image-only chapters (e.g. SVG-wrapped
+    /// thumbnail covers for each book section) from also being collapsed into
+    /// cover layout, which would drop their wrapping `<div id="...">` and
+    /// break TOC anchors targeting them.
+    pub inline_cover_emitted: bool,
+
     /// Chapters that need chapter-start anchors.
     chapters_needing_anchor: HashSet<ChapterId>,
 
@@ -791,6 +798,7 @@ impl ExportContext {
             heading_positions: Vec::new(),
             cover_fragment_id: None,
             cover_content_id: None,
+            inline_cover_emitted: false,
             chapters_needing_anchor: HashSet::new(),
             pending_chapter_anchor: None,
             first_content_ids: HashMap::new(),

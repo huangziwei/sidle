@@ -79,6 +79,24 @@ impl<'a> TransformContext<'a> {
             body_style.language = Some(lang);
         }
 
+        // Promote body's `id` attribute to the chapter root so anchors that
+        // target it (e.g. NCX `<content src="ch.xhtml#bodyid"/>`) resolve.
+        // Calibre-generated EPUBs frequently put a unique id on `<body>` and
+        // reference it from the TOC; without this, `resolve_href` finds no
+        // matching IR node and the TOC entry is silently dropped. The KFX
+        // export side then falls back to chapter position when the target
+        // node is ROOT (see `resolve_toc_target` in export/kfx.rs).
+        if let Some(node) = self.dom.get(body)
+            && let ArenaNodeData::Element { attrs, .. } = &node.data
+        {
+            for attr in attrs {
+                if attr.name.local.as_ref() == "id" && !attr.value.is_empty() {
+                    self.chapter.semantics.set_id(NodeId::ROOT, &attr.value);
+                    break;
+                }
+            }
+        }
+
         // Process body's children as children of IR root, inheriting body's style
         self.process_children(body, NodeId::ROOT, Some(&body_style));
 
@@ -211,7 +229,14 @@ impl<'a> TransformContext<'a> {
                     let attr_name = attr.name.local.as_ref();
                     let attr_ns = attr.name.ns.as_ref();
                     match attr_name {
-                        // Core layout attributes
+                        // Core layout attributes. SVG `<image>` uses `href`
+                        // (SVG2) or `xlink:href` (SVG1) for the image source;
+                        // the IR's Image role expects `src`, so redirect when
+                        // the node is an image. (HTML `<a href>` still routes
+                        // through this arm for non-image roles.)
+                        "href" if role == Role::Image => {
+                            self.chapter.semantics.set_src(ir_id, &attr.value);
+                        }
                         "href" => {
                             self.chapter.semantics.set_href(ir_id, &attr.value);
                         }
