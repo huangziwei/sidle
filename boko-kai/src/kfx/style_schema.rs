@@ -291,6 +291,9 @@ pub enum IrField {
     // Phase 14: Text emphasis (圏点 / sesame-dot etc.)
     TextEmphasisStyle,
     TextEmphasisColor,
+    // text-combine-upright (縦中横 / tate-chu-yoko) — combine a run of chars
+    // (typically digits) into a single upright cell in vertical writing.
+    TextCombineUpright,
 }
 
 /// Declarative definition for how a style property maps from IR to KFX.
@@ -695,6 +698,19 @@ impl StyleSchema {
             transform: ValueTransform::ParseColor {
                 output_format: ColorFormat::PackedInt,
             },
+            context: StyleContext::InlineSafe,
+        });
+
+        // text-combine-upright → KFX text_combine (縦中横). Inline-safe; runs
+        // of digits in vertical text get combined into one upright cell.
+        schema.register(StylePropertyRule {
+            ir_key: "text-combine-upright",
+            ir_field: Some(IrField::TextCombineUpright),
+            kfx_symbol: KfxSymbol::TextCombine,
+            transform: ValueTransform::Map(vec![
+                ("none".into(), KfxValue::Symbol(KfxSymbol::None)),
+                ("all".into(), KfxValue::Symbol(KfxSymbol::All)),
+            ]),
             context: StyleContext::InlineSafe,
         });
 
@@ -2236,6 +2252,13 @@ pub fn extract_ir_field(ir_style: &ir_style::ComputedStyle, field: IrField) -> O
                 None
             }
         }
+        IrField::TextCombineUpright => {
+            if ir_style.text_combine_upright != default.text_combine_upright {
+                Some(ir_style.text_combine_upright.to_css_string())
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -2786,6 +2809,12 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
             if let Some((r, g, b)) = parse_css_color(css_value) {
                 ir_style.text_emphasis_color = Some(ir_style::Color::rgb(r, g, b));
             }
+        }
+        IrField::TextCombineUpright => {
+            ir_style.text_combine_upright = match css_value {
+                "all" => ir_style::TextCombineUpright::All,
+                _ => ir_style::TextCombineUpright::None,
+            };
         }
     }
 }

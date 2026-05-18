@@ -23,13 +23,17 @@ use crate::kfx::schema::{SemanticTarget, schema};
 use crate::kfx::symbols::KfxSymbol;
 use crate::kfx::tokens::{ContentRef, ElementStart, KfxToken, SpanStart, TokenStream};
 use crate::kfx::transforms::ImportContext;
-use crate::model::{Chapter, Node, NodeId};
+use crate::model::{Chapter, Node, NodeId, Role};
 use std::collections::HashMap;
 
 /// Context for tokenization including anchor resolution.
 struct TokenizeContext<'a> {
     doc_symbols: &'a [String],
     anchors: Option<&'a HashMap<String, String>>,
+    /// Map of ruby_name (e.g. "b_ruby_0") → ordered list of annotation texts.
+    /// Built from `ruby_content` entities by the importer. Style events with
+    /// `ruby_name`+`ruby_id` resolve to `ruby_index[name][ruby_id - 1]`.
+    ruby_index: Option<&'a HashMap<String, Vec<String>>>,
 }
 
 /// Shorthand for getting a KfxSymbol as u64.
@@ -55,6 +59,7 @@ pub fn tokenize_storyline(
     doc_symbols: &[String],
     anchors: Option<&HashMap<String, String>>,
     _styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    ruby_index: Option<&HashMap<String, Vec<String>>>,
 ) -> TokenStream {
     let mut stream = TokenStream::new();
 
@@ -71,6 +76,7 @@ pub fn tokenize_storyline(
     let ctx = TokenizeContext {
         doc_symbols,
         anchors,
+        ruby_index,
     };
     tokenize_content_list(content_list, &ctx, &mut stream);
     stream
@@ -288,6 +294,35 @@ fn parse_style_events(events: &[IonValue], ctx: &TokenizeContext) -> Vec<SpanSta
             // Get style symbol ID for later lookup
             let style_symbol = get_field(fields, sym!(Style)).and_then(|v| v.as_symbol());
 
+            // Ruby span: a style_event with `ruby_name` points at an entry in
+            // a `ruby_content` fragment. Resolve to the annotation text now so
+            // the IR builder can attach a `<rt>` child on close. This is
+            // special-cased rather than schema-driven because ruby requires
+            // combining two fields plus an external lookup.
+            if let Some(ruby_name) = get_field(fields, sym!(RubyName))
+                .and_then(|v| resolve_symbol_or_string(v, ctx.doc_symbols))
+            {
+                let ruby_id_1 = get_field(fields, sym!(RubyId))
+                    .and_then(|v| v.as_int())
+                    .map(|n| n as usize)
+                    .unwrap_or(0);
+                let ruby_annotation = ctx
+                    .ruby_index
+                    .and_then(|idx| idx.get(&ruby_name))
+                    .and_then(|annotations| annotations.get(ruby_id_1.saturating_sub(1)))
+                    .cloned();
+                return Some(SpanStart {
+                    role: Role::Ruby,
+                    node_id: None,
+                    semantics: HashMap::new(),
+                    offset,
+                    length,
+                    style_symbol,
+                    kfx_attrs: Vec::new(),
+                    ruby_annotation,
+                });
+            }
+
             // Create closure to check which fields are present
             let has_field = |symbol: KfxSymbol| get_field(fields, symbol as u64).is_some();
 
@@ -305,6 +340,7 @@ fn parse_style_events(events: &[IonValue], ctx: &TokenizeContext) -> Vec<SpanSta
                 length,
                 style_symbol,
                 kfx_attrs: Vec::new(),
+                ruby_annotation: None,
             })
         })
         .collect()
@@ -532,9 +568,21 @@ fn build_text_with_spans(
         span_node
     };
 
-    // Stack of (node_id, char_end_offset) for active spans
-    let mut span_stack: Vec<(NodeId, usize)> = vec![(parent, usize::MAX)];
+    // Stack of (node_id, char_end_offset, ruby_annotation_to_attach_on_close)
+    // for active spans. A Ruby span carries the annotation text resolved from
+    // ruby_content; when the span closes we attach a `<rt>` child holding it.
+    let mut span_stack: Vec<(NodeId, usize, Option<String>)> = vec![(parent, usize::MAX, None)];
     let mut char_pos: usize = 0; // Current position in char offsets
+
+    // Closure to append a `<rt>` child holding the annotation. Called when a
+    // Ruby span is popped from the stack.
+    fn append_ruby_text(chapter: &mut Chapter, ruby_node: NodeId, annotation: &str) {
+        let range = chapter.append_text(annotation);
+        let text_node = chapter.alloc_node(Node::text(range));
+        let rt_node = chapter.alloc_node(Node::new(Role::RubyText));
+        chapter.append_child(rt_node, text_node);
+        chapter.append_child(ruby_node, rt_node);
+    }
 
     for span in sorted_spans {
         let span_start = span.offset;
@@ -542,7 +590,7 @@ fn build_text_with_spans(
 
         // Pop any spans that have ended before this span starts
         while span_stack.len() > 1 {
-            let (_, stack_end) = span_stack.last().unwrap();
+            let (_, stack_end, _) = span_stack.last().unwrap();
             if *stack_end <= span_start {
                 // This span has ended - add any remaining text to it first
                 if char_pos < *stack_end {
@@ -552,12 +600,15 @@ fn build_text_with_spans(
                         let segment = &text[byte_start..byte_end];
                         let range = chapter.append_text(segment);
                         let text_node = chapter.alloc_node(Node::text(range));
-                        let (parent_id, _) = span_stack.last().unwrap();
+                        let (parent_id, _, _) = span_stack.last().unwrap();
                         chapter.append_child(*parent_id, text_node);
                     }
                     char_pos = *stack_end;
                 }
-                span_stack.pop();
+                let (closing_node, _, ruby_ann) = span_stack.pop().unwrap();
+                if let Some(annotation) = ruby_ann {
+                    append_ruby_text(chapter, closing_node, &annotation);
+                }
             } else {
                 break;
             }
@@ -571,7 +622,7 @@ fn build_text_with_spans(
                 let before = &text[byte_start..byte_end];
                 let range = chapter.append_text(before);
                 let text_node = chapter.alloc_node(Node::text(range));
-                let (current_parent, _) = span_stack.last().unwrap();
+                let (current_parent, _, _) = span_stack.last().unwrap();
                 chapter.append_child(*current_parent, text_node);
             }
             char_pos = span_start;
@@ -580,14 +631,14 @@ fn build_text_with_spans(
         // Create this span and push onto stack
         if span_end > span_start {
             let span_node = create_span_node(chapter, span);
-            let (current_parent, _) = span_stack.last().unwrap();
+            let (current_parent, _, _) = span_stack.last().unwrap();
             chapter.append_child(*current_parent, span_node);
-            span_stack.push((span_node, span_end));
+            span_stack.push((span_node, span_end, span.ruby_annotation.clone()));
         }
     }
 
     // Close all remaining spans and add trailing text
-    while let Some((node_id, end_offset)) = span_stack.pop() {
+    while let Some((node_id, end_offset, ruby_ann)) = span_stack.pop() {
         let actual_end = end_offset.min(text.chars().count());
         if char_pos < actual_end {
             let byte_start = char_to_byte_offset(text, char_pos);
@@ -599,6 +650,9 @@ fn build_text_with_spans(
                 chapter.append_child(node_id, text_node);
             }
             char_pos = actual_end;
+        }
+        if let Some(annotation) = ruby_ann {
+            append_ruby_text(chapter, node_id, &annotation);
         }
     }
 }
@@ -647,12 +701,13 @@ pub fn parse_storyline_to_ir<F>(
     doc_symbols: &[String],
     anchors: Option<&HashMap<String, String>>,
     styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    ruby_index: Option<&HashMap<String, Vec<String>>>,
     content_lookup: F,
 ) -> Chapter
 where
     F: FnMut(&str, usize) -> Option<String>,
 {
-    let tokens = tokenize_storyline(storyline, doc_symbols, anchors, styles);
+    let tokens = tokenize_storyline(storyline, doc_symbols, anchors, styles, ruby_index);
     build_ir_from_tokens(&tokens, doc_symbols, styles, content_lookup)
 }
 
@@ -661,7 +716,6 @@ where
 // ============================================================================
 
 use crate::kfx::context::ExportContext;
-use crate::model::Role;
 use crate::style::{BorderStyle, ComputedStyle, Length};
 
 /// Check if a style has borders that require container wrapping in KFX.
@@ -2008,6 +2062,7 @@ mod tests {
                 offset: 7,
                 length: 5,
                 style_symbol: None,
+                ruby_annotation: None,
                 kfx_attrs: Vec::new(),
             }],
             kfx_attrs: Vec::new(),
@@ -2634,6 +2689,7 @@ mod tests {
                     length: 19,
                     style_symbol: None,
                     kfx_attrs: Vec::new(),
+                    ruby_annotation: None,
                 },
                 SpanStart {
                     role: Role::Inline,
@@ -2643,6 +2699,7 @@ mod tests {
                     length: 2,
                     style_symbol: None,
                     kfx_attrs: Vec::new(),
+                    ruby_annotation: None,
                 },
             ],
             kfx_attrs: Vec::new(),
