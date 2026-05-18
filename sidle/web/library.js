@@ -230,13 +230,17 @@ function galleryCard(b) {
   const cover = document.createElement("div");
   cover.className = "cover";
   if (coverUrl) {
+    cover.classList.add("has-image");
     const img = document.createElement("img");
     img.src = coverUrl;
     img.alt = "";
     img.loading = "lazy";
     cover.appendChild(img);
   } else {
-    cover.textContent = b.title || "Untitled";
+    const ph = document.createElement("div");
+    ph.className = "cover-placeholder";
+    ph.textContent = b.title || "Untitled";
+    cover.appendChild(ph);
   }
   card.appendChild(cover);
 
