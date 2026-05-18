@@ -6,3 +6,5 @@ books/
 bench
 scripts/
 boko-kai/target/
+/target
+sidle/src-tauri/gen/

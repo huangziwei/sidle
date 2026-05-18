@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sidle</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <div class="brand">sidle</div>
+
+      <div class="toolbar-group">
+        <button id="btn-add" class="btn">Add EPUB&hellip;</button>
+        <div class="seg" role="tablist" aria-label="View">
+          <button id="view-gallery" class="seg-btn active" role="tab" aria-selected="true">Gallery</button>
+          <button id="view-list" class="seg-btn" role="tab" aria-selected="false">List</button>
+        </div>
+      </div>
+
+      <div class="toolbar-spacer"></div>
+
+      <label class="workers">
+        Workers
+        <select id="workers">
+          <option value="1">1</option>
+          <option value="2" selected>2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="6">6</option>
+          <option value="8">8</option>
+        </select>
+      </label>
+    </header>
+
+    <main id="main">
+      <section id="gallery" class="view active" aria-label="Gallery">
+        <div id="gallery-grid" class="gallery-grid"></div>
+        <div id="gallery-empty" class="empty">
+          <p>Drop an EPUB anywhere to import.</p>
+        </div>
+      </section>
+
+      <section id="list" class="view" aria-label="List" hidden>
+        <table class="book-table">
+          <thead>
+            <tr>
+              <th data-sort="title">Title</th>
+              <th data-sort="author">Author</th>
+              <th data-sort="language">Lang</th>
+              <th data-sort="imported_at">Date added</th>
+              <th data-sort="file_size">Size</th>
+              <th data-sort="status">Status</th>
+            </tr>
+          </thead>
+          <tbody id="list-body"></tbody>
+        </table>
+        <div id="list-empty" class="empty">
+          <p>Drop an EPUB anywhere to import.</p>
+        </div>
+      </section>
+    </main>
+
+    <div id="drop-veil" class="drop-veil" hidden>
+      <div class="drop-veil-inner">Drop to import</div>
+    </div>
+
+    <ul id="ctx-menu" class="ctx-menu" hidden></ul>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <script src="api.js"></script>
+    <script src="library.js"></script>
+  </body>
+</html>

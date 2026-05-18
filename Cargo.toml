@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = [
+    "boko-kai",
+    "sidle/src-tauri",
+]
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
