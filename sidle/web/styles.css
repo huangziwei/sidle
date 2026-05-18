@@ -59,19 +59,15 @@ button {
   padding: 10px 16px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
-  -webkit-app-region: drag;
   height: 52px;
 }
 
-.toolbar > * {
-  -webkit-app-region: no-drag;
-}
-
-.brand {
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  margin-right: 8px;
-  padding-left: 64px; /* room for traffic-light buttons on mac */
+.toolbar-sep {
+  width: 1px;
+  height: 22px;
+  background: var(--border-strong);
+  margin: 0 4px;
+  flex: 0 0 auto;
 }
 
 .toolbar-spacer {
@@ -118,13 +114,6 @@ button {
 .seg-btn.active {
   background: var(--accent);
   color: white;
-}
-
-.workers {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted);
 }
 
 /* Device pill + popover */
@@ -306,14 +295,6 @@ button {
   font-size: 12px;
 }
 
-.workers select {
-  font: inherit;
-  background: var(--surface);
-  color: var(--fg);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  padding: 4px 6px;
-}
 
 /* Views */
 

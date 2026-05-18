@@ -8,10 +8,9 @@
   </head>
   <body>
     <header class="toolbar">
-      <div class="brand">sidle</div>
-
       <div class="toolbar-group">
         <button id="btn-add" class="btn">Add EPUB&hellip;</button>
+        <div class="toolbar-sep" aria-hidden="true"></div>
         <div class="seg" role="tablist" aria-label="View">
           <button id="view-gallery" class="seg-btn active" role="tab" aria-selected="true">Gallery</button>
           <button id="view-list" class="seg-btn" role="tab" aria-selected="false">List</button>
@@ -45,17 +44,6 @@
         </div>
       </div>
 
-      <label class="workers">
-        Workers
-        <select id="workers">
-          <option value="1">1</option>
-          <option value="2" selected>2</option>
-          <option value="3">3</option>
-          <option value="4">4</option>
-          <option value="6">6</option>
-          <option value="8">8</option>
-        </select>
-      </label>
     </header>
 
     <main id="main">

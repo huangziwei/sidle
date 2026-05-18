@@ -66,15 +66,6 @@ function wireToolbar() {
   $("#btn-add").addEventListener("click", onAddClick);
   $("#view-gallery").addEventListener("click", () => setView("gallery"));
   $("#view-list").addEventListener("click", () => setView("list"));
-  $("#workers").addEventListener("change", async (e) => {
-    const n = Number(e.target.value) || 2;
-    try {
-      const actual = await window.api.invoke("conversion_set_workers", { n });
-      e.target.value = String(actual);
-    } catch (err) {
-      showToast(`failed to set workers: ${err}`, true);
-    }
-  });
 }
 
 async function onAddClick() {

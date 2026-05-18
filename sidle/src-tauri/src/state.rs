@@ -13,7 +13,13 @@ use crate::queue::{self, QueueHandle};
 
 pub type DbHandle = Arc<Mutex<Connection>>;
 
-const DEFAULT_WORKERS: usize = 2;
+/// Default to all available cores. Conversion is CPU-bound; the OS scheduler
+/// handles contention with other apps better than we can from a guessed cap.
+fn default_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
 
 pub struct AppState {
     pub db: DbHandle,
@@ -43,7 +49,7 @@ impl AppState {
         let pending = db::pending_or_error_book_ids(&conn).unwrap_or_default();
 
         let db: DbHandle = Arc::new(Mutex::new(conn));
-        let queue = queue::spawn(app.clone(), db.clone(), paths.clone(), DEFAULT_WORKERS);
+        let queue = queue::spawn(app.clone(), db.clone(), paths.clone(), default_workers());
 
         // Re-enqueue surviving jobs. Use Tauri's runtime — `bootstrap` is
         // called from `setup`, which runs on the OS main thread.
