@@ -1508,6 +1508,7 @@ impl ValueTransform {
                     "rem" => KfxSymbol::Rem,
                     "%" => KfxSymbol::Percent,
                     "pt" => KfxSymbol::Pt,
+                    "lh" => KfxSymbol::Lh,
                     _ => KfxSymbol::Px, // Default fallback
                 };
                 Some(KfxValue::Dimensioned {
@@ -1735,6 +1736,24 @@ fn extract_shorthand_value(
 // IR Field Extraction (Bidirectional Schema Bridge)
 // ============================================================================
 
+/// The em-multiple emitted as the document-level `line_height` in
+/// `document_data`. Per-paragraph line-heights in `lh` units multiply this
+/// baseline, so both sides need to agree on the same constant when we
+/// convert source-em values to `lh`. Keep in sync with the emission in
+/// `build_document_data_fragment` (src/export/kfx.rs).
+pub const DOCUMENT_LINE_HEIGHT_EM: f32 = 1.2;
+
+/// Treat `Length::Px(0.0)` as equivalent to the IR's `Auto` default when
+/// deciding whether to emit a box-model length (margin, padding, text-indent,
+/// letter/word-spacing). The CSS-spec default for these is `0`, so a computed
+/// value of `0px` carries no extra information — but emitting it locks the
+/// device into a literal `0px` and prevents Kindle's Layout > Spacing slider
+/// from injecting its own scaled inter-column / line-spacing values. Calibre
+/// omits zero margins entirely; matching that lets the slider work.
+fn is_default_length(value: ir_style::Length, default: ir_style::Length) -> bool {
+    value == default || matches!(value, ir_style::Length::Px(v) if v == 0.0)
+}
+
 /// Extract a CSS string from an IR ComputedStyle field.
 ///
 /// This is the centralized extraction logic for the bidirectional schema.
@@ -1782,13 +1801,20 @@ pub fn extract_ir_field(ir_style: &ir_style::ComputedStyle, field: IrField) -> O
             }
         }
         IrField::TextIndent => {
-            if ir_style.text_indent != default.text_indent {
+            if !is_default_length(ir_style.text_indent, default.text_indent) {
                 Some(ir_style.text_indent.to_css_string())
             } else {
                 None
             }
         }
         IrField::LineHeight => {
+            // Emit as a plain em string here; the final em→lh normalisation
+            // (dividing each style's em value by the book's dominant
+            // line-height so body lands on 1.0 lh) happens in a second pass
+            // after all styles are registered — see
+            // `normalize_line_heights_to_lh` in src/kfx/style_registry.rs.
+            // Doing it here can't see the dominant value because we only
+            // have one style in hand.
             if ir_style.line_height != default.line_height {
                 Some(ir_style.line_height.to_css_string())
             } else {
@@ -1796,56 +1822,56 @@ pub fn extract_ir_field(ir_style: &ir_style::ComputedStyle, field: IrField) -> O
             }
         }
         IrField::MarginTop => {
-            if ir_style.margin_top != default.margin_top {
+            if !is_default_length(ir_style.margin_top, default.margin_top) {
                 Some(ir_style.margin_top.to_css_string())
             } else {
                 None
             }
         }
         IrField::MarginBottom => {
-            if ir_style.margin_bottom != default.margin_bottom {
+            if !is_default_length(ir_style.margin_bottom, default.margin_bottom) {
                 Some(ir_style.margin_bottom.to_css_string())
             } else {
                 None
             }
         }
         IrField::MarginLeft => {
-            if ir_style.margin_left != default.margin_left {
+            if !is_default_length(ir_style.margin_left, default.margin_left) {
                 Some(ir_style.margin_left.to_css_string())
             } else {
                 None
             }
         }
         IrField::MarginRight => {
-            if ir_style.margin_right != default.margin_right {
+            if !is_default_length(ir_style.margin_right, default.margin_right) {
                 Some(ir_style.margin_right.to_css_string())
             } else {
                 None
             }
         }
         IrField::PaddingTop => {
-            if ir_style.padding_top != default.padding_top {
+            if !is_default_length(ir_style.padding_top, default.padding_top) {
                 Some(ir_style.padding_top.to_css_string())
             } else {
                 None
             }
         }
         IrField::PaddingBottom => {
-            if ir_style.padding_bottom != default.padding_bottom {
+            if !is_default_length(ir_style.padding_bottom, default.padding_bottom) {
                 Some(ir_style.padding_bottom.to_css_string())
             } else {
                 None
             }
         }
         IrField::PaddingLeft => {
-            if ir_style.padding_left != default.padding_left {
+            if !is_default_length(ir_style.padding_left, default.padding_left) {
                 Some(ir_style.padding_left.to_css_string())
             } else {
                 None
             }
         }
         IrField::PaddingRight => {
-            if ir_style.padding_right != default.padding_right {
+            if !is_default_length(ir_style.padding_right, default.padding_right) {
                 Some(ir_style.padding_right.to_css_string())
             } else {
                 None
@@ -1876,14 +1902,14 @@ pub fn extract_ir_field(ir_style: &ir_style::ComputedStyle, field: IrField) -> O
         }
         // Phase 1: Text properties
         IrField::LetterSpacing => {
-            if ir_style.letter_spacing != default.letter_spacing {
+            if !is_default_length(ir_style.letter_spacing, default.letter_spacing) {
                 Some(ir_style.letter_spacing.to_css_string())
             } else {
                 None
             }
         }
         IrField::WordSpacing => {
-            if ir_style.word_spacing != default.word_spacing {
+            if !is_default_length(ir_style.word_spacing, default.word_spacing) {
                 Some(ir_style.word_spacing.to_css_string())
             } else {
                 None

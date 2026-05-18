@@ -575,6 +575,15 @@ fn build_style_fragments(ctx: &mut ExportContext) -> Vec<KfxFragment> {
     // and needs to read the document-level writing-mode from somewhere.
     ctx.document_writing_mode = dominant_writing_mode(ctx);
 
+    // Normalise per-paragraph line-height values to `lh` ratios so Kindle's
+    // Spacing slider can scale them. The body's dominant line-height
+    // becomes `1.0 lh`; outliers (tighter notes, looser headings) carry
+    // proportional ratios. Document_data baseline stays at 1.2 em, so the
+    // rendered body line-height is 1.0 × 1.2em = 1.2em at slider default —
+    // tighter than the source CSS asks for, matching the publisher KFX's
+    // E-Ink-optimised default.
+    ctx.style_registry.normalize_line_heights_to_lh();
+
     // Drain all styles from the registry to generate Ion fragments
     let style_pairs = ctx.style_registry.drain_to_ion();
 
@@ -858,7 +867,9 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
             IonValue::Struct(vec![
                 (
                     KfxSymbol::Value as u64,
-                    IonValue::Decimal("1.2".to_string()),
+                    IonValue::Decimal(
+                        crate::kfx::style_schema::DOCUMENT_LINE_HEIGHT_EM.to_string(),
+                    ),
                 ),
                 (
                     KfxSymbol::Unit as u64,
@@ -866,10 +877,12 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
                 ),
             ]),
         ),
-        (
-            KfxSymbol::SpacingPercentBase as u64,
-            IonValue::Symbol(KfxSymbol::Width as u64),
-        ),
+        // NOTE: `spacing_percent_base: width` was emitted here historically
+        // but pins percentage-spacing to the horizontal axis. In vertical-rl
+        // books that locks the device's Layout > Spacing slider to the wrong
+        // axis — it ends up adjusting left/right page margins instead of the
+        // column-to-column line spacing. Calibre-generated KFX omits this
+        // field entirely; we follow suit and let the device default rule.
         (
             KfxSymbol::ReadingOrders as u64,
             IonValue::List(vec![reading_order]),

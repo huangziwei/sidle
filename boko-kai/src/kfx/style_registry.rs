@@ -288,6 +288,58 @@ impl StyleRegistry {
     pub fn styles(&self) -> impl Iterator<Item = (&u64, &ComputedStyle)> {
         self.styles.values().map(|(id, _, style)| (id, style))
     }
+
+    /// Normalise per-paragraph `line_height` values so the book's dominant
+    /// (most-common em-based) value becomes `1.0 lh` and the rest are emitted
+    /// as proportional `lh` ratios.
+    ///
+    /// Why this pass exists: the document-level `line_height` in
+    /// `document_data` is fixed at `1.2 em` (a sensible E-Ink baseline). The
+    /// Kindle Layout > Spacing slider scales any `lh`-unit value against
+    /// that baseline. Emitting per-paragraph line-heights in `em` makes the
+    /// slider unable to adjust them; emitting raw source-em values as `lh`
+    /// (e.g. source `line-height: 1.75` → `1.75 lh`) renders at
+    /// `1.75 × 1.2em = 2.1em` — much wider than what the original publisher
+    /// KFX shows. Calibre normalises so the body lands on `1.0 lh` and
+    /// outliers carry proportional ratios; this method matches that.
+    ///
+    /// Returns the dominant em value if any line-heights were normalised.
+    pub fn normalize_line_heights_to_lh(&mut self) -> Option<f32> {
+        // Pass 1: find the most-common em value across all styles.
+        let mut tally: HashMap<u32, usize> = HashMap::new();
+        for (_, _, style) in self.styles.values() {
+            if let Some(KfxValue::Dimensioned { value, unit }) =
+                style.get(KfxSymbol::LineHeight)
+                && matches!(unit, KfxSymbol::Em | KfxSymbol::Rem)
+            {
+                // Bucket by float bit-pattern to count exact-equal values.
+                *tally.entry((*value as f32).to_bits()).or_insert(0) += 1;
+            }
+        }
+        let dominant_bits = tally.into_iter().max_by_key(|(_, c)| *c).map(|(b, _)| b)?;
+        let dominant = f32::from_bits(dominant_bits);
+        if dominant <= 0.0 || !dominant.is_finite() {
+            return None;
+        }
+
+        // Pass 2: rewrite each style's line_height as `(value / dominant) lh`.
+        for (_, _, style) in self.styles.values_mut() {
+            if let Some(KfxValue::Dimensioned { value, unit }) =
+                style.get(KfxSymbol::LineHeight).cloned()
+                && matches!(unit, KfxSymbol::Em | KfxSymbol::Rem)
+            {
+                let ratio = (value as f32) / dominant;
+                style.set(
+                    KfxSymbol::LineHeight,
+                    KfxValue::Dimensioned {
+                        value: ratio as f64,
+                        unit: KfxSymbol::Lh,
+                    },
+                );
+            }
+        }
+        Some(dominant)
+    }
 }
 
 impl Default for StyleRegistry {

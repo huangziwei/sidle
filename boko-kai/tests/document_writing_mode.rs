@@ -52,4 +52,21 @@ fn document_writing_mode_matches_book_orientation() {
         "writing_mode: horizontal_tb was emitted {} time(s) in a vertical book — likely document_data fragment regression",
         h_hits
     );
+
+    // `spacing_percent_base: width` pins percentage-spacing to the horizontal
+    // axis and breaks the Layout > Spacing slider in vertical-rl mode (the
+    // device ends up adjusting left/right margins instead of column-to-column
+    // line spacing). Encoded as: field `spacing_percent_base` (sym 477,
+    // VarUInt 0x03 0xDD) + value symbol `width` (sym 56, type 0x71, mag 0x38).
+    // Calibre never emits this field; neither should we.
+    let spacing_bug: &[u8] = &[0x03, 0xDD, 0x71, 0x38];
+    let spacing_hits = kfx
+        .windows(spacing_bug.len())
+        .filter(|w| *w == spacing_bug)
+        .count();
+    assert_eq!(
+        spacing_hits, 0,
+        "spacing_percent_base: width emitted {} time(s) — Layout > Spacing slider will adjust margins instead of line spacing in vertical books",
+        spacing_hits
+    );
 }
