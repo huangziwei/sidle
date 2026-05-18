@@ -1,6 +1,7 @@
 //! sidle desktop app — library + KFX conversion + (later) Kindle sync.
 
 mod commands;
+mod device;
 mod library;
 mod queue;
 mod state;
@@ -31,6 +32,10 @@ pub fn run() {
             commands::queue::conversion_status,
             commands::queue::conversion_retry,
             commands::queue::conversion_set_workers,
+            commands::device::device_status,
+            commands::device::device_list_ours,
+            commands::device::device_send,
+            commands::device::device_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

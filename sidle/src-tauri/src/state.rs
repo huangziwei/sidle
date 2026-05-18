@@ -7,6 +7,7 @@ use rusqlite::Connection;
 use tauri::AppHandle;
 use tokio::sync::Mutex;
 
+use crate::device::monitor::{self, DeviceState};
 use crate::library::{LibraryPaths, db};
 use crate::queue::{self, QueueHandle};
 
@@ -18,6 +19,7 @@ pub struct AppState {
     pub db: DbHandle,
     pub paths: LibraryPaths,
     pub queue: QueueHandle,
+    pub device: DeviceState,
 }
 
 impl AppState {
@@ -41,7 +43,7 @@ impl AppState {
         let pending = db::pending_or_error_book_ids(&conn).unwrap_or_default();
 
         let db: DbHandle = Arc::new(Mutex::new(conn));
-        let queue = queue::spawn(app, db.clone(), paths.clone(), DEFAULT_WORKERS);
+        let queue = queue::spawn(app.clone(), db.clone(), paths.clone(), DEFAULT_WORKERS);
 
         // Re-enqueue surviving jobs. Use Tauri's runtime — `bootstrap` is
         // called from `setup`, which runs on the OS main thread.
@@ -52,6 +54,14 @@ impl AppState {
             });
         }
 
-        Ok(Self { db, paths, queue })
+        let device = monitor::new_state();
+        monitor::spawn(app, device.clone());
+
+        Ok(Self {
+            db,
+            paths,
+            queue,
+            device,
+        })
     }
 }

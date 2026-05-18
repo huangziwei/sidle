@@ -60,8 +60,50 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_jobs_status ON conversion_jobs(status);
+
+        CREATE TABLE IF NOT EXISTS device_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_serial   TEXT NOT NULL,
+            sha256          TEXT NOT NULL,
+            action          TEXT NOT NULL,  -- 'push' | 'delete' (P2b: 'pull')
+            device_path     TEXT NOT NULL,
+            ts              TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_device_history_serial
+            ON device_history(device_serial);
+        CREATE INDEX IF NOT EXISTS idx_device_history_sha
+            ON device_history(sha256);
         "#,
     )
+}
+
+pub fn record_device_action(
+    conn: &Connection,
+    device_serial: &str,
+    sha256: &str,
+    action: &str,
+    device_path: &str,
+) -> rusqlite::Result<()> {
+    let now = now_iso();
+    conn.execute(
+        r#"INSERT INTO device_history (device_serial, sha256, action, device_path, ts)
+           VALUES (?1, ?2, ?3, ?4, ?5)"#,
+        params![device_serial, sha256, action, device_path, now],
+    )?;
+    Ok(())
+}
+
+/// True if a job for this book is currently pending or converting.
+/// Used to gate device send/delete while work is in flight.
+pub fn job_in_flight(conn: &Connection, book_id: i64) -> rusqlite::Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM conversion_jobs
+         WHERE book_id = ?1 AND status IN ('pending', 'converting')",
+        params![book_id],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 pub fn find_by_sha(conn: &Connection, sha: &str) -> rusqlite::Result<Option<BookRow>> {

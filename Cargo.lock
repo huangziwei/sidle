@@ -3819,6 +3819,7 @@ dependencies = [
  "boko-kai",
  "chrono",
  "dirs",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

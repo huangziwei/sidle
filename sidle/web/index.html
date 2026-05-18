@@ -20,6 +20,31 @@
 
       <div class="toolbar-spacer"></div>
 
+      <div class="device" id="device">
+        <button type="button" id="device-pill" class="device-pill">
+          <span class="device-dot disconnected"></span>
+          <span id="device-pill-label">No Kindle</span>
+        </button>
+        <div class="device-popover" id="device-popover" hidden>
+          <header class="device-popover-header">
+            <strong id="device-popover-title">Kindle</strong>
+            <span id="device-popover-status" class="device-popover-status disconnected">Disconnected</span>
+          </header>
+          <div class="device-actions">
+            <button type="button" id="btn-send-unsent" class="btn-link" disabled>Send all unsent</button>
+            <span id="device-send-progress" class="device-send-progress" hidden></span>
+          </div>
+          <dl class="device-fields">
+            <dt>Model</dt><dd id="device-model">—</dd>
+            <dt>Serial</dt><dd id="device-serial">—</dd>
+            <dt>Free space</dt><dd id="device-free">—</dd>
+            <dt>On device</dt><dd id="device-count">—</dd>
+          </dl>
+          <ul id="device-sent-list" class="device-sent-list" aria-label="Books on device"></ul>
+          <div id="device-empty" class="device-empty">Nothing sent yet.</div>
+        </div>
+      </div>
+
       <label class="workers">
         Workers
         <select id="workers">

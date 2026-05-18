@@ -7,6 +7,8 @@ const state = {
   books: [],
   view: "gallery", // 'gallery' | 'list'
   sort: { key: "imported_at", asc: false },
+  device: null, // DeviceInfo | null
+  sent: [],     // Vec<DeviceBookRow>
 };
 
 // ---------------------------------------------------------------------------
@@ -19,8 +21,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireDragDrop();
   wireContextMenu();
   wireQueueDrawer();
+  wireDevice();
   await refresh();
   subscribeStatus();
+  subscribeDeviceStatus();
+  subscribeSendProgress();
 });
 
 async function loadPreferences() {
@@ -154,6 +159,7 @@ function render() {
   renderGallery(books);
   renderList(books);
   renderQueue();
+  updateSendUnsentButton();
   $("#gallery-empty").hidden = books.length > 0;
   $("#list-empty").hidden = books.length > 0;
 }
@@ -326,6 +332,236 @@ function subscribeStatus() {
 }
 
 // ---------------------------------------------------------------------------
+// Device pill + popover
+// ---------------------------------------------------------------------------
+
+function wireDevice() {
+  $("#device-pill").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const pop = $("#device-popover");
+    pop.hidden = !pop.hidden;
+    if (!pop.hidden) refreshDeviceList();
+  });
+  $("#btn-send-unsent").addEventListener("click", () => sendUnsent());
+  // Clicks INSIDE the popover shouldn't close it.
+  $("#device-popover").addEventListener("click", (e) => e.stopPropagation());
+  document.addEventListener("click", (e) => {
+    const root = $("#device");
+    if (root && !root.contains(e.target)) $("#device-popover").hidden = true;
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") $("#device-popover").hidden = true;
+  });
+}
+
+function subscribeSendProgress() {
+  window.api.listen("device:send-progress", (e) => {
+    const r = e.payload;
+    if (!r) return;
+    const prog = $("#device-send-progress");
+    let line;
+    if (r.kind === "pushed") line = `sent: ${r.filename}`;
+    else if (r.kind === "already_present") line = `already on device: ${r.filename}`;
+    else if (r.kind === "skipped") line = `skipped (${r.reason})`;
+    else line = `failed: ${r.error}`;
+    prog.hidden = false;
+    prog.textContent = line;
+  });
+}
+
+async function sendBooks(bookIds) {
+  if (!state.device) {
+    showToast("no Kindle connected", true);
+    return;
+  }
+  const btn = $("#btn-send-unsent");
+  btn.disabled = true;
+  let results = [];
+  try {
+    results = await window.api.invoke("device_send", { bookIds });
+  } catch (e) {
+    showToast(`send failed: ${e}`, true);
+    btn.disabled = false;
+    return;
+  }
+  const counts = { pushed: 0, already_present: 0, skipped: 0, failed: 0 };
+  for (const r of results) counts[r.kind] = (counts[r.kind] || 0) + 1;
+  const parts = [];
+  if (counts.pushed) parts.push(`${counts.pushed} sent`);
+  if (counts.already_present) parts.push(`${counts.already_present} already there`);
+  if (counts.skipped) parts.push(`${counts.skipped} skipped`);
+  if (counts.failed) parts.push(`${counts.failed} failed`);
+  showToast(parts.join(" · ") || "nothing to do", counts.failed > 0);
+  await refreshDeviceList();
+  updateSendUnsentButton();
+  setTimeout(() => {
+    $("#device-send-progress").hidden = true;
+  }, 2000);
+}
+
+async function sendUnsent() {
+  const sentSet = new Set(state.sent.map((s) => s.sha256));
+  const unsent = state.books.filter(
+    (b) => b.status === "done" && !sentSet.has(b.sha256),
+  );
+  if (unsent.length === 0) {
+    showToast("nothing to send");
+    return;
+  }
+  await sendBooks(unsent.map((b) => b.id));
+}
+
+function updateSendUnsentButton() {
+  const btn = $("#btn-send-unsent");
+  if (!state.device) {
+    btn.disabled = true;
+    btn.textContent = "Send all unsent";
+    return;
+  }
+  const sentSet = new Set(state.sent.map((s) => s.sha256));
+  const count = state.books.filter(
+    (b) => b.status === "done" && !sentSet.has(b.sha256),
+  ).length;
+  btn.disabled = count === 0;
+  btn.textContent = count === 0 ? "Send all unsent" : `Send all unsent (${count})`;
+}
+
+function subscribeDeviceStatus() {
+  window.api.listen("device:status", (e) => updateDeviceUI(e.payload));
+  window.api.invoke("device_status").then(updateDeviceUI).catch(() => {});
+}
+
+function updateDeviceUI(info) {
+  state.device = info || null;
+  const dot = $("#device-pill .device-dot");
+  const label = $("#device-pill-label");
+  const status = $("#device-popover-status");
+  if (info) {
+    dot.className = "device-dot connected";
+    const free = info.free_bytes ? `· ${formatBytes(info.free_bytes)} free` : "";
+    label.textContent = `Kindle ${free}`.trim();
+    status.className = "device-popover-status connected";
+    status.textContent = "Connected";
+    $("#device-model").textContent = info.model || "Kindle";
+    $("#device-serial").textContent = info.serial || "—";
+    $("#device-free").textContent =
+      info.free_bytes != null && info.total_bytes != null
+        ? `${formatBytes(info.free_bytes)} of ${formatBytes(info.total_bytes)}`
+        : "—";
+    if (!$("#device-popover").hidden) refreshDeviceList();
+  } else {
+    dot.className = "device-dot disconnected";
+    label.textContent = "No Kindle";
+    status.className = "device-popover-status disconnected";
+    status.textContent = "Disconnected";
+    $("#device-model").textContent = "—";
+    $("#device-serial").textContent = "—";
+    $("#device-free").textContent = "—";
+    $("#device-count").textContent = "—";
+    $("#device-sent-list").innerHTML = "";
+    state.sent = [];
+    $("#device-empty").textContent = "Plug in a Kindle via USB.";
+    $("#device-empty").hidden = false;
+  }
+}
+
+async function refreshDeviceList() {
+  if (!state.device) return;
+  try {
+    state.sent = await window.api.invoke("device_list_ours");
+  } catch (e) {
+    console.error("device_list_ours failed:", e);
+    state.sent = [];
+  }
+  renderDeviceList();
+}
+
+function renderDeviceList() {
+  const list = $("#device-sent-list");
+  list.innerHTML = "";
+  const rows = state.sent || [];
+  $("#device-count").textContent =
+    rows.length === 0 ? "0 books" : `${rows.length} book${rows.length === 1 ? "" : "s"}`;
+  const empty = $("#device-empty");
+  if (rows.length === 0) {
+    empty.textContent = "Nothing sent yet.";
+    empty.hidden = false;
+  } else {
+    empty.hidden = true;
+  }
+  for (const r of rows) list.appendChild(deviceRow(r));
+  updateSendUnsentButton();
+}
+
+function deviceRow(r) {
+  const li = document.createElement("li");
+  const top = document.createElement("div");
+  top.className = "device-sent-top";
+
+  const title = document.createElement("div");
+  title.className = "device-sent-title";
+  title.textContent = r.title || r.filename;
+  title.title = r.filename;
+
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "device-sent-del";
+  del.title = "Remove from Kindle";
+  del.textContent = "×";
+  del.addEventListener("click", (e) => {
+    e.stopPropagation();
+    deleteFromDevice([r.sha256], [r.title || r.filename]);
+  });
+
+  top.append(title, del);
+
+  const meta = document.createElement("div");
+  meta.className = "device-sent-meta";
+  const parts = [];
+  if (r.author) parts.push(r.author);
+  parts.push(formatDate(r.sent_at));
+  meta.textContent = parts.join(" · ");
+  if (!r.file_present) {
+    const missing = document.createElement("span");
+    missing.className = "device-sent-missing";
+    missing.textContent = " · missing on device";
+    meta.appendChild(missing);
+  }
+
+  li.append(top, meta);
+  return li;
+}
+
+async function deleteFromDevice(sha256s, titles) {
+  if (!state.device) {
+    showToast("no Kindle connected", true);
+    return;
+  }
+  const label =
+    titles.length === 1
+      ? `Remove "${titles[0]}" from the Kindle?`
+      : `Remove ${titles.length} books from the Kindle?`;
+  if (!confirm(`${label}\n\nThe file is deleted from /documents; the local library is untouched.`)) {
+    return;
+  }
+  let results = [];
+  try {
+    results = await window.api.invoke("device_delete", { sha256s });
+  } catch (e) {
+    showToast(`delete failed: ${e}`, true);
+    return;
+  }
+  const counts = { removed: 0, not_ours: 0, failed: 0 };
+  for (const r of results) counts[r.kind] = (counts[r.kind] || 0) + 1;
+  const parts = [];
+  if (counts.removed) parts.push(`${counts.removed} removed`);
+  if (counts.not_ours) parts.push(`${counts.not_ours} not ours`);
+  if (counts.failed) parts.push(`${counts.failed} failed`);
+  showToast(parts.join(" · "), counts.failed > 0);
+  await refreshDeviceList();
+}
+
+// ---------------------------------------------------------------------------
 // Queue drawer
 // ---------------------------------------------------------------------------
 
@@ -430,6 +666,14 @@ function wireContextMenu() {
 function openContextMenu(x, y, b) {
   const menu = $("#ctx-menu");
   menu.innerHTML = "";
+  if (state.device && b.status === "done") {
+    const sentSet = new Set(state.sent.map((s) => s.sha256));
+    if (sentSet.has(b.sha256)) {
+      add(menu, "Remove from Kindle", () => deleteFromDevice([b.sha256], [b.title]));
+    } else {
+      add(menu, "Send to Kindle", () => sendBooks([b.id]));
+    }
+  }
   add(menu, "Open in Finder", () => openInFinder(b.id));
   add(menu, "Force re-convert", () => retryConvert(b.id));
   add(menu, "Remove from library", () => removeBook(b), true);
