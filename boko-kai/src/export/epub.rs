@@ -248,8 +248,23 @@ impl EpubExporter {
         {
             asset_paths.push(cover.clone());
         }
-        for (asset_idx, asset_path) in asset_paths.iter().enumerate() {
-            let media_type = guess_media_type(asset_path);
+        // Pre-load asset bytes so we can sniff MIME types for extensionless
+        // assets (KFX stores resources as `e0`/`eF`/… without extensions). We
+        // reuse the bytes when writing to the zip below.
+        let mut asset_bytes: Vec<(String, Vec<u8>)> = Vec::with_capacity(asset_paths.len());
+        for asset_path in &asset_paths {
+            let bytes = book
+                .load_asset(std::path::Path::new(asset_path))
+                .unwrap_or_default();
+            asset_bytes.push((asset_path.clone(), bytes));
+        }
+        for (asset_idx, (asset_path, bytes)) in asset_bytes.iter().enumerate() {
+            let mut media_type = guess_media_type(asset_path);
+            if media_type == "application/octet-stream"
+                && let Some(sniffed) = sniff_image_media_type(bytes)
+            {
+                media_type = sniffed.to_string();
+            }
             let id = format!("asset_{}", asset_idx);
             let href = format!("OEBPS/{}", sanitize_path(asset_path));
 
@@ -292,15 +307,14 @@ impl EpubExporter {
             zip.write_all(chapter.document.as_bytes())?;
         }
 
-        // 8. Write assets (use the same `asset_paths` set we put in the
-        // manifest, so any forced-included cover image is emitted to disk).
-        for asset_path in &asset_paths {
-            let zip_path = format!("OEBPS/{}", sanitize_path(asset_path));
-
-            if let Ok(data) = book.load_asset(std::path::Path::new(asset_path)) {
-                zip.start_file(&zip_path, deflated).map_err(io_error)?;
-                zip.write_all(&data)?;
+        // 8. Write assets (reuse the bytes we already loaded for MIME sniffing).
+        for (asset_path, bytes) in &asset_bytes {
+            if bytes.is_empty() {
+                continue;
             }
+            let zip_path = format!("OEBPS/{}", sanitize_path(asset_path));
+            zip.start_file(&zip_path, deflated).map_err(io_error)?;
+            zip.write_all(bytes)?;
         }
 
         zip.finish().map_err(io_error)?;
@@ -691,6 +705,35 @@ fn guess_media_type(path: &str) -> String {
         "opf" => "application/oebps-package+xml".to_string(),
         _ => "application/octet-stream".to_string(),
     }
+}
+
+/// Sniff an image MIME type from the leading bytes. Returns `None` if the
+/// signature doesn't match a known image format — covers KFX assets stored
+/// without a file extension (e.g. `e20`, `eF`) so the OPF can advertise the
+/// right `media-type` and Apple Books / ADE will pick the cover up.
+fn sniff_image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 3 && &bytes[..3] == b"\xFF\xD8\xFF" {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+        return Some("image/png");
+    }
+    if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    // SVG: text format, sniff by the first non-whitespace char + signature
+    if bytes.len() >= 5 {
+        let head = std::str::from_utf8(&bytes[..bytes.len().min(256)])
+            .unwrap_or("")
+            .trim_start();
+        if head.starts_with("<svg") || head.starts_with("<?xml") && head.contains("<svg") {
+            return Some("image/svg+xml");
+        }
+    }
+    None
 }
 
 #[cfg(test)]
