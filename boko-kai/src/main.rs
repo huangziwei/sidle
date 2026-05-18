@@ -47,11 +47,11 @@ enum Command {
         #[arg(short, long)]
         quiet: bool,
 
-        /// `.kfx-zip` → `.kfx` merge strategy. `mechanical` (default) is a
-        /// faithful port of calibre's pipeline. `fast` passes entity bodies
-        /// through verbatim — significantly faster but produces a different
-        /// (still calibre-accepted) byte stream.
-        #[arg(long = "mode", default_value = "mechanical")]
+        /// `.kfx-zip` → `.kfx` merge strategy. `fast` (default) passes
+        /// entity bodies through verbatim — fast and calibre-accepted.
+        /// `mechanical` is a faithful port of calibre's pipeline, kept as
+        /// the correctness reference.
+        #[arg(long = "mode", default_value = "fast")]
         merge_mode: String,
     },
 

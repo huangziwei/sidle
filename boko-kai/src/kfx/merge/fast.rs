@@ -103,29 +103,130 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
     // ---- 2. Lightweight per-container parse (header + entity table only).
     //
     // We have to walk container_info Ion to learn the entity-table offset
-    // and the doc_symbols byte range. We use a *fresh* symtab per container
-    // because container_info only ever references SYSTEM + YJ catalog symbols
-    // (numeric `$N` form) — no local symbols. Same logic as the mechanical
-    // path, but we don't need a shared symtab here.
-    let mut raws: Vec<RawContainer> = Vec::with_capacity(kfx_names.len());
-    for name in &kfx_names {
-        let mut entry = archive
-            .by_name(name)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut buf)?;
-        raws.push(parse_container_shallow(buf)?);
-    }
+    // and the doc_symbols byte range. Each source `.kfx` is decompressed +
+    // shallow-parsed on its own thread — deflate is the merge's largest
+    // single phase (~5 ms on a 1.3 MB bundle) and fans out cleanly when
+    // each thread owns its own `ZipArchive` (parsing the central directory
+    // is cheap; the win is overlapping the deflate work).
+    //
+    // The per-container parser uses a *fresh* symtab because container_info
+    // only ever references SYSTEM + YJ catalog symbols (numeric `$N` form)
+    // — no local symbols, no shared state needed.
+    //
+    // The decompress and SHA1 phases overlap: the decompression threads
+    // join first (we need every container's entity table before we know
+    // what bytes to skip / hash), then a hasher thread runs in parallel
+    // with the main thread's symtab parse + `$419` build + body memcpy.
+    //
+    // We also experimented with *per-container pipelined* SHA1 (hash each
+    // container the moment it decompresses, in alphabetical/output order).
+    // That variant did shave ~1 ms off the hot trace, but its OnceLock +
+    // mpsc machinery cost more on average across the 30-book corpus
+    // (50-run-avg median went from 28 → 30 ms — process startup dominates
+    // and the channel overhead pushes the warm work up). The batch-join
+    // variant below is the corpus sweet spot.
+    let raws = decompress_containers_parallel(path, &kfx_names)?;
+    let raws_refs: Vec<&RawContainer> = raws.iter().collect();
     trace.mark("unzip + shallow parse");
 
-    // ---- 3. Build the merged symtab (parse doc_symbols once, if any).
-    //
-    // We expect exactly one source to carry doc_symbols. If multiple do
-    // and they disagree, the fast path can't help — caller falls back.
+    let (new_419_tx, new_419_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+    let bytes = std::thread::scope(|scope| -> io::Result<Vec<u8>> {
+        let raws_for_sha = &raws_refs;
+        let sha1_handle = scope.spawn(move || -> io::Result<[u8; 20]> {
+            use sha1::Digest;
+            let mut hasher = sha1::Sha1::new();
+            for rc in raws_for_sha {
+                for &(off, len) in &per_container_hash_chunks(rc) {
+                    hasher.update(&rc.data[off..off + len]);
+                }
+            }
+            if let Ok(new_419) = new_419_rx.recv() {
+                hasher.update(&new_419);
+            }
+            Ok(hasher.finalize().into())
+        });
+        finish_merge(scope, &raws_refs, new_419_tx, sha1_handle, trace)
+    })?;
+    Ok(bytes)
+}
+
+fn decompress_containers_parallel(
+    path: &Path,
+    kfx_names: &[String],
+) -> io::Result<Vec<RawContainer>> {
+    // Spawn one OS thread per source `.kfx`. Each thread opens its own
+    // `ZipArchive` (central-directory parse is ~tens of microseconds, so
+    // the duplication is cheap) and decompresses one entry. The deflate
+    // work overlaps across threads; wall time is bound by the largest
+    // single source.
+    if kfx_names.len() <= 1 {
+        return kfx_names.iter().map(|n| decompress_one(path, n)).collect();
+    }
+    let mut results: Vec<Option<io::Result<RawContainer>>> =
+        (0..kfx_names.len()).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(kfx_names.len());
+        for name in kfx_names {
+            handles.push(scope.spawn(move || decompress_one(path, name)));
+        }
+        for (i, h) in handles.into_iter().enumerate() {
+            results[i] = Some(
+                h.join()
+                    .unwrap_or_else(|_| Err(io::Error::other("decompression thread panicked"))),
+            );
+        }
+    });
+    let mut out = Vec::with_capacity(kfx_names.len());
+    for r in results.into_iter() {
+        out.push(r.expect("slot filled")?);
+    }
+    Ok(out)
+}
+
+/// Body byte ranges (offset, length) within a single source container that
+/// should be hashed — i.e. all entity bodies except the source `$419`'s body.
+/// Within one container the entity bodies are laid out contiguously, so this
+/// is at most two `(off, len)` runs.
+fn per_container_hash_chunks(rc: &RawContainer) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(2);
+    let mut cur: Option<(usize, usize)> = None;
+    for row in &rc.entity_rows {
+        if row.type_idnum == SYM_DOLLAR_419 {
+            if let Some(c) = cur.take() {
+                out.push(c);
+            }
+            continue;
+        }
+        match cur {
+            Some((off, len)) if off + len == row.body_offset => {
+                cur = Some((off, len + row.body_length));
+            }
+            Some(prev) => {
+                out.push(prev);
+                cur = Some((row.body_offset, row.body_length));
+            }
+            None => {
+                cur = Some((row.body_offset, row.body_length));
+            }
+        }
+    }
+    if let Some(c) = cur {
+        out.push(c);
+    }
+    out
+}
+
+fn finish_merge<'a>(
+    _scope: &'a std::thread::Scope<'a, '_>,
+    raws: &[&RawContainer],
+    new_419_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    sha1_handle: std::thread::ScopedJoinHandle<'a, io::Result<[u8; 20]>>,
+    trace: Trace,
+) -> io::Result<Vec<u8>> {
     let mut symtab = LocalSymbolTable::new();
     let mut doc_symbols_bytes_owned: Option<Vec<u8>> = None;
     let mut doc_symbols_count = 0;
-    for r in &raws {
+    for r in raws {
         if let Some((off, len)) = r.doc_symbols_range {
             doc_symbols_count += 1;
             doc_symbols_bytes_owned = Some(r.data[off..off + len].to_vec());
@@ -140,10 +241,8 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
     if let Some(ds_bytes) = doc_symbols_bytes_owned.as_ref() {
         populate_symtab_from_doc_symbols(&mut symtab, ds_bytes)?;
     }
-
-    // ---- 4. Find one format_capabilities blob to keep (verbatim).
     let mut format_capabilities_bytes: Option<Vec<u8>> = None;
-    for r in &raws {
+    for r in raws {
         if let Some((off, len)) = r.format_capabilities_range {
             format_capabilities_bytes = Some(r.data[off..off + len].to_vec());
             break;
@@ -151,18 +250,11 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
     }
     trace.mark("symtab + format_capabilities");
 
-    // ---- 5. Pick merged container metadata.
-    //
-    // Same rules as the mechanical path: prefer asset_id from $490, else
-    // the source with the most entity rows, else a generated id.
     let (merged_id, app_version, pkg_version, version) =
-        pick_merged_metadata(&raws, &symtab)?;
+        pick_merged_metadata(raws, &symtab)?;
     trace.mark("pick metadata");
 
-    // ---- 6. Aggregate entities. Skip the source $419 entity (its content
-    //         is rebuilt from scratch). Keep its $253 deps for verbatim
-    //         re-use if present.
-    let mut merged_entities: Vec<(RawEntityRow, usize)> = Vec::new(); // (row, source_container_idx)
+    let mut merged_entities: Vec<(RawEntityRow, usize)> = Vec::new();
     let mut existing_419_deps: Option<IonNode> = None;
     for (c_idx, r) in raws.iter().enumerate() {
         for row in &r.entity_rows {
@@ -182,13 +274,11 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
         }
     }
 
-    // entity_fids list = every non-singleton entity's fid (resolved through
-    // symtab) in source-walk order.
     let mut entity_fids: Vec<String> = Vec::with_capacity(merged_entities.len() + 1);
     let mut seen_fids: std::collections::HashSet<String> = Default::default();
     for (row, _) in &merged_entities {
         if row.id_idnum == SYM_DOLLAR_348 {
-            continue; // singleton — calibre encodes id_idnum=$348 and skips fid emission
+            continue;
         }
         let fid = symtab.get_symbol(row.id_idnum);
         if seen_fids.insert(fid.clone()) {
@@ -197,17 +287,18 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
     }
     trace.mark("aggregate entities");
 
-    // ---- 7. Build new $419 body Ion + wrap in ENTY frame.
+    let chunks = coalesce_body_chunks(raws, &merged_entities);
     let new_419_body = build_419_body(&merged_id, &entity_fids, existing_419_deps);
-    let new_419_bytes = serialize_single_value(&new_419_body, &symtab);
-    let new_419_entity = wrap_entity_body(&new_419_bytes, &symtab);
-    trace.mark("build $419");
+    let new_419_ion_bytes = serialize_single_value(&new_419_body, &symtab);
+    let new_419_entity = wrap_entity_body(&new_419_ion_bytes, &symtab);
+    let _ = new_419_tx.send(new_419_entity.clone());
+    trace.mark("build $419 + sha1-thread fed");
 
-    // ---- 8. Compute layout offsets + emit container.
-    Ok(emit_container(
-        &raws,
+    let out = emit_container_streaming(
+        raws,
         &merged_entities,
         &new_419_entity,
+        &chunks,
         &symtab,
         doc_symbols_bytes_owned.as_deref(),
         format_capabilities_bytes.as_deref(),
@@ -216,7 +307,47 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
         &pkg_version,
         version,
         &trace,
-    ))
+    );
+
+    let digest_bytes = sha1_handle.join().expect("hash thread panicked")?;
+    trace.mark("sha1 thread joined");
+    Ok(finalize_sha1_backfill(out, digest_bytes))
+}
+
+fn finalize_sha1_backfill(mut out: Vec<u8>, digest: [u8; 20]) -> Vec<u8> {
+    // The placeholder is the first run of 40 ASCII '0' bytes inside
+    // kfxgen_info — which is the only place 40 consecutive '0's can appear
+    // (entity body bytes can hold zeros but never 40 ASCII zeros in a row in
+    // practice, and we sized the placeholder specifically so it's findable).
+    // We use a fixed kfxgen_info template, so the offset was recorded into
+    // the buffer's `sha1_abs_off` slot via [`emit_container_streaming`].
+    let sha1_abs_off = u32::from_le_bytes([
+        out[out.len() - 4],
+        out[out.len() - 3],
+        out[out.len() - 2],
+        out[out.len() - 1],
+    ]) as usize;
+    out.truncate(out.len() - 4);
+    let mut hex = [0u8; 40];
+    write_hex_lower(&digest, &mut hex);
+    out[sha1_abs_off..sha1_abs_off + 40].copy_from_slice(&hex);
+    out
+}
+
+// =========================================================================
+// Parallel zip decompression
+// =========================================================================
+
+fn decompress_one(path: &Path, name: &str) -> io::Result<RawContainer> {
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let mut entry = archive
+        .by_name(name)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let mut buf = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut buf)?;
+    parse_container_shallow(buf)
 }
 
 // =========================================================================
@@ -363,7 +494,7 @@ fn populate_symtab_from_doc_symbols(
 // =========================================================================
 
 fn pick_merged_metadata(
-    raws: &[RawContainer],
+    raws: &[&RawContainer],
     symtab: &LocalSymbolTable,
 ) -> io::Result<(String, String, String, i64)> {
     let mut app_version = String::new();
@@ -371,7 +502,7 @@ fn pick_merged_metadata(
     let mut version: i64 = 2;
     let mut largest_container: Option<(usize, &RawContainer)> = None;
 
-    for r in raws {
+    for &r in raws {
         if !r.kfxgen_app_version.is_empty() {
             app_version = r.kfxgen_app_version.clone();
         }
@@ -406,7 +537,7 @@ fn pick_merged_metadata(
 }
 
 fn find_asset_id(
-    raws: &[RawContainer],
+    raws: &[&RawContainer],
     symtab: &LocalSymbolTable,
 ) -> io::Result<Option<String>> {
     // $490 metadata lives in metadata.kfx as an entity. We must parse it.
@@ -498,11 +629,16 @@ fn wrap_entity_body(body: &[u8], symtab: &LocalSymbolTable) -> Vec<u8> {
 // Container layout
 // =========================================================================
 
+/// Streaming container emit. Writes the full container minus the SHA1 digest
+/// (which a side thread is computing in parallel). The SHA1 placeholder slot's
+/// absolute offset is appended to the buffer as 4 trailing LE bytes — the
+/// caller strips them off after backfilling the real digest.
 #[allow(clippy::too_many_arguments)]
-fn emit_container(
-    raws: &[RawContainer],
+fn emit_container_streaming(
+    raws: &[&RawContainer],
     merged_entities: &[(RawEntityRow, usize)],
     new_419_entity: &[u8],
+    chunks: &[(usize, usize, usize)],
     symtab: &LocalSymbolTable,
     doc_symbols_bytes: Option<&[u8]>,
     format_capabilities_bytes: Option<&[u8]>,
@@ -593,29 +729,44 @@ fn emit_container(
     patch_u32_le(&mut out, ci_len_pack, ci_bytes.len() as u32);
     out.extend_from_slice(&ci_bytes);
 
-    // kfxgen_info trailer (calibre's JSON-textish form).
-    let payload_sha1 = sha1_of_bodies(merged_entities, raws, new_419_entity);
+    // kfxgen_info trailer (calibre's JSON-textish form). We write the SHA1
+    // field with a known-length placeholder (40 zeros), copy the entity
+    // bodies while incrementally hashing them, then backfill the real digest
+    // into the placeholder slot. One pass over the body bytes instead of two.
+    const SHA1_PLACEHOLDER: &str = "0000000000000000000000000000000000000000";
     let kfxgen_info = format!(
         r#"[{{key:"kfxgen_package_version",value:"{}"}},{{key:"kfxgen_application_version",value:"{}"}},{{key:"kfxgen_payload_sha1",value:"{}"}},{{key:"kfxgen_acr",value:"{}"}}]"#,
         escape_json(pkg_version),
         escape_json(app_version),
-        payload_sha1,
+        SHA1_PLACEHOLDER,
         escape_json(merged_id),
     );
+    // Locate the placeholder inside kfxgen_info so we can backfill after we
+    // know the real hash. The placeholder is unique within the trailer (all
+    // other fields are non-hex prose).
+    let sha1_local_off = kfxgen_info
+        .find(SHA1_PLACEHOLDER)
+        .expect("SHA1 placeholder we just wrote must be present");
+    let sha1_abs_off = out.len() + sha1_local_off;
     out.extend_from_slice(kfxgen_info.as_bytes());
 
     let header_len_value = out.len() as u32;
     patch_u32_le(&mut out, header_len_pack, header_len_value);
     trace.mark("header laid out");
 
-    // Entity bodies — copied verbatim, including the synthesized $419 at the
-    // end. This is the bulk of the output bytes.
-    for (row, c_idx) in merged_entities {
-        let src = &raws[*c_idx].data;
-        out.extend_from_slice(&src[row.body_offset..row.body_offset + row.body_length]);
+    // Entity body memcpy only — hashing is handled by the side thread spawned
+    // earlier in `merge_kfx_zip`. The chunks were already coalesced (per-
+    // source contiguous runs, ~5 for a typical book), so this is a tiny
+    // number of large memcpys.
+    for &(c_idx, off, len) in chunks {
+        out.extend_from_slice(&raws[c_idx].data[off..off + len]);
     }
     out.extend_from_slice(new_419_entity);
     trace.mark("entity bodies copied");
+
+    // Pass the SHA1-placeholder offset back to the caller via a 4-byte LE
+    // trailer that they strip + read.
+    out.extend_from_slice(&(sha1_abs_off as u32).to_le_bytes());
 
     // version + format alignment with the mechanical path (we don't actually
     // need `version` in the output; calibre reads it from the on-wire header
@@ -623,20 +774,6 @@ fn emit_container(
     let _ = version;
 
     out
-}
-
-fn sha1_of_bodies(
-    merged_entities: &[(RawEntityRow, usize)],
-    raws: &[RawContainer],
-    new_419_entity: &[u8],
-) -> String {
-    let mut hasher = sha1_smol::Sha1::new();
-    for (row, c_idx) in merged_entities {
-        let src = &raws[*c_idx].data;
-        hasher.update(&src[row.body_offset..row.body_offset + row.body_length]);
-    }
-    hasher.update(new_419_entity);
-    hasher.digest().to_string()
 }
 
 // =========================================================================
@@ -717,6 +854,54 @@ fn u64_le(d: &[u8], off: usize) -> u64 {
 
 fn patch_u32_le(buf: &mut [u8], at: usize, v: u32) {
     buf[at..at + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+/// Group contiguous entity-body byte ranges per source container into one
+/// (or two) merge-able chunks. Returns `(source_container_idx, offset_into_data, length)`.
+///
+/// Within a source `.kfx`, entity bodies are written contiguously starting at
+/// `header_len`. Two adjacent kept entities can be coalesced into a single
+/// `&[u8]` slice — and SHA1 + memcpy of one big slice is much faster than of
+/// many tiny ones (each `sha1::Sha1::update` call has fixed overhead).
+fn coalesce_body_chunks(
+    raws: &[&RawContainer],
+    merged_entities: &[(RawEntityRow, usize)],
+) -> Vec<(usize, usize, usize)> {
+    let mut out: Vec<(usize, usize, usize)> = Vec::with_capacity(8);
+    let mut cur: Option<(usize, usize, usize)> = None; // (c_idx, off, len)
+    for (row, c_idx) in merged_entities {
+        match cur {
+            Some((ci, off, len))
+                if ci == *c_idx && off + len == row.body_offset =>
+            {
+                cur = Some((ci, off, len + row.body_length));
+            }
+            Some(prev) => {
+                out.push(prev);
+                cur = Some((*c_idx, row.body_offset, row.body_length));
+            }
+            None => {
+                cur = Some((*c_idx, row.body_offset, row.body_length));
+            }
+        }
+    }
+    if let Some(c) = cur {
+        out.push(c);
+    }
+    // We don't actually need `raws` here for the math, but borrowing it
+    // keeps the call site obvious and lets a future change (e.g. bounds
+    // assertions per container) plug in here.
+    let _ = raws;
+    out
+}
+
+/// Write 20 raw SHA1 bytes as 40 lowercase hex characters.
+fn write_hex_lower(src: &[u8; 20], out: &mut [u8; 40]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (i, &b) in src.iter().enumerate() {
+        out[i * 2] = HEX[(b >> 4) as usize];
+        out[i * 2 + 1] = HEX[(b & 0x0f) as usize];
+    }
 }
 
 // Suppress an unused-warning for SYM_DOLLAR_270 — kept for symmetry with the

@@ -30,21 +30,23 @@ use std::path::Path;
 /// Which merge implementation to use.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum MergeMode {
-    /// Faithful port of calibre's pipeline. Slower, full Ion roundtrip on
-    /// every entity. The reference for correctness.
-    #[default]
-    Mechanical,
     /// Byte-passthrough merge. Entity bodies are copied verbatim from source
     /// to output; only the merged container's `$270` + `$419` are encoded
-    /// fresh.
+    /// fresh. Default — produces calibre-accepted output with ~3-6× the
+    /// throughput of [`MergeMode::Mechanical`].
+    #[default]
     Fast,
+    /// Faithful port of calibre's `convert_to_single_kfx` pipeline. Slower,
+    /// full Ion roundtrip on every entity. Kept as the correctness reference
+    /// — any change to the fast path is validated against this baseline.
+    Mechanical,
 }
 
 /// Merge a `.kfx-zip` bundle into a single `.kfx` container payload (bytes).
-/// Uses the [`MergeMode::Mechanical`] path — for the fast path, call
-/// [`merge_kfx_zip_with_mode`].
+/// Uses the default [`MergeMode`] (currently [`MergeMode::Fast`]). For
+/// explicit control, call [`merge_kfx_zip_with_mode`].
 pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
-    merge_kfx_zip_with_mode(path, MergeMode::Mechanical)
+    merge_kfx_zip_with_mode(path, MergeMode::default())
 }
 
 /// Merge using the specified mode. Falls back from [`MergeMode::Fast`] to
