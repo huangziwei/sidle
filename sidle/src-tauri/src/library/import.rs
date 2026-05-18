@@ -2,16 +2,16 @@
 //!
 //! Pipeline (per file):
 //! 1. sha256 the bytes
-//! 2. copy to `epubs/<sha>/source.epub`
-//! 3. parse with `boko::Book` to pull title/authors/language/ppd/cover
-//! 4. extract cover image to `cache/<sha>/cover.<ext>` if present
-//! 5. INSERT book row (UNIQUE(sha256) — skip if already imported)
-//! 6. decide job status:
-//!    - if `cache/<sha>/book.kfx` already exists → `done` (KFX reused)
+//! 2. extract metadata (title/authors/language/ppd/date/cover) with boko
+//! 3. derive a filesystem-safe basename `[Author] Title (Year)`
+//! 4. copy EPUB to `books/<sha>/<basename>.epub`
+//! 5. save cover (if any) to `books/<sha>/cover.<ext>`
+//! 6. INSERT book row (UNIQUE(sha256) — skip if already imported)
+//! 7. decide job status:
+//!    - if `books/<sha>/<basename>.kfx` already exists → `done` (KFX reused)
 //!    - otherwise → `pending` (worker will pick it up)
 //!
-//! Each step that touches disk runs on the calling thread; callers should run
-//! this inside `spawn_blocking` so the Tauri event loop stays responsive.
+//! Each step touches disk; callers should run this inside `spawn_blocking`.
 
 use std::fs;
 use std::io::Read;
@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::library::db::{self, BookRow, NewBook};
-use crate::library::paths::{LibraryPaths, cover_ext_from};
+use crate::library::paths::{LibraryPaths, cover_ext_from, format_basename};
 
 pub fn import_file(
     conn: &rusqlite::Connection,
@@ -35,25 +35,27 @@ pub fn import_file(
     hasher.update(&bytes);
     let sha = format!("{:x}", hasher.finalize());
 
-    // Short-circuit: already in DB.
     if let Some(existing) = db::find_by_sha(conn, &sha)? {
         return Ok(ImportOutcome::Duplicate(existing));
     }
 
+    // Parse metadata directly from the source EPUB before we copy, so we can
+    // name the destination file with title/author/year.
+    let meta = read_epub_metadata(src)
+        .with_context(|| format!("parse {}", src.display()))?;
+    let basename = format_basename(&meta.authors, &meta.title, meta.date.as_deref());
+
     paths.ensure_sha(&sha)?;
-    let dest_epub = paths.source_epub(&sha);
+    let dest_epub = paths.book_dir(&sha).join(format!("{basename}.epub"));
     if !dest_epub.exists() {
         fs::write(&dest_epub, &bytes)
             .with_context(|| format!("write {}", dest_epub.display()))?;
     }
 
-    let meta = read_epub_metadata(&dest_epub)
-        .with_context(|| format!("parse {}", dest_epub.display()))?;
+    let cover_path = write_cover(paths, &sha, &dest_epub, meta.cover_image.as_deref())
+        .unwrap_or(None);
 
-    let cover_path =
-        write_cover(paths, &sha, &dest_epub, meta.cover_image.as_deref()).unwrap_or(None);
-
-    let kfx_path = paths.kfx(&sha);
+    let kfx_path = paths.book_dir(&sha).join(format!("{basename}.kfx"));
     let kfx_ready = kfx_path.exists();
 
     let dest_epub_str = dest_epub.to_string_lossy().to_string();
@@ -63,13 +65,14 @@ pub fn import_file(
     } else {
         None
     };
+    let authors_joined = meta.authors.join(", ");
     let now = db::now_iso();
     let book_id = db::insert_book(
         conn,
         &NewBook {
             sha256: &sha,
             title: &meta.title,
-            author: &meta.authors_joined,
+            author: &authors_joined,
             language: &meta.language,
             ppd: meta.ppd.as_deref(),
             source_epub_path: &dest_epub_str,
@@ -100,10 +103,11 @@ pub enum ImportOutcome {
 
 struct EpubMeta {
     title: String,
-    authors_joined: String,
+    authors: Vec<String>,
     language: String,
     ppd: Option<String>,
     cover_image: Option<String>,
+    date: Option<String>,
 }
 
 fn read_epub_metadata(path: &Path) -> Result<EpubMeta> {
@@ -116,18 +120,17 @@ fn read_epub_metadata(path: &Path) -> Result<EpubMeta> {
     } else {
         m.title.clone()
     };
-    let authors_joined = m.authors.join(", ");
     Ok(EpubMeta {
         title,
-        authors_joined,
+        authors: m.authors.clone(),
         language: m.language.clone(),
         ppd: m.page_progression_direction.clone(),
         cover_image: m.cover_image.clone(),
+        date: m.date.clone(),
     })
 }
 
-/// Pull the cover image out of the EPUB and copy it into `cache/<sha>/cover.<ext>`.
-/// Returns the saved path. Silently returns `None` if no cover is referenced.
+/// Pull the cover image out of the EPUB and copy it into `books/<sha>/cover.<ext>`.
 fn write_cover(
     paths: &LibraryPaths,
     sha: &str,
@@ -139,12 +142,9 @@ fn write_cover(
         return Ok(None);
     }
 
-    let mut book =
-        boko::Book::open(epub_path).with_context(|| "reopen for cover")?;
+    let mut book = boko::Book::open(epub_path).with_context(|| "reopen for cover")?;
     let asset_path = PathBuf::from(cover_ref);
 
-    // `load_asset` expects a path inside the archive. The metadata's cover_image
-    // is whatever the OPF spit out — usually it's already canonical.
     let bytes = match book.load_asset(&asset_path) {
         Ok(b) => b,
         Err(_) => return Ok(None),
@@ -156,14 +156,6 @@ fn write_cover(
     Ok(Some(out))
 }
 
-/// Quick existence check used by the frontend to verify a cover path.
-#[allow(dead_code)]
-pub fn cover_exists(p: &Path) -> bool {
-    p.is_file() && fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
-}
-
-/// Used by callers that read bytes themselves (e.g., drag-drop bridge).
-/// Kept here so the hashing implementation stays in one place.
 #[allow(dead_code)]
 pub fn sha256_of_file(path: &Path) -> std::io::Result<String> {
     let mut f = std::fs::File::open(path)?;

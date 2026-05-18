@@ -83,8 +83,15 @@ fn convert_sync(
     source: &std::path::Path,
 ) -> anyhow::Result<PathBuf> {
     paths.ensure_sha(sha)?;
-    let out_path = paths.kfx(sha);
-    let tmp_path = paths.cache_dir(sha).join("book.kfx.partial");
+    // Mirror the source EPUB's basename so the KFX sits next to it with the
+    // same `[Author] Title (Year)` name.
+    let base = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| sha.to_string());
+    let dir = paths.book_dir(sha);
+    let out_path = dir.join(format!("{base}.kfx"));
+    let tmp_path = dir.join(format!("{base}.kfx.partial"));
 
     let mut book = boko::Book::open(source)?;
     let mut writer = File::create(&tmp_path)?;
