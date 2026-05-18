@@ -84,6 +84,16 @@
       </section>
     </main>
 
+    <div id="selection-bar" class="selection-bar" hidden>
+      <span id="selection-count" class="selection-count">0 selected</span>
+      <div class="selection-actions">
+        <button type="button" id="sel-send" class="btn-link" disabled>Send to Kindle</button>
+        <button type="button" id="sel-unsend" class="btn-link" disabled>Remove from Kindle</button>
+        <button type="button" id="sel-delete" class="btn-link sel-danger">Remove from library</button>
+        <button type="button" id="sel-clear" class="btn-link">Clear</button>
+      </div>
+    </div>
+
     <footer id="status-bar" class="status-bar">
       <button id="status-bar-toggle" class="status-bar-toggle" type="button">
         <span class="dot" id="status-bar-dot"></span>
@@ -99,6 +109,8 @@
       <ul id="queue-list" class="queue-list"></ul>
       <div id="queue-empty" class="queue-empty">Nothing in flight.</div>
     </aside>
+
+    <div id="lasso" class="lasso" hidden aria-hidden="true"></div>
 
     <div id="drop-veil" class="drop-veil" hidden>
       <div class="drop-veil-inner">Drop to import</div>

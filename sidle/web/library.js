@@ -11,6 +11,8 @@ const state = {
   sent: [],     // Vec<DeviceBookRow>
   sentSet: new Set(), // sha256s currently on device, derived from `sent`
   columnWidths: {}, // { title: 280, ... } persisted px widths
+  selected: new Set(), // book ids currently selected
+  lastClicked: null,   // last single-clicked book id, anchor for shift-range
 };
 
 // ---------------------------------------------------------------------------
@@ -25,6 +27,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireQueueDrawer();
   wireDevice();
   wireListHeaderInteractions();
+  wireSelection();
   await refresh();
   subscribeStatus();
   subscribeDeviceStatus();
@@ -178,10 +181,21 @@ function setSent(rows) {
 }
 
 function render() {
+  // Prune selection of any books that no longer exist (e.g. after a refresh).
+  if (state.selected.size > 0) {
+    const live = new Set(state.books.map((b) => b.id));
+    for (const id of [...state.selected]) {
+      if (!live.has(id)) state.selected.delete(id);
+    }
+    if (state.lastClicked != null && !live.has(state.lastClicked)) {
+      state.lastClicked = null;
+    }
+  }
   const books = sortedBooks();
   renderGallery(books);
   renderList(books);
   renderQueue();
+  renderSelectionBar();
   updateSendUnsentButton();
   $("#gallery-empty").hidden = books.length > 0;
   $("#list-empty").hidden = books.length > 0;
@@ -223,6 +237,7 @@ function renderGallery(books) {
 function galleryCard(b) {
   const card = document.createElement("div");
   card.className = "book-card";
+  if (state.selected.has(b.id)) card.classList.add("selected");
   card.dataset.bookId = b.id;
   card.title = `${b.title}\n${b.author}`;
 
@@ -252,34 +267,53 @@ function galleryCard(b) {
   const a = document.createElement("div");
   a.className = "a";
   a.textContent = b.author || "Unknown author";
-  meta.append(t, a);
+  meta.append(t, a, metaBadges(b));
   card.appendChild(meta);
 
-  const pill = statusPill(b);
-  if (pill) card.appendChild(pill);
-
+  card.addEventListener("click", (e) => onItemClick(e, b));
   card.addEventListener("dblclick", () => openInFinder(b.id));
   card.addEventListener("contextmenu", (e) => {
     e.preventDefault();
+    onItemContext(e, b);
     openContextMenu(e.clientX, e.clientY, b);
   });
   return card;
 }
 
-function statusPill(b) {
-  if (b.status === "done") return null;
-  const pill = document.createElement("div");
-  pill.className = `status-pill ${b.status}`;
-  if (b.status === "converting" || b.status === "pending") {
-    const spin = document.createElement("div");
-    spin.className = "spinner";
-    pill.appendChild(spin);
-    pill.appendChild(document.createTextNode(b.status === "pending" ? "queued" : "converting"));
-  } else if (b.status === "error") {
-    pill.textContent = "error";
-    pill.title = b.error || "";
+function metaBadges(b) {
+  const wrap = document.createElement("div");
+  wrap.className = "meta-badges";
+
+  const epub = document.createElement("span");
+  epub.className = "fmt-badge epub";
+  epub.textContent = "EPUB";
+  epub.title = "EPUB available";
+  wrap.appendChild(epub);
+
+  const kfx = document.createElement("span");
+  kfx.className = `fmt-badge kfx ${b.status}`;
+  kfx.textContent = "KFX";
+  kfx.title = kfxTooltip(b);
+  wrap.appendChild(kfx);
+
+  if (state.sentSet.has(b.sha256)) {
+    const dot = document.createElement("span");
+    dot.className = "meta-kindle-dot";
+    dot.title = "On Kindle";
+    wrap.appendChild(dot);
   }
-  return pill;
+
+  return wrap;
+}
+
+function kfxTooltip(b) {
+  switch (b.status) {
+    case "done": return "KFX ready";
+    case "converting": return "KFX converting…";
+    case "pending": return "KFX queued";
+    case "error": return `KFX failed: ${b.error || ""}`;
+    default: return "KFX";
+  }
 }
 
 function renderList(books) {
@@ -294,6 +328,7 @@ function renderList(books) {
 
 function listRow(b) {
   const tr = document.createElement("tr");
+  if (state.selected.has(b.id)) tr.classList.add("selected");
   tr.dataset.bookId = b.id;
 
   tr.appendChild(cell(b.title || "Untitled"));
@@ -304,9 +339,11 @@ function listRow(b) {
   tr.appendChild(formatsCell(b));
   tr.appendChild(onKindleCell(b));
 
+  tr.addEventListener("click", (e) => onItemClick(e, b));
   tr.addEventListener("dblclick", () => openInFinder(b.id));
   tr.addEventListener("contextmenu", (e) => {
     e.preventDefault();
+    onItemContext(e, b);
     openContextMenu(e.clientX, e.clientY, b);
   });
   return tr;
@@ -818,16 +855,37 @@ function wireContextMenu() {
 function openContextMenu(x, y, b) {
   const menu = $("#ctx-menu");
   menu.innerHTML = "";
-  if (state.device && b.status === "done") {
-    if (state.sentSet.has(b.sha256)) {
-      add(menu, "Remove from Kindle", () => deleteFromDevice([b.sha256], [b.title]));
-    } else {
-      add(menu, "Send to Kindle", () => sendBooks([b.id]));
+
+  if (state.selected.size > 1) {
+    // Multi-selection menu — bulk actions.
+    const sel = selectedBooks();
+    const send = sel.filter(
+      (s) => s.status === "done" && !state.sentSet.has(s.sha256),
+    );
+    const unsend = sel.filter((s) => state.sentSet.has(s.sha256));
+    if (state.device && send.length) {
+      add(menu, `Send to Kindle (${send.length})`, () => bulkSend());
     }
+    if (state.device && unsend.length) {
+      add(menu, `Remove from Kindle (${unsend.length})`, () => bulkUnsend());
+    }
+    add(menu, `Remove ${sel.length} from library`, () => bulkRemove(), true);
+  } else {
+    // Single-item menu.
+    if (state.device && b.status === "done") {
+      if (state.sentSet.has(b.sha256)) {
+        add(menu, "Remove from Kindle", () =>
+          deleteFromDevice([b.sha256], [b.title]),
+        );
+      } else {
+        add(menu, "Send to Kindle", () => sendBooks([b.id]));
+      }
+    }
+    add(menu, "Open in Finder", () => openInFinder(b.id));
+    add(menu, "Force re-convert", () => retryConvert(b.id));
+    add(menu, "Remove from library", () => removeBook(b), true);
   }
-  add(menu, "Open in Finder", () => openInFinder(b.id));
-  add(menu, "Force re-convert", () => retryConvert(b.id));
-  add(menu, "Remove from library", () => removeBook(b), true);
+
   menu.hidden = false;
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
@@ -849,6 +907,280 @@ function add(menu, label, fn, danger = false) {
     fn();
   });
   menu.appendChild(li);
+}
+
+// ---------------------------------------------------------------------------
+// Selection (multi-select + bulk actions)
+// ---------------------------------------------------------------------------
+
+function wireSelection() {
+  $("#sel-send").addEventListener("click", bulkSend);
+  $("#sel-unsend").addEventListener("click", bulkUnsend);
+  $("#sel-delete").addEventListener("click", bulkRemove);
+  $("#sel-clear").addEventListener("click", clearSelection);
+
+  // Lasso + click-to-clear behavior on empty area of main. We use mousedown
+  // (rather than click) so we can distinguish a drag (→ lasso) from a tap
+  // (→ clear selection).
+  $("#main").addEventListener("mousedown", onMainMouseDown);
+
+  // Esc clears selection. Cmd/Ctrl-A selects all.
+  document.addEventListener("keydown", (e) => {
+    const t = e.target;
+    const inField =
+      t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+    if (e.key === "Escape" && state.selected.size > 0) {
+      clearSelection();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === "a" && !inField) {
+      e.preventDefault();
+      state.selected = new Set(state.books.map((b) => b.id));
+      render();
+    }
+  });
+}
+
+const LASSO_THRESHOLD = 4; // px before a mousedown promotes to a drag
+
+function onMainMouseDown(e) {
+  if (e.button !== 0) return; // primary button only
+  // Anything actionable: let the card/row/header/resizer handler take it.
+  if (
+    e.target.closest(
+      ".book-card, .book-table tbody tr, .book-table thead, .resizer",
+    )
+  ) {
+    return;
+  }
+
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const additive = e.metaKey || e.ctrlKey || e.shiftKey;
+  const baseSelection = additive ? new Set(state.selected) : new Set();
+  let active = false;
+  const lasso = $("#lasso");
+
+  const onMove = (ev) => {
+    if (!active) {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (Math.hypot(dx, dy) < LASSO_THRESHOLD) return;
+      active = true;
+      lasso.hidden = false;
+    }
+    positionLasso(lasso, startX, startY, ev.clientX, ev.clientY);
+    const rect = makeRect(startX, startY, ev.clientX, ev.clientY);
+    const hits = computeLassoHits(rect);
+    state.selected = new Set([...baseSelection, ...hits]);
+    applyLassoVisuals();
+  };
+
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    if (active) {
+      lasso.hidden = true;
+      state.lastClicked = null;
+      render();
+    } else {
+      // No drag — treat as a click on empty area: clear unless additive.
+      if (!additive) clearSelection();
+    }
+  };
+
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+  e.preventDefault();
+}
+
+function positionLasso(el, x1, y1, x2, y2) {
+  const left = Math.min(x1, x2);
+  const top = Math.min(y1, y2);
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+  el.style.width = `${Math.abs(x2 - x1)}px`;
+  el.style.height = `${Math.abs(y2 - y1)}px`;
+}
+
+function makeRect(x1, y1, x2, y2) {
+  return {
+    left: Math.min(x1, x2),
+    top: Math.min(y1, y2),
+    right: Math.max(x1, x2),
+    bottom: Math.max(y1, y2),
+  };
+}
+
+function computeLassoHits(rect) {
+  const items =
+    state.view === "gallery"
+      ? $$("#gallery-grid .book-card")
+      : $$("#list-body tr");
+  const hits = new Set();
+  for (const el of items) {
+    const r = el.getBoundingClientRect();
+    if (rectsIntersect(rect, r)) {
+      const id = Number(el.dataset.bookId);
+      if (id) hits.add(id);
+    }
+  }
+  return hits;
+}
+
+function rectsIntersect(a, b) {
+  return !(
+    a.right < b.left ||
+    a.left > b.right ||
+    a.bottom < b.top ||
+    a.top > b.bottom
+  );
+}
+
+/// Update only the .selected classes + the action bar during a drag — avoids
+/// a full re-render (which would tear down + rebuild every card/row on every
+/// mousemove frame).
+function applyLassoVisuals() {
+  const sel = state.selected;
+  $$("#gallery-grid .book-card").forEach((el) => {
+    const id = Number(el.dataset.bookId);
+    el.classList.toggle("selected", sel.has(id));
+  });
+  $$("#list-body tr").forEach((el) => {
+    const id = Number(el.dataset.bookId);
+    el.classList.toggle("selected", sel.has(id));
+  });
+  renderSelectionBar();
+}
+
+function onItemClick(e, b) {
+  e.stopPropagation();
+  if (e.shiftKey && state.lastClicked != null) {
+    selectRangeTo(b.id);
+  } else if (e.metaKey || e.ctrlKey) {
+    toggleSelected(b.id);
+    state.lastClicked = b.id;
+  } else {
+    state.selected = new Set([b.id]);
+    state.lastClicked = b.id;
+  }
+  render();
+}
+
+/// Context menu (right-click) behavior:
+/// - if right-click hits an already-selected book, keep the selection as-is
+///   so the menu can operate on the multi-selection
+/// - if it hits an unselected book, reset selection to just that one
+function onItemContext(_e, b) {
+  if (state.selected.has(b.id)) return;
+  state.selected = new Set([b.id]);
+  state.lastClicked = b.id;
+  render();
+}
+
+function selectRangeTo(toId) {
+  const ordered = sortedBooks();
+  const from = ordered.findIndex((b) => b.id === state.lastClicked);
+  const to = ordered.findIndex((b) => b.id === toId);
+  if (from === -1 || to === -1) {
+    state.selected.add(toId);
+    return;
+  }
+  const [lo, hi] = from < to ? [from, to] : [to, from];
+  for (let i = lo; i <= hi; i++) state.selected.add(ordered[i].id);
+}
+
+function toggleSelected(id) {
+  if (state.selected.has(id)) state.selected.delete(id);
+  else state.selected.add(id);
+}
+
+function clearSelection() {
+  if (state.selected.size === 0) return;
+  state.selected.clear();
+  state.lastClicked = null;
+  render();
+}
+
+function selectedBooks() {
+  return state.books.filter((b) => state.selected.has(b.id));
+}
+
+function renderSelectionBar() {
+  const bar = $("#selection-bar");
+  const n = state.selected.size;
+  if (n === 0) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  $("#selection-count").textContent = `${n} selected`;
+
+  const sel = selectedBooks();
+  const eligibleSend = sel.filter(
+    (b) => b.status === "done" && !state.sentSet.has(b.sha256),
+  );
+  const eligibleUnsend = sel.filter((b) => state.sentSet.has(b.sha256));
+
+  const send = $("#sel-send");
+  send.disabled = !state.device || eligibleSend.length === 0;
+  send.textContent =
+    eligibleSend.length && eligibleSend.length !== n
+      ? `Send to Kindle (${eligibleSend.length})`
+      : "Send to Kindle";
+
+  const unsend = $("#sel-unsend");
+  unsend.disabled = !state.device || eligibleUnsend.length === 0;
+  unsend.textContent =
+    eligibleUnsend.length && eligibleUnsend.length !== n
+      ? `Remove from Kindle (${eligibleUnsend.length})`
+      : "Remove from Kindle";
+}
+
+async function bulkSend() {
+  const eligible = selectedBooks().filter(
+    (b) => b.status === "done" && !state.sentSet.has(b.sha256),
+  );
+  if (eligible.length === 0) {
+    showToast("nothing to send");
+    return;
+  }
+  await sendBooks(eligible.map((b) => b.id));
+}
+
+async function bulkUnsend() {
+  const eligible = selectedBooks().filter((b) => state.sentSet.has(b.sha256));
+  if (eligible.length === 0) return;
+  await deleteFromDevice(
+    eligible.map((b) => b.sha256),
+    eligible.map((b) => b.title || b.sha256.slice(0, 8)),
+  );
+}
+
+async function bulkRemove() {
+  const sel = selectedBooks();
+  if (sel.length === 0) return;
+  const msg =
+    sel.length === 1
+      ? `Remove "${sel[0].title}" from the library?`
+      : `Remove ${sel.length} books from the library?`;
+  if (
+    !confirm(
+      `${msg}\n\nThis deletes the cached EPUB and KFX. The Kindle is untouched.`,
+    )
+  ) {
+    return;
+  }
+  for (const b of sel) {
+    try {
+      await window.api.invoke("library_remove", { bookId: b.id });
+    } catch (e) {
+      console.error("remove failed:", b.id, e);
+    }
+  }
+  state.selected.clear();
+  state.lastClicked = null;
+  await refresh();
 }
 
 // ---------------------------------------------------------------------------

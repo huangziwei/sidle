@@ -23,8 +23,11 @@ impl DeviceInfo {
     pub fn mount_path(&self) -> PathBuf {
         PathBuf::from(&self.mount)
     }
+    /// Where we write KFX. The `Sidle` subdir keeps our pushes namespaced so
+    /// the Kindle's `/documents` root stays whatever the user had before, and
+    /// our deletes can't ever touch unrelated files.
     pub fn documents_dir(&self) -> PathBuf {
-        self.mount_path().join("documents")
+        self.mount_path().join("documents").join("Sidle")
     }
 }
 
