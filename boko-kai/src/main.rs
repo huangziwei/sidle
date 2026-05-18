@@ -187,6 +187,15 @@ enum ValidateCheck {
         details: usize,
     },
 
+    /// Verify book-level writing mode (horizontal-tb / vertical-rl / vertical-lr)
+    /// is preserved across the conversion
+    WritingMode {
+        epub: String,
+        kfx: String,
+        #[arg(long, default_value_t = 20)]
+        details: usize,
+    },
+
     /// Run all available validations against the conversion
     All {
         epub: String,
@@ -260,6 +269,9 @@ fn main() -> ExitCode {
                 }
                 ValidateCheck::Metadata { epub, kfx, details } => {
                     validate_metadata(&epub, &kfx, details, dir)
+                }
+                ValidateCheck::WritingMode { epub, kfx, details } => {
+                    validate_writing_mode(&epub, &kfx, details, dir)
                 }
                 ValidateCheck::All { epub, kfx, details } => {
                     validate_all(&epub, &kfx, details, dir)
@@ -564,6 +576,31 @@ fn validate_metadata(
     }
 }
 
+fn validate_writing_mode(
+    epub_path: &str,
+    kfx_path: &str,
+    details: usize,
+    dir: boko::validate::Direction,
+) -> Result<(), String> {
+    let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
+    let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
+
+    let report = boko::validate::writing_mode::validate(&epub_bytes, &kfx_bytes)?;
+    report.print_summary(dir);
+    if details > 0 {
+        report.print_details(details, dir);
+    }
+    if report.is_clean() {
+        Ok(())
+    } else {
+        Err(format!(
+            "writing-mode mismatch: EPUB={}  KFX={}",
+            report.epub_book_mode.as_css(),
+            report.kfx_book_mode.as_css()
+        ))
+    }
+}
+
 fn validate_all(
     epub_path: &str,
     kfx_path: &str,
@@ -656,11 +693,24 @@ fn validate_all(
         all_clean = false;
     }
 
+    println!("\n=== Writing mode ===");
+    let wm = boko::validate::writing_mode::validate(&epub_bytes, &kfx_bytes)?;
+    wm.print_summary(dir);
+    if !wm.is_clean() {
+        all_clean = false;
+    }
+
     println!("\n=== Scorecard ===");
-    let ruby_pct = if ruby.epub_pairs.is_empty() {
+    // Ruby: denominator is the source side's pair count.
+    let ruby_source_count = if dir.epub_is_source() {
+        ruby.epub_pairs.len()
+    } else {
+        ruby.kfx_pairs.len()
+    };
+    let ruby_pct = if ruby_source_count == 0 {
         100.0
     } else {
-        ruby.matched as f64 * 100.0 / ruby.epub_pairs.len() as f64
+        ruby.matched as f64 * 100.0 / ruby_source_count as f64
     };
     println!("  Ruby pairs:   {:.2}% preserved", ruby_pct);
     println!(
@@ -675,7 +725,16 @@ fn validate_all(
         "  HTML tags:    {:.2}% semantic",
         tags.semantic_ratio() * 100.0
     );
-    let link_score = if links.epub_external_count == 0 {
+    // External URLs: denominator is the source side's external count. KFX
+    // doesn't track external URL counts separately; use EPUB count as a proxy
+    // in both directions (the assumption is that EPUB anchors mirror KFX uri
+    // anchors 1:1 when preserved).
+    let url_source_count = if dir.epub_is_source() {
+        links.epub_external_count
+    } else {
+        links.kfx_external_anchor_count
+    };
+    let link_score = if url_source_count == 0 {
         100.0
     } else {
         let dropped = if dir.epub_is_source() {
@@ -684,13 +743,17 @@ fn validate_all(
             &links.external_only_in_kfx
         };
         let dropped_n: usize = dropped.iter().map(|(_, n)| n).sum();
-        let preserved = links.epub_external_count.saturating_sub(dropped_n);
-        preserved as f64 * 100.0 / links.epub_external_count as f64
+        let preserved = url_source_count.saturating_sub(dropped_n);
+        preserved as f64 * 100.0 / url_source_count as f64
     };
     println!("  External URLs:{:.2}% preserved", link_score);
     println!(
         "  Images:       {:.2}% preserved",
         images.preservation_ratio(dir) * 100.0
+    );
+    println!(
+        "  Writing mode: {}",
+        if wm.is_clean() { "preserved" } else { "LOST" }
     );
 
     if all_clean {

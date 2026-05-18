@@ -36,6 +36,7 @@ pub mod ruby;
 pub mod style;
 pub mod tags;
 pub mod text;
+pub mod writing_mode;
 
 /// Which way the conversion under validation runs. Determines how printed
 /// reports interpret each side: which is "source / ground truth" vs "target

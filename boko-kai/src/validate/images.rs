@@ -48,6 +48,52 @@ use crate::kfx::symbols::{KFX_SYMBOL_TABLE, KfxSymbol};
 pub struct EpubImage {
     pub spine_path: String,
     pub raw_src: String,
+    /// `raw_src` resolved against `spine_path`'s base directory and normalised
+    /// (e.g. `../images/cover.jpg` → `OEBPS/images/cover.jpg`). The path is
+    /// percent-decoded so it matches the zip entry name. None when src has a
+    /// scheme (`http:`, `data:`, etc.) and therefore can't be a zip entry.
+    pub resolved_path: Option<String>,
+    /// Whether `resolved_path` is present as an entry in the EPUB zip. False
+    /// for external URLs and for tags whose referenced bytes weren't bundled.
+    pub bundled: bool,
+    /// Recognised image format ("jpeg", "png", "gif", "webp", "bmp", "svg")
+    /// based on file-magic detection of the bundled bytes. `None` means the
+    /// bytes don't look like any standard image format — including the case
+    /// where boko has bundled the raw KFX `external_resource` Ion struct
+    /// (~58 bytes) instead of decoding the image to JPEG/PNG/etc.
+    pub detected_format: Option<String>,
+}
+
+/// Classify the leading bytes of a bundled file. Returns the standard format
+/// name (lowercase) or `None` if the magic doesn't match.
+fn detect_image_format(bytes: &[u8]) -> Option<String> {
+    if bytes.len() >= 3 && bytes[..3] == [0xFF, 0xD8, 0xFF] {
+        return Some("jpeg".into());
+    }
+    if bytes.len() >= 8 && bytes[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+        return Some("png".into());
+    }
+    if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
+        return Some("gif".into());
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("webp".into());
+    }
+    if bytes.len() >= 2 && &bytes[..2] == b"BM" {
+        return Some("bmp".into());
+    }
+    // SVG: text/XML. Look for either `<?xml` (with svg later) or `<svg` early.
+    if bytes.len() >= 5 {
+        let head: String = bytes.iter().take(1024).map(|&b| b as char).collect();
+        let lower = head.to_ascii_lowercase();
+        if lower.starts_with("<?xml") && lower.contains("<svg") {
+            return Some("svg".into());
+        }
+        if lower.trim_start().starts_with("<svg") {
+            return Some("svg".into());
+        }
+    }
+    None
 }
 
 /// One KFX `external_resource` entity, filtered to image formats.
@@ -82,9 +128,23 @@ pub struct Report {
     pub epub_image_count: usize,
     pub epub_distinct_srcs: usize,
     pub kfx_image_resource_count: usize,
+    /// Count of `<img src>` whose referenced bytes are present as an entry in
+    /// the EPUB zip AND look like a valid image format (JPEG/PNG/GIF/WebP/
+    /// BMP/SVG by magic number).
+    pub epub_renderable_image_count: usize,
+    /// Count of `<img src>` whose resolved path doesn't exist in the bundle.
+    pub epub_missing_image_count: usize,
+    /// Count of `<img src>` whose resolved path exists but the bytes don't
+    /// match any known image magic. boko's current kfx→epub path bundles the
+    /// raw KFX Ion resource struct (~58 bytes) at the image path without
+    /// decoding it, so this catches that case.
+    pub epub_unreadable_image_count: usize,
 
     // --- Defects (EPUB-side internal) ---
-    // (none right now — could later flag <img src> pointing at missing manifest items)
+    /// EPUB images whose `resolved_path` doesn't exist in the bundle.
+    pub epub_missing_images: Vec<EpubImage>,
+    /// EPUB images whose bytes exist but aren't a recognised image format.
+    pub epub_unreadable_images: Vec<EpubImage>,
 
     // --- Defects (KFX-side internal) ---
     /// `external_resource` entities whose `location` doesn't refer to an
@@ -98,12 +158,15 @@ pub struct Report {
 }
 
 impl Report {
-    /// Whether the conversion in the given direction looks clean: no
-    /// internal defects on either side, and image counts match.
+    /// Whether the conversion in the given direction looks clean: no internal
+    /// defects on either side, image counts match, every internal `<img>` in
+    /// the EPUB has bundled bytes AND those bytes parse as a real image.
     pub fn is_clean(&self) -> bool {
         self.dangling_external_resources.is_empty()
             && self.orphan_image_refs.is_empty()
             && self.epub_image_count == self.kfx_image_element_count
+            && self.epub_missing_image_count == 0
+            && self.epub_unreadable_image_count == 0
     }
 
     /// Count of images dropped by boko's converter, given the conversion
@@ -126,6 +189,15 @@ impl Report {
             return 1.0;
         }
         let preserved = source_count.saturating_sub(self.dropped_count(dir));
+        // For KFX→EPUB, also subtract missing + unreadable EPUB images — the
+        // <img> tag exists but the reader can't actually display anything.
+        let preserved = if !dir.epub_is_source() {
+            preserved
+                .saturating_sub(self.epub_missing_image_count)
+                .saturating_sub(self.epub_unreadable_image_count)
+        } else {
+            preserved
+        };
         preserved as f64 / source_count as f64
     }
 
@@ -134,6 +206,12 @@ impl Report {
         println!(
             "  <img>:         {} ({} distinct src values)",
             self.epub_image_count, self.epub_distinct_srcs
+        );
+        println!(
+            "  bundled bytes: {} renderable, {} unreadable, {} missing",
+            self.epub_renderable_image_count,
+            self.epub_unreadable_image_count,
+            self.epub_missing_image_count
         );
         println!("KFX images:");
         println!(
@@ -157,6 +235,14 @@ impl Report {
             self.dropped_count(dir)
         );
         println!(
+            "  EPUB <img> missing bytes:   {}",
+            self.epub_missing_image_count
+        );
+        println!(
+            "  EPUB <img> unreadable bytes: {} (e.g. raw KFX Ion blob, JXR not re-encoded)",
+            self.epub_unreadable_image_count
+        );
+        println!(
             "  dangling external_resource:    {}",
             self.dangling_external_resources.len()
         );
@@ -171,8 +257,37 @@ impl Report {
     }
 
     pub fn print_details(&self, limit: usize) {
+        if !self.epub_missing_images.is_empty() {
+            println!(
+                "\n--- EPUB <img src> pointing at missing zip entries [first {}] ---",
+                limit
+            );
+            for img in self.epub_missing_images.iter().take(limit) {
+                let resolved = img.resolved_path.as_deref().unwrap_or("(unresolved)");
+                println!("  {}  src={:?}  →  {}", img.spine_path, img.raw_src, resolved);
+            }
+            if self.epub_missing_images.len() > limit {
+                println!("  ... and {} more", self.epub_missing_images.len() - limit);
+            }
+        }
+        if !self.epub_unreadable_images.is_empty() {
+            println!(
+                "\n--- EPUB <img src> with unreadable bytes (no image magic) [first {}] ---",
+                limit
+            );
+            for img in self.epub_unreadable_images.iter().take(limit) {
+                let resolved = img.resolved_path.as_deref().unwrap_or("(unresolved)");
+                println!("  {}  src={:?}  →  {}", img.spine_path, img.raw_src, resolved);
+            }
+            if self.epub_unreadable_images.len() > limit {
+                println!("  ... and {} more", self.epub_unreadable_images.len() - limit);
+            }
+        }
         if !self.dangling_external_resources.is_empty() {
-            println!("\n--- external_resource pointing at missing bcRawMedia [first {}] ---", limit);
+            println!(
+                "\n--- external_resource pointing at missing bcRawMedia [first {}] ---",
+                limit
+            );
             for d in self.dangling_external_resources.iter().take(limit) {
                 println!("  {}  →  {}", d.resource_name, d.location);
             }
@@ -181,7 +296,10 @@ impl Report {
             }
         }
         if !self.orphan_image_refs.is_empty() {
-            println!("\n--- Storyline image refs with no external_resource [first {}] ---", limit);
+            println!(
+                "\n--- Storyline image refs with no external_resource [first {}] ---",
+                limit
+            );
             for name in self.orphan_image_refs.iter().take(limit) {
                 println!("  {}", name);
             }
@@ -190,7 +308,10 @@ impl Report {
             }
         }
         if !self.orphan_raw_media.is_empty() {
-            println!("\n--- bcRawMedia not referenced by any external_resource [first {}] ---", limit);
+            println!(
+                "\n--- bcRawMedia not referenced by any external_resource [first {}] ---",
+                limit
+            );
             for name in self.orphan_raw_media.iter().take(limit) {
                 println!("  {}", name);
             }
@@ -252,6 +373,31 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 
     let epub_image_count = epub_images.len();
 
+    // Bundled-bytes accounting. Internal references = ones with a resolved
+    // path (no scheme). External URLs are excluded from all three buckets.
+    // Renderable = bundled AND known image magic. Unreadable = bundled but no
+    // image magic (boko's current path falls here — it bundles raw Ion blobs).
+    // Missing = path not in the zip at all.
+    let mut epub_renderable_image_count = 0;
+    let mut epub_missing_image_count = 0;
+    let mut epub_unreadable_image_count = 0;
+    let mut epub_missing_images: Vec<EpubImage> = Vec::new();
+    let mut epub_unreadable_images: Vec<EpubImage> = Vec::new();
+    for img in &epub_images {
+        if img.resolved_path.is_none() {
+            continue;
+        }
+        if !img.bundled {
+            epub_missing_image_count += 1;
+            epub_missing_images.push(img.clone());
+        } else if img.detected_format.is_some() {
+            epub_renderable_image_count += 1;
+        } else {
+            epub_unreadable_image_count += 1;
+            epub_unreadable_images.push(img.clone());
+        }
+    }
+
     Ok(Report {
         epub_images,
         epub_image_count,
@@ -261,6 +407,11 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         kfx_raw_media_names: kfx.raw_media_names,
         kfx_image_refs_distinct: kfx.image_refs_distinct,
         kfx_image_element_count: kfx.image_element_count,
+        epub_renderable_image_count,
+        epub_missing_image_count,
+        epub_unreadable_image_count,
+        epub_missing_images,
+        epub_unreadable_images,
         dangling_external_resources,
         orphan_image_refs,
         orphan_raw_media,
@@ -292,6 +443,13 @@ pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<EpubImage>, Str
     let opf_str = crate::util::decode_text(&opf_bytes, hint_encoding);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
 
+    // Snapshot every zip entry name so we can cross-check `<img src>` later.
+    // Used to detect boko's biggest current kfx→epub defect: `<img>` tags
+    // emitted but bytes never bundled.
+    let zip_entries: HashSet<String> = (0..archive.len())
+        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+        .collect();
+
     let mut images = Vec::new();
     for spine_id in &opf.spine_ids {
         let Some((href, _media_type)) = opf.manifest.get(spine_id) else {
@@ -305,7 +463,131 @@ pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<EpubImage>, Str
         let xhtml = crate::util::decode_text(&xhtml_bytes, enc);
         extract_images_from_xhtml(&xhtml, &full_path, &mut images);
     }
+
+    // Resolve each src against its spine path; for bundled entries, also
+    // peek the leading bytes to detect the image format. We cache reads in a
+    // local map so repeated <img src> pointing at the same path don't reopen.
+    let mut head_cache: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for img in &mut images {
+        let (resolved, bundled) =
+            resolve_against_zip(&img.spine_path, &img.raw_src, &zip_entries);
+        img.resolved_path = resolved.clone();
+        img.bundled = bundled;
+        if !bundled {
+            continue;
+        }
+        let Some(path) = resolved else { continue };
+        let detected = head_cache.entry(path.clone()).or_insert_with(|| {
+            // Try both decoded and re-encoded forms against the zip.
+            let head_bytes = read_zip_head(&mut archive, &path)
+                .or_else(|| {
+                    // Some zips use the un-decoded form; try the raw normalized
+                    // name too. We don't have the un-decoded version here; just
+                    // try `path` as a fallback (already attempted above).
+                    None
+                })
+                .unwrap_or_default();
+            detect_image_format(&head_bytes)
+        });
+        img.detected_format = detected.clone();
+    }
+
     Ok(images)
+}
+
+/// Read up to 1024 bytes from a zip entry, or None on error.
+fn read_zip_head<R: std::io::Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    name: &str,
+) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut file = archive.by_name(name).ok()?;
+    let mut buf = vec![0u8; 1024.min(file.size() as usize)];
+    let n = file.read(&mut buf).ok()?;
+    buf.truncate(n);
+    Some(buf)
+}
+
+/// Resolve a possibly-relative href against the spine path's base directory,
+/// normalise `..`/`.`, percent-decode, and check whether the resulting path is
+/// a zip entry. Returns `(None, false)` for hrefs with a scheme (http://,
+/// data:, etc.) — those can't be zip entries by definition.
+fn resolve_against_zip(
+    spine_path: &str,
+    raw_src: &str,
+    zip_entries: &HashSet<String>,
+) -> (Option<String>, bool) {
+    let trimmed = raw_src.split('#').next().unwrap_or(raw_src).trim();
+    if trimmed.is_empty() {
+        return (None, false);
+    }
+    if has_url_scheme(trimmed) {
+        return (None, false);
+    }
+    let base = match spine_path.rfind('/') {
+        Some(i) => &spine_path[..=i],
+        None => "",
+    };
+    let joined = if trimmed.starts_with('/') {
+        trimmed.trim_start_matches('/').to_string()
+    } else {
+        format!("{}{}", base, trimmed)
+    };
+    let normalized = normalize_path(&joined);
+    let decoded = percent_decode(&normalized);
+    let bundled = zip_entries.contains(&decoded) || zip_entries.contains(&normalized);
+    (Some(decoded), bundled)
+}
+
+fn has_url_scheme(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_alphabetic() {
+        return false;
+    }
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b':' {
+            return i >= 1;
+        }
+        if !(b.is_ascii_alphanumeric() || b == b'+' || b == b'.' || b == b'-') {
+            return false;
+        }
+    }
+    false
+}
+
+fn normalize_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+fn percent_decode(s: &str) -> String {
+    let mut out = Vec::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 fn read_zip_entry<R: std::io::Read + std::io::Seek>(
@@ -354,6 +636,9 @@ pub fn extract_images_from_xhtml(
                     out.push(EpubImage {
                         spine_path: spine_path.to_string(),
                         raw_src: src,
+                        resolved_path: None,
+                        bundled: false,
+                        detected_format: None,
                     });
                     break;
                 }
