@@ -22,7 +22,6 @@ mod mechanical;
 mod node;
 mod structure;
 mod symtab;
-mod trace;
 
 use std::io;
 use std::path::Path;

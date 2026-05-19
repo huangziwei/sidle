@@ -36,7 +36,7 @@ use std::path::Path;
 
 use super::node::{parse_single_value, serialize_single_value, IonNode, ION_BVM};
 use super::symtab::{LocalSymbolTable, SymbolTableImport, SYSTEM_SIZE};
-use super::trace::Trace;
+use crate::trace::Trace;
 
 const CONT_SIGNATURE: &[u8] = b"CONT";
 const ENTY_SIGNATURE: &[u8] = b"ENTY";
@@ -69,7 +69,7 @@ struct RawEntityRow {
 }
 
 pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
-    let trace = Trace::new("merge-fast");
+    let trace = Trace::new("merge-fast", "BOKO_MERGE_TRACE");
 
     // ---- 1. Read zip + sort entries.
     let file = std::fs::File::open(path)?;

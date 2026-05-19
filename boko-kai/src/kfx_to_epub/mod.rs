@@ -61,33 +61,42 @@ impl From<io::Error> for ConvertError {
 ///
 /// We follow the same shape; missing steps are TODOs in the relevant modules.
 pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
+    let trace = crate::trace::Trace::new("kfx2epub", "BOKO_KFX2EPUB_TRACE");
     let book = loader::load(kfx_bytes)?;
+    trace.mark("loader::load");
     let mut out = EpubOutput::new();
 
     // Phase 1 step 1 — resources (images, cover).
     let resources = resources::process(&book, &mut out)?;
+    trace.mark("resources::process (JXR → JPEG)");
 
     // Phase 1 step 4 — content (storyline → XHTML).
     let mut content_state = content::ContentState::new(&book, &resources);
     content_state.process_reading_order()?;
+    trace.mark("content::process_reading_order");
     // Rewrite `<a href="anchor:NAME">` placeholders (emitted by
     // `$179 link_to`) to `chapter.xhtml#anchor-id`. Must run after
     // `process_reading_order` so `element_id_to_filename` is complete.
     content::resolve_link_placeholders(&mut content_state);
+    trace.mark("content::resolve_link_placeholders");
     // Calibre's div→p promotion (yj_to_epub_properties.py:1921). Must run
     // before `finalize_chapter_attrs` so the renamed `<p>` carries the same
     // `class=` / `style=` the original `<div>` accumulated.
     content::consolidate_html(&mut content_state);
+    trace.mark("content::consolidate_html");
     // Drop declarations that match their CSS spec default (calibre's
     // `simplify_styles` — minimal port). Has to run before
     // `fixup_styles_and_classes` so the dedupe counts identical
     // "post-pruning" style strings.
     content::simplify_styles(&mut content_state);
+    trace.mark("content::simplify_styles");
     // Inline-style → class promotion. Runs before `finalize_chapter_attrs`
     // so we can rewrite the in-memory `element_styles` / `element_classes`
     // maps directly instead of mutating already-serialized attributes.
     content::fixup_styles_and_classes(&mut content_state);
+    trace.mark("content::fixup_styles_and_classes");
     content::finalize_chapter_attrs(&mut content_state);
+    trace.mark("content::finalize_chapter_attrs");
 
     // Emit stylesheet + per-section XHTML files. The stylesheet has to be
     // the same path the chapters' <link rel="stylesheet"> point at.
@@ -101,6 +110,7 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
             None,
         );
     }
+    trace.mark("content::emit_stylesheet");
     for part in &content_state.book_parts {
         let xhtml = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE html>\n{}",
@@ -108,6 +118,7 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
         );
         out.add_spine_chapter(&part.filename, xhtml);
     }
+    trace.mark("dom serialize + add spine chapters");
 
     // If content emission produced nothing, fall back to image scaffolding
     // so the EPUB still has something in the spine.
@@ -134,6 +145,7 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
     if !toc.is_empty() {
         out.ncx_navmap = Some(navigation::render_navmap(&toc));
     }
+    trace.mark("navigation::extract_toc");
 
     // Page-progression-direction comes from the document_data extractor in
     // content.rs (calibre's `yj_to_epub_metadata.py:108+131`). Propagate to
@@ -145,7 +157,9 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
     // OPF hint for vertical books (calibre's `epub_output.py:955`).
     out.writing_mode = Some(content_state.writing_mode.clone());
 
-    out.finalize(&book.metadata).map_err(ConvertError::Io)
+    let bytes = out.finalize(&book.metadata).map_err(ConvertError::Io)?;
+    trace.mark("output::finalize (zip)");
+    Ok(bytes)
 }
 
 /// Build calibre-style `titlepage.xhtml`: an SVG viewBox sized to the

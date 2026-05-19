@@ -18,10 +18,10 @@ use super::container::{
 use super::fragment::YJFragment;
 use super::structure::{finalize, rebuild_fragments_and_container_map, rebuild_symbol_table};
 use super::symtab::LocalSymbolTable;
-use super::trace::Trace;
+use crate::trace::Trace;
 
 pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
-    let trace = Trace::new("merge-mechanical");
+    let trace = Trace::new("merge-mechanical", "BOKO_MERGE_TRACE");
     let file = std::fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
