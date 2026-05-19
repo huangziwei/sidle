@@ -301,6 +301,19 @@ button {
   font-size: 12px;
 }
 
+.device-tip {
+  margin: 0;
+  padding: 8px 14px 12px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+  border-top: 1px solid var(--border);
+}
+
+.device-tip[hidden] {
+  display: none;
+}
+
 /* Views */
 
 #main {

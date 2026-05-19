@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use serde::Serialize;
 
 pub mod dedrm;
@@ -64,7 +64,7 @@ pub enum TransportKind {
 
 impl DeviceInfo {
     /// Open a fresh transport handle for this device. Cheap for mass-storage
-    /// (just wraps the mount path); for MTP this will open a USB session, so
+    /// (just wraps the mount path); for MTP this opens a USB session, so
     /// callers should reuse the handle within a single operation rather than
     /// re-opening per IO call.
     pub fn open_transport(&self) -> Result<Box<dyn Transport>> {
@@ -72,12 +72,8 @@ impl DeviceInfo {
             TransportKind::MassStorage { mount } => Ok(Box::new(
                 mass_storage::transport::MassStorageTransport::new(PathBuf::from(mount)),
             )),
-            TransportKind::Mtp { .. } => {
-                // Phase 3 lands the impl; until then push/delete on MTP
-                // devices fails cleanly at the command layer.
-                Err(anyhow!(
-                    "MTP transport not yet implemented — Scribe push/delete arrives in P2c phase 3"
-                ))
+            TransportKind::Mtp { location_id, .. } => {
+                Ok(Box::new(mtp::transport::MtpTransport::open(*location_id)?))
             }
         }
     }

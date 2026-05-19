@@ -18,9 +18,9 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
-use crate::device::DeviceInfo;
 use crate::device::dedrm::{self, PullResult};
 use crate::device::detect;
+use crate::device::{DeviceInfo, TransportKind};
 use crate::library::LibraryPaths;
 use crate::queue::QueueHandle;
 use crate::state::DbHandle;
@@ -69,16 +69,26 @@ pub fn spawn(
             first_tick = false;
 
             if let Some(device) = just_connected {
-                // Fire-and-forget — keep the poll loop ticking even while
-                // the auto-pull is doing IO. Each spawned task owns clones
-                // of the shared handles.
-                tauri::async_runtime::spawn(autopull_on_connect(
-                    app.clone(),
-                    db.clone(),
-                    paths.clone(),
-                    queue.clone(),
-                    device,
-                ));
+                // DeDRM auto-pull only runs on mass-storage. Non-jailbroken
+                // (MTP-class) Kindles have no `/dedrm` folder; the jailbreak
+                // that creates it isn't available for Scribe-and-later
+                // firmware either. Skipping the spawn entirely keeps the
+                // `device:autopull-progress`/`device:autopull-done` events
+                // off the UI for MTP devices — without this guard the
+                // frontend would briefly flash "scanning for DRM-free books"
+                // on every Scribe connect.
+                if matches!(device.transport, TransportKind::MassStorage { .. }) {
+                    // Fire-and-forget — keep the poll loop ticking even while
+                    // the auto-pull is doing IO. Each spawned task owns clones
+                    // of the shared handles.
+                    tauri::async_runtime::spawn(autopull_on_connect(
+                        app.clone(),
+                        db.clone(),
+                        paths.clone(),
+                        queue.clone(),
+                        device,
+                    ));
+                }
             }
 
             tokio::time::sleep(POLL_INTERVAL).await;

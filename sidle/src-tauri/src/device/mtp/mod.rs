@@ -4,8 +4,9 @@
 //! - [`detect`]: lists USB MTP devices via [`mtp_rs::MtpDevice::list_devices`],
 //!   filters to Amazon, builds a [`DeviceInfo`](crate::device::DeviceInfo)
 //!   with `TransportKind::Mtp`.
-//! - The transport impl arrives in Phase 3 (P2c). For now `open_transport`
-//!   returns an error on MTP devices, which surfaces to the UI if push/delete
-//!   is attempted before the impl lands.
+//! - [`transport`]: implements [`crate::device::transport::Transport`] over
+//!   an open MTP session — push/delete/list/manifest go through the same
+//!   trait the mass-storage impl satisfies.
 
 pub mod detect;
+pub mod transport;

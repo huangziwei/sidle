@@ -660,6 +660,7 @@ function updateDeviceUI(info) {
   const dot = $("#device-pill .device-dot");
   const label = $("#device-pill-label");
   const status = $("#device-popover-status");
+  const tip = $("#device-tip");
   if (info) {
     dot.className = "device-dot connected";
     const free = info.free_bytes ? `· ${formatBytes(info.free_bytes)} free` : "";
@@ -668,10 +669,22 @@ function updateDeviceUI(info) {
     status.textContent = "Connected";
     $("#device-model").textContent = info.model || "Kindle";
     $("#device-serial").textContent = info.serial || "—";
+    $("#device-transport").textContent = transportLabel(info.transport);
     $("#device-free").textContent =
       info.free_bytes != null && info.total_bytes != null
         ? `${formatBytes(info.free_bytes)} of ${formatBytes(info.total_bytes)}`
         : "—";
+    // MTP devices don't expose free-space without an open session (taking
+    // one every poll cycle would keep claiming/releasing the USB
+    // interface). Surfacing the gap here so the dash isn't mysterious.
+    if (info.transport === "mtp") {
+      tip.textContent =
+        "MTP device. Quit Image Capture, OpenMTP, or Calibre if a push fails — only one app can hold the USB session at a time.";
+      tip.hidden = false;
+    } else {
+      tip.hidden = true;
+      tip.textContent = "";
+    }
     // Always load sent state when device connects so the list-view "On Kindle"
     // column reflects reality without the user having to open the popover.
     refreshDeviceList();
@@ -682,14 +695,23 @@ function updateDeviceUI(info) {
     status.textContent = "Disconnected";
     $("#device-model").textContent = "—";
     $("#device-serial").textContent = "—";
+    $("#device-transport").textContent = "—";
     $("#device-free").textContent = "—";
     $("#device-count").textContent = "—";
     $("#device-sent-list").innerHTML = "";
+    tip.hidden = true;
+    tip.textContent = "";
     setSent([]);
     $("#device-empty").textContent = "Plug in a Kindle via USB.";
     $("#device-empty").hidden = false;
     render();
   }
+}
+
+function transportLabel(t) {
+  if (t === "mass_storage") return "USB (mass storage)";
+  if (t === "mtp") return "USB (MTP)";
+  return t || "—";
 }
 
 async function refreshDeviceList() {
