@@ -42,6 +42,7 @@ pub mod markdown;
 pub mod model;
 pub mod style;
 
+pub mod aozora;
 pub mod epub;
 pub mod kfx;
 pub mod kfx_to_epub;

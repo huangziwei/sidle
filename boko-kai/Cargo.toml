@@ -37,6 +37,11 @@ precomputed-hash = "0.1"
 # Encoding detection and conversion (UTF-8, CP1252, etc.)
 encoding_rs = "0.8"
 
+# Regex engine. Used by the Aozora Bunko TXT parser (annotations.rs and
+# parser_txt.rs) — the source format is markup-heavy and the JS reference
+# tool we're porting relies on ~40 regex patterns.
+regex = "1.11"
+
 # Base64 encoding for KFX raw media
 base64 = "0.22"
 
