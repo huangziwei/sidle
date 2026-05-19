@@ -67,6 +67,19 @@ pub struct Report {
     pub epub_html_lang_present: usize,
     /// Total spine doc count.
     pub epub_html_doc_count: usize,
+    /// Parent-escape (`..`) usage in spine `<img src>` or stylesheet
+    /// `<link href>`. Apple Books rejects these even when they resolve
+    /// mathematically (because the resolution still leaves the document's
+    /// container) — the result is missing images and an unloaded
+    /// stylesheet, and therefore no vertical writing mode.
+    pub epub_parent_escape_refs: Vec<String>,
+    /// OPF `<package version>` string (e.g. `"2.0"`, `"3.0"`).
+    pub epub_opf_version: String,
+    /// True if `<package version>` starts with `"3"` but the manifest has
+    /// no `<item properties="nav">`. EPUB 3.x mandates a nav document
+    /// separate from the NCX; strict readers reject 3.x packages without
+    /// one.
+    pub epub_epub3_missing_nav: bool,
 
     pub kfx_title: String,
     pub kfx_language: String,
@@ -137,16 +150,39 @@ impl Report {
             "  {} / {} spine XHTMLs carry xml:lang on <html>",
             self.epub_html_lang_present, self.epub_html_doc_count
         );
+        println!("EPUB compatibility:");
+        println!("  OPF version:                {}", self.epub_opf_version);
+        println!(
+            "  Parent-escape (..) in spine refs: {}",
+            self.epub_parent_escape_refs.len()
+        );
+        if self.epub_epub3_missing_nav {
+            println!("  DEFECT: <package version=\"3.x\"> with no <item properties=\"nav\">");
+        }
         println!("Defects: {}", self.diffs.len());
     }
 
-    pub fn print_details(&self, _limit: usize, _dir: super::Direction) {
-        if self.diffs.is_empty() {
-            return;
+    pub fn print_details(&self, limit: usize, _dir: super::Direction) {
+        if !self.diffs.is_empty() {
+            println!("\n--- Field mismatches ---");
+            for d in &self.diffs {
+                println!("  {}: epub={:?}  kfx={:?}", d.field, d.epub, d.kfx);
+            }
         }
-        println!("\n--- Field mismatches ---");
-        for d in &self.diffs {
-            println!("  {}: epub={:?}  kfx={:?}", d.field, d.epub, d.kfx);
+        if !self.epub_parent_escape_refs.is_empty() {
+            println!(
+                "\n--- Spine resource refs with `..` parent escape [first {}] ---",
+                limit
+            );
+            for r in self.epub_parent_escape_refs.iter().take(limit) {
+                println!("  {}", r);
+            }
+            if self.epub_parent_escape_refs.len() > limit {
+                println!(
+                    "  ... and {} more",
+                    self.epub_parent_escape_refs.len() - limit
+                );
+            }
         }
     }
 }
@@ -257,6 +293,33 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         });
     }
 
+    // Parent-escape (`..`) in any spine `<img src>` / `<link href>`.
+    // Apple Books treats these as broken even when they mathematically
+    // resolve, causing missing images and an unloaded stylesheet (which
+    // suppresses vertical writing mode in CJK books). The correct path
+    // for a chapter resource is sibling-relative to the chapter file.
+    if !epub.parent_escape_refs.is_empty() {
+        diffs.push(FieldDiff {
+            field: "spine resource refs with .. parent escape",
+            epub: format!(
+                "{} ref(s); first: {}",
+                epub.parent_escape_refs.len(),
+                epub.parent_escape_refs[0]
+            ),
+            kfx: "n/a".into(),
+        });
+    }
+
+    // EPUB 3.x without nav.xhtml. Strict readers (Apple Books) reject
+    // these silently — the package opens, no content renders.
+    if epub.epub3_missing_nav {
+        diffs.push(FieldDiff {
+            field: "EPUB3 missing <item properties=\"nav\">",
+            epub: epub.opf_version.clone(),
+            kfx: "n/a".into(),
+        });
+    }
+
     Ok(Report {
         epub_title: epub.title,
         epub_language: epub.language,
@@ -269,6 +332,9 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         epub_primary_writing_mode: epub.primary_writing_mode,
         epub_html_lang_present: epub.html_lang_present,
         epub_html_doc_count: epub.html_doc_count,
+        epub_parent_escape_refs: epub.parent_escape_refs,
+        epub_opf_version: epub.opf_version,
+        epub_epub3_missing_nav: epub.epub3_missing_nav,
         kfx_title: kfx.title,
         kfx_language: kfx.language,
         kfx_authors: kfx.authors,
@@ -303,6 +369,15 @@ struct EpubMetadata {
     html_lang_present: usize,
     /// Total number of spine XHTMLs scanned.
     html_doc_count: usize,
+    /// All spine-doc `<img src>` / `<link href>` values that contain `..`
+    /// segments. Each entry is `"<chapter-href>: <ref>"`. Format-only;
+    /// the gate fires when this is non-empty.
+    parent_escape_refs: Vec<String>,
+    /// OPF `<package version>` string.
+    opf_version: String,
+    /// `<package version="3.X">` with no `<item properties="nav">` in the
+    /// manifest. Required by EPUB 3; rejected by Apple Books when missing.
+    epub3_missing_nav: bool,
 }
 
 fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
@@ -334,14 +409,20 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
     let date = scan_opf_dc_date(&opf_str);
     let primary_writing_mode = scan_opf_primary_writing_mode(&opf_str);
 
-    // xml:lang count across spine docs.
+    // Walk every spine XHTML once: count xml:lang on `<html>`, and scan
+    // for gratuitous `..` parent escapes in `<img src>` / `<link href>`.
     let mut html_doc_count = 0usize;
     let mut html_lang_present = 0usize;
+    let mut parent_escape_refs: Vec<String> = Vec::new();
     for spine_id in &opf.spine_ids {
         let Some((href, _)) = opf.manifest.get(spine_id) else {
             continue;
         };
         let full_path = format!("{}{}", opf_base, href);
+        let chapter_dir = full_path
+            .rfind('/')
+            .map(|i| &full_path[..i])
+            .unwrap_or("");
         let Ok(xhtml_bytes) = read_zip_entry(&mut archive, &full_path) else {
             continue;
         };
@@ -351,7 +432,17 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
         if html_root_has_xml_lang(&xhtml) {
             html_lang_present += 1;
         }
+        for r in scan_parent_escape_refs(&xhtml) {
+            if is_gratuitous_escape(&r, chapter_dir) {
+                parent_escape_refs.push(format!("{}: {}", href, r));
+            }
+        }
     }
+
+    // OPF package version + EPUB-3-nav check.
+    let opf_version = scan_opf_version(&opf_str);
+    let has_nav_item = scan_opf_has_nav_item(&opf_str);
+    let epub3_missing_nav = opf_version.starts_with('3') && !has_nav_item;
 
     Ok(EpubMetadata {
         title: opf.metadata.title.clone(),
@@ -366,7 +457,137 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
         primary_writing_mode,
         html_lang_present,
         html_doc_count,
+        parent_escape_refs,
+        opf_version,
+        epub3_missing_nav,
     })
+}
+
+/// Resolve `ref` against `chapter_dir` (e.g. `"OEBPS"`) and check whether
+/// the `..` segments are gratuitous: does the resolved absolute path land
+/// back inside `chapter_dir`? When yes, the natural form is sibling-
+/// relative and the `..` is just noise — Apple Books rejects this form
+/// silently. When the `..` actually moves the target out of chapter_dir
+/// (calibre's `../stylesheet.css` from a chapter in `OEBPS/`), the form is
+/// legitimate.
+fn is_gratuitous_escape(href: &str, chapter_dir: &str) -> bool {
+    let resolved = resolve_relative(chapter_dir, href);
+    let resolved_dir = resolved.rfind('/').map(|i| &resolved[..i]).unwrap_or("");
+    resolved_dir == chapter_dir
+}
+
+/// Apply standard relative-URL resolution to produce an archive-root path.
+fn resolve_relative(base_dir: &str, href: &str) -> String {
+    let combined = if base_dir.is_empty() {
+        href.to_string()
+    } else {
+        format!("{}/{}", base_dir, href)
+    };
+    let mut out: Vec<&str> = Vec::new();
+    for seg in combined.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out.join("/")
+}
+
+/// Walk an XHTML document and return every `<img src>` or `<link href>`
+/// value that contains a `..` path segment. The caller (extract_epub_metadata)
+/// filters down to *gratuitous* escapes via `is_gratuitous_escape`.
+fn scan_parent_escape_refs(xhtml: &str) -> Vec<String> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    let mut out: Vec<String> = Vec::new();
+    let mut reader = Reader::from_str(xhtml);
+    reader.config_mut().trim_text(false);
+    let attr_for = |tag: &[u8]| -> Option<&'static [u8]> {
+        match tag {
+            b"img" | b"image" | b"audio" | b"video" | b"source" | b"script" | b"iframe" => Some(b"src"),
+            b"link" | b"a" => Some(b"href"),
+            _ => None,
+        }
+    };
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let tag = e.local_name().as_ref().to_vec();
+                if let Some(attr_name) = attr_for(&tag) {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.local_name().as_ref() == attr_name {
+                            let v = String::from_utf8_lossy(&attr.value);
+                            if v.split('/').any(|seg| seg == "..") {
+                                out.push(v.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// Pull `<package version="..."/>` out of the OPF source.
+fn scan_opf_version(opf_str: &str) -> String {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    let mut reader = Reader::from_str(opf_str);
+    reader.config_mut().trim_text(false);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                if e.local_name().as_ref() == b"package" {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.local_name().as_ref() == b"version" {
+                            return String::from_utf8_lossy(&attr.value).to_string();
+                        }
+                    }
+                    return String::new();
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    String::new()
+}
+
+/// Does the OPF manifest contain at least one `<item properties="nav"/>`?
+fn scan_opf_has_nav_item(opf_str: &str) -> bool {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    let mut reader = Reader::from_str(opf_str);
+    reader.config_mut().trim_text(false);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                if e.local_name().as_ref() == b"item" {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.local_name().as_ref() == b"properties"
+                            && String::from_utf8_lossy(&attr.value)
+                                .split_whitespace()
+                                .any(|p| p == "nav")
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    false
 }
 
 /// Does the `<html>` root in this XHTML doc carry `xml:lang`?

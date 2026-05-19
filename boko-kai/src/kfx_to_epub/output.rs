@@ -234,9 +234,18 @@ impl EpubOutput {
     }
 
     fn generate_opf(&self, meta: &BookMetadata) -> String {
+        // EPUB 2.0 package. Reason: EPUB 3.0 mandates a nav.xhtml document
+        // (`<item properties="nav">` in the manifest, distinct from NCX) and
+        // strict readers — notably Apple Books — reject 3.0 packages lacking
+        // one with no rendered output. Calibre's EPUB output uses 2.0 + NCX
+        // for the same reason. We keep our existing OPF features that are
+        // valid in both (ASIN identifiers, `<dc:date>`, `xml:lang`, custom
+        // `<meta name="...">` hints, `page-progression-direction` on spine)
+        // but drop the EPUB-3-only bits (`properties=` on manifest items,
+        // `<meta property="dcterms:modified">`).
         let mut s = String::new();
         s.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
 "#);
 
@@ -279,8 +288,9 @@ impl EpubOutput {
             ));
         }
 
-        // EPUB3 dcterms:modified (required)
-        s.push_str("    <meta property=\"dcterms:modified\">2024-01-01T00:00:00Z</meta>\n");
+        // (EPUB3-only `<meta property="dcterms:modified">` intentionally
+        // dropped — EPUB2 doesn't require it, and including it under EPUB2
+        // is invalid because `property=` is an EPUB3 attribute.)
 
         // Publication date — calibre uses `kindle_title_metadata/issue_date`
         // (KFX stores as YYYY-MM-DD). Emit as ISO-8601 with a UTC offset to
@@ -344,24 +354,16 @@ impl EpubOutput {
             "    <item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n",
         );
         for m in &self.manifest {
-            let mut props = String::new();
-            if m.is_cover_image {
-                props.push_str(" properties=\"cover-image\"");
-            }
-            if m.is_nav {
-                if props.is_empty() {
-                    props.push_str(" properties=\"nav\"");
-                } else {
-                    // Combine into one properties attr if both.
-                    props = format!(" properties=\"cover-image nav\"");
-                }
-            }
+            // EPUB-3-only `properties="cover-image"` / `properties="nav"`
+            // intentionally omitted under EPUB 2.0. The cover marker lives
+            // in `<meta name="cover" content="..."/>` instead (emitted in
+            // the metadata block above), which is the EPUB2 convention all
+            // readers (including Apple Books) honour.
             s.push_str(&format!(
-                "    <item id=\"{}\" href=\"{}\" media-type=\"{}\"{}/>\n",
+                "    <item id=\"{}\" href=\"{}\" media-type=\"{}\"/>\n",
                 xml_escape(&m.id),
                 xml_escape(&m.href),
                 xml_escape(&m.media_type),
-                props
             ));
         }
         s.push_str("  </manifest>\n");

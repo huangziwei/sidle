@@ -199,7 +199,13 @@ impl<'a> ContentState<'a> {
         let l = part.dom.get_mut(link);
         l.set("rel", "stylesheet");
         l.set("type", "text/css");
-        l.set("href", "../OEBPS/style.css");
+        // Plain filename: the chapter lives in `OEBPS/`, the stylesheet is
+        // also bundled in `OEBPS/`, so a sibling reference is the correct
+        // resolution. The earlier `../OEBPS/style.css` resolved to the same
+        // file mathematically but tripped Apple Books (which silently
+        // declined to load it), leaving the body without
+        // `writing-mode: vertical-rl` — pages then rendered horizontal.
+        l.set("href", "style.css");
     }
 
     /// Recursive content walker. `parent_id` is the DOM node we append into.
@@ -390,13 +396,16 @@ impl<'a> ContentState<'a> {
             .unwrap_or("")
             .to_string();
         if let Some(img) = self.resources.by_name.get(&resource_name) {
-            let href = format!("../OEBPS/{}", img.filename);
-            dom.get_mut(id).set("src", href);
+            // Sibling reference: chapter and image both live under `OEBPS/`,
+            // so the chapter resolves `image_rsrcXX.jpg` to the right path.
+            // Earlier `../OEBPS/<file>` was mathematically equivalent but
+            // tripped Apple Books, which then showed no images.
+            dom.get_mut(id).set("src", img.filename.clone());
             if let Some(w) = img.width {
                 let _ = w;
             }
         } else {
-            dom.get_mut(id).set("src", format!("../OEBPS/missing_{resource_name}.jpg"));
+            dom.get_mut(id).set("src", format!("missing_{resource_name}.jpg"));
         }
         // Alt text. Calibre defaults to "" when missing.
         let alt = get_field(fields, KfxSymbol::AltText as u64)
