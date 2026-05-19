@@ -40,6 +40,39 @@ pub fn time_now_secs() -> u32 {
     (js_sys::Date::now() / 1000.0) as u32
 }
 
+/// Current UTC time formatted as ISO-8601 (`YYYY-MM-DDTHH:MM:SSZ`).
+///
+/// Used for `dcterms:modified` / KFX `modified_date` stamps. We synthesize on
+/// every export rather than pass the source value through — modified-date
+/// describes *this file*, not the work, so the value must reflect when this
+/// converter wrote it. See `[[feedback-modified-date-is-conversion-time]]`.
+pub fn time_now_iso8601_utc() -> String {
+    let secs = time_now_secs() as i64;
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+    let h = (sod / 3600) as u32;
+    let m = ((sod / 60) % 60) as u32;
+    let s = (sod % 60) as u32;
+    let (y, mo, d) = civil_from_days(days);
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, m, s)
+}
+
+// Howard Hinnant's `civil_from_days`. Days are counted from 1970-01-01.
+// Reference: https://howardhinnant.github.io/date_algorithms.html
+fn civil_from_days(z: i64) -> (i32, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i32 + (era as i32) * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
 /// Decode bytes to a string, handling various encodings.
 ///
 /// This function:

@@ -438,6 +438,11 @@ pub fn build_category_entries(
                             Some(MetadataValue::Text(meta.authors.join(" & ")))
                         }
                     }
+                    MetadataField::ModifiedDate => {
+                        // Always stamp the conversion time, never copy the source value —
+                        // modified_date describes *this file*, not the work.
+                        Some(MetadataValue::Text(crate::util::time_now_iso8601_utc()))
+                    }
                     MetadataField::SeriesPosition => {
                         // Series position from collection
                         meta.collection.as_ref().and_then(|c| c.position).map(|p| {
