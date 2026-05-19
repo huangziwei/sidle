@@ -81,7 +81,7 @@ impl PartialEq<str> for MetadataValue {
 pub enum MetadataField {
     Title,
     Language,
-    FirstAuthor,
+    Author,
     Description,
     Publisher,
     Identifier,
@@ -130,7 +130,10 @@ impl MetadataField {
                     Some(&meta.language)
                 }
             }
-            MetadataField::FirstAuthor => meta.authors.first().map(|s| s.as_str()),
+            // Single-author convenience; `build_category_entries` joins the full
+            // list with " & " (calibre's `yj_metadata.py:209` convention) — use
+            // that path instead when emitting to KFX.
+            MetadataField::Author => meta.authors.first().map(|s| s.as_str()),
             MetadataField::Description => meta.description.as_deref(),
             MetadataField::Publisher => meta.publisher.as_deref(),
             MetadataField::Identifier => {
@@ -183,7 +186,7 @@ pub fn metadata_schema() -> Vec<MetadataRule> {
         MetadataRule {
             key: "author",
             category: MetadataCategory::KindleTitle,
-            source: MetadataSource::Dynamic(MetadataField::FirstAuthor),
+            source: MetadataSource::Dynamic(MetadataField::Author),
         },
         MetadataRule {
             key: "description",
@@ -425,6 +428,16 @@ pub fn build_category_entries(
                         // Both fields mirror the same generated ASIN value.
                         ctx.asin.clone().map(MetadataValue::Text)
                     }
+                    MetadataField::Author => {
+                        // KFX uses a single `author` value with multiple authors
+                        // joined by " & " (calibre's `yj_metadata.py:209`). The
+                        // import side splits on "&" symmetrically.
+                        if meta.authors.is_empty() {
+                            None
+                        } else {
+                            Some(MetadataValue::Text(meta.authors.join(" & ")))
+                        }
+                    }
                     MetadataField::SeriesPosition => {
                         // Series position from collection
                         meta.collection.as_ref().and_then(|c| c.position).map(|p| {
@@ -473,7 +486,7 @@ mod tests {
 
         assert_eq!(MetadataField::Title.extract(&meta), Some("Test Book"));
         assert_eq!(
-            MetadataField::FirstAuthor.extract(&meta),
+            MetadataField::Author.extract(&meta),
             Some("Author One")
         );
         assert_eq!(MetadataField::Language.extract(&meta), Some("en"));
