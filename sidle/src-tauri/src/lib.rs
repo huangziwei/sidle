@@ -25,6 +25,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::library::library_list,
             commands::library::library_import,
+            commands::library::library_update_metadata,
             commands::library::library_remove,
             commands::library::library_open_in_finder,
             commands::library::library_cover_path,

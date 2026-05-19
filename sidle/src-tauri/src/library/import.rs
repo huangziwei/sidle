@@ -312,6 +312,12 @@ fn insert_row(
             file_size,
             imported_at: &now,
             asin: meta.asin.as_deref(),
+            // Series and tags aren't populated from source format yet —
+            // they're set via the metadata editor. Flagged as a follow-up
+            // in `.claude/plans/library-navigation.md` (Phase 5+).
+            series_name: None,
+            series_index: None,
+            tags: &[],
         },
     )?;
     Ok(id)

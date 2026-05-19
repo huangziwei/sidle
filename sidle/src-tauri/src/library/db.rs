@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BookRow {
@@ -38,6 +38,13 @@ pub struct BookRow {
     /// devices like the KOA2). `None` for EPUB-imported books and KFXes
     /// without a `book_id`.
     pub asin: Option<String>,
+    pub series_name: Option<String>,
+    /// Position within the series. REAL so half-numbers (1.5, 2.5) common
+    /// in fiction series numbering work without coercion.
+    pub series_index: Option<f64>,
+    /// User-defined tags. Stored as a JSON array TEXT in SQLite; canonicalized
+    /// (trimmed, lowercased, deduped in-order, empties dropped) at write time.
+    pub tags: Vec<String>,
 }
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
@@ -60,9 +67,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         // foreign_keys off. Dropping conversion_jobs first works too; we go
         // with foreign_keys=OFF for symmetry with any future similar reset.
         conn.pragma_update(None, "foreign_keys", "OFF")?;
-        conn.execute_batch(
-            "DROP TABLE IF EXISTS conversion_jobs; DROP TABLE IF EXISTS books;",
-        )?;
+        conn.execute_batch("DROP TABLE IF EXISTS conversion_jobs; DROP TABLE IF EXISTS books;")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
     }
 
@@ -80,7 +85,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             kfx_path          TEXT,
             file_size         INTEGER NOT NULL,
             imported_at       TEXT NOT NULL,
-            asin              TEXT
+            asin              TEXT,
+            series_name       TEXT,
+            series_index      REAL,
+            tags              TEXT NOT NULL DEFAULT '[]'
         );
 
         CREATE TABLE IF NOT EXISTS conversion_jobs (
@@ -110,11 +118,23 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         "#,
     )?;
 
-    // Idempotent column add for installs that already migrated past the v1
-    // schema but pre-date the asin column. `CREATE IF NOT EXISTS` above is
-    // a no-op for an existing table, so we have to ALTER out-of-band.
+    // Idempotent column adds for installs that already migrated past the
+    // v1 schema. `CREATE IF NOT EXISTS` above is a no-op for an existing
+    // table, so we have to ALTER out-of-band.
     if !has_column(conn, "books", "asin")? {
         conn.execute("ALTER TABLE books ADD COLUMN asin TEXT", [])?;
+    }
+    if !has_column(conn, "books", "series_name")? {
+        conn.execute("ALTER TABLE books ADD COLUMN series_name TEXT", [])?;
+    }
+    if !has_column(conn, "books", "series_index")? {
+        conn.execute("ALTER TABLE books ADD COLUMN series_index REAL", [])?;
+    }
+    if !has_column(conn, "books", "tags")? {
+        conn.execute(
+            "ALTER TABLE books ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
     }
 
     Ok(())
@@ -161,12 +181,8 @@ pub fn job_in_flight(conn: &Connection, book_id: i64) -> rusqlite::Result<bool> 
 }
 
 pub fn find_by_sha(conn: &Connection, sha: &str) -> rusqlite::Result<Option<BookRow>> {
-    conn.query_row(
-        SELECT_BOOK_WITH_JOB_BY_SHA,
-        params![sha],
-        row_to_book,
-    )
-    .optional()
+    conn.query_row(SELECT_BOOK_WITH_JOB_BY_SHA, params![sha], row_to_book)
+        .optional()
 }
 
 pub fn list_books(conn: &Connection) -> rusqlite::Result<Vec<BookRow>> {
@@ -176,10 +192,13 @@ pub fn list_books(conn: &Connection) -> rusqlite::Result<Vec<BookRow>> {
 }
 
 pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i64> {
+    let tags_json = serde_json::to_string(book.tags)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     conn.execute(
         r#"INSERT INTO books
-            (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path, file_size, imported_at, asin)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#,
+            (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path,
+             file_size, imported_at, asin, series_name, series_index, tags)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
         params![
             book.sha256,
             book.title,
@@ -192,6 +211,9 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             book.file_size,
             book.imported_at,
             book.asin,
+            book.series_name,
+            book.series_index,
+            tags_json,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -266,6 +288,53 @@ pub fn set_cover_path(conn: &Connection, book_id: i64, cover_path: &str) -> rusq
     Ok(())
 }
 
+/// Full-form metadata patch sent by the editor modal. Every field is
+/// always present; the editor populates from the current row and the
+/// user edits in place, so we don't need to distinguish "no-op" from
+/// "clear" here.
+///
+/// Caller (the command layer) is responsible for validation (title
+/// non-empty, series_index ≥ 0) and tag canonicalization (trim,
+/// lowercase, dedupe, drop empties).
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct MetadataPatch {
+    pub title: String,
+    pub author: String,
+    pub language: String,
+    pub series_name: Option<String>,
+    pub series_index: Option<f64>,
+    pub tags: Vec<String>,
+}
+
+pub fn update_metadata(
+    conn: &Connection,
+    book_id: i64,
+    patch: &MetadataPatch,
+) -> rusqlite::Result<()> {
+    let tags_json = serde_json::to_string(&patch.tags)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        r#"UPDATE books
+              SET title         = ?1,
+                  author        = ?2,
+                  language      = ?3,
+                  series_name   = ?4,
+                  series_index  = ?5,
+                  tags          = ?6
+              WHERE id = ?7"#,
+        params![
+            patch.title,
+            patch.author,
+            patch.language,
+            patch.series_name,
+            patch.series_index,
+            tags_json,
+            book_id,
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn remove_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<String>> {
     let sha: Option<String> = conn
         .query_row(
@@ -281,20 +350,15 @@ pub fn remove_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<S
 }
 
 pub fn pending_or_error_book_ids(conn: &Connection) -> rusqlite::Result<Vec<i64>> {
-    let mut stmt = conn.prepare(
-        "SELECT book_id FROM conversion_jobs WHERE status IN ('pending', 'converting')",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT book_id FROM conversion_jobs WHERE status IN ('pending', 'converting')")?;
     let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
     rows.collect()
 }
 
 pub fn get_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<BookRow>> {
-    conn.query_row(
-        SELECT_BOOK_WITH_JOB_BY_ID,
-        params![book_id],
-        row_to_book,
-    )
-    .optional()
+    conn.query_row(SELECT_BOOK_WITH_JOB_BY_ID, params![book_id], row_to_book)
+        .optional()
 }
 
 pub struct NewBook<'a> {
@@ -309,6 +373,11 @@ pub struct NewBook<'a> {
     pub file_size: i64,
     pub imported_at: &'a str,
     pub asin: Option<&'a str>,
+    pub series_name: Option<&'a str>,
+    pub series_index: Option<f64>,
+    /// Caller passes the canonical tag list (already trimmed / lowercased
+    /// / deduped). `insert_book` serializes it to a JSON array TEXT.
+    pub tags: &'a [String],
 }
 
 pub fn now_iso() -> String {
@@ -319,7 +388,8 @@ const SELECT_BOOKS_WITH_JOBS: &str = r#"
     SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
            b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at, b.asin,
-           COALESCE(j.status, 'pending') AS status, j.error, j.kind
+           COALESCE(j.status, 'pending') AS status, j.error, j.kind,
+           b.series_name, b.series_index, b.tags
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     ORDER BY b.imported_at DESC
@@ -329,7 +399,8 @@ const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
     SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
            b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at, b.asin,
-           COALESCE(j.status, 'pending') AS status, j.error, j.kind
+           COALESCE(j.status, 'pending') AS status, j.error, j.kind,
+           b.series_name, b.series_index, b.tags
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.sha256 = ?1
@@ -339,13 +410,18 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
     SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
            b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at, b.asin,
-           COALESCE(j.status, 'pending') AS status, j.error, j.kind
+           COALESCE(j.status, 'pending') AS status, j.error, j.kind,
+           b.series_name, b.series_index, b.tags
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
 "#;
 
 fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
+    let tags_json: String = row.get(17)?;
+    // Defensive parse: we control writes and only emit canonical JSON
+    // arrays, but a corrupt column shouldn't take down the whole list.
+    let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
     Ok(BookRow {
         id: row.get(0)?,
         sha256: row.get(1)?,
@@ -362,5 +438,135 @@ fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
         status: row.get(12)?,
         error: row.get(13)?,
         kind: row.get(14)?,
+        series_name: row.get(15)?,
+        series_index: row.get(16)?,
+        tags,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        migrate(&conn).expect("migrate");
+        conn
+    }
+
+    fn insert_minimal(conn: &Connection, sha: &str, title: &str) -> i64 {
+        insert_book(
+            conn,
+            &NewBook {
+                sha256: sha,
+                title,
+                author: "",
+                language: "",
+                ppd: None,
+                epub_path: None,
+                cover_path: None,
+                kfx_path: None,
+                file_size: 0,
+                imported_at: "2026-05-19T00:00:00Z",
+                asin: None,
+                series_name: None,
+                series_index: None,
+                tags: &[],
+            },
+        )
+        .expect("insert")
+    }
+
+    #[test]
+    fn update_metadata_sets_all_fields() {
+        let conn = fresh_db();
+        let id = insert_minimal(&conn, "sha-a", "original");
+
+        let patch = MetadataPatch {
+            title: "新しいタイトル".into(),
+            author: "村上春樹".into(),
+            language: "ja".into(),
+            series_name: Some("ハルキ三部作".into()),
+            series_index: Some(2.5),
+            tags: vec!["小説".into(), "ライトノベル".into()],
+        };
+        update_metadata(&conn, id, &patch).expect("update");
+
+        let row = get_book(&conn, id).expect("get").expect("present");
+        assert_eq!(row.title, "新しいタイトル");
+        assert_eq!(row.author, "村上春樹");
+        assert_eq!(row.language, "ja");
+        assert_eq!(row.series_name.as_deref(), Some("ハルキ三部作"));
+        assert_eq!(row.series_index, Some(2.5));
+        assert_eq!(row.tags, vec!["小説", "ライトノベル"]);
+    }
+
+    #[test]
+    fn update_metadata_clears_series() {
+        let conn = fresh_db();
+        let id = insert_minimal(&conn, "sha-b", "x");
+
+        // Seed with series populated.
+        update_metadata(
+            &conn,
+            id,
+            &MetadataPatch {
+                title: "x".into(),
+                author: "a".into(),
+                language: "en".into(),
+                series_name: Some("Foundation".into()),
+                series_index: Some(1.0),
+                tags: vec![],
+            },
+        )
+        .expect("seed");
+
+        // Then clear both.
+        update_metadata(
+            &conn,
+            id,
+            &MetadataPatch {
+                title: "x".into(),
+                author: "a".into(),
+                language: "en".into(),
+                series_name: None,
+                series_index: None,
+                tags: vec![],
+            },
+        )
+        .expect("clear");
+
+        let row = get_book(&conn, id).expect("get").expect("present");
+        assert_eq!(row.series_name, None);
+        assert_eq!(row.series_index, None);
+    }
+
+    #[test]
+    fn tags_roundtrip_through_json_storage() {
+        let conn = fresh_db();
+        let id = insert_minimal(&conn, "sha-c", "x");
+
+        // Empty default on a freshly-inserted book.
+        let row = get_book(&conn, id).expect("get").expect("present");
+        assert!(row.tags.is_empty());
+
+        // CJK + emoji + ASCII; verify nothing gets escaped or lost.
+        let tags = vec!["sci-fi".into(), "小説".into(), "🦀rust".into()];
+        update_metadata(
+            &conn,
+            id,
+            &MetadataPatch {
+                title: "x".into(),
+                author: "".into(),
+                language: "".into(),
+                series_name: None,
+                series_index: None,
+                tags: tags.clone(),
+            },
+        )
+        .expect("update");
+
+        let row = get_book(&conn, id).expect("get").expect("present");
+        assert_eq!(row.tags, tags);
+    }
 }
