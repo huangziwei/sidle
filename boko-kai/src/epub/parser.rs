@@ -851,6 +851,113 @@ pub fn parse_nav_landmarks(content: &str) -> io::Result<Vec<Landmark>> {
     Ok(landmarks)
 }
 
+/// Parse EPUB 2.0 `<guide>` references in an OPF document.
+///
+/// Source: EPUB 2.0.1, §2.6. `<guide>` contains `<reference type="..."
+/// href="..." title="..."/>` entries that map directly to EPUB 3
+/// landmarks. We read this as a fallback when the OPF doesn't list an
+/// EPUB 3 nav doc (or when the nav doc has no `<nav epub:type="landmarks">`
+/// section). Calibre's kfx_to_epub path emits `<guide>` instead of a nav
+/// doc, so without this, the round-trip drops every landmark.
+pub fn parse_opf_guide(content: &str) -> io::Result<Vec<Landmark>> {
+    let mut reader = Reader::from_str(content);
+    reader.config_mut().trim_text(true);
+    let mut landmarks: Vec<Landmark> = Vec::new();
+    let mut in_guide = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                let local = local_name(name.as_ref());
+                if local == b"guide" {
+                    in_guide = true;
+                } else if in_guide
+                    && local == b"reference"
+                    && let Some(lm) = reference_attrs_to_landmark(&e)
+                {
+                    landmarks.push(lm);
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = e.name();
+                let local = local_name(name.as_ref());
+                if in_guide
+                    && local == b"reference"
+                    && let Some(lm) = reference_attrs_to_landmark(&e)
+                {
+                    landmarks.push(lm);
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = e.name();
+                let local = local_name(name.as_ref());
+                if local == b"guide" {
+                    in_guide = false;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(io::Error::other(e)),
+            _ => {}
+        }
+    }
+
+    Ok(landmarks)
+}
+
+fn reference_attrs_to_landmark(e: &quick_xml::events::BytesStart) -> Option<Landmark> {
+    let mut ref_type: Option<String> = None;
+    let mut href: Option<String> = None;
+    let mut title = String::new();
+    for attr in e.attributes().flatten() {
+        match local_name(attr.key.as_ref()) {
+            b"type" => {
+                ref_type = String::from_utf8(attr.value.to_vec()).ok();
+            }
+            b"href" => {
+                href = String::from_utf8(attr.value.to_vec()).ok();
+            }
+            b"title" => {
+                if let Ok(v) = String::from_utf8(attr.value.to_vec()) {
+                    title = v;
+                }
+            }
+            _ => {}
+        }
+    }
+    let (ref_type, href) = (ref_type?, href?);
+    let landmark_type = guide_type_to_landmark(&ref_type)?;
+    Some(Landmark {
+        landmark_type,
+        href,
+        label: title,
+    })
+}
+
+/// Map an EPUB 2 `<reference type="...">` value to a LandmarkType.
+/// Sibling of `epub_type_to_landmark` for the EPUB-3 nav doc path.
+fn guide_type_to_landmark(guide_type: &str) -> Option<LandmarkType> {
+    match guide_type {
+        "cover" => Some(LandmarkType::Cover),
+        "title-page" | "titlepage" => Some(LandmarkType::TitlePage),
+        "toc" => Some(LandmarkType::Toc),
+        // EPUB 2 "text" = start of body text = StartReading (matches
+        // calibre's `GUIDE_TYPE_OF_LANDMARK_TYPE` mapping `$396`/`$269`
+        // → "text").
+        "text" => Some(LandmarkType::StartReading),
+        "bodymatter" => Some(LandmarkType::BodyMatter),
+        "preface" => Some(LandmarkType::Preface),
+        "acknowledgements" | "acknowledgments" => Some(LandmarkType::Acknowledgements),
+        "bibliography" => Some(LandmarkType::Bibliography),
+        "glossary" => Some(LandmarkType::Glossary),
+        "index" => Some(LandmarkType::Index),
+        "loi" => Some(LandmarkType::Loi),
+        "lot" => Some(LandmarkType::Lot),
+        "notes" => Some(LandmarkType::Endnotes),
+        _ => None,
+    }
+}
+
 /// Map EPUB epub:type value to LandmarkType.
 fn epub_type_to_landmark(epub_type: &str) -> Option<LandmarkType> {
     // epub:type can have multiple space-separated values; check each

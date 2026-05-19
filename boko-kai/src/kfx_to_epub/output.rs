@@ -73,6 +73,11 @@ pub struct EpubOutput {
     /// `horizontal-tb`, the OPF emits `<meta name="primary-writing-mode">`
     /// as a Kindle reader hint — mirrors calibre's `epub_output.py:955+`.
     pub writing_mode: Option<String>,
+
+    /// OPF `<guide>` entries (EPUB 2.0 landmark references). Populated from
+    /// KFX `nav_type=landmarks` containers; emitted as
+    /// `<reference type="..." href="..." title="..."/>` inside `<guide>`.
+    pub guide: Vec<super::navigation::GuideRef>,
 }
 
 impl EpubOutput {
@@ -86,6 +91,7 @@ impl EpubOutput {
             ncx_navmap: None,
             page_progression_direction: None,
             writing_mode: None,
+            guide: Vec::new(),
         }
     }
 
@@ -482,6 +488,24 @@ impl EpubOutput {
             ));
         }
         s.push_str("  </spine>\n");
+
+        // `<guide>` (EPUB 2.0 landmarks). Mirrors calibre's
+        // `add_guide_entry` output. Each entry is one
+        // `<reference type="..." title="..." href="..."/>`. Skipped when
+        // empty so the OPF stays clean for inputs with no landmark
+        // metadata.
+        if !self.guide.is_empty() {
+            s.push_str("  <guide>\n");
+            for g in &self.guide {
+                s.push_str(&format!(
+                    "    <reference type=\"{}\" title=\"{}\" href=\"{}\"/>\n",
+                    xml_escape(&g.guide_type),
+                    xml_escape(&g.label),
+                    xml_escape(&g.href),
+                ));
+            }
+            s.push_str("  </guide>\n");
+        }
 
         s.push_str("</package>\n");
         s

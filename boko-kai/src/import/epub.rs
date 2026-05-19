@@ -8,7 +8,7 @@ use std::sync::Arc;
 use zip::ZipArchive;
 
 use crate::dom::Stylesheet;
-use crate::epub::{parse_container_xml, parse_nav_landmarks, parse_ncx, parse_opf};
+use crate::epub::{parse_container_xml, parse_nav_landmarks, parse_ncx, parse_opf, parse_opf_guide};
 use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href};
 use crate::io::{ByteSource, ByteSourceCursor, FileSource};
 use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
@@ -235,7 +235,7 @@ impl EpubImporter {
         };
 
         // 6. Parse landmarks from EPUB 3 nav document
-        let landmarks = if let Some(nav_href) = &opf.nav_href {
+        let mut landmarks = if let Some(nav_href) = &opf.nav_href {
             let nav_path = format!("{}{}", opf_base, nav_href);
             if let Ok(nav_bytes) = read_entry(&source, &zip_index, &nav_path) {
                 let hint_encoding = crate::util::extract_xml_encoding(&nav_bytes);
@@ -254,6 +254,26 @@ impl EpubImporter {
         } else {
             Vec::new()
         };
+
+        // 6b. Fall back to EPUB 2.0 `<guide>` entries when the nav doc had
+        // none (or didn't exist). EPUB 2.0 books and calibre-style 3.0
+        // OPFs both ship landmarks via `<guide>`, and the kfx_to_epub path
+        // emits guide-only OPFs by design (so Apple Books renders them).
+        // We merge missing types rather than wholesale replace, so a nav
+        // doc that omitted some EPUB-2-only landmarks (or vice versa)
+        // still gets the union.
+        if let Ok(mut guide_marks) = parse_opf_guide(&opf_str) {
+            for landmark in &mut guide_marks {
+                if !landmark.href.starts_with('#') && !landmark.href.is_empty() {
+                    landmark.href = format!("{}{}", opf_base, landmark.href);
+                }
+            }
+            for g in guide_marks {
+                if !landmarks.iter().any(|l| l.landmark_type == g.landmark_type) {
+                    landmarks.push(g);
+                }
+            }
+        }
 
         // Build path -> ChapterId map
         let mut path_to_chapter = HashMap::new();

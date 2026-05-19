@@ -912,6 +912,29 @@ impl<'a> ContentState<'a> {
                     .insert(elem_id, (hints, level));
             }
         }
+        // 1b. Layout hints + heading level can also be carried inline on the
+        // content element's outer fields rather than on a named style entity.
+        // boko's `export::kfx` writes them this way (storyline.rs adds
+        // `$761 layout_hints` and `$790 yj.semantics.heading_level` to
+        // `outer_fields`), so on a boko→boko roundtrip the named-style path
+        // above never fires. Merge with anything from the named style so
+        // both sources contribute.
+        let (inline_hints, inline_level) =
+            properties::layout_hints_from_element_fields(fields, &self.book.symbols);
+        if !inline_hints.is_empty() || inline_level.is_some() {
+            let entry = self.book_parts[part_index]
+                .element_layout_hints
+                .entry(elem_id)
+                .or_default();
+            for h in inline_hints {
+                if !entry.0.iter().any(|existing| existing == &h) {
+                    entry.0.push(h);
+                }
+            }
+            if entry.1.is_none() {
+                entry.1 = inline_level;
+            }
+        }
         // 2. Inline content properties (writing-mode, etc.).
         let inline = properties::convert_yj_properties(fields, &self.book.symbols, self.book);
         if !inline.is_empty() {
@@ -1400,6 +1423,70 @@ pub fn consolidate_html(state: &mut ContentState) {
             }
             let lvl = level.as_deref().unwrap_or("1");
             elem.tag = format!("h{}", lvl);
+        }
+    }
+}
+
+/// Replace EOL characters (`\n` / `\r` / ` ` / ` `) inside
+/// element text or tail with explicit `<br/>` elements. Mirrors calibre's
+/// `replace_eol_with_br` (yj_to_epub_content.py:1720). KFX text content
+/// carries forced line breaks as raw EOL characters; without this pass
+/// they get collapsed by HTML whitespace rules and the source `<br/>`s
+/// disappear from the rendered output.
+///
+/// Restart the per-part scan after each split because (a) the newly
+/// created `<br/>`'s tail may itself contain more EOLs, (b) the
+/// in-place insertion shifts indices.
+pub fn replace_eol_with_br(state: &mut ContentState) {
+    const EOL_CHARS: &[char] = &['\n', '\r', '\u{2028}', '\u{2029}'];
+    for part in &mut state.book_parts {
+        loop {
+            let n = part.dom.len();
+            let mut changed = false;
+            for id in 0..n {
+                // Element text — split at the first EOL, insert `<br/>` as
+                // the new first child, drop the EOL.
+                if let Some(text) = part.dom.get(id).text.clone()
+                    && let Some(idx) = text.find(EOL_CHARS)
+                {
+                    let (head, rest) = text.split_at(idx);
+                    let head = head.to_string();
+                    let tail = rest.chars().skip(1).collect::<String>();
+                    let br = part.dom.create_element("br");
+                    part.dom.get_mut(br).tail = if tail.is_empty() { None } else { Some(tail) };
+                    part.dom.get_mut(id).text =
+                        if head.is_empty() { None } else { Some(head) };
+                    part.dom.insert(id, 0, br);
+                    changed = true;
+                    break;
+                }
+                // Element tail — split, insert `<br/>` as the next sibling.
+                if let Some(tail_text) = part.dom.get(id).tail.clone()
+                    && let Some(idx) = tail_text.find(EOL_CHARS)
+                {
+                    let parent = match part.dom.get(id).parent {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let pos = match part.dom.child_index(parent, id) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let (head, rest) = tail_text.split_at(idx);
+                    let head = head.to_string();
+                    let tail = rest.chars().skip(1).collect::<String>();
+                    let br = part.dom.create_element("br");
+                    part.dom.get_mut(br).tail = if tail.is_empty() { None } else { Some(tail) };
+                    part.dom.get_mut(id).tail =
+                        if head.is_empty() { None } else { Some(head) };
+                    part.dom.insert(parent, pos + 1, br);
+                    changed = true;
+                    break;
+                }
+            }
+            if !changed {
+                break;
+            }
         }
     }
 }
