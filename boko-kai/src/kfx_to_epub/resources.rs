@@ -57,6 +57,11 @@ pub struct ResourceIndex {
 
 /// Iterate every image-format `external_resource` in `book` and bundle it
 /// into `out`. Also marks the cover image declared by `book_metadata`.
+///
+/// The hot stage (JXR decode + JPEG encode) runs **in parallel** across all
+/// available CPU cores via `std::thread::scope`. The KFX field extraction
+/// before transcode and the EPUB manifest insertion after are both cheap
+/// and stay serial so manifest filenames + IDs remain deterministic.
 pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, ConvertError> {
     let mut index = ResourceIndex::default();
 
@@ -68,25 +73,57 @@ pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, C
     let mut keys: Vec<&String> = resources.keys().collect();
     keys.sort();
 
+    // ---- Serial pre-pass: extract KFX fields, locate raw bytes, decide
+    //      whether this resource needs the JXR transcode. Cheap (microseconds).
+    let prepared: Vec<PreparedResource<'_>> = keys
+        .into_iter()
+        .filter_map(|key| prepare_resource(key, &resources[key], book))
+        .collect();
+
+    // ---- Parallel pass: run jxr::transcode on each prepared item that needs
+    //      it. Items that don't need transcoding (already JPEG/PNG/etc.) carry
+    //      their bytes through. Each worker thread owns its slice; we
+    //      reassemble in `prepared` order to preserve determinism.
+    let transcoded: Vec<Result<TranscodedBytes, ConvertError>> =
+        parallel_transcode(&prepared);
+
+    // ---- Serial post-pass: filenames, manifest insertion, index.
     let mut totals = jxr::TranscodeTiming::default();
     let mut jxr_count = 0usize;
-    for key in keys {
-        let raw = &resources[key];
-        if let Some((img, timing)) = process_one_resource(key, raw, book, out)? {
-            if let Some(t) = timing {
-                totals.container_parse += t.container_parse;
-                totals.jxr_decode += t.jxr_decode;
-                totals.jpeg_encode += t.jpeg_encode;
-                jxr_count += 1;
-            }
-            index.by_name.insert(img.resource_name.clone(), img);
+    for (prep, t_result) in prepared.iter().zip(transcoded.into_iter()) {
+        let TranscodedBytes { bytes, final_format, timing } = t_result?;
+        if let Some(t) = timing {
+            totals.container_parse += t.container_parse;
+            totals.jxr_decode += t.jxr_decode;
+            totals.jpeg_encode += t.jpeg_encode;
+            jxr_count += 1;
         }
+        let final_mime = format_to_mime(&final_format);
+        let filename = build_image_filename(&prep.location, &final_format, out);
+        let manifest_id = out.add_resource(
+            &filename,
+            bytes,
+            &final_mime,
+            prep.width,
+            prep.height,
+        );
+        index.by_name.insert(
+            prep.resource_name.clone(),
+            ProcessedImage {
+                resource_name: prep.resource_name.clone(),
+                filename,
+                manifest_id,
+                mime: final_mime,
+                width: prep.width,
+                height: prep.height,
+            },
+        );
     }
 
     if std::env::var("BOKO_KFX2EPUB_TRACE").is_ok() && jxr_count > 0 {
         let to_ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
         eprintln!(
-            "[kfx2epub:jxr] {} images, totals: container_parse={:.2} ms  jxr_decode={:.2} ms  jpeg_encode={:.2} ms  (per-image: {:.2} / {:.2} / {:.2} ms)",
+            "[kfx2epub:jxr] {} images, totals: container_parse={:.2} ms  jxr_decode={:.2} ms  jpeg_encode={:.2} ms  (per-image: {:.2} / {:.2} / {:.2} ms; CPU-time, NOT wall)",
             jxr_count,
             to_ms(totals.container_parse),
             to_ms(totals.jxr_decode),
@@ -127,16 +164,37 @@ pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, C
     Ok(index)
 }
 
-fn process_one_resource(
+/// Everything `prepare_resource` extracts up-front, before the transcode.
+/// Borrows from `book.raw_media` for the actual image bytes — that's fine
+/// because the parallel transcode runs inside a `std::thread::scope` whose
+/// lifetime is bound to `process`.
+struct PreparedResource<'a> {
+    resource_name: String,
+    location: String,
+    raw_bytes: &'a [u8],
+    width: Option<u32>,
+    height: Option<u32>,
+    /// True iff the bytes are JPEG-XR (by `format` field or by file magic).
+    is_jxr: bool,
+    /// `format` field as a String for the non-JXR pass-through path.
+    format_str: String,
+}
+
+/// What the parallel transcode step returns for each prepared resource.
+struct TranscodedBytes {
+    bytes: Vec<u8>,
+    final_format: String,
+    /// `Some` only when the JXR pipeline ran; `None` for pass-through formats.
+    timing: Option<jxr::TranscodeTiming>,
+}
+
+fn prepare_resource<'a>(
     fid: &str,
-    raw: &IonValue,
-    book: &BookData,
-    out: &mut EpubOutput,
-) -> Result<Option<(ProcessedImage, Option<jxr::TranscodeTiming>)>, ConvertError> {
+    raw: &'a IonValue,
+    book: &'a BookData,
+) -> Option<PreparedResource<'a>> {
     let inner = raw.unwrap_annotated();
-    let Some(fields) = inner.as_struct() else {
-        return Ok(None);
-    };
+    let fields = inner.as_struct()?;
 
     // Pull the fields we care about. We use symbol-id lookups rather than
     // string keys for speed and to match calibre's $-symbol style.
@@ -155,7 +213,7 @@ fn process_one_resource(
 
     let location = get_field(fields, KfxSymbol::Location as u64)
         .and_then(|v| v.as_string())
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())?;
 
     let width = get_field(fields, KfxSymbol::ResourceWidth as u64)
         .and_then(|v| v.as_int())
@@ -167,53 +225,86 @@ fn process_one_resource(
     // Skip non-image formats here (fonts come in via the fonts step).
     let format_str = format_raw.as_deref().unwrap_or("");
     if !is_image_format_symbol(format_str, mime_raw.as_deref()) {
-        return Ok(None);
+        return None;
     }
 
-    // Locate raw media bytes.
-    let Some(location) = location else {
-        return Ok(None);
-    };
-    let Some(raw_bytes) = book.raw_media.get(&location) else {
-        // Calibre logs "Missing bcRawMedia" here and returns None.
-        eprintln!("kfx_to_epub: missing bcRawMedia at {location:?}");
-        return Ok(None);
+    let raw_bytes = match book.raw_media.get(&location) {
+        Some(b) => b.as_slice(),
+        None => {
+            // Calibre logs "Missing bcRawMedia" here and skips.
+            eprintln!("kfx_to_epub: missing bcRawMedia at {location:?}");
+            return None;
+        }
     };
 
-    // Transcode JXR → JPEG/PNG; pass everything else through. We also sniff
-    // file magic here so a mislabelled format doesn't bundle the wrong mime.
-    let (bytes, final_format, timing) = if format_str == FORMAT_JXR
-        || sniff_format(raw_bytes).as_deref() == Some(FORMAT_JXR)
-    {
-        let (b, fmt, t) = jxr::transcode(raw_bytes, &resource_name)?;
-        (b, fmt, Some(t))
-    } else {
-        let sniffed = sniff_format(raw_bytes).unwrap_or_else(|| format_str.to_string());
-        (raw_bytes.clone(), sniffed, None)
-    };
-    let final_mime = format_to_mime(&final_format);
+    let is_jxr = format_str == FORMAT_JXR
+        || sniff_format(raw_bytes).as_deref() == Some(FORMAT_JXR);
 
-    let filename = build_image_filename(&location, &final_format, out);
-
-    let manifest_id = out.add_resource(
-        &filename,
-        bytes,
-        &final_mime,
+    Some(PreparedResource {
+        resource_name,
+        location,
+        raw_bytes,
         width,
         height,
-    );
+        is_jxr,
+        format_str: format_str.to_string(),
+    })
+}
 
-    Ok(Some((
-        ProcessedImage {
-            resource_name,
-            filename,
-            manifest_id,
-            mime: final_mime,
-            width,
-            height,
-        },
-        timing,
-    )))
+/// Run the per-image transcode (or pass-through) for every prepared item.
+/// Each thread owns a contiguous slice of `prepared` — static striping is
+/// fine because all JXR images on the corpus cost ~20 ms ± 30%.
+fn parallel_transcode(
+    prepared: &[PreparedResource<'_>],
+) -> Vec<Result<TranscodedBytes, ConvertError>> {
+    if prepared.is_empty() {
+        return Vec::new();
+    }
+    let n_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(prepared.len());
+    if n_workers <= 1 {
+        return prepared.iter().map(transcode_one).collect();
+    }
+    let mut out: Vec<Option<Result<TranscodedBytes, ConvertError>>> =
+        (0..prepared.len()).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let chunk_size = prepared.len().div_ceil(n_workers);
+        let mut handles = Vec::with_capacity(n_workers);
+        for chunk in prepared.chunks(chunk_size) {
+            handles.push(scope.spawn(move || -> Vec<Result<TranscodedBytes, ConvertError>> {
+                chunk.iter().map(transcode_one).collect()
+            }));
+        }
+        let mut write_idx = 0;
+        for h in handles {
+            let results = h.join().expect("transcode worker panicked");
+            for r in results {
+                out[write_idx] = Some(r);
+                write_idx += 1;
+            }
+        }
+    });
+    out.into_iter().map(|slot| slot.expect("filled")).collect()
+}
+
+fn transcode_one(p: &PreparedResource<'_>) -> Result<TranscodedBytes, ConvertError> {
+    if p.is_jxr {
+        let (bytes, final_format, t) = jxr::transcode(p.raw_bytes, &p.resource_name)?;
+        Ok(TranscodedBytes {
+            bytes,
+            final_format,
+            timing: Some(t),
+        })
+    } else {
+        let sniffed = sniff_format(p.raw_bytes).unwrap_or_else(|| p.format_str.clone());
+        Ok(TranscodedBytes {
+            bytes: p.raw_bytes.to_vec(),
+            final_format: sniffed,
+            timing: None,
+        })
+    }
 }
 
 fn is_image_format_symbol(format: &str, mime: Option<&str>) -> bool {
