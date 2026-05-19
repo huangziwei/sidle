@@ -68,11 +68,33 @@ pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, C
     let mut keys: Vec<&String> = resources.keys().collect();
     keys.sort();
 
+    let mut totals = jxr::TranscodeTiming::default();
+    let mut jxr_count = 0usize;
     for key in keys {
         let raw = &resources[key];
-        if let Some(img) = process_one_resource(key, raw, book, out)? {
+        if let Some((img, timing)) = process_one_resource(key, raw, book, out)? {
+            if let Some(t) = timing {
+                totals.container_parse += t.container_parse;
+                totals.jxr_decode += t.jxr_decode;
+                totals.jpeg_encode += t.jpeg_encode;
+                jxr_count += 1;
+            }
             index.by_name.insert(img.resource_name.clone(), img);
         }
+    }
+
+    if std::env::var("BOKO_KFX2EPUB_TRACE").is_ok() && jxr_count > 0 {
+        let to_ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        eprintln!(
+            "[kfx2epub:jxr] {} images, totals: container_parse={:.2} ms  jxr_decode={:.2} ms  jpeg_encode={:.2} ms  (per-image: {:.2} / {:.2} / {:.2} ms)",
+            jxr_count,
+            to_ms(totals.container_parse),
+            to_ms(totals.jxr_decode),
+            to_ms(totals.jpeg_encode),
+            to_ms(totals.container_parse) / jxr_count as f64,
+            to_ms(totals.jxr_decode) / jxr_count as f64,
+            to_ms(totals.jpeg_encode) / jxr_count as f64,
+        );
     }
 
     // Cover wiring: book_metadata names a resource_name; mark its manifest
@@ -110,7 +132,7 @@ fn process_one_resource(
     raw: &IonValue,
     book: &BookData,
     out: &mut EpubOutput,
-) -> Result<Option<ProcessedImage>, ConvertError> {
+) -> Result<Option<(ProcessedImage, Option<jxr::TranscodeTiming>)>, ConvertError> {
     let inner = raw.unwrap_annotated();
     let Some(fields) = inner.as_struct() else {
         return Ok(None);
@@ -160,13 +182,14 @@ fn process_one_resource(
 
     // Transcode JXR → JPEG/PNG; pass everything else through. We also sniff
     // file magic here so a mislabelled format doesn't bundle the wrong mime.
-    let (bytes, final_format) = if format_str == FORMAT_JXR
+    let (bytes, final_format, timing) = if format_str == FORMAT_JXR
         || sniff_format(raw_bytes).as_deref() == Some(FORMAT_JXR)
     {
-        jxr::transcode(raw_bytes, &resource_name)?
+        let (b, fmt, t) = jxr::transcode(raw_bytes, &resource_name)?;
+        (b, fmt, Some(t))
     } else {
         let sniffed = sniff_format(raw_bytes).unwrap_or_else(|| format_str.to_string());
-        (raw_bytes.clone(), sniffed)
+        (raw_bytes.clone(), sniffed, None)
     };
     let final_mime = format_to_mime(&final_format);
 
@@ -180,14 +203,17 @@ fn process_one_resource(
         height,
     );
 
-    Ok(Some(ProcessedImage {
-        resource_name,
-        filename,
-        manifest_id,
-        mime: final_mime,
-        width,
-        height,
-    }))
+    Ok(Some((
+        ProcessedImage {
+            resource_name,
+            filename,
+            manifest_id,
+            mime: final_mime,
+            width,
+            height,
+        },
+        timing,
+    )))
 }
 
 fn is_image_format_symbol(format: &str, mime: Option<&str>) -> bool {

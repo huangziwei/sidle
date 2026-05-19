@@ -35,30 +35,52 @@ use super::ConvertError;
 /// stream. Returns `(bytes, format_symbol)` where `format_symbol` is one of
 /// `"jpg"` / `"png"` (matching `resources::FORMAT_*`).
 ///
+/// Per-stage timing for one transcode call. Always collected — `Instant`'s
+/// read cost is ~10 ns. Caller may aggregate or ignore.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TranscodeTiming {
+    pub container_parse: std::time::Duration,
+    pub jxr_decode: std::time::Duration,
+    pub jpeg_encode: std::time::Duration,
+}
+
 /// On any decoder failure the original bytes pass through with format
 /// `"jxr"` so the caller can decide whether to error or bundle as-is.
-pub fn transcode(jxr_bytes: &[u8], resource_name: &str) -> Result<(Vec<u8>, String), ConvertError> {
+pub fn transcode(
+    jxr_bytes: &[u8],
+    resource_name: &str,
+) -> Result<(Vec<u8>, String, TranscodeTiming), ConvertError> {
+    use std::time::Instant;
+    let mut t = TranscodeTiming::default();
+
+    let t0 = Instant::now();
     let container = match container::parse(jxr_bytes) {
         Ok(c) => c,
         Err(e) => {
             eprintln!(
                 "kfx_to_epub jxr: container parse failed for {resource_name}: {e}; passing through"
             );
-            return Ok((jxr_bytes.to_vec(), "jxr".into()));
+            return Ok((jxr_bytes.to_vec(), "jxr".into(), t));
         }
     };
+    t.container_parse = t0.elapsed();
 
+    let t1 = Instant::now();
     let decoded = match decoder::Decoder::new(container.image_data).decode() {
         Ok(d) => d,
         Err(e) => {
             eprintln!(
                 "kfx_to_epub jxr: decode failed for {resource_name}: {e}; passing through"
             );
-            return Ok((jxr_bytes.to_vec(), "jxr".into()));
+            return Ok((jxr_bytes.to_vec(), "jxr".into(), t));
         }
     };
+    t.jxr_decode = t1.elapsed();
 
-    encode_jpeg(&decoded).map(|bytes| (bytes, "jpg".into()))
+    let t2 = Instant::now();
+    let bytes = encode_jpeg(&decoded)?;
+    t.jpeg_encode = t2.elapsed();
+    Ok((bytes, "jpg".into(), t))
 }
 
 fn encode_jpeg(img: &decoder::DecodedImage) -> Result<Vec<u8>, ConvertError> {
