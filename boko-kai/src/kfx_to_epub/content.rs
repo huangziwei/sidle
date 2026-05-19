@@ -50,6 +50,14 @@ pub struct ContentState<'a> {
     /// Used after content emission to wire up internal href targets.
     pub anchor_targets: HashMap<(String, i64), AnchorTarget>,
 
+    /// Per-element-id → chapter filename. Populated during content emission as
+    /// we encounter elements with an `id` ($155) anywhere in the storyline
+    /// (including page_templates, container/text/etc.). Drives nav resolution
+    /// in `navigation::extract_toc`: a nav_unit `target_position.id` maps to
+    /// the chapter file containing that element. Mirrors part of calibre's
+    /// `process_position` — currently chapter-granular, not paragraph-fragment.
+    pub element_id_to_filename: HashMap<i64, String>,
+
     /// Mapping for the "main_content" link id and similar markers.
     pub link_ids: HashMap<String, String>,
 
@@ -90,6 +98,7 @@ impl<'a> ContentState<'a> {
             anchor_targets: HashMap::new(),
             link_ids: HashMap::new(),
             used_kfx_styles: Vec::new(),
+            element_id_to_filename: HashMap::new(),
         }
     }
 
@@ -154,6 +163,20 @@ impl<'a> ContentState<'a> {
 
         // Link stylesheet.
         self.link_stylesheet(part_index);
+
+        // Record every element id reachable from this section (page_templates +
+        // their storylines, recursively). This lets `navigation::extract_toc`
+        // resolve `nav_unit.target_position.id` to the chapter file the
+        // navigation entry belongs in.
+        let mut ids: Vec<i64> = Vec::new();
+        for tpl in &page_templates {
+            collect_element_ids(tpl, self.book, &mut ids);
+        }
+        for eid in ids {
+            self.element_id_to_filename
+                .entry(eid)
+                .or_insert_with(|| filename.clone());
+        }
 
         // Process the LAST page_template into the existing body element
         // (calibre's main path; conditional templates are prepended).
@@ -848,6 +871,62 @@ fn lookup_fragment(book: &BookData, ftype: KfxSymbol, fid: &str) -> Option<IonVa
         .get(&(ftype as u64))
         .and_then(|m| m.get(fid))
         .cloned()
+}
+
+/// Walk every Ion value reachable from a page_template (including referenced
+/// storylines) and append every `$155 id` value into `out`.
+///
+/// "Referenced storyline" = when an Ion struct has a `story_name` ($176)
+/// field, look it up in `book.by_type[storyline]` and recurse into its
+/// `content_list`. The walk is depth-first and idempotent against cycles
+/// (tracks visited story names).
+fn collect_element_ids(template: &IonValue, book: &BookData, out: &mut Vec<i64>) {
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    walk_ids_recursive(template, book, &mut visited, out);
+}
+
+fn walk_ids_recursive(
+    value: &IonValue,
+    book: &BookData,
+    visited: &mut std::collections::HashSet<String>,
+    out: &mut Vec<i64>,
+) {
+    let inner = value.unwrap_annotated();
+    match inner {
+        IonValue::Struct(fields) => {
+            // Capture this struct's id field, if any.
+            if let Some(id_value) = get_field(fields, KfxSymbol::Id as u64) {
+                if let Some(n) = id_value.as_int() {
+                    out.push(n);
+                }
+            }
+            // Follow story_name references — these point at storylines in
+            // book.by_type[storyline], whose content_list holds the actual
+            // body of the chapter.
+            if let Some(story_value) = get_field(fields, KfxSymbol::StoryName as u64) {
+                if let Some(name) = book.symbols.text_of(story_value) {
+                    if visited.insert(name.to_string()) {
+                        if let Some(storyline) =
+                            lookup_fragment(book, KfxSymbol::Storyline, name)
+                        {
+                            walk_ids_recursive(&storyline, book, visited, out);
+                        }
+                    }
+                }
+            }
+            // Recurse into every field value (covers content_list, nested
+            // structs, etc.).
+            for (_, v) in fields {
+                walk_ids_recursive(v, book, visited, out);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                walk_ids_recursive(item, book, visited, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Resolve `$145` text: either a literal string or a struct

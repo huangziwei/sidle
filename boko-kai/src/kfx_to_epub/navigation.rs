@@ -9,6 +9,8 @@
 //! 1.5 (when content emission emits per-position anchor ids) will wire
 //! `#fragment-id` references that drop into the right paragraph.
 
+use std::collections::HashMap;
+
 use crate::kfx::container::get_field;
 use crate::kfx::ion::IonValue;
 use crate::kfx::symbols::KfxSymbol;
@@ -25,7 +27,13 @@ pub struct NavPoint {
 }
 
 /// Walk the `book_navigation` fragment and return the TOC tree.
-pub fn extract_toc(book: &BookData) -> Vec<NavPoint> {
+///
+/// `element_id_to_filename` is the chapter resolution map built by
+/// `content.rs::process_section` — each entry maps an element id (the value
+/// stored on storyline elements via `$155 id`) to the chapter `.xhtml` file
+/// the element ended up in. We use it to point each nav_unit's
+/// `target_position.id` at the right chapter file.
+pub fn extract_toc(book: &BookData, element_id_to_filename: &HashMap<i64, String>) -> Vec<NavPoint> {
     let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
         return Vec::new();
     };
@@ -66,7 +74,7 @@ pub fn extract_toc(book: &BookData) -> Vec<NavPoint> {
                     .map(|s| s.to_vec())
                     .unwrap_or_default();
                 for entry in &entries {
-                    if let Some(np) = nav_unit_to_navpoint(entry, book) {
+                    if let Some(np) = nav_unit_to_navpoint(entry, book, element_id_to_filename) {
                         toc.push(np);
                     }
                 }
@@ -76,7 +84,11 @@ pub fn extract_toc(book: &BookData) -> Vec<NavPoint> {
     toc
 }
 
-fn nav_unit_to_navpoint(entry: &IonValue, book: &BookData) -> Option<NavPoint> {
+fn nav_unit_to_navpoint(
+    entry: &IonValue,
+    book: &BookData,
+    element_id_to_filename: &HashMap<i64, String>,
+) -> Option<NavPoint> {
     let inner = entry.unwrap_annotated();
     let fields = inner.as_struct()?;
 
@@ -95,21 +107,18 @@ fn nav_unit_to_navpoint(entry: &IonValue, book: &BookData) -> Option<NavPoint> {
         return None;
     }
 
-    // Target position: gives us (id, offset) but we don't yet wire to a
-    // specific chapter file. Use the section_name from the position id
-    // resolution if available; otherwise leave the href empty (calibre's
-    // later fixup wires it via anchor_uri).
-    let target_position = get_field(fields, KfxSymbol::TargetPosition as u64)
-        .and_then(|v| v.as_struct());
-    let href = if let Some(_pos) = target_position {
-        // We can't resolve to a chapter file without the position_anchors
-        // table fully built. For now, leave href as a placeholder pointing
-        // to the first chapter.
-        // TODO(phase1-nav): resolve via position → chapter map.
-        String::from("c4VC.xhtml")
-    } else {
-        String::new()
-    };
+    // Target position: gives us (id, offset). Look the id up in the chapter
+    // map populated by `content::process_section`. Fragment ids (`#paragraph`)
+    // are a separate phase-1.5 follow-up — calibre's `process_position`
+    // emits `id="..."` attributes on storyline elements at matching offsets;
+    // for now we land on the chapter file only, which is enough for "the TOC
+    // takes me to the right place" UX.
+    let href = get_field(fields, KfxSymbol::TargetPosition as u64)
+        .and_then(|v| v.as_struct())
+        .and_then(|pos| get_field(pos, KfxSymbol::Id as u64))
+        .and_then(|v| v.as_int())
+        .and_then(|id| element_id_to_filename.get(&id).cloned())
+        .unwrap_or_default();
 
     // Children — recursive.
     let mut children = Vec::new();
@@ -117,7 +126,7 @@ fn nav_unit_to_navpoint(entry: &IonValue, book: &BookData) -> Option<NavPoint> {
         get_field(fields, KfxSymbol::Entries as u64).and_then(|v| v.as_list())
     {
         for child in child_entries {
-            if let Some(np) = nav_unit_to_navpoint(child, book) {
+            if let Some(np) = nav_unit_to_navpoint(child, book, element_id_to_filename) {
                 children.push(np);
             }
         }

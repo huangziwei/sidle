@@ -98,8 +98,10 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
         resources::emit_image_scaffold_chapters(&mut out);
     }
 
-    // Phase 1 step 2 — navigation. Build NCX from book_navigation.
-    let toc = navigation::extract_toc(&book);
+    // Phase 1 step 2 — navigation. Build NCX from book_navigation, using the
+    // element-id → chapter-filename map populated by `process_section` to
+    // resolve `nav_unit.target_position.id` to a real chapter file.
+    let toc = navigation::extract_toc(&book, &content_state.element_id_to_filename);
     if !toc.is_empty() {
         out.ncx_navmap = Some(navigation::render_navmap(&toc));
     }
