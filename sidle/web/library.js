@@ -965,7 +965,11 @@ function onResizerDown(e, resizer, idx) {
   if (!col) return;
   const key = col.dataset.col;
   const startX = e.clientX;
-  const startWidth = col.getBoundingClientRect().width;
+  // <col> is invisible to layout — getBoundingClientRect on it returns 0,
+  // which used to make the column snap to the 48px minimum on the first
+  // pixel of drag. Measure the actual rendered width via the th instead.
+  const th = resizer.closest("th");
+  const startWidth = th ? th.getBoundingClientRect().width : (state.columnWidths[key] || 100);
   resizer.classList.add("active");
   document.body.style.cursor = "col-resize";
   const onMove = (ev) => {
