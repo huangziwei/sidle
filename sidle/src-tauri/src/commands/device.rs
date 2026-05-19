@@ -1,12 +1,9 @@
 //! Tauri commands for Kindle device sync.
 
-use std::path::PathBuf;
-
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::device::dedrm::{self, DedrmRow, PullResult};
 use crate::device::detect::DeviceInfo;
 use crate::device::push::{self, DeleteResult, PushResult};
 use crate::device::{manifest, manifest::Manifest};
@@ -99,61 +96,6 @@ pub async fn device_delete(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn device_scan_dedrm(state: State<'_, AppState>) -> Result<Vec<DedrmRow>, String> {
-    let Some(device) = state.device.lock().await.clone() else {
-        return Ok(Vec::new());
-    };
-    let db_handle = state.db.clone();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<DedrmRow>> {
-        let conn = db_handle.blocking_lock();
-        dedrm::scan(&conn, &device)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn device_pull(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    paths: Vec<String>,
-) -> Result<Vec<PullResult>, String> {
-    let Some(device) = state.device.lock().await.clone() else {
-        return Err("no Kindle connected".to_string());
-    };
-    let db_handle = state.db.clone();
-    let paths_handle = state.paths.clone();
-
-    // Each freshly-imported KFX/KFX-zip now needs a background `kfx_to_epub`
-    // job — import_file no longer runs `convert_to_epub` inline. Pull_one
-    // returns the book_id whenever an enqueue is required; we collect those
-    // and submit them after the blocking import loop finishes.
-    let outcomes = tokio::task::spawn_blocking(move || -> Vec<(PullResult, Option<i64>)> {
-        let conn = db_handle.blocking_lock();
-        let mut out = Vec::with_capacity(paths.len());
-        for raw in paths {
-            let path = PathBuf::from(&raw);
-            let pair = dedrm::pull_one(&conn, &paths_handle, &device, &path);
-            let _ = app.emit("device:pull-progress", &pair.0);
-            out.push(pair);
-        }
-        out
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let mut results = Vec::with_capacity(outcomes.len());
-    for (result, enqueue) in outcomes {
-        if let Some(book_id) = enqueue {
-            let _ = state.queue.enqueue(book_id).await;
-        }
-        results.push(result);
-    }
-    Ok(results)
 }
 
 #[tauri::command]

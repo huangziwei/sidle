@@ -36,8 +36,6 @@ pub fn run() {
             commands::device::device_list_ours,
             commands::device::device_send,
             commands::device::device_delete,
-            commands::device::device_scan_dedrm,
-            commands::device::device_pull,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

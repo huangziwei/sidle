@@ -98,6 +98,34 @@ pub enum PullResult {
     },
 }
 
+/// Scan + pull every not-yet-imported dedrm file in one shot. Used by the
+/// auto-pull-on-connect path so a freshly plugged-in Kindle drains its
+/// `/dedrm` folder into the library without any UI interaction.
+///
+/// Returns `(PullResult, Option<book_id_to_enqueue>)` for each attempted
+/// file. The caller (async context) does the actual queue enqueues.
+pub fn pull_new(
+    conn: &rusqlite::Connection,
+    paths: &LibraryPaths,
+    device: &DeviceInfo,
+) -> Vec<(PullResult, Option<i64>)> {
+    let rows = match scan(conn, device) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[sidle/dedrm] auto-scan failed: {e:#}");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for r in rows {
+        if r.already_imported {
+            continue;
+        }
+        out.push(pull_one(conn, paths, device, Path::new(&r.path)));
+    }
+    out
+}
+
 /// Import a single dedrm file into the library. Records a `pull` row in
 /// `device_history`. Returns the import outcome plus, when the row needs a
 /// background conversion (now true for every fresh KFX/KFX-zip pull — the

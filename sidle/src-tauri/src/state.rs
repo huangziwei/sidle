@@ -61,7 +61,13 @@ impl AppState {
         }
 
         let device = monitor::new_state();
-        monitor::spawn(app, device.clone());
+        monitor::spawn(
+            app,
+            device.clone(),
+            db.clone(),
+            paths.clone(),
+            queue.clone(),
+        );
 
         Ok(Self {
             db,
