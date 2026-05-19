@@ -43,7 +43,6 @@ const ENTY_SIGNATURE: &[u8] = b"ENTY";
 const CONTAINER_VERSION: u16 = 2;
 const ENTITY_VERSION: u16 = 1;
 const DEFAULT_CHUNK_SIZE: i64 = 4096;
-const KFX_CONTAINER_FORMAT_MAIN: &str = "KFX main";
 const SYM_DOLLAR_348: u32 = 348;
 const SYM_DOLLAR_419: u32 = 419;
 const SYM_DOLLAR_270: u32 = 270;
@@ -51,7 +50,6 @@ const SYM_DOLLAR_270: u32 = 270;
 /// Compact view of one source `.kfx` after the cheap parse phase.
 struct RawContainer {
     data: Vec<u8>,
-    header_len: usize,
     container_id: String,
     kfxgen_app_version: String,
     kfxgen_pkg_version: String,
@@ -133,8 +131,7 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
     let bytes = std::thread::scope(|scope| -> io::Result<Vec<u8>> {
         let raws_for_sha = &raws_refs;
         let sha1_handle = scope.spawn(move || -> io::Result<[u8; 20]> {
-            use sha1::Digest;
-            let mut hasher = sha1::Sha1::new();
+            let mut hasher = sha1_smol::Sha1::new();
             for rc in raws_for_sha {
                 for &(off, len) in &per_container_hash_chunks(rc) {
                     hasher.update(&rc.data[off..off + len]);
@@ -143,7 +140,7 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
             if let Ok(new_419) = new_419_rx.recv() {
                 hasher.update(&new_419);
             }
-            Ok(hasher.finalize().into())
+            Ok(hasher.digest().bytes())
         });
         finish_merge(scope, &raws_refs, new_419_tx, sha1_handle, trace)
     })?;
@@ -421,7 +418,6 @@ fn parse_container_shallow(data: Vec<u8>) -> io::Result<RawContainer> {
 
     Ok(RawContainer {
         data,
-        header_len,
         container_id,
         kfxgen_app_version: app_version,
         kfxgen_pkg_version: pkg_version,

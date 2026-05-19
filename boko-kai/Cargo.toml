@@ -48,11 +48,13 @@ jpeg-encoder = { version = "0.6", default-features = false }
 # Ion binary format parsing for KFX dump tool
 ion-rs = { version = "1.0.0-rc.11", features = ["experimental-reader-writer"] }
 
-# SHA1 hashing for KFX content hashes (minimal, WASM-compatible)
+# SHA1 hashing for KFX content hashes (minimal, WASM-compatible).
+# Used by the kfx-zip → kfx fast path. RustCrypto's `sha1 = "0.10"` with
+# `features=["asm"]` was tried for speed but produced wrong digests on
+# Apple Silicon — calibre rejected the output with "Incorrect
+# kfxgen_payload_sha1". `sha1_smol` matches OpenSSL/hashlib on every
+# platform we test, so we keep it as the single SHA1 implementation.
 sha1_smol = { version = "1.0", features = ["std"] }
-# RustCrypto SHA1 with SIMD-asm fallback; ~2× sha1_smol on Intel without SHA-NI.
-# Used on the kfx-zip → kfx fast path where SHA1 of entity bodies is hot.
-sha1 = { version = "0.10", default-features = false, features = ["asm"] }
 
 # CLI argument parsing (only for binary)
 clap = { version = "4", features = ["derive"], optional = true }

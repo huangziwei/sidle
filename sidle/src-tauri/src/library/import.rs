@@ -7,11 +7,12 @@
 //!   `.kfx-zip` is first merged to a single-container `.kfx` (via boko's
 //!   `kfx::merge::merge_kfx_zip`) and persisted to disk; the same in-memory
 //!   KFX bytes are then handed to boko's `kfx_to_epub::convert_to_epub` to
-//!   produce the EPUB without re-reading the file. The cover image is pulled
-//!   from that same in-memory KFX (it lives in the KFX's resource entities,
-//!   not the EPUB output), so no second `Book::open` is needed. `.kfx` inputs
-//!   skip the merge step but follow the same shape. No EPUB→KFX queue work
-//!   runs — we already have the KFX.
+//!   produce the EPUB without re-reading the file. The cover sidecar is
+//!   pulled from those produced EPUB bytes — `kfx_to_epub` already transcodes
+//!   the KFX's JXR cover into a renderable JPEG and renames it `cover.<ext>`,
+//!   so we just copy it out instead of running JXR through the decoder twice.
+//!   `.kfx` inputs skip the merge step but follow the same shape. No EPUB→KFX
+//!   queue work runs — we already have the KFX.
 //!
 //! Each step touches disk; callers should run this inside `spawn_blocking`.
 
@@ -156,23 +157,12 @@ fn import_kfx(
         _ => unreachable!("import_kfx called with non-KFX source"),
     };
 
-    // Read metadata AND pull the cover image out of the same in-memory KFX —
-    // we already have all the bytes, so a second `Book::open` later would be
-    // pure overhead. The cover ref lives in `Metadata.cover_image`; its bytes
-    // live in a resource entity inside the KFX itself.
-    let (meta, cover_data): (BookMeta, Option<(Vec<u8>, &'static str)>) = {
-        let mut book = boko::Book::from_bytes(&kfx_bytes, boko::Format::Kfx)
+    // Read metadata from the in-memory merged KFX so we can name the file.
+    // Cover is *not* extracted here — see step 3 below.
+    let meta = {
+        let book = boko::Book::from_bytes(&kfx_bytes, boko::Format::Kfx)
             .with_context(|| "read kfx metadata")?;
-        let meta = extract_meta(book.metadata(), src.file_stem().and_then(|s| s.to_str()));
-        let cover = meta
-            .cover_image
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .and_then(|cref| {
-                let bytes = book.load_asset(&PathBuf::from(cref)).ok()?;
-                Some((bytes, cover_ext_from(cref)))
-            });
-        (meta, cover)
+        extract_meta(book.metadata(), src.file_stem().and_then(|s| s.to_str()))
     };
     let basename = format_basename(&meta.authors, &meta.title, meta.date.as_deref());
 
@@ -186,12 +176,22 @@ fn import_kfx(
     // Step 2: KFX bytes → EPUB bytes via boko's mechanical port. The bytes
     // are byte-identical to what we just wrote to `dest_kfx`, so this matches
     // a re-open without the disk round-trip.
-    if !dest_epub.exists() {
-        synthesize_epub_from_kfx(&kfx_bytes, &dest_epub)
+    let epub_bytes = if dest_epub.exists() {
+        // Idempotent re-import: reuse the EPUB on disk so we can still pull
+        // the cover out of it below without re-running the KFX→EPUB convert.
+        fs::read(&dest_epub).with_context(|| format!("read {}", dest_epub.display()))?
+    } else {
+        let bytes = boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
+            .map_err(|e| anyhow::anyhow!("boko kfx→epub: {e}"))
             .with_context(|| format!("export EPUB {}", dest_epub.display()))?;
-    }
+        write_bytes_atomic(&dest_epub, &bytes)?;
+        bytes
+    };
 
-    let cover_path = cover_data.and_then(|(bytes, ext)| {
+    // Step 3: cover sidecar. `kfx_to_epub` already transcoded the KFX's JXR
+    // cover into JPEG and renamed it `cover.<ext>` inside the EPUB, so we
+    // copy those bytes out as-is — no second JXR decode pass.
+    let cover_path = extract_cover_from_epub(&epub_bytes).and_then(|(bytes, ext)| {
         let out = paths.cover(&sha, ext);
         fs::write(&out, &bytes).ok().map(|_| out)
     });
@@ -215,13 +215,20 @@ fn import_kfx(
     })
 }
 
-/// Convert single-container KFX bytes to an EPUB file via boko's mechanical
-/// port (`kfx_to_epub::convert_to_epub`). Caller is responsible for ensuring
-/// the bytes are a single-container `.kfx` — `.kfx-zip` must be merged first.
-fn synthesize_epub_from_kfx(kfx_bytes: &[u8], dest_epub: &Path) -> Result<()> {
-    let epub_bytes = boko::kfx_to_epub::convert_to_epub(kfx_bytes)
-        .map_err(|e| anyhow::anyhow!("boko kfx→epub: {e}"))?;
-    write_bytes_atomic(dest_epub, &epub_bytes)
+/// Read the cover entry out of an in-memory EPUB. Returns `(bytes, ext)`
+/// where `ext` is the lowercase extension from the EPUB's cover-image href
+/// (e.g. `"jpg"`, `"png"`).
+///
+/// The EPUB has already had JXR transcoded to JPEG by `kfx_to_epub`, so the
+/// bytes are renderable as-is in the sidle UI.
+fn extract_cover_from_epub(epub_bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
+    let mut book = boko::Book::from_bytes(epub_bytes, boko::Format::Epub).ok()?;
+    let cref = book.metadata().cover_image.as_deref()?.to_string();
+    if cref.is_empty() {
+        return None;
+    }
+    let bytes = book.load_asset(&PathBuf::from(&cref)).ok()?;
+    Some((bytes, cover_ext_from(&cref)))
 }
 
 fn write_bytes_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
