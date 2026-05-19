@@ -36,6 +36,9 @@ libc = "0.2"
 # rustls so we don't pull in system OpenSSL on macOS/Linux. Only used for
 # the cover-fetch path (amazon.co.jp /images/P/<ASIN>.09.LZZZZZZZ.jpg).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+# Used by the post-fetch EPUB cover swap (rewrite the zip with new cover
+# bytes). Match boko-kai's version so we don't pull in two zip crates.
+zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 
 boko-kai = { path = "../../boko-kai", default-features = false }
 

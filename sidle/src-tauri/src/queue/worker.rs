@@ -14,6 +14,7 @@ use tauri::AppHandle;
 use crate::library::LibraryPaths;
 use crate::library::cover_fetch;
 use crate::library::db::{self, BookRow};
+use crate::library::epub_cover;
 use crate::library::import::{extract_cover_from_epub, write_bytes_atomic};
 use crate::library::paths::format_basename;
 use crate::queue::emit_status;
@@ -102,6 +103,24 @@ pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_
                                 out.display()
                             );
                             produced.cover_path = Some(out);
+
+                            // Also swap the cover inside the just-produced
+                            // EPUB so external readers see color too. Best-
+                            // effort — log and continue on failure rather
+                            // than failing the whole job over a cosmetic
+                            // EPUB tweak.
+                            if let Some(epub) = &produced.epub_path {
+                                match epub_cover::replace_cover(epub, &bytes, "jpg") {
+                                    Ok(()) => eprintln!(
+                                        "[sidle/queue] book {book_id} color cover \
+                                         swapped inside epub"
+                                    ),
+                                    Err(e) => eprintln!(
+                                        "[sidle/queue] book {book_id} epub cover \
+                                         swap failed: {e:#}"
+                                    ),
+                                }
+                            }
                         }
                     }
                     None => {

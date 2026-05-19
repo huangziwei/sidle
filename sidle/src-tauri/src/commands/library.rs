@@ -10,6 +10,7 @@ use tokio::sync::oneshot;
 
 use crate::library::cover_fetch;
 use crate::library::db::{self, BookRow};
+use crate::library::epub_cover;
 use crate::library::import::{self, ImportOutcome};
 use crate::state::AppState;
 
@@ -173,6 +174,17 @@ pub async fn library_recrawl_cover(
         && old != out_str.as_str()
     {
         let _ = std::fs::remove_file(old);
+    }
+    // Also swap the cover inside the EPUB so external readers see the
+    // color version. Best-effort: log to stderr and continue if the swap
+    // fails — the sidecar is what the sidle gallery uses, so a failed
+    // EPUB swap doesn't invalidate the user's "Re-fetch cover" action.
+    if let Some(epub) = book.epub_path.as_deref() {
+        if let Err(e) =
+            epub_cover::replace_cover(std::path::Path::new(epub), &bytes, "jpg")
+        {
+            eprintln!("[sidle/recrawl] book {book_id} epub cover swap failed: {e:#}");
+        }
     }
     Ok(RecrawlResult::Updated {
         cover_path: out_str,
