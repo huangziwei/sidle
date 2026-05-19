@@ -346,11 +346,20 @@ pub fn extract_text_from_kfx(kfx_bytes: &[u8]) -> Result<String, String> {
     let entities =
         parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
-    let content_type = KfxSymbol::Content as u32;
+    // Iterate every entity type that carries reading text. `$145 content` is
+    // the obvious one; `$259 storyline` ALSO carries text via its own
+    // content_list when KFX inlines the content rather than referencing a
+    // separate Content entity. Skipping storylines under-counts the source
+    // (e.g., on horror.boko.kfx 35 Content entities cover only 35 of 40
+    // storylines; the other 5 inline their text and were previously missed).
+    let text_types: [u32; 2] = [
+        KfxSymbol::Content as u32,
+        KfxSymbol::Storyline as u32,
+    ];
 
     let mut out = String::new();
     for ent in &entities {
-        if ent.type_id != content_type {
+        if !text_types.contains(&ent.type_id) {
             continue;
         }
         if ent.offset + ent.length > kfx_bytes.len() {
@@ -384,20 +393,45 @@ where
         IonValue::Annotated(_, inner) => inner.as_ref(),
         _ => value,
     };
-    let IonValue::Struct(fields) = inner else {
-        return;
-    };
-    for (k, v) in fields {
-        if resolve_sym(*k) == "content_list"
-            && let IonValue::List(items) = v
-        {
-            for item in items {
-                if let IonValue::String(s) = item {
-                    out.push_str(s);
-                    out.push(' ');
+    match inner {
+        IonValue::Struct(fields) => {
+            for (k, v) in fields {
+                match resolve_sym(*k).as_str() {
+                    // `$145 content`: leaf text. Direct string is the
+                    // common case; struct (`$176 name` + `$169 index`)
+                    // is a content_ref, resolved when its target Content
+                    // entity is iterated by the outer loop.
+                    "content" => {
+                        if let IonValue::String(s) = v.unwrap_annotated() {
+                            out.push_str(s);
+                            out.push(' ');
+                        }
+                    }
+                    // `$146 content_list`: structural children. Strings
+                    // are leaf text; structs may carry their own
+                    // `content` / `content_list` fields and must be
+                    // walked recursively.
+                    "content_list" => {
+                        if let IonValue::List(items) = v {
+                            for item in items {
+                                match item.unwrap_annotated() {
+                                    IonValue::String(s) => {
+                                        out.push_str(s);
+                                        out.push(' ');
+                                    }
+                                    IonValue::Struct(_) => {
+                                        collect_content_text(item, resolve_sym, out);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
+        _ => {}
     }
 }
 
