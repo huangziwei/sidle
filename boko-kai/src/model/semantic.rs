@@ -49,6 +49,11 @@ pub struct SemanticMap {
     is_header_cell: HashMap<NodeId, bool>,
     /// Programming language for code blocks.
     language: HashMap<NodeId, TextRange>,
+    /// Original `class` attribute string (verbatim, space-separated). Used to
+    /// preserve source class identity through the EPUB → IR → KFX → EPUB
+    /// round-trip. The cascade resolves styling independently; this field is
+    /// purely a name hint for the KFX style symbol and the output `class`.
+    class: HashMap<NodeId, TextRange>,
 }
 
 impl SemanticMap {
@@ -280,6 +285,21 @@ impl SemanticMap {
         self.language.get(&node).map(|r| self.get_str(*r))
     }
 
+    // --- class ---
+
+    /// Set the original class attribute for a node.
+    pub fn set_class(&mut self, node: NodeId, class: &str) {
+        if !class.is_empty() {
+            let range = self.append(class);
+            self.class.insert(node, range);
+        }
+    }
+
+    /// Get the original class attribute for a node.
+    pub fn class(&self, node: NodeId) -> Option<&str> {
+        self.class.get(&node).map(|r| self.get_str(*r))
+    }
+
     // --- Generic access ---
 
     /// Get an attribute by name.
@@ -398,6 +418,7 @@ impl SemanticMap {
             + self.col_span.len()
             + self.is_header_cell.len()
             + self.language.len()
+            + self.class.len()
     }
 
     /// Check if the map is empty.

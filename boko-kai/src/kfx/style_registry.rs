@@ -181,8 +181,19 @@ fn hash_kfx_value<H: Hasher>(value: &KfxValue, hasher: &mut H) {
 
 /// Registry for collecting and deduplicating styles during export.
 pub struct StyleRegistry {
-    /// Hash -> (style_id, style_name_symbol, computed_style)
-    styles: HashMap<u64, (u64, u64, ComputedStyle)>,
+    /// Hash -> (style_id, style_name_symbol, name_string, computed_style)
+    ///
+    /// `name_string` is the actual symbol text. For source-EPUB-origin styles
+    /// where the IR carried a single source class name, this is that class
+    /// (e.g. "bold", "vrtl") so the round-trip preserves identity. For styles
+    /// without a usable hint it falls back to `format!("s{:X}", style_id)`.
+    styles: HashMap<u64, (u64, u64, String, ComputedStyle)>,
+
+    /// Names already taken as style symbols. Lets us avoid two distinct
+    /// `ComputedStyle`s competing for the same source-class name. First-
+    /// registration wins; later styles with the same hint get the synthesized
+    /// `s<N>` fallback.
+    taken_names: std::collections::HashSet<String>,
 
     /// Next style ID to assign
     next_style_id: u64,
@@ -200,8 +211,12 @@ impl StyleRegistry {
     /// The `default_style_symbol` is the symbol ID for "s0" (or similar),
     /// pre-registered in the symbol table.
     pub fn new(default_style_symbol: u64) -> Self {
+        let mut taken_names = std::collections::HashSet::new();
+        // "s0" is the default-style name; everything we generate starts at s1.
+        taken_names.insert("s0".to_string());
         Self {
             styles: HashMap::new(),
+            taken_names,
             next_style_id: 1, // Start at 1, 0 is default
             default_style_id: 0,
             default_style_symbol,
@@ -218,33 +233,74 @@ impl StyleRegistry {
         self.default_style_symbol
     }
 
-    /// Register a computed style and get its ID.
+    /// Register a computed style and get its symbol.
     ///
-    /// If an identical style was already registered, returns the existing ID.
-    /// Otherwise, assigns a new ID.
+    /// If an identical style was already registered, returns the existing
+    /// symbol. Otherwise, assigns a new ID with synthesized name `s<N>`.
     pub fn register(
         &mut self,
         style: ComputedStyle,
+        symbols: &mut crate::kfx::context::SymbolTable,
+    ) -> u64 {
+        self.register_with_hint(style, None, symbols)
+    }
+
+    /// Register a computed style with an optional name hint.
+    ///
+    /// The hint is the original CSS class attribute string from the source
+    /// element. When the hint is a single valid identifier (no whitespace,
+    /// ASCII alphanumeric + `_` + `-`, doesn't start with a digit) and not
+    /// already taken by another style, it becomes the KFX style symbol. This
+    /// preserves names like `bold`, `vrtl`, `main` through the round-trip.
+    /// Otherwise (multi-class, special characters, or collision) the symbol
+    /// falls back to the synthesized `s<N>` form.
+    ///
+    /// Dedup uses `(computed_style, usable_hint)` — not the computed style
+    /// alone. Two elements with `class="main"` and `class="align-center"`
+    /// whose cascades resolve to identical computed styles still get distinct
+    /// KFX style entries (same CSS, different names) so the round-trip can
+    /// route each element back to its original class name. The cost is a few
+    /// extra `$style` fragments in the KFX, all visually equivalent.
+    pub fn register_with_hint(
+        &mut self,
+        style: ComputedStyle,
+        class_hint: Option<&str>,
         symbols: &mut crate::kfx::context::SymbolTable,
     ) -> u64 {
         if style.is_empty() {
             return self.default_style_symbol;
         }
 
-        let hash = style.compute_hash();
+        let usable = class_hint.and_then(usable_class_hint);
+        let mut hash = style.compute_hash();
+        if let Some(ref name) = usable {
+            // Mix the hint into the hash so distinct class names get distinct
+            // entries even when their computed styles are byte-identical.
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::Hasher;
+            let mut h = DefaultHasher::new();
+            h.write_u64(hash);
+            h.write_u8(0xFF);
+            h.write(name.as_bytes());
+            hash = h.finish();
+        }
 
-        if let Some((_, name_symbol, _)) = self.styles.get(&hash) {
+        if let Some((_, name_symbol, _, _)) = self.styles.get(&hash) {
             return *name_symbol;
         }
 
-        // Assign new ID and create symbol name
         let style_id = self.next_style_id;
         self.next_style_id += 1;
 
-        let style_name = format!("s{:X}", style_id);
-        let name_symbol = symbols.get_or_intern(&style_name);
+        let synthesized = format!("s{:X}", style_id);
+        let style_name = usable
+            .filter(|n| !self.taken_names.contains(n))
+            .unwrap_or(synthesized);
 
-        self.styles.insert(hash, (style_id, name_symbol, style));
+        let name_symbol = symbols.get_or_intern(&style_name);
+        self.taken_names.insert(style_name.clone());
+        self.styles
+            .insert(hash, (style_id, name_symbol, style_name, style));
 
         name_symbol
     }
@@ -261,7 +317,9 @@ impl StyleRegistry {
 
     /// Drain all styles into KFX fragments.
     ///
-    /// Returns a list of (style_name, IonValue) pairs for building style entities.
+    /// Returns a list of (style_name, IonValue) pairs for building style
+    /// entities. The `style_name` matches the symbol attached to the style —
+    /// either the preserved source-class name or the synthesized `s<N>`.
     pub fn drain_to_ion(&mut self) -> Vec<(String, IonValue)> {
         let mut result = Vec::new();
 
@@ -272,12 +330,9 @@ impl StyleRegistry {
         )]);
         result.push(("s0".to_string(), default_ion));
 
-        // Then all registered styles
-        // Tuple is (style_id, name_symbol, computed_style)
-        for (_, (style_id, name_symbol, style)) in self.styles.drain() {
+        // Then all registered styles.
+        for (_, (_style_id, name_symbol, name, style)) in self.styles.drain() {
             let ion = style.to_ion(name_symbol);
-            // Use style_id for the fragment name (e.g., "s1", "s2", "sA")
-            let name = format!("s{:X}", style_id);
             result.push((name, ion));
         }
 
@@ -286,7 +341,7 @@ impl StyleRegistry {
 
     /// Get all styles without draining.
     pub fn styles(&self) -> impl Iterator<Item = (&u64, &ComputedStyle)> {
-        self.styles.values().map(|(id, _, style)| (id, style))
+        self.styles.values().map(|(id, _, _, style)| (id, style))
     }
 
     /// Normalise per-paragraph `line_height` values so the book's dominant
@@ -307,7 +362,7 @@ impl StyleRegistry {
     pub fn normalize_line_heights_to_lh(&mut self) -> Option<f32> {
         // Pass 1: find the most-common em value across all styles.
         let mut tally: HashMap<u32, usize> = HashMap::new();
-        for (_, _, style) in self.styles.values() {
+        for (_, _, _, style) in self.styles.values() {
             if let Some(KfxValue::Dimensioned { value, unit }) =
                 style.get(KfxSymbol::LineHeight)
                 && matches!(unit, KfxSymbol::Em | KfxSymbol::Rem)
@@ -323,7 +378,7 @@ impl StyleRegistry {
         }
 
         // Pass 2: rewrite each style's line_height as `(value / dominant) lh`.
-        for (_, _, style) in self.styles.values_mut() {
+        for (_, _, _, style) in self.styles.values_mut() {
             if let Some(KfxValue::Dimensioned { value, unit }) =
                 style.get(KfxSymbol::LineHeight).cloned()
                 && matches!(unit, KfxSymbol::Em | KfxSymbol::Rem)
@@ -346,6 +401,44 @@ impl Default for StyleRegistry {
     fn default() -> Self {
         Self::new(0)
     }
+}
+
+/// Validate a CSS class string for use as a KFX style symbol.
+///
+/// Returns the trimmed class name when it's a single token suitable as a
+/// symbol identifier; returns `None` for multi-class, empty, or special-
+/// character cases.
+///
+/// Rules:
+/// - One token only (no whitespace) — multi-class like "main top-block" maps
+///   to a single style symbol in KFX, so preserving more than one would
+///   require a separate mechanism. Falls back to synthesized.
+/// - ASCII alphanumeric, `_`, or `-` only. CSS allows more (e.g. escaped
+///   Unicode), but KFX/Kindle readers tolerate a narrower set safely.
+/// - Doesn't start with a digit (would collide with `s<N>` fallback shape
+///   only when the digit is hex; keep symmetry).
+/// - Doesn't collide with the reserved synthesized prefix shape `s<hex>` —
+///   actually fine; the registry tracks taken names separately, so a literal
+///   "s5" hint coexists with synthesized counterparts safely.
+fn usable_class_hint(class: &str) -> Option<String> {
+    let trimmed = class.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.contains(char::is_whitespace) {
+        return None;
+    }
+    let first = trimmed.chars().next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 // ============================================================================

@@ -278,16 +278,23 @@ impl<'a> TransformContext<'a> {
                                 self.chapter.semantics.set_col_span(ir_id, span);
                             }
                         }
-                        // Extract language from class for code elements
-                        "class" if matches!(name.local.as_ref(), "code" | "pre") => {
-                            for class in attr.value.split_whitespace() {
-                                if let Some(lang) = class.strip_prefix("language-") {
-                                    self.chapter.semantics.set_language(ir_id, lang);
-                                    break;
-                                }
-                                if let Some(lang) = class.strip_prefix("lang-") {
-                                    self.chapter.semantics.set_language(ir_id, lang);
-                                    break;
+                        // Class attribute: store verbatim so EPUB → KFX → EPUB
+                        // round-trips can preserve source class names instead
+                        // of synthesizing `sN`. For code/pre we also extract
+                        // the `language-xxx` / `lang-xxx` hint into the
+                        // dedicated `language` semantic.
+                        "class" => {
+                            self.chapter.semantics.set_class(ir_id, &attr.value);
+                            if matches!(name.local.as_ref(), "code" | "pre") {
+                                for class in attr.value.split_whitespace() {
+                                    if let Some(lang) = class.strip_prefix("language-") {
+                                        self.chapter.semantics.set_language(ir_id, lang);
+                                        break;
+                                    }
+                                    if let Some(lang) = class.strip_prefix("lang-") {
+                                        self.chapter.semantics.set_language(ir_id, lang);
+                                        break;
+                                    }
                                 }
                             }
                         }

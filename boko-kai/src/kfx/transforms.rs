@@ -333,11 +333,15 @@ pub fn format_to_kfx_symbol(format: MediaFormat) -> u64 {
         MediaFormat::Jpeg => KfxSymbol::Jpg as u64,
         MediaFormat::Png => KfxSymbol::Png as u64,
         MediaFormat::Gif => KfxSymbol::Gif as u64,
-        // SVG, WebP, and fonts use Jpg as fallback (KFX limitation)
+        // SVG, WebP, fonts, and CSS use Jpg as fallback for the `$format`
+        // symbol — KFX has no standard symbol for these. CSS is identified
+        // downstream via `mime = "text/css"` on the external_resource,
+        // which is what the boko round-trip path keys on.
         MediaFormat::Svg => KfxSymbol::Jpg as u64,
         MediaFormat::WebP => KfxSymbol::Jpg as u64,
         MediaFormat::Ttf => KfxSymbol::Jpg as u64,
         MediaFormat::Otf => KfxSymbol::Jpg as u64,
+        MediaFormat::Css => KfxSymbol::Jpg as u64,
         MediaFormat::Binary => KfxSymbol::Jpg as u64,
     }
 }

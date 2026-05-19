@@ -1470,8 +1470,14 @@ fn build_cover_storyline(chapter: &Chapter, ctx: &mut ExportContext) -> IonValue
                 let resource_name = ctx.resource_registry.get_or_create_name(src);
                 let resource_name_symbol = ctx.symbols.get_or_intern(&resource_name);
 
-                // Register style and get symbol
-                let style_symbol = ctx.register_style_id(node.style, &chapter.styles);
+                // Register style and get symbol. Cover image often has a
+                // distinctive source class like `p-cover` — passing it as a
+                // hint keeps that name in the KFX style symbol table.
+                let style_symbol = ctx.register_style_id_with_hint(
+                    node.style,
+                    &chapter.styles,
+                    chapter.semantics.class(node_id),
+                );
 
                 // Generate unique container ID
                 let container_id = ctx.fragment_ids.next_id();
@@ -1738,10 +1744,18 @@ fn build_external_resource_fragment(
         ));
     }
 
-    // mime type for images
+    // mime type for images and CSS. For non-image, non-CSS assets the helper
+    // returns None and the field is omitted.
     if let Some(mime) = crate::util::detect_mime_type(href, data) {
         fields.push((KfxSymbol::Mime as u64, IonValue::String(mime.to_string())));
     }
+
+    // Original asset path. Calibre-origin KFX doesn't carry this (images get
+    // mechanically-named files on read), but boko stashes it so non-image
+    // assets like CSS can round-trip to their source path on the kfx_to_epub
+    // side. `$249 path` is a generic standard symbol, safely ignored by
+    // Kindle when the renderer doesn't expect it.
+    fields.push((KfxSymbol::Path as u64, IonValue::String(href.to_string())));
 
     let ion = IonValue::Struct(fields);
     KfxFragment::new(KfxSymbol::ExternalResource, &resource_name, ion)
@@ -2225,12 +2239,18 @@ fn detect_format_symbol(href: &str, data: &[u8]) -> u64 {
     format_to_kfx_symbol(format)
 }
 
-/// Check if a path is a media asset (image, font, etc.)
+/// Check if a path is a media asset (image, font, etc.) that should travel
+/// through KFX as an `external_resource`.
+///
+/// CSS files ride along too — they don't drive Kindle rendering (KFX uses
+/// synthesized `$style` entities for that) but preserving them through
+/// the round-trip lets `kfx_to_epub` re-emit the source EPUB's stylesheet
+/// files verbatim instead of only the synthesized one.
 fn is_media_asset(path: &std::path::Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(
         ext.to_lowercase().as_str(),
-        "jpg" | "jpeg" | "png" | "gif" | "svg" | "webp" | "ttf" | "otf" | "woff" | "woff2"
+        "jpg" | "jpeg" | "png" | "gif" | "svg" | "webp" | "ttf" | "otf" | "woff" | "woff2" | "css"
     )
 }
 

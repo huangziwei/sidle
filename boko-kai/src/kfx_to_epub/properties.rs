@@ -591,7 +591,10 @@ pub fn layout_hints_from_element_fields(
 }
 
 /// Build a stylesheet from a deduplicated map of style_name → CssDecl.
-/// Emits one class per distinct style. Class names = "s_" + safe_name.
+/// Emits one class per distinct style, named after the KFX style symbol
+/// directly (sanitized to CSS-safe chars). Calibre adds an `s_` prefix
+/// here; boko doesn't, to keep source class identity through the
+/// EPUB → KFX → EPUB round-trip (see `attach_style` in `content.rs`).
 pub fn render_stylesheet(styles_used: &HashMap<String, CssDecl>) -> String {
     let mut s = String::new();
     let mut keys: Vec<&String> = styles_used.keys().collect();
@@ -601,7 +604,7 @@ pub fn render_stylesheet(styles_used: &HashMap<String, CssDecl>) -> String {
         if decl.is_empty() {
             continue;
         }
-        s.push_str(&format!(".s_{} {{ {} }}\n", safe_class_name(k), decl.to_inline()));
+        s.push_str(&format!(".{} {{ {} }}\n", safe_class_name(k), decl.to_inline()));
     }
     s
 }

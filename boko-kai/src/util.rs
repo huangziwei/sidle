@@ -234,6 +234,10 @@ pub enum MediaFormat {
     Ttf,
     /// OpenType font
     Otf,
+    /// CSS stylesheet — carried opaquely so source EPUB sheets survive the
+    /// EPUB → KFX → EPUB round-trip. The Kindle reader uses synthesized KFX
+    /// style entities for rendering, not these files.
+    Css,
     /// Unknown/binary format
     Binary,
 }
@@ -249,6 +253,7 @@ impl MediaFormat {
             MediaFormat::WebP => "image/webp",
             MediaFormat::Ttf => "font/ttf",
             MediaFormat::Otf => "font/otf",
+            MediaFormat::Css => "text/css",
             MediaFormat::Binary => "application/octet-stream",
         }
     }
@@ -305,6 +310,9 @@ pub fn detect_media_format(path: &str, data: &[u8]) -> MediaFormat {
     }
     if path_lower.ends_with(".ttf") {
         return MediaFormat::Ttf;
+    }
+    if path_lower.ends_with(".css") {
+        return MediaFormat::Css;
     }
     if path_lower.ends_with(".otf") {
         return MediaFormat::Otf;
