@@ -118,6 +118,17 @@ pub async fn library_update_metadata(
         }
         None => {}
     }
+    match &mut patch.published_at {
+        Some(s) => {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() {
+                patch.published_at = None;
+            } else {
+                *s = trimmed;
+            }
+        }
+        None => {}
+    }
     match &mut patch.series_name {
         Some(s) => {
             let trimmed = s.trim().to_string();

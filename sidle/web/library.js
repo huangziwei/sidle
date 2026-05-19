@@ -23,6 +23,10 @@ const state = {
   sent: [],     // Vec<DeviceBookRow>
   sentSet: new Set(), // sha256s currently on device, derived from `sent`
   columnWidths: {}, // { title: 280, ... } persisted px widths
+  // Ordered array of { key, visible } — drives the list view's column
+  // order and show/hide state. Built from localStorage in loadPreferences;
+  // defaults to defaultColumnConfig() on first install.
+  columnConfig: [],
   selected: new Set(), // book ids currently selected
   lastClicked: null,   // last single-clicked book id, anchor for shift-range
   // Bumped every time a cover is overwritten (worker tail-step fetch, manual
@@ -42,6 +46,8 @@ const state = {
 const SORT_KEYS = [
   ["title", "Title"],
   ["author", "Author"],
+  ["series", "Series"],
+  ["publisher", "Publisher"],
   ["language", "Language"],
   ["imported_at", "Date added"],
   ["file_size", "Size"],
@@ -49,6 +55,61 @@ const SORT_KEYS = [
 ];
 
 const FACETS = ["language", "author", "on_kindle", "publisher", "series", "tags"];
+
+// All columns the list view knows about, keyed by column id. The label is
+// what shows in the header; sortable=false skips data-sort wiring (Tags is
+// multi-value, Formats is rendered widgets — neither sorts cleanly).
+const COLUMN_DEFS = {
+  title:        { label: "Title",      sortable: true  },
+  author:       { label: "Author",     sortable: true  },
+  series:       { label: "Series",     sortable: true  },
+  publisher:    { label: "Publisher",  sortable: true  },
+  published_at: { label: "Published",  sortable: true  },
+  language:     { label: "Lang",       sortable: true  },
+  tags:         { label: "Tags",       sortable: false },
+  imported_at:  { label: "Date added", sortable: true  },
+  file_size:    { label: "Size",       sortable: true  },
+  formats:      { label: "Formats",    sortable: false },
+  on_kindle:    { label: "On Kindle",  sortable: true  },
+};
+
+// First-install ordering. After load, state.columnConfig is what governs
+// the rendered order; this only seeds it when there's nothing in
+// localStorage, plus serves as the "where to append new columns added in
+// future versions" anchor for mergeColumnConfig.
+const DEFAULT_COLUMN_ORDER = [
+  "title",
+  "author",
+  "series",
+  "publisher",
+  "published_at",
+  "language",
+  "tags",
+  "imported_at",
+  "file_size",
+  "formats",
+  "on_kindle",
+];
+
+function defaultColumnConfig() {
+  return DEFAULT_COLUMN_ORDER.map((key) => ({ key, visible: true }));
+}
+
+// Merge persisted config with the current column set. Drops unknown keys
+// (e.g. a column removed in a later version) and appends any newly-added
+// columns at the end with visible:true — so a fresh feature column shows
+// up automatically without nuking the user's order.
+function mergeColumnConfig(stored) {
+  const known = new Set(Object.keys(COLUMN_DEFS));
+  const valid = (stored || [])
+    .filter((c) => c && known.has(c.key))
+    .map((c) => ({ key: c.key, visible: c.visible !== false }));
+  const present = new Set(valid.map((c) => c.key));
+  for (const key of DEFAULT_COLUMN_ORDER) {
+    if (!present.has(key)) valid.push({ key, visible: true });
+  }
+  return valid;
+}
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -61,7 +122,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireContextMenu();
   wireQueueDrawer();
   wireDevice();
-  wireListHeaderInteractions();
+  // Header interactions (sort, resize, drag-to-reorder, visibility menu)
+  // are wired by renderList() itself since the thead is rebuilt on every
+  // render — no separate boot call needed.
   wireSelection();
   wireFilterBar();
   wireSortPopover();
@@ -89,6 +152,16 @@ async function loadPreferences() {
       state.columnWidths = JSON.parse(cols) || {};
     } catch {}
   }
+  const colCfg = localStorage.getItem("columnConfig");
+  if (colCfg) {
+    try {
+      state.columnConfig = mergeColumnConfig(JSON.parse(colCfg));
+    } catch {
+      state.columnConfig = defaultColumnConfig();
+    }
+  } else {
+    state.columnConfig = defaultColumnConfig();
+  }
   const filters = localStorage.getItem("filters");
   if (filters) {
     try {
@@ -114,6 +187,7 @@ function persistPreferences() {
   }
   localStorage.setItem("filters", JSON.stringify(filtersForStorage));
   localStorage.setItem("search", state.search);
+  localStorage.setItem("columnConfig", JSON.stringify(state.columnConfig));
 }
 
 function saveColumnWidths() {
@@ -296,7 +370,37 @@ function sortedBooks(books) {
 
 function sortValue(b, key) {
   if (key === "on_kindle") return state.sentSet.has(b.sha256) ? 1 : 0;
+  if (key === "series") return seriesSortKey(b);
   return b[key];
+}
+
+// Composite sort key for the Series column: primary by series_name,
+// secondary by series_index. We pack both into a single string with a
+// control-char separator ( sorts before every printable char) and
+// a zero-padded index, so the existing localeCompare path in
+// sortedBooks() handles the two-level ordering without any tuple
+// machinery. Books without a series return null and sink to the bottom
+// via the existing null-handling.
+function seriesSortKey(b) {
+  const name = b.series_name?.trim();
+  if (!name) return null;
+  // *10 so half-numbered series (1.5, 2.5) sort correctly; pad to 8
+  // digits so even an unset index (99_999_999) compares cleanly.
+  const rawIdx =
+    b.series_index != null && Number.isFinite(b.series_index)
+      ? Math.round(b.series_index * 10)
+      : 99_999_999;
+  return `${name}${String(rawIdx).padStart(8, "0")}`;
+}
+
+// Display string for the Series cell: "<Name> #<index>" or just "<Name>".
+function seriesText(b) {
+  const name = b.series_name?.trim();
+  if (!name) return "";
+  if (b.series_index != null && Number.isFinite(b.series_index)) {
+    return `${name} #${b.series_index}`;
+  }
+  return name;
 }
 
 // ---------------------------------------------------------------------------
@@ -553,27 +657,47 @@ function formatBadge(format, b, compact) {
 }
 
 function renderList(books) {
+  const visibleCols = state.columnConfig.filter((c) => c.visible);
+
+  // Rebuild colgroup so the resize logic indexes correctly into it.
+  const colGroup = $("#book-cols");
+  colGroup.innerHTML = "";
+  for (const col of visibleCols) {
+    const c = document.createElement("col");
+    c.dataset.col = col.key;
+    colGroup.appendChild(c);
+  }
+
+  // Rebuild the header row.
+  const head = $("#list-head");
+  head.innerHTML = "";
+  for (const col of visibleCols) {
+    head.appendChild(buildHeaderCell(col.key));
+  }
+
+  // Body rows.
   const tbody = $("#list-body");
   tbody.innerHTML = "";
-  for (const b of books) tbody.appendChild(listRow(b));
+  for (const b of books) tbody.appendChild(listRow(b, visibleCols));
+
+  // Sort indicator on the new header.
   $$("#list th[data-sort]").forEach((th) => {
     th.classList.toggle("sorted", th.dataset.sort === state.sort.key);
     th.classList.toggle("asc", state.sort.asc);
   });
+
+  // Re-attach header interactions (the thead got recreated).
+  wireListHeaders();
 }
 
-function listRow(b) {
+function listRow(b, visibleCols) {
   const tr = document.createElement("tr");
   if (state.selected.has(b.id)) tr.classList.add("selected");
   tr.dataset.bookId = b.id;
 
-  tr.appendChild(cell(b.title || "Untitled"));
-  tr.appendChild(cell(b.author || ""));
-  tr.appendChild(cell(b.language || ""));
-  tr.appendChild(cell(formatDate(b.imported_at)));
-  tr.appendChild(cell(formatBytes(b.file_size)));
-  tr.appendChild(formatsCell(b));
-  tr.appendChild(onKindleCell(b));
+  for (const col of visibleCols) {
+    tr.appendChild(buildBodyCell(col.key, b));
+  }
 
   tr.addEventListener("click", (e) => onItemClick(e, b));
   tr.addEventListener("dblclick", () => openInFinder(b.id));
@@ -583,6 +707,47 @@ function listRow(b) {
     openContextMenu(e.clientX, e.clientY, b);
   });
   return tr;
+}
+
+function buildHeaderCell(key) {
+  const def = COLUMN_DEFS[key];
+  const th = document.createElement("th");
+  th.dataset.col = key;
+  if (def.sortable) th.dataset.sort = key;
+
+  // .th-label is the drag handle. We do NOT use the HTML5 draggable=true
+  // API because Tauri's webview (with dragDropEnabled=true, required for
+  // file-drop import) intercepts native drags at the OS level, which
+  // both blocks dragstart events in the page and triggers the file-drop
+  // import overlay. Column-reorder is implemented with mousedown/move/up
+  // in onLabelMouseDown — see wireListHeaders().
+  const label = document.createElement("span");
+  label.className = "th-label";
+  label.textContent = def.label;
+  th.appendChild(label);
+
+  const resizer = document.createElement("span");
+  resizer.className = "resizer";
+  th.appendChild(resizer);
+
+  return th;
+}
+
+function buildBodyCell(key, b) {
+  switch (key) {
+    case "title":        return cell(b.title || "Untitled");
+    case "author":       return cell(b.author || "");
+    case "series":       return cell(seriesText(b));
+    case "publisher":    return cell(b.publisher || "");
+    case "published_at": return cell(b.published_at || "");
+    case "language":     return cell(b.language || "");
+    case "tags":         return cell((b.tags || []).join(", "));
+    case "imported_at":  return cell(formatDate(b.imported_at));
+    case "file_size":    return cell(formatBytes(b.file_size));
+    case "formats":      return formatsCell(b);
+    case "on_kindle":    return onKindleCell(b);
+    default:             return cell("");
+  }
 }
 
 function formatsCell(b) {
@@ -620,12 +785,21 @@ function cell(text) {
   return td;
 }
 
-function wireListHeaderInteractions() {
-  // Sort handlers: only on TH elements that declare data-sort.
+// Re-attaches every header interaction after renderList rebuilds the
+// thead/colgroup: sort-click, resize, drag-to-reorder, and the
+// right-click visibility menu. Old listeners die with the previous DOM,
+// so there's no need to manually remove them.
+function wireListHeaders() {
+  // Sort on header click. Skip clicks that originated on the resizer
+  // (mousedown there handles the resize; the click would still bubble).
   $$("#list th[data-sort]").forEach((th) => {
     th.addEventListener("click", (e) => {
-      // Don't trigger sort when grabbing the resizer.
       if (e.target.classList.contains("resizer")) return;
+      if (e.target.classList.contains("th-label") && th.classList.contains("just-dragged")) {
+        // Suppress the synthetic click that fires at the end of a drag.
+        th.classList.remove("just-dragged");
+        return;
+      }
       const key = th.dataset.sort;
       if (state.sort.key === key) state.sort.asc = !state.sort.asc;
       else state.sort = { key, asc: true };
@@ -633,9 +807,153 @@ function wireListHeaderInteractions() {
       render();
     });
   });
-  // Column resize handles.
+
+  // Resize handles.
   $$("#list .resizer").forEach((resizer, i) => {
     resizer.addEventListener("mousedown", (e) => onResizerDown(e, resizer, i));
+  });
+
+  // Drag-to-reorder via mouse events (not HTML5 drag — see the comment
+  // in buildHeaderCell). Drag handle is the .th-label span; the rest of
+  // the th and the resizer don't participate.
+  $$("#list .th-label").forEach((label) => {
+    label.addEventListener("mousedown", onLabelMouseDown);
+  });
+
+  // Right-click anywhere in the header row → visibility menu.
+  $("#list thead").addEventListener("contextmenu", onHeaderContextMenu);
+}
+
+// --- Drag-to-reorder columns (mouse-based) ---
+
+function onLabelMouseDown(e) {
+  if (e.button !== 0) return; // left click only
+  const th = e.target.closest("th");
+  if (!th) return;
+  const fromKey = th.dataset.col;
+
+  const startX = e.clientX;
+  const startY = e.clientY;
+  // Threshold so a plain click (which should sort) doesn't trigger a
+  // drag. Once we cross this, the gesture becomes a drag and the
+  // post-mouseup click is suppressed via .just-dragged.
+  const THRESHOLD = 4;
+  let dragging = false;
+  let ghost = null;
+
+  const onMove = (ev) => {
+    if (!dragging) {
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < THRESHOLD) return;
+      dragging = true;
+      th.classList.add("dragging");
+      ghost = document.createElement("div");
+      ghost.className = "col-drag-ghost";
+      ghost.textContent = COLUMN_DEFS[fromKey]?.label ?? fromKey;
+      ghost.style.width = `${th.offsetWidth}px`;
+      document.body.appendChild(ghost);
+      document.body.style.cursor = "grabbing";
+    }
+    ghost.style.left = `${ev.clientX + 8}px`;
+    ghost.style.top = `${ev.clientY + 8}px`;
+
+    // Highlight the th under the cursor with a drop indicator.
+    $$("#list thead th").forEach((t) => {
+      t.classList.remove("drop-left", "drop-right");
+    });
+    const overTh = elementUnder(ev.clientX, ev.clientY)?.closest("#list thead th");
+    if (overTh && overTh.dataset.col !== fromKey) {
+      const r = overTh.getBoundingClientRect();
+      const before = ev.clientX - r.left < r.width / 2;
+      overTh.classList.toggle("drop-left", before);
+      overTh.classList.toggle("drop-right", !before);
+    }
+  };
+
+  const onUp = (ev) => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    document.body.style.cursor = "";
+    if (ghost) ghost.remove();
+    $$("#list thead th").forEach((t) => {
+      t.classList.remove("dragging", "drop-left", "drop-right");
+    });
+
+    if (!dragging) return; // plain click — let the sort handler run
+
+    // Suppress the synthetic click that fires after this mouseup.
+    th.classList.add("just-dragged");
+
+    const overTh = elementUnder(ev.clientX, ev.clientY)?.closest("#list thead th");
+    if (!overTh || overTh.dataset.col === fromKey) return;
+    const r = overTh.getBoundingClientRect();
+    const before = ev.clientX - r.left < r.width / 2;
+    reorderColumn(fromKey, overTh.dataset.col, before);
+  };
+
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+  // No preventDefault: we want the click event to still fire when there's
+  // no drag (so sort works). The just-dragged flag guards against the
+  // trailing click when there IS a drag.
+}
+
+function elementUnder(x, y) {
+  return document.elementFromPoint(x, y);
+}
+
+function reorderColumn(fromKey, toKey, before) {
+  const order = [...state.columnConfig];
+  const fromIdx = order.findIndex((c) => c.key === fromKey);
+  if (fromIdx === -1) return;
+  const [dragged] = order.splice(fromIdx, 1);
+  let toIdx = order.findIndex((c) => c.key === toKey);
+  if (toIdx === -1) return;
+  if (!before) toIdx++;
+  order.splice(toIdx, 0, dragged);
+  state.columnConfig = order;
+  persistPreferences();
+  render();
+}
+
+// --- Column visibility (right-click header) ---
+
+function onHeaderContextMenu(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const menu = $("#ctx-menu");
+  menu.innerHTML = "";
+
+  const visibleCount = state.columnConfig.filter((c) => c.visible).length;
+  for (const col of state.columnConfig) {
+    const def = COLUMN_DEFS[col.key];
+    if (!def) continue;
+    const li = document.createElement("li");
+    li.textContent = (col.visible ? "✓  " : "    ") + def.label;
+    const wouldHideLast = col.visible && visibleCount === 1;
+    if (wouldHideLast) {
+      li.style.opacity = "0.5";
+      li.title = "At least one column must stay visible";
+    }
+    li.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      menu.hidden = true;
+      if (wouldHideLast) return;
+      col.visible = !col.visible;
+      persistPreferences();
+      render();
+    });
+    menu.appendChild(li);
+  }
+
+  menu.hidden = false;
+  menu.style.left = `${e.clientX}px`;
+  menu.style.top = `${e.clientY}px`;
+  requestAnimationFrame(() => {
+    const r = menu.getBoundingClientRect();
+    if (r.right > window.innerWidth)
+      menu.style.left = `${window.innerWidth - r.width - 4}px`;
+    if (r.bottom > window.innerHeight)
+      menu.style.top = `${window.innerHeight - r.height - 4}px`;
   });
 }
 
@@ -1936,6 +2254,7 @@ function openMetadataModal(book) {
   form.author.value = book.author || "";
   form.language.value = book.language || "";
   form.publisher.value = book.publisher || "";
+  form.published_at.value = book.published_at || "";
   form.series_name.value = book.series_name || "";
   form.series_index.value =
     book.series_index != null && Number.isFinite(book.series_index)
@@ -1981,6 +2300,10 @@ async function submitMetadataForm() {
     language: form.language.value.trim(),
     publisher:
       form.publisher.value.trim() === "" ? null : form.publisher.value.trim(),
+    published_at:
+      form.published_at.value.trim() === ""
+        ? null
+        : form.published_at.value.trim(),
     series_name:
       form.series_name.value.trim() === "" ? null : form.series_name.value.trim(),
     series_index:

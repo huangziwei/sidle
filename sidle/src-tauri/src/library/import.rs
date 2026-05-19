@@ -317,6 +317,14 @@ fn insert_row(
             imported_at: &now,
             asin: meta.asin.as_deref(),
             publisher: meta.publisher.as_deref(),
+            // meta.date comes from boko's EPUB `<dc:date>` / KFX equivalent.
+            // Stored verbatim — typically `2024-03-15` or `2024`. We filter
+            // empties so a missing OPF date doesn't land as `Some("")`.
+            published_at: meta
+                .date
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
             // Series and tags aren't populated from source format yet —
             // they're set via the metadata editor. Flagged as a follow-up
             // in `.claude/plans/library-navigation.md` (Phase 5+).

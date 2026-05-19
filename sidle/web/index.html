@@ -106,26 +106,11 @@
 
       <section id="list" class="view" aria-label="List" hidden>
         <table class="book-table">
-          <colgroup id="book-cols">
-            <col data-col="title">
-            <col data-col="author">
-            <col data-col="language">
-            <col data-col="imported_at">
-            <col data-col="file_size">
-            <col data-col="formats">
-            <col data-col="on_kindle">
-          </colgroup>
-          <thead>
-            <tr>
-              <th data-col="title" data-sort="title">Title<span class="resizer"></span></th>
-              <th data-col="author" data-sort="author">Author<span class="resizer"></span></th>
-              <th data-col="language" data-sort="language">Lang<span class="resizer"></span></th>
-              <th data-col="imported_at" data-sort="imported_at">Date added<span class="resizer"></span></th>
-              <th data-col="file_size" data-sort="file_size">Size<span class="resizer"></span></th>
-              <th data-col="formats">Formats<span class="resizer"></span></th>
-              <th data-col="on_kindle" data-sort="on_kindle">On Kindle<span class="resizer"></span></th>
-            </tr>
-          </thead>
+          <!-- colgroup + thead are built by renderList() from
+               state.columnConfig so the user's drag-to-reorder + show/hide
+               choices are honored. -->
+          <colgroup id="book-cols"></colgroup>
+          <thead><tr id="list-head"></tr></thead>
           <tbody id="list-body"></tbody>
         </table>
         <div id="list-empty" class="empty" hidden>
@@ -199,6 +184,10 @@
             <label class="field">
               <span>Publisher</span>
               <input name="publisher" placeholder="新潮文庫" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Published</span>
+              <input name="published_at" placeholder="2024-03-15 or 2024" autocomplete="off" />
             </label>
             <label class="field">
               <span>Series</span>

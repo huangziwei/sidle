@@ -42,6 +42,11 @@ pub struct BookRow {
     /// metadata field `publisher` (symbol 232). Optional; many self-pub or
     /// indie books have no publisher. Editable via the metadata modal.
     pub publisher: Option<String>,
+    /// Publication date as it appears in the source (EPUB `<dc:date>` or
+    /// KFX equivalent). Stored verbatim — typically ISO 8601 (`2024-03-15`
+    /// or just `2024`), but we don't enforce parsing. Sort works on the
+    /// string, which gives correct chronological order for ISO 8601.
+    pub published_at: Option<String>,
     pub series_name: Option<String>,
     /// Position within the series. REAL so half-numbers (1.5, 2.5) common
     /// in fiction series numbering work without coercion.
@@ -91,6 +96,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             imported_at       TEXT NOT NULL,
             asin              TEXT,
             publisher         TEXT,
+            published_at      TEXT,
             series_name       TEXT,
             series_index      REAL,
             tags              TEXT NOT NULL DEFAULT '[]'
@@ -131,6 +137,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !has_column(conn, "books", "publisher")? {
         conn.execute("ALTER TABLE books ADD COLUMN publisher TEXT", [])?;
+    }
+    if !has_column(conn, "books", "published_at")? {
+        conn.execute("ALTER TABLE books ADD COLUMN published_at TEXT", [])?;
     }
     if !has_column(conn, "books", "series_name")? {
         conn.execute("ALTER TABLE books ADD COLUMN series_name TEXT", [])?;
@@ -205,8 +214,9 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
     conn.execute(
         r#"INSERT INTO books
             (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path,
-             file_size, imported_at, asin, publisher, series_name, series_index, tags)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"#,
+             file_size, imported_at, asin, publisher, published_at,
+             series_name, series_index, tags)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"#,
         params![
             book.sha256,
             book.title,
@@ -220,6 +230,7 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             book.imported_at,
             book.asin,
             book.publisher,
+            book.published_at,
             book.series_name,
             book.series_index,
             tags_json,
@@ -311,6 +322,7 @@ pub struct MetadataPatch {
     pub author: String,
     pub language: String,
     pub publisher: Option<String>,
+    pub published_at: Option<String>,
     pub series_name: Option<String>,
     pub series_index: Option<f64>,
     pub tags: Vec<String>,
@@ -329,15 +341,17 @@ pub fn update_metadata(
                   author        = ?2,
                   language      = ?3,
                   publisher     = ?4,
-                  series_name   = ?5,
-                  series_index  = ?6,
-                  tags          = ?7
-              WHERE id = ?8"#,
+                  published_at  = ?5,
+                  series_name   = ?6,
+                  series_index  = ?7,
+                  tags          = ?8
+              WHERE id = ?9"#,
         params![
             patch.title,
             patch.author,
             patch.language,
             patch.publisher,
+            patch.published_at,
             patch.series_name,
             patch.series_index,
             tags_json,
@@ -386,6 +400,7 @@ pub struct NewBook<'a> {
     pub imported_at: &'a str,
     pub asin: Option<&'a str>,
     pub publisher: Option<&'a str>,
+    pub published_at: Option<&'a str>,
     pub series_name: Option<&'a str>,
     pub series_index: Option<f64>,
     /// Caller passes the canonical tag list (already trimmed / lowercased
@@ -402,7 +417,7 @@ const SELECT_BOOKS_WITH_JOBS: &str = r#"
            b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
-           b.publisher, b.series_name, b.series_index, b.tags
+           b.publisher, b.published_at, b.series_name, b.series_index, b.tags
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     ORDER BY b.imported_at DESC
@@ -413,7 +428,7 @@ const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
            b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
-           b.publisher, b.series_name, b.series_index, b.tags
+           b.publisher, b.published_at, b.series_name, b.series_index, b.tags
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.sha256 = ?1
@@ -424,14 +439,14 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
            b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
-           b.publisher, b.series_name, b.series_index, b.tags
+           b.publisher, b.published_at, b.series_name, b.series_index, b.tags
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
 "#;
 
 fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
-    let tags_json: String = row.get(18)?;
+    let tags_json: String = row.get(19)?;
     // Defensive parse: we control writes and only emit canonical JSON
     // arrays, but a corrupt column shouldn't take down the whole list.
     let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
@@ -452,8 +467,9 @@ fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
         error: row.get(13)?,
         kind: row.get(14)?,
         publisher: row.get(15)?,
-        series_name: row.get(16)?,
-        series_index: row.get(17)?,
+        published_at: row.get(16)?,
+        series_name: row.get(17)?,
+        series_index: row.get(18)?,
         tags,
     })
 }
@@ -484,6 +500,7 @@ mod tests {
                 imported_at: "2026-05-19T00:00:00Z",
                 asin: None,
                 publisher: None,
+                published_at: None,
                 series_name: None,
                 series_index: None,
                 tags: &[],
@@ -502,6 +519,7 @@ mod tests {
             author: "村上春樹".into(),
             language: "ja".into(),
             publisher: Some("新潮文庫".into()),
+            published_at: Some("2024-03-15".into()),
             series_name: Some("ハルキ三部作".into()),
             series_index: Some(2.5),
             tags: vec!["小説".into(), "ライトノベル".into()],
@@ -513,6 +531,7 @@ mod tests {
         assert_eq!(row.author, "村上春樹");
         assert_eq!(row.language, "ja");
         assert_eq!(row.publisher.as_deref(), Some("新潮文庫"));
+        assert_eq!(row.published_at.as_deref(), Some("2024-03-15"));
         assert_eq!(row.series_name.as_deref(), Some("ハルキ三部作"));
         assert_eq!(row.series_index, Some(2.5));
         assert_eq!(row.tags, vec!["小説", "ライトノベル"]);
@@ -532,6 +551,7 @@ mod tests {
                 author: "a".into(),
                 language: "en".into(),
                 publisher: None,
+                published_at: None,
                 series_name: Some("Foundation".into()),
                 series_index: Some(1.0),
                 tags: vec![],
@@ -548,6 +568,7 @@ mod tests {
                 author: "a".into(),
                 language: "en".into(),
                 publisher: None,
+                published_at: None,
                 series_name: None,
                 series_index: None,
                 tags: vec![],
@@ -574,6 +595,7 @@ mod tests {
                 author: "".into(),
                 language: "".into(),
                 publisher: Some("講談社文庫".into()),
+                published_at: None,
                 series_name: None,
                 series_index: None,
                 tags: vec![],
@@ -592,6 +614,7 @@ mod tests {
                 author: "".into(),
                 language: "".into(),
                 publisher: None,
+                published_at: None,
                 series_name: None,
                 series_index: None,
                 tags: vec![],
@@ -621,6 +644,7 @@ mod tests {
                 author: "".into(),
                 language: "".into(),
                 publisher: None,
+                published_at: None,
                 series_name: None,
                 series_index: None,
                 tags: tags.clone(),

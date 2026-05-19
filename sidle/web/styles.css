@@ -860,6 +860,50 @@ button {
   text-overflow: ellipsis;
 }
 
+/* Draggable header label (the drag-to-reorder handle). */
+.book-table thead .th-label {
+  cursor: grab;
+  user-select: none;
+}
+
+.book-table thead .th-label:active {
+  cursor: grabbing;
+}
+
+.book-table thead th.dragging {
+  opacity: 0.4;
+}
+
+/* Drop indicator: a vertical accent line on the side the dragged column
+   would land. Drawn with inset shadow so it doesn't shift layout. */
+.book-table thead th.drop-left {
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
+
+.book-table thead th.drop-right {
+  box-shadow: inset -2px 0 0 0 var(--accent);
+}
+
+/* Floating ghost element shown next to the cursor during a column drag.
+   We use a custom element (not HTML5's native drag image) because the
+   webview's dragDropEnabled=true blocks the native drag API. */
+.col-drag-ghost {
+  position: fixed;
+  pointer-events: none;
+  z-index: 500;
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent);
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Formats column */
 
 .formats {
