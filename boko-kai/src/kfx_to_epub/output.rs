@@ -166,6 +166,70 @@ impl EpubOutput {
         }
     }
 
+    /// Rename a bundled resource: change both its filename (in
+    /// `oebps_files` / `oebps_order`) and its manifest entry (href + id).
+    /// Returns the new manifest id (callers may need it for cross-references
+    /// like spine `idref` or `<meta name="cover" content="...">`).
+    pub fn rename_resource(
+        &mut self,
+        old_filename: &str,
+        new_filename: &str,
+        new_id: Option<&str>,
+    ) -> Option<String> {
+        // Move the file blob.
+        let blob = self.oebps_files.remove(old_filename)?;
+        self.oebps_files.insert(new_filename.to_string(), blob);
+        for slot in &mut self.oebps_order {
+            if slot == old_filename {
+                *slot = new_filename.to_string();
+            }
+        }
+        // Update the manifest entry. The old id is keyed by old filename;
+        // a caller-supplied `new_id` overrides the auto-derived id.
+        let old_id = self
+            .manifest
+            .iter()
+            .find(|m| m.href == old_filename)
+            .map(|m| m.id.clone())?;
+        let new_id_str = new_id.map(|s| s.to_string()).unwrap_or_else(|| self.make_id(new_filename));
+        let idx = *self.manifest_by_id.get(&old_id)?;
+        self.manifest[idx].href = new_filename.to_string();
+        self.manifest[idx].id = new_id_str.clone();
+        // Re-index the lookup map.
+        self.manifest_by_id.remove(&old_id);
+        self.manifest_by_id.insert(new_id_str.clone(), idx);
+        // Spine entries are by id — update any reference to the old id.
+        for slot in &mut self.spine {
+            if slot == &old_id {
+                *slot = new_id_str.clone();
+            }
+        }
+        Some(new_id_str)
+    }
+
+    /// Insert a chapter at the beginning of the spine (rather than appended).
+    /// Used for cover wrappers like `titlepage.xhtml` that must render before
+    /// the first KFX section.
+    pub fn prepend_spine_chapter(&mut self, filename: &str, xhtml: String) {
+        let id = self.add_resource(
+            filename,
+            xhtml.into_bytes(),
+            "application/xhtml+xml",
+            None,
+            None,
+        );
+        self.spine.insert(0, id);
+    }
+
+    /// Public read-only accessor used by `mod.rs` when generating the
+    /// titlepage (we need the cover image filename + dimensions to size the
+    /// SVG viewBox).
+    pub fn cover_image_info(&self) -> Option<(&str, Option<u32>, Option<u32>)> {
+        let entry = self.manifest.iter().find(|m| m.is_cover_image)?;
+        let file = self.oebps_files.get(&entry.href)?;
+        Some((entry.href.as_str(), file.width, file.height))
+    }
+
     /// Whether a file already exists under `OEBPS/<filename>`.
     pub fn has_file(&self, filename: &str) -> bool {
         self.oebps_files.contains_key(filename)
@@ -253,10 +317,14 @@ impl EpubOutput {
         let title = if meta.title.is_empty() { "Untitled" } else { &meta.title };
         s.push_str(&format!("    <dc:title>{}</dc:title>\n", xml_escape(title)));
 
-        // Authors
+        // Authors — `opf:role="aut"` + a shared `opf:file-as` containing all
+        // authors joined by ` & ` (calibre's convention; same string on every
+        // creator). Lets EPUB libraries sort multi-author books consistently.
+        let file_as = meta.authors.join(" & ");
         for author in &meta.authors {
             s.push_str(&format!(
-                "    <dc:creator>{}</dc:creator>\n",
+                "    <dc:creator opf:file-as=\"{}\" opf:role=\"aut\">{}</dc:creator>\n",
+                xml_escape(&file_as),
                 xml_escape(author)
             ));
         }
@@ -287,6 +355,13 @@ impl EpubOutput {
                 xml_escape(asin)
             ));
         }
+        // Reproducible UUID v5 derived from the KFX book_id. Calibre emits a
+        // randomly-generated UUID here; we use a deterministic one so two
+        // converts of the same KFX produce the same OPF identifier.
+        s.push_str(&format!(
+            "    <dc:identifier opf:scheme=\"uuid\">{}</dc:identifier>\n",
+            uuid_v5_from(id)
+        ));
 
         // (EPUB3-only `<meta property="dcterms:modified">` intentionally
         // dropped — EPUB2 doesn't require it, and including it under EPUB2
@@ -456,4 +531,31 @@ fn xml_escape(s: &str) -> String {
 
 fn io_error<E: std::error::Error + Send + Sync + 'static>(e: E) -> std::io::Error {
     std::io::Error::other(e)
+}
+
+/// RFC 4122 v5 UUID derived from the KFX book identifier. SHA-1(namespace +
+/// name), then set the version (5) and variant (RFC 4122) bits. Namespace is
+/// the URL namespace UUID (6ba7b811-9dad-11d1-80b4-00c04fd430c8).
+fn uuid_v5_from(name: &str) -> String {
+    const URL_NAMESPACE: [u8; 16] = [
+        0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1,
+        0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+    ];
+    let mut hasher = sha1_smol::Sha1::new();
+    hasher.update(&URL_NAMESPACE);
+    hasher.update(name.as_bytes());
+    let digest = hasher.digest().bytes();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // Set version (5) in the high nibble of byte 6.
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    // Set variant (10xx) in the high nibble of byte 8.
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    )
 }

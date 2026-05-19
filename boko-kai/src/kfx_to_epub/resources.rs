@@ -77,10 +77,29 @@ pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, C
 
     // Cover wiring: book_metadata names a resource_name; mark its manifest
     // entry as cover-image so EPUB readers (and the validator) see it.
+    // Also rename the file from `image_rsrcXX.jpg` to `cover.<ext>` and the
+    // manifest id to `cover` — matches calibre's convention and lets the
+    // titlepage SVG wrapper reference a stable path.
     if let Some(cover_name) = &book.metadata.cover_resource_name
-        && let Some(img) = index.by_name.get(cover_name)
+        && let Some(img) = index.by_name.get(cover_name).cloned()
     {
-        out.mark_cover(&img.manifest_id);
+        let ext = std::path::Path::new(&img.filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| if e == "jpg" { "jpeg" } else { e })
+            .unwrap_or("jpeg");
+        let new_filename = format!("cover.{}", ext);
+        if let Some(new_id) =
+            out.rename_resource(&img.filename, &new_filename, Some("cover"))
+        {
+            out.mark_cover(&new_id);
+            if let Some(slot) = index.by_name.get_mut(cover_name) {
+                slot.filename = new_filename;
+                slot.manifest_id = new_id;
+            }
+        } else {
+            out.mark_cover(&img.manifest_id);
+        }
     }
 
     Ok(index)

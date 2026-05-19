@@ -102,6 +102,14 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
         resources::emit_image_scaffold_chapters(&mut out);
     }
 
+    // Cover titlepage wrapper: matches calibre's `titlepage.xhtml` — an SVG
+    // viewBox sized to the cover image so readers (Apple Books, Kindle, etc.)
+    // render the cover at the right aspect ratio. Inserted at the FRONT of
+    // the spine so it's what opens when a reader picks up the book.
+    if let Some(titlepage) = build_titlepage(&out) {
+        out.prepend_spine_chapter("titlepage.xhtml", titlepage);
+    }
+
     // Phase 1 step 2 — navigation. Build NCX from book_navigation, using the
     // element-id → chapter-filename map populated by `process_section` to
     // resolve `nav_unit.target_position.id` to a real chapter file.
@@ -121,4 +129,54 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
     out.writing_mode = Some(content_state.writing_mode.clone());
 
     out.finalize(&book.metadata).map_err(ConvertError::Io)
+}
+
+/// Build calibre-style `titlepage.xhtml`: an SVG viewBox sized to the
+/// cover image's pixel dimensions, with the JPEG referenced via
+/// `xlink:href`. Returns `None` if no cover image was bundled. The
+/// `<meta name="calibre:cover" content="true"/>` marker matches calibre's
+/// output so cover-aware readers identify the page as a title page rather
+/// than the first content page.
+fn build_titlepage(out: &EpubOutput) -> Option<String> {
+    let (href, width, height) = out.cover_image_info()?;
+    let w = width.unwrap_or(0);
+    let h = height.unwrap_or(0);
+    if w == 0 || h == 0 {
+        // Without dimensions the viewBox would collapse; fall back to a
+        // bare image wrapper rather than emit a zero-size SVG.
+        return Some(format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE html>\n\
+             <html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\">\n\
+             <head>\n\
+             <meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\"/>\n\
+             <meta name=\"calibre:cover\" content=\"true\"/>\n\
+             <title>Cover</title>\n\
+             </head>\n\
+             <body><div><img src=\"{href}\" alt=\"\"/></div></body>\n\
+             </html>\n"
+        ));
+    }
+    Some(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE html>\n\
+         <html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\">\n\
+         <head>\n\
+         <meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\"/>\n\
+         <meta name=\"calibre:cover\" content=\"true\"/>\n\
+         <title>Cover</title>\n\
+         <style type=\"text/css\" title=\"override_css\">\n\
+         @page {{padding: 0pt; margin:0pt}}\n\
+         body {{ text-align: center; padding:0pt; margin: 0pt; }}\n\
+         </style>\n\
+         </head>\n\
+         <body>\n\
+         <div>\n\
+         <svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" version=\"1.1\" width=\"100%\" height=\"100%\" viewBox=\"0 0 {w} {h}\" preserveAspectRatio=\"none\">\n\
+         <image width=\"{w}\" height=\"{h}\" xlink:href=\"{href}\"/>\n\
+         </svg>\n\
+         </div>\n\
+         </body>\n\
+         </html>\n"
+    ))
 }
