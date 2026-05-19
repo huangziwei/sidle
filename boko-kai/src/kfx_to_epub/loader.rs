@@ -43,6 +43,13 @@ pub struct BookMetadata {
     /// stores it as `YYYY-MM-DD`; calibre normalises to ISO-8601 with a UTC
     /// offset. Surface raw and let the OPF emitter format it.
     pub issue_date: Option<String>,
+    /// `kindle_title_metadata/title_pronunciation` — title sort key
+    /// (yomigana for Japanese books). Surfaces in OPF as
+    /// `<dc:title opf:file-as="...">`.
+    pub title_pronunciation: Option<String>,
+    /// `kindle_title_metadata/author_pronunciation` — author sort key.
+    /// Surfaces in OPF as `<dc:creator opf:file-as="...">`.
+    pub author_pronunciation: Option<String>,
 }
 
 /// Everything we need from a KFX container to drive an EPUB write.
@@ -315,6 +322,19 @@ fn extract_book_metadata(
                 "cover_image" => {
                     if let Some(name) = resolve_cover_value(value_raw, symbols) {
                         meta.cover_resource_name = Some(name);
+                    }
+                }
+                "title_pronunciation" => {
+                    if !value.is_empty() {
+                        meta.title_pronunciation = Some(value.into());
+                    }
+                }
+                // KFX emits one `author_pronunciation` per `author` in source
+                // order. `import::kfx` keeps the last value; mirror that so the
+                // OPF `opf:file-as` matches what `boko info` reports.
+                "author_pronunciation" => {
+                    if !value.is_empty() {
+                        meta.author_pronunciation = Some(value.into());
                     }
                 }
                 _ => {}

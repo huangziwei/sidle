@@ -324,18 +324,30 @@ impl EpubOutput {
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
 "#);
 
-        // Title
+        // Title — when KFX carries `title_pronunciation` (Japanese yomigana
+        // sort key), surface it as `opf:file-as`; otherwise omit the attr.
         let title = if meta.title.is_empty() { "Untitled" } else { &meta.title };
-        s.push_str(&format!("    <dc:title>{}</dc:title>\n", xml_escape(title)));
+        if let Some(file_as) = meta.title_pronunciation.as_deref() {
+            s.push_str(&format!(
+                "    <dc:title opf:file-as=\"{}\">{}</dc:title>\n",
+                xml_escape(file_as),
+                xml_escape(title)
+            ));
+        } else {
+            s.push_str(&format!("    <dc:title>{}</dc:title>\n", xml_escape(title)));
+        }
 
-        // Authors — `opf:role="aut"` + a shared `opf:file-as` containing all
-        // authors joined by ` & ` (calibre's convention; same string on every
-        // creator). Lets EPUB libraries sort multi-author books consistently.
-        let file_as = meta.authors.join(" & ");
+        // Authors — `opf:role="aut"` + `opf:file-as`. Prefer the KFX-supplied
+        // `author_pronunciation` (yomigana sort key); fall back to the joined
+        // author list so EPUB libraries still sort multi-author books.
+        let author_file_as = meta
+            .author_pronunciation
+            .clone()
+            .unwrap_or_else(|| meta.authors.join(" & "));
         for author in &meta.authors {
             s.push_str(&format!(
                 "    <dc:creator opf:file-as=\"{}\" opf:role=\"aut\">{}</dc:creator>\n",
-                xml_escape(&file_as),
+                xml_escape(&author_file_as),
                 xml_escape(author)
             ));
         }

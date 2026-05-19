@@ -91,6 +91,9 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     // Tracks the `opf:scheme` attribute on the currently-open `<dc:identifier>`
     // so we can route `scheme="ASIN"` separately from the generic identifier.
     let mut current_identifier_scheme: Option<String> = None;
+    // EPUB-2 `opf:file-as` attribute captured on the currently-open
+    // `<dc:title>` / `<dc:creator>`, applied on element close.
+    let mut current_file_as: Option<String> = None;
     let mut buf_text = String::new();
 
     // For meta elements with content (non-empty tags)
@@ -120,6 +123,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                         // we need the scheme to route ASIN into Metadata.asin).
                         current_element_id = None;
                         current_identifier_scheme = None;
+                        current_file_as = None;
                         for attr in e.attributes().flatten() {
                             let key = attr.key.as_ref();
                             if key == b"id" {
@@ -131,6 +135,16 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                                 && local_name(key) == b"scheme"
                             {
                                 current_identifier_scheme = Some(
+                                    String::from_utf8(attr.value.to_vec())
+                                        .map_err(io::Error::other)?,
+                                );
+                            } else if (local == b"title" || local == b"creator")
+                                && local_name(key) == b"file-as"
+                            {
+                                // EPUB-2 sort-key form: `<dc:title opf:file-as="…">`.
+                                // EPUB-3 uses `<meta property="file-as" refines="#x">`
+                                // and is handled later via apply_refinements.
+                                current_file_as = Some(
                                     String::from_utf8(attr.value.to_vec())
                                         .map_err(io::Error::other)?,
                                 );
@@ -376,11 +390,26 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                             if let Some(ref id) = current_element_id {
                                 element_ids.insert(id.clone(), MetaElement::Title);
                             }
+                            if let Some(file_as) = current_file_as.take()
+                                && metadata.title_sort.is_none()
+                            {
+                                metadata.title_sort = Some(file_as);
+                            }
                         }
                         "creator" => {
+                            let is_first_author = metadata.authors.is_empty();
                             metadata.authors.push(text.clone());
                             if let Some(ref id) = current_element_id {
                                 element_ids.insert(id.clone(), MetaElement::Creator(text));
+                            }
+                            // EPUB-2 sort key sits on each `<dc:creator>`; take the
+                            // first author's value (calibre's convention — the rest
+                            // typically repeat the same joined string).
+                            if let Some(file_as) = current_file_as.take()
+                                && is_first_author
+                                && metadata.author_sort.is_none()
+                            {
+                                metadata.author_sort = Some(file_as);
                             }
                         }
                         "contributor" => {
