@@ -37,6 +37,22 @@ use sha2::{Digest, Sha256};
 use crate::library::db::{self, BookRow, NewBook};
 use crate::library::paths::{LibraryPaths, cover_ext_from, format_basename};
 
+// ---------------------------------------------------------------------------
+// Aozora Bunko .zip → EPUB
+//
+// Wires boko-kai's aozora pipeline into the import flow. Aozora source
+// archives are unstructured .zip files: a Shift_JIS text file with
+// ［＃markers］ + 底本 colophon, plus accompanying image files. We open
+// the zip, sniff for those markers, parse → Document, render a
+// programmatic cover JPEG (resvg), and build the EPUB. From there
+// `import_one` continues with Canonical::Epub bytes, so the import is
+// indistinguishable from a regular EPUB drop.
+//
+// "Secret feature" per user request: no UI affordance, no help text. A
+// non-aozora .zip falls out as an "import failed" toast like any other
+// bad input.
+// ---------------------------------------------------------------------------
+
 pub fn import_file(
     conn: &rusqlite::Connection,
     paths: &LibraryPaths,
@@ -57,6 +73,11 @@ enum SourceKind {
     Epub,
     Kfx,
     KfxZip,
+    /// `.zip` extension — tentatively an Aozora Bunko archive. The actual
+    /// aozora sniff (底本/［＃ markers) happens in `convert_aozora_zip`
+    /// during canonical-bytes extraction; a non-aozora zip fails out
+    /// there.
+    AozoraZip,
     Unknown,
 }
 
@@ -77,13 +98,14 @@ impl SourceKind {
             Some("epub") => Self::Epub,
             Some("kfx") => Self::Kfx,
             Some("kfx-zip") => Self::KfxZip,
+            Some("zip") => Self::AozoraZip,
             _ => Self::Unknown,
         }
     }
 
     fn canonical(self) -> Canonical {
         match self {
-            Self::Epub => Canonical::Epub,
+            Self::Epub | Self::AozoraZip => Canonical::Epub,
             Self::Kfx | Self::KfxZip => Canonical::Kfx,
             Self::Unknown => unreachable!("filtered by import_file"),
         }
@@ -134,6 +156,8 @@ fn import_one(
         }
         SourceKind::KfxZip => boko::kfx::merge::merge_kfx_zip(src)
             .with_context(|| format!("merge kfx-zip {}", src.display()))?,
+        SourceKind::AozoraZip => convert_aozora_zip(src)
+            .with_context(|| format!("aozora zip {}", src.display()))?,
         SourceKind::Unknown => unreachable!("filtered above"),
     };
 
@@ -348,4 +372,66 @@ pub fn sha256_of_file(path: &Path) -> std::io::Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Open an Aozora Bunko `.zip`, sniff for the markers, run the
+/// parse → cover → build_epub pipeline, return EPUB bytes. Errors out
+/// (via `bail!`) for any zip that doesn't look like aozora — the caller's
+/// `?` then surfaces this as a normal import failure with no special UI.
+///
+/// Pipeline mirrors `aozora_dispatch` in `boko-kai/src/main.rs:1602` so
+/// the CLI and the GUI produce byte-identical EPUBs from the same input.
+fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
+    let file =
+        fs::File::open(src).with_context(|| format!("open {}", src.display()))?;
+    let mut archive = zip::ZipArchive::new(file).context("not a valid zip archive")?;
+
+    let mut txt_buf: Option<Vec<u8>> = None;
+    let mut images: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .with_context(|| format!("zip entry {i}"))?;
+        if !entry.is_file() {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let lower = name.to_ascii_lowercase();
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut buf).context("read zip entry")?;
+        if lower.ends_with(".txt") {
+            txt_buf = Some(buf);
+        } else if lower.ends_with(".png")
+            || lower.ends_with(".jpg")
+            || lower.ends_with(".jpeg")
+            || lower.ends_with(".gif")
+        {
+            let basename = Path::new(&name)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or(name);
+            images.push((basename, buf));
+        }
+    }
+
+    let Some(txt) = txt_buf else {
+        bail!("zip contains no .txt entry");
+    };
+    let text = boko::aozora::parser_txt::decode_bytes(&txt);
+
+    // Aozora marker sniff. Bare zips with no aozora content fail here.
+    if !text.contains("底本") && !text.contains("［＃") {
+        bail!("not an Aozora Bunko archive");
+    }
+
+    let doc = boko::aozora::parse_txt(&text);
+    let cover = boko::aozora::render_cover_jpeg(&doc.title, &doc.author)
+        .context("aozora cover render")?;
+    let epub_bytes = boko::aozora::build_epub(boko::aozora::EpubInput {
+        document: &doc,
+        images: &images,
+        cover_jpeg: &cover,
+    })
+    .context("aozora build_epub")?;
+    Ok(epub_bytes)
 }

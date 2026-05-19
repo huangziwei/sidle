@@ -253,7 +253,12 @@ function wireDragDrop() {
         return (
           lower.endsWith(".epub") ||
           lower.endsWith(".kfx") ||
-          lower.endsWith(".kfx-zip")
+          lower.endsWith(".kfx-zip") ||
+          // Plain .zip is accepted silently so an Aozora Bunko archive can
+          // be dropped in. Non-aozora .zips fail at the backend with a
+          // standard import-failed toast; no special UI signal that .zip
+          // is supported (intentional — see import.rs convert_aozora_zip).
+          lower.endsWith(".zip")
         );
       });
       if (accepted.length === 0) {
