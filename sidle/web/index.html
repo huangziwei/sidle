@@ -168,6 +168,61 @@
 
     <ul id="ctx-menu" class="ctx-menu" hidden></ul>
 
+    <div id="metadata-modal" class="modal" hidden>
+      <div class="modal-backdrop"></div>
+      <form id="metadata-form" class="modal-panel" aria-labelledby="metadata-title">
+        <header class="modal-header">
+          <h2 id="metadata-title">Edit metadata</h2>
+        </header>
+
+        <div class="modal-body">
+          <div class="metadata-cover">
+            <div id="metadata-cover-preview" class="metadata-cover-preview"></div>
+            <button type="button" id="metadata-cover-change" class="btn-link">
+              Change cover…
+            </button>
+          </div>
+
+          <div class="metadata-fields">
+            <label class="field">
+              <span>Title</span>
+              <input name="title" required autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Authors</span>
+              <input name="author" placeholder="John Doe, Jane Smith" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Language</span>
+              <input name="language" placeholder="ja, en, zh…" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Publisher</span>
+              <input name="publisher" placeholder="新潮文庫" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Series</span>
+              <input name="series_name" placeholder="Foundation" autocomplete="off" />
+            </label>
+            <label class="field field-narrow">
+              <span>Series #</span>
+              <input name="series_index" type="number" step="0.5" min="0" placeholder="1"
+                     autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Tags</span>
+              <input name="tags" placeholder="sci-fi, to-read" autocomplete="off" />
+            </label>
+          </div>
+        </div>
+
+        <footer class="modal-footer">
+          <button type="button" class="btn-link" id="metadata-cancel">Cancel</button>
+          <button type="submit" class="btn">Save</button>
+        </footer>
+      </form>
+    </div>
+
     <div id="toast" class="toast" hidden></div>
 
     <script src="api.js"></script>

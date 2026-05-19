@@ -293,6 +293,142 @@ pub async fn library_recrawl_cover(
     })
 }
 
+/// Outcome of the user "Change cover…" action in the metadata editor.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SetCoverResult {
+    Updated { cover_path: String },
+    Failed { error: String },
+}
+
+/// Replace the cover for one book from a user-picked image file.
+///
+/// Modeled on `library_recrawl_cover` but takes its bytes from a local
+/// file instead of Amazon's `/images/P/` endpoint. Immediate-apply
+/// semantics: commits on file pick; the editor modal's Cancel doesn't
+/// undo this.
+///
+/// Reads bytes, sniffs the format (JPG/PNG/WebP) via magic bytes so a
+/// `.png` file mislabeled as `.jpg` still lands correctly, writes to
+/// `paths.cover(&sha, ext)`, updates `cover_path` in the DB, removes the
+/// previous file if the extension differs, best-effort EPUB embed via
+/// `epub_cover::replace_cover`, and emits `library:row-updated` so the
+/// rest of the UI refreshes.
+#[tauri::command]
+pub async fn library_set_cover(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    book_id: i64,
+    src_path: String,
+) -> Result<SetCoverResult, String> {
+    let bytes = match std::fs::read(&src_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(SetCoverResult::Failed {
+                error: format!("read {src_path}: {e}"),
+            });
+        }
+    };
+
+    let ext = match sniff_image_format(&bytes) {
+        Some(e) => e,
+        None => {
+            return Ok(SetCoverResult::Failed {
+                error: "unsupported image format (expected JPG, PNG, or WebP)".into(),
+            });
+        }
+    };
+
+    let book = {
+        let conn = state.db.lock().await;
+        db::get_book(&conn, book_id).map_err(|e| e.to_string())?
+    };
+    let Some(book) = book else {
+        return Err("book not found".into());
+    };
+
+    let out = state.paths.cover(&book.sha256, ext);
+    if let Err(e) = std::fs::write(&out, &bytes) {
+        return Ok(SetCoverResult::Failed {
+            error: format!("write {}: {e}", out.display()),
+        });
+    }
+    let out_str = out.to_string_lossy().to_string();
+
+    {
+        let conn = state.db.lock().await;
+        let _ = db::set_cover_path(&conn, book_id, &out_str);
+    }
+
+    // Old cover at a different filename (e.g. `cover.jpg` being replaced
+    // by `cover.png`) — tidy up so we don't leave both on disk.
+    if let Some(old) = book.cover_path.as_deref()
+        && old != out_str.as_str()
+    {
+        let _ = std::fs::remove_file(old);
+    }
+
+    // Embed in the EPUB so external readers see the user-chosen image.
+    // Best-effort: failure logs and doesn't fail the command (the gallery
+    // reads from the sidecar, not the EPUB).
+    if let Some(epub) = book.epub_path.as_deref()
+        && let Err(e) =
+            epub_cover::replace_cover(std::path::Path::new(epub), &bytes, ext)
+    {
+        eprintln!("[sidle/set-cover] book {book_id} epub cover swap failed: {e:#}");
+    }
+
+    let updated = {
+        let conn = state.db.lock().await;
+        db::get_book(&conn, book_id).map_err(|e| e.to_string())?
+    };
+    if let Some(updated) = updated {
+        let _ = app.emit("library:row-updated", &updated);
+    }
+
+    Ok(SetCoverResult::Updated {
+        cover_path: out_str,
+    })
+}
+
+/// Magic-byte sniff for the three image formats sidle accepts as covers.
+/// Returns the canonical lowercase extension or None if no header matches.
+fn sniff_image_format(bytes: &[u8]) -> Option<&'static str> {
+    // JPEG: FF D8 FF
+    if bytes.len() >= 3 && bytes[0..3] == [0xFF, 0xD8, 0xFF] {
+        return Some("jpg");
+    }
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if bytes.len() >= 8 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+    {
+        return Some("png");
+    }
+    // WebP: "RIFF" .... "WEBP"
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("webp");
+    }
+    None
+}
+
+/// Open the system file dialog filtered to images and return one path.
+///
+/// Used by the metadata editor's "Change cover…" button. The filter is a
+/// hint for the OS dialog; the actual format detection happens in
+/// `library_set_cover` via magic-byte sniff, so a file with a wrong
+/// extension still gets validated before write.
+#[tauri::command]
+pub async fn library_pick_image(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Images", &["jpg", "jpeg", "png", "webp"])
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let result = rx.await.map_err(|e| e.to_string())?;
+    Ok(result.map(|p| p.to_string()))
+}
+
 /// Open the system file dialog and return selected ebook paths.
 ///
 /// Accepts EPUB, KFX, and KFX-zip (the multi-container bundle Kindle DeDRM
@@ -317,7 +453,36 @@ pub async fn library_pick_files(app: tauri::AppHandle) -> Result<Vec<String>, St
 
 #[cfg(test)]
 mod tests {
-    use super::canonicalize_tags;
+    use super::{canonicalize_tags, sniff_image_format};
+
+    #[test]
+    fn sniff_detects_jpeg_png_webp() {
+        // JPEG SOI + APP0 (typical EXIF/JFIF prefix).
+        assert_eq!(
+            sniff_image_format(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]),
+            Some("jpg")
+        );
+        // PNG 8-byte signature.
+        assert_eq!(
+            sniff_image_format(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+            Some("png")
+        );
+        // WebP container: "RIFF" + 4 size bytes + "WEBP".
+        assert_eq!(
+            sniff_image_format(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+            Some("webp")
+        );
+    }
+
+    #[test]
+    fn sniff_rejects_non_image() {
+        assert_eq!(sniff_image_format(b""), None);
+        assert_eq!(sniff_image_format(b"PK\x03\x04"), None); // ZIP
+        assert_eq!(sniff_image_format(b"hello"), None);
+        // Too short to match anything.
+        assert_eq!(sniff_image_format(&[0xFF, 0xD8]), None);
+    }
+
 
     #[test]
     fn canonicalize_collapses_case_and_trims() {

@@ -65,11 +65,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireSelection();
   wireFilterBar();
   wireSortPopover();
+  wireMetadataModal();
   await refresh();
   subscribeStatus();
   subscribeDeviceStatus();
   subscribeSendProgress();
   subscribePullProgress();
+  subscribeLibraryRowUpdated();
 });
 
 async function loadPreferences() {
@@ -1205,6 +1207,7 @@ function openContextMenu(x, y, b) {
         add(menu, "Send to Kindle", () => sendBooks([b.id]));
       }
     }
+    add(menu, "Edit metadata…", () => openMetadataModal(b));
     add(menu, "Open in Finder", () => openInFinder(b.id));
     add(menu, "Re-fetch cover", () => recrawlCover(b));
     add(menu, "Force re-convert", () => retryConvert(b.id));
@@ -1886,5 +1889,191 @@ function wireSortPopover() {
       persistPreferences();
       render();
     });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Metadata editor modal
+//
+// Right-click → "Edit metadata…" opens this modal prefilled from the row.
+// All text fields commit together on Save (the form always submits the
+// full set — matches the Rust MetadataPatch shape). Cover changes commit
+// immediately when the user picks a file via library_set_cover; Cancel
+// does NOT revert the cover. See library-navigation.md Phase 4 for the
+// "immediate-apply" rationale.
+// ---------------------------------------------------------------------------
+
+let metadataBook = null;
+
+function wireMetadataModal() {
+  $("#metadata-cancel").addEventListener("click", closeMetadataModal);
+  $("#metadata-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    submitMetadataForm();
+  });
+  $("#metadata-cover-change").addEventListener("click", onCoverChangeClick);
+
+  // Esc closes; Cmd/Ctrl+Enter submits. Scoped to the modal element so
+  // it doesn't fight the global selection/context-menu shortcuts.
+  $("#metadata-modal").addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      closeMetadataModal();
+    } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      submitMetadataForm();
+    }
+  });
+
+  // Backdrop click closes (but not inside the panel).
+  $("#metadata-modal .modal-backdrop").addEventListener("click", closeMetadataModal);
+}
+
+function openMetadataModal(book) {
+  metadataBook = book;
+  const form = $("#metadata-form");
+  form.title.value = book.title || "";
+  form.author.value = book.author || "";
+  form.language.value = book.language || "";
+  form.publisher.value = book.publisher || "";
+  form.series_name.value = book.series_name || "";
+  form.series_index.value =
+    book.series_index != null && Number.isFinite(book.series_index)
+      ? String(book.series_index)
+      : "";
+  // Tags display as comma-joined; canonicalization happens on the
+  // backend so case + duplicates clean themselves up on save.
+  form.tags.value = (book.tags || []).join(", ");
+
+  renderCoverPreview(book);
+
+  $("#metadata-modal").hidden = false;
+  // Focus the title input for keyboard-first flow.
+  setTimeout(() => form.title.focus(), 0);
+}
+
+function closeMetadataModal() {
+  $("#metadata-modal").hidden = true;
+  metadataBook = null;
+}
+
+function renderCoverPreview(book) {
+  const box = $("#metadata-cover-preview");
+  box.innerHTML = "";
+  const url = coverUrlFor(book);
+  if (url) {
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = "";
+    box.appendChild(img);
+  } else {
+    box.textContent = book.title || "No cover";
+  }
+}
+
+async function submitMetadataForm() {
+  if (!metadataBook) return;
+  const form = $("#metadata-form");
+  const tagsRaw = form.tags.value.trim();
+  const patch = {
+    title: form.title.value.trim(),
+    author: form.author.value.trim(),
+    language: form.language.value.trim(),
+    publisher:
+      form.publisher.value.trim() === "" ? null : form.publisher.value.trim(),
+    series_name:
+      form.series_name.value.trim() === "" ? null : form.series_name.value.trim(),
+    series_index:
+      form.series_index.value === "" ? null : Number(form.series_index.value),
+    // Accept ASCII or CJK comma — same as the author facet split. The
+    // backend lowercases + dedupes + drops empties.
+    tags:
+      tagsRaw === ""
+        ? []
+        : tagsRaw.split(/[,、]/).map((s) => s.trim()).filter(Boolean),
+  };
+
+  if (!patch.title) {
+    showToast("Title cannot be empty.", true);
+    return;
+  }
+  if (
+    patch.series_index != null &&
+    (!Number.isFinite(patch.series_index) || patch.series_index < 0)
+  ) {
+    showToast("Series # must be a non-negative number.", true);
+    return;
+  }
+
+  try {
+    const updated = await window.api.invoke("library_update_metadata", {
+      bookId: metadataBook.id,
+      patch,
+    });
+    mergeBookRow(updated);
+    closeMetadataModal();
+    render();
+  } catch (e) {
+    showToast(`Save failed: ${e}`, true);
+  }
+}
+
+async function onCoverChangeClick() {
+  if (!metadataBook) return;
+  let src;
+  try {
+    src = await window.api.invoke("library_pick_image");
+  } catch (e) {
+    showToast(`Image picker failed: ${e}`, true);
+    return;
+  }
+  if (!src) return; // user cancelled
+
+  try {
+    const result = await window.api.invoke("library_set_cover", {
+      bookId: metadataBook.id,
+      srcPath: src,
+    });
+    if (result.kind === "updated") {
+      // Bump the cache-buster so the gallery thumbnail and the modal
+      // preview both reload from disk instead of the cached image.
+      state.coverCacheBust += 1;
+      // Update the in-memory row directly; library:row-updated will
+      // also fire and re-apply, but doing it locally avoids a render
+      // gap.
+      const idx = state.books.findIndex((b) => b.id === metadataBook.id);
+      if (idx !== -1) {
+        state.books[idx] = { ...state.books[idx], cover_path: result.cover_path };
+        metadataBook = state.books[idx];
+      }
+      renderCoverPreview(metadataBook);
+      render();
+    } else if (result.kind === "failed") {
+      showToast(`Cover change failed: ${result.error}`, true);
+    }
+  } catch (e) {
+    showToast(`Cover change failed: ${e}`, true);
+  }
+}
+
+// Replace one book in state.books by id. Used by the metadata save path
+// and by the library:row-updated event subscriber.
+function mergeBookRow(row) {
+  const idx = state.books.findIndex((b) => b.id === row.id);
+  if (idx !== -1) state.books[idx] = row;
+}
+
+function subscribeLibraryRowUpdated() {
+  window.api.listen("library:row-updated", (e) => {
+    if (!e?.payload) return;
+    mergeBookRow(e.payload);
+    // If the modal is open on this book, refresh the cover preview so a
+    // backend-driven update (e.g. a future bulk recrawl) keeps the UI in
+    // sync.
+    if (metadataBook && metadataBook.id === e.payload.id) {
+      metadataBook = e.payload;
+      renderCoverPreview(metadataBook);
+    }
+    render();
   });
 }
