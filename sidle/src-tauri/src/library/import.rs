@@ -5,14 +5,17 @@
 //! - **EPUB**: original P1 path. Copy as the canonical source, queue EPUB→KFX.
 //! - **KFX / KFX-zip**: P2b reverse path. The chain is `.kfx-zip → .kfx → .epub`:
 //!   `.kfx-zip` is first merged to a single-container `.kfx` (via boko's
-//!   `kfx::merge::merge_kfx_zip`) and persisted to disk; that on-disk `.kfx`
-//!   is then re-opened and exported to EPUB via `Book::export(Format::Epub, …)`.
-//!   `.kfx` inputs skip the merge step but follow the same on-disk-first path.
-//!   No EPUB→KFX queue work runs — we already have the KFX.
+//!   `kfx::merge::merge_kfx_zip`) and persisted to disk; the same in-memory
+//!   KFX bytes are then handed to boko's `kfx_to_epub::convert_to_epub` to
+//!   produce the EPUB without re-reading the file. The cover image is pulled
+//!   from that same in-memory KFX (it lives in the KFX's resource entities,
+//!   not the EPUB output), so no second `Book::open` is needed. `.kfx` inputs
+//!   skip the merge step but follow the same shape. No EPUB→KFX queue work
+//!   runs — we already have the KFX.
 //!
 //! Each step touches disk; callers should run this inside `spawn_blocking`.
 
-use std::fs::{self, File};
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -153,12 +156,23 @@ fn import_kfx(
         _ => unreachable!("import_kfx called with non-KFX source"),
     };
 
-    // Read metadata from the in-memory merged KFX so we can name the file —
-    // still no `Book::open(.kfx-zip)` involved.
-    let meta = {
-        let book = boko::Book::from_bytes(&kfx_bytes, boko::Format::Kfx)
+    // Read metadata AND pull the cover image out of the same in-memory KFX —
+    // we already have all the bytes, so a second `Book::open` later would be
+    // pure overhead. The cover ref lives in `Metadata.cover_image`; its bytes
+    // live in a resource entity inside the KFX itself.
+    let (meta, cover_data): (BookMeta, Option<(Vec<u8>, &'static str)>) = {
+        let mut book = boko::Book::from_bytes(&kfx_bytes, boko::Format::Kfx)
             .with_context(|| "read kfx metadata")?;
-        extract_meta(book.metadata(), src.file_stem().and_then(|s| s.to_str()))
+        let meta = extract_meta(book.metadata(), src.file_stem().and_then(|s| s.to_str()));
+        let cover = meta
+            .cover_image
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(|cref| {
+                let bytes = book.load_asset(&PathBuf::from(cref)).ok()?;
+                Some((bytes, cover_ext_from(cref)))
+            });
+        (meta, cover)
     };
     let basename = format_basename(&meta.authors, &meta.title, meta.date.as_deref());
 
@@ -169,17 +183,18 @@ fn import_kfx(
     // Persist the intermediate `.kfx`.
     write_bytes_atomic(&dest_kfx, &kfx_bytes)?;
 
-    // Step 2: `.kfx` (on disk) → `.epub`. Reading from the persisted `.kfx`
-    // keeps the chain explicit — the EPUB exporter sees exactly the same Book
-    // a later re-open would see.
+    // Step 2: KFX bytes → EPUB bytes via boko's mechanical port. The bytes
+    // are byte-identical to what we just wrote to `dest_kfx`, so this matches
+    // a re-open without the disk round-trip.
     if !dest_epub.exists() {
-        synthesize_epub_from_kfx(&dest_kfx, &dest_epub)
+        synthesize_epub_from_kfx(&kfx_bytes, &dest_epub)
             .with_context(|| format!("export EPUB {}", dest_epub.display()))?;
     }
 
-    let cover_path =
-        write_cover_from_source(paths, &sha, &dest_kfx, meta.cover_image.as_deref())
-            .unwrap_or(None);
+    let cover_path = cover_data.and_then(|(bytes, ext)| {
+        let out = paths.cover(&sha, ext);
+        fs::write(&out, &bytes).ok().map(|_| out)
+    });
 
     let book_id = insert_row(
         conn,
@@ -200,30 +215,13 @@ fn import_kfx(
     })
 }
 
-/// Open a single-container `.kfx` from disk and write EPUB to `dest`.
-///
-/// Caller must guarantee `src` is `.kfx` (not `.kfx-zip`). Splitting this out
-/// from a generic `Book::open` callsite is the cheap way to keep the
-/// `.kfx-zip → .kfx → .epub` chain honest: `.kfx-zip` never reaches here.
-fn synthesize_epub_from_kfx(src_kfx: &Path, dest_epub: &Path) -> Result<()> {
-    debug_assert!(
-        !src_kfx
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("kfx-zip")),
-        "synthesize_epub_from_kfx must be called with a single-container .kfx, not .kfx-zip"
-    );
-    let mut book = boko::Book::open(src_kfx).with_context(|| "open kfx with boko")?;
-    let tmp = dest_epub.with_extension("epub.partial");
-    {
-        let mut writer = File::create(&tmp)
-            .with_context(|| format!("create {}", tmp.display()))?;
-        book.export(boko::Format::Epub, &mut writer)
-            .with_context(|| "boko export to EPUB")?;
-        writer.sync_all().ok();
-    }
-    fs::rename(&tmp, dest_epub)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), dest_epub.display()))?;
-    Ok(())
+/// Convert single-container KFX bytes to an EPUB file via boko's mechanical
+/// port (`kfx_to_epub::convert_to_epub`). Caller is responsible for ensuring
+/// the bytes are a single-container `.kfx` — `.kfx-zip` must be merged first.
+fn synthesize_epub_from_kfx(kfx_bytes: &[u8], dest_epub: &Path) -> Result<()> {
+    let epub_bytes = boko::kfx_to_epub::convert_to_epub(kfx_bytes)
+        .map_err(|e| anyhow::anyhow!("boko kfx→epub: {e}"))?;
+    write_bytes_atomic(dest_epub, &epub_bytes)
 }
 
 fn write_bytes_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
