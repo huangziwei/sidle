@@ -107,6 +107,17 @@ pub async fn library_update_metadata(
     patch.title = patch.title.trim().to_string();
     patch.author = patch.author.trim().to_string();
     patch.language = patch.language.trim().to_string();
+    match &mut patch.publisher {
+        Some(s) => {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() {
+                patch.publisher = None;
+            } else {
+                *s = trimmed;
+            }
+        }
+        None => {}
+    }
     match &mut patch.series_name {
         Some(s) => {
             let trimmed = s.trim().to_string();

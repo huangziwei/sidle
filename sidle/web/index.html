@@ -48,6 +48,54 @@
 
     </header>
 
+    <nav class="filter-bar" id="filter-bar" aria-label="Filter library">
+      <button type="button" class="pill pill-all active" data-pill="all">All</button>
+      <button type="button" class="pill" data-facet="language">
+        <span class="pill-label">Language</span>
+      </button>
+      <button type="button" class="pill" data-facet="author">
+        <span class="pill-label">Author</span>
+      </button>
+      <button type="button" class="pill" data-facet="on_kindle">
+        <span class="pill-label">On Kindle</span>
+      </button>
+      <button type="button" class="pill" data-facet="publisher">
+        <span class="pill-label">Publisher</span>
+      </button>
+      <button type="button" class="pill" data-facet="series">
+        <span class="pill-label">Series</span>
+      </button>
+      <button type="button" class="pill" data-facet="tags">
+        <span class="pill-label">Tags</span>
+      </button>
+
+      <div class="filter-spacer"></div>
+
+      <button type="button" class="sort-button" id="sort-button">
+        <span class="sort-label">Sort: Date added</span>
+        <span class="sort-dir">↓</span>
+      </button>
+
+      <div class="filter-search">
+        <input type="search" id="search-input" placeholder="Search title, author, publisher, series, tags…" />
+      </div>
+    </nav>
+
+    <div class="filter-dropdown" id="filter-dropdown" hidden>
+      <input type="search" class="filter-dropdown-search" placeholder="Filter options…" />
+      <ul class="filter-dropdown-list"></ul>
+      <div class="filter-dropdown-empty" hidden>No options match the current filters.</div>
+      <button type="button" class="filter-dropdown-clear">Clear</button>
+    </div>
+
+    <div class="sort-popover" id="sort-popover" hidden>
+      <ul class="sort-key-list" id="sort-key-list"></ul>
+      <div class="sort-dir-toggle" role="group" aria-label="Sort direction">
+        <button type="button" data-dir="asc">↑ Asc</button>
+        <button type="button" data-dir="desc">↓ Desc</button>
+      </div>
+    </div>
+
     <main id="main">
       <section id="gallery" class="view active" aria-label="Gallery">
         <div id="gallery-grid" class="gallery-grid"></div>

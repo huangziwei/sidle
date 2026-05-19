@@ -122,6 +122,308 @@ button {
   color: white;
 }
 
+/* Filter bar (facet pills + free-text search) */
+
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+
+.filter-spacer {
+  flex: 1;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font: inherit;
+  color: var(--fg);
+  white-space: nowrap;
+  transition: background 80ms ease, border-color 80ms ease, color 80ms ease;
+}
+
+.pill:hover {
+  background: var(--bg);
+}
+
+.pill.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.pill.active:hover {
+  /* Slightly darken on hover so the active state remains legible. */
+  filter: brightness(0.95);
+}
+
+.pill-all {
+  font-weight: 600;
+}
+
+.pill .pill-label {
+  /* No layout adjustments — span just lets us swap text without
+     blowing away pill-clear children. */
+}
+
+.pill-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 0;
+  background: rgba(255, 255, 255, 0.25);
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  padding: 0;
+  margin-left: 2px;
+}
+
+.pill-clear:hover {
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.filter-search {
+  display: flex;
+  align-items: center;
+}
+
+.filter-search input[type="search"] {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 4px 10px;
+  min-width: 240px;
+  outline: none;
+  transition: border-color 80ms ease, background 80ms ease;
+}
+
+.filter-search input[type="search"]:focus {
+  border-color: var(--accent);
+}
+
+/* Filter dropdown (one element, positioned over the page) */
+
+.filter-dropdown {
+  position: absolute;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  min-width: 240px;
+  max-width: 340px;
+  max-height: 60vh;
+  overflow: hidden;
+}
+
+.filter-dropdown[hidden] {
+  display: none;
+}
+
+.filter-dropdown-search {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  outline: none;
+}
+
+.filter-dropdown-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+.filter-dropdown-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.filter-dropdown-list li:hover {
+  background: var(--bg);
+}
+
+.filter-dropdown-list li input[type="checkbox"] {
+  accent-color: var(--accent);
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.filter-dropdown-list li .opt-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filter-dropdown-list li .opt-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+/* Selected-but-excluded by cross-facet filters — italicized hint that
+   "this is filtered out by another pill" so the user understands why
+   the count is 0. */
+.filter-dropdown-list li.zero .opt-label,
+.filter-dropdown-list li.zero .opt-count {
+  font-style: italic;
+  color: var(--muted);
+}
+
+.filter-dropdown-empty {
+  padding: 14px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.filter-dropdown-clear {
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--border);
+  color: var(--accent);
+  padding: 8px 12px;
+  text-align: left;
+  font: inherit;
+}
+
+.filter-dropdown-clear:hover {
+  background: var(--bg);
+}
+
+/* Sort button + popover (single-select keys + Asc/Desc toggle) */
+
+.sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font: inherit;
+  color: var(--fg);
+  white-space: nowrap;
+  transition: background 80ms ease;
+}
+
+.sort-button:hover {
+  background: var(--bg);
+}
+
+.sort-button .sort-dir {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sort-popover {
+  position: absolute;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  overflow: hidden;
+}
+
+.sort-popover[hidden] {
+  display: none;
+}
+
+.sort-key-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+}
+
+.sort-key-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sort-key-list li:hover {
+  background: var(--bg);
+}
+
+.sort-key-list li .sort-radio {
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+  flex: 0 0 auto;
+  position: relative;
+}
+
+.sort-key-list li.active .sort-radio {
+  border-color: var(--accent);
+}
+
+.sort-key-list li.active .sort-radio::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  background: var(--accent);
+  border-radius: 50%;
+}
+
+.sort-dir-toggle {
+  display: flex;
+  border-top: 1px solid var(--border);
+}
+
+.sort-dir-toggle button {
+  flex: 1 1 0;
+  background: transparent;
+  border: 0;
+  padding: 8px 12px;
+  font: inherit;
+  color: var(--muted);
+}
+
+.sort-dir-toggle button:hover {
+  background: var(--bg);
+}
+
+.sort-dir-toggle button.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 /* Device pill + popover */
 
 .device {

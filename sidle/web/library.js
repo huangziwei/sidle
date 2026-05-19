@@ -7,6 +7,18 @@ const state = {
   books: [],
   view: "gallery", // 'gallery' | 'list'
   sort: { key: "imported_at", asc: false },
+  // Facet filters: AND across facets, OR within. Each Set holds the
+  // currently-selected values for that facet. See extractFacetValues for
+  // how values are derived per book.
+  filters: {
+    language: new Set(),
+    author: new Set(),
+    on_kindle: new Set(), // "yes" | "no"
+    publisher: new Set(),
+    series: new Set(),
+    tags: new Set(),
+  },
+  search: "", // global free-text search across title, author, series, tags
   device: null, // DeviceInfo | null
   sent: [],     // Vec<DeviceBookRow>
   sentSet: new Set(), // sha256s currently on device, derived from `sent`
@@ -24,6 +36,20 @@ const state = {
   autopull: null,
 };
 
+// Sort keys exposed in the gallery-visible sort popover and as
+// data-sort attrs on the list-view column headers. Order here is the
+// order shown in the popover. Series will be added in Phase 5.
+const SORT_KEYS = [
+  ["title", "Title"],
+  ["author", "Author"],
+  ["language", "Language"],
+  ["imported_at", "Date added"],
+  ["file_size", "Size"],
+  ["on_kindle", "On Kindle"],
+];
+
+const FACETS = ["language", "author", "on_kindle", "publisher", "series", "tags"];
+
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
@@ -37,6 +63,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireDevice();
   wireListHeaderInteractions();
   wireSelection();
+  wireFilterBar();
+  wireSortPopover();
   await refresh();
   subscribeStatus();
   subscribeDeviceStatus();
@@ -59,12 +87,31 @@ async function loadPreferences() {
       state.columnWidths = JSON.parse(cols) || {};
     } catch {}
   }
+  const filters = localStorage.getItem("filters");
+  if (filters) {
+    try {
+      const parsed = JSON.parse(filters) || {};
+      for (const facet of FACETS) {
+        if (Array.isArray(parsed[facet])) {
+          state.filters[facet] = new Set(parsed[facet]);
+        }
+      }
+    } catch {}
+  }
+  const search = localStorage.getItem("search");
+  if (typeof search === "string") state.search = search;
   applyView();
 }
 
 function persistPreferences() {
   localStorage.setItem("view", state.view);
   localStorage.setItem("sort", JSON.stringify(state.sort));
+  const filtersForStorage = {};
+  for (const facet of FACETS) {
+    filtersForStorage[facet] = [...state.filters[facet]];
+  }
+  localStorage.setItem("filters", JSON.stringify(filtersForStorage));
+  localStorage.setItem("search", state.search);
 }
 
 function saveColumnWidths() {
@@ -208,14 +255,20 @@ function render() {
       state.lastClicked = null;
     }
   }
-  const books = sortedBooks();
+  const books = sortedBooks(visibleBooks(state.books));
   renderGallery(books);
   renderList(books);
   renderQueue();
   renderSelectionBar();
   updateSendUnsentButton();
+  // The empty-state messages are wired to whether the *visible* set is
+  // empty. If the underlying library is non-empty but filters hide
+  // everything, the empty state surfaces in the same slot — the user
+  // can clear filters via the "All" pill.
   $("#gallery-empty").hidden = books.length > 0;
   $("#list-empty").hidden = books.length > 0;
+  renderFilterBar();
+  renderSortControl();
   if (state.view === "list") {
     requestAnimationFrame(() => {
       ensureDefaultColumnWidths();
@@ -224,10 +277,11 @@ function render() {
   }
 }
 
-function sortedBooks() {
+function sortedBooks(books) {
+  const list = books || state.books;
   const { key, asc } = state.sort;
   const dir = asc ? 1 : -1;
-  return [...state.books].sort((a, b) => {
+  return [...list].sort((a, b) => {
     const av = sortValue(a, key);
     const bv = sortValue(b, key);
     if (av == null && bv == null) return 0;
@@ -241,6 +295,139 @@ function sortedBooks() {
 function sortValue(b, key) {
   if (key === "on_kindle") return state.sentSet.has(b.sha256) ? 1 : 0;
   return b[key];
+}
+
+// ---------------------------------------------------------------------------
+// Filter algorithm (cascading facets + free-text search)
+//
+// Composition: render() calls sortedBooks(visibleBooks(state.books)).
+//   - visibleBooks applies the global search and AND-across-facets.
+//   - facetOptions, used by the dropdown, applies a "leave-one-out" view
+//     so selecting language=jp narrows the Author pill's options, but the
+//     Language pill itself still shows every language in the library.
+//
+// CJK support: extractFacetValues for authors splits on /\s*[,、]\s*/ so a
+// Japanese OPF that emits "村上春樹、夏目漱石" inside one <dc:creator> still
+// yields two distinct authors in the facet. Everywhere else is just JS
+// Unicode-native string ops (.includes, .toLowerCase no-op for CJK, etc.).
+// ---------------------------------------------------------------------------
+
+function extractFacetValues(book, facet) {
+  switch (facet) {
+    case "language":
+      return [book.language?.trim() || "—"];
+    case "author": {
+      const trimmed = (book.author || "").trim();
+      if (!trimmed) return ["—"];
+      // ASCII comma OR CJK ideographic comma U+3001. Japanese EPUBs often
+      // pack multiple creators into one <dc:creator> separated by 「、」.
+      const parts = trimmed.split(/\s*[,、]\s*/).filter(Boolean);
+      return parts.length ? [...new Set(parts)] : ["—"];
+    }
+    case "on_kindle":
+      return [state.sentSet.has(book.sha256) ? "yes" : "no"];
+    case "publisher":
+      return [book.publisher?.trim() || "—"];
+    case "series":
+      return [book.series_name?.trim() || "—"];
+    case "tags":
+      return book.tags?.length ? book.tags : ["—"];
+    default:
+      return [];
+  }
+}
+
+function activeFacetsExcept(skipFacet) {
+  const out = {};
+  for (const facet of FACETS) {
+    const sel = state.filters[facet];
+    if (facet === skipFacet || sel.size === 0) continue;
+    out[facet] = sel;
+  }
+  return out;
+}
+
+function matchesFacets(book, facets) {
+  for (const facet of Object.keys(facets)) {
+    const vals = extractFacetValues(book, facet);
+    if (!vals.some((v) => facets[facet].has(v))) return false;
+  }
+  return true;
+}
+
+function matchesSearch(book) {
+  const q = state.search.trim().toLowerCase();
+  if (!q) return true;
+  const hay = [
+    book.title,
+    book.author,
+    book.publisher,
+    book.series_name,
+    ...(book.tags || []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return hay.includes(q);
+}
+
+function visibleBooks(books) {
+  const facets = activeFacetsExcept(null);
+  return books.filter((b) => matchesSearch(b) && matchesFacets(b, facets));
+}
+
+function facetOptions(facet) {
+  const others = activeFacetsExcept(facet);
+  const counts = new Map();
+  for (const b of state.books) {
+    if (!matchesSearch(b)) continue;
+    if (!matchesFacets(b, others)) continue;
+    for (const v of extractFacetValues(b, facet)) {
+      counts.set(v, (counts.get(v) || 0) + 1);
+    }
+  }
+  // Always include this pill's currently-selected values, even if the
+  // cross-facet filter would exclude them. Without this, a user who
+  // selected author=A then language=B (excluding A's books) would have
+  // no way to unselect A.
+  for (const v of state.filters[facet]) {
+    if (!counts.has(v)) counts.set(v, 0);
+  }
+  return [...counts.entries()].sort((a, b) => {
+    if (a[0] === "—") return 1;
+    if (b[0] === "—") return -1;
+    return a[0].localeCompare(b[0]);
+  });
+}
+
+function hasAnyFilter() {
+  if (state.search.trim()) return true;
+  for (const facet of FACETS) {
+    if (state.filters[facet].size > 0) return true;
+  }
+  return false;
+}
+
+function clearAllFilters() {
+  for (const facet of FACETS) state.filters[facet] = new Set();
+  state.search = "";
+  $("#search-input").value = "";
+  persistPreferences();
+  render();
+}
+
+function toggleFilterValue(facet, value) {
+  const sel = state.filters[facet];
+  if (sel.has(value)) sel.delete(value);
+  else sel.add(value);
+  persistPreferences();
+  render();
+}
+
+function clearFacet(facet) {
+  state.filters[facet] = new Set();
+  persistPreferences();
+  render();
 }
 
 function renderGallery(books) {
@@ -1410,4 +1597,294 @@ function showToast(msg, isError = false) {
   t.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (t.hidden = true), 4000);
+}
+
+// ---------------------------------------------------------------------------
+// Filter bar + sort UI
+//
+// One filter bar serves both gallery and list views — it lives between the
+// toolbar and <main>, outside either view section. render() composes
+// sortedBooks(visibleBooks(state.books)) so both views consume the same
+// filtered+sorted set.
+// ---------------------------------------------------------------------------
+
+// Currently-open dropdown facet name (e.g. "language") or null.
+let openDropdownFacet = null;
+// Current dropdown internal search input value.
+let dropdownSearch = "";
+// Debounce timer for the global free-text search input.
+let searchDebounceTimer = null;
+
+function wireFilterBar() {
+  // "All" pill — clears every facet + search.
+  document
+    .querySelector('.pill[data-pill="all"]')
+    .addEventListener("click", clearAllFilters);
+
+  // Facet pills.
+  document.querySelectorAll(".pill[data-facet]").forEach((pill) => {
+    pill.addEventListener("click", (e) => {
+      // The × inline button (created lazily in renderFilterBar) handles
+      // its own click via stopPropagation; this only fires when the pill
+      // body is clicked.
+      const facet = pill.dataset.facet;
+      if (openDropdownFacet === facet) closeFilterDropdown();
+      else openFilterDropdown(facet, pill);
+    });
+  });
+
+  // Global free-text search.
+  const search = $("#search-input");
+  search.value = state.search;
+  search.addEventListener("input", () => {
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = setTimeout(() => {
+      state.search = search.value;
+      persistPreferences();
+      render();
+    }, 100);
+  });
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      search.value = "";
+      state.search = "";
+      persistPreferences();
+      render();
+    }
+  });
+
+  // Sort button.
+  $("#sort-button").addEventListener("click", () => {
+    if ($("#sort-popover").hidden) openSortPopover();
+    else closeSortPopover();
+  });
+
+  // Dropdown internal search.
+  $(".filter-dropdown-search").addEventListener("input", (e) => {
+    dropdownSearch = e.target.value;
+    if (openDropdownFacet) renderDropdownOptions(openDropdownFacet);
+  });
+
+  // Dropdown clear.
+  $(".filter-dropdown-clear").addEventListener("click", () => {
+    if (openDropdownFacet) clearFacet(openDropdownFacet);
+  });
+
+  // Dismiss popovers on outside click + Escape.
+  document.addEventListener("click", (e) => {
+    if (
+      openDropdownFacet &&
+      !$("#filter-dropdown").contains(e.target) &&
+      !e.target.closest(`.pill[data-facet="${openDropdownFacet}"]`)
+    ) {
+      closeFilterDropdown();
+    }
+    if (
+      !$("#sort-popover").hidden &&
+      !$("#sort-popover").contains(e.target) &&
+      !e.target.closest("#sort-button")
+    ) {
+      closeSortPopover();
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      closeFilterDropdown();
+      closeSortPopover();
+    }
+  });
+}
+
+function renderFilterBar() {
+  // "All" pill is active iff no filter is active.
+  const allPill = document.querySelector('.pill[data-pill="all"]');
+  allPill.classList.toggle("active", !hasAnyFilter());
+
+  // Facet pills: visual state reflects the filter Set.
+  document.querySelectorAll(".pill[data-facet]").forEach((pill) => {
+    const facet = pill.dataset.facet;
+    const sel = state.filters[facet];
+    const baseLabel = facetDisplayLabel(facet);
+
+    // Rebuild the pill's interior: <span class="pill-label">…</span>
+    // optionally followed by an × clear button.
+    pill.innerHTML = "";
+    const label = document.createElement("span");
+    label.className = "pill-label";
+    if (sel.size === 0) {
+      label.textContent = baseLabel;
+      pill.classList.remove("active");
+    } else if (sel.size === 1) {
+      const [value] = sel;
+      label.textContent = `${baseLabel}: ${value}`;
+      pill.classList.add("active");
+    } else {
+      label.textContent = `${baseLabel}: ${sel.size}`;
+      pill.classList.add("active");
+    }
+    pill.appendChild(label);
+
+    if (sel.size > 0) {
+      const clear = document.createElement("span");
+      clear.className = "pill-clear";
+      clear.textContent = "×";
+      clear.title = `Clear ${baseLabel}`;
+      clear.addEventListener("click", (e) => {
+        e.stopPropagation();
+        clearFacet(facet);
+      });
+      pill.appendChild(clear);
+    }
+  });
+}
+
+function facetDisplayLabel(facet) {
+  switch (facet) {
+    case "language": return "Language";
+    case "author":   return "Author";
+    case "on_kindle": return "On Kindle";
+    case "publisher": return "Publisher";
+    case "series":   return "Series";
+    case "tags":     return "Tags";
+    default:         return facet;
+  }
+}
+
+function openFilterDropdown(facet, anchorPill) {
+  openDropdownFacet = facet;
+  dropdownSearch = "";
+  const dd = $("#filter-dropdown");
+  dd.hidden = false;
+  dd.querySelector(".filter-dropdown-search").value = "";
+  positionPopover(dd, anchorPill);
+  renderDropdownOptions(facet);
+  // Focus the inner search for immediate filtering.
+  dd.querySelector(".filter-dropdown-search").focus();
+}
+
+function closeFilterDropdown() {
+  if (!openDropdownFacet) return;
+  openDropdownFacet = null;
+  dropdownSearch = "";
+  $("#filter-dropdown").hidden = true;
+}
+
+function renderDropdownOptions(facet) {
+  const dd = $("#filter-dropdown");
+  const list = dd.querySelector(".filter-dropdown-list");
+  const empty = dd.querySelector(".filter-dropdown-empty");
+  list.innerHTML = "";
+
+  const needle = dropdownSearch.trim().toLowerCase();
+  const all = facetOptions(facet);
+  const filtered = needle
+    ? all.filter(([v]) => v.toLowerCase().includes(needle))
+    : all;
+
+  if (filtered.length === 0) {
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+
+  const selected = state.filters[facet];
+  for (const [value, count] of filtered) {
+    const li = document.createElement("li");
+    if (count === 0) li.classList.add("zero");
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = selected.has(value);
+    cb.addEventListener("click", (e) => e.stopPropagation());
+    cb.addEventListener("change", () => toggleFilterValue(facet, value));
+
+    const lbl = document.createElement("span");
+    lbl.className = "opt-label";
+    lbl.textContent = value;
+    lbl.title = value;
+
+    const cnt = document.createElement("span");
+    cnt.className = "opt-count";
+    cnt.textContent = count;
+
+    li.append(cb, lbl, cnt);
+    li.addEventListener("click", () => {
+      cb.checked = !cb.checked;
+      toggleFilterValue(facet, value);
+    });
+    list.appendChild(li);
+  }
+}
+
+function positionPopover(popover, anchor) {
+  // Render off-screen first to measure intrinsic size, then place under
+  // the anchor. Clamps to viewport horizontally.
+  popover.style.visibility = "hidden";
+  popover.style.left = "0px";
+  popover.style.top = "0px";
+  const aRect = anchor.getBoundingClientRect();
+  const pRect = popover.getBoundingClientRect();
+  let left = aRect.left;
+  const maxLeft = window.innerWidth - pRect.width - 8;
+  if (left > maxLeft) left = Math.max(8, maxLeft);
+  popover.style.left = `${left}px`;
+  popover.style.top = `${aRect.bottom + 4}px`;
+  popover.style.visibility = "";
+}
+
+// --- Sort UI ---
+
+function renderSortControl() {
+  // Button label reflects current sort.
+  const label = SORT_KEYS.find(([k]) => k === state.sort.key)?.[1] ?? "—";
+  $("#sort-button .sort-label").textContent = `Sort: ${label}`;
+  $("#sort-button .sort-dir").textContent = state.sort.asc ? "↑" : "↓";
+
+  // Populate the popover key list. Rebuild each time so .active is fresh.
+  const list = $("#sort-key-list");
+  list.innerHTML = "";
+  for (const [key, name] of SORT_KEYS) {
+    const li = document.createElement("li");
+    li.dataset.key = key;
+    if (state.sort.key === key) li.classList.add("active");
+    const radio = document.createElement("span");
+    radio.className = "sort-radio";
+    const text = document.createElement("span");
+    text.textContent = name;
+    li.append(radio, text);
+    li.addEventListener("click", () => {
+      state.sort = { key, asc: state.sort.asc };
+      persistPreferences();
+      render();
+    });
+    list.appendChild(li);
+  }
+
+  // Direction buttons.
+  $$("#sort-popover .sort-dir-toggle button").forEach((btn) => {
+    btn.classList.toggle(
+      "active",
+      btn.dataset.dir === (state.sort.asc ? "asc" : "desc"),
+    );
+  });
+}
+
+function openSortPopover() {
+  const pop = $("#sort-popover");
+  pop.hidden = false;
+  positionPopover(pop, $("#sort-button"));
+}
+
+function closeSortPopover() {
+  $("#sort-popover").hidden = true;
+}
+
+function wireSortPopover() {
+  $$("#sort-popover .sort-dir-toggle button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.sort = { ...state.sort, asc: btn.dataset.dir === "asc" };
+      persistPreferences();
+      render();
+    });
+  });
 }

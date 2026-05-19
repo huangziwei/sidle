@@ -264,6 +264,9 @@ struct BookMeta {
     /// generic `identifier`, which for KFX is the per-device internal
     /// `book_id` UUID — not the ASIN.
     asin: Option<String>,
+    /// EPUB `<dc:publisher>` or KFX `publisher` field (symbol 232). Optional;
+    /// many self-pub and indie books leave it blank.
+    publisher: Option<String>,
 }
 
 fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
@@ -281,6 +284,7 @@ fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
         ppd: m.page_progression_direction.clone(),
         date: m.date.clone(),
         asin: m.asin.clone().filter(|s| !s.is_empty()),
+        publisher: m.publisher.clone().filter(|s| !s.is_empty()),
     }
 }
 
@@ -312,6 +316,7 @@ fn insert_row(
             file_size,
             imported_at: &now,
             asin: meta.asin.as_deref(),
+            publisher: meta.publisher.as_deref(),
             // Series and tags aren't populated from source format yet —
             // they're set via the metadata editor. Flagged as a follow-up
             // in `.claude/plans/library-navigation.md` (Phase 5+).
