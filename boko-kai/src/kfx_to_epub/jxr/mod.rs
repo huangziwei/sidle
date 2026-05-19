@@ -62,7 +62,7 @@ pub fn transcode(jxr_bytes: &[u8], resource_name: &str) -> Result<(Vec<u8>, Stri
 }
 
 fn encode_jpeg(img: &decoder::DecodedImage) -> Result<Vec<u8>, ConvertError> {
-    use jpeg_encoder::{ColorType, Encoder};
+    use jpeg_encoder::Encoder;
     use consts::*;
 
     // We currently only emit JPEG for 8-bit RGB / Y outputs. Higher bit

@@ -29,7 +29,7 @@ pub fn twos_complement_byte(v: u32) -> i32 {
 }
 
 #[inline]
-pub fn num_ones(mut x: u32) -> u32 {
+pub fn num_ones(x: u32) -> u32 {
     x.count_ones()
 }
 

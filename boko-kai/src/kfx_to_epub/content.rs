@@ -24,7 +24,6 @@ use crate::kfx::symbols::KfxSymbol;
 
 use super::dom::{Dom, NodeId};
 use super::loader::BookData;
-use super::output::EpubOutput;
 use super::properties::{self, CssDecl};
 use super::resources::ResourceIndex;
 use super::ConvertError;

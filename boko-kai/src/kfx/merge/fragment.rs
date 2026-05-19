@@ -30,14 +30,6 @@ impl YJFragment {
         }
     }
 
-    pub fn keyed(ftype: impl Into<String>, fid: impl Into<String>, value: IonNode) -> Self {
-        Self {
-            ftype: ftype.into(),
-            fid: fid.into(),
-            value,
-        }
-    }
-
     pub fn is_single(&self) -> bool {
         self.fid == self.ftype
     }
@@ -85,33 +77,9 @@ pub const PREFERED_FRAGMENT_TYPE_ORDER: &[&str] = &[
     "$419",
 ];
 
-pub const ROOT_FRAGMENT_TYPES: &[&str] = &[
-    "$ion_symbol_table",
-    "$270",
-    "$490",
-    "$389",
-    "$419",
-    "$585",
-    "$538",
-    "$262",
-    "$593",
-    "$550",
-    "$258",
-    "$265",
-    "$264",
-    "$395",
-    "$390",
-    "$621",
-    "$611",
-];
-
 pub const CONTAINER_FRAGMENT_TYPES: &[&str] = &["$270", "$593", "$ion_symbol_table", "$419"];
 
 pub const RAW_FRAGMENT_TYPES: &[&str] = &["$418", "$417"];
-
-pub fn is_root(ftype: &str) -> bool {
-    ROOT_FRAGMENT_TYPES.contains(&ftype)
-}
 
 pub fn is_container_fragment(ftype: &str) -> bool {
     CONTAINER_FRAGMENT_TYPES.contains(&ftype)

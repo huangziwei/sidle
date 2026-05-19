@@ -180,12 +180,6 @@ impl LocalSymbolTable {
         self.local_min_id - 1 + (self.local_symbols.len() as u32)
     }
 
-    /// True iff the symbol is in a shared (imported) table — i.e. id > 0 and
-    /// id < local_min_id. Mirrors calibre's `is_shared_symbol`.
-    pub fn is_shared_symbol(&self, name: &str) -> bool {
-        let id = self.get_id(name);
-        id > 0 && id < self.local_min_id
-    }
 }
 
 /// Constants for callers that need to know the SYSTEM table size etc.
@@ -193,6 +187,7 @@ pub const SYSTEM_SIZE: u32 = SYSTEM_SYMBOLS.len() as u32; // 9
 
 #[cfg(test)]
 mod tests {
+    use super::super::catalog::{YJ_SYMBOLS_NAME, YJ_SYMBOLS_VERSION};
     use super::*;
 
     #[test]

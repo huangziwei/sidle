@@ -75,6 +75,7 @@ impl IonNode {
             _ => None,
         }
     }
+    #[cfg(test)]
     pub fn as_symbol(&self) -> Option<&str> {
         match self {
             IonNode::Symbol(s) => Some(s),
@@ -86,19 +87,6 @@ impl IonNode {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v)
-    }
-
-    /// Strip a single matching annotation. Mirrors the calibre
-    /// `KfxContainerEntity.deserialize` unwrap step.
-    pub fn unwrap_annotation_if(&mut self, expected: &str) -> bool {
-        if let IonNode::Annotated(anns, inner) = self {
-            if anns.len() == 1 && anns[0] == expected {
-                let owned = std::mem::replace(&mut **inner, IonNode::Null);
-                *self = owned;
-                return true;
-            }
-        }
-        false
     }
 }
 
