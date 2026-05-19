@@ -15,7 +15,6 @@ pushed over wifi, no USB cable needed.
 - [`sidle/`](./sidle) — Tauri 2 desktop app (Rust + vanilla JS).
 - [`boko-kai/`](./boko-kai) — pure-Rust ebook conversion library (KFX, EPUB,
   AZW3, MOBI). Used as a crate.
-- `ref/` — calibre's KFX plugins, kept as the reference model for boko-kai.
 
 ## Build
 
