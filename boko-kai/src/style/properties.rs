@@ -427,6 +427,21 @@ enum_property! {
 }
 
 enum_property! {
+    /// `text-align-last`: alignment of the last (or single) line of a block.
+    /// Same value set as `text-align` plus `auto` (= "defer to text-align rules").
+    pub enum TextAlignLast {
+        #[default]
+        Auto => "auto",
+        Start => "start",
+        End => "end",
+        Left => "left",
+        Right => "right",
+        Center => "center",
+        Justify => "justify",
+    }
+}
+
+enum_property! {
     /// Display mode.
     pub enum Display {
         #[default]

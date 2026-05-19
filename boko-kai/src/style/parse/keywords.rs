@@ -8,9 +8,9 @@ use cssparser::Parser;
 use crate::style::properties::{
     BorderCollapse, BorderStyle, BoxSizing, BreakValue, Clear, DecorationStyle, Display, Float,
     FontStyle, FontVariant, Hyphens, LineBreak, ListStylePosition, ListStyleType, OverflowWrap,
-    TextAlign, TextCombineUpright, TextEmphasisOver, TextEmphasisPosition, TextEmphasisRight,
-    TextEmphasisStyle, TextOrientation, TextTransform, VerticalAlign, Visibility, WhiteSpace,
-    WordBreak, WritingMode,
+    TextAlign, TextAlignLast, TextCombineUpright, TextEmphasisOver, TextEmphasisPosition,
+    TextEmphasisRight, TextEmphasisStyle, TextOrientation, TextTransform, VerticalAlign,
+    Visibility, WhiteSpace, WordBreak, WritingMode,
 };
 
 use crate::style::Declaration;
@@ -32,6 +32,7 @@ macro_rules! keyword_parser {
 keyword_parser!(parse_font_style, FontStyle);
 keyword_parser!(parse_font_variant, FontVariant);
 keyword_parser!(parse_text_align, TextAlign);
+keyword_parser!(parse_text_align_last, TextAlignLast);
 keyword_parser!(parse_text_transform, TextTransform);
 keyword_parser!(parse_hyphens, Hyphens);
 keyword_parser!(parse_white_space, WhiteSpace);

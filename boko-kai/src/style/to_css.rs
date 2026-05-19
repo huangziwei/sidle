@@ -87,6 +87,7 @@ impl ToCss for ComputedStyle {
 
         // Text properties
         emit_if_changed!(self, default, buf, text_align, "text-align");
+        emit_if_changed!(self, default, buf, text_align_last, "text-align-last");
         emit_if_changed!(self, default, buf, text_indent, "text-indent");
         emit_if_changed!(self, default, buf, line_height, "line-height");
 

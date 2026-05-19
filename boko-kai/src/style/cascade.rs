@@ -44,6 +44,7 @@ fn inherit_from_parent(parent: &ComputedStyle) -> ComputedStyle {
         // Text properties (inherited)
         color: parent.color,
         text_align: parent.text_align,
+        text_align_last: parent.text_align_last,
         text_indent: parent.text_indent,
         line_height: parent.line_height,
         letter_spacing: parent.letter_spacing,
@@ -195,6 +196,7 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration) {
 
         // Text properties
         Declaration::TextAlign(a) => style.text_align = *a,
+        Declaration::TextAlignLast(a) => style.text_align_last = *a,
         Declaration::TextIndent(l) => style.text_indent = *l,
         Declaration::LineHeight(l) => style.line_height = *l,
         Declaration::LetterSpacing(l) => style.letter_spacing = *l,

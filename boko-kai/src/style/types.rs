@@ -26,6 +26,7 @@ pub struct ComputedStyle {
 
     // Text
     pub text_align: TextAlign,
+    pub text_align_last: TextAlignLast,
     pub text_indent: Length,
     pub line_height: Length,
     pub text_decoration_underline: bool,

@@ -18,7 +18,7 @@ use super::parse::keywords::{
     parse_break_value, parse_clear, parse_decoration_style, parse_display, parse_float,
     parse_font_style, parse_font_variant, parse_hyphens, parse_line_break,
     parse_list_style_position, parse_list_style_shorthand, parse_list_style_type,
-    parse_overflow_wrap, parse_text_align, parse_text_combine_upright,
+    parse_overflow_wrap, parse_text_align, parse_text_align_last, parse_text_combine_upright,
     parse_text_emphasis_position, parse_text_emphasis_style, parse_text_orientation,
     parse_text_transform, parse_vertical_align, parse_visibility, parse_white_space,
     parse_word_break, parse_writing_mode,
@@ -48,6 +48,7 @@ pub enum Declaration {
 
     // Text properties
     TextAlign(TextAlign),
+    TextAlignLast(TextAlignLast),
     TextIndent(Length),
     LineHeight(Length),
     LetterSpacing(Length),
@@ -294,6 +295,7 @@ impl Declaration {
 
             // Text properties
             "text-align" => parse_text_align(input).map(Self::TextAlign),
+            "text-align-last" => parse_text_align_last(input).map(Self::TextAlignLast),
             "text-indent" => parse_length(input).map(Self::TextIndent),
             "line-height" => parse_line_height(input).map(Self::LineHeight),
             "letter-spacing" => parse_length_or_normal(input).map(Self::LetterSpacing),
