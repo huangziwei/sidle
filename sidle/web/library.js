@@ -18,6 +18,10 @@ const state = {
   // the browser doesn't keep serving the stale grayscale image from cache
   // after we've swapped the file on disk.
   coverCacheBust: 0,
+  // When non-null, an autopull from /dedrm is in progress. `{ done, total }`
+  // — surfaced in the status bar and used by renderQueue to know it shouldn't
+  // clobber the autopull line with the queue summary.
+  autopull: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -800,7 +804,12 @@ async function deleteFromDevice(sha256s, titles) {
 // ---------------------------------------------------------------------------
 
 function subscribePullProgress() {
-  window.api.listen("device:pull-progress", (e) => {
+  // Per-file event from the autopull worker. Updates the device-popover
+  // status line for users who have the popover open, and — for actually-
+  // imported files — triggers a library refresh so the new row appears in
+  // the gallery the moment it lands on disk, instead of waiting for the
+  // whole batch to finish.
+  window.api.listen("device:pull-progress", async (e) => {
     const r = e.payload;
     if (!r) return;
     const prog = $("#device-send-progress");
@@ -811,20 +820,36 @@ function subscribePullProgress() {
     else line = `failed: ${r.error}`;
     prog.hidden = false;
     prog.textContent = line;
+    if (r.kind === "imported") await refresh();
+  });
+
+  // Status-bar progress counter. The backend emits this once on autopull
+  // start (`done: 0`) and once per book completed thereafter — covers the
+  // gap that used to look like a freeze where nothing rendered until the
+  // whole pull was done.
+  window.api.listen("device:autopull-progress", (e) => {
+    const p = e.payload;
+    if (!p) return;
+    state.autopull = { done: p.done, total: p.total };
+    renderQueue();
   });
 
   window.api.listen("device:autopull-done", async (e) => {
     const s = e.payload || { imported: 0, duplicate: 0, failed: 0 };
-    if (s.imported === 0 && s.duplicate === 0 && s.failed === 0) return;
-    const parts = [];
-    if (s.imported) parts.push(`${s.imported} imported`);
-    if (s.duplicate) parts.push(`${s.duplicate} already in library`);
-    if (s.failed) parts.push(`${s.failed} failed`);
-    showToast(`Kindle /dedrm: ${parts.join(" · ")}`, s.failed > 0);
-    setTimeout(() => {
-      $("#device-send-progress").hidden = true;
-    }, 2000);
-    if (s.imported > 0) await refresh();
+    state.autopull = null;
+    if (s.imported + s.duplicate + s.failed > 0) {
+      const parts = [];
+      if (s.imported) parts.push(`${s.imported} imported`);
+      if (s.duplicate) parts.push(`${s.duplicate} already in library`);
+      if (s.failed) parts.push(`${s.failed} failed`);
+      showToast(`Kindle /dedrm: ${parts.join(" · ")}`, s.failed > 0);
+      setTimeout(() => {
+        $("#device-send-progress").hidden = true;
+      }, 2000);
+    }
+    // One final refresh to pick up the last row's status + reset the
+    // status-bar line to the queue summary.
+    await refresh();
   });
 }
 
@@ -857,19 +882,29 @@ function renderQueue() {
   const toggle = $("#status-bar-toggle");
   const summary = $("#status-bar-summary");
   toggle.classList.remove("active", "errors", "done");
-  const parts = [];
-  if (counts.converting) parts.push(`${counts.converting} converting`);
-  if (counts.pending) parts.push(`${counts.pending} queued`);
-  if (counts.error) parts.push(`${counts.error} failed`);
-  if (parts.length === 0) {
-    summary.textContent = counts.total
-      ? `Library: ${counts.total} book${counts.total === 1 ? "" : "s"}`
-      : "No conversions running";
-    toggle.classList.add("done");
+
+  // When an autopull is in flight, its progress takes the status-bar line
+  // (the queue counts will follow once the converting jobs kick in). Don't
+  // overwrite it here.
+  if (state.autopull) {
+    summary.textContent =
+      `Pulling ${state.autopull.done}/${state.autopull.total} from Kindle…`;
+    toggle.classList.add("active");
   } else {
-    summary.textContent = parts.join("  ·  ");
-    if (counts.error) toggle.classList.add("errors");
-    else if (counts.converting) toggle.classList.add("active");
+    const parts = [];
+    if (counts.converting) parts.push(`${counts.converting} converting`);
+    if (counts.pending) parts.push(`${counts.pending} queued`);
+    if (counts.error) parts.push(`${counts.error} failed`);
+    if (parts.length === 0) {
+      summary.textContent = counts.total
+        ? `Library: ${counts.total} book${counts.total === 1 ? "" : "s"}`
+        : "No conversions running";
+      toggle.classList.add("done");
+    } else {
+      summary.textContent = parts.join("  ·  ");
+      if (counts.error) toggle.classList.add("errors");
+      else if (counts.converting) toggle.classList.add("active");
+    }
   }
 
   const ul = $("#queue-list");

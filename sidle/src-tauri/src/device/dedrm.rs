@@ -9,7 +9,6 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 
@@ -17,67 +16,6 @@ use crate::device::detect::DeviceInfo;
 use crate::library::db;
 use crate::library::import::{self, ImportOutcome, sha256_of_file};
 use crate::library::paths::LibraryPaths;
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DedrmRow {
-    /// Path on the Kindle, e.g. `/Volumes/Kindle/dedrm/foo.kfx-zip`.
-    pub path: String,
-    /// File basename (no directory).
-    pub filename: String,
-    /// SHA-256 of the file contents.
-    pub sha256: String,
-    /// True if a row with this sha already exists locally.
-    pub already_imported: bool,
-    pub size: u64,
-}
-
-/// List dedrm files on the device with their import status.
-///
-/// Scans `<kindle>/dedrm/` for `.kfx` and `.kfx-zip` files (case-insensitive).
-/// Hashes each so the UI can show "X already imported / Y new" before the
-/// user commits to a pull.
-pub fn scan(conn: &rusqlite::Connection, device: &DeviceInfo) -> Result<Vec<DedrmRow>> {
-    let dir = device.mount_path().join("dedrm");
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(out);
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !is_kfx_input(&path) {
-            continue;
-        }
-        let sha = match sha256_of_file(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[sidle/dedrm] skip {}: hash failed: {e}", path.display());
-                continue;
-            }
-        };
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        let already: bool = conn
-            .query_row(
-                "SELECT 1 FROM books WHERE sha256 = ?1",
-                rusqlite::params![sha],
-                |_| Ok(true),
-            )
-            .optional()?
-            .unwrap_or(false);
-        out.push(DedrmRow {
-            path: path.to_string_lossy().to_string(),
-            filename: path
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            sha256: sha,
-            already_imported: already,
-            size,
-        });
-    }
-    // Stable order: filename ascending.
-    out.sort_by(|a, b| a.filename.cmp(&b.filename));
-    Ok(out)
-}
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -98,32 +36,55 @@ pub enum PullResult {
     },
 }
 
-/// Scan + pull every not-yet-imported dedrm file in one shot. Used by the
-/// auto-pull-on-connect path so a freshly plugged-in Kindle drains its
-/// `/dedrm` folder into the library without any UI interaction.
-///
-/// Returns `(PullResult, Option<book_id_to_enqueue>)` for each attempted
-/// file. The caller (async context) does the actual queue enqueues.
-pub fn pull_new(
-    conn: &rusqlite::Connection,
-    paths: &LibraryPaths,
-    device: &DeviceInfo,
-) -> Vec<(PullResult, Option<i64>)> {
-    let rows = match scan(conn, device) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[sidle/dedrm] auto-scan failed: {e:#}");
-            return Vec::new();
-        }
+/// Phase 1 of the autopull scan: list every `.kfx` / `.kfx-zip` in `/dedrm`
+/// and hash it. Does no DB work, so it's safe to run outside the DB lock —
+/// crucial because hashing several MB-per-file off a USB-attached Kindle
+/// takes a second or two, and holding the DB lock for that long would block
+/// the frontend's first `library_list` request after a cold start.
+pub fn hash_dedrm_candidates(device: &DeviceInfo) -> Vec<(PathBuf, String)> {
+    let dir = device.mount_path().join("dedrm");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
     };
     let mut out = Vec::new();
-    for r in rows {
-        if r.already_imported {
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_kfx_input(&path) {
             continue;
         }
-        out.push(pull_one(conn, paths, device, Path::new(&r.path)));
+        match sha256_of_file(&path) {
+            Ok(sha) => out.push((path, sha)),
+            Err(e) => {
+                eprintln!("[sidle/dedrm] skip {}: hash failed: {e}", path.display())
+            }
+        }
     }
     out
+}
+
+/// Phase 2: filter the hashed candidates against the library so only files
+/// we haven't seen before get pulled. Holds the DB lock for one `SELECT`
+/// per candidate — tens of microseconds total, fine to keep inside the
+/// autopull's lock-acquiring `spawn_blocking`.
+pub fn filter_new_candidates(
+    conn: &rusqlite::Connection,
+    candidates: Vec<(PathBuf, String)>,
+) -> Vec<PathBuf> {
+    candidates
+        .into_iter()
+        .filter(|(_, sha)| {
+            conn.query_row(
+                "SELECT 1 FROM books WHERE sha256 = ?1",
+                rusqlite::params![sha],
+                |_| Ok(()),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .is_none()
+        })
+        .map(|(path, _)| path)
+        .collect()
 }
 
 /// Import a single dedrm file into the library. Records a `pull` row in
@@ -202,8 +163,18 @@ mod tests {
         }
     }
 
+    fn fresh_books_table() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE books (sha256 TEXT PRIMARY KEY)",
+            rusqlite::params![],
+        )
+        .unwrap();
+        conn
+    }
+
     #[test]
-    fn scan_filters_by_extension_and_hashes() {
+    fn hash_filters_by_extension_and_returns_64char_shas() {
         let tmp = tempfile::tempdir().unwrap();
         let dedrm = tmp.path().join("dedrm");
         touch(&dedrm.join("a.kfx"), b"hello-kfx");
@@ -211,60 +182,49 @@ mod tests {
         touch(&dedrm.join("ignore.txt"), b"x");
         touch(&dedrm.join("notes.md"), b"y");
 
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute(
-            "CREATE TABLE books (sha256 TEXT PRIMARY KEY)",
-            rusqlite::params![],
-        )
-        .unwrap();
-
-        let rows = scan(&conn, &fake_device(tmp.path())).unwrap();
-        assert_eq!(rows.len(), 2);
-        let names: Vec<_> = rows.iter().map(|r| r.filename.as_str()).collect();
-        assert!(names.contains(&"a.kfx"));
-        assert!(names.contains(&"b.kfx-zip"));
-        for r in &rows {
-            assert_eq!(r.sha256.len(), 64);
-            assert!(!r.already_imported);
+        let candidates = hash_dedrm_candidates(&fake_device(tmp.path()));
+        assert_eq!(candidates.len(), 2);
+        let names: Vec<_> = candidates
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"a.kfx".to_string()));
+        assert!(names.contains(&"b.kfx-zip".to_string()));
+        for (_, sha) in &candidates {
+            assert_eq!(sha.len(), 64);
         }
     }
 
     #[test]
-    fn scan_marks_already_imported() {
+    fn filter_drops_already_imported() {
         let tmp = tempfile::tempdir().unwrap();
         let dedrm = tmp.path().join("dedrm");
-        let f = dedrm.join("known.kfx-zip");
-        touch(&f, b"known-bytes");
+        let known = dedrm.join("known.kfx-zip");
+        let fresh = dedrm.join("fresh.kfx");
+        touch(&known, b"known-bytes");
+        touch(&fresh, b"fresh-bytes");
 
-        let known_sha = sha256_of_file(&f).unwrap();
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute(
-            "CREATE TABLE books (sha256 TEXT PRIMARY KEY)",
-            rusqlite::params![],
-        )
-        .unwrap();
+        let known_sha = sha256_of_file(&known).unwrap();
+        let conn = fresh_books_table();
         conn.execute(
             "INSERT INTO books (sha256) VALUES (?1)",
             rusqlite::params![known_sha],
         )
         .unwrap();
 
-        let rows = scan(&conn, &fake_device(tmp.path())).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].already_imported);
+        let candidates = hash_dedrm_candidates(&fake_device(tmp.path()));
+        assert_eq!(candidates.len(), 2);
+
+        let to_pull = filter_new_candidates(&conn, candidates);
+        assert_eq!(to_pull.len(), 1);
+        assert_eq!(to_pull[0].file_name().unwrap(), "fresh.kfx");
     }
 
     #[test]
-    fn scan_missing_dir_is_empty() {
+    fn hash_returns_empty_when_dedrm_dir_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute(
-            "CREATE TABLE books (sha256 TEXT PRIMARY KEY)",
-            rusqlite::params![],
-        )
-        .unwrap();
-        // No /dedrm subdir created — should return [].
-        let rows = scan(&conn, &fake_device(tmp.path())).unwrap();
-        assert!(rows.is_empty());
+        // No /dedrm subdir created — hash_dedrm_candidates should return [].
+        let candidates = hash_dedrm_candidates(&fake_device(tmp.path()));
+        assert!(candidates.is_empty());
     }
 }
