@@ -1375,12 +1375,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -1443,11 +1459,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
 
 [[package]]
+name = "futures-timer"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f288b0a4f20f9a56b5d1da57e2227c661b7b16168e2f72365f57b63326e29b24"
+
+[[package]]
 name = "futures-util"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
+ "futures-channel",
  "futures-core",
  "futures-io",
  "futures-macro",
@@ -2161,6 +2184,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-kit-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06d3a048d09fbb6597dbf7c69f40d14df4a49487db1487191618c893fc3b1c26"
+dependencies = [
+ "core-foundation-sys",
+ "mach2",
+]
+
+[[package]]
 name = "ion-rs"
 version = "1.0.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2459,6 +2492,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
+name = "mach2"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a1b95cd5421ec55b445b5ae102f5ea0e768de1f82bd3001e11f426c269c3aea"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "markup5ever"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2520,6 +2562,21 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mtp-rs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff6509de99d1c6dfe16aada97b64a3d02490f9d2dd82dc84dc91cea2fd9f0436"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "futures-timer",
+ "num_enum",
+ "nusb",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2627,6 +2684,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "nusb"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a330b3bc7f8b4fc729a4c63164b3927eeeaced198222a3ce6b8b6e034851b7a"
+dependencies = [
+ "core-foundation",
+ "core-foundation-sys",
+ "futures-core",
+ "io-kit-sys",
+ "linux-raw-sys",
+ "log",
+ "once_cell",
+ "rustix",
+ "slab",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4031,9 +4106,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "boko-kai",
+ "bytes",
  "chrono",
  "dirs",
+ "futures",
  "libc",
+ "mtp-rs",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
