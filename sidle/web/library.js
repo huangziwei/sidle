@@ -38,6 +38,10 @@ const state = {
   // — surfaced in the status bar and used by renderQueue to know it shouldn't
   // clobber the autopull line with the queue summary.
   autopull: null,
+  // When non-null, a foreground import (user-initiated drop / add) is in
+  // flight. `{ message, failed }` — shown in the status bar with priority
+  // over the autopull and queue summary lines.
+  importing: null,
 };
 
 // Sort keys exposed in the gallery-visible sort popover and as
@@ -271,6 +275,8 @@ function wireDragDrop() {
 }
 
 async function importPaths(paths) {
+  startImportStatus(paths);
+
   let imported = 0;
   let dupes = 0;
   let failed = 0;
@@ -286,7 +292,16 @@ async function importPaths(paths) {
     }
   } catch (e) {
     showToast(`import error: ${e}`, true);
+    showImportFailure();
     return;
+  }
+
+  // Status-bar failure mode is the all-failed case (status bar is the
+  // single-line summary; per-file detail still goes in the toast below).
+  if (failed > 0 && imported === 0 && dupes === 0) {
+    showImportFailure();
+  } else {
+    clearImportStatus();
   }
 
   await refresh();
@@ -296,6 +311,65 @@ async function importPaths(paths) {
   if (dupes) parts.push(`${dupes} already in library`);
   if (failed) parts.push(`${failed} failed`);
   if (parts.length) showToast(parts.join(" · "), failed > 0);
+}
+
+// Two-phase reveal for the aozora pipeline: the slow step is the
+// parse → cover render → build_epub inside library_import. Without an
+// event from Rust we can't tell exactly when it kicks in, but in
+// practice the file-IO prefix is microseconds, so a short timer is a
+// good-enough approximation.
+let importPhaseTimer = null;
+
+function startImportStatus(paths) {
+  state.importing = { message: importInitialMessage(paths), failed: false };
+  if (importPhaseTimer) clearTimeout(importPhaseTimer);
+  // Only aozora gets a phase-2 message — for EPUB / KFX the import
+  // returns almost instantly anyway.
+  if (paths.length === 1 && paths[0].toLowerCase().endsWith(".zip")) {
+    importPhaseTimer = setTimeout(() => {
+      if (state.importing && !state.importing.failed) {
+        state.importing.message = "Converting Aozora zip to EPUB…";
+        render();
+      }
+    }, 300);
+  }
+  render();
+}
+
+function clearImportStatus() {
+  if (importPhaseTimer) {
+    clearTimeout(importPhaseTimer);
+    importPhaseTimer = null;
+  }
+  state.importing = null;
+  render();
+}
+
+function showImportFailure() {
+  if (importPhaseTimer) {
+    clearTimeout(importPhaseTimer);
+    importPhaseTimer = null;
+  }
+  state.importing = { message: "Import failed", failed: true };
+  render();
+  // Linger briefly so the user notices, then fall back to queue summary.
+  setTimeout(() => {
+    if (state.importing && state.importing.failed) {
+      state.importing = null;
+      render();
+    }
+  }, 3000);
+}
+
+function importInitialMessage(paths) {
+  if (paths.length === 1) {
+    const lower = paths[0].toLowerCase();
+    if (lower.endsWith(".zip")) return "Importing Aozora zip…";
+    if (lower.endsWith(".epub")) return "Importing EPUB…";
+    if (lower.endsWith(".kfx-zip")) return "Importing KFX bundle…";
+    if (lower.endsWith(".kfx")) return "Importing KFX…";
+  }
+  return `Importing ${paths.length} file${paths.length === 1 ? "" : "s"}…`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1428,10 +1502,15 @@ function renderQueue() {
   const summary = $("#status-bar-summary");
   toggle.classList.remove("active", "errors", "done");
 
-  // When an autopull is in flight, its progress takes the status-bar line
-  // (the queue counts will follow once the converting jobs kick in). Don't
-  // overwrite it here.
-  if (state.autopull) {
+  // Priority order in the status bar:
+  //   1. foreground import (state.importing) — user-initiated drop / add
+  //   2. autopull from Kindle's /dedrm folder (state.autopull)
+  //   3. background conversion queue summary (the default)
+  if (state.importing) {
+    summary.textContent = state.importing.message;
+    if (state.importing.failed) toggle.classList.add("errors");
+    else toggle.classList.add("active");
+  } else if (state.autopull) {
     summary.textContent =
       `Pulling ${state.autopull.done}/${state.autopull.total} from Kindle…`;
     toggle.classList.add("active");
