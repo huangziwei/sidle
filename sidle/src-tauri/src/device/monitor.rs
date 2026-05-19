@@ -47,21 +47,37 @@ pub fn spawn(
         let mut last_serial: Option<String> = None;
 
         loop {
-            let next = detect::detect();
+            let mut next = detect::detect();
 
-            let just_connected: Option<DeviceInfo> = {
+            let (just_connected, changed) = {
+                let mut guard = state.lock().await;
+                let prev = guard.clone();
+
+                // Mass-storage refreshes `free_bytes` cheaply on every poll
+                // via `statvfs`. MTP can't: each refresh would claim the USB
+                // interface, which can race with a user-initiated push. So
+                // `mtp::detect()` returns `None` for free/total, and we
+                // preserve the last known values across polls when the
+                // serial matches. Initial population comes from the
+                // on-connect refresh task spawned below.
+                if let (Some(new_info), Some(prev_info)) = (next.as_mut(), prev.as_ref())
+                {
+                    let same_device = new_info.serial == prev_info.serial;
+                    let is_mtp = matches!(new_info.transport, TransportKind::Mtp { .. });
+                    if same_device && is_mtp && new_info.free_bytes.is_none() {
+                        new_info.free_bytes = prev_info.free_bytes;
+                        new_info.total_bytes = prev_info.total_bytes;
+                    }
+                }
+
                 let current_serial = next.as_ref().map(|d| d.serial.clone());
                 let is_new = current_serial != last_serial;
                 last_serial = current_serial;
-                if is_new { next.clone() } else { None }
-            };
+                let just_connected = if is_new { next.clone() } else { None };
 
-            let changed = {
-                let mut guard = state.lock().await;
-                let prev = guard.clone();
                 let changed = prev != next;
                 *guard = next.clone();
-                changed
+                (just_connected, changed)
             };
             if changed || first_tick {
                 let _ = app.emit("device:status", &next);
@@ -69,25 +85,32 @@ pub fn spawn(
             first_tick = false;
 
             if let Some(device) = just_connected {
-                // DeDRM auto-pull only runs on mass-storage. Non-jailbroken
-                // (MTP-class) Kindles have no `/dedrm` folder; the jailbreak
-                // that creates it isn't available for Scribe-and-later
-                // firmware either. Skipping the spawn entirely keeps the
-                // `device:autopull-progress`/`device:autopull-done` events
-                // off the UI for MTP devices — without this guard the
-                // frontend would briefly flash "scanning for DRM-free books"
-                // on every Scribe connect.
-                if matches!(device.transport, TransportKind::MassStorage { .. }) {
-                    // Fire-and-forget — keep the poll loop ticking even while
-                    // the auto-pull is doing IO. Each spawned task owns clones
-                    // of the shared handles.
-                    tauri::async_runtime::spawn(autopull_on_connect(
-                        app.clone(),
-                        db.clone(),
-                        paths.clone(),
-                        queue.clone(),
-                        device,
-                    ));
+                match device.transport {
+                    TransportKind::MassStorage { .. } => {
+                        // Fire-and-forget — keep the poll loop ticking even
+                        // while the auto-pull is doing IO. Each spawned task
+                        // owns clones of the shared handles.
+                        tauri::async_runtime::spawn(autopull_on_connect(
+                            app.clone(),
+                            db.clone(),
+                            paths.clone(),
+                            queue.clone(),
+                            device,
+                        ));
+                    }
+                    TransportKind::Mtp { .. } => {
+                        // DeDRM auto-pull doesn't apply: non-jailbroken
+                        // (MTP-class) Kindles have no `/dedrm` folder, and
+                        // the jailbreak that creates it isn't available for
+                        // Scribe-and-later firmware. Instead, do a one-shot
+                        // `GetStorageInfo` so the popover stops showing "—"
+                        // for free space.
+                        tauri::async_runtime::spawn(refresh_mtp_storage_info(
+                            app.clone(),
+                            state.clone(),
+                            device,
+                        ));
+                    }
                 }
             }
 
@@ -227,4 +250,62 @@ struct AutoPullSummary {
     imported: u32,
     duplicate: u32,
     failed: u32,
+}
+
+/// One-shot MTP `GetStorageInfo` after the user plugs in. The 2s detect
+/// poll deliberately doesn't open MTP sessions — each open claims the USB
+/// interface and would race with a user-initiated push. Instead we do it
+/// once on connect, write the result back into `state.device`, and emit
+/// a follow-up `device:status` so the popover swaps "—" for real numbers.
+///
+/// Staleness after a push/delete is the trade-off: the cached free/total
+/// won't drop until the next reconnect. Acceptable for sidle's usage
+/// pattern (occasional manual push); if it becomes annoying, the push
+/// command can refresh in-place via `mtp_rs::Storage::refresh` before
+/// dropping its transport.
+async fn refresh_mtp_storage_info(app: AppHandle, state: DeviceState, device: DeviceInfo) {
+    let serial = device.serial.clone();
+    let snapshot = {
+        let device = device.clone();
+        tokio::task::spawn_blocking(move || -> Option<(u64, u64)> {
+            let transport = match device.open_transport() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!(
+                        "[sidle/mtp] free-space refresh: open failed for {}: {e:#}",
+                        device.serial
+                    );
+                    return None;
+                }
+            };
+            transport.free_space()
+        })
+        .await
+        .ok()
+        .flatten()
+    };
+
+    let Some((free, total)) = snapshot else {
+        eprintln!("[sidle/mtp] free-space refresh: no storage info for {serial}");
+        return;
+    };
+
+    let updated = {
+        let mut guard = state.lock().await;
+        match guard.as_mut() {
+            // Only apply if the same device is still connected. If the
+            // user unplugged before the refresh finished, drop the result
+            // rather than resurrecting stale state.
+            Some(current) if current.serial == serial => {
+                current.free_bytes = Some(free);
+                current.total_bytes = Some(total);
+                Some(current.clone())
+            }
+            _ => None,
+        }
+    };
+
+    if let Some(updated) = updated {
+        let _ = app.emit("device:status", &Some(updated));
+    }
 }

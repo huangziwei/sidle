@@ -674,9 +674,11 @@ function updateDeviceUI(info) {
       info.free_bytes != null && info.total_bytes != null
         ? `${formatBytes(info.free_bytes)} of ${formatBytes(info.total_bytes)}`
         : "—";
-    // MTP devices don't expose free-space without an open session (taking
-    // one every poll cycle would keep claiming/releasing the USB
-    // interface). Surfacing the gap here so the dash isn't mysterious.
+    // MTP devices need exclusive USB session access, so any other app
+    // currently talking to the Kindle (Image Capture, OpenMTP, Calibre)
+    // will block sidle's push/delete with a "device busy" error. The tip
+    // names them so the user knows what to quit. Mass-storage doesn't
+    // have this contention.
     if (info.transport === "mtp") {
       tip.textContent =
         "MTP device. Quit Image Capture, OpenMTP, or Calibre if a push fails — only one app can hold the USB session at a time.";
