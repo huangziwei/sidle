@@ -615,10 +615,12 @@ impl<'a> ContentState<'a> {
         Ok(())
     }
 
-    /// Inline-ruby emission: if the content struct has `$142 style_events`
-    /// covering a `$757 ruby_name` reference, slice `text` by event offset
-    /// + length and emit `<ruby><rb>slice</rb><rt>annotation</rt></ruby>`
-    /// for each event, with plain spans between for the un-annotated runs.
+    /// Inline-event emission. Walks `$142 style_events` and emits each
+    /// event as either a `<ruby>` (when `$757 ruby_name` is present) or
+    /// an `<a href="anchor:NAME">` (when `$179 link_to` is present).
+    /// Slices `text` at event boundaries; un-annotated runs become plain
+    /// `<span>` children. Returns `true` if at least one event was
+    /// emitted, so the caller can skip the plain-text fallback.
     fn try_emit_ruby_text(
         &mut self,
         fields: &[(u64, IonValue)],
@@ -631,7 +633,27 @@ impl<'a> ContentState<'a> {
         else {
             return Ok(false);
         };
-        let mut ruby_events: Vec<(i64, i64, String, Vec<(i64, i64, String)>)> = Vec::new();
+        // RubyId can be Int (most common) or Symbol; we normalise both
+        // to a string for lookup. Defined once here, used in both event
+        // collection paths.
+        let id_to_string = |v: &IonValue, syms: &super::loader::SymbolTable| -> Option<String> {
+            match v.unwrap_annotated() {
+                IonValue::Int(n) => Some(n.to_string()),
+                IonValue::String(s) => Some(s.clone()),
+                IonValue::Symbol(id) => Some(syms.resolve(*id).to_string()),
+                _ => None,
+            }
+        };
+
+        enum Ev {
+            // (offset, length, ruby_name, id_list[(sub_off, sub_len, ruby_id)])
+            Ruby(i64, i64, String, Vec<(i64, i64, String)>),
+            // (offset, length, anchor_name) — the link target name; resolved
+            // to a `chapter.xhtml#id` URI by `resolve_link_placeholders`.
+            Link(i64, i64, String),
+        }
+
+        let mut collected: Vec<Ev> = Vec::new();
         for event in events {
             let Some(ef) = event.unwrap_annotated().as_struct() else {
                 continue;
@@ -642,86 +664,143 @@ impl<'a> ContentState<'a> {
             let Some(length) = get_field(ef, KfxSymbol::Length as u64).and_then(|v| v.as_int()) else {
                 continue;
             };
-            let Some(ruby_name) = get_field(ef, KfxSymbol::RubyName as u64)
-                .and_then(|v| self.book.symbols.text_of(v))
-            else {
-                continue;
-            };
-            let ruby_name = ruby_name.to_string();
 
-            // RubyId can be Int (most common) or Symbol; we normalise both
-            // to a string for lookup.
-            let id_to_string = |v: &IonValue, syms: &super::loader::SymbolTable| -> Option<String> {
-                match v.unwrap_annotated() {
-                    IonValue::Int(n) => Some(n.to_string()),
-                    IonValue::String(s) => Some(s.clone()),
-                    IonValue::Symbol(id) => Some(syms.resolve(*id).to_string()),
-                    _ => None,
-                }
-            };
-            let id_list: Vec<(i64, i64, String)> = if let Some(id_val) =
-                get_field(ef, KfxSymbol::RubyId as u64)
-                && let Some(id_str) = id_to_string(id_val, &self.book.symbols)
+            // Ruby event takes precedence (a single style_event in horror
+            // never carries both ruby_name and link_to, but we'd render the
+            // ruby annotation rather than the link if it did).
+            if let Some(ruby_name) = get_field(ef, KfxSymbol::RubyName as u64)
+                .and_then(|v| self.book.symbols.text_of(v))
             {
-                vec![(0, length, id_str)]
-            } else if let Some(list) =
-                get_field(ef, KfxSymbol::RubyIdList as u64).and_then(|v| v.as_list())
+                let ruby_name = ruby_name.to_string();
+                let id_list: Vec<(i64, i64, String)> = if let Some(id_val) =
+                    get_field(ef, KfxSymbol::RubyId as u64)
+                    && let Some(id_str) = id_to_string(id_val, &self.book.symbols)
+                {
+                    vec![(0, length, id_str)]
+                } else if let Some(list) =
+                    get_field(ef, KfxSymbol::RubyIdList as u64).and_then(|v| v.as_list())
+                {
+                    list.iter()
+                        .filter_map(|entry| {
+                            let f = entry.unwrap_annotated().as_struct()?;
+                            let o = get_field(f, KfxSymbol::Offset as u64)?.as_int()?;
+                            let l = get_field(f, KfxSymbol::Length as u64)?.as_int()?;
+                            let id_str = id_to_string(
+                                get_field(f, KfxSymbol::RubyId as u64)?,
+                                &self.book.symbols,
+                            )?;
+                            Some((o, l, id_str))
+                        })
+                        .collect()
+                } else {
+                    continue;
+                };
+                collected.push(Ev::Ruby(offset, length, ruby_name, id_list));
+            } else if let Some(link_sym) = get_field(ef, KfxSymbol::LinkTo as u64)
+                && let Some(name) = self.book.symbols.text_of(link_sym)
             {
-                list.iter()
-                    .filter_map(|entry| {
-                        let f = entry.unwrap_annotated().as_struct()?;
-                        let o = get_field(f, KfxSymbol::Offset as u64)?.as_int()?;
-                        let l = get_field(f, KfxSymbol::Length as u64)?.as_int()?;
-                        let id_str =
-                            id_to_string(get_field(f, KfxSymbol::RubyId as u64)?, &self.book.symbols)?;
-                        Some((o, l, id_str))
-                    })
-                    .collect()
-            } else {
-                continue;
-            };
-            ruby_events.push((offset, length, ruby_name, id_list));
+                collected.push(Ev::Link(offset, length, name.to_string()));
+            }
         }
 
-        if ruby_events.is_empty() {
+        if collected.is_empty() {
             return Ok(false);
         }
-        ruby_events.sort_by_key(|e| e.0);
+        collected.sort_by_key(|e| match e {
+            Ev::Ruby(off, ..) | Ev::Link(off, ..) => *off,
+        });
 
         let chars: Vec<char> = text.chars().collect();
-        let mut cursor: usize = 0;
+        // Two-phase emit: separate link wrappers (which cover wide ranges,
+        // typically a whole heading) from ruby wrappers (single-char,
+        // nested inside the link's range). Without this split, a link
+        // event at (0, N) advances the cursor past the whole text and
+        // any ruby events inside `[0, N)` are silently skipped — the bug
+        // that lost 5 ruby pairs after task #10 wired up link_to.
+        let mut links: Vec<(usize, usize, String)> = Vec::new();
+        let mut rubies: Vec<(usize, usize, String, Vec<(i64, i64, String)>)> = Vec::new();
+        for ev in collected {
+            match ev {
+                Ev::Link(off, len, name) => {
+                    let off = off as usize;
+                    let len = len as usize;
+                    if off + len > chars.len() {
+                        continue;
+                    }
+                    links.push((off, len, name));
+                }
+                Ev::Ruby(off, len, name, id_list) => {
+                    let off = off as usize;
+                    let len = len as usize;
+                    if off + len > chars.len() {
+                        continue;
+                    }
+                    rubies.push((off, len, name, id_list));
+                }
+            }
+        }
 
-        for (ev_off, ev_len, ruby_name, id_list) in ruby_events {
-            let ev_off = ev_off as usize;
-            let ev_len = ev_len as usize;
-            if ev_off < cursor || ev_off + ev_len > chars.len() {
+        // Helper: emit ruby/text pieces into `parent` for range [from, to).
+        // Picks up any ruby event whose `[off, off+len)` falls inside the
+        // range; leaves the rest as a `<span>`.
+        let emit_range = |this: &mut Self, parent: NodeId, from: usize, to: usize| {
+            let mut cursor = from;
+            for (off, len, ruby_name, id_list) in &rubies {
+                let off = *off;
+                let len = *len;
+                if off + len <= from || off >= to {
+                    continue;
+                }
+                if off < cursor {
+                    continue;
+                }
+                if off > cursor {
+                    this.emit_span(part_index, parent, &chars[cursor..off]);
+                }
+                let ruby_el = this.book_parts[part_index].dom.sub_element(parent, "ruby");
+                for (sub_off, sub_len, ruby_id_str) in id_list {
+                    let sub_off = *sub_off as usize;
+                    let sub_len = *sub_len as usize;
+                    let slice_start = off + sub_off;
+                    let slice_end = slice_start + sub_len;
+                    if slice_end > chars.len() {
+                        break;
+                    }
+                    let rb_text: String = chars[slice_start..slice_end].iter().collect();
+                    let rb = this.book_parts[part_index].dom.sub_element(ruby_el, "rb");
+                    this.book_parts[part_index].dom.get_mut(rb).text = Some(rb_text);
+
+                    let rt_text = this.lookup_ruby_annotation(ruby_name, ruby_id_str);
+                    let rt = this.book_parts[part_index].dom.sub_element(ruby_el, "rt");
+                    this.book_parts[part_index].dom.get_mut(rt).text = Some(rt_text);
+                }
+                cursor = off + len;
+            }
+            if cursor < to {
+                this.emit_span(part_index, parent, &chars[cursor..to]);
+            }
+        };
+
+        // Walk the text top-to-bottom. Inside a link's range emit into
+        // the `<a>`; outside, into the parent. Links don't nest in horror.
+        let mut cursor: usize = 0;
+        for (link_off, link_len, anchor_name) in &links {
+            if *link_off < cursor {
                 continue;
             }
-            if ev_off > cursor {
-                self.emit_span(part_index, parent_id, &chars[cursor..ev_off]);
+            if *link_off > cursor {
+                emit_range(self, parent_id, cursor, *link_off);
             }
-
-            let ruby_el = self.book_parts[part_index].dom.sub_element(parent_id, "ruby");
-            for (sub_off, sub_len, ruby_id_str) in id_list {
-                let sub_off = sub_off as usize;
-                let sub_len = sub_len as usize;
-                let slice_start = ev_off + sub_off;
-                let slice_end = slice_start + sub_len;
-                if slice_end > chars.len() {
-                    break;
-                }
-                let rb_text: String = chars[slice_start..slice_end].iter().collect();
-                let rb = self.book_parts[part_index].dom.sub_element(ruby_el, "rb");
-                self.book_parts[part_index].dom.get_mut(rb).text = Some(rb_text);
-
-                let rt_text = self.lookup_ruby_annotation(&ruby_name, &ruby_id_str);
-                let rt = self.book_parts[part_index].dom.sub_element(ruby_el, "rt");
-                self.book_parts[part_index].dom.get_mut(rt).text = Some(rt_text);
-            }
-            cursor = ev_off + ev_len;
+            let a = self.book_parts[part_index].dom.sub_element(parent_id, "a");
+            self.book_parts[part_index]
+                .dom
+                .get_mut(a)
+                .set("href", format!("anchor:{}", anchor_name));
+            emit_range(self, a, *link_off, *link_off + *link_len);
+            cursor = *link_off + *link_len;
         }
         if cursor < chars.len() {
-            self.emit_span(part_index, parent_id, &chars[cursor..]);
+            emit_range(self, parent_id, cursor, chars.len());
         }
         Ok(true)
     }
