@@ -68,6 +68,11 @@ pub struct EpubOutput {
     /// page-progression-direction="...">` only when set and not `"ltr"`
     /// (calibre suppresses the attribute for the EPUB default — `ltr`).
     pub page_progression_direction: Option<String>,
+
+    /// Book-level writing mode (e.g. `vertical-rl`). When set and not
+    /// `horizontal-tb`, the OPF emits `<meta name="primary-writing-mode">`
+    /// as a Kindle reader hint — mirrors calibre's `epub_output.py:955+`.
+    pub writing_mode: Option<String>,
 }
 
 impl EpubOutput {
@@ -80,6 +85,7 @@ impl EpubOutput {
             spine: Vec::new(),
             ncx_navmap: None,
             page_progression_direction: None,
+            writing_mode: None,
         }
     }
 
@@ -231,7 +237,7 @@ impl EpubOutput {
         let mut s = String::new();
         s.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
 "#);
 
         // Title
@@ -250,7 +256,9 @@ impl EpubOutput {
         let lang = if meta.language.is_empty() { "en" } else { &meta.language };
         s.push_str(&format!("    <dc:language>{}</dc:language>\n", xml_escape(lang)));
 
-        // Identifier
+        // Identifier — calibre emits multiple <dc:identifier> with
+        // opf:scheme="ASIN" / "MOBI-ASIN" / "uuid" / "calibre"; we mirror the
+        // ASIN ones when present and use the KFX book_id as the unique-id.
         let id = if meta.identifier.is_empty() {
             "urn:uuid:00000000-0000-0000-0000-000000000000"
         } else {
@@ -260,9 +268,37 @@ impl EpubOutput {
             "    <dc:identifier id=\"BookId\">{}</dc:identifier>\n",
             xml_escape(id)
         ));
+        if let Some(asin) = meta.asin.as_deref() {
+            s.push_str(&format!(
+                "    <dc:identifier opf:scheme=\"ASIN\">{}</dc:identifier>\n",
+                xml_escape(asin)
+            ));
+            s.push_str(&format!(
+                "    <dc:identifier opf:scheme=\"MOBI-ASIN\">{}</dc:identifier>\n",
+                xml_escape(asin)
+            ));
+        }
 
         // EPUB3 dcterms:modified (required)
         s.push_str("    <meta property=\"dcterms:modified\">2024-01-01T00:00:00Z</meta>\n");
+
+        // Publication date — calibre uses `kindle_title_metadata/issue_date`
+        // (KFX stores as YYYY-MM-DD). Emit as ISO-8601 with a UTC offset to
+        // match calibre's output format.
+        if let Some(date) = meta.issue_date.as_deref() {
+            let iso = if date.len() == 10
+                && date.chars().nth(4) == Some('-')
+                && date.chars().nth(7) == Some('-')
+            {
+                format!("{}T00:00:00+00:00", date)
+            } else {
+                date.to_string()
+            };
+            s.push_str(&format!(
+                "    <dc:date>{}</dc:date>\n",
+                xml_escape(&iso)
+            ));
+        }
 
         // Publisher (optional)
         if let Some(ref pub_) = meta.publisher {
@@ -282,6 +318,21 @@ impl EpubOutput {
             s.push_str(&format!(
                 "    <meta name=\"cover\" content=\"{}\"/>\n",
                 xml_escape(cover_id)
+            ));
+        }
+
+        // Primary writing mode hint — calibre emits this for any
+        // non-`horizontal-tb` book (epub_output.py:955). The Kindle reader
+        // uses it as a layout signal even though EPUB-3 readers also read
+        // the CSS writing-mode declaration in the stylesheet.
+        if let Some(wm) = self
+            .writing_mode
+            .as_deref()
+            .filter(|v| !v.is_empty() && *v != "horizontal-tb")
+        {
+            s.push_str(&format!(
+                "    <meta name=\"primary-writing-mode\" content=\"{}\"/>\n",
+                xml_escape(wm)
             ));
         }
 

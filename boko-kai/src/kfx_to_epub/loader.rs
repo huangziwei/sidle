@@ -35,6 +35,14 @@ pub struct BookMetadata {
     /// Cover image's `resource_name` (e.g. `"eF"`), if declared by KFX. The
     /// output stage resolves this to the actual file path during cover wiring.
     pub cover_resource_name: Option<String>,
+    /// `kindle_title_metadata/ASIN` — Amazon catalogue id. Calibre emits this
+    /// as `<dc:identifier opf:scheme="ASIN">B0CPJ2B88T</dc:identifier>` and
+    /// (redundantly) also as `opf:scheme="MOBI-ASIN"`.
+    pub asin: Option<String>,
+    /// `kindle_title_metadata/issue_date` — publication date string. KFX
+    /// stores it as `YYYY-MM-DD`; calibre normalises to ISO-8601 with a UTC
+    /// offset. Surface raw and let the OPF emitter format it.
+    pub issue_date: Option<String>,
 }
 
 /// Everything we need from a KFX container to drive an EPUB write.
@@ -277,16 +285,33 @@ fn extract_book_metadata(
                         meta.title = value.into();
                     }
                 }
-                // Calibre's `insert(0, value)` prepends so the LAST
-                // KFX-listed author becomes primary. Mirror that.
+                // Authors are stored in source order in
+                // `kindle_title_metadata/author` entries. Calibre's library
+                // pathway (`yj_metadata.py:get_yj_metadata_from_book`) uses
+                // `authors.append(val)`, preserving source order in the OPF —
+                // that's the order in `horror.calibre.epub`. The other
+                // calibre code path in `yj_to_epub_metadata.py:192` uses
+                // `insert(0)` for the intermediate EPUB stage, but that
+                // intermediate is discarded by calibre's library importer.
+                // We match the library output, which the user reads.
                 "author" => {
                     if !value.is_empty() {
-                        meta.authors.insert(0, value.into());
+                        meta.authors.push(value.into());
                     }
                 }
                 "publisher" => meta.publisher = Some(value.trim().into()),
                 "language" => meta.language = value.into(),
                 "book_id" => meta.identifier = value.into(),
+                "ASIN" => {
+                    if meta.asin.is_none() && !value.is_empty() {
+                        meta.asin = Some(value.into());
+                    }
+                }
+                "issue_date" => {
+                    if meta.issue_date.is_none() && !value.is_empty() {
+                        meta.issue_date = Some(value.into());
+                    }
+                }
                 "cover_image" => {
                     if let Some(name) = resolve_cover_value(value_raw, symbols) {
                         meta.cover_resource_name = Some(name);

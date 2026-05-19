@@ -63,6 +63,11 @@ pub struct Report {
     /// True iff the OPF carries `<meta name="primary-writing-mode" .../>`.
     pub epub_primary_writing_mode: Option<String>,
 
+    /// Number of spine XHTML docs whose `<html>` root carries `xml:lang`.
+    pub epub_html_lang_present: usize,
+    /// Total spine doc count.
+    pub epub_html_doc_count: usize,
+
     pub kfx_title: String,
     pub kfx_language: String,
     /// Ordered author list as it appears in KFX `kindle_title_metadata`
@@ -126,6 +131,11 @@ impl Report {
         println!(
             "  KFX  vertical?:                   {} ({:?})",
             self.kfx_is_vertical, self.kfx_vertical_mode
+        );
+        println!("xml:lang on spine docs:");
+        println!(
+            "  {} / {} spine XHTMLs carry xml:lang on <html>",
+            self.epub_html_lang_present, self.epub_html_doc_count
         );
         println!("Defects: {}", self.diffs.len());
     }
@@ -229,6 +239,24 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         });
     }
 
+    // `xml:lang` on each spine XHTML `<html>` root — calibre adds it for
+    // every spine doc (the per-doc language hint that reading systems use
+    // for font selection and word-break behaviour). Source-of-truth is
+    // KFX `language`. If any spine doc is missing it, that's a port defect.
+    if !kfx.language.is_empty()
+        && epub.html_doc_count > 0
+        && epub.html_lang_present < epub.html_doc_count
+    {
+        diffs.push(FieldDiff {
+            field: "<html xml:lang> on spine docs",
+            epub: format!(
+                "{} of {} carry it",
+                epub.html_lang_present, epub.html_doc_count
+            ),
+            kfx: kfx.language.clone(),
+        });
+    }
+
     Ok(Report {
         epub_title: epub.title,
         epub_language: epub.language,
@@ -239,6 +267,8 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         epub_ppd: epub.ppd,
         epub_date: epub.date,
         epub_primary_writing_mode: epub.primary_writing_mode,
+        epub_html_lang_present: epub.html_lang_present,
+        epub_html_doc_count: epub.html_doc_count,
         kfx_title: kfx.title,
         kfx_language: kfx.language,
         kfx_authors: kfx.authors,
@@ -269,6 +299,10 @@ struct EpubMetadata {
     ppd: Option<String>,
     date: Option<String>,
     primary_writing_mode: Option<String>,
+    /// Number of spine XHTMLs whose `<html>` element carries `xml:lang`.
+    html_lang_present: usize,
+    /// Total number of spine XHTMLs scanned.
+    html_doc_count: usize,
 }
 
 fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
@@ -280,6 +314,11 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
         .map_err(|e| format!("container.xml: {}", e))?;
     let opf_path = parse_container_xml(&container_bytes)
         .map_err(|e| format!("container.xml parse: {:?}", e))?;
+    let opf_base = opf_path
+        .rfind('/')
+        .map(|i| &opf_path[..=i])
+        .unwrap_or("")
+        .to_string();
     let opf_bytes = read_zip_entry(&mut archive, &opf_path)
         .map_err(|e| format!("opf {}: {}", opf_path, e))?;
     let enc = crate::util::extract_xml_encoding(&opf_bytes);
@@ -295,6 +334,25 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
     let date = scan_opf_dc_date(&opf_str);
     let primary_writing_mode = scan_opf_primary_writing_mode(&opf_str);
 
+    // xml:lang count across spine docs.
+    let mut html_doc_count = 0usize;
+    let mut html_lang_present = 0usize;
+    for spine_id in &opf.spine_ids {
+        let Some((href, _)) = opf.manifest.get(spine_id) else {
+            continue;
+        };
+        let full_path = format!("{}{}", opf_base, href);
+        let Ok(xhtml_bytes) = read_zip_entry(&mut archive, &full_path) else {
+            continue;
+        };
+        html_doc_count += 1;
+        let enc = crate::util::extract_xml_encoding(&xhtml_bytes);
+        let xhtml = crate::util::decode_text(&xhtml_bytes, enc);
+        if html_root_has_xml_lang(&xhtml) {
+            html_lang_present += 1;
+        }
+    }
+
     Ok(EpubMetadata {
         title: opf.metadata.title.clone(),
         language: opf.metadata.language.clone(),
@@ -306,7 +364,38 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
         ppd: opf.metadata.page_progression_direction.clone(),
         date,
         primary_writing_mode,
+        html_lang_present,
+        html_doc_count,
     })
+}
+
+/// Does the `<html>` root in this XHTML doc carry `xml:lang`?
+fn html_root_has_xml_lang(xhtml: &str) -> bool {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    let mut reader = Reader::from_str(xhtml);
+    reader.config_mut().trim_text(false);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                if e.local_name().as_ref() == b"html" {
+                    for attr in e.attributes().flatten() {
+                        let key = attr.key.as_ref();
+                        // Match `xml:lang` (with the `xml:` prefix) OR plain
+                        // `lang` (HTML5 fallback some authors use).
+                        if key == b"xml:lang" || key == b"lang" {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    false
 }
 
 /// Scan the raw OPF XML for every `<dc:identifier>` element and return

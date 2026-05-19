@@ -110,5 +110,9 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
     // the value is `ltr`.
     out.page_progression_direction = Some(content_state.page_progression_direction.clone());
 
+    // Book-level writing mode drives the `<meta name="primary-writing-mode">`
+    // OPF hint for vertical books (calibre's `epub_output.py:955`).
+    out.writing_mode = Some(content_state.writing_mode.clone());
+
     out.finalize(&book.metadata).map_err(ConvertError::Io)
 }

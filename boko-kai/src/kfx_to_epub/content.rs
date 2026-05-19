@@ -132,7 +132,15 @@ impl<'a> ContentState<'a> {
         // Calibre's "main page_template": the last one in the list.
         let filename = format!("{section_name}.xhtml");
         let part_index = self.book_parts.len();
-        let (dom, html_id, head_id, body_id) = super::dom::new_book_part(section_name);
+        let (mut dom, html_id, head_id, body_id) = super::dom::new_book_part(section_name);
+        // `xml:lang` on `<html>` — calibre adds it on every spine doc using
+        // the book-level `dc:language` (epub_output.py: `set_doc_lang`).
+        // Reading systems use this for font selection and word-break.
+        let lang = self.book.metadata.language.trim();
+        if !lang.is_empty() {
+            dom.get_mut(html_id).set("xml:lang", lang);
+            dom.get_mut(html_id).set("lang", lang);
+        }
         self.book_parts.push(BookPart {
             filename: filename.clone(),
             dom,
