@@ -473,6 +473,15 @@ impl KfxImporter {
                                         self.metadata.description = Some(value.to_string())
                                     }
                                     "book_id" => self.metadata.identifier = value.to_string(),
+                                    "ASIN" => {
+                                        // Amazon catalogue id. Separate from
+                                        // `book_id`, which is a per-device
+                                        // internal UUID — both keys appear
+                                        // side-by-side in kindle_title_metadata.
+                                        if !value.is_empty() && self.metadata.asin.is_none() {
+                                            self.metadata.asin = Some(value.to_string());
+                                        }
+                                    }
                                     "issue_date" => self.metadata.date = Some(value.to_string()),
                                     "cover_image" => {
                                         let value_elem = get_field(meta_fields, sym!(Value));

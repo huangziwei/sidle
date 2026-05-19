@@ -69,6 +69,12 @@ pub struct Metadata {
     pub authors: Vec<String>,
     pub language: String,
     pub identifier: String,
+    /// Amazon Standard Identification Number, kept separate from `identifier`
+    /// because KFX carries both a generic `book_id` (internal Kindle UUID)
+    /// *and* an `ASIN` (catalogue id used by amazon.com / .co.jp /…). EPUB
+    /// imports populate this from a `<dc:identifier opf:scheme="ASIN">` line
+    /// when present.
+    pub asin: Option<String>,
     pub publisher: Option<String>,
     pub description: Option<String>,
     pub subjects: Vec<String>,

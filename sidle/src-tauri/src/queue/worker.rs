@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 
 use crate::library::LibraryPaths;
+use crate::library::cover_fetch;
 use crate::library::db::{self, BookRow};
 use crate::library::import::{extract_cover_from_epub, write_bytes_atomic};
 use crate::library::paths::format_basename;
@@ -43,37 +44,94 @@ pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_
     })
     .await;
 
-    match result {
-        Ok(Ok(produced)) => {
-            {
-                let conn = db.lock().await;
-                if let Some(epub) = &produced.epub_path {
-                    let _ = db::set_epub_path(&conn, book_id, &epub.to_string_lossy());
-                }
-                if let Some(kfx) = &produced.kfx_path {
-                    let _ = db::set_kfx_path(&conn, book_id, &kfx.to_string_lossy());
-                }
-                if let Some(cover) = &produced.cover_path {
-                    let _ = db::set_cover_path(&conn, book_id, &cover.to_string_lossy());
-                }
-            }
-            eprintln!(
-                "[sidle/queue] book {book_id} done in {:.2}s",
-                started.elapsed().as_secs_f32()
-            );
-            mark_status(db, app, book_id, "done", None).await;
-        }
+    let mut produced = match result {
+        Ok(Ok(p)) => p,
         Ok(Err(e)) => {
             let msg = format!("{e:#}");
             eprintln!("[sidle/queue] book {book_id} error: {msg}");
             mark_status(db, app, book_id, "error", Some(&msg)).await;
+            return;
         }
         Err(join_err) => {
             let msg = format!("worker panicked: {join_err}");
             eprintln!("[sidle/queue] book {book_id} PANIC: {msg}");
             mark_status(db, app, book_id, "error", Some(&msg)).await;
+            return;
+        }
+    };
+
+    // Tail step (kfx_to_epub only): swap the grayscale cover extracted from
+    // the KFX for the color cover Amazon shows on the product page. KOA2 +
+    // friends only ship the desaturated build, so the cover inside the KFX
+    // is itself grayscale — we have to refetch by ASIN to colorize.
+    if kind == "kfx_to_epub" {
+        match book.asin.as_deref() {
+            None => eprintln!(
+                "[sidle/queue] book {book_id} color cover: no ASIN on row \
+                 (KFX metadata likely missing `book_id`)"
+            ),
+            Some(asin) => {
+                eprintln!(
+                    "[sidle/queue] book {book_id} color cover: fetching ASIN={asin} \
+                     language={:?}",
+                    book.language
+                );
+                match cover_fetch::fetch_color_cover(asin, &book.language).await {
+                    Some(bytes) => {
+                        let out = paths.cover(&book.sha256, "jpg");
+                        if let Err(e) = std::fs::write(&out, &bytes) {
+                            eprintln!(
+                                "[sidle/queue] book {book_id} color cover write failed: {e}"
+                            );
+                        } else {
+                            // If the worker had just written a grayscale
+                            // `cover.<otherext>` (rare — typically the
+                            // JXR→JPG transcode lands on .jpg too), remove
+                            // the stale file so we don't leave both on disk.
+                            if let Some(old) = &produced.cover_path
+                                && old != &out
+                                && let Err(e) = std::fs::remove_file(old)
+                            {
+                                eprintln!(
+                                    "[sidle/queue] book {book_id} couldn't remove stale {}: {e}",
+                                    old.display()
+                                );
+                            }
+                            eprintln!(
+                                "[sidle/queue] book {book_id} color cover written -> {}",
+                                out.display()
+                            );
+                            produced.cover_path = Some(out);
+                        }
+                    }
+                    None => {
+                        eprintln!(
+                            "[sidle/queue] book {book_id} color cover: fetch returned None; \
+                             keeping grayscale fallback"
+                        );
+                    }
+                }
+            }
         }
     }
+
+    {
+        let conn = db.lock().await;
+        if let Some(epub) = &produced.epub_path {
+            let _ = db::set_epub_path(&conn, book_id, &epub.to_string_lossy());
+        }
+        if let Some(kfx) = &produced.kfx_path {
+            let _ = db::set_kfx_path(&conn, book_id, &kfx.to_string_lossy());
+        }
+        if let Some(cover) = &produced.cover_path {
+            let _ = db::set_cover_path(&conn, book_id, &cover.to_string_lossy());
+        }
+    }
+    eprintln!(
+        "[sidle/queue] book {book_id} done in {:.2}s",
+        started.elapsed().as_secs_f32()
+    );
+    mark_status(db, app, book_id, "done", None).await;
 }
 
 async fn lookup_book(db: &DbHandle, book_id: i64) -> Option<BookRow> {

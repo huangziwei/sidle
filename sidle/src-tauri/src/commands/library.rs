@@ -8,6 +8,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::oneshot;
 
+use crate::library::cover_fetch;
 use crate::library::db::{self, BookRow};
 use crate::library::import::{self, ImportOutcome};
 use crate::state::AppState;
@@ -117,6 +118,65 @@ pub async fn library_cover_path(
     Ok(db::get_book(&conn, book_id)
         .map_err(|e| e.to_string())?
         .and_then(|b| b.cover_path))
+}
+
+/// Outcome of a per-book "Re-fetch cover" action. The frontend uses the tag
+/// to pick the right toast.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecrawlResult {
+    Updated { cover_path: String },
+    NoAsin,
+    Failed { error: String },
+}
+
+/// Re-pull the color cover for one book by hitting Amazon's `/images/P/`
+/// endpoint with its ASIN. Same fetch path the kfx_to_epub worker tail uses;
+/// this command is just the manual trigger from the right-click menu.
+#[tauri::command]
+pub async fn library_recrawl_cover(
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<RecrawlResult, String> {
+    let book = {
+        let conn = state.db.lock().await;
+        db::get_book(&conn, book_id).map_err(|e| e.to_string())?
+    };
+    let Some(book) = book else {
+        return Err("book not found".into());
+    };
+    let Some(asin) = book.asin.as_deref() else {
+        return Ok(RecrawlResult::NoAsin);
+    };
+    let Some(bytes) = cover_fetch::fetch_color_cover(asin, &book.language).await else {
+        return Ok(RecrawlResult::Failed {
+            error: "no cover returned (404, placeholder, or network error \
+                    — see [sidle/cover-fetch] log lines)"
+                .into(),
+        });
+    };
+    let out = state.paths.cover(&book.sha256, "jpg");
+    if let Err(e) = std::fs::write(&out, &bytes) {
+        return Ok(RecrawlResult::Failed {
+            error: format!("write failed: {e}"),
+        });
+    }
+    let out_str = out.to_string_lossy().to_string();
+    {
+        let conn = state.db.lock().await;
+        let _ = db::set_cover_path(&conn, book_id, &out_str);
+    }
+    // If the previous cover lived at a different filename (e.g. cover.png
+    // from a PNG-encoded resource), tidy it up so we don't leave both on
+    // disk.
+    if let Some(old) = book.cover_path.as_deref()
+        && old != out_str.as_str()
+    {
+        let _ = std::fs::remove_file(old);
+    }
+    Ok(RecrawlResult::Updated {
+        cover_path: out_str,
+    })
 }
 
 /// Open the system file dialog and return selected ebook paths.

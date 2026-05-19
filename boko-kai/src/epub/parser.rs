@@ -88,6 +88,9 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     let mut in_metadata = false;
     let mut current_element: Option<String> = None;
     let mut current_element_id: Option<String> = None;
+    // Tracks the `opf:scheme` attribute on the currently-open `<dc:identifier>`
+    // so we can route `scheme="ASIN"` separately from the generic identifier.
+    let mut current_identifier_scheme: Option<String> = None;
     let mut buf_text = String::new();
 
     // For meta elements with content (non-empty tags)
@@ -110,11 +113,24 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                     {
                         current_element = Some(String::from_utf8_lossy(local).to_string());
                         buf_text.clear();
-                        // Check for id attribute
+                        // Check for id attribute, and for <dc:identifier> also the
+                        // `opf:scheme` / `scheme` attribute (calibre and KFX-derived
+                        // EPUBs emit multiple identifiers like
+                        // `<dc:identifier opf:scheme="ASIN">…</dc:identifier>` and
+                        // we need the scheme to route ASIN into Metadata.asin).
                         current_element_id = None;
+                        current_identifier_scheme = None;
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"id" {
+                            let key = attr.key.as_ref();
+                            if key == b"id" {
                                 current_element_id = Some(
+                                    String::from_utf8(attr.value.to_vec())
+                                        .map_err(io::Error::other)?,
+                                );
+                            } else if local == b"identifier"
+                                && local_name(key) == b"scheme"
+                            {
+                                current_identifier_scheme = Some(
                                     String::from_utf8(attr.value.to_vec())
                                         .map_err(io::Error::other)?,
                                 );
@@ -381,8 +397,24 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                             });
                         }
                         "language" => metadata.language = text,
-                        "identifier" if metadata.identifier.is_empty() => {
-                            metadata.identifier = text
+                        "identifier" => {
+                            // Route by scheme: ASIN / MOBI-ASIN go into the
+                            // dedicated field; everything else fills the
+                            // generic identifier (first one wins to match
+                            // prior behavior).
+                            let is_asin = current_identifier_scheme
+                                .as_deref()
+                                .is_some_and(|s| {
+                                    s.eq_ignore_ascii_case("ASIN")
+                                        || s.eq_ignore_ascii_case("MOBI-ASIN")
+                                });
+                            if is_asin {
+                                if metadata.asin.is_none() && !text.is_empty() {
+                                    metadata.asin = Some(text);
+                                }
+                            } else if metadata.identifier.is_empty() {
+                                metadata.identifier = text;
+                            }
                         }
                         "publisher" => metadata.publisher = Some(text),
                         "description" => metadata.description = Some(text),
@@ -393,6 +425,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                     }
                     current_element = None;
                     current_element_id = None;
+                    current_identifier_scheme = None;
                     buf_text.clear();
                 }
             }

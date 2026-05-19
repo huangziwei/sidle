@@ -258,6 +258,12 @@ struct BookMeta {
     language: String,
     ppd: Option<String>,
     date: Option<String>,
+    /// Amazon catalogue id. Comes from boko's dedicated `Metadata.asin` field
+    /// (populated from KFX `kindle_title_metadata.ASIN` and from EPUB
+    /// `<dc:identifier opf:scheme="ASIN">`). Distinct from `boko::Metadata`'s
+    /// generic `identifier`, which for KFX is the per-device internal
+    /// `book_id` UUID — not the ASIN.
+    asin: Option<String>,
 }
 
 fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
@@ -274,6 +280,7 @@ fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
         language: m.language.clone(),
         ppd: m.page_progression_direction.clone(),
         date: m.date.clone(),
+        asin: m.asin.clone().filter(|s| !s.is_empty()),
     }
 }
 
@@ -304,6 +311,7 @@ fn insert_row(
             kfx_path: kfx_path_str.as_deref(),
             file_size,
             imported_at: &now,
+            asin: meta.asin.as_deref(),
         },
     )?;
     Ok(id)

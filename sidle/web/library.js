@@ -13,6 +13,11 @@ const state = {
   columnWidths: {}, // { title: 280, ... } persisted px widths
   selected: new Set(), // book ids currently selected
   lastClicked: null,   // last single-clicked book id, anchor for shift-range
+  // Bumped every time a cover is overwritten (worker tail-step fetch, manual
+  // recrawl, conversion completion). Appended as `?v=N` to each cover URL so
+  // the browser doesn't keep serving the stale grayscale image from cache
+  // after we've swapped the file on disk.
+  coverCacheBust: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -249,7 +254,7 @@ function galleryCard(b) {
   card.dataset.bookId = b.id;
   card.title = `${b.title}\n${b.author}`;
 
-  const coverUrl = window.api.fileUrl(b.cover_path);
+  const coverUrl = coverUrlFor(b);
   const cover = document.createElement("div");
   cover.className = "cover";
   if (coverUrl) {
@@ -524,10 +529,28 @@ function subscribeStatus() {
       return;
     }
     state.books[idx] = { ...state.books[idx], status, error: error || null };
-    // When a conversion finishes, fetch the row to pick up kfx_path.
-    if (status === "done") refresh();
-    else render();
+    // When a conversion finishes, fetch the row to pick up kfx_path. Bump
+    // the cache buster too — the worker may have just overwritten the
+    // grayscale cover.jpg with the color-fetch result, and without a fresh
+    // URL the browser would keep showing the cached desaturated image.
+    if (status === "done") {
+      state.coverCacheBust += 1;
+      refresh();
+    } else {
+      render();
+    }
   });
+}
+
+// Build the URL we hand to <img src=…>. Returns null when the book has no
+// cover on disk yet. The `?v=N` cache buster matches the file's "version"
+// from sidle's perspective — incrementing it on every cover overwrite is
+// the cheap way to force the webview to re-fetch.
+function coverUrlFor(b) {
+  if (!b || !b.cover_path) return null;
+  const base = window.api.fileUrl(b.cover_path);
+  if (!base) return null;
+  return `${base}?v=${state.coverCacheBust}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -937,6 +960,7 @@ function openContextMenu(x, y, b) {
       }
     }
     add(menu, "Open in Finder", () => openInFinder(b.id));
+    add(menu, "Re-fetch cover", () => recrawlCover(b));
     add(menu, "Force re-convert", () => retryConvert(b.id));
     add(menu, "Remove from library", () => removeBook(b), true);
   }
@@ -1256,6 +1280,28 @@ async function retryConvert(bookId) {
   } catch (e) {
     showToast(`retry failed: ${e}`, true);
   }
+}
+
+async function recrawlCover(b) {
+  let result;
+  try {
+    result = await window.api.invoke("library_recrawl_cover", { bookId: b.id });
+  } catch (e) {
+    showToast(`cover fetch error: ${e}`, true);
+    return;
+  }
+  if (result.kind === "no_asin") {
+    showToast("no ASIN — can't fetch", true);
+    return;
+  }
+  if (result.kind === "failed") {
+    showToast(`cover fetch failed: ${result.error}`, true);
+    return;
+  }
+  // kind === "updated"
+  state.coverCacheBust += 1;
+  showToast(`cover updated: ${b.title}`);
+  await refresh();
 }
 
 async function removeBook(b) {

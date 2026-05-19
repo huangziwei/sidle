@@ -28,6 +28,7 @@ pub fn run() {
             commands::library::library_remove,
             commands::library::library_open_in_finder,
             commands::library::library_cover_path,
+            commands::library::library_recrawl_cover,
             commands::library::library_pick_files,
             commands::queue::conversion_status,
             commands::queue::conversion_retry,

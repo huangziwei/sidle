@@ -33,6 +33,9 @@ anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 dirs = "6"
 libc = "0.2"
+# rustls so we don't pull in system OpenSSL on macOS/Linux. Only used for
+# the cover-fetch path (amazon.co.jp /images/P/<ASIN>.09.LZZZZZZZ.jpg).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 
 boko-kai = { path = "../../boko-kai", default-features = false }
 

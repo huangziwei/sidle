@@ -32,6 +32,12 @@ pub struct BookRow {
     /// state where the row exists without a job (shouldn't happen in normal
     /// flow but `LEFT JOIN` makes it representable).
     pub kind: Option<String>,
+    /// Amazon Standard Identification Number — populated from the KFX
+    /// `book_id` field on import. Used by the color-cover fetch (the KFX
+    /// itself ships with the grayscale cover Amazon serves to monochrome
+    /// devices like the KOA2). `None` for EPUB-imported books and KFXes
+    /// without a `book_id`.
+    pub asin: Option<String>,
 }
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
@@ -73,7 +79,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             cover_path        TEXT,
             kfx_path          TEXT,
             file_size         INTEGER NOT NULL,
-            imported_at       TEXT NOT NULL
+            imported_at       TEXT NOT NULL,
+            asin              TEXT
         );
 
         CREATE TABLE IF NOT EXISTS conversion_jobs (
@@ -101,7 +108,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_device_history_sha
             ON device_history(sha256);
         "#,
-    )
+    )?;
+
+    // Idempotent column add for installs that already migrated past the v1
+    // schema but pre-date the asin column. `CREATE IF NOT EXISTS` above is
+    // a no-op for an existing table, so we have to ALTER out-of-band.
+    if !has_column(conn, "books", "asin")? {
+        conn.execute("ALTER TABLE books ADD COLUMN asin TEXT", [])?;
+    }
+
+    Ok(())
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
@@ -162,8 +178,8 @@ pub fn list_books(conn: &Connection) -> rusqlite::Result<Vec<BookRow>> {
 pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i64> {
     conn.execute(
         r#"INSERT INTO books
-            (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path, file_size, imported_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+            (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path, file_size, imported_at, asin)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#,
         params![
             book.sha256,
             book.title,
@@ -175,6 +191,7 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             book.kfx_path,
             book.file_size,
             book.imported_at,
+            book.asin,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -291,6 +308,7 @@ pub struct NewBook<'a> {
     pub kfx_path: Option<&'a str>,
     pub file_size: i64,
     pub imported_at: &'a str,
+    pub asin: Option<&'a str>,
 }
 
 pub fn now_iso() -> String {
@@ -300,7 +318,7 @@ pub fn now_iso() -> String {
 const SELECT_BOOKS_WITH_JOBS: &str = r#"
     SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
            b.epub_path, b.cover_path, b.kfx_path,
-           b.file_size, b.imported_at,
+           b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
@@ -310,7 +328,7 @@ const SELECT_BOOKS_WITH_JOBS: &str = r#"
 const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
     SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
            b.epub_path, b.cover_path, b.kfx_path,
-           b.file_size, b.imported_at,
+           b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
@@ -320,7 +338,7 @@ const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
 const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
     SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
            b.epub_path, b.cover_path, b.kfx_path,
-           b.file_size, b.imported_at,
+           b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
@@ -340,8 +358,9 @@ fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
         kfx_path: row.get(8)?,
         file_size: row.get(9)?,
         imported_at: row.get(10)?,
-        status: row.get(11)?,
-        error: row.get(12)?,
-        kind: row.get(13)?,
+        asin: row.get(11)?,
+        status: row.get(12)?,
+        error: row.get(13)?,
+        kind: row.get(14)?,
     })
 }
