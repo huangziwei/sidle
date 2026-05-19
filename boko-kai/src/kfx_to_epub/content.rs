@@ -780,7 +780,13 @@ fn extract_doc_data(book: &BookData) -> (String, String) {
             other => other.to_string(),
         };
     }
-    // Calibre fabricates ppd from writing-mode; per the plan, we don't.
+    // Calibre's writing-mode → ppd override (yj_to_epub_metadata.py:131): any
+    // vertical-RL writing mode forces the page to read right-to-left, even if
+    // the KFX `direction` field literally says `ltr` (which is the common case
+    // for CJK vertical books).
+    if writing_mode.ends_with("-rl") {
+        page_progression_direction = "rtl".to_string();
+    }
     (writing_mode, page_progression_direction)
 }
 

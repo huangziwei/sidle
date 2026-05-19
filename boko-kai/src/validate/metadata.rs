@@ -153,23 +153,10 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
             kfx: "(missing)".into(),
         });
     }
-    // PPD: only check when EPUB declared one. EPUB "default" or absent
-    // matches KFX omission (no $rtl / $ltr emitted).
-    match (&epub.ppd, &kfx.ppd) {
-        (Some(s), kfx_ppd) if s == "rtl" || s == "ltr" => {
-            let kfx_str = kfx_ppd.clone().unwrap_or_default();
-            // KFX stores it as "$rtl" or "$ltr"; normalise.
-            let kfx_norm = kfx_str.trim_start_matches('$').to_string();
-            if kfx_norm != *s {
-                diffs.push(FieldDiff {
-                    field: "page_progression_direction",
-                    epub: s.clone(),
-                    kfx: kfx_str,
-                });
-            }
-        }
-        _ => {}
-    }
+    // PPD check moved to `validate::page_progression`, which mirrors calibre's
+    // writing-mode → ppd override (a KFX with `direction: ltr` + `writing_mode:
+    // vertical_rl` still has PPD = rtl, which a literal field-by-field compare
+    // here would miss). PPD values are still printed below as informational.
 
     Ok(Report {
         epub_title: epub.title,

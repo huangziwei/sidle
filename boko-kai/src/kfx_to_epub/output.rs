@@ -62,6 +62,12 @@ pub struct EpubOutput {
     /// When set, `generate_ncx` uses this instead of the spine-derived
     /// fallback.
     pub ncx_navmap: Option<String>,
+
+    /// Page-progression-direction. Mirrors calibre's `EPUB_Output.
+    /// page_progression_direction`. Emitted to `<spine
+    /// page-progression-direction="...">` only when set and not `"ltr"`
+    /// (calibre suppresses the attribute for the EPUB default — `ltr`).
+    pub page_progression_direction: Option<String>,
 }
 
 impl EpubOutput {
@@ -73,6 +79,7 @@ impl EpubOutput {
             manifest_by_id: HashMap::new(),
             spine: Vec::new(),
             ncx_navmap: None,
+            page_progression_direction: None,
         }
     }
 
@@ -308,8 +315,15 @@ impl EpubOutput {
         }
         s.push_str("  </manifest>\n");
 
-        // Spine
-        s.push_str("  <spine toc=\"ncx\">\n");
+        // Spine — calibre emits page-progression-direction only when it
+        // diverges from the default `ltr` (epub_output.py:1052).
+        let ppd_attr = self
+            .page_progression_direction
+            .as_deref()
+            .filter(|v| !v.is_empty() && *v != "ltr")
+            .map(|v| format!(" page-progression-direction=\"{}\"", xml_escape(v)))
+            .unwrap_or_default();
+        s.push_str(&format!("  <spine toc=\"ncx\"{}>\n", ppd_attr));
         for id in &self.spine {
             s.push_str(&format!(
                 "    <itemref idref=\"{}\"/>\n",

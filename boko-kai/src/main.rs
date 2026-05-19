@@ -196,6 +196,16 @@ enum ValidateCheck {
         details: usize,
     },
 
+    /// Verify OPF `<spine page-progression-direction>` matches the source KFX
+    /// (ltr / rtl, with the writing-mode override calibre applies for vertical
+    /// books)
+    PageProgression {
+        epub: String,
+        kfx: String,
+        #[arg(long, default_value_t = 20)]
+        details: usize,
+    },
+
     /// Run all available validations against the conversion
     All {
         epub: String,
@@ -272,6 +282,9 @@ fn main() -> ExitCode {
                 }
                 ValidateCheck::WritingMode { epub, kfx, details } => {
                     validate_writing_mode(&epub, &kfx, details, dir)
+                }
+                ValidateCheck::PageProgression { epub, kfx, details } => {
+                    validate_page_progression(&epub, &kfx, details, dir)
                 }
                 ValidateCheck::All { epub, kfx, details } => {
                     validate_all(&epub, &kfx, details, dir)
@@ -601,6 +614,31 @@ fn validate_writing_mode(
     }
 }
 
+fn validate_page_progression(
+    epub_path: &str,
+    kfx_path: &str,
+    details: usize,
+    dir: boko::validate::Direction,
+) -> Result<(), String> {
+    let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
+    let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
+
+    let report = boko::validate::page_progression::validate(&epub_bytes, &kfx_bytes)?;
+    report.print_summary(dir);
+    if details > 0 {
+        report.print_details(details, dir);
+    }
+    if report.is_clean() {
+        Ok(())
+    } else {
+        Err(format!(
+            "page-progression-direction mismatch: EPUB={}  KFX={}",
+            report.epub_ppd.as_str(),
+            report.kfx_ppd.as_str()
+        ))
+    }
+}
+
 fn validate_all(
     epub_path: &str,
     kfx_path: &str,
@@ -700,6 +738,13 @@ fn validate_all(
         all_clean = false;
     }
 
+    println!("\n=== Page progression direction ===");
+    let ppd = boko::validate::page_progression::validate(&epub_bytes, &kfx_bytes)?;
+    ppd.print_summary(dir);
+    if !ppd.is_clean() {
+        all_clean = false;
+    }
+
     println!("\n=== Scorecard ===");
     // Ruby: denominator is the source side's pair count.
     let ruby_source_count = if dir.epub_is_source() {
@@ -754,6 +799,11 @@ fn validate_all(
     println!(
         "  Writing mode: {}",
         if wm.is_clean() { "preserved" } else { "LOST" }
+    );
+    println!(
+        "  Page progression: {} ({} on KFX side)",
+        if ppd.is_clean() { "preserved" } else { "LOST" },
+        ppd.kfx_ppd.as_str()
     );
 
     if all_clean {

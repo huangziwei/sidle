@@ -104,5 +104,11 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
         out.ncx_navmap = Some(navigation::render_navmap(&toc));
     }
 
+    // Page-progression-direction comes from the document_data extractor in
+    // content.rs (calibre's `yj_to_epub_metadata.py:108+131`). Propagate to
+    // the OPF spine; `EpubOutput::generate_opf` suppresses the attribute when
+    // the value is `ltr`.
+    out.page_progression_direction = Some(content_state.page_progression_direction.clone());
+
     out.finalize(&book.metadata).map_err(ConvertError::Io)
 }
