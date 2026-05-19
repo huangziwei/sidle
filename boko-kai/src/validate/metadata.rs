@@ -49,20 +49,42 @@ pub struct FieldDiff {
 pub struct Report {
     pub epub_title: String,
     pub epub_language: String,
-    pub epub_first_author: String,
+    /// Full ordered author list from `<dc:creator>` elements. The first entry
+    /// is the primary author per EPUB convention.
+    pub epub_authors: Vec<String>,
     pub epub_identifier: String,
+    /// All `<dc:identifier>` (scheme, value) pairs in the OPF (calibre emits
+    /// `ASIN`, `MOBI-ASIN`, `uuid` schemes plus a `calibre` scheme).
+    pub epub_identifiers: Vec<(String, String)>,
     pub epub_has_cover: bool,
     pub epub_ppd: Option<String>,
-    pub epub_extra_authors: usize,
+    /// `<dc:date>` value if any (ISO-8601 or whatever the source emits).
+    pub epub_date: Option<String>,
+    /// True iff the OPF carries `<meta name="primary-writing-mode" .../>`.
+    pub epub_primary_writing_mode: Option<String>,
 
     pub kfx_title: String,
     pub kfx_language: String,
-    pub kfx_first_author: String,
+    /// Ordered author list as it appears in KFX `kindle_title_metadata`
+    /// (repeated `author` keys). Source order — calibre's library output
+    /// emits these in the same order via `<dc:creator>`.
+    pub kfx_authors: Vec<String>,
     pub kfx_cover_image: Option<String>,
     pub kfx_ppd: Option<String>,
     /// `book_id` field if present — derived from EPUB identifier in EPUB→KFX
     /// flow, or already present from a prior conversion in KFX→EPUB flow.
     pub kfx_book_id: Option<String>,
+    /// `ASIN` field from `kindle_title_metadata` (Amazon catalogue id).
+    pub kfx_asin: Option<String>,
+    /// `issue_date` field from `kindle_title_metadata` (publication date).
+    pub kfx_issue_date: Option<String>,
+    /// True iff any KFX style struct has `writing_mode` ending in `_rl` or
+    /// `_lr` (vertical). When true, calibre emits
+    /// `<meta name="primary-writing-mode">` in the OPF as a Kindle hint.
+    pub kfx_is_vertical: bool,
+    /// Detected vertical writing mode value (e.g. `vertical-rl`) when
+    /// `kfx_is_vertical` is true.
+    pub kfx_vertical_mode: Option<String>,
 
     pub diffs: Vec<FieldDiff>,
 }
@@ -79,29 +101,32 @@ impl Report {
         println!("Language:");
         println!("  EPUB: {:?}", self.epub_language);
         println!("  KFX:  {:?}", self.kfx_language);
-        println!("Author (first):");
-        println!(
-            "  EPUB: {:?}{}",
-            self.epub_first_author,
-            if self.epub_extra_authors > 0 {
-                format!(
-                    " (+{} more; KFX stores only first by design)",
-                    self.epub_extra_authors
-                )
-            } else {
-                String::new()
-            }
-        );
-        println!("  KFX:  {:?}", self.kfx_first_author);
+        println!("Authors (ordered):");
+        println!("  EPUB ({}): {:?}", self.epub_authors.len(), self.epub_authors);
+        println!("  KFX  ({}): {:?}", self.kfx_authors.len(), self.kfx_authors);
         println!("Cover image:");
         println!("  EPUB has cover:  {}", self.epub_has_cover);
         println!("  KFX cover_image: {:?}", self.kfx_cover_image);
         println!("Page progression direction:");
         println!("  EPUB: {:?}", self.epub_ppd);
         println!("  KFX:  {:?}", self.kfx_ppd);
-        println!("Identifier round-trip:");
-        println!("  EPUB identifier: {:?}", self.epub_identifier);
-        println!("  KFX book_id:     {:?}", self.kfx_book_id);
+        println!("Identifiers:");
+        println!("  EPUB unique-id: {:?}", self.epub_identifier);
+        println!("  EPUB all:       {:?}", self.epub_identifiers);
+        println!("  KFX book_id:    {:?}", self.kfx_book_id);
+        println!("  KFX ASIN:       {:?}", self.kfx_asin);
+        println!("Publication date:");
+        println!("  EPUB <dc:date>:           {:?}", self.epub_date);
+        println!("  KFX  issue_date:          {:?}", self.kfx_issue_date);
+        println!("Primary writing mode (Kindle hint):");
+        println!(
+            "  EPUB <meta primary-writing-mode>: {:?}",
+            self.epub_primary_writing_mode
+        );
+        println!(
+            "  KFX  vertical?:                   {} ({:?})",
+            self.kfx_is_vertical, self.kfx_vertical_mode
+        );
         println!("Defects: {}", self.diffs.len());
     }
 
@@ -136,11 +161,15 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
             kfx: kfx.language.clone(),
         });
     }
-    if !epub.first_author.is_empty() && epub.first_author != kfx.first_author {
+    // Authors: full ordered vector compare. KFX side preserves source order
+    // (mirrors `yj_metadata.py:get_yj_metadata_from_book` which uses
+    // `authors.append(val)`). EPUB side reads `<dc:creator>` elements in
+    // OPF source order.
+    if !kfx.authors.is_empty() && epub.authors != kfx.authors {
         diffs.push(FieldDiff {
-            field: "author",
-            epub: epub.first_author.clone(),
-            kfx: kfx.first_author.clone(),
+            field: "authors (ordered)",
+            epub: format!("{:?}", epub.authors),
+            kfx: format!("{:?}", kfx.authors),
         });
     }
     // Cover: EPUB declares a cover path → KFX should have a non-empty
@@ -158,20 +187,68 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     // vertical_rl` still has PPD = rtl, which a literal field-by-field compare
     // here would miss). PPD values are still printed below as informational.
 
+    // ASIN: KFX `kindle_title_metadata.ASIN` is the Amazon catalogue id.
+    // Calibre emits it as `<dc:identifier opf:scheme="ASIN">B0CPJ2B88T</...>`.
+    // If KFX has it but EPUB lacks any ASIN-scheme identifier (or no
+    // identifier matching the value), that's a port defect.
+    if let Some(asin) = kfx.asin.as_deref() {
+        let epub_has_asin = epub
+            .identifiers
+            .iter()
+            .any(|(scheme, value)| scheme.eq_ignore_ascii_case("ASIN") && value == asin);
+        if !epub_has_asin {
+            diffs.push(FieldDiff {
+                field: "ASIN identifier",
+                epub: format!("{:?}", epub.identifiers),
+                kfx: asin.to_string(),
+            });
+        }
+    }
+
+    // Publication date: KFX `kindle_title_metadata.issue_date` → EPUB
+    // `<dc:date>`. We don't compare formats — KFX uses `YYYY-MM-DD` strings,
+    // calibre normalises to ISO-8601 with offset. The defect we catch is
+    // "KFX has a date, EPUB has none."
+    if kfx.issue_date.is_some() && epub.date.is_none() {
+        diffs.push(FieldDiff {
+            field: "dc:date",
+            epub: "(missing)".into(),
+            kfx: kfx.issue_date.clone().unwrap_or_default(),
+        });
+    }
+
+    // Primary writing mode hint: calibre emits
+    // `<meta name="primary-writing-mode" content="vertical-rl"/>` for
+    // vertical books. The Kindle app uses it as a layout hint. When KFX
+    // declares a vertical writing mode, the EPUB should carry the meta.
+    if kfx.is_vertical && epub.primary_writing_mode.is_none() {
+        diffs.push(FieldDiff {
+            field: "meta primary-writing-mode",
+            epub: "(missing)".into(),
+            kfx: kfx.vertical_mode.clone().unwrap_or_default(),
+        });
+    }
+
     Ok(Report {
         epub_title: epub.title,
         epub_language: epub.language,
-        epub_first_author: epub.first_author,
+        epub_authors: epub.authors,
         epub_identifier: epub.identifier,
+        epub_identifiers: epub.identifiers,
         epub_has_cover: epub.has_cover,
         epub_ppd: epub.ppd,
-        epub_extra_authors: epub.extra_authors,
+        epub_date: epub.date,
+        epub_primary_writing_mode: epub.primary_writing_mode,
         kfx_title: kfx.title,
         kfx_language: kfx.language,
-        kfx_first_author: kfx.first_author,
+        kfx_authors: kfx.authors,
         kfx_cover_image: kfx.cover_image,
         kfx_ppd: kfx.ppd,
         kfx_book_id: kfx.book_id,
+        kfx_asin: kfx.asin,
+        kfx_issue_date: kfx.issue_date,
+        kfx_is_vertical: kfx.is_vertical,
+        kfx_vertical_mode: kfx.vertical_mode,
         diffs,
     })
 }
@@ -184,12 +261,14 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 struct EpubMetadata {
     title: String,
     language: String,
-    first_author: String,
+    authors: Vec<String>,
     identifier: String,
+    identifiers: Vec<(String, String)>,
     has_cover: bool,
     cover_path: Option<String>,
     ppd: Option<String>,
-    extra_authors: usize,
+    date: Option<String>,
+    primary_writing_mode: Option<String>,
 }
 
 fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
@@ -207,16 +286,148 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
     let opf_str = crate::util::decode_text(&opf_bytes, enc);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
 
+    // The shared epub::parse_opf strips a lot of fields we now need for
+    // round-trip; rescan the raw OPF source for `<dc:identifier>` schemes,
+    // `<dc:date>`, and `<meta name="primary-writing-mode">`. The lossy
+    // representation in `Metadata` is fine for the existing extractors but
+    // can't tell us "0 identifiers" vs "1 unique" reliably across schemes.
+    let identifiers = scan_opf_identifiers(&opf_str);
+    let date = scan_opf_dc_date(&opf_str);
+    let primary_writing_mode = scan_opf_primary_writing_mode(&opf_str);
+
     Ok(EpubMetadata {
         title: opf.metadata.title.clone(),
         language: opf.metadata.language.clone(),
-        first_author: opf.metadata.authors.first().cloned().unwrap_or_default(),
-        extra_authors: opf.metadata.authors.len().saturating_sub(1),
+        authors: opf.metadata.authors.clone(),
         identifier: opf.metadata.identifier.clone(),
+        identifiers,
         has_cover: opf.metadata.cover_image.is_some(),
         cover_path: opf.metadata.cover_image.clone(),
         ppd: opf.metadata.page_progression_direction.clone(),
+        date,
+        primary_writing_mode,
     })
+}
+
+/// Scan the raw OPF XML for every `<dc:identifier>` element and return
+/// `(scheme, value)` pairs. The `scheme` comes from `opf:scheme` if present;
+/// otherwise `""`. (The shared `parse_opf` picks one identifier and loses
+/// schemes; we don't want to widen that struct for a validator-only need.)
+fn scan_opf_identifiers(opf_str: &str) -> Vec<(String, String)> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    let mut reader = Reader::from_str(opf_str);
+    reader.config_mut().trim_text(false);
+    let mut out = Vec::new();
+    let mut current_scheme: Option<String> = None;
+    let mut in_identifier = false;
+    let mut text_buf = String::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                if e.local_name().as_ref() == b"identifier" {
+                    in_identifier = true;
+                    text_buf.clear();
+                    current_scheme = None;
+                    for attr in e.attributes().flatten() {
+                        if attr.key.local_name().as_ref() == b"scheme" {
+                            current_scheme =
+                                Some(String::from_utf8_lossy(&attr.value).to_string());
+                        }
+                    }
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if e.local_name().as_ref() == b"identifier" {
+                    let mut scheme = String::new();
+                    for attr in e.attributes().flatten() {
+                        if attr.key.local_name().as_ref() == b"scheme" {
+                            scheme = String::from_utf8_lossy(&attr.value).to_string();
+                        }
+                    }
+                    out.push((scheme, String::new()));
+                }
+            }
+            Ok(Event::Text(e)) if in_identifier => {
+                text_buf.push_str(&String::from_utf8_lossy(e.as_ref()));
+            }
+            Ok(Event::End(e)) => {
+                if e.local_name().as_ref() == b"identifier" {
+                    out.push((
+                        current_scheme.take().unwrap_or_default(),
+                        text_buf.trim().to_string(),
+                    ));
+                    in_identifier = false;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+fn scan_opf_dc_date(opf_str: &str) -> Option<String> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    let mut reader = Reader::from_str(opf_str);
+    reader.config_mut().trim_text(false);
+    let mut in_date = false;
+    let mut buf = String::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == b"date" => {
+                in_date = true;
+                buf.clear();
+            }
+            Ok(Event::Text(e)) if in_date => {
+                buf.push_str(&String::from_utf8_lossy(e.as_ref()));
+            }
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"date" => {
+                let trimmed = buf.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+                in_date = false;
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    None
+}
+
+fn scan_opf_primary_writing_mode(opf_str: &str) -> Option<String> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    let mut reader = Reader::from_str(opf_str);
+    reader.config_mut().trim_text(false);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Empty(e)) | Ok(Event::Start(e)) if e.local_name().as_ref() == b"meta" => {
+                let mut name: Option<String> = None;
+                let mut content: Option<String> = None;
+                for attr in e.attributes().flatten() {
+                    match attr.key.local_name().as_ref() {
+                        b"name" => name = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                        b"content" => {
+                            content = Some(String::from_utf8_lossy(&attr.value).to_string())
+                        }
+                        _ => {}
+                    }
+                }
+                if name.as_deref() == Some("primary-writing-mode") {
+                    return content;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    None
 }
 
 fn read_zip_entry<R: std::io::Read + std::io::Seek>(
@@ -238,10 +449,14 @@ fn read_zip_entry<R: std::io::Read + std::io::Seek>(
 struct KfxMetadata {
     title: String,
     language: String,
-    first_author: String,
+    authors: Vec<String>,
     cover_image: Option<String>,
     book_id: Option<String>,
     ppd: Option<String>,
+    asin: Option<String>,
+    issue_date: Option<String>,
+    is_vertical: bool,
+    vertical_mode: Option<String>,
 }
 
 fn extract_kfx_metadata(kfx_bytes: &[u8]) -> Result<KfxMetadata, String> {
@@ -288,7 +503,10 @@ fn extract_kfx_metadata(kfx_bytes: &[u8]) -> Result<KfxMetadata, String> {
     let book_metadata_type = KfxSymbol::BookMetadata as u32;
 
     let mut out = KfxMetadata::default();
-    let mut kv: HashMap<String, String> = HashMap::new();
+    // Ordered (key, value) pairs preserve repeated `author` entries in source
+    // order — the HashMap-based collector above silently dropped all but the
+    // last when multiple authors were declared.
+    let mut kvs: Vec<(String, String)> = Vec::new();
 
     for ent in &entities {
         if ent.type_id == metadata_type {
@@ -297,17 +515,116 @@ fn extract_kfx_metadata(kfx_bytes: &[u8]) -> Result<KfxMetadata, String> {
             }
         } else if ent.type_id == book_metadata_type {
             if let Some(value) = parse_entity(kfx_bytes, ent) {
-                extract_categorised(&value, &resolve_sym, &mut kv);
+                extract_categorised(&value, &resolve_sym, &mut kvs);
             }
         }
     }
 
-    out.title = kv.get("title").cloned().unwrap_or_default();
-    out.language = kv.get("language").cloned().unwrap_or_default();
-    out.first_author = kv.get("author").cloned().unwrap_or_default();
-    out.cover_image = kv.get("cover_image").cloned();
-    out.book_id = kv.get("book_id").cloned();
+    // Singleton fields take the first occurrence (matches calibre's "if not X"
+    // guards in process_metadata_item).
+    let first = |k: &str| kvs.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+    out.title = first("title").unwrap_or_default();
+    out.language = first("language").unwrap_or_default();
+    out.authors = kvs
+        .iter()
+        .filter(|(k, _)| k == "author")
+        .map(|(_, v)| v.clone())
+        .collect();
+    out.cover_image = first("cover_image");
+    out.book_id = first("book_id");
+    out.asin = first("ASIN");
+    out.issue_date = first("issue_date");
+
+    // Detect any vertical writing mode anywhere in the KFX. Calibre's hint
+    // logic (`epub_output.py:955`) emits `<meta name="primary-writing-mode">`
+    // for any non-`horizontal-tb` book-level mode.
+    let (is_vertical, vertical_mode) = detect_vertical_writing_mode(kfx_bytes, &resolve_sym)?;
+    out.is_vertical = is_vertical;
+    out.vertical_mode = vertical_mode;
+
     Ok(out)
+}
+
+/// Walk every entity and look for `writing_mode` fields. Returns
+/// `(is_vertical, dominant_vertical_value)` — `is_vertical` is true iff any
+/// `writing_mode` ends in `_rl` or `_lr`, and the dominant value picks
+/// `vertical-rl` over `vertical-lr` when both exist (matches calibre's
+/// most-cited-non-default selection).
+fn detect_vertical_writing_mode<F>(
+    kfx_bytes: &[u8],
+    resolve_sym: &F,
+) -> Result<(bool, Option<String>), String>
+where
+    F: Fn(u64) -> String,
+{
+    let header =
+        parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
+    let info_data = &kfx_bytes[header.container_info_offset
+        ..header.container_info_offset + header.container_info_length];
+    let info = parse_container_info(info_data)
+        .map_err(|e| format!("kfx container info: {:?}", e))?;
+    let Some((idx_off, idx_len)) = info.index else {
+        return Ok((false, None));
+    };
+    let entities =
+        parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for ent in &entities {
+        if ent.offset + ent.length > kfx_bytes.len() {
+            continue;
+        }
+        let entity = &kfx_bytes[ent.offset..ent.offset + ent.length];
+        let ion = skip_enty_header(entity);
+        let Ok(value) = IonParser::new(ion).parse() else {
+            continue;
+        };
+        collect_writing_modes(&value, resolve_sym, &mut counts);
+    }
+    let mut best: Option<(String, usize)> = None;
+    for (mode, n) in &counts {
+        let css_value = mode.trim_start_matches('$').replace('_', "-");
+        if css_value.ends_with("-rl") || css_value.ends_with("-lr") {
+            match &best {
+                Some((_, prev)) if prev >= n => {}
+                _ => best = Some((css_value, *n)),
+            }
+        }
+    }
+    Ok((best.is_some(), best.map(|(m, _)| m)))
+}
+
+fn collect_writing_modes<F>(value: &IonValue, resolve_sym: &F, out: &mut HashMap<String, usize>)
+where
+    F: Fn(u64) -> String,
+{
+    let inner = match value {
+        IonValue::Annotated(_, b) => b.as_ref(),
+        v => v,
+    };
+    match inner {
+        IonValue::Struct(fields) => {
+            for (k, v) in fields {
+                if resolve_sym(*k) == "writing_mode" {
+                    let name = match v {
+                        IonValue::Symbol(s) => resolve_sym(*s),
+                        IonValue::String(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    if !name.is_empty() {
+                        *out.entry(name).or_insert(0) += 1;
+                    }
+                }
+                collect_writing_modes(v, resolve_sym, out);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                collect_writing_modes(item, resolve_sym, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn parse_entity(data: &[u8], ent: &crate::kfx::container::EntityLoc) -> Option<IonValue> {
@@ -351,8 +668,11 @@ where
 }
 
 /// Walk `book_metadata` ($490): `{categorised_metadata: [{category, metadata: [{key, value}, ...]}, ...]}`.
-/// Collect all (key, value) pairs into a flat map.
-fn extract_categorised<F>(value: &IonValue, resolve_sym: &F, out: &mut HashMap<String, String>)
+/// Collect all (key, value) pairs into an ordered `Vec` so repeated keys
+/// (like `author` for multi-author books) keep source order. Earlier versions
+/// used a HashMap, which silently dropped all but the last value of any
+/// repeated key.
+fn extract_categorised<F>(value: &IonValue, resolve_sym: &F, out: &mut Vec<(String, String)>)
 where
     F: Fn(u64) -> String,
 {
@@ -396,7 +716,7 @@ where
                                 }
                             }
                             if !key.is_empty() {
-                                out.insert(key, val);
+                                out.push((key, val));
                             }
                         }
                     }
