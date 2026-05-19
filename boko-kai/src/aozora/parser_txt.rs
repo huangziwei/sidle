@@ -392,161 +392,236 @@ fn plain_text_for_heading(s: &str) -> String {
 // =========================================================================
 
 fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
-    let mut s = escape_xml(line);
+    // Per-line fast paths. Most lines in a typical Aozora book have *no*
+    // annotation markers (`［＃`) and no gaiji marker (`※`); a meaningful
+    // fraction have ruby (`《》` ± `｜`). Gate each block on a cheap
+    // `memchr`-backed `contains` so we skip the regex passes that would
+    // find nothing anyway. Without this, every line was being scanned
+    // ~30× — the dominant cost vs V8 regex.
+    let has_anno = line.contains('［');
+    let has_ruby = line.contains('《');
+    let has_gaiji = line.contains('※');
 
-    // Image refs: ［＃description（filename、dims）入る］
-    static IMG_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"［＃([^（］]*)（([^、]+)、[^）]*）入る］").unwrap()
-    });
-    s = replace_all_with(&IMG_RE, &s, |caps| {
-        let alt = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
-        let filename = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-        images.push(filename.to_string());
-        format!(
-            r#"<img src="../images/{}" alt="{}"/>"#,
-            filename, alt
-        )
-    });
+    // escape_xml is also a hot path; it allocates only when needed.
+    let mut s: Cow<str> = escape_xml_lazy(line);
 
-    // Ruby with explicit ｜ marker: ｜base《reading》
-    static RUBY_MARKER_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"｜([^《]+?)《([^》]+)》").unwrap());
-    s = replace_all_with(&RUBY_MARKER_RE, &s, |caps| {
-        format!(
-            "<ruby>{}<rp>（</rp><rt>{}</rt><rp>）</rp></ruby>",
-            &caps[1], &caps[2]
-        )
-    });
-
-    // Ruby on bare CJK runs: kanji《reading》
-    static RUBY_CJK_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"([\u{4E00}-\u{9FFF}\u{3400}-\u{4DBF}\u{F900}-\u{FAFF}]+)《([^》]+)》")
-            .unwrap()
-    });
-    s = replace_all_with(&RUBY_CJK_RE, &s, |caps| {
-        format!(
-            "<ruby>{}<rp>（</rp><rt>{}</rt><rp>）</rp></ruby>",
-            &caps[1], &caps[2]
-        )
-    });
-
-    // --- Block-form paired annotations ---
-    for form in PAIRED_FORMS.iter() {
-        s = replace_all_with(&form.re, &s, |caps| {
-            format!("{}{}{}", form.open, &caps[1], form.close)
+    if has_anno {
+        // Image refs: ［＃description（filename、dims）入る］
+        static IMG_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"［＃([^（］]*)（([^、]+)、[^）]*）入る］").unwrap()
+        });
+        s = re_replace_cow(&IMG_RE, s, |caps| {
+            let alt = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+            let filename = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            images.push(filename.to_string());
+            format!(
+                r#"<img src="../images/{}" alt="{}"/>"#,
+                filename, alt
+            )
         });
     }
 
-    // Batsu (ばつ or ×) bouten — two open/close forms.
-    static BATSU_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"［＃(?:ばつ|×)傍点］([^［]*)［＃(?:ばつ|×)傍点終わり］").unwrap()
-    });
-    s = replace_all_with(&BATSU_RE, &s, |caps| {
-        format!(r#"<em class="batsu">{}</em>"#, &caps[1])
-    });
-
-    // 罫囲み / 枠囲み — two name forms map to the same class. Handle each
-    // pair explicitly so opening/closing names can differ.
-    static FRAME_PLAIN_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"［＃(?:罫囲み|枠囲み)］([^［]*)［＃(?:罫囲み|枠囲み)終わり］").unwrap()
-    });
-    s = replace_all_with(&FRAME_PLAIN_RE, &s, |caps| {
-        format!(r#"<span class="keigakomi">{}</span>"#, &caps[1])
-    });
-    static FRAME_DASHED_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"［＃破線(?:罫囲み|枠囲み)］([^［]*)［＃破線(?:罫囲み|枠囲み)終わり］")
+    if has_ruby {
+        // Ruby with explicit ｜ marker: ｜base《reading》
+        static RUBY_MARKER_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"｜([^《]+?)《([^》]+)》").unwrap());
+        s = re_replace_cow(&RUBY_MARKER_RE, s, |caps| {
+            format!(
+                "<ruby>{}<rp>（</rp><rt>{}</rt><rp>）</rp></ruby>",
+                &caps[1], &caps[2]
+            )
+        });
+        // Ruby on bare CJK runs: kanji《reading》
+        static RUBY_CJK_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r"([\u{4E00}-\u{9FFF}\u{3400}-\u{4DBF}\u{F900}-\u{FAFF}]+)《([^》]+)》",
+            )
             .unwrap()
-    });
-    s = replace_all_with(&FRAME_DASHED_RE, &s, |caps| {
-        format!(r#"<span class="keigakomi-dashed">{}</span>"#, &caps[1])
-    });
-    static FRAME_DOUBLE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"［＃二重(?:罫囲み|枠囲み)］([^［]*)［＃二重(?:罫囲み|枠囲み)終わり］")
+        });
+        s = re_replace_cow(&RUBY_CJK_RE, s, |caps| {
+            format!(
+                "<ruby>{}<rp>（</rp><rt>{}</rt><rp>）</rp></ruby>",
+                &caps[1], &caps[2]
+            )
+        });
+    }
+
+    if has_anno {
+        // --- Block-form paired annotations ---
+        for form in PAIRED_FORMS.iter() {
+            s = re_replace_cow(&form.re, s, |caps| {
+                format!("{}{}{}", form.open, &caps[1], form.close)
+            });
+        }
+
+        // Batsu (ばつ or ×) bouten — two open/close forms.
+        static BATSU_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"［＃(?:ばつ|×)傍点］([^［]*)［＃(?:ばつ|×)傍点終わり］").unwrap()
+        });
+        s = re_replace_cow(&BATSU_RE, s, |caps| {
+            format!(r#"<em class="batsu">{}</em>"#, &caps[1])
+        });
+
+        // 罫囲み / 枠囲み — two name forms map to the same class.
+        static FRAME_PLAIN_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"［＃(?:罫囲み|枠囲み)］([^［]*)［＃(?:罫囲み|枠囲み)終わり］")
+                .unwrap()
+        });
+        s = re_replace_cow(&FRAME_PLAIN_RE, s, |caps| {
+            format!(r#"<span class="keigakomi">{}</span>"#, &caps[1])
+        });
+        static FRAME_DASHED_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r"［＃破線(?:罫囲み|枠囲み)］([^［]*)［＃破線(?:罫囲み|枠囲み)終わり］",
+            )
             .unwrap()
-    });
-    s = replace_all_with(&FRAME_DOUBLE_RE, &s, |caps| {
-        format!(r#"<span class="keigakomi-double">{}</span>"#, &caps[1])
-    });
+        });
+        s = re_replace_cow(&FRAME_DASHED_RE, s, |caps| {
+            format!(r#"<span class="keigakomi-dashed">{}</span>"#, &caps[1])
+        });
+        static FRAME_DOUBLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r"［＃二重(?:罫囲み|枠囲み)］([^［]*)［＃二重(?:罫囲み|枠囲み)終わり］",
+            )
+            .unwrap()
+        });
+        s = re_replace_cow(&FRAME_DOUBLE_RE, s, |caps| {
+            format!(r#"<span class="keigakomi-double">{}</span>"#, &caps[1])
+        });
 
+        // 返り点 (kanbun reading marks)
+        static KAERITEN_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"［＃(返り点)］([^［]*)［＃\u{8FD4}\u{308A}\u{70B9}終わり］")
+                .unwrap()
+        });
+        s = re_replace_cow(&KAERITEN_RE, s, |caps| {
+            format!(r#"<sup class="kaeriten">{}</sup>"#, &caps[2])
+        });
 
-    // 返り点 (kanbun reading marks)
-    static KAERITEN_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"［＃(返り点)］([^［]*)［＃\u{8FD4}\u{308A}\u{70B9}終わり］").unwrap()
-    });
-    s = replace_all_with(&KAERITEN_RE, &s, |caps| {
-        format!(r#"<sup class="kaeriten">{}</sup>"#, &caps[2])
-    });
+        // Font size: ［＃N段階大きな文字］...
+        static BIGGER_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"［＃([０-９0-9]+)段階大きな文字］([^［]*)［＃大きな文字終わり］")
+                .unwrap()
+        });
+        s = re_replace_cow(&BIGGER_RE, s, |caps| {
+            let n = parse_zenkaku_int(&caps[1]).unwrap_or(1);
+            let em = 1.0 + n as f32 * 0.2;
+            format!(r#"<span style="font-size:{}em">{}</span>"#, em, &caps[2])
+        });
+        static SMALLER_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"［＃([０-９0-9]+)段階小さな文字］([^［]*)［＃小さな文字終わり］")
+                .unwrap()
+        });
+        s = re_replace_cow(&SMALLER_RE, s, |caps| {
+            let n = parse_zenkaku_int(&caps[1]).unwrap_or(1);
+            let em = (1.0 - n as f32 * 0.1).max(0.6);
+            format!(r#"<span style="font-size:{}em">{}</span>"#, em, &caps[2])
+        });
 
-    // Font size: ［＃N段階大きな文字］...
-    static BIGGER_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"［＃([０-９0-9]+)段階大きな文字］([^［]*)［＃大きな文字終わり］").unwrap()
-    });
-    s = replace_all_with(&BIGGER_RE, &s, |caps| {
-        let n = parse_zenkaku_int(&caps[1]).unwrap_or(1);
-        let em = 1.0 + n as f32 * 0.2;
-        format!(r#"<span style="font-size:{}em">{}</span>"#, em, &caps[2])
-    });
-    // ［＃N段階小さな文字］...
-    static SMALLER_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"［＃([０-９0-9]+)段階小さな文字］([^［]*)［＃小さな文字終わり］").unwrap()
-    });
-    s = replace_all_with(&SMALLER_RE, &s, |caps| {
-        let n = parse_zenkaku_int(&caps[1]).unwrap_or(1);
-        let em = (1.0 - n as f32 * 0.1).max(0.6);
-        format!(r#"<span style="font-size:{}em">{}</span>"#, em, &caps[2])
-    });
+        // Postfix annotations: ［＃「text」にXXX］
+        if s.contains('「') {
+            let owned = apply_postfix_annotations(&s);
+            if owned.len() != s.len() || owned != *s {
+                s = Cow::Owned(owned);
+            }
+        }
 
-    // --- Postfix annotations: ［＃「text」にXXX］ — wrap the immediately-
-    // preceding occurrence of `text` in `s`. Process right-to-left so byte
-    // positions stay valid after splicing.
-    s = apply_postfix_annotations(&s);
+        // Inline notes
+        static WARIRYUU_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"［＃割り注］([^［]*)［＃割り注終わり］").unwrap()
+        });
+        s = re_replace_cow(&WARIRYUU_RE, s, |caps| {
+            format!("<small>（{}）</small>", &caps[1])
+        });
+    }
 
-    // Inline notes
-    static WARIRYUU_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"［＃割り注］([^［]*)［＃割り注終わり］").unwrap());
-    s = replace_all_with(&WARIRYUU_RE, &s, |caps| {
-        format!("<small>（{}）</small>", &caps[1])
-    });
+    if has_gaiji {
+        // Gaiji: ※［＃description、code］ → keep ※
+        static GAIJI_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"※［＃[^］]*］").unwrap());
+        s = match GAIJI_RE.replace_all(&s, "※") {
+            Cow::Borrowed(_) => s,
+            Cow::Owned(o) => Cow::Owned(o),
+        };
+    }
 
-    // Gaiji: ※［＃description、code］ → keep ※
-    static GAIJI_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"※［＃[^］]*］").unwrap());
-    s = GAIJI_RE.replace_all(&s, "※").to_string();
+    if has_anno {
+        // Named special chars
+        static KANTAN_GIMON_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"［＃感嘆符疑問符、[^\]]*］").unwrap());
+        s = re_replace_str_cow(&KANTAN_GIMON_RE, s, "\u{2049}");
+        static KANTAN_FUTATSU_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"［＃感嘆符二つ、[^\]]*］").unwrap());
+        s = re_replace_str_cow(&KANTAN_FUTATSU_RE, s, "\u{203C}");
+        static DAKUTEN_WA_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"［＃濁点付き片仮名ワ、[^\]]*］").unwrap());
+        s = re_replace_str_cow(&DAKUTEN_WA_RE, s, "\u{30F7}");
+        static ALEPH_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"［＃アレフ、[^\]]*］").unwrap());
+        s = re_replace_str_cow(&ALEPH_RE, s, "\u{05D0}");
 
-    // Named special chars
-    static KANTAN_GIMON_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"［＃感嘆符疑問符、[^\]]*］").unwrap());
-    s = KANTAN_GIMON_RE.replace_all(&s, "\u{2049}").to_string();
-    static KANTAN_FUTATSU_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"［＃感嘆符二つ、[^\]]*］").unwrap());
-    s = KANTAN_FUTATSU_RE.replace_all(&s, "\u{203C}").to_string();
-    static DAKUTEN_WA_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"［＃濁点付き片仮名ワ、[^\]]*］").unwrap());
-    s = DAKUTEN_WA_RE.replace_all(&s, "\u{30F7}").to_string();
-    static ALEPH_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"［＃アレフ、[^\]]*］").unwrap());
-    s = ALEPH_RE.replace_all(&s, "\u{05D0}").to_string();
+        // Strip editorial notes and heading-reference notes.
+        s = re_replace_str_cow(&EDITORIAL_BASE_NOTE_RE, s, "");
+        static HEADING_REF_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"［＃「[^」]*」は[大中小]見出し］").unwrap());
+        s = re_replace_str_cow(&HEADING_REF_RE, s, "");
 
-    // Strip editorial notes and heading-reference notes.
-    s = EDITORIAL_BASE_NOTE_RE.replace_all(&s, "").to_string();
-    static HEADING_REF_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"［＃「[^」]*」は[大中小]見出し］").unwrap());
-    s = HEADING_REF_RE.replace_all(&s, "").to_string();
+        // Final catch-all: drop any remaining ［＃...］.
+        static REMAINING_ANN_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"［＃[^］]*］").unwrap());
+        s = re_replace_str_cow(&REMAINING_ANN_RE, s, "");
+    }
 
-    // Final catch-all: drop any remaining ［＃...］.
-    static REMAINING_ANN_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"［＃[^］]*］").unwrap());
-    s = REMAINING_ANN_RE.replace_all(&s, "").to_string();
-
-    s
+    s.into_owned()
 }
 
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+/// Borrow-first XML escape. Returns the input unchanged when it contains
+/// no XML-meta characters — the common case for Japanese body text.
+fn escape_xml_lazy(s: &str) -> Cow<'_, str> {
+    if !s.bytes().any(|b| matches!(b, b'&' | b'<' | b'>' | b'"' | b'\'')) {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 16);
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Wrap `Regex::replace_all` so the result threads through a `Cow<str>`.
+/// When no match: input is returned unchanged (no allocation). When there
+/// is a match: the closure produces the replacement and `replace_all`
+/// allocates once for the whole pass. Either way we keep ownership of
+/// the previous `Cow` so the next pass can read from it cheaply.
+fn re_replace_cow<'a>(
+    re: &Regex,
+    s: Cow<'a, str>,
+    mut f: impl FnMut(&Captures<'_>) -> String,
+) -> Cow<'a, str> {
+    // We can't pass `&s` directly into `replace_all` because the returned
+    // `Cow` would borrow from the temporary. Match on the underlying
+    // `&str` and decide ownership ourselves.
+    let borrowed: &str = &s;
+    match re.replace_all(borrowed, |caps: &Captures<'_>| f(caps)) {
+        Cow::Borrowed(_) => s,
+        Cow::Owned(o) => Cow::Owned(o),
+    }
+}
+
+/// Same as [`re_replace_cow`] but for a fixed replacement string (no closure).
+fn re_replace_str_cow<'a>(re: &Regex, s: Cow<'a, str>, rep: &str) -> Cow<'a, str> {
+    let borrowed: &str = &s;
+    match re.replace_all(borrowed, rep) {
+        Cow::Borrowed(_) => s,
+        Cow::Owned(o) => Cow::Owned(o),
+    }
 }
 
 struct PairedForm {
@@ -598,18 +673,6 @@ static PAIRED_FORMS: LazyLock<Vec<PairedForm>> = LazyLock::new(|| {
     ]
 });
 
-fn replace_all_with(re: &Regex, s: &str, mut f: impl FnMut(&Captures) -> String) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last = 0;
-    for caps in re.captures_iter(s) {
-        let m = caps.get(0).unwrap();
-        out.push_str(&s[last..m.start()]);
-        out.push_str(&f(&caps));
-        last = m.end();
-    }
-    out.push_str(&s[last..]);
-    out
-}
 
 fn parse_zenkaku_int(s: &str) -> Option<u32> {
     // Convert full-width digits to half-width, then parse.
