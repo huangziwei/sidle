@@ -262,8 +262,13 @@ impl<'a> ContentState<'a> {
             })
             .unwrap_or_else(|| writing_mode.to_string());
 
-        // Apply kfx_style (style_name → CSS lookup).
-        let style_name = get_field(fields, KfxSymbol::StyleName as u64)
+        // Apply kfx_style. The field key on content structs is `$style`
+        // ($157, KfxSymbol::Style — same symbol id used as the by_type key
+        // for `$style` entities). The previously-used `$style_name` ($173,
+        // KfxSymbol::StyleName) is a different field used in a different
+        // context and never matched any content element, which is why no
+        // classes were emitted despite 78 `$style` entities being defined.
+        let style_name = get_field(fields, KfxSymbol::Style as u64)
             .and_then(|v| self.book.symbols.text_of(v))
             .map(|s| s.to_string());
 
@@ -982,6 +987,206 @@ fn safe_class_name(name: &str) -> String {
             }
         })
         .collect()
+}
+
+/// HTML block-level elements (calibre's set in
+/// `yj_to_epub_properties.py:1965`). Used by `consolidate_html` to decide
+/// whether a `<div>` qualifies as a leaf-text paragraph.
+const BLOCK_TAGS: &[&str] = &[
+    "aside", "body", "caption", "div", "figure", "footer", "header", "main",
+    "nav", "section", "article",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "li", "ol", "ul", "dl", "dt", "dd",
+    "p", "blockquote", "pre", "hr",
+    "table", "thead", "tbody", "tfoot", "tr", "td", "th",
+    "figcaption",
+];
+
+fn is_block_tag(tag: &str) -> bool {
+    BLOCK_TAGS.iter().any(|t| *t == tag)
+}
+
+/// Strip every `<span>` whose attribute list is empty (or carries only an
+/// empty `class=""`), inlining its text and children into the parent.
+/// Mirrors calibre's `consolidate_html` span pass (epub_output.py:783).
+///
+/// lxml semantics for `strip_tags`:
+/// - `span.text` appends to previous-sibling.tail (or parent.text when
+///   span is the first child),
+/// - span's children move into span's position in parent.children, in
+///   order,
+/// - `span.tail` appends to the new last-child-of-span's tail (or the
+///   previous tail-bearer when span had no children).
+fn strip_empty_spans(dom: &mut super::dom::Dom) {
+    // Snapshot ids to iterate; the strip mutates parent.children but we
+    // walk via a stable id list. Repeat until a pass produces zero strips,
+    // since a stripped span may unwrap a nested empty span.
+    loop {
+        let mut stripped_any = false;
+        for id in 0..dom.len() {
+            let elem = dom.get(id);
+            if elem.tag != "span" {
+                continue;
+            }
+            // "Empty" = no attrs, OR only attrs that are noise (empty class).
+            let has_meaningful_attr = elem.attrs.iter().any(|(k, v)| {
+                if k == "class" {
+                    !v.trim().is_empty()
+                } else {
+                    !v.is_empty() || !k.is_empty()
+                }
+            });
+            if has_meaningful_attr {
+                continue;
+            }
+            let Some(parent_id) = elem.parent else {
+                continue;
+            };
+            let Some(pos) = dom.child_index(parent_id, id) else {
+                continue;
+            };
+            // Pull the span's text + children + tail before mutating.
+            let span_text = dom.get(id).text.clone().unwrap_or_default();
+            let span_children: Vec<NodeId> = dom.get(id).children.clone();
+            let span_tail = dom.get(id).tail.clone().unwrap_or_default();
+
+            // 1. Splice span.text into the preceding text slot:
+            //    - if span is first child: parent.text += span_text
+            //    - else: prev-sibling.tail += span_text
+            if !span_text.is_empty() {
+                if pos == 0 {
+                    let parent = dom.get_mut(parent_id);
+                    let mut t = parent.text.clone().unwrap_or_default();
+                    t.push_str(&span_text);
+                    parent.text = Some(t);
+                } else {
+                    let prev_id = dom.get(parent_id).children[pos - 1];
+                    let prev = dom.get_mut(prev_id);
+                    let mut t = prev.tail.clone().unwrap_or_default();
+                    t.push_str(&span_text);
+                    prev.tail = Some(t);
+                }
+            }
+
+            // 2. Remove span from parent.children, then insert span_children
+            //    at the same pos (in order). Reparent each.
+            {
+                let parent = dom.get_mut(parent_id);
+                parent.children.remove(pos);
+                for (i, &child) in span_children.iter().enumerate() {
+                    parent.children.insert(pos + i, child);
+                }
+            }
+            for &child in &span_children {
+                dom.get_mut(child).parent = Some(parent_id);
+            }
+
+            // 3. Splice span.tail. If span had children, append onto the
+            //    last child's tail; else handle like the text case (onto
+            //    the new previous sibling, or parent.text).
+            if !span_tail.is_empty() {
+                if let Some(&last) = span_children.last() {
+                    let e = dom.get_mut(last);
+                    let mut t = e.tail.clone().unwrap_or_default();
+                    t.push_str(&span_tail);
+                    e.tail = Some(t);
+                } else if pos == 0 {
+                    // No prev sibling, no inserted children — falls onto
+                    // parent.text.
+                    let parent = dom.get_mut(parent_id);
+                    let mut t = parent.text.clone().unwrap_or_default();
+                    t.push_str(&span_tail);
+                    parent.text = Some(t);
+                } else {
+                    let prev_id = dom.get(parent_id).children[pos - 1];
+                    let prev = dom.get_mut(prev_id);
+                    let mut t = prev.tail.clone().unwrap_or_default();
+                    t.push_str(&span_tail);
+                    prev.tail = Some(t);
+                }
+            }
+
+            // Orphan the stripped span (leave the node in the arena —
+            // node ids are stable; nothing references it from a parent now).
+            dom.get_mut(id).parent = None;
+            dom.get_mut(id).children.clear();
+            stripped_any = true;
+        }
+        if !stripped_any {
+            break;
+        }
+    }
+}
+
+/// Port of calibre's `consolidate_html` (epub_output.py:742) +
+/// div→p promotion (yj_to_epub_properties.py:1921).
+///
+/// Three passes per chapter:
+/// 1. Strip attribute-less `<span>` (and class-less ones) — merges their
+///    text/children into the parent so the spine isn't 90% `<span>` noise.
+/// 2. Compute (has_block_desc, has_text_desc) per node.
+/// 3. Rename leaf-text `<div>`s to `<p>` (no block child + has text).
+///
+/// Does NOT yet do `kfx-layout-hints: heading → h<N>` or `figure → figure`
+/// promotions — those need YJ_PROPERTY_INFO entries for $761 / $790, owned
+/// by step 6.
+pub fn consolidate_html(state: &mut ContentState) {
+    for part in &mut state.book_parts {
+        strip_empty_spans(&mut part.dom);
+
+        // First pass: compute (has_block_desc, has_text_desc) per node.
+        let n = part.dom.len();
+        let mut has_block_desc = vec![false; n];
+        let mut has_text_desc = vec![false; n];
+        // Reverse-post-order (children before parents): do iteratively.
+        let mut order: Vec<NodeId> = Vec::with_capacity(n);
+        let mut stack: Vec<NodeId> = vec![part.dom.root];
+        while let Some(id) = stack.pop() {
+            order.push(id);
+            for &child in &part.dom.get(id).children {
+                stack.push(child);
+            }
+        }
+        // Process in reverse so children fold into parents.
+        for id in order.iter().rev() {
+            let elem = part.dom.get(*id);
+            let mut block = has_block_desc[*id];
+            let mut text = has_text_desc[*id];
+            // Element's own text counts as text.
+            if let Some(t) = &elem.text
+                && t.chars().any(|c| !c.is_whitespace())
+            {
+                text = true;
+            }
+            for &child in &elem.children {
+                let child_tag = part.dom.get(child).tag.clone();
+                if is_block_tag(&child_tag) {
+                    block = true;
+                }
+                if has_block_desc[child] {
+                    block = true;
+                }
+                if has_text_desc[child] {
+                    text = true;
+                }
+                // Tail text on the child counts as text under this parent.
+                if let Some(tail) = &part.dom.get(child).tail
+                    && tail.chars().any(|c| !c.is_whitespace())
+                {
+                    text = true;
+                }
+            }
+            has_block_desc[*id] = block;
+            has_text_desc[*id] = text;
+        }
+        // Second pass: rename `<div>` to `<p>` when it's a leaf-text container.
+        for id in 0..n {
+            let elem = part.dom.get_mut(id);
+            if elem.tag == "div" && !has_block_desc[id] && has_text_desc[id] {
+                elem.tag = "p".to_string();
+            }
+        }
+    }
 }
 
 /// After all chapters are emitted, fold per-element classes + inline styles

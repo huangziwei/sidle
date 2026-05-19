@@ -70,6 +70,10 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
     // Phase 1 step 4 — content (storyline → XHTML).
     let mut content_state = content::ContentState::new(&book, &resources);
     content_state.process_reading_order()?;
+    // Calibre's div→p promotion (yj_to_epub_properties.py:1921). Must run
+    // before `finalize_chapter_attrs` so the renamed `<p>` carries the same
+    // `class=` / `style=` the original `<div>` accumulated.
+    content::consolidate_html(&mut content_state);
     content::finalize_chapter_attrs(&mut content_state);
 
     // Emit stylesheet + per-section XHTML files. The stylesheet has to be
