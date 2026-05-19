@@ -67,6 +67,13 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
     }
     trace.mark("phase 2 (parse entity bodies)");
 
+    for f in fragments.iter_mut() {
+        if f.ftype == "$490" {
+            super::common::rewrite_cde_content_type_pdoc(&mut f.value);
+        }
+    }
+    trace.mark("rewrite cde_content_type → PDOC");
+
     let (merged_id, app_version, pkg_version, version) =
         decide_merged_container_metadata(&fragments);
     trace.mark("pick container metadata");

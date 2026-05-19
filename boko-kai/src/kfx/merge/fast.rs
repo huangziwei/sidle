@@ -45,6 +45,7 @@ const ENTITY_VERSION: u16 = 1;
 const DEFAULT_CHUNK_SIZE: i64 = 4096;
 const SYM_DOLLAR_348: u32 = 348;
 const SYM_DOLLAR_419: u32 = 419;
+const SYM_DOLLAR_490: u32 = 490;
 const SYM_DOLLAR_270: u32 = 270;
 
 /// Compact view of one source `.kfx` after the cheap parse phase.
@@ -127,7 +128,11 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
     let raws_refs: Vec<&RawContainer> = raws.iter().collect();
     trace.mark("unzip + shallow parse");
 
-    let (new_419_tx, new_419_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+    // Channel for the bodies we synthesize on the main thread ($419 always,
+    // $490 when source metadata needs the `cde_content_type` → "PDOC" rewrite).
+    // The hasher loops until the sender is dropped, picking up each synth
+    // body in the order it was sent.
+    let (synth_tx, synth_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(2);
     let bytes = std::thread::scope(|scope| -> io::Result<Vec<u8>> {
         let raws_for_sha = &raws_refs;
         let sha1_handle = scope.spawn(move || -> io::Result<[u8; 20]> {
@@ -137,12 +142,12 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
                     hasher.update(&rc.data[off..off + len]);
                 }
             }
-            if let Ok(new_419) = new_419_rx.recv() {
-                hasher.update(&new_419);
+            while let Ok(body) = synth_rx.recv() {
+                hasher.update(&body);
             }
             Ok(hasher.digest().bytes())
         });
-        finish_merge(scope, &raws_refs, new_419_tx, sha1_handle, trace)
+        finish_merge(scope, &raws_refs, synth_tx, sha1_handle, trace)
     })?;
     Ok(bytes)
 }
@@ -181,14 +186,15 @@ fn decompress_containers_parallel(
 }
 
 /// Body byte ranges (offset, length) within a single source container that
-/// should be hashed — i.e. all entity bodies except the source `$419`'s body.
-/// Within one container the entity bodies are laid out contiguously, so this
-/// is at most two `(off, len)` runs.
+/// should be hashed — i.e. all entity bodies except the ones we synthesize
+/// on the main thread (`$419` always, `$490` because we rewrite
+/// `cde_content_type`). Within one container the entity bodies are laid out
+/// contiguously, so this is at most a handful of `(off, len)` runs.
 fn per_container_hash_chunks(rc: &RawContainer) -> Vec<(usize, usize)> {
     let mut out: Vec<(usize, usize)> = Vec::with_capacity(2);
     let mut cur: Option<(usize, usize)> = None;
     for row in &rc.entity_rows {
-        if row.type_idnum == SYM_DOLLAR_419 {
+        if row.type_idnum == SYM_DOLLAR_419 || row.type_idnum == SYM_DOLLAR_490 {
             if let Some(c) = cur.take() {
                 out.push(c);
             }
@@ -216,7 +222,7 @@ fn per_container_hash_chunks(rc: &RawContainer) -> Vec<(usize, usize)> {
 fn finish_merge<'a>(
     _scope: &'a std::thread::Scope<'a, '_>,
     raws: &[&RawContainer],
-    new_419_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    synth_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     sha1_handle: std::thread::ScopedJoinHandle<'a, io::Result<[u8; 20]>>,
     trace: Trace,
 ) -> io::Result<Vec<u8>> {
@@ -253,6 +259,7 @@ fn finish_merge<'a>(
 
     let mut merged_entities: Vec<(RawEntityRow, usize)> = Vec::new();
     let mut existing_419_deps: Option<IonNode> = None;
+    let mut existing_490: Option<(IonNode, u32)> = None;
     for (c_idx, r) in raws.iter().enumerate() {
         for row in &r.entity_rows {
             if row.type_idnum == SYM_DOLLAR_419 {
@@ -265,6 +272,20 @@ fn finish_merge<'a>(
                 if let Some(deps) = node.get_field("$253") {
                     existing_419_deps = Some(deps.clone());
                 }
+                continue;
+            }
+            if row.type_idnum == SYM_DOLLAR_490 {
+                // Parse $490 here so we can rewrite `cde_content_type` to
+                // "PDOC" before re-emitting. We always synthesize the merged
+                // $490 (rather than memcpy from source) because EBOK-flagged
+                // Amazon bundles are sideloaded as personal documents.
+                let body =
+                    extract_entity_body(&r.data, row.body_offset, row.body_length)?;
+                let mut node = parse_single_value(body, &symtab)?;
+                if let IonNode::Annotated(_, inner) = node {
+                    node = *inner;
+                }
+                existing_490 = Some((node, row.id_idnum));
                 continue;
             }
             merged_entities.push((*row, c_idx));
@@ -288,13 +309,24 @@ fn finish_merge<'a>(
     let new_419_body = build_419_body(&merged_id, &entity_fids, existing_419_deps);
     let new_419_ion_bytes = serialize_single_value(&new_419_body, &symtab);
     let new_419_entity = wrap_entity_body(&new_419_ion_bytes, &symtab);
-    let _ = new_419_tx.send(new_419_entity.clone());
-    trace.mark("build $419 + sha1-thread fed");
+    let _ = synth_tx.send(new_419_entity.clone());
+
+    let new_490_entity: Option<(Vec<u8>, u32)> = existing_490.map(|(mut node, id_idnum)| {
+        super::common::rewrite_cde_content_type_pdoc(&mut node);
+        let ion_bytes = serialize_single_value(&node, &symtab);
+        let entity = wrap_entity_body(&ion_bytes, &symtab);
+        let _ = synth_tx.send(entity.clone());
+        (entity, id_idnum)
+    });
+    // Close the channel so the hasher's `while let Ok(...)` loop exits.
+    drop(synth_tx);
+    trace.mark("build $419 + $490 + sha1-thread fed");
 
     let out = emit_container_streaming(
         raws,
         &merged_entities,
         &new_419_entity,
+        new_490_entity.as_ref(),
         &chunks,
         &symtab,
         doc_symbols_bytes_owned.as_deref(),
@@ -634,6 +666,7 @@ fn emit_container_streaming(
     raws: &[&RawContainer],
     merged_entities: &[(RawEntityRow, usize)],
     new_419_entity: &[u8],
+    new_490_entity: Option<&(Vec<u8>, u32)>,
     chunks: &[(usize, usize, usize)],
     symtab: &LocalSymbolTable,
     doc_symbols_bytes: Option<&[u8]>,
@@ -647,13 +680,16 @@ fn emit_container_streaming(
     // Pre-compute total output size: header + entity table + doc_symbols
     //   + format_capabilities + container_info (≤300 B est.) + kfxgen_info
     //   + sum(entity bodies).
-    let n_rows = merged_entities.len() + 1; // +1 for synthesized $419
+    let synth_490_len = new_490_entity.map_or(0, |(b, _)| b.len());
+    let synth_count = 1 + usize::from(new_490_entity.is_some());
+    let n_rows = merged_entities.len() + synth_count;
     let entity_table_size = n_rows * 24;
     let bodies_size: usize = merged_entities
         .iter()
         .map(|(r, _)| r.body_length)
         .sum::<usize>()
-        + new_419_entity.len();
+        + new_419_entity.len()
+        + synth_490_len;
     let ds_len = doc_symbols_bytes.map_or(0, |b| b.len());
     let fc_len = format_capabilities_bytes.map_or(0, |b| b.len());
     let mut out = Vec::with_capacity(
@@ -672,7 +708,9 @@ fn emit_container_streaming(
 
     let entity_table_off = out.len();
     // Entity-table rows. Source rows first (in source-walk order), then
-    // synthesized $419 row last.
+    // synthesized $419 row, then synthesized $490 row (if present). The
+    // synth-order must match the order bodies are written below AND the
+    // order the SHA1 hasher receives them on the channel.
     let mut entity_offset: u64 = 0;
     for (row, _) in merged_entities {
         out.extend_from_slice(&row.id_idnum.to_le_bytes());
@@ -686,6 +724,15 @@ fn emit_container_streaming(
     out.extend_from_slice(&SYM_DOLLAR_419.to_le_bytes());
     out.extend_from_slice(&entity_offset.to_le_bytes());
     out.extend_from_slice(&(new_419_entity.len() as u64).to_le_bytes());
+    entity_offset += new_419_entity.len() as u64;
+    // Synthesized $490: reuse the source row's id_idnum (singleton form,
+    // typically $348) so calibre/Kindle resolve it the same way.
+    if let Some((body, id_idnum)) = new_490_entity {
+        out.extend_from_slice(&id_idnum.to_le_bytes());
+        out.extend_from_slice(&SYM_DOLLAR_490.to_le_bytes());
+        out.extend_from_slice(&entity_offset.to_le_bytes());
+        out.extend_from_slice(&(body.len() as u64).to_le_bytes());
+    }
 
     // doc_symbols verbatim. Container_info captures its offset/length.
     let doc_symbols_off = out.len();
@@ -758,6 +805,9 @@ fn emit_container_streaming(
         out.extend_from_slice(&raws[c_idx].data[off..off + len]);
     }
     out.extend_from_slice(new_419_entity);
+    if let Some((body, _)) = new_490_entity {
+        out.extend_from_slice(body);
+    }
     trace.mark("entity bodies copied");
 
     // Pass the SHA1-placeholder offset back to the caller via a 4-byte LE
