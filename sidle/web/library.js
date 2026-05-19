@@ -832,6 +832,11 @@ function onLabelMouseDown(e) {
   if (!th) return;
   const fromKey = th.dataset.col;
 
+  // Suppress the browser's default text-selection-on-drag behavior.
+  // Does NOT prevent the click event from firing on mouseup, so the sort
+  // handler still runs for plain clicks.
+  e.preventDefault();
+
   const startX = e.clientX;
   const startY = e.clientY;
   // Threshold so a plain click (which should sort) doesn't trigger a

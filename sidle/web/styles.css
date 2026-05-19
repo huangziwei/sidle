@@ -858,6 +858,11 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* Override the global body { user-select: none } so users can highlight
+     and copy individual cell values. Column headers stay unselectable
+     because that's where drag-to-reorder lives. */
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* Draggable header label (the drag-to-reorder handle). */
