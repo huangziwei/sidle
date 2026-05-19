@@ -1,14 +1,19 @@
-//! On-device manifest at `<kindle>/.sidle/sent.json`.
+//! On-device manifest at `<device>/.sidle/sent.json`.
 //!
 //! Tracks which KFXes we put there so:
 //! - Deletes from the app only ever touch files we sent.
 //! - Plugging the same Kindle into a different Mac still knows what's "ours".
+//!
+//! Read/written through [`Transport`] rather than `std::fs` so it works
+//! identically across mass-storage and MTP — both transports treat
+//! `.sidle/sent.json` as a regular object under the storage root.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::device::transport::{TPath, Transport};
 
 const MANIFEST_DIR: &str = ".sidle";
 const MANIFEST_FILE: &str = "sent.json";
@@ -38,31 +43,27 @@ pub struct SentEntry {
     pub sent_at: String,
 }
 
-pub fn manifest_path(device_root: &Path) -> PathBuf {
-    device_root.join(MANIFEST_DIR).join(MANIFEST_FILE)
+pub fn manifest_path() -> TPath {
+    TPath::parse(MANIFEST_DIR).join(MANIFEST_FILE)
 }
 
-pub fn load(device_root: &Path) -> Result<Manifest> {
-    let path = manifest_path(device_root);
-    if !path.exists() {
+pub fn load(transport: &dyn Transport) -> Result<Manifest> {
+    let path = manifest_path();
+    if !transport.exists(&path).unwrap_or(false) {
         return Ok(Manifest::default());
     }
-    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-    let m: Manifest =
-        serde_json::from_slice(&bytes).with_context(|| "parse sent.json")?;
+    let bytes = transport
+        .read(&path)
+        .with_context(|| format!("read {}", transport.display_path(&path)))?;
+    let m: Manifest = serde_json::from_slice(&bytes).context("parse sent.json")?;
     Ok(m)
 }
 
-pub fn save(device_root: &Path, manifest: &Manifest) -> Result<()> {
-    let dir = device_root.join(MANIFEST_DIR);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
-    let path = manifest_path(device_root);
-    let tmp = path.with_extension("json.partial");
+pub fn save(transport: &dyn Transport, manifest: &Manifest) -> Result<()> {
+    let path = manifest_path();
     let bytes = serde_json::to_vec_pretty(manifest)?;
-    std::fs::write(&tmp, &bytes)
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    transport
+        .write_atomic(&path, &bytes)
+        .with_context(|| format!("write {}", transport.display_path(&path)))?;
     Ok(())
 }

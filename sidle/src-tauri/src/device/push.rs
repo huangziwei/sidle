@@ -1,9 +1,12 @@
-//! Push a KFX from the local library to `<kindle>/documents`.
+//! Push a KFX from the local library to the device's documents directory.
 //!
-//! Atomic: writes `<filename>.partial`, then renames on success — so an unplug
-//! mid-copy leaves a stray `.partial` rather than a truncated `.kfx`.
+//! Routes through [`Transport`] so the same code handles mass-storage (KOA2
+//! family) and MTP (Scribe, 2024+) — `copy_in_atomic` does the right thing for
+//! each: `.partial` + `rename` on a real filesystem, `SendObjectInfo` /
+//! `SendObject` over MTP. Either way, an unplug mid-copy leaves no visible
+//! half-written `.kfx` for the device's indexer to choke on.
 //!
-//! Updates the on-device manifest (`<kindle>/.sidle/sent.json`) and the local
+//! Updates the on-device manifest (`<device>/.sidle/sent.json`) and the local
 //! `device_history` table.
 
 use std::path::Path;
@@ -11,9 +14,17 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::device::detect::DeviceInfo;
+use crate::device::DeviceInfo;
 use crate::device::manifest::{self, Manifest, SentEntry};
+use crate::device::transport::{TPath, Transport};
 use crate::library::db::{self, BookRow};
+
+/// Where we write KFX. The `Sidle` subdir keeps our pushes namespaced so the
+/// Kindle's `/documents` root stays whatever the user had before, and our
+/// deletes can't ever touch unrelated files.
+fn documents_dir() -> TPath {
+    TPath::parse("documents").join("Sidle")
+}
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -27,6 +38,7 @@ pub enum PushResult {
 pub fn push_one(
     conn: &rusqlite::Connection,
     device: &DeviceInfo,
+    transport: &dyn Transport,
     manifest: &mut Manifest,
     book: &BookRow,
 ) -> Result<PushResult> {
@@ -41,14 +53,12 @@ pub fn push_one(
         .as_deref()
         .expect("preflight guarantees kfx_path is Some");
 
-    let dest_dir = device.documents_dir();
-    std::fs::create_dir_all(&dest_dir)
-        .with_context(|| format!("create {}", dest_dir.display()))?;
+    let dest_dir = documents_dir();
 
     // If we've sent it before AND the file still exists, no-op.
     if let Some(entry) = manifest.sent.get(&book.sha256).cloned() {
         let dest = dest_dir.join(&entry.filename);
-        if dest.exists() {
+        if transport.exists(&dest).unwrap_or(false) {
             return Ok(PushResult::AlreadyPresent {
                 book_id: book.id,
                 filename: entry.filename,
@@ -56,13 +66,15 @@ pub fn push_one(
         }
         // Manifest says we sent it but the file is gone (user deleted on-device).
         // Re-push under the same name.
-        copy_atomic(kfx_src, &dest_dir, &entry.filename)?;
+        transport
+            .copy_in_atomic(Path::new(kfx_src), &dest)
+            .with_context(|| format!("copy {} -> {}", kfx_src, transport.display_path(&dest)))?;
         db::record_device_action(
             conn,
             &device.serial,
             &book.sha256,
             "push",
-            &dest.to_string_lossy(),
+            &transport.display_path(&dest),
         )?;
         return Ok(PushResult::Pushed {
             book_id: book.id,
@@ -80,8 +92,11 @@ pub fn push_one(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| format!("book-{}", &book.sha256[..8]));
 
-    let filename = unique_filename(&dest_dir, &base, manifest, &book.sha256);
-    copy_atomic(kfx_src, &dest_dir, &filename)?;
+    let filename = unique_filename(transport, &dest_dir, &base, manifest, &book.sha256);
+    let dest = dest_dir.join(&filename);
+    transport
+        .copy_in_atomic(Path::new(kfx_src), &dest)
+        .with_context(|| format!("copy {} -> {}", kfx_src, transport.display_path(&dest)))?;
 
     let now = db::now_iso();
     manifest.sent.insert(
@@ -93,15 +108,14 @@ pub fn push_one(
             sent_at: now,
         },
     );
-    manifest::save(&device.mount_path(), manifest)?;
+    manifest::save(transport, manifest)?;
 
-    let dest = dest_dir.join(&filename);
     db::record_device_action(
         conn,
         &device.serial,
         &book.sha256,
         "push",
-        &dest.to_string_lossy(),
+        &transport.display_path(&dest),
     )?;
 
     Ok(PushResult::Pushed {
@@ -123,26 +137,21 @@ fn preflight(conn: &rusqlite::Connection, book: &BookRow) -> Result<Option<Strin
     Ok(None)
 }
 
-fn copy_atomic(src: &str, dest_dir: &Path, filename: &str) -> Result<()> {
-    let dest = dest_dir.join(filename);
-    let tmp = dest_dir.join(format!("{filename}.partial"));
-    std::fs::copy(src, &tmp)
-        .with_context(|| format!("copy {} -> {}", src, tmp.display()))?;
-    std::fs::rename(&tmp, &dest).with_context(|| {
-        format!("rename {} -> {}", tmp.display(), dest.display())
-    })?;
-    Ok(())
-}
-
 /// Find a non-colliding filename: `<base>.kfx`, then `<base> (2).kfx`, …
-fn unique_filename(dir: &Path, base: &str, manifest: &Manifest, self_sha: &str) -> String {
+fn unique_filename(
+    transport: &dyn Transport,
+    dir: &TPath,
+    base: &str,
+    manifest: &Manifest,
+    self_sha: &str,
+) -> String {
     let candidate = format!("{base}.kfx");
-    if !filename_taken(dir, &candidate, manifest, self_sha) {
+    if !filename_taken(transport, dir, &candidate, manifest, self_sha) {
         return candidate;
     }
     for n in 2..1000 {
         let candidate = format!("{base} ({n}).kfx");
-        if !filename_taken(dir, &candidate, manifest, self_sha) {
+        if !filename_taken(transport, dir, &candidate, manifest, self_sha) {
             return candidate;
         }
     }
@@ -150,8 +159,14 @@ fn unique_filename(dir: &Path, base: &str, manifest: &Manifest, self_sha: &str) 
     format!("{base}-{}.kfx", &self_sha[..8])
 }
 
-fn filename_taken(dir: &Path, name: &str, manifest: &Manifest, self_sha: &str) -> bool {
-    if dir.join(name).exists() {
+fn filename_taken(
+    transport: &dyn Transport,
+    dir: &TPath,
+    name: &str,
+    manifest: &Manifest,
+    self_sha: &str,
+) -> bool {
+    if transport.exists(&dir.join(name)).unwrap_or(false) {
         return true;
     }
     manifest
@@ -188,6 +203,7 @@ pub enum DeleteResult {
 pub fn delete_one(
     conn: &rusqlite::Connection,
     device: &DeviceInfo,
+    transport: &dyn Transport,
     manifest: &mut Manifest,
     sha256: &str,
 ) -> Result<DeleteResult> {
@@ -197,25 +213,24 @@ pub fn delete_one(
         });
     };
 
-    let dest = device.documents_dir().join(&entry.filename);
-    let file_existed = match std::fs::remove_file(&dest) {
-        Ok(_) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+    let dest = documents_dir().join(&entry.filename);
+    let file_existed = match transport.delete(&dest) {
+        Ok(b) => b,
         Err(e) => {
             // Roll back the manifest mutation so we don't lose the record of
             // a file we actually couldn't remove.
             manifest.sent.insert(sha256.to_string(), entry);
-            return Err(anyhow::anyhow!("remove {}: {}", dest.display(), e));
+            return Err(e);
         }
     };
 
-    manifest::save(&device.mount_path(), manifest)?;
+    manifest::save(transport, manifest)?;
     db::record_device_action(
         conn,
         &device.serial,
         sha256,
         "delete",
-        &dest.to_string_lossy(),
+        &transport.display_path(&dest),
     )?;
 
     Ok(DeleteResult::Removed {

@@ -4,7 +4,7 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::device::detect::DeviceInfo;
+use crate::device::DeviceInfo;
 use crate::device::push::{self, DeleteResult, PushResult};
 use crate::device::{manifest, manifest::Manifest};
 use crate::library::db;
@@ -35,8 +35,9 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceBo
     };
     let db_handle = state.db.clone();
     tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<DeviceBookRow>> {
-        let manifest = manifest::load(&device.mount_path())?;
-        let docs = device.documents_dir();
+        let transport = device.open_transport()?;
+        let manifest = manifest::load(transport.as_ref())?;
+        let docs = crate::device::TPath::parse("documents/Sidle");
         let conn = db_handle.blocking_lock();
         let mut out = Vec::with_capacity(manifest.sent.len());
         for (sha, entry) in &manifest.sent {
@@ -47,7 +48,9 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceBo
                     |r| r.get(0),
                 )
                 .optional()?;
-            let file_present = docs.join(&entry.filename).exists();
+            let file_present = transport
+                .exists(&docs.join(&entry.filename))
+                .unwrap_or(false);
             out.push(DeviceBookRow {
                 sha256: sha.clone(),
                 title: entry.title.clone(),
@@ -77,17 +80,19 @@ pub async fn device_delete(
     let db_handle = state.db.clone();
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<DeleteResult>> {
+        let transport = device.open_transport()?;
         let conn = db_handle.blocking_lock();
-        let mut manifest: Manifest = manifest::load(&device.mount_path())?;
+        let mut manifest: Manifest = manifest::load(transport.as_ref())?;
         let mut out = Vec::with_capacity(sha256s.len());
         for sha in sha256s {
-            let result = match push::delete_one(&conn, &device, &mut manifest, &sha) {
-                Ok(r) => r,
-                Err(e) => DeleteResult::Failed {
-                    sha256: sha.clone(),
-                    error: format!("{e:#}"),
-                },
-            };
+            let result =
+                match push::delete_one(&conn, &device, transport.as_ref(), &mut manifest, &sha) {
+                    Ok(r) => r,
+                    Err(e) => DeleteResult::Failed {
+                        sha256: sha.clone(),
+                        error: format!("{e:#}"),
+                    },
+                };
             let _ = app.emit("device:delete-progress", &result);
             out.push(result);
         }
@@ -110,18 +115,27 @@ pub async fn device_send(
     let db_handle = state.db.clone();
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<PushResult>> {
+        let transport = device.open_transport()?;
         let conn = db_handle.blocking_lock();
-        let mut manifest: Manifest = manifest::load(&device.mount_path())?;
+        let mut manifest: Manifest = manifest::load(transport.as_ref())?;
         let mut out = Vec::with_capacity(book_ids.len());
         for book_id in book_ids {
             let result = match db::get_book(&conn, book_id)? {
-                Some(book) => match push::push_one(&conn, &device, &mut manifest, &book) {
-                    Ok(r) => r,
-                    Err(e) => PushResult::Failed {
-                        book_id,
-                        error: format!("{e:#}"),
-                    },
-                },
+                Some(book) => {
+                    match push::push_one(
+                        &conn,
+                        &device,
+                        transport.as_ref(),
+                        &mut manifest,
+                        &book,
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => PushResult::Failed {
+                            book_id,
+                            error: format!("{e:#}"),
+                        },
+                    }
+                }
                 None => PushResult::Failed {
                     book_id,
                     error: "book not found".into(),

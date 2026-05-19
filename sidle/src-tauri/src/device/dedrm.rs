@@ -6,13 +6,19 @@
 //! skip what's already in the local library by sha256, and run the rest
 //! through the standard import pipeline — which synthesizes an EPUB via boko
 //! and enqueues the canonical EPUB→KFX conversion just like a drag-drop.
+//!
+//! Mass-storage only. Non-jailbroken devices (every MTP-class Kindle) have no
+//! `/dedrm` folder, and the jailbreak that creates the folder isn't available
+//! for Scribe-and-later firmware anyway. `monitor.rs` gates the call here on
+//! `TransportKind::MassStorage`; reaching this module via any other transport
+//! is a bug.
 
 use std::path::{Path, PathBuf};
 
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 
-use crate::device::detect::DeviceInfo;
+use crate::device::DeviceInfo;
 use crate::library::db;
 use crate::library::import::{self, ImportOutcome, sha256_of_file};
 use crate::library::paths::LibraryPaths;
@@ -42,7 +48,10 @@ pub enum PullResult {
 /// takes a second or two, and holding the DB lock for that long would block
 /// the frontend's first `library_list` request after a cold start.
 pub fn hash_dedrm_candidates(device: &DeviceInfo) -> Vec<(PathBuf, String)> {
-    let dir = device.mount_path().join("dedrm");
+    let Some(mount) = device.mass_storage_mount() else {
+        return Vec::new();
+    };
+    let dir = mount.join("dedrm");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -146,6 +155,7 @@ fn is_kfx_input(path: &PathBuf) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::TransportKind;
     use std::fs;
 
     fn touch(path: &Path, content: &[u8]) {
@@ -155,11 +165,13 @@ mod tests {
 
     fn fake_device(mount: &Path) -> DeviceInfo {
         DeviceInfo {
-            mount: mount.to_string_lossy().into_owned(),
             model: None,
             serial: "test".into(),
             free_bytes: None,
             total_bytes: None,
+            transport: TransportKind::MassStorage {
+                mount: mount.to_string_lossy().into_owned(),
+            },
         }
     }
 

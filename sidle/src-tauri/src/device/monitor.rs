@@ -18,8 +18,9 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
+use crate::device::DeviceInfo;
 use crate::device::dedrm::{self, PullResult};
-use crate::device::detect::{self, DeviceInfo};
+use crate::device::detect;
 use crate::library::LibraryPaths;
 use crate::queue::QueueHandle;
 use crate::state::DbHandle;
