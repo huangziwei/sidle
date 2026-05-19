@@ -361,7 +361,12 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
     ("line_height", Prop { name: "line-height", values: Some(&[
         ("auto", Some("normal")),
     ])}),
-    ("language", Prop { name: "-kfx-attrib-xml-lang", values: None }),
+    // `language` is intentionally NOT mapped to CSS. Calibre's
+    // `-kfx-attrib-xml-lang` is a sentinel for "set xml:lang attribute",
+    // not real CSS, and is stripped by simplify_styles before serialization.
+    // Book-level `xml:lang` on every spine `<html>` (set in `process_section`)
+    // covers the same intent; per-element lang overrides are rare and not
+    // present in our corpus.
 
     // ---- writing-mode (THE big one for this port) ----
     ("writing_mode", Prop { name: "writing-mode", values: Some(&[

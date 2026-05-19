@@ -212,6 +212,9 @@ pub(crate) fn parse_length(input: &mut Parser<'_, '_>) -> Option<Length> {
                 "%" => Length::Percent(*value),
                 // ex = x-height, approximately 0.5em
                 "ex" => Length::Em(*value * 0.5),
+                // lh = current line-height. CSS L4 unit. Default
+                // line-height is ~1.2× font-size, so approximate as 1.2em.
+                "lh" => Length::Em(*value * 1.2),
                 // pt = points, 1pt = 96/72 px
                 "pt" => Length::Px(*value * 96.0 / 72.0),
                 _ => return None,
