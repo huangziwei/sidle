@@ -272,9 +272,19 @@ fn extract_book_metadata(
             let value_raw = get_field(item_fields, KfxSymbol::Value as u64);
             let value = value_raw.and_then(|v| v.as_string()).unwrap_or("");
             match key {
-                "title" => meta.title = value.into(),
-                "author" => meta.authors.push(value.into()),
-                "publisher" => meta.publisher = Some(value.into()),
+                "title" => {
+                    if meta.title.is_empty() {
+                        meta.title = value.into();
+                    }
+                }
+                // Calibre's `insert(0, value)` prepends so the LAST
+                // KFX-listed author becomes primary. Mirror that.
+                "author" => {
+                    if !value.is_empty() {
+                        meta.authors.insert(0, value.into());
+                    }
+                }
+                "publisher" => meta.publisher = Some(value.trim().into()),
                 "language" => meta.language = value.into(),
                 "book_id" => meta.identifier = value.into(),
                 "cover_image" => {

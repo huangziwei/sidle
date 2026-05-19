@@ -57,6 +57,11 @@ pub struct EpubOutput {
 
     /// Spine: ordered list of manifest item ids.
     spine: Vec<String>,
+
+    /// NCX navMap content (the inner <navPoint>…</navPoint> sequence).
+    /// When set, `generate_ncx` uses this instead of the spine-derived
+    /// fallback.
+    pub ncx_navmap: Option<String>,
 }
 
 impl EpubOutput {
@@ -67,6 +72,7 @@ impl EpubOutput {
             manifest: Vec::new(),
             manifest_by_id: HashMap::new(),
             spine: Vec::new(),
+            ncx_navmap: None,
         }
     }
 
@@ -337,9 +343,11 @@ impl EpubOutput {
   <navMap>
 "#, id = xml_escape(id), title = xml_escape(title)));
 
-        // Phase 1 step 2 will replace with the real TOC from book_navigation.
-        // For step 1 scaffolding, point at the first spine entry.
-        if let Some(first_chapter_id) = self.spine.first() {
+        // Use the navigation module's NCX if provided; otherwise emit the
+        // single-entry fallback pointing at the first spine chapter.
+        if let Some(navmap) = &self.ncx_navmap {
+            s.push_str(navmap);
+        } else if let Some(first_chapter_id) = self.spine.first() {
             let href = self
                 .manifest_by_id
                 .get(first_chapter_id)
