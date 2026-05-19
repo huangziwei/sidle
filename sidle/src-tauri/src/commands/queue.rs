@@ -35,7 +35,10 @@ pub async fn conversion_status(state: State<'_, AppState>) -> Result<Vec<JobRow>
 pub async fn conversion_retry(state: State<'_, AppState>, book_id: i64) -> Result<(), String> {
     {
         let conn = state.db.lock().await;
-        db::upsert_job(&conn, book_id, "pending", None).map_err(|e| e.to_string())?;
+        // Reset status to `pending` and clear any prior error. `kind` is
+        // preserved by `set_job_status` — the worker still dispatches in the
+        // right direction on the retry attempt.
+        db::set_job_status(&conn, book_id, "pending", None).map_err(|e| e.to_string())?;
     }
     state.queue.enqueue(book_id).await.map_err(|e| e.to_string())
 }

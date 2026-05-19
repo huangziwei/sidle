@@ -16,13 +16,22 @@ pub struct BookRow {
     pub author: String,
     pub language: String,
     pub ppd: Option<String>,
-    pub source_epub_path: String,
+    /// Path to the EPUB on disk. `None` while a KFX-imported book is still
+    /// awaiting its background EPUB conversion.
+    pub epub_path: Option<String>,
     pub cover_path: Option<String>,
+    /// Path to the KFX on disk. `None` while an EPUB-imported book is still
+    /// awaiting its background KFX conversion.
     pub kfx_path: Option<String>,
     pub file_size: i64,
     pub imported_at: String,
     pub status: String,
     pub error: Option<String>,
+    /// Direction of the background conversion job — `"epub_to_kfx"` for EPUB
+    /// imports, `"kfx_to_epub"` for KFX imports. `None` only on a transient
+    /// state where the row exists without a job (shouldn't happen in normal
+    /// flow but `LEFT JOIN` makes it representable).
+    pub kind: Option<String>,
 }
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
@@ -34,7 +43,23 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+/// Schema setup.
+///
+/// No production data yet, so we don't migrate v1 schemas — if we spot the
+/// old `source_epub_path` column we just drop `books` + `conversion_jobs`
+/// and rebuild fresh. The CREATE block below is then the source of truth.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "books", "source_epub_path")? {
+        // FK from conversion_jobs.book_id blocks the DROP order without
+        // foreign_keys off. Dropping conversion_jobs first works too; we go
+        // with foreign_keys=OFF for symmetry with any future similar reset.
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS conversion_jobs; DROP TABLE IF EXISTS books;",
+        )?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+    }
+
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS books (
@@ -44,7 +69,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             author            TEXT NOT NULL DEFAULT '',
             language          TEXT NOT NULL DEFAULT '',
             ppd               TEXT,
-            source_epub_path  TEXT NOT NULL,
+            epub_path         TEXT,
             cover_path        TEXT,
             kfx_path          TEXT,
             file_size         INTEGER NOT NULL,
@@ -56,6 +81,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             status      TEXT NOT NULL,
             error       TEXT,
             attempts    INTEGER NOT NULL DEFAULT 0,
+            kind        TEXT NOT NULL,  -- 'epub_to_kfx' | 'kfx_to_epub'
             updated_at  TEXT NOT NULL
         );
 
@@ -76,6 +102,18 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             ON device_history(sha256);
         "#,
     )
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn record_device_action(
@@ -124,7 +162,7 @@ pub fn list_books(conn: &Connection) -> rusqlite::Result<Vec<BookRow>> {
 pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i64> {
     conn.execute(
         r#"INSERT INTO books
-            (sha256, title, author, language, ppd, source_epub_path, cover_path, kfx_path, file_size, imported_at)
+            (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path, file_size, imported_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
         params![
             book.sha256,
@@ -132,7 +170,7 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             book.author,
             book.language,
             book.ppd,
-            book.source_epub_path,
+            book.epub_path,
             book.cover_path,
             book.kfx_path,
             book.file_size,
@@ -142,7 +180,33 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
     Ok(conn.last_insert_rowid())
 }
 
-pub fn upsert_job(
+/// Create or replace the job row for a book. `kind` is set on first insert
+/// and preserved on subsequent status updates — the worker doesn't need to
+/// know which direction it ran when it reports back.
+pub fn insert_job(
+    conn: &Connection,
+    book_id: i64,
+    status: &str,
+    kind: &str,
+) -> rusqlite::Result<()> {
+    let now = now_iso();
+    conn.execute(
+        r#"INSERT INTO conversion_jobs (book_id, status, error, attempts, kind, updated_at)
+            VALUES (?1, ?2, NULL, 0, ?3, ?4)
+            ON CONFLICT(book_id) DO UPDATE SET
+                status = excluded.status,
+                error = NULL,
+                kind = excluded.kind,
+                updated_at = excluded.updated_at,
+                attempts = 0
+            "#,
+        params![book_id, status, kind, now],
+    )?;
+    Ok(())
+}
+
+/// Update an existing job's status. Leaves `kind` alone.
+pub fn set_job_status(
     conn: &Connection,
     book_id: i64,
     status: &str,
@@ -150,16 +214,12 @@ pub fn upsert_job(
 ) -> rusqlite::Result<()> {
     let now = now_iso();
     conn.execute(
-        r#"INSERT INTO conversion_jobs (book_id, status, error, attempts, updated_at)
-            VALUES (?1, ?2, ?3, 0, ?4)
-            ON CONFLICT(book_id) DO UPDATE SET
-                status = excluded.status,
-                error = excluded.error,
-                updated_at = excluded.updated_at,
-                attempts = CASE WHEN excluded.status = 'converting'
-                                THEN conversion_jobs.attempts + 1
-                                ELSE conversion_jobs.attempts END
-            "#,
+        r#"UPDATE conversion_jobs
+            SET status = ?2,
+                error = ?3,
+                updated_at = ?4,
+                attempts = CASE WHEN ?2 = 'converting' THEN attempts + 1 ELSE attempts END
+            WHERE book_id = ?1"#,
         params![book_id, status, error, now],
     )?;
     Ok(())
@@ -169,6 +229,22 @@ pub fn set_kfx_path(conn: &Connection, book_id: i64, kfx_path: &str) -> rusqlite
     conn.execute(
         "UPDATE books SET kfx_path = ?1 WHERE id = ?2",
         params![kfx_path, book_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_epub_path(conn: &Connection, book_id: i64, epub_path: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE books SET epub_path = ?1 WHERE id = ?2",
+        params![epub_path, book_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_cover_path(conn: &Connection, book_id: i64, cover_path: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE books SET cover_path = ?1 WHERE id = ?2",
+        params![cover_path, book_id],
     )?;
     Ok(())
 }
@@ -210,7 +286,7 @@ pub struct NewBook<'a> {
     pub author: &'a str,
     pub language: &'a str,
     pub ppd: Option<&'a str>,
-    pub source_epub_path: &'a str,
+    pub epub_path: Option<&'a str>,
     pub cover_path: Option<&'a str>,
     pub kfx_path: Option<&'a str>,
     pub file_size: i64,
@@ -223,9 +299,9 @@ pub fn now_iso() -> String {
 
 const SELECT_BOOKS_WITH_JOBS: &str = r#"
     SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
-           b.source_epub_path, b.cover_path, b.kfx_path,
+           b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at,
-           COALESCE(j.status, 'pending') AS status, j.error
+           COALESCE(j.status, 'pending') AS status, j.error, j.kind
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     ORDER BY b.imported_at DESC
@@ -233,9 +309,9 @@ const SELECT_BOOKS_WITH_JOBS: &str = r#"
 
 const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
     SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
-           b.source_epub_path, b.cover_path, b.kfx_path,
+           b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at,
-           COALESCE(j.status, 'pending') AS status, j.error
+           COALESCE(j.status, 'pending') AS status, j.error, j.kind
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.sha256 = ?1
@@ -243,9 +319,9 @@ const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
 
 const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
     SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
-           b.source_epub_path, b.cover_path, b.kfx_path,
+           b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at,
-           COALESCE(j.status, 'pending') AS status, j.error
+           COALESCE(j.status, 'pending') AS status, j.error, j.kind
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
@@ -259,12 +335,13 @@ fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
         author: row.get(3)?,
         language: row.get(4)?,
         ppd: row.get(5)?,
-        source_epub_path: row.get(6)?,
+        epub_path: row.get(6)?,
         cover_path: row.get(7)?,
         kfx_path: row.get(8)?,
         file_size: row.get(9)?,
         imported_at: row.get(10)?,
         status: row.get(11)?,
         error: row.get(12)?,
+        kind: row.get(13)?,
     })
 }

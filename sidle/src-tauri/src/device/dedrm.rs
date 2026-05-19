@@ -99,15 +99,18 @@ pub enum PullResult {
 }
 
 /// Import a single dedrm file into the library. Records a `pull` row in
-/// `device_history`. Returns the import outcome — duplicate is a no-op success.
+/// `device_history`. Returns the import outcome plus, when the row needs a
+/// background conversion (now true for every fresh KFX/KFX-zip pull — the
+/// EPUB is produced by the worker, not import_file), the `book_id` to
+/// enqueue. Caller does the enqueue from async context.
 pub fn pull_one(
     conn: &rusqlite::Connection,
     paths: &LibraryPaths,
     device: &DeviceInfo,
     path: &Path,
-) -> PullResult {
+) -> (PullResult, Option<i64>) {
     match import::import_file(conn, paths, path) {
-        Ok(ImportOutcome::Imported { book, .. }) => {
+        Ok(ImportOutcome::Imported { book, needs_enqueue }) => {
             let _ = db::record_device_action(
                 conn,
                 &device.serial,
@@ -115,21 +118,29 @@ pub fn pull_one(
                 "pull",
                 &path.to_string_lossy(),
             );
-            PullResult::Imported {
+            let book_id = book.id;
+            let result = PullResult::Imported {
+                book_id,
+                sha256: book.sha256,
+                path: path.to_string_lossy().into_owned(),
+            };
+            (result, needs_enqueue.then_some(book_id))
+        }
+        Ok(ImportOutcome::Duplicate(book)) => (
+            PullResult::Duplicate {
                 book_id: book.id,
                 sha256: book.sha256,
                 path: path.to_string_lossy().into_owned(),
-            }
-        }
-        Ok(ImportOutcome::Duplicate(book)) => PullResult::Duplicate {
-            book_id: book.id,
-            sha256: book.sha256,
-            path: path.to_string_lossy().into_owned(),
-        },
-        Err(e) => PullResult::Failed {
-            path: path.to_string_lossy().into_owned(),
-            error: format!("{e:#}"),
-        },
+            },
+            None,
+        ),
+        Err(e) => (
+            PullResult::Failed {
+                path: path.to_string_lossy().into_owned(),
+                error: format!("{e:#}"),
+            },
+            None,
+        ),
     }
 }
 

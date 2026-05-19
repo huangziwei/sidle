@@ -70,7 +70,12 @@ pub fn push_one(
         });
     }
 
-    let base = Path::new(&book.source_epub_path)
+    // Both files share the same basename (import writes them as
+    // `<basename>.kfx` / `<basename>.epub`), so deriving from the KFX path
+    // we just bound above is equivalent to the old `epub_path` derivation —
+    // and avoids depending on a field that may be `None` for a KFX-imported
+    // book whose EPUB hasn't finished converting yet.
+    let base = Path::new(kfx_src)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| format!("book-{}", &book.sha256[..8]));

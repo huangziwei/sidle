@@ -294,17 +294,11 @@ function metaBadges(b) {
   const wrap = document.createElement("div");
   wrap.className = "meta-badges";
 
-  const epub = document.createElement("span");
-  epub.className = "fmt-badge epub";
-  epub.textContent = "EPUB";
-  epub.title = "EPUB available";
-  wrap.appendChild(epub);
-
-  const kfx = document.createElement("span");
-  kfx.className = `fmt-badge kfx ${b.status}`;
-  kfx.textContent = "KFX";
-  kfx.title = kfxTooltip(b);
-  wrap.appendChild(kfx);
+  // The side that the import wrote directly is always "done". The other
+  // side (whichever direction the background job runs) carries the row's
+  // status. `b.kind` tells us which side that is.
+  wrap.appendChild(formatBadge("epub", b, /*compact=*/ true));
+  wrap.appendChild(formatBadge("kfx", b, /*compact=*/ true));
 
   if (state.sentSet.has(b.sha256)) {
     const dot = document.createElement("span");
@@ -316,14 +310,50 @@ function metaBadges(b) {
   return wrap;
 }
 
-function kfxTooltip(b) {
-  switch (b.status) {
-    case "done": return "KFX ready";
-    case "converting": return "KFX converting…";
-    case "pending": return "KFX queued";
-    case "error": return `KFX failed: ${b.error || ""}`;
-    default: return "KFX";
+// Returns the conversion status as it applies to the given format side
+// (`"epub"` or `"kfx"`). The format that the import wrote directly is
+// always "done"; the format being produced by the queue follows b.status.
+function formatStatusFor(format, b) {
+  const producing = b.kind === "kfx_to_epub" ? "epub" : "kfx";
+  return format === producing ? b.status : "done";
+}
+
+function formatLabel(format, status, compact) {
+  const upper = format.toUpperCase();
+  if (compact || status === "done") return upper;
+  switch (status) {
+    case "converting": return `${upper} · converting`;
+    case "pending":    return `${upper} · queued`;
+    case "error":      return `${upper} · failed`;
+    default:           return upper;
   }
+}
+
+function formatTooltip(format, status, b) {
+  const upper = format.toUpperCase();
+  switch (status) {
+    case "done":       return `${upper} ready`;
+    case "converting": return `${upper} converting…`;
+    case "pending":    return `${upper} queued`;
+    case "error":      return `${upper} failed: ${b.error || ""}`;
+    default:           return upper;
+  }
+}
+
+function formatBadge(format, b, compact) {
+  const status = formatStatusFor(format, b);
+  const span = document.createElement("span");
+  span.className = `fmt-badge ${format} ${status}`;
+  span.textContent = formatLabel(format, status, compact);
+  span.title = formatTooltip(format, status, b);
+  if (status === "error") {
+    span.addEventListener("click", (e) => {
+      e.stopPropagation();
+      retryConvert(b.id);
+    });
+    span.style.cursor = "pointer";
+  }
+  return span;
 }
 
 function renderList(books) {
@@ -363,31 +393,11 @@ function formatsCell(b) {
   const td = document.createElement("td");
   const wrap = document.createElement("div");
   wrap.className = "formats";
-
-  // EPUB is always present after import — we own the source file.
-  const epub = document.createElement("span");
-  epub.className = "fmt-badge epub";
-  epub.textContent = "EPUB";
-  wrap.appendChild(epub);
-
-  const kfx = document.createElement("span");
-  kfx.className = `fmt-badge kfx ${b.status}`;
-  if (b.status === "done") {
-    kfx.textContent = "KFX";
-  } else if (b.status === "converting") {
-    kfx.textContent = "KFX · converting";
-  } else if (b.status === "pending") {
-    kfx.textContent = "KFX · queued";
-  } else if (b.status === "error") {
-    kfx.textContent = "KFX · failed";
-    kfx.title = b.error || "";
-    kfx.addEventListener("click", (e) => {
-      e.stopPropagation();
-      retryConvert(b.id);
-    });
-    kfx.style.cursor = "pointer";
-  }
-  wrap.appendChild(kfx);
+  // Verbose badges in the list (`KFX · converting` etc.) — the format that
+  // the queue is producing carries the row's status; the other side stays
+  // "done". See `formatStatusFor` above.
+  wrap.appendChild(formatBadge("epub", b, /*compact=*/ false));
+  wrap.appendChild(formatBadge("kfx", b, /*compact=*/ false));
   td.appendChild(wrap);
   return td;
 }

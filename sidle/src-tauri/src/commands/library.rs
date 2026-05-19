@@ -15,7 +15,11 @@ use crate::state::AppState;
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImportResult {
-    Imported { book: BookRow, reused_kfx: bool },
+    /// `needs_enqueue` is true when the row was inserted with a pending job —
+    /// either an EPUB-import awaiting EPUB→KFX, or a KFX-import awaiting
+    /// KFX→EPUB. False on an idempotent re-import where the other side was
+    /// already on disk.
+    Imported { book: BookRow, needs_enqueue: bool },
     Duplicate { book: BookRow },
     Failed { path: String, error: String },
 }
@@ -47,12 +51,12 @@ pub async fn library_import(
         .map_err(|e| e.to_string())?;
 
         match result {
-            Ok(ImportOutcome::Imported { book, reused_kfx }) => {
+            Ok(ImportOutcome::Imported { book, needs_enqueue }) => {
                 let book_id = book.id;
-                if !reused_kfx {
+                if needs_enqueue {
                     let _ = state.queue.enqueue(book_id).await;
                 }
-                out.push(ImportResult::Imported { book, reused_kfx });
+                out.push(ImportResult::Imported { book, needs_enqueue });
             }
             Ok(ImportOutcome::Duplicate(book)) => {
                 out.push(ImportResult::Duplicate { book });
@@ -89,9 +93,16 @@ pub async fn library_open_in_finder(
         let conn = state.db.lock().await;
         db::get_book(&conn, book_id)
             .map_err(|e| e.to_string())?
-            .map(|b| b.source_epub_path)
+            .and_then(|b| {
+                // Prefer the EPUB if it exists; fall back to KFX so books
+                // imported as `.kfx` with a still-converting EPUB can still
+                // be revealed by their `.kfx` file.
+                b.epub_path.or(b.kfx_path)
+            })
     };
-    let Some(path) = path else { return Err("book not found".into()) };
+    let Some(path) = path else {
+        return Err("no file on disk for this book yet".into());
+    };
     app.opener()
         .reveal_item_in_dir(path)
         .map_err(|e| e.to_string())

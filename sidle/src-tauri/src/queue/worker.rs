@@ -1,12 +1,20 @@
-//! Conversion worker: runs boko-kai EPUB→KFX synchronously on a blocking thread.
+//! Conversion worker: runs boko-kai on a blocking thread.
+//!
+//! Both directions share the worker shape — claim job → mark `converting` →
+//! do the heavy work → write the output to disk → record paths on the book
+//! row → mark `done`/`error`. The direction (`epub_to_kfx` or `kfx_to_epub`)
+//! is stored on the `conversion_jobs` row at import time; the worker just
+//! dispatches on it.
 
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tauri::AppHandle;
 
 use crate::library::LibraryPaths;
-use crate::library::db;
+use crate::library::db::{self, BookRow};
+use crate::library::import::{extract_cover_from_epub, write_bytes_atomic};
+use crate::library::paths::format_basename;
 use crate::queue::emit_status;
 use crate::state::DbHandle;
 
@@ -14,32 +22,43 @@ use crate::state::DbHandle;
 /// update `done` or `error`. Errors are recorded in the DB; never propagated
 /// to the caller (this is a fire-and-forget worker).
 pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_id: i64) {
-    let Some((sha, source)) = lookup_paths(db, book_id).await else {
+    let Some(book) = lookup_book(db, book_id).await else {
         eprintln!("[sidle/queue] book {book_id} vanished before conversion");
         return;
     };
+    let Some(kind) = book.kind.as_deref() else {
+        eprintln!("[sidle/queue] book {book_id} has no job kind; skipping");
+        return;
+    };
 
-    eprintln!("[sidle/queue] book {book_id} converting: {}", source.display());
+    eprintln!("[sidle/queue] book {book_id} converting ({kind})");
     mark_status(db, app, book_id, "converting", None).await;
 
     let paths_owned = paths.clone();
-    let sha_owned = sha.clone();
-    let source_owned = source.clone();
+    let book_owned = book.clone();
+    let kind_owned = kind.to_string();
     let started = std::time::Instant::now();
     let result = tokio::task::spawn_blocking(move || {
-        convert_sync(&paths_owned, &sha_owned, &source_owned)
+        run_direction(&paths_owned, &book_owned, &kind_owned)
     })
     .await;
 
     match result {
-        Ok(Ok(kfx_path)) => {
-            let kfx_str = kfx_path.to_string_lossy().to_string();
+        Ok(Ok(produced)) => {
             {
                 let conn = db.lock().await;
-                let _ = db::set_kfx_path(&conn, book_id, &kfx_str);
+                if let Some(epub) = &produced.epub_path {
+                    let _ = db::set_epub_path(&conn, book_id, &epub.to_string_lossy());
+                }
+                if let Some(kfx) = &produced.kfx_path {
+                    let _ = db::set_kfx_path(&conn, book_id, &kfx.to_string_lossy());
+                }
+                if let Some(cover) = &produced.cover_path {
+                    let _ = db::set_cover_path(&conn, book_id, &cover.to_string_lossy());
+                }
             }
             eprintln!(
-                "[sidle/queue] book {book_id} done in {:.2}s -> {kfx_str}",
+                "[sidle/queue] book {book_id} done in {:.2}s",
                 started.elapsed().as_secs_f32()
             );
             mark_status(db, app, book_id, "done", None).await;
@@ -57,10 +76,9 @@ pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_
     }
 }
 
-async fn lookup_paths(db: &DbHandle, book_id: i64) -> Option<(String, PathBuf)> {
+async fn lookup_book(db: &DbHandle, book_id: i64) -> Option<BookRow> {
     let conn = db.lock().await;
-    let row = db::get_book(&conn, book_id).ok()??;
-    Some((row.sha256, PathBuf::from(row.source_epub_path)))
+    db::get_book(&conn, book_id).ok().flatten()
 }
 
 async fn mark_status(
@@ -72,33 +90,104 @@ async fn mark_status(
 ) {
     {
         let conn = db.lock().await;
-        let _ = db::upsert_job(&conn, book_id, status, error);
+        let _ = db::set_job_status(&conn, book_id, status, error);
     }
     emit_status(app, book_id, status, error);
 }
 
-fn convert_sync(
-    paths: &LibraryPaths,
-    sha: &str,
-    source: &std::path::Path,
-) -> anyhow::Result<PathBuf> {
-    paths.ensure_sha(sha)?;
-    // Mirror the source EPUB's basename so the KFX sits next to it with the
-    // same `[Author] Title (Year)` name.
-    let base = source
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| sha.to_string());
-    let dir = paths.book_dir(sha);
+/// Outputs the worker produced — populated columns get written back to the
+/// book row on success.
+#[derive(Default)]
+struct Produced {
+    epub_path: Option<PathBuf>,
+    kfx_path: Option<PathBuf>,
+    cover_path: Option<PathBuf>,
+}
+
+fn run_direction(paths: &LibraryPaths, book: &BookRow, kind: &str) -> anyhow::Result<Produced> {
+    match kind {
+        "epub_to_kfx" => convert_epub_to_kfx(paths, book),
+        "kfx_to_epub" => convert_kfx_to_epub(paths, book),
+        other => Err(anyhow::anyhow!("unknown job kind: {other}")),
+    }
+}
+
+fn convert_epub_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Produced> {
+    let source = book
+        .epub_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("epub_to_kfx job has no epub_path"))?;
+    let source_path = Path::new(source);
+
+    paths.ensure_sha(&book.sha256)?;
+    let dir = paths.book_dir(&book.sha256);
+    let base = derived_basename(book, source_path);
     let out_path = dir.join(format!("{base}.kfx"));
     let tmp_path = dir.join(format!("{base}.kfx.partial"));
 
-    let mut book = boko::Book::open(source)?;
+    let mut handle = boko::Book::open(source_path)?;
     let mut writer = File::create(&tmp_path)?;
-    book.export(boko::Format::Kfx, &mut writer)?;
+    handle.export(boko::Format::Kfx, &mut writer)?;
     writer.sync_all().ok();
     drop(writer);
-
     std::fs::rename(&tmp_path, &out_path)?;
-    Ok(out_path)
+
+    Ok(Produced {
+        kfx_path: Some(out_path),
+        ..Default::default()
+    })
 }
+
+fn convert_kfx_to_epub(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Produced> {
+    let source = book
+        .kfx_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("kfx_to_epub job has no kfx_path"))?;
+    let source_path = Path::new(source);
+
+    paths.ensure_sha(&book.sha256)?;
+    let dir = paths.book_dir(&book.sha256);
+    let base = derived_basename(book, source_path);
+    let out_path = dir.join(format!("{base}.epub"));
+
+    // Mechanical port: KFX bytes → EPUB bytes. The intermediate `.kfx` is
+    // already persisted (import wrote it before enqueueing), so we read it
+    // back here rather than threading the bytes through the queue.
+    let kfx_bytes = std::fs::read(source_path)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
+    let epub_bytes = boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
+        .map_err(|e| anyhow::anyhow!("boko kfx→epub: {e}"))?;
+    write_bytes_atomic(&out_path, &epub_bytes)?;
+
+    // Cover sidecar — `kfx_to_epub` already transcoded any JXR to JPG and
+    // marked the manifest entry as `cover-image`, so this is a plain copy
+    // out of the produced zip.
+    let cover_path = extract_cover_from_epub(&epub_bytes).and_then(|(bytes, ext)| {
+        let out = paths.cover(&book.sha256, ext);
+        std::fs::write(&out, &bytes).ok().map(|_| out)
+    });
+
+    Ok(Produced {
+        epub_path: Some(out_path),
+        cover_path,
+        ..Default::default()
+    })
+}
+
+/// Reproduce the import-time basename. The source file's stem already encodes
+/// `[Author] Title (Year)` (import writes it that way), so we fall back to
+/// the stem and only re-derive from metadata if the stem is missing or empty.
+fn derived_basename(book: &BookRow, source: &Path) -> String {
+    if let Some(stem) = source.file_stem().and_then(|s| s.to_str()) {
+        if !stem.is_empty() {
+            return stem.to_string();
+        }
+    }
+    let authors: Vec<String> = if book.author.is_empty() {
+        Vec::new()
+    } else {
+        book.author.split(", ").map(|s| s.to_string()).collect()
+    };
+    format_basename(&authors, &book.title, None)
+}
+
