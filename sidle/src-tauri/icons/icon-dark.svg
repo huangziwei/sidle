@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>sidle (dark)</title>
+  <rect width="1024" height="1024" rx="229" ry="229" fill="#1a1816"/>
+  <path d="M 200 256 H 824 V 460 H 720 V 564 H 824 V 768 H 200 Z" fill="#ff5a5a"/>
+</svg>

@@ -139,7 +139,13 @@ impl EpubExporter {
         }
 
         // 4. Write content.opf
-        let opf = generate_opf(book.metadata(), &manifest_items, &spine_refs);
+        let cover_id = find_cover_manifest_id(book.metadata(), &manifest_items);
+        let opf = generate_opf(
+            book.metadata(),
+            &manifest_items,
+            &spine_refs,
+            cover_id.as_deref(),
+        );
         zip.start_file("OEBPS/content.opf", deflated)
             .map_err(io_error)?;
         zip.write_all(opf.as_bytes())?;
@@ -230,9 +236,35 @@ impl EpubExporter {
             spine_refs.push(id);
         }
 
-        // Add assets to manifest (from normalized content)
-        for (asset_idx, asset_path) in content.assets.iter().enumerate() {
-            let media_type = guess_media_type(asset_path);
+        // Add assets to manifest (from normalized content). Sort for stable
+        // ordering across runs, and force-include the cover image even if no
+        // chapter references it inline (Amazon's KFX stores the cover as a
+        // bcRawMedia that's only mentioned in metadata).
+        let mut asset_paths: Vec<String> = content.assets.iter().cloned().collect();
+        asset_paths.sort();
+        if let Some(cover) = book.metadata().cover_image.as_ref()
+            && !cover.trim().is_empty()
+            && !asset_paths.iter().any(|a| a == cover)
+        {
+            asset_paths.push(cover.clone());
+        }
+        // Pre-load asset bytes so we can sniff MIME types for extensionless
+        // assets (KFX stores resources as `e0`/`eF`/… without extensions). We
+        // reuse the bytes when writing to the zip below.
+        let mut asset_bytes: Vec<(String, Vec<u8>)> = Vec::with_capacity(asset_paths.len());
+        for asset_path in &asset_paths {
+            let bytes = book
+                .load_asset(std::path::Path::new(asset_path))
+                .unwrap_or_default();
+            asset_bytes.push((asset_path.clone(), bytes));
+        }
+        for (asset_idx, (asset_path, bytes)) in asset_bytes.iter().enumerate() {
+            let mut media_type = guess_media_type(asset_path);
+            if media_type == "application/octet-stream"
+                && let Some(sniffed) = sniff_image_media_type(bytes)
+            {
+                media_type = sniffed.to_string();
+            }
             let id = format!("asset_{}", asset_idx);
             let href = format!("OEBPS/{}", sanitize_path(asset_path));
 
@@ -244,7 +276,13 @@ impl EpubExporter {
         }
 
         // 4. Write content.opf
-        let opf = generate_opf(book.metadata(), &manifest_items, &spine_refs);
+        let cover_id = find_cover_manifest_id(book.metadata(), &manifest_items);
+        let opf = generate_opf(
+            book.metadata(),
+            &manifest_items,
+            &spine_refs,
+            cover_id.as_deref(),
+        );
         zip.start_file("OEBPS/content.opf", deflated)
             .map_err(io_error)?;
         zip.write_all(opf.as_bytes())?;
@@ -269,15 +307,14 @@ impl EpubExporter {
             zip.write_all(chapter.document.as_bytes())?;
         }
 
-        // 8. Write assets referenced by normalized content
-        for asset_path in &content.assets {
-            let zip_path = format!("OEBPS/{}", sanitize_path(asset_path));
-
-            // Try to load the asset from the book
-            if let Ok(data) = book.load_asset(std::path::Path::new(asset_path)) {
-                zip.start_file(&zip_path, deflated).map_err(io_error)?;
-                zip.write_all(&data)?;
+        // 8. Write assets (reuse the bytes we already loaded for MIME sniffing).
+        for (asset_path, bytes) in &asset_bytes {
+            if bytes.is_empty() {
+                continue;
             }
+            let zip_path = format!("OEBPS/{}", sanitize_path(asset_path));
+            zip.start_file(&zip_path, deflated).map_err(io_error)?;
+            zip.write_all(bytes)?;
         }
 
         zip.finish().map_err(io_error)?;
@@ -305,11 +342,42 @@ struct ManifestItem {
     media_type: String,
 }
 
+/// Find the manifest item whose asset corresponds to `metadata.cover_image`.
+///
+/// `cover_image` carries the value populated by the importer: for an EPUB
+/// source this is typically a path like `images/cover.jpg`; for a KFX source
+/// it's a resource name like `eF`. Manifest hrefs always end with the asset's
+/// raw path (e.g. `OEBPS/eF` or `OEBPS/images/cover.jpg`), so a suffix match
+/// covers both cases without needing format-aware normalization.
+fn find_cover_manifest_id(
+    metadata: &crate::model::Metadata,
+    manifest: &[ManifestItem],
+) -> Option<String> {
+    let cover = metadata.cover_image.as_ref()?;
+    let cover_trim = cover.trim_start_matches('/');
+    if cover_trim.is_empty() {
+        return None;
+    }
+    manifest
+        .iter()
+        .find(|item| {
+            let h = item.href.strip_prefix("OEBPS/").unwrap_or(&item.href);
+            h == cover_trim || h.ends_with(cover_trim)
+        })
+        .map(|item| item.id.clone())
+}
+
 /// Generate content.opf from metadata and manifest.
+///
+/// `cover_manifest_id`: when set, emits `<meta name="cover" content="...">` in
+/// the metadata block and `properties="cover-image"` on the matching manifest
+/// item. EPUB2 readers find the cover via the meta; EPUB3 readers via the
+/// properties attribute. We emit both for compatibility.
 fn generate_opf(
     metadata: &crate::model::Metadata,
     manifest: &[ManifestItem],
     spine_refs: &[String],
+    cover_manifest_id: Option<&str>,
 ) -> String {
     let mut opf = String::new();
 
@@ -478,6 +546,15 @@ fn generate_opf(
         ));
     }
 
+    // EPUB2-style cover declaration. EPUB3 readers also accept this and many
+    // tools (Calibre, ADE) only find the cover via this meta.
+    if let Some(cover_id) = cover_manifest_id {
+        opf.push_str(&format!(
+            "    <meta name=\"cover\" content=\"{}\"/>\n",
+            escape_xml(cover_id)
+        ));
+    }
+
     opf.push_str("  </metadata>\n");
 
     // Manifest
@@ -489,17 +566,30 @@ fn generate_opf(
     for item in manifest {
         // Get relative path from OEBPS/
         let href = item.href.strip_prefix("OEBPS/").unwrap_or(&item.href);
+        let properties = if Some(item.id.as_str()) == cover_manifest_id {
+            " properties=\"cover-image\""
+        } else {
+            ""
+        };
         opf.push_str(&format!(
-            "    <item id=\"{}\" href=\"{}\" media-type=\"{}\"/>\n",
+            "    <item id=\"{}\" href=\"{}\" media-type=\"{}\"{}/>\n",
             escape_xml(&item.id),
             escape_xml(href),
-            escape_xml(&item.media_type)
+            escape_xml(&item.media_type),
+            properties
         ));
     }
     opf.push_str("  </manifest>\n");
 
-    // Spine
-    opf.push_str("  <spine toc=\"ncx\">\n");
+    // Spine. Carry page-progression-direction through for vertical-RTL books
+    // — without it, Kindle/Calibre paginate in the wrong direction.
+    let spine_open = match metadata.page_progression_direction.as_deref() {
+        Some(dir @ ("rtl" | "ltr" | "default")) => {
+            format!("  <spine toc=\"ncx\" page-progression-direction=\"{}\">\n", dir)
+        }
+        _ => "  <spine toc=\"ncx\">\n".to_string(),
+    };
+    opf.push_str(&spine_open);
     for id in spine_refs {
         opf.push_str(&format!("    <itemref idref=\"{}\"/>\n", escape_xml(id)));
     }
@@ -615,6 +705,35 @@ fn guess_media_type(path: &str) -> String {
         "opf" => "application/oebps-package+xml".to_string(),
         _ => "application/octet-stream".to_string(),
     }
+}
+
+/// Sniff an image MIME type from the leading bytes. Returns `None` if the
+/// signature doesn't match a known image format — covers KFX assets stored
+/// without a file extension (e.g. `e20`, `eF`) so the OPF can advertise the
+/// right `media-type` and Apple Books / ADE will pick the cover up.
+fn sniff_image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 3 && &bytes[..3] == b"\xFF\xD8\xFF" {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+        return Some("image/png");
+    }
+    if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    // SVG: text format, sniff by the first non-whitespace char + signature
+    if bytes.len() >= 5 {
+        let head = std::str::from_utf8(&bytes[..bytes.len().min(256)])
+            .unwrap_or("")
+            .trim_start();
+        if head.starts_with("<svg") || head.starts_with("<?xml") && head.contains("<svg") {
+            return Some("image/svg+xml");
+        }
+    }
+    None
 }
 
 #[cfg(test)]

@@ -95,6 +95,12 @@ pub struct KfxImporter {
     /// Whether styles have been indexed
     styles_indexed: bool,
 
+    /// Ruby map: ruby_name (e.g. "b_ruby_0") → ordered annotation texts.
+    /// Style events reference entries via `ruby_name`+`ruby_id` (1-indexed).
+    ruby_index: Arc<HashMap<String, Vec<String>>>,
+    /// Whether ruby_content has been indexed
+    ruby_indexed: bool,
+
     // --- Link resolution ---
     /// Internal anchors: anchor_name -> (position_id, offset)
     internal_anchors: Arc<HashMap<String, (i64, i64)>>,
@@ -141,9 +147,10 @@ impl Importer for KfxImporter {
     }
 
     fn load_chapter(&mut self, id: ChapterId) -> io::Result<Chapter> {
-        // Ensure anchors and styles are indexed
+        // Ensure anchors, styles, and ruby are indexed
         self.index_anchor_entities()?;
         self.index_styles()?;
+        self.index_ruby_content()?;
 
         let section_name = self
             .section_names
@@ -161,6 +168,7 @@ impl Importer for KfxImporter {
         let doc_symbols = Arc::clone(&self.doc_symbols);
         let anchors = Arc::clone(&self.anchors);
         let styles = Arc::clone(&self.styles);
+        let ruby_index = Arc::clone(&self.ruby_index);
 
         // Parse storyline and build IR using schema-driven tokenization
         let mut chapter = parse_storyline_to_ir(
@@ -168,6 +176,7 @@ impl Importer for KfxImporter {
             doc_symbols.as_ref(),
             Some(anchors.as_ref()),
             Some(styles.as_ref()),
+            Some(ruby_index.as_ref()),
             |name, index| self.lookup_content_text(name, index),
         );
 
@@ -375,6 +384,8 @@ impl KfxImporter {
             anchors_indexed: false,
             styles: Arc::new(HashMap::new()),
             styles_indexed: false,
+            ruby_index: Arc::new(HashMap::new()),
+            ruby_indexed: false,
             internal_anchors: Arc::new(HashMap::new()),
             element_id_map: HashMap::new(),
         };
@@ -682,9 +693,16 @@ impl KfxImporter {
 
     /// Parse spine from reading_orders.
     ///
-    /// Uses the section→storyline cache to get size estimates.
+    /// Uses the section→storyline cache to get size estimates. Also captures
+    /// `page_progression_direction` from the selected reading order onto
+    /// `metadata.page_progression_direction` so the EPUB exporter can re-emit
+    /// it on `<spine>` (vertical-RTL Japanese books rely on this).
     fn parse_spine(&mut self) -> io::Result<()> {
-        let section_names = self.get_reading_order_sections()?;
+        let (section_names, ppd) = self.get_reading_order_sections()?;
+
+        if let Some(ppd) = ppd {
+            self.metadata.page_progression_direction = Some(ppd);
+        }
 
         for (idx, name) in section_names.into_iter().enumerate() {
             // Get size from cached storyline location
@@ -765,55 +783,73 @@ impl KfxImporter {
         Ok(())
     }
 
-    /// Extract section names from reading_orders in document_data or metadata.
+    /// Extract section names + `page_progression_direction` from
+    /// reading_orders in document_data or metadata. Prefers the "default"
+    /// reading order if multiple are present.
     ///
-    /// Prefers the "default" reading order if multiple are present.
-    fn get_reading_order_sections(&self) -> io::Result<Vec<String>> {
-        // Try document_data ($538) first, then metadata ($258)
-        let doc_data_loc = self
-            .entities
-            .iter()
-            .find(|e| e.type_id == KfxSymbol::DocumentData as u32)
-            .copied();
+    /// Walks both `document_data` ($538) and `metadata` ($258) — boko's own
+    /// exports put ppd only on the `metadata` fragment while sections are in
+    /// both, so we collect from each rather than returning on the first hit.
+    fn get_reading_order_sections(&self) -> io::Result<(Vec<String>, Option<String>)> {
+        let candidate_types = [KfxSymbol::DocumentData as u32, KfxSymbol::Metadata as u32];
+        let mut found_sections: Vec<String> = Vec::new();
+        let mut found_ppd: Option<String> = None;
 
-        let metadata_loc = self
-            .entities
-            .iter()
-            .find(|e| e.type_id == KfxSymbol::Metadata as u32)
-            .copied();
+        for type_id in candidate_types {
+            let loc = self.entities.iter().find(|e| e.type_id == type_id).copied();
+            let Some(loc) = loc else { continue };
+            let Ok(elem) = self.parse_entity_ion(loc) else { continue };
+            let Some(fields) = elem.as_struct() else { continue };
+            let Some(orders) = get_field(fields, sym!(ReadingOrders)).and_then(|v| v.as_list())
+            else {
+                continue;
+            };
 
-        for loc in [doc_data_loc, metadata_loc].into_iter().flatten() {
-            if let Ok(elem) = self.parse_entity_ion(loc)
-                && let Some(fields) = elem.as_struct()
-                && let Some(orders) =
-                    get_field(fields, sym!(ReadingOrders)).and_then(|v| v.as_list())
-            {
-                // First pass: look for "default" reading order
-                for order in orders {
-                    if let Some(order_fields) = order.as_struct() {
-                        let order_name = get_field(order_fields, sym!(ReadingOrderName))
-                            .and_then(|v| self.get_symbol_text(v));
+            // Prefer reading_order_name == "default"; fall back to first with sections.
+            let chosen = orders
+                .iter()
+                .find(|o| {
+                    o.as_struct()
+                        .map(|f| {
+                            get_field(f, sym!(ReadingOrderName))
+                                .and_then(|v| self.get_symbol_text(v))
+                                == Some("default")
+                        })
+                        .unwrap_or(false)
+                })
+                .or_else(|| orders.iter().find(|o| o.as_struct().is_some()))
+                .and_then(|o| o.as_struct());
 
-                        if order_name == Some("default")
-                            && let Some(sections) = self.extract_sections(order_fields)
-                        {
-                            return Ok(sections);
-                        }
-                    }
+            if let Some(order_fields) = chosen {
+                if found_sections.is_empty()
+                    && let Some(sections) = self.extract_sections(order_fields)
+                {
+                    found_sections = sections;
                 }
-
-                // Second pass: take first reading order with sections
-                for order in orders {
-                    if let Some(order_fields) = order.as_struct()
-                        && let Some(sections) = self.extract_sections(order_fields)
-                    {
-                        return Ok(sections);
-                    }
+                if found_ppd.is_none() {
+                    found_ppd = self.extract_ppd(order_fields);
                 }
+            }
+
+            if !found_sections.is_empty() && found_ppd.is_some() {
+                break;
             }
         }
 
-        Ok(Vec::new())
+        Ok((found_sections, found_ppd))
+    }
+
+    /// Extract `page_progression_direction` from a reading_order struct.
+    /// The KFX value is a symbol (`$rtl`/`$ltr`/`$default`); we strip the
+    /// leading `$` for the EPUB `<spine>` attribute.
+    fn extract_ppd(&self, order_fields: &[(u64, IonValue)]) -> Option<String> {
+        let raw = get_field(order_fields, sym!(PageProgressionDirection))
+            .and_then(|v| self.get_symbol_text(v))?;
+        let dir = raw.strip_prefix('$').unwrap_or(raw);
+        match dir {
+            "rtl" | "ltr" | "default" => Some(dir.to_string()),
+            _ => None,
+        }
     }
 
     /// Extract section names from a reading order struct.
@@ -1097,6 +1133,99 @@ impl KfxImporter {
         }
 
         self.styles_indexed = true;
+        Ok(())
+    }
+
+    /// Index `ruby_content` entities (type $756) into `ruby_index`.
+    ///
+    /// Each ruby_content entity has shape:
+    /// ```ion
+    /// {
+    ///   ruby_name: 'b_ruby_0',
+    ///   content_list: [
+    ///     { ruby_id: 1, content: "かな", ... },
+    ///     ...
+    ///   ]
+    /// }
+    /// ```
+    /// We slot each entry's `content` string into a vec at position
+    /// `ruby_id - 1` (KFX uses 1-indexed ruby_id) so style_events can read it
+    /// with `ruby_index[ruby_name][ruby_id - 1]`.
+    fn index_ruby_content(&mut self) -> io::Result<()> {
+        if self.ruby_indexed {
+            return Ok(());
+        }
+
+        let locs: Vec<_> = self
+            .entities
+            .iter()
+            .filter(|e| e.type_id == KfxSymbol::RubyContent as u32)
+            .copied()
+            .collect();
+
+        let mut new_entries: Vec<(String, Vec<String>)> = Vec::new();
+
+        for loc in locs {
+            if let Ok(elem) = self.parse_entity_ion(loc)
+                && let Some(fields) = elem.unwrap_annotated().as_struct()
+            {
+                let ruby_name = get_field(fields, sym!(RubyName))
+                    .and_then(|v| container::get_symbol_text(v, self.doc_symbols.as_ref()))
+                    .map(|s| s.to_string());
+
+                let Some(name) = ruby_name else {
+                    continue;
+                };
+
+                let Some(content_list) =
+                    get_field(fields, sym!(ContentList)).and_then(|v| v.as_list())
+                else {
+                    continue;
+                };
+
+                // Collect (ruby_id, text). ruby_id is 1-indexed; build a dense
+                // vec by max id so direct subscript works in parse_style_events.
+                let mut pairs: Vec<(usize, String)> = Vec::with_capacity(content_list.len());
+                let mut max_id = 0usize;
+                for entry in content_list {
+                    let Some(entry_fields) = entry.as_struct() else {
+                        continue;
+                    };
+                    let ruby_id = get_field(entry_fields, sym!(RubyId))
+                        .and_then(|v| v.as_int())
+                        .map(|n| n as usize);
+                    let content = get_field(entry_fields, sym!(Content))
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_string());
+                    if let (Some(id_n), Some(text)) = (ruby_id, content) {
+                        if id_n > max_id {
+                            max_id = id_n;
+                        }
+                        pairs.push((id_n, text));
+                    }
+                }
+
+                let mut annotations = vec![String::new(); max_id];
+                for (id_n, text) in pairs {
+                    if id_n >= 1 && id_n <= annotations.len() {
+                        annotations[id_n - 1] = text;
+                    }
+                }
+
+                if !annotations.is_empty() {
+                    new_entries.push((name, annotations));
+                }
+            }
+        }
+
+        if !new_entries.is_empty() {
+            let ruby = Arc::make_mut(&mut self.ruby_index);
+            for (name, anns) in new_entries {
+                ruby.insert(name, anns);
+            }
+        }
+
+        self.ruby_indexed = true;
         Ok(())
     }
 }

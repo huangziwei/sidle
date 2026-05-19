@@ -108,16 +108,17 @@ pub async fn library_cover_path(
         .and_then(|b| b.cover_path))
 }
 
-/// Open the system file dialog and return selected EPUB paths.
+/// Open the system file dialog and return selected ebook paths.
 ///
-/// We expose this from Rust because vanilla-JS (no bundler) can't import the
-/// dialog plugin's JS module. The plugin runtime handles the dialog itself.
+/// Accepts EPUB, KFX, and KFX-zip (the multi-container bundle Kindle DeDRM
+/// produces) — the import pipeline dispatches on extension. Exposed from Rust
+/// because vanilla-JS (no bundler) can't import the dialog plugin's JS module.
 #[tauri::command]
 pub async fn library_pick_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     let (tx, rx) = oneshot::channel();
     app.dialog()
         .file()
-        .add_filter("EPUB", &["epub"])
+        .add_filter("Ebooks", &["epub", "kfx", "kfx-zip"])
         .pick_files(move |paths| {
             let _ = tx.send(paths);
         });

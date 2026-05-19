@@ -121,6 +121,10 @@ pub struct SpanStart {
     /// Pre-transformed KFX attributes (field_id, value_string).
     /// Populated during export by schema.export_attributes().
     pub kfx_attrs: Vec<(u64, String)>,
+    /// Ruby annotation text resolved from a `ruby_name`+`ruby_id` style_event
+    /// (import only; `role` is `Role::Ruby` when set). The IR builder appends a
+    /// `Role::RubyText` child carrying this text when the Ruby span closes.
+    pub ruby_annotation: Option<String>,
 }
 
 impl SpanStart {
@@ -134,6 +138,7 @@ impl SpanStart {
             length,
             style_symbol: None,
             kfx_attrs: Vec::new(),
+            ruby_annotation: None,
         }
     }
 
@@ -207,6 +212,7 @@ impl TokenStream {
             length: 0,
             style_symbol: None,
             kfx_attrs: Vec::new(),
+            ruby_annotation: None,
         }));
     }
 
