@@ -96,6 +96,10 @@ pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, C
             totals.container_parse += t.container_parse;
             totals.jxr_decode += t.jxr_decode;
             totals.jpeg_encode += t.jpeg_encode;
+            totals.jxr_decode_breakdown.header += t.jxr_decode_breakdown.header;
+            totals.jxr_decode_breakdown.coded_tiles += t.jxr_decode_breakdown.coded_tiles;
+            totals.jxr_decode_breakdown.sample_recon += t.jxr_decode_breakdown.sample_recon;
+            totals.jxr_decode_breakdown.output_fmt += t.jxr_decode_breakdown.output_fmt;
             jxr_count += 1;
         }
         let final_mime = format_to_mime(&final_format);
@@ -122,15 +126,28 @@ pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, C
 
     if std::env::var("BOKO_KFX2EPUB_TRACE").is_ok() && jxr_count > 0 {
         let to_ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        let n = jxr_count as f64;
         eprintln!(
             "[kfx2epub:jxr] {} images, totals: container_parse={:.2} ms  jxr_decode={:.2} ms  jpeg_encode={:.2} ms  (per-image: {:.2} / {:.2} / {:.2} ms; CPU-time, NOT wall)",
             jxr_count,
             to_ms(totals.container_parse),
             to_ms(totals.jxr_decode),
             to_ms(totals.jpeg_encode),
-            to_ms(totals.container_parse) / jxr_count as f64,
-            to_ms(totals.jxr_decode) / jxr_count as f64,
-            to_ms(totals.jpeg_encode) / jxr_count as f64,
+            to_ms(totals.container_parse) / n,
+            to_ms(totals.jxr_decode) / n,
+            to_ms(totals.jpeg_encode) / n,
+        );
+        let bd = totals.jxr_decode_breakdown;
+        eprintln!(
+            "[kfx2epub:jxr:decode]   header={:.2} ms  coded_tiles={:.2} ms  sample_recon={:.2} ms  output_fmt={:.2} ms  (per-image: {:.2} / {:.2} / {:.2} / {:.2} ms)",
+            to_ms(bd.header),
+            to_ms(bd.coded_tiles),
+            to_ms(bd.sample_recon),
+            to_ms(bd.output_fmt),
+            to_ms(bd.header) / n,
+            to_ms(bd.coded_tiles) / n,
+            to_ms(bd.sample_recon) / n,
+            to_ms(bd.output_fmt) / n,
         );
     }
 

@@ -42,6 +42,8 @@ pub struct TranscodeTiming {
     pub container_parse: std::time::Duration,
     pub jxr_decode: std::time::Duration,
     pub jpeg_encode: std::time::Duration,
+    /// JXR decoder sub-stages (sums to ~`jxr_decode`).
+    pub jxr_decode_breakdown: decoder::DecodeTiming,
 }
 
 /// On any decoder failure the original bytes pass through with format
@@ -76,6 +78,7 @@ pub fn transcode(
         }
     };
     t.jxr_decode = t1.elapsed();
+    t.jxr_decode_breakdown = decoded.timing;
 
     let t2 = Instant::now();
     let bytes = encode_jpeg(&decoded)?;

@@ -56,6 +56,21 @@ pub struct DecodedImage {
     pub output_clr_fmt: u8,
     pub output_bitdepth: u8,
     pub red_blue_swapped: bool,
+    pub timing: DecodeTiming,
+}
+
+/// Per-image sub-stage timing collected during `Decoder::decode`. Used by
+/// the `BOKO_KFX2EPUB_TRACE=1` aggregator to scope the next perf lever.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DecodeTiming {
+    /// `image_header` + plane headers + index table + vlw_esc/profile_level_info.
+    pub header: std::time::Duration,
+    /// `coded_tiles`: Huffman + adaptive VLC + dequant. The "parse" phase.
+    pub coded_tiles: std::time::Duration,
+    /// `sample_reconstruction`: inverse transforms + overlap filters.
+    pub sample_recon: std::time::Duration,
+    /// `output_formatting` + `construct_image`: color conv, shift, pack.
+    pub output_fmt: std::time::Duration,
 }
 
 /// Top-level decoder. Owns the bitstream cursor and all plane state.
@@ -114,6 +129,10 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn decode(mut self) -> Result<DecodedImage> {
+        use std::time::Instant;
+        let mut timing = DecodeTiming::default();
+
+        let t_hdr = Instant::now();
         self.image_header()?;
 
         // Primary plane.
@@ -139,18 +158,29 @@ impl<'a> Decoder<'a> {
                 let _ = self.ds.extract(extra as usize, true)?;
             }
         }
+        timing.header = t_hdr.elapsed();
 
+        let t_tiles = Instant::now();
         self.coded_tiles(num_bands_primary)?;
-
         self.ds.discard_remainder_bits();
+        timing.coded_tiles = t_tiles.elapsed();
 
         // SampleReconstruction + OutputFormatting per plane.
         for p in 0..self.planes.len() {
+            let t_sr = Instant::now();
             self.sample_reconstruction(p);
+            timing.sample_recon += t_sr.elapsed();
+
+            let t_of = Instant::now();
             self.output_formatting(p)?;
+            timing.output_fmt += t_of.elapsed();
         }
 
-        Ok(self.construct_image())
+        let t_out = Instant::now();
+        let mut img = self.construct_image();
+        timing.output_fmt += t_out.elapsed();
+        img.timing = timing;
+        Ok(img)
     }
 
     fn image_header(&mut self) -> Result<()> {
@@ -771,7 +801,7 @@ impl<'a> Decoder<'a> {
         }
 
         for i in 0..nc {
-            self.planes[p].mb[mbx][mby].mb_dclp[i][0] = dc_input[i];
+            self.planes[p].mb[mbx][mby].mb_dclp[i * MB_DCLP_PER_COMP] = dc_input[i];
         }
 
         // DC mode prediction.
@@ -789,21 +819,21 @@ impl<'a> Decoder<'a> {
             let left = self.planes[p].mb[mbx][mby].left_mb.unwrap();
             let top = self.planes[p].mb[mbx][mby].top_mb.unwrap();
             let topleft = self.planes[p].mb[mbx][mby].top_left_mb.unwrap();
-            let i_left = self.planes[p].mb[left.0][left.1].mb_dclp[0][0];
-            let i_top = self.planes[p].mb[top.0][top.1].mb_dclp[0][0];
-            let i_topleft = self.planes[p].mb[topleft.0][topleft.1].mb_dclp[0][0];
+            let i_left = self.planes[p].mb[left.0][left.1].mb_dclp[0];
+            let i_top = self.planes[p].mb[top.0][top.1].mb_dclp[0];
+            let i_topleft = self.planes[p].mb[topleft.0][topleft.1].mb_dclp[0];
 
             let (i_str_hor, i_str_ver);
             if matches!(int_fmt, INT_YONLY | INT_NCOMPONENT) {
                 i_str_hor = (i_topleft - i_left).abs();
                 i_str_ver = (i_topleft - i_top).abs();
             } else {
-                let i_left_u = self.planes[p].mb[left.0][left.1].mb_dclp[1][0];
-                let i_top_u = self.planes[p].mb[top.0][top.1].mb_dclp[1][0];
-                let i_topleft_u = self.planes[p].mb[topleft.0][topleft.1].mb_dclp[1][0];
-                let i_left_v = self.planes[p].mb[left.0][left.1].mb_dclp[2][0];
-                let i_top_v = self.planes[p].mb[top.0][top.1].mb_dclp[2][0];
-                let i_topleft_v = self.planes[p].mb[topleft.0][topleft.1].mb_dclp[2][0];
+                let i_left_u = self.planes[p].mb[left.0][left.1].mb_dclp[MB_DCLP_PER_COMP];
+                let i_top_u = self.planes[p].mb[top.0][top.1].mb_dclp[MB_DCLP_PER_COMP];
+                let i_topleft_u = self.planes[p].mb[topleft.0][topleft.1].mb_dclp[MB_DCLP_PER_COMP];
+                let i_left_v = self.planes[p].mb[left.0][left.1].mb_dclp[2 * MB_DCLP_PER_COMP];
+                let i_top_v = self.planes[p].mb[top.0][top.1].mb_dclp[2 * MB_DCLP_PER_COMP];
+                let i_topleft_v = self.planes[p].mb[topleft.0][topleft.1].mb_dclp[2 * MB_DCLP_PER_COMP];
                 let i_scale = 2;
                 i_str_hor = (i_topleft - i_left).abs() * i_scale
                     + (i_topleft_u - i_left_u).abs()
@@ -824,23 +854,24 @@ impl<'a> Decoder<'a> {
 
         self.planes[p].mb[mbx][mby].mb_dc_mode = mb_dc_mode;
         for i_comp in 0..nc {
+            let dst = i_comp * MB_DCLP_PER_COMP;
             match mb_dc_mode {
                 PREDICT_FROM_LEFT => {
                     let left = self.planes[p].mb[mbx][mby].left_mb.unwrap();
-                    let dv = self.planes[p].mb[left.0][left.1].mb_dclp[i_comp][0];
-                    self.planes[p].mb[mbx][mby].mb_dclp[i_comp][0] += dv;
+                    let dv = self.planes[p].mb[left.0][left.1].mb_dclp[dst];
+                    self.planes[p].mb[mbx][mby].mb_dclp[dst] += dv;
                 }
                 PREDICT_FROM_TOP => {
                     let top = self.planes[p].mb[mbx][mby].top_mb.unwrap();
-                    let dv = self.planes[p].mb[top.0][top.1].mb_dclp[i_comp][0];
-                    self.planes[p].mb[mbx][mby].mb_dclp[i_comp][0] += dv;
+                    let dv = self.planes[p].mb[top.0][top.1].mb_dclp[dst];
+                    self.planes[p].mb[mbx][mby].mb_dclp[dst] += dv;
                 }
                 PREDICT_FROM_TOP_LEFT => {
                     let left = self.planes[p].mb[mbx][mby].left_mb.unwrap();
                     let top = self.planes[p].mb[mbx][mby].top_mb.unwrap();
-                    let v_l = self.planes[p].mb[left.0][left.1].mb_dclp[i_comp][0];
-                    let v_t = self.planes[p].mb[top.0][top.1].mb_dclp[i_comp][0];
-                    self.planes[p].mb[mbx][mby].mb_dclp[i_comp][0] += (v_t + v_l) >> 1;
+                    let v_l = self.planes[p].mb[left.0][left.1].mb_dclp[dst];
+                    let v_t = self.planes[p].mb[top.0][top.1].mb_dclp[dst];
+                    self.planes[p].mb[mbx][mby].mb_dclp[dst] += (v_t + v_l) >> 1;
                 }
                 _ => {}
             }
@@ -850,8 +881,8 @@ impl<'a> Decoder<'a> {
             this.planes[p].dc_qp.as_ref().unwrap().scaling_factor(i)
         };
         for i_comp in 0..nc {
-            let v = self.planes[p].mb[mbx][mby].mb_dclp[i_comp][0] * scaling(self, p, i_comp);
-            self.planes[p].mb[mbx][mby].mb_buffer[i_comp][16 * ICT4X4_INV_PERM[0]] = v;
+            let v = self.planes[p].mb[mbx][mby].mb_dclp[i_comp * MB_DCLP_PER_COMP] * scaling(self, p, i_comp);
+            self.planes[p].mb[mbx][mby].mb_buffer[i_comp * MB_BUF_PER_COMP + 16 * ICT4X4_INV_PERM[0]] = v;
         }
 
         Ok(())
@@ -960,8 +991,9 @@ impl<'a> Decoder<'a> {
         }
 
         for i in 0..plane_nc {
+            let cbase = i * MB_DCLP_PER_COMP;
             for j in 1..16 {
-                self.planes[p].mb[mbx][mby].mb_dclp[i][j] = lp_input[i][j];
+                self.planes[p].mb[mbx][mby].mb_dclp[cbase + j] = lp_input[i][j];
             }
         }
 
@@ -988,27 +1020,29 @@ impl<'a> Decoder<'a> {
         self.planes[p].mb[mbx][mby].mb_lp_mode = mb_lp_mode;
 
         for i in 0..plane_nc {
+            let cbase = i * MB_DCLP_PER_COMP;
             if mb_lp_mode == PREDICT_FROM_LEFT {
                 let lm = self.planes[p].mb[mbx][mby].left_mb.unwrap();
                 for j in [1, 2, 3].iter().copied() {
-                    let v = self.planes[p].mb[lm.0][lm.1].mb_dclp[i][j];
-                    self.planes[p].mb[mbx][mby].mb_dclp[i][j] += v;
+                    let v = self.planes[p].mb[lm.0][lm.1].mb_dclp[cbase + j];
+                    self.planes[p].mb[mbx][mby].mb_dclp[cbase + j] += v;
                 }
             } else if mb_lp_mode == PREDICT_FROM_TOP {
                 let tm = self.planes[p].mb[mbx][mby].top_mb.unwrap();
                 for j in [4, 8, 12].iter().copied() {
-                    let v = self.planes[p].mb[tm.0][tm.1].mb_dclp[i][j];
-                    self.planes[p].mb[mbx][mby].mb_dclp[i][j] += v;
+                    let v = self.planes[p].mb[tm.0][tm.1].mb_dclp[cbase + j];
+                    self.planes[p].mb[mbx][mby].mb_dclp[cbase + j] += v;
                 }
             }
         }
 
         for i in 0..plane_nc {
             let scaling = self.planes[p].lp_qp.as_ref().unwrap().scaling_factor(i);
+            let cbase = i * MB_DCLP_PER_COMP;
             for j in 1..16 {
-                let v = self.planes[p].mb[mbx][mby].mb_dclp[i][j] * scaling;
+                let v = self.planes[p].mb[mbx][mby].mb_dclp[cbase + j] * scaling;
                 let pos = 16 * ICT4X4_INV_PERM[j];
-                self.planes[p].mb[mbx][mby].mb_buffer[i][pos] = v;
+                self.planes[p].mb[mbx][mby].mb_buffer[i * MB_BUF_PER_COMP + pos] = v;
             }
         }
 
@@ -1255,14 +1289,15 @@ impl<'a> Decoder<'a> {
             // CalcHPPredMode (uses mb.MbDCLP[0])
             let mb = &self.planes[p].mb[mbx][mby];
             let strength_hor =
-                mb.mb_dclp[0][1].abs() + mb.mb_dclp[0][2].abs() + mb.mb_dclp[0][3].abs();
+                mb.mb_dclp[1].abs() + mb.mb_dclp[2].abs() + mb.mb_dclp[3].abs();
             let strength_ver =
-                mb.mb_dclp[0][4].abs() + mb.mb_dclp[0][8].abs() + mb.mb_dclp[0][12].abs();
+                mb.mb_dclp[4].abs() + mb.mb_dclp[8].abs() + mb.mb_dclp[12].abs();
             let (mut s_hor, mut s_ver) = (strength_hor, strength_ver);
             if !matches!(self.planes[p].internal_clr_fmt, INT_YONLY | INT_NCOMPONENT) {
                 for i in 1..3 {
-                    s_hor += mb.mb_dclp[i][1].abs();
-                    s_ver += mb.mb_dclp[i][4].abs();
+                    let cbase = i * MB_DCLP_PER_COMP;
+                    s_hor += mb.mb_dclp[cbase + 1].abs();
+                    s_ver += mb.mb_dclp[cbase + 4].abs();
                 }
             }
             let i_or_wt = 4;
@@ -1356,7 +1391,8 @@ impl<'a> Decoder<'a> {
                     scan.adapt(i_location);
                     t
                 };
-                self.planes[p].mb[mbx][mby].hp_input_vlc[i_component][i_block][pos] = level;
+                self.planes[p].mb[mbx][mby].hp_input_vlc
+                    [i_component * HP_INPUT_PER_COMP + i_block * 16 + pos] = level;
                 i_location += 1;
                 i_num_non_zero += 1;
             }
@@ -1378,10 +1414,11 @@ impl<'a> Decoder<'a> {
         if i_flex_bits_left <= 0 {
             return Ok(());
         }
+        let hp_base = i_component * HP_INPUT_PER_COMP + i_block * 16;
         for &n in &I_TRANSPOSE_FLEX[1..] {
             let flex_ref = self.ds.unpack_bits(i_flex_bits_left as u32)? as i32;
             let i_vlc_coeff =
-                self.planes[p].mb[mbx][mby].hp_input_vlc[i_component][i_block][n];
+                self.planes[p].mb[mbx][mby].hp_input_vlc[hp_base + n];
             let i_flex_coeff = if i_vlc_coeff > 0 {
                 flex_ref
             } else if i_vlc_coeff < 0 {
@@ -1389,7 +1426,7 @@ impl<'a> Decoder<'a> {
             } else {
                 self.sign_optional(flex_ref)?
             };
-            self.planes[p].mb[mbx][mby].hp_input_flex[i_component][i_block][n] =
+            self.planes[p].mb[mbx][mby].hp_input_flex[hp_base + n] =
                 i_flex_coeff << i_trim_flex_bits;
         }
         Ok(())
@@ -1402,32 +1439,36 @@ impl<'a> Decoder<'a> {
             let scaling = self.planes[p].hp_qp.as_ref().unwrap().scaling_factor(i_comp);
             let bits = self.planes[p].mb[mbx][mby].model_bits_mb_hp[i_index];
 
+            let hp_cbase = i_comp * HP_INPUT_PER_COMP;
+            let mb_cbase = i_comp * MB_BUF_PER_COMP;
             for blk in 0..16 {
+                let blk_off = blk * 16;
                 for j in 1..16 {
-                    let vlc = self.planes[p].mb[mbx][mby].hp_input_vlc[i_comp][blk][j];
-                    let flex = self.planes[p].mb[mbx][mby].hp_input_flex[i_comp][blk][j];
+                    let vlc = self.planes[p].mb[mbx][mby].hp_input_vlc[hp_cbase + blk_off + j];
+                    let flex = self.planes[p].mb[mbx][mby].hp_input_flex[hp_cbase + blk_off + j];
                     let val = ((vlc << bits) + flex) * scaling;
-                    self.planes[p].mb[mbx][mby].mb_buffer[i_comp][16 * blk + j] = val;
+                    self.planes[p].mb[mbx][mby].mb_buffer[mb_cbase + blk_off + j] = val;
                 }
             }
         }
 
         for i_comp in 0..plane_nc {
             let mode = self.planes[p].mb[mbx][mby].mb_hp_mode;
+            let cbase = i_comp * MB_BUF_PER_COMP;
             if mode == PREDICT_FROM_TOP {
                 for &blk_id in &[1usize, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15] {
                     for &k in &[2usize, 10, 9] {
-                        let v_prev =
-                            self.planes[p].mb[mbx][mby].mb_buffer[i_comp][16 * (blk_id - 1) + k];
-                        self.planes[p].mb[mbx][mby].mb_buffer[i_comp][16 * blk_id + k] += v_prev;
+                        let v_prev = self.planes[p].mb[mbx][mby].mb_buffer
+                            [cbase + 16 * (blk_id - 1) + k];
+                        self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * blk_id + k] += v_prev;
                     }
                 }
             } else if mode == PREDICT_FROM_LEFT {
                 for blk_id in 4..16 {
                     for &k in &[1usize, 5, 6] {
-                        let v_prev =
-                            self.planes[p].mb[mbx][mby].mb_buffer[i_comp][16 * (blk_id - 4) + k];
-                        self.planes[p].mb[mbx][mby].mb_buffer[i_comp][16 * blk_id + k] += v_prev;
+                        let v_prev = self.planes[p].mb[mbx][mby].mb_buffer
+                            [cbase + 16 * (blk_id - 4) + k];
+                        self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * blk_id + k] += v_prev;
                     }
                 }
             }
@@ -1787,12 +1828,13 @@ impl<'a> Decoder<'a> {
         let nc = self.planes[p].num_components;
         let scaled = self.planes[p].scaled_flag != 0;
         for i in 0..nc {
+            let cbase = i * MB_BUF_PER_COMP;
             for mby in 0..self.hdr.mb_height {
                 for mbx in 0..self.hdr.mb_width {
                     let mb = &mut self.planes[p].mb[mbx][mby];
                     let mut dclp0 = [0i32; 16];
                     for j in 0..16 {
-                        dclp0[j] = mb.mb_buffer[i][j * 16];
+                        dclp0[j] = mb.mb_buffer[cbase + j * 16];
                     }
                     str_idct4x4_stage2(&mut dclp0);
                     if i > 0 && scaled {
@@ -1801,7 +1843,7 @@ impl<'a> Decoder<'a> {
                         }
                     }
                     for j in 0..16 {
-                        mb.mb_buffer[i][j * 16] = dclp0[j];
+                        mb.mb_buffer[cbase + j * 16] = dclp0[j];
                     }
                 }
             }
@@ -1923,18 +1965,16 @@ impl<'a> Decoder<'a> {
     fn second_level_inverse_transform(&mut self, p: usize) {
         let nc = self.planes[p].num_components;
         for i in 0..nc {
+            let cbase = i * MB_BUF_PER_COMP;
             for mby in 0..self.hdr.mb_height {
                 for mbx in 0..self.hdr.mb_width {
                     let mb = &mut self.planes[p].mb[mbx][mby];
                     for j in 0..16 {
+                        let block = &mut mb.mb_buffer[cbase + j * 16..cbase + j * 16 + 16];
                         let mut coeff = [0i32; 16];
-                        for k in 0..16 {
-                            coeff[k] = mb.mb_buffer[i][j * 16 + k];
-                        }
+                        coeff.copy_from_slice(block);
                         str_idct4x4_stage1(&mut coeff);
-                        for k in 0..16 {
-                            mb.mb_buffer[i][j * 16 + k] = coeff[k];
-                        }
+                        block.copy_from_slice(&coeff);
                     }
                 }
             }
@@ -1945,8 +1985,11 @@ impl<'a> Decoder<'a> {
         let nc = self.planes[p].num_components;
         let w = self.hdr.width as usize;
         let h = self.hdr.height as usize;
-        let mut ip: Vec<Vec<Vec<i32>>> = (0..nc).map(|_| vec![vec![0; h]; w]).collect();
+        let mut ip: Vec<Plane2D> = (0..nc).map(|_| Plane2D::new(w, h)).collect();
         for i in 0..nc {
+            let plane2d = &mut ip[i];
+            let stride = plane2d.stride;
+            let cbase = i * MB_BUF_PER_COMP;
             for mby in 0..self.hdr.mb_height {
                 let mbyy = mby << 4;
                 for mbx in 0..self.hdr.mb_width {
@@ -1960,9 +2003,10 @@ impl<'a> Decoder<'a> {
                             let bx_x64 = bx << 6;
                             for py in 0..4 {
                                 let py_x4 = py << 2;
+                                let row = by_x4 + py;
                                 for px in 0..4 {
-                                    ip[i][bx_x4 + px][by_x4 + py] =
-                                        mb.mb_buffer[i][by_x16 + bx_x64 + MB_PIXEL_MAP[px + py_x4]];
+                                    plane2d.data[row * stride + bx_x4 + px] =
+                                        mb.mb_buffer[cbase + by_x16 + bx_x64 + MB_PIXEL_MAP[px + py_x4]];
                                 }
                             }
                         }
@@ -2132,19 +2176,29 @@ impl<'a> Decoder<'a> {
         if int_fmt == INT_YUV444 && out_fmt == OUT_RGB {
             let do_swap = matches!(self.hdr.output_bitdepth, BD5 | BD565 | BD10)
                 && self.hdr.red_blue_not_swapped_flag == 0;
-            for y in 0..h {
-                for x in 0..w {
-                    let y_val = self.planes[p].image_plane[0][x][y];
-                    let u_val = self.planes[p].image_plane[1][x][y];
-                    let v_val = self.planes[p].image_plane[2][x][y];
+            // Get disjoint mutable borrows of the three component planes
+            // so we can do the YUV→RGB transform in one row-major sweep.
+            let stride = self.planes[p].image_plane[0].stride;
+            let (left, right) = self.planes[p].image_plane.split_at_mut(1);
+            let y_plane = &mut left[0].data;
+            let (u_left, v_left) = right.split_at_mut(1);
+            let u_plane = &mut u_left[0].data;
+            let v_plane = &mut v_left[0].data;
+            for row in 0..h {
+                let base = row * stride;
+                for col in 0..w {
+                    let idx = base + col;
+                    let y_val = y_plane[idx];
+                    let u_val = u_plane[idx];
+                    let v_val = v_plane[idx];
                     let temp_t = -u_val;
                     let out1 = y_val - floor_div2(temp_t);
                     let out0 = temp_t + out1 - ceil_div2(v_val);
                     let out2 = v_val + out0;
                     let (a, b, c) = if do_swap { (out2, out1, out0) } else { (out0, out1, out2) };
-                    self.planes[p].image_plane[0][x][y] = a;
-                    self.planes[p].image_plane[1][x][y] = b;
-                    self.planes[p].image_plane[2][x][y] = c;
+                    y_plane[idx] = a;
+                    u_plane[idx] = b;
+                    v_plane[idx] = c;
                 }
             }
             return Ok(());
@@ -2190,10 +2244,8 @@ impl<'a> Decoder<'a> {
         if i_bias != 0 {
             let nc = self.planes[p].num_components;
             for i in 0..nc {
-                for x in 0..self.hdr.width as usize {
-                    for y in 0..self.hdr.height as usize {
-                        self.planes[p].image_plane[i][x][y] += i_bias;
-                    }
+                for v in &mut self.planes[p].image_plane[i].data {
+                    *v += i_bias;
                 }
             }
         }
@@ -2227,11 +2279,8 @@ impl<'a> Decoder<'a> {
                 i_scale
             };
             if i_rounding != 0 || j_scale != 0 {
-                for y in 0..self.hdr.height as usize {
-                    for x in 0..self.hdr.width as usize {
-                        self.planes[p].image_plane[i][x][y] =
-                            (self.planes[p].image_plane[i][x][y] + i_rounding) >> j_scale;
-                    }
+                for v in &mut self.planes[p].image_plane[i].data {
+                    *v = (*v + i_rounding) >> j_scale;
                 }
             }
         }
@@ -2249,10 +2298,8 @@ impl<'a> Decoder<'a> {
                 let nc = self.planes[p].num_components;
                 let s = self.planes[p].shift_bits;
                 for i in 0..nc {
-                    for y in 0..self.hdr.height as usize {
-                        for x in 0..self.hdr.width as usize {
-                            self.planes[p].image_plane[i][x][y] <<= s;
-                        }
+                    for v in &mut self.planes[p].image_plane[i].data {
+                        *v <<= s;
                     }
                 }
             }
@@ -2280,18 +2327,15 @@ impl<'a> Decoder<'a> {
         let nc = self.planes[p].num_components;
 
         for i in 0..nc {
-            let mut new_plane: Vec<Vec<i32>> = vec![vec![0; out_h]; out_w];
-            if m == 0 && n == 0 {
-                for y in 0..out_h {
-                    for x in 0..out_w {
-                        new_plane[x][y] = clip(self.planes[p].image_plane[i][x][y], clip_low, clip_high);
-                    }
-                }
-            } else {
-                for y in 0..out_h {
-                    for x in 0..out_w {
-                        new_plane[x][y] = clip(self.planes[p].image_plane[i][x + m][y + n], clip_low, clip_high);
-                    }
+            let src = &self.planes[p].image_plane[i];
+            let src_stride = src.stride;
+            let mut new_plane = Plane2D::new(out_w, out_h);
+            for y in 0..out_h {
+                let dst_row = &mut new_plane.data[y * out_w..(y + 1) * out_w];
+                let src_y = y + n;
+                let src_row = &src.data[src_y * src_stride + m..src_y * src_stride + m + out_w];
+                for (d, s) in dst_row.iter_mut().zip(src_row.iter()) {
+                    *d = clip(*s, clip_low, clip_high);
                 }
             }
             self.planes[p].image_plane[i] = new_plane;
@@ -2303,33 +2347,24 @@ impl<'a> Decoder<'a> {
     // Final image assembly
     // -----------------------------------------------------------------
 
-    fn construct_image(self) -> DecodedImage {
+    fn construct_image(mut self) -> DecodedImage {
         let w = self.hdr.image_width;
         let h = self.hdr.image_height;
-        let primary = &self.planes[0];
-        let num_components = primary.num_components
+        let num_components = self.planes[0].num_components
             + if self.hdr.alpha_image_plane_flag != 0 { 1 } else { 0 };
 
-        // Linearise into [c][y*w+x] (row-major).
+        // Each Plane2D is already row-major `[y*stride + x]` with stride =
+        // image_width after clipping_and_packing_stage, so we can move the
+        // contiguous Vec<i32> straight out — no transpose, no copy.
         let mut planes_flat: Vec<Vec<i32>> = Vec::with_capacity(num_components);
-        for i in 0..primary.num_components {
-            let mut row = vec![0i32; (w as usize) * (h as usize)];
-            for y in 0..h as usize {
-                for x in 0..w as usize {
-                    row[y * w as usize + x] = primary.image_plane[i][x][y];
-                }
-            }
-            planes_flat.push(row);
+        let primary_nc = self.planes[0].num_components;
+        for i in 0..primary_nc {
+            debug_assert_eq!(self.planes[0].image_plane[i].stride, w as usize);
+            planes_flat.push(std::mem::take(&mut self.planes[0].image_plane[i].data));
         }
         if self.hdr.alpha_image_plane_flag != 0 {
-            let alpha = &self.planes[1];
-            let mut row = vec![0i32; (w as usize) * (h as usize)];
-            for y in 0..h as usize {
-                for x in 0..w as usize {
-                    row[y * w as usize + x] = alpha.image_plane[0][x][y];
-                }
-            }
-            planes_flat.push(row);
+            debug_assert_eq!(self.planes[1].image_plane[0].stride, w as usize);
+            planes_flat.push(std::mem::take(&mut self.planes[1].image_plane[0].data));
         }
 
         DecodedImage {
@@ -2340,6 +2375,7 @@ impl<'a> Decoder<'a> {
             output_clr_fmt: self.hdr.output_clr_fmt,
             output_bitdepth: self.hdr.output_bitdepth,
             red_blue_swapped: self.hdr.red_blue_not_swapped_flag == 0,
+            timing: DecodeTiming::default(),
         }
     }
 }
@@ -2371,13 +2407,14 @@ fn flc4x4_op(
     list: &[(i32, i32, usize); 16],
     zzz: &dyn Fn(usize) -> usize,
 ) {
+    let cbase = i * MB_BUF_PER_COMP;
     let mut arr = [0i32; 16];
     for (k, (xx, yy, zz)) in list.iter().enumerate() {
-        arr[k] = mb[x + *xx as usize][y + *yy as usize].mb_buffer[i][zzz(*zz)];
+        arr[k] = mb[x + *xx as usize][y + *yy as usize].mb_buffer[cbase + zzz(*zz)];
     }
     let out = str_post_4x4_stage2_split_alternate(&arr);
     for (k, (xx, yy, zz)) in list.iter().enumerate() {
-        mb[x + *xx as usize][y + *yy as usize].mb_buffer[i][zzz(*zz)] = out[k];
+        mb[x + *xx as usize][y + *yy as usize].mb_buffer[cbase + zzz(*zz)] = out[k];
     }
 }
 
@@ -2390,37 +2427,48 @@ fn filter4_op(
     list: &[(i32, i32, usize); 4],
     zzz: &dyn Fn(usize) -> usize,
 ) {
+    let cbase = i * MB_BUF_PER_COMP;
     let mut arr = [0i32; 4];
     for (k, (xx, yy, zz)) in list.iter().enumerate() {
-        arr[k] = mb[x + *xx as usize][y + *yy as usize].mb_buffer[i][zzz(*zz)];
+        arr[k] = mb[x + *xx as usize][y + *yy as usize].mb_buffer[cbase + zzz(*zz)];
     }
     let out = overlap_post_filter_4(arr);
     for (k, (xx, yy, zz)) in list.iter().enumerate() {
-        mb[x + *xx as usize][y + *yy as usize].mb_buffer[i][zzz(*zz)] = out[k];
+        mb[x + *xx as usize][y + *yy as usize].mb_buffer[cbase + zzz(*zz)] = out[k];
     }
 }
 
 /// Second-level overlap-filter helper: 4x4 block.
-fn ip_4x4_op(ip: &mut Vec<Vec<i32>>, x: usize, y: usize, list: &[(i32, i32)]) {
+fn ip_4x4_op(ip: &mut Plane2D, x: usize, y: usize, list: &[(i32, i32)]) {
+    let stride = ip.stride;
     let mut arr = [0i32; 16];
     for (k, (xx, yy)) in list.iter().enumerate() {
-        arr[k] = ip[x + *xx as usize][y + *yy as usize];
+        let xi = x + *xx as usize;
+        let yi = y + *yy as usize;
+        arr[k] = ip.data[yi * stride + xi];
     }
     let out = overlap_post_filter_4x4(arr);
     for (k, (xx, yy)) in list.iter().enumerate() {
-        ip[x + *xx as usize][y + *yy as usize] = out[k];
+        let xi = x + *xx as usize;
+        let yi = y + *yy as usize;
+        ip.data[yi * stride + xi] = out[k];
     }
 }
 
 /// Second-level overlap-filter helper: 4-coeff edge.
-fn ip_4_op(ip: &mut Vec<Vec<i32>>, x: usize, y: usize, list: &[(i32, i32)]) {
+fn ip_4_op(ip: &mut Plane2D, x: usize, y: usize, list: &[(i32, i32)]) {
+    let stride = ip.stride;
     let mut arr = [0i32; 4];
     for (k, (xx, yy)) in list.iter().enumerate() {
-        arr[k] = ip[x + *xx as usize][y + *yy as usize];
+        let xi = x + *xx as usize;
+        let yi = y + *yy as usize;
+        arr[k] = ip.data[yi * stride + xi];
     }
     let out = overlap_post_filter_4(arr);
     for (k, (xx, yy)) in list.iter().enumerate() {
-        ip[x + *xx as usize][y + *yy as usize] = out[k];
+        let xi = x + *xx as usize;
+        let yi = y + *yy as usize;
+        ip.data[yi * stride + xi] = out[k];
     }
 }
 

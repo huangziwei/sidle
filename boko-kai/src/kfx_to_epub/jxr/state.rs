@@ -286,21 +286,34 @@ pub struct MB {
     pub mb_lp_mode: u8,
     pub mb_hp_mode: u8,
 
-    /// HPInputVLC[component][block][pos]  (16x16)
-    pub hp_input_vlc: Vec<Vec<Vec<i32>>>,
-    /// HPInputFlex[component][block][pos]
-    pub hp_input_flex: Vec<Vec<Vec<i32>>>,
-    /// MbDCLP[component][pos]  (16)
-    pub mb_dclp: Vec<Vec<i32>>,
+    /// HPInputVLC flat across (component, block, pos): index
+    /// `c * HP_INPUT_PER_COMP + b * 16 + p` (c ∈ 0..nc, b ∈ 0..16, p ∈ 0..16).
+    pub hp_input_vlc: Vec<i32>,
+    /// HPInputFlex with the same layout as `hp_input_vlc`.
+    pub hp_input_flex: Vec<i32>,
+    /// MbDCLP flat across (component, pos): index `c * MB_DCLP_PER_COMP + p`
+    /// (c ∈ 0..nc, p ∈ 0..16).
+    pub mb_dclp: Vec<i32>,
     /// MBCBPHP[component]
     pub mb_cbphp: Vec<i32>,
     /// ModelBitsMBHP[chroma 0..2]
     pub model_bits_mb_hp: [i32; 2],
     pub mb_qp_index_lp: usize,
 
-    /// MBBuffer[component][pos]  (16*16 = 256)
-    pub mb_buffer: Vec<Vec<i32>>,
+    /// MBBuffer flat across components: `mb_buffer[c * MB_BUF_PER_COMP + pos]`
+    /// where `pos` ∈ 0..256. Original Python layout was per-component
+    /// `Vec<Vec<i32>>`; flattened to one alloc per MB to avoid the
+    /// per-MB pointer chase in the IDCT / overlap-filter inner loops.
+    pub mb_buffer: Vec<i32>,
 }
+
+/// Stride between adjacent components inside [`MB::mb_buffer`].
+pub const MB_BUF_PER_COMP: usize = 256;
+/// Stride between adjacent components inside [`MB::hp_input_vlc`] /
+/// [`MB::hp_input_flex`] (16 blocks × 16 positions).
+pub const HP_INPUT_PER_COMP: usize = 16 * 16;
+/// Stride between adjacent components inside [`MB::mb_dclp`].
+pub const MB_DCLP_PER_COMP: usize = 16;
 
 impl MB {
     pub fn new(
@@ -336,13 +349,13 @@ impl MB {
             mb_dc_mode: NO_PREDICTION,
             mb_lp_mode: NO_PREDICTION,
             mb_hp_mode: NO_PREDICTION,
-            hp_input_vlc: vec![vec![vec![0; 16]; 16]; num_components],
-            hp_input_flex: vec![vec![vec![0; 16]; 16]; num_components],
-            mb_dclp: vec![vec![0; 16]; num_components],
+            hp_input_vlc: vec![0; num_components * HP_INPUT_PER_COMP],
+            hp_input_flex: vec![0; num_components * HP_INPUT_PER_COMP],
+            mb_dclp: vec![0; num_components * MB_DCLP_PER_COMP],
             mb_cbphp: vec![0; num_components],
             model_bits_mb_hp: [0, 0],
             mb_qp_index_lp: 0,
-            mb_buffer: vec![vec![0; 16 * 16]; num_components],
+            mb_buffer: vec![0; num_components * MB_BUF_PER_COMP],
         }
     }
 }
@@ -422,10 +435,47 @@ pub struct Plane {
     /// MB grid: `mb[MBx][MBy]`.
     pub mb: Vec<Vec<MB>>,
 
-    /// Reconstructed pixels per component. Indexed `[c][x][y]` after
-    /// SecondLevelCoefficientCombination runs. Sized to padded
-    /// `width × height` until the final clipping stage trims to image size.
-    pub image_plane: Vec<Vec<Vec<i32>>>,
+    /// Reconstructed pixels per component, one [`Plane2D`] per channel.
+    /// Sized to padded `width × height` until [`clipping_and_packing_stage`]
+    /// trims to the final image size.
+    pub image_plane: Vec<Plane2D>,
+}
+
+/// 2D image plane stored flat row-major in a single `Vec<i32>`. Replaces the
+/// `[c][x][y]`-indexed `Vec<Vec<Vec<i32>>>` of the original Python port: same
+/// logical access pattern, one allocation per component instead of one per
+/// column. Cache-friendly traversal in either axis.
+#[derive(Debug, Default, Clone)]
+pub struct Plane2D {
+    pub data: Vec<i32>,
+    /// Row pitch in pixels. Equals the stored width (no extra padding).
+    pub stride: usize,
+    pub height: usize,
+}
+
+impl Plane2D {
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            data: vec![0; width * height],
+            stride: width,
+            height,
+        }
+    }
+
+    #[inline]
+    pub fn width(&self) -> usize {
+        self.stride
+    }
+
+    #[inline]
+    pub fn get(&self, x: usize, y: usize) -> i32 {
+        self.data[y * self.stride + x]
+    }
+
+    #[inline]
+    pub fn set(&mut self, x: usize, y: usize, v: i32) {
+        self.data[y * self.stride + x] = v;
+    }
 }
 
 impl Plane {
