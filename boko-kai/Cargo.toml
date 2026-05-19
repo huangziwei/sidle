@@ -42,6 +42,14 @@ encoding_rs = "0.8"
 # tool we're porting relies on ~40 regex patterns.
 regex = "1.11"
 
+# SVG rasterization for Aozora cover generation. We build the cover as
+# pure SVG (port of `buildCoverSvg` from `aozora-epub.html`) and rasterize
+# it to a JPEG for the EPUB. `system-fonts` feature pulls macOS fonts
+# (Hiragino Mincho ProN etc.) into usvg's fontdb at runtime — Aozora is
+# personal software per [[feedback_personal_software_no_other_users]], no
+# bundled fallback font needed.
+resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"] }
+
 # Base64 encoding for KFX raw media
 base64 = "0.22"
 

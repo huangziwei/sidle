@@ -314,31 +314,32 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
     raw = INDENT_SINGLE_PREFIX_RE.replace_all(&raw, "").to_string();
 
     // Postfix heading form: `TEXT［＃「TEXT」は<大|中|小>見出し］`. Detect
-    // before the regular-paragraph fallback. Strict superset over the JS
-    // reference — see the [[postfix_heading_re]] doc comment.
+    // before the regular-paragraph fallback. The preceding text may carry
+    // `｜`/`《…》` ruby markup; compare against the bracketed plain form
+    // after stripping markup (via `plain_text_for_heading`), and render
+    // the raw form so `convert_aozora_line` can emit `<ruby>` inside the
+    // heading. Strict superset over the JS reference — see the
+    // [[postfix_heading_re]] doc comment.
     if let Some(caps) = POSTFIX_HEADING_RE.captures(&raw) {
         let m = caps.get(0).unwrap();
         let target = caps.get(1).unwrap().as_str().to_string();
         let level_kind = caps.get(2).unwrap().as_str();
         let head = &raw[..m.start()];
-        // The target should appear immediately before the annotation. If
-        // there's only the target (plus maybe trailing whitespace) before
-        // the annotation, accept it as a heading line.
-        if head.trim_end() == target {
+        let head_trimmed = head.trim_end();
+        if plain_text_for_heading(head_trimmed) == target {
             let level = match level_kind {
                 "大" => 2,
                 "中" => 3,
                 _ => 4,
             };
             state.heading_id += 1;
-            let plain = plain_text_for_heading(&target);
             let id = format!("h{}", state.heading_id);
             state.toc.push(TocEntry {
                 id: id.clone(),
                 level,
-                text: plain,
+                text: target.clone(), // already plain
             });
-            let converted = convert_aozora_line(&target, &mut state.referenced_images);
+            let converted = convert_aozora_line(head_trimmed, &mut state.referenced_images);
             state.html.push_str(&format!(
                 "<h{} id=\"{}\">{}</h{}>\n",
                 level, id, converted, level
