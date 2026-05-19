@@ -1160,6 +1160,21 @@ fn convert(
         return Ok(());
     }
 
+    // Aozora Bunko `.zip` → `.epub`. Detects an Aozora bundle by zip content
+    // sniff (a `.txt` with `底本：` or `［＃` markers). When matched, runs
+    // the dedicated `aozora` pipeline (parse → cover → build_epub) instead
+    // of any generic format detection.
+    if !from_stdin
+        && output_format == Format::Epub
+        && std::path::Path::new(input)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        if let Some(()) = aozora_dispatch(input, output, to_stdout, quiet)? {
+            return Ok(());
+        }
+    }
+
     // Fast path: .kfx-zip -> .kfx merges fragments without touching the IR
     // pipeline. This avoids storyline/section resolution (and the
     // `document_regions` blocker) entirely. See `kfx::merge` for the design.
@@ -1579,3 +1594,86 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
         format!("{}...", truncated)
     }
 }
+
+// =========================================================================
+// Aozora dispatch (called from `convert` when input is .zip → .epub)
+// =========================================================================
+
+fn aozora_dispatch(
+    input: &str,
+    output: Option<&str>,
+    to_stdout: bool,
+    quiet: bool,
+) -> Result<Option<()>, String> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(input)
+        .map_err(|e| format!("Failed to open input: {e}"))?;
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(_) => return Ok(None),
+    };
+
+    let mut txt_buf: Option<Vec<u8>> = None;
+    let mut images: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("zip entry: {e}"))?;
+        if !entry.is_file() {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let lower = name.to_ascii_lowercase();
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        entry
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("read zip: {e}"))?;
+        if lower.ends_with(".txt") {
+            txt_buf = Some(buf);
+        } else if lower.ends_with(".png")
+            || lower.ends_with(".jpg")
+            || lower.ends_with(".jpeg")
+            || lower.ends_with(".gif")
+        {
+            let basename = std::path::Path::new(&name)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or(name);
+            images.push((basename, buf));
+        }
+    }
+
+    let Some(txt) = txt_buf else {
+        return Ok(None);
+    };
+    let text = boko::aozora::parser_txt::decode_bytes(&txt);
+    // Sniff: must look like an Aozora source (底本：/［＃ markers).
+    if !text.contains("底本") && !text.contains("［＃") {
+        return Ok(None);
+    }
+    let doc = boko::aozora::parse_txt(&text);
+    let cover = boko::aozora::render_cover_jpeg(&doc.title, &doc.author)
+        .map_err(|e| format!("cover render: {e}"))?;
+    let epub_bytes = boko::aozora::build_epub(boko::aozora::EpubInput {
+        document: &doc,
+        images: &images,
+        cover_jpeg: &cover,
+    })
+    .map_err(|e| format!("build epub: {e}"))?;
+
+    if to_stdout {
+        use std::io::Write;
+        std::io::stdout()
+            .write_all(&epub_bytes)
+            .map_err(|e| format!("Write failed: {e}"))?;
+    } else {
+        std::fs::write(output.unwrap(), &epub_bytes)
+            .map_err(|e| format!("Failed to write output: {e}"))?;
+    }
+    if !quiet && !to_stdout {
+        eprintln!("Done.");
+    }
+    Ok(Some(()))
+}
+

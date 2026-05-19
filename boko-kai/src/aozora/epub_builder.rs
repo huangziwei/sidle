@@ -35,7 +35,13 @@ pub fn build_epub(input: EpubInput<'_>) -> io::Result<Vec<u8>> {
     let uuid = uuid_v5(&format!("aozora:{}:{}", doc.title, doc.author));
     let chapters = split_into_chapters(doc);
     let id_to_file = build_id_to_file_map(&chapters);
-    let (publisher, pub_date) = parse_publisher_and_date(&doc.colophon);
+    // EPUB publisher is always "青空文庫" (the digital publisher). The print
+    // publisher that the HTML tool used to extract from the 底本 colophon
+    // line is just the *source* paperback — kept inside the colophon
+    // chapter text but not surfaced as `<dc:publisher>`. Pub-date is still
+    // parsed from the colophon as the work's most authoritative date.
+    let publisher = "青空文庫";
+    let pub_date = parse_pub_date(&doc.colophon);
 
     let buf = Vec::with_capacity(256 * 1024);
     let cursor = io::Cursor::new(buf);
@@ -415,6 +421,8 @@ fn build_opf(
     chapters: &[Chapter],
     images: &[(String, Vec<u8>)],
 ) -> String {
+    // Aozora publisher is hardcoded upstream; pub-date is parsed from
+    // colophon. Empty pub_date suppresses the `<dc:date>` element.
     let mut chapter_manifest = String::new();
     let mut chapter_spine = String::new();
     for (i, ch) in chapters.iter().enumerate() {
@@ -441,14 +449,10 @@ fn build_opf(
         ));
     }
     let modified = utc_now_iso8601();
-    let publisher_xml = if publisher.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "    <dc:publisher>{}</dc:publisher>\n",
-            escape_xml(publisher)
-        )
-    };
+    let publisher_xml = format!(
+        "    <dc:publisher>{}</dc:publisher>\n",
+        escape_xml(publisher),
+    );
     let pub_date_xml = if pub_date.is_empty() {
         String::new()
     } else {
@@ -495,36 +499,21 @@ fn build_opf(
 // Colophon parsing — publisher + pub date
 // =========================================================================
 
-fn parse_publisher_and_date(colophon: &str) -> (String, String) {
+fn parse_pub_date(colophon: &str) -> String {
     if colophon.is_empty() {
-        return (String::new(), String::new());
+        return String::new();
     }
-    // Publisher: `底本：「…」<publisher>` up to the first `、` or newline.
-    let publisher = {
-        use std::sync::LazyLock;
-        static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-            regex::Regex::new(r"底本[：:]「[^」]*」([^、\n]+)").unwrap()
-        });
-        RE.captures(colophon)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str().trim().to_string())
-            .unwrap_or_default()
-    };
-    // Pub date: `YYYY（…）年M月` → `YYYY-MM`.
-    let pub_date = {
-        use std::sync::LazyLock;
-        static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-            regex::Regex::new(r"(\d{4})[（(].*?[）)]\s*年\s*(\d{1,2})\s*月").unwrap()
-        });
-        RE.captures(colophon)
-            .map(|c| {
-                let year = c.get(1).unwrap().as_str();
-                let month: u32 = c.get(2).unwrap().as_str().parse().unwrap_or(1);
-                format!("{}-{:02}", year, month)
-            })
-            .unwrap_or_default()
-    };
-    (publisher, pub_date)
+    use std::sync::LazyLock;
+    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(\d{4})[（(].*?[）)]\s*年\s*(\d{1,2})\s*月").unwrap()
+    });
+    RE.captures(colophon)
+        .map(|c| {
+            let year = c.get(1).unwrap().as_str();
+            let month: u32 = c.get(2).unwrap().as_str().parse().unwrap_or(1);
+            format!("{}-{:02}", year, month)
+        })
+        .unwrap_or_default()
 }
 
 // =========================================================================
@@ -823,11 +812,29 @@ mod tests {
     }
 
     #[test]
-    fn parses_colophon_publisher_and_date() {
-        let (p, d) =
-            parse_publisher_and_date("底本：「タイトル」テスト出版社、1990（平成2）年5月1日初版");
-        assert_eq!(p, "テスト出版社");
+    fn parses_pub_date_from_colophon() {
+        // Print publisher is no longer surfaced — `<dc:publisher>` is
+        // hardcoded to 青空文庫. Only the print date is extracted, and
+        // we use it as `<dc:date>` for the work.
+        let d = parse_pub_date("底本：「タイトル」テスト出版社、1990（平成2）年5月1日初版");
         assert_eq!(d, "1990-05");
+    }
+
+    #[test]
+    fn opf_publisher_is_aozora_bunko() {
+        let doc = sample_document();
+        let bytes = build_epub(EpubInput {
+            document: &doc,
+            images: &[],
+            cover_jpeg: &tiny_jpeg(),
+        })
+        .unwrap();
+        let opf = extract_zip_entry(&bytes, "OEBPS/content.opf");
+        assert!(
+            opf.contains("<dc:publisher>青空文庫</dc:publisher>"),
+            "publisher should be 青空文庫, got OPF:\n{}",
+            opf
+        );
     }
 
     fn extract_zip_entry(zip_bytes: &[u8], name: &str) -> String {
