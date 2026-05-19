@@ -485,6 +485,66 @@ pub fn style_decl_for(style_name: &str, book: &BookData) -> CssDecl {
     convert_yj_properties(fields, &book.symbols, book)
 }
 
+/// KFX layout-hint values used by the tag-promotion pass in
+/// `content::consolidate_html`. Returns `(layout_hints, heading_level)`
+/// — both come from the named `$style` entity, not the content element
+/// itself. Calibre's `LAYOUT_HINT_ELEMENT_NAMES` maps the KFX symbols:
+///   `$453 caption` → `"caption"`,
+///   `$282 figure`  → `"figure"`,
+///   `$760 heading` → `"heading"`.
+///
+/// `layout_hints` is a list because a single style can declare multiple
+/// (e.g. `["heading", "figure"]`). `heading_level` is a string `"1"`..`"6"`.
+pub fn style_layout_hints_for(
+    style_name: &str,
+    book: &BookData,
+) -> (Vec<String>, Option<String>) {
+    use crate::kfx::symbols::KfxSymbol;
+    let Some(styles) = book.by_type.get(&(KfxSymbol::Style as u64)) else {
+        return (Vec::new(), None);
+    };
+    let Some(value) = styles.get(style_name) else {
+        return (Vec::new(), None);
+    };
+    let Some(fields) = value.unwrap_annotated().as_struct() else {
+        return (Vec::new(), None);
+    };
+    let mut hints: Vec<String> = Vec::new();
+    let mut heading_level: Option<String> = None;
+    for (k, v) in fields {
+        let key = book.symbols.resolve(*k);
+        match key {
+            "layout_hints" => {
+                // List of symbols. Map each to its element-name equivalent
+                // (caption / figure / heading).
+                if let IonValue::List(items) = v.unwrap_annotated() {
+                    for item in items {
+                        if let IonValue::Symbol(id) = item.unwrap_annotated() {
+                            let sym = book.symbols.resolve(*id);
+                            let name = match sym {
+                                "caption" => "caption",
+                                "figure" => "figure",
+                                "heading" => "heading",
+                                _ => continue,
+                            };
+                            hints.push(name.to_string());
+                        }
+                    }
+                }
+            }
+            "yj.semantics.heading_level" => {
+                match v.unwrap_annotated() {
+                    IonValue::Int(n) => heading_level = Some(n.to_string()),
+                    IonValue::String(s) => heading_level = Some(s.clone()),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    (hints, heading_level)
+}
+
 /// Build a stylesheet from a deduplicated map of style_name → CssDecl.
 /// Emits one class per distinct style. Class names = "s_" + safe_name.
 pub fn render_stylesheet(styles_used: &HashMap<String, CssDecl>) -> String {

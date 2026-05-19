@@ -1,13 +1,11 @@
 //! Phase 1 step 2: book_navigation → NCX.
 //!
-//! Mechanical port of `yj_to_epub_navigation.py` (the parts needed to
-//! emit NCX). Walks the `book_navigation` ($389) fragment to extract TOC
-//! entries (nav_type=`toc`) and writes the NCX `<navMap>` for the OPF.
-//!
-//! Calibre's NCX entries reference per-element anchor ids; we currently
-//! resolve nav_units only to their target section's chapter file. Phase
-//! 1.5 (when content emission emits per-position anchor ids) will wire
-//! `#fragment-id` references that drop into the right paragraph.
+//! Mechanical port of `yj_to_epub_navigation.py`. Walks the
+//! `book_navigation` ($389) fragment to extract TOC entries
+//! (nav_type=`toc`) and writes the NCX `<navMap>` for the OPF.
+//! Also extracts the `$266 anchors` table for use by
+//! `content::process_position` to set `id="..."` on storyline
+//! elements whose `(location_id, offset)` matches a registered anchor.
 
 use std::collections::HashMap;
 
@@ -16,6 +14,155 @@ use crate::kfx::ion::IonValue;
 use crate::kfx::symbols::KfxSymbol;
 
 use super::loader::BookData;
+
+/// Per-anchor data extracted from `$266 anchor` entities. Mirrors
+/// calibre's `process_anchors` (yj_to_epub_navigation.py:40).
+#[derive(Debug, Default, Clone)]
+pub struct AnchorTable {
+    /// External-URI anchors: anchor_name → uri. Set when `$186 uri` is
+    /// present. These are dereferenced by `<a href>` link_to → uri
+    /// resolution.
+    pub anchor_uri: HashMap<String, String>,
+
+    /// Internal-position anchors, keyed by `(location_id, offset)`. Each
+    /// position can have multiple anchor names (calibre stores a list).
+    /// `content::process_position` looks up `(eid, offset)` here and, if
+    /// found, sets the HTML element's `id="..."` attribute to a unique
+    /// id derived from the first anchor name.
+    pub position_anchors: HashMap<i64, HashMap<i64, Vec<String>>>,
+}
+
+impl AnchorTable {
+    /// Resolve an html id for the given anchor name. The id is unique
+    /// across the table; calibre's `make_unique_name` over a set —
+    /// here we just sanitize the anchor name with a `anchor-` prefix
+    /// fallback for purely numeric names (HTML ids can't start with a
+    /// digit in some validators).
+    pub fn anchor_id(&self, anchor_name: &str) -> String {
+        fix_html_id(anchor_name)
+    }
+
+    /// Look up the html id for `(eid, offset)`. Returns the id derived
+    /// from the FIRST anchor at that position (matches calibre's
+    /// `process_position` behavior).
+    pub fn id_at(&self, eid: i64, offset: i64) -> Option<String> {
+        let names = self.position_anchors.get(&eid)?.get(&offset)?;
+        let name = names.first()?;
+        Some(self.anchor_id(name))
+    }
+
+    /// Resolve an `anchor_name` to its final EPUB URI for `<a href>`
+    /// emission. Calibre's `get_anchor_uri` — looks at three sources
+    /// in order: external `anchor_uri` (a real http URI), then the
+    /// `(eid, offset)` mapping plus the caller-supplied
+    /// `element_id_to_filename` to produce `{chapter}#{html_id}`.
+    /// Returns `None` if the anchor is not registered (caller should
+    /// treat as a dangling link and either drop the href or log).
+    pub fn resolve_uri(
+        &self,
+        anchor_name: &str,
+        element_id_to_filename: &HashMap<i64, String>,
+    ) -> Option<String> {
+        // Already-resolved external URI?
+        if let Some(uri) = self.anchor_uri.get(anchor_name) {
+            return Some(uri.clone());
+        }
+        // Internal position anchor.
+        for (eid, offsets) in &self.position_anchors {
+            for (offset, names) in offsets {
+                if names.iter().any(|n| n == anchor_name) {
+                    let file = element_id_to_filename.get(eid)?;
+                    let frag = self.anchor_id(anchor_name);
+                    // `(eid, 0)` and no visible content before the
+                    // element — calibre drops the fragment in that
+                    // case; we keep it for simplicity (validator
+                    // doesn't penalize the extra `#id`).
+                    let _ = offset;
+                    return Some(format!("{}#{}", file, frag));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Build the anchor table by iterating every `$266 anchor` entity.
+///
+/// Each anchor has either:
+///   - `$186 uri` — external link target (kept as-is)
+///   - `$183 position` struct with `$155 id` (location_id) and
+///     `$143 offset` — registers the anchor against `(id, offset)`.
+pub fn extract_anchors(book: &BookData) -> AnchorTable {
+    let mut table = AnchorTable::default();
+    let Some(anchors) = book.by_type.get(&(KfxSymbol::Anchor as u64)) else {
+        return table;
+    };
+    for (name, value) in anchors {
+        let inner = value.unwrap_annotated();
+        let Some(fields) = inner.as_struct() else {
+            continue;
+        };
+        // External URI anchor.
+        if let Some(uri_val) = get_field(fields, KfxSymbol::Uri as u64)
+            && let IonValue::String(uri) = uri_val.unwrap_annotated()
+        {
+            // Calibre normalises bare scheme placeholders to empty string.
+            let clean = if uri == "http://" || uri == "https://" {
+                String::new()
+            } else {
+                uri.clone()
+            };
+            table.anchor_uri.insert(name.clone(), clean);
+            continue;
+        }
+        // Internal position anchor.
+        if let Some(pos_val) = get_field(fields, KfxSymbol::Position as u64) {
+            let pos = pos_val.unwrap_annotated();
+            let Some(pos_fields) = pos.as_struct() else {
+                continue;
+            };
+            let Some(eid) = get_field(pos_fields, KfxSymbol::Id as u64)
+                .and_then(|v| v.as_int())
+            else {
+                continue;
+            };
+            // `$143 offset` defaults to 0 when missing.
+            let offset = get_field(pos_fields, KfxSymbol::Offset as u64)
+                .and_then(|v| v.as_int())
+                .unwrap_or(0);
+            table
+                .position_anchors
+                .entry(eid)
+                .or_default()
+                .entry(offset)
+                .or_default()
+                .push(name.clone());
+        }
+    }
+    table
+}
+
+/// Sanitise an anchor name into a valid HTML id (alphanumerics + `_` /
+/// `-`; prefix with `anchor-` if it would start with a digit). Matches
+/// the safe-name policy `fix_html_id` in calibre's misc helpers.
+fn fix_html_id(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 8);
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    let starts_with_alpha = out
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    if !starts_with_alpha {
+        out = format!("anchor-{}", out);
+    }
+    out
+}
 
 /// One NCX nav point.
 #[derive(Debug, Clone)]
@@ -33,7 +180,11 @@ pub struct NavPoint {
 /// stored on storyline elements via `$155 id`) to the chapter `.xhtml` file
 /// the element ended up in. We use it to point each nav_unit's
 /// `target_position.id` at the right chapter file.
-pub fn extract_toc(book: &BookData, element_id_to_filename: &HashMap<i64, String>) -> Vec<NavPoint> {
+pub fn extract_toc(
+    book: &BookData,
+    element_id_to_filename: &HashMap<i64, String>,
+    anchors: &AnchorTable,
+) -> Vec<NavPoint> {
     let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
         return Vec::new();
     };
@@ -74,7 +225,9 @@ pub fn extract_toc(book: &BookData, element_id_to_filename: &HashMap<i64, String
                     .map(|s| s.to_vec())
                     .unwrap_or_default();
                 for entry in &entries {
-                    if let Some(np) = nav_unit_to_navpoint(entry, book, element_id_to_filename) {
+                    if let Some(np) =
+                        nav_unit_to_navpoint(entry, book, element_id_to_filename, anchors)
+                    {
                         toc.push(np);
                     }
                 }
@@ -88,6 +241,7 @@ fn nav_unit_to_navpoint(
     entry: &IonValue,
     book: &BookData,
     element_id_to_filename: &HashMap<i64, String>,
+    anchors: &AnchorTable,
 ) -> Option<NavPoint> {
     let inner = entry.unwrap_annotated();
     let fields = inner.as_struct()?;
@@ -115,9 +269,20 @@ fn nav_unit_to_navpoint(
     // takes me to the right place" UX.
     let href = get_field(fields, KfxSymbol::TargetPosition as u64)
         .and_then(|v| v.as_struct())
-        .and_then(|pos| get_field(pos, KfxSymbol::Id as u64))
-        .and_then(|v| v.as_int())
-        .and_then(|id| element_id_to_filename.get(&id).cloned())
+        .and_then(|pos| {
+            let id = get_field(pos, KfxSymbol::Id as u64)?.as_int()?;
+            let offset = get_field(pos, KfxSymbol::Offset as u64)
+                .and_then(|v| v.as_int())
+                .unwrap_or(0);
+            let file = element_id_to_filename.get(&id)?.clone();
+            // If there's a registered anchor at this (id, offset),
+            // append `#anchor-id` so the reader scrolls to the right
+            // paragraph instead of the top of the chapter.
+            Some(match anchors.id_at(id, offset) {
+                Some(frag) => format!("{}#{}", file, frag),
+                None => file,
+            })
+        })
         .unwrap_or_default();
 
     // Children — recursive.
@@ -126,7 +291,9 @@ fn nav_unit_to_navpoint(
         get_field(fields, KfxSymbol::Entries as u64).and_then(|v| v.as_list())
     {
         for child in child_entries {
-            if let Some(np) = nav_unit_to_navpoint(child, book, element_id_to_filename) {
+            if let Some(np) =
+                nav_unit_to_navpoint(child, book, element_id_to_filename, anchors)
+            {
                 children.push(np);
             }
         }

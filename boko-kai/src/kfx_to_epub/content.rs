@@ -43,6 +43,14 @@ pub struct ContentState<'a> {
     /// Stylesheet (style_name → CssDecl) accumulated across all chapters.
     pub stylesheet: HashMap<String, CssDecl>,
 
+    /// Auto-generated classes created by `fixup_styles_and_classes` when the
+    /// same inline-style declaration appears on N elements. Each entry is
+    /// `(class_name, decl)`; emitted as `.<class_name> { ... }` by
+    /// `emit_stylesheet`. Kept separate from `stylesheet` because the keys
+    /// in the latter are KFX style names (emitted as `.s_<name>`), whereas
+    /// generated classes use a `g<N>` prefix.
+    pub generated_classes: Vec<(String, CssDecl)>,
+
     /// Output book parts: filename → DOM. Insertion-ordered.
     pub book_parts: Vec<BookPart>,
 
@@ -54,9 +62,16 @@ pub struct ContentState<'a> {
     /// we encounter elements with an `id` ($155) anywhere in the storyline
     /// (including page_templates, container/text/etc.). Drives nav resolution
     /// in `navigation::extract_toc`: a nav_unit `target_position.id` maps to
-    /// the chapter file containing that element. Mirrors part of calibre's
-    /// `process_position` — currently chapter-granular, not paragraph-fragment.
+    /// the chapter file containing that element.
     pub element_id_to_filename: HashMap<i64, String>,
+
+    /// `$266 anchor` table — `(location_id, offset) → anchor_name(s)`.
+    /// `process_content` consults this after dispatching a content struct
+    /// and sets `id="anchor-name"` on the corresponding HTML element so
+    /// (a) NCX entries pointing at `(eid, offset)` can use a fragment
+    /// id, and (b) internal `<a href>` `link_to` references can resolve
+    /// to the right element instead of the chapter file.
+    pub anchors: super::navigation::AnchorTable,
 
     /// Mapping for the "main_content" link id and similar markers.
     pub link_ids: HashMap<String, String>,
@@ -83,19 +98,26 @@ pub struct BookPart {
     pub element_styles: HashMap<NodeId, CssDecl>,
     /// element id attribute assignments (anchor_name → NodeId).
     pub element_ids: HashMap<String, NodeId>,
+    /// KFX `$761 layout_hints` + `$790 heading_level` carried from the
+    /// element's named style. Read in `consolidate_html` to promote
+    /// `<div>` → `<h<N>>` / `<figure>` (calibre `yj_to_epub_properties.py:1921`).
+    pub element_layout_hints: HashMap<NodeId, (Vec<String>, Option<String>)>,
 }
 
 impl<'a> ContentState<'a> {
     pub fn new(book: &'a BookData, resources: &'a ResourceIndex) -> Self {
         let (writing_mode, page_progression_direction) = extract_doc_data(book);
+        let anchors = super::navigation::extract_anchors(book);
         Self {
             book,
             resources,
             writing_mode,
             page_progression_direction,
             stylesheet: HashMap::new(),
+            generated_classes: Vec::new(),
             book_parts: Vec::new(),
             anchor_targets: HashMap::new(),
+            anchors,
             link_ids: HashMap::new(),
             used_kfx_styles: Vec::new(),
             element_id_to_filename: HashMap::new(),
@@ -159,6 +181,7 @@ impl<'a> ContentState<'a> {
             element_classes: HashMap::new(),
             element_styles: HashMap::new(),
             element_ids: HashMap::new(),
+            element_layout_hints: HashMap::new(),
         });
 
         // Link stylesheet.
@@ -308,11 +331,74 @@ impl<'a> ContentState<'a> {
             }
         };
 
+        // `$615 yj.classification` — calibre `yj_to_epub_content.py:1058`.
+        // EPUB-2.0 active branches (we emit EPUB 2.0):
+        //   - `$453 caption` → rename to `<caption>` when the parent is
+        //     `<table>` (the only place an EPUB2 reader will style it).
+        // EPUB-3-only branches (skipped here; would be `<aside>` /
+        // `role="math"`):
+        //   - `$281 footnote`, `$618 yj.chapternote` → `<aside epub:type="footnote">`
+        //   - `$619 yj.endnote` → `<aside epub:type="endnote">`
+        //   - `$688 math` → `role="math"`
+        //   - `$689` is a documented no-op in calibre.
+        if let Some(class_val) = get_field(fields, KfxSymbol::YjClassification as u64)
+            && let Some(class_name) = self.book.symbols.text_of(class_val)
+        {
+            let dom_ref = &mut self.book_parts[part_index].dom;
+            let parent_tag = dom_ref.get(parent_id).tag.clone();
+            if class_name == "caption"
+                && dom_ref.get(elem_id).tag == "div"
+                && parent_tag == "table"
+            {
+                dom_ref.get_mut(elem_id).tag = "caption".to_string();
+            }
+            // Other classifications: tracked for parity with calibre but
+            // intentionally non-promoting under EPUB 2.0.
+            let _ = class_name;
+        }
+
+        // `process_position` — calibre `yj_to_epub_navigation.py:375`.
+        // Every content struct with `$155 id` registers itself at
+        // `(id, offset=0)`; if the anchor table has a position match
+        // there, the element gets `id="anchor-id"`. This is what wires
+        // NCX `<content src="chapter.xhtml#X">` to the right paragraph
+        // and what lets internal `<a href>` resolve to fragments.
+        // Partial-offset positions (offset > 0 from `locate_offset`)
+        // are deferred to task #11 (split_span for partial-text ruby
+        // covers the same machinery).
+        if let Some(loc_id) = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int())
+            && let Some(anchor_id) = self.anchors.id_at(loc_id, 0)
+        {
+            let dom_ref = &mut self.book_parts[part_index].dom;
+            // Don't overwrite an id that was already set (e.g. an
+            // earlier walk through the same node).
+            if !dom_ref.get(elem_id).attrs.iter().any(|(k, _)| k == "id") {
+                dom_ref.get_mut(elem_id).set("id", anchor_id);
+            }
+        }
+
+        // `$179 link_to`: wrap the emitted element in an `<a>`. Calibre
+        // (`yj_to_epub_content.py:1268`) emits a placeholder anchor URI
+        // (`anchor:NAME`) at this point; the post-pass
+        // `resolve_link_placeholders` rewrites it to
+        // `chapter.xhtml#anchor-id` after all content is laid out.
+        let wrapped_id = if let Some(link_sym) = get_field(fields, KfxSymbol::LinkTo as u64)
+            && let Some(name) = self.book.symbols.text_of(link_sym)
+        {
+            let dom_ref = &mut self.book_parts[part_index].dom;
+            let a = dom_ref.create_element("a");
+            dom_ref.get_mut(a).set("href", format!("anchor:{}", name));
+            dom_ref.append(a, elem_id);
+            a
+        } else {
+            elem_id
+        };
+
         // Always append into parent. For the top-level call, parent is the
         // existing body element; we don't retag (the body already exists).
         let dom = &mut self.book_parts[part_index].dom;
-        if dom.get(elem_id).parent.is_none() {
-            dom.append(parent_id, elem_id);
+        if dom.get(wrapped_id).parent.is_none() {
+            dom.append(parent_id, wrapped_id);
         }
         let _ = is_top_level;
         Ok(())
@@ -737,6 +823,15 @@ impl<'a> ContentState<'a> {
                     .entry(elem_id)
                     .or_default()
                     .push(format!("s_{}", safe_class_name(name)));
+            }
+            // Layout hints + heading level — drive the `<div>` → `<h<N>>`
+            // promotion in `consolidate_html`. Not emitted as CSS (calibre
+            // uses these as sentinels too and `simplify_styles` strips them).
+            let (hints, level) = properties::style_layout_hints_for(name, self.book);
+            if !hints.is_empty() || level.is_some() {
+                self.book_parts[part_index]
+                    .element_layout_hints
+                    .insert(elem_id, (hints, level));
             }
         }
         // 2. Inline content properties (writing-mode, etc.).
@@ -1195,11 +1290,201 @@ pub fn consolidate_html(state: &mut ContentState) {
                 elem.tag = "p".to_string();
             }
         }
+
+        // Third pass: promote `<div>` / `<p>` to `<h<N>>` for elements whose
+        // KFX style carries `$761 layout_hints` containing `heading`. The
+        // heading level comes from `$790 yj.semantics.heading_level` (default
+        // 1 if missing — calibre carries the "last seen" value forward in
+        // `simplify_styles`, but that's an EPUB-output ordering concern;
+        // defaulting to 1 is a safe fallback for now).
+        //
+        // Figure promotion (`<figure>`) is calibre-gated on `not epub2_desired`
+        // — we're emitting EPUB 2.0, so we skip it. The `<figure>` element
+        // is HTML5; most EPUB2 readers render it as a generic block, but the
+        // calibre rule is the conservative choice.
+        let layout_hints: Vec<(NodeId, Vec<String>, Option<String>)> = part
+            .element_layout_hints
+            .iter()
+            .map(|(k, (hints, level))| (*k, hints.clone(), level.clone()))
+            .collect();
+        for (id, hints, level) in layout_hints {
+            if !hints.iter().any(|h| h == "heading") {
+                continue;
+            }
+            if has_block_desc[id] {
+                // Calibre's promotion requires `not contains_block_elem` —
+                // a heading with block children would be invalid HTML.
+                continue;
+            }
+            let elem = part.dom.get_mut(id);
+            if elem.tag != "div" && elem.tag != "p" {
+                continue;
+            }
+            let lvl = level.as_deref().unwrap_or("1");
+            elem.tag = format!("h{}", lvl);
+        }
     }
 }
 
 /// After all chapters are emitted, fold per-element classes + inline styles
 /// back onto the DOM as actual `class=` / `style=` attributes.
+/// Rewrite `<a href="anchor:NAME">` placeholders emitted by `$179 link_to`
+/// to their final `chapter.xhtml#anchor-id` form.
+///
+/// This is the post-pass equivalent of calibre's
+/// `fixup_anchors_and_hrefs` `<a href>` rewrite (`yj_to_epub_navigation.py:493`).
+/// Runs AFTER `process_reading_order` so `element_id_to_filename` is
+/// fully populated (we need it to look up which chapter file a target
+/// element lives in). Dangling anchors keep their placeholder href —
+/// calibre logs them; we leave them so the validator's link-defects
+/// gate surfaces them.
+pub fn resolve_link_placeholders(state: &mut ContentState) {
+    let map = state.element_id_to_filename.clone();
+    let anchors = state.anchors.clone();
+    for part in &mut state.book_parts {
+        let n = part.dom.len();
+        for id in 0..n {
+            let attrs = part.dom.get(id).attrs.clone();
+            for (k, v) in attrs {
+                if k != "href" {
+                    continue;
+                }
+                if let Some(name) = v.strip_prefix("anchor:")
+                    && let Some(uri) = anchors.resolve_uri(name, &map)
+                {
+                    part.dom.get_mut(id).set("href", uri);
+                }
+            }
+        }
+    }
+}
+
+/// Drop declarations that match their CSS spec default value.
+///
+/// Minimal port of calibre's `simplify_styles` — the full version does
+/// inheritance-aware partition (drop declarations that would inherit
+/// the same value from an ancestor), but the per-element walk requires
+/// reproducing the CSS cascade in Rust. The default-pruning pass is
+/// the high-impact 80% of the win: declarations like
+/// `letter-spacing: 0em` / `white-space: normal` / `text-indent: 0`
+/// are no-ops that calibre's pass strips. On horror those three
+/// account for ~150 redundant decls (~3 per stylesheet rule × 50
+/// rules), shrinking the stylesheet without changing rendering.
+///
+/// Properties pruned to their spec default:
+///   - `letter-spacing`: `0` / `0em` / `0px` → drop (default `normal`)
+///   - `word-spacing`: `0` / `0em` / `0px` → drop (default `normal`)
+///   - `text-indent`: `0` / `0em` / `0px` / `0%` → drop (default `0`)
+///   - `white-space`: `normal` → drop
+///   - `font-style`: `normal` → drop
+///   - `font-weight`: `normal` → drop
+///   - `font-variant`: `normal` → drop
+///   - `font-stretch`: `normal` → drop
+///   - `text-decoration`: `none` → drop
+///   - `text-transform`: `none` → drop
+pub fn simplify_styles(state: &mut ContentState) {
+    let prunable = |name: &str, value: &str| -> bool {
+        let v = value.trim();
+        match name {
+            "letter-spacing" | "word-spacing" => {
+                matches!(v, "0" | "0em" | "0px" | "0rem" | "normal")
+            }
+            "text-indent" => matches!(v, "0" | "0em" | "0px" | "0rem" | "0%"),
+            "white-space" | "font-style" | "font-weight" | "font-variant"
+            | "font-stretch" => v == "normal",
+            "text-decoration" | "text-transform" => v == "none",
+            _ => false,
+        }
+    };
+    let prune = |decl: &mut CssDecl| {
+        decl.items.retain(|(k, v)| !prunable(k, v));
+    };
+    for v in state.stylesheet.values_mut() {
+        prune(v);
+    }
+    for (_, decl) in &mut state.generated_classes {
+        prune(decl);
+    }
+    for part in &mut state.book_parts {
+        for decl in part.element_styles.values_mut() {
+            prune(decl);
+        }
+    }
+}
+
+/// Dedupe per-element inline styles into auto-generated class rules.
+///
+/// Mirrors a subset of calibre's `fixup_styles_and_classes`
+/// (yj_to_epub_properties.py:1388): when the same `style="..."` value
+/// shows up on ≥ 2 elements across the book, promote it to a class
+/// rule (`g<N>`) and replace the inline style with a class reference.
+///
+/// Runs BEFORE `finalize_chapter_attrs` so we can mutate
+/// `element_styles` / `element_classes` instead of post-processing
+/// already-rendered DOM attributes. Skipping this on horror is mostly
+/// a no-op — only one inline-style string repeats (writing-mode:
+/// horizontal-tb on figure captions) — but the same machinery is
+/// what calibre uses to drive class-rule generation on books with
+/// heavy inline overrides.
+pub fn fixup_styles_and_classes(state: &mut ContentState) {
+    // Build occurrence map: serialized inline style → count.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for part in &state.book_parts {
+        for decl in part.element_styles.values() {
+            if decl.is_empty() {
+                continue;
+            }
+            *counts.entry(decl.to_inline()).or_insert(0) += 1;
+        }
+    }
+    // Promote any style that appears ≥ 2 times. Calibre promotes all,
+    // but for our purposes the small-count noise (1× one-off styles)
+    // is better left inline — keeps the stylesheet readable.
+    let mut promoted: HashMap<String, String> = HashMap::new();
+    let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    for (style_str, count) in sorted {
+        if count < 2 {
+            break; // Remaining entries are all single-occurrence.
+        }
+        let class_name = format!("g{}", state.generated_classes.len());
+        // Rebuild a CssDecl from the serialized string so we can emit
+        // the rule via the same path as named-style rules.
+        let mut decl = CssDecl::new();
+        for chunk in style_str.split(';') {
+            let chunk = chunk.trim();
+            if chunk.is_empty() {
+                continue;
+            }
+            if let Some(colon) = chunk.find(':') {
+                let k = chunk[..colon].trim();
+                let v = chunk[colon + 1..].trim();
+                decl.set(k, v);
+            }
+        }
+        state.generated_classes.push((class_name.clone(), decl));
+        promoted.insert(style_str, class_name);
+    }
+    if promoted.is_empty() {
+        return;
+    }
+    // Rewrite: for any element whose serialized inline style matches a
+    // promoted entry, replace the inline style with a class reference.
+    for part in &mut state.book_parts {
+        let style_keys: Vec<NodeId> = part.element_styles.keys().copied().collect();
+        for id in style_keys {
+            let style_str = part.element_styles[&id].to_inline();
+            if let Some(class) = promoted.get(&style_str) {
+                part.element_styles.remove(&id);
+                part.element_classes
+                    .entry(id)
+                    .or_default()
+                    .push(class.clone());
+            }
+        }
+    }
+}
+
 pub fn finalize_chapter_attrs(state: &mut ContentState) {
     for part in &mut state.book_parts {
         // Apply class assignments.
@@ -1254,6 +1539,15 @@ pub fn emit_stylesheet(state: &ContentState) -> String {
             continue;
         }
         s.push_str(&format!(".s_{} {{ {} }}\n", safe_class_name(k), decl.to_inline()));
+    }
+    // Auto-generated classes from `fixup_styles_and_classes` (inline →
+    // class dedupe). Emit in insertion order so class names stay stable
+    // (g0, g1, ...) across runs on the same input.
+    for (class_name, decl) in &state.generated_classes {
+        if decl.is_empty() {
+            continue;
+        }
+        s.push_str(&format!(".{} {{ {} }}\n", class_name, decl.to_inline()));
     }
     s
 }

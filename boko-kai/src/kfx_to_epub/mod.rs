@@ -70,10 +70,23 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
     // Phase 1 step 4 — content (storyline → XHTML).
     let mut content_state = content::ContentState::new(&book, &resources);
     content_state.process_reading_order()?;
+    // Rewrite `<a href="anchor:NAME">` placeholders (emitted by
+    // `$179 link_to`) to `chapter.xhtml#anchor-id`. Must run after
+    // `process_reading_order` so `element_id_to_filename` is complete.
+    content::resolve_link_placeholders(&mut content_state);
     // Calibre's div→p promotion (yj_to_epub_properties.py:1921). Must run
     // before `finalize_chapter_attrs` so the renamed `<p>` carries the same
     // `class=` / `style=` the original `<div>` accumulated.
     content::consolidate_html(&mut content_state);
+    // Drop declarations that match their CSS spec default (calibre's
+    // `simplify_styles` — minimal port). Has to run before
+    // `fixup_styles_and_classes` so the dedupe counts identical
+    // "post-pruning" style strings.
+    content::simplify_styles(&mut content_state);
+    // Inline-style → class promotion. Runs before `finalize_chapter_attrs`
+    // so we can rewrite the in-memory `element_styles` / `element_classes`
+    // maps directly instead of mutating already-serialized attributes.
+    content::fixup_styles_and_classes(&mut content_state);
     content::finalize_chapter_attrs(&mut content_state);
 
     // Emit stylesheet + per-section XHTML files. The stylesheet has to be
@@ -113,7 +126,11 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
     // Phase 1 step 2 — navigation. Build NCX from book_navigation, using the
     // element-id → chapter-filename map populated by `process_section` to
     // resolve `nav_unit.target_position.id` to a real chapter file.
-    let toc = navigation::extract_toc(&book, &content_state.element_id_to_filename);
+    let toc = navigation::extract_toc(
+        &book,
+        &content_state.element_id_to_filename,
+        &content_state.anchors,
+    );
     if !toc.is_empty() {
         out.ncx_navmap = Some(navigation::render_navmap(&toc));
     }
