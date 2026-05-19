@@ -684,23 +684,23 @@ fn build_book_metadata_fragment(
         None
     });
 
-    // Generate book_id from identifier (deterministic per publication)
+    // book_id: reuse `meta.identifier` if it already has the KFX shape (23-char
+    // URL-safe Base64). Otherwise derive deterministically. Reuse keeps the
+    // identifier stable across a KFX → EPUB → KFX round trip.
     let book_id = if !meta.identifier.is_empty() {
-        Some(generate_book_id(&meta.identifier))
+        if looks_like_kfx_book_id(&meta.identifier) {
+            Some(meta.identifier.clone())
+        } else {
+            Some(generate_book_id(&meta.identifier))
+        }
     } else {
         None
     };
 
-    // Mint a deterministic 32-char uppercase-alphanumeric ASIN keyed off the
-    // book's identifier. The Kindle library service uses this as the cache
-    // key for the cover thumbnail and sleep-screen art when cde_content_type
-    // is PDOC, so a stable value lets the device reuse a cached cover across
-    // re-exports of the same book.
-    let asin = if !meta.identifier.is_empty() {
-        Some(generate_asin(&meta.identifier))
-    } else {
-        None
-    };
+    // ASIN: pass through the source value. Never synthesize — ASIN is a real
+    // Amazon catalog identifier and a fabricated one would be indistinguishable
+    // from a genuine value once persisted.
+    let asin = meta.asin.as_deref().filter(|a| !a.is_empty()).map(str::to_string);
 
     let meta_ctx = MetadataContext {
         version: Some(env!("CARGO_PKG_VERSION")),
@@ -762,25 +762,12 @@ fn metadata_kv(key: &str, value: &crate::kfx::metadata::MetadataValue) -> IonVal
     ])
 }
 
-/// Generate a 32-char uppercase-alphanumeric ASIN deterministically from the
-/// book's identifier. Calibre's KFX uses the same value for both `ASIN` and
-/// `content_id`; we mirror that by reading `MetadataField::ContentId` from
-/// the same context slot.
-fn generate_asin(identifier: &str) -> String {
-    let digest = sha1_smol::Sha1::from(identifier.as_bytes()).digest().bytes();
-    // Base32 (Crockford-style minus disallowed chars) is overkill; map each
-    // input nibble to one of 32 chars. SHA1 has 20 bytes = 40 nibbles, more
-    // than enough for the 32-char ASIN.
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let mut out = String::with_capacity(32);
-    for (i, byte) in digest.iter().enumerate().take(16) {
-        // Two chars per byte gives us 32 chars total — high nibble then low.
-        let _ = i;
-        out.push(ALPHABET[((byte >> 4) & 0x1F) as usize] as char);
-        out.push(ALPHABET[(byte & 0x1F) as usize] as char);
-    }
-    debug_assert_eq!(out.len(), 32);
-    out
+// KFX book_id shape: 23 chars, URL-safe Base64 alphabet. Matches what
+// `generate_book_id` emits, so reusing a passthrough value is safe.
+fn looks_like_kfx_book_id(s: &str) -> bool {
+    s.len() == 23
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Build the content features fragment ($585).
