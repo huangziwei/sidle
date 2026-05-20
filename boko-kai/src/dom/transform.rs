@@ -3,6 +3,7 @@
 use super::arena::{ArenaDom, ArenaNodeData, ArenaNodeId};
 use super::element_ref::ElementRef;
 use super::role_map::element_to_role;
+use super::{is_html_whitespace, is_html_whitespace_only};
 use crate::model::{Chapter, Node, NodeId, Role};
 use crate::style::{ComputedStyle, Display, Origin, Stylesheet, WhiteSpace, compute_styles};
 
@@ -129,8 +130,7 @@ impl<'a> TransformContext<'a> {
 
         match &node.data {
             ArenaNodeData::Text(text) => {
-                // Handle whitespace-only text nodes
-                if text.trim().is_empty() {
+                if is_html_whitespace_only(text) {
                     // Whitespace between inline elements should be preserved as a single space.
                     // We preserve whitespace unless:
                     // 1. We're at the root level (no parent style)
@@ -317,21 +317,16 @@ pub fn transform(dom: &ArenaDom, stylesheets: &[(Stylesheet, Origin)]) -> Chapte
     ctx.transform()
 }
 
-/// Normalize whitespace in text content according to HTML rules.
-///
-/// Collapses runs of whitespace (spaces, tabs, newlines) to single spaces.
-/// This matches standard HTML text content normalization.
 fn normalize_whitespace(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut prev_was_whitespace = false;
 
     for c in text.chars() {
-        if c.is_whitespace() {
+        if is_html_whitespace(c) {
             if !prev_was_whitespace {
                 result.push(' ');
                 prev_was_whitespace = true;
             }
-            // Skip consecutive whitespace
         } else {
             result.push(c);
             prev_was_whitespace = false;

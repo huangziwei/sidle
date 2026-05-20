@@ -1518,9 +1518,6 @@ fn dump_node_tree(chapter: &Chapter, id: NodeId, opts: &DumpOptions, depth: usiz
     if let Some(anchor_id) = chapter.semantics.id(id) {
         line.push_str(&format!(" id=\"{}\"", anchor_id));
     }
-    if let Some(class) = chapter.semantics.class(id) {
-        line.push_str(&format!(" class=\"{}\"", class));
-    }
 
     // Add text content for text nodes
     if !opts.structure && node.role == Role::Text && !node.text.is_empty() {
