@@ -9,3 +9,16 @@ name = "sidle"
 path = "src/main.rs"
 
 [dependencies]
+# libc: raw open/ioctl/mmap. Pure Rust, no C build script — keeps the
+# rust-lld cross path working without zig.
+libc = "0.2"
+# anyhow: ergonomic error propagation in the on-device run loop, where we
+# want to capture context strings and log the full chain on failure.
+anyhow = "1"
+# ureq: small sync HTTP client. default-features=false drops rustls so the
+# whole crate stays pure-Rust (we're LAN-only, no TLS needed).
+ureq = { version = "2", default-features = false }
+# serde + serde_json: JSON deserialize of the server's `/list.json`. The
+# `derive` feature is proc-macro-driven (pure Rust at build time).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

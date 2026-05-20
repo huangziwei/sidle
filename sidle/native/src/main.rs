@@ -1,47 +1,56 @@
-//! Sidle native — Milestone 0 hello-world.
+//! Sidle native — Milestone 4 HTTP + JSON list.
 //!
-//! The picker described in `.claude/plans/native-kindle-app.md` starts here:
-//! prove the toolchain (cargo-zigbuild → armv7-musleabihf static binary) by
-//! getting a stamp onto the device.
-//!
-//! When launched from KUAL there's no tty, so stdout vanishes. We append to
-//! `/mnt/us/sidle-native.log` — accessible over USB after the device is
-//! replugged, which is how we'll verify M0 done.
+//! Reads `etc/server.conf`, GETs `/list.json` over LAN, logs every title
+//! to `/mnt/us/sidle-native.log`. No fb / touch yet — M5 reintroduces
+//! them to render the list on the panel.
 
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod api;
+mod config;
+mod eink;
+
 const LOG_PATH: &str = "/mnt/us/sidle-native.log";
+const CONFIG_PATH: &str = "/mnt/us/extensions/sidle/etc/server.conf";
 
 fn main() {
-    let stamp = SystemTime::now()
+    let result = run();
+    log(format!("done: {result:?}"));
+}
+
+fn run() -> anyhow::Result<()> {
+    let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    log(format!("sidle-native M4 start: ts={ts}"));
 
-    let arch = std::env::consts::ARCH;
-    let os = std::env::consts::OS;
-    let pid = std::process::id();
+    let cfg = config::load(Path::new(CONFIG_PATH))?;
+    log(format!("server: http://{}:{}", cfg.host, cfg.port));
 
-    let line = format!(
-        "sidle-native hello: ts={stamp} arch={arch} os={os} pid={pid}\n",
-    );
+    let books = api::list_books(&cfg)?;
+    log(format!("books: {}", books.len()));
+    for book in &books {
+        log(format!(
+            "  [{}] {} — {} ({})",
+            book.id, book.title, book.author, book.language,
+        ));
+    }
+    Ok(())
+}
 
-    // File first — under KUAL, stdout/stderr point at a pipe nobody reads,
-    // so a `print!` that panics on EPIPE would shadow the log write. Once
-    // the file is on disk, anything later is bonus.
+fn log(line: impl AsRef<str>) {
+    let line = line.as_ref();
     let log_path = if std::path::Path::new("/mnt/us").is_dir() {
         LOG_PATH
     } else {
         "./sidle-native.log"
     };
-
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(log_path) {
-        let _ = f.write_all(line.as_bytes());
+        let _ = writeln!(f, "{line}");
     }
-
-    // `let _ =` swallows EPIPE — running from a real shell still echoes,
-    // running from KUAL silently no-ops instead of panicking.
-    let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    let _ = writeln!(std::io::stderr(), "{line}");
 }
