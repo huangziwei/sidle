@@ -23,8 +23,11 @@ use crate::library::import::write_bytes_atomic;
 
 /// Replace the cover image inside `epub_path` with `new_bytes`. `new_ext` is
 /// the lowercased extension matching the format of those bytes (e.g. `"jpg"`)
-/// — used both to rename the in-zip entry when the original cover had a
-/// different extension, and to compute the new `media-type` for the OPF.
+/// — used to compute the new `media-type` for the OPF manifest entry. The
+/// in-zip filename is **kept** (we overwrite at the original path); only the
+/// media-type attribute is updated. Renaming would orphan internal
+/// references like `<image xlink:href="cover.jpeg"/>` inside
+/// `titlepage.xhtml` and break the cover render in Apple Books.
 ///
 /// No-ops cleanly (returns Ok) when the EPUB has no cover entry.
 pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result<()> {
@@ -43,43 +46,40 @@ pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Resul
     };
     let opf_path = find_opf_path(&epub_bytes)?;
 
-    let new_basename = format!("cover.{new_ext}");
-    let cover_dir = parent_dir(&cover_href);
-    let new_href = if cover_dir.is_empty() {
-        new_basename.clone()
-    } else {
-        format!("{cover_dir}/{new_basename}")
-    };
     let new_media_type = media_type_for_ext(new_ext);
-    let need_rename = !new_href.eq_ignore_ascii_case(&cover_href);
-    let old_basename = basename(&cover_href);
+    let cover_basename = basename(&cover_href);
+    let old_media_type = media_type_for_ext(
+        cover_basename
+            .rsplit_once('.')
+            .map(|(_, e)| e)
+            .unwrap_or(""),
+    );
+    let media_type_changed = old_media_type != new_media_type;
 
     let mut out: Vec<u8> = Vec::with_capacity(epub_bytes.len() + new_bytes.len());
     rewrite_zip(
         &epub_bytes,
         &mut out,
         &cover_href,
-        &new_href,
         new_bytes,
-        need_rename.then_some((opf_path.as_str(), &old_basename, &new_basename, new_media_type)),
+        media_type_changed.then_some((opf_path.as_str(), cover_basename.as_str(), new_media_type)),
     )?;
 
     write_bytes_atomic(epub_path, &out)?;
     Ok(())
 }
 
-/// Walks the source EPUB and writes a fresh zip to `out`. The cover entry
-/// gets replaced; if `opf_rewrite` is `Some`, the OPF entry also gets a
-/// targeted edit. Everything else is `raw_copy_file`'d, preserving the
-/// original compression (and the EPUB-spec-required uncompressed `mimetype`
-/// at offset 0).
+/// Walks the source EPUB and writes a fresh zip to `out`. The cover entry's
+/// bytes get replaced in place (filename unchanged); when `opf_rewrite` is
+/// `Some` (media-type changed), the OPF entry also gets a targeted edit.
+/// Everything else is `raw_copy_file`'d, preserving the original compression
+/// (and the EPUB-spec-required uncompressed `mimetype` at offset 0).
 fn rewrite_zip(
     epub_bytes: &[u8],
     out: &mut Vec<u8>,
-    old_cover_href: &str,
-    new_cover_href: &str,
+    cover_href: &str,
     new_cover_bytes: &[u8],
-    opf_rewrite: Option<(&str, &str, &str, &'static str)>,
+    opf_rewrite: Option<(&str, &str, &'static str)>,
 ) -> Result<()> {
     let cursor = Cursor::new(epub_bytes);
     let mut archive = zip::ZipArchive::new(cursor).with_context(|| "read epub zip")?;
@@ -92,21 +92,20 @@ fn rewrite_zip(
         let name = entry.name().to_string();
         let compression = entry.compression();
 
-        if name == old_cover_href {
+        if name == cover_href {
             let opts = zip::write::SimpleFileOptions::default().compression_method(compression);
             writer
-                .start_file(new_cover_href, opts)
-                .with_context(|| format!("start cover entry {new_cover_href}"))?;
+                .start_file(&name, opts)
+                .with_context(|| format!("start cover entry {name}"))?;
             writer.write_all(new_cover_bytes)?;
-        } else if let Some((opf_path, old_basename, new_basename, new_media_type)) = opf_rewrite
+        } else if let Some((opf_path, cover_basename, new_media_type)) = opf_rewrite
             && name == opf_path
         {
             let mut text = String::new();
             entry
                 .read_to_string(&mut text)
                 .with_context(|| "read opf for rewrite")?;
-            let rewritten =
-                rewrite_opf_for_cover(&text, old_basename, new_basename, new_media_type);
+            let rewritten = rewrite_opf_for_cover(&text, cover_basename, new_media_type);
             let opts = zip::write::SimpleFileOptions::default().compression_method(compression);
             writer
                 .start_file(&name, opts)
@@ -147,10 +146,6 @@ fn find_opf_path(epub_bytes: &[u8]) -> Result<String> {
     bail!("could not parse OPF path from META-INF/container.xml")
 }
 
-fn parent_dir(href: &str) -> &str {
-    href.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
-}
-
 fn basename(href: &str) -> String {
     href.rsplit_once('/')
         .map(|(_, b)| b)
@@ -169,24 +164,23 @@ fn media_type_for_ext(ext: &str) -> &'static str {
 }
 
 /// Rewrite the OPF so the manifest `<item>` whose `href` ends with
-/// `old_basename` instead carries `new_basename` and `new_media_type`. The
-/// OPF references files relative to its own directory, so a basename match
-/// is correct for the same-directory case (which is what `kfx_to_epub`
-/// emits — `OEBPS/content.opf` plus `OEBPS/cover.<ext>` next to it).
+/// `cover_basename` carries the new `media-type` (the href is unchanged —
+/// we keep the cover file at its original path to avoid orphaning internal
+/// references like `<image xlink:href="cover.jpeg"/>` inside
+/// `titlepage.xhtml`). The OPF references files relative to its own
+/// directory, so a basename match is correct for the same-directory case
+/// (which is what `kfx_to_epub` emits — `OEBPS/content.opf` plus
+/// `OEBPS/cover.<ext>` next to it).
 fn rewrite_opf_for_cover(
     opf: &str,
-    old_basename: &str,
-    new_basename: &str,
+    cover_basename: &str,
     new_media_type: &str,
 ) -> String {
     let mut out = String::with_capacity(opf.len() + 16);
-    let href_needle = format!("href=\"{old_basename}\"");
+    let href_needle = format!("href=\"{cover_basename}\"");
     for line in opf.split_inclusive('\n') {
         if line.contains("<item") && line.contains(&href_needle) {
-            let with_href =
-                line.replace(&href_needle, &format!("href=\"{new_basename}\""));
-            let with_mime = replace_attr_value(&with_href, "media-type", new_media_type);
-            out.push_str(&with_mime);
+            out.push_str(&replace_attr_value(line, "media-type", new_media_type));
         } else {
             out.push_str(line);
         }
@@ -228,24 +222,24 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_opf_swaps_href_and_mime_on_matching_line() {
+    fn rewrite_opf_swaps_mime_keeps_href() {
         let opf = "<package>\n  <manifest>\n    <item id=\"cover\" href=\"cover.png\" media-type=\"image/png\"/>\n    <item id=\"toc\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n  </manifest>\n</package>\n";
-        let out = rewrite_opf_for_cover(opf, "cover.png", "cover.jpg", "image/jpeg");
-        assert!(out.contains("href=\"cover.jpg\""));
+        let out = rewrite_opf_for_cover(opf, "cover.png", "image/jpeg");
+        // media-type swapped, href preserved (in-zip file is overwritten
+        // at the same path so internal SVG xlink:href references stay valid).
+        assert!(out.contains("href=\"cover.png\""));
         assert!(out.contains("media-type=\"image/jpeg\""));
         // Other item untouched.
         assert!(out.contains("href=\"toc.ncx\""));
         assert!(out.contains("application/x-dtbncx+xml"));
-        // No stale entry left.
-        assert!(!out.contains("href=\"cover.png\""));
+        // Old media-type cleared.
         assert!(!out.contains("media-type=\"image/png\""));
     }
 
     #[test]
-    fn parent_and_basename() {
-        assert_eq!(parent_dir("OEBPS/cover.jpg"), "OEBPS");
+    fn basename_pulls_last_segment() {
         assert_eq!(basename("OEBPS/cover.jpg"), "cover.jpg");
-        assert_eq!(parent_dir("cover.jpg"), "");
         assert_eq!(basename("cover.jpg"), "cover.jpg");
+        assert_eq!(basename("a/b/c.png"), "c.png");
     }
 }
