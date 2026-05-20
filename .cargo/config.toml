@@ -1,0 +1,23 @@
+# Workspace cargo config.
+#
+# Target-specific only — keeps host (macOS) builds untouched and only kicks in
+# when cross-compiling sidle-native to the Kindle.
+#
+# Build the on-device picker:
+#   cargo build --release --target armv7-unknown-linux-musleabihf -p sidle-native
+# Output: target/armv7-unknown-linux-musleabihf/release/sidle (~5MB static).
+#
+# armv7-unknown-linux-musleabihf = hardfloat NEON, matches the KOA2's Cortex-A9.
+# musl = static link so the binary is firmware-version-agnostic.
+#
+# Linker: rustc's bundled rust-lld via `link-self-contained=yes`. This is the
+# pure-Rust cross path — no zig, no GNU cross-binutils. Works as long as no
+# crate in our graph has a C build-script. If that changes, the fallback is
+# `brew install zig && cargo install cargo-zigbuild` and switching to
+# `cargo zigbuild`.
+# rust-lld is bundled with rustup but not on PATH; the absolute path is
+# version-stable as long as the user stays on the `stable-x86_64-apple-darwin`
+# toolchain. If you rustup-switch, update this path or symlink it onto PATH.
+[target.armv7-unknown-linux-musleabihf]
+linker = "/Users/ziweih/.rustup/toolchains/stable-x86_64-apple-darwin/lib/rustlib/x86_64-apple-darwin/bin/rust-lld"
+rustflags = ["-C", "link-self-contained=yes"]

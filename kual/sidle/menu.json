@@ -1,0 +1,5 @@
+{
+	"items": [
+		{"name": "Sidle", "priority": 1, "action": "bin/sidle.sh"}
+	]
+}
