@@ -521,6 +521,11 @@ impl Azw3Importer {
         };
 
         importer.assets = importer.discover_assets();
+        // Filter out flows that are actually SVG illustration content —
+        // those get inlined into chapter HTML by `inline_svg_flows` and
+        // are dead weight (plus they leak `kindle:embed:` URLs) when
+        // emitted as `.css` assets.
+        importer.prune_svg_flow_assets();
 
         Ok(importer)
     }
@@ -633,6 +638,37 @@ impl Azw3Importer {
             transform::ensure_html_lang_dual(&cleaned, &self.metadata.language);
 
         Ok(with_lang)
+    }
+
+    /// Drop `styles/styleNNNN.css` asset entries that correspond to flows
+    /// whose actual content is SVG (full-page illustration wrappers). These
+    /// get inlined into chapter HTML by `inline_svg_flows`, so emitting them
+    /// as orphan `.css` assets ships dead bytes — and leaks the SVG's
+    /// `kindle:embed:` URLs into the EPUB zip. Mirrors the same prefix-sniff
+    /// `transform::inline_svg_flows` uses.
+    fn prune_svg_flow_assets(&mut self) {
+        if self.text_cache.is_none() {
+            self.text_cache = self.extract_text().ok();
+        }
+        let Some(text) = self.text_cache.as_ref() else {
+            return;
+        };
+        self.assets.retain(|p| {
+            let Some(stem) = p
+                .to_string_lossy()
+                .strip_prefix("styles/style")
+                .and_then(|s| s.strip_suffix(".css"))
+                .and_then(|s| s.parse::<usize>().ok())
+            else {
+                return true; // not a CSS asset — keep
+            };
+            let flow_idx = stem + 1;
+            let Some(&(start, end)) = self.kf8.flow_table.get(flow_idx) else {
+                return true;
+            };
+            let end = end.min(text.len());
+            !looks_like_svg_flow(&text[start..end])
+        });
     }
 
     /// Discover asset paths by scanning image records and the flow table.
@@ -803,6 +839,14 @@ fn build_metadata(
 /// the UUID calibre's AZW3 exporter occasionally writes into the same slot.
 fn looks_like_asin(s: &str) -> bool {
     s.len() == 10 && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// True when a flow's first kilobyte holds an SVG document (after any
+/// `<?xml-stylesheet?>` PI calibre's `mobi8.py` also peers past). Mirrors
+/// the sniff in `transform::inline_svg_flows`.
+fn looks_like_svg_flow(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(1024)];
+    bstr::ByteSlice::find(head, b"<svg").is_some()
 }
 
 /// Build chapter parts by combining skeletons with div content.
