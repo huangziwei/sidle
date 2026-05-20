@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "boko-kai",
+    "sidle/core",
+    "sidle/server",
     "sidle/src-tauri",
 ]
 

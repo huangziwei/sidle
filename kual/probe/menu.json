@@ -1,0 +1,10 @@
+{
+  "items": [
+    {
+      "name": "Probe busybox",
+      "priority": 0,
+      "action": "/mnt/us/extensions/probe/bin/probe.sh",
+      "status": "echo Wrote /mnt/us/sidle-probe.txt"
+    }
+  ]
+}
