@@ -9,8 +9,6 @@
 //! - Embedded — Tauri spawns it as a tokio task, sharing the runtime.
 //! - Standalone — `sidle-server` CLI binary parses args, calls `serve()`.
 
-mod kindle;
-
 use std::collections::HashMap;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
@@ -64,9 +62,7 @@ pub async fn serve(config: Config) -> Result<()> {
         .route("/", get(health))
         .route("/list.json", get(list_json))
         .route("/get/{id}", get(get_book))
-        .route("/dl/{id}", get(get_book))
         .route("/cover/{id}", get(get_cover))
-        .route("/kindle", get(kindle::page))
         .with_state(state);
 
     let listener = TcpListener::bind(&config.bind)
@@ -147,9 +143,7 @@ async fn health() -> Response {
         "Endpoints (require token via X-Sidle-Token header or ?token= query):\n",
         "  GET /list.json     — library as JSON\n",
         "  GET /get/{id}      — book .kfx bytes\n",
-        "  GET /dl/{id}       — alias for /get/{id} (used by the KUAL helper)\n",
         "  GET /cover/{id}    — cover image\n",
-        "  GET /kindle        — eink-friendly gallery (HTML)\n",
     );
     let mut headers = HeaderMap::new();
     headers.insert(
