@@ -473,6 +473,64 @@ pub fn inline_svg_flows(
 /// Strip Amazon-specific attributes from HTML.
 ///
 /// Removes: aid="...", data-AmznRemoved..., data-AmznPageBreak="..."
+/// Rewrite `kindle:flow:NNNN?...` URLs inside a CSS file to sibling-relative
+/// `styleNNNN.css` paths.
+///
+/// Native Amazon AZW3 stylesheets often chain-load each other with
+/// `@import url(kindle:flow:0001?mime=text/css);`. Boko emits the flow-table
+/// CSS verbatim (P1.1), which preserves these unresolvable URLs — Apple Books
+/// silently drops the import and the chained rules (writing-mode among them)
+/// never load. Calibre-exported AZW3s don't have this defect because calibre
+/// pre-resolves imports during its EPUB → AZW3 stage.
+///
+/// Sibling-relative output (`style0000.css` rather than `styles/style0000.css`)
+/// because the CSS file is itself already inside `styles/` in the EPUB zip.
+pub fn rewrite_kindle_flow_in_css(css: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(css.len());
+    let mut pos = 0;
+    let needle = b"kindle:flow:";
+    while let Some(rel) = memmem::find(&css[pos..], needle) {
+        let start = pos + rel;
+        out.extend_from_slice(&css[pos..start]);
+        let after_kw = start + needle.len();
+        // Parse the flow number until the first non-base32 char.
+        let mut num_end = after_kw;
+        while num_end < css.len() {
+            let b = css[num_end];
+            let is_b32 = b.is_ascii_digit() || (b'A'..=b'V').contains(&b);
+            if !is_b32 {
+                break;
+            }
+            num_end += 1;
+        }
+        if num_end == after_kw {
+            // Not a real flow ref — emit the literal and continue past `kindle:flow:`.
+            out.extend_from_slice(needle);
+            pos = after_kw;
+            continue;
+        }
+        let flow_num = parse_base32(&css[after_kw..num_end]);
+        let css_idx = flow_num.saturating_sub(1);
+        let replacement = format!("style{:04}.css", css_idx);
+        out.extend_from_slice(replacement.as_bytes());
+        // Skip the optional `?mime=...` query string up to the closing `)`,
+        // `"`, or `'` so we don't leave a dangling mime hint behind.
+        let mut tail = num_end;
+        if tail < css.len() && css[tail] == b'?' {
+            while tail < css.len() {
+                let b = css[tail];
+                if b == b')' || b == b'"' || b == b'\'' {
+                    break;
+                }
+                tail += 1;
+            }
+        }
+        pos = tail;
+    }
+    out.extend_from_slice(&css[pos..]);
+    out
+}
+
 /// Ensure the `<html>` root tag carries both `xml:lang` and `lang` attributes.
 ///
 /// Calibre's AZW3 exporter scrubs `xml:lang` from the source HTML and leaves

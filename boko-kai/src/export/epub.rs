@@ -146,31 +146,73 @@ impl EpubExporter {
             media_type: "application/xhtml+xml".to_string(),
         });
 
-        // 4. Write content.opf
+        // 4. Build titlepage. Apple Books / Kindle only render a cover *page*
+        // in the reading flow when a spine-positioned cover doc exists; the
+        // manifest `properties="cover-image"` alone only drives the library
+        // thumbnail. Cover image dimensions come from a JPEG SOF / PNG IHDR
+        // probe of the actual asset bytes — `viewBox` collapses without them.
         let cover_id = find_cover_manifest_id(book.metadata(), &manifest_items);
+        let titlepage_xhtml = if let Some(ref cid) = cover_id {
+            let cover_item = manifest_items.iter().find(|i| &i.id == cid);
+            cover_item.and_then(|item| {
+                let cover_zip_path = &item.href;
+                let cover_relative = cover_zip_path
+                    .strip_prefix("OEBPS/")
+                    .unwrap_or(cover_zip_path);
+                // Resolve to the on-disk asset path to load bytes.
+                let asset_path = std::path::Path::new(cover_relative);
+                let bytes = book.load_asset(asset_path).ok()?;
+                let (w, h) = crate::util::extract_image_dimensions(&bytes)?;
+                Some(build_titlepage(cover_relative, w, h))
+            })
+        } else {
+            None
+        };
+        if titlepage_xhtml.is_some() {
+            manifest_items.insert(
+                0,
+                ManifestItem {
+                    id: "titlepage".to_string(),
+                    href: "OEBPS/titlepage.xhtml".to_string(),
+                    media_type: "application/xhtml+xml".to_string(),
+                },
+            );
+            spine_refs.insert(0, "titlepage".to_string());
+        }
+
+        // 5. Write content.opf
+        let titlepage_href = titlepage_xhtml.as_ref().map(|_| "titlepage.xhtml");
         let opf = generate_opf(
             book.metadata(),
             &manifest_items,
             &spine_refs,
             cover_id.as_deref(),
+            titlepage_href,
         );
         zip.start_file("OEBPS/content.opf", deflated)
             .map_err(io_error)?;
         zip.write_all(opf.as_bytes())?;
 
-        // 5a. Write nav.xhtml (EPUB 3 navigation document)
+        // 6a. Write nav.xhtml (EPUB 3 navigation document)
         let nav = generate_nav(book.metadata(), book.toc(), book.landmarks());
         zip.start_file("OEBPS/nav.xhtml", deflated)
             .map_err(io_error)?;
         zip.write_all(nav.as_bytes())?;
 
-        // 5b. Write toc.ncx (legacy fallback for EPUB 2 readers)
+        // 6b. Write toc.ncx (legacy fallback for EPUB 2 readers)
         let ncx = generate_ncx(book.metadata(), book.toc());
         zip.start_file("OEBPS/toc.ncx", deflated)
             .map_err(io_error)?;
         zip.write_all(ncx.as_bytes())?;
 
-        // 6. Write chapters
+        // 6c. Write titlepage.xhtml when a cover was found.
+        if let Some(ref xhtml) = titlepage_xhtml {
+            zip.start_file("OEBPS/titlepage.xhtml", deflated)
+                .map_err(io_error)?;
+            zip.write_all(xhtml.as_bytes())?;
+        }
+
+        // 7. Write chapters
         for entry in &spine {
             let source_path = book
                 .source_id(entry.id)
@@ -183,7 +225,7 @@ impl EpubExporter {
             zip.write_all(&content)?;
         }
 
-        // 7. Write assets
+        // 8. Write assets
         for asset_path in &assets {
             let content = book.load_asset(asset_path)?;
             let zip_path = format!("OEBPS/{}", sanitize_path(&asset_path.to_string_lossy()));
@@ -297,45 +339,87 @@ impl EpubExporter {
             media_type: "application/xhtml+xml".to_string(),
         });
 
-        // 4. Write content.opf
+        // 4. Build titlepage from the cover (same rationale as export_raw —
+        // Apple Books needs a spine-positioned cover doc to render the cover
+        // page in the reading flow). Asset bytes are already pre-loaded above
+        // for MIME sniffing, so we don't pay a second `load_asset`.
         let cover_id = find_cover_manifest_id(book.metadata(), &manifest_items);
+        let titlepage_xhtml = if let Some(ref cid) = cover_id {
+            let cover_item = manifest_items.iter().find(|i| &i.id == cid);
+            cover_item.and_then(|item| {
+                let cover_relative = item
+                    .href
+                    .strip_prefix("OEBPS/")
+                    .unwrap_or(&item.href);
+                let bytes = asset_bytes
+                    .iter()
+                    .find(|(p, _)| sanitize_path(p) == cover_relative)
+                    .map(|(_, b)| b.as_slice())?;
+                let (w, h) = crate::util::extract_image_dimensions(bytes)?;
+                Some(build_titlepage(cover_relative, w, h))
+            })
+        } else {
+            None
+        };
+        if titlepage_xhtml.is_some() {
+            manifest_items.insert(
+                0,
+                ManifestItem {
+                    id: "titlepage".to_string(),
+                    href: "OEBPS/titlepage.xhtml".to_string(),
+                    media_type: "application/xhtml+xml".to_string(),
+                },
+            );
+            spine_refs.insert(0, "titlepage".to_string());
+        }
+
+        // 5. Write content.opf
+        let titlepage_href = titlepage_xhtml.as_ref().map(|_| "titlepage.xhtml");
         let opf = generate_opf(
             book.metadata(),
             &manifest_items,
             &spine_refs,
             cover_id.as_deref(),
+            titlepage_href,
         );
         zip.start_file("OEBPS/content.opf", deflated)
             .map_err(io_error)?;
         zip.write_all(opf.as_bytes())?;
 
-        // 5a. Write nav.xhtml (EPUB 3 navigation document)
+        // 6a. Write nav.xhtml (EPUB 3 navigation document)
         let nav = generate_nav(book.metadata(), book.toc(), book.landmarks());
         zip.start_file("OEBPS/nav.xhtml", deflated)
             .map_err(io_error)?;
         zip.write_all(nav.as_bytes())?;
 
-        // 5b. Write toc.ncx (legacy fallback for EPUB 2 readers)
+        // 6b. Write toc.ncx (legacy fallback for EPUB 2 readers)
         let ncx = generate_ncx(book.metadata(), book.toc());
         zip.start_file("OEBPS/toc.ncx", deflated)
             .map_err(io_error)?;
         zip.write_all(ncx.as_bytes())?;
 
-        // 6. Write unified stylesheet
+        // 6c. Write titlepage.xhtml when a cover was found.
+        if let Some(ref xhtml) = titlepage_xhtml {
+            zip.start_file("OEBPS/titlepage.xhtml", deflated)
+                .map_err(io_error)?;
+            zip.write_all(xhtml.as_bytes())?;
+        }
+
+        // 7. Write unified stylesheet
         if !content.css.is_empty() {
             zip.start_file("OEBPS/style.css", deflated)
                 .map_err(io_error)?;
             zip.write_all(content.css.as_bytes())?;
         }
 
-        // 7. Write synthesized chapters
+        // 8. Write synthesized chapters
         for (i, chapter) in content.chapters.iter().enumerate() {
             let zip_path = format!("OEBPS/chapter_{}.xhtml", i);
             zip.start_file(&zip_path, deflated).map_err(io_error)?;
             zip.write_all(chapter.document.as_bytes())?;
         }
 
-        // 8. Write assets (reuse the bytes we already loaded for MIME sniffing).
+        // 9. Write assets (reuse the bytes we already loaded for MIME sniffing).
         for (asset_path, bytes) in &asset_bytes {
             if bytes.is_empty() {
                 continue;
@@ -406,6 +490,7 @@ fn generate_opf(
     manifest: &[ManifestItem],
     spine_refs: &[String],
     cover_manifest_id: Option<&str>,
+    titlepage_href: Option<&str>,
 ) -> String {
     let mut opf = String::new();
 
@@ -657,6 +742,20 @@ fn generate_opf(
     }
     opf.push_str("  </spine>\n");
 
+    // `<guide>` cover reference — EPUB 2 holdover that Apple Books / Kindle /
+    // calibre still consult for the cover page in the reading flow (the
+    // `properties="cover-image"` on the manifest item only drives the library
+    // thumbnail). Emitted only when a titlepage.xhtml has been prepended to
+    // the spine; without that, the reader has nothing to point at.
+    if let Some(href) = titlepage_href {
+        opf.push_str("  <guide>\n");
+        opf.push_str(&format!(
+            "    <reference type=\"cover\" title=\"Cover\" href=\"{}\"/>\n",
+            escape_xml(href)
+        ));
+        opf.push_str("  </guide>\n");
+    }
+
     opf.push_str("</package>\n");
     opf
 }
@@ -857,6 +956,43 @@ fn escape_xml(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+/// Calibre-shaped `titlepage.xhtml` — an SVG `viewBox` sized to the cover
+/// image's pixel dimensions, with the cover JPEG/PNG referenced via
+/// `xlink:href`. Renders full-bleed in Apple Books / Kindle because the
+/// `viewBox` is self-contained CSS-wise (bypasses the reader's body margin
+/// defaults a plain `<img>` would inherit). `<meta name="calibre:cover">`
+/// flags this as the title page rather than first content page.
+///
+/// `cover_href` is the spine-doc-relative path to the cover image (e.g.
+/// `images/cover.jpg`). `w` / `h` come from a JPEG SOF / PNG IHDR probe.
+fn build_titlepage(cover_href: &str, w: u32, h: u32) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE html>\n\
+         <html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\">\n\
+         <head>\n\
+         <meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\"/>\n\
+         <meta name=\"calibre:cover\" content=\"true\"/>\n\
+         <title>Cover</title>\n\
+         <style type=\"text/css\" title=\"override_css\">\n\
+         @page {{padding: 0pt; margin:0pt}}\n\
+         body {{ text-align: center; padding:0pt; margin: 0pt; }}\n\
+         </style>\n\
+         </head>\n\
+         <body>\n\
+         <div>\n\
+         <svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" version=\"1.1\" width=\"100%\" height=\"100%\" viewBox=\"0 0 {w} {h}\" preserveAspectRatio=\"none\">\n\
+         <image width=\"{w}\" height=\"{h}\" xlink:href=\"{href}\"/>\n\
+         </svg>\n\
+         </div>\n\
+         </body>\n\
+         </html>\n",
+        w = w,
+        h = h,
+        href = escape_xml(cover_href),
+    )
 }
 
 /// 36-char `8-4-4-4-12` hex pattern. Used to decide whether `metadata.identifier`

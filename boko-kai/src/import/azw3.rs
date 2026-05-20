@@ -183,7 +183,13 @@ impl Importer for Azw3Importer {
                 )
             })?;
             let end = end.min(text.len());
-            return Ok(text[start..end].to_vec());
+            // Native Amazon stylesheets often chain-load each other via
+            // `@import url(kindle:flow:0001?mime=text/css);`. Rewriting those
+            // URLs to sibling-relative `styleNNNN.css` paths lets Apple Books
+            // resolve the import chain (otherwise the writing-mode / class
+            // rules in the imported sheet never load). Calibre-converted
+            // AZW3s don't carry such imports — the pass is a no-op for them.
+            return Ok(transform::rewrite_kindle_flow_in_css(&text[start..end]));
         }
 
         // Image: images/image_NNNN.ext
