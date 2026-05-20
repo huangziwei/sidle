@@ -316,10 +316,19 @@ pub struct MetadataContext<'a> {
     /// Book ID (stable per publication, derived from identifier).
     /// Format: 23-character URL-safe Base64.
     pub book_id: Option<String>,
-    /// ASIN — 32-char uppercase alphanumeric. For sideloaded files this is
-    /// what the Kindle library uses to key its on-disk cover thumbnail and
-    /// sleep-screen cover caches. content_id is mirrored from this value.
+    /// ASIN — real Amazon catalogue identifier. Only set when the source
+    /// carries a genuine ASIN (e.g. KFX → EPUB → KFX where the catalogue
+    /// value travelled in); never fabricated, because sidle's separate
+    /// cover-fetch path queries Amazon's catalogue and a fake value would
+    /// resolve to nothing.
     pub asin: Option<String>,
+    /// `content_id` — device-internal identifier Kindle uses to key the
+    /// per-book `.sdr` state directory (bookmarks, reading position,
+    /// navigation overlay). Distinct from ASIN: it never leaves the device
+    /// so it can be safely synthesized from the publication identifier.
+    /// Empty `content_id` is what breaks the in-book exit menu on
+    /// sideloaded PDOC titles.
+    pub content_id: Option<String>,
 }
 
 /// Generate a book ID from a publication identifier.
@@ -379,6 +388,26 @@ fn base64_url_encode(bytes: &[u8]) -> String {
     result
 }
 
+/// Generate a 32-char uppercase-alphanumeric `content_id` deterministically
+/// from the publication identifier. This is the **device-internal** key
+/// Kindle uses to name the per-book `.sdr` directory (bookmarks, reading
+/// position, navigation chrome). Same shape as an Amazon ASIN — Kindle's
+/// schema expects 32 chars from the Crockford-style alphabet — but the
+/// value is local-only and is never sent to Amazon. Sideloaded PDOC titles
+/// without a `content_id` lose their `.sdr` binding, which breaks the
+/// in-book exit menu on the device.
+pub fn generate_content_id(identifier: &str) -> String {
+    let digest = sha1_smol::Sha1::from(identifier.as_bytes()).digest().bytes();
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = String::with_capacity(32);
+    for byte in digest.iter().take(16) {
+        out.push(ALPHABET[((byte >> 4) & 0x1F) as usize] as char);
+        out.push(ALPHABET[(byte & 0x1F) as usize] as char);
+    }
+    debug_assert_eq!(out.len(), 32);
+    out
+}
+
 /// Build metadata entries for a category from the schema.
 ///
 /// This is a pure function that applies the schema rules to extract
@@ -424,9 +453,16 @@ pub fn build_category_entries(
                         // Book ID from context (derived from identifier)
                         ctx.book_id.clone().map(MetadataValue::Text)
                     }
-                    MetadataField::Asin | MetadataField::ContentId => {
-                        // Both fields mirror the same generated ASIN value.
+                    MetadataField::Asin => {
+                        // Passthrough only — never fabricated. Empty when the
+                        // source EPUB carries no ASIN.
                         ctx.asin.clone().map(MetadataValue::Text)
+                    }
+                    MetadataField::ContentId => {
+                        // Device-internal `.sdr` key. Always synthesized from
+                        // the identifier so PDOC sideloads have stable per-book
+                        // state. Decoupled from ASIN as of 2026-05-20.
+                        ctx.content_id.clone().map(MetadataValue::Text)
                     }
                     MetadataField::Author => {
                         // KFX uses a single `author` value with multiple authors
@@ -695,25 +731,39 @@ mod tests {
     }
 
     #[test]
-    fn test_asin_and_content_id_from_context() {
+    fn test_asin_and_content_id_are_independent() {
         let meta = Metadata {
             title: "Test".to_string(),
             language: "en".to_string(),
             ..Default::default()
         };
+        // Both populated: real ASIN passed through, synthesized content_id
+        // distinct from it. Common shape for KFX → EPUB → KFX where the
+        // source carried a catalogue ASIN.
         let ctx = MetadataContext {
-            asin: Some("ABCDEF0123456789ABCDEF0123456789".to_string()),
+            asin: Some("B0CPJ2B88T".to_string()),
+            content_id: Some("GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2".to_string()),
             ..Default::default()
         };
         let entries = build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx);
+        assert!(entries.iter().any(|(k, v)| *k == "ASIN" && v == "B0CPJ2B88T"));
         assert!(entries
             .iter()
-            .any(|(k, v)| *k == "ASIN" && v == "ABCDEF0123456789ABCDEF0123456789"));
-        assert!(entries
-            .iter()
-            .any(|(k, v)| *k == "content_id" && v == "ABCDEF0123456789ABCDEF0123456789"));
+            .any(|(k, v)| *k == "content_id" && v == "GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2"));
 
-        // Without ctx.asin, both fields should be omitted.
+        // content_id present, ASIN absent: typical PDOC sideload from an
+        // EPUB without a catalogue ASIN.
+        let ctx_pdoc = MetadataContext {
+            content_id: Some("GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2".to_string()),
+            ..Default::default()
+        };
+        let entries_pdoc =
+            build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx_pdoc);
+        assert!(!entries_pdoc.iter().any(|(k, _)| *k == "ASIN"));
+        assert!(entries_pdoc.iter().any(|(k, v)| *k == "content_id"
+            && v == "GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2"));
+
+        // Both absent (no identifier at all).
         let ctx_empty = MetadataContext::default();
         let entries_empty =
             build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx_empty);

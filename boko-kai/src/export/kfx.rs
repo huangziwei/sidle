@@ -684,23 +684,45 @@ fn build_book_metadata_fragment(
         None
     });
 
-    // Generate book_id from identifier (deterministic per publication)
+    // book_id: reuse `meta.identifier` if it already has the KFX shape (23-char
+    // URL-safe Base64). Otherwise derive deterministically. Reuse keeps the
+    // identifier stable across a KFX → EPUB → KFX round trip.
     let book_id = if !meta.identifier.is_empty() {
-        Some(generate_book_id(&meta.identifier))
+        if looks_like_kfx_book_id(&meta.identifier) {
+            Some(meta.identifier.clone())
+        } else {
+            Some(generate_book_id(&meta.identifier))
+        }
     } else {
         None
     };
 
-    // Mint a deterministic 32-char uppercase-alphanumeric ASIN keyed off the
-    // book's identifier. The Kindle library service uses this as the cache
-    // key for the cover thumbnail and sleep-screen art when cde_content_type
-    // is PDOC, so a stable value lets the device reuse a cached cover across
-    // re-exports of the same book.
-    let asin = if !meta.identifier.is_empty() {
-        Some(generate_asin(&meta.identifier))
-    } else {
-        None
-    };
+    // ASIN: pass through when the source carries a real Amazon catalogue
+    // value (10 chars, uppercase alphanumeric — the actual ASIN shape).
+    // Otherwise synthesize from the identifier so PDOC sideloads get a
+    // stable library-tile cover-cache key. Without ASIN the Kindle tile is
+    // blank even though the embedded cover image is intact.
+    //
+    // Sidle's separate Amazon-catalogue cover-fetch path is keyed on real
+    // ASINs only and rejects fabricated 32-char hashes (the predicate above
+    // is the same shape filter), so the synthesized value here doesn't
+    // pollute that lookup — it just acts as the on-device cache key.
+    let asin = meta
+        .asin
+        .as_deref()
+        .filter(|a| looks_like_real_amazon_asin(a))
+        .map(str::to_string)
+        .or_else(|| {
+            (!meta.identifier.is_empty())
+                .then(|| crate::kfx::metadata::generate_content_id(&meta.identifier))
+        });
+
+    // content_id mirrors ASIN (calibre convention). The device `.sdr`
+    // directory uses this as the per-book state key; matching ASIN means
+    // kfx-zip → kfx round-trips preserve the binding the user already has
+    // on the device. Schema keeps them as separate `MetadataContext` slots
+    // so future divergence is possible, but at write time they're equal.
+    let content_id = asin.clone();
 
     let meta_ctx = MetadataContext {
         version: Some(env!("CARGO_PKG_VERSION")),
@@ -708,6 +730,7 @@ fn build_book_metadata_fragment(
         asset_id: Some(container_id),
         book_id,
         asin,
+        content_id,
     };
 
     // Build each category using the schema. Order matches calibre's KFX:
@@ -762,25 +785,23 @@ fn metadata_kv(key: &str, value: &crate::kfx::metadata::MetadataValue) -> IonVal
     ])
 }
 
-/// Generate a 32-char uppercase-alphanumeric ASIN deterministically from the
-/// book's identifier. Calibre's KFX uses the same value for both `ASIN` and
-/// `content_id`; we mirror that by reading `MetadataField::ContentId` from
-/// the same context slot.
-fn generate_asin(identifier: &str) -> String {
-    let digest = sha1_smol::Sha1::from(identifier.as_bytes()).digest().bytes();
-    // Base32 (Crockford-style minus disallowed chars) is overkill; map each
-    // input nibble to one of 32 chars. SHA1 has 20 bytes = 40 nibbles, more
-    // than enough for the 32-char ASIN.
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let mut out = String::with_capacity(32);
-    for (i, byte) in digest.iter().enumerate().take(16) {
-        // Two chars per byte gives us 32 chars total — high nibble then low.
-        let _ = i;
-        out.push(ALPHABET[((byte >> 4) & 0x1F) as usize] as char);
-        out.push(ALPHABET[(byte & 0x1F) as usize] as char);
-    }
-    debug_assert_eq!(out.len(), 32);
-    out
+// KFX book_id shape: 23 chars, URL-safe Base64 alphabet. Matches what
+// `generate_book_id` emits, so reusing a passthrough value is safe.
+fn looks_like_kfx_book_id(s: &str) -> bool {
+    s.len() == 23
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Real Amazon catalogue ASINs are 10 characters, uppercase alphanumeric
+/// (no lowercase, no symbols). A boko-synthesized fallback is 32 chars of
+/// Crockford-style Base32 — distinguishable by length alone. We use this
+/// predicate to decide whether `meta.asin` is genuine (passthrough) or a
+/// stale fabricated value from a previous round-trip (regenerate fresh).
+fn looks_like_real_amazon_asin(s: &str) -> bool {
+    s.len() == 10
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
 /// Build the content features fragment ($585).
