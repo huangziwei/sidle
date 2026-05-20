@@ -4,6 +4,7 @@ mod commands;
 mod cover_fetch;
 mod device;
 mod queue;
+mod server;
 mod state;
 
 // The on-disk library — db, paths, import pipeline — lives in `sidle-core`
@@ -45,6 +46,9 @@ pub fn run() {
             commands::device::device_list_ours,
             commands::device::device_send,
             commands::device::device_delete,
+            commands::server::server_status,
+            commands::server::server_start,
+            commands::server::server_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

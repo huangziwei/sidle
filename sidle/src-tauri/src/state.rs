@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use crate::device::monitor::{self, DeviceState};
 use crate::library::{LibraryPaths, db};
 use crate::queue::{self, QueueHandle};
+use crate::server::ServerHandle;
 
 pub type DbHandle = Arc<Mutex<Connection>>;
 
@@ -26,6 +27,7 @@ pub struct AppState {
     pub paths: LibraryPaths,
     pub queue: QueueHandle,
     pub device: DeviceState,
+    pub server: ServerHandle,
 }
 
 impl AppState {
@@ -74,6 +76,7 @@ impl AppState {
             paths,
             queue,
             device,
+            server: ServerHandle::default(),
         })
     }
 }

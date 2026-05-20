@@ -126,6 +126,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireContextMenu();
   wireQueueDrawer();
   wireDevice();
+  wireServer();
   // Header interactions (sort, resize, drag-to-reorder, visibility menu)
   // are wired by renderList() itself since the thead is rebuilt on every
   // render — no separate boot call needed.
@@ -136,6 +137,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   await refresh();
   subscribeStatus();
   subscribeDeviceStatus();
+  refreshServerStatus();
   subscribeSendProgress();
   subscribePullProgress();
   subscribeLibraryRowUpdated();
@@ -2494,4 +2496,75 @@ function subscribeLibraryRowUpdated() {
     }
     render();
   });
+}
+
+// ---------------------------------------------------------------------------
+// LAN server toggle (device popover)
+// ---------------------------------------------------------------------------
+
+function wireServer() {
+  $("#btn-server-toggle").addEventListener("click", () => toggleServer());
+  $("#server-token").addEventListener("click", () => copyServerToken());
+}
+
+async function refreshServerStatus() {
+  try {
+    const s = await window.api.invoke("server_status");
+    updateServerUI(s);
+  } catch (e) {
+    console.error("server_status failed:", e);
+  }
+}
+
+async function toggleServer() {
+  const btn = $("#btn-server-toggle");
+  btn.disabled = true;
+  try {
+    const running = btn.dataset.running === "1";
+    const cmd = running ? "server_stop" : "server_start";
+    const s = await window.api.invoke(cmd);
+    updateServerUI(s);
+  } catch (e) {
+    showToast(`server toggle failed: ${e}`, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function updateServerUI(s) {
+  const label = $("#server-status-label");
+  const btn = $("#btn-server-toggle");
+  const fields = $("#server-fields");
+  const portCell = $("#server-port");
+  const tokenBtn = $("#server-token");
+  if (s?.running) {
+    label.className = "server-status-label on";
+    label.textContent = "On";
+    btn.textContent = "Stop serving";
+    btn.dataset.running = "1";
+    fields.hidden = false;
+    portCell.textContent = String(s.port ?? s.default_port);
+    tokenBtn.textContent = s.token || "—";
+    tokenBtn.dataset.token = s.token || "";
+  } else {
+    label.className = "server-status-label off";
+    label.textContent = "Off";
+    btn.textContent = `Start serving on port ${s?.default_port ?? 8731}`;
+    btn.dataset.running = "0";
+    fields.hidden = true;
+    portCell.textContent = "—";
+    tokenBtn.textContent = "—";
+    tokenBtn.dataset.token = "";
+  }
+}
+
+async function copyServerToken() {
+  const token = $("#server-token").dataset.token || "";
+  if (!token) return;
+  try {
+    await navigator.clipboard.writeText(token);
+    showToast("token copied");
+  } catch (e) {
+    showToast(`copy failed: ${e}`, true);
+  }
 }

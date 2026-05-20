@@ -4392,6 +4392,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sidle-core",
+ "sidle-server",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -4400,6 +4401,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "zip",
 ]
 

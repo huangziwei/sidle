@@ -58,6 +58,7 @@ pub async fn serve(config: Config) -> Result<()> {
     };
 
     let app = Router::new()
+        .route("/", get(health))
         .route("/list.json", get(list_json))
         .route("/get/{id}", get(get_book))
         .route("/cover/{id}", get(get_cover))
@@ -122,6 +123,25 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Unauthenticated liveness page. Browsers hitting `http://host:port/`
+/// otherwise see a blank 404 — this gives a clear "yes, it's up" without
+/// leaking any library content. The real endpoints stay token-gated.
+async fn health() -> Response {
+    let body = concat!(
+        "sidle-server up.\n\n",
+        "Endpoints (require X-Sidle-Token header):\n",
+        "  GET /list.json     — library as JSON\n",
+        "  GET /get/{id}      — book .kfx bytes\n",
+        "  GET /cover/{id}    — cover image\n",
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    (headers, body).into_response()
 }
 
 fn open_db(paths: &LibraryPaths) -> Result<Connection, StatusCode> {

@@ -47,6 +47,23 @@
           <p id="device-tip" class="device-tip" hidden></p>
           <ul id="device-sent-list" class="device-sent-list" aria-label="Books on device"></ul>
           <div id="device-empty" class="device-empty">Nothing sent yet.</div>
+
+          <section class="server-section" aria-label="LAN server">
+            <header class="server-section-header">
+              <strong>LAN server</strong>
+              <span id="server-status-label" class="server-status-label off">Off</span>
+            </header>
+            <div class="server-actions">
+              <button type="button" id="btn-server-toggle" class="btn-link">Start serving</button>
+            </div>
+            <dl class="server-fields" id="server-fields" hidden>
+              <dt>Port</dt><dd id="server-port">—</dd>
+              <dt>Token</dt>
+              <dd>
+                <button type="button" id="server-token" class="server-token" title="Click to copy">—</button>
+              </dd>
+            </dl>
+          </section>
         </div>
       </div>
 

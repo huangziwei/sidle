@@ -616,6 +616,67 @@ button {
   display: none;
 }
 
+.server-section {
+  border-top: 1px solid var(--border);
+}
+
+.server-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px 4px;
+}
+
+.server-status-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.server-status-label.on {
+  color: #6fb361;
+}
+
+.server-actions {
+  padding: 4px 14px 10px;
+  font-size: 12px;
+}
+
+.server-fields {
+  margin: 0;
+  padding: 0 14px 12px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 12px;
+  row-gap: 6px;
+  font-size: 12px;
+}
+
+.server-fields dt {
+  color: var(--muted);
+}
+
+.server-fields dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+.server-token {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  word-break: break-all;
+}
+
+.server-token:hover {
+  color: var(--accent);
+}
+
 /* Views */
 
 #main {
