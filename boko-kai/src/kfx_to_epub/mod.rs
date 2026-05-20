@@ -163,6 +163,31 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
         &content_state.element_id_to_filename,
         &content_state.anchors,
     );
+    // When we synthesized a `titlepage.xhtml` wrapper above, repoint the
+    // cover guide reference at it (calibre's convention; see
+    // `ref/calibre-mobi-output/transforms/...`). KFX's CoverPage landmark
+    // targets the first content chapter, but the cover the reader actually
+    // *sees* is our titlepage SVG wrapper. Apple Books reads the guide
+    // `type="cover"` href to render the cover page; without this rewrite
+    // it ends up rendering c0.xhtml's first paragraph instead of the
+    // cover image.
+    if out.has_file("titlepage.xhtml") {
+        if let Some(cover_ref) = out.guide.iter_mut().find(|g| g.guide_type == "cover") {
+            cover_ref.href = "titlepage.xhtml".to_string();
+            if cover_ref.label.is_empty() {
+                cover_ref.label = "Cover".to_string();
+            }
+        } else {
+            out.guide.insert(
+                0,
+                navigation::GuideRef {
+                    guide_type: "cover".to_string(),
+                    label: "Cover".to_string(),
+                    href: "titlepage.xhtml".to_string(),
+                },
+            );
+        }
+    }
     trace.mark("navigation::extract_landmarks");
 
     // Page-progression-direction comes from the document_data extractor in
