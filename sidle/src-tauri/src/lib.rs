@@ -1,10 +1,15 @@
 //! sidle desktop app — library + KFX conversion + (later) Kindle sync.
 
 mod commands;
+mod cover_fetch;
 mod device;
-mod library;
 mod queue;
 mod state;
+
+// The on-disk library — db, paths, import pipeline — lives in `sidle-core`
+// so the LAN server crate can share it without pulling Tauri. Re-bind as
+// `crate::library` so the existing `use crate::library::...` sites keep working.
+use sidle_core::library;
 
 use tauri::Manager;
 

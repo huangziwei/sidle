@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use tauri::AppHandle;
 
+use crate::cover_fetch;
 use crate::library::LibraryPaths;
-use crate::library::cover_fetch;
 use crate::library::db::{self, BookRow};
 use crate::library::epub_cover;
 use crate::library::import::{extract_cover_from_epub, write_bytes_atomic};

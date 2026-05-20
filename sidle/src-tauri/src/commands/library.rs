@@ -9,7 +9,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::oneshot;
 
-use crate::library::cover_fetch;
+use crate::cover_fetch;
 use crate::library::db::{self, BookRow};
 use crate::library::epub_cover;
 use crate::library::import::{self, ImportOutcome};

@@ -41,6 +41,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 
 boko-kai = { path = "../../boko-kai", default-features = false }
+sidle-core = { path = "../core" }
 
 # Pure-Rust MTP transport for Scribe and other 2024+ Kindles that dropped USB
 # mass storage. Pinned exact (young crate, recent API churn) — bump
