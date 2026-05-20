@@ -579,6 +579,16 @@ fn generate_opf(
         ));
     }
 
+    // primary-writing-mode hint for vertical-RTL / vertical-LR books. Apple
+    // Books, ADE and the Kindle apps read this to switch the reader into
+    // vertical pagination mode. Calibre emits the same meta from EXTH 525.
+    if let Some(ref pwm) = metadata.primary_writing_mode {
+        opf.push_str(&format!(
+            "    <meta name=\"primary-writing-mode\" content=\"{}\"/>\n",
+            escape_xml(pwm)
+        ));
+    }
+
     opf.push_str("  </metadata>\n");
 
     // Manifest

@@ -94,6 +94,11 @@ pub struct Metadata {
     /// OPF spine `page-progression-direction` attribute ("ltr" | "rtl" | "default").
     /// Required for vertical-RTL Japanese books to bind/swipe correctly on Kindle.
     pub page_progression_direction: Option<String>,
+    /// OPF `<meta name="primary-writing-mode">` value (e.g. "vertical-rl",
+    /// "vertical-lr"). Richer vocabulary than `page_progression_direction`:
+    /// distinguishes Japanese vertical-rl from Mongolian vertical-lr, which
+    /// share a `rtl` PPD but render differently.
+    pub primary_writing_mode: Option<String>,
 }
 
 /// A table of contents entry (hierarchical)

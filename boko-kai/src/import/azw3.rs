@@ -750,6 +750,26 @@ fn build_metadata(
             .or_else(|| exth.asin.clone())
             .or_else(|| exth.source.clone())
             .unwrap_or_default();
+        // Writing-mode signals (EXTH 525 / 527). Both calibre-exported AZW3s
+        // and native Amazon AZW3s carry these; no fallback to inline HTML
+        // class needed. Calibre's `reader/headers.py:96-108` is the spec.
+        metadata.primary_writing_mode = exth.primary_writing_mode.clone();
+        metadata.page_progression_direction = exth
+            .page_progression_direction
+            .clone()
+            // Calibre derives PPD from writing-mode when EXTH 527 is absent:
+            // anything ending `-rl` is RTL pagination.
+            .or_else(|| {
+                exth.primary_writing_mode.as_deref().and_then(|pwm| {
+                    if pwm.ends_with("-rl") {
+                        Some("rtl".to_string())
+                    } else if pwm.ends_with("-lr") {
+                        Some("ltr".to_string())
+                    } else {
+                        None
+                    }
+                })
+            });
     }
 
     metadata
