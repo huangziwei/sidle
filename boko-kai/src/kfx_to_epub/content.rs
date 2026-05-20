@@ -46,8 +46,8 @@ pub struct ContentState<'a> {
     /// same inline-style declaration appears on N elements. Each entry is
     /// `(class_name, decl)`; emitted as `.<class_name> { ... }` by
     /// `emit_stylesheet`. Kept separate from `stylesheet` because the keys
-    /// in the latter are KFX style names (emitted bare), whereas generated
-    /// classes use a `g<N>` prefix.
+    /// in the latter are KFX style names (emitted as `.s_<name>`), whereas
+    /// generated classes use a `g<N>` prefix.
     pub generated_classes: Vec<(String, CssDecl)>,
 
     /// Output book parts: filename → DOM. Insertion-ordered.
@@ -216,17 +216,17 @@ impl<'a> ContentState<'a> {
     }
 
     fn link_stylesheet(&mut self, part_index: usize) {
-        // Synthesized `style.css` — the only stylesheet on the EPUB side.
-        // Plain sibling filename; both chapters and the stylesheet live in
-        // `OEBPS/`. The earlier `../OEBPS/style.css` resolved mathematically
-        // but tripped Apple Books (silently declined to load), so a sibling
-        // reference is the correct resolution.
         let part = &mut self.book_parts[part_index];
-        let head_id = part.head_id;
-        let link = part.dom.sub_element(head_id, "link");
+        let link = part.dom.sub_element(part.head_id, "link");
         let l = part.dom.get_mut(link);
         l.set("rel", "stylesheet");
         l.set("type", "text/css");
+        // Plain filename: the chapter lives in `OEBPS/`, the stylesheet is
+        // also bundled in `OEBPS/`, so a sibling reference is the correct
+        // resolution. The earlier `../OEBPS/style.css` resolved to the same
+        // file mathematically but tripped Apple Books (which silently
+        // declined to load it), leaving the body without
+        // `writing-mode: vertical-rl` — pages then rendered horizontal.
         l.set("href", "style.css");
     }
 
@@ -888,15 +888,7 @@ impl<'a> ContentState<'a> {
         style_name: &Option<String>,
         fields: &[(u64, IonValue)],
     ) {
-        // 1. Style-name class. The class name we emit is the KFX style
-        // symbol verbatim (sanitized to CSS-safe chars). Calibre adds an
-        // `s_` prefix here; we don't — boko's exporter has already chosen
-        // a single-token symbol name (a real source class like `bold` /
-        // `vrtl`, or a synthesized `s<N>` fallback), and prefixing it
-        // would defeat the round-trip identity work in
-        // `StyleRegistry::register_with_hint`. Source EPUBs almost never
-        // ship names that collide with the synthesized `s<N>` shape, and
-        // when they do the registry's `taken_names` set keeps them apart.
+        // 1. Style-name class.
         if let Some(name) = style_name {
             let decl = properties::style_decl_for(name, self.book);
             if !decl.is_empty() {
@@ -908,7 +900,7 @@ impl<'a> ContentState<'a> {
                     .element_classes
                     .entry(elem_id)
                     .or_default()
-                    .push(safe_class_name(name));
+                    .push(format!("s_{}", safe_class_name(name)));
             }
             // Layout hints + heading level — drive the `<div>` → `<h<N>>`
             // promotion in `consolidate_html`. Not emitted as CSS (calibre
@@ -918,29 +910,6 @@ impl<'a> ContentState<'a> {
                 self.book_parts[part_index]
                     .element_layout_hints
                     .insert(elem_id, (hints, level));
-            }
-        }
-        // 1b. Layout hints + heading level can also be carried inline on the
-        // content element's outer fields rather than on a named style entity.
-        // boko's `export::kfx` writes them this way (storyline.rs adds
-        // `$761 layout_hints` and `$790 yj.semantics.heading_level` to
-        // `outer_fields`), so on a boko→boko roundtrip the named-style path
-        // above never fires. Merge with anything from the named style so
-        // both sources contribute.
-        let (inline_hints, inline_level) =
-            properties::layout_hints_from_element_fields(fields, &self.book.symbols);
-        if !inline_hints.is_empty() || inline_level.is_some() {
-            let entry = self.book_parts[part_index]
-                .element_layout_hints
-                .entry(elem_id)
-                .or_default();
-            for h in inline_hints {
-                if !entry.0.iter().any(|existing| existing == &h) {
-                    entry.0.push(h);
-                }
-            }
-            if entry.1.is_none() {
-                entry.1 = inline_level;
             }
         }
         // 2. Inline content properties (writing-mode, etc.).
@@ -1435,70 +1404,6 @@ pub fn consolidate_html(state: &mut ContentState) {
     }
 }
 
-/// Replace EOL characters (`\n` / `\r` / ` ` / ` `) inside
-/// element text or tail with explicit `<br/>` elements. Mirrors calibre's
-/// `replace_eol_with_br` (yj_to_epub_content.py:1720). KFX text content
-/// carries forced line breaks as raw EOL characters; without this pass
-/// they get collapsed by HTML whitespace rules and the source `<br/>`s
-/// disappear from the rendered output.
-///
-/// Restart the per-part scan after each split because (a) the newly
-/// created `<br/>`'s tail may itself contain more EOLs, (b) the
-/// in-place insertion shifts indices.
-pub fn replace_eol_with_br(state: &mut ContentState) {
-    const EOL_CHARS: &[char] = &['\n', '\r', '\u{2028}', '\u{2029}'];
-    for part in &mut state.book_parts {
-        loop {
-            let n = part.dom.len();
-            let mut changed = false;
-            for id in 0..n {
-                // Element text — split at the first EOL, insert `<br/>` as
-                // the new first child, drop the EOL.
-                if let Some(text) = part.dom.get(id).text.clone()
-                    && let Some(idx) = text.find(EOL_CHARS)
-                {
-                    let (head, rest) = text.split_at(idx);
-                    let head = head.to_string();
-                    let tail = rest.chars().skip(1).collect::<String>();
-                    let br = part.dom.create_element("br");
-                    part.dom.get_mut(br).tail = if tail.is_empty() { None } else { Some(tail) };
-                    part.dom.get_mut(id).text =
-                        if head.is_empty() { None } else { Some(head) };
-                    part.dom.insert(id, 0, br);
-                    changed = true;
-                    break;
-                }
-                // Element tail — split, insert `<br/>` as the next sibling.
-                if let Some(tail_text) = part.dom.get(id).tail.clone()
-                    && let Some(idx) = tail_text.find(EOL_CHARS)
-                {
-                    let parent = match part.dom.get(id).parent {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    let pos = match part.dom.child_index(parent, id) {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    let (head, rest) = tail_text.split_at(idx);
-                    let head = head.to_string();
-                    let tail = rest.chars().skip(1).collect::<String>();
-                    let br = part.dom.create_element("br");
-                    part.dom.get_mut(br).tail = if tail.is_empty() { None } else { Some(tail) };
-                    part.dom.get_mut(id).tail =
-                        if head.is_empty() { None } else { Some(head) };
-                    part.dom.insert(parent, pos + 1, br);
-                    changed = true;
-                    break;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-    }
-}
-
 /// After all chapters are emitted, fold per-element classes + inline styles
 /// back onto the DOM as actual `class=` / `style=` attributes.
 /// Rewrite `<a href="anchor:NAME">` placeholders emitted by `$179 link_to`
@@ -1711,7 +1616,7 @@ pub fn emit_stylesheet(state: &ContentState) -> String {
         if decl.is_empty() {
             continue;
         }
-        s.push_str(&format!(".{} {{ {} }}\n", safe_class_name(k), decl.to_inline()));
+        s.push_str(&format!(".s_{} {{ {} }}\n", safe_class_name(k), decl.to_inline()));
     }
     // Auto-generated classes from `fixup_styles_and_classes` (inline →
     // class dedupe). Emit in insertion order so class names stay stable

@@ -464,17 +464,7 @@ impl KfxImporter {
 
                                 match key {
                                     "title" => self.metadata.title = value.to_string(),
-                                    "author" => {
-                                        // calibre joins multiple authors with " & " in a
-                                        // single `author` field (yj_metadata.py:209) and
-                                        // splits on "&" when reading back. Mirror that.
-                                        for part in value.split('&') {
-                                            let trimmed = part.trim();
-                                            if !trimmed.is_empty() {
-                                                self.metadata.authors.push(trimmed.to_string());
-                                            }
-                                        }
-                                    }
+                                    "author" => self.metadata.authors.push(value.to_string()),
                                     "publisher" => {
                                         self.metadata.publisher = Some(value.to_string())
                                     }

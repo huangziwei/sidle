@@ -25,16 +25,6 @@ pub mod role_map;
 mod transform;
 mod tree_sink;
 
-// CSS Text 3 §3 collapsible-whitespace set — narrower than `char::is_whitespace`,
-// which would collapse U+3000 IDEOGRAPHIC SPACE and break JP paragraph indents.
-pub(crate) fn is_html_whitespace(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | '\x0C' | '\r')
-}
-
-pub(crate) fn is_html_whitespace_only(text: &str) -> bool {
-    text.chars().all(is_html_whitespace)
-}
-
 pub use arena::{ArenaDom, ArenaNode, ArenaNodeData, ArenaNodeId};
 pub use element_ref::{BokoSelectors, ElementRef};
 pub use optimize::optimize;

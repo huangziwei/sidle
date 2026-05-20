@@ -873,25 +873,11 @@ impl ExportContext {
 
     /// Register an IR style and return its KFX style symbol.
     pub fn register_ir_style(&mut self, ir_style: &crate::style::ComputedStyle) -> u64 {
-        self.register_ir_style_with_hint(ir_style, None)
-    }
-
-    /// Register an IR style with an optional source-class hint.
-    ///
-    /// The hint is the originating element's `class` attribute string. The
-    /// registry will use it as the KFX style symbol if it's a single valid
-    /// identifier and not already taken. See `StyleRegistry::register_with_hint`.
-    pub fn register_ir_style_with_hint(
-        &mut self,
-        ir_style: &crate::style::ComputedStyle,
-        class_hint: Option<&str>,
-    ) -> u64 {
         let schema = crate::kfx::style_schema::StyleSchema::standard();
         let mut builder = crate::kfx::style_registry::StyleBuilder::new(schema);
         builder.ingest_ir_style(ir_style);
         let kfx_style = builder.build();
-        self.style_registry
-            .register_with_hint(kfx_style, class_hint, &mut self.symbols)
+        self.style_registry.register(kfx_style, &mut self.symbols)
     }
 
     /// Register an IR style by StyleId.
@@ -900,22 +886,12 @@ impl ExportContext {
         style_id: StyleId,
         style_pool: &crate::style::StylePool,
     ) -> u64 {
-        self.register_style_id_with_hint(style_id, style_pool, None)
-    }
-
-    /// Register an IR style by StyleId with an optional source-class hint.
-    pub fn register_style_id_with_hint(
-        &mut self,
-        style_id: StyleId,
-        style_pool: &crate::style::StylePool,
-        class_hint: Option<&str>,
-    ) -> u64 {
         if style_id == StyleId::DEFAULT {
             return self.default_style_symbol;
         }
 
         if let Some(ir_style) = style_pool.get(style_id) {
-            self.register_ir_style_with_hint(ir_style, class_hint)
+            self.register_ir_style(ir_style)
         } else {
             self.default_style_symbol
         }

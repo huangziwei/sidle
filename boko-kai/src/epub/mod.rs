@@ -3,6 +3,5 @@
 mod parser;
 
 pub use parser::{
-    OpfData, parse_container_xml, parse_nav_landmarks, parse_ncx, parse_opf,
-    parse_opf_guide, strip_bom,
+    OpfData, parse_container_xml, parse_nav_landmarks, parse_ncx, parse_opf, strip_bom,
 };

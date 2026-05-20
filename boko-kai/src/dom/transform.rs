@@ -3,7 +3,6 @@
 use super::arena::{ArenaDom, ArenaNodeData, ArenaNodeId};
 use super::element_ref::ElementRef;
 use super::role_map::element_to_role;
-use super::{is_html_whitespace, is_html_whitespace_only};
 use crate::model::{Chapter, Node, NodeId, Role};
 use crate::style::{ComputedStyle, Display, Origin, Stylesheet, WhiteSpace, compute_styles};
 
@@ -130,7 +129,8 @@ impl<'a> TransformContext<'a> {
 
         match &node.data {
             ArenaNodeData::Text(text) => {
-                if is_html_whitespace_only(text) {
+                // Handle whitespace-only text nodes
+                if text.trim().is_empty() {
                     // Whitespace between inline elements should be preserved as a single space.
                     // We preserve whitespace unless:
                     // 1. We're at the root level (no parent style)
@@ -278,23 +278,16 @@ impl<'a> TransformContext<'a> {
                                 self.chapter.semantics.set_col_span(ir_id, span);
                             }
                         }
-                        // Class attribute: store verbatim so EPUB → KFX → EPUB
-                        // round-trips can preserve source class names instead
-                        // of synthesizing `sN`. For code/pre we also extract
-                        // the `language-xxx` / `lang-xxx` hint into the
-                        // dedicated `language` semantic.
-                        "class" => {
-                            self.chapter.semantics.set_class(ir_id, &attr.value);
-                            if matches!(name.local.as_ref(), "code" | "pre") {
-                                for class in attr.value.split_whitespace() {
-                                    if let Some(lang) = class.strip_prefix("language-") {
-                                        self.chapter.semantics.set_language(ir_id, lang);
-                                        break;
-                                    }
-                                    if let Some(lang) = class.strip_prefix("lang-") {
-                                        self.chapter.semantics.set_language(ir_id, lang);
-                                        break;
-                                    }
+                        // Extract language from class for code elements
+                        "class" if matches!(name.local.as_ref(), "code" | "pre") => {
+                            for class in attr.value.split_whitespace() {
+                                if let Some(lang) = class.strip_prefix("language-") {
+                                    self.chapter.semantics.set_language(ir_id, lang);
+                                    break;
+                                }
+                                if let Some(lang) = class.strip_prefix("lang-") {
+                                    self.chapter.semantics.set_language(ir_id, lang);
+                                    break;
                                 }
                             }
                         }
@@ -324,16 +317,21 @@ pub fn transform(dom: &ArenaDom, stylesheets: &[(Stylesheet, Origin)]) -> Chapte
     ctx.transform()
 }
 
+/// Normalize whitespace in text content according to HTML rules.
+///
+/// Collapses runs of whitespace (spaces, tabs, newlines) to single spaces.
+/// This matches standard HTML text content normalization.
 fn normalize_whitespace(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut prev_was_whitespace = false;
 
     for c in text.chars() {
-        if is_html_whitespace(c) {
+        if c.is_whitespace() {
             if !prev_was_whitespace {
                 result.push(' ');
                 prev_was_whitespace = true;
             }
+            // Skip consecutive whitespace
         } else {
             result.push(c);
             prev_was_whitespace = false;

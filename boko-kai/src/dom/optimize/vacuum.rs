@@ -89,8 +89,9 @@ fn should_vacuum(chapter: &Chapter, node_id: NodeId) -> bool {
         return true; // Empty text nodes can always be vacuumed
     }
 
+    // Check if content is whitespace-only
     let text = chapter.text(node.text);
-    crate::dom::is_html_whitespace_only(text)
+    text.trim().is_empty()
 }
 
 #[cfg(test)]

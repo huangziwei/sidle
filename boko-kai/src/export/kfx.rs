@@ -684,23 +684,23 @@ fn build_book_metadata_fragment(
         None
     });
 
-    // book_id: reuse `meta.identifier` if it already has the KFX shape (23-char
-    // URL-safe Base64). Otherwise derive deterministically. Reuse keeps the
-    // identifier stable across a KFX → EPUB → KFX round trip.
+    // Generate book_id from identifier (deterministic per publication)
     let book_id = if !meta.identifier.is_empty() {
-        if looks_like_kfx_book_id(&meta.identifier) {
-            Some(meta.identifier.clone())
-        } else {
-            Some(generate_book_id(&meta.identifier))
-        }
+        Some(generate_book_id(&meta.identifier))
     } else {
         None
     };
 
-    // ASIN: pass through the source value. Never synthesize — ASIN is a real
-    // Amazon catalog identifier and a fabricated one would be indistinguishable
-    // from a genuine value once persisted.
-    let asin = meta.asin.as_deref().filter(|a| !a.is_empty()).map(str::to_string);
+    // Mint a deterministic 32-char uppercase-alphanumeric ASIN keyed off the
+    // book's identifier. The Kindle library service uses this as the cache
+    // key for the cover thumbnail and sleep-screen art when cde_content_type
+    // is PDOC, so a stable value lets the device reuse a cached cover across
+    // re-exports of the same book.
+    let asin = if !meta.identifier.is_empty() {
+        Some(generate_asin(&meta.identifier))
+    } else {
+        None
+    };
 
     let meta_ctx = MetadataContext {
         version: Some(env!("CARGO_PKG_VERSION")),
@@ -762,12 +762,25 @@ fn metadata_kv(key: &str, value: &crate::kfx::metadata::MetadataValue) -> IonVal
     ])
 }
 
-// KFX book_id shape: 23 chars, URL-safe Base64 alphabet. Matches what
-// `generate_book_id` emits, so reusing a passthrough value is safe.
-fn looks_like_kfx_book_id(s: &str) -> bool {
-    s.len() == 23
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+/// Generate a 32-char uppercase-alphanumeric ASIN deterministically from the
+/// book's identifier. Calibre's KFX uses the same value for both `ASIN` and
+/// `content_id`; we mirror that by reading `MetadataField::ContentId` from
+/// the same context slot.
+fn generate_asin(identifier: &str) -> String {
+    let digest = sha1_smol::Sha1::from(identifier.as_bytes()).digest().bytes();
+    // Base32 (Crockford-style minus disallowed chars) is overkill; map each
+    // input nibble to one of 32 chars. SHA1 has 20 bytes = 40 nibbles, more
+    // than enough for the 32-char ASIN.
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = String::with_capacity(32);
+    for (i, byte) in digest.iter().enumerate().take(16) {
+        // Two chars per byte gives us 32 chars total — high nibble then low.
+        let _ = i;
+        out.push(ALPHABET[((byte >> 4) & 0x1F) as usize] as char);
+        out.push(ALPHABET[(byte & 0x1F) as usize] as char);
+    }
+    debug_assert_eq!(out.len(), 32);
+    out
 }
 
 /// Build the content features fragment ($585).
@@ -1470,14 +1483,8 @@ fn build_cover_storyline(chapter: &Chapter, ctx: &mut ExportContext) -> IonValue
                 let resource_name = ctx.resource_registry.get_or_create_name(src);
                 let resource_name_symbol = ctx.symbols.get_or_intern(&resource_name);
 
-                // Register style and get symbol. Cover image often has a
-                // distinctive source class like `p-cover` — passing it as a
-                // hint keeps that name in the KFX style symbol table.
-                let style_symbol = ctx.register_style_id_with_hint(
-                    node.style,
-                    &chapter.styles,
-                    chapter.semantics.class(node_id),
-                );
+                // Register style and get symbol
+                let style_symbol = ctx.register_style_id(node.style, &chapter.styles);
 
                 // Generate unique container ID
                 let container_id = ctx.fragment_ids.next_id();
@@ -1744,7 +1751,7 @@ fn build_external_resource_fragment(
         ));
     }
 
-    // mime type for images. For non-image assets the helper returns None.
+    // mime type for images
     if let Some(mime) = crate::util::detect_mime_type(href, data) {
         fields.push((KfxSymbol::Mime as u64, IonValue::String(mime.to_string())));
     }
@@ -2231,11 +2238,7 @@ fn detect_format_symbol(href: &str, data: &[u8]) -> u64 {
     format_to_kfx_symbol(format)
 }
 
-/// Check if a path is a media asset (image, font) that should travel
-/// through KFX as an `external_resource`. CSS does **not** belong here —
-/// KFX styles live in `$style` entities, not stylesheets. A KFX with a
-/// CSS `external_resource` (format=Jpg fallback) poisons Kindle's
-/// resource table.
+/// Check if a path is a media asset (image, font, etc.)
 fn is_media_asset(path: &std::path::Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(

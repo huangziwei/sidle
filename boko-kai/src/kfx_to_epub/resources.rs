@@ -426,7 +426,6 @@ fn build_image_filename(location: &str, format: &str, out: &EpubOutput) -> Strin
     candidate
 }
 
-
 /// Scaffolding for phase 1 step 1's validator gate. Emits one minimal XHTML
 /// chapter per bundled image so the validator sees an `<img src>` for each.
 /// Replaced by the real content pipeline in step 4.

@@ -84,13 +84,6 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
     // `class=` / `style=` the original `<div>` accumulated.
     content::consolidate_html(&mut content_state);
     trace.mark("content::consolidate_html");
-    // EOL → `<br/>` (calibre `yj_to_epub_content.py:1720`). Must run AFTER
-    // `consolidate_html` so the div→p promotion sees the original text
-    // shape and isn't fooled by inserted `<br/>` block-children. KFX
-    // encodes forced line breaks as raw `\n` inside text segments; without
-    // this pass HTML whitespace collapse silently eats them.
-    content::replace_eol_with_br(&mut content_state);
-    trace.mark("content::replace_eol_with_br");
     // Drop declarations that match their CSS spec default (calibre's
     // `simplify_styles` — minimal port). Has to run before
     // `fixup_styles_and_classes` so the dedupe counts identical
@@ -153,16 +146,6 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
         out.ncx_navmap = Some(navigation::render_navmap(&toc));
     }
     trace.mark("navigation::extract_toc");
-
-    // OPF `<guide>` from `nav_type=landmarks` containers (calibre's
-    // `add_guide_entry` path). EPUB 2.0 readers (Apple Books, Kindle)
-    // surface these as Cover / Table of Contents / Start Reading shortcuts.
-    out.guide = navigation::extract_landmarks(
-        &book,
-        &content_state.element_id_to_filename,
-        &content_state.anchors,
-    );
-    trace.mark("navigation::extract_landmarks");
 
     // Page-progression-direction comes from the document_data extractor in
     // content.rs (calibre's `yj_to_epub_metadata.py:108+131`). Propagate to

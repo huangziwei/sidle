@@ -449,12 +449,16 @@ fn generate_opf(
         opf.push_str("    <dc:identifier id=\"BookId\">urn:uuid:00000000-0000-0000-0000-000000000000</dc:identifier>\n");
     }
 
-    // dcterms:modified (required for EPUB 3) — stamp conversion time, not the
-    // source value. See [[feedback-modified-date-is-conversion-time]].
-    opf.push_str(&format!(
-        "    <meta property=\"dcterms:modified\">{}</meta>\n",
-        escape_xml(&crate::util::time_now_iso8601_utc())
-    ));
+    // dcterms:modified (required for EPUB3)
+    if let Some(ref modified) = metadata.modified_date {
+        opf.push_str(&format!(
+            "    <meta property=\"dcterms:modified\">{}</meta>\n",
+            escape_xml(modified)
+        ));
+    } else {
+        // Generate a timestamp for EPUB3 compliance
+        opf.push_str("    <meta property=\"dcterms:modified\">2024-01-01T00:00:00Z</meta>\n");
+    }
 
     // Contributors with role refinements
     for contrib in &metadata.contributors {

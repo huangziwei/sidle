@@ -73,11 +73,6 @@ pub struct EpubOutput {
     /// `horizontal-tb`, the OPF emits `<meta name="primary-writing-mode">`
     /// as a Kindle reader hint — mirrors calibre's `epub_output.py:955+`.
     pub writing_mode: Option<String>,
-
-    /// OPF `<guide>` entries (EPUB 2.0 landmark references). Populated from
-    /// KFX `nav_type=landmarks` containers; emitted as
-    /// `<reference type="..." href="..." title="..."/>` inside `<guide>`.
-    pub guide: Vec<super::navigation::GuideRef>,
 }
 
 impl EpubOutput {
@@ -91,7 +86,6 @@ impl EpubOutput {
             ncx_navmap: None,
             page_progression_direction: None,
             writing_mode: None,
-            guide: Vec::new(),
         }
     }
 
@@ -330,30 +324,18 @@ impl EpubOutput {
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
 "#);
 
-        // Title — when KFX carries `title_pronunciation` (Japanese yomigana
-        // sort key), surface it as `opf:file-as`; otherwise omit the attr.
+        // Title
         let title = if meta.title.is_empty() { "Untitled" } else { &meta.title };
-        if let Some(file_as) = meta.title_pronunciation.as_deref() {
-            s.push_str(&format!(
-                "    <dc:title opf:file-as=\"{}\">{}</dc:title>\n",
-                xml_escape(file_as),
-                xml_escape(title)
-            ));
-        } else {
-            s.push_str(&format!("    <dc:title>{}</dc:title>\n", xml_escape(title)));
-        }
+        s.push_str(&format!("    <dc:title>{}</dc:title>\n", xml_escape(title)));
 
-        // Authors — `opf:role="aut"` + `opf:file-as`. Prefer the KFX-supplied
-        // `author_pronunciation` (yomigana sort key); fall back to the joined
-        // author list so EPUB libraries still sort multi-author books.
-        let author_file_as = meta
-            .author_pronunciation
-            .clone()
-            .unwrap_or_else(|| meta.authors.join(" & "));
+        // Authors — `opf:role="aut"` + a shared `opf:file-as` containing all
+        // authors joined by ` & ` (calibre's convention; same string on every
+        // creator). Lets EPUB libraries sort multi-author books consistently.
+        let file_as = meta.authors.join(" & ");
         for author in &meta.authors {
             s.push_str(&format!(
                 "    <dc:creator opf:file-as=\"{}\" opf:role=\"aut\">{}</dc:creator>\n",
-                xml_escape(&author_file_as),
+                xml_escape(&file_as),
                 xml_escape(author)
             ));
         }
@@ -488,24 +470,6 @@ impl EpubOutput {
             ));
         }
         s.push_str("  </spine>\n");
-
-        // `<guide>` (EPUB 2.0 landmarks). Mirrors calibre's
-        // `add_guide_entry` output. Each entry is one
-        // `<reference type="..." title="..." href="..."/>`. Skipped when
-        // empty so the OPF stays clean for inputs with no landmark
-        // metadata.
-        if !self.guide.is_empty() {
-            s.push_str("  <guide>\n");
-            for g in &self.guide {
-                s.push_str(&format!(
-                    "    <reference type=\"{}\" title=\"{}\" href=\"{}\"/>\n",
-                    xml_escape(&g.guide_type),
-                    xml_escape(&g.label),
-                    xml_escape(&g.href),
-                ));
-            }
-            s.push_str("  </guide>\n");
-        }
 
         s.push_str("</package>\n");
         s

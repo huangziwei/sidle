@@ -13,7 +13,6 @@
 
 use std::collections::HashMap;
 
-use crate::kfx::container::get_field;
 use crate::kfx::ion::IonValue;
 
 use super::loader::{BookData, SymbolTable};
@@ -546,55 +545,8 @@ pub fn style_layout_hints_for(
     (hints, heading_level)
 }
 
-/// Layout hints / heading level extracted from a content element's own
-/// outer fields (as opposed to its named `$style` entity). Mirrors
-/// `style_layout_hints_for` but reads from the inline `$761` /
-/// `$790` fields. Required because boko's `export::kfx` writes the
-/// layout_hints and heading_level directly on the content element, not
-/// on the style entity — calibre's `LAYOUT_HINT_ELEMENT_NAMES` keys by
-/// the symbol id (`$760` / `$282` / `$453`) which is the same here.
-pub fn layout_hints_from_element_fields(
-    fields: &[(u64, IonValue)],
-    symbols: &super::loader::SymbolTable,
-) -> (Vec<String>, Option<String>) {
-    use crate::kfx::symbols::KfxSymbol;
-    let mut hints: Vec<String> = Vec::new();
-    let mut heading_level: Option<String> = None;
-    if let Some(layout_hints) = get_field(fields, KfxSymbol::LayoutHints as u64) {
-        if let IonValue::List(items) = layout_hints.unwrap_annotated() {
-            for item in items {
-                let IonValue::Symbol(id) = item.unwrap_annotated() else {
-                    continue;
-                };
-                // Match calibre's `LAYOUT_HINT_ELEMENT_NAMES`: key by the
-                // symbol id, not its name (boko's local symbol table calls
-                // `$760` "treat_as_title", calibre leaves it nameless).
-                let name = match *id {
-                    x if x == KfxSymbol::TreatAsTitle as u64 => "heading",
-                    x if x == KfxSymbol::Figure as u64 => "figure",
-                    x if x == KfxSymbol::Caption as u64 => "caption",
-                    _ => continue,
-                };
-                hints.push(name.to_string());
-            }
-        }
-    }
-    if let Some(level) = get_field(fields, KfxSymbol::YjSemanticsHeadingLevel as u64) {
-        match level.unwrap_annotated() {
-            IonValue::Int(n) => heading_level = Some(n.to_string()),
-            IonValue::String(s) => heading_level = Some(s.clone()),
-            _ => {}
-        }
-    }
-    let _ = symbols;
-    (hints, heading_level)
-}
-
 /// Build a stylesheet from a deduplicated map of style_name → CssDecl.
-/// Emits one class per distinct style, named after the KFX style symbol
-/// directly (sanitized to CSS-safe chars). Calibre adds an `s_` prefix
-/// here; boko doesn't, to keep source class identity through the
-/// EPUB → KFX → EPUB round-trip (see `attach_style` in `content.rs`).
+/// Emits one class per distinct style. Class names = "s_" + safe_name.
 pub fn render_stylesheet(styles_used: &HashMap<String, CssDecl>) -> String {
     let mut s = String::new();
     let mut keys: Vec<&String> = styles_used.keys().collect();
@@ -604,7 +556,7 @@ pub fn render_stylesheet(styles_used: &HashMap<String, CssDecl>) -> String {
         if decl.is_empty() {
             continue;
         }
-        s.push_str(&format!(".{} {{ {} }}\n", safe_class_name(k), decl.to_inline()));
+        s.push_str(&format!(".s_{} {{ {} }}\n", safe_class_name(k), decl.to_inline()));
     }
     s
 }
