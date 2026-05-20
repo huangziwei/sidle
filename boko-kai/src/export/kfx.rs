@@ -1744,18 +1744,10 @@ fn build_external_resource_fragment(
         ));
     }
 
-    // mime type for images and CSS. For non-image, non-CSS assets the helper
-    // returns None and the field is omitted.
+    // mime type for images. For non-image assets the helper returns None.
     if let Some(mime) = crate::util::detect_mime_type(href, data) {
         fields.push((KfxSymbol::Mime as u64, IonValue::String(mime.to_string())));
     }
-
-    // Original asset path. Calibre-origin KFX doesn't carry this (images get
-    // mechanically-named files on read), but boko stashes it so non-image
-    // assets like CSS can round-trip to their source path on the kfx_to_epub
-    // side. `$249 path` is a generic standard symbol, safely ignored by
-    // Kindle when the renderer doesn't expect it.
-    fields.push((KfxSymbol::Path as u64, IonValue::String(href.to_string())));
 
     let ion = IonValue::Struct(fields);
     KfxFragment::new(KfxSymbol::ExternalResource, &resource_name, ion)
@@ -2239,18 +2231,16 @@ fn detect_format_symbol(href: &str, data: &[u8]) -> u64 {
     format_to_kfx_symbol(format)
 }
 
-/// Check if a path is a media asset (image, font, etc.) that should travel
-/// through KFX as an `external_resource`.
-///
-/// CSS files ride along too — they don't drive Kindle rendering (KFX uses
-/// synthesized `$style` entities for that) but preserving them through
-/// the round-trip lets `kfx_to_epub` re-emit the source EPUB's stylesheet
-/// files verbatim instead of only the synthesized one.
+/// Check if a path is a media asset (image, font) that should travel
+/// through KFX as an `external_resource`. CSS does **not** belong here —
+/// KFX styles live in `$style` entities, not stylesheets. A KFX with a
+/// CSS `external_resource` (format=Jpg fallback) poisons Kindle's
+/// resource table.
 fn is_media_asset(path: &std::path::Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(
         ext.to_lowercase().as_str(),
-        "jpg" | "jpeg" | "png" | "gif" | "svg" | "webp" | "ttf" | "otf" | "woff" | "woff2" | "css"
+        "jpg" | "jpeg" | "png" | "gif" | "svg" | "webp" | "ttf" | "otf" | "woff" | "woff2"
     )
 }
 

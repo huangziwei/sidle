@@ -70,20 +70,8 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
     let resources = resources::process(&book, &mut out)?;
     trace.mark("resources::process (JXR → JPEG)");
 
-    // S4 — pull any source CSS files that boko's export stashed alongside the
-    // image resources. They get re-linked from each chapter `<head>` later,
-    // sitting beside the synthesized `style.css` so synthesized class names
-    // (`s2`, `sC`, …) still resolve when source class identity didn't survive
-    // the round-trip.
-    let source_css = resources::process_css(&book, &mut out);
-    trace.mark("resources::process_css");
-
     // Phase 1 step 4 — content (storyline → XHTML).
     let mut content_state = content::ContentState::new(&book, &resources);
-    content_state.source_css_files = source_css
-        .iter()
-        .map(|c| c.filename.clone())
-        .collect();
     content_state.process_reading_order()?;
     trace.mark("content::process_reading_order");
     // Rewrite `<a href="anchor:NAME">` placeholders (emitted by

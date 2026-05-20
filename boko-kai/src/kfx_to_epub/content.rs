@@ -77,11 +77,6 @@ pub struct ContentState<'a> {
 
     /// Tracks which KFX styles have been used (for emit-only-used-classes).
     pub used_kfx_styles: Vec<String>,
-
-    /// Source CSS files bundled from KFX `external_resource` entries (S4).
-    /// Each chapter `<head>` gets a `<link rel="stylesheet">` for these in
-    /// addition to the synthesized `style.css`.
-    pub source_css_files: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,7 +120,6 @@ impl<'a> ContentState<'a> {
             link_ids: HashMap::new(),
             used_kfx_styles: Vec::new(),
             element_id_to_filename: HashMap::new(),
-            source_css_files: Vec::new(),
         }
     }
 
@@ -222,34 +216,13 @@ impl<'a> ContentState<'a> {
     }
 
     fn link_stylesheet(&mut self, part_index: usize) {
-        // Helper: append a `<link rel="stylesheet" type="text/css" href=…>`
-        // child to `<head>`. Pulled out so we can chain the synthesized
-        // sheet with any source sheets pulled from S4 in order.
-        // The order matches the source EPUB import precedence (source first,
-        // then synthesized) so that synthesized rules for fallback `s<N>`
-        // names take precedence on a tie.
+        // Synthesized `style.css` — the only stylesheet on the EPUB side.
+        // Plain sibling filename; both chapters and the stylesheet live in
+        // `OEBPS/`. The earlier `../OEBPS/style.css` resolved mathematically
+        // but tripped Apple Books (silently declined to load), so a sibling
+        // reference is the correct resolution.
         let part = &mut self.book_parts[part_index];
         let head_id = part.head_id;
-
-        // S4 — preserved source CSS files first. The roundtrip exporter
-        // stashed these alongside the image resources and `process_css`
-        // bundled them under their basename in OEBPS/.
-        let source_css: Vec<String> = self.source_css_files.clone();
-        for filename in source_css {
-            let part = &mut self.book_parts[part_index];
-            let link = part.dom.sub_element(head_id, "link");
-            let l = part.dom.get_mut(link);
-            l.set("rel", "stylesheet");
-            l.set("type", "text/css");
-            l.set("href", filename);
-        }
-
-        // Synthesized `style.css` second. Plain filename — chapters live in
-        // `OEBPS/`, the stylesheet does too. The earlier `../OEBPS/style.css`
-        // resolved to the same file mathematically but tripped Apple Books
-        // (silently declined to load it), so a sibling reference is the
-        // correct resolution.
-        let part = &mut self.book_parts[part_index];
         let link = part.dom.sub_element(head_id, "link");
         let l = part.dom.get_mut(link);
         l.set("rel", "stylesheet");
