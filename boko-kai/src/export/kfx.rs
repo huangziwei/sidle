@@ -11,8 +11,8 @@ use crate::import::ChapterId;
 use crate::kfx::auxiliary::{build_auxiliary_data_fragment, build_ruby_content_fragments};
 use crate::kfx::context::{ExportContext, LandmarkTarget};
 use crate::kfx::cover::{
-    COVER_SECTION_NAME, build_cover_section, is_image_only_chapter, needs_standalone_cover,
-    normalize_cover_path,
+    COVER_SECTION_NAME, build_cover_section, get_chapter_image_path, is_image_only_chapter,
+    needs_standalone_cover, normalize_cover_path,
 };
 use crate::kfx::fragment::KfxFragment;
 use crate::kfx::ion::IonValue;
@@ -94,19 +94,39 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
     let cover_image = book.metadata().cover_image.clone();
     let first_chapter_id = book.spine().first().map(|e| e.id);
 
-    let standalone_cover_path: Option<String> = match (cover_image, first_chapter_id) {
+    let (standalone_cover_path, probe_path): (Option<String>, Option<String>) = match (cover_image, first_chapter_id) {
         (Some(cover_img), Some(first_id)) => {
             let normalized = normalize_cover_path(&cover_img, &asset_paths);
-            book.load_chapter(first_id).ok().and_then(|first_chapter| {
-                if needs_standalone_cover(&normalized, &first_chapter) {
-                    Some(normalized)
+            book.load_chapter(first_id).ok().map(|first_chapter| {
+                let in_spine_image = get_chapter_image_path(&first_chapter);
+                let needs_standalone = needs_standalone_cover(&normalized, &first_chapter);
+                // For dimension probe we want the file that's actually going
+                // to render as the cover. Standalone path: the metadata cover.
+                // In-spine titlepage path: whatever single image that chapter
+                // hosts (which may or may not be the same file).
+                let probe = if needs_standalone {
+                    Some(normalized.clone())
                 } else {
-                    None
-                }
-            })
+                    in_spine_image.or(Some(normalized.clone()))
+                };
+                let standalone = if needs_standalone { Some(normalized) } else { None };
+                (standalone, probe)
+            }).unwrap_or((None, None))
         }
-        _ => None,
+        _ => (None, None),
     };
+    // Probe the cover image's pixel dimensions once, in Pass 1, so both
+    // emission paths (standalone c0 in `build_cover_section` and in-spine
+    // image-only-chapter in `build_chapter_entities_grouped`) can size the
+    // page_template's `fixed_width` / `fixed_height` to the actual image.
+    // Amazon's encoder always matches them; mismatched dimensions plus
+    // `scale_fit` produces the cover-with-margins bug.
+    if let Some(ref p) = probe_path
+        && let Ok(bytes) = book.load_asset(std::path::Path::new(p))
+        && let Some(dims) = crate::util::extract_image_dimensions(&bytes)
+    {
+        ctx.cover_dimensions = Some(dims);
+    }
 
     // If standalone cover needed, section offset starts at 1 (c0 reserved for cover)
     let section_offset = if standalone_cover_path.is_some() {
@@ -301,7 +321,13 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
         let cover_content_id = ctx.fragment_ids.peek();
         // Store cover content ID for position_map (so c0 contains both section and content IDs)
         ctx.cover_content_id = Some(cover_content_id);
-        let (section, storyline) = build_cover_section(cover_path, section_id, &mut ctx);
+        // Probe the cover image for its actual pixel dimensions. Amazon's KFX
+        // encoder sizes the cover page_template's fixed_width / fixed_height
+        // to the image's resource dimensions; any mismatch causes the device
+        // to letterbox/pillarbox with `scale_fit`. Falls back to a sane
+        // book-cover aspect default when probing fails.
+        let (section, storyline) =
+            build_cover_section(cover_path, section_id, &mut ctx);
         section_fragments.push(section);
         storyline_fragments.push(storyline);
 
@@ -1430,7 +1456,12 @@ fn build_chapter_entities_grouped(
 
     // Entity C: SECTION ($260) - Entry point, references Storyline by story_name
     let page_template = if is_cover {
-        // Cover page: container type with fixed dimensions and scale_fit layout
+        // Cover page: container type sized to the cover image's actual pixel
+        // dimensions. Matching the resource exactly is what Amazon's encoder
+        // does — `scale_fit` with mismatched dims letterbox/pillarboxes (the
+        // cover-with-margins bug). Falls back to a generic book-cover aspect
+        // when the Pass-1 probe failed.
+        let (cw, ch) = ctx.cover_dimensions.unwrap_or((1400, 2100));
         IonValue::Struct(vec![
             (KfxSymbol::Id as u64, IonValue::Int(section_id as i64)),
             (
@@ -1441,8 +1472,8 @@ fn build_chapter_entities_grouped(
                 KfxSymbol::Type as u64,
                 IonValue::Symbol(KfxSymbol::Container as u64),
             ),
-            (KfxSymbol::FixedWidth as u64, IonValue::Int(1400)),
-            (KfxSymbol::FixedHeight as u64, IonValue::Int(2100)),
+            (KfxSymbol::FixedWidth as u64, IonValue::Int(cw as i64)),
+            (KfxSymbol::FixedHeight as u64, IonValue::Int(ch as i64)),
             (
                 KfxSymbol::Layout as u64,
                 IonValue::Symbol(KfxSymbol::ScaleFit as u64),

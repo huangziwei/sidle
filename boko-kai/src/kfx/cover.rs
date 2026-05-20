@@ -106,13 +106,19 @@ pub fn needs_standalone_cover(cover_image_path: &str, first_chapter: &Chapter) -
 
 /// Build a dedicated cover section and storyline.
 ///
-/// Creates a c0 section with container type and fixed dimensions,
-/// plus a storyline containing just the cover image.
+/// Creates a c0 section with container type sized to the cover image's
+/// actual pixel dimensions, plus a storyline containing just the cover
+/// image. Matching `fixed_width` / `fixed_height` to the resource's
+/// dimensions is what Amazon's encoder does — any mismatch letterbox/
+/// pillarboxes the cover via `scale_fit` (kfx-zip-derived KFXs:
+/// 885×1260 cover → 885×1260 page_template, no margins). Cover dims
+/// are populated in Pass 1 via `ctx.cover_dimensions`; falls back to a
+/// generic book-cover aspect when the probe couldn't read them.
 ///
 /// # Arguments
 /// * `cover_path` - Path to the cover image resource
 /// * `section_id` - Fragment ID for the section
-/// * `ctx` - Export context for symbol interning and resource lookup
+/// * `ctx` - Export context (carries `cover_dimensions` + resource registry)
 ///
 /// # Returns
 /// A tuple of (section_fragment, storyline_fragment)
@@ -179,8 +185,14 @@ pub fn build_cover_section(
             KfxSymbol::Type as u64,
             IonValue::Symbol(KfxSymbol::Container as u64),
         ),
-        (KfxSymbol::FixedWidth as u64, IonValue::Int(1400)),
-        (KfxSymbol::FixedHeight as u64, IonValue::Int(2100)),
+        (
+            KfxSymbol::FixedWidth as u64,
+            IonValue::Int(ctx.cover_dimensions.map(|(w, _)| w).unwrap_or(1400) as i64),
+        ),
+        (
+            KfxSymbol::FixedHeight as u64,
+            IonValue::Int(ctx.cover_dimensions.map(|(_, h)| h).unwrap_or(2100) as i64),
+        ),
         (
             KfxSymbol::Layout as u64,
             IonValue::Symbol(KfxSymbol::ScaleFit as u64),

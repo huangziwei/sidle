@@ -651,6 +651,15 @@ pub struct ExportContext {
     /// break TOC anchors targeting them.
     pub inline_cover_emitted: bool,
 
+    /// Cover image pixel dimensions (width, height), probed in Pass 1 from
+    /// the cover asset's JPEG SOF / PNG IHDR header. Drives the
+    /// `fixed_width` / `fixed_height` of the cover `page_template` so the
+    /// `scale_fit` layout doesn't letterbox or pillarbox the cover.
+    /// Amazon's encoder sizes the page_template to the resource exactly;
+    /// kfx-zip-derived KFXs reliably do the same (e.g. 885×1260 cover →
+    /// 885×1260 page_template).
+    pub cover_dimensions: Option<(u32, u32)>,
+
     /// Chapters that need chapter-start anchors.
     chapters_needing_anchor: HashSet<ChapterId>,
 
@@ -799,6 +808,7 @@ impl ExportContext {
             cover_fragment_id: None,
             cover_content_id: None,
             inline_cover_emitted: false,
+            cover_dimensions: None,
             chapters_needing_anchor: HashSet::new(),
             pending_chapter_anchor: None,
             first_content_ids: HashMap::new(),
