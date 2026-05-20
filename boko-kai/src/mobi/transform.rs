@@ -361,6 +361,115 @@ fn find_last_attr_in_window(
     last
 }
 
+/// Inline SVG flow content into `<img src="kindle:flow:NNNN..."/>` references.
+///
+/// KF8 illustration / full-page-art pages embed their SVG content in
+/// auxiliary flows and reference it from the body XHTML via
+/// `<img src="kindle:flow:NNNN?mime=image/svg+xml"/>`. The flow itself
+/// contains `<svg viewBox="..."><image xlink:href="kindle:embed:NN"/></svg>`
+/// wrapping a raster image. Calibre's `mobi8.py` handles this by inlining
+/// the SVG bytes where the `<img>` tag was — see
+/// `ref/calibre-mobi-input/reader/mobi8.py` around the
+/// `image_tag_pattern.search(from_svg)` branch.
+///
+/// Must run BEFORE `transform_kindle_refs`: the inlined SVG content
+/// contains `kindle:embed:NNNN` references that the regular transform
+/// rewrites to `images/image_NNNN.ext`. Once this pass has run, every
+/// remaining `kindle:flow:` reference is a CSS link (in `<link>` tags)
+/// and the regular transform handles it.
+pub fn inline_svg_flows(
+    html: &[u8],
+    flow_table: &[(usize, usize)],
+    decompressed_text: &[u8],
+) -> Vec<u8> {
+    let mut output = Vec::with_capacity(html.len() * 2);
+    let mut pos = 0;
+
+    let needle = b"src=\"kindle:flow:";
+    let finder = memmem::Finder::new(needle);
+
+    while let Some(rel) = finder.find(&html[pos..]) {
+        let src_pos = pos + rel;
+
+        // Walk backward to the '<' that opens this tag.
+        let Some(tag_start) = html[..src_pos].iter().rposition(|&b| b == b'<') else {
+            output.extend_from_slice(&html[pos..]);
+            return output;
+        };
+
+        // Read the tag name and reject anything that isn't <img> / <image>.
+        // <link href="kindle:flow:..."> is a CSS link — leave it for
+        // `transform_kindle_refs` to rewrite.
+        let tag_body = tag_start + 1;
+        let tag_name_end = tag_body
+            + html[tag_body..]
+                .iter()
+                .position(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'/' || b == b'>')
+                .unwrap_or(html.len() - tag_body);
+        let tag_name = &html[tag_body..tag_name_end];
+        let is_img = tag_name.eq_ignore_ascii_case(b"img")
+            || tag_name.eq_ignore_ascii_case(b"image");
+
+        // Find the closing `>` of this tag.
+        let Some(rel_end) = memchr::memchr(b'>', &html[tag_start..]) else {
+            output.extend_from_slice(&html[pos..]);
+            return output;
+        };
+        let tag_end = tag_start + rel_end + 1;
+
+        if !is_img {
+            // Not an inlineable tag — copy unchanged and continue past it.
+            output.extend_from_slice(&html[pos..tag_end]);
+            pos = tag_end;
+            continue;
+        }
+
+        // Parse the flow number out of `kindle:flow:NNNN?...` or
+        // `kindle:flow:NNNN"`. The number ends at `?` or the closing quote.
+        let num_start = src_pos + needle.len();
+        let num_end = html[num_start..]
+            .iter()
+            .position(|&b| b == b'?' || b == b'"' || b == b'\'')
+            .map(|p| num_start + p)
+            .unwrap_or(html.len());
+        let flow_num = parse_base32(&html[num_start..num_end]);
+
+        // Locate `<svg` within the flow content. Inline from there to the
+        // flow's end (mirrors calibre `mobi8.py`'s `flowpart[start:]`
+        // slice — strips any leading `<?xml-stylesheet ...?>` PI that KF8
+        // prepends, since those aren't valid mid-XHTML).
+        let svg_range = flow_table.get(flow_num).and_then(|&(start, end)| {
+            let end = end.min(decompressed_text.len());
+            if start > end {
+                return None;
+            }
+            let head = &decompressed_text[start..end];
+            // Sniff window — `<svg` should be near the top if this flow
+            // is actually SVG. 1024 bytes is comfortably past any PI / BOM.
+            let sniff_end = head.len().min(1024);
+            memmem::Finder::new(b"<svg")
+                .find(&head[..sniff_end])
+                .map(|svg_pos| (start + svg_pos, end))
+        });
+
+        if let Some((svg_start, svg_end)) = svg_range {
+            output.extend_from_slice(&html[pos..tag_start]);
+            output.extend_from_slice(&decompressed_text[svg_start..svg_end]);
+            pos = tag_end;
+        } else {
+            // Flow missing, not SVG, or out of range — leave the tag alone.
+            // `transform_kindle_refs` will rewrite the URL to a CSS path,
+            // which produces a broken `<img src="...css">` but matches
+            // prior behavior rather than silently dropping content.
+            output.extend_from_slice(&html[pos..tag_end]);
+            pos = tag_end;
+        }
+    }
+
+    output.extend_from_slice(&html[pos..]);
+    output
+}
+
 /// Strip Amazon-specific attributes from HTML.
 ///
 /// Removes: aid="...", data-AmznRemoved..., data-AmznPageBreak="..."

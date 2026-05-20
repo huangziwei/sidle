@@ -153,9 +153,40 @@ impl Importer for Azw3Importer {
     }
 
     fn load_asset(&mut self, path: &Path) -> io::Result<Vec<u8>> {
-        let key = path.to_string_lossy();
+        let key = path.to_string_lossy().replace('\\', "/");
 
-        // Parse index from path (images/image_XXXX.ext)
+        // Stylesheet: styles/styleNNNN.css → bytes from flow_table[idx+1].
+        // KF8 packs CSS in flows 1..N (flow 0 is the HTML body); the
+        // `kindle:flow:N` → `styles/style{N-1}.css` rewrite happens in
+        // `transform_kindle_refs`, so the source HTML references stylesheets
+        // by this naming. Serving the source bytes verbatim here is what
+        // makes those links resolve in the emitted EPUB.
+        if let Some(stem) = key
+            .strip_prefix("styles/style")
+            .and_then(|s| s.strip_suffix(".css"))
+        {
+            let css_idx: usize = stem.parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Invalid CSS asset path: {}", key),
+                )
+            })?;
+            let flow_idx = css_idx + 1;
+            if self.text_cache.is_none() {
+                self.text_cache = Some(self.extract_text()?);
+            }
+            let text = self.text_cache.as_ref().unwrap();
+            let (start, end) = self.kf8.flow_table.get(flow_idx).copied().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Flow {} not present in flow_table", flow_idx),
+                )
+            })?;
+            let end = end.min(text.len());
+            return Ok(text[start..end].to_vec());
+        }
+
+        // Image: images/image_NNNN.ext
         let idx: usize = key
             .strip_prefix("images/image_")
             .and_then(|s| s.split('.').next())
@@ -564,6 +595,14 @@ impl Azw3Importer {
                 )
             })?;
 
+        // Inline SVG flow content where the body uses
+        // `<img src="kindle:flow:NNNN..."/>` to reference a full-page
+        // illustration wrapper. Must precede `transform_kindle_refs` so the
+        // raster-image `kindle:embed:NNNN` refs inside the inlined SVG get
+        // rewritten in the same pass below.
+        let inlined =
+            transform::inline_svg_flows(&content, &self.kf8.flow_table, text);
+
         // Transform kindle: references to standard EPUB-style paths
         // This converts kindle:pos:fid:XXXX:off:YYYY to partNNNN.html#id
         let file_starts: Vec<(u32, u32)> = self
@@ -574,7 +613,7 @@ impl Azw3Importer {
             .collect();
 
         let transformed =
-            transform::transform_kindle_refs(&content, &self.kf8.elems, html_text, &file_starts);
+            transform::transform_kindle_refs(&inlined, &self.kf8.elems, html_text, &file_starts);
 
         // Strip Amazon-specific attributes (aid, data-Amzn*)
         let cleaned = transform::strip_kindle_attributes_fast(&transformed);
@@ -582,9 +621,19 @@ impl Azw3Importer {
         Ok(cleaned)
     }
 
-    /// Discover asset paths by scanning image records.
+    /// Discover asset paths by scanning image records and the flow table.
     fn discover_assets(&self) -> Vec<PathBuf> {
         let mut assets = Vec::new();
+
+        // Stylesheets from the flow table. Flow 0 is HTML body; flows 1..N
+        // are auxiliary resources, by convention CSS (matches the
+        // `kindle:flow:N` → `styles/style{N-1}.css` rewrite in
+        // `transform_kindle_refs`). Registering them here makes
+        // `book.list_assets()` enumerate stylesheets so `export_raw` emits
+        // them to the EPUB zip alongside images.
+        for css_idx in 0..self.kf8.flow_table.len().saturating_sub(1) {
+            assets.push(PathBuf::from(format!("styles/style{:04}.css", css_idx)));
+        }
 
         if self.mobi.first_image_index == NULL_INDEX {
             return assets;

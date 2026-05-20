@@ -54,6 +54,8 @@ pub enum Direction {
     EpubToKfx,
     /// KFX is the source (ground truth); EPUB is boko's output.
     KfxToEpub,
+    /// AZW3 (KF8) is the source (ground truth); EPUB is boko's output.
+    Azw3ToEpub,
 }
 
 impl Direction {
@@ -62,6 +64,7 @@ impl Direction {
         match self {
             Self::EpubToKfx => "EPUB",
             Self::KfxToEpub => "KFX",
+            Self::Azw3ToEpub => "AZW3",
         }
     }
 
@@ -70,6 +73,7 @@ impl Direction {
         match self {
             Self::EpubToKfx => "KFX",
             Self::KfxToEpub => "EPUB",
+            Self::Azw3ToEpub => "EPUB",
         }
     }
 

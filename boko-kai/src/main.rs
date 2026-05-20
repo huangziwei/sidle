@@ -114,8 +114,9 @@ fn parse_direction(s: &str) -> Result<boko::validate::Direction, String> {
     match s {
         "epub-to-kfx" | "epub2kfx" | "e2k" => Ok(boko::validate::Direction::EpubToKfx),
         "kfx-to-epub" | "kfx2epub" | "k2e" => Ok(boko::validate::Direction::KfxToEpub),
+        "azw3-to-epub" | "azw32epub" | "a2e" => Ok(boko::validate::Direction::Azw3ToEpub),
         other => Err(format!(
-            "--direction must be 'epub-to-kfx' or 'kfx-to-epub', got '{other}'"
+            "--direction must be 'epub-to-kfx', 'kfx-to-epub', or 'azw3-to-epub', got '{other}'"
         )),
     }
 }
