@@ -1,0 +1,7 @@
+# Sidle server config — read by `bin/sidle` on launch.
+# Edit values to point at your Mac's LAN IP. Token must match
+# `~/Library/Application Support/sidle/.server-token` on the Mac.
+
+HOST=192.168.0.248
+PORT=8731
+TOKEN=fc7250d6ede89312103e3570978c1aef1dc8e3913002a0f0abb1d31f57983730

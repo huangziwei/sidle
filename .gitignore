@@ -10,3 +10,8 @@ boko-kai/target/
 sidle/src-tauri/gen/
 
 artifacts/
+
+# Per-install secret + binary. The .example file is the template; real
+# values fill in `etc/server.conf` at install time and stay out of git.
+kual/sidle/etc/server.conf
+kual/sidle/bin/sidle
