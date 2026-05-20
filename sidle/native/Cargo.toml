@@ -22,3 +22,12 @@ ureq = { version = "2", default-features = false }
 # `derive` feature is proc-macro-driven (pure Rust at build time).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# fontdue: TTF rasterizer. Pure Rust, no system deps. We load the Kindle's
+# bundled Japanese font (TBGothic) at /usr/java/lib/fonts/ — no need to
+# ship our own CJK font. Coverage bitmap gets thresholded for crisp eink
+# rendering (DU waveform is B/W; antialiased gray turns muddy).
+fontdue = { version = "0.9", default-features = false, features = ["std"] }
+# image: cover JPG/PNG decode + resize. Feature-gated to just the two
+# formats the server returns (.jpg from EPUB / Amazon, occasional .png).
+# All sub-deps (jpeg-decoder, png) are pure Rust.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
