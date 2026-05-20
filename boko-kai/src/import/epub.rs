@@ -345,9 +345,16 @@ impl EpubImporter {
     }
 }
 
-/// Replace each `@import "url";` (or `'url'`) with the contents of the
-/// referenced file, resolved relative to `base`. Unknown @import forms
-/// (e.g. `url(...)`, media queries, supports queries) are left as-is.
+/// Replace each `@import` directive with the contents of the referenced
+/// file, resolved relative to `base`. Handles all three syntaxes the CSS
+/// spec defines:
+/// - `@import "url";` / `@import 'url';` (quoted)
+/// - `@import url("url");` / `url('url')` / `url(url)` (function form)
+///
+/// Japanese EPUBs converted from AZW3 commonly use `url(...)` to chain
+/// stylesheets (style0012.css imports style0010.css where `.vrtl` lives);
+/// without resolving these the `writing-mode: vertical-rl` rule never reaches
+/// the cascade and the KFX exporter falls back to horizontal_tb.
 fn inline_css_imports<F>(src: &str, base: &Path, mut load: F) -> String
 where
     F: FnMut(&Path) -> Option<String>,
@@ -355,45 +362,49 @@ where
     let mut out = String::with_capacity(src.len());
     let bytes = src.as_bytes();
     // Index of the first byte not yet copied into `out`. Byte scans are safe
-    // because every token we look for (@, " ', ;, whitespace) is ASCII and
-    // therefore never appears as a UTF-8 continuation byte — so `i` always
-    // lands on a char boundary when we slice.
+    // because every token we look for (@, " ', ;, whitespace, parens) is
+    // ASCII and therefore never appears as a UTF-8 continuation byte — so
+    // `i` always lands on a char boundary when we slice.
     let mut copied = 0;
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'@' && src[i..].to_ascii_lowercase().starts_with("@import") {
             let after_kw = i + "@import".len();
             let mut j = after_kw;
-            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
                 j += 1;
             }
-            if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
-                let quote = bytes[j];
-                let start = j + 1;
-                if let Some(end_rel) = src[start..].as_bytes().iter().position(|&b| b == quote) {
-                    let url = &src[start..start + end_rel];
-                    let mut k = start + end_rel + 1;
-                    while k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\t') {
-                        k += 1;
-                    }
-                    if k < bytes.len() && bytes[k] == b';' {
-                        k += 1;
-                    }
-                    // Copy everything before the @import as-is, then splice in
-                    // the imported file (or drop the @import on load failure).
-                    out.push_str(&src[copied..i]);
-                    let child = base
-                        .parent()
-                        .map(|p| p.join(url))
-                        .unwrap_or_else(|| PathBuf::from(url));
-                    if let Some(child_css) = load(&child) {
-                        out.push_str(&child_css);
-                        out.push('\n');
-                    }
-                    copied = k;
-                    i = k;
-                    continue;
+            // Try to parse one of the supported source-URL forms. Each
+            // helper returns `(url, end_index_past_url_token)` on success.
+            let parsed = if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
+                parse_quoted_url(src, j)
+            } else if j + 4 <= bytes.len() && src[j..j + 4].eq_ignore_ascii_case("url(") {
+                parse_url_function(src, j)
+            } else {
+                None
+            };
+            if let Some((url, mut k)) = parsed {
+                // Skip optional media queries / whitespace up to the `;`.
+                while k < bytes.len() && bytes[k] != b';' && bytes[k] != b'}' {
+                    k += 1;
                 }
+                if k < bytes.len() && bytes[k] == b';' {
+                    k += 1;
+                }
+                // Copy everything before the @import as-is, then splice in
+                // the imported file (or drop the @import on load failure).
+                out.push_str(&src[copied..i]);
+                let child = base
+                    .parent()
+                    .map(|p| p.join(url))
+                    .unwrap_or_else(|| PathBuf::from(url));
+                if let Some(child_css) = load(&child) {
+                    out.push_str(&child_css);
+                    out.push('\n');
+                }
+                copied = k;
+                i = k;
+                continue;
             }
             // Unrecognised @import form — fall through and keep scanning.
         }
@@ -401,6 +412,45 @@ where
     }
     out.push_str(&src[copied..]);
     out
+}
+
+/// Parse a `"url"` / `'url'` literal starting at the opening quote position.
+/// Returns `(url, index_one_past_closing_quote)`.
+fn parse_quoted_url(src: &str, q_pos: usize) -> Option<(&str, usize)> {
+    let bytes = src.as_bytes();
+    let quote = bytes[q_pos];
+    let start = q_pos + 1;
+    let end_rel = src[start..].as_bytes().iter().position(|&b| b == quote)?;
+    Some((&src[start..start + end_rel], start + end_rel + 1))
+}
+
+/// Parse a `url( … )` token starting at the `u` of `url`. Inner content can be
+/// `"foo.css"`, `'foo.css'`, or a bare `foo.css`. Returns
+/// `(url, index_one_past_closing_paren)`.
+fn parse_url_function(src: &str, u_pos: usize) -> Option<(&str, usize)> {
+    let bytes = src.as_bytes();
+    let mut p = u_pos + 4; // skip "url("
+    while p < bytes.len() && bytes[p].is_ascii_whitespace() {
+        p += 1;
+    }
+    let (url, end) = if p < bytes.len() && (bytes[p] == b'"' || bytes[p] == b'\'') {
+        parse_quoted_url(src, p)?
+    } else {
+        // Bare URL: read until whitespace or `)`
+        let url_start = p;
+        while p < bytes.len() && bytes[p] != b')' && !bytes[p].is_ascii_whitespace() {
+            p += 1;
+        }
+        (&src[url_start..p], p)
+    };
+    let mut k = end;
+    while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+        k += 1;
+    }
+    if k >= bytes.len() || bytes[k] != b')' {
+        return None;
+    }
+    Some((url, k + 1))
 }
 
 // ----------------------------------------------------------------------------
