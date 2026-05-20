@@ -409,11 +409,15 @@ fn generate_opf(
 ) -> String {
     let mut opf = String::new();
 
-    // Use EPUB3 for extended metadata support
+    // Use EPUB3 for extended metadata support. `xmlns:opf` is declared so we
+    // can use the EPUB-2-style `opf:role` / `opf:file-as` / `opf:scheme`
+    // attributes that every major reader (Apple Books, Kindle, ADE, calibre)
+    // still consults — they're tolerated in EPUB 3 packages even though the
+    // canonical EPUB 3 alternative is `<meta refines>`.
     opf.push_str(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
 "#,
     );
 
@@ -436,25 +440,23 @@ fn generate_opf(
         ));
     }
 
-    // Authors with optional file-as refinement for first author
+    // Authors — emit `opf:role="aut"` and `opf:file-as` on every creator,
+    // matching calibre's reference output. `file-as` falls back to the
+    // display name when no sort key is provided (calibre's convention).
     for (i, author) in metadata.authors.iter().enumerate() {
         let creator_id = format!("creator{}", next_id);
         next_id += 1;
+        let file_as = if i == 0 {
+            metadata.author_sort.as_deref().unwrap_or(author)
+        } else {
+            author.as_str()
+        };
         opf.push_str(&format!(
-            "    <dc:creator id=\"{}\">{}</dc:creator>\n",
+            "    <dc:creator id=\"{}\" opf:file-as=\"{}\" opf:role=\"aut\">{}</dc:creator>\n",
             creator_id,
+            escape_xml(file_as),
             escape_xml(author)
         ));
-        // Add file-as for first author if available
-        if i == 0
-            && let Some(ref author_sort) = metadata.author_sort
-        {
-            opf.push_str(&format!(
-                "    <meta refines=\"#{}\" property=\"file-as\">{}</meta>\n",
-                creator_id,
-                escape_xml(author_sort)
-            ));
-        }
     }
 
     // Language
@@ -467,14 +469,38 @@ fn generate_opf(
         opf.push_str("    <dc:language>en</dc:language>\n");
     }
 
-    // Identifier
-    if !metadata.identifier.is_empty() {
-        opf.push_str(&format!(
-            "    <dc:identifier id=\"BookId\">{}</dc:identifier>\n",
-            escape_xml(&metadata.identifier)
-        ));
+    // Identifiers — primary `BookId` plus ASIN-scheme siblings when an
+    // Amazon ASIN was preserved through the import. Calibre emits the same
+    // pattern (`ASIN` + `MOBI-ASIN`); both are surfaced so library tools
+    // that key off either scheme find the book.
+    let primary_id = if metadata.identifier.is_empty() {
+        "urn:uuid:00000000-0000-0000-0000-000000000000".to_string()
     } else {
-        opf.push_str("    <dc:identifier id=\"BookId\">urn:uuid:00000000-0000-0000-0000-000000000000</dc:identifier>\n");
+        metadata.identifier.clone()
+    };
+    opf.push_str(&format!(
+        "    <dc:identifier id=\"BookId\">{}</dc:identifier>\n",
+        escape_xml(&primary_id)
+    ));
+    if let Some(ref asin) = metadata.asin {
+        opf.push_str(&format!(
+            "    <dc:identifier opf:scheme=\"ASIN\">{}</dc:identifier>\n",
+            escape_xml(asin)
+        ));
+        opf.push_str(&format!(
+            "    <dc:identifier opf:scheme=\"MOBI-ASIN\">{}</dc:identifier>\n",
+            escape_xml(asin)
+        ));
+    }
+    // Deterministic UUID v5 derived from the primary id (URL namespace).
+    // Re-converting the same source yields the same uuid so library tools
+    // can dedupe across re-imports. Skipped when the primary id is already
+    // a UUID literal — emitting a derived uuid would be redundant noise.
+    if !looks_like_uuid(&primary_id) {
+        opf.push_str(&format!(
+            "    <dc:identifier opf:scheme=\"uuid\">{}</dc:identifier>\n",
+            escape_xml(&crate::util::uuid_v5(&primary_id))
+        ));
     }
 
     // dcterms:modified (required for EPUB 3) — stamp conversion time, not the
@@ -831,6 +857,20 @@ fn escape_xml(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+/// 36-char `8-4-4-4-12` hex pattern. Used to decide whether `metadata.identifier`
+/// is already a UUID (in which case the OPF skips the derived `opf:scheme="uuid"`
+/// entry to avoid redundant noise).
+fn looks_like_uuid(s: &str) -> bool {
+    let s = s.strip_prefix("urn:uuid:").unwrap_or(s);
+    if s.len() != 36 {
+        return false;
+    }
+    s.as_bytes().iter().enumerate().all(|(i, b)| match i {
+        8 | 13 | 18 | 23 => *b == b'-',
+        _ => b.is_ascii_hexdigit(),
+    })
 }
 
 /// Sanitize a path for use in ZIP (remove leading slashes, normalize).

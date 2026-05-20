@@ -40,6 +40,30 @@ pub fn time_now_secs() -> u32 {
     (js_sys::Date::now() / 1000.0) as u32
 }
 
+/// RFC 4122 v5 UUID derived from `name` via SHA-1 over the URL namespace.
+/// Deterministic: same input always yields the same UUID. Used for the OPF
+/// `<dc:identifier opf:scheme="uuid">` slot so two converts of the same
+/// source produce the same package id (vs. calibre's random v4, which makes
+/// every export look like a new book to library tools).
+pub fn uuid_v5(name: &str) -> String {
+    const URL_NAMESPACE: [u8; 16] = [
+        0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1,
+        0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+    ];
+    let mut hasher = sha1_smol::Sha1::new();
+    hasher.update(&URL_NAMESPACE);
+    hasher.update(name.as_bytes());
+    let digest = hasher.digest().bytes();
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&digest[..16]);
+    b[6] = (b[6] & 0x0f) | 0x50; // version 5
+    b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+    )
+}
+
 /// Current UTC time formatted as ISO-8601 (`YYYY-MM-DDTHH:MM:SSZ`).
 ///
 /// Used for `dcterms:modified` / KFX `modified_date` stamps. We synthesize on

@@ -473,6 +473,117 @@ pub fn inline_svg_flows(
 /// Strip Amazon-specific attributes from HTML.
 ///
 /// Removes: aid="...", data-AmznRemoved..., data-AmznPageBreak="..."
+/// Ensure the `<html>` root tag carries both `xml:lang` and `lang` attributes.
+///
+/// Calibre's AZW3 exporter scrubs `xml:lang` from the source HTML and leaves
+/// only `lang=`, which makes count-level diffs against the original publisher
+/// EPUB show a per-spine-doc xml:lang deficit (every chapter is `-1`). EPUB 3
+/// recommends both — XHTML processors honor `xml:lang`, HTML5 processors
+/// honor `lang`. Emitting both is universally compatible.
+///
+/// Behavior:
+/// - Has both: untouched.
+/// - Has only `lang=`: adds `xml:lang=` with the same value.
+/// - Has only `xml:lang=`: adds `lang=` with the same value.
+/// - Has neither: adds both with `default_lang` (skipped when empty).
+/// - No `<html` tag at all: input returned unchanged.
+pub fn ensure_html_lang_dual(html: &[u8], default_lang: &str) -> Vec<u8> {
+    let Some(tag_start) = memmem::find(html, b"<html") else {
+        return html.to_vec();
+    };
+    let after_html = tag_start + 5;
+    let Some(rel_end) = memchr::memchr(b'>', &html[after_html..]) else {
+        return html.to_vec();
+    };
+    let tag_end = after_html + rel_end;
+    let attrs = &html[after_html..tag_end];
+
+    let existing_lang = extract_attr_value(attrs, b"lang");
+    let existing_xml_lang = extract_attr_value(attrs, b"xml:lang");
+
+    let (lang_val, xml_lang_val) = match (existing_lang, existing_xml_lang) {
+        (Some(_), Some(_)) => return html.to_vec(),
+        (Some(l), None) => (None, Some(l)),
+        (None, Some(x)) => (Some(x), None),
+        (None, None) if !default_lang.is_empty() => (
+            Some(default_lang.as_bytes()),
+            Some(default_lang.as_bytes()),
+        ),
+        (None, None) => return html.to_vec(),
+    };
+
+    let mut out = Vec::with_capacity(html.len() + 32);
+    out.extend_from_slice(&html[..tag_end]);
+    if let Some(v) = lang_val {
+        out.push(b' ');
+        out.extend_from_slice(b"lang=\"");
+        out.extend_from_slice(v);
+        out.push(b'"');
+    }
+    if let Some(v) = xml_lang_val {
+        out.push(b' ');
+        out.extend_from_slice(b"xml:lang=\"");
+        out.extend_from_slice(v);
+        out.push(b'"');
+    }
+    out.extend_from_slice(&html[tag_end..]);
+    out
+}
+
+/// Find `attr="value"` (or `attr='value'`) inside an attribute byte slice and
+/// return the value. Looks for the attribute name preceded by ASCII
+/// whitespace OR appearing at the start of the slice — avoids matching e.g.
+/// `xml:lang` when searching for `lang`.
+fn extract_attr_value<'a>(attrs: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let mut pos = 0;
+    while pos < attrs.len() {
+        let abs = if pos == 0 {
+            0
+        } else {
+            // Require a whitespace boundary so `xml:lang` doesn't match `lang`.
+            let rest = &attrs[pos..];
+            let Some(off) = rest.iter().position(|b| b.is_ascii_whitespace()) else {
+                return None;
+            };
+            pos + off + 1
+        };
+        if abs >= attrs.len() {
+            return None;
+        }
+        let window = &attrs[abs..];
+        if window.starts_with(name) {
+            let after_name = &window[name.len()..];
+            // Allow optional whitespace before `=`.
+            let mut p = 0;
+            while p < after_name.len() && after_name[p].is_ascii_whitespace() {
+                p += 1;
+            }
+            if p < after_name.len() && after_name[p] == b'=' {
+                p += 1;
+                while p < after_name.len() && after_name[p].is_ascii_whitespace() {
+                    p += 1;
+                }
+                if p < after_name.len() {
+                    let quote = after_name[p];
+                    if quote == b'"' || quote == b'\'' {
+                        p += 1;
+                        let value_start = p;
+                        while p < after_name.len() && after_name[p] != quote {
+                            p += 1;
+                        }
+                        if p <= after_name.len() {
+                            return Some(&after_name[value_start..p]);
+                        }
+                    }
+                }
+            }
+        }
+        // Advance to the next whitespace-separated attribute.
+        pos = abs + 1;
+    }
+    None
+}
+
 pub fn strip_kindle_attributes_fast(html: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(html.len());
     let mut pos = 0;

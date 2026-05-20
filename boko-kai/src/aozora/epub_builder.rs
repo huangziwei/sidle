@@ -32,7 +32,7 @@ pub struct EpubInput<'a> {
 /// `EpubImporter::from_source` or for writing to a `.epub` file.
 pub fn build_epub(input: EpubInput<'_>) -> io::Result<Vec<u8>> {
     let doc = input.document;
-    let uuid = uuid_v5(&format!("aozora:{}:{}", doc.title, doc.author));
+    let uuid = crate::util::uuid_v5(&format!("aozora:{}:{}", doc.title, doc.author));
     let chapters = split_into_chapters(doc);
     let id_to_file = build_id_to_file_map(&chapters);
     // EPUB publisher is always "青空文庫" (the digital publisher). The print
@@ -545,29 +545,7 @@ fn mime_for_image(name: &str) -> &'static str {
     }
 }
 
-/// RFC 4122 v5 UUID, derived from a name string via SHA-1 + URL-namespace.
-/// We use a deterministic v5 instead of the HTML tool's `Math.random()`
-/// v4 so re-importing the same Aozora work yields the same package id —
-/// useful for library deduplication and idempotent sideloads. Same shape
-/// EPUB readers accept either way; only the bytes are different.
-fn uuid_v5(name: &str) -> String {
-    const URL_NAMESPACE: [u8; 16] = [
-        0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30,
-        0xc8,
-    ];
-    let mut hasher = sha1_smol::Sha1::new();
-    hasher.update(&URL_NAMESPACE);
-    hasher.update(name.as_bytes());
-    let digest = hasher.digest().bytes();
-    let mut b = [0u8; 16];
-    b.copy_from_slice(&digest[..16]);
-    b[6] = (b[6] & 0x0f) | 0x50;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
-    )
-}
+// `uuid_v5` lives in `crate::util` — shared across the EPUB exporters.
 
 fn utc_now_iso8601() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};

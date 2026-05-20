@@ -404,7 +404,7 @@ impl EpubOutput {
         // converts of the same KFX produce the same OPF identifier.
         s.push_str(&format!(
             "    <dc:identifier opf:scheme=\"uuid\">{}</dc:identifier>\n",
-            uuid_v5_from(id)
+            crate::util::uuid_v5(id)
         ));
 
         // `dcterms:modified` — required by EPUB 3 (every Publication must
@@ -715,29 +715,5 @@ fn is_precompressed_mime(mime: &str) -> bool {
     )
 }
 
-/// RFC 4122 v5 UUID derived from the KFX book identifier. SHA-1(namespace +
-/// name), then set the version (5) and variant (RFC 4122) bits. Namespace is
-/// the URL namespace UUID (6ba7b811-9dad-11d1-80b4-00c04fd430c8).
-fn uuid_v5_from(name: &str) -> String {
-    const URL_NAMESPACE: [u8; 16] = [
-        0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1,
-        0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
-    ];
-    let mut hasher = sha1_smol::Sha1::new();
-    hasher.update(&URL_NAMESPACE);
-    hasher.update(name.as_bytes());
-    let digest = hasher.digest().bytes();
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    // Set version (5) in the high nibble of byte 6.
-    bytes[6] = (bytes[6] & 0x0f) | 0x50;
-    // Set variant (10xx) in the high nibble of byte 8.
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-    )
-}
+// `uuid_v5` lives in `crate::util` — shared with the generic exporter and
+// the Aozora builder.

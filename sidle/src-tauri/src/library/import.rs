@@ -9,11 +9,19 @@
 //!  - KFX  → library (merging `.kfx-zip` first if needed); pending
 //!           `kfx_to_epub` job.
 //!
-//! Steps, identical for both inputs:
+//! Two formats are converted to EPUB at import time and from there look
+//! identical to a regular EPUB drop:
+//!
+//!  - `.azw3` → boko-kai's AZW3 importer + EPUB exporter.
+//!  - `.zip`  → Aozora Bunko sniff + parse → cover → build_epub. See
+//!              `convert_aozora_zip` for the sniff details.
+//!
+//! Steps, identical for all inputs:
 //!
 //!  1. Stream-hash the source file and check the dedupe index.
-//!  2. Normalize to canonical bytes (`.kfx-zip` → merged `.kfx`; other
-//!     inputs are loaded verbatim).
+//!  2. Normalize to canonical bytes (`.kfx-zip` → merged `.kfx`;
+//!     `.azw3`/`.zip` → freshly built EPUB; other inputs are loaded
+//!     verbatim).
 //!  3. Read metadata from those bytes.
 //!  4. Persist the canonical file into `books/<sha>/<basename>.<ext>`.
 //!  5. Extract the cover sidecar if we already have a readable EPUB on
@@ -28,7 +36,7 @@
 //! Each step touches disk; callers should run this inside `spawn_blocking`.
 
 use std::fs;
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -61,7 +69,7 @@ pub fn import_file(
     let src_kind = SourceKind::detect(src);
     if matches!(src_kind, SourceKind::Unknown) {
         bail!(
-            "unsupported file type: {} (expected .epub, .kfx, or .kfx-zip)",
+            "unsupported file type: {} (expected .epub, .kfx, .kfx-zip, or .azw3)",
             src.display()
         );
     }
@@ -73,6 +81,12 @@ enum SourceKind {
     Epub,
     Kfx,
     KfxZip,
+    /// `.azw3` — Kindle AZW3 (decrypted). Converted to EPUB at import time
+    /// via boko-kai's AZW3 importer + EPUB exporter, so downstream
+    /// everything looks like a regular EPUB drop. Symmetric with the
+    /// aozora `.zip` path, except the format is detected purely by
+    /// extension (no content sniff).
+    Azw3,
     /// `.zip` extension — tentatively an Aozora Bunko archive. The actual
     /// aozora sniff (底本/［＃ markers) happens in `convert_aozora_zip`
     /// during canonical-bytes extraction; a non-aozora zip fails out
@@ -98,6 +112,7 @@ impl SourceKind {
             Some("epub") => Self::Epub,
             Some("kfx") => Self::Kfx,
             Some("kfx-zip") => Self::KfxZip,
+            Some("azw3") => Self::Azw3,
             Some("zip") => Self::AozoraZip,
             _ => Self::Unknown,
         }
@@ -105,7 +120,7 @@ impl SourceKind {
 
     fn canonical(self) -> Canonical {
         match self {
-            Self::Epub | Self::AozoraZip => Canonical::Epub,
+            Self::Epub | Self::AozoraZip | Self::Azw3 => Canonical::Epub,
             Self::Kfx | Self::KfxZip => Canonical::Kfx,
             Self::Unknown => unreachable!("filtered by import_file"),
         }
@@ -156,6 +171,8 @@ fn import_one(
         }
         SourceKind::KfxZip => boko::kfx::merge::merge_kfx_zip(src)
             .with_context(|| format!("merge kfx-zip {}", src.display()))?,
+        SourceKind::Azw3 => convert_azw3(src)
+            .with_context(|| format!("azw3 {}", src.display()))?,
         SourceKind::AozoraZip => convert_aozora_zip(src)
             .with_context(|| format!("aozora zip {}", src.display()))?,
         SourceKind::Unknown => unreachable!("filtered above"),
@@ -372,6 +389,33 @@ pub fn sha256_of_file(path: &Path) -> std::io::Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Convert a decrypted `.azw3` to EPUB bytes via boko-kai's AZW3 importer
+/// + EPUB exporter. Caller has already extension-detected `.azw3`; if the
+/// file isn't a real AZW3 (bad PalmDOC header, etc.), boko's `Book::from_bytes`
+/// returns the error and the caller's `?` surfaces it as a normal import
+/// failure.
+///
+/// Gated on the standalone EPUB-3 validator for the same reason as the
+/// aozora path: the bytes we're about to persist were freshly synthesized
+/// rather than passed through, so we'd rather fail import than write a
+/// broken book and then fail the downstream `epub_to_kfx` job.
+fn convert_azw3(src: &Path) -> Result<Vec<u8>> {
+    use boko::Exporter as _;
+    let azw3_bytes = fs::read(src).with_context(|| format!("read {}", src.display()))?;
+    let mut book = boko::Book::from_bytes(&azw3_bytes, boko::Format::Azw3)
+        .with_context(|| format!("parse azw3 {}", src.display()))?;
+    let mut buf = Cursor::new(Vec::<u8>::new());
+    boko::EpubExporter::new()
+        .export(&mut book, &mut buf)
+        .context("azw3 -> epub export")?;
+    let epub_bytes = buf.into_inner();
+    let report = boko::validate::epub3::validate(&epub_bytes);
+    if !report.is_clean() {
+        bail!("azw3 -> epub failed validation:\n{report}");
+    }
+    Ok(epub_bytes)
 }
 
 /// Open an Aozora Bunko `.zip`, sniff for the markers, run the

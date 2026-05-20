@@ -618,7 +618,15 @@ impl Azw3Importer {
         // Strip Amazon-specific attributes (aid, data-Amzn*)
         let cleaned = transform::strip_kindle_attributes_fast(&transformed);
 
-        Ok(cleaned)
+        // Ensure the root `<html>` carries both `xml:lang` and `lang`.
+        // Calibre's AZW3 exporter scrubs `xml:lang` and leaves only `lang=`,
+        // dropping per-spine-doc xml:lang counts versus the publisher EPUB.
+        // We pair them up; the fallback to `metadata.language` covers AZW3s
+        // that lack any lang signal on `<html>`.
+        let with_lang =
+            transform::ensure_html_lang_dual(&cleaned, &self.metadata.language);
+
+        Ok(with_lang)
     }
 
     /// Discover asset paths by scanning image records and the flow table.
@@ -750,6 +758,15 @@ fn build_metadata(
             .or_else(|| exth.asin.clone())
             .or_else(|| exth.source.clone())
             .unwrap_or_default();
+        // EXTH 113 nominally holds an ASIN, but calibre's AZW3 exporter
+        // writes a freshly-minted UUID there. Only promote to
+        // `metadata.asin` when the value actually looks like an Amazon
+        // ASIN (10-char alphanumeric starting with B for ebooks).
+        metadata.asin = exth
+            .asin
+            .as_ref()
+            .filter(|s| looks_like_asin(s))
+            .cloned();
         // Writing-mode signals (EXTH 525 / 527). Both calibre-exported AZW3s
         // and native Amazon AZW3s carry these; no fallback to inline HTML
         // class needed. Calibre's `reader/headers.py:96-108` is the spec.
@@ -773,6 +790,13 @@ fn build_metadata(
     }
 
     metadata
+}
+
+/// Amazon ASIN format: exactly 10 ASCII alphanumeric characters, typically
+/// starting with `B` for ebook listings. Used to disambiguate EXTH 113 from
+/// the UUID calibre's AZW3 exporter occasionally writes into the same slot.
+fn looks_like_asin(s: &str) -> bool {
+    s.len() == 10 && s.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Build chapter parts by combining skeletons with div content.
