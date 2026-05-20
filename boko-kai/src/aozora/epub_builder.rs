@@ -480,7 +480,7 @@ fn build_opf(
     <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
 {image_manifest}  </manifest>
   <spine page-progression-direction="rtl" toc="ncx">
-    <itemref idref="cover" linear="no"/>
+    <itemref idref="cover"/>
 {chapter_spine}  </spine>
 </package>"#,
         uuid = uuid,
@@ -809,6 +809,13 @@ mod tests {
             "ppd missing"
         );
         assert!(opf.contains(r#"properties="cover-image""#));
+        // Cover spine entry must NOT be `linear="no"` without a hyperlink to
+        // it elsewhere — EPUB 3.3 §5.8.2 (non-linear reachability). Apple
+        // Books and downstream KFX conversion both reject the violation.
+        assert!(
+            !opf.contains(r#"idref="cover" linear="no""#),
+            "cover must be linear; non-linear cover with no inbound hyperlink fails epubcheck"
+        );
     }
 
     #[test]
