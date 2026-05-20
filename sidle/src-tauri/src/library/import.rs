@@ -433,5 +433,12 @@ fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
         cover_jpeg: &cover,
     })
     .context("aozora build_epub")?;
+    // Gate the import on the standalone EPUB-3 validator. Bad output here
+    // silently corrupts the downstream KFX conversion, so we fail fast
+    // instead of writing a broken book into the library.
+    let report = boko::validate::epub3::validate(&epub_bytes);
+    if !report.is_clean() {
+        bail!("aozora epub failed validation:\n{report}");
+    }
     Ok(epub_bytes)
 }

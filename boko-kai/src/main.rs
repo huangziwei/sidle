@@ -1661,6 +1661,10 @@ fn aozora_dispatch(
         cover_jpeg: &cover,
     })
     .map_err(|e| format!("build epub: {e}"))?;
+    let report = boko::validate::epub3::validate(&epub_bytes);
+    if !report.is_clean() {
+        return Err(format!("aozora epub failed validation:\n{report}"));
+    }
 
     if to_stdout {
         use std::io::Write;

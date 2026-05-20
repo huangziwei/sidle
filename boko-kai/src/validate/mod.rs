@@ -28,6 +28,7 @@
 //! Calibre's output is NEVER ground truth — sidle exists to replace it.
 //! See feedback memory: ground-truth-by-direction.
 
+pub mod epub3;
 pub mod images;
 pub mod links;
 pub mod metadata;
