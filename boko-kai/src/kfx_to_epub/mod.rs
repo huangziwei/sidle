@@ -151,6 +151,7 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
     );
     if !toc.is_empty() {
         out.ncx_navmap = Some(navigation::render_navmap(&toc));
+        out.nav_ol_html = Some(navigation::render_nav_ol(&toc));
     }
     trace.mark("navigation::extract_toc");
 

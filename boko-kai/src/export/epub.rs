@@ -10,7 +10,7 @@ use zip::CompressionMethod;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-use crate::model::{Book, TocEntry};
+use crate::model::{Book, Landmark, LandmarkType, TocEntry};
 
 use super::Exporter;
 
@@ -138,6 +138,14 @@ impl EpubExporter {
             asset_map.insert(path_str.to_string(), href);
         }
 
+        // EPUB 3 navigation document (required by spec; Apple Books rejects
+        // EPUB 3 packages missing it). NCX remains for backwards-compat.
+        manifest_items.push(ManifestItem {
+            id: "nav".to_string(),
+            href: "OEBPS/nav.xhtml".to_string(),
+            media_type: "application/xhtml+xml".to_string(),
+        });
+
         // 4. Write content.opf
         let cover_id = find_cover_manifest_id(book.metadata(), &manifest_items);
         let opf = generate_opf(
@@ -150,7 +158,13 @@ impl EpubExporter {
             .map_err(io_error)?;
         zip.write_all(opf.as_bytes())?;
 
-        // 5. Write toc.ncx
+        // 5a. Write nav.xhtml (EPUB 3 navigation document)
+        let nav = generate_nav(book.metadata(), book.toc(), book.landmarks());
+        zip.start_file("OEBPS/nav.xhtml", deflated)
+            .map_err(io_error)?;
+        zip.write_all(nav.as_bytes())?;
+
+        // 5b. Write toc.ncx (legacy fallback for EPUB 2 readers)
         let ncx = generate_ncx(book.metadata(), book.toc());
         zip.start_file("OEBPS/toc.ncx", deflated)
             .map_err(io_error)?;
@@ -275,6 +289,14 @@ impl EpubExporter {
             });
         }
 
+        // EPUB 3 navigation document (required by spec; Apple Books rejects
+        // EPUB 3 packages missing it). NCX remains for backwards-compat.
+        manifest_items.push(ManifestItem {
+            id: "nav".to_string(),
+            href: "OEBPS/nav.xhtml".to_string(),
+            media_type: "application/xhtml+xml".to_string(),
+        });
+
         // 4. Write content.opf
         let cover_id = find_cover_manifest_id(book.metadata(), &manifest_items);
         let opf = generate_opf(
@@ -287,7 +309,13 @@ impl EpubExporter {
             .map_err(io_error)?;
         zip.write_all(opf.as_bytes())?;
 
-        // 5. Write toc.ncx
+        // 5a. Write nav.xhtml (EPUB 3 navigation document)
+        let nav = generate_nav(book.metadata(), book.toc(), book.landmarks());
+        zip.start_file("OEBPS/nav.xhtml", deflated)
+            .map_err(io_error)?;
+        zip.write_all(nav.as_bytes())?;
+
+        // 5b. Write toc.ncx (legacy fallback for EPUB 2 readers)
         let ncx = generate_ncx(book.metadata(), book.toc());
         zip.start_file("OEBPS/toc.ncx", deflated)
             .map_err(io_error)?;
@@ -562,7 +590,9 @@ fn generate_opf(
     for item in manifest {
         // Get relative path from OEBPS/
         let href = item.href.strip_prefix("OEBPS/").unwrap_or(&item.href);
-        let properties = if Some(item.id.as_str()) == cover_manifest_id {
+        let properties = if item.id == "nav" {
+            " properties=\"nav\""
+        } else if Some(item.id.as_str()) == cover_manifest_id {
             " properties=\"cover-image\""
         } else {
             ""
@@ -593,6 +623,129 @@ fn generate_opf(
 
     opf.push_str("</package>\n");
     opf
+}
+
+/// Generate `nav.xhtml`, the EPUB 3 navigation document.
+///
+/// Every EPUB 3 publication MUST contain exactly one navigation document
+/// per the W3C EPUB 3.3 spec (NCX is a legacy fallback that does NOT
+/// satisfy this requirement). Apple Books enforces the spec strictly and
+/// rejects EPUB 3 packages missing this document.
+///
+/// Emits `<nav epub:type="toc">` from `Metadata::toc`, plus
+/// `<nav epub:type="landmarks">` from `Metadata::landmarks` when any
+/// landmarks are present.
+fn generate_nav(
+    metadata: &crate::model::Metadata,
+    toc: &[TocEntry],
+    landmarks: &[Landmark],
+) -> String {
+    let mut s = String::new();
+    s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    s.push_str("<!DOCTYPE html>\n");
+    let lang = if metadata.language.is_empty() {
+        "en"
+    } else {
+        metadata.language.as_str()
+    };
+    s.push_str(&format!(
+        "<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\" xml:lang=\"{}\" lang=\"{}\">\n",
+        escape_xml(lang),
+        escape_xml(lang),
+    ));
+    s.push_str("<head>\n");
+    s.push_str("  <meta charset=\"utf-8\"/>\n");
+    s.push_str("  <title>Navigation</title>\n");
+    s.push_str("</head>\n<body>\n");
+
+    // Table of contents.
+    s.push_str("  <nav epub:type=\"toc\" id=\"toc\">\n");
+    s.push_str("    <h1>Table of Contents</h1>\n");
+    if toc.is_empty() {
+        // Spec requires the nav to be non-empty; fall back to the title
+        // pointing at the first content document. Empty TOC is unusual but
+        // exists on minimal books.
+        s.push_str("    <ol>\n      <li><a href=\"chapter_0.xhtml\">");
+        s.push_str(&escape_xml(if metadata.title.is_empty() {
+            "Content"
+        } else {
+            metadata.title.as_str()
+        }));
+        s.push_str("</a></li>\n    </ol>\n");
+    } else {
+        write_nav_list(&mut s, toc, 2);
+    }
+    s.push_str("  </nav>\n");
+
+    // Landmarks — hidden from rendered TOC view but used by readers for
+    // "skip to start reading" / "go to cover" actions.
+    if !landmarks.is_empty() {
+        s.push_str("  <nav epub:type=\"landmarks\" id=\"landmarks\" hidden=\"\">\n");
+        s.push_str("    <h2>Landmarks</h2>\n");
+        s.push_str("    <ol>\n");
+        for lm in landmarks {
+            let epub_type = landmark_epub_type(lm.landmark_type);
+            s.push_str(&format!(
+                "      <li><a epub:type=\"{}\" href=\"{}\">{}</a></li>\n",
+                epub_type,
+                escape_xml(&lm.href),
+                escape_xml(&lm.label),
+            ));
+        }
+        s.push_str("    </ol>\n");
+        s.push_str("  </nav>\n");
+    }
+
+    s.push_str("</body>\n</html>\n");
+    s
+}
+
+/// Recursively write `<ol><li>...</li></ol>` for the TOC tree.
+fn write_nav_list(s: &mut String, entries: &[TocEntry], indent: usize) {
+    let pad = "  ".repeat(indent);
+    s.push_str(&pad);
+    s.push_str("<ol>\n");
+    for entry in entries {
+        s.push_str(&pad);
+        s.push_str(&format!(
+            "  <li><a href=\"{}\">{}</a>",
+            escape_xml(&entry.href),
+            escape_xml(&entry.title),
+        ));
+        if !entry.children.is_empty() {
+            s.push('\n');
+            write_nav_list(s, &entry.children, indent + 2);
+            s.push_str(&pad);
+            s.push_str("  </li>\n");
+        } else {
+            s.push_str("</li>\n");
+        }
+    }
+    s.push_str(&pad);
+    s.push_str("</ol>\n");
+}
+
+/// Map an internal LandmarkType to the EPUB 3 `epub:type` vocabulary.
+fn landmark_epub_type(t: LandmarkType) -> &'static str {
+    match t {
+        LandmarkType::Cover => "cover",
+        LandmarkType::TitlePage => "titlepage",
+        LandmarkType::Toc => "toc",
+        // EPUB 3.3 deprecated `start` in favor of `bodymatter`; lump
+        // StartReading + BodyMatter into bodymatter — both denote where
+        // the main content begins.
+        LandmarkType::StartReading | LandmarkType::BodyMatter => "bodymatter",
+        LandmarkType::FrontMatter => "frontmatter",
+        LandmarkType::BackMatter => "backmatter",
+        LandmarkType::Acknowledgements => "acknowledgments",
+        LandmarkType::Bibliography => "bibliography",
+        LandmarkType::Glossary => "glossary",
+        LandmarkType::Index => "index",
+        LandmarkType::Preface => "preface",
+        LandmarkType::Endnotes => "endnotes",
+        LandmarkType::Loi => "loi",
+        LandmarkType::Lot => "lot",
+    }
 }
 
 /// Generate toc.ncx from TOC entries.

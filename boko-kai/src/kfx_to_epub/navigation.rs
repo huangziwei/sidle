@@ -446,6 +446,38 @@ pub fn render_navmap(points: &[NavPoint]) -> String {
     s
 }
 
+/// Render the EPUB 3 nav doc TOC body — `<ol><li><a href="...">title</a></li></ol>`.
+/// Used inside `<nav epub:type="toc">` (mandatory in EPUB 3 per W3C spec).
+pub fn render_nav_ol(points: &[NavPoint]) -> String {
+    let mut s = String::new();
+    write_nav_ol(&mut s, points, 4);
+    s
+}
+
+fn write_nav_ol(s: &mut String, points: &[NavPoint], indent: usize) {
+    let pad = "  ".repeat(indent);
+    s.push_str(&pad);
+    s.push_str("<ol>\n");
+    for p in points {
+        s.push_str(&pad);
+        s.push_str(&format!(
+            "  <li><a href=\"{}\">{}</a>",
+            xml_escape(&p.href),
+            xml_escape(&p.label)
+        ));
+        if !p.children.is_empty() {
+            s.push('\n');
+            write_nav_ol(s, &p.children, indent + 2);
+            s.push_str(&pad);
+            s.push_str("  </li>\n");
+        } else {
+            s.push_str("</li>\n");
+        }
+    }
+    s.push_str(&pad);
+    s.push_str("</ol>\n");
+}
+
 fn write_points(s: &mut String, points: &[NavPoint], play_order: &mut usize, indent: usize) {
     let prefix = "  ".repeat(indent);
     for p in points {

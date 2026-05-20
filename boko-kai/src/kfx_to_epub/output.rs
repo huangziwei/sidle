@@ -63,6 +63,13 @@ pub struct EpubOutput {
     /// fallback.
     pub ncx_navmap: Option<String>,
 
+    /// EPUB 3 nav doc TOC `<ol>` body, paired with `ncx_navmap` (both
+    /// derived from the same `NavPoint` tree). Populated alongside
+    /// `ncx_navmap` in `mod.rs`. When set, `generate_nav` emits this
+    /// inside `<nav epub:type="toc">`; otherwise falls back to a
+    /// single-entry list pointing at the first spine chapter.
+    pub nav_ol_html: Option<String>,
+
     /// Page-progression-direction. Mirrors calibre's `EPUB_Output.
     /// page_progression_direction`. Emitted to `<spine
     /// page-progression-direction="...">` only when set and not `"ltr"`
@@ -89,6 +96,7 @@ impl EpubOutput {
             manifest_by_id: HashMap::new(),
             spine: Vec::new(),
             ncx_navmap: None,
+            nav_ol_html: None,
             page_progression_direction: None,
             writing_mode: None,
             guide: Vec::new(),
@@ -285,7 +293,15 @@ impl EpubOutput {
                 .map_err(io_error)?;
             zip.write_all(opf.as_bytes())?;
 
-            // 4. toc.ncx (minimal — phase 1 step 2 will replace with real)
+            // 4a. nav.xhtml (EPUB 3 navigation document — required by spec,
+            //     enforced by Apple Books).
+            let nav = self.generate_nav(meta);
+            zip.start_file("OEBPS/nav.xhtml", deflated)
+                .map_err(io_error)?;
+            zip.write_all(nav.as_bytes())?;
+
+            // 4b. toc.ncx (legacy fallback for EPUB 2 readers; kept alongside
+            //     the nav doc).
             let ncx = self.generate_ncx(meta);
             zip.start_file("OEBPS/toc.ncx", deflated).map_err(io_error)?;
             zip.write_all(ncx.as_bytes())?;
@@ -315,18 +331,17 @@ impl EpubOutput {
     }
 
     fn generate_opf(&self, meta: &BookMetadata) -> String {
-        // EPUB 2.0 package. Reason: EPUB 3.0 mandates a nav.xhtml document
-        // (`<item properties="nav">` in the manifest, distinct from NCX) and
-        // strict readers — notably Apple Books — reject 3.0 packages lacking
-        // one with no rendered output. Calibre's EPUB output uses 2.0 + NCX
-        // for the same reason. We keep our existing OPF features that are
-        // valid in both (ASIN identifiers, `<dc:date>`, `xml:lang`, custom
-        // `<meta name="...">` hints, `page-progression-direction` on spine)
-        // but drop the EPUB-3-only bits (`properties=` on manifest items,
-        // `<meta property="dcterms:modified">`).
+        // EPUB 3.0 package. Earlier we downgraded to 2.0 to placate strict
+        // readers (notably Apple Books) that rejected EPUB 3 packages
+        // missing the spec-required `nav.xhtml` document. We now emit a
+        // proper nav doc (see `generate_nav` + the `OEBPS/nav.xhtml`
+        // entry written in `into_zip_bytes`), so EPUB 3 conformance is
+        // back — with `properties="nav"` / `properties="cover-image"` on
+        // manifest items and `<meta property="dcterms:modified">` in
+        // metadata. NCX still emitted for legacy EPUB 2 readers.
         let mut s = String::new();
         s.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
 "#);
 
@@ -392,9 +407,14 @@ impl EpubOutput {
             uuid_v5_from(id)
         ));
 
-        // (EPUB3-only `<meta property="dcterms:modified">` intentionally
-        // dropped — EPUB2 doesn't require it, and including it under EPUB2
-        // is invalid because `property=` is an EPUB3 attribute.)
+        // `dcterms:modified` — required by EPUB 3 (every Publication must
+        // declare its last-modified time). Stamps NOW per
+        // [[feedback_modified_date_is_conversion_time]] — never the
+        // source's value.
+        s.push_str(&format!(
+            "    <meta property=\"dcterms:modified\">{}</meta>\n",
+            xml_escape(&crate::util::time_now_iso8601_utc())
+        ));
 
         // Publication date — calibre uses `kindle_title_metadata/issue_date`
         // (KFX stores as YYYY-MM-DD). Emit as ISO-8601 with a UTC offset to
@@ -452,22 +472,31 @@ impl EpubOutput {
 
         s.push_str("  </metadata>\n");
 
-        // Manifest
+        // Manifest. The `<meta name="cover">` marker in metadata is kept
+        // alongside `properties="cover-image"` here for EPUB-2-reader
+        // compatibility — both are honoured by most readers, and emitting
+        // both is the calibre convention.
         s.push_str("  <manifest>\n");
         s.push_str(
             "    <item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n",
         );
+        s.push_str(
+            "    <item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>\n",
+        );
         for m in &self.manifest {
-            // EPUB-3-only `properties="cover-image"` / `properties="nav"`
-            // intentionally omitted under EPUB 2.0. The cover marker lives
-            // in `<meta name="cover" content="..."/>` instead (emitted in
-            // the metadata block above), which is the EPUB2 convention all
-            // readers (including Apple Books) honour.
+            let properties = if m.is_cover_image {
+                " properties=\"cover-image\""
+            } else if m.is_nav {
+                " properties=\"nav\""
+            } else {
+                ""
+            };
             s.push_str(&format!(
-                "    <item id=\"{}\" href=\"{}\" media-type=\"{}\"/>\n",
+                "    <item id=\"{}\" href=\"{}\" media-type=\"{}\"{}/>\n",
                 xml_escape(&m.id),
                 xml_escape(&m.href),
                 xml_escape(&m.media_type),
+                properties,
             ));
         }
         s.push_str("  </manifest>\n");
@@ -508,6 +537,86 @@ impl EpubOutput {
         }
 
         s.push_str("</package>\n");
+        s
+    }
+
+    /// Generate `nav.xhtml`, the EPUB 3 navigation document.
+    ///
+    /// The W3C EPUB 3.3 spec requires every Publication to include exactly
+    /// one nav doc, and conformant readers (Apple Books) reject EPUB 3
+    /// packages without it. NCX no longer satisfies the requirement on
+    /// its own — it's strictly legacy.
+    ///
+    /// Body shape (mirrors calibre's EPUB 3 nav output):
+    /// `<nav epub:type="toc"><ol><li><a href=…>…</a></li></ol></nav>`,
+    /// optional `<nav epub:type="landmarks">` from `self.guide` (the same
+    /// container used to emit the EPUB-2 `<guide>` block).
+    fn generate_nav(&self, meta: &BookMetadata) -> String {
+        let title = if meta.title.is_empty() { "Untitled" } else { &meta.title };
+        let lang = if meta.language.is_empty() {
+            "en"
+        } else {
+            meta.language.as_str()
+        };
+
+        let mut s = String::new();
+        s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        s.push_str("<!DOCTYPE html>\n");
+        s.push_str(&format!(
+            "<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\" xml:lang=\"{lang}\" lang=\"{lang}\">\n",
+            lang = xml_escape(lang),
+        ));
+        s.push_str("<head>\n");
+        s.push_str("  <meta charset=\"utf-8\"/>\n");
+        s.push_str(&format!("  <title>{}</title>\n", xml_escape(title)));
+        s.push_str("</head>\n<body>\n");
+
+        // TOC nav.
+        s.push_str("  <nav epub:type=\"toc\" id=\"toc\">\n");
+        s.push_str("    <h1>Table of Contents</h1>\n");
+        if let Some(ol) = &self.nav_ol_html {
+            s.push_str(ol);
+        } else if let Some(first_chapter_id) = self.spine.first() {
+            // Fallback: single entry pointing at the first spine chapter
+            // (mirrors what `generate_ncx` does when `ncx_navmap` is unset).
+            let href = self
+                .manifest_by_id
+                .get(first_chapter_id)
+                .map(|&idx| self.manifest[idx].href.clone())
+                .unwrap_or_default();
+            s.push_str(&format!(
+                "    <ol>\n      <li><a href=\"{}\">{}</a></li>\n    </ol>\n",
+                xml_escape(&href),
+                xml_escape(title),
+            ));
+        } else {
+            s.push_str("    <ol></ol>\n");
+        }
+        s.push_str("  </nav>\n");
+
+        // Landmarks nav, derived from the same `self.guide` source the
+        // EPUB-2 `<guide>` block uses. EPUB-3 vocabulary differs from
+        // EPUB-2 guide types in a few names (start → bodymatter,
+        // acknowledgements vs acknowledgments); map at emit time so the
+        // GuideRef struct stays a single source of truth.
+        if !self.guide.is_empty() {
+            s.push_str("  <nav epub:type=\"landmarks\" id=\"landmarks\" hidden=\"\">\n");
+            s.push_str("    <h2>Landmarks</h2>\n");
+            s.push_str("    <ol>\n");
+            for g in &self.guide {
+                let epub_type = guide_type_to_epub3(&g.guide_type);
+                s.push_str(&format!(
+                    "      <li><a epub:type=\"{}\" href=\"{}\">{}</a></li>\n",
+                    epub_type,
+                    xml_escape(&g.href),
+                    xml_escape(&g.label),
+                ));
+            }
+            s.push_str("    </ol>\n");
+            s.push_str("  </nav>\n");
+        }
+
+        s.push_str("</body>\n</html>\n");
         s
     }
 
@@ -578,6 +687,18 @@ fn xml_escape(s: &str) -> String {
 
 fn io_error<E: std::error::Error + Send + Sync + 'static>(e: E) -> std::io::Error {
     std::io::Error::other(e)
+}
+
+/// Map an EPUB 2.0 `<guide>` reference type to the EPUB 3 nav-doc
+/// `epub:type` vocabulary. Most types are identical; a few names differ
+/// (`start` → `bodymatter`, `acknowledgements` → `acknowledgments`).
+/// Unknown types pass through verbatim — readers ignore unknown values.
+fn guide_type_to_epub3(guide_type: &str) -> &str {
+    match guide_type {
+        "start" | "text" => "bodymatter",
+        "acknowledgements" => "acknowledgments",
+        other => other,
+    }
 }
 
 /// Media types whose bytes are already compressed; running deflate over them
