@@ -843,8 +843,12 @@ fn walk_node_for_export(
     elem.node_id = Some(node_id);
 
     // Register the node's style and get a KFX style symbol
-    // This converts IR ComputedStyle → KFX style and deduplicates
-    let style_symbol = ctx.register_style_id(node.style, &chapter.styles);
+    // This converts IR ComputedStyle → KFX style and deduplicates.
+    // Pass the source class attribute as a name hint so single-class
+    // identifiers like "bold" / "vrtl" survive into the KFX style symbol
+    // table instead of becoming opaque `s<N>` names.
+    let class_hint = chapter.semantics.class(node_id);
+    let style_symbol = ctx.register_style_id_with_hint(node.style, &chapter.styles, class_hint);
     elem.style_symbol = Some(style_symbol);
 
     // Check if this element needs container wrapping for borders to render
@@ -949,6 +953,11 @@ struct InlineState {
     element_id: Option<String>,
     /// Active node ID (for anchor creation with GlobalNodeId)
     node_id: Option<NodeId>,
+    /// Source `class` attribute of the inline node owning the active style.
+    /// Tracked alongside `style` (innermost-wins) so the KFX style registry
+    /// can preserve names like `bold`, `tcy`, `upright` instead of falling
+    /// back to synthesized `s<N>` symbols.
+    class_hint: Option<String>,
     /// Ruby annotation text from a Ruby ancestor (the <rt> content).
     /// When set, the base text segments get a ruby_name + ruby_id style_event
     /// pointing at an entry in a ruby_content fragment.
@@ -1009,6 +1018,13 @@ fn flatten_inline_content(
             Some(node.style)
         } else {
             state.style
+        },
+        // Class hint moves alongside style — when the innermost inline wins
+        // on style, it also contributes its source class name.
+        class_hint: if node.role == Role::Inline || node.role == Role::Link {
+            chapter.semantics.class(node_id).map(|s| s.to_string())
+        } else {
+            state.class_hint.clone()
         },
         // epub:type: propagate for noteref detection
         epub_type: chapter
@@ -1142,9 +1158,16 @@ fn emit_flattened_segments(
                 0,
             );
 
-            // Set style (innermost)
+            // Set style (innermost). The class hint carried in the segment
+            // state mirrors the innermost-wins style, so the KFX style
+            // registry sees the same source class name that styled this
+            // text segment.
             if let Some(style_id) = segment.state.style {
-                let style_symbol = ctx.register_style_id(style_id, &chapter.styles);
+                let style_symbol = ctx.register_style_id_with_hint(
+                    style_id,
+                    &chapter.styles,
+                    segment.state.class_hint.as_deref(),
+                );
                 span.style_symbol = Some(style_symbol);
             }
 
@@ -1218,7 +1241,11 @@ fn emit_definition_list(
 
     // Emit the outer dl container (becomes Paragraph like KPR)
     let mut dl_elem = ElementStart::new(Role::Paragraph);
-    let dl_style = ctx.register_style_id(node.style, &chapter.styles);
+    let dl_style = ctx.register_style_id_with_hint(
+        node.style,
+        &chapter.styles,
+        chapter.semantics.class(node_id),
+    );
     dl_elem.style_symbol = Some(dl_style);
 
     stream.push(KfxToken::StartElement(dl_elem));
@@ -1255,8 +1282,12 @@ fn emit_definition_list(
             // Start a wrapper Paragraph for this dt+dd pair
             // Use a neutral style (from dd or default)
             let mut wrapper_elem = ElementStart::new(Role::Paragraph);
-            let wrapper_style = if let Some((_, dd_style_id)) = dd_info {
-                ctx.register_style_id(dd_style_id, &chapter.styles)
+            let wrapper_style = if let Some((dd_node_id, dd_style_id)) = dd_info {
+                ctx.register_style_id_with_hint(
+                    dd_style_id,
+                    &chapter.styles,
+                    chapter.semantics.class(dd_node_id),
+                )
             } else {
                 ctx.default_style_symbol
             };
@@ -1265,7 +1296,11 @@ fn emit_definition_list(
 
             // Emit the dt as a Container (with float:left style)
             // Use DefinitionTerm role since it maps to KfxSymbol::Container
-            let dt_style = ctx.register_style_id(child.style, &chapter.styles);
+            let dt_style = ctx.register_style_id_with_hint(
+                child.style,
+                &chapter.styles,
+                chapter.semantics.class(child_id),
+            );
             let mut dt_elem = ElementStart::new(Role::DefinitionTerm);
             dt_elem.style_symbol = Some(dt_style);
             stream.push(KfxToken::StartElement(dt_elem));

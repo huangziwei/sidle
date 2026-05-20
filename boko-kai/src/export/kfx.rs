@@ -1504,8 +1504,14 @@ fn build_cover_storyline(chapter: &Chapter, ctx: &mut ExportContext) -> IonValue
                 let resource_name = ctx.resource_registry.get_or_create_name(src);
                 let resource_name_symbol = ctx.symbols.get_or_intern(&resource_name);
 
-                // Register style and get symbol
-                let style_symbol = ctx.register_style_id(node.style, &chapter.styles);
+                // Register style and get symbol. Cover image often has a
+                // distinctive source class like `p-cover` — passing it as a
+                // hint keeps that name in the KFX style symbol table.
+                let style_symbol = ctx.register_style_id_with_hint(
+                    node.style,
+                    &chapter.styles,
+                    chapter.semantics.class(node_id),
+                );
 
                 // Generate unique container ID
                 let container_id = ctx.fragment_ids.next_id();

@@ -46,8 +46,8 @@ pub struct ContentState<'a> {
     /// same inline-style declaration appears on N elements. Each entry is
     /// `(class_name, decl)`; emitted as `.<class_name> { ... }` by
     /// `emit_stylesheet`. Kept separate from `stylesheet` because the keys
-    /// in the latter are KFX style names (emitted as `.s_<name>`), whereas
-    /// generated classes use a `g<N>` prefix.
+    /// in the latter are KFX style names (emitted bare), whereas generated
+    /// classes use a `g<N>` prefix.
     pub generated_classes: Vec<(String, CssDecl)>,
 
     /// Output book parts: filename → DOM. Insertion-ordered.
@@ -216,17 +216,17 @@ impl<'a> ContentState<'a> {
     }
 
     fn link_stylesheet(&mut self, part_index: usize) {
+        // Synthesized `style.css` — the only stylesheet on the EPUB side.
+        // Plain sibling filename; both chapters and the stylesheet live in
+        // `OEBPS/`. The earlier `../OEBPS/style.css` resolved mathematically
+        // but tripped Apple Books (silently declined to load), so a sibling
+        // reference is the correct resolution.
         let part = &mut self.book_parts[part_index];
-        let link = part.dom.sub_element(part.head_id, "link");
+        let head_id = part.head_id;
+        let link = part.dom.sub_element(head_id, "link");
         let l = part.dom.get_mut(link);
         l.set("rel", "stylesheet");
         l.set("type", "text/css");
-        // Plain filename: the chapter lives in `OEBPS/`, the stylesheet is
-        // also bundled in `OEBPS/`, so a sibling reference is the correct
-        // resolution. The earlier `../OEBPS/style.css` resolved to the same
-        // file mathematically but tripped Apple Books (which silently
-        // declined to load it), leaving the body without
-        // `writing-mode: vertical-rl` — pages then rendered horizontal.
         l.set("href", "style.css");
     }
 
@@ -888,7 +888,15 @@ impl<'a> ContentState<'a> {
         style_name: &Option<String>,
         fields: &[(u64, IonValue)],
     ) {
-        // 1. Style-name class.
+        // 1. Style-name class. The class name we emit is the KFX style
+        // symbol verbatim (sanitized to CSS-safe chars). Calibre adds an
+        // `s_` prefix here; we don't — boko's exporter has already chosen
+        // a single-token symbol name (a real source class like `bold` /
+        // `vrtl`, or a synthesized `s<N>` fallback), and prefixing it
+        // would defeat the round-trip identity work in
+        // `StyleRegistry::register_with_hint`. Source EPUBs almost never
+        // ship names that collide with the synthesized `s<N>` shape, and
+        // when they do the registry's `taken_names` set keeps them apart.
         if let Some(name) = style_name {
             let decl = properties::style_decl_for(name, self.book);
             if !decl.is_empty() {
@@ -900,7 +908,7 @@ impl<'a> ContentState<'a> {
                     .element_classes
                     .entry(elem_id)
                     .or_default()
-                    .push(format!("s_{}", safe_class_name(name)));
+                    .push(safe_class_name(name));
             }
             // Layout hints + heading level — drive the `<div>` → `<h<N>>`
             // promotion in `consolidate_html`. Not emitted as CSS (calibre
@@ -1703,7 +1711,7 @@ pub fn emit_stylesheet(state: &ContentState) -> String {
         if decl.is_empty() {
             continue;
         }
-        s.push_str(&format!(".s_{} {{ {} }}\n", safe_class_name(k), decl.to_inline()));
+        s.push_str(&format!(".{} {{ {} }}\n", safe_class_name(k), decl.to_inline()));
     }
     // Auto-generated classes from `fixup_styles_and_classes` (inline →
     // class dedupe). Emit in insertion order so class names stay stable
