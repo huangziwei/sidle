@@ -9,13 +9,16 @@
 //! - Embedded — Tauri spawns it as a tokio task, sharing the runtime.
 //! - Standalone — `sidle-server` CLI binary parses args, calls `serve()`.
 
+mod kindle;
+
+use std::collections::HashMap;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
@@ -44,9 +47,9 @@ pub struct Config {
 }
 
 #[derive(Clone)]
-struct AppState {
-    paths: LibraryPaths,
-    token: Arc<str>,
+pub(crate) struct AppState {
+    pub(crate) paths: LibraryPaths,
+    pub(crate) token: Arc<str>,
 }
 
 pub async fn serve(config: Config) -> Result<()> {
@@ -61,7 +64,9 @@ pub async fn serve(config: Config) -> Result<()> {
         .route("/", get(health))
         .route("/list.json", get(list_json))
         .route("/get/{id}", get(get_book))
+        .route("/dl/{id}", get(get_book))
         .route("/cover/{id}", get(get_cover))
+        .route("/kindle", get(kindle::page))
         .with_state(state);
 
     let listener = TcpListener::bind(&config.bind)
@@ -101,10 +106,18 @@ pub fn load_or_generate_token(data_dir: &StdPath) -> Result<String> {
     Ok(token)
 }
 
-fn check_token(headers: &HeaderMap, expected: &str) -> Result<(), StatusCode> {
+pub(crate) fn check_token(
+    headers: &HeaderMap,
+    query: &HashMap<String, String>,
+    expected: &str,
+) -> Result<(), StatusCode> {
+    // Header takes precedence (programmatic callers — KUAL helper, curl
+    // scripts), then `?token=` fallback for browser navigations on `/kindle`
+    // / `/dl/{id}` where setting a custom header isn't possible from a click.
     let got = headers
         .get("x-sidle-token")
         .and_then(|v| v.to_str().ok())
+        .or_else(|| query.get("token").map(|s| s.as_str()))
         .ok_or(StatusCode::FORBIDDEN)?;
     // Constant-time compare — the token is short and the workload is single-
     // user so the practical impact is nil, but it costs nothing to do right.
@@ -131,10 +144,12 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
 async fn health() -> Response {
     let body = concat!(
         "sidle-server up.\n\n",
-        "Endpoints (require X-Sidle-Token header):\n",
+        "Endpoints (require token via X-Sidle-Token header or ?token= query):\n",
         "  GET /list.json     — library as JSON\n",
         "  GET /get/{id}      — book .kfx bytes\n",
+        "  GET /dl/{id}       — alias for /get/{id} (used by the KUAL helper)\n",
         "  GET /cover/{id}    — cover image\n",
+        "  GET /kindle        — eink-friendly gallery (HTML)\n",
     );
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -144,7 +159,7 @@ async fn health() -> Response {
     (headers, body).into_response()
 }
 
-fn open_db(paths: &LibraryPaths) -> Result<Connection, StatusCode> {
+pub(crate) fn open_db(paths: &LibraryPaths) -> Result<Connection, StatusCode> {
     db::open(&paths.db()).map_err(|err| {
         tracing::error!(?err, "open library.db failed");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -153,9 +168,10 @@ fn open_db(paths: &LibraryPaths) -> Result<Connection, StatusCode> {
 
 async fn list_json(
     State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<db::BookRow>>, StatusCode> {
-    check_token(&headers, &state.token)?;
+    check_token(&headers, &query, &state.token)?;
     let conn = open_db(&state.paths)?;
     let books = db::list_books(&conn).map_err(|err| {
         tracing::error!(?err, "list_books failed");
@@ -167,9 +183,10 @@ async fn list_json(
 async fn get_book(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    check_token(&headers, &state.token)?;
+    check_token(&headers, &query, &state.token)?;
     let conn = open_db(&state.paths)?;
     let book = db::get_book(&conn, id)
         .map_err(|err| {
@@ -189,9 +206,10 @@ async fn get_book(
 async fn get_cover(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    check_token(&headers, &state.token)?;
+    check_token(&headers, &query, &state.token)?;
     let conn = open_db(&state.paths)?;
     let book = db::get_book(&conn, id)
         .map_err(|err| {
