@@ -20,9 +20,9 @@ mod orientation;
 mod ui;
 mod wrap;
 
-use eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_GC16};
+use eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16};
 use eink::pillow::Pillow;
-use eink::touch::Touch;
+use eink::touch::{Touch, TouchEvent};
 use image::DynamicImage;
 use ui::grid;
 use ui::pager::{self, PAGE_SIZE, PagerHit};
@@ -43,6 +43,22 @@ const TOP_MARGIN: u32 = 80;
 const DOWNLOAD_DIR: &str = "/mnt/us/documents/Sidle";
 const CLEANINDEX: &str = "/mnt/us/system/.cleanindex";
 const TOAST_LINGER: Duration = Duration::from_millis(1200);
+/// Minimum hold duration on a cell for a long-press to fire a download.
+/// Shorter than this and we treat the touch as a misclick, showing a
+/// "hold to download" discovery hint instead of starting the download.
+/// 1s is on the slow side (stock Kindle's long-press is ~500ms) but
+/// the cost of a wrong download (1–10s + a wrong file on the device)
+/// is high enough that deliberateness wins over speed. Tune on
+/// hardware if it feels sluggish.
+const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(1000);
+
+/// Cell currently outlined and awaiting either a long-enough hold to
+/// fire a download or a too-short release to fire the discovery hint.
+struct Armed {
+    book_idx: usize,
+    cell_idx: usize,
+    down_at: Instant,
+}
 
 fn main() {
     let result = run();
@@ -154,106 +170,171 @@ fn run() -> anyhow::Result<()> {
         &cfg, &mut fb, &books, &mut covers, page, grid_left, grid_top,
     )?;
 
+    let mut armed: Option<Armed> = None;
     loop {
-        let (tx, ty) = touch.next_tap()?;
-        log(format!("tap: ({tx},{ty})"));
+        let event = touch.next_event()?;
 
-        // Toolbar strip always wins over cell hit-test. Exit lives there
-        // now; page nav too when there's more than one page.
-        if let Some(hit) = pager::hit(tx, ty, fb.var.xres, fb.var.yres, total_pages) {
-            match hit {
-                PagerHit::Exit => {
-                    log("exit-button tap");
-                    break;
-                }
-                PagerHit::Prev => {
-                    let new_page = page.saturating_sub(1);
-                    if new_page != page {
-                        page = new_page;
-                        draw_gallery_page(
-                            &mut fb, &mut renderer, &books, &covers, page,
-                            total_pages, grid_left, grid_top,
+        match event {
+            TouchEvent::Down { x, y } => {
+                log(format!("down: ({x},{y})"));
+                // Down on a cell arms it. Down on the strip or in margins
+                // is a no-op — strip actions fire on Up regardless of
+                // hold time, so they don't need to arm.
+                let visible_count = books
+                    .len()
+                    .saturating_sub(page * PAGE_SIZE)
+                    .min(PAGE_SIZE);
+                if let Some(cell_idx) =
+                    grid::cell_at_tap(x, y, grid_left, grid_top, visible_count)
+                {
+                    let book_idx = page * PAGE_SIZE + cell_idx;
+                    let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_idx);
+                    if cx >= 0 && cy >= 0 {
+                        grid::outline_cell(&mut fb, cx, cy, true);
+                        fb.send_update(
+                            MxcfbRect {
+                                top: cy as u32,
+                                left: cx as u32,
+                                width: grid::CELL_W,
+                                height: grid::CELL_H,
+                            },
+                            WAVEFORM_MODE_DU,
                         )?;
-                        fetch_and_paint_page(
-                            &cfg, &mut fb, &books, &mut covers, page,
-                            grid_left, grid_top,
-                        )?;
-                    }
-                }
-                PagerHit::Next => {
-                    let new_page = (page + 1).min(total_pages.saturating_sub(1));
-                    if new_page != page {
-                        page = new_page;
-                        draw_gallery_page(
-                            &mut fb, &mut renderer, &books, &covers, page,
-                            total_pages, grid_left, grid_top,
-                        )?;
-                        fetch_and_paint_page(
-                            &cfg, &mut fb, &books, &mut covers, page,
-                            grid_left, grid_top,
-                        )?;
+                        armed = Some(Armed {
+                            book_idx,
+                            cell_idx,
+                            down_at: Instant::now(),
+                        });
+                        log(format!(
+                            "armed cell {} (book {}: {})",
+                            cell_idx,
+                            books[book_idx].id,
+                            books[book_idx].title,
+                        ));
                     }
                 }
             }
-            continue;
+            TouchEvent::Up { x, y } => {
+                log(format!("up: ({x},{y})"));
+                if let Some(a) = armed.take() {
+                    let held = a.down_at.elapsed();
+                    if held >= LONG_PRESS_THRESHOLD {
+                        // Long press → download. No need to clear the
+                        // outline first — the download toast paints
+                        // over the gallery, and the post-download
+                        // redraw paints the clean cell.
+                        let book = &books[a.book_idx];
+                        log(format!(
+                            "long press fired ({held:?}) on book {}: {}",
+                            book.id, book.title,
+                        ));
+                        let msg =
+                            format!("Downloading {}…", truncate_title(&book.title, 40));
+                        let dirty = toast::draw(&mut fb, &mut renderer, &msg);
+                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+
+                        let dl_t0 = Instant::now();
+                        let banner_msg = match api::download_book(&cfg, book) {
+                            Ok(d) => match persist(&d.filename, &d.bytes) {
+                                Ok(saved) => {
+                                    log(format!(
+                                        "downloaded {} bytes to {} in {:?}",
+                                        d.bytes.len(),
+                                        saved.display(),
+                                        dl_t0.elapsed()
+                                    ));
+                                    let _ =
+                                        Command::new("touch").arg(CLEANINDEX).output();
+                                    "Downloaded → Library will refresh shortly"
+                                        .to_string()
+                                }
+                                Err(err) => {
+                                    log(format!("persist failed: {err:#}"));
+                                    format!("Failed: {err}")
+                                }
+                            },
+                            Err(api::SidleError::TokenMismatch) => {
+                                log(
+                                    "token rejected during download — resync via sidle desktop app"
+                                        .to_string(),
+                                );
+                                "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
+                                    .to_string()
+                            }
+                            Err(api::SidleError::Other(err)) => {
+                                log(format!("download failed: {err:#}"));
+                                format!("Failed: {err}")
+                            }
+                        };
+                        let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
+                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                        thread::sleep(TOAST_LINGER);
+                        draw_gallery_page(
+                            &mut fb, &mut renderer, &books, &covers, page,
+                            total_pages, grid_left, grid_top,
+                        )?;
+                    } else {
+                        // Short tap on a cover — discovery hint. Without
+                        // this, a tap-trained user keeps tapping and
+                        // wondering why nothing happens.
+                        log(format!("short tap ({held:?}), showing hint"));
+                        let dirty = toast::draw(
+                            &mut fb,
+                            &mut renderer,
+                            "Hold cover to download",
+                        );
+                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                        thread::sleep(TOAST_LINGER);
+                        // Redraw the page to clear both the toast and
+                        // the cell outline that Down left behind.
+                        draw_gallery_page(
+                            &mut fb, &mut renderer, &books, &covers, page,
+                            total_pages, grid_left, grid_top,
+                        )?;
+                    }
+                    continue;
+                }
+
+                // No armed cell — Up on the strip means a strip action.
+                // Off-cell-off-strip is ignored.
+                if let Some(hit) = pager::hit(x, y, fb.var.xres, fb.var.yres, total_pages) {
+                    match hit {
+                        PagerHit::Exit => {
+                            log("exit-button tap");
+                            break;
+                        }
+                        PagerHit::Prev => {
+                            let new_page = page.saturating_sub(1);
+                            if new_page != page {
+                                page = new_page;
+                                draw_gallery_page(
+                                    &mut fb, &mut renderer, &books, &covers, page,
+                                    total_pages, grid_left, grid_top,
+                                )?;
+                                fetch_and_paint_page(
+                                    &cfg, &mut fb, &books, &mut covers, page,
+                                    grid_left, grid_top,
+                                )?;
+                            }
+                        }
+                        PagerHit::Next => {
+                            let new_page = (page + 1).min(total_pages.saturating_sub(1));
+                            if new_page != page {
+                                page = new_page;
+                                draw_gallery_page(
+                                    &mut fb, &mut renderer, &books, &covers, page,
+                                    total_pages, grid_left, grid_top,
+                                )?;
+                                fetch_and_paint_page(
+                                    &cfg, &mut fb, &books, &mut covers, page,
+                                    grid_left, grid_top,
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
         }
-
-        let visible_count = books.len().saturating_sub(page * PAGE_SIZE).min(PAGE_SIZE);
-        let Some(cell_idx) = grid::cell_at_tap(tx, ty, grid_left, grid_top, visible_count) else {
-            continue;
-        };
-        let book_idx = page * PAGE_SIZE + cell_idx;
-        let book = &books[book_idx];
-        log(format!("tap on book {}: {}", book.id, book.title));
-
-        let msg = format!("Downloading {}…", truncate_title(&book.title, 40));
-        let dirty = toast::draw(&mut fb, &mut renderer, &msg);
-        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
-
-        let dl_t0 = Instant::now();
-        let banner_msg = match api::download_book(&cfg, book) {
-            Ok(d) => match persist(&d.filename, &d.bytes) {
-                Ok(saved) => {
-                    log(format!(
-                        "downloaded {} bytes to {} in {:?}",
-                        d.bytes.len(),
-                        saved.display(),
-                        dl_t0.elapsed()
-                    ));
-                    let _ = Command::new("touch").arg(CLEANINDEX).output();
-                    "Downloaded → Library will refresh shortly".to_string()
-                }
-                Err(err) => {
-                    log(format!("persist failed: {err:#}"));
-                    format!("Failed: {err}")
-                }
-            },
-            Err(api::SidleError::TokenMismatch) => {
-                // Token rotated mid-session (unusual: list_books got
-                // through, then the server rotated). Same breadcrumb
-                // as the boot-time mismatch.
-                log("token rejected during download — resync via sidle desktop app".to_string());
-                "Token mismatch.\nPlug Kindle into sidle and click Update KUAL.".to_string()
-            }
-            Err(api::SidleError::Other(err)) => {
-                log(format!("download failed: {err:#}"));
-                format!("Failed: {err}")
-            }
-        };
-        let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
-        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
-        thread::sleep(TOAST_LINGER);
-
-        draw_gallery_page(
-            &mut fb,
-            &mut renderer,
-            &books,
-            &covers,
-            page,
-            total_pages,
-            grid_left,
-            grid_top,
-        )?;
     }
     Ok(())
 }
