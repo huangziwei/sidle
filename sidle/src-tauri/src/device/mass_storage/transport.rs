@@ -58,8 +58,23 @@ impl Transport for MassStorageTransport {
                 .with_context(|| format!("create {}", parent.display()))?;
         }
         let tmp = with_partial_suffix(&dest_full);
-        std::fs::copy(src_local, &tmp)
-            .with_context(|| format!("copy {} -> {}", src_local.display(), tmp.display()))?;
+        // Plain read/write rather than `std::fs::copy`. On macOS, copy uses
+        // `fcopyfile(COPYFILE_ALL)` which carries extended attributes — and
+        // on FAT/exFAT (every Kindle's storage) the kernel materializes
+        // those xattrs as a hidden `._<filename>` AppleDouble companion
+        // next to the real file. Those companions parse as a valid `.<sha>.kfx`
+        // and show up as duplicate rows in our scan. read/write copies bytes
+        // only, no metadata, no AppleDouble.
+        {
+            let mut src = std::fs::File::open(src_local)
+                .with_context(|| format!("open {}", src_local.display()))?;
+            let mut dst = std::fs::File::create(&tmp)
+                .with_context(|| format!("create {}", tmp.display()))?;
+            std::io::copy(&mut src, &mut dst)
+                .with_context(|| format!("copy {} -> {}", src_local.display(), tmp.display()))?;
+            dst.sync_all()
+                .with_context(|| format!("sync {}", tmp.display()))?;
+        }
         std::fs::rename(&tmp, &dest_full)
             .with_context(|| format!("rename {} -> {}", tmp.display(), dest_full.display()))?;
         Ok(())

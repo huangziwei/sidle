@@ -66,6 +66,13 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
             if entry.is_dir {
                 continue;
             }
+            if is_macos_metadata(&entry.name) {
+                // `._foo.<sha>.kfx` AppleDouble companions get the same
+                // sha8 suffix as the real file and would otherwise be
+                // emitted as a duplicate row pointing at the same book.
+                // Same logic for `.DS_Store` etc.
+                continue;
+            }
             let Some(sha8) = parse_sha_infix(&entry.name) else {
                 // Not one of ours (no sha8 infix). Shouldn't happen in
                 // practice — anything under Sidle/ was put there by us —
@@ -103,6 +110,14 @@ fn parse_sha_infix(filename: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Skip files macOS scatters into FAT/exFAT mounts as a side effect of
+/// xattr/Finder-metadata handling: `._<filename>` AppleDouble companions
+/// (the real bug — they'd otherwise be parsed as a second copy of the
+/// same book), `.DS_Store`, `.Spotlight-V100`, etc.
+fn is_macos_metadata(name: &str) -> bool {
+    name.starts_with('.')
 }
 
 #[tauri::command]

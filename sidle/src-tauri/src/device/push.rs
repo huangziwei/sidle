@@ -124,7 +124,10 @@ fn preflight(conn: &rusqlite::Connection, book: &BookRow) -> Result<Option<Strin
 }
 
 /// Scan `documents/Sidle/` for a file whose name contains our sha8 infix.
-/// Returns the actual filename if present.
+/// Returns the actual filename if present. Skips `._*` AppleDouble
+/// companions — macOS drops them next to the real file on FAT volumes,
+/// and matching one of those would have us return (and later delete) the
+/// metadata file instead of the KFX itself.
 fn find_by_sha(
     transport: &dyn Transport,
     dir: &TPath,
@@ -132,7 +135,7 @@ fn find_by_sha(
 ) -> Result<Option<String>> {
     let suffix = kfx_suffix(sha256);
     for entry in transport.list(dir)? {
-        if entry.is_dir {
+        if entry.is_dir || entry.name.starts_with('.') {
             continue;
         }
         if entry.name.ends_with(&suffix) {
@@ -187,6 +190,11 @@ pub fn delete_one(
     };
 
     let file_existed = if let Some(ref name) = filename {
+        // Best-effort wipe of any matching `._<name>` AppleDouble dropped
+        // by an older push (before we switched copy_in_atomic to a raw
+        // read/write). New pushes don't create these, but cleaning up
+        // legacy ones keeps the Kindle's indexer from re-scanning them.
+        let _ = transport.delete(&dir.join(&format!("._{name}")));
         transport
             .delete(&dir.join(name))
             .with_context(|| format!("delete {name}"))?
@@ -226,7 +234,7 @@ fn find_sdr_by_sha(
 ) -> Result<Option<String>> {
     let suffix = sdr_suffix(sha256);
     for entry in transport.list(dir)? {
-        if !entry.is_dir {
+        if !entry.is_dir || entry.name.starts_with('.') {
             continue;
         }
         if entry.name.ends_with(&suffix) {
