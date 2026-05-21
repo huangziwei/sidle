@@ -1182,6 +1182,7 @@ function wireDevice() {
   });
   $("#btn-send-unsent").addEventListener("click", () => sendUnsent());
   $("#btn-import-all-orphans").addEventListener("click", () => importAllOrphans());
+  $("#btn-device-eject").addEventListener("click", () => ejectDevice());
   // Clicks INSIDE the popover shouldn't close it.
   $("#device-popover").addEventListener("click", (e) => e.stopPropagation());
   document.addEventListener("click", (e) => {
@@ -1448,6 +1449,14 @@ function updateDeviceUI(info) {
     label.textContent = `Kindle ${free}`.trim();
     status.className = "device-popover-status connected";
     status.textContent = "Connected";
+    // Eject is mass-storage-only. MTP devices close their USB session
+    // on unplug — no eject concept — so hide the button instead of
+    // showing a no-op.
+    const ejectBtn = $("#btn-device-eject");
+    if (ejectBtn) {
+      ejectBtn.hidden = info.transport !== "mass_storage";
+      ejectBtn.disabled = false;
+    }
     $("#device-model").textContent = info.model || "Kindle";
     $("#device-serial").textContent = info.serial || "—";
     $("#device-transport").textContent = transportLabel(info.transport);
@@ -1491,6 +1500,9 @@ function updateDeviceUI(info) {
     // Hide KUAL section when no device is connected.
     const kualSection = $("#kual-section");
     if (kualSection) kualSection.hidden = true;
+    // Hide eject button on disconnect — nothing to eject.
+    const ejectBtn = $("#btn-device-eject");
+    if (ejectBtn) ejectBtn.hidden = true;
     render();
   }
 }
@@ -1636,6 +1648,22 @@ async function deleteFromDevice(filenames, titles) {
   if (counts.failed) parts.push(`${counts.failed} failed`);
   showToast(parts.join(" · "), counts.failed > 0);
   await refreshDeviceList();
+}
+
+async function ejectDevice() {
+  if (!state.device) return;
+  const btn = $("#btn-device-eject");
+  btn.disabled = true;
+  try {
+    await window.api.invoke("device_eject");
+    // Don't manually clear UI state — the device monitor will fire
+    // `device:status` with null shortly, and `updateDeviceUI` will
+    // do the right thing.
+    showToast("Kindle ejected");
+  } catch (e) {
+    btn.disabled = false;
+    showToast(`eject failed: ${e}`, true);
+  }
 }
 
 async function importAllOrphans() {

@@ -31,7 +31,10 @@
         <div class="device-popover" id="device-popover" hidden>
           <header class="device-popover-header">
             <strong id="device-popover-title">Kindle</strong>
-            <span id="device-popover-status" class="device-popover-status disconnected">Disconnected</span>
+            <div class="device-popover-header-right">
+              <span id="device-popover-status" class="device-popover-status disconnected">Disconnected</span>
+              <button type="button" id="btn-device-eject" class="device-eject-btn" title="Eject Kindle" hidden>⏏</button>
+            </div>
           </header>
           <div class="device-actions">
             <button type="button" id="btn-send-unsent" class="btn-link" disabled>Send all unsent</button>

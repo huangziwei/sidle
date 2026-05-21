@@ -18,6 +18,50 @@ pub async fn device_status(state: State<'_, AppState>) -> Result<Option<DeviceIn
     Ok(state.device.lock().await.clone())
 }
 
+/// Unmount + spin down a mass-storage Kindle so the user can unplug
+/// safely without macOS scolding them. Shells out to `diskutil eject`
+/// — the same command Finder's eject button runs.
+///
+/// MTP devices don't need (and don't support) eject in the
+/// mass-storage sense — they just need to have their USB session
+/// closed, which happens automatically on unplug. The frontend hides
+/// the button when transport is MTP, so a caller hitting this with an
+/// MTP device is treated as a programming error.
+#[tauri::command]
+pub async fn device_eject(state: State<'_, AppState>) -> Result<(), String> {
+    let device = state.device.lock().await.clone();
+    let mount = device
+        .as_ref()
+        .and_then(|d| d.mass_storage_mount())
+        .ok_or_else(|| "no mass-storage Kindle connected".to_string())?;
+
+    let mount_arg = mount
+        .to_str()
+        .ok_or_else(|| format!("mount path is not utf-8: {}", mount.display()))?
+        .to_string();
+
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("diskutil")
+            .arg("eject")
+            .arg(&mount_arg)
+            .output()
+            .map_err(|e| format!("diskutil eject: {e}"))
+            .and_then(|out| {
+                if out.status.success() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "diskutil eject failed ({}): {}",
+                        out.status,
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ))
+                }
+            })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// One on-device file under `documents/Sidle/`, plus its link back to the
 /// local library if we can find one.
 ///
