@@ -18,6 +18,7 @@ mod device_state;
 mod eink;
 mod orientation;
 mod ui;
+mod wrap;
 
 use eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_GC16};
 use eink::pillow::Pillow;
@@ -279,8 +280,13 @@ fn draw_gallery_page(
             Some(img) => grid::blit_cell(fb, cx, cy, img),
             None => {
                 grid::blit_placeholder(fb, cx, cy, 0xDD);
-                let baseline = cy + grid::CELL_H as i32 / 2;
-                renderer.draw(fb, cx + 16, baseline, &books[book_idx].title, false);
+                draw_placeholder_title(
+                    fb,
+                    renderer,
+                    cx,
+                    cy,
+                    &books[book_idx].title,
+                );
             }
         }
     }
@@ -293,6 +299,55 @@ fn draw_gallery_page(
         WAVEFORM_MODE_GC16,
     )?;
     Ok(())
+}
+
+/// Render the book title centered inside a placeholder cell, wrapped
+/// to the cell's interior width and truncated with `…` on the last
+/// visible line if it overflows vertically. Used when the cover
+/// hasn't arrived (or failed to decode) so the user still sees what
+/// the cell *is*.
+fn draw_placeholder_title(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    cx: i32,
+    cy: i32,
+    title: &str,
+) {
+    // Symmetric padding inside the cell so the text doesn't kiss the
+    // edges; matches typical print-tile margins.
+    const PAD: u32 = 16;
+    let max_text_w = grid::CELL_W.saturating_sub(PAD * 2);
+    let max_text_h = grid::CELL_H.saturating_sub(PAD * 2);
+    let line_h = renderer.line_height().max(1);
+    let max_lines = (max_text_h / line_h).max(1) as usize;
+
+    let mut lines = renderer.wrap(title, max_text_w);
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            // Trim trailing chars until "<last>…" fits the width;
+            // then assign the ellipsized form back.
+            let mut candidate = format!("{last}…");
+            while !last.is_empty() && renderer.measure_width(&candidate) > max_text_w {
+                last.pop();
+                candidate = format!("{last}…");
+            }
+            *last = candidate;
+        }
+    }
+
+    // Center the block vertically.
+    let total_h = (lines.len() as u32) * line_h;
+    let start_y = cy + ((grid::CELL_H.saturating_sub(total_h)) / 2) as i32;
+
+    for (i, line) in lines.iter().enumerate() {
+        let line_w = renderer.measure_width(line);
+        let line_x = cx + ((grid::CELL_W.saturating_sub(line_w)) / 2) as i32;
+        // Baseline ≈ 80% down each line box (above descender, below
+        // cap height) — matches the existing `pager` baseline ratio.
+        let baseline = start_y + ((i as u32) * line_h + line_h * 80 / 100) as i32;
+        renderer.draw(fb, line_x, baseline, line, false);
+    }
 }
 
 /// Populate `covers[start..end]` for the given page by HTTP-fetching

@@ -9,3 +9,4 @@
 pub mod api;
 pub mod config;
 pub mod device_state;
+pub mod wrap;

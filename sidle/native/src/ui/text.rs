@@ -68,6 +68,15 @@ impl TextRenderer {
         w
     }
 
+    /// Word-wrap `text` to fit `max_width` per line. Latin titles wrap
+    /// at whitespace; CJK titles (no spaces) fall through to char-level
+    /// wrap so they pack densely without overflowing the box.
+    pub fn wrap(&mut self, text: &str, max_width: u32) -> Vec<String> {
+        crate::wrap::wrap_to_width(text, max_width, |s| self.measure_width(s))
+    }
+}
+
+impl TextRenderer {
     /// Draw `s` starting at baseline (x, y_baseline). Returns the
     /// advanced X. `inverted=true` swaps colors (white-on-black) so the
     /// caller can highlight a tapped row by painting the row's background
