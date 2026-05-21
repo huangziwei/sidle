@@ -111,28 +111,13 @@ fn blit_threshold(
     if w == 0 || h == 0 {
         return;
     }
-    let line_length = fb.fix.line_length as usize;
-    let bpp = (fb.var.bits_per_pixel / 8).max(1) as usize;
-    let fb_w = fb.var.xres as i32;
-    let fb_h = fb.var.yres as i32;
-    let pixels = fb.pixels_mut();
+    // put_pixel applies the orientation transform + bounds check. Glyphs
+    // are small (≤32x32 typically), so per-pixel call overhead is fine.
     for row in 0..h {
-        let py = y + row as i32;
-        if py < 0 || py >= fb_h {
-            continue;
-        }
-        let row_base = py as usize * line_length;
         let cov_row = &coverage[row * w..row * w + w];
         for col in 0..w {
-            let px = x + col as i32;
-            if px < 0 || px >= fb_w {
-                continue;
-            }
             if cov_row[col] >= COVERAGE_THRESHOLD {
-                let idx = row_base + px as usize * bpp;
-                if idx < pixels.len() {
-                    pixels[idx] = fg;
-                }
+                fb.put_pixel(x + col as i32, y + row as i32, fg);
             }
         }
     }

@@ -23,6 +23,8 @@ use std::ptr;
 
 use anyhow::{Context, Result, bail};
 
+use crate::orientation::Orientation;
+
 // Standard Linux fbdev ioctls — won't change across kernels.
 // Note: libc::ioctl takes `c_int` on Linux (not `c_ulong` like BSD), so the
 // constants are typed accordingly. All our request values fit in i32.
@@ -178,10 +180,22 @@ pub struct Framebuffer {
     /// Monotonic counter for `update_marker`. The driver echoes this back via
     /// `MXCFB_WAIT_FOR_UPDATE_COMPLETE` (used later for tap-feedback paths).
     next_marker: u32,
+    /// Applied to every send_update so the eink driver gets a panel-coords
+    /// rect and the flush copies pixels into the right physical location.
+    /// All drawing operations write into `backing` in *user* coords; the
+    /// orientation transform happens once per flush.
+    pub orientation: Orientation,
+    /// Off-screen backing buffer (same size + stride as mmap). All UI
+    /// drawing writes here in user-visible coords. `send_update` copies
+    /// the affected rect into mmap, applying the orientation transform.
+    /// Cost: one extra `smem_len` bytes (~4.5MB on KOA2) and one full-rect
+    /// memcpy per refresh — fast enough on armv7l, hugely cleaner than
+    /// per-blit orientation handling.
+    backing: Vec<u8>,
 }
 
 impl Framebuffer {
-    pub fn open() -> Result<Self> {
+    pub fn open(orientation: Orientation) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -220,6 +234,7 @@ impl Framebuffer {
             bail!("mmap fb: {}", io::Error::last_os_error());
         }
 
+        let backing = vec![0xFFu8; mmap_len];
         Ok(Self {
             file,
             var,
@@ -227,29 +242,117 @@ impl Framebuffer {
             mmap_ptr: mmap_ptr as *mut u8,
             mmap_len,
             next_marker: 1,
+            orientation,
+            backing,
         })
     }
 
+    /// Transform a user-coords rect corner to physical-coords corner. The
+    /// rect's width/height are unchanged.
+    #[inline]
+    fn phys_rect(&self, top: u32, left: u32, width: u32, height: u32) -> (u32, u32) {
+        match self.orientation {
+            Orientation::Up => (top, left),
+            Orientation::Down => (
+                self.var.yres.saturating_sub(top + height),
+                self.var.xres.saturating_sub(left + width),
+            ),
+        }
+    }
+
+    /// Single-pixel write in user coords. Writes to the backing buffer —
+    /// nothing hits mmap until `send_update` flushes. Out-of-range writes
+    /// silently no-op (callers like the blitters pass arbitrary src/dst
+    /// pairs and rely on us to clip).
+    #[inline]
+    pub fn put_pixel(&mut self, x: i32, y: i32, value: u8) {
+        if x < 0 || y < 0 {
+            return;
+        }
+        if x >= self.var.xres as i32 || y >= self.var.yres as i32 {
+            return;
+        }
+        let line_length = self.fix.line_length as usize;
+        let bpp = (self.var.bits_per_pixel / 8).max(1) as usize;
+        let idx = y as usize * line_length + x as usize * bpp;
+        if idx < self.backing.len() {
+            self.backing[idx] = value;
+        }
+    }
+
+    /// Copy a rect from backing → mmap, applying the orientation transform.
+    /// Called from `send_update` before the eink refresh ioctl.
+    fn flush_rect(&mut self, top: u32, left: u32, width: u32, height: u32) {
+        let line_length = self.fix.line_length as usize;
+        let bpp = (self.var.bits_per_pixel / 8).max(1) as usize;
+        let xres = self.var.xres;
+        let yres = self.var.yres;
+        // SAFETY: backing and mmap are non-overlapping; we own the mmap
+        // until Drop. Both are sized to `smem_len`.
+        let mmap = unsafe { std::slice::from_raw_parts_mut(self.mmap_ptr, self.mmap_len) };
+        match self.orientation {
+            Orientation::Up => {
+                for y in 0..height {
+                    let row_start = (top + y) as usize * line_length + left as usize * bpp;
+                    let row_end = row_start + width as usize * bpp;
+                    if row_end <= self.backing.len() && row_end <= mmap.len() {
+                        mmap[row_start..row_end]
+                            .copy_from_slice(&self.backing[row_start..row_end]);
+                    }
+                }
+            }
+            Orientation::Down => {
+                // 180° rotation: pixel at user (x, y) lives in mmap at
+                // physical (xres-1-x, yres-1-y). Reading the user-coord
+                // row in forward order means writing the physical row in
+                // reverse order.
+                for y in 0..height {
+                    let user_y = top + y;
+                    if user_y >= yres {
+                        continue;
+                    }
+                    let phys_y = yres - 1 - user_y;
+                    let src_row = user_y as usize * line_length + left as usize * bpp;
+                    let dst_row_end =
+                        phys_y as usize * line_length + (xres - left) as usize * bpp;
+                    for x in 0..width {
+                        let user_x = left + x;
+                        if user_x >= xres {
+                            continue;
+                        }
+                        let src = src_row + x as usize * bpp;
+                        let dst = dst_row_end - (x as usize + 1) * bpp;
+                        if src + bpp <= self.backing.len() && dst + bpp <= mmap.len() {
+                            for b in 0..bpp {
+                                mmap[dst + b] = self.backing[src + b];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Mutable view of the backing buffer. All UI drawing operates here in
+    /// user-visible coords; nothing hits the panel until `send_update`.
     pub fn pixels_mut(&mut self) -> &mut [u8] {
-        // SAFETY: we own the mmap until Drop; len is the kernel-reported smem_len.
-        unsafe { std::slice::from_raw_parts_mut(self.mmap_ptr, self.mmap_len) }
+        &mut self.backing
     }
 
     /// Fill a rectangle with `value` (8bpp grayscale: 0=black, 255=white).
-    /// Clamps to the framebuffer bounds. Assumes 8bpp packed grayscale —
-    /// the KOA2 framebuffer reports `bits_per_pixel=8` in `var`.
+    /// Writes to backing in user coords — the orientation transform happens
+    /// once per refresh inside `send_update`.
     pub fn fill_rect(&mut self, top: u32, left: u32, width: u32, height: u32, value: u8) {
         let line_length = self.fix.line_length as usize;
         let bpp_bytes = (self.var.bits_per_pixel / 8).max(1) as usize;
-        let pixels = self.pixels_mut();
         let max_y = top.saturating_add(height);
         let max_x = left.saturating_add(width);
         for y in top..max_y {
             let row_offset = y as usize * line_length;
             let row_start = row_offset + left as usize * bpp_bytes;
             let row_end = row_offset + max_x as usize * bpp_bytes;
-            if row_end <= pixels.len() {
-                pixels[row_start..row_end].fill(value);
+            if row_end <= self.backing.len() {
+                self.backing[row_start..row_end].fill(value);
             }
         }
     }
@@ -257,8 +360,17 @@ impl Framebuffer {
     /// Trigger an eink refresh over the given rect with the given waveform.
     /// Returns the marker the driver will use for completion-wait calls.
     pub fn send_update(&mut self, rect: MxcfbRect, waveform: u32) -> Result<u32> {
+        // Push the backing rect to mmap (with orientation transform) before
+        // asking the driver to refresh that area.
+        self.flush_rect(rect.top, rect.left, rect.width, rect.height);
+
         let marker = self.next_marker;
         self.next_marker = self.next_marker.wrapping_add(1).max(1);
+
+        // The eink driver works in physical panel coords; map our user-coords
+        // rect to where the matching pixels actually live in mmap.
+        let (phys_top, phys_left) = self.phys_rect(rect.top, rect.left, rect.width, rect.height);
+        let rect = MxcfbRect { top: phys_top, left: phys_left, width: rect.width, height: rect.height };
 
         // Build a v3 payload (88 bytes, zero-padded for v1/v2). Whatever
         // size the kernel encoded into the ioctl number, it reads only that

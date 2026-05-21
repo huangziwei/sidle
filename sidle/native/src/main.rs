@@ -1,13 +1,9 @@
-//! Sidle native — Milestone 7 download flow end-to-end.
+//! Sidle native — Milestone 9 paginated cover grid + download flow.
 //!
-//! Render the cover grid (M6). Tap a cover → overlay "Downloading…" →
-//! stream `.kfx` to `/mnt/us/documents/Sidle/<filename>` → `touch
-//! /mnt/us/system/.cleanindex` so the Kindle library indexer picks it up
-//! → overlay "Downloaded" briefly → restore gallery.
-//!
-//! Single-tap = immediate download (no two-tap confirm). For personal use
-//! with a 9-book library, accidental triggers are recoverable (re-download
-//! is idempotent in the Kindle library — same filename overwrites).
+//! 3×3 grid per page, prev/next bottom-strip controls when the library
+//! overflows one page. Tap a cover → overlay "Downloading…" → stream
+//! `.kfx` to `/mnt/us/documents/Sidle/<filename>` → `touch
+//! /mnt/us/system/.cleanindex` → overlay "Downloaded" → restore gallery.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -19,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 mod api;
 mod config;
 mod eink;
+mod orientation;
 mod ui;
 
 use eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_GC16};
@@ -26,14 +23,18 @@ use eink::pillow::Pillow;
 use eink::touch::Touch;
 use image::DynamicImage;
 use ui::grid;
+use ui::pager::{self, PAGE_SIZE, PagerHit};
 use ui::text::TextRenderer;
 use ui::toast;
 
 const LOG_PATH: &str = "/mnt/us/sidle-native.log";
 const CONFIG_PATH: &str = "/mnt/us/extensions/sidle/etc/server.conf";
 const FONT_PX: f32 = 28.0;
-const QUIT_BOX: u32 = 200;
-const TOP_MARGIN: u32 = QUIT_BOX + 40;
+/// Quit moved off the implicit top-left corner (too easy to trigger
+/// accidentally with stray touch events near the panel edge) — exit is
+/// now an explicit `✕ Exit` tap zone in the bottom strip. Top margin can
+/// drop back to a small visual gap.
+const TOP_MARGIN: u32 = 80;
 /// Stock Kindle indexer watches `documents/` subfolders too (verified via
 /// the existing `documents/Downloads/Items01/` indexed tree). Land here so
 /// our books are grouped and easy to find in the library.
@@ -51,14 +52,20 @@ fn run() -> anyhow::Result<()> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    log(format!("sidle-native M7 start: ts={ts}"));
+    log(format!("sidle-native M9 start: ts={ts}"));
 
     let cfg = config::load(Path::new(CONFIG_PATH))?;
     log(format!("server: http://{}:{}", cfg.host, cfg.port));
 
     let t0 = Instant::now();
     let books = api::list_books(&cfg)?;
-    log(format!("books: {} (list in {:?})", books.len(), t0.elapsed()));
+    let total_pages = pager::n_pages(books.len());
+    log(format!(
+        "books: {} ({} pages, list in {:?})",
+        books.len(),
+        total_pages,
+        t0.elapsed()
+    ));
 
     let t_cov = Instant::now();
     let covers: Vec<Option<DynamicImage>> = books
@@ -77,31 +84,74 @@ fn run() -> anyhow::Result<()> {
 
     let mut renderer = TextRenderer::load(FONT_PX)?;
 
+    let orient = orientation::Orientation::detect();
+    log(format!("orientation: {orient:?}"));
+
     let _pillow = Pillow::disable()?;
-    let mut fb = Framebuffer::open()?;
-    let mut touch = Touch::open()?;
+    // Open fb in Up — Kindle kernel rotates fb writes itself based on
+    // framework orientation. Our transform double-rotates. Touch needs
+    // the transform because raw evdev events are not pre-rotated.
+    let mut fb = Framebuffer::open(orientation::Orientation::Up)?;
+    let mut touch = Touch::open(orient, fb.var.xres, fb.var.yres)?;
 
     let (grid_left, grid_top) = grid::grid_origin(fb.var.xres, TOP_MARGIN);
-    draw_gallery(&mut fb, &mut renderer, &books, &covers, grid_left, grid_top)?;
+    let mut page: usize = 0;
+    draw_gallery_page(
+        &mut fb,
+        &mut renderer,
+        &books,
+        &covers,
+        page,
+        total_pages,
+        grid_left,
+        grid_top,
+    )?;
     log("initial render");
 
     loop {
         let (tx, ty) = touch.next_tap()?;
         log(format!("tap: ({tx},{ty})"));
 
-        if tx < QUIT_BOX && ty < QUIT_BOX {
-            log("quit-corner tap");
-            break;
+        // Toolbar strip always wins over cell hit-test. Exit lives there
+        // now; page nav too when there's more than one page.
+        if let Some(hit) = pager::hit(tx, ty, fb.var.xres, fb.var.yres, total_pages) {
+            match hit {
+                PagerHit::Exit => {
+                    log("exit-button tap");
+                    break;
+                }
+                PagerHit::Prev => {
+                    let new_page = page.saturating_sub(1);
+                    if new_page != page {
+                        page = new_page;
+                        draw_gallery_page(
+                            &mut fb, &mut renderer, &books, &covers, page,
+                            total_pages, grid_left, grid_top,
+                        )?;
+                    }
+                }
+                PagerHit::Next => {
+                    let new_page = (page + 1).min(total_pages.saturating_sub(1));
+                    if new_page != page {
+                        page = new_page;
+                        draw_gallery_page(
+                            &mut fb, &mut renderer, &books, &covers, page,
+                            total_pages, grid_left, grid_top,
+                        )?;
+                    }
+                }
+            }
+            continue;
         }
 
-        let Some(idx) = grid::cell_at_tap(tx, ty, grid_left, grid_top, books.len()) else {
+        let visible_count = books.len().saturating_sub(page * PAGE_SIZE).min(PAGE_SIZE);
+        let Some(cell_idx) = grid::cell_at_tap(tx, ty, grid_left, grid_top, visible_count) else {
             continue;
         };
-        let book = &books[idx];
+        let book_idx = page * PAGE_SIZE + cell_idx;
+        let book = &books[book_idx];
         log(format!("tap on book {}: {}", book.id, book.title));
 
-        // Show "Downloading <title>" overlay before the blocking HTTP call,
-        // so the user has immediate visual feedback.
         let msg = format!("Downloading {}…", truncate_title(&book.title, 40));
         let dirty = toast::draw(&mut fb, &mut renderer, &msg);
         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
@@ -120,7 +170,7 @@ fn run() -> anyhow::Result<()> {
                     dl_t0.elapsed()
                 ));
                 let _ = Command::new("touch").arg(CLEANINDEX).output();
-                format!("Downloaded → Library will refresh shortly")
+                "Downloaded → Library will refresh shortly".to_string()
             }
             Err(err) => {
                 log(format!("download failed: {err:#}"));
@@ -131,36 +181,49 @@ fn run() -> anyhow::Result<()> {
         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
         thread::sleep(TOAST_LINGER);
 
-        // Restore the gallery underneath. Easier than tracking the toast's
-        // exact pixels — a full-screen GC16 redraw is ~600ms but only once
-        // per download.
-        draw_gallery(&mut fb, &mut renderer, &books, &covers, grid_left, grid_top)?;
+        draw_gallery_page(
+            &mut fb,
+            &mut renderer,
+            &books,
+            &covers,
+            page,
+            total_pages,
+            grid_left,
+            grid_top,
+        )?;
     }
     Ok(())
 }
 
-fn draw_gallery(
+fn draw_gallery_page(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
     books: &[api::Book],
     covers: &[Option<DynamicImage>],
+    page: usize,
+    total_pages: usize,
     grid_left: i32,
     grid_top: i32,
 ) -> anyhow::Result<()> {
     fb.fill_rect(0, 0, fb.var.xres, fb.var.yres, 0xFF);
-    for (i, cover) in covers.iter().enumerate() {
-        let (cx, cy) = grid::cell_xy(grid_left, grid_top, i);
+    let start = page * PAGE_SIZE;
+    let end = (start + PAGE_SIZE).min(books.len());
+    for (cell_idx, book_idx) in (start..end).enumerate() {
+        let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_idx);
         if cx < 0 || cy < 0 {
             continue;
         }
-        match cover {
+        match &covers[book_idx] {
             Some(img) => grid::blit_cell(fb, cx, cy, img),
             None => {
                 grid::blit_placeholder(fb, cx, cy, 0xDD);
                 let baseline = cy + grid::CELL_H as i32 / 2;
-                renderer.draw(fb, cx + 16, baseline, &books[i].title, false);
+                renderer.draw(fb, cx + 16, baseline, &books[book_idx].title, false);
             }
         }
+    }
+    if total_pages > 1 {
+        pager::draw(fb, renderer, page, total_pages);
     }
     fb.send_update(
         MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: fb.var.yres },

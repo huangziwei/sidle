@@ -23,6 +23,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
+use crate::orientation::Orientation;
+
 // evdev type/code constants (linux/input-event-codes.h). Stable.
 const EV_ABS: u16 = 0x03;
 const ABS_MT_POSITION_X: u16 = 0x35;
@@ -42,10 +44,16 @@ pub struct Touch {
     /// Once grabbed, no other reader (framework included) sees events from
     /// this device. Belt-and-braces alongside the framework SIGSTOP.
     grabbed: bool,
+    /// Same orientation the framebuffer was opened with. We mirror the
+    /// raw touch coords by the same amount so caller-visible coords match
+    /// what's drawn on screen.
+    orientation: Orientation,
+    fb_xres: u32,
+    fb_yres: u32,
 }
 
 impl Touch {
-    pub fn open() -> Result<Self> {
+    pub fn open(orientation: Orientation, fb_xres: u32, fb_yres: u32) -> Result<Self> {
         let path = find_touch_device()?;
         let file = OpenOptions::new()
             .read(true)
@@ -60,12 +68,14 @@ impl Touch {
             cur_x: 0,
             cur_y: 0,
             grabbed,
+            orientation,
+            fb_xres,
+            fb_yres,
         })
     }
 
     /// Blocks until the next finger-up. Returns the absolute (x, y) in
-    /// framebuffer coordinates — the KOA2's touch coordinate space matches
-    /// `/dev/fb0` 1:1 (1264x1680, no rotation), so no transform needed.
+    /// user-visible framebuffer coordinates (orientation-corrected).
     pub fn next_tap(&mut self) -> Result<(u32, u32)> {
         let mut buf = [0u8; EVENT_BYTES];
         loop {
@@ -85,8 +95,17 @@ impl Touch {
                 ABS_MT_POSITION_X => self.cur_x = value,
                 ABS_MT_POSITION_Y => self.cur_y = value,
                 ABS_MT_TRACKING_ID if value == -1 => {
-                    let x = self.cur_x.max(0) as u32;
-                    let y = self.cur_y.max(0) as u32;
+                    let raw_x = self.cur_x.max(0) as u32;
+                    let raw_y = self.cur_y.max(0) as u32;
+                    let (x, y) = match self.orientation {
+                        Orientation::Up => (raw_x, raw_y),
+                        // Mirror both axes so the touch coordinate space
+                        // matches the orientation-transformed fb writes.
+                        Orientation::Down => (
+                            self.fb_xres.saturating_sub(1).saturating_sub(raw_x),
+                            self.fb_yres.saturating_sub(1).saturating_sub(raw_y),
+                        ),
+                    };
                     return Ok((x, y));
                 }
                 _ => {}

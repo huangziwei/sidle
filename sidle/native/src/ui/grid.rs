@@ -69,28 +69,14 @@ fn blit_luma(fb: &mut Framebuffer, x: i32, y: i32, w: u32, h: u32, raw: &[u8]) {
     if w == 0 || h == 0 {
         return;
     }
-    let line_length = fb.fix.line_length as usize;
-    let bpp = (fb.var.bits_per_pixel / 8).max(1) as usize;
-    let fb_w = fb.var.xres as i32;
-    let fb_h = fb.var.yres as i32;
-    let pixels = fb.pixels_mut();
+    // put_pixel handles orientation + bounds. Per-pixel call overhead is
+    // ~negligible — 86KB cover at 240x360 is ~80k pixels, well under 100ms
+    // even on armv7l.
     let wu = w as usize;
     for row in 0..h as i32 {
-        let py = y + row;
-        if py < 0 || py >= fb_h {
-            continue;
-        }
         let src_row_base = row as usize * wu;
-        let row_base = py as usize * line_length;
         for col in 0..w as i32 {
-            let px = x + col;
-            if px < 0 || px >= fb_w {
-                continue;
-            }
-            let idx = row_base + px as usize * bpp;
-            if idx < pixels.len() {
-                pixels[idx] = raw[src_row_base + col as usize];
-            }
+            fb.put_pixel(x + col, y + row, raw[src_row_base + col as usize]);
         }
     }
 }
