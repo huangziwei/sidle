@@ -81,7 +81,12 @@ fn get_with_token(url: &str, token: &str) -> Result<ureq::Response> {
     }
 }
 
-const TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for the boot-time `list_books` request. Short so the boot
+/// toast surfaces quickly when the server is down/wedged — anything
+/// over a couple of seconds reads as "nothing happened" on e-ink and
+/// the user gives up before any error renders. LAN-only, so 3s is
+/// plenty for a healthy round-trip.
+const TIMEOUT: Duration = Duration::from_secs(3);
 /// Cap per-cover bytes so a corrupt server response can't OOM us. Real
 /// covers fit comfortably under 200KB; 8MB is wildly generous but still
 /// bounded.

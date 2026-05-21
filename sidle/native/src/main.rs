@@ -60,18 +60,33 @@ fn run() -> anyhow::Result<()> {
     let t0 = Instant::now();
     let books = match api::list_books(&cfg) {
         Ok(b) => b,
-        Err(api::SidleError::TokenMismatch) => {
-            // Most common failure mode after sidle-server rotates its
-            // .server-token: every request 403s and the user just sees
-            // "nothing happened". Draw a friendly toast on the e-ink so
-            // there's a visible breadcrumb pointing at the desktop app's
-            // KUAL deploy button — and log the same message for log-
-            // tailers.
-            log("token rejected by sidle-server (401/403); resync via sidle desktop app".to_string());
-            let _ = draw_boot_toast("Token mismatch.\nPlug Kindle into sidle and click Update KUAL.");
+        Err(err) => {
+            // Any failure here is the user's experience of "I tapped
+            // Sidle and nothing happened" — the binary used to just
+            // exit and KUAL would flash back. We now always render a
+            // boot toast with whatever we know, even if it's a vague
+            // network error, so the user has *something* on screen to
+            // act on instead of having to tail the log.
+            let (log_line, screen_msg) = match &err {
+                api::SidleError::TokenMismatch => (
+                    "token rejected by sidle-server (401/403); resync via sidle desktop app".to_string(),
+                    "Token mismatch.\nPlug Kindle into sidle and click Update KUAL.".to_string(),
+                ),
+                api::SidleError::Other(e) => (
+                    format!("list_books failed: {e:#}"),
+                    // Keep the e-ink message terse — multi-line tiny
+                    // text is hard to read. First line names the
+                    // class, second is a hint.
+                    format!(
+                        "Couldn't reach sidle server.\nIs it running on {}:{}?",
+                        cfg.host, cfg.port
+                    ),
+                ),
+            };
+            log(log_line);
+            let _ = draw_boot_toast(&screen_msg);
             return Ok(());
         }
-        Err(api::SidleError::Other(e)) => return Err(e),
     };
     let total_pages = pager::n_pages(books.len());
     log(format!(
