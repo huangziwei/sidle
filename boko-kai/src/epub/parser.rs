@@ -743,6 +743,150 @@ pub fn parse_ncx(content: &str) -> io::Result<Vec<TocEntry>> {
     Ok(stack.pop().map(|s| s.children).unwrap_or_default())
 }
 
+/// Parse the TOC from an EPUB 3 nav document.
+///
+/// EPUB 3 publishes its TOC inside `<nav epub:type="toc">` as nested `<ol><li><a>...`,
+/// mirroring NCX's `<navMap>/<navPoint>` shape. Both kadokawa/EBPAJ-style
+/// EPUBs and calibre's EPUB 3 output drop NCX entirely and ship only this
+/// nav doc, so when `parse_ncx` returns nothing we have to dig the TOC
+/// out of here or the KFX export emits no `book_navigation` fragment and
+/// the device shows no chapter list.
+///
+/// Nested `<ol>`s become `children` on the parent entry. An empty `<a>`
+/// (no href) or an entry without any anchor is skipped — we don't want
+/// the implicit `<h1>Navigation</h1>` label leaking in as a TOC row.
+pub fn parse_nav_toc(content: &str) -> io::Result<Vec<TocEntry>> {
+    let mut reader = Reader::from_str(content);
+    reader.config_mut().trim_text(true);
+
+    // We only care about content inside <nav epub:type="toc">. Track nesting
+    // depth so a stray `<ol>` outside that nav (e.g. landmarks, page-list)
+    // doesn't pollute the TOC.
+    let mut in_toc_nav = false;
+    let mut nav_depth = 0u32;
+
+    // The TOC tree is built bottom-up: each <li> pushes a frame, its
+    // child <ol> contributes to that frame's children, then the </li>
+    // closes it and folds back into the parent frame's children. The
+    // outermost frame collects the top-level entries.
+    struct ListItem {
+        href: Option<String>,
+        label: String,
+        children: Vec<TocEntry>,
+    }
+    let mut root_children: Vec<TocEntry> = Vec::new();
+    let mut stack: Vec<ListItem> = Vec::new();
+    let mut in_anchor_at_depth: Option<usize> = None; // stack depth where the open <a> sits
+    let mut play_order: usize = 0;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                let local = local_name(name.as_ref());
+                match local {
+                    b"nav" => {
+                        // Enter only the toc-typed nav; the doc may carry
+                        // landmarks / page-list / loi / lot sibling navs.
+                        let mut is_toc = false;
+                        for attr in e.attributes().flatten() {
+                            if local_name(attr.key.as_ref()) == b"type" {
+                                let value = String::from_utf8_lossy(&attr.value);
+                                if value.split_ascii_whitespace().any(|v| v == "toc") {
+                                    is_toc = true;
+                                }
+                            }
+                        }
+                        if is_toc {
+                            in_toc_nav = true;
+                            nav_depth = 1;
+                        } else if in_toc_nav {
+                            nav_depth += 1;
+                        }
+                    }
+                    b"li" if in_toc_nav => {
+                        stack.push(ListItem {
+                            href: None,
+                            label: String::new(),
+                            children: Vec::new(),
+                        });
+                    }
+                    b"a" if in_toc_nav && !stack.is_empty() => {
+                        in_anchor_at_depth = Some(stack.len() - 1);
+                        for attr in e.attributes().flatten() {
+                            if local_name(attr.key.as_ref()) == b"href"
+                                && let Some(top) = stack.last_mut()
+                            {
+                                top.href = Some(
+                                    String::from_utf8(attr.value.to_vec())
+                                        .map_err(io::Error::other)?,
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(e)) => {
+                if let Some(depth) = in_anchor_at_depth
+                    && let Some(item) = stack.get_mut(depth)
+                {
+                    let raw = String::from_utf8_lossy(e.as_ref());
+                    item.label.push_str(&raw);
+                }
+            }
+            Ok(Event::GeneralRef(e)) => {
+                if let Some(depth) = in_anchor_at_depth
+                    && let Some(item) = stack.get_mut(depth)
+                {
+                    let entity = String::from_utf8_lossy(e.as_ref());
+                    if let Some(resolved) = resolve_entity(&entity) {
+                        item.label.push_str(&resolved);
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = e.name();
+                let local = local_name(name.as_ref());
+                match local {
+                    b"a" if in_anchor_at_depth.is_some() => {
+                        in_anchor_at_depth = None;
+                    }
+                    b"li" if in_toc_nav => {
+                        if let Some(item) = stack.pop()
+                            && let Some(href) = item.href
+                        {
+                            play_order += 1;
+                            let mut entry = TocEntry::new(item.label.trim(), href);
+                            entry.children = item.children;
+                            entry.play_order = Some(play_order);
+                            // Attach to parent <li>'s children, or to root
+                            // if this was a top-level item.
+                            if let Some(parent) = stack.last_mut() {
+                                parent.children.push(entry);
+                            } else {
+                                root_children.push(entry);
+                            }
+                        }
+                    }
+                    b"nav" if in_toc_nav => {
+                        nav_depth = nav_depth.saturating_sub(1);
+                        if nav_depth == 0 {
+                            in_toc_nav = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(io::Error::other(e)),
+            _ => {}
+        }
+    }
+
+    Ok(root_children)
+}
+
 /// Parse EPUB 3 nav document landmarks.
 ///
 /// Landmarks are in a `<nav epub:type="landmarks">` element containing

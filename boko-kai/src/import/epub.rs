@@ -8,7 +8,10 @@ use std::sync::Arc;
 use zip::ZipArchive;
 
 use crate::dom::Stylesheet;
-use crate::epub::{parse_container_xml, parse_nav_landmarks, parse_ncx, parse_opf, parse_opf_guide};
+use crate::epub::{
+    parse_container_xml, parse_nav_landmarks, parse_nav_toc, parse_ncx, parse_opf,
+    parse_opf_guide,
+};
 use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href};
 use crate::io::{ByteSource, ByteSourceCursor, FileSource};
 use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
@@ -218,20 +221,41 @@ impl EpubImporter {
             }
         }
 
-        // 5. Parse TOC (NCX)
-        let toc = if let Some(ncx_href) = &opf.ncx_href {
-            let ncx_path = format!("{}{}", opf_base, ncx_href);
-            if let Ok(ncx_bytes) = read_entry(&source, &zip_index, &ncx_path) {
+        // 5. Parse TOC. Try NCX first (EPUB 2 and many 3.0 hybrids), then
+        // fall back to the EPUB 3 nav doc's `<nav epub:type="toc">`.
+        // Kadokawa/EBPAJ-style Japanese EPUBs drop NCX entirely and only
+        // ship the nav doc TOC; without this fallback, those books make
+        // it through conversion with no `book_navigation` entries and the
+        // device shows no chapter list.
+        let toc = {
+            let ncx_toc = opf.ncx_href.as_ref().and_then(|ncx_href| {
+                let ncx_path = format!("{}{}", opf_base, ncx_href);
+                let ncx_bytes = read_entry(&source, &zip_index, &ncx_path).ok()?;
                 let hint_encoding = crate::util::extract_xml_encoding(&ncx_bytes);
                 let ncx_str = crate::util::decode_text(&ncx_bytes, hint_encoding);
-                let toc_entries = parse_ncx(&ncx_str)?;
-                // Prepend base path to hrefs (NCX uses relative paths)
-                prepend_base_to_toc(&toc_entries, &opf_base)
+                let entries = parse_ncx(&ncx_str).ok()?;
+                if entries.is_empty() {
+                    None
+                } else {
+                    Some(prepend_base_to_toc(&entries, &opf_base))
+                }
+            });
+            if let Some(toc) = ncx_toc {
+                toc
+            } else if let Some(nav_href) = &opf.nav_href {
+                let nav_path = format!("{}{}", opf_base, nav_href);
+                read_entry(&source, &zip_index, &nav_path)
+                    .ok()
+                    .and_then(|nav_bytes| {
+                        let hint_encoding = crate::util::extract_xml_encoding(&nav_bytes);
+                        let nav_str = crate::util::decode_text(&nav_bytes, hint_encoding);
+                        parse_nav_toc(&nav_str).ok()
+                    })
+                    .map(|entries| prepend_base_to_toc(&entries, &opf_base))
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             }
-        } else {
-            Vec::new()
         };
 
         // 6. Parse landmarks from EPUB 3 nav document
