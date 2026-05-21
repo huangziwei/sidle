@@ -58,6 +58,22 @@ base64 = "0.22"
 # can render. Small, focused, no C deps.
 jpeg-encoder = { version = "0.6", default-features = false }
 
+# Pure-Rust multi-format image decoder. Used by the EPUB→KFX path to
+# transcode every non-JPEG image (GIF, PNG, WebP, BMP) to JPEG before
+# bundling. KDP's "Image Guidelines — Reflowable" warns that Kindle
+# can't render multi-frame GIFs and that transparent areas don't
+# composite, and Amazon's authoritative KFX pipeline transcodes every
+# input image to JPEG-XR. Matching that here means embedded images
+# actually render on device instead of silently going missing. We pull
+# only decoders here; JPEG encode stays on `jpeg-encoder` so existing
+# call sites (Aozora cover, JXR re-encode) don't double up.
+image = { version = "0.25", default-features = false, features = [
+    "gif",
+    "png",
+    "webp",
+    "bmp",
+] }
+
 # Ion binary format parsing for KFX dump tool
 ion-rs = { version = "1.0.0-rc.11", features = ["experimental-reader-writer"] }
 

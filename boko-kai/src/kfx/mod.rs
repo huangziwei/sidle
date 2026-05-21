@@ -26,6 +26,7 @@ pub mod container;
 pub mod context;
 pub mod cover;
 pub mod fragment;
+pub mod image_transcode;
 pub mod ion;
 pub mod merge;
 pub mod metadata;

@@ -309,32 +309,10 @@ impl MediaFormat {
 ///
 /// The detected `MediaFormat`, or `Binary` if unknown.
 pub fn detect_media_format(path: &str, data: &[u8]) -> MediaFormat {
-    // Try extension-based detection first (faster, most common case)
-    let path_lower = path.to_lowercase();
-
-    if path_lower.ends_with(".jpg") || path_lower.ends_with(".jpeg") {
-        return MediaFormat::Jpeg;
-    }
-    if path_lower.ends_with(".png") {
-        return MediaFormat::Png;
-    }
-    if path_lower.ends_with(".gif") {
-        return MediaFormat::Gif;
-    }
-    if path_lower.ends_with(".svg") {
-        return MediaFormat::Svg;
-    }
-    if path_lower.ends_with(".webp") {
-        return MediaFormat::WebP;
-    }
-    if path_lower.ends_with(".ttf") {
-        return MediaFormat::Ttf;
-    }
-    if path_lower.ends_with(".otf") {
-        return MediaFormat::Otf;
-    }
-
-    // Fallback to magic byte detection
+    // Magic-bytes detection first. When the EPUB→KFX export transcodes a
+    // GIF to JPEG before bundling, the path still ends `.gif` but `data`
+    // is JPEG; an extension-only check would mislabel it and the KFX
+    // renderer would refuse the resource.
     if data.len() >= 4 {
         // JPEG: FF D8 FF
         if data[0] == 0xFF && data[1] == 0xD8 {
@@ -361,6 +339,33 @@ pub fn detect_media_format(path: &str, data: &[u8]) -> MediaFormat {
         {
             return MediaFormat::WebP;
         }
+    }
+
+    // Fall back to extension when magic bytes are absent or unrecognised
+    // (covers SVG/TTF/OTF, plus the no-data case in callers that only
+    // have a path string).
+    let path_lower = path.to_lowercase();
+
+    if path_lower.ends_with(".jpg") || path_lower.ends_with(".jpeg") {
+        return MediaFormat::Jpeg;
+    }
+    if path_lower.ends_with(".png") {
+        return MediaFormat::Png;
+    }
+    if path_lower.ends_with(".gif") {
+        return MediaFormat::Gif;
+    }
+    if path_lower.ends_with(".svg") {
+        return MediaFormat::Svg;
+    }
+    if path_lower.ends_with(".webp") {
+        return MediaFormat::WebP;
+    }
+    if path_lower.ends_with(".ttf") {
+        return MediaFormat::Ttf;
+    }
+    if path_lower.ends_with(".otf") {
+        return MediaFormat::Otf;
     }
 
     MediaFormat::Binary

@@ -904,6 +904,36 @@ impl ExportContext {
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
     }
 
+    /// Register a Link-element style. Like `register_ir_style_with_hint`,
+    /// but forces an explicit `underline` field (either `solid` or `none`)
+    /// when the cascade didn't set one. Kindle's renderer defaults `<a>` to
+    /// underlined; without an explicit `underline: none`, source EPUBs that
+    /// kill link underlines via `text-decoration: none` (e.g. calibre's
+    /// `.calibre3`) still render with stripes on device.
+    pub fn register_link_ir_style_with_hint(
+        &mut self,
+        ir_style: &crate::style::ComputedStyle,
+        class_hint: Option<&str>,
+    ) -> u64 {
+        use crate::kfx::style_schema::KfxValue;
+        let schema = crate::kfx::style_schema::StyleSchema::standard();
+        let mut builder = crate::kfx::style_registry::StyleBuilder::new(schema);
+        builder.ingest_ir_style(ir_style);
+        let mut kfx_style = builder.build();
+        if kfx_style.get(KfxSymbol::Underline).is_none() {
+            kfx_style.set(
+                KfxSymbol::Underline,
+                KfxValue::Symbol(if ir_style.text_decoration_underline {
+                    KfxSymbol::Solid
+                } else {
+                    KfxSymbol::None
+                }),
+            );
+        }
+        self.style_registry
+            .register_with_hint(kfx_style, class_hint, &mut self.symbols)
+    }
+
     /// Register an IR style by StyleId.
     pub fn register_style_id(
         &mut self,
@@ -926,6 +956,25 @@ impl ExportContext {
 
         if let Some(ir_style) = style_pool.get(style_id) {
             self.register_ir_style_with_hint(ir_style, class_hint)
+        } else {
+            self.default_style_symbol
+        }
+    }
+
+    /// Register a Link element's style by StyleId. See
+    /// `register_link_ir_style_with_hint` for the underline-forcing rationale.
+    pub fn register_link_style_id_with_hint(
+        &mut self,
+        style_id: StyleId,
+        style_pool: &crate::style::StylePool,
+        class_hint: Option<&str>,
+    ) -> u64 {
+        if style_id == StyleId::DEFAULT {
+            return self.default_style_symbol;
+        }
+
+        if let Some(ir_style) = style_pool.get(style_id) {
+            self.register_link_ir_style_with_hint(ir_style, class_hint)
         } else {
             self.default_style_symbol
         }

@@ -964,10 +964,19 @@ struct InlineState {
     ruby_annotation: Option<String>,
 }
 
-/// A flattened text segment with its computed state.
-struct FlatSegment {
-    text: String,
-    state: InlineState,
+/// A flattened segment with its computed state. Most segments carry text,
+/// but an inline `<img>` (e.g. a gaiji glyph used as the base of a `<ruby>`)
+/// emits as an Image variant so the image element survives — without this,
+/// images that aren't direct children of a block-level element get dropped
+/// because `flatten_inline_content` only knows how to emit text leaves.
+enum FlatSegment {
+    Text { text: String, state: InlineState },
+    // Image segments don't carry inline state: the surrounding ruby
+    // annotation / link_to / inline style can't transfer to a KFX image
+    // element in our current pipeline, so the image emits standalone via
+    // `walk_node_for_export`. Track only the node so the walker can refetch
+    // src/alt/style for the element.
+    Image { node_id: NodeId },
 }
 
 /// Recursively concatenate all Text descendants of a node into `out`.
@@ -1052,7 +1061,7 @@ fn flatten_inline_content(
             if !node.text.is_empty() {
                 let text = chapter.text(node.text);
                 if !text.is_empty() {
-                    segments.push(FlatSegment {
+                    segments.push(FlatSegment::Text {
                         text: text.to_string(),
                         state: effective_state,
                     });
@@ -1061,10 +1070,19 @@ fn flatten_inline_content(
         }
         // BREAK: Emit newline as text
         Role::Break => {
-            segments.push(FlatSegment {
+            segments.push(FlatSegment::Text {
                 text: "\n".to_string(),
                 state: effective_state,
             });
+        }
+        // IMAGE: leaf, emit as Image segment. Without this arm an `<img>`
+        // inside `<ruby>`/`<a>`/`<span>` falls through the catch-all below,
+        // which recurses into the (empty) children and emits nothing — the
+        // image silently vanishes. Common in Japanese EPUBs that use a
+        // gaiji glyph image as the base of a ruby pair.
+        Role::Image => {
+            let _ = effective_state; // see FlatSegment::Image — state can't transfer to image element
+            segments.push(FlatSegment::Image { node_id });
         }
         // RUBY TEXT: never recursed into here. Consumed by the parent Ruby
         // arm below — its text becomes the annotation, not inline content.
@@ -1118,7 +1136,7 @@ fn flatten_inline_content(
             let children: Vec<_> = chapter.children(node_id).collect();
             if children.is_empty() && effective_state.element_id.is_some() {
                 // Empty element with ID (anchor marker) - emit zero-width space to carry the ID
-                segments.push(FlatSegment {
+                segments.push(FlatSegment::Text {
                     text: "\u{200B}".to_string(), // Zero-width space
                     state: effective_state,
                 });
@@ -1137,81 +1155,110 @@ fn flatten_inline_content(
 fn emit_flattened_segments(
     segments: Vec<FlatSegment>,
     chapter: &Chapter,
-    _sch: &crate::kfx::schema::KfxSchema,
+    sch: &crate::kfx::schema::KfxSchema,
     ctx: &mut ExportContext,
     stream: &mut TokenStream,
 ) {
     for segment in segments {
-        let needs_style_event = segment.state.link_to.is_some()
-            || segment.state.style.is_some()
-            || segment.state.ruby_annotation.is_some();
+        match segment {
+            FlatSegment::Image { node_id } => {
+                // Inline image leaf (e.g. gaiji inside <ruby>). Re-enter
+                // walk_node_for_export so the image element gets its src/
+                // alt/style/resource registration the same way a block-level
+                // image would. Surrounding inline state (link_to, ruby
+                // annotation) doesn't transfer to the image element — KFX
+                // doesn't support a hyperlinked or ruby-base inline image
+                // in our current pipeline, so the image renders standalone
+                // and the annotation is dropped for that segment.
+                walk_node_for_export(chapter, node_id, sch, ctx, stream);
+            }
+            FlatSegment::Text { text, state } => {
+                let needs_style_event = state.link_to.is_some()
+                    || state.style.is_some()
+                    || state.ruby_annotation.is_some();
 
-        if needs_style_event {
-            // Build span with accumulated state
-            let mut span = SpanStart::new(
-                if segment.state.link_to.is_some() {
-                    Role::Link
+                if needs_style_event {
+                    // Build span with accumulated state
+                    let mut span = SpanStart::new(
+                        if state.link_to.is_some() {
+                            Role::Link
+                        } else {
+                            Role::Inline
+                        },
+                        0,
+                        0,
+                    );
+
+                    // Set style (innermost). The class hint carried in the segment
+                    // state mirrors the innermost-wins style, so the KFX style
+                    // registry sees the same source class name that styled this
+                    // text segment.
+                    //
+                    // When the segment is inside a Link, use the link-aware
+                    // registration so the resulting KFX style carries an
+                    // explicit `underline` field — otherwise Kindle's
+                    // built-in `<a>` underline overrides any source CSS that
+                    // killed it via `text-decoration: none`.
+                    if let Some(style_id) = state.style {
+                        let style_symbol = if state.link_to.is_some() {
+                            ctx.register_link_style_id_with_hint(
+                                style_id,
+                                &chapter.styles,
+                                state.class_hint.as_deref(),
+                            )
+                        } else {
+                            ctx.register_style_id_with_hint(
+                                style_id,
+                                &chapter.styles,
+                                state.class_hint.as_deref(),
+                            )
+                        };
+                        span.style_symbol = Some(style_symbol);
+                    }
+
+                    // Build KFX attributes
+                    let mut kfx_attrs = Vec::new();
+
+                    // Add link_to if present
+                    if let Some(ref href) = state.link_to {
+                        let anchor_symbol = ctx.anchor_registry.get_or_create_href_symbol(href);
+                        kfx_attrs.push((sym!(LinkTo), anchor_symbol));
+                    }
+
+                    // Add yj.display for noterefs
+                    if let Some(ref epub_type) = state.epub_type
+                        && epub_type.split_whitespace().any(|t| t == "noteref")
+                    {
+                        // YjNote = 617
+                        kfx_attrs.push((sym!(YjDisplay), "617".to_string()));
+                    }
+
+                    // Add ruby_name + ruby_id if this segment is base text under a <ruby>.
+                    // ruby_name resolves to the kfx_id of the ruby_content fragment that
+                    // holds the annotation; ruby_id is the 1-indexed entry within it.
+                    if let Some(ref annotation) = state.ruby_annotation {
+                        let (frag_idx, ruby_id) = ctx.ruby_registry.register(annotation);
+                        let ruby_name = format!("b_ruby_{}", frag_idx);
+                        kfx_attrs.push((sym!(RubyName), ruby_name));
+                        kfx_attrs.push((sym!(RubyId), ruby_id.to_string()));
+                    }
+
+                    span.kfx_attrs = kfx_attrs;
+
+                    // Store element ID and node_id for anchor creation
+                    if let Some(ref id) = state.element_id {
+                        span.set_semantic(SemanticTarget::Id, id.clone());
+                    }
+                    span.node_id = state.node_id;
+
+                    stream.push(KfxToken::StartSpan(span));
+                    stream.push(KfxToken::Text(text));
+                    stream.push(KfxToken::EndSpan);
                 } else {
-                    Role::Inline
-                },
-                0,
-                0,
-            );
-
-            // Set style (innermost). The class hint carried in the segment
-            // state mirrors the innermost-wins style, so the KFX style
-            // registry sees the same source class name that styled this
-            // text segment.
-            if let Some(style_id) = segment.state.style {
-                let style_symbol = ctx.register_style_id_with_hint(
-                    style_id,
-                    &chapter.styles,
-                    segment.state.class_hint.as_deref(),
-                );
-                span.style_symbol = Some(style_symbol);
+                    // Plain text, no style event needed
+                    stream.push(KfxToken::Text(text));
+                }
             }
-
-            // Build KFX attributes
-            let mut kfx_attrs = Vec::new();
-
-            // Add link_to if present
-            if let Some(ref href) = segment.state.link_to {
-                let anchor_symbol = ctx.anchor_registry.get_or_create_href_symbol(href);
-                kfx_attrs.push((sym!(LinkTo), anchor_symbol));
-            }
-
-            // Add yj.display for noterefs
-            if let Some(ref epub_type) = segment.state.epub_type
-                && epub_type.split_whitespace().any(|t| t == "noteref")
-            {
-                // YjNote = 617
-                kfx_attrs.push((sym!(YjDisplay), "617".to_string()));
-            }
-
-            // Add ruby_name + ruby_id if this segment is base text under a <ruby>.
-            // ruby_name resolves to the kfx_id of the ruby_content fragment that
-            // holds the annotation; ruby_id is the 1-indexed entry within it.
-            if let Some(ref annotation) = segment.state.ruby_annotation {
-                let (frag_idx, ruby_id) = ctx.ruby_registry.register(annotation);
-                let ruby_name = format!("b_ruby_{}", frag_idx);
-                kfx_attrs.push((sym!(RubyName), ruby_name));
-                kfx_attrs.push((sym!(RubyId), ruby_id.to_string()));
-            }
-
-            span.kfx_attrs = kfx_attrs;
-
-            // Store element ID and node_id for anchor creation
-            if let Some(ref id) = segment.state.element_id {
-                span.set_semantic(SemanticTarget::Id, id.clone());
-            }
-            span.node_id = segment.state.node_id;
-
-            stream.push(KfxToken::StartSpan(span));
-            stream.push(KfxToken::Text(segment.text));
-            stream.push(KfxToken::EndSpan);
-        } else {
-            // Plain text, no style event needed
-            stream.push(KfxToken::Text(segment.text));
         }
     }
 }
@@ -2854,27 +2901,33 @@ mod tests {
         assert_eq!(segments.len(), 2, "Should have 2 non-overlapping segments");
 
         // First segment: "1." with Inline's style and Link's href
-        assert_eq!(segments[0].text, "1.");
+        let FlatSegment::Text { text, state } = &segments[0] else {
+            panic!("First segment should be Text, got Image");
+        };
+        assert_eq!(text, "1.");
         assert_eq!(
-            segments[0].state.link_to,
+            state.link_to,
             Some("#chapter1".to_string()),
             "First segment should have link_to from Link"
         );
         assert_eq!(
-            segments[0].state.style,
+            state.style,
             Some(inline_style),
             "First segment should have Inline's style (innermost wins)"
         );
 
         // Second segment: " Easy Concurrency" with Link's style and Link's href
-        assert_eq!(segments[1].text, " Easy Concurrency");
+        let FlatSegment::Text { text, state } = &segments[1] else {
+            panic!("Second segment should be Text, got Image");
+        };
+        assert_eq!(text, " Easy Concurrency");
         assert_eq!(
-            segments[1].state.link_to,
+            state.link_to,
             Some("#chapter1".to_string()),
             "Second segment should have link_to from Link"
         );
         assert_eq!(
-            segments[1].state.style,
+            state.style,
             Some(link_style),
             "Second segment should have Link's style"
         );

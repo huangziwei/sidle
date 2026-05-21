@@ -181,13 +181,20 @@ fn hash_kfx_value<H: Hasher>(value: &KfxValue, hasher: &mut H) {
 
 /// Registry for collecting and deduplicating styles during export.
 pub struct StyleRegistry {
-    /// Hash -> (style_id, style_name_symbol, name_string, computed_style)
+    /// Hash -> (style_id, style_name_symbol, name_string, computed_style, uses)
     ///
     /// `name_string` is the actual symbol text. For source-EPUB-origin styles
     /// where the IR carried a single source class name, this is that class
     /// (e.g. "bold", "vrtl") so the round-trip preserves identity. For styles
     /// without a usable hint it falls back to `format!("s{:X}", style_id)`.
-    styles: HashMap<u64, (u64, u64, String, ComputedStyle)>,
+    ///
+    /// `uses` counts how many `register_with_hint` calls hit this entry —
+    /// roughly the number of storyline nodes that reference this style.
+    /// Used by `normalize_line_heights_to_lh` to weight the "dominant"
+    /// line-height by actual usage rather than distinct-style count, so a
+    /// `1.75em` body paragraph used on every block outweighs many `1em`
+    /// ruby/inline styles that each appear only a handful of times.
+    styles: HashMap<u64, (u64, u64, String, ComputedStyle, u64)>,
 
     /// Names already taken as style symbols. Lets us avoid two distinct
     /// `ComputedStyle`s competing for the same source-class name. First-
@@ -285,8 +292,9 @@ impl StyleRegistry {
             hash = h.finish();
         }
 
-        if let Some((_, name_symbol, _, _)) = self.styles.get(&hash) {
-            return *name_symbol;
+        if let Some(entry) = self.styles.get_mut(&hash) {
+            entry.4 = entry.4.saturating_add(1);
+            return entry.1;
         }
 
         let style_id = self.next_style_id;
@@ -300,7 +308,7 @@ impl StyleRegistry {
         let name_symbol = symbols.get_or_intern(&style_name);
         self.taken_names.insert(style_name.clone());
         self.styles
-            .insert(hash, (style_id, name_symbol, style_name, style));
+            .insert(hash, (style_id, name_symbol, style_name, style, 1));
 
         name_symbol
     }
@@ -331,7 +339,7 @@ impl StyleRegistry {
         result.push(("s0".to_string(), default_ion));
 
         // Then all registered styles.
-        for (_, (_style_id, name_symbol, name, style)) in self.styles.drain() {
+        for (_, (_style_id, name_symbol, name, style, _uses)) in self.styles.drain() {
             let ion = style.to_ion(name_symbol);
             result.push((name, ion));
         }
@@ -341,7 +349,7 @@ impl StyleRegistry {
 
     /// Get all styles without draining.
     pub fn styles(&self) -> impl Iterator<Item = (&u64, &ComputedStyle)> {
-        self.styles.values().map(|(id, _, _, style)| (id, style))
+        self.styles.values().map(|(id, _, _, style, _)| (id, style))
     }
 
     /// Normalise per-paragraph `line_height` values so the book's dominant
@@ -358,17 +366,24 @@ impl StyleRegistry {
     /// KFX shows. Calibre normalises so the body lands on `1.0 lh` and
     /// outliers carry proportional ratios; this method matches that.
     ///
+    /// Dominant is picked by *usage count* (sum of `uses` from
+    /// `register_with_hint` calls), not the number of distinct registered
+    /// styles. A book with many rare ruby/inline styles at `1em` and one
+    /// body style at `1.75em` would otherwise pick `1em` as dominant —
+    /// inverting every body paragraph's line-height into `1.75 lh` and
+    /// blowing it up to `2.1em` on device.
+    ///
     /// Returns the dominant em value if any line-heights were normalised.
     pub fn normalize_line_heights_to_lh(&mut self) -> Option<f32> {
-        // Pass 1: find the most-common em value across all styles.
-        let mut tally: HashMap<u32, usize> = HashMap::new();
-        for (_, _, _, style) in self.styles.values() {
+        // Pass 1: tally em-based line-heights weighted by usage.
+        let mut tally: HashMap<u32, u64> = HashMap::new();
+        for (_, _, _, style, uses) in self.styles.values() {
             if let Some(KfxValue::Dimensioned { value, unit }) =
                 style.get(KfxSymbol::LineHeight)
                 && matches!(unit, KfxSymbol::Em | KfxSymbol::Rem)
             {
                 // Bucket by float bit-pattern to count exact-equal values.
-                *tally.entry((*value as f32).to_bits()).or_insert(0) += 1;
+                *tally.entry((*value as f32).to_bits()).or_insert(0) += *uses;
             }
         }
         let dominant_bits = tally.into_iter().max_by_key(|(_, c)| *c).map(|(b, _)| b)?;
@@ -378,7 +393,7 @@ impl StyleRegistry {
         }
 
         // Pass 2: rewrite each style's line_height as `(value / dominant) lh`.
-        for (_, _, _, style) in self.styles.values_mut() {
+        for (_, _, _, style, _) in self.styles.values_mut() {
             if let Some(KfxValue::Dimensioned { value, unit }) =
                 style.get(KfxSymbol::LineHeight).cloned()
                 && matches!(unit, KfxSymbol::Em | KfxSymbol::Rem)
