@@ -4,9 +4,9 @@
 //! against `/Volumes/Kindle/...` Just Work. MTP-class Kindles (Scribe and
 //! everything 2024+) expose a tree of objects accessed over USB through
 //! Apple's `IOUSBHost`; the same logical paths (`documents/Sidle/foo.kfx`)
-//! map to a chain of MTP object IDs. Pushing and deleting books, plus
-//! reading/writing the on-device manifest, all go through this trait so
-//! the layers above don't have to care which world they're in.
+//! map to a chain of MTP object IDs. Pushing, listing, deleting books and
+//! their `.sdr/` sidecars all go through this trait so the layers above
+//! don't have to care which world they're in.
 
 use std::path::Path;
 
@@ -103,6 +103,15 @@ pub trait Transport: Send + Sync {
     fn copy_in_atomic(&self, src_local: &Path, dest: &TPath) -> Result<()>;
     /// Returns `Ok(false)` when the object was already absent.
     fn delete(&self, path: &TPath) -> Result<bool>;
+    /// Recursively delete a directory and its contents. `Ok(false)` when the
+    /// directory was already absent. Used to wipe the Kindle-created
+    /// `<basename>.sdr/` sidecar (reading progress, annotations, highlights)
+    /// next to a `.kfx` on remove.
+    fn delete_dir(&self, path: &TPath) -> Result<bool>;
+    /// Existence probe. Unused by the scan-based push/delete path, but kept
+    /// as a transport primitive — tests rely on it and a future "is this
+    /// file still there" UI check could too.
+    #[allow(dead_code)]
     fn exists(&self, path: &TPath) -> Result<bool>;
     /// Immediate children of `dir`. Empty when `dir` is absent.
     #[allow(dead_code)] // Phase 4 wiring (push UI device-state introspection).

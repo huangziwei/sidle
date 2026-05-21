@@ -1,13 +1,21 @@
-//! Push a KFX from the local library to the device's documents directory.
+//! Push a KFX from the local library to the device's documents directory,
+//! and remove what we've sent.
+//!
+//! State model: there is no on-device manifest. The `documents/Sidle/`
+//! directory is the source of truth — every file in it is something we
+//! pushed, and the sha8 infix in each filename (`<basename>.<sha8>.kfx`)
+//! links it back to a `books.sha256` in the local library DB. To detect
+//! "already pushed" we list `Sidle/` and look for any `*.<sha8>.kfx`; to
+//! delete we scan for that same pattern and remove both the `.kfx` and the
+//! Kindle-created `<basename>.<sha8>.sdr/` sidecar next to it (reading
+//! progress, annotations, highlights — invisible to sidle but it
+//! accumulates if we don't clean it up).
 //!
 //! Routes through [`Transport`] so the same code handles mass-storage (KOA2
-//! family) and MTP (Scribe, 2024+) — `copy_in_atomic` does the right thing for
-//! each: `.partial` + `rename` on a real filesystem, `SendObjectInfo` /
-//! `SendObject` over MTP. Either way, an unplug mid-copy leaves no visible
-//! half-written `.kfx` for the device's indexer to choke on.
-//!
-//! Updates the on-device manifest (`<device>/.sidle/sent.json`) and the local
-//! `device_history` table.
+//! family) and MTP (Scribe, 2024+): `copy_in_atomic` does the right thing
+//! for each (`.partial` + `rename` on a real filesystem, `SendObjectInfo`
+//! / `SendObject` over MTP), and `delete_dir` handles the `.sdr/` recursion
+//! on MTP where `DeleteObject` doesn't loop.
 
 use std::path::Path;
 
@@ -15,15 +23,35 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::device::DeviceInfo;
-use crate::device::manifest::{self, Manifest, SentEntry};
 use crate::device::transport::{TPath, Transport};
 use crate::library::db::{self, BookRow};
 
-/// Where we write KFX. The `Sidle` subdir keeps our pushes namespaced so the
-/// Kindle's `/documents` root stays whatever the user had before, and our
-/// deletes can't ever touch unrelated files.
+/// Length of the sha256 prefix we put in filenames. 8 hex chars = 32 bits;
+/// collision-free for any realistic personal library (50% chance at ~93k
+/// books per the birthday bound), and short enough to stay readable.
+const SHA_INFIX_LEN: usize = 8;
+
+/// Where we write KFX. The `Sidle` subdir keeps our pushes namespaced so
+/// the Kindle's `/documents` root stays whatever the user had before and
+/// our deletes can't ever touch unrelated files.
 fn documents_dir() -> TPath {
     TPath::parse("documents").join("Sidle")
+}
+
+fn sha_infix(sha256: &str) -> &str {
+    &sha256[..SHA_INFIX_LEN]
+}
+
+/// The `<basename>.<sha8>.kfx` suffix that identifies an on-device file as
+/// belonging to a particular library row. Matched against on-device
+/// filenames in both push (already-present check) and delete (find-and-
+/// remove).
+fn kfx_suffix(sha256: &str) -> String {
+    format!(".{}.kfx", sha_infix(sha256))
+}
+
+fn sdr_suffix(sha256: &str) -> String {
+    format!(".{}.sdr", sha_infix(sha256))
 }
 
 #[derive(Debug, Serialize)]
@@ -36,10 +64,9 @@ pub enum PushResult {
 }
 
 pub fn push_one(
-    conn: &rusqlite::Connection,
-    device: &DeviceInfo,
+    _device: &DeviceInfo,
     transport: &dyn Transport,
-    manifest: &mut Manifest,
+    conn: &rusqlite::Connection,
     book: &BookRow,
 ) -> Result<PushResult> {
     if let Some(reason) = preflight(conn, book)? {
@@ -55,68 +82,27 @@ pub fn push_one(
 
     let dest_dir = documents_dir();
 
-    // If we've sent it before AND the file still exists, no-op.
-    if let Some(entry) = manifest.sent.get(&book.sha256).cloned() {
-        let dest = dest_dir.join(&entry.filename);
-        if transport.exists(&dest).unwrap_or(false) {
-            return Ok(PushResult::AlreadyPresent {
-                book_id: book.id,
-                filename: entry.filename,
-            });
-        }
-        // Manifest says we sent it but the file is gone (user deleted on-device).
-        // Re-push under the same name.
-        transport
-            .copy_in_atomic(Path::new(kfx_src), &dest)
-            .with_context(|| format!("copy {} -> {}", kfx_src, transport.display_path(&dest)))?;
-        db::record_device_action(
-            conn,
-            &device.serial,
-            &book.sha256,
-            "push",
-            &transport.display_path(&dest),
-        )?;
-        return Ok(PushResult::Pushed {
+    // Already-pushed check: any file in Sidle/ ending in our sha8 infix is
+    // ours, regardless of basename (a re-import after a metadata edit can
+    // leave the on-device file with the old basename — that's fine, sha is
+    // the stable identity).
+    if let Some(existing) = find_by_sha(transport, &dest_dir, &book.sha256)? {
+        return Ok(PushResult::AlreadyPresent {
             book_id: book.id,
-            filename: entry.filename,
+            filename: existing,
         });
     }
 
-    // Both files share the same basename (import writes them as
-    // `<basename>.kfx` / `<basename>.epub`), so deriving from the KFX path
-    // we just bound above is equivalent to the old `epub_path` derivation —
-    // and avoids depending on a field that may be `None` for a KFX-imported
-    // book whose EPUB hasn't finished converting yet.
     let base = Path::new(kfx_src)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| format!("book-{}", &book.sha256[..8]));
-
-    let filename = unique_filename(transport, &dest_dir, &base, manifest, &book.sha256);
+        .unwrap_or_else(|| format!("book-{}", sha_infix(&book.sha256)));
+    let filename = format!("{base}.{}.kfx", sha_infix(&book.sha256));
     let dest = dest_dir.join(&filename);
+
     transport
         .copy_in_atomic(Path::new(kfx_src), &dest)
         .with_context(|| format!("copy {} -> {}", kfx_src, transport.display_path(&dest)))?;
-
-    let now = db::now_iso();
-    manifest.sent.insert(
-        book.sha256.clone(),
-        SentEntry {
-            title: book.title.clone(),
-            author: book.author.clone(),
-            filename: filename.clone(),
-            sent_at: now,
-        },
-    );
-    manifest::save(transport, manifest)?;
-
-    db::record_device_action(
-        conn,
-        &device.serial,
-        &book.sha256,
-        "push",
-        &transport.display_path(&dest),
-    )?;
 
     Ok(PushResult::Pushed {
         book_id: book.id,
@@ -137,42 +123,23 @@ fn preflight(conn: &rusqlite::Connection, book: &BookRow) -> Result<Option<Strin
     Ok(None)
 }
 
-/// Find a non-colliding filename: `<base>.kfx`, then `<base> (2).kfx`, …
-fn unique_filename(
+/// Scan `documents/Sidle/` for a file whose name contains our sha8 infix.
+/// Returns the actual filename if present.
+fn find_by_sha(
     transport: &dyn Transport,
     dir: &TPath,
-    base: &str,
-    manifest: &Manifest,
-    self_sha: &str,
-) -> String {
-    let candidate = format!("{base}.kfx");
-    if !filename_taken(transport, dir, &candidate, manifest, self_sha) {
-        return candidate;
-    }
-    for n in 2..1000 {
-        let candidate = format!("{base} ({n}).kfx");
-        if !filename_taken(transport, dir, &candidate, manifest, self_sha) {
-            return candidate;
+    sha256: &str,
+) -> Result<Option<String>> {
+    let suffix = kfx_suffix(sha256);
+    for entry in transport.list(dir)? {
+        if entry.is_dir {
+            continue;
+        }
+        if entry.name.ends_with(&suffix) {
+            return Ok(Some(entry.name));
         }
     }
-    // Pathological fallback — essentially never reached.
-    format!("{base}-{}.kfx", &self_sha[..8])
-}
-
-fn filename_taken(
-    transport: &dyn Transport,
-    dir: &TPath,
-    name: &str,
-    manifest: &Manifest,
-    self_sha: &str,
-) -> bool {
-    if transport.exists(&dir.join(name)).unwrap_or(false) {
-        return true;
-    }
-    manifest
-        .sent
-        .iter()
-        .any(|(sha, e)| sha != self_sha && e.filename == name)
+    Ok(None)
 }
 
 // ----------------------------------------------------------------------------
@@ -182,60 +149,89 @@ fn filename_taken(
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeleteResult {
-    /// Removed from /documents and from sent.json.
+    /// `.kfx` removed (or already absent — `file_existed` reflects the prior
+    /// state). The matching `.sdr/` sidecar, if any, was wiped as well —
+    /// `sdr_existed` records whether it was present at delete time.
     Removed {
         sha256: String,
-        filename: String,
-        /// Whether the file was still on the device at the moment of removal.
-        /// `false` means the user had already deleted it on-device.
+        filename: Option<String>,
         file_existed: bool,
+        sdr_existed: bool,
     },
-    /// Sha wasn't in our manifest — refused to touch the file.
-    NotOurs { sha256: String },
     Failed { sha256: String, error: String },
 }
 
-/// Remove a book we previously sent from the Kindle.
-///
-/// **Safety:** only books in `manifest.sent` are deletable. Anything else is
-/// invisible to this function — explicit guard against nuking unrelated files
-/// the user has on their device.
+/// Remove an on-device file (and its `.sdr/`) by sha. The directory scan
+/// keeps deletes inherently namespaced — we only touch things matching our
+/// sha8 infix, so we can never nuke unrelated user files even if the local
+/// library DB is wiped.
 pub fn delete_one(
-    conn: &rusqlite::Connection,
-    device: &DeviceInfo,
+    _device: &DeviceInfo,
     transport: &dyn Transport,
-    manifest: &mut Manifest,
     sha256: &str,
 ) -> Result<DeleteResult> {
-    let Some(entry) = manifest.sent.remove(sha256) else {
-        return Ok(DeleteResult::NotOurs {
-            sha256: sha256.to_string(),
-        });
+    let dir = documents_dir();
+    let filename = find_by_sha(transport, &dir, sha256)?;
+
+    // Always attempt the `.sdr/` cleanup, even if the `.kfx` is missing —
+    // the sidecar is the Kindle's, not ours, and could outlive a manual
+    // on-device delete. We need the basename to address it; derive it from
+    // the .kfx filename when we have one, otherwise scan for any matching
+    // `*.<sha8>.sdr` in the directory.
+    let sdr_path = if let Some(ref name) = filename {
+        // Strip the `.kfx` to get the `<basename>.<sha8>` stem.
+        let stem = name.strip_suffix(".kfx").unwrap_or(name.as_str());
+        Some(dir.join(&format!("{stem}.sdr")))
+    } else {
+        find_sdr_by_sha(transport, &dir, sha256)?.map(|name| dir.join(&name))
     };
 
-    let dest = documents_dir().join(&entry.filename);
-    let file_existed = match transport.delete(&dest) {
-        Ok(b) => b,
-        Err(e) => {
-            // Roll back the manifest mutation so we don't lose the record of
-            // a file we actually couldn't remove.
-            manifest.sent.insert(sha256.to_string(), entry);
-            return Err(e);
+    let file_existed = if let Some(ref name) = filename {
+        transport
+            .delete(&dir.join(name))
+            .with_context(|| format!("delete {name}"))?
+    } else {
+        false
+    };
+
+    let sdr_existed = if let Some(ref p) = sdr_path {
+        // Best-effort: log to stderr but don't fail the delete — the .kfx
+        // is already gone, leaving a residual .sdr/ behind is annoying but
+        // not corrupting.
+        match transport.delete_dir(p) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!(
+                    "[sidle/delete] sdr cleanup failed for {sha256}: {e:#}"
+                );
+                false
+            }
         }
+    } else {
+        false
     };
-
-    manifest::save(transport, manifest)?;
-    db::record_device_action(
-        conn,
-        &device.serial,
-        sha256,
-        "delete",
-        &transport.display_path(&dest),
-    )?;
 
     Ok(DeleteResult::Removed {
         sha256: sha256.to_string(),
-        filename: entry.filename,
+        filename,
         file_existed,
+        sdr_existed,
     })
+}
+
+fn find_sdr_by_sha(
+    transport: &dyn Transport,
+    dir: &TPath,
+    sha256: &str,
+) -> Result<Option<String>> {
+    let suffix = sdr_suffix(sha256);
+    for entry in transport.list(dir)? {
+        if !entry.is_dir {
+            continue;
+        }
+        if entry.name.ends_with(&suffix) {
+            return Ok(Some(entry.name));
+        }
+    }
+    Ok(None)
 }

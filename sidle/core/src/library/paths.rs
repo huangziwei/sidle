@@ -48,9 +48,20 @@ impl LibraryPaths {
         std::fs::create_dir_all(self.book_dir(sha))
     }
 
-    /// Remove the per-sha directory. Best-effort.
-    pub fn remove_sha(&self, sha: &str) {
-        let _ = std::fs::remove_dir_all(self.book_dir(sha));
+    /// Remove the per-sha directory. Surfaces IO errors so callers can roll
+    /// back the matching `books` row delete — a silent swallow here was the
+    /// source of orphan `books/<sha>/` dirs left after `library_remove`
+    /// (Spotlight/Quicklook/Books.app holding a handle on the EPUB returned
+    /// EBUSY, the error went nowhere, the row was already gone).
+    ///
+    /// Treats `NotFound` as success: a re-run after a partial failure should
+    /// be a no-op rather than an error.
+    pub fn remove_sha(&self, sha: &str) -> std::io::Result<()> {
+        match std::fs::remove_dir_all(self.book_dir(sha)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 

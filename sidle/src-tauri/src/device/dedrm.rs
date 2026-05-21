@@ -19,7 +19,6 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 
 use crate::device::DeviceInfo;
-use crate::library::db;
 use crate::library::import::{self, ImportOutcome, sha256_of_file};
 use crate::library::paths::LibraryPaths;
 
@@ -96,26 +95,19 @@ pub fn filter_new_candidates(
         .collect()
 }
 
-/// Import a single dedrm file into the library. Records a `pull` row in
-/// `device_history`. Returns the import outcome plus, when the row needs a
-/// background conversion (now true for every fresh KFX/KFX-zip pull — the
-/// EPUB is produced by the worker, not import_file), the `book_id` to
-/// enqueue. Caller does the enqueue from async context.
+/// Import a single dedrm file into the library. Returns the import outcome
+/// plus, when the row needs a background conversion (now true for every
+/// fresh KFX/KFX-zip pull — the EPUB is produced by the worker, not
+/// import_file), the `book_id` to enqueue. Caller does the enqueue from
+/// async context.
 pub fn pull_one(
     conn: &rusqlite::Connection,
     paths: &LibraryPaths,
-    device: &DeviceInfo,
+    _device: &DeviceInfo,
     path: &Path,
 ) -> (PullResult, Option<i64>) {
     match import::import_file(conn, paths, path) {
         Ok(ImportOutcome::Imported { book, needs_enqueue }) => {
-            let _ = db::record_device_action(
-                conn,
-                &device.serial,
-                &book.sha256,
-                "pull",
-                &path.to_string_lossy(),
-            );
             let book_id = book.id;
             let result = PullResult::Imported {
                 book_id,

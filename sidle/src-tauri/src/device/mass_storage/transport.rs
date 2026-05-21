@@ -74,6 +74,15 @@ impl Transport for MassStorageTransport {
         }
     }
 
+    fn delete_dir(&self, path: &TPath) -> Result<bool> {
+        let p = self.resolve(path);
+        match std::fs::remove_dir_all(&p) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(anyhow::anyhow!("remove_dir_all {}: {}", p.display(), e)),
+        }
+    }
+
     fn exists(&self, path: &TPath) -> Result<bool> {
         Ok(self.resolve(path).exists())
     }

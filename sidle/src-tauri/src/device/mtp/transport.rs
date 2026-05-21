@@ -151,10 +151,10 @@ impl Transport for MtpTransport {
             // MTP has no atomic overwrite. Delete-then-upload is simpler than
             // upload-as-temp + rename and keeps the code symmetric with the
             // pristine-write case. Tradeoff: a tiny window where neither the
-            // old nor the new object is present. For the manifest (~1KB this
-            // is sub-millisecond); for a re-pushed KFX it's the upload
-            // duration. The next push can always re-create from
-            // `device_history`.
+            // old nor the new object is present. Push routes through
+            // `copy_in_atomic`, not here — `write_atomic` is only used for
+            // small auxiliary writes today (currently none in the new
+            // scan-based model), so the window is academic.
             let entries = self
                 .storage
                 .list_objects(parent)
@@ -205,6 +205,41 @@ impl Transport for MtpTransport {
                 .await
                 .map_err(map_mtp_err)
                 .with_context(|| format!("MTP delete {path}"))?;
+            Ok(true)
+        })
+    }
+
+    fn delete_dir(&self, path: &TPath) -> Result<bool> {
+        // PTP `DeleteObject` is a single transaction — mtp-rs explicitly
+        // doesn't loop, and device behavior on non-empty folders is undefined.
+        // So we walk children, accumulate handles in preorder, and delete in
+        // reverse so leaves go before their parents.
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        block_on(async {
+            let root = match self.resolve(path).await? {
+                Some(h) => h,
+                None => return Ok(false),
+            };
+            let mut stack = vec![root];
+            let mut to_delete: Vec<ObjectHandle> = Vec::new();
+            while let Some(h) = stack.pop() {
+                to_delete.push(h);
+                let children = self
+                    .storage
+                    .list_objects(Some(h))
+                    .await
+                    .map_err(map_mtp_err)?;
+                for child in children {
+                    stack.push(child.handle);
+                }
+            }
+            for h in to_delete.into_iter().rev() {
+                self.storage
+                    .delete(h)
+                    .await
+                    .map_err(map_mtp_err)
+                    .with_context(|| format!("MTP delete_dir {path} (handle {h:?})"))?;
+            }
             Ok(true)
         })
     }

@@ -190,13 +190,28 @@ fn canonicalize_tags(tags: Vec<String>) -> Vec<String> {
 
 #[tauri::command]
 pub async fn library_remove(state: State<'_, AppState>, book_id: i64) -> Result<(), String> {
-    let sha = {
+    // Look up the sha first so we can delete the files BEFORE the row.
+    // If file deletion fails (Spotlight/Books.app holding a handle, perms),
+    // the row stays put so the user sees the failure in the gallery rather
+    // than ending up with an orphan `books/<sha>/` dir whose row is gone.
+    let sha: Option<String> = {
         let conn = state.db.lock().await;
-        db::remove_book(&conn, book_id).map_err(|e| e.to_string())?
+        db::get_book(&conn, book_id)
+            .map_err(|e| e.to_string())?
+            .map(|b| b.sha256)
     };
-    if let Some(sha) = sha {
-        state.paths.remove_sha(&sha);
-    }
+    let Some(sha) = sha else {
+        // Already absent — treat as success so a double-click doesn't error.
+        return Ok(());
+    };
+
+    state
+        .paths
+        .remove_sha(&sha)
+        .map_err(|e| format!("could not remove files for {sha}: {e}"))?;
+
+    let conn = state.db.lock().await;
+    db::remove_book(&conn, book_id).map_err(|e| e.to_string())?;
     Ok(())
 }
 

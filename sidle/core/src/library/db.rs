@@ -67,16 +67,20 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
 
 /// Schema setup.
 ///
-/// No production data yet, so we don't migrate v1 schemas — if we spot the
-/// old `source_epub_path` column we just drop `books` + `conversion_jobs`
-/// and rebuild fresh. The CREATE block below is then the source of truth.
+/// No production data yet, so we don't migrate — if we spot any artefact of
+/// a prior schema (`source_epub_path` column on books, the `device_history`
+/// table) we drop the lot and rebuild fresh from the CREATE block below,
+/// which is the only source of truth.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    if has_column(conn, "books", "source_epub_path")? {
-        // FK from conversion_jobs.book_id blocks the DROP order without
-        // foreign_keys off. Dropping conversion_jobs first works too; we go
-        // with foreign_keys=OFF for symmetry with any future similar reset.
+    let needs_reset = has_column(conn, "books", "source_epub_path")?
+        || has_table(conn, "device_history")?;
+    if needs_reset {
         conn.pragma_update(None, "foreign_keys", "OFF")?;
-        conn.execute_batch("DROP TABLE IF EXISTS conversion_jobs; DROP TABLE IF EXISTS books;")?;
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS device_history;
+             DROP TABLE IF EXISTS conversion_jobs;
+             DROP TABLE IF EXISTS books;",
+        )?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
     }
 
@@ -112,20 +116,6 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_jobs_status ON conversion_jobs(status);
-
-        CREATE TABLE IF NOT EXISTS device_history (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_serial   TEXT NOT NULL,
-            sha256          TEXT NOT NULL,
-            action          TEXT NOT NULL,  -- 'push' | 'delete' (P2b: 'pull')
-            device_path     TEXT NOT NULL,
-            ts              TEXT NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_device_history_serial
-            ON device_history(device_serial);
-        CREATE INDEX IF NOT EXISTS idx_device_history_sha
-            ON device_history(sha256);
         "#,
     )?;
 
@@ -169,20 +159,23 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<
     Ok(false)
 }
 
-pub fn record_device_action(
-    conn: &Connection,
-    device_serial: &str,
-    sha256: &str,
-    action: &str,
-    device_path: &str,
-) -> rusqlite::Result<()> {
-    let now = now_iso();
-    conn.execute(
-        r#"INSERT INTO device_history (device_serial, sha256, action, device_path, ts)
-           VALUES (?1, ?2, ?3, ?4, ?5)"#,
-        params![device_serial, sha256, action, device_path, now],
+fn has_table(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        params![table],
+        |r| r.get(0),
     )?;
-    Ok(())
+    Ok(count > 0)
+}
+
+/// Look up the book matching a sha256 prefix. Used when a device-side file's
+/// filename carries a short sha to link it back to a library row. Returns
+/// the first match; sha8 collisions are statistically negligible for a
+/// personal library and we don't try to disambiguate.
+pub fn find_by_sha_prefix(conn: &Connection, prefix: &str) -> rusqlite::Result<Option<BookRow>> {
+    let pattern = format!("{prefix}%");
+    conn.query_row(SELECT_BOOK_WITH_JOB_BY_SHA_PREFIX, params![pattern], row_to_book)
+        .optional()
 }
 
 /// True if a job for this book is currently pending or converting.
@@ -443,6 +436,18 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
+"#;
+
+const SELECT_BOOK_WITH_JOB_BY_SHA_PREFIX: &str = r#"
+    SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
+           b.epub_path, b.cover_path, b.kfx_path,
+           b.file_size, b.imported_at, b.asin,
+           COALESCE(j.status, 'pending') AS status, j.error, j.kind,
+           b.publisher, b.published_at, b.series_name, b.series_index, b.tags
+    FROM books b
+    LEFT JOIN conversion_jobs j ON j.book_id = b.id
+    WHERE b.sha256 LIKE ?1
+    LIMIT 1
 "#;
 
 fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {

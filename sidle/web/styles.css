@@ -592,8 +592,25 @@ button {
   text-overflow: ellipsis;
 }
 
-.device-sent-missing {
+.device-sent-orphan {
   color: var(--accent);
+  font-style: italic;
+  margin-right: 8px;
+}
+
+.device-sent-reimport {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 8px;
+  font: inherit;
+  font-size: 11px;
+  color: inherit;
+  cursor: pointer;
+}
+
+.device-sent-reimport:hover {
+  background: var(--hover);
 }
 
 .device-empty {

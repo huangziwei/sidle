@@ -400,7 +400,14 @@ async function refresh() {
 
 function setSent(rows) {
   state.sent = rows || [];
-  state.sentSet = new Set(state.sent.map((r) => r.sha256));
+  // Only `sent` rows have a full sha256 we can intersect with the local
+  // library; `orphan` rows expose a sha8 prefix only. The sentSet drives
+  // the green-badge / Send vs Remove decisions, which only matter for
+  // books that actually exist locally — so excluding orphans here is
+  // correct, not an omission.
+  state.sentSet = new Set(
+    state.sent.filter((r) => r.kind === "sent").map((r) => r.sha256),
+  );
 }
 
 function render() {
@@ -1357,8 +1364,16 @@ function deviceRow(r) {
 
   const title = document.createElement("div");
   title.className = "device-sent-title";
-  title.textContent = r.title || r.filename;
-  title.title = r.filename;
+  if (r.kind === "sent") {
+    title.textContent = r.title || r.filename;
+    title.title = r.filename;
+  } else {
+    // orphan — no local library entry. Show the filename minus the sha8
+    // infix so the user sees something recognizable.
+    const display = r.filename.replace(/\.[0-9a-f]{8}\.kfx$/i, ".kfx");
+    title.textContent = display;
+    title.title = r.filename;
+  }
 
   const del = document.createElement("button");
   del.type = "button";
@@ -1367,22 +1382,36 @@ function deviceRow(r) {
   del.textContent = "×";
   del.addEventListener("click", (e) => {
     e.stopPropagation();
-    deleteFromDevice([r.sha256], [r.title || r.filename]);
+    // Orphans only have a sha8 prefix on hand; pass that through —
+    // delete_one's scan matches by suffix, not full sha.
+    const sha = r.kind === "sent" ? r.sha256 : r.sha8;
+    const label = r.kind === "sent"
+      ? r.title || r.filename
+      : r.filename;
+    deleteFromDevice([sha], [label]);
   });
 
   top.append(title, del);
 
   const meta = document.createElement("div");
   meta.className = "device-sent-meta";
-  const parts = [];
-  if (r.author) parts.push(r.author);
-  parts.push(formatDate(r.sent_at));
-  meta.textContent = parts.join(" · ");
-  if (!r.file_present) {
-    const missing = document.createElement("span");
-    missing.className = "device-sent-missing";
-    missing.textContent = " · missing on device";
-    meta.appendChild(missing);
+  if (r.kind === "sent") {
+    if (r.author) meta.textContent = r.author;
+  } else {
+    const badge = document.createElement("span");
+    badge.className = "device-sent-orphan";
+    badge.textContent = "not in library";
+    meta.appendChild(badge);
+
+    const reimport = document.createElement("button");
+    reimport.type = "button";
+    reimport.className = "device-sent-reimport";
+    reimport.textContent = "Import to library";
+    reimport.addEventListener("click", (e) => {
+      e.stopPropagation();
+      importOrphan(r.filename);
+    });
+    meta.appendChild(reimport);
   }
 
   li.append(top, meta);
@@ -1408,13 +1437,35 @@ async function deleteFromDevice(sha256s, titles) {
     showToast(`delete failed: ${e}`, true);
     return;
   }
-  const counts = { removed: 0, not_ours: 0, failed: 0 };
+  const counts = { removed: 0, failed: 0 };
   for (const r of results) counts[r.kind] = (counts[r.kind] || 0) + 1;
   const parts = [];
   if (counts.removed) parts.push(`${counts.removed} removed`);
-  if (counts.not_ours) parts.push(`${counts.not_ours} not ours`);
   if (counts.failed) parts.push(`${counts.failed} failed`);
   showToast(parts.join(" · "), counts.failed > 0);
+  await refreshDeviceList();
+}
+
+async function importOrphan(filename) {
+  if (!state.device) {
+    showToast("no Kindle connected", true);
+    return;
+  }
+  let result;
+  try {
+    result = await window.api.invoke("device_import_orphan", { filename });
+  } catch (e) {
+    showToast(`import failed: ${e}`, true);
+    return;
+  }
+  if (result.kind === "imported") {
+    showToast(`imported: ${filename}`);
+  } else if (result.kind === "duplicate") {
+    showToast(`already in library: ${filename}`);
+  } else {
+    showToast(`import failed: ${result.error}`, true);
+  }
+  await refresh();
   await refreshDeviceList();
 }
 
@@ -1914,10 +1965,17 @@ async function bulkRemove() {
   ) {
     return;
   }
+  let failed = 0;
   for (const b of sel) {
     try {
       await window.api.invoke("library_remove", { bookId: b.id });
     } catch (e) {
+      // library_remove now surfaces IO errors (e.g. Spotlight/Books.app
+      // holding a handle on the EPUB) instead of silently leaving the
+      // files behind. Show the first one in a toast and keep going so
+      // partial success still gets reported.
+      failed += 1;
+      if (failed === 1) showToast(`remove failed for "${b.title}": ${e}`, true);
       console.error("remove failed:", b.id, e);
     }
   }

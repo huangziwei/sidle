@@ -1,11 +1,16 @@
 //! Kindle device sync — discovery, transport-agnostic IO, push/delete/pull.
 //!
-//! - P2a: push KFX to the device's documents directory, delete what we've sent.
-//! - P2b: pull `.kfx`/`.kfx-zip` from `/dedrm` and import (mass-storage only —
+//! - Push KFX to the device's `documents/Sidle/` directory; the filename
+//!   carries an `sha8` infix (`<basename>.<sha8>.kfx`) so the directory
+//!   alone is enough to identify what's ours — no on-device sidecar file
+//!   to keep in sync with the library DB.
+//! - Delete on-device by sha: scan `documents/Sidle/` for the matching
+//!   `*.<sha8>.kfx`, remove it plus the Kindle-created `.sdr/` next to it.
+//! - Pull `.kfx`/`.kfx-zip` from `/dedrm` and import (mass-storage only —
 //!   non-jailbroken devices have no `/dedrm` folder).
-//! - P2c: send/remove over MTP for Kindle Scribe and other 2024+ models that
+//! - Send/remove over MTP for Kindle Scribe and other 2024+ models that
 //!   dropped USB mass storage. Detection + IO live behind the [`Transport`]
-//!   trait so push/delete/manifest stay transport-agnostic.
+//!   trait so push/delete/list stay transport-agnostic.
 
 use std::path::PathBuf;
 
@@ -14,7 +19,6 @@ use serde::Serialize;
 
 pub mod dedrm;
 pub mod detect;
-pub mod manifest;
 pub mod mass_storage;
 pub mod monitor;
 pub mod mtp;

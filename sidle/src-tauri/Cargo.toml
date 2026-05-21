@@ -61,9 +61,12 @@ futures = "0.3"
 # the single-chunk upload path. Transitive via mtp-rs; declared directly so
 # our code reads clean.
 bytes = "1"
+# Stages orphan KFXes pulled off the device (via MTP `GetObject`) to a real
+# file path so the existing extension-dispatch import pipeline can consume
+# them — mass-storage hands us a path natively; MTP needs the round-trip.
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

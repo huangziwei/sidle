@@ -5,8 +5,8 @@
 //!   filters to Amazon, builds a [`DeviceInfo`](crate::device::DeviceInfo)
 //!   with `TransportKind::Mtp`.
 //! - [`transport`]: implements [`crate::device::transport::Transport`] over
-//!   an open MTP session — push/delete/list/manifest go through the same
-//!   trait the mass-storage impl satisfies.
+//!   an open MTP session — push/delete/list go through the same trait the
+//!   mass-storage impl satisfies.
 
 pub mod detect;
 pub mod transport;
