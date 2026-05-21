@@ -1,6 +1,7 @@
 //! Tauri commands for Kindle device sync.
 
 use serde::Serialize;
+use sidle_core::library::paths::parse_sha_infix;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::device::DeviceInfo;
@@ -8,11 +9,6 @@ use crate::device::dedrm::{self, PullResult};
 use crate::device::push::{self, DeleteResult, PushResult};
 use crate::library::db;
 use crate::state::AppState;
-
-/// Same sha8 width as `push::SHA_INFIX_LEN`. Kept private here so
-/// `device_list_ours` can parse it back out of filenames without
-/// re-importing the constant.
-const SHA_INFIX_LEN: usize = 8;
 
 #[tauri::command]
 pub async fn device_status(state: State<'_, AppState>) -> Result<Option<DeviceInfo>, String> {
@@ -100,18 +96,6 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
     .map_err(|e| e.to_string())
 }
 
-/// Parse the `<sha8>` out of a `<basename>.<sha8>.kfx` filename.
-/// Returns None for files that don't follow our scheme.
-fn parse_sha_infix(filename: &str) -> Option<String> {
-    let stem = filename.strip_suffix(".kfx")?;
-    let (_, sha) = stem.rsplit_once('.')?;
-    if sha.len() == SHA_INFIX_LEN && sha.chars().all(|c| c.is_ascii_hexdigit()) {
-        Some(sha.to_string())
-    } else {
-        None
-    }
-}
-
 /// Skip files macOS scatters into FAT/exFAT mounts as a side effect of
 /// xattr/Finder-metadata handling: `._<filename>` AppleDouble companions
 /// (the real bug — they'd otherwise be parsed as a second copy of the
@@ -140,7 +124,7 @@ pub async fn device_delete(
             // also wipe Kindle's `<title>_<ASIN>.sdr/` (catalog-style
             // sidecar). Best-effort: if the row is gone or the lookup
             // errors out, we still delete the file + filename-style .sdr.
-            let asin = sha_from_filename(&name)
+            let asin = parse_sha_infix(&name)
                 .and_then(|sha| db::find_by_kfx_sha_prefix(&conn, &sha).ok().flatten())
                 .and_then(|b| b.asin);
             let result =
@@ -159,20 +143,6 @@ pub async fn device_delete(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())
-}
-
-/// Pull the `.<sha8>.kfx` infix out of a filename. Returns `None` if the
-/// filename doesn't have our shape; the catalog-sdr lookup just gets
-/// skipped in that case (and `delete_one` will refuse the delete with
-/// `NotOurs` anyway).
-fn sha_from_filename(name: &str) -> Option<String> {
-    let stem = name.strip_suffix(".kfx")?;
-    let (_, sha) = stem.rsplit_once('.')?;
-    if sha.len() == SHA_INFIX_LEN && sha.chars().all(|c| c.is_ascii_hexdigit()) {
-        Some(sha.to_string())
-    } else {
-        None
-    }
 }
 
 #[tauri::command]

@@ -157,7 +157,7 @@ fn run() -> anyhow::Result<()> {
         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
 
         let dl_t0 = Instant::now();
-        let result = api::download_book(&cfg, book.id).and_then(|d| {
+        let result = api::download_book(&cfg, book).and_then(|d| {
             persist(&d.filename, &d.bytes).map(|saved| (saved, d.bytes.len()))
         });
 

@@ -65,6 +65,57 @@ impl LibraryPaths {
     }
 }
 
+/// Length of the sha256 prefix used as the on-device filename infix
+/// (`<basename>.<sha8>.kfx`). 8 hex chars = 32 bits — collision-free for
+/// any realistic personal library (50% chance at ~93k books per the
+/// birthday bound) and short enough to stay readable.
+pub const SHA_INFIX_LEN: usize = 8;
+
+/// First [`SHA_INFIX_LEN`] hex chars of a KFX sha256.
+///
+/// Panics if `kfx_sha256.len() < SHA_INFIX_LEN`. The caller is responsible
+/// for ensuring this — every code path either reads from `books.kfx_sha256`
+/// (a full sha256, 64 hex chars) or short-circuits when the column is
+/// `NULL`.
+pub fn sha_infix(kfx_sha256: &str) -> &str {
+    &kfx_sha256[..SHA_INFIX_LEN]
+}
+
+/// Build the canonical on-device basename for a KFX: `<stem>.<sha8>.kfx`.
+///
+/// `kfx_path` is the on-disk file in the local library (under
+/// `books/<sha>/`); we take its file_stem so the device-side name mirrors
+/// the Mac-side name. Falls back to `book-<sha8>` if the path has no
+/// usable stem (shouldn't happen for library-managed files; defense in
+/// depth).
+///
+/// Used by both the USB push (`device::push::push_one`) and the LAN
+/// server's Content-Disposition header so the same file shows up under
+/// the same name regardless of how it got onto the Kindle.
+pub fn kfx_device_filename(kfx_path: &str, kfx_sha256: &str) -> String {
+    let stem = Path::new(kfx_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("book-{}", sha_infix(kfx_sha256)));
+    format!("{stem}.{}.kfx", sha_infix(kfx_sha256))
+}
+
+/// Parse the `<sha8>` out of an on-device filename matching the
+/// `<basename>.<sha8>.kfx` shape. Returns `None` for anything else —
+/// used both as a "is this ours?" gate (push/delete) and to look the
+/// matching library row back up (`device_list_ours`).
+pub fn parse_sha_infix(filename: &str) -> Option<String> {
+    let stem = filename.strip_suffix(".kfx")?;
+    let (_, sha) = stem.rsplit_once('.')?;
+    if sha.len() == SHA_INFIX_LEN && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(sha.to_string())
+    } else {
+        None
+    }
+}
+
 /// Map a media type or filename to an image extension we want on disk.
 pub fn cover_ext_from(media_or_path: &str) -> &'static str {
     let lower = media_or_path.to_ascii_lowercase();
@@ -201,5 +252,64 @@ mod tests {
         assert_eq!(extract_year("April 2023"), Some("2023".into()));
         assert_eq!(extract_year("12345"), None); // too many digits → not isolated
         assert_eq!(extract_year("no year here"), None);
+    }
+
+    const SAMPLE_SHA: &str = "deadbeefcafef00d1234567890abcdefdeadbeefcafef00d1234567890abcdef";
+
+    #[test]
+    fn sha_infix_returns_first_8() {
+        assert_eq!(sha_infix(SAMPLE_SHA), "deadbeef");
+    }
+
+    #[test]
+    fn kfx_device_filename_uses_stem_and_sha() {
+        let path = "/Users/me/Library/Application Support/sidle/books/abc/[Author] Title (2024).kfx";
+        assert_eq!(
+            kfx_device_filename(path, SAMPLE_SHA),
+            "[Author] Title (2024).deadbeef.kfx"
+        );
+    }
+
+    #[test]
+    fn kfx_device_filename_falls_back_when_no_stem() {
+        assert_eq!(kfx_device_filename("", SAMPLE_SHA), "book-deadbeef.deadbeef.kfx");
+    }
+
+    #[test]
+    fn parse_sha_infix_round_trips_canonical_name() {
+        let path = "/x/[A] T (2020).kfx";
+        let name = kfx_device_filename(path, SAMPLE_SHA);
+        assert_eq!(parse_sha_infix(&name).as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn parse_sha_infix_rejects_non_kfx() {
+        assert_eq!(parse_sha_infix("foo.deadbeef.epub"), None);
+    }
+
+    #[test]
+    fn parse_sha_infix_rejects_no_infix() {
+        assert_eq!(parse_sha_infix("just-a-file.kfx"), None);
+    }
+
+    #[test]
+    fn parse_sha_infix_rejects_wrong_length() {
+        // 7 hex chars — too short
+        assert_eq!(parse_sha_infix("foo.deadbee.kfx"), None);
+        // 9 hex chars — too long
+        assert_eq!(parse_sha_infix("foo.deadbeef0.kfx"), None);
+    }
+
+    #[test]
+    fn parse_sha_infix_rejects_non_hex() {
+        assert_eq!(parse_sha_infix("foo.deadbeeZ.kfx"), None);
+    }
+
+    #[test]
+    fn parse_sha_infix_handles_basename_with_dots() {
+        // basename can contain dots ("v1.2"); only the LAST `.`-separated
+        // segment before `.kfx` is the sha.
+        let name = "[A] Series v1.2 (2024).deadbeef.kfx";
+        assert_eq!(parse_sha_infix(name).as_deref(), Some("deadbeef"));
     }
 }

@@ -24,7 +24,7 @@ use axum::{
 use rusqlite::Connection;
 use tokio::net::TcpListener;
 
-use sidle_core::library::{LibraryPaths, db};
+use sidle_core::library::{LibraryPaths, db, paths::kfx_device_filename};
 
 // We call `db::open` per request (rather than holding a long-lived `Arc<
 // Mutex<Connection>>` like the Tauri side) because the server's workload is
@@ -189,10 +189,22 @@ async fn get_book(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
     let kfx_path = book.kfx_path.ok_or(StatusCode::NOT_FOUND)?;
+    // The on-device name has to match the `<basename>.<sha8>.kfx` shape
+    // sidle-tauri's USB push uses, so that a book downloaded via KUAL is
+    // recognized by `device_list_ours` / `delete_one` and not flagged as
+    // foreign. The bootstrap backfill (`state.rs`) populates `kfx_sha256`
+    // for every row before the server takes requests; the fallback only
+    // protects against an in-flight race where a freshly-converted row
+    // hasn't had its sha hashed yet.
+    let device_name = book
+        .kfx_sha256
+        .as_deref()
+        .map(|sha| kfx_device_filename(&kfx_path, sha))
+        .unwrap_or_else(|| filename_from_path(&kfx_path));
     serve_file(
         PathBuf::from(&kfx_path),
         "application/octet-stream",
-        Some(&filename_from_path(&kfx_path)),
+        Some(&device_name),
     )
     .await
 }

@@ -21,15 +21,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
+use sidle_core::library::paths::{kfx_device_filename, parse_sha_infix, sha_infix};
 
 use crate::device::DeviceInfo;
 use crate::device::transport::{TPath, Transport};
 use crate::library::db::{self, BookRow};
-
-/// Length of the sha256 prefix we put in filenames. 8 hex chars = 32 bits;
-/// collision-free for any realistic personal library (50% chance at ~93k
-/// books per the birthday bound), and short enough to stay readable.
-const SHA_INFIX_LEN: usize = 8;
 
 /// Where we write KFX. The `Sidle` subdir keeps our pushes namespaced so
 /// the Kindle's `/documents` root stays whatever the user had before and
@@ -38,14 +34,9 @@ fn documents_dir() -> TPath {
     TPath::parse("documents").join("Sidle")
 }
 
-fn sha_infix(sha256: &str) -> &str {
-    &sha256[..SHA_INFIX_LEN]
-}
-
 /// The `<basename>.<sha8>.kfx` suffix that identifies an on-device file as
 /// belonging to a particular library row. Matched against on-device
-/// filenames in both push (already-present check) and delete (find-and-
-/// remove).
+/// filenames in [`find_by_sha`] (already-present check).
 fn kfx_suffix(sha256: &str) -> String {
     format!(".{}.kfx", sha_infix(sha256))
 }
@@ -94,11 +85,7 @@ pub fn push_one(
         });
     }
 
-    let base = Path::new(kfx_src)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| format!("book-{}", sha_infix(kfx_sha)));
-    let filename = format!("{base}.{}.kfx", sha_infix(kfx_sha));
+    let filename = kfx_device_filename(kfx_src, kfx_sha);
     let dest = dest_dir.join(&filename);
 
     transport
@@ -196,21 +183,12 @@ pub fn delete_one(
     // Filename must match `<basename>.<sha8>.kfx`. Reject anything else so
     // a stale UI can't drive deletes of unrelated files even if the user
     // had moved random KFXes into `documents/Sidle/`.
-    let Some(stem) = filename.strip_suffix(".kfx") else {
-        return Ok(DeleteResult::NotOurs {
-            filename: filename.to_string(),
-        });
-    };
-    let Some((_, sha)) = stem.rsplit_once('.') else {
-        return Ok(DeleteResult::NotOurs {
-            filename: filename.to_string(),
-        });
-    };
-    if sha.len() != SHA_INFIX_LEN || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+    if parse_sha_infix(filename).is_none() {
         return Ok(DeleteResult::NotOurs {
             filename: filename.to_string(),
         });
     }
+    let stem = filename.strip_suffix(".kfx").expect("parse_sha_infix matched .kfx");
 
     let dir = documents_dir();
     let sdr_name = format!("{stem}.sdr");

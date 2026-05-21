@@ -27,6 +27,13 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// bounded.
 const COVER_MAX_BYTES: usize = 8 * 1024 * 1024;
 
+/// Length of the sha256 prefix sidle uses in on-device filenames
+/// (`<basename>.<sha8>.kfx`). Must match `sidle_core::library::paths::
+/// SHA_INFIX_LEN` — kept as a local const because `sidle-native` doesn't
+/// depend on sidle-core (cross-compile boundary; sidle-core pulls in
+/// rusqlite/image and would bloat the armv7l binary).
+const SHA_INFIX_LEN: usize = 8;
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Book {
     pub id: i64,
@@ -35,6 +42,13 @@ pub struct Book {
     pub author: String,
     #[serde(default)]
     pub language: String,
+    /// Full sha256 of the KFX bytes (64 hex chars). Used to derive the
+    /// on-device filename so it matches what sidle-tauri's USB push would
+    /// write — otherwise USB-side delete sees the file as `NotOurs` and
+    /// refuses to touch it. `#[serde(default)]` so older servers without
+    /// the column still parse (download will then fail loudly).
+    #[serde(default)]
+    pub kfx_sha256: Option<String>,
 }
 
 pub fn list_books(cfg: &ServerConfig) -> Result<Vec<Book>> {
@@ -77,23 +91,65 @@ pub struct Download {
     pub bytes: Vec<u8>,
 }
 
-pub fn download_book(cfg: &ServerConfig, id: i64) -> Result<Download> {
-    let url = format!("http://{}:{}/get/{}", cfg.host, cfg.port, id);
+pub fn download_book(cfg: &ServerConfig, book: &Book) -> Result<Download> {
+    let url = format!("http://{}:{}/get/{}", cfg.host, cfg.port, book.id);
     let res = ureq::get(&url)
         .set("X-Sidle-Token", &cfg.token)
         .timeout(DOWNLOAD_TIMEOUT)
         .call()
         .map_err(|e| anyhow!("GET {url}: {e}"))?;
-    // Pull the filename from Content-Disposition. Server emits
-    // `attachment; filename="<name>"` — see sidle/server/src/lib.rs.
-    let filename = parse_cd_filename(res.header("content-disposition"))
-        .unwrap_or_else(|| format!("book-{id}.kfx"));
+    let cd_filename = parse_cd_filename(res.header("content-disposition"));
+    let filename = pick_filename(cd_filename.as_deref(), book)?;
     let mut bytes = Vec::new();
     res.into_reader()
         .take(KFX_MAX_BYTES as u64)
         .read_to_end(&mut bytes)
         .with_context(|| format!("read body of {url}"))?;
     Ok(Download { filename, bytes })
+}
+
+/// Resolve the on-device filename. Prefers the server's
+/// Content-Disposition when it already has the `<basename>.<sha8>.kfx`
+/// shape; otherwise synthesizes the name locally from `book.kfx_sha256`.
+/// Fails hard if neither source gives us a sha — writing to a name
+/// without the sha8 infix would leave the file unrecognized by
+/// sidle-tauri's USB-side delete (`NotOurs`), which is worse than
+/// surfacing the failure to the user.
+fn pick_filename(cd_filename: Option<&str>, book: &Book) -> Result<String> {
+    if let Some(name) = cd_filename {
+        if looks_like_sha8_kfx(name) {
+            return Ok(name.to_string());
+        }
+    }
+    let sha = book.kfx_sha256.as_deref().ok_or_else(|| {
+        anyhow!(
+            "server omitted kfx_sha256 from /list.json and Content-Disposition \
+             lacks a sha8-tagged filename; refusing to save to a name that \
+             sidle would treat as foreign on the device"
+        )
+    })?;
+    if sha.len() < SHA_INFIX_LEN {
+        return Err(anyhow!(
+            "kfx_sha256 from /list.json is {} chars, expected at least {}",
+            sha.len(),
+            SHA_INFIX_LEN,
+        ));
+    }
+    // If C-D gave us *some* name (just not the sha8-tagged shape), reuse
+    // its stem; otherwise fall back to the book's title. Either way the
+    // on-device identity is the sha8 — sidle-tauri keys on that, not on
+    // the basename, so a divergent stem here is cosmetic.
+    let stem = cd_filename
+        .and_then(|n| n.strip_suffix(".kfx"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or(book.title.as_str());
+    Ok(format!("{stem}.{}.kfx", &sha[..SHA_INFIX_LEN]))
+}
+
+fn looks_like_sha8_kfx(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".kfx") else { return false; };
+    let Some((_, sha)) = stem.rsplit_once('.') else { return false; };
+    sha.len() == SHA_INFIX_LEN && sha.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn parse_cd_filename(hdr: Option<&str>) -> Option<String> {
@@ -108,5 +164,64 @@ fn parse_cd_filename(hdr: Option<&str>) -> Option<String> {
         None
     } else {
         Some(raw.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_book(sha: Option<&str>) -> Book {
+        Book {
+            id: 7,
+            title: "Sample Title".into(),
+            author: String::new(),
+            language: String::new(),
+            kfx_sha256: sha.map(str::to_string),
+        }
+    }
+
+    const FULL_SHA: &str = "deadbeefcafef00d1234567890abcdefdeadbeefcafef00d1234567890abcdef";
+
+    #[test]
+    fn prefers_cd_when_already_sha8_tagged() {
+        let book = make_book(Some(FULL_SHA));
+        let name = pick_filename(Some("[A] Title (2024).deadbeef.kfx"), &book).unwrap();
+        assert_eq!(name, "[A] Title (2024).deadbeef.kfx");
+    }
+
+    #[test]
+    fn synthesizes_from_sha_when_cd_absent() {
+        let book = make_book(Some(FULL_SHA));
+        let name = pick_filename(None, &book).unwrap();
+        assert_eq!(name, "Sample Title.deadbeef.kfx");
+    }
+
+    #[test]
+    fn synthesizes_using_cd_stem_when_present_but_untagged() {
+        let book = make_book(Some(FULL_SHA));
+        let name = pick_filename(Some("[A] Title (2024).kfx"), &book).unwrap();
+        assert_eq!(name, "[A] Title (2024).deadbeef.kfx");
+    }
+
+    #[test]
+    fn fails_without_sha_or_cd() {
+        let book = make_book(None);
+        assert!(pick_filename(None, &book).is_err());
+    }
+
+    #[test]
+    fn fails_without_sha_when_cd_is_untagged() {
+        let book = make_book(None);
+        assert!(pick_filename(Some("[A] Title.kfx"), &book).is_err());
+    }
+
+    #[test]
+    fn looks_like_sha8_kfx_basics() {
+        assert!(looks_like_sha8_kfx("foo.deadbeef.kfx"));
+        assert!(!looks_like_sha8_kfx("foo.deadbeef.epub"));
+        assert!(!looks_like_sha8_kfx("foo.kfx"));
+        assert!(!looks_like_sha8_kfx("foo.deadbeeZ.kfx"));
+        assert!(!looks_like_sha8_kfx("foo.deadbee.kfx"));
     }
 }
