@@ -97,7 +97,7 @@ const COVER_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// SHA_INFIX_LEN` — kept as a local const because `sidle-native` doesn't
 /// depend on sidle-core (cross-compile boundary; sidle-core pulls in
 /// rusqlite/image and would bloat the armv7l binary).
-const SHA_INFIX_LEN: usize = 8;
+pub(crate) const SHA_INFIX_LEN: usize = 8;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Book {

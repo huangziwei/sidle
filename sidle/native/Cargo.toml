@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[lib]
+name = "sidle_native"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sidle"
 path = "src/main.rs"

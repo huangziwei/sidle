@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod api;
 mod config;
+mod device_state;
 mod eink;
 mod orientation;
 mod ui;
@@ -88,10 +89,29 @@ fn run() -> anyhow::Result<()> {
             return Ok(());
         }
     };
+    let total_from_server = books.len();
+
+    // Hide books that already live on this Kindle. The picker is a
+    // transfer queue, not a library viewer — stock library answers
+    // "what do I have" perfectly. Source of truth is the sha8 embedded
+    // in each filename under /mnt/us/documents/Sidle/ (see
+    // device_state.rs). Missing kfx_sha256 on the row means we can't
+    // dedupe; show it anyway so the user isn't silently dropped books.
+    let downloaded = device_state::scan_downloaded_shas(Path::new(DOWNLOAD_DIR));
+    let books: Vec<api::Book> = books
+        .into_iter()
+        .filter(|b| match b.kfx_sha256.as_deref() {
+            Some(sha) if sha.len() >= 8 => !downloaded.contains(&sha[..8]),
+            _ => true,
+        })
+        .collect();
+
     let total_pages = pager::n_pages(books.len());
     log(format!(
-        "books: {} ({} pages, list in {:?})",
+        "books: {} of {} ({} on device, {} pages, list in {:?})",
         books.len(),
+        total_from_server,
+        downloaded.len(),
         total_pages,
         t0.elapsed()
     ));
