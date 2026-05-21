@@ -403,20 +403,19 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
     // 2j. Resource fragments (images, fonts, etc.)
     // Each resource gets two entities: external_resource (metadata) + bcRawMedia (bytes).
     //
-    // Non-JPEG raster images (GIF, PNG, WebP, BMP) are transcoded to
-    // JPEG before bundling — KDP's "Image Guidelines — Reflowable"
-    // explicitly warns that Kindle can't render multi-frame GIFs or
-    // images with transparent areas, and Amazon's authoritative KFX
-    // pipeline transcodes every input image to JPEG-XR. Without this
-    // step, gif/png/webp `<img>` resources are silently invisible on
-    // device even though the bytes are present.
+    // Images go through `sanitize_for_kfx` first: non-JPEG rasters
+    // (GIF/PNG/WebP/BMP) are re-encoded as JFIF JPEG, and JPEG inputs
+    // are walked to strip APP1–APP15/COM metadata so the resulting
+    // bytes are a clean `FF D8 FF E0 JFIF` JPEG. See the module doc on
+    // `image_transcode` for the rationale (silent gif/png invisibility
+    // + KOA2 screensaver-thumbnailer rejecting EXIF-tagged covers).
     for asset_path in &asset_paths {
         if is_media_asset(asset_path)
             && let Ok(data) = book.load_asset(asset_path)
         {
             let href = asset_path.to_string_lossy().to_string();
             let bundled =
-                crate::kfx::image_transcode::transcode_to_jpeg(&data).unwrap_or(data);
+                crate::kfx::image_transcode::sanitize_for_kfx(&data).unwrap_or(data);
             // external_resource ($164) - metadata about the resource
             fragments.push(build_external_resource_fragment(&href, &bundled, &mut ctx));
             // bcRawMedia ($417) - the actual bytes
