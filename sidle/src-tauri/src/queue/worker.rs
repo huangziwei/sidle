@@ -166,6 +166,9 @@ pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_
         if let Some(cover) = &produced.cover_path {
             let _ = db::set_cover_path(&conn, book_id, &cover.to_string_lossy());
         }
+        if let Some(asin) = &produced.asin {
+            let _ = db::set_asin(&conn, book_id, asin);
+        }
     }
     eprintln!(
         "[sidle/queue] book {book_id} done in {:.2}s",
@@ -200,6 +203,11 @@ struct Produced {
     epub_path: Option<PathBuf>,
     kfx_path: Option<PathBuf>,
     cover_path: Option<PathBuf>,
+    /// ASIN boko stamped into the produced KFX. For EPUB→KFX this is the
+    /// fabricated 32-char value (unless the source EPUB carried a real
+    /// one); the device-delete path keys catalog-style `.sdr/` cleanup on
+    /// it. None for the kfx→epub direction (no KFX produced).
+    asin: Option<String>,
 }
 
 fn run_direction(paths: &LibraryPaths, book: &BookRow, kind: &str) -> anyhow::Result<Produced> {
@@ -230,8 +238,16 @@ fn convert_epub_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<P
     drop(writer);
     std::fs::rename(&tmp_path, &out_path)?;
 
+    // The KFX export stamps an ASIN — either the source's (if real) or a
+    // fabricated 32-char value derived from the publication identifier.
+    // The DB row started life from the EPUB metadata which usually has no
+    // ASIN at all; we need the stamped value on the row so device-delete
+    // can wipe Kindle's `<title>_<ASIN>.sdr/` catalog sidecar.
+    let asin = boko::kfx::metadata::resolve_export_asin(handle.metadata());
+
     Ok(Produced {
         kfx_path: Some(out_path),
+        asin,
         ..Default::default()
     })
 }

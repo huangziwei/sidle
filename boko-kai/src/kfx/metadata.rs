@@ -408,6 +408,33 @@ pub fn generate_content_id(identifier: &str) -> String {
     out
 }
 
+/// Real Amazon catalogue ASINs are 10 characters, uppercase alphanumeric
+/// (no lowercase, no symbols). A boko-synthesized fallback is 32 chars of
+/// Crockford-style Base32 — distinguishable by length alone.
+pub fn looks_like_real_amazon_asin(s: &str) -> bool {
+    s.len() == 10
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// Compute the ASIN the KFX export will stamp on the produced file. Pass
+/// through the source ASIN when it has the real Amazon shape; otherwise
+/// synthesize from `meta.identifier` via [`generate_content_id`]. Returns
+/// `None` only when the source has no real ASIN AND no identifier.
+///
+/// Callers downstream of the export (e.g. sidle's library DB) use this to
+/// learn what value Kindle will see on the device — the value gets used as
+/// the on-device `<title>_<ASIN>.sdr/` directory key, so a Mac-side
+/// sidecar cleanup needs to know it without re-parsing the produced KFX.
+pub fn resolve_export_asin(meta: &Metadata) -> Option<String> {
+    if let Some(asin) = meta.asin.as_deref()
+        && looks_like_real_amazon_asin(asin)
+    {
+        return Some(asin.to_string());
+    }
+    (!meta.identifier.is_empty()).then(|| generate_content_id(&meta.identifier))
+}
+
 /// Build metadata entries for a category from the schema.
 ///
 /// This is a pure function that applies the schema rules to extract

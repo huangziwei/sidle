@@ -100,12 +100,9 @@ pub async fn fetch_color_cover(asin: &str, language: &str) -> Option<Vec<u8>> {
 /// Real Amazon catalogue ASINs are 10 chars, uppercase alphanumeric. boko-
 /// kai's fabricated fallback (stamped on EPUB→KFX so Kindle's ingestion is
 /// happy) is 32-char Crockford-Base32. Length alone distinguishes them.
-/// Same predicate boko uses internally (see `boko-kai/src/export/kfx.rs`).
-pub fn looks_like_real_amazon_asin(s: &str) -> bool {
-    s.len() == 10
-        && s.bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-}
+/// Re-exported from boko-kai so the fabrication source-of-truth is in one
+/// place (`boko::kfx::metadata::resolve_export_asin` uses the same gate).
+pub use boko::kfx::metadata::looks_like_real_amazon_asin;
 
 /// Map a book language (BCP-47 — "ja", "ja-JP", "en-US", …) to Amazon's
 /// numeric locale segment in the `/images/P/` URL.

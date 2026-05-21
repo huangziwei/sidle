@@ -330,6 +330,20 @@ pub fn books_missing_kfx_sha(conn: &Connection) -> rusqlite::Result<Vec<(i64, St
     rows.collect()
 }
 
+/// Find rows with a `kfx_path` but no `asin`. Bootstrap reads each KFX's
+/// metadata to recover the value boko-kai stamped at export time — the
+/// device-delete path needs it to wipe Kindle's `<title>_<ASIN>.sdr/`
+/// catalog sidecar. Exists purely for rows converted before the worker
+/// started capturing ASIN; new rows always land with `asin` populated.
+pub fn books_missing_asin(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kfx_path FROM books \
+         WHERE kfx_path IS NOT NULL AND (asin IS NULL OR asin = '')",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    rows.collect()
+}
+
 pub fn set_epub_path(conn: &Connection, book_id: i64, epub_path: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE books SET epub_path = ?1 WHERE id = ?2",
@@ -342,6 +356,20 @@ pub fn set_cover_path(conn: &Connection, book_id: i64, cover_path: &str) -> rusq
     conn.execute(
         "UPDATE books SET cover_path = ?1 WHERE id = ?2",
         params![cover_path, book_id],
+    )?;
+    Ok(())
+}
+
+/// Stamp the ASIN that boko-kai's KFX export wrote into the produced file.
+/// For PDOC sideloads the value is fabricated from the publication
+/// identifier (32-char Crockford-Base32), so the row holds it only after
+/// EPUB→KFX completes — the import-time value is whatever the source
+/// EPUB carried (usually `None`). Sidle's device-delete path keys
+/// catalog-style `<title>_<ASIN>.sdr/` cleanup on this column.
+pub fn set_asin(conn: &Connection, book_id: i64, asin: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE books SET asin = ?1 WHERE id = ?2",
+        params![asin, book_id],
     )?;
     Ok(())
 }

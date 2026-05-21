@@ -733,24 +733,12 @@ fn build_book_metadata_fragment(
     };
 
     // ASIN: pass through when the source carries a real Amazon catalogue
-    // value (10 chars, uppercase alphanumeric — the actual ASIN shape).
-    // Otherwise synthesize from the identifier so PDOC sideloads get a
-    // stable library-tile cover-cache key. Without ASIN the Kindle tile is
-    // blank even though the embedded cover image is intact.
-    //
-    // Sidle's separate Amazon-catalogue cover-fetch path is keyed on real
-    // ASINs only and rejects fabricated 32-char hashes (the predicate above
-    // is the same shape filter), so the synthesized value here doesn't
-    // pollute that lookup — it just acts as the on-device cache key.
-    let asin = meta
-        .asin
-        .as_deref()
-        .filter(|a| looks_like_real_amazon_asin(a))
-        .map(str::to_string)
-        .or_else(|| {
-            (!meta.identifier.is_empty())
-                .then(|| crate::kfx::metadata::generate_content_id(&meta.identifier))
-        });
+    // value; otherwise synthesize from the identifier so PDOC sideloads
+    // get a stable library-tile cover-cache key. Logic lives in
+    // `kfx::metadata::resolve_export_asin` so sidle can call the same
+    // function to learn what we stamp here (it needs the value to clean
+    // up the on-device `<title>_<ASIN>.sdr/` sidecar Kindle invents).
+    let asin = crate::kfx::metadata::resolve_export_asin(meta);
 
     // content_id mirrors ASIN (calibre convention). The device `.sdr`
     // directory uses this as the per-book state key; matching ASIN means
@@ -826,17 +814,6 @@ fn looks_like_kfx_book_id(s: &str) -> bool {
     s.len() == 23
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
-/// Real Amazon catalogue ASINs are 10 characters, uppercase alphanumeric
-/// (no lowercase, no symbols). A boko-synthesized fallback is 32 chars of
-/// Crockford-style Base32 — distinguishable by length alone. We use this
-/// predicate to decide whether `meta.asin` is genuine (passthrough) or a
-/// stale fabricated value from a previous round-trip (regenerate fresh).
-fn looks_like_real_amazon_asin(s: &str) -> bool {
-    s.len() == 10
-        && s.bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
 /// Build the content features fragment ($585).

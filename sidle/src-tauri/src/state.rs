@@ -65,6 +65,28 @@ impl AppState {
                 }
             }
         }
+        // Backfill `asin` for any row that has a KFX but the value never made
+        // it to the row (rows converted before the worker started capturing
+        // boko's stamped ASIN). One-time `Book::open` on each KFX is heavier
+        // than the sha256 backfill above, but the work happens at most once
+        // per row and only for the rare pre-fix subset. Without it,
+        // device-delete can't clean the on-device `<title>_<ASIN>.sdr/`
+        // catalog sidecar Kindle invents.
+        for (book_id, kfx_path) in db::books_missing_asin(&conn).unwrap_or_default() {
+            match boko::Book::open(std::path::Path::new(&kfx_path)) {
+                Ok(book) => {
+                    if let Some(asin) = boko::kfx::metadata::resolve_export_asin(book.metadata()) {
+                        let _ = db::set_asin(&conn, book_id, &asin);
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[sidle/bootstrap] book {book_id}: backfill asin failed for \
+                         {kfx_path}: {e}; catalog .sdr cleanup will be skipped on delete"
+                    );
+                }
+            }
+        }
         let pending = db::pending_or_error_book_ids(&conn).unwrap_or_default();
 
         let db: DbHandle = Arc::new(Mutex::new(conn));

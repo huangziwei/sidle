@@ -159,8 +159,10 @@ fn find_by_sha(
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeleteResult {
     /// `.kfx` removed (or already absent — `file_existed` reflects the prior
-    /// state). The matching `.sdr/` sidecar, if any, was wiped as well —
-    /// `sdr_existed` records whether it was present at delete time.
+    /// state). All matching `.sdr/` sidecars were wiped as well — both the
+    /// filename-style (`<basename>.<sha8>.sdr`) and any catalog-style
+    /// (`<title>_<ASIN>.sdr`) Kindle invented next to the file.
+    /// `sdr_existed` records whether at least one was present at delete.
     Removed {
         filename: String,
         file_existed: bool,
@@ -174,14 +176,17 @@ pub enum DeleteResult {
     Failed { filename: String, error: String },
 }
 
-/// Remove an on-device file (and its `.sdr/`) by filename. The popup
-/// always has the exact filename, so we don't need to scan + match — we
-/// just verify the filename has our `.<sha8>.kfx` shape (defense against
-/// a stale UI passing in arbitrary user files) and delete by name.
+/// Remove an on-device file (and any `.sdr/` it spawned) by filename. The
+/// popup always has the exact filename, so we don't need to scan + match
+/// for the .kfx itself — we just verify the filename has our `.<sha8>.kfx`
+/// shape (defense against a stale UI passing in arbitrary user files) and
+/// delete by name. The `asin` argument enables a second .sdr cleanup pass
+/// keyed on the catalog-style name Kindle invents (see below).
 pub fn delete_one(
     _device: &DeviceInfo,
     transport: &dyn Transport,
     filename: &str,
+    asin: Option<&str>,
 ) -> Result<DeleteResult> {
     if filename.contains('/') || filename.contains('\\') || is_apple_double(filename) {
         return Ok(DeleteResult::NotOurs {
@@ -220,7 +225,7 @@ pub fn delete_one(
 
     // .sdr/ cleanup is best-effort — the .kfx is the user-visible thing;
     // leaving the sidecar behind is annoying but not corrupting.
-    let sdr_existed = match transport.delete_dir(&dir.join(&sdr_name)) {
+    let filename_sdr_existed = match transport.delete_dir(&dir.join(&sdr_name)) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("[sidle/delete] sdr cleanup failed for {sdr_name}: {e:#}");
@@ -228,11 +233,64 @@ pub fn delete_one(
         }
     };
 
+    // Kindle also drops a *catalog-style* `<title>_<ASIN>.sdr/` next to
+    // the file (mirrors how Amazon-fetched books are tracked by ASIN
+    // server-side, even for PDOC sideloads). The title segment is
+    // Kindle-normalized — different from our `<basename>` — so we can't
+    // predict the exact name, but the `_<ASIN>.sdr` suffix is unique
+    // per book (the ASIN is boko-kai's content-derived fabricated value,
+    // or a real catalog one if it came from kfxlib). Scan `Sidle/` and
+    // wipe any `.sdr` whose name ends with `_<ASIN>.sdr`.
+    let catalog_sdr_existed = match asin {
+        Some(asin) if !asin.is_empty() => wipe_catalog_sdrs(transport, &dir, asin, &sdr_name),
+        _ => false,
+    };
+
     Ok(DeleteResult::Removed {
         filename: filename.to_string(),
         file_existed,
-        sdr_existed,
+        sdr_existed: filename_sdr_existed || catalog_sdr_existed,
     })
+}
+
+/// Scan `documents/Sidle/` for any directory ending with `_<asin>.sdr` and
+/// wipe it. Skips the filename-style `.sdr` that the caller already
+/// handled. Returns true if at least one extra directory was wiped.
+/// Errors are logged, never propagated — the kfx is gone either way.
+fn wipe_catalog_sdrs(
+    transport: &dyn Transport,
+    dir: &TPath,
+    asin: &str,
+    already_wiped: &str,
+) -> bool {
+    let suffix = format!("_{asin}.sdr");
+    let entries = match transport.list(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("[sidle/delete] catalog sdr scan failed: {e:#}");
+            return false;
+        }
+    };
+    let mut wiped_any = false;
+    for entry in entries {
+        if !entry.is_dir || entry.name == already_wiped {
+            continue;
+        }
+        if !entry.name.ends_with(&suffix) {
+            continue;
+        }
+        match transport.delete_dir(&dir.join(&entry.name)) {
+            Ok(true) => wiped_any = true,
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!(
+                    "[sidle/delete] catalog sdr wipe failed for {}: {e:#}",
+                    entry.name
+                );
+            }
+        }
+    }
+    wiped_any
 }
 
 fn is_apple_double(name: &str) -> bool {

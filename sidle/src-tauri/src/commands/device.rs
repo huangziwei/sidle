@@ -129,18 +129,28 @@ pub async fn device_delete(
     let Some(device) = state.device.lock().await.clone() else {
         return Err("no Kindle connected".to_string());
     };
+    let db_handle = state.db.clone();
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<DeleteResult>> {
         let transport = device.open_transport()?;
+        let conn = db_handle.blocking_lock();
         let mut out = Vec::with_capacity(filenames.len());
         for name in filenames {
-            let result = match push::delete_one(&device, transport.as_ref(), &name) {
-                Ok(r) => r,
-                Err(e) => DeleteResult::Failed {
-                    filename: name.clone(),
-                    error: format!("{e:#}"),
-                },
-            };
+            // Pull the book's ASIN from the local row so delete_one can
+            // also wipe Kindle's `<title>_<ASIN>.sdr/` (catalog-style
+            // sidecar). Best-effort: if the row is gone or the lookup
+            // errors out, we still delete the file + filename-style .sdr.
+            let asin = sha_from_filename(&name)
+                .and_then(|sha| db::find_by_kfx_sha_prefix(&conn, &sha).ok().flatten())
+                .and_then(|b| b.asin);
+            let result =
+                match push::delete_one(&device, transport.as_ref(), &name, asin.as_deref()) {
+                    Ok(r) => r,
+                    Err(e) => DeleteResult::Failed {
+                        filename: name.clone(),
+                        error: format!("{e:#}"),
+                    },
+                };
             let _ = app.emit("device:delete-progress", &result);
             out.push(result);
         }
@@ -149,6 +159,20 @@ pub async fn device_delete(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())
+}
+
+/// Pull the `.<sha8>.kfx` infix out of a filename. Returns `None` if the
+/// filename doesn't have our shape; the catalog-sdr lookup just gets
+/// skipped in that case (and `delete_one` will refuse the delete with
+/// `NotOurs` anyway).
+fn sha_from_filename(name: &str) -> Option<String> {
+    let stem = name.strip_suffix(".kfx")?;
+    let (_, sha) = stem.rsplit_once('.')?;
+    if sha.len() == SHA_INFIX_LEN && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(sha.to_string())
+    } else {
+        None
+    }
 }
 
 #[tauri::command]
