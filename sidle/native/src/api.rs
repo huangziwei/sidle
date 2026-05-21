@@ -67,10 +67,10 @@ pub type Result<T> = std::result::Result<T, SidleError>;
 /// Issue a GET against sidle-server with the token header, translating
 /// `ureq::Error::Status(401|403)` to [`SidleError::TokenMismatch`].
 /// Every other transport/status error becomes `SidleError::Other`.
-fn get_with_token(url: &str, token: &str) -> Result<ureq::Response> {
+fn get_with_token(url: &str, token: &str, timeout: Duration) -> Result<ureq::Response> {
     match ureq::get(url)
         .set("X-Sidle-Token", token)
-        .timeout(TIMEOUT)
+        .timeout(timeout)
         .call()
     {
         Ok(res) => Ok(res),
@@ -85,8 +85,15 @@ fn get_with_token(url: &str, token: &str) -> Result<ureq::Response> {
 /// toast surfaces quickly when the server is down/wedged — anything
 /// over a couple of seconds reads as "nothing happened" on e-ink and
 /// the user gives up before any error renders. LAN-only, so 3s is
-/// plenty for a healthy round-trip.
-const TIMEOUT: Duration = Duration::from_secs(3);
+/// plenty for a healthy round-trip on a JSON-only endpoint.
+const LIST_TIMEOUT: Duration = Duration::from_secs(3);
+/// Timeout for cover fetches. The server reads sqlite + opens the
+/// cover file from disk per request; first hit after wake can be slow.
+/// Covers download serially today (priority #3 in the UI plan will
+/// move them to per-page lazy), so one slow cover blocks the next —
+/// 3s was too tight and produced grey placeholders for any book the
+/// server didn't answer instantly. 15s gives the slow cases room.
+const COVER_TIMEOUT: Duration = Duration::from_secs(15);
 /// Cap per-cover bytes so a corrupt server response can't OOM us. Real
 /// covers fit comfortably under 200KB; 8MB is wildly generous but still
 /// bounded.
@@ -118,7 +125,7 @@ pub struct Book {
 
 pub fn list_books(cfg: &ServerConfig) -> Result<Vec<Book>> {
     let url = format!("http://{}:{}/list.json", cfg.host, cfg.port);
-    let res = get_with_token(&url, &cfg.token)?;
+    let res = get_with_token(&url, &cfg.token, LIST_TIMEOUT)?;
     let body = res
         .into_string()
         .with_context(|| format!("read body of {url}"))?;
@@ -129,7 +136,7 @@ pub fn list_books(cfg: &ServerConfig) -> Result<Vec<Book>> {
 
 pub fn fetch_cover(cfg: &ServerConfig, id: i64) -> Result<Vec<u8>> {
     let url = format!("http://{}:{}/cover/{}", cfg.host, cfg.port, id);
-    let res = get_with_token(&url, &cfg.token)?;
+    let res = get_with_token(&url, &cfg.token, COVER_TIMEOUT)?;
     let mut bytes = Vec::new();
     res.into_reader()
         .take(COVER_MAX_BYTES as u64)
