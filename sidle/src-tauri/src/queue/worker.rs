@@ -61,10 +61,12 @@ pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_
         }
     };
 
-    // Tail step (kfx_to_epub only): swap the grayscale cover extracted from
-    // the KFX for the color cover Amazon shows on the product page. KOA2 +
-    // friends only ship the desaturated build, so the cover inside the KFX
-    // is itself grayscale — we have to refetch by ASIN to colorize.
+    // Tail step (kfx_to_epub only): if the KFX came from Amazon's monochrome-
+    // device build (KOA2 + friends), its embedded cover is grayscale-baked
+    // and there's no way to recover color from the file itself — refetch from
+    // the product page by ASIN. KFXes boko-kai produced from a color EPUB
+    // already have the original color cover; the ASIN is fabricated there,
+    // so cover_fetch skips and we just keep what's in the KFX.
     if kind == "kfx_to_epub" {
         match book.asin.as_deref() {
             None => eprintln!(
@@ -126,7 +128,7 @@ pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_
                     None => {
                         eprintln!(
                             "[sidle/queue] book {book_id} color cover: fetch returned None; \
-                             keeping grayscale fallback"
+                             keeping the cover embedded in the KFX"
                         );
                     }
                 }

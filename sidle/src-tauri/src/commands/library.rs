@@ -279,6 +279,12 @@ pub async fn library_recrawl_cover(
     let Some(asin) = book.asin.as_deref() else {
         return Ok(RecrawlResult::NoAsin);
     };
+    // Treat fabricated boko ASINs the same as missing — neither can resolve
+    // to a real `/images/P/` cover, so showing the user "no ASIN" is more
+    // honest than "fetch failed".
+    if !cover_fetch::looks_like_real_amazon_asin(asin) {
+        return Ok(RecrawlResult::NoAsin);
+    }
     let Some(bytes) = cover_fetch::fetch_color_cover(asin, &book.language).await else {
         return Ok(RecrawlResult::Failed {
             error: "no cover returned (404, placeholder, or network error \
