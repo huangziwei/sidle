@@ -116,24 +116,13 @@ fn run() -> anyhow::Result<()> {
         t0.elapsed()
     ));
 
-    let t_cov = Instant::now();
-    let covers: Vec<Option<DynamicImage>> = books
-        .iter()
-        .map(|book| match api::fetch_cover(&cfg, book.id) {
-            Ok(bytes) => match grid::decode_resize(&bytes) {
-                Ok(img) => Some(img),
-                Err(err) => {
-                    log(format!("cover {}: {err}", book.id));
-                    None
-                }
-            },
-            Err(err) => {
-                log(format!("cover {}: {err}", book.id));
-                None
-            }
-        })
-        .collect();
-    log(format!("covers decoded in {:?}", t_cov.elapsed()));
+    // Lazy cover fetch: start with all None, populate per-page as the
+    // user navigates. Initial paint shows placeholders + titles
+    // immediately so the picker never blanks during boot; each cover
+    // arrives via a per-cell GC16 partial refresh from
+    // fetch_and_paint_page. Cached across page revisits, so paging
+    // back is instant.
+    let mut covers: Vec<Option<DynamicImage>> = vec![None; books.len()];
 
     let mut renderer = TextRenderer::load(FONT_PX)?;
 
@@ -159,7 +148,10 @@ fn run() -> anyhow::Result<()> {
         grid_left,
         grid_top,
     )?;
-    log("initial render");
+    log("initial render (placeholders)");
+    fetch_and_paint_page(
+        &cfg, &mut fb, &books, &mut covers, page, grid_left, grid_top,
+    )?;
 
     loop {
         let (tx, ty) = touch.next_tap()?;
@@ -181,6 +173,10 @@ fn run() -> anyhow::Result<()> {
                             &mut fb, &mut renderer, &books, &covers, page,
                             total_pages, grid_left, grid_top,
                         )?;
+                        fetch_and_paint_page(
+                            &cfg, &mut fb, &books, &mut covers, page,
+                            grid_left, grid_top,
+                        )?;
                     }
                 }
                 PagerHit::Next => {
@@ -190,6 +186,10 @@ fn run() -> anyhow::Result<()> {
                         draw_gallery_page(
                             &mut fb, &mut renderer, &books, &covers, page,
                             total_pages, grid_left, grid_top,
+                        )?;
+                        fetch_and_paint_page(
+                            &cfg, &mut fb, &books, &mut covers, page,
+                            grid_left, grid_top,
                         )?;
                     }
                 }
@@ -284,13 +284,80 @@ fn draw_gallery_page(
             }
         }
     }
-    if total_pages > 1 {
-        pager::draw(fb, renderer, page, total_pages);
-    }
+    // Strip is the only path to Exit — always draw, even on a single
+    // page. `pager::draw` internally returns early after Exit when
+    // total_pages <= 1, so no prev/next labels are shown then.
+    pager::draw(fb, renderer, page, total_pages);
     fb.send_update(
         MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: fb.var.yres },
         WAVEFORM_MODE_GC16,
     )?;
+    Ok(())
+}
+
+/// Populate `covers[start..end]` for the given page by HTTP-fetching
+/// any cells whose slot is still `None`, painting each into its cell
+/// with a GC16 partial refresh as it arrives. Already-loaded cells
+/// (page revisits) are skipped — paint is no-op since the cached cover
+/// is already on screen from the preceding `draw_gallery_page` call.
+fn fetch_and_paint_page(
+    cfg: &config::ServerConfig,
+    fb: &mut Framebuffer,
+    books: &[api::Book],
+    covers: &mut [Option<DynamicImage>],
+    page: usize,
+    grid_left: i32,
+    grid_top: i32,
+) -> anyhow::Result<()> {
+    let start = page * PAGE_SIZE;
+    let end = (start + PAGE_SIZE).min(books.len());
+    let t_pg = Instant::now();
+    let mut fetched = 0usize;
+    for book_idx in start..end {
+        if covers[book_idx].is_some() {
+            continue;
+        }
+        let book = &books[book_idx];
+        let img = match api::fetch_cover(cfg, book.id) {
+            Ok(bytes) => match grid::decode_resize(&bytes) {
+                Ok(img) => Some(img),
+                Err(err) => {
+                    log(format!("cover {}: {err}", book.id));
+                    None
+                }
+            },
+            Err(err) => {
+                log(format!("cover {}: {err}", book.id));
+                None
+            }
+        };
+        if let Some(img) = img.as_ref() {
+            let cell_idx = book_idx - start;
+            let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_idx);
+            if cx >= 0 && cy >= 0 {
+                grid::blit_cell(fb, cx, cy, img);
+                fb.send_update(
+                    MxcfbRect {
+                        top: cy as u32,
+                        left: cx as u32,
+                        width: grid::CELL_W,
+                        height: grid::CELL_H,
+                    },
+                    WAVEFORM_MODE_GC16,
+                )?;
+            }
+        }
+        covers[book_idx] = img;
+        fetched += 1;
+    }
+    if fetched > 0 {
+        log(format!(
+            "page {} fetched {} covers in {:?}",
+            page,
+            fetched,
+            t_pg.elapsed()
+        ));
+    }
     Ok(())
 }
 
