@@ -1382,13 +1382,13 @@ function deviceRow(r) {
   del.textContent = "×";
   del.addEventListener("click", (e) => {
     e.stopPropagation();
-    // Orphans only have a sha8 prefix on hand; pass that through —
-    // delete_one's scan matches by suffix, not full sha.
-    const sha = r.kind === "sent" ? r.sha256 : r.sha8;
+    // The popup row always carries the exact filename — delete by name,
+    // no sha translation. The backend verifies the `.<sha8>.kfx` shape
+    // before touching anything so a stale UI can't drive arbitrary deletes.
     const label = r.kind === "sent"
       ? r.title || r.filename
       : r.filename;
-    deleteFromDevice([sha], [label]);
+    deleteFromDevice([r.filename], [label]);
   });
 
   top.append(title, del);
@@ -1418,7 +1418,7 @@ function deviceRow(r) {
   return li;
 }
 
-async function deleteFromDevice(sha256s, titles) {
+async function deleteFromDevice(filenames, titles) {
   if (!state.device) {
     showToast("no Kindle connected", true);
     return;
@@ -1432,15 +1432,16 @@ async function deleteFromDevice(sha256s, titles) {
   }
   let results = [];
   try {
-    results = await window.api.invoke("device_delete", { sha256s });
+    results = await window.api.invoke("device_delete", { filenames });
   } catch (e) {
     showToast(`delete failed: ${e}`, true);
     return;
   }
-  const counts = { removed: 0, failed: 0 };
+  const counts = { removed: 0, not_ours: 0, failed: 0 };
   for (const r of results) counts[r.kind] = (counts[r.kind] || 0) + 1;
   const parts = [];
   if (counts.removed) parts.push(`${counts.removed} removed`);
+  if (counts.not_ours) parts.push(`${counts.not_ours} skipped (not ours)`);
   if (counts.failed) parts.push(`${counts.failed} failed`);
   showToast(parts.join(" · "), counts.failed > 0);
   await refreshDeviceList();
@@ -1666,9 +1667,15 @@ function openContextMenu(x, y, b) {
     // Single-item menu.
     if (state.device && b.status === "done") {
       if (state.sentSet.has(b.sha256)) {
-        add(menu, "Remove from Kindle", () =>
-          deleteFromDevice([b.sha256], [b.title]),
+        const row = state.sent.find(
+          (r) => r.kind === "sent" && r.sha256 === b.sha256,
         );
+        const filename = row ? row.filename : null;
+        if (filename) {
+          add(menu, "Remove from Kindle", () =>
+            deleteFromDevice([filename], [b.title]),
+          );
+        }
       } else {
         add(menu, "Send to Kindle", () => sendBooks([b.id]));
       }
@@ -1945,9 +1952,18 @@ async function bulkSend() {
 async function bulkUnsend() {
   const eligible = selectedBooks().filter((b) => state.sentSet.has(b.sha256));
   if (eligible.length === 0) return;
+  const byKind = new Map(
+    state.sent
+      .filter((r) => r.kind === "sent")
+      .map((r) => [r.sha256, r.filename]),
+  );
+  const pairs = eligible
+    .map((b) => ({ filename: byKind.get(b.sha256), title: b.title }))
+    .filter((p) => p.filename);
+  if (pairs.length === 0) return;
   await deleteFromDevice(
-    eligible.map((b) => b.sha256),
-    eligible.map((b) => b.title || b.sha256.slice(0, 8)),
+    pairs.map((p) => p.filename),
+    pairs.map((p) => p.title),
   );
 }
 

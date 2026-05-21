@@ -23,6 +23,15 @@ pub struct BookRow {
     /// Path to the KFX on disk. `None` while an EPUB-imported book is still
     /// awaiting its background KFX conversion.
     pub kfx_path: Option<String>,
+    /// SHA-256 of the KFX file's bytes. Distinct from `sha256` (which is the
+    /// hash of whatever the user originally imported — `.epub`, `.kfx-zip`,
+    /// `.azw3`) because the generated/extracted `.kfx` is rarely byte-
+    /// identical to the source. The on-device filename infix is derived
+    /// from THIS hash, so when an orphan KFX is re-imported from the Kindle
+    /// the new row's identity matches what's already in the filename.
+    /// `Some(_)` iff `kfx_path` is `Some(_)` — they're always written
+    /// together.
+    pub kfx_sha256: Option<String>,
     pub file_size: i64,
     pub imported_at: String,
     pub status: String,
@@ -96,6 +105,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             epub_path         TEXT,
             cover_path        TEXT,
             kfx_path          TEXT,
+            kfx_sha256        TEXT,
             file_size         INTEGER NOT NULL,
             imported_at       TEXT NOT NULL,
             asin              TEXT,
@@ -143,6 +153,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    if !has_column(conn, "books", "kfx_sha256")? {
+        conn.execute("ALTER TABLE books ADD COLUMN kfx_sha256 TEXT", [])?;
+    }
 
     Ok(())
 }
@@ -168,14 +181,22 @@ fn has_table(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
     Ok(count > 0)
 }
 
-/// Look up the book matching a sha256 prefix. Used when a device-side file's
-/// filename carries a short sha to link it back to a library row. Returns
-/// the first match; sha8 collisions are statistically negligible for a
-/// personal library and we don't try to disambiguate.
-pub fn find_by_sha_prefix(conn: &Connection, prefix: &str) -> rusqlite::Result<Option<BookRow>> {
+/// Look up the book whose KFX hash starts with `prefix`. Used by
+/// `device_list_ours` to link an on-device `<basename>.<sha8>.kfx` back
+/// to a library row: the sha8 in the filename was generated from the
+/// KFX bytes (`kfx_sha256`), not from the source file (`sha256`). For
+/// .epub-imported books the two differ.
+pub fn find_by_kfx_sha_prefix(
+    conn: &Connection,
+    prefix: &str,
+) -> rusqlite::Result<Option<BookRow>> {
     let pattern = format!("{prefix}%");
-    conn.query_row(SELECT_BOOK_WITH_JOB_BY_SHA_PREFIX, params![pattern], row_to_book)
-        .optional()
+    conn.query_row(
+        SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX,
+        params![pattern],
+        row_to_book,
+    )
+    .optional()
 }
 
 /// True if a job for this book is currently pending or converting.
@@ -208,8 +229,8 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
         r#"INSERT INTO books
             (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path,
              file_size, imported_at, asin, publisher, published_at,
-             series_name, series_index, tags)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"#,
+             series_name, series_index, tags, kfx_sha256)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"#,
         params![
             book.sha256,
             book.title,
@@ -227,6 +248,7 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             book.series_name,
             book.series_index,
             tags_json,
+            book.kfx_sha256,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -277,12 +299,35 @@ pub fn set_job_status(
     Ok(())
 }
 
-pub fn set_kfx_path(conn: &Connection, book_id: i64, kfx_path: &str) -> rusqlite::Result<()> {
+/// Set the KFX path and its content hash atomically. Both columns are
+/// always written together — the push pipeline reads `kfx_sha256` to
+/// build the on-device filename, so a row that has `kfx_path` but no
+/// `kfx_sha256` would be unsendable.
+pub fn set_kfx_path_and_sha(
+    conn: &Connection,
+    book_id: i64,
+    kfx_path: &str,
+    kfx_sha256: &str,
+) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE books SET kfx_path = ?1 WHERE id = ?2",
-        params![kfx_path, book_id],
+        "UPDATE books SET kfx_path = ?1, kfx_sha256 = ?2 WHERE id = ?3",
+        params![kfx_path, kfx_sha256, book_id],
     )?;
     Ok(())
+}
+
+/// Bootstrap-time fixup. Returns `(book_id, kfx_path)` pairs for rows
+/// that have a KFX file on disk but no recorded hash — the bootstrap
+/// hashes each and writes it back via `set_kfx_path_and_sha`. Exists
+/// purely for upgrades from a pre-`kfx_sha256` schema; new rows always
+/// land with the hash already set.
+pub fn books_missing_kfx_sha(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kfx_path FROM books \
+         WHERE kfx_path IS NOT NULL AND kfx_sha256 IS NULL",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    rows.collect()
 }
 
 pub fn set_epub_path(conn: &Connection, book_id: i64, epub_path: &str) -> rusqlite::Result<()> {
@@ -389,6 +434,9 @@ pub struct NewBook<'a> {
     pub epub_path: Option<&'a str>,
     pub cover_path: Option<&'a str>,
     pub kfx_path: Option<&'a str>,
+    /// Hash of the KFX bytes — required iff `kfx_path` is `Some`.
+    /// See `BookRow::kfx_sha256` for the reasoning.
+    pub kfx_sha256: Option<&'a str>,
     pub file_size: i64,
     pub imported_at: &'a str,
     pub asin: Option<&'a str>,
@@ -410,7 +458,8 @@ const SELECT_BOOKS_WITH_JOBS: &str = r#"
            b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
-           b.publisher, b.published_at, b.series_name, b.series_index, b.tags
+           b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
+           b.kfx_sha256
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     ORDER BY b.imported_at DESC
@@ -421,7 +470,8 @@ const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
            b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
-           b.publisher, b.published_at, b.series_name, b.series_index, b.tags
+           b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
+           b.kfx_sha256
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.sha256 = ?1
@@ -432,21 +482,23 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
            b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
-           b.publisher, b.published_at, b.series_name, b.series_index, b.tags
+           b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
+           b.kfx_sha256
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
 "#;
 
-const SELECT_BOOK_WITH_JOB_BY_SHA_PREFIX: &str = r#"
+const SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX: &str = r#"
     SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
            b.epub_path, b.cover_path, b.kfx_path,
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
-           b.publisher, b.published_at, b.series_name, b.series_index, b.tags
+           b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
+           b.kfx_sha256
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
-    WHERE b.sha256 LIKE ?1
+    WHERE b.kfx_sha256 LIKE ?1
     LIMIT 1
 "#;
 
@@ -476,6 +528,7 @@ fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
         series_name: row.get(17)?,
         series_index: row.get(18)?,
         tags,
+        kfx_sha256: row.get(20)?,
     })
 }
 
@@ -501,6 +554,7 @@ mod tests {
                 epub_path: None,
                 cover_path: None,
                 kfx_path: None,
+                kfx_sha256: None,
                 file_size: 0,
                 imported_at: "2026-05-19T00:00:00Z",
                 asin: None,

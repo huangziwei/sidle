@@ -50,9 +50,6 @@ fn kfx_suffix(sha256: &str) -> String {
     format!(".{}.kfx", sha_infix(sha256))
 }
 
-fn sdr_suffix(sha256: &str) -> String {
-    format!(".{}.sdr", sha_infix(sha256))
-}
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -79,14 +76,18 @@ pub fn push_one(
         .kfx_path
         .as_deref()
         .expect("preflight guarantees kfx_path is Some");
+    let kfx_sha = book
+        .kfx_sha256
+        .as_deref()
+        .expect("preflight guarantees kfx_sha256 is Some alongside kfx_path");
 
     let dest_dir = documents_dir();
 
-    // Already-pushed check: any file in Sidle/ ending in our sha8 infix is
-    // ours, regardless of basename (a re-import after a metadata edit can
-    // leave the on-device file with the old basename — that's fine, sha is
+    // Already-pushed check: any file in Sidle/ ending in the KFX sha8
+    // infix is ours, regardless of basename (a metadata edit can leave
+    // the on-device file with the old basename — that's fine, sha is
     // the stable identity).
-    if let Some(existing) = find_by_sha(transport, &dest_dir, &book.sha256)? {
+    if let Some(existing) = find_by_sha(transport, &dest_dir, kfx_sha)? {
         return Ok(PushResult::AlreadyPresent {
             book_id: book.id,
             filename: existing,
@@ -96,8 +97,8 @@ pub fn push_one(
     let base = Path::new(kfx_src)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| format!("book-{}", sha_infix(&book.sha256)));
-    let filename = format!("{base}.{}.kfx", sha_infix(&book.sha256));
+        .unwrap_or_else(|| format!("book-{}", sha_infix(kfx_sha)));
+    let filename = format!("{base}.{}.kfx", sha_infix(kfx_sha));
     let dest = dest_dir.join(&filename);
 
     transport
@@ -116,6 +117,11 @@ fn preflight(conn: &rusqlite::Connection, book: &BookRow) -> Result<Option<Strin
     }
     if book.kfx_path.is_none() {
         return Ok(Some("no KFX yet".to_string()));
+    }
+    if book.kfx_sha256.is_none() {
+        // Row predates the kfx_sha256 column. Reconvert (or wait for the
+        // bootstrap backfill) to populate it.
+        return Ok(Some("kfx hash missing — reconvert".to_string()));
     }
     if db::job_in_flight(conn, book.id)? {
         return Ok(Some("conversion in flight".to_string()));
@@ -156,90 +162,79 @@ pub enum DeleteResult {
     /// state). The matching `.sdr/` sidecar, if any, was wiped as well —
     /// `sdr_existed` records whether it was present at delete time.
     Removed {
-        sha256: String,
-        filename: Option<String>,
+        filename: String,
         file_existed: bool,
         sdr_existed: bool,
     },
-    Failed { sha256: String, error: String },
+    /// Filename didn't look like one of ours (no `.<sha8>.kfx` suffix), or
+    /// it tried to climb out of `Sidle/` via path separators. Treated as a
+    /// hard refusal — better to surface than to silently target the wrong
+    /// thing.
+    NotOurs { filename: String },
+    Failed { filename: String, error: String },
 }
 
-/// Remove an on-device file (and its `.sdr/`) by sha. The directory scan
-/// keeps deletes inherently namespaced — we only touch things matching our
-/// sha8 infix, so we can never nuke unrelated user files even if the local
-/// library DB is wiped.
+/// Remove an on-device file (and its `.sdr/`) by filename. The popup
+/// always has the exact filename, so we don't need to scan + match — we
+/// just verify the filename has our `.<sha8>.kfx` shape (defense against
+/// a stale UI passing in arbitrary user files) and delete by name.
 pub fn delete_one(
     _device: &DeviceInfo,
     transport: &dyn Transport,
-    sha256: &str,
+    filename: &str,
 ) -> Result<DeleteResult> {
+    if filename.contains('/') || filename.contains('\\') || is_apple_double(filename) {
+        return Ok(DeleteResult::NotOurs {
+            filename: filename.to_string(),
+        });
+    }
+    // Filename must match `<basename>.<sha8>.kfx`. Reject anything else so
+    // a stale UI can't drive deletes of unrelated files even if the user
+    // had moved random KFXes into `documents/Sidle/`.
+    let Some(stem) = filename.strip_suffix(".kfx") else {
+        return Ok(DeleteResult::NotOurs {
+            filename: filename.to_string(),
+        });
+    };
+    let Some((_, sha)) = stem.rsplit_once('.') else {
+        return Ok(DeleteResult::NotOurs {
+            filename: filename.to_string(),
+        });
+    };
+    if sha.len() != SHA_INFIX_LEN || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(DeleteResult::NotOurs {
+            filename: filename.to_string(),
+        });
+    }
+
     let dir = documents_dir();
-    let filename = find_by_sha(transport, &dir, sha256)?;
+    let sdr_name = format!("{stem}.sdr");
 
-    // Always attempt the `.sdr/` cleanup, even if the `.kfx` is missing —
-    // the sidecar is the Kindle's, not ours, and could outlive a manual
-    // on-device delete. We need the basename to address it; derive it from
-    // the .kfx filename when we have one, otherwise scan for any matching
-    // `*.<sha8>.sdr` in the directory.
-    let sdr_path = if let Some(ref name) = filename {
-        // Strip the `.kfx` to get the `<basename>.<sha8>` stem.
-        let stem = name.strip_suffix(".kfx").unwrap_or(name.as_str());
-        Some(dir.join(&format!("{stem}.sdr")))
-    } else {
-        find_sdr_by_sha(transport, &dir, sha256)?.map(|name| dir.join(&name))
-    };
+    // Best-effort wipe of any legacy `._<name>` AppleDouble dropped by an
+    // older push (before `copy_in_atomic` switched to raw read/write).
+    let _ = transport.delete(&dir.join(&format!("._{filename}")));
 
-    let file_existed = if let Some(ref name) = filename {
-        // Best-effort wipe of any matching `._<name>` AppleDouble dropped
-        // by an older push (before we switched copy_in_atomic to a raw
-        // read/write). New pushes don't create these, but cleaning up
-        // legacy ones keeps the Kindle's indexer from re-scanning them.
-        let _ = transport.delete(&dir.join(&format!("._{name}")));
-        transport
-            .delete(&dir.join(name))
-            .with_context(|| format!("delete {name}"))?
-    } else {
-        false
-    };
+    let file_existed = transport
+        .delete(&dir.join(filename))
+        .with_context(|| format!("delete {filename}"))?;
 
-    let sdr_existed = if let Some(ref p) = sdr_path {
-        // Best-effort: log to stderr but don't fail the delete — the .kfx
-        // is already gone, leaving a residual .sdr/ behind is annoying but
-        // not corrupting.
-        match transport.delete_dir(p) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!(
-                    "[sidle/delete] sdr cleanup failed for {sha256}: {e:#}"
-                );
-                false
-            }
+    // .sdr/ cleanup is best-effort — the .kfx is the user-visible thing;
+    // leaving the sidecar behind is annoying but not corrupting.
+    let sdr_existed = match transport.delete_dir(&dir.join(&sdr_name)) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("[sidle/delete] sdr cleanup failed for {sdr_name}: {e:#}");
+            false
         }
-    } else {
-        false
     };
 
     Ok(DeleteResult::Removed {
-        sha256: sha256.to_string(),
-        filename,
+        filename: filename.to_string(),
         file_existed,
         sdr_existed,
     })
 }
 
-fn find_sdr_by_sha(
-    transport: &dyn Transport,
-    dir: &TPath,
-    sha256: &str,
-) -> Result<Option<String>> {
-    let suffix = sdr_suffix(sha256);
-    for entry in transport.list(dir)? {
-        if !entry.is_dir || entry.name.starts_with('.') {
-            continue;
-        }
-        if entry.name.ends_with(&suffix) {
-            return Ok(Some(entry.name));
-        }
-    }
-    Ok(None)
+fn is_apple_double(name: &str) -> bool {
+    name.starts_with("._")
 }

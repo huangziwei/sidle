@@ -214,6 +214,19 @@ fn import_one(
 
     // 6. Insert book row + job.
     let other_ready = other_dest.exists();
+    // When this import lands a KFX (either as canonical or because the
+    // other side was already on disk from a prior import), record the
+    // hash of *its* bytes. That hash drives the on-device filename
+    // infix; without it, a re-import of the same file off the Kindle
+    // can't be linked back to the local row.
+    let kfx_bytes_sha: Option<String> = match canonical {
+        Canonical::Kfx => Some(sha256_of_bytes(&canonical_bytes)),
+        Canonical::Epub if other_ready => match fs::read(&dest_kfx) {
+            Ok(bytes) => Some(sha256_of_bytes(&bytes)),
+            Err(_) => None,
+        },
+        _ => None,
+    };
     let book_id = insert_row(
         conn,
         &sha,
@@ -228,6 +241,7 @@ fn import_one(
             Canonical::Kfx => Some(dest_kfx.as_path()),
             Canonical::Epub => other_ready.then_some(dest_kfx.as_path()),
         },
+        kfx_bytes_sha.as_deref(),
     )?;
 
     let job_status = if other_ready { "done" } else { "pending" };
@@ -337,6 +351,7 @@ fn insert_row(
     epub_path: Option<&Path>,
     cover_path: Option<&Path>,
     kfx_path: Option<&Path>,
+    kfx_sha256: Option<&str>,
 ) -> Result<i64> {
     let epub_path_str = epub_path.map(|p| p.to_string_lossy().to_string());
     let cover_path_str = cover_path.map(|p| p.to_string_lossy().to_string());
@@ -354,6 +369,7 @@ fn insert_row(
             epub_path: epub_path_str.as_deref(),
             cover_path: cover_path_str.as_deref(),
             kfx_path: kfx_path_str.as_deref(),
+            kfx_sha256,
             file_size,
             imported_at: &now,
             asin: meta.asin.as_deref(),
@@ -389,6 +405,12 @@ pub fn sha256_of_file(path: &Path) -> std::io::Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+pub fn sha256_of_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 /// Convert a decrypted `.azw3` to EPUB bytes via boko-kai's AZW3 importer

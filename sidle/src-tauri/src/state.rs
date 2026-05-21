@@ -48,6 +48,23 @@ impl AppState {
              WHERE status = 'converting'",
             rusqlite::params![db::now_iso()],
         );
+        // Backfill `kfx_sha256` for any pre-`kfx_sha256`-column rows. Push
+        // requires the hash to derive the on-device filename infix; rows
+        // imported before the column existed would otherwise be marked
+        // "kfx hash missing — reconvert" until manual intervention.
+        for (book_id, kfx_path) in db::books_missing_kfx_sha(&conn).unwrap_or_default() {
+            match sidle_core::library::import::sha256_of_file(std::path::Path::new(&kfx_path)) {
+                Ok(sha) => {
+                    let _ = db::set_kfx_path_and_sha(&conn, book_id, &kfx_path, &sha);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[sidle/bootstrap] book {book_id}: backfill kfx_sha256 \
+                         failed for {kfx_path}: {e}; row stays unsendable until reconvert"
+                    );
+                }
+            }
+        }
         let pending = db::pending_or_error_book_ids(&conn).unwrap_or_default();
 
         let db: DbHandle = Arc::new(Mutex::new(conn));

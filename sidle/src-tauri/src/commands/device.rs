@@ -79,7 +79,7 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
                 // but skip rather than treat as an orphan.
                 continue;
             };
-            match db::find_by_sha_prefix(&conn, &sha8).map_err(anyhow::Error::from)? {
+            match db::find_by_kfx_sha_prefix(&conn, &sha8).map_err(anyhow::Error::from)? {
                 Some(book) => out.push(DeviceRow::Sent {
                     book_id: book.id,
                     sha256: book.sha256,
@@ -124,7 +124,7 @@ fn is_macos_metadata(name: &str) -> bool {
 pub async fn device_delete(
     app: AppHandle,
     state: State<'_, AppState>,
-    sha256s: Vec<String>,
+    filenames: Vec<String>,
 ) -> Result<Vec<DeleteResult>, String> {
     let Some(device) = state.device.lock().await.clone() else {
         return Err("no Kindle connected".to_string());
@@ -132,12 +132,12 @@ pub async fn device_delete(
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<DeleteResult>> {
         let transport = device.open_transport()?;
-        let mut out = Vec::with_capacity(sha256s.len());
-        for sha in sha256s {
-            let result = match push::delete_one(&device, transport.as_ref(), &sha) {
+        let mut out = Vec::with_capacity(filenames.len());
+        for name in filenames {
+            let result = match push::delete_one(&device, transport.as_ref(), &name) {
                 Ok(r) => r,
                 Err(e) => DeleteResult::Failed {
-                    sha256: sha.clone(),
+                    filename: name.clone(),
                     error: format!("{e:#}"),
                 },
             };

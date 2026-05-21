@@ -15,7 +15,7 @@ use crate::cover_fetch;
 use crate::library::LibraryPaths;
 use crate::library::db::{self, BookRow};
 use crate::library::epub_cover;
-use crate::library::import::{extract_cover_from_epub, write_bytes_atomic};
+use crate::library::import::{extract_cover_from_epub, sha256_of_file, write_bytes_atomic};
 use crate::library::paths::format_basename;
 use crate::queue::emit_status;
 use crate::state::DbHandle;
@@ -140,7 +140,26 @@ pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_
             let _ = db::set_epub_path(&conn, book_id, &epub.to_string_lossy());
         }
         if let Some(kfx) = &produced.kfx_path {
-            let _ = db::set_kfx_path(&conn, book_id, &kfx.to_string_lossy());
+            // Hash the freshly-written KFX so push can stamp the on-device
+            // filename with its `<sha8>` infix. Without this the on-device
+            // file's identity drifts from the local row's `kfx_sha256`
+            // (still None) and re-import wouldn't link back.
+            match sha256_of_file(kfx) {
+                Ok(sha) => {
+                    let _ = db::set_kfx_path_and_sha(
+                        &conn,
+                        book_id,
+                        &kfx.to_string_lossy(),
+                        &sha,
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[sidle/queue] book {book_id}: hashing produced KFX failed: {e}; \
+                         row will be unsendable until reconvert"
+                    );
+                }
+            }
         }
         if let Some(cover) = &produced.cover_path {
             let _ = db::set_cover_path(&conn, book_id, &cover.to_string_lossy());
