@@ -543,8 +543,27 @@ button {
   margin: 0;
   padding: 0;
   border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  /* Internal scroll, capped so a long list doesn't push the KUAL +
+     LAN-server sections off the popover. The popover itself also
+     scrolls if total content exceeds 80vh, so the user always reaches
+     everything either way. */
+  max-height: 260px;
   overflow-y: auto;
-  flex: 1;
+}
+
+/* Inline "Import all orphans" button next to the `<dd>` book count. */
+.device-count-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0;
+  word-break: break-all;
+}
+
+.device-inline-action {
+  font-size: 11px;
+  padding: 0;
 }
 
 .device-sent-list li {

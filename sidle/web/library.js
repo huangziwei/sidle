@@ -1181,6 +1181,7 @@ function wireDevice() {
     }
   });
   $("#btn-send-unsent").addEventListener("click", () => sendUnsent());
+  $("#btn-import-all-orphans").addEventListener("click", () => importAllOrphans());
   // Clicks INSIDE the popover shouldn't close it.
   $("#device-popover").addEventListener("click", (e) => e.stopPropagation());
   document.addEventListener("click", (e) => {
@@ -1533,6 +1534,18 @@ function renderDeviceList() {
   }
   for (const r of rows) list.appendChild(deviceRow(r));
   updateSendUnsentButton();
+
+  // Bulk "Import all orphans" — count + show/hide. The button drives
+  // `device_import_orphan` per row, which already enqueues the KFX→EPUB
+  // background job; nothing extra to do here.
+  const orphanCount = rows.filter((r) => r.kind === "orphan").length;
+  const btn = $("#btn-import-all-orphans");
+  if (btn) {
+    btn.hidden = orphanCount === 0;
+    btn.textContent =
+      orphanCount === 1 ? "Import 1 orphan" : `Import all ${orphanCount} orphans`;
+    btn.disabled = false;
+  }
 }
 
 function deviceRow(r) {
@@ -1622,6 +1635,42 @@ async function deleteFromDevice(filenames, titles) {
   if (counts.not_ours) parts.push(`${counts.not_ours} skipped (not ours)`);
   if (counts.failed) parts.push(`${counts.failed} failed`);
   showToast(parts.join(" · "), counts.failed > 0);
+  await refreshDeviceList();
+}
+
+async function importAllOrphans() {
+  if (!state.device) {
+    showToast("no Kindle connected", true);
+    return;
+  }
+  const rows = state.sent || [];
+  const orphans = rows.filter((r) => r.kind === "orphan");
+  if (orphans.length === 0) return;
+  const btn = $("#btn-import-all-orphans");
+  btn.disabled = true;
+  let imported = 0;
+  let duplicate = 0;
+  let failed = 0;
+  for (const r of orphans) {
+    try {
+      const result = await window.api.invoke("device_import_orphan", {
+        filename: r.filename,
+      });
+      if (result.kind === "imported") imported++;
+      else if (result.kind === "duplicate") duplicate++;
+      else failed++;
+    } catch (e) {
+      failed++;
+      console.error("import_orphan failed:", r.filename, e);
+    }
+    btn.textContent = `Importing… ${imported + duplicate + failed}/${orphans.length}`;
+  }
+  const parts = [];
+  if (imported) parts.push(`${imported} imported`);
+  if (duplicate) parts.push(`${duplicate} already in library`);
+  if (failed) parts.push(`${failed} failed`);
+  showToast(parts.join(", ") || "done", failed > 0);
+  await refresh();
   await refreshDeviceList();
 }
 

@@ -42,7 +42,11 @@
             <dt>Serial</dt><dd id="device-serial">—</dd>
             <dt>Connection</dt><dd id="device-transport">—</dd>
             <dt>Free space</dt><dd id="device-free">—</dd>
-            <dt>On device</dt><dd id="device-count">—</dd>
+            <dt>On device</dt>
+            <dd class="device-count-cell">
+              <span id="device-count">—</span>
+              <button type="button" id="btn-import-all-orphans" class="btn-link device-inline-action" hidden>Import all orphans</button>
+            </dd>
           </dl>
           <p id="device-tip" class="device-tip" hidden></p>
           <ul id="device-sent-list" class="device-sent-list" aria-label="Books on device"></ul>
