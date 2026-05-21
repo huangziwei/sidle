@@ -48,6 +48,21 @@
           <ul id="device-sent-list" class="device-sent-list" aria-label="Books on device"></ul>
           <div id="device-empty" class="device-empty">Nothing sent yet.</div>
 
+          <section class="kual-section" id="kual-section" aria-label="KUAL extension" hidden>
+            <header class="kual-section-header">
+              <strong>KUAL extension</strong>
+              <span id="kual-status-label" class="kual-status-label unknown">—</span>
+            </header>
+            <div class="kual-actions">
+              <button type="button" id="btn-kual-install" class="btn-link" disabled>
+                Install KUAL
+              </button>
+              <span id="kual-install-progress" class="kual-install-progress" hidden></span>
+            </div>
+            <p id="kual-tip" class="kual-tip" hidden></p>
+            <ul id="kual-file-list" class="kual-file-list" aria-label="KUAL files" hidden></ul>
+          </section>
+
           <section class="server-section" aria-label="LAN server">
             <header class="server-section-header">
               <strong>LAN server</strong>

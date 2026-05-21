@@ -137,6 +137,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   await refresh();
   subscribeStatus();
   subscribeDeviceStatus();
+  setupKualSection();
   refreshServerStatus();
   subscribeSendProgress();
   subscribePullProgress();
@@ -1172,7 +1173,12 @@ function wireDevice() {
     e.stopPropagation();
     const pop = $("#device-popover");
     pop.hidden = !pop.hidden;
-    if (!pop.hidden) refreshDeviceList();
+    if (!pop.hidden) {
+      refreshDeviceList();
+      // KUAL section staleness can change between opens (server token
+      // rotates, native rebuilt, etc.) so always re-pull on show.
+      refreshKualStatus();
+    }
   });
   $("#btn-send-unsent").addEventListener("click", () => sendUnsent());
   // Clicks INSIDE the popover shouldn't close it.
@@ -1261,6 +1267,174 @@ function subscribeDeviceStatus() {
   window.api.invoke("device_status").then(updateDeviceUI).catch(() => {});
 }
 
+// ----- KUAL deploy section ---------------------------------------------------
+
+function setupKualSection() {
+  // Per-file progress event from the install command. Surfaces a live
+  // count next to the button so a multi-file push doesn't look frozen.
+  window.api.listen("kual:install-progress", (e) => {
+    const r = e.payload;
+    const prog = $("#kual-install-progress");
+    if (!prog) return;
+    const path = r.device_path || "";
+    let line;
+    if (r.kind === "wrote") line = `wrote ${path}`;
+    else if (r.kind === "skipped") line = `skipped ${path}`;
+    else if (r.kind === "failed") line = `failed ${path}: ${r.error}`;
+    else line = JSON.stringify(r);
+    prog.textContent = line;
+    prog.hidden = false;
+  });
+
+  $("#btn-kual-install").addEventListener("click", async () => {
+    const btn = $("#btn-kual-install");
+    const prog = $("#kual-install-progress");
+    btn.disabled = true;
+    prog.hidden = false;
+    prog.textContent = "pushing…";
+    try {
+      const report = await window.api.invoke("kual_install");
+      const wrote = report.results.filter((r) => r.kind === "wrote").length;
+      const skipped = report.results.filter((r) => r.kind === "skipped").length;
+      const failed = report.results.filter((r) => r.kind === "failed");
+      if (failed.length) {
+        prog.textContent = `${failed.length} failed — see file list`;
+      } else if (wrote === 0) {
+        prog.textContent = `already in sync (${skipped} skipped)`;
+      } else {
+        prog.textContent = `pushed ${wrote}, skipped ${skipped}`;
+      }
+    } catch (err) {
+      prog.textContent = `error: ${err}`;
+    } finally {
+      // Re-pull status; that'll re-enable/disable the button based on
+      // the new state.
+      await refreshKualStatus();
+    }
+  });
+}
+
+async function refreshKualStatus() {
+  try {
+    const status = await window.api.invoke("kual_status");
+    renderKualStatus(status);
+  } catch (err) {
+    console.error("kual_status failed:", err);
+  }
+}
+
+function renderKualStatus(status) {
+  const section = $("#kual-section");
+  const label = $("#kual-status-label");
+  const btn = $("#btn-kual-install");
+  const tip = $("#kual-tip");
+  const list = $("#kual-file-list");
+
+  if (!status || status.overall.kind === "device_disconnected") {
+    // Hide the whole section when no Kindle is connected (or MTP-only).
+    // The server section above stays visible regardless.
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+
+  const overall = status.overall.kind;
+  label.className = "kual-status-label " + overallClass(overall);
+  label.textContent = overallLabel(status.overall);
+
+  if (overall === "binary_not_built") {
+    btn.disabled = true;
+    btn.textContent = "Install KUAL";
+    tip.textContent =
+      "Run `cargo build --release --target armv7-unknown-linux-musleabihf -p sidle-native`, then click again.";
+    tip.hidden = false;
+  } else {
+    btn.disabled = false;
+    btn.textContent =
+      overall === "in_sync"
+        ? "Re-push KUAL"
+        : overall === "not_installed"
+          ? "Install KUAL"
+          : "Update KUAL";
+    // Show "binary older than source" hint only when nothing else is wrong.
+    if (
+      overall === "in_sync" &&
+      status.binary_mtime_ms != null &&
+      status.native_source_mtime_ms != null &&
+      status.native_source_mtime_ms > status.binary_mtime_ms
+    ) {
+      tip.textContent =
+        "Binary is older than native source — you have unbuilt code changes.";
+      tip.hidden = false;
+    } else {
+      tip.hidden = true;
+      tip.textContent = "";
+    }
+  }
+
+  // Per-file rows.
+  list.innerHTML = "";
+  if (status.files && status.files.length) {
+    for (const f of status.files) {
+      const li = document.createElement("li");
+      const name = document.createElement("span");
+      name.textContent = f.device_path;
+      const state = document.createElement("span");
+      state.className = "kual-file-state " + fileStateClass(f.state.kind);
+      state.textContent = fileStateLabel(f.state.kind);
+      li.appendChild(name);
+      li.appendChild(state);
+      list.appendChild(li);
+    }
+    list.hidden = false;
+  } else {
+    list.hidden = true;
+  }
+}
+
+function overallClass(kind) {
+  switch (kind) {
+    case "in_sync": return "in-sync";
+    case "stale": return "stale";
+    case "not_installed": return "not-installed";
+    case "binary_not_built": return "binary-not-built";
+    default: return "unknown";
+  }
+}
+
+function overallLabel(overall) {
+  switch (overall.kind) {
+    case "in_sync": return "In sync";
+    case "stale": {
+      const n = (overall.stale_count || 0) + (overall.missing_count || 0);
+      return `${n} file${n === 1 ? "" : "s"} out of date`;
+    }
+    case "not_installed": return "Not installed";
+    case "binary_not_built": return "Binary not built";
+    default: return "—";
+  }
+}
+
+function fileStateClass(kind) {
+  switch (kind) {
+    case "synced": return "synced";
+    case "stale": return "stale";
+    case "missing": return "missing";
+    case "source_missing": return "source-missing";
+    default: return "";
+  }
+}
+
+function fileStateLabel(kind) {
+  switch (kind) {
+    case "synced": return "synced";
+    case "stale": return "stale";
+    case "missing": return "missing";
+    case "source_missing": return "source missing";
+    default: return kind;
+  }
+}
+
 function updateDeviceUI(info) {
   state.device = info || null;
   const dot = $("#device-pill .device-dot");
@@ -1296,6 +1470,7 @@ function updateDeviceUI(info) {
     // Always load sent state when device connects so the list-view "On Kindle"
     // column reflects reality without the user having to open the popover.
     refreshDeviceList();
+    refreshKualStatus();
   } else {
     dot.className = "device-dot disconnected";
     label.textContent = "No Kindle";
@@ -1312,6 +1487,9 @@ function updateDeviceUI(info) {
     setSent([]);
     $("#device-empty").textContent = "Plug in a Kindle via USB.";
     $("#device-empty").hidden = false;
+    // Hide KUAL section when no device is connected.
+    const kualSection = $("#kual-section");
+    if (kualSection) kualSection.hidden = true;
     render();
   }
 }

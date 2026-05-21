@@ -13,13 +13,73 @@
 //! unknown JSON fields, so this stays compatible if the server adds
 //! columns. The full shape lives at sidle/core/src/library/db.rs.
 
+use std::fmt;
 use std::io::Read;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, anyhow};
 use serde::Deserialize;
 
 use crate::config::ServerConfig;
+
+/// Errors from talking to sidle-server. `TokenMismatch` is broken out so
+/// the toast layer in `main.rs` can show a "plug Kindle into sidle"
+/// breadcrumb instead of the opaque "Failed: GET ... status code 403"
+/// that users have to grep the log for.
+#[derive(Debug)]
+pub enum SidleError {
+    /// Server returned 401 or 403 — the bearer token in our
+    /// `etc/server.conf` no longer matches the one sidle-server is
+    /// validating against (rotated `.server-token`, fresh install).
+    /// User action is to re-deploy via the desktop app's KUAL button.
+    TokenMismatch,
+    Other(anyhow::Error),
+}
+
+impl fmt::Display for SidleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SidleError::TokenMismatch => {
+                write!(f, "token rejected by sidle-server (401/403)")
+            }
+            SidleError::Other(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for SidleError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SidleError::TokenMismatch => None,
+            SidleError::Other(e) => e.source(),
+        }
+    }
+}
+
+impl From<anyhow::Error> for SidleError {
+    fn from(e: anyhow::Error) -> Self {
+        SidleError::Other(e)
+    }
+}
+
+pub type Result<T> = std::result::Result<T, SidleError>;
+
+/// Issue a GET against sidle-server with the token header, translating
+/// `ureq::Error::Status(401|403)` to [`SidleError::TokenMismatch`].
+/// Every other transport/status error becomes `SidleError::Other`.
+fn get_with_token(url: &str, token: &str) -> Result<ureq::Response> {
+    match ureq::get(url)
+        .set("X-Sidle-Token", token)
+        .timeout(TIMEOUT)
+        .call()
+    {
+        Ok(res) => Ok(res),
+        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            Err(SidleError::TokenMismatch)
+        }
+        Err(e) => Err(anyhow!("GET {url}: {e}").into()),
+    }
+}
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// Cap per-cover bytes so a corrupt server response can't OOM us. Real
@@ -53,11 +113,7 @@ pub struct Book {
 
 pub fn list_books(cfg: &ServerConfig) -> Result<Vec<Book>> {
     let url = format!("http://{}:{}/list.json", cfg.host, cfg.port);
-    let res = ureq::get(&url)
-        .set("X-Sidle-Token", &cfg.token)
-        .timeout(TIMEOUT)
-        .call()
-        .map_err(|e| anyhow!("GET {url}: {e}"))?;
+    let res = get_with_token(&url, &cfg.token)?;
     let body = res
         .into_string()
         .with_context(|| format!("read body of {url}"))?;
@@ -68,11 +124,7 @@ pub fn list_books(cfg: &ServerConfig) -> Result<Vec<Book>> {
 
 pub fn fetch_cover(cfg: &ServerConfig, id: i64) -> Result<Vec<u8>> {
     let url = format!("http://{}:{}/cover/{}", cfg.host, cfg.port, id);
-    let res = ureq::get(&url)
-        .set("X-Sidle-Token", &cfg.token)
-        .timeout(TIMEOUT)
-        .call()
-        .map_err(|e| anyhow!("GET {url}: {e}"))?;
+    let res = get_with_token(&url, &cfg.token)?;
     let mut bytes = Vec::new();
     res.into_reader()
         .take(COVER_MAX_BYTES as u64)
@@ -93,11 +145,19 @@ pub struct Download {
 
 pub fn download_book(cfg: &ServerConfig, book: &Book) -> Result<Download> {
     let url = format!("http://{}:{}/get/{}", cfg.host, cfg.port, book.id);
-    let res = ureq::get(&url)
+    // download uses the longer timeout — re-issue the request locally
+    // instead of routing through `get_with_token` (which uses TIMEOUT).
+    let res = match ureq::get(&url)
         .set("X-Sidle-Token", &cfg.token)
         .timeout(DOWNLOAD_TIMEOUT)
         .call()
-        .map_err(|e| anyhow!("GET {url}: {e}"))?;
+    {
+        Ok(res) => res,
+        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            return Err(SidleError::TokenMismatch);
+        }
+        Err(e) => return Err(anyhow!("GET {url}: {e}").into()),
+    };
     let cd_filename = parse_cd_filename(res.header("content-disposition"));
     let filename = pick_filename(cd_filename.as_deref(), book)?;
     let mut bytes = Vec::new();
@@ -133,7 +193,8 @@ fn pick_filename(cd_filename: Option<&str>, book: &Book) -> Result<String> {
             "kfx_sha256 from /list.json is {} chars, expected at least {}",
             sha.len(),
             SHA_INFIX_LEN,
-        ));
+        )
+        .into());
     }
     // If C-D gave us *some* name (just not the sha8-tagged shape), reuse
     // its stem; otherwise fall back to the book's title. Either way the

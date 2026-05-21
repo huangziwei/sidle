@@ -1,0 +1,722 @@
+//! KUAL extension deploy — pushes the native picker binary, the bundle
+//! files (`config.xml`, `menu.json`, `bin/sidle.sh`), and a freshly-
+//! rendered `etc/server.conf` to `/Volumes/Kindle/extensions/sidle/`.
+//!
+//! Why this exists: the manual workflow (`cargo build ... && cp ...`) was
+//! easy to forget after every native change, and `etc/server.conf` would
+//! silently fall out of sync whenever sidle-server rotated its
+//! `.server-token`, leaving the picker getting `403` from `/list.json`
+//! with no UI breadcrumb. The button this module backs (`kual_install`
+//! in `commands/device.rs`) re-syncs every file in one click and is
+//! idempotent — content-hash equal means skip.
+//!
+//! Mass-storage only. KUAL is a jailbreak-only feature on the
+//! mass-storage Kindle generations (KOA2 and older); MTP-only Scribes
+//! don't have a `/extensions/` directory at all, so callers should
+//! refuse the install with a friendly message when the connected
+//! device's transport is MTP.
+
+use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+use anyhow::{Context, Result, anyhow};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+/// Where on the device the KUAL bundle lives, relative to the mount.
+const DEVICE_BUNDLE_REL: &str = "extensions/sidle";
+
+/// Cross-compile target the native binary is built for. Hard-coded
+/// because KUAL only runs on armv7l Kindles; if a different target ever
+/// matters, that's a per-device problem, not a per-build one.
+const NATIVE_TARGET_TRIPLE: &str = "armv7-unknown-linux-musleabihf";
+
+/// Where on the desktop side each piece of the deploy comes from. The
+/// `bundle_dir` is the in-repo source for the static KUAL files; the
+/// `binary_path` is the developer's freshly cross-compiled native
+/// binary. Both are resolved at app startup (see `state.rs`) and
+/// re-evaluated per status query so a fresh `cargo build` shows up
+/// without restarting the desktop app.
+#[derive(Debug, Clone)]
+pub struct KualSource {
+    pub bundle_dir: PathBuf,
+    pub binary_path: PathBuf,
+}
+
+impl KualSource {
+    /// Resolve the source paths from a workspace root. The workspace
+    /// root is the directory containing the `[workspace]` Cargo.toml
+    /// (`/Users/.../sidle/` for the developer machine).
+    pub fn from_workspace_root(repo: &Path) -> Self {
+        Self {
+            bundle_dir: repo.join("kual").join("sidle"),
+            binary_path: repo
+                .join("target")
+                .join(NATIVE_TARGET_TRIPLE)
+                .join("release")
+                .join("sidle"),
+        }
+    }
+}
+
+/// Fields rendered into `etc/server.conf` on the device. Held as a
+/// struct (rather than a single rendered String) so callers can also
+/// surface the individual values to the UI for confirmation before the
+/// user clicks Install.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServerConfRender {
+    pub host: String,
+    pub port: u16,
+    pub token: String,
+}
+
+impl ServerConfRender {
+    /// The bytes that should land at `etc/server.conf` on the device.
+    /// Trailing newline is intentional and load-bearing: the staleness
+    /// check is byte-equality, so omitting it would re-trigger "stale"
+    /// every time a previously-installed conf is compared.
+    pub fn render(&self) -> String {
+        format!(
+            "# Sidle server config — read by `bin/sidle` on launch.\n\
+             # DO NOT COMMIT — this file holds the bearer token for the LAN server.\n\
+             # Gitignored at the repo root.\n\
+             \n\
+             HOST={}\n\
+             PORT={}\n\
+             TOKEN={}\n",
+            self.host, self.port, self.token,
+        )
+    }
+}
+
+/// Per-file outcome of the staleness check.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KualFileState {
+    /// Source bytes hash-match the on-device bytes — nothing to do.
+    Synced,
+    /// They differ. Hex sha256 of both surfaces so the UI can show a
+    /// diff hint without re-reading the files.
+    Stale {
+        source_hash: String,
+        device_hash: String,
+    },
+    /// File is missing on the device (clean install case).
+    Missing { source_hash: String },
+    /// File is missing on the *source* side. Only meaningful for the
+    /// binary slot — UI surfaces "run `cargo build ...` first".
+    SourceMissing,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KualFileStatus {
+    /// Device-relative path under `extensions/sidle/` —
+    /// e.g. `bin/sidle`, `etc/server.conf`.
+    pub device_path: String,
+    pub state: KualFileState,
+}
+
+/// Headline summary the UI uses to label the button + status pill.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KualOverall {
+    /// No mass-storage device connected. Section hidden.
+    /// Constructed at the command layer (no Kindle plugged in or MTP-
+    /// only), not by `compute_status` — which requires a mount path.
+    #[allow(dead_code)]
+    DeviceDisconnected,
+    /// Source binary doesn't exist — the user hasn't run `cargo
+    /// build --release --target armv7-unknown-linux-musleabihf
+    /// -p sidle-native` yet (or the rebuild failed). Other files may
+    /// be checkable but the button is disabled until the binary is
+    /// present.
+    BinaryNotBuilt,
+    /// Every device file is missing — first-time install.
+    NotInstalled,
+    /// At least one file differs. `stale_count` and `missing_count`
+    /// add up to "files that would be written".
+    Stale {
+        stale_count: u32,
+        missing_count: u32,
+    },
+    /// Every file is present and content-equal — button re-pushes
+    /// anyway, but the pill reads "In sync".
+    InSync,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KualStatus {
+    pub overall: KualOverall,
+    pub files: Vec<KualFileStatus>,
+    /// mtime of the source binary, if it exists. Serialized as a Unix
+    /// epoch milliseconds value so the frontend can render a relative
+    /// timestamp without timezone gymnastics.
+    pub binary_mtime_ms: Option<u64>,
+    /// mtime of the newest source file under `sidle/native/src/`.
+    /// Surfaces "your binary is older than your source" *before* the
+    /// user clicks anything — staleness against the device is one
+    /// thing, but if your binary is also pre-dating your code edits
+    /// you'd push a no-op.
+    pub native_source_mtime_ms: Option<u64>,
+}
+
+/// Per-file outcome of an install. Distinct from `KualFileState`
+/// because the relevant after-state is "did we write or skip", not
+/// "is it stale" (it isn't, by the time we report).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KualFileInstallResult {
+    /// Wrote new bytes (either because Missing or Stale).
+    Wrote { device_path: String },
+    /// Skipped — already content-equal to the source.
+    Skipped { device_path: String },
+    /// Write failed; the rest of the install continues so a partial
+    /// failure leaves a recoverable state.
+    Failed { device_path: String, error: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KualInstallReport {
+    pub results: Vec<KualFileInstallResult>,
+}
+
+/// File-slot specs: where each piece comes from on the source side,
+/// where it lands on the device. The `server.conf` slot has a special
+/// `Source::Rendered` variant because its bytes are computed live, not
+/// read from a file.
+enum Source<'a> {
+    File(PathBuf),
+    Rendered(String),
+    /// For the binary: same as File, but a missing source path
+    /// surfaces as `SourceMissing` instead of an error.
+    BinaryFile(&'a Path),
+}
+
+struct Slot<'a> {
+    device_rel: &'static str,
+    source: Source<'a>,
+}
+
+fn slots<'a>(source: &'a KualSource, conf: &ServerConfRender) -> Vec<Slot<'a>> {
+    vec![
+        Slot {
+            device_rel: "bin/sidle",
+            source: Source::BinaryFile(source.binary_path.as_path()),
+        },
+        Slot {
+            device_rel: "bin/sidle.sh",
+            source: Source::File(source.bundle_dir.join("bin/sidle.sh")),
+        },
+        Slot {
+            device_rel: "config.xml",
+            source: Source::File(source.bundle_dir.join("config.xml")),
+        },
+        Slot {
+            device_rel: "menu.json",
+            source: Source::File(source.bundle_dir.join("menu.json")),
+        },
+        Slot {
+            device_rel: "etc/server.conf",
+            source: Source::Rendered(conf.render()),
+        },
+    ]
+}
+
+/// Hex sha256 of a file's bytes. Returns `None` if the path doesn't
+/// exist (the common case for both source-missing and device-missing
+/// files); other errors propagate.
+pub fn sha256_file_opt(path: &Path) -> Result<Option<String>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(sha256_bytes(&bytes))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::from(e)).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+pub fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// Compute the per-file staleness given a source layout, a rendered
+/// server.conf, and the mount path of the connected mass-storage
+/// device (e.g. `/Volumes/Kindle`).
+///
+/// Pure function — does no writes, no network. Uses the host
+/// filesystem to read both sides.
+pub fn compute_status(
+    source: &KualSource,
+    conf: &ServerConfRender,
+    device_mount: &Path,
+) -> Result<KualStatus> {
+    let device_root = device_mount.join(DEVICE_BUNDLE_REL);
+    let mut files = Vec::with_capacity(5);
+    let mut binary_missing = false;
+
+    for slot in slots(source, conf) {
+        let device_path = device_root.join(slot.device_rel);
+        let device_hash = sha256_file_opt(&device_path)?;
+
+        let state = match slot.source {
+            Source::Rendered(text) => {
+                let source_hash = sha256_bytes(text.as_bytes());
+                classify(source_hash, device_hash)
+            }
+            Source::File(path) => {
+                let source_hash = sha256_file_opt(&path)?.ok_or_else(|| {
+                    anyhow!(
+                        "KUAL bundle source missing at {} — repo layout drift?",
+                        path.display()
+                    )
+                })?;
+                classify(source_hash, device_hash)
+            }
+            Source::BinaryFile(path) => match sha256_file_opt(path)? {
+                Some(source_hash) => classify(source_hash, device_hash),
+                None => {
+                    binary_missing = true;
+                    KualFileState::SourceMissing
+                }
+            },
+        };
+
+        files.push(KualFileStatus {
+            device_path: slot.device_rel.to_string(),
+            state,
+        });
+    }
+
+    let overall = if binary_missing {
+        KualOverall::BinaryNotBuilt
+    } else {
+        summarize(&files)
+    };
+
+    let binary_mtime_ms = mtime_ms(&source.binary_path);
+    let native_source_mtime_ms = newest_native_source_mtime_ms(source);
+
+    Ok(KualStatus {
+        overall,
+        files,
+        binary_mtime_ms,
+        native_source_mtime_ms,
+    })
+}
+
+fn classify(source_hash: String, device_hash: Option<String>) -> KualFileState {
+    match device_hash {
+        None => KualFileState::Missing { source_hash },
+        Some(dh) if dh == source_hash => KualFileState::Synced,
+        Some(dh) => KualFileState::Stale {
+            source_hash,
+            device_hash: dh,
+        },
+    }
+}
+
+fn summarize(files: &[KualFileStatus]) -> KualOverall {
+    let mut stale = 0u32;
+    let mut missing = 0u32;
+    let mut synced = 0u32;
+    for f in files {
+        match f.state {
+            KualFileState::Synced => synced += 1,
+            KualFileState::Stale { .. } => stale += 1,
+            KualFileState::Missing { .. } => missing += 1,
+            KualFileState::SourceMissing => {}
+        }
+    }
+    if stale == 0 && missing == 0 {
+        KualOverall::InSync
+    } else if synced == 0 && stale == 0 {
+        KualOverall::NotInstalled
+    } else {
+        KualOverall::Stale {
+            stale_count: stale,
+            missing_count: missing,
+        }
+    }
+}
+
+fn mtime_ms(path: &Path) -> Option<u64> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?;
+    let dur = mtime.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    Some(dur.as_millis() as u64)
+}
+
+/// Walks `sidle/native/src/` and returns the newest mtime found. The
+/// frontend uses this to flag "binary older than source" in the UI
+/// without re-running cargo. Best-effort: any IO error returns `None`.
+fn newest_native_source_mtime_ms(source: &KualSource) -> Option<u64> {
+    // The native crate lives at `<repo>/sidle/native/src/`. We don't
+    // have the repo root in KualSource, so derive it from
+    // `bundle_dir` which is `<repo>/kual/sidle`.
+    let repo = source.bundle_dir.parent()?.parent()?;
+    let native_src = repo.join("sidle").join("native").join("src");
+    walk_newest_mtime(&native_src)
+}
+
+fn walk_newest_mtime(dir: &Path) -> Option<u64> {
+    let mut newest: Option<u64> = None;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let read = match std::fs::read_dir(&p) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            let ft = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if ft.is_dir() {
+                stack.push(path);
+            } else if ft.is_file() {
+                if let Some(ms) = mtime_ms(&path) {
+                    newest = Some(newest.map_or(ms, |n| n.max(ms)));
+                }
+            }
+        }
+    }
+    newest
+}
+
+/// Install every slot. For each: skip if Synced, write-via-temp +
+/// rename otherwise. On failure, record per-file and continue — a
+/// partial install is recoverable on the next click.
+///
+/// `on_progress` fires once per file with its outcome. The Tauri
+/// command wires this to `kual:install-progress` events for live UI
+/// updates; tests can pass `|_| {}`.
+pub fn install_all(
+    source: &KualSource,
+    conf: &ServerConfRender,
+    device_mount: &Path,
+    mut on_progress: impl FnMut(&KualFileInstallResult),
+) -> Result<KualInstallReport> {
+    let device_root = device_mount.join(DEVICE_BUNDLE_REL);
+    // The bin/ and etc/ subdirs may not exist on a fresh install.
+    std::fs::create_dir_all(device_root.join("bin"))
+        .with_context(|| format!("mkdir {}", device_root.join("bin").display()))?;
+    std::fs::create_dir_all(device_root.join("etc"))
+        .with_context(|| format!("mkdir {}", device_root.join("etc").display()))?;
+
+    let mut results = Vec::with_capacity(5);
+    for slot in slots(source, conf) {
+        let dest = device_root.join(slot.device_rel);
+        let result = install_one(&slot, &dest);
+        on_progress(&result);
+        results.push(result);
+    }
+    Ok(KualInstallReport { results })
+}
+
+fn install_one(slot: &Slot<'_>, dest: &Path) -> KualFileInstallResult {
+    let bytes_result: Result<Vec<u8>> = match &slot.source {
+        Source::Rendered(text) => Ok(text.as_bytes().to_vec()),
+        Source::File(path) => std::fs::read(path)
+            .with_context(|| format!("read source {}", path.display())),
+        Source::BinaryFile(path) => std::fs::read(path)
+            .with_context(|| format!("read binary {}", path.display())),
+    };
+
+    let bytes = match bytes_result {
+        Ok(b) => b,
+        Err(e) => {
+            return KualFileInstallResult::Failed {
+                device_path: slot.device_rel.to_string(),
+                error: format!("{e:#}"),
+            };
+        }
+    };
+
+    let source_hash = sha256_bytes(&bytes);
+    if let Ok(Some(device_hash)) = sha256_file_opt(dest) {
+        if device_hash == source_hash {
+            return KualFileInstallResult::Skipped {
+                device_path: slot.device_rel.to_string(),
+            };
+        }
+    }
+
+    if let Err(e) = atomic_write(dest, &bytes) {
+        return KualFileInstallResult::Failed {
+            device_path: slot.device_rel.to_string(),
+            error: format!("{e:#}"),
+        };
+    }
+    KualFileInstallResult::Wrote {
+        device_path: slot.device_rel.to_string(),
+    }
+}
+
+fn atomic_write(dest: &Path, bytes: &[u8]) -> Result<()> {
+    let partial = with_suffix(dest, ".partial");
+    {
+        let mut f = std::fs::File::create(&partial)
+            .with_context(|| format!("create {}", partial.display()))?;
+        f.write_all(bytes)
+            .with_context(|| format!("write {}", partial.display()))?;
+        // FAT/exFAT doesn't actually fsync the way a UNIX fs does, but
+        // calling it doesn't hurt and gives the macOS VFS a hint to
+        // flush before rename.
+        let _ = f.sync_all();
+    }
+    std::fs::rename(&partial, dest).with_context(|| {
+        format!("rename {} -> {}", partial.display(), dest.display())
+    })?;
+    Ok(())
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Detect the IPv4 address sidle-server is reachable at from the LAN.
+///
+/// Uses the "no-packet" UDP trick: `bind` + `connect` to a public-
+/// internet address, then read `local_addr()`. The kernel picks the
+/// interface it would route via, without actually sending anything.
+/// Pure-std, no extra deps.
+///
+/// Returns `None` if there's no routable interface (e.g. fully
+/// offline). Callers fall back to whatever HOST is currently in the
+/// on-device server.conf, or prompt the user.
+pub fn detect_lan_ipv4() -> Option<Ipv4Addr> {
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    // Use a TEST-NET-3 address (RFC 5737) rather than 8.8.8.8 — we
+    // don't want to leak that "is this machine using sidle?" to any
+    // network observer, and TEST-NET addresses are guaranteed
+    // unreachable so even a misbehaving kernel won't actually send.
+    sock.set_read_timeout(Some(Duration::from_millis(50))).ok();
+    sock.connect("203.0.113.1:80").ok()?;
+    match sock.local_addr().ok()? {
+        SocketAddr::V4(v4) => {
+            let ip = *v4.ip();
+            // Skip the loopback range — `bind("0.0.0.0:0").connect(...)`
+            // on a fully-disconnected machine can sometimes hand back
+            // 127.0.0.1, which is useless to the Kindle.
+            if IpAddr::V4(ip).is_loopback() {
+                None
+            } else {
+                Some(ip)
+            }
+        }
+        SocketAddr::V6(_) => None,
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_conf() -> ServerConfRender {
+        ServerConfRender {
+            host: "192.168.0.42".into(),
+            port: 8731,
+            token: "abc123".into(),
+        }
+    }
+
+    #[test]
+    fn render_has_trailing_newline_and_all_fields() {
+        let conf = make_conf();
+        let out = conf.render();
+        assert!(out.ends_with('\n'));
+        assert!(out.contains("HOST=192.168.0.42"));
+        assert!(out.contains("PORT=8731"));
+        assert!(out.contains("TOKEN=abc123"));
+    }
+
+    #[test]
+    fn render_is_byte_stable() {
+        // Same inputs must produce identical bytes — staleness check is
+        // byte-equality, any drift would re-trigger "stale" forever.
+        let a = make_conf().render();
+        let b = make_conf().render();
+        assert_eq!(a, b);
+    }
+
+    fn write_file(path: &Path, contents: &[u8]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// Build a minimal source layout under `repo_root`:
+    /// `<repo>/kual/sidle/{config.xml,menu.json,bin/sidle.sh}` and
+    /// optionally `<repo>/target/.../release/sidle`.
+    fn make_source(repo: &Path, include_binary: bool) -> KualSource {
+        let bundle = repo.join("kual/sidle");
+        write_file(&bundle.join("config.xml"), b"<config/>");
+        write_file(&bundle.join("menu.json"), b"{\"items\":[]}");
+        write_file(&bundle.join("bin/sidle.sh"), b"#!/bin/sh\nexec sidle\n");
+        if include_binary {
+            write_file(
+                &repo
+                    .join("target")
+                    .join(NATIVE_TARGET_TRIPLE)
+                    .join("release/sidle"),
+                b"\x7fELF...fake-binary",
+            );
+        }
+        KualSource::from_workspace_root(repo)
+    }
+
+    #[test]
+    fn status_not_installed_when_device_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let device = tempfile::tempdir().unwrap();
+
+        let status = compute_status(&source, &make_conf(), device.path()).unwrap();
+        assert_eq!(status.overall, KualOverall::NotInstalled);
+        assert!(status.files.iter().all(|f| matches!(f.state, KualFileState::Missing { .. })));
+    }
+
+    #[test]
+    fn status_in_sync_after_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let device = tempfile::tempdir().unwrap();
+        let conf = make_conf();
+
+        install_all(&source, &conf, device.path(), |_| {}).unwrap();
+        let status = compute_status(&source, &conf, device.path()).unwrap();
+        assert_eq!(status.overall, KualOverall::InSync);
+    }
+
+    #[test]
+    fn status_stale_when_token_rotated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let device = tempfile::tempdir().unwrap();
+
+        // First install with one token.
+        let conf1 = make_conf();
+        install_all(&source, &conf1, device.path(), |_| {}).unwrap();
+
+        // Token rotates; everything else identical.
+        let mut conf2 = conf1.clone();
+        conf2.token = "rotated".into();
+        let status = compute_status(&source, &conf2, device.path()).unwrap();
+
+        match status.overall {
+            KualOverall::Stale { stale_count, missing_count } => {
+                assert_eq!(stale_count, 1, "only server.conf should be stale");
+                assert_eq!(missing_count, 0);
+            }
+            other => panic!("expected Stale, got {other:?}"),
+        }
+
+        let conf_status = status
+            .files
+            .iter()
+            .find(|f| f.device_path == "etc/server.conf")
+            .unwrap();
+        assert!(matches!(conf_status.state, KualFileState::Stale { .. }));
+    }
+
+    #[test]
+    fn status_binary_not_built_when_missing_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), false); // no binary
+        let device = tempfile::tempdir().unwrap();
+
+        let status = compute_status(&source, &make_conf(), device.path()).unwrap();
+        assert_eq!(status.overall, KualOverall::BinaryNotBuilt);
+        let bin = status.files.iter().find(|f| f.device_path == "bin/sidle").unwrap();
+        assert_eq!(bin.state, KualFileState::SourceMissing);
+    }
+
+    #[test]
+    fn install_skips_synced_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let device = tempfile::tempdir().unwrap();
+        let conf = make_conf();
+
+        install_all(&source, &conf, device.path(), |_| {}).unwrap();
+        let report = install_all(&source, &conf, device.path(), |_| {}).unwrap();
+
+        assert!(report.results.iter().all(|r| matches!(r, KualFileInstallResult::Skipped { .. })),
+                "second install on identical inputs should skip everything");
+    }
+
+    #[test]
+    fn install_rewrites_only_stale_file_after_token_rotation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let device = tempfile::tempdir().unwrap();
+
+        let conf1 = make_conf();
+        install_all(&source, &conf1, device.path(), |_| {}).unwrap();
+
+        let mut conf2 = conf1.clone();
+        conf2.token = "rotated".into();
+        let report = install_all(&source, &conf2, device.path(), |_| {}).unwrap();
+
+        let written: Vec<&str> = report
+            .results
+            .iter()
+            .filter_map(|r| match r {
+                KualFileInstallResult::Wrote { device_path } => Some(device_path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(written, vec!["etc/server.conf"]);
+    }
+
+    #[test]
+    fn install_creates_subdirs_on_clean_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let device = tempfile::tempdir().unwrap();
+
+        install_all(&source, &make_conf(), device.path(), |_| {}).unwrap();
+        assert!(device.path().join("extensions/sidle/bin/sidle").exists());
+        assert!(device.path().join("extensions/sidle/bin/sidle.sh").exists());
+        assert!(device.path().join("extensions/sidle/etc/server.conf").exists());
+        assert!(device.path().join("extensions/sidle/config.xml").exists());
+        assert!(device.path().join("extensions/sidle/menu.json").exists());
+    }
+
+    #[test]
+    fn install_progress_fires_per_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let device = tempfile::tempdir().unwrap();
+
+        let mut events = 0;
+        install_all(&source, &make_conf(), device.path(), |_| events += 1).unwrap();
+        assert_eq!(events, 5); // bin/sidle, bin/sidle.sh, config.xml, menu.json, etc/server.conf
+    }
+
+    #[test]
+    fn sha256_bytes_known_vector() {
+        // sha256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        assert_eq!(
+            sha256_bytes(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn detect_lan_ipv4_returns_something_or_none_without_panicking() {
+        // Can't assert a specific IP in CI, just that the call is
+        // side-effect-free and doesn't panic on either outcome.
+        let _ = detect_lan_ipv4();
+    }
+}

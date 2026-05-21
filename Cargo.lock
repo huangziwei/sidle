@@ -4466,6 +4466,7 @@ dependencies = [
  "chrono",
  "dirs",
  "futures",
+ "hex",
  "libc",
  "mtp-rs",
  "reqwest 0.12.28",

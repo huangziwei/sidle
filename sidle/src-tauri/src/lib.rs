@@ -47,6 +47,8 @@ pub fn run() {
             commands::device::device_send,
             commands::device::device_delete,
             commands::device::device_import_orphan,
+            commands::device::kual_status,
+            commands::device::kual_install,
             commands::server::server_status,
             commands::server::server_start,
             commands::server::server_stop,

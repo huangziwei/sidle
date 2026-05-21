@@ -58,7 +58,21 @@ fn run() -> anyhow::Result<()> {
     log(format!("server: http://{}:{}", cfg.host, cfg.port));
 
     let t0 = Instant::now();
-    let books = api::list_books(&cfg)?;
+    let books = match api::list_books(&cfg) {
+        Ok(b) => b,
+        Err(api::SidleError::TokenMismatch) => {
+            // Most common failure mode after sidle-server rotates its
+            // .server-token: every request 403s and the user just sees
+            // "nothing happened". Draw a friendly toast on the e-ink so
+            // there's a visible breadcrumb pointing at the desktop app's
+            // KUAL deploy button — and log the same message for log-
+            // tailers.
+            log("token rejected by sidle-server (401/403); resync via sidle desktop app".to_string());
+            let _ = draw_boot_toast("Token mismatch.\nPlug Kindle into sidle and click Update KUAL.");
+            return Ok(());
+        }
+        Err(api::SidleError::Other(e)) => return Err(e),
+    };
     let total_pages = pager::n_pages(books.len());
     log(format!(
         "books: {} ({} pages, list in {:?})",
@@ -70,13 +84,17 @@ fn run() -> anyhow::Result<()> {
     let t_cov = Instant::now();
     let covers: Vec<Option<DynamicImage>> = books
         .iter()
-        .map(|book| {
-            match api::fetch_cover(&cfg, book.id).and_then(|b| grid::decode_resize(&b)) {
+        .map(|book| match api::fetch_cover(&cfg, book.id) {
+            Ok(bytes) => match grid::decode_resize(&bytes) {
                 Ok(img) => Some(img),
                 Err(err) => {
                     log(format!("cover {}: {err}", book.id));
                     None
                 }
+            },
+            Err(err) => {
+                log(format!("cover {}: {err}", book.id));
+                None
             }
         })
         .collect();
@@ -157,22 +175,31 @@ fn run() -> anyhow::Result<()> {
         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
 
         let dl_t0 = Instant::now();
-        let result = api::download_book(&cfg, book).and_then(|d| {
-            persist(&d.filename, &d.bytes).map(|saved| (saved, d.bytes.len()))
-        });
-
-        let banner_msg = match result {
-            Ok((saved, n)) => {
-                log(format!(
-                    "downloaded {} bytes to {} in {:?}",
-                    n,
-                    saved.display(),
-                    dl_t0.elapsed()
-                ));
-                let _ = Command::new("touch").arg(CLEANINDEX).output();
-                "Downloaded → Library will refresh shortly".to_string()
+        let banner_msg = match api::download_book(&cfg, book) {
+            Ok(d) => match persist(&d.filename, &d.bytes) {
+                Ok(saved) => {
+                    log(format!(
+                        "downloaded {} bytes to {} in {:?}",
+                        d.bytes.len(),
+                        saved.display(),
+                        dl_t0.elapsed()
+                    ));
+                    let _ = Command::new("touch").arg(CLEANINDEX).output();
+                    "Downloaded → Library will refresh shortly".to_string()
+                }
+                Err(err) => {
+                    log(format!("persist failed: {err:#}"));
+                    format!("Failed: {err}")
+                }
+            },
+            Err(api::SidleError::TokenMismatch) => {
+                // Token rotated mid-session (unusual: list_books got
+                // through, then the server rotated). Same breadcrumb
+                // as the boot-time mismatch.
+                log("token rejected during download — resync via sidle desktop app".to_string());
+                "Token mismatch.\nPlug Kindle into sidle and click Update KUAL.".to_string()
             }
-            Err(err) => {
+            Err(api::SidleError::Other(err)) => {
                 log(format!("download failed: {err:#}"));
                 format!("Failed: {err}")
             }
@@ -229,6 +256,25 @@ fn draw_gallery_page(
         MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: fb.var.yres },
         WAVEFORM_MODE_GC16,
     )?;
+    Ok(())
+}
+
+/// Boot-time toast for unrecoverable startup errors (token mismatch
+/// today; could grow). Opens the framebuffer just long enough to
+/// flash a message, then returns. Best-effort: any error short-
+/// circuits silently — caller has already logged the underlying
+/// problem and the worst-case is the same "nothing happened" symptom
+/// users were getting before.
+fn draw_boot_toast(msg: &str) -> anyhow::Result<()> {
+    let mut renderer = TextRenderer::load(FONT_PX)?;
+    let orient = orientation::Orientation::detect();
+    let _pillow = Pillow::disable()?;
+    let mut fb = Framebuffer::open(orientation::Orientation::Up)?;
+    let dirty = toast::draw(&mut fb, &mut renderer, msg);
+    fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+    // Linger 3× normal — boot toast is the only thing the user will
+    // see, vs in-app toasts that get redrawn over by the gallery.
+    thread::sleep(TOAST_LINGER * 3);
     Ok(())
 }
 

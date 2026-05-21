@@ -465,7 +465,7 @@ button {
   top: calc(100% + 6px);
   right: 0;
   width: 380px;
-  max-height: 60vh;
+  max-height: 80vh;
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: 8px;
@@ -473,7 +473,10 @@ button {
   z-index: 150;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  /* Scroll the popover body once the KUAL + LAN-server + sent-list
+     sections together exceed max-height — used to be `hidden` which
+     clipped everything below the device fields. */
+  overflow-y: auto;
 }
 
 .device-popover[hidden] {
@@ -692,6 +695,92 @@ button {
 
 .server-token:hover {
   color: var(--accent);
+}
+
+/* KUAL extension — mirrors .server-section chrome. */
+
+.kual-section {
+  border-top: 1px solid var(--border);
+}
+
+.kual-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px 4px;
+}
+
+.kual-status-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.kual-status-label.in-sync {
+  color: #6fb361;
+}
+
+.kual-status-label.stale,
+.kual-status-label.not-installed {
+  color: #d8a05a;
+}
+
+.kual-status-label.binary-not-built {
+  color: #d86a5a;
+}
+
+.kual-actions {
+  padding: 4px 14px 6px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.kual-install-progress {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.kual-tip {
+  margin: 0;
+  padding: 0 14px 6px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.kual-tip[hidden] {
+  display: none;
+}
+
+.kual-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 14px 12px;
+  font-size: 11px;
+  display: grid;
+  row-gap: 4px;
+}
+
+.kual-file-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.kual-file-list li .kual-file-state.synced {
+  color: #6fb361;
+}
+
+.kual-file-list li .kual-file-state.stale,
+.kual-file-list li .kual-file-state.missing {
+  color: #d8a05a;
+}
+
+.kual-file-list li .kual-file-state.source-missing {
+  color: #d86a5a;
 }
 
 /* Views */

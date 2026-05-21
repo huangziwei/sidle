@@ -21,25 +21,44 @@ extensions/sidle/
     └── server.conf         your Mac's IP + sidle-server auth token
 ```
 
-## Install
+## Install / Update
 
-1. Build the binary on your Mac (one cargo invocation):
+After a one-time KUAL bootstrap (KUAL itself + `/mnt/us/extensions/`
+present on the device), every subsequent push is one click:
+
+1. Build the binary:
    ```
    cargo build --release --target armv7-unknown-linux-musleabihf -p sidle-native
    ```
-   Produces `target/armv7-unknown-linux-musleabihf/release/sidle`.
+2. Open the sidle desktop app, plug Kindle via USB, click the device
+   pill → **Install KUAL** (or **Update KUAL** if files are out of
+   date). The button copies the binary, the bundle files, and writes
+   `etc/server.conf` with the live LAN IP + sidle-server port + token
+   — staleness is content-hashed per file so already-synced files are
+   skipped. The same button also handles the most common silent
+   failure (token rotated after a `.server-token` regen) by always
+   re-rendering `server.conf` from the running server's current state.
+3. Eject the Kindle. KUAL → **Sidle**.
 
-2. Plug Kindle via USB, copy `kual/sidle/` to `/Volumes/Kindle/extensions/`,
-   replacing `bin/sidle` with the freshly built binary.
+### Manual install (first-time bootstrap or button unavailable)
 
+If `/Volumes/Kindle/extensions/sidle/` doesn't exist yet, or the
+desktop app isn't running, you can do it by hand:
+
+1. Build the binary as above.
+2. Plug Kindle via USB, copy `kual/sidle/` to
+   `/Volumes/Kindle/extensions/`, replacing `bin/sidle` with the
+   freshly built binary.
 3. Copy `etc/server.conf.example` to `etc/server.conf`, fill in:
    - `HOST` — your Mac's LAN IP
    - `PORT` — sidle-server port (default `8731`)
    - `TOKEN` — contents of `~/Library/Application Support/sidle/.server-token`
+4. Eject the Kindle. KUAL → **Sidle**.
 
-4. Eject the Kindle.
-
-5. From KUAL, tap **Sidle**.
+If the picker launches but blanks back to KUAL with no toast, tail
+`/mnt/us/sidle-native.log` on the next plug — a "token rejected" line
+means `.server-token` rotated and the on-device `server.conf` is
+stale. Click **Update KUAL** in the desktop app to resync.
 
 ## Usage
 

@@ -6,6 +6,9 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::device::DeviceInfo;
 use crate::device::dedrm::{self, PullResult};
+use crate::device::kual::{
+    self, KualInstallReport, KualOverall, KualStatus, ServerConfRender,
+};
 use crate::device::push::{self, DeleteResult, PushResult};
 use crate::library::db;
 use crate::state::AppState;
@@ -240,4 +243,84 @@ pub async fn device_import_orphan(
     }
     let _ = app.emit("device:pull-progress", &result);
     Ok(result)
+}
+
+// ----------------------------------------------------------------------------
+// KUAL deploy (Install / Update KUAL button)
+// ----------------------------------------------------------------------------
+
+/// Resolve the live `ServerConfRender` from app state. Same shape used
+/// by both `kual_status` and `kual_install` — keeping it in one place
+/// guarantees the staleness check and the actual install agree on
+/// what `server.conf` *should* contain.
+async fn render_conf(state: &AppState) -> Option<ServerConfRender> {
+    let server_status = state.server.status(&state.paths).await;
+    let host = kual::detect_lan_ipv4()?.to_string();
+    let token = server_status.token?;
+    let port = server_status.port.unwrap_or(server_status.default_port);
+    Some(ServerConfRender { host, port, token })
+}
+
+#[tauri::command]
+pub async fn kual_status(state: State<'_, AppState>) -> Result<KualStatus, String> {
+    let device = state.device.lock().await.clone();
+    let mount = match device.as_ref().and_then(|d| d.mass_storage_mount()) {
+        Some(m) => m,
+        // No mass-storage Kindle connected (or MTP-only Scribe). The
+        // section is hidden by the UI when overall == DeviceDisconnected.
+        None => {
+            return Ok(KualStatus {
+                overall: KualOverall::DeviceDisconnected,
+                files: Vec::new(),
+                binary_mtime_ms: None,
+                native_source_mtime_ms: None,
+            });
+        }
+    };
+
+    // If we can't render a conf (no server token, no LAN IP), fall back
+    // to a placeholder so the binary/bundle slots still get checked.
+    // The status will read "server.conf stale" but at least the user
+    // sees which other files need pushing.
+    let conf = render_conf(&state).await.unwrap_or(ServerConfRender {
+        host: String::new(),
+        port: 0,
+        token: String::new(),
+    });
+
+    let source = state.kual_source.clone();
+    tokio::task::spawn_blocking(move || kual::compute_status(&source, &conf, &mount))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn kual_install(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<KualInstallReport, String> {
+    let device = state.device.lock().await.clone();
+    let mount = device
+        .as_ref()
+        .and_then(|d| d.mass_storage_mount())
+        .ok_or_else(|| "no mass-storage Kindle connected".to_string())?;
+
+    // Hard-fail if any input the conf needs is missing — better than
+    // writing a broken server.conf that'd silently 403 the picker.
+    let conf = render_conf(&state).await.ok_or_else(|| {
+        "couldn't resolve server.conf inputs (need a running server with token + a LAN IP)"
+            .to_string()
+    })?;
+
+    let source = state.kual_source.clone();
+    let app_handle = app.clone();
+    tokio::task::spawn_blocking(move || {
+        kual::install_all(&source, &conf, &mount, |progress| {
+            let _ = app_handle.emit("kual:install-progress", progress);
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
 }

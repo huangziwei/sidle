@@ -28,6 +28,9 @@ serde_json = "1"
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "fs", "time"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
+# Hex-encode sha256 digests for the KUAL deploy staleness check, where
+# source-vs-device hashes are surfaced to the frontend as strings.
+hex = "0.4"
 thiserror = "2"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

@@ -1,12 +1,14 @@
 //! Process-wide state owned by Tauri's manager.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use rusqlite::Connection;
 use tauri::AppHandle;
 use tokio::sync::Mutex;
 
+use crate::device::kual::KualSource;
 use crate::device::monitor::{self, DeviceState};
 use crate::library::{LibraryPaths, db};
 use crate::queue::{self, QueueHandle};
@@ -28,6 +30,35 @@ pub struct AppState {
     pub queue: QueueHandle,
     pub device: DeviceState,
     pub server: ServerHandle,
+    /// Source-of-truth paths for the KUAL deploy button (binary +
+    /// bundle dir). Resolved once at startup by walking up from
+    /// `CARGO_MANIFEST_DIR` to the workspace Cargo.toml.
+    pub kual_source: KualSource,
+}
+
+/// Walk up from `CARGO_MANIFEST_DIR` (`<repo>/sidle/src-tauri`) until
+/// we hit a `Cargo.toml` declaring `[workspace]` — that's the repo
+/// root. Robust to layout changes that don't move the workspace
+/// manifest. If the desktop app is ever shipped packaged (outside the
+/// dev workspace), this returns Err and KualSource paths will report
+/// `SourceMissing` to the UI.
+fn find_workspace_root() -> Result<PathBuf> {
+    let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut p: &Path = start.as_path();
+    loop {
+        let candidate = p.join("Cargo.toml");
+        if candidate.exists()
+            && std::fs::read_to_string(&candidate)
+                .ok()
+                .is_some_and(|s| s.contains("[workspace]"))
+        {
+            return Ok(p.to_path_buf());
+        }
+        match p.parent() {
+            Some(parent) => p = parent,
+            None => return Err(anyhow!("workspace root not found above {}", start.display())),
+        }
+    }
 }
 
 impl AppState {
@@ -110,12 +141,26 @@ impl AppState {
             queue.clone(),
         );
 
+        let kual_source = match find_workspace_root() {
+            Ok(root) => KualSource::from_workspace_root(&root),
+            Err(e) => {
+                eprintln!(
+                    "[sidle/bootstrap] kual: workspace root not found ({e}); \
+                     KUAL deploy section will show SourceMissing for all files"
+                );
+                // Synthesize a path that won't resolve — compute_status
+                // handles missing source files gracefully.
+                KualSource::from_workspace_root(Path::new("/__no_workspace__"))
+            }
+        };
+
         Ok(Self {
             db,
             paths,
             queue,
             device,
             server: ServerHandle::default(),
+            kual_source,
         })
     }
 }
