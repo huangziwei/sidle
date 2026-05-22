@@ -507,16 +507,26 @@ impl<'a> StyleBuilder<'a> {
     /// 2. Extract CSS string value from IR struct via `extract_ir_field()`
     /// 3. Apply schema transform to convert CSS → KFX
     ///
+    /// `doc_writing_mode` is the document-effective writing-mode, computed
+    /// once before any ingest. It's only consulted by the `WritingMode`
+    /// arm so per-page horizontal-tb overrides survive in vertical books;
+    /// callers without a doc-level mode hint can pass
+    /// `WritingMode::default()`.
+    ///
     /// Adding new properties only requires:
     /// 1. Add variant to `IrField` enum
     /// 2. Add extraction case to `extract_ir_field()`
     /// 3. Add schema rule with `ir_field: Some(IrField::NewField)`
-    pub fn ingest_ir_style(&mut self, ir_style: &ir_style::ComputedStyle) -> &mut Self {
+    pub fn ingest_ir_style(
+        &mut self,
+        ir_style: &ir_style::ComputedStyle,
+        doc_writing_mode: ir_style::WritingMode,
+    ) -> &mut Self {
         // Iterate over all schema rules that have IR field mappings
         for rule in self.schema.ir_mapped_rules() {
             if let Some(ir_field) = rule.ir_field {
                 // Extract CSS string from IR struct (returns None for default values)
-                if let Some(css_value) = extract_ir_field(ir_style, ir_field) {
+                if let Some(css_value) = extract_ir_field(ir_style, ir_field, doc_writing_mode) {
                     // Apply schema transform to convert CSS → KFX
                     self.apply_single(rule.ir_key, &css_value);
                 }
@@ -698,7 +708,7 @@ mod tests {
         let mut ir = IrStyle::default();
         ir.writing_mode = WritingMode::VerticalRl;
 
-        builder.ingest_ir_style(&ir);
+        builder.ingest_ir_style(&ir, WritingMode::default());
         let style = builder.build();
 
         let value = style

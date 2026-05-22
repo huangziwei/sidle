@@ -1777,7 +1777,18 @@ fn is_default_length(value: ir_style::Length, default: ir_style::Length) -> bool
 /// this function provides the HOW (accessing the struct field, checking defaults).
 ///
 /// Returns `None` if the field has its default value (nothing to emit).
-pub fn extract_ir_field(ir_style: &ir_style::ComputedStyle, field: IrField) -> Option<String> {
+///
+/// `doc_writing_mode` is the document-effective writing-mode (precomputed
+/// from the IR style pools before any ingest). For most fields this is
+/// ignored. For `IrField::WritingMode` specifically, it overrides the
+/// CSS-spec default — so an explicit `horizontal-tb` in a vertical book
+/// (i.e. a per-page override) is emitted, instead of getting silently
+/// dropped because it matches the static spec default.
+pub fn extract_ir_field(
+    ir_style: &ir_style::ComputedStyle,
+    field: IrField,
+    doc_writing_mode: ir_style::WritingMode,
+) -> Option<String> {
     let default = ir_style::ComputedStyle::default();
 
     match field {
@@ -2230,8 +2241,15 @@ pub fn extract_ir_field(ir_style: &ir_style::ComputedStyle, field: IrField) -> O
             }
         }
         // Phase 13: Writing mode
+        //
+        // Compare against `doc_writing_mode`, not the CSS-spec default.
+        // For horizontal books these coincide and behavior is unchanged;
+        // for vertical books an explicit `horizontal-tb` resolved by the
+        // cascade is a real override that must be emitted, otherwise KFX
+        // inheritance from `document_data.writing_mode = vertical_rl`
+        // takes over and the page renders vertical.
         IrField::WritingMode => {
-            if ir_style.writing_mode != default.writing_mode {
+            if ir_style.writing_mode != doc_writing_mode {
                 Some(ir_style.writing_mode.to_css_string())
             } else {
                 None
@@ -3012,12 +3030,12 @@ mod tests {
         use crate::style::{ComputedStyle, FontWeight};
 
         let default = ComputedStyle::default();
-        assert_eq!(extract_ir_field(&default, IrField::FontWeight), None);
+        assert_eq!(extract_ir_field(&default, IrField::FontWeight, ir_style::WritingMode::default()), None);
 
         let mut bold = ComputedStyle::default();
         bold.font_weight = FontWeight::BOLD;
         assert_eq!(
-            extract_ir_field(&bold, IrField::FontWeight),
+            extract_ir_field(&bold, IrField::FontWeight, ir_style::WritingMode::default()),
             Some("bold".to_string())
         );
     }
@@ -3027,12 +3045,12 @@ mod tests {
         use crate::style::{ComputedStyle, FontStyle};
 
         let default = ComputedStyle::default();
-        assert_eq!(extract_ir_field(&default, IrField::FontStyle), None);
+        assert_eq!(extract_ir_field(&default, IrField::FontStyle, ir_style::WritingMode::default()), None);
 
         let mut italic = ComputedStyle::default();
         italic.font_style = FontStyle::Italic;
         assert_eq!(
-            extract_ir_field(&italic, IrField::FontStyle),
+            extract_ir_field(&italic, IrField::FontStyle, ir_style::WritingMode::default()),
             Some("italic".to_string())
         );
     }
@@ -3042,12 +3060,12 @@ mod tests {
         use crate::style::{Color, ComputedStyle};
 
         let default = ComputedStyle::default();
-        assert_eq!(extract_ir_field(&default, IrField::Color), None);
+        assert_eq!(extract_ir_field(&default, IrField::Color, ir_style::WritingMode::default()), None);
 
         let mut styled = ComputedStyle::default();
         styled.color = Some(Color::rgb(255, 0, 0));
         assert_eq!(
-            extract_ir_field(&styled, IrField::Color),
+            extract_ir_field(&styled, IrField::Color, ir_style::WritingMode::default()),
             Some("#ff0000".to_string())
         );
     }
@@ -3057,12 +3075,12 @@ mod tests {
         use crate::style::{ComputedStyle, Length};
 
         let default = ComputedStyle::default();
-        assert_eq!(extract_ir_field(&default, IrField::MarginTop), None);
+        assert_eq!(extract_ir_field(&default, IrField::MarginTop, ir_style::WritingMode::default()), None);
 
         let mut styled = ComputedStyle::default();
         styled.margin_top = Length::Em(1.5);
         assert_eq!(
-            extract_ir_field(&styled, IrField::MarginTop),
+            extract_ir_field(&styled, IrField::MarginTop, ir_style::WritingMode::default()),
             Some("1.5em".to_string())
         );
     }
@@ -3803,12 +3821,12 @@ mod tests {
         use crate::style::{ComputedStyle, Length};
 
         let default = ComputedStyle::default();
-        assert_eq!(extract_ir_field(&default, IrField::LetterSpacing), None);
+        assert_eq!(extract_ir_field(&default, IrField::LetterSpacing, ir_style::WritingMode::default()), None);
 
         let mut styled = ComputedStyle::default();
         styled.letter_spacing = Length::Em(0.1);
         assert_eq!(
-            extract_ir_field(&styled, IrField::LetterSpacing),
+            extract_ir_field(&styled, IrField::LetterSpacing, ir_style::WritingMode::default()),
             Some("0.1em".to_string())
         );
     }
@@ -3818,12 +3836,12 @@ mod tests {
         use crate::style::{ComputedStyle, TextTransform};
 
         let default = ComputedStyle::default();
-        assert_eq!(extract_ir_field(&default, IrField::TextTransform), None);
+        assert_eq!(extract_ir_field(&default, IrField::TextTransform, ir_style::WritingMode::default()), None);
 
         let mut styled = ComputedStyle::default();
         styled.text_transform = TextTransform::Uppercase;
         assert_eq!(
-            extract_ir_field(&styled, IrField::TextTransform),
+            extract_ir_field(&styled, IrField::TextTransform, ir_style::WritingMode::default()),
             Some("uppercase".to_string())
         );
     }
@@ -3833,12 +3851,12 @@ mod tests {
         use crate::style::{BreakValue, ComputedStyle};
 
         let default = ComputedStyle::default();
-        assert_eq!(extract_ir_field(&default, IrField::BreakBefore), None);
+        assert_eq!(extract_ir_field(&default, IrField::BreakBefore, ir_style::WritingMode::default()), None);
 
         let mut styled = ComputedStyle::default();
         styled.break_before = BreakValue::Always;
         assert_eq!(
-            extract_ir_field(&styled, IrField::BreakBefore),
+            extract_ir_field(&styled, IrField::BreakBefore, ir_style::WritingMode::default()),
             Some("always".to_string())
         );
     }
@@ -3848,12 +3866,12 @@ mod tests {
         use crate::style::{BorderStyle, ComputedStyle};
 
         let default = ComputedStyle::default();
-        assert_eq!(extract_ir_field(&default, IrField::BorderStyleTop), None);
+        assert_eq!(extract_ir_field(&default, IrField::BorderStyleTop, ir_style::WritingMode::default()), None);
 
         let mut styled = ComputedStyle::default();
         styled.border_style_top = BorderStyle::Solid;
         assert_eq!(
-            extract_ir_field(&styled, IrField::BorderStyleTop),
+            extract_ir_field(&styled, IrField::BorderStyleTop, ir_style::WritingMode::default()),
             Some("solid".to_string())
         );
     }
@@ -3929,7 +3947,7 @@ mod tests {
         let mut style = ComputedStyle::default();
         style.width = Length::Percent(75.0);
 
-        let result = extract_ir_field(&style, IrField::SizingBounds);
+        let result = extract_ir_field(&style, IrField::SizingBounds, ir_style::WritingMode::default());
         assert_eq!(result, Some("content-box".to_string()));
     }
 
@@ -3942,7 +3960,7 @@ mod tests {
         style.box_sizing = BoxSizing::BorderBox;
         style.width = Length::Percent(100.0);
 
-        let result = extract_ir_field(&style, IrField::SizingBounds);
+        let result = extract_ir_field(&style, IrField::SizingBounds, ir_style::WritingMode::default());
         assert_eq!(result, Some("border-box".to_string()));
     }
 
@@ -3953,7 +3971,7 @@ mod tests {
         // No width/height = no sizing_bounds
         let style = ComputedStyle::default();
 
-        let result = extract_ir_field(&style, IrField::SizingBounds);
+        let result = extract_ir_field(&style, IrField::SizingBounds, ir_style::WritingMode::default());
         assert_eq!(result, None);
     }
 
@@ -3966,7 +3984,7 @@ mod tests {
         style.margin_left = Length::Auto;
         style.margin_right = Length::Auto;
 
-        let result = extract_ir_field(&style, IrField::BoxAlign);
+        let result = extract_ir_field(&style, IrField::BoxAlign, ir_style::WritingMode::default());
         assert_eq!(result, Some("center".to_string()));
     }
 
@@ -3979,7 +3997,7 @@ mod tests {
         style.margin_left = Length::Auto;
         style.margin_right = Length::Px(0.0);
 
-        let result = extract_ir_field(&style, IrField::BoxAlign);
+        let result = extract_ir_field(&style, IrField::BoxAlign, ir_style::WritingMode::default());
         assert_eq!(result, None);
     }
 
@@ -4064,12 +4082,12 @@ mod tests {
         use crate::style::{BorderCollapse, ComputedStyle};
 
         let default = ComputedStyle::default();
-        assert_eq!(extract_ir_field(&default, IrField::BorderCollapse), None);
+        assert_eq!(extract_ir_field(&default, IrField::BorderCollapse, ir_style::WritingMode::default()), None);
 
         let mut styled = ComputedStyle::default();
         styled.border_collapse = BorderCollapse::Collapse;
         assert_eq!(
-            extract_ir_field(&styled, IrField::BorderCollapse),
+            extract_ir_field(&styled, IrField::BorderCollapse, ir_style::WritingMode::default()),
             Some("collapse".to_string())
         );
     }
@@ -4079,12 +4097,12 @@ mod tests {
         use crate::style::{ComputedStyle, Length};
 
         let default = ComputedStyle::default();
-        assert_eq!(extract_ir_field(&default, IrField::BorderSpacing), None);
+        assert_eq!(extract_ir_field(&default, IrField::BorderSpacing, ir_style::WritingMode::default()), None);
 
         let mut styled = ComputedStyle::default();
         styled.border_spacing = Length::Px(5.0);
         assert_eq!(
-            extract_ir_field(&styled, IrField::BorderSpacing),
+            extract_ir_field(&styled, IrField::BorderSpacing, ir_style::WritingMode::default()),
             Some("5px".to_string())
         );
     }
@@ -4095,18 +4113,18 @@ mod tests {
 
         let default = ComputedStyle::default();
         // HorizontalTb is the default, so nothing to emit
-        assert_eq!(extract_ir_field(&default, IrField::WritingMode), None);
+        assert_eq!(extract_ir_field(&default, IrField::WritingMode, ir_style::WritingMode::default()), None);
 
         let mut styled = ComputedStyle::default();
         styled.writing_mode = WritingMode::VerticalRl;
         assert_eq!(
-            extract_ir_field(&styled, IrField::WritingMode),
+            extract_ir_field(&styled, IrField::WritingMode, ir_style::WritingMode::default()),
             Some("vertical-rl".to_string())
         );
 
         styled.writing_mode = WritingMode::VerticalLr;
         assert_eq!(
-            extract_ir_field(&styled, IrField::WritingMode),
+            extract_ir_field(&styled, IrField::WritingMode, ir_style::WritingMode::default()),
             Some("vertical-lr".to_string())
         );
     }

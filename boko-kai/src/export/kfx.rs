@@ -275,6 +275,14 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
     // Note: TOC anchor entity IDs are computed AFTER Pass 2 chapter processing
     // since anchors are created during content generation.
 
+    // Determine the document-level writing-mode by scanning IR style pools
+    // across every chapter. This must happen *before* Pass 2 starts
+    // registering KFX styles — otherwise `extract_ir_field` can't decide
+    // whether an explicit `horizontal-tb` cascade result is an override
+    // (in a vertical book) or just the spec default, and the horizontal
+    // override silently disappears into KFX's `vertical_rl` inheritance.
+    ctx.document_writing_mode = dominant_writing_mode_from_ir(book);
+
     // ========================================================================
     // PASS 2: SYNTHESIS (Generate Ion)
     // Now ctx.position_map is populated. We can resolve links correctly.
@@ -615,11 +623,10 @@ fn register_chapter_link_targets(
 /// KFX requires every storyline element to have a style reference.
 /// This generates all collected styles from the registry, including the default.
 fn build_style_fragments(ctx: &mut ExportContext) -> Vec<KfxFragment> {
-    // Snapshot the dominant writing-mode while the registry still has the
-    // per-style values — `drain_to_ion()` empties the registry but
-    // `build_document_data_fragment` runs *after* style fragments are built
-    // and needs to read the document-level writing-mode from somewhere.
-    ctx.document_writing_mode = dominant_writing_mode(ctx);
+    // `ctx.document_writing_mode` was set before Pass 2 by
+    // `dominant_writing_mode_from_ir` (scanning IR style pools), so the
+    // ingest pipeline could compare each style's `writing_mode` against it
+    // when deciding what to emit.
 
     // Normalise per-paragraph line-height values to `lh` ratios so Kindle's
     // Spacing slider can scale them. The body's dominant line-height
@@ -979,23 +986,35 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
     KfxFragment::singleton(KfxSymbol::DocumentData, document_data)
 }
 
-/// Return the writing-mode that best describes the document as a whole.
+/// Return the writing-mode that best describes the document as a whole, by
+/// scanning every chapter's IR style pool.
 ///
-/// Scans every emitted per-style writing_mode value and returns the most
-/// frequent one. Defaults to `HorizontalTb` for empty registries / books that
-/// never declare a writing-mode (matches CSS default).
-fn dominant_writing_mode(ctx: &ExportContext) -> KfxSymbol {
-    use crate::kfx::style_schema::KfxValue;
+/// This runs *before* Pass 2 so the answer is available while IR styles are
+/// being ingested. The ingest side then compares each style's `writing_mode`
+/// against this — emitting `writing_mode: horizontal_tb` on overrides in
+/// vertical books, which the previous KFX-side scan couldn't recover
+/// because `extract_ir_field` had already filtered horizontal-tb out as
+/// the CSS-spec default.
+///
+/// Distinct styles in the pool are counted (the existing semantic; usage
+/// frequency would also be valid but matches what `dominant_writing_mode`
+/// used to do). Defaults to `HorizontalTb` for empty pools / books that
+/// never declare a writing-mode.
+fn dominant_writing_mode_from_ir(book: &mut Book) -> KfxSymbol {
+    use crate::style::WritingMode;
     let mut horiz = 0usize;
     let mut vrl = 0usize;
     let mut vlr = 0usize;
-    for (_, style) in ctx.style_registry.styles() {
-        if let Some(KfxValue::Symbol(sym)) = style.get(KfxSymbol::WritingMode) {
-            match *sym {
-                s if s == KfxSymbol::VerticalRl => vrl += 1,
-                s if s == KfxSymbol::VerticalLr => vlr += 1,
-                s if s == KfxSymbol::HorizontalTb => horiz += 1,
-                _ => {}
+    let chapter_ids: Vec<_> = book.spine().iter().map(|e| e.id).collect();
+    for chapter_id in chapter_ids {
+        let Ok(chapter) = book.load_chapter(chapter_id) else {
+            continue;
+        };
+        for (_, style) in chapter.styles.iter() {
+            match style.writing_mode {
+                WritingMode::VerticalRl => vrl += 1,
+                WritingMode::VerticalLr => vlr += 1,
+                WritingMode::HorizontalTb => horiz += 1,
             }
         }
     }

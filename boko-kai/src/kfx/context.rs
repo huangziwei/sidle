@@ -886,6 +886,19 @@ impl ExportContext {
         self.register_ir_style_with_hint(ir_style, None)
     }
 
+    /// Mirror `self.document_writing_mode` (a KFX symbol) as the IR
+    /// `WritingMode` enum so the style ingest pipeline can compare against
+    /// it. The export entry point sets `document_writing_mode` before any
+    /// IR style is registered.
+    fn ir_document_writing_mode(&self) -> crate::style::WritingMode {
+        use crate::style::WritingMode;
+        match self.document_writing_mode {
+            KfxSymbol::VerticalRl => WritingMode::VerticalRl,
+            KfxSymbol::VerticalLr => WritingMode::VerticalLr,
+            _ => WritingMode::HorizontalTb,
+        }
+    }
+
     /// Register an IR style with an optional source-class hint.
     ///
     /// The hint is the originating element's `class` attribute string. The
@@ -898,7 +911,7 @@ impl ExportContext {
     ) -> u64 {
         let schema = crate::kfx::style_schema::StyleSchema::standard();
         let mut builder = crate::kfx::style_registry::StyleBuilder::new(schema);
-        builder.ingest_ir_style(ir_style);
+        builder.ingest_ir_style(ir_style, self.ir_document_writing_mode());
         let kfx_style = builder.build();
         self.style_registry
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
@@ -918,7 +931,7 @@ impl ExportContext {
         use crate::kfx::style_schema::KfxValue;
         let schema = crate::kfx::style_schema::StyleSchema::standard();
         let mut builder = crate::kfx::style_registry::StyleBuilder::new(schema);
-        builder.ingest_ir_style(ir_style);
+        builder.ingest_ir_style(ir_style, self.ir_document_writing_mode());
         let mut kfx_style = builder.build();
         if kfx_style.get(KfxSymbol::Underline).is_none() {
             kfx_style.set(
