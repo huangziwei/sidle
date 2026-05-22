@@ -333,12 +333,6 @@ impl Framebuffer {
         }
     }
 
-    /// Mutable view of the backing buffer. All UI drawing operates here in
-    /// user-visible coords; nothing hits the panel until `send_update`.
-    pub fn pixels_mut(&mut self) -> &mut [u8] {
-        &mut self.backing
-    }
-
     /// Fill a rectangle with `value` (8bpp grayscale: 0=black, 255=white).
     /// Writes to backing in user coords — the orientation transform happens
     /// once per refresh inside `send_update`.

@@ -56,7 +56,6 @@ const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(1000);
 /// fire a download or a too-short release to fire the discovery hint.
 struct Armed {
     book_idx: usize,
-    cell_idx: usize,
     down_at: Instant,
 }
 
@@ -202,7 +201,6 @@ fn run() -> anyhow::Result<()> {
                         )?;
                         armed = Some(Armed {
                             book_idx,
-                            cell_idx,
                             down_at: Instant::now(),
                         });
                         log(format!(
@@ -505,7 +503,6 @@ fn fetch_and_paint_page(
 /// users were getting before.
 fn draw_boot_toast(msg: &str) -> anyhow::Result<()> {
     let mut renderer = TextRenderer::load(FONT_PX)?;
-    let orient = orientation::Orientation::detect();
     let _pillow = Pillow::disable()?;
     let mut fb = Framebuffer::open(orientation::Orientation::Up)?;
     let dirty = toast::draw(&mut fb, &mut renderer, msg);

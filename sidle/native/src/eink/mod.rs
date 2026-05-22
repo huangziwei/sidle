@@ -8,7 +8,3 @@
 pub mod fb;
 pub mod pillow;
 pub mod touch;
-
-/// Re-export so `crate::eink::fb::Framebuffer` is reachable via the
-/// shorter `crate::eink::Framebuffer` from rendering modules.
-pub use fb::Framebuffer;

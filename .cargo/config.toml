@@ -15,9 +15,19 @@
 # crate in our graph has a C build-script. If that changes, the fallback is
 # `brew install zig && cargo install cargo-zigbuild` and switching to
 # `cargo zigbuild`.
-# rust-lld is bundled with rustup but not on PATH; the absolute path is
-# version-stable as long as the user stays on the `stable-x86_64-apple-darwin`
-# toolchain. If you rustup-switch, update this path or symlink it onto PATH.
+#
+# Prerequisite (one-time, host-architecture-agnostic): rust-lld is bundled with
+# rustup but lives inside the active toolchain at
+# `$(rustc --print sysroot)/lib/rustlib/<host-triple>/bin/rust-lld` — the host
+# triple differs between Intel (`x86_64-apple-darwin`) and Apple Silicon
+# (`aarch64-apple-darwin`) Macs, so this file must not hardcode it. Make it
+# discoverable on PATH with one symlink that resolves the host triple at link
+# time:
+#
+#   ln -sf "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/ {print $2}')/bin/rust-lld" \
+#       ~/.cargo/bin/rust-lld
+#
+# Re-run if you `rustup update` to a release that reshuffles bundled tools.
 [target.armv7-unknown-linux-musleabihf]
-linker = "/Users/ziweih/.rustup/toolchains/stable-x86_64-apple-darwin/lib/rustlib/x86_64-apple-darwin/bin/rust-lld"
+linker = "rust-lld"
 rustflags = ["-C", "link-self-contained=yes"]

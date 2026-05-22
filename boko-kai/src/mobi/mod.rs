@@ -1,15 +1,10 @@
-//! MOBI/AZW3 format support.
+//! MOBI/AZW3 format support (read-only).
 
 mod headers;
 pub mod huffcdic;
 pub(crate) mod index;
 pub mod palmdoc;
 pub mod parser;
-
-// Internal modules for AZW3 export
-pub(crate) mod skeleton;
-pub(crate) mod tbs;
-pub(crate) mod writer_transform;
 
 // Transform for reading MOBI/KF8 files
 pub mod transform;

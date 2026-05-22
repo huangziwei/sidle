@@ -31,15 +31,12 @@ use std::io::{self, Seek, Write};
 
 use crate::model::Book;
 
-mod azw3;
 mod css_gen;
 mod epub;
 mod html_synth;
 mod kfx;
 mod normalize;
-mod text;
 
-pub use azw3::{Azw3Config, Azw3Exporter};
 pub use css_gen::{CssArtifact, generate_css, generate_css_all};
 pub use epub::{EpubConfig, EpubExporter};
 pub use html_synth::{
@@ -48,7 +45,6 @@ pub use html_synth::{
 };
 pub use kfx::{KfxConfig, KfxExporter};
 pub use normalize::{ChapterContent, GlobalStylePool, NormalizedContent, normalize_book};
-pub use text::{MarkdownConfig, MarkdownExporter};
 
 /// Trait for exporting books to specific formats.
 ///

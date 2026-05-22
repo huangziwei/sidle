@@ -110,10 +110,6 @@ pub(crate) const SHA_INFIX_LEN: usize = 8;
 pub struct Book {
     pub id: i64,
     pub title: String,
-    #[serde(default)]
-    pub author: String,
-    #[serde(default)]
-    pub language: String,
     /// Full sha256 of the KFX bytes (64 hex chars). Used to derive the
     /// on-device filename so it matches what sidle-tauri's USB push would
     /// write — otherwise USB-side delete sees the file as `NotOurs` and
@@ -248,8 +244,6 @@ mod tests {
         Book {
             id: 7,
             title: "Sample Title".into(),
-            author: String::new(),
-            language: String::new(),
             kfx_sha256: sha.map(str::to_string),
         }
     }

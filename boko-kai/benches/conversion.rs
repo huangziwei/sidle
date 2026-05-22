@@ -7,7 +7,7 @@ use std::path::Path;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use boko::export::{Azw3Exporter, EpubExporter, Exporter, KfxExporter, MarkdownExporter};
+use boko::export::{EpubExporter, Exporter, KfxExporter};
 use boko::{Book, Format, Origin, Stylesheet, compile_html};
 
 const EPUB_BYTES: &[u8] = include_bytes!("../tests/fixtures/epictetus.epub");
@@ -74,17 +74,6 @@ fn bench_write_epub(c: &mut Criterion) {
     });
 }
 
-fn bench_write_azw3(c: &mut Criterion) {
-    let mut book = Book::from_bytes(EPUB_BYTES, Format::Epub).unwrap();
-
-    c.bench_function("write_azw3", |b| {
-        b.iter(|| {
-            let mut output = Cursor::new(Vec::new());
-            Azw3Exporter::new().export(&mut book, &mut output).unwrap();
-        });
-    });
-}
-
 fn bench_write_kfx(c: &mut Criterion) {
     let mut book = Book::from_bytes(EPUB_BYTES, Format::Epub).unwrap();
 
@@ -116,23 +105,6 @@ fn bench_compile_html_no_css(c: &mut Criterion) {
     });
 }
 
-// ============================================================================
-// Text Export Benchmarks
-// ============================================================================
-
-fn bench_write_markdown(c: &mut Criterion) {
-    let mut book = Book::from_bytes(EPUB_BYTES, Format::Epub).unwrap();
-
-    c.bench_function("write_markdown", |b| {
-        b.iter(|| {
-            let mut output = Vec::new();
-            MarkdownExporter::new()
-                .export(&mut book, &mut Cursor::new(&mut output))
-                .unwrap();
-        });
-    });
-}
-
 criterion_group!(
     benches,
     // Book I/O
@@ -140,12 +112,9 @@ criterion_group!(
     bench_read_azw3,
     bench_read_kfx,
     bench_write_epub,
-    bench_write_azw3,
     bench_write_kfx,
     // IR pipeline
     bench_compile_html,
     bench_compile_html_no_css,
-    // Text export
-    bench_write_markdown,
 );
 criterion_main!(benches);

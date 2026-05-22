@@ -9,7 +9,7 @@ use std::io::{self, Seek, Write};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use crate::export::{Azw3Exporter, EpubExporter, Exporter, KfxExporter, MarkdownExporter};
+use crate::export::{EpubExporter, Exporter, KfxExporter};
 use crate::import::{
     Azw3Importer, ChapterId, EpubImporter, Importer, KfxImporter, MobiImporter, SpineEntry,
 };
@@ -26,14 +26,12 @@ use crate::model::{AnchorTarget, Chapter, ResolvedLinks};
 pub enum Format {
     /// EPUB format (EPUB 2 or 3)
     Epub,
-    /// AZW3/KF8 format (modern Kindle)
+    /// AZW3/KF8 format (modern Kindle, input-only)
     Azw3,
-    /// MOBI format (legacy Kindle)
+    /// MOBI format (legacy Kindle, input-only)
     Mobi,
     /// KFX format (Kindle Format 10)
     Kfx,
-    /// Markdown (export only)
-    Markdown,
 }
 
 /// A resource (image, font, CSS, etc.) with its data and media type.
@@ -219,7 +217,6 @@ impl Format {
                 // `.kfx-zip` is Amazon's multi-container KFX bundle; the KFX
                 // importer auto-detects and dispatches it via its `open()`.
                 "kfx" | "kfx-zip" => Some(Format::Kfx),
-                "md" | "txt" => Some(Format::Markdown),
                 _ => None,
             })
     }
@@ -234,7 +231,7 @@ impl Format {
 
     /// Whether this format can be used for output/export.
     pub fn can_export(&self) -> bool {
-        !matches!(self, Format::Mobi)
+        matches!(self, Format::Epub | Format::Kfx)
     }
 }
 
@@ -275,12 +272,6 @@ impl Book {
                     Box::new(KfxImporter::open(path)?)
                 }
             }
-            Format::Markdown => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Markdown format is export-only",
-                ));
-            }
         };
         Ok(Self {
             backend,
@@ -298,12 +289,6 @@ impl Book {
             Format::Azw3 => Box::new(Azw3Importer::from_source(source)?),
             Format::Mobi => Box::new(MobiImporter::from_source(source)?),
             Format::Kfx => Box::new(KfxImporter::from_source(source)?),
-            Format::Markdown => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Markdown format is export-only",
-                ));
-            }
         };
         Ok(Self {
             backend,
@@ -572,10 +557,8 @@ impl Book {
     pub fn export<W: Write + Seek>(&mut self, format: Format, writer: &mut W) -> io::Result<()> {
         match format {
             Format::Epub => EpubExporter::new().export(self, writer),
-            Format::Azw3 => Azw3Exporter::new().export(self, writer),
-            Format::Markdown => MarkdownExporter::new().export(self, writer),
             Format::Kfx => KfxExporter::new().export(self, writer),
-            Format::Mobi => Err(io::Error::new(
+            Format::Azw3 | Format::Mobi => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("{:?} export is not supported", format),
             )),

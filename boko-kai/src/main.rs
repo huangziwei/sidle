@@ -1054,13 +1054,12 @@ fn print_toc_human(entries: &[TocEntry], depth: usize) {
 
 fn parse_format(fmt: &str) -> Result<Format, String> {
     match fmt.to_lowercase().as_str() {
-        "md" | "markdown" | "txt" | "text" => Ok(Format::Markdown),
         "epub" => Ok(Format::Epub),
         "azw3" => Ok(Format::Azw3),
         "mobi" => Ok(Format::Mobi),
         "kfx" => Ok(Format::Kfx),
         _ => Err(format!(
-            "Unknown format: {}. Supported: md, txt, epub, azw3, mobi, kfx",
+            "Unknown format: {}. Supported: epub, azw3, mobi, kfx",
             fmt
         )),
     }
@@ -1081,9 +1080,9 @@ fn convert(
     let input_format = if let Some(fmt) = from_format {
         Some(parse_format(fmt)?)
     } else if from_stdin {
-        // Default to EPUB for stdin since that's most common
         return Err(
-            "Input format required when reading from stdin. Use -f (epub|azw3|mobi)".to_string(),
+            "Input format required when reading from stdin. Use -f (epub|azw3|mobi|kfx)"
+                .to_string(),
         );
     } else {
         Format::from_path(input)
@@ -1096,32 +1095,35 @@ fn convert(
         return Err(format!("{:?} cannot be used as input format", fmt));
     }
 
-    // Determine output format
+    // Determine output format. Both EPUB and KFX need a real output path —
+    // no stdout default, no implicit fallback.
     let output_format = if let Some(fmt) = to_format {
         parse_format(fmt)?
-    } else if let Some(out) = output {
-        if out == "-" {
-            // Explicit stdout, default to markdown
-            Format::Markdown
-        } else {
-            Format::from_path(out).ok_or_else(|| {
-                format!(
-                    "Unknown output format: {}. Supported: .epub, .azw3, .txt, .md",
-                    out
-                )
-            })?
-        }
+    } else if let Some(out) = output
+        && out != "-"
+    {
+        Format::from_path(out).ok_or_else(|| {
+            format!(
+                "Unknown output format: {}. Supported: .epub, .kfx",
+                out
+            )
+        })?
     } else {
-        // No output specified, default to markdown on stdout
-        Format::Markdown
+        return Err(
+            "Output path required. Supported targets: .epub, .kfx (use -t to override)"
+                .to_string(),
+        );
     };
 
-    if output_format == Format::Mobi {
-        return Err("MOBI output is not supported; use .azw3 instead".to_string());
+    if !output_format.can_export() {
+        return Err(format!(
+            "{:?} cannot be used as output format. Supported: epub, kfx",
+            output_format
+        ));
     }
 
     // Check if writing to stdout
-    let to_stdout = output.is_none() || output == Some("-");
+    let to_stdout = output == Some("-");
 
     if !quiet && !to_stdout {
         let input_name = if from_stdin { "stdin" } else { input };
