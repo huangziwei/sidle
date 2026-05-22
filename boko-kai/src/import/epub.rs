@@ -12,7 +12,7 @@ use crate::epub::{
     parse_container_xml, parse_nav_landmarks, parse_nav_toc, parse_ncx, parse_opf,
     parse_opf_guide,
 };
-use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href};
+use crate::import::{ChapterId, Importer, SpineEntry, normalize_components, resolve_path_based_href};
 use crate::io::{ByteSource, ByteSourceCursor, FileSource};
 use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
 
@@ -418,10 +418,15 @@ where
                 // Copy everything before the @import as-is, then splice in
                 // the imported file (or drop the @import on load failure).
                 out.push_str(&src[copied..i]);
-                let child = base
+                // PathBuf::join doesn't collapse `..`, so a chained import
+                // like `style0011.css` → `url("../Styles/style0007.css")`
+                // yields `OEBPS/Styles/../Styles/style0007.css` and silently
+                // misses the canonical zip entry. Normalize before loading.
+                let joined = base
                     .parent()
                     .map(|p| p.join(url))
                     .unwrap_or_else(|| PathBuf::from(url));
+                let child = normalize_components(&joined);
                 if let Some(child_css) = load(&child) {
                     out.push_str(&child_css);
                     out.push('\n');
@@ -623,5 +628,44 @@ mod tests {
             result[0].children[0].children[0].href,
             "content/text/ch1.xhtml#sec1"
         );
+    }
+
+    #[test]
+    fn inline_css_imports_normalizes_parent_dir_in_url() {
+        // Mirrors the structure in books 2/5 of the
+        // `epub2kfx-missing-vertical-outliers/涼, 結城/` set: a stylesheet
+        // chains via `@import url("../Styles/x.css")`. The load callback must
+        // see the canonical zip key, not the literal un-normalized path —
+        // otherwise the writing-mode rules never reach the cascade and the
+        // KFX exporter falls back to horizontal-tb.
+        let base = std::path::Path::new("OEBPS/Styles/style0011.css");
+        let mut requested: Vec<String> = Vec::new();
+        let out = inline_css_imports(
+            r#"@import url("../Styles/style0007.css"); body {}"#,
+            base,
+            |p| {
+                requested.push(p.to_string_lossy().into_owned());
+                Some(".vrtl { writing-mode: vertical-rl }".into())
+            },
+        );
+        assert_eq!(requested, vec!["OEBPS/Styles/style0007.css"]);
+        assert!(out.contains(".vrtl"));
+    }
+
+    #[test]
+    fn inline_css_imports_handles_bare_url_function() {
+        // Books 3/4 form: `@import url(file.css)` with no `..` — must keep
+        // working after the normalization patch.
+        let base = std::path::Path::new("OEBPS/Styles/flow0011.css");
+        let mut requested: Vec<String> = Vec::new();
+        let _ = inline_css_imports(
+            r#"@import url(flow0007.css);"#,
+            base,
+            |p| {
+                requested.push(p.to_string_lossy().into_owned());
+                Some(String::new())
+            },
+        );
+        assert_eq!(requested, vec!["OEBPS/Styles/flow0007.css"]);
     }
 }

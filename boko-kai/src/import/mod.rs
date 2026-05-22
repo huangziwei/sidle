@@ -310,12 +310,19 @@ fn resolve_relative_path(base: &str, relative: &str) -> PathBuf {
     let base_path = Path::new(base);
     let base_dir = base_path.parent().unwrap_or(Path::new(""));
 
-    // Join and normalize
-    let joined = base_dir.join(relative);
+    // Join and collapse `..` / `.` so the result matches the canonical
+    // archive entry (PathBuf::join does not normalize on its own).
+    normalize_components(&base_dir.join(relative))
+}
 
-    // Normalize by iterating through components
+/// Collapse `.` and `..` components in a path. `PathBuf::join` appends
+/// literally, so `OEBPS/Styles`.join(`../Styles/x.css`) yields
+/// `OEBPS/Styles/../Styles/x.css` — which does not match canonical EPUB zip
+/// entries. This walks the components and folds them, matching the URL-style
+/// resolution every consumer of zip keys needs.
+pub(crate) fn normalize_components(p: &Path) -> PathBuf {
     let mut result = PathBuf::new();
-    for component in joined.components() {
+    for component in p.components() {
         match component {
             std::path::Component::ParentDir => {
                 result.pop();
@@ -332,7 +339,6 @@ fn resolve_relative_path(base: &str, relative: &str) -> PathBuf {
             }
         }
     }
-
     result
 }
 
