@@ -2,11 +2,14 @@
 //! at once via `poll(2)`, surfacing a unified event so the main loop handles
 //! both without threads or channels.
 //!
-//! Why poll rather than two read loops: `Touch::next_event` and
-//! `Buttons::read_one` both block on `read`, and the main loop can only block
-//! in one place. `poll(2)` blocks until *either* fd is readable, then we drain
-//! the ready one. The touch parser is unchanged — once its fd is readable we
-//! hand off to the existing `next_event`, which completes its packet.
+//! Why poll rather than two read loops: the main loop can only block in one
+//! place, and it must wake for *either* device. `poll(2)` blocks until one fd
+//! is readable, then we drain the ready one without blocking on the other.
+//! `Buttons::read_one` reads exactly one record (poll already guaranteed it's
+//! present). `Touch::next_event` is non-blocking (its fd is `O_NONBLOCK`): it
+//! drains the currently-available events and returns `None` if they don't
+//! complete a Down/Up boundary, in which case we re-poll — so a touch stroke
+//! mid-flight can't block the loop and starve the button fd.
 
 use std::os::fd::RawFd;
 
@@ -37,8 +40,9 @@ impl Input {
     ///
     /// Button presses are checked first each wake: a press is a deliberate
     /// navigation intent, and draining it promptly keeps the grabbed device's
-    /// queue short. A touch readiness hands off to `Touch::next_event`, which
-    /// reads through to the next Down/Up boundary as before.
+    /// queue short. On touch readiness we drain `Touch::next_event`
+    /// non-blocking; if it returns `None` (no boundary in the available data)
+    /// we re-poll rather than block, keeping the button fd serviced.
     pub fn next(&mut self) -> Result<InputEvent> {
         let touch_fd: RawFd = self.touch.raw_fd();
         loop {
@@ -71,7 +75,15 @@ impl Input {
             }
 
             if fds[0].revents & libc::POLLIN != 0 {
-                return Ok(InputEvent::Touch(self.touch.next_event()?));
+                // Drain non-blocking. `next_event` returns None when the
+                // available bytes don't complete a Down/Up boundary (a
+                // move-only or partial packet) — re-poll rather than block in
+                // the touch read, so a concurrent bezel-button press isn't
+                // starved. This is why touch is opened O_NONBLOCK.
+                if let Some(ev) = self.touch.next_event()? {
+                    return Ok(InputEvent::Touch(ev));
+                }
+                continue;
             }
 
             // Spurious wake with no POLLIN — poll again.

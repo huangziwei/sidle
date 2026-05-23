@@ -34,6 +34,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -89,8 +90,16 @@ pub struct Touch {
 impl Touch {
     pub fn open(orientation: Orientation, fb_xres: u32, fb_yres: u32) -> Result<Self> {
         let path = find_touch_device()?;
+        // O_NONBLOCK is essential for the poll(2) multiplexer in `input.rs`:
+        // `next_event` must drain only the currently-available events and
+        // return, never block waiting for the rest of a touch packet.
+        // Otherwise a touch fd that goes readable mid-stroke (e.g. a trailing
+        // move with no following boundary) blocks the whole input loop inside
+        // the touch read, starving the bezel-button fd — the "use an on-screen
+        // control, then the physical buttons go dead until relaunch" bug.
         let file = OpenOptions::new()
             .read(true)
+            .custom_flags(libc::O_NONBLOCK)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
         // The kernel treats the arg as a "non-NULL = grab, NULL = ungrab"
@@ -117,16 +126,29 @@ impl Touch {
         self.file.as_raw_fd()
     }
 
-    /// Blocks until the next `Down` or `Up` boundary. Returns the
-    /// boundary's (x, y) in user-visible framebuffer coordinates
-    /// (orientation-corrected). Move events between boundaries silently
-    /// update `cur_x/cur_y`.
-    pub fn next_event(&mut self) -> Result<TouchEvent> {
+    /// Drain currently-available events (non-blocking). Returns `Some` when a
+    /// `Down`/`Up` boundary completes — (x, y) in user-visible framebuffer
+    /// coords (orientation-corrected) — or `None` when the available data is
+    /// exhausted without completing one (a move-only or partial packet).
+    ///
+    /// **Never blocks**: the fd is opened `O_NONBLOCK`, and on `WouldBlock` we
+    /// return `None` so the `poll(2)` loop in `input.rs` re-polls and keeps
+    /// servicing the bezel-button fd. Boundary state (`down_pending`/
+    /// `up_pending`/`cur_x`/`cur_y`) lives on `self`, so a packet split across
+    /// calls resumes correctly. The caller must treat `None` as "no event yet"
+    /// and go back to `poll`, not as end-of-stream.
+    pub fn next_event(&mut self) -> Result<Option<TouchEvent>> {
         let mut buf = [0u8; EVENT_BYTES];
         loop {
-            self.file
-                .read_exact(&mut buf)
-                .context("read /dev/input/eventN")?;
+            match self.file.read(&mut buf) {
+                Ok(EVENT_BYTES) => {}
+                // evdev hands back whole 16-byte records; 0 or a short read
+                // means nothing more is buffered right now.
+                Ok(_) => return Ok(None),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e).context("read /dev/input/eventN"),
+            }
 
             // Bytes 0..8 are the timestamp; we don't need it.
             let type_ = u16::from_ne_bytes([buf[8], buf[9]]);
@@ -144,14 +166,14 @@ impl Touch {
                         self.up_pending = false;
                         self.down_pending = false;
                         let (x, y) = self.transform_coords();
-                        return Ok(TouchEvent::Up { x, y });
+                        return Ok(Some(TouchEvent::Up { x, y }));
                     }
                     if self.down_pending {
                         self.down_pending = false;
                         let (x, y) = self.transform_coords();
-                        return Ok(TouchEvent::Down { x, y });
+                        return Ok(Some(TouchEvent::Down { x, y }));
                     }
-                    // Move-only packet — keep reading.
+                    // Move-only packet — keep draining.
                 }
                 (EV_ABS, ABS_MT_TRACKING_ID) => {
                     if value >= 0 {
