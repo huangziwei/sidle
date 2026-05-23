@@ -69,6 +69,17 @@ bytes = "1"
 # them — mass-storage hands us a path natively; MTP needs the round-trip.
 tempfile = "3"
 
+# macOS App Nap suppression. When the app window is backgrounded (the user is
+# reading on the Kindle), App Nap throttles the whole process — the tokio
+# reactor/timers get coalesced by tens of seconds, so the embedded LAN server
+# answers too late for the KUAL picker's 3s timeout and the Kindle shows
+# "can't reach server". We hold a process-lifetime NSProcessInfo activity
+# assertion to opt out (see lib.rs::disable_app_nap). objc2-foundation is
+# already in the tree via Tauri; declared directly with just the two classes
+# we touch.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }
+
 [dev-dependencies]
 
 [features]

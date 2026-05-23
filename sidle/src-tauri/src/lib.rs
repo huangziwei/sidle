@@ -16,8 +16,35 @@ use tauri::Manager;
 
 use crate::state::AppState;
 
+/// Opt the whole process out of macOS App Nap.
+///
+/// When the app window is in the background (the user is reading on the
+/// Kindle, not looking at the Mac), App Nap throttles the process: the tokio
+/// reactor and timers get coalesced by tens of seconds. The embedded LAN
+/// server then answers a request ~30s late, well past the KUAL picker's 3s
+/// `LIST_TIMEOUT`, so the Kindle shows "can't reach server" even though the
+/// server is healthy (it answers in ~50ms once the app is foregrounded).
+///
+/// We hold an `NSProcessInfo` activity assertion for the life of the process.
+/// `UserInitiatedAllowingIdleSystemSleep` disables App Nap but still lets the
+/// Mac sleep normally when idle. The token is intentionally leaked: the
+/// assertion must last as long as the app runs, and we never want to end it.
+#[cfg(target_os = "macos")]
+fn disable_app_nap() {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+        &NSString::from_str("sidle embedded LAN server stays responsive while backgrounded"),
+    );
+    std::mem::forget(token);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn disable_app_nap() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    disable_app_nap();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
