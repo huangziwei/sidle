@@ -26,6 +26,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
+use crate::orientation::Orientation;
+
 const EV_KEY: u16 = 0x01;
 const KEY_PAGEUP: u16 = 104;
 const KEY_PAGEDOWN: u16 = 109;
@@ -49,6 +51,10 @@ pub struct Buttons {
     /// Whether the `EVIOCGRAB` succeeded. If it didn't, the framework still
     /// sees presses (UI may tear), but we still read + act on them.
     grabbed: bool,
+    /// Current framework orientation. On `Down` (180° flip) the physical top/
+    /// bottom buttons swap sides, so we swap `Prev`/`Next` to keep "forward"
+    /// under the same thumb. Updated at runtime by [`Buttons::set_orientation`].
+    orientation: Orientation,
 }
 
 impl Buttons {
@@ -64,13 +70,18 @@ impl Buttons {
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
         let grabbed = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB, 1) } == 0;
-        Ok(Some(Self { file, grabbed }))
+        Ok(Some(Self { file, grabbed, orientation: Orientation::Up }))
     }
 
     /// Raw fd for `poll(2)` multiplexing alongside the touchscreen — see
     /// [`crate::eink::input`].
     pub fn raw_fd(&self) -> RawFd {
         self.file.as_raw_fd()
+    }
+
+    /// Update orientation so a 180° flip swaps prev/next (see field docs).
+    pub fn set_orientation(&mut self, orientation: Orientation) {
+        self.orientation = orientation;
     }
 
     /// Read one event record. The caller polls first, so a record is available
@@ -86,7 +97,7 @@ impl Buttons {
         let code = u16::from_ne_bytes([buf[10], buf[11]]);
         let value = i32::from_ne_bytes([buf[12], buf[13], buf[14], buf[15]]);
         if type_ == EV_KEY && value == 1 {
-            return Ok(match code {
+            let btn = match code {
                 // Hardware-confirmed on KOA2: the *top* button emits
                 // KEY_PAGEUP and the *bottom* emits KEY_PAGEDOWN, and the user
                 // reads top = forward. So top/PAGEUP → Next, bottom/PAGEDOWN →
@@ -94,6 +105,13 @@ impl Buttons {
                 KEY_PAGEUP => Some(PageButton::Next),
                 KEY_PAGEDOWN => Some(PageButton::Prev),
                 _ => None,
+            };
+            // On a 180° flip the physical buttons swap sides; swap prev/next so
+            // "forward" stays under the same thumb as the rotated display.
+            return Ok(match (btn, self.orientation) {
+                (Some(PageButton::Next), Orientation::Down) => Some(PageButton::Prev),
+                (Some(PageButton::Prev), Orientation::Down) => Some(PageButton::Next),
+                (other, _) => other,
             });
         }
         Ok(None)

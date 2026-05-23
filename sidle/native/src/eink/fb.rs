@@ -5,14 +5,17 @@
 //! crucially, recomposites the whole screen (home library + status bar) when
 //! our window is torn down on exit — the kterm model. This removes the
 //! windowless-exit bug (dead status bar) and the cvm freeze that used to mask
-//! the framework drawing over us. See [[project_kual_statusbar_x11]] for why.
+//! the framework drawing over us. See [[project_kual_statusbar_x11]].
 //!
-//! The panel is 8bpp grayscale (depth 8, white=255 / black=0) — exactly our
-//! backing-buffer format — so presenting is a 1:1 `PutImage` of the dirty rows,
-//! no pixel conversion. `PutImage`s are chunked under the server's max request
-//! length. Type/method names (`Framebuffer`, `MxcfbRect`, `send_update`) are
-//! kept so the renderer is unchanged; eink refresh is now the X server's job,
-//! so the waveform arg is accepted and ignored.
+//! The compositor ALSO auto-rotates our window 180° to the framework
+//! orientation (page-bezel side), so we render identity here and never rotate
+//! pixels ourselves — doing so would double-rotate. Touch/buttons are read raw
+//! from evdev (panel-fixed), so the main loop re-orients *those* on rotation;
+//! see [`crate::eink::input`]. The panel is 8bpp grayscale (depth 8, white=255 /
+//! black=0) — exactly our backing format — so presenting is a 1:1 `PutImage` of
+//! the dirty rows, chunked under the server's max request length. Type/method
+//! names (`Framebuffer`, `MxcfbRect`, `send_update`) are kept so the renderer is
+//! unchanged; the X server drives the eink refresh, so the waveform is ignored.
 
 use anyhow::{Context, Result};
 
@@ -24,8 +27,6 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 // `change_property8` lives in the wrapper `ConnectionExt`.
 use x11rb::wrapper::ConnectionExt as _;
-
-use crate::orientation::Orientation;
 
 // Waveform constants kept for call-site compatibility — the X server now picks
 // the eink waveform, so `send_update` accepts and ignores these.
@@ -39,7 +40,9 @@ pub const WAVEFORM_MODE_GC16: u32 = 2;
 #[derive(Default, Debug, Clone, Copy)]
 pub struct MxcfbRect {
     pub top: u32,
+    #[allow(dead_code)]
     pub left: u32,
+    #[allow(dead_code)]
     pub width: u32,
     pub height: u32,
 }
@@ -62,15 +65,11 @@ pub struct Framebuffer {
     backing: Vec<u8>,
     /// Per-`PutImage` byte budget (server max request length minus header slack).
     max_req_bytes: usize,
-    /// Accepted for API compatibility. The X server presents in screen
-    /// orientation, so we render identity (no rotation) for now.
-    #[allow(dead_code)]
-    orientation: Orientation,
 }
 
 impl Framebuffer {
     /// Connect to the X server (`$DISPLAY`), create + map a fullscreen window.
-    pub fn open(orientation: Orientation) -> Result<Self> {
+    pub fn open() -> Result<Self> {
         let (conn, screen_num) = x11rb::connect(None).context("connect to X ($DISPLAY)")?;
         let screen = conn.setup().roots[screen_num].clone();
         let xres = screen.width_in_pixels as u32;
@@ -122,7 +121,6 @@ impl Framebuffer {
             var: Var { xres, yres },
             backing,
             max_req_bytes,
-            orientation,
         })
     }
 
@@ -160,7 +158,7 @@ impl Framebuffer {
     /// ZPixmap needs 32-bit scanline padding, and `xres` (1264) is already
     /// 4-byte aligned, so a full-width band is a contiguous backing slice with
     /// no per-scanline padding. Chunked under the server's max request length.
-    /// Waveform ignored — the X server drives the eink refresh.
+    /// Identity (the X server rotates the window); waveform ignored.
     pub fn send_update(&mut self, rect: MxcfbRect, _waveform: u32) -> Result<u32> {
         let stride = self.var.xres as usize;
         let width = self.var.xres as u16;

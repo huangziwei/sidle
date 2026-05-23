@@ -126,6 +126,14 @@ impl Touch {
         self.file.as_raw_fd()
     }
 
+    /// Update the orientation used to transform raw coords. The main loop calls
+    /// this when it detects the framework rotated (the X server rotates the
+    /// display, but raw evdev coords are panel-fixed), so taps keep matching
+    /// what's drawn after a 180° flip.
+    pub fn set_orientation(&mut self, orientation: Orientation) {
+        self.orientation = orientation;
+    }
+
     /// Drain currently-available events (non-blocking). Returns `Some` when a
     /// `Down`/`Up` boundary completes — (x, y) in user-visible framebuffer
     /// coords (orientation-corrected) — or `None` when the available data is

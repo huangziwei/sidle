@@ -107,10 +107,10 @@ fn run() -> anyhow::Result<()> {
     let orient = orientation::Orientation::detect();
     log(format!("orientation: {orient:?}"));
 
-    // The X server presents in screen orientation, so render identity; the
-    // arg is kept only for API compatibility. Touch still transforms raw
-    // evdev coords by the detected orientation to match what's drawn.
-    let mut fb = Framebuffer::open(orientation::Orientation::Up)?;
+    // The X server auto-rotates our window to the framework orientation, so the
+    // surface renders identity. Only the raw evdev touch/buttons need orienting
+    // (done below + re-applied on rotation via InputEvent::Tick).
+    let mut fb = Framebuffer::open()?;
     let touch = Touch::open(orient, fb.var.xres, fb.var.yres)?;
     // Bezel page-turn buttons are a separate evdev device (gpio-keys). Grab
     // them so the stock framework stops repainting the library over our
@@ -134,6 +134,10 @@ fn run() -> anyhow::Result<()> {
         }
     };
     let mut input = Input::new(touch, buttons);
+    // Sync the initial orientation onto both devices (Buttons default to Up).
+    // `current_orient` tracks it so InputEvent::Tick can detect a later flip.
+    input.set_orientation(orient);
+    let mut current_orient = orient;
 
     // Fetch the library, retrying through the Diagnostics screen on
     // failure. The old behavior here was draw_boot_toast + return (KUAL
@@ -392,6 +396,30 @@ fn run() -> anyhow::Result<()> {
                         &agent, &cfg, cache_dir, &mut fb, &books,
                         &mut covers, page, grid_left, grid_top,
                     )?;
+                }
+            }
+            InputEvent::Tick => {
+                // Idle poll. The X server rotates our window to the framework
+                // orientation but leaves it blank until we repaint, and raw
+                // touch/buttons don't follow the rotation. So on a detected
+                // flip: re-orient input, then repaint the current page (the X
+                // server rotates the repaint correctly, clearing the blank).
+                // Skip while a cell is armed so we don't disrupt a long-press.
+                if armed.is_none() {
+                    let o = orientation::Orientation::detect();
+                    if o != current_orient {
+                        log(format!("orientation: {current_orient:?} -> {o:?}"));
+                        current_orient = o;
+                        input.set_orientation(o);
+                        draw_gallery_page(
+                            &mut fb, &mut renderer, &books, &covers, page,
+                            total_pages, grid_left, grid_top,
+                        )?;
+                        fetch_and_paint_page(
+                            &agent, &cfg, cache_dir, &mut fb, &books,
+                            &mut covers, page, grid_left, grid_top,
+                        )?;
+                    }
                 }
             }
         }

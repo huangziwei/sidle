@@ -17,11 +17,21 @@ use anyhow::{Context, Result};
 
 use super::buttons::{Buttons, PageButton};
 use super::touch::{Touch, TouchEvent};
+use crate::orientation::Orientation;
+
+/// How long `next` blocks before surfacing a `Tick`. Bounds how quickly the
+/// main loop notices a device rotation (it re-reads the framework orientation
+/// on each `Tick`); only fires when idle, since real input returns first.
+const TICK_MS: libc::c_int = 500;
 
 /// A unified input event from either device.
 pub enum InputEvent {
     Touch(TouchEvent),
     Page(PageButton),
+    /// Poll timed out with no input. The main loop re-checks the framework
+    /// orientation on this and repaints + re-orients touch/buttons if it
+    /// changed (the X server rotates the display; raw evdev coords don't).
+    Tick,
 }
 
 pub struct Input {
@@ -34,6 +44,15 @@ pub struct Input {
 impl Input {
     pub fn new(touch: Touch, buttons: Option<Buttons>) -> Self {
         Self { touch, buttons }
+    }
+
+    /// Re-orient both devices after a detected rotation (the display is rotated
+    /// by the X server; raw evdev coords/buttons are panel-fixed and need this).
+    pub fn set_orientation(&mut self, orientation: Orientation) {
+        self.touch.set_orientation(orientation);
+        if let Some(buttons) = self.buttons.as_mut() {
+            buttons.set_orientation(orientation);
+        }
     }
 
     /// Block until the next event from either device.
@@ -53,13 +72,16 @@ impl Input {
             ];
             let nfds: libc::nfds_t = if self.buttons.is_some() { 2 } else { 1 };
 
-            let rc = unsafe { libc::poll(fds.as_mut_ptr(), nfds, -1) };
+            let rc = unsafe { libc::poll(fds.as_mut_ptr(), nfds, TICK_MS) };
             if rc < 0 {
                 let err = std::io::Error::last_os_error();
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue; // EINTR — re-arm the poll.
                 }
                 return Err(err).context("poll(touch, buttons)");
+            }
+            if rc == 0 {
+                return Ok(InputEvent::Tick); // idle timeout — see TICK_MS.
             }
 
             // Buttons first. `read_one` returns None for releases / autorepeat

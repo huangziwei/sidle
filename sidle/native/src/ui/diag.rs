@@ -182,6 +182,8 @@ pub fn run(
             // Page buttons do nothing here, but they're grabbed by `Input`
             // so they can't reach the framework and repaint over us.
             InputEvent::Page(_) => {}
+            // Idle tick — the diag panel is transient; ignore rotation here.
+            InputEvent::Tick => {}
         }
     }
 }
