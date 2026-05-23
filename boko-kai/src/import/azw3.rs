@@ -37,6 +37,14 @@ pub struct Azw3Importer {
     /// Record offset for KF8 content (0 for pure KF8, >0 for combo files).
     record_offset: usize,
 
+    /// PDB record index of the first image record. For pure KF8 this equals
+    /// `mobi.first_image_index`; for KF8+MOBI6 combo files the images live
+    /// in the MOBI6 section and the KF8 record0's `first_image_index` is
+    /// past the image run, so this is saved from the MOBI6 record0 before
+    /// the KF8 re-parse. `load_image_record` and `discover_assets` use this
+    /// instead of recomputing from `mobi.first_image_index + record_offset`.
+    image_record_base: usize,
+
     /// File length.
     file_len: u64,
 
@@ -371,12 +379,28 @@ impl Azw3Importer {
         let format = detect_format(&mobi, &exth, &pdb, &read_record)?;
         let record_offset = format.record_offset();
 
+        // For combo files the MOBI6 record0 carries the actual image-record
+        // base — kindlegen 2.x leaves images in the MOBI6 section and the
+        // KF8 record0's `first_image_index` field is past the image run.
+        // Capture MOBI6's value before the `mobi` variable gets reassigned
+        // to the KF8 header below.
+        let mobi6_first_image_index = mobi.first_image_index as usize;
+
         // For combo files, re-parse KF8 header
         let mobi = if record_offset > 0 {
             let kf8_record0 = read_record(record_offset)?;
             MobiHeader::parse(&kf8_record0)?
         } else {
             mobi
+        };
+
+        // Pure KF8 → images live alongside the KF8 records, indexed off
+        // `mobi.first_image_index`. Combo → images live in MOBI6 records,
+        // indexed off the MOBI6-record0 value captured above.
+        let image_record_base = if record_offset > 0 {
+            mobi6_first_image_index
+        } else {
+            mobi.first_image_index as usize
         };
 
         // Verify this is KF8
@@ -501,6 +525,7 @@ impl Azw3Importer {
             pdb,
             mobi,
             record_offset,
+            image_record_base,
             file_len,
             metadata,
             toc,
@@ -526,6 +551,22 @@ impl Azw3Importer {
         // are dead weight (plus they leak `kindle:embed:` URLs) when
         // emitted as `.css` assets.
         importer.prune_svg_flow_assets();
+
+        // Cover fallback: older Japanese-Amazon kindlegen output omits
+        // EXTH 201 and only carries the cover ref in EXTH 129's KF8
+        // `kindle:embed:NNNN` form, whose 1-based resource-index scheme
+        // doesn't map cleanly to the image-only subset (decoded indices
+        // overshoot by 1–2 vs the actual cover). Kindlegen always emits
+        // the cover as the first image record, so when 201 is absent
+        // fall back to the first `images/` asset.
+        if importer.metadata.cover_image.is_none()
+            && let Some(first_image) = importer
+                .assets
+                .iter()
+                .find(|p| p.starts_with("images"))
+        {
+            importer.metadata.cover_image = Some(first_image.to_string_lossy().into_owned());
+        }
 
         Ok(importer)
     }
@@ -689,7 +730,7 @@ impl Azw3Importer {
             return assets;
         }
 
-        let first_img = self.mobi.first_image_index as usize + self.record_offset;
+        let first_img = self.image_record_base;
         for i in first_img..self.pdb.num_records as usize {
             // Only read first 16 bytes to detect type (magic bytes)
             if let Ok((start, end)) = self.pdb.record_range(i, self.file_len) {
@@ -723,8 +764,7 @@ impl Azw3Importer {
 
     /// Load an image record by index.
     fn load_image_record(&self, idx: usize) -> io::Result<Vec<u8>> {
-        let first_img = self.mobi.first_image_index as usize + self.record_offset;
-        let record_idx = first_img + idx;
+        let record_idx = self.image_record_base + idx;
         self.read_record(record_idx)
     }
 

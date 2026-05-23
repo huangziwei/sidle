@@ -995,9 +995,45 @@ fn build_metadata(
             .or_else(|| exth.asin.clone())
             .or_else(|| exth.source.clone())
             .unwrap_or_default();
+        // EXTH 113 nominally holds an ASIN, but calibre's MOBI exporter
+        // writes a freshly-minted UUID there. Only promote to
+        // `metadata.asin` when the value actually looks like an Amazon
+        // ASIN (10-char alphanumeric starting with B for ebooks).
+        metadata.asin = exth
+            .asin
+            .as_ref()
+            .filter(|s| looks_like_asin(s))
+            .cloned();
+        // Writing-mode signals (EXTH 525 / 527). Both calibre-exported MOBIs
+        // and native Amazon MOBIs carry these; no fallback to inline HTML
+        // class needed. Calibre's `reader/headers.py:96-108` is the spec.
+        metadata.primary_writing_mode = exth.primary_writing_mode.clone();
+        metadata.page_progression_direction = exth
+            .page_progression_direction
+            .clone()
+            // Calibre derives PPD from writing-mode when EXTH 527 is absent:
+            // anything ending `-rl` is RTL pagination.
+            .or_else(|| {
+                exth.primary_writing_mode.as_deref().and_then(|pwm| {
+                    if pwm.ends_with("-rl") {
+                        Some("rtl".to_string())
+                    } else if pwm.ends_with("-lr") {
+                        Some("ltr".to_string())
+                    } else {
+                        None
+                    }
+                })
+            });
     }
 
     metadata
+}
+
+/// Amazon ASIN format: exactly 10 ASCII alphanumeric characters, typically
+/// starting with `B` for ebook listings. Used to disambiguate EXTH 113 from
+/// the UUID calibre's MOBI exporter occasionally writes into the same slot.
+fn looks_like_asin(s: &str) -> bool {
+    s.len() == 10 && s.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Wrap raw text as HTML.

@@ -254,7 +254,22 @@ impl Book {
         let backend: Box<dyn Importer> = match format {
             Format::Epub => Box::new(EpubImporter::open(path)?),
             Format::Azw3 => Box::new(Azw3Importer::open(path)?),
-            Format::Mobi => Box::new(MobiImporter::open(path)?),
+            // `.mobi` covers three on-disk shapes: pure MOBI6, pure KF8, and
+            // MOBI6+KF8 combo (older Amazon kindlegen output). The KF8-aware
+            // shapes route through `Azw3Importer` so the source CSS, KF8
+            // spine, and per-chapter `xml:lang` make it into the EPUB —
+            // strict readers (Apple Books, KOReader) need that for vertical
+            // Japanese rendering. Pure MOBI6 stays on `MobiImporter`.
+            Format::Mobi => {
+                let file = std::fs::File::open(path)?;
+                let source: Arc<dyn crate::io::ByteSource> =
+                    Arc::new(crate::io::FileSource::new(file)?);
+                if crate::mobi::sniff_format(&*source)?.is_kf8() {
+                    Box::new(Azw3Importer::from_source(source)?)
+                } else {
+                    Box::new(MobiImporter::from_source(source)?)
+                }
+            }
             Format::Kfx => {
                 // `.kfx-zip` bundles are merged into a single in-memory KFX
                 // container before import. This unifies per-container symbol
@@ -283,11 +298,21 @@ impl Book {
     ///
     /// This is useful for reading from stdin or other non-file sources.
     pub fn from_bytes(data: &[u8], format: Format) -> io::Result<Self> {
-        let source = Arc::new(MemorySource::new(data.to_vec()));
+        let source: Arc<dyn crate::io::ByteSource> =
+            Arc::new(MemorySource::new(data.to_vec()));
         let backend: Box<dyn Importer> = match format {
             Format::Epub => Box::new(EpubImporter::from_source(source)?),
             Format::Azw3 => Box::new(Azw3Importer::from_source(source)?),
-            Format::Mobi => Box::new(MobiImporter::from_source(source)?),
+            // See the matching arm in `open_format` for the routing rationale.
+            // The sniff is cheap (PDB + record 0); branching here keeps the
+            // dispatch on a single .mobi extension across both entry points.
+            Format::Mobi => {
+                if crate::mobi::sniff_format(&*source)?.is_kf8() {
+                    Box::new(Azw3Importer::from_source(source)?)
+                } else {
+                    Box::new(MobiImporter::from_source(source)?)
+                }
+            }
             Format::Kfx => Box::new(KfxImporter::from_source(source)?),
         };
         Ok(Self {

@@ -25,7 +25,7 @@ pub struct BookRow {
     pub kfx_path: Option<String>,
     /// SHA-256 of the KFX file's bytes. Distinct from `sha256` (which is the
     /// hash of whatever the user originally imported — `.epub`, `.kfx-zip`,
-    /// `.azw3`) because the generated/extracted `.kfx` is rarely byte-
+    /// `.azw3`, `.mobi`) because the generated/extracted `.kfx` is rarely byte-
     /// identical to the source. The on-device filename infix is derived
     /// from THIS hash, so when an orphan KFX is re-imported from the Kindle
     /// the new row's identity matches what's already in the filename.

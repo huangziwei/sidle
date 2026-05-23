@@ -463,15 +463,16 @@ pub async fn library_pick_image(app: tauri::AppHandle) -> Result<Option<String>,
 
 /// Open the system file dialog and return selected ebook paths.
 ///
-/// Accepts EPUB, KFX, and KFX-zip (the multi-container bundle Kindle DeDRM
-/// produces) — the import pipeline dispatches on extension. Exposed from Rust
-/// because vanilla-JS (no bundler) can't import the dialog plugin's JS module.
+/// Accepts EPUB, KFX, KFX-zip (the multi-container bundle Kindle DeDRM
+/// produces), and MOBI — the import pipeline dispatches on extension.
+/// Exposed from Rust because vanilla-JS (no bundler) can't import the
+/// dialog plugin's JS module.
 #[tauri::command]
 pub async fn library_pick_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     let (tx, rx) = oneshot::channel();
     app.dialog()
         .file()
-        .add_filter("Ebooks", &["epub", "kfx", "kfx-zip"])
+        .add_filter("Ebooks", &["epub", "kfx", "kfx-zip", "mobi"])
         .pick_files(move |paths| {
             let _ = tx.send(paths);
         });

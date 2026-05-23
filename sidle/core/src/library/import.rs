@@ -9,10 +9,11 @@
 //!  - KFX  → library (merging `.kfx-zip` first if needed); pending
 //!           `kfx_to_epub` job.
 //!
-//! Two formats are converted to EPUB at import time and from there look
+//! Three formats are converted to EPUB at import time and from there look
 //! identical to a regular EPUB drop:
 //!
 //!  - `.azw3` → boko-kai's AZW3 importer + EPUB exporter.
+//!  - `.mobi` → boko-kai's MOBI importer + EPUB exporter.
 //!  - `.zip`  → Aozora Bunko sniff + parse → cover → build_epub. See
 //!              `convert_aozora_zip` for the sniff details.
 //!
@@ -20,8 +21,8 @@
 //!
 //!  1. Stream-hash the source file and check the dedupe index.
 //!  2. Normalize to canonical bytes (`.kfx-zip` → merged `.kfx`;
-//!     `.azw3`/`.zip` → freshly built EPUB; other inputs are loaded
-//!     verbatim).
+//!     `.azw3`/`.mobi`/`.zip` → freshly built EPUB; other inputs are
+//!     loaded verbatim).
 //!  3. Read metadata from those bytes.
 //!  4. Persist the canonical file into `books/<sha>/<basename>.<ext>`.
 //!  5. Extract the cover sidecar if we already have a readable EPUB on
@@ -69,7 +70,7 @@ pub fn import_file(
     let src_kind = SourceKind::detect(src);
     if matches!(src_kind, SourceKind::Unknown) {
         bail!(
-            "unsupported file type: {} (expected .epub, .kfx, .kfx-zip, or .azw3)",
+            "unsupported file type: {} (expected .epub, .kfx, .kfx-zip, .azw3, or .mobi)",
             src.display()
         );
     }
@@ -87,6 +88,11 @@ enum SourceKind {
     /// aozora `.zip` path, except the format is detected purely by
     /// extension (no content sniff).
     Azw3,
+    /// `.mobi` — older Mobipocket/KF8 hybrid (decrypted). Same shape as
+    /// AZW3: boko-kai's MOBI importer + EPUB exporter, detected purely by
+    /// extension. Japanese MOBIs carry vertical-writing-mode and PPD in
+    /// EXTH 525/527, which the boko importer propagates into the EPUB.
+    Mobi,
     /// `.zip` extension — tentatively an Aozora Bunko archive. The actual
     /// aozora sniff (底本/［＃ markers) happens in `convert_aozora_zip`
     /// during canonical-bytes extraction; a non-aozora zip fails out
@@ -113,6 +119,7 @@ impl SourceKind {
             Some("kfx") => Self::Kfx,
             Some("kfx-zip") => Self::KfxZip,
             Some("azw3") => Self::Azw3,
+            Some("mobi") => Self::Mobi,
             Some("zip") => Self::AozoraZip,
             _ => Self::Unknown,
         }
@@ -120,7 +127,7 @@ impl SourceKind {
 
     fn canonical(self) -> Canonical {
         match self {
-            Self::Epub | Self::AozoraZip | Self::Azw3 => Canonical::Epub,
+            Self::Epub | Self::AozoraZip | Self::Azw3 | Self::Mobi => Canonical::Epub,
             Self::Kfx | Self::KfxZip => Canonical::Kfx,
             Self::Unknown => unreachable!("filtered by import_file"),
         }
@@ -173,6 +180,8 @@ fn import_one(
             .with_context(|| format!("merge kfx-zip {}", src.display()))?,
         SourceKind::Azw3 => convert_azw3(src)
             .with_context(|| format!("azw3 {}", src.display()))?,
+        SourceKind::Mobi => convert_mobi(src)
+            .with_context(|| format!("mobi {}", src.display()))?,
         SourceKind::AozoraZip => convert_aozora_zip(src)
             .with_context(|| format!("aozora zip {}", src.display()))?,
         SourceKind::Unknown => unreachable!("filtered above"),
@@ -436,6 +445,27 @@ fn convert_azw3(src: &Path) -> Result<Vec<u8>> {
     let report = boko::validate::epub3::validate(&epub_bytes);
     if !report.is_clean() {
         bail!("azw3 -> epub failed validation:\n{report}");
+    }
+    Ok(epub_bytes)
+}
+
+/// Convert a decrypted `.mobi` to EPUB bytes via boko-kai's MOBI importer
+/// + EPUB exporter. Shape matches `convert_azw3` — the EXTH parsing and
+/// EPUB export are shared infrastructure; only the input format tag and
+/// boko's per-importer wiring differ.
+fn convert_mobi(src: &Path) -> Result<Vec<u8>> {
+    use boko::Exporter as _;
+    let mobi_bytes = fs::read(src).with_context(|| format!("read {}", src.display()))?;
+    let mut book = boko::Book::from_bytes(&mobi_bytes, boko::Format::Mobi)
+        .with_context(|| format!("parse mobi {}", src.display()))?;
+    let mut buf = Cursor::new(Vec::<u8>::new());
+    boko::EpubExporter::new()
+        .export(&mut book, &mut buf)
+        .context("mobi -> epub export")?;
+    let epub_bytes = buf.into_inner();
+    let report = boko::validate::epub3::validate(&epub_bytes);
+    if !report.is_clean() {
+        bail!("mobi -> epub failed validation:\n{report}");
     }
     Ok(epub_bytes)
 }
