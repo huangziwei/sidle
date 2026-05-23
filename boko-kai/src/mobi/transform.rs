@@ -789,19 +789,26 @@ fn ensure_img_alt(tag: &[u8]) -> Vec<u8> {
         return tag.to_vec();
     }
 
-    let mut result = Vec::with_capacity(tag.len() + 7);
-
-    if let Some(close_pos) = tag.iter().rposition(|&b| b == b'/' || b == b'>') {
-        result.extend_from_slice(&tag[..close_pos]);
-        if !result.ends_with(b" ") {
-            result.push(b' ');
-        }
-        result.extend_from_slice(b"alt=\"\"");
-        result.extend_from_slice(&tag[close_pos..]);
+    // Insert `alt=""` before the closing punctuation. For self-closing
+    // `<img …/>` the alt must go *before* the slash; inserting it between
+    // the `/` and `>` produces `<img …/ alt="">`, which Apple Books rejects
+    // as "attributes construct error". A naive `rposition('/' or '>')`
+    // returns the `>` index and lands the alt in that broken slot.
+    let insert_pos = if tag.ends_with(b"/>") {
+        tag.len() - 2
+    } else if tag.ends_with(b">") {
+        tag.len() - 1
     } else {
-        result.extend_from_slice(tag);
-    }
+        return tag.to_vec();
+    };
 
+    let mut result = Vec::with_capacity(tag.len() + 7);
+    result.extend_from_slice(&tag[..insert_pos]);
+    if !result.ends_with(b" ") {
+        result.push(b' ');
+    }
+    result.extend_from_slice(b"alt=\"\"");
+    result.extend_from_slice(&tag[insert_pos..]);
     result
 }
 
@@ -834,8 +841,20 @@ mod tests {
 
     #[test]
     fn test_img_alt() {
-        let input = b"<img src=\"test.jpg\"/>";
-        let output = ensure_img_alt(input);
-        assert!(output.contains_str("alt=\"\""));
+        // Self-closing: alt must go before the `/>`, not between `/` and `>`
+        // (which Apple Books rejects as "attributes construct error").
+        let output = ensure_img_alt(b"<img src=\"test.jpg\"/>");
+        let s = String::from_utf8_lossy(&output);
+        assert_eq!(s, r#"<img src="test.jpg" alt=""/>"#);
+
+        // Non-self-closing: alt before the `>`.
+        let output = ensure_img_alt(b"<img src=\"test.jpg\">");
+        let s = String::from_utf8_lossy(&output);
+        assert_eq!(s, r#"<img src="test.jpg" alt="">"#);
+
+        // Already has alt — return unchanged.
+        let output = ensure_img_alt(b"<img src=\"test.jpg\" alt=\"x\"/>");
+        let s = String::from_utf8_lossy(&output);
+        assert_eq!(s, r#"<img src="test.jpg" alt="x"/>"#);
     }
 }
