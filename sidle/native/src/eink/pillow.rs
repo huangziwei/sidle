@@ -1,50 +1,48 @@
-//! Framework lifecycle guard.
+//! Exit-repaint guard — no framework freeze.
 //!
-//! SIGSTOP the Kindle framework process (`cvm`) on entry, SIGCONT on exit.
-//! That single move freezes all framework drawing AND its input pump (so
-//! the status bar can't repaint over us, and taps don't reach the home
-//! tile router). The "pillow disable" lipc property is NOT used: with cvm
-//! stopped, pillow has nothing to draw anyway; re-enabling it on exit was
-//! leaving the status bar in a stale half-redraw state because pillow
-//! resumes without a full repaint trigger.
+//! Sidle draws raw to `/dev/fb0`, which is invisible to the window manager
+//! (unlike kterm, a real WM window). Two consequences drive this design:
 //!
-//! Drop order: SIGCONT cvm, then `appmgrd start home` to nudge the
-//! framework into redrawing its full UI (status bar + library tiles) over
-//! whatever pixels we left behind.
+//!  * We do NOT `SIGSTOP cvm`. The freeze was redundant — the framework only
+//!    repainted over the gallery in RESPONSE to input, and we `EVIOCGRAB` both
+//!    the touchscreen (`touch.rs`) and the bezel buttons (`buttons.rs`), so it
+//!    sees none and stays quiescent. Worse, a frozen cvm stranded the chrome
+//!    state machine (`winmgr chromeState` stuck at 0), leaving the home status
+//!    bar (wifi/battery/clock) dead after exit. No freeze ⇒ chrome isn't
+//!    corrupted ⇒ the home repaint brings its status bar back.
 //!
-//! Risk: a sigkill of our process leaves cvm SIGSTOP'd, looking frozen
-//! until the user power-holds. Signal handling joins later; for now a
-//! panic still hits Drop via Rust's unwind path.
+//!  * On `Drop` we `appmgrd start app://com.lab126.booklet.home`. Since the WM
+//!    never saw our raw writes, nothing repaints over our last frame unless we
+//!    transition to a *different* app. `booklet.home` does that (on this
+//!    firmware it resolves to the real KPP home and forces a full repaint).
+//!    Starting `KPPMainApp` directly is a no-op — it's already the active app,
+//!    so there's no transition and the screen stays stuck on our gallery frame.
 //!
-//! Module name kept as `pillow` because the plan references it; the
-//! struct exposed is the framework guard.
+//! Risk: a stray system popup could in principle draw over the gallery mid-use
+//! (the freeze used to mask that). Not observed in practice; an explicit
+//! chrome-dismiss-on-entry can hang here if it ever happens.
 
 use std::process::Command;
 
 use anyhow::Result;
 
 pub struct Pillow {
-    framework_paused: bool,
+    _private: (),
 }
 
 impl Pillow {
     pub fn disable() -> Result<Self> {
-        let framework_paused = killall("STOP", "cvm");
-        Ok(Self { framework_paused })
+        // No cvm freeze — see module docs.
+        Ok(Self { _private: () })
     }
 }
 
 impl Drop for Pillow {
     fn drop(&mut self) {
-        if !self.framework_paused {
-            return;
-        }
-        // Failure to resume cvm is the catastrophic case (device frozen
-        // until reboot). Best effort since Drop can't propagate.
-        let _ = killall("CONT", "cvm");
-        // SIGCONT'd framework resumes execution but doesn't repaint — it
-        // only redraws on state changes. `appmgrd start home` forces a
-        // full UI redraw including the status bar.
+        // Transition to a different app to force a repaint over our raw frame.
+        // booklet.home resolves to the real home here; without the cvm freeze
+        // its chrome (status bar) repaints with it. Best effort — Drop can't
+        // propagate, and a missing lipc-set-prop just means no repaint nudge.
         let _ = Command::new("lipc-set-prop")
             .args([
                 "-s",
@@ -54,14 +52,4 @@ impl Drop for Pillow {
             ])
             .output();
     }
-}
-
-fn killall(signal: &str, target: &str) -> bool {
-    // BusyBox killall accepts `-SIGNAME PROC` for signal shorthand.
-    Command::new("killall")
-        .arg(format!("-{signal}"))
-        .arg(target)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }

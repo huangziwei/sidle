@@ -22,7 +22,6 @@ mod ui;
 mod wrap;
 
 use eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16};
-use eink::pillow::Pillow;
 use eink::buttons::{Buttons, PageButton};
 use eink::input::{Input, InputEvent};
 use eink::touch::{Touch, TouchEvent};
@@ -67,6 +66,14 @@ struct Armed {
 }
 
 fn main() {
+    // X11-window proof-of-concept (see eink::x11poc): validates that a
+    // Sidle-created window is WM-managed + recomposited on teardown before we
+    // port the renderer off raw /dev/fb0. Bypasses all fb/config setup.
+    if std::env::args().any(|a| a == "--x11-poc") {
+        let r = eink::x11poc::run(|m| log(m));
+        log(format!("x11poc done: {r:?}"));
+        return;
+    }
     let result = run();
     log(format!("done: {result:?}"));
 }
@@ -86,24 +93,23 @@ fn run() -> anyhow::Result<()> {
     let agent = ureq::AgentBuilder::new().build();
     let cache_dir = Path::new(COVER_CACHE_DIR);
 
-    // Open the framebuffer, input, and renderer *before* the first
-    // network call. The Diagnostics screen (shown when list_books can't
-    // reach the server) needs the fb to render and `input` to take taps,
-    // so all device setup is hoisted above list_books and the call is
-    // wrapped in a retry loop below. On the success path this only means
-    // the fb opens a few hundred ms earlier; the panel keeps its prior
-    // contents (the frozen KUAL menu) until the first draw, so nothing
-    // flashes blank. `_pillow` restores the framework on every exit path
-    // via Drop — including the diag "Exit" return.
+    // Open the X11 window, input, and renderer *before* the first network
+    // call. The Diagnostics screen (shown when list_books can't reach the
+    // server) needs the surface to render and `input` to take taps, so all
+    // device setup is hoisted above list_books and the call is wrapped in a
+    // retry loop below. The surface is now a real WM-managed X window (see
+    // eink::fb): on every exit path the window is torn down on Drop and the
+    // lab126 compositor recomposites the screen (home library + status bar
+    // repaint) — no cvm freeze, no chrome poking. The old `Pillow` guard is
+    // gone for that reason.
     let mut renderer = TextRenderer::load(FONT_PX)?;
 
     let orient = orientation::Orientation::detect();
     log(format!("orientation: {orient:?}"));
 
-    let _pillow = Pillow::disable()?;
-    // Open fb in Up — Kindle kernel rotates fb writes itself based on
-    // framework orientation. Our transform double-rotates. Touch needs
-    // the transform because raw evdev events are not pre-rotated.
+    // The X server presents in screen orientation, so render identity; the
+    // arg is kept only for API compatibility. Touch still transforms raw
+    // evdev coords by the detected orientation to match what's drawn.
     let mut fb = Framebuffer::open(orientation::Orientation::Up)?;
     let touch = Touch::open(orient, fb.var.xres, fb.var.yres)?;
     // Bezel page-turn buttons are a separate evdev device (gpio-keys). Grab
@@ -133,7 +139,8 @@ fn run() -> anyhow::Result<()> {
     // failure. The old behavior here was draw_boot_toast + return (KUAL
     // flashes back, no recourse). Now a failure renders diag::run, which
     // blocks on a Retry/Exit tap: Retry re-runs list_books (server may now
-    // be up), Exit returns cleanly (pillow restored on drop). diag::run is
+    // be up), Exit returns cleanly (window torn down on drop → WM recomposites
+    // the home + status bar). diag::run is
     // called fresh each failed attempt, so its "Last" row tracks the
     // latest error across retries.
     let t0 = Instant::now();

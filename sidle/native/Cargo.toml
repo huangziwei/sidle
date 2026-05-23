@@ -35,3 +35,10 @@ fontdue = { version = "0.9", default-features = false, features = ["std"] }
 # formats the server returns (.jpg from EPUB / Amazon, occasional .png).
 # All sub-deps (jpeg-decoder, png) are pure Rust.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# x11rb: pure-Rust X11 client. RustConnection speaks the wire protocol over the
+# socket — no libxcb/C — so the rust-lld cross path stays intact. Used to make
+# Sidle a real WM-managed window instead of raw /dev/fb0 writes, so the
+# framework composites + tears it down cleanly on exit (the kterm model).
+# NB: NO `allow-unsafe-code` feature — it pulls `as-raw-xcb-connection`, which
+# links the system `libxcb` (`-lxcb`) and breaks the static musl cross-link.
+x11rb = { version = "0.13", default-features = false }
