@@ -179,9 +179,56 @@ pub fn list_books(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<Vec<Book>> 
     let body = res
         .into_string()
         .with_context(|| format!("read body of {url}"))?;
-    let books: Vec<Book> =
+    let mut books: Vec<Book> =
         serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
+    for book in &mut books {
+        sanitize(book);
+    }
     Ok(books)
+}
+
+/// Strip zero-width / format characters and trim the text fields the picker
+/// sorts and facets on.
+///
+/// Why: some imported titles carry stray Unicode format characters — notably a
+/// leading BOM (U+FEFF) — that the desktop's `localeCompare` silently ignores,
+/// but the picker's code-point `str` ordering does not. A leading U+FEFF
+/// (0xFEFF) sorts near the top of the BMP, so a BOM-prefixed title is shoved to
+/// the *end* of a Title sort. That split the "文学少女" series on device: vol 07
+/// (BOM buried mid-title, so it starts with `0`) sorted first while vols 01-08
+/// (leading BOM) sorted last. Removing these characters makes code-point order
+/// agree with the desktop here — after stripping, all eight titles start with
+/// their digit. Display is unaffected (the characters are invisible).
+///
+/// This sanitizes the picker's in-memory copy only; the library DB is untouched
+/// (and downloads key off `device_filename`, not these fields).
+fn sanitize(book: &mut Book) {
+    book.title = clean(&book.title);
+    book.author = clean(&book.author);
+    book.language = clean(&book.language);
+    book.publisher = book.publisher.as_deref().map(clean);
+    book.series_name = book.series_name.as_deref().map(clean);
+    for tag in &mut book.tags {
+        *tag = clean(tag);
+    }
+}
+
+/// Drop [`is_ignorable`] characters anywhere in `s`, then trim surrounding
+/// whitespace.
+fn clean(s: &str) -> String {
+    s.chars().filter(|c| !is_ignorable(*c)).collect::<String>().trim().to_string()
+}
+
+/// Zero-width / formatting code points that carry no visible glyph and that
+/// locale collation treats as ignorable: BOM / zero-width space family, bidi
+/// marks, word joiner + invisible operators, and the soft hyphen.
+fn is_ignorable(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}'                  // soft hyphen
+        | '\u{200B}'..='\u{200F}'   // ZWSP, ZWNJ, ZWJ, LRM, RLM
+        | '\u{2060}'..='\u{2064}'   // word joiner + invisible operators
+        | '\u{FEFF}'                // BOM / zero-width no-break space
+    )
 }
 
 pub fn fetch_cover(agent: &ureq::Agent, cfg: &ServerConfig, id: i64) -> Result<Vec<u8>> {
@@ -341,5 +388,20 @@ mod tests {
         assert!(!looks_like_sha8_kfx("foo.kfx"));
         assert!(!looks_like_sha8_kfx("foo.deadbeeZ.kfx"));
         assert!(!looks_like_sha8_kfx("foo.deadbee.kfx"));
+    }
+
+    #[test]
+    fn clean_strips_bom_and_zero_width() {
+        // The real bug: a leading BOM (U+FEFF) made a title code-point-sort to
+        // the end. Stripped → the digit leads → correct order.
+        assert_eq!(clean("\u{FEFF}01 〝文学少女〟"), "01 〝文学少女〟");
+        // A BOM buried mid-title (vol 07's case) is removed too.
+        assert_eq!(clean("07 \u{FEFF}〝x"), "07 〝x");
+        // Other zero-width junk + surrounding whitespace.
+        assert_eq!(clean("  \u{200B}Hello\u{200D} "), "Hello");
+        // Only-ignorables collapses to empty (→ facet sentinel downstream).
+        assert_eq!(clean("\u{FEFF}\u{200B}"), "");
+        // Plain text is untouched.
+        assert_eq!(clean("Normal Title 7"), "Normal Title 7");
     }
 }
