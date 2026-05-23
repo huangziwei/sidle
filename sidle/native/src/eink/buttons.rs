@@ -34,9 +34,10 @@ const EVENT_BYTES: usize = 16;
 // Same EVIOCGRAB as touch.rs — _IOW('E', 0x90, int) = 0x40044590.
 const EVIOCGRAB: libc::c_int = 0x40044590;
 
-/// Which bezel button fired. Mapped from keycodes: `KEY_PAGEUP` → `Prev`,
-/// `KEY_PAGEDOWN` → `Next`. If the physical direction feels reversed on
-/// hardware, swap these two arms in [`Buttons::read_one`].
+/// Which bezel button fired. Hardware-confirmed KOA2 mapping: top button
+/// (`KEY_PAGEUP`) → `Next`, bottom button (`KEY_PAGEDOWN`) → `Prev` — top pages
+/// forward, matching how the user reads. See the keycode match in
+/// [`Buttons::read_one`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageButton {
     Prev,
@@ -86,8 +87,12 @@ impl Buttons {
         let value = i32::from_ne_bytes([buf[12], buf[13], buf[14], buf[15]]);
         if type_ == EV_KEY && value == 1 {
             return Ok(match code {
-                KEY_PAGEUP => Some(PageButton::Prev),
-                KEY_PAGEDOWN => Some(PageButton::Next),
+                // Hardware-confirmed on KOA2: the *top* button emits
+                // KEY_PAGEUP and the *bottom* emits KEY_PAGEDOWN, and the user
+                // reads top = forward. So top/PAGEUP → Next, bottom/PAGEDOWN →
+                // Prev (the opposite of the keycodes' literal names).
+                KEY_PAGEUP => Some(PageButton::Next),
+                KEY_PAGEDOWN => Some(PageButton::Prev),
                 _ => None,
             });
         }
