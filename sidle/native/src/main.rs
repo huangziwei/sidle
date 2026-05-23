@@ -27,6 +27,7 @@ use eink::buttons::{Buttons, PageButton};
 use eink::input::{Input, InputEvent};
 use eink::touch::{Touch, TouchEvent};
 use image::DynamicImage;
+use ui::diag;
 use ui::grid;
 use ui::pager::{self, PAGE_SIZE, PagerHit};
 use ui::text::TextRenderer;
@@ -85,35 +86,67 @@ fn run() -> anyhow::Result<()> {
     let agent = ureq::AgentBuilder::new().build();
     let cache_dir = Path::new(COVER_CACHE_DIR);
 
+    // Open the framebuffer, input, and renderer *before* the first
+    // network call. The Diagnostics screen (shown when list_books can't
+    // reach the server) needs the fb to render and `input` to take taps,
+    // so all device setup is hoisted above list_books and the call is
+    // wrapped in a retry loop below. On the success path this only means
+    // the fb opens a few hundred ms earlier; the panel keeps its prior
+    // contents (the frozen KUAL menu) until the first draw, so nothing
+    // flashes blank. `_pillow` restores the framework on every exit path
+    // via Drop — including the diag "Exit" return.
+    let mut renderer = TextRenderer::load(FONT_PX)?;
+
+    let orient = orientation::Orientation::detect();
+    log(format!("orientation: {orient:?}"));
+
+    let _pillow = Pillow::disable()?;
+    // Open fb in Up — Kindle kernel rotates fb writes itself based on
+    // framework orientation. Our transform double-rotates. Touch needs
+    // the transform because raw evdev events are not pre-rotated.
+    let mut fb = Framebuffer::open(orientation::Orientation::Up)?;
+    let touch = Touch::open(orient, fb.var.xres, fb.var.yres)?;
+    // Bezel page-turn buttons are a separate evdev device (gpio-keys). Grab
+    // them so the stock framework stops repainting the library over our
+    // gallery on a press, and map them to prev/next via the input multiplexer.
+    // Grabbing them here (before list_books) also shields the Diagnostics
+    // screen from that same repaint-on-press corruption (#7).
+    // Best-effort: a missing device or open failure just means touch-only
+    // navigation — never fail the picker over the buttons.
+    let buttons = match Buttons::open() {
+        Ok(Some(b)) => {
+            log("buttons: grabbed gpio-keys");
+            Some(b)
+        }
+        Ok(None) => {
+            log("buttons: no gpio-keys device — touch-only");
+            None
+        }
+        Err(e) => {
+            log(format!("buttons: open failed: {e:#} — touch-only"));
+            None
+        }
+    };
+    let mut input = Input::new(touch, buttons);
+
+    // Fetch the library, retrying through the Diagnostics screen on
+    // failure. The old behavior here was draw_boot_toast + return (KUAL
+    // flashes back, no recourse). Now a failure renders diag::run, which
+    // blocks on a Retry/Exit tap: Retry re-runs list_books (server may now
+    // be up), Exit returns cleanly (pillow restored on drop). diag::run is
+    // called fresh each failed attempt, so its "Last" row tracks the
+    // latest error across retries.
     let t0 = Instant::now();
-    let books = match api::list_books(&agent, &cfg) {
-        Ok(b) => b,
-        Err(err) => {
-            // Any failure here is the user's experience of "I tapped
-            // Sidle and nothing happened" — the binary used to just
-            // exit and KUAL would flash back. We now always render a
-            // boot toast with whatever we know, even if it's a vague
-            // network error, so the user has *something* on screen to
-            // act on instead of having to tail the log.
-            let (log_line, screen_msg) = match &err {
-                api::SidleError::TokenMismatch => (
-                    "token rejected by sidle-server (401/403); resync via sidle desktop app".to_string(),
-                    "Token mismatch.\nPlug Kindle into sidle and click Update KUAL.".to_string(),
-                ),
-                api::SidleError::Other(e) => (
-                    format!("list_books failed: {e:#}"),
-                    // Keep the e-ink message terse — multi-line tiny
-                    // text is hard to read. First line names the
-                    // class, second is a hint.
-                    format!(
-                        "Couldn't reach sidle server.\nIs it running on {}:{}?",
-                        cfg.host, cfg.port
-                    ),
-                ),
-            };
-            log(log_line);
-            let _ = draw_boot_toast(&screen_msg);
-            return Ok(());
+    let books = loop {
+        match api::list_books(&agent, &cfg) {
+            Ok(b) => break b,
+            Err(err) => {
+                log(format!("list_books failed: {err}"));
+                match diag::run(&mut fb, &mut input, &mut renderer, &cfg, &err)? {
+                    diag::Action::Retry => continue,
+                    diag::Action::Exit => return Ok(()),
+                }
+            }
         }
     };
     let total_from_server = books.len();
@@ -150,38 +183,6 @@ fn run() -> anyhow::Result<()> {
     // fetch_and_paint_page. Cached across page revisits, so paging
     // back is instant.
     let mut covers: Vec<Option<DynamicImage>> = vec![None; books.len()];
-
-    let mut renderer = TextRenderer::load(FONT_PX)?;
-
-    let orient = orientation::Orientation::detect();
-    log(format!("orientation: {orient:?}"));
-
-    let _pillow = Pillow::disable()?;
-    // Open fb in Up — Kindle kernel rotates fb writes itself based on
-    // framework orientation. Our transform double-rotates. Touch needs
-    // the transform because raw evdev events are not pre-rotated.
-    let mut fb = Framebuffer::open(orientation::Orientation::Up)?;
-    let touch = Touch::open(orient, fb.var.xres, fb.var.yres)?;
-    // Bezel page-turn buttons are a separate evdev device (gpio-keys). Grab
-    // them so the stock framework stops repainting the library over our
-    // gallery on a press, and map them to prev/next via the input multiplexer.
-    // Best-effort: a missing device or open failure just means touch-only
-    // navigation — never fail the picker over the buttons.
-    let buttons = match Buttons::open() {
-        Ok(Some(b)) => {
-            log("buttons: grabbed gpio-keys");
-            Some(b)
-        }
-        Ok(None) => {
-            log("buttons: no gpio-keys device — touch-only");
-            None
-        }
-        Err(e) => {
-            log(format!("buttons: open failed: {e:#} — touch-only"));
-            None
-        }
-    };
-    let mut input = Input::new(touch, buttons);
 
     let (grid_left, grid_top) = grid::grid_origin(fb.var.xres, TOP_MARGIN);
     let mut page: usize = 0;
@@ -454,20 +455,7 @@ fn draw_placeholder_title(
     let line_h = renderer.line_height().max(1);
     let max_lines = (max_text_h / line_h).max(1) as usize;
 
-    let mut lines = renderer.wrap(title, max_text_w);
-    if lines.len() > max_lines {
-        lines.truncate(max_lines);
-        if let Some(last) = lines.last_mut() {
-            // Trim trailing chars until "<last>…" fits the width;
-            // then assign the ellipsized form back.
-            let mut candidate = format!("{last}…");
-            while !last.is_empty() && renderer.measure_width(&candidate) > max_text_w {
-                last.pop();
-                candidate = format!("{last}…");
-            }
-            *last = candidate;
-        }
-    }
+    let lines = renderer.wrap_and_clamp(title, max_text_w, max_lines);
 
     // Center the block vertically.
     let total_h = (lines.len() as u32) * line_h;
@@ -583,24 +571,6 @@ fn fetch_and_paint_page(
             t_pg.elapsed()
         ));
     }
-    Ok(())
-}
-
-/// Boot-time toast for unrecoverable startup errors (token mismatch
-/// today; could grow). Opens the framebuffer just long enough to
-/// flash a message, then returns. Best-effort: any error short-
-/// circuits silently — caller has already logged the underlying
-/// problem and the worst-case is the same "nothing happened" symptom
-/// users were getting before.
-fn draw_boot_toast(msg: &str) -> anyhow::Result<()> {
-    let mut renderer = TextRenderer::load(FONT_PX)?;
-    let _pillow = Pillow::disable()?;
-    let mut fb = Framebuffer::open(orientation::Orientation::Up)?;
-    let dirty = toast::draw(&mut fb, &mut renderer, msg);
-    fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
-    // Linger 3× normal — boot toast is the only thing the user will
-    // see, vs in-app toasts that get redrawn over by the gallery.
-    thread::sleep(TOAST_LINGER * 3);
     Ok(())
 }
 

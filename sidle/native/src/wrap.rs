@@ -70,6 +70,37 @@ where
     lines
 }
 
+/// Word-wrap `text` to `max_width`, then clamp to at most `max_lines`
+/// lines — appending `…` to the last kept line whenever content was
+/// dropped. The ellipsis is fitted by trimming trailing chars until
+/// `"<line>…"` measures within `max_width`, so the truncated line never
+/// overflows the box (in the degenerate case the line collapses to just
+/// `…`).
+///
+/// Same `measure` contract as [`wrap_to_width`]. Extracted from the cover
+/// placeholder renderer so the diagnostics panel can clamp long error
+/// strings the same way — one tested path for both.
+pub fn wrap_and_clamp<F>(text: &str, max_width: u32, max_lines: usize, mut measure: F) -> Vec<String>
+where
+    F: FnMut(&str) -> u32,
+{
+    let mut lines = wrap_to_width(text, max_width, &mut measure);
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            // Trim trailing chars until "<last>…" fits the width, then
+            // assign the ellipsized form back.
+            let mut candidate = format!("{last}…");
+            while !last.is_empty() && measure(&candidate) > max_width {
+                last.pop();
+                candidate = format!("{last}…");
+            }
+            *last = candidate;
+        }
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +159,28 @@ mod tests {
         // mix.
         let lines = wrap_to_width("a bb cccc ddddd", 30, fixed);
         assert!(lines.iter().all(|l| l.chars().count() <= 3));
+    }
+
+    #[test]
+    fn clamp_keeps_all_lines_when_within_max() {
+        // "hello world" wraps to 2 lines at 100px; max_lines 3 → returned
+        // unchanged, no ellipsis.
+        let lines = wrap_and_clamp("hello world", 100, 3, fixed);
+        assert_eq!(lines, vec!["hello".to_string(), "world".to_string()]);
+    }
+
+    #[test]
+    fn clamp_truncates_and_ellipsizes_last_line() {
+        // 30px = 3 chars. "aaa bbb ccc ddd" wraps to 4 lines; clamp to 2.
+        // The 2nd kept line "bbb" loses a char to make room for the
+        // ellipsis (which itself measures 10px): "bb…" = 30px ≤ 30.
+        let lines = wrap_and_clamp("aaa bbb ccc ddd", 30, 2, fixed);
+        assert_eq!(lines, vec!["aaa".to_string(), "bb…".to_string()]);
+    }
+
+    #[test]
+    fn clamp_to_one_line_ellipsizes() {
+        let lines = wrap_and_clamp("aaa bbb ccc", 30, 1, fixed);
+        assert_eq!(lines, vec!["aa…".to_string()]);
     }
 }

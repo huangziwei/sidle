@@ -68,11 +68,14 @@ impl TextRenderer {
         w
     }
 
-    /// Word-wrap `text` to fit `max_width` per line. Latin titles wrap
-    /// at whitespace; CJK titles (no spaces) fall through to char-level
-    /// wrap so they pack densely without overflowing the box.
-    pub fn wrap(&mut self, text: &str, max_width: u32) -> Vec<String> {
-        crate::wrap::wrap_to_width(text, max_width, |s| self.measure_width(s))
+    /// Word-wrap `text` to fit `max_width` per line, then clamp to at most
+    /// `max_lines`, ellipsizing the dropped tail. Latin titles wrap at
+    /// whitespace; CJK titles (no spaces) fall through to char-level wrap
+    /// so they pack densely without overflowing the box. Thin font-backed
+    /// wrapper over [`crate::wrap::wrap_and_clamp`]; shared by the cover
+    /// placeholder and the diagnostics panel.
+    pub fn wrap_and_clamp(&mut self, text: &str, max_width: u32, max_lines: usize) -> Vec<String> {
+        crate::wrap::wrap_and_clamp(text, max_width, max_lines, |s| self.measure_width(s))
     }
 }
 
