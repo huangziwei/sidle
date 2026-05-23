@@ -1,0 +1,43 @@
+#!/bin/sh
+# Build sidle desktop app + on-Kindle native picker, install to /Applications.
+#
+# Two cargo invocations, run sequentially from the workspace root:
+#   1. Cross-compile sidle-native for the Kindle (armv7 musl static).
+#   2. Build the Tauri desktop app for the host Mac.
+# Then ditto the bundle into /Applications, replacing any prior copy.
+#
+# Why a script and not `cargo tauri build`'s build.rs: nesting cargo
+# inside cargo livelocks on the shared workspace lockfile. See
+# .claude/plans/build-sh-script.md for the history.
+
+set -eu
+
+cd "$(dirname "$0")"
+
+KUAL_TARGET="armv7-unknown-linux-musleabihf"
+
+# Precheck: surface a one-liner if the cross target isn't installed,
+# instead of cargo's opaque "can't find core for armv7-..." panic.
+if ! rustup target list --installed | grep -qx "$KUAL_TARGET"; then
+    echo "error: rustup target '$KUAL_TARGET' is not installed" >&2
+    echo "       fix: rustup target add $KUAL_TARGET" >&2
+    exit 1
+fi
+
+echo "==> Cross-compiling sidle-native for Kindle ($KUAL_TARGET)"
+cargo build --release --target "$KUAL_TARGET" -p sidle-native
+
+echo "==> Building sidle desktop app"
+cargo tauri build
+
+echo "==> Installing to /Applications/sidle.app"
+SRC="target/release/bundle/macos/sidle.app"
+DST="/Applications/sidle.app"
+if [ ! -d "$SRC" ]; then
+    echo "error: expected bundle not found at $SRC" >&2
+    exit 1
+fi
+rm -rf "$DST"
+ditto "$SRC" "$DST"
+
+echo "==> Done."
