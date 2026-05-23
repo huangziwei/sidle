@@ -213,6 +213,7 @@ mod tests {
             series_index: None,
             file_size: 0,
             imported_at: String::new(),
+            tags: Vec::new(),
         }
     }
 

@@ -143,15 +143,15 @@ pub struct Book {
     #[serde(default)]
     pub device_filename: Option<String>,
 
-    // ---- Sort metadata ----
+    // ---- Sort + facet metadata ----
     // Mirror the same-named columns on `db::BookRow`, which the server already
     // flattens into every `/list.json` entry (`server/src/lib.rs`
     // `BookListEntry`) — so consuming them needs no server/protocol change.
     // Each is `#[serde(default)]` for the same reason as the two fields above:
     // an older server that doesn't ship a column still parses, the field just
-    // takes its type default. Read by `ui::sort`. (The facet fields `tags` etc.
-    // join here in phase 2, added alongside the `ui::filter` code that reads
-    // them — fields land when first used, not speculatively.)
+    // takes its type default. Read by `ui::sort` and `ui::filter`. (`published_at`
+    // is deliberately absent — it's a desktop list column, not in the picker's
+    // net sort keys or facets, so carrying it would be dead code.)
     #[serde(default)]
     pub author: String,
     #[serde(default)]
@@ -167,6 +167,10 @@ pub struct Book {
     pub file_size: i64,
     #[serde(default)]
     pub imported_at: String,
+    /// User-defined tags. Server canonicalizes them (trimmed, lowercased,
+    /// deduped, in-order); the `tags` facet (`ui::filter`) reads them as-is.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 pub fn list_books(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<Vec<Book>> {
@@ -301,6 +305,7 @@ mod tests {
             series_index: None,
             file_size: 0,
             imported_at: String::new(),
+            tags: Vec::new(),
         }
     }
 

@@ -4,7 +4,8 @@
 //! left-to-right:
 //!
 //! - `✕ Exit`         (always shown, fixed-width left zone)
-//! - `Sort`           (always shown, fixed-width zone — opens the sort picker)
+//! - `Filter`         (always shown, fixed-width zone — opens the filter & sort
+//!                     menu; shows `(N)` when N facets are active)
 //! - `← Prev / N / Next →` (the remaining width, only when n_pages > 1)
 //!
 //! Replaces the earlier hidden top-left-corner quit gesture, which was
@@ -17,16 +18,16 @@ pub const STRIP_H: u32 = 80;
 pub const PAGE_SIZE: usize = 9;
 
 const EXIT_ZONE_W: u32 = 200;
-/// Sort zone sits immediately right of Exit, same fixed-width pattern. The page
-/// nav (Prev/mid/Next) gets whatever width is left.
-const SORT_ZONE_W: u32 = 220;
+/// Filter zone sits immediately right of Exit, same fixed-width pattern. The
+/// page nav (Prev/mid/Next) gets whatever width is left.
+const FILTER_ZONE_W: u32 = 220;
 /// Left edge of the page-nav region.
-const NAV_LEFT: u32 = EXIT_ZONE_W + SORT_ZONE_W;
+const NAV_LEFT: u32 = EXIT_ZONE_W + FILTER_ZONE_W;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PagerHit {
     Exit,
-    Sort,
+    Filter,
     Prev,
     Next,
 }
@@ -47,13 +48,13 @@ pub fn hit(tx: u32, ty: u32, fb_xres: u32, fb_yres: u32, total_pages: usize) -> 
     if ty < strip_top(fb_yres) {
         return None;
     }
-    // Exit and Sort take the two leftmost fixed slices; the rest of the strip
+    // Exit and Filter take the two leftmost fixed slices; the rest of the strip
     // is split for page nav only when there's somewhere to navigate to.
     if tx < EXIT_ZONE_W {
         return Some(PagerHit::Exit);
     }
     if tx < NAV_LEFT {
-        return Some(PagerHit::Sort);
+        return Some(PagerHit::Filter);
     }
     if total_pages <= 1 {
         return None;
@@ -65,7 +66,13 @@ pub fn hit(tx: u32, ty: u32, fb_xres: u32, fb_yres: u32, total_pages: usize) -> 
     }
 }
 
-pub fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, page: usize, total_pages: usize) {
+pub fn draw(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    page: usize,
+    total_pages: usize,
+    filter_count: usize,
+) {
     let strip_y = strip_top(fb.var.yres);
     // 2px black divider, white strip body below.
     fb.fill_rect(strip_y, 0, fb.var.xres, 2, 0x00);
@@ -78,10 +85,15 @@ pub fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, page: usize, tota
     // Vertical separator after exit zone.
     fb.fill_rect(strip_y + 12, EXIT_ZONE_W - 2, 2, STRIP_H - 24, 0x00);
 
-    // Sort zone, right of Exit. Always visible (sorting works on a single page
-    // too). The active key/dir is shown in the grid header, not here, so this
-    // label is static. Phase 2 broadens it to Filter + an active-facet count.
-    renderer.draw(fb, EXIT_ZONE_W as i32 + 40, baseline, "Sort", false);
+    // Filter zone, right of Exit. Always visible (filter/sort work on a single
+    // page too). Shows `(N)` when N facets are active so a filtered state is
+    // obvious; the active sort key/dir lives in the grid header.
+    let filter_label = if filter_count > 0 {
+        format!("Filter ({filter_count})")
+    } else {
+        "Filter".to_string()
+    };
+    renderer.draw(fb, EXIT_ZONE_W as i32 + 40, baseline, &filter_label, false);
     fb.fill_rect(strip_y + 12, NAV_LEFT - 2, 2, STRIP_H - 24, 0x00);
 
     if total_pages <= 1 {
