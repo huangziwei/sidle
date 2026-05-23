@@ -23,6 +23,8 @@ mod wrap;
 
 use eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16};
 use eink::pillow::Pillow;
+use eink::buttons::{Buttons, PageButton};
+use eink::input::{Input, InputEvent};
 use eink::touch::{Touch, TouchEvent};
 use image::DynamicImage;
 use ui::grid;
@@ -159,7 +161,27 @@ fn run() -> anyhow::Result<()> {
     // framework orientation. Our transform double-rotates. Touch needs
     // the transform because raw evdev events are not pre-rotated.
     let mut fb = Framebuffer::open(orientation::Orientation::Up)?;
-    let mut touch = Touch::open(orient, fb.var.xres, fb.var.yres)?;
+    let touch = Touch::open(orient, fb.var.xres, fb.var.yres)?;
+    // Bezel page-turn buttons are a separate evdev device (gpio-keys). Grab
+    // them so the stock framework stops repainting the library over our
+    // gallery on a press, and map them to prev/next via the input multiplexer.
+    // Best-effort: a missing device or open failure just means touch-only
+    // navigation — never fail the picker over the buttons.
+    let buttons = match Buttons::open() {
+        Ok(Some(b)) => {
+            log("buttons: grabbed gpio-keys");
+            Some(b)
+        }
+        Ok(None) => {
+            log("buttons: no gpio-keys device — touch-only");
+            None
+        }
+        Err(e) => {
+            log(format!("buttons: open failed: {e:#} — touch-only"));
+            None
+        }
+    };
+    let mut input = Input::new(touch, buttons);
 
     let (grid_left, grid_top) = grid::grid_origin(fb.var.xres, TOP_MARGIN);
     let mut page: usize = 0;
@@ -180,10 +202,10 @@ fn run() -> anyhow::Result<()> {
 
     let mut armed: Option<Armed> = None;
     loop {
-        let event = touch.next_event()?;
+        let event = input.next()?;
 
         match event {
-            TouchEvent::Down { x, y } => {
+            InputEvent::Touch(TouchEvent::Down { x, y }) => {
                 log(format!("down: ({x},{y})"));
                 // Down on a cell arms it. Down on the strip or in margins
                 // is a no-op — strip actions fire on Up regardless of
@@ -221,7 +243,7 @@ fn run() -> anyhow::Result<()> {
                     }
                 }
             }
-            TouchEvent::Up { x, y } => {
+            InputEvent::Touch(TouchEvent::Up { x, y }) => {
                 log(format!("up: ({x},{y})"));
                 if let Some(a) = armed.take() {
                     let held = a.down_at.elapsed();
@@ -339,6 +361,29 @@ fn run() -> anyhow::Result<()> {
                             }
                         }
                     }
+                }
+            }
+            InputEvent::Page(pb) => {
+                log(format!("page button: {pb:?}"));
+                // A hardware page-turn cancels any in-progress long-press: the
+                // finger may still be down on a now-stale cell, so drop the
+                // armed state (the redraw below clears its outline) and a later
+                // finger-up won't fire a download on the wrong page.
+                armed = None;
+                let new_page = match pb {
+                    PageButton::Prev => page.saturating_sub(1),
+                    PageButton::Next => (page + 1).min(total_pages.saturating_sub(1)),
+                };
+                if new_page != page {
+                    page = new_page;
+                    draw_gallery_page(
+                        &mut fb, &mut renderer, &books, &covers, page,
+                        total_pages, grid_left, grid_top,
+                    )?;
+                    fetch_and_paint_page(
+                        &agent, &cfg, cache_dir, &mut fb, &books,
+                        &mut covers, page, grid_left, grid_top,
+                    )?;
                 }
             }
         }

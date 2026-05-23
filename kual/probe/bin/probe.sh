@@ -54,5 +54,41 @@ OUT=/mnt/us/sidle-probe.txt
   ifconfig 2>&1 || busybox ifconfig 2>&1
   echo
 
+  # --- Input devices: find the bezel page-button device + its keycodes, so the
+  #     native picker can grab it (stop the framework repainting on a press) and
+  #     map the buttons to prev/next. The touchscreen is already known; we need
+  #     the *separate* gpio-keys/button device's Name, Handlers (eventN), and
+  #     KEY= bitmask.
+  echo "=== /proc/bus/input/devices ==="
+  cat /proc/bus/input/devices 2>&1 || echo "(no /proc/bus/input/devices)"
+  echo
+
+  # --- Live key capture. Read every event node in parallel for ~12s while the
+  #     user presses the page buttons; whichever node yields EV_KEY records is
+  #     the button device. Read-only (no EVIOCGRAB), so it can't lock out the
+  #     power/home buttons. Background-cat + kill instead of `timeout` to stay
+  #     robust across busybox arg-order variants.
+  echo "=== key-event capture (~12s — PRESS BOTH PAGE BUTTONS REPEATEDLY) ==="
+  : > /tmp/sidle-cap.pids
+  for dev in /dev/input/event*; do
+    [ -e "$dev" ] || continue
+    base=$(basename "$dev")
+    cat "$dev" > "/tmp/sidle-cap.$base.bin" 2>/dev/null &
+    echo "$!" >> /tmp/sidle-cap.pids
+  done
+  sleep 12
+  while read pid; do kill "$pid" 2>/dev/null; done < /tmp/sidle-cap.pids
+  rm -f /tmp/sidle-cap.pids
+  # 16-byte records on this kernel: type@8-9, code@10-11, value@12-15 (LE).
+  # EV_KEY=0x0001, value 1=press / 0=release. Non-empty dumps = that device saw
+  # input during the window.
+  for f in /tmp/sidle-cap.event*.bin; do
+    [ -e "$f" ] || continue
+    echo "--- $f ($(wc -c < "$f" 2>/dev/null) bytes) ---"
+    hexdump -C "$f" 2>&1
+    rm -f "$f"
+  done
+  echo
+
   echo "[sidle-probe] done: $(date 2>&1)"
 } > "$OUT" 2>&1

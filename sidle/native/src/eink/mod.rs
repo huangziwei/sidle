@@ -5,6 +5,8 @@
 //! C dependencies. See `.claude/plans/native-kindle-app.md` for the
 //! rationale.
 
+pub mod buttons;
 pub mod fb;
+pub mod input;
 pub mod pillow;
 pub mod touch;

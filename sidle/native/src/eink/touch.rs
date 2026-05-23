@@ -33,7 +33,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Read;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -108,6 +108,13 @@ impl Touch {
             fb_xres,
             fb_yres,
         })
+    }
+
+    /// Raw fd for `poll(2)` multiplexing with the button device (see
+    /// [`crate::eink::input`]). The `Touch` keeps ownership; callers only poll
+    /// on it, then call [`Touch::next_event`] when it's readable.
+    pub fn raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
     }
 
     /// Blocks until the next `Down` or `Up` boundary. Returns the
