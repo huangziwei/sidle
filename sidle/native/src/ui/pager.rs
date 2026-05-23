@@ -1,10 +1,11 @@
 //! Bottom-strip toolbar.
 //!
-//! Always-visible 80px strip at the bottom of the panel with three tap
-//! zones, left-to-right:
+//! Always-visible 80px strip at the bottom of the panel with tap zones,
+//! left-to-right:
 //!
-//! - `[Exit]`         (always shown, left third)
-//! - `← Prev / N / Next →` (middle + right third, only when n_pages > 1)
+//! - `✕ Exit`         (always shown, fixed-width left zone)
+//! - `Sort`           (always shown, fixed-width zone — opens the sort picker)
+//! - `← Prev / N / Next →` (the remaining width, only when n_pages > 1)
 //!
 //! Replaces the earlier hidden top-left-corner quit gesture, which was
 //! ambiguous with stray touch events near the panel edge.
@@ -16,10 +17,16 @@ pub const STRIP_H: u32 = 80;
 pub const PAGE_SIZE: usize = 9;
 
 const EXIT_ZONE_W: u32 = 200;
+/// Sort zone sits immediately right of Exit, same fixed-width pattern. The page
+/// nav (Prev/mid/Next) gets whatever width is left.
+const SORT_ZONE_W: u32 = 220;
+/// Left edge of the page-nav region.
+const NAV_LEFT: u32 = EXIT_ZONE_W + SORT_ZONE_W;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PagerHit {
     Exit,
+    Sort,
     Prev,
     Next,
 }
@@ -40,10 +47,13 @@ pub fn hit(tx: u32, ty: u32, fb_xres: u32, fb_yres: u32, total_pages: usize) -> 
     if ty < strip_top(fb_yres) {
         return None;
     }
-    // Exit takes the leftmost slice; the rest of the strip is split for
-    // page nav only when there's somewhere to navigate to.
+    // Exit and Sort take the two leftmost fixed slices; the rest of the strip
+    // is split for page nav only when there's somewhere to navigate to.
     if tx < EXIT_ZONE_W {
         return Some(PagerHit::Exit);
+    }
+    if tx < NAV_LEFT {
+        return Some(PagerHit::Sort);
     }
     if total_pages <= 1 {
         return None;
@@ -68,6 +78,12 @@ pub fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, page: usize, tota
     // Vertical separator after exit zone.
     fb.fill_rect(strip_y + 12, EXIT_ZONE_W - 2, 2, STRIP_H - 24, 0x00);
 
+    // Sort zone, right of Exit. Always visible (sorting works on a single page
+    // too). The active key/dir is shown in the grid header, not here, so this
+    // label is static. Phase 2 broadens it to Filter + an active-facet count.
+    renderer.draw(fb, EXIT_ZONE_W as i32 + 40, baseline, "Sort", false);
+    fb.fill_rect(strip_y + 12, NAV_LEFT - 2, 2, STRIP_H - 24, 0x00);
+
     if total_pages <= 1 {
         return;
     }
@@ -77,7 +93,7 @@ pub fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, page: usize, tota
     let label_mid = format!("{} / {}", page + 1, total_pages);
 
     if page > 0 {
-        renderer.draw(fb, EXIT_ZONE_W as i32 + 40, baseline, label_prev, false);
+        renderer.draw(fb, NAV_LEFT as i32 + 40, baseline, label_prev, false);
     }
     let mid_w = renderer.measure_width(&label_mid);
     let mid_x = (fb.var.xres as i32 - mid_w as i32) / 2;

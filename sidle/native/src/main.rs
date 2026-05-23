@@ -29,6 +29,8 @@ use image::DynamicImage;
 use ui::diag;
 use ui::grid;
 use ui::pager::{self, PAGE_SIZE, PagerHit};
+use ui::sort::SortState;
+use ui::sortmenu;
 use ui::text::TextRenderer;
 use ui::toast;
 
@@ -169,7 +171,7 @@ fn run() -> anyhow::Result<()> {
     // device_state.rs). Missing kfx_sha256 on the row means we can't
     // dedupe; show it anyway so the user isn't silently dropped books.
     let downloaded = device_state::scan_downloaded_shas(Path::new(DOWNLOAD_DIR));
-    let books: Vec<api::Book> = books
+    let all_books: Vec<api::Book> = books
         .into_iter()
         .filter(|b| match b.kfx_sha256.as_deref() {
             Some(sha) if sha.len() >= 8 => !downloaded.contains(&sha[..8]),
@@ -177,7 +179,17 @@ fn run() -> anyhow::Result<()> {
         })
         .collect();
 
-    let total_pages = pager::n_pages(books.len());
+    // `all_books` is the master (hide-downloaded) set; `books` is the view the
+    // grid actually pages over — `all_books` sorted (and, in phase 2, filtered).
+    // A re-sort rebuilds the view from the master, and `total_pages`/`covers`/
+    // `page` all re-derive from it (see the `PagerHit::Sort` handler below).
+    // Default sort is Date-added-desc: the same order the server already returns
+    // (`ORDER BY imported_at DESC`), but now labelled in the grid header instead
+    // of reading as random. (Phase 3 will seed `sort` from a persisted file.)
+    let mut sort = SortState::default();
+    let mut books = rebuild_view(&all_books, sort);
+
+    let mut total_pages = pager::n_pages(books.len());
     log(format!(
         "books: {} of {} ({} on device, {} pages, list in {:?})",
         books.len(),
@@ -206,6 +218,7 @@ fn run() -> anyhow::Result<()> {
         total_pages,
         grid_left,
         grid_top,
+        sort,
     )?;
     log("initial render (placeholders)");
     fetch_and_paint_page(
@@ -312,7 +325,7 @@ fn run() -> anyhow::Result<()> {
                         thread::sleep(TOAST_LINGER);
                         draw_gallery_page(
                             &mut fb, &mut renderer, &books, &covers, page,
-                            total_pages, grid_left, grid_top,
+                            total_pages, grid_left, grid_top, sort,
                         )?;
                     } else {
                         // Short tap on a cover — discovery hint. Without
@@ -330,7 +343,7 @@ fn run() -> anyhow::Result<()> {
                         // the cell outline that Down left behind.
                         draw_gallery_page(
                             &mut fb, &mut renderer, &books, &covers, page,
-                            total_pages, grid_left, grid_top,
+                            total_pages, grid_left, grid_top, sort,
                         )?;
                     }
                     continue;
@@ -344,13 +357,45 @@ fn run() -> anyhow::Result<()> {
                             log("exit-button tap");
                             break;
                         }
+                        PagerHit::Sort => {
+                            log("sort-button tap");
+                            // Blocking overlay — owns input until Done. It keeps
+                            // `current_orient` in sync (it repaints itself on a
+                            // mid-menu rotation), so the main loop's Tick path
+                            // stays correct on return.
+                            let new_sort = sortmenu::run(
+                                &mut fb, &mut input, &mut renderer, sort, &mut current_orient,
+                            )?;
+                            if new_sort != sort {
+                                sort = new_sort;
+                                // Rebuild the view from the master, reset paging,
+                                // and drop the positional cover vec — it re-fills
+                                // from the id-keyed disk cache on the paint below
+                                // (no re-fetch). See `rebuild_view` / cover_cache.
+                                books = rebuild_view(&all_books, sort);
+                                total_pages = pager::n_pages(books.len());
+                                covers = vec![None; books.len()];
+                                page = 0;
+                                log(format!("re-sorted: {} ({total_pages} pages)", sort.header()));
+                            }
+                            // Repaint regardless — the overlay painted over the
+                            // grid even when the sort is unchanged.
+                            draw_gallery_page(
+                                &mut fb, &mut renderer, &books, &covers, page,
+                                total_pages, grid_left, grid_top, sort,
+                            )?;
+                            fetch_and_paint_page(
+                                &agent, &cfg, cache_dir, &mut fb, &books,
+                                &mut covers, page, grid_left, grid_top,
+                            )?;
+                        }
                         PagerHit::Prev => {
                             let new_page = page.saturating_sub(1);
                             if new_page != page {
                                 page = new_page;
                                 draw_gallery_page(
                                     &mut fb, &mut renderer, &books, &covers, page,
-                                    total_pages, grid_left, grid_top,
+                                    total_pages, grid_left, grid_top, sort,
                                 )?;
                                 fetch_and_paint_page(
                                     &agent, &cfg, cache_dir, &mut fb, &books,
@@ -364,7 +409,7 @@ fn run() -> anyhow::Result<()> {
                                 page = new_page;
                                 draw_gallery_page(
                                     &mut fb, &mut renderer, &books, &covers, page,
-                                    total_pages, grid_left, grid_top,
+                                    total_pages, grid_left, grid_top, sort,
                                 )?;
                                 fetch_and_paint_page(
                                     &agent, &cfg, cache_dir, &mut fb, &books,
@@ -390,7 +435,7 @@ fn run() -> anyhow::Result<()> {
                     page = new_page;
                     draw_gallery_page(
                         &mut fb, &mut renderer, &books, &covers, page,
-                        total_pages, grid_left, grid_top,
+                        total_pages, grid_left, grid_top, sort,
                     )?;
                     fetch_and_paint_page(
                         &agent, &cfg, cache_dir, &mut fb, &books,
@@ -413,7 +458,7 @@ fn run() -> anyhow::Result<()> {
                         input.set_orientation(o);
                         draw_gallery_page(
                             &mut fb, &mut renderer, &books, &covers, page,
-                            total_pages, grid_left, grid_top,
+                            total_pages, grid_left, grid_top, sort,
                         )?;
                         fetch_and_paint_page(
                             &agent, &cfg, cache_dir, &mut fb, &books,
@@ -427,6 +472,17 @@ fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Build the view the grid pages over: the master `all_books` cloned and
+/// sorted. (Phase 2 adds a filter pass before the sort.) Cloning a few hundred
+/// small `Book` structs per rebuild is trivial and keeps the
+/// `draw_gallery_page` / `fetch_and_paint_page` signatures (`&[Book]`)
+/// unchanged versus threading index lists through them.
+fn rebuild_view(all_books: &[api::Book], sort: SortState) -> Vec<api::Book> {
+    let mut view = all_books.to_vec();
+    sort.apply(&mut view);
+    view
+}
+
 fn draw_gallery_page(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -436,8 +492,19 @@ fn draw_gallery_page(
     total_pages: usize,
     grid_left: i32,
     grid_top: i32,
+    sort: SortState,
 ) -> anyhow::Result<()> {
     fb.fill_rect(0, 0, fb.var.xres, fb.var.yres, 0xFF);
+
+    // Header line in the top margin (above the grid): name the sort order so it
+    // isn't a mystery — the default (newest import first) otherwise reads as a
+    // random shuffle, especially with the hide-downloaded gaps.
+    let header = format!("Sorted by {}", sort.header());
+    let hw = renderer.measure_width(&header);
+    let hx = ((fb.var.xres as i32 - hw as i32) / 2).max(0);
+    let hbaseline = grid_top * 60 / 100;
+    renderer.draw(fb, hx, hbaseline, &header, false);
+
     let start = page * PAGE_SIZE;
     let end = (start + PAGE_SIZE).min(books.len());
     for (cell_idx, book_idx) in (start..end).enumerate() {

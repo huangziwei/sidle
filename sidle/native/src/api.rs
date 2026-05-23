@@ -8,12 +8,15 @@
 //! Token is sent as `X-Sidle-Token` header. The server also accepts
 //! `?token=` query but the header is cleaner for programmatic clients.
 //!
-//! Book shape mirrors `sidle_core::library::db::BookRow` but only the fields
-//! the picker needs: `id` + `title` for display, `kfx_sha256` for on-device
-//! dedupe, and `device_filename` for the save name (`/get/{id}`'s
-//! Content-Disposition is unusable here — see [`device_filename`]). serde
-//! silently drops unknown JSON fields, so this stays compatible if the
-//! server adds columns. The full shape lives at sidle/core/src/library/db.rs.
+//! Book shape mirrors `sidle_core::library::db::BookRow`. The core display +
+//! download fields are `id`/`title` (display), `kfx_sha256` (on-device dedupe),
+//! and `device_filename` (the save name — `/get/{id}`'s Content-Disposition is
+//! unusable here, see [`device_filename`]). The remaining metadata fields
+//! (`author`, `language`, `publisher`, …) feed the picker's filter + sort
+//! (`ui::sort`); the server already flattens them into `/list.json`, so reading
+//! them is a client-only change. serde silently drops unknown JSON fields, so
+//! this stays compatible if the server adds columns. The full shape lives at
+//! sidle/core/src/library/db.rs.
 
 use std::fmt;
 use std::io::Read;
@@ -139,6 +142,31 @@ pub struct Book {
     /// rather than guessing a divergent name).
     #[serde(default)]
     pub device_filename: Option<String>,
+
+    // ---- Sort metadata ----
+    // Mirror the same-named columns on `db::BookRow`, which the server already
+    // flattens into every `/list.json` entry (`server/src/lib.rs`
+    // `BookListEntry`) — so consuming them needs no server/protocol change.
+    // Each is `#[serde(default)]` for the same reason as the two fields above:
+    // an older server that doesn't ship a column still parses, the field just
+    // takes its type default. Read by `ui::sort`. (The facet fields `tags` etc.
+    // join here in phase 2, added alongside the `ui::filter` code that reads
+    // them — fields land when first used, not speculatively.)
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub language: String,
+    #[serde(default)]
+    pub publisher: Option<String>,
+    #[serde(default)]
+    pub series_name: Option<String>,
+    /// Position within the series; REAL on the server (half-numbers like 1.5).
+    #[serde(default)]
+    pub series_index: Option<f64>,
+    #[serde(default)]
+    pub file_size: i64,
+    #[serde(default)]
+    pub imported_at: String,
 }
 
 pub fn list_books(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<Vec<Book>> {
@@ -264,6 +292,15 @@ mod tests {
                 "deadbeefcafef00d1234567890abcdefdeadbeefcafef00d1234567890abcdef".into(),
             ),
             device_filename: device_filename.map(str::to_string),
+            // Filter/sort metadata is irrelevant to filename resolution — these
+            // tests predate it. Defaults keep the literal compiling.
+            author: String::new(),
+            language: String::new(),
+            publisher: None,
+            series_name: None,
+            series_index: None,
+            file_size: 0,
+            imported_at: String::new(),
         }
     }
 
