@@ -1,17 +1,19 @@
 //! Sidle-server HTTP client.
 //!
 //! Three endpoints, all token-gated, all sync via `ureq`:
-//! - `GET /list.json`  → library as JSON
+//! - `GET /list.json`  → library as JSON (incl. the on-device save name)
 //! - `GET /cover/{id}` → cover image bytes (M6)
-//! - `GET /get/{id}`   → KFX bytes + Content-Disposition filename (M7)
+//! - `GET /get/{id}`   → KFX bytes (M7)
 //!
 //! Token is sent as `X-Sidle-Token` header. The server also accepts
 //! `?token=` query but the header is cleaner for programmatic clients.
 //!
-//! Book shape mirrors `sidle_core::library::db::BookRow` but only the
-//! fields the picker needs (id + display strings). serde silently drops
-//! unknown JSON fields, so this stays compatible if the server adds
-//! columns. The full shape lives at sidle/core/src/library/db.rs.
+//! Book shape mirrors `sidle_core::library::db::BookRow` but only the fields
+//! the picker needs: `id` + `title` for display, `kfx_sha256` for on-device
+//! dedupe, and `device_filename` for the save name (`/get/{id}`'s
+//! Content-Disposition is unusable here — see [`device_filename`]). serde
+//! silently drops unknown JSON fields, so this stays compatible if the
+//! server adds columns. The full shape lives at sidle/core/src/library/db.rs.
 
 use std::fmt;
 use std::io::Read;
@@ -110,13 +112,22 @@ pub(crate) const SHA_INFIX_LEN: usize = 8;
 pub struct Book {
     pub id: i64,
     pub title: String,
-    /// Full sha256 of the KFX bytes (64 hex chars). Used to derive the
-    /// on-device filename so it matches what sidle-tauri's USB push would
-    /// write — otherwise USB-side delete sees the file as `NotOurs` and
-    /// refuses to touch it. `#[serde(default)]` so older servers without
-    /// the column still parse (download will then fail loudly).
+    /// Full sha256 of the KFX bytes (64 hex chars). The first 8 chars are
+    /// matched against the sha8 infix of files already under
+    /// `/mnt/us/documents/Sidle/` to hide books already on the device
+    /// (`main.rs`'s download dedupe). `#[serde(default)]` so an older server
+    /// without the column still parses.
     #[serde(default)]
     pub kfx_sha256: Option<String>,
+    /// Canonical on-device filename (`<basename>.<sha8>.kfx`), computed
+    /// server-side with the same rule sidle-tauri's USB push uses — so a LAN
+    /// download lands under a byte-identical name and isn't flagged
+    /// `NotOurs` by the USB-side delete. This is the name we save the
+    /// download as; see [`device_filename`]. `#[serde(default)]` so an older
+    /// server without the field still parses (download then fails loudly
+    /// rather than guessing a divergent name).
+    #[serde(default)]
+    pub device_filename: Option<String>,
 }
 
 pub fn list_books(cfg: &ServerConfig) -> Result<Vec<Book>> {
@@ -152,6 +163,10 @@ pub struct Download {
 }
 
 pub fn download_book(cfg: &ServerConfig, book: &Book) -> Result<Download> {
+    // Resolve the on-device name first, from data the list endpoint already
+    // gave us — so a row the server couldn't name fails before we spend the
+    // download instead of after.
+    let filename = device_filename(book)?;
     let url = format!("http://{}:{}/get/{}", cfg.host, cfg.port, book.id);
     // download uses the longer timeout — re-issue the request locally
     // instead of routing through `get_with_token` (which uses TIMEOUT).
@@ -166,8 +181,6 @@ pub fn download_book(cfg: &ServerConfig, book: &Book) -> Result<Download> {
         }
         Err(e) => return Err(anyhow!("GET {url}: {e}").into()),
     };
-    let cd_filename = parse_cd_filename(res.header("content-disposition"));
-    let filename = pick_filename(cd_filename.as_deref(), book)?;
     let mut bytes = Vec::new();
     res.into_reader()
         .take(KFX_MAX_BYTES as u64)
@@ -176,43 +189,42 @@ pub fn download_book(cfg: &ServerConfig, book: &Book) -> Result<Download> {
     Ok(Download { filename, bytes })
 }
 
-/// Resolve the on-device filename. Prefers the server's
-/// Content-Disposition when it already has the `<basename>.<sha8>.kfx`
-/// shape; otherwise synthesizes the name locally from `book.kfx_sha256`.
-/// Fails hard if neither source gives us a sha — writing to a name
-/// without the sha8 infix would leave the file unrecognized by
-/// sidle-tauri's USB-side delete (`NotOurs`), which is worse than
-/// surfacing the failure to the user.
-fn pick_filename(cd_filename: Option<&str>, book: &Book) -> Result<String> {
-    if let Some(name) = cd_filename {
-        if looks_like_sha8_kfx(name) {
-            return Ok(name.to_string());
-        }
-    }
-    let sha = book.kfx_sha256.as_deref().ok_or_else(|| {
-        anyhow!(
-            "server omitted kfx_sha256 from /list.json and Content-Disposition \
-             lacks a sha8-tagged filename; refusing to save to a name that \
-             sidle would treat as foreign on the device"
+/// The on-device filename, taken straight from `/list.json`'s
+/// `device_filename`. The server computes it with the same
+/// `kfx_device_filename` rule sidle-tauri's USB push uses, so a LAN download
+/// and a USB push land under byte-identical names — which is what lets the
+/// USB-side delete recognize a KUAL-downloaded file instead of treating it
+/// as foreign (`NotOurs`).
+///
+/// We deliberately do NOT read this off the `/get/{id}` `Content-Disposition`
+/// header: `ureq` discards header values containing non-ASCII bytes
+/// (RFC 7230 field-vchar filter — see its own `test_iso8859_utf8_mixup`),
+/// and every book in the library has a Japanese filename, so that header is
+/// always invisible to us. Leaning on it is what made LAN downloads fall
+/// back to a divergent title-only name.
+///
+/// Hard-errors rather than guessing when the field is absent or malformed: a
+/// wrong name silently orphans the file on the device (USB delete won't find
+/// it), which is worse than a visible failure in the toast banner.
+fn device_filename(book: &Book) -> Result<String> {
+    match book.device_filename.as_deref() {
+        Some(name) if looks_like_sha8_kfx(name) => Ok(name.to_string()),
+        Some(bad) => Err(anyhow!(
+            "server sent an unrecognized device_filename {bad:?} for \"{}\" \
+             (id {}); refusing to save under a name sidle wouldn't recognize \
+             on the device",
+            book.title,
+            book.id,
         )
-    })?;
-    if sha.len() < SHA_INFIX_LEN {
-        return Err(anyhow!(
-            "kfx_sha256 from /list.json is {} chars, expected at least {}",
-            sha.len(),
-            SHA_INFIX_LEN,
+        .into()),
+        None => Err(anyhow!(
+            "server did not provide device_filename for \"{}\" (id {}) — \
+             update sidle-server (Update KUAL in the desktop app)",
+            book.title,
+            book.id,
         )
-        .into());
+        .into()),
     }
-    // If C-D gave us *some* name (just not the sha8-tagged shape), reuse
-    // its stem; otherwise fall back to the book's title. Either way the
-    // on-device identity is the sha8 — sidle-tauri keys on that, not on
-    // the basename, so a divergent stem here is cosmetic.
-    let stem = cd_filename
-        .and_then(|n| n.strip_suffix(".kfx"))
-        .filter(|s| !s.is_empty())
-        .unwrap_or(book.title.as_str());
-    Ok(format!("{stem}.{}.kfx", &sha[..SHA_INFIX_LEN]))
 }
 
 fn looks_like_sha8_kfx(name: &str) -> bool {
@@ -221,66 +233,46 @@ fn looks_like_sha8_kfx(name: &str) -> bool {
     sha.len() == SHA_INFIX_LEN && sha.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn parse_cd_filename(hdr: Option<&str>) -> Option<String> {
-    let hdr = hdr?;
-    let after = hdr.split_once("filename=")?.1;
-    let raw = if let Some(stripped) = after.strip_prefix('"') {
-        stripped.split_once('"').map(|(a, _)| a).unwrap_or("")
-    } else {
-        after.split(';').next().unwrap_or("").trim()
-    };
-    if raw.is_empty() {
-        None
-    } else {
-        Some(raw.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_book(sha: Option<&str>) -> Book {
+    fn make_book(device_filename: Option<&str>) -> Book {
         Book {
             id: 7,
             title: "Sample Title".into(),
-            kfx_sha256: sha.map(str::to_string),
+            // Irrelevant to filename resolution now — used only by main.rs's
+            // on-device dedupe. Set to a plausible full sha for realism.
+            kfx_sha256: Some(
+                "deadbeefcafef00d1234567890abcdefdeadbeefcafef00d1234567890abcdef".into(),
+            ),
+            device_filename: device_filename.map(str::to_string),
         }
     }
 
-    const FULL_SHA: &str = "deadbeefcafef00d1234567890abcdefdeadbeefcafef00d1234567890abcdef";
-
     #[test]
-    fn prefers_cd_when_already_sha8_tagged() {
-        let book = make_book(Some(FULL_SHA));
-        let name = pick_filename(Some("[A] Title (2024).deadbeef.kfx"), &book).unwrap();
-        assert_eq!(name, "[A] Title (2024).deadbeef.kfx");
+    fn uses_server_device_filename_verbatim() {
+        // The non-ASCII name round-trips intact: it rides in the JSON body,
+        // not a header, so ureq's ASCII-only header filter never sees it.
+        let book = make_book(Some("[河野 裕] サクラダリセット５ ONE HAND EDEN.9ea26f33.kfx"));
+        assert_eq!(
+            device_filename(&book).unwrap(),
+            "[河野 裕] サクラダリセット５ ONE HAND EDEN.9ea26f33.kfx"
+        );
     }
 
     #[test]
-    fn synthesizes_from_sha_when_cd_absent() {
-        let book = make_book(Some(FULL_SHA));
-        let name = pick_filename(None, &book).unwrap();
-        assert_eq!(name, "Sample Title.deadbeef.kfx");
+    fn errors_when_device_filename_absent() {
+        // Older server that doesn't send the field → loud failure, never a
+        // guessed (and divergent) name.
+        assert!(device_filename(&make_book(None)).is_err());
     }
 
     #[test]
-    fn synthesizes_using_cd_stem_when_present_but_untagged() {
-        let book = make_book(Some(FULL_SHA));
-        let name = pick_filename(Some("[A] Title (2024).kfx"), &book).unwrap();
-        assert_eq!(name, "[A] Title (2024).deadbeef.kfx");
-    }
-
-    #[test]
-    fn fails_without_sha_or_cd() {
-        let book = make_book(None);
-        assert!(pick_filename(None, &book).is_err());
-    }
-
-    #[test]
-    fn fails_without_sha_when_cd_is_untagged() {
-        let book = make_book(None);
-        assert!(pick_filename(Some("[A] Title.kfx"), &book).is_err());
+    fn errors_on_untagged_device_filename() {
+        // A name without the `.<sha8>.kfx` shape is rejected, not saved.
+        assert!(device_filename(&make_book(Some("just-a-title.kfx"))).is_err());
+        assert!(device_filename(&make_book(Some("foo.deadbeeZ.kfx"))).is_err());
     }
 
     #[test]

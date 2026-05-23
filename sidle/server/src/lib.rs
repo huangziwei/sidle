@@ -160,18 +160,53 @@ pub(crate) fn open_db(paths: &LibraryPaths) -> Result<Connection, StatusCode> {
     })
 }
 
+/// One `/list.json` entry: the full library row plus `device_filename`, the
+/// canonical on-device name (`<basename>.<sha8>.kfx`) the client should save
+/// the download as.
+///
+/// The name is computed here, server-side, with the same
+/// [`kfx_device_filename`] rule the USB push uses — so a book pulled over the
+/// LAN lands under a byte-identical name to one pushed over USB, and
+/// sidle-tauri's USB-side delete recognizes it instead of flagging it as
+/// foreign.
+///
+/// Why ship it in the JSON body rather than let the client read it off the
+/// `/get/{id}` `Content-Disposition` header: every on-device name here is
+/// non-ASCII (Japanese), and the native client's HTTP library (`ureq`)
+/// silently drops header values containing bytes outside visible ASCII
+/// (RFC 7230 field-vchar) — so that header is invisible to it. The body has
+/// no such restriction. `None` only until a row has both `kfx_path` and
+/// `kfx_sha256` (conversion + hashing done); such a row isn't downloadable
+/// anyway (`get_book` 404s without a `kfx_path`).
+#[derive(serde::Serialize)]
+struct BookListEntry {
+    #[serde(flatten)]
+    row: db::BookRow,
+    device_filename: Option<String>,
+}
+
 async fn list_json(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
-) -> Result<Json<Vec<db::BookRow>>, StatusCode> {
+) -> Result<Json<Vec<BookListEntry>>, StatusCode> {
     check_token(&headers, &query, &state.token)?;
     let conn = open_db(&state.paths)?;
     let books = db::list_books(&conn).map_err(|err| {
         tracing::error!(?err, "list_books failed");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    Ok(Json(books))
+    let entries = books
+        .into_iter()
+        .map(|row| {
+            let device_filename = match (row.kfx_path.as_deref(), row.kfx_sha256.as_deref()) {
+                (Some(path), Some(sha)) => Some(kfx_device_filename(path, sha)),
+                _ => None,
+            };
+            BookListEntry { row, device_filename }
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(entries))
 }
 
 async fn get_book(
