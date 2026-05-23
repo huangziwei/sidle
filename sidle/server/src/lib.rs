@@ -53,6 +53,25 @@ pub(crate) struct AppState {
 pub async fn serve(config: Config) -> Result<()> {
     config.paths.ensure().context("ensure library paths")?;
 
+    // Backfill cover thumbnails for books imported before thumbnails existed
+    // (and self-heal any that went missing). Spawned in the background so we
+    // start listening immediately — a book whose thumbnail isn't ready yet just
+    // falls back to its full-res cover in `get_cover` until it lands.
+    // Idempotent + mtime-gated, so this is a near-instant no-op once warm.
+    let thumb_paths = config.paths.clone();
+    tokio::spawn(async move {
+        match tokio::task::spawn_blocking(move || {
+            sidle_core::library::thumbnail::backfill_thumbnails(&thumb_paths)
+        })
+        .await
+        {
+            Ok(Ok(n)) if n > 0 => tracing::info!("cover thumbnails: backfilled {n}"),
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => tracing::warn!(?err, "cover thumbnail backfill failed"),
+            Err(err) => tracing::warn!(?err, "cover thumbnail backfill task panicked"),
+        }
+    });
+
     let state = AppState {
         paths: config.paths,
         token: Arc::from(config.token),
@@ -143,7 +162,7 @@ async fn health() -> Response {
         "Endpoints (require token via X-Sidle-Token header or ?token= query):\n",
         "  GET /list.json     — library as JSON\n",
         "  GET /get/{id}      — book .kfx bytes\n",
-        "  GET /cover/{id}    — cover image\n",
+        "  GET /cover/{id}    — cover image (?thumb=1 for a small grayscale thumbnail)\n",
     );
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -259,6 +278,20 @@ async fn get_cover(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
     let cover_path = book.cover_path.ok_or(StatusCode::NOT_FOUND)?;
+
+    // The Kindle picker asks for `?thumb=1` — serve the small grayscale
+    // thumbnail produced at import (see sidle_core::library::thumbnail). If it
+    // isn't on disk yet (the boot backfill hasn't reached this book, or it
+    // failed), fall through to the full-res cover so the picker still gets
+    // something — just slower for that one book until the thumbnail lands.
+    let want_thumb = query.get("thumb").is_some_and(|v| v == "1" || v == "true");
+    if want_thumb {
+        let thumb = state.paths.cover_thumb(&book.sha256);
+        if tokio::fs::try_exists(&thumb).await.unwrap_or(false) {
+            return serve_file(thumb, "image/jpeg", None).await;
+        }
+    }
+
     let mime = mime_guess::from_path(&cover_path)
         .first_raw()
         .unwrap_or("image/jpeg");

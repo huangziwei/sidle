@@ -303,6 +303,9 @@ pub async fn library_recrawl_cover(
         let conn = state.db.lock().await;
         let _ = db::set_cover_path(&conn, book_id, &out_str);
     }
+    // Refresh the picker thumbnail to match the re-fetched cover. Best-effort
+    // (see library::thumbnail).
+    let _ = crate::library::thumbnail::ensure_thumbnail(&state.paths, &book.sha256, &out);
     // If the previous cover lived at a different filename (e.g. cover.png
     // from a PNG-encoded resource), tidy it up so we don't leave both on
     // disk.
@@ -391,6 +394,10 @@ pub async fn library_set_cover(
         let conn = state.db.lock().await;
         let _ = db::set_cover_path(&conn, book_id, &out_str);
     }
+
+    // Refresh the picker thumbnail to match the user-picked cover. Best-effort
+    // (see library::thumbnail).
+    let _ = crate::library::thumbnail::ensure_thumbnail(&state.paths, &book.sha256, &out);
 
     // Old cover at a different filename (e.g. `cover.jpg` being replaced
     // by `cover.png`) — tidy up so we don't leave both on disk.

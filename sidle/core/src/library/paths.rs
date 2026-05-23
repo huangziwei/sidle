@@ -37,6 +37,15 @@ impl LibraryPaths {
         self.book_dir(sha).join(format!("cover.{ext}"))
     }
 
+    /// Thumbnail sidecar: the small grayscale JPEG derived from the cover at
+    /// import time and served to the Kindle picker (`/cover/{id}?thumb=1`).
+    /// Always `.jpg` regardless of the source cover's extension — the
+    /// thumbnail is re-encoded, so its format is fixed. See
+    /// [`crate::library::thumbnail`].
+    pub fn cover_thumb(&self, sha: &str) -> PathBuf {
+        self.book_dir(sha).join("cover.thumb.jpg")
+    }
+
     /// Ensure base subdirectories exist.
     pub fn ensure(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.root)?;

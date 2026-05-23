@@ -165,6 +165,9 @@ pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_
         }
         if let Some(cover) = &produced.cover_path {
             let _ = db::set_cover_path(&conn, book_id, &cover.to_string_lossy());
+            // Refresh the picker thumbnail to match the produced cover.
+            // Best-effort (see library::thumbnail).
+            let _ = crate::library::thumbnail::ensure_thumbnail(paths, &book.sha256, cover);
         }
         if let Some(asin) = &produced.asin {
             let _ = db::set_asin(&conn, book_id, asin);

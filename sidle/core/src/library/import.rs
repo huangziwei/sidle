@@ -282,7 +282,12 @@ fn write_cover_from_epub_bytes(
 ) -> Option<PathBuf> {
     let (bytes, ext) = extract_cover_from_epub(epub_bytes)?;
     let out = paths.cover(sha, ext);
-    fs::write(&out, &bytes).ok().map(|_| out)
+    fs::write(&out, &bytes).ok()?;
+    // Derive the picker thumbnail now, at import. Best-effort: a thumbnail
+    // failure must not fail the import — the full-res cover still works and the
+    // server falls back to it (see library::thumbnail).
+    let _ = super::thumbnail::ensure_thumbnail(paths, sha, &out);
+    Some(out)
 }
 
 /// Pull the cover bytes (and extension) out of an in-memory EPUB. Used both

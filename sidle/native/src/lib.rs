@@ -8,5 +8,6 @@
 
 pub mod api;
 pub mod config;
+pub mod cover_cache;
 pub mod device_state;
 pub mod wrap;

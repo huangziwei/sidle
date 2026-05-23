@@ -4496,6 +4496,7 @@ dependencies = [
  "boko-kai",
  "chrono",
  "dirs",
+ "image",
  "rusqlite",
  "serde",
  "serde_json",

@@ -69,8 +69,20 @@ pub type Result<T> = std::result::Result<T, SidleError>;
 /// Issue a GET against sidle-server with the token header, translating
 /// `ureq::Error::Status(401|403)` to [`SidleError::TokenMismatch`].
 /// Every other transport/status error becomes `SidleError::Other`.
-fn get_with_token(url: &str, token: &str, timeout: Duration) -> Result<ureq::Response> {
-    match ureq::get(url)
+///
+/// Takes a shared [`ureq::Agent`] (built once in `main`) rather than the
+/// `ureq::get()` convenience fn, which spins up a fresh connection pool per
+/// call — that meant every one of the 9 covers on a page opened a *new* TCP
+/// connection, re-waking the Kindle's power-saving radio each time. One agent
+/// = HTTP keep-alive across the page's fetches over a single warm connection.
+fn get_with_token(
+    agent: &ureq::Agent,
+    url: &str,
+    token: &str,
+    timeout: Duration,
+) -> Result<ureq::Response> {
+    match agent
+        .get(url)
         .set("X-Sidle-Token", token)
         .timeout(timeout)
         .call()
@@ -89,12 +101,11 @@ fn get_with_token(url: &str, token: &str, timeout: Duration) -> Result<ureq::Res
 /// the user gives up before any error renders. LAN-only, so 3s is
 /// plenty for a healthy round-trip on a JSON-only endpoint.
 const LIST_TIMEOUT: Duration = Duration::from_secs(3);
-/// Timeout for cover fetches. The server reads sqlite + opens the
-/// cover file from disk per request; first hit after wake can be slow.
-/// Covers download serially today (priority #3 in the UI plan will
-/// move them to per-page lazy), so one slow cover blocks the next —
-/// 3s was too tight and produced grey placeholders for any book the
-/// server didn't answer instantly. 15s gives the slow cases room.
+/// Timeout for cover fetches. Covers are now ~20KB grayscale thumbnails
+/// (`?thumb=1`), so the common case is fast — but the server falls back to
+/// the full-res cover (up to ~1MB) for any book whose thumbnail hasn't been
+/// generated yet (boot backfill still running), and covers fetch serially, so
+/// keep generous headroom rather than risk a grey placeholder on a slow one.
 const COVER_TIMEOUT: Duration = Duration::from_secs(15);
 /// Cap per-cover bytes so a corrupt server response can't OOM us. Real
 /// covers fit comfortably under 200KB; 8MB is wildly generous but still
@@ -130,9 +141,9 @@ pub struct Book {
     pub device_filename: Option<String>,
 }
 
-pub fn list_books(cfg: &ServerConfig) -> Result<Vec<Book>> {
+pub fn list_books(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<Vec<Book>> {
     let url = format!("http://{}:{}/list.json", cfg.host, cfg.port);
-    let res = get_with_token(&url, &cfg.token, LIST_TIMEOUT)?;
+    let res = get_with_token(agent, &url, &cfg.token, LIST_TIMEOUT)?;
     let body = res
         .into_string()
         .with_context(|| format!("read body of {url}"))?;
@@ -141,9 +152,13 @@ pub fn list_books(cfg: &ServerConfig) -> Result<Vec<Book>> {
     Ok(books)
 }
 
-pub fn fetch_cover(cfg: &ServerConfig, id: i64) -> Result<Vec<u8>> {
-    let url = format!("http://{}:{}/cover/{}", cfg.host, cfg.port, id);
-    let res = get_with_token(&url, &cfg.token, COVER_TIMEOUT)?;
+pub fn fetch_cover(agent: &ureq::Agent, cfg: &ServerConfig, id: i64) -> Result<Vec<u8>> {
+    // `?thumb=1` → the server returns the small grayscale thumbnail produced
+    // at import (see sidle_core::library::thumbnail) — ~20KB instead of the
+    // full-res color cover. The server falls back to full-res if the thumbnail
+    // isn't on disk yet, so this is always safe to request.
+    let url = format!("http://{}:{}/cover/{}?thumb=1", cfg.host, cfg.port, id);
+    let res = get_with_token(agent, &url, &cfg.token, COVER_TIMEOUT)?;
     let mut bytes = Vec::new();
     res.into_reader()
         .take(COVER_MAX_BYTES as u64)
@@ -162,15 +177,17 @@ pub struct Download {
     pub bytes: Vec<u8>,
 }
 
-pub fn download_book(cfg: &ServerConfig, book: &Book) -> Result<Download> {
+pub fn download_book(agent: &ureq::Agent, cfg: &ServerConfig, book: &Book) -> Result<Download> {
     // Resolve the on-device name first, from data the list endpoint already
     // gave us — so a row the server couldn't name fails before we spend the
     // download instead of after.
     let filename = device_filename(book)?;
     let url = format!("http://{}:{}/get/{}", cfg.host, cfg.port, book.id);
-    // download uses the longer timeout — re-issue the request locally
-    // instead of routing through `get_with_token` (which uses TIMEOUT).
-    let res = match ureq::get(&url)
+    // download uses the longer timeout — re-issue the request on the shared
+    // agent instead of routing through `get_with_token` (which uses the short
+    // cover/list timeout).
+    let res = match agent
+        .get(&url)
         .set("X-Sidle-Token", &cfg.token)
         .timeout(DOWNLOAD_TIMEOUT)
         .call()

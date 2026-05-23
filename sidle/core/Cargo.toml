@@ -17,5 +17,11 @@ dirs = "6"
 
 boko-kai = { path = "../../boko-kai", default-features = false }
 
+# image: cover thumbnail decode + grayscale + downscale, produced at import
+# time (see library::thumbnail). Host-only (server/desktop), so unlike
+# sidle-native we don't sweat binary size — but still feature-gate to the
+# cover formats we actually decode (jpg/png).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
 [dev-dependencies]
 tempfile = "3"

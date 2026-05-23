@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod api;
 mod config;
+mod cover_cache;
 mod device_state;
 mod eink;
 mod orientation;
@@ -41,6 +42,9 @@ const TOP_MARGIN: u32 = 80;
 /// the existing `documents/Downloads/Items01/` indexed tree). Land here so
 /// our books are grouped and easy to find in the library.
 const DOWNLOAD_DIR: &str = "/mnt/us/documents/Sidle";
+/// On-device cover thumbnail cache, under the extension dir (not documents/,
+/// so the stock indexer never sees it). See [`cover_cache`].
+const COVER_CACHE_DIR: &str = "/mnt/us/extensions/sidle/cache/covers";
 const CLEANINDEX: &str = "/mnt/us/system/.cleanindex";
 const TOAST_LINGER: Duration = Duration::from_millis(1200);
 /// Minimum hold duration on a cell for a long-press to fire a download.
@@ -74,8 +78,13 @@ fn run() -> anyhow::Result<()> {
     let cfg = config::load(Path::new(CONFIG_PATH))?;
     log(format!("server: http://{}:{}", cfg.host, cfg.port));
 
+    // One agent for the whole session: HTTP keep-alive across list + covers +
+    // download over a single warm connection (see api::get_with_token).
+    let agent = ureq::AgentBuilder::new().build();
+    let cache_dir = Path::new(COVER_CACHE_DIR);
+
     let t0 = Instant::now();
-    let books = match api::list_books(&cfg) {
+    let books = match api::list_books(&agent, &cfg) {
         Ok(b) => b,
         Err(err) => {
             // Any failure here is the user's experience of "I tapped
@@ -166,7 +175,7 @@ fn run() -> anyhow::Result<()> {
     )?;
     log("initial render (placeholders)");
     fetch_and_paint_page(
-        &cfg, &mut fb, &books, &mut covers, page, grid_left, grid_top,
+        &agent, &cfg, cache_dir, &mut fb, &books, &mut covers, page, grid_left, grid_top,
     )?;
 
     let mut armed: Option<Armed> = None;
@@ -232,7 +241,7 @@ fn run() -> anyhow::Result<()> {
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
 
                         let dl_t0 = Instant::now();
-                        let banner_msg = match api::download_book(&cfg, book) {
+                        let banner_msg = match api::download_book(&agent, &cfg, book) {
                             Ok(d) => match persist(&d.filename, &d.bytes) {
                                 Ok(saved) => {
                                     log(format!(
@@ -310,8 +319,8 @@ fn run() -> anyhow::Result<()> {
                                     total_pages, grid_left, grid_top,
                                 )?;
                                 fetch_and_paint_page(
-                                    &cfg, &mut fb, &books, &mut covers, page,
-                                    grid_left, grid_top,
+                                    &agent, &cfg, cache_dir, &mut fb, &books,
+                                    &mut covers, page, grid_left, grid_top,
                                 )?;
                             }
                         }
@@ -324,8 +333,8 @@ fn run() -> anyhow::Result<()> {
                                     total_pages, grid_left, grid_top,
                                 )?;
                                 fetch_and_paint_page(
-                                    &cfg, &mut fb, &books, &mut covers, page,
-                                    grid_left, grid_top,
+                                    &agent, &cfg, cache_dir, &mut fb, &books,
+                                    &mut covers, page, grid_left, grid_top,
                                 )?;
                             }
                         }
@@ -435,7 +444,9 @@ fn draw_placeholder_title(
 /// (page revisits) are skipped — paint is no-op since the cached cover
 /// is already on screen from the preceding `draw_gallery_page` call.
 fn fetch_and_paint_page(
+    agent: &ureq::Agent,
     cfg: &config::ServerConfig,
+    cache_dir: &Path,
     fb: &mut Framebuffer,
     books: &[api::Book],
     covers: &mut [Option<DynamicImage>],
@@ -452,19 +463,54 @@ fn fetch_and_paint_page(
             continue;
         }
         let book = &books[book_idx];
-        let img = match api::fetch_cover(cfg, book.id) {
-            Ok(bytes) => match grid::decode_resize(&bytes) {
-                Ok(img) => Some(img),
+
+        // Disk cache first (instant, no network); on a miss, fetch over the LAN
+        // and write through so the next launch is a hit. Timing is split into
+        // get (cache-read or network) vs decode so a hardware log tells us
+        // where the per-cover cost actually lands — the whole point of the
+        // thumbnail change was to shrink both.
+        let t_get = Instant::now();
+        let (bytes, source) = match cover_cache::load(cache_dir, book.id) {
+            Some(b) => (Some(b), "cache"),
+            None => match api::fetch_cover(agent, cfg, book.id) {
+                Ok(b) => {
+                    if let Err(e) = cover_cache::store(cache_dir, book.id, &b) {
+                        log(format!("cover {}: cache store failed: {e}", book.id));
+                    }
+                    (Some(b), "net")
+                }
                 Err(err) => {
                     log(format!("cover {}: {err}", book.id));
-                    None
+                    (None, "net")
                 }
             },
-            Err(err) => {
-                log(format!("cover {}: {err}", book.id));
-                None
-            }
         };
+        let get_ms = t_get.elapsed();
+
+        let img = match bytes {
+            Some(b) => {
+                let t_dec = Instant::now();
+                match grid::decode_resize(&b) {
+                    Ok(img) => {
+                        log(format!(
+                            "cover {} {} ({}B) get={:?} decode={:?}",
+                            book.id,
+                            source,
+                            b.len(),
+                            get_ms,
+                            t_dec.elapsed()
+                        ));
+                        Some(img)
+                    }
+                    Err(err) => {
+                        log(format!("cover {}: decode {err}", book.id));
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+
         if let Some(img) = img.as_ref() {
             let cell_idx = book_idx - start;
             let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_idx);
@@ -486,7 +532,7 @@ fn fetch_and_paint_page(
     }
     if fetched > 0 {
         log(format!(
-            "page {} fetched {} covers in {:?}",
+            "page {} filled {} covers in {:?}",
             page,
             fetched,
             t_pg.elapsed()
