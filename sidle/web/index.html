@@ -163,6 +163,7 @@
       <div class="selection-actions">
         <button type="button" id="sel-send" class="btn-link" disabled>Send to Kindle</button>
         <button type="button" id="sel-unsend" class="btn-link" disabled>Remove from Kindle</button>
+        <button type="button" id="sel-edit" class="btn-link">Edit metadata</button>
         <button type="button" id="sel-delete" class="btn-link sel-danger">Remove from library</button>
         <button type="button" id="sel-clear" class="btn-link">Clear</button>
       </div>
@@ -205,10 +206,13 @@
             <button type="button" id="metadata-cover-change" class="btn-link">
               Change cover…
             </button>
+            <button type="button" id="metadata-cover-refetch" class="btn-link" disabled>
+              Re-fetch cover
+            </button>
           </div>
 
           <div class="metadata-fields">
-            <label class="field">
+            <label class="field" id="field-title">
               <span>Title</span>
               <input name="title" required autocomplete="off" />
             </label>
@@ -237,16 +241,24 @@
               <input name="series_index" type="number" step="0.5" min="0" placeholder="1"
                      autocomplete="off" />
             </label>
-            <label class="field">
-              <span>Tags</span>
+            <label class="field" id="field-tags">
+              <span id="field-tags-label">Tags</span>
               <input name="tags" placeholder="sci-fi, to-read" autocomplete="off" />
             </label>
+            <label class="field" id="field-asin">
+              <span>ASIN</span>
+              <input name="asin" placeholder="B01ABCDEFG" autocomplete="off" spellcheck="false" />
+            </label>
+            <div class="asin-aside" id="asin-aside">
+              <small class="field-hint" id="asin-hint"></small>
+              <button type="button" class="btn-link" id="asin-search">Search Amazon ↗</button>
+            </div>
           </div>
         </div>
 
         <footer class="modal-footer">
           <button type="button" class="btn-link" id="metadata-cancel">Cancel</button>
-          <button type="submit" class="btn">Save</button>
+          <button type="submit" class="btn" id="metadata-submit">Save</button>
         </footer>
       </form>
     </div>

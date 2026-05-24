@@ -188,6 +188,155 @@ fn canonicalize_tags(tags: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Set a book's ASIN to a real 10-character Amazon catalogue id.
+///
+/// Deliberately separate from `library_update_metadata` (the full-replacement
+/// patch). That command sends every field on every save, so validating ASIN
+/// there would reject saves on books that still carry their fabricated 32-char
+/// boko id. A dedicated command validates only when the user actually changes
+/// the ASIN, and keeps the edit a distinct action — it has device-side
+/// consequences (the `_<ASIN>.sdr` cleanup scan in `device::push`).
+///
+/// Rejects empty / free-text values (clearing isn't a use case — the fabricated
+/// id is the resting state) and an ASIN already held by another book (the
+/// per-book unique-id invariant; see `db::book_id_with_asin`).
+#[tauri::command]
+pub async fn library_set_asin(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    book_id: i64,
+    asin: String,
+) -> Result<BookRow, String> {
+    let asin = asin.trim().to_string();
+    if !cover_fetch::looks_like_real_amazon_asin(&asin) {
+        return Err("ASIN must be a real 10-character Amazon id (A–Z, 0–9).".into());
+    }
+
+    let updated = {
+        let conn = state.db.lock().await;
+        if let Some(other) =
+            db::book_id_with_asin(&conn, &asin, book_id).map_err(|e| e.to_string())?
+        {
+            return Err(format!(
+                "ASIN {asin} is already used by another book (id {other})."
+            ));
+        }
+        db::set_asin(&conn, book_id, &asin).map_err(|e| e.to_string())?;
+        db::get_book(&conn, book_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("book {book_id} not found"))?
+    };
+
+    let _ = app.emit("library:row-updated", &updated);
+    Ok(updated)
+}
+
+/// Open the user's browser to an Amazon search for this book, so they can find
+/// its real ASIN to paste into the editor. The marketplace is chosen from the
+/// book's language — the same language→store proxy `cover_fetch` uses to pick
+/// the cover locale. Scoped to the Kindle store (`i=digital-text`).
+#[tauri::command]
+pub async fn library_amazon_search(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<(), String> {
+    let book = {
+        let conn = state.db.lock().await;
+        db::get_book(&conn, book_id).map_err(|e| e.to_string())?
+    };
+    let Some(book) = book else {
+        return Err("book not found".into());
+    };
+    let domain = cover_fetch::amazon_search_domain(&book.language);
+    let mut query = book.title.clone();
+    if !book.author.is_empty() {
+        query.push(' ');
+        query.push_str(&book.author);
+    }
+    let url = format!(
+        "https://www.{domain}/s?k={}&i=digital-text",
+        percent_encode_query(query.trim())
+    );
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// Minimal `application/x-www-form-urlencoded` encoding for a search query, so
+/// we don't pull in a `url`/`urlencoding` crate for one call site. Spaces →
+/// `+`; RFC 3986 unreserved chars pass through; everything else (including all
+/// multi-byte UTF-8, e.g. CJK titles) is percent-encoded per byte.
+fn percent_encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Trim an optional string in place; a now-empty value collapses to `None`
+/// ("leave unchanged" in bulk semantics).
+fn normalize_opt(s: &mut Option<String>) {
+    if let Some(v) = s {
+        let t = v.trim().to_string();
+        if t.is_empty() {
+            *s = None;
+        } else {
+            *v = t;
+        }
+    }
+}
+
+/// Bulk-edit metadata across many books. Sparse semantics: only the fields the
+/// user filled in change; tags are additive. See [`db::BulkMetadataPatch`].
+///
+/// Validates / normalizes once, then applies per book under a single DB lock.
+/// Unlike the single-book commands it does **not** emit `library:row-updated`
+/// per book — the gallery's subscriber re-renders on every event, so a bulk
+/// emit would mean one full render per book. The caller merges the returned
+/// Vec and renders once.
+#[tauri::command]
+pub async fn library_bulk_update_metadata(
+    state: State<'_, AppState>,
+    book_ids: Vec<i64>,
+    patch: db::BulkMetadataPatch,
+) -> Result<Vec<BookRow>, String> {
+    let mut patch = patch;
+    normalize_opt(&mut patch.author);
+    normalize_opt(&mut patch.language);
+    normalize_opt(&mut patch.publisher);
+    normalize_opt(&mut patch.published_at);
+    normalize_opt(&mut patch.series_name);
+
+    if let Some(idx) = patch.series_index
+        && (!idx.is_finite() || idx < 0.0)
+    {
+        return Err("series_index must be a non-negative number".into());
+    }
+    patch.add_tags = canonicalize_tags(std::mem::take(&mut patch.add_tags));
+    patch.remove_tags = canonicalize_tags(std::mem::take(&mut patch.remove_tags));
+
+    let updated = {
+        let conn = state.db.lock().await;
+        let mut rows = Vec::with_capacity(book_ids.len());
+        for id in &book_ids {
+            db::apply_bulk_patch(&conn, *id, &patch).map_err(|e| e.to_string())?;
+            if let Some(r) = db::get_book(&conn, *id).map_err(|e| e.to_string())? {
+                rows.push(r);
+            }
+        }
+        rows
+    };
+    Ok(updated)
+}
+
 #[tauri::command]
 pub async fn library_remove(state: State<'_, AppState>, book_id: i64) -> Result<(), String> {
     // Look up the sha first so we can delete the files BEFORE the row.
@@ -493,7 +642,7 @@ pub async fn library_pick_files(app: tauri::AppHandle) -> Result<Vec<String>, St
 
 #[cfg(test)]
 mod tests {
-    use super::{canonicalize_tags, sniff_image_format};
+    use super::{canonicalize_tags, percent_encode_query, sniff_image_format};
 
     #[test]
     fn sniff_detects_jpeg_png_webp() {
@@ -562,5 +711,16 @@ mod tests {
     fn canonicalize_mixed_cjk_and_ascii_lowercases_only_ascii() {
         let got = canonicalize_tags(vec!["ライトSciFi".into(), "ライトscifi".into()]);
         assert_eq!(got, vec!["ライトscifi"]);
+    }
+
+    #[test]
+    fn percent_encode_query_handles_spaces_and_cjk() {
+        // Spaces become '+'; unreserved chars pass through.
+        assert_eq!(percent_encode_query("Foundation Asimov"), "Foundation+Asimov");
+        assert_eq!(percent_encode_query("a-b_c.d~e"), "a-b_c.d~e");
+        // CJK is percent-encoded per UTF-8 byte ("ノ" = E3 83 8E).
+        assert_eq!(percent_encode_query("ノ"), "%E3%83%8E");
+        // Reserved ASCII that could break the query string is escaped.
+        assert_eq!(percent_encode_query("a&b=c"), "a%26b%3Dc");
     }
 }

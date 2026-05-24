@@ -18,6 +18,7 @@
     "dialog:allow-open",
     "opener:default",
     "opener:allow-open-path",
+    "opener:allow-open-url",
     "opener:allow-reveal-item-in-dir",
     "fs:default",
     "fs:allow-read-file",

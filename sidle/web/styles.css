@@ -1449,6 +1449,42 @@ button {
   max-width: 100px;
 }
 
+/* ASIN field: validity hint + "Search Amazon" on one row below the input. */
+.asin-aside {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: -4px;
+}
+
+.field-hint {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.field-hint.warn {
+  color: var(--accent);
+}
+
+.asin-aside .btn-link {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* Bulk-edit mode: collapse to one column and hide per-book-unique fields. */
+.modal-panel.bulk .modal-body {
+  grid-template-columns: 1fr;
+}
+
+.modal-panel.bulk .metadata-cover,
+.modal-panel.bulk #field-title,
+.modal-panel.bulk #field-asin,
+.modal-panel.bulk #asin-aside {
+  display: none;
+}
+
 /* Status bar + queue drawer */
 
 .status-bar {

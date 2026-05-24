@@ -374,6 +374,25 @@ pub fn set_asin(conn: &Connection, book_id: i64, asin: &str) -> rusqlite::Result
     Ok(())
 }
 
+/// Return the id of another book (≠ `except_id`) that already holds `asin`, if
+/// any. The metadata editor uses this to keep ASIN unique across the library:
+/// a duplicate would make the device-delete `_<ASIN>.sdr` catalog-sidecar scan
+/// (`device::push::wipe_catalog_sdrs`) wipe *both* books' sidecars on either
+/// delete. Only a non-empty ASIN is meaningful here — callers gate on the real
+/// 10-char shape before calling.
+pub fn book_id_with_asin(
+    conn: &Connection,
+    asin: &str,
+    except_id: i64,
+) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM books WHERE asin = ?1 AND id != ?2 LIMIT 1",
+        params![asin, except_id],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
 /// Full-form metadata patch sent by the editor modal. Every field is
 /// always present; the editor populates from the current row and the
 /// user edits in place, so we don't need to distinguish "no-op" from
@@ -425,6 +444,105 @@ pub fn update_metadata(
         ],
     )?;
     Ok(())
+}
+
+/// Sparse patch for bulk metadata editing across many books. Unlike
+/// [`MetadataPatch`] (a full replacement), every scalar here means `None` =
+/// "leave unchanged on every book", `Some(v)` = "set to v on every book".
+/// Tags are *additive*: `add_tags` merge into each book's existing set and
+/// `remove_tags` are pulled out, so applying a genre tag in bulk doesn't wipe
+/// per-book tags. `title` and `asin` are intentionally absent — both are
+/// per-book unique.
+///
+/// The command layer trims/normalizes scalars (empty → `None`) and
+/// canonicalizes the tag lists before calling [`apply_bulk_patch`].
+#[derive(Debug, Default, Deserialize)]
+pub struct BulkMetadataPatch {
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub publisher: Option<String>,
+    #[serde(default)]
+    pub published_at: Option<String>,
+    #[serde(default)]
+    pub series_name: Option<String>,
+    #[serde(default)]
+    pub series_index: Option<f64>,
+    #[serde(default)]
+    pub add_tags: Vec<String>,
+    #[serde(default)]
+    pub remove_tags: Vec<String>,
+}
+
+/// Apply a sparse [`BulkMetadataPatch`] to one book. Only present scalars
+/// change; tags merge additively. Returns `Ok(false)` when the book id no
+/// longer exists (caller skips it), `Ok(true)` when a row was written.
+///
+/// Series consistency mirrors [`update_metadata`]: an index is kept only when a
+/// series name is present (newly set or pre-existing); a book with no series
+/// name has its index forced to `NULL` so the row stays self-consistent.
+/// Caller canonicalizes `add_tags`/`remove_tags` so they match the stored
+/// (trimmed / lowercased) form.
+pub fn apply_bulk_patch(
+    conn: &Connection,
+    book_id: i64,
+    patch: &BulkMetadataPatch,
+) -> rusqlite::Result<bool> {
+    let Some(row) = get_book(conn, book_id)? else {
+        return Ok(false);
+    };
+
+    let author = patch.author.clone().unwrap_or(row.author);
+    let language = patch.language.clone().unwrap_or(row.language);
+    let publisher = patch.publisher.clone().or(row.publisher);
+    let published_at = patch.published_at.clone().or(row.published_at);
+    let series_name = patch.series_name.clone().or(row.series_name);
+
+    // Take the patch index if given, else keep the row's; then enforce the
+    // "no name ⇒ no index" invariant.
+    let mut series_index = patch.series_index.or(row.series_index);
+    if series_name.is_none() {
+        series_index = None;
+    }
+
+    // Additive tag merge: existing (already canonical) ∪ add, then minus
+    // remove, preserving first-seen order.
+    let mut tags = row.tags;
+    for t in &patch.add_tags {
+        if !tags.contains(t) {
+            tags.push(t.clone());
+        }
+    }
+    if !patch.remove_tags.is_empty() {
+        tags.retain(|t| !patch.remove_tags.contains(t));
+    }
+    let tags_json = serde_json::to_string(&tags)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+    conn.execute(
+        r#"UPDATE books
+              SET author       = ?1,
+                  language     = ?2,
+                  publisher    = ?3,
+                  published_at = ?4,
+                  series_name  = ?5,
+                  series_index = ?6,
+                  tags         = ?7
+              WHERE id = ?8"#,
+        params![
+            author,
+            language,
+            publisher,
+            published_at,
+            series_name,
+            series_index,
+            tags_json,
+            book_id,
+        ],
+    )?;
+    Ok(true)
 }
 
 pub fn remove_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<String>> {
@@ -741,5 +859,118 @@ mod tests {
 
         let row = get_book(&conn, id).expect("get").expect("present");
         assert_eq!(row.tags, tags);
+    }
+
+    #[test]
+    fn set_asin_and_uniqueness() {
+        let conn = fresh_db();
+        let a = insert_minimal(&conn, "sha-asin-a", "A");
+        let b = insert_minimal(&conn, "sha-asin-b", "B");
+
+        // Fresh books have no ASIN, so the column is free.
+        assert_eq!(
+            book_id_with_asin(&conn, "B07PXGQC1Q", a).expect("query"),
+            None
+        );
+
+        set_asin(&conn, a, "B07PXGQC1Q").expect("set asin a");
+        assert_eq!(
+            get_book(&conn, a).unwrap().unwrap().asin.as_deref(),
+            Some("B07PXGQC1Q")
+        );
+
+        // Another book asking for the same ASIN now finds the collision...
+        assert_eq!(
+            book_id_with_asin(&conn, "B07PXGQC1Q", b).expect("query"),
+            Some(a)
+        );
+        // ...but the owner itself is excluded (re-saving the same ASIN is fine).
+        assert_eq!(
+            book_id_with_asin(&conn, "B07PXGQC1Q", a).expect("query"),
+            None
+        );
+    }
+
+    fn seed_full(conn: &Connection, sha: &str, tags: Vec<String>) -> i64 {
+        let id = insert_minimal(conn, sha, "Original");
+        update_metadata(
+            conn,
+            id,
+            &MetadataPatch {
+                title: "Original".into(),
+                author: "Asimov".into(),
+                language: "en".into(),
+                publisher: Some("Spectra".into()),
+                published_at: None,
+                series_name: None,
+                series_index: None,
+                tags,
+            },
+        )
+        .expect("seed");
+        id
+    }
+
+    #[test]
+    fn bulk_patch_sparse_leaves_unset_fields() {
+        let conn = fresh_db();
+        let id = seed_full(&conn, "sha-bulk-a", vec!["sci-fi".into()]);
+
+        // Set only series_name + add a tag; everything else stays None.
+        let patch = BulkMetadataPatch {
+            series_name: Some("Foundation".into()),
+            add_tags: vec!["classic".into()],
+            ..Default::default()
+        };
+        assert!(apply_bulk_patch(&conn, id, &patch).expect("apply"));
+
+        let row = get_book(&conn, id).unwrap().unwrap();
+        assert_eq!(row.title, "Original"); // title is never bulk-touched
+        assert_eq!(row.author, "Asimov"); // None → unchanged
+        assert_eq!(row.publisher.as_deref(), Some("Spectra")); // None → unchanged
+        assert_eq!(row.series_name.as_deref(), Some("Foundation")); // set
+        assert_eq!(row.tags, vec!["sci-fi", "classic"]); // additive
+    }
+
+    #[test]
+    fn bulk_patch_tag_merge_dedupes_and_removes() {
+        let conn = fresh_db();
+        let id = seed_full(&conn, "sha-bulk-b", vec!["sci-fi".into(), "to-read".into()]);
+
+        let patch = BulkMetadataPatch {
+            add_tags: vec!["sci-fi".into(), "classic".into()], // sci-fi already present
+            remove_tags: vec!["to-read".into()],
+            ..Default::default()
+        };
+        apply_bulk_patch(&conn, id, &patch).expect("apply");
+
+        let row = get_book(&conn, id).unwrap().unwrap();
+        // sci-fi kept (no dupe), classic appended, to-read removed.
+        assert_eq!(row.tags, vec!["sci-fi", "classic"]);
+    }
+
+    #[test]
+    fn bulk_patch_index_dropped_without_series_name() {
+        let conn = fresh_db();
+        let id = insert_minimal(&conn, "sha-bulk-c", "x");
+
+        // Index but no series name anywhere → index must be dropped.
+        let patch = BulkMetadataPatch {
+            series_index: Some(3.0),
+            ..Default::default()
+        };
+        apply_bulk_patch(&conn, id, &patch).expect("apply");
+
+        let row = get_book(&conn, id).unwrap().unwrap();
+        assert_eq!(row.series_name, None);
+        assert_eq!(row.series_index, None);
+    }
+
+    #[test]
+    fn bulk_patch_skips_missing_book() {
+        let conn = fresh_db();
+        assert!(
+            !apply_bulk_patch(&conn, 9999, &BulkMetadataPatch::default()).expect("apply")
+        );
     }
 }

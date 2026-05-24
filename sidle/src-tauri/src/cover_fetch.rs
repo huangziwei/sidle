@@ -127,6 +127,28 @@ fn locale_for_language(lang: &str) -> &'static str {
     }
 }
 
+/// Map a book language to the Amazon marketplace hostname to search for its
+/// ASIN. Same language→store proxy as `locale_for_language`, but yields the
+/// browseable domain rather than the `/images/P/` numeric segment. Used by the
+/// "Search Amazon" affordance in the metadata editor so the user can find the
+/// real ASIN to paste. Defaults to amazon.com.
+pub fn amazon_search_domain(lang: &str) -> &'static str {
+    let prefix: String = lang
+        .chars()
+        .take(2)
+        .flat_map(char::to_lowercase)
+        .collect();
+    match prefix.as_str() {
+        "ja" => "amazon.co.jp",
+        "de" => "amazon.de",
+        "fr" => "amazon.fr",
+        "es" => "amazon.es",
+        "it" => "amazon.it",
+        "pt" => "amazon.com.br",
+        _ => "amazon.com",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

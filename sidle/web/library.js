@@ -1919,6 +1919,9 @@ function openContextMenu(x, y, b) {
     if (state.device && unsend.length) {
       add(menu, `Remove from Kindle (${unsend.length})`, () => bulkUnsend());
     }
+    add(menu, `Edit metadata (${sel.length})…`, () =>
+      openMetadataModal(sel, { bulk: true }),
+    );
     add(menu, `Remove ${sel.length} from library`, () => bulkRemove(), true);
   } else {
     // Single-item menu.
@@ -1974,6 +1977,11 @@ function add(menu, label, fn, danger = false) {
 function wireSelection() {
   $("#sel-send").addEventListener("click", bulkSend);
   $("#sel-unsend").addEventListener("click", bulkUnsend);
+  $("#sel-edit").addEventListener("click", () => {
+    const sel = selectedBooks();
+    if (sel.length === 1) openMetadataModal(sel[0]);
+    else if (sel.length > 1) openMetadataModal(sel, { bulk: true });
+  });
   $("#sel-delete").addEventListener("click", bulkRemove);
   $("#sel-clear").addEventListener("click", clearSelection);
 
@@ -2650,6 +2658,16 @@ function wireSortPopover() {
 // ---------------------------------------------------------------------------
 
 let metadataBook = null;
+// When non-null, the modal is in bulk mode editing this array of books. Bulk
+// and single modes are mutually exclusive (one is always null).
+let metadataBulk = null;
+
+// Mirror of cover_fetch::looks_like_real_amazon_asin: a real Amazon ASIN is 10
+// chars, uppercase letters + digits. boko's fabricated fallback is 32-char, so
+// length + charset distinguishes them.
+function looksLikeRealAsin(s) {
+  return /^[A-Z0-9]{10}$/.test(s);
+}
 
 function wireMetadataModal() {
   $("#metadata-cancel").addEventListener("click", closeMetadataModal);
@@ -2658,6 +2676,15 @@ function wireMetadataModal() {
     submitMetadataForm();
   });
   $("#metadata-cover-change").addEventListener("click", onCoverChangeClick);
+  $("#metadata-cover-refetch").addEventListener("click", onCoverRefetchClick);
+  $("#asin-search").addEventListener("click", onAsinSearchClick);
+  $("#metadata-form").asin.addEventListener("input", renderAsinHint);
+
+  // Snapshot each input's placeholder so bulk mode can swap to "Leave
+  // unchanged" and single mode can restore the original hint.
+  for (const el of $("#metadata-form").querySelectorAll("input")) {
+    el.dataset.ph = el.placeholder || "";
+  }
 
   // Esc closes; Cmd/Ctrl+Enter submits. Scoped to the modal element so
   // it doesn't fight the global selection/context-menu shortcuts.
@@ -2675,9 +2702,61 @@ function wireMetadataModal() {
   $("#metadata-modal .modal-backdrop").addEventListener("click", closeMetadataModal);
 }
 
-function openMetadataModal(book) {
-  metadataBook = book;
+// Fields the bulk editor can touch (everything except per-book-unique title +
+// asin, and the cover). Order is irrelevant.
+const BULK_FIELDS = [
+  "author",
+  "language",
+  "publisher",
+  "published_at",
+  "series_name",
+  "series_index",
+  "tags",
+];
+
+// Open the editor for one book (single mode) or, with { bulk: true }, for an
+// array of books (bulk mode). The two modes share the modal; a `.bulk` class
+// on the panel hides per-book-unique fields and collapses the layout.
+function openMetadataModal(arg, opts = {}) {
   const form = $("#metadata-form");
+  const panel = form; // the <form> carries the .modal-panel class
+
+  if (opts.bulk) {
+    const books = arg || [];
+    if (books.length === 0) return;
+    metadataBulk = books;
+    metadataBook = null;
+    panel.classList.add("bulk");
+    const n = books.length;
+    $("#metadata-title").textContent = `Edit metadata · ${n} book${n === 1 ? "" : "s"}`;
+    $("#metadata-submit").textContent = `Apply to ${n}`;
+    $("#field-tags-label").textContent = "Add tags";
+
+    // Every editable field starts empty → "leave unchanged".
+    for (const name of BULK_FIELDS) form[name].value = "";
+    setBulkPlaceholders(true);
+    // Title + ASIN are hidden in bulk; disable them so they're exempt from
+    // native required-validation and aren't read on submit.
+    form.title.disabled = true;
+    form.asin.disabled = true;
+
+    $("#metadata-modal").hidden = false;
+    setTimeout(() => form.author.focus(), 0);
+    return;
+  }
+
+  // Single-book mode.
+  const book = arg;
+  metadataBook = book;
+  metadataBulk = null;
+  panel.classList.remove("bulk");
+  $("#metadata-title").textContent = "Edit metadata";
+  $("#metadata-submit").textContent = "Save";
+  $("#field-tags-label").textContent = "Tags";
+  form.title.disabled = false;
+  form.asin.disabled = false;
+  setBulkPlaceholders(false);
+
   form.title.value = book.title || "";
   form.author.value = book.author || "";
   form.language.value = book.language || "";
@@ -2691,6 +2770,8 @@ function openMetadataModal(book) {
   // Tags display as comma-joined; canonicalization happens on the
   // backend so case + duplicates clean themselves up on save.
   form.tags.value = (book.tags || []).join(", ");
+  form.asin.value = book.asin || "";
+  renderAsinHint();
 
   renderCoverPreview(book);
 
@@ -2702,6 +2783,42 @@ function openMetadataModal(book) {
 function closeMetadataModal() {
   $("#metadata-modal").hidden = true;
   metadataBook = null;
+  metadataBulk = null;
+  // Restore a clean single-book state for the next open.
+  const form = $("#metadata-form");
+  form.classList.remove("bulk");
+  form.title.disabled = false;
+  form.asin.disabled = false;
+}
+
+// Swap the editable fields' placeholders to "Leave unchanged" in bulk mode;
+// restore each input's original placeholder (snapshotted in wireMetadataModal)
+// in single mode.
+function setBulkPlaceholders(bulk) {
+  const form = $("#metadata-form");
+  for (const name of BULK_FIELDS) {
+    form[name].placeholder = bulk ? "Leave unchanged" : form[name].dataset.ph || "";
+  }
+}
+
+// Live validity feedback for the ASIN field, and gate the Re-fetch button on a
+// real-looking ASIN (the recrawl backend would otherwise just return NoAsin).
+function renderAsinHint() {
+  const v = $("#metadata-form").asin.value.trim();
+  const hint = $("#asin-hint");
+  const refetch = $("#metadata-cover-refetch");
+  const real = looksLikeRealAsin(v);
+  if (v === "") {
+    hint.textContent = "No ASIN — needed to fetch the color cover.";
+    hint.className = "field-hint";
+  } else if (real) {
+    hint.textContent = "✓ Looks like a real ASIN.";
+    hint.className = "field-hint";
+  } else {
+    hint.textContent = "Fabricated id — paste the real 10-char ASIN to enable cover fetch.";
+    hint.className = "field-hint warn";
+  }
+  refetch.disabled = !real;
 }
 
 function renderCoverPreview(book) {
@@ -2719,6 +2836,7 @@ function renderCoverPreview(book) {
 }
 
 async function submitMetadataForm() {
+  if (metadataBulk) return submitBulkMetadataForm();
   if (!metadataBook) return;
   const form = $("#metadata-form");
   const tagsRaw = form.tags.value.trim();
@@ -2756,16 +2874,94 @@ async function submitMetadataForm() {
     return;
   }
 
+  // ASIN is saved by its own command (library_set_asin), and only when it
+  // actually changed to a real value — that keeps the full-patch save working
+  // on books that still carry their fabricated 32-char id.
+  const asin = form.asin.value.trim();
+  const asinChanged = asin !== (metadataBook.asin || "");
+  if (asinChanged && asin !== "" && !looksLikeRealAsin(asin)) {
+    showToast("ASIN must be a real 10-character Amazon id, or left unchanged.", true);
+    return;
+  }
+
   try {
     const updated = await window.api.invoke("library_update_metadata", {
       bookId: metadataBook.id,
       patch,
     });
     mergeBookRow(updated);
+    if (asinChanged && looksLikeRealAsin(asin)) {
+      const withAsin = await window.api.invoke("library_set_asin", {
+        bookId: metadataBook.id,
+        asin,
+      });
+      mergeBookRow(withAsin);
+    }
     closeMetadataModal();
     render();
   } catch (e) {
     showToast(`Save failed: ${e}`, true);
+  }
+}
+
+// Bulk mode: build a sparse patch from only the fields the user filled in
+// (empty = leave unchanged), tags additive. Calls library_bulk_update_metadata,
+// which returns the updated rows (it doesn't emit row-updated, to avoid one
+// render per book), so we merge them all and render once.
+async function submitBulkMetadataForm() {
+  const books = metadataBulk;
+  if (!books || books.length === 0) return;
+  const form = $("#metadata-form");
+  const patch = {};
+  const setIf = (name, key) => {
+    const v = form[name].value.trim();
+    if (v !== "") patch[key] = v;
+  };
+  setIf("author", "author");
+  setIf("language", "language");
+  setIf("publisher", "publisher");
+  setIf("published_at", "published_at");
+  setIf("series_name", "series_name");
+
+  const idxRaw = form.series_index.value;
+  if (idxRaw !== "") {
+    const idx = Number(idxRaw);
+    if (!Number.isFinite(idx) || idx < 0) {
+      showToast("Series # must be a non-negative number.", true);
+      return;
+    }
+    patch.series_index = idx;
+  }
+
+  const tagsRaw = form.tags.value.trim();
+  patch.add_tags =
+    tagsRaw === "" ? [] : tagsRaw.split(/[,、]/).map((s) => s.trim()).filter(Boolean);
+  patch.remove_tags = []; // v1 is add-only
+
+  const hasScalar = [
+    "author",
+    "language",
+    "publisher",
+    "published_at",
+    "series_name",
+    "series_index",
+  ].some((k) => k in patch);
+  if (!hasScalar && patch.add_tags.length === 0) {
+    showToast("Nothing to apply — fill at least one field.");
+    return;
+  }
+
+  try {
+    const rows = await window.api.invoke("library_bulk_update_metadata", {
+      bookIds: books.map((b) => b.id),
+      patch,
+    });
+    for (const r of rows) mergeBookRow(r);
+    closeMetadataModal();
+    render();
+    showToast(`Updated ${rows.length} book${rows.length === 1 ? "" : "s"}.`);
+  } catch (e) {
+    showToast(`Bulk update failed: ${e}`, true);
   }
 }
 
@@ -2804,6 +3000,71 @@ async function onCoverChangeClick() {
     }
   } catch (e) {
     showToast(`Cover change failed: ${e}`, true);
+  }
+}
+
+// "Re-fetch cover" in the editor: persist the (possibly just-edited) ASIN, then
+// re-pull the color cover from Amazon. Stays in the modal and refreshes the
+// preview itself, because library_recrawl_cover does NOT emit row-updated.
+async function onCoverRefetchClick() {
+  if (!metadataBook) return;
+  const asin = $("#metadata-form").asin.value.trim();
+  if (!looksLikeRealAsin(asin)) {
+    showToast("Enter a real 10-character ASIN first.", true);
+    return;
+  }
+  // Save the ASIN first (if changed) so the backend recrawl reads it.
+  if (asin !== (metadataBook.asin || "")) {
+    try {
+      const row = await window.api.invoke("library_set_asin", {
+        bookId: metadataBook.id,
+        asin,
+      });
+      mergeBookRow(row);
+      metadataBook = row;
+    } catch (e) {
+      showToast(`Couldn't save ASIN: ${e}`, true);
+      return;
+    }
+  }
+
+  let result;
+  try {
+    result = await window.api.invoke("library_recrawl_cover", {
+      bookId: metadataBook.id,
+    });
+  } catch (e) {
+    showToast(`cover fetch error: ${e}`, true);
+    return;
+  }
+  if (result.kind === "no_asin") {
+    showToast("no ASIN — can't fetch", true);
+    return;
+  }
+  if (result.kind === "failed") {
+    showToast(`cover fetch failed: ${result.error}`, true);
+    return;
+  }
+  // updated — refresh the gallery tile + the open modal preview ourselves.
+  state.coverCacheBust += 1;
+  const idx = state.books.findIndex((b) => b.id === metadataBook.id);
+  if (idx !== -1) {
+    state.books[idx] = { ...state.books[idx], cover_path: result.cover_path };
+    metadataBook = state.books[idx];
+  }
+  renderCoverPreview(metadataBook);
+  render();
+  showToast(`cover updated: ${metadataBook.title}`);
+}
+
+// "Search Amazon ↗": open the browser to a marketplace search so the user can
+// find the real ASIN to paste. The backend picks the domain from language.
+async function onAsinSearchClick() {
+  if (!metadataBook) return;
+  try {
+    await window.api.invoke("library_amazon_search", { bookId: metadataBook.id });
+  } catch (e) {
+    showToast(`couldn't open Amazon: ${e}`, true);
   }
 }
 
