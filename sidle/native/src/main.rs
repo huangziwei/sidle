@@ -627,11 +627,11 @@ fn fetch_and_paint_page(
         // where the per-cover cost actually lands — the whole point of the
         // thumbnail change was to shrink both.
         let t_get = Instant::now();
-        let (bytes, source) = match cover_cache::load(cache_dir, book.id) {
+        let (bytes, source) = match cover_cache::load(cache_dir, book.id, book.cover_rev) {
             Some(b) => (Some(b), "cache"),
             None => match api::fetch_cover(agent, cfg, book.id) {
                 Ok(b) => {
-                    if let Err(e) = cover_cache::store(cache_dir, book.id, &b) {
+                    if let Err(e) = cover_cache::store(cache_dir, book.id, book.cover_rev, &b) {
                         log(format!("cover {}: cache store failed: {e}", book.id));
                     }
                     (Some(b), "net")

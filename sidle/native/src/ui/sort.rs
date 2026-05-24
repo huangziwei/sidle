@@ -214,6 +214,7 @@ mod tests {
             file_size: 0,
             imported_at: String::new(),
             tags: Vec::new(),
+            cover_rev: 0,
         }
     }
 

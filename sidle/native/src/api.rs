@@ -171,6 +171,13 @@ pub struct Book {
     /// deduped, in-order); the `tags` facet (`ui::filter`) reads them as-is.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Cover revision (ms mtime) from the server, folded into the on-device
+    /// cover-cache filename (`cover_cache`) so a desktop recrawl that changes
+    /// the cover bumps the rev and self-invalidates the stale thumbnail.
+    /// `#[serde(default)]` → 0 against an older server, i.e. cache by id alone
+    /// (the prior behavior).
+    #[serde(default)]
+    pub cover_rev: i64,
 }
 
 pub fn list_books(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<Vec<Book>> {
@@ -353,6 +360,7 @@ mod tests {
             file_size: 0,
             imported_at: String::new(),
             tags: Vec::new(),
+            cover_rev: 0,
         }
     }
 

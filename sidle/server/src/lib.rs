@@ -202,6 +202,12 @@ struct BookListEntry {
     #[serde(flatten)]
     row: db::BookRow,
     device_filename: Option<String>,
+    /// Millisecond mtime of whatever `get_cover` would serve for this book (the
+    /// grayscale thumb if present, else the full-res cover), or 0 if it has no
+    /// cover. The Kindle picker folds this into its on-device cover-cache
+    /// filename so a desktop cover-recrawl bumps the rev and self-invalidates
+    /// the stale thumbnail (`sidle/native/src/cover_cache.rs`).
+    cover_rev: i64,
 }
 
 async fn list_json(
@@ -222,10 +228,43 @@ async fn list_json(
                 (Some(path), Some(sha)) => Some(kfx_device_filename(path, sha)),
                 _ => None,
             };
-            BookListEntry { row, device_filename }
+            let cover_rev = cover_rev_millis(&state.paths, &row);
+            BookListEntry {
+                row,
+                device_filename,
+                cover_rev,
+            }
         })
         .collect::<Vec<_>>();
     Ok(Json(entries))
+}
+
+/// Revision token for a book's cover: the millisecond mtime of whatever
+/// [`get_cover`] would serve (the grayscale thumb if present, else the full-res
+/// cover). Returns 0 when the book has no cover or the file can't be stat'd.
+///
+/// Shipped in `/list.json` so the Kindle picker can key its cover cache on
+/// `(id, rev)` and refetch automatically after a desktop recrawl rewrites the
+/// cover — `recrawl`/`set_cover` rewrite the sidecar (and regenerate the
+/// thumb), which bumps the mtime here.
+fn cover_rev_millis(paths: &LibraryPaths, row: &db::BookRow) -> i64 {
+    let path = {
+        let thumb = paths.cover_thumb(&row.sha256);
+        if thumb.exists() {
+            thumb
+        } else {
+            match row.cover_path.as_deref() {
+                Some(p) => PathBuf::from(p),
+                None => return 0,
+            }
+        }
+    };
+    std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 async fn get_book(
