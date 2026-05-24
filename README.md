@@ -25,4 +25,22 @@ The app will be built and put into `/Applications/Sidle`
 
 Book data and library database will be stored in `~/Library/Application Support/sidle/`
 
-To instal the KUAL app, plug in the Kindle via USB, then in the Kindle tab, enter `KUAL extension`, click `push KUAL`. 
+To install the KUAL app, plug in the Kindle via USB, then in the Kindle tab, enter `KUAL extension`, click `push KUAL`. 
+
+Currenty only tested on MacOS 26 and Kindle Oasis 2 (9th Gen) with 15.16.2.1.1.
+
+## But Why?
+
+To sideload books to Kindle, one might just use Send-to-Kindle. But I don't want to use more Amazon services. 
+
+One can also use Calibre. I mostly use it for DeDRM. But as Amazon tightened up their DRM recently, DeDRM stopped stripping DRM from books pulled from e-ink Kindle already. The only way to deDRM that still works for me today is to use [KFXArchiver](https://github.com/Satsuoni/DeDRM_tools/discussions/74#discussioncomment-17034265) on jailbroken devices, get the KFX-ZIP, then drag them back to Calibre to produce KFX, which can then be converted to EPUB or other formats. It's a cumbersome and slow process.
+
+I want a faster, mor streamline process to manage my books:
+
+1. mount the Kindle, all KFX-ZIP will be auto-imported and converted to KFX, and EPUB;
+2. imported EPUB will be auto-converted to KFX;
+3. imported AZW3 and MOBI will be auto-converted to EPUB then KFX;
+4. (bonus) imported ZIP from [Aozora/青空文庫](https://www.aozora.gr.jp) will be auto-converted to EPUB then KFX;
+5. while mouted, the desktop app can push a KUAL app to Kinde, which can be used to view the library and download the KFX from the host within the same network.
+
+This is basically what Sidle does for now.
