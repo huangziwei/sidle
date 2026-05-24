@@ -30,9 +30,9 @@ cargo build --release --target "$KUAL_TARGET" -p sidle-native
 echo "==> Building sidle desktop app"
 cargo tauri build
 
-echo "==> Installing to /Applications/sidle.app"
-SRC="target/release/bundle/macos/sidle.app"
-DST="/Applications/sidle.app"
+echo "==> Installing to /Applications/Sidle.app"
+SRC="target/release/bundle/macos/Sidle.app"
+DST="/Applications/Sidle.app"
 if [ ! -d "$SRC" ]; then
     echo "error: expected bundle not found at $SRC" >&2
     exit 1
