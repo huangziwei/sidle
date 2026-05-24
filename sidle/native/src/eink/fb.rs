@@ -17,6 +17,8 @@
 //! names (`Framebuffer`, `MxcfbRect`, `send_update`) are kept so the renderer is
 //! unchanged; the X server drives the eink refresh, so the waveform is ignored.
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
 
 use x11rb::connection::Connection;
@@ -189,6 +191,40 @@ impl Framebuffer {
         }
         self.conn.flush().context("flush")?;
         Ok(0)
+    }
+
+    /// Clone the backing buffer — the exact 8bpp grayscale image currently on
+    /// screen. Used to save a screenshot and to restore the screen after the
+    /// capture flash overwrites it.
+    pub fn backing_snapshot(&self) -> Vec<u8> {
+        self.backing.clone()
+    }
+
+    /// Restore a previously snapshotted backing buffer. No-op on a size
+    /// mismatch (a rotation between snapshot and restore would change `xres`).
+    /// The caller still has to `send_update` to present it.
+    pub fn restore_backing(&mut self, snap: Vec<u8>) {
+        if snap.len() == self.backing.len() {
+            self.backing = snap;
+        }
+    }
+
+    /// Encode the current backing (8bpp gray, white=255) as a PNG at `path`.
+    /// `flip_180` rotates it to match the displayed orientation: we render
+    /// identity and the compositor rotates the window 180° when the framework
+    /// is page-bezel-up (the same condition that mirrors touch — see the module
+    /// header). The `png` encoder ships with the `image` dep (pure Rust).
+    pub fn capture_png(&self, path: &Path, flip_180: bool) -> Result<()> {
+        let img = image::GrayImage::from_raw(self.var.xres, self.var.yres, self.backing.clone())
+            .context("backing buffer size != xres*yres")?;
+        let img = if flip_180 {
+            image::imageops::rotate180(&img)
+        } else {
+            img
+        };
+        img.save(path)
+            .with_context(|| format!("write screenshot {}", path.display()))?;
+        Ok(())
     }
 }
 

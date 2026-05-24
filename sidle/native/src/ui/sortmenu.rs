@@ -177,6 +177,9 @@ pub fn run(
                 None => {}
             },
             InputEvent::Touch(TouchEvent::Down { .. }) => {}
+            InputEvent::Touch(TouchEvent::Screenshot) => {
+                let _ = crate::eink::screenshot::capture(fb);
+            }
             // Eight rows fit on one screen — nothing to page.
             InputEvent::Page(_) => {}
             InputEvent::Tick => {

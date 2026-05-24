@@ -48,8 +48,16 @@ const EV_ABS: u16 = 0x03;
 const ABS_MT_POSITION_X: u16 = 0x35;
 const ABS_MT_POSITION_Y: u16 = 0x36;
 const ABS_MT_TRACKING_ID: u16 = 0x39;
+// Protocol-B contact selector: subsequent ABS_MT_* events address this slot.
+// Sticky — the kernel only emits it when the active contact changes.
+const ABS_MT_SLOT: u16 = 0x2f;
 
 const EVENT_BYTES: usize = 16;
+
+/// Side of the square corner zones for the two-finger screenshot gesture, in
+/// user-visible pixels. ~14% of the KOA2's 1264px width — clearly "a corner"
+/// without demanding pixel precision.
+const SCREENSHOT_CORNER_PX: u32 = 180;
 
 /// Boundary touch events surfaced to the main loop. `Down` fires when
 /// the user's finger first lands; `Up` fires when it lifts. Move
@@ -60,6 +68,12 @@ const EVENT_BYTES: usize = 16;
 pub enum TouchEvent {
     Down { x: u32, y: u32 },
     Up { x: u32, y: u32 },
+    /// Two contacts landed simultaneously in opposite screen corners (either
+    /// diagonal) — the native Kindle screenshot gesture. We recognize it here
+    /// because the OS's own recognizer never fires under Sidle: our
+    /// `EVIOCGRAB` (below) starves the framework of touch events. Carries no
+    /// coords — it's a recognized gesture, not a tap.
+    Screenshot,
 }
 
 // _IOW('E', 0x90, int): direction(W=1)<<30 | size(4)<<16 | type('E'=0x45)<<8 | nr(0x90)
@@ -76,8 +90,25 @@ pub struct Touch {
     /// different packets — the state machine straddles boundaries.
     down_pending: bool,
     up_pending: bool,
+    /// Multi-touch slot state for the two-corner screenshot gesture. Protocol-B
+    /// `ABS_MT_SLOT` selects which contact subsequent position/tracking events
+    /// address (sticky across packets). We track the primary (slot 0 — drives
+    /// `Down`/`Up` above, via `cur_x`/`cur_y`) plus one secondary (slot 1);
+    /// two contacts is all the gesture needs, so higher slots are ignored.
+    cur_slot: usize,
+    slot0_active: bool,
+    slot1_active: bool,
+    slot1_x: i32,
+    slot1_y: i32,
+    /// Latches the gesture to fire once per two-contact episode (rising edge);
+    /// reset when the contacts drop below two.
+    screenshot_latched: bool,
+    /// After a screenshot fires, swallow the trailing slot-0 `Up` so the lift
+    /// in a corner doesn't register as a stray tap on whatever's underneath.
+    suppress_next_up: bool,
     /// Once grabbed, no other reader (framework included) sees events from
-    /// this device. Belt-and-braces alongside the framework SIGSTOP.
+    /// this device — which is *why* we recognize the screenshot gesture
+    /// ourselves: the framework's recognizer is starved while we hold this.
     grabbed: bool,
     /// Same orientation the framebuffer was opened with. We mirror the
     /// raw touch coords by the same amount so caller-visible coords match
@@ -112,6 +143,13 @@ impl Touch {
             cur_y: 0,
             down_pending: false,
             up_pending: false,
+            cur_slot: 0,
+            slot0_active: false,
+            slot1_active: false,
+            slot1_x: 0,
+            slot1_y: 0,
+            screenshot_latched: false,
+            suppress_next_up: false,
             grabbed,
             orientation,
             fb_xres,
@@ -165,6 +203,28 @@ impl Touch {
 
             match (type_, code) {
                 (EV_SYN, SYN_REPORT) => {
+                    // Two contacts in opposite corners = the screenshot
+                    // gesture. Checked before the single-touch flush so the
+                    // gesture wins over a stray tap, and latched so it fires
+                    // once per two-finger episode (rising edge).
+                    if self.slot0_active && self.slot1_active {
+                        if !self.screenshot_latched {
+                            let (ax, ay) = self.transform_xy(self.cur_x, self.cur_y);
+                            let (bx, by) = self.transform_xy(self.slot1_x, self.slot1_y);
+                            if opposite_corners(ax, ay, bx, by, self.fb_xres, self.fb_yres) {
+                                self.screenshot_latched = true;
+                                // The gesture, not a tap: drop any queued slot-0
+                                // boundary and swallow the eventual lift.
+                                self.down_pending = false;
+                                self.up_pending = false;
+                                self.suppress_next_up = true;
+                                return Ok(Some(TouchEvent::Screenshot));
+                            }
+                        }
+                    } else {
+                        self.screenshot_latched = false;
+                    }
+
                     // Packet boundary — flush whichever pending state we
                     // accumulated. If both fired in the same packet
                     // (shouldn't happen — Down and Up are separate
@@ -173,33 +233,62 @@ impl Touch {
                     if self.up_pending {
                         self.up_pending = false;
                         self.down_pending = false;
-                        let (x, y) = self.transform_coords();
-                        return Ok(Some(TouchEvent::Up { x, y }));
-                    }
-                    if self.down_pending {
+                        if self.suppress_next_up {
+                            // Post-screenshot lift — don't surface it; keep
+                            // draining so it doesn't fire a stray tap.
+                            self.suppress_next_up = false;
+                        } else {
+                            let (x, y) = self.transform_coords();
+                            return Ok(Some(TouchEvent::Up { x, y }));
+                        }
+                    } else if self.down_pending {
                         self.down_pending = false;
                         let (x, y) = self.transform_coords();
                         return Ok(Some(TouchEvent::Down { x, y }));
                     }
                     // Move-only packet — keep draining.
                 }
-                (EV_ABS, ABS_MT_TRACKING_ID) => {
-                    if value >= 0 {
-                        self.down_pending = true;
-                    } else if value == -1 {
-                        self.up_pending = true;
+                (EV_ABS, ABS_MT_SLOT) => self.cur_slot = value.max(0) as usize,
+                (EV_ABS, ABS_MT_TRACKING_ID) => match self.cur_slot {
+                    // Slot 0 drives the single-touch Down/Up boundaries (taps,
+                    // long-press). Slot 1 only feeds the two-finger gesture.
+                    0 => {
+                        if value >= 0 {
+                            self.slot0_active = true;
+                            self.down_pending = true;
+                        } else if value == -1 {
+                            self.slot0_active = false;
+                            self.up_pending = true;
+                        }
                     }
-                }
-                (EV_ABS, ABS_MT_POSITION_X) => self.cur_x = value,
-                (EV_ABS, ABS_MT_POSITION_Y) => self.cur_y = value,
+                    1 => self.slot1_active = value >= 0,
+                    _ => {}
+                },
+                (EV_ABS, ABS_MT_POSITION_X) => match self.cur_slot {
+                    0 => self.cur_x = value,
+                    1 => self.slot1_x = value,
+                    _ => {}
+                },
+                (EV_ABS, ABS_MT_POSITION_Y) => match self.cur_slot {
+                    0 => self.cur_y = value,
+                    1 => self.slot1_y = value,
+                    _ => {}
+                },
                 _ => {}
             }
         }
     }
 
     fn transform_coords(&self) -> (u32, u32) {
-        let raw_x = self.cur_x.max(0) as u32;
-        let raw_y = self.cur_y.max(0) as u32;
+        self.transform_xy(self.cur_x, self.cur_y)
+    }
+
+    /// Map raw panel coords to user-visible framebuffer coords for the current
+    /// orientation. Shared by the slot-0 `Down`/`Up` path and the two-finger
+    /// gesture so corner detection matches what's drawn.
+    fn transform_xy(&self, x: i32, y: i32) -> (u32, u32) {
+        let raw_x = x.max(0) as u32;
+        let raw_y = y.max(0) as u32;
         match self.orientation {
             Orientation::Up => (raw_x, raw_y),
             // Mirror both axes so the touch coordinate space
@@ -210,6 +299,22 @@ impl Touch {
             ),
         }
     }
+}
+
+/// True when two contacts occupy opposite corners — either diagonal
+/// (top-right+bottom-left or top-left+bottom-right), in either finger order.
+/// A corner is a [`SCREENSHOT_CORNER_PX`]-square box; coords are user-visible.
+fn opposite_corners(ax: u32, ay: u32, bx: u32, by: u32, w: u32, h: u32) -> bool {
+    let right = w.saturating_sub(SCREENSHOT_CORNER_PX);
+    let bottom = h.saturating_sub(SCREENSHOT_CORNER_PX);
+    let tl = |x: u32, y: u32| x < SCREENSHOT_CORNER_PX && y < SCREENSHOT_CORNER_PX;
+    let tr = |x: u32, y: u32| x >= right && y < SCREENSHOT_CORNER_PX;
+    let bl = |x: u32, y: u32| x < SCREENSHOT_CORNER_PX && y >= bottom;
+    let br = |x: u32, y: u32| x >= right && y >= bottom;
+    (tr(ax, ay) && bl(bx, by))
+        || (bl(ax, ay) && tr(bx, by))
+        || (tl(ax, ay) && br(bx, by))
+        || (br(ax, ay) && tl(bx, by))
 }
 
 impl Drop for Touch {

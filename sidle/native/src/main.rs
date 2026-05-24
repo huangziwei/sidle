@@ -429,6 +429,15 @@ fn run() -> anyhow::Result<()> {
                     }
                 }
             }
+            InputEvent::Touch(TouchEvent::Screenshot) => {
+                // Two-corner gesture. Cancel any cell the first finger armed so
+                // its lift can't fire a download, then capture + flash.
+                armed = None;
+                match eink::screenshot::capture(&mut fb) {
+                    Ok(p) => log(format!("screenshot saved: {}", p.display())),
+                    Err(e) => log(format!("screenshot failed: {e:#}")),
+                }
+            }
             InputEvent::Page(pb) => {
                 log(format!("page button: {pb:?}"));
                 // A hardware page-turn cancels any in-progress long-press: the

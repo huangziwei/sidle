@@ -179,6 +179,9 @@ pub fn run(
             }
             // Finger-down: no press feedback for v1 (keep it minimal).
             InputEvent::Touch(TouchEvent::Down { .. }) => {}
+            InputEvent::Touch(TouchEvent::Screenshot) => {
+                let _ = crate::eink::screenshot::capture(fb);
+            }
             // Page buttons do nothing here, but they're grabbed by `Input`
             // so they can't reach the framework and repaint over us.
             InputEvent::Page(_) => {}

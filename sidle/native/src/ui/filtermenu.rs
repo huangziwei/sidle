@@ -186,6 +186,9 @@ pub fn run(
                 }
             }
             InputEvent::Touch(TouchEvent::Down { .. }) => {}
+            InputEvent::Touch(TouchEvent::Screenshot) => {
+                let _ = crate::eink::screenshot::capture(fb);
+            }
             InputEvent::Page(_) => {}
             InputEvent::Tick => {
                 let o = Orientation::detect();
@@ -397,6 +400,9 @@ fn value_picker(
                 }
             }
             InputEvent::Touch(TouchEvent::Down { .. }) => {}
+            InputEvent::Touch(TouchEvent::Screenshot) => {
+                let _ = crate::eink::screenshot::capture(fb);
+            }
             InputEvent::Page(pb) => {
                 let new_page = match pb {
                     PageButton::Prev => page.saturating_sub(1),
