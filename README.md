@@ -1,32 +1,28 @@
-# Sidle
+# Sidle: Sideload books into your (jailbroken) Kindle.
 
-A personal-use macOS desktop app for managing a Kindle library: drag-and-drop
-import of EPUB / KFX files, automatic KFX ↔ EPUB conversion via
-[boko-kai](./boko-kai/), USB-attached Kindle detection with one-click push to
-`/documents`, and auto-pull of DRM-stripped books from the device's `/dedrm/`
-folder.
+<p align="center">
+  <img src=".github/assets/Sidle-Tauri.png" height="300" />
+  <img src=".github/assets/Sidle-KUAL.png" height="300" />
+</p>
 
-Longer-term goal: a companion KUAL app on a jailbroken Kindle that talks to
-a sidle-hosted local EPUB server — pick a book on the device, get the KFX
-pushed over wifi, no USB cable needed.
+## TL;DR
 
-## Layout
+Sidle contains two parts:
 
-- [`sidle/`](./sidle) — Tauri 2 desktop app (Rust + vanilla JS).
-- [`boko-kai/`](./boko-kai) — pure-Rust ebook conversion library (KFX, EPUB,
-  AZW3, MOBI). Used as a crate.
+1. a Rust/Tauri app for managing books and converting various formats to EPUB and KFX on MacOS;
+2. a KUAL app to pull books from from the library via WIFI.
+
+The Tauri app doesn't require the Kindle being jailbroken, but the second one does (to instal KUAL, to begin with). 
 
 ## Build
 
 ```sh
-cargo install tauri-cli --version "^2"
-cd sidle && cargo tauri build
-mv src-tauri/target/release/bundle/macos/sidle.app /Applications/
+git clone https://github.com/huangziwei/sidle
+./build.sh
 ```
 
-First launch: right-click → **Open** (one-time Gatekeeper bypass; the `.app`
-is unsigned).
+The app will be built and put into `/Applications/Sidle`
 
-## Library data
+Book data and library database will be stored in `~/Library/Application Support/sidle/`
 
-`~/Library/Application Support/sidle/` — survives rebuilds.
+To instal the KUAL app, plug in the Kindle via USB, then in the Kindle tab, enter `KUAL extension`, click `push KUAL`. 
