@@ -90,7 +90,7 @@ pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, C
     // ---- Serial post-pass: filenames, manifest insertion, index.
     let mut totals = jxr::TranscodeTiming::default();
     let mut jxr_count = 0usize;
-    for (prep, t_result) in prepared.iter().zip(transcoded.into_iter()) {
+    for (prep, t_result) in prepared.iter().zip(transcoded) {
         let TranscodedBytes { bytes, final_format, timing } = t_result?;
         if let Some(t) = timing {
             totals.container_parse += t.container_parse;
@@ -488,10 +488,10 @@ fn xml_attr_escape(s: &str) -> String {
 fn out_manifest_len(out: &EpubOutput) -> usize {
     out.manifest_view().len()
 }
-fn out_manifest_get<'a>(
-    out: &'a EpubOutput,
+fn out_manifest_get(
+    out: &EpubOutput,
     idx: usize,
-) -> Option<&'a super::output::ManifestEntry> {
+) -> Option<&super::output::ManifestEntry> {
     out.manifest_view().get(idx)
 }
 

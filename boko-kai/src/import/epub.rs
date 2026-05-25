@@ -449,7 +449,7 @@ fn parse_quoted_url(src: &str, q_pos: usize) -> Option<(&str, usize)> {
     let bytes = src.as_bytes();
     let quote = bytes[q_pos];
     let start = q_pos + 1;
-    let end_rel = src[start..].as_bytes().iter().position(|&b| b == quote)?;
+    let end_rel = src.as_bytes()[start..].iter().position(|&b| b == quote)?;
     Some((&src[start..start + end_rel], start + end_rel + 1))
 }
 

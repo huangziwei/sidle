@@ -76,41 +76,6 @@ pub enum Origin {
     Author = 1,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::style::WritingMode;
-
-    #[test]
-    fn writing_mode_parses_with_vendor_prefixes() {
-        let css = r#"
-            .vrtl {
-              -webkit-writing-mode: vertical-rl;
-              -epub-writing-mode:   vertical-rl;
-              writing-mode:         vertical-rl;
-            }
-        "#;
-        let stylesheet = Stylesheet::parse(css);
-        assert_eq!(stylesheet.rules.len(), 1, "should parse the .vrtl rule");
-        let modes: Vec<WritingMode> = stylesheet.rules[0]
-            .declarations
-            .iter()
-            .filter_map(|d| match d {
-                Declaration::WritingMode(m) => Some(*m),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            modes.len(),
-            3,
-            "all three forms (standard + -webkit- + -epub-) should produce \
-             a WritingMode declaration, got: {:?}",
-            stylesheet.rules[0].declarations
-        );
-        assert!(modes.iter().all(|m| *m == WritingMode::VerticalRl));
-    }
-}
-
 impl Stylesheet {
     /// Parse a CSS stylesheet from a string.
     pub fn parse(css: &str) -> Self {
@@ -322,5 +287,40 @@ impl<'i> RuleBodyItemParser<'i, (), ()> for DeclarationListParser<'_> {
     }
     fn parse_qualified(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::style::WritingMode;
+
+    #[test]
+    fn writing_mode_parses_with_vendor_prefixes() {
+        let css = r#"
+            .vrtl {
+              -webkit-writing-mode: vertical-rl;
+              -epub-writing-mode:   vertical-rl;
+              writing-mode:         vertical-rl;
+            }
+        "#;
+        let stylesheet = Stylesheet::parse(css);
+        assert_eq!(stylesheet.rules.len(), 1, "should parse the .vrtl rule");
+        let modes: Vec<WritingMode> = stylesheet.rules[0]
+            .declarations
+            .iter()
+            .filter_map(|d| match d {
+                Declaration::WritingMode(m) => Some(*m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            modes.len(),
+            3,
+            "all three forms (standard + -webkit- + -epub-) should produce \
+             a WritingMode declaration, got: {:?}",
+            stylesheet.rules[0].declarations
+        );
+        assert!(modes.iter().all(|m| *m == WritingMode::VerticalRl));
     }
 }

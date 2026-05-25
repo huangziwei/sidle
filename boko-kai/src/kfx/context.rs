@@ -737,8 +737,7 @@ impl RubyContentRegistry {
         if self.annotations.is_empty() {
             0
         } else {
-            (self.annotations.len() + Self::ENTRIES_PER_FRAGMENT - 1)
-                / Self::ENTRIES_PER_FRAGMENT
+            self.annotations.len().div_ceil(Self::ENTRIES_PER_FRAGMENT)
         }
     }
 

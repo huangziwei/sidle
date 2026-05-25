@@ -241,7 +241,7 @@ impl<'a> Parser<'a> {
                 };
                 Ok(IonNode::Annotated(anns, Box::new(inner)))
             }
-            4 | 5 | 6 => {
+            4..=6 => {
                 let bytes = self.take(len)?.to_vec();
                 Ok(IonNode::Raw(type_code, bytes))
             }

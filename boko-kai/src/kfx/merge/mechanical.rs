@@ -113,21 +113,18 @@ fn decide_merged_container_metadata(
         if f.ftype != "$270" {
             continue;
         }
-        if let Some(s) = f.value.get_field("$409").and_then(|v| v.as_string()) {
-            if !s.is_empty() {
+        if let Some(s) = f.value.get_field("$409").and_then(|v| v.as_string())
+            && !s.is_empty() {
                 container_ids.insert(s.to_string());
             }
-        }
-        if let Some(s) = f.value.get_field("$587").and_then(|v| v.as_string()) {
-            if !s.is_empty() {
+        if let Some(s) = f.value.get_field("$587").and_then(|v| v.as_string())
+            && !s.is_empty() {
                 app_version = s.to_string();
             }
-        }
-        if let Some(s) = f.value.get_field("$588").and_then(|v| v.as_string()) {
-            if !s.is_empty() {
+        if let Some(s) = f.value.get_field("$588").and_then(|v| v.as_string())
+            && !s.is_empty() {
                 pkg_version = s.to_string();
             }
-        }
         if let Some(n) = f.value.get_field("version").and_then(|v| v.as_int()) {
             version = n;
         }
@@ -163,11 +160,10 @@ fn lookup_asset_id(fragments: &[YJFragment]) -> Option<String> {
         let kvs = cat.get_field("$258")?.as_list()?;
         for kv in kvs {
             let k = kv.get_field("$492").and_then(|n| n.as_string()).unwrap_or("");
-            if k == "asset_id" {
-                if let Some(v) = kv.get_field("$307").and_then(|n| n.as_string()) {
+            if k == "asset_id"
+                && let Some(v) = kv.get_field("$307").and_then(|n| n.as_string()) {
                     return Some(v.to_string());
                 }
-            }
         }
     }
     None

@@ -311,16 +311,13 @@ pub fn extract_pairs_from_xhtml(xhtml: &str, out: &mut Vec<RubyPair>) {
                 }
                 _ => {}
             },
-            Ok(Event::Empty(e)) => match e.local_name().as_ref() {
-                b"rt" => {
-                    // Self-closing rt — emit pair with empty annotation if base exists.
-                    if !pending_base.is_empty() {
-                        out.push(RubyPair::from_trimmed(&pending_base, ""));
-                    }
-                    pending_base.clear();
-                    pending_annotation.clear();
+            Ok(Event::Empty(e)) => if e.local_name().as_ref() == b"rt" {
+                // Self-closing rt — emit pair with empty annotation if base exists.
+                if !pending_base.is_empty() {
+                    out.push(RubyPair::from_trimmed(&pending_base, ""));
                 }
-                _ => {}
+                pending_base.clear();
+                pending_annotation.clear();
             },
             Ok(Event::Text(e)) => {
                 if state == RubyState::Outside || state == RubyState::InRp {
@@ -423,11 +420,10 @@ pub fn extract_pairs_from_kfx(kfx_bytes: &[u8]) -> Result<Vec<RubyPair>, String>
             if let Some((name, texts)) = extract_content_texts(&value, &resolve_sym) {
                 content_map.insert(name, texts);
             }
-        } else if ent.type_id == ruby_content_type {
-            if let Some((ruby_name, annotations)) = extract_ruby_content(&value, &resolve_sym) {
+        } else if ent.type_id == ruby_content_type
+            && let Some((ruby_name, annotations)) = extract_ruby_content(&value, &resolve_sym) {
                 ruby_lookup.insert(ruby_name, annotations);
             }
-        }
     }
 
     // Pass 2: walk every storyline, collect pairs in document order.

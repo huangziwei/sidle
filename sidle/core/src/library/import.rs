@@ -6,8 +6,8 @@
 //! later by the background queue:
 //!
 //!  - EPUB → library; pending `epub_to_kfx` job.
-//!  - KFX  → library (merging `.kfx-zip` first if needed); pending
-//!           `kfx_to_epub` job.
+//!  - KFX  → library (merging `.kfx-zip` first if needed); pending a
+//!    `kfx_to_epub` job.
 //!
 //! Three formats are converted to EPUB at import time and from there look
 //! identical to a regular EPUB drop:
@@ -15,7 +15,7 @@
 //!  - `.azw3` → boko-kai's AZW3 importer + EPUB exporter.
 //!  - `.mobi` → boko-kai's MOBI importer + EPUB exporter.
 //!  - `.zip`  → Aozora Bunko sniff + parse → cover → build_epub. See
-//!              `convert_aozora_zip` for the sniff details.
+//!    `convert_aozora_zip` for the sniff details.
 //!
 //! Steps, identical for all inputs:
 //!
@@ -241,16 +241,18 @@ fn import_one(
         &sha,
         &meta,
         file_size,
-        match canonical {
-            Canonical::Epub => Some(dest_epub.as_path()),
-            Canonical::Kfx => other_ready.then_some(dest_epub.as_path()),
+        &Persisted {
+            epub_path: match canonical {
+                Canonical::Epub => Some(dest_epub.as_path()),
+                Canonical::Kfx => other_ready.then_some(dest_epub.as_path()),
+            },
+            cover_path: cover_path.as_deref(),
+            kfx_path: match canonical {
+                Canonical::Kfx => Some(dest_kfx.as_path()),
+                Canonical::Epub => other_ready.then_some(dest_kfx.as_path()),
+            },
+            kfx_sha256: kfx_bytes_sha.as_deref(),
         },
-        cover_path.as_deref(),
-        match canonical {
-            Canonical::Kfx => Some(dest_kfx.as_path()),
-            Canonical::Epub => other_ready.then_some(dest_kfx.as_path()),
-        },
-        kfx_bytes_sha.as_deref(),
     )?;
 
     let job_status = if other_ready { "done" } else { "pending" };
@@ -357,19 +359,26 @@ fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
     }
 }
 
+/// The on-disk artifacts an import produced (or found already present): the
+/// paths and KFX hash to persist on the book row. Grouped into one struct so
+/// `insert_row` stays under clippy's argument-count lint.
+struct Persisted<'a> {
+    epub_path: Option<&'a Path>,
+    cover_path: Option<&'a Path>,
+    kfx_path: Option<&'a Path>,
+    kfx_sha256: Option<&'a str>,
+}
+
 fn insert_row(
     conn: &rusqlite::Connection,
     sha: &str,
     meta: &BookMeta,
     file_size: i64,
-    epub_path: Option<&Path>,
-    cover_path: Option<&Path>,
-    kfx_path: Option<&Path>,
-    kfx_sha256: Option<&str>,
+    files: &Persisted<'_>,
 ) -> Result<i64> {
-    let epub_path_str = epub_path.map(|p| p.to_string_lossy().to_string());
-    let cover_path_str = cover_path.map(|p| p.to_string_lossy().to_string());
-    let kfx_path_str = kfx_path.map(|p| p.to_string_lossy().to_string());
+    let epub_path_str = files.epub_path.map(|p| p.to_string_lossy().to_string());
+    let cover_path_str = files.cover_path.map(|p| p.to_string_lossy().to_string());
+    let kfx_path_str = files.kfx_path.map(|p| p.to_string_lossy().to_string());
     let authors_joined = meta.authors.join(", ");
     let now = db::now_iso();
     let id = db::insert_book(
@@ -383,7 +392,7 @@ fn insert_row(
             epub_path: epub_path_str.as_deref(),
             cover_path: cover_path_str.as_deref(),
             kfx_path: kfx_path_str.as_deref(),
-            kfx_sha256,
+            kfx_sha256: files.kfx_sha256,
             file_size,
             imported_at: &now,
             asin: meta.asin.as_deref(),
@@ -427,8 +436,8 @@ pub fn sha256_of_bytes(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Convert a decrypted `.azw3` to EPUB bytes via boko-kai's AZW3 importer
-/// + EPUB exporter. Caller has already extension-detected `.azw3`; if the
+/// Convert a decrypted `.azw3` to EPUB bytes via boko-kai's AZW3 importer +
+/// EPUB exporter. Caller has already extension-detected `.azw3`; if the
 /// file isn't a real AZW3 (bad PalmDOC header, etc.), boko's `Book::from_bytes`
 /// returns the error and the caller's `?` surfaces it as a normal import
 /// failure.
@@ -454,8 +463,8 @@ fn convert_azw3(src: &Path) -> Result<Vec<u8>> {
     Ok(epub_bytes)
 }
 
-/// Convert a decrypted `.mobi` to EPUB bytes via boko-kai's MOBI importer
-/// + EPUB exporter. Shape matches `convert_azw3` — the EXTH parsing and
+/// Convert a decrypted `.mobi` to EPUB bytes via boko-kai's MOBI importer +
+/// EPUB exporter. Shape matches `convert_azw3` — the EXTH parsing and
 /// EPUB export are shared infrastructure; only the input format tag and
 /// boko's per-importer wiring differ.
 fn convert_mobi(src: &Path) -> Result<Vec<u8>> {

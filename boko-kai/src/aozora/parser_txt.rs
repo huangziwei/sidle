@@ -100,8 +100,8 @@ pub fn parse_txt(text: &str) -> Document {
         }
     }
     let mut colophon_lines: Vec<String> = Vec::new();
-    for c in body_end..lines.len() {
-        let cl = lines[c].trim();
+    for line in &lines[body_end..] {
+        let cl = line.trim();
         if colophon_end_re.is_match(cl) {
             break;
         }
@@ -716,7 +716,7 @@ fn postfix_table() -> &'static [(&'static str, &'static str, &'static str)] {
 fn apply_postfix_annotations(s: &str) -> String {
     // Match keys longest-first so `に二重傍線` wins over `に傍線`.
     let mut keys: Vec<&str> = postfix_table().iter().map(|(k, _, _)| *k).collect();
-    keys.sort_by(|a, b| b.len().cmp(&a.len()));
+    keys.sort_by_key(|b| std::cmp::Reverse(b.len()));
     let escaped_alt = keys
         .iter()
         .map(|k| regex::escape(k))

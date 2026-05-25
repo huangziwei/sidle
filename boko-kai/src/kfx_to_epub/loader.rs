@@ -286,11 +286,10 @@ fn extract_book_metadata(
             let value_raw = get_field(item_fields, KfxSymbol::Value as u64);
             let value = value_raw.and_then(|v| v.as_string()).unwrap_or("");
             match key {
-                "title" => {
-                    if meta.title.is_empty() {
+                "title"
+                    if meta.title.is_empty() => {
                         meta.title = value.into();
                     }
-                }
                 // Authors are stored in source order in
                 // `kindle_title_metadata/author` entries. Calibre's library
                 // pathway (`yj_metadata.py:get_yj_metadata_from_book`) uses
@@ -300,42 +299,37 @@ fn extract_book_metadata(
                 // `insert(0)` for the intermediate EPUB stage, but that
                 // intermediate is discarded by calibre's library importer.
                 // We match the library output, which the user reads.
-                "author" => {
-                    if !value.is_empty() {
+                "author"
+                    if !value.is_empty() => {
                         meta.authors.push(value.into());
                     }
-                }
                 "publisher" => meta.publisher = Some(value.trim().into()),
                 "language" => meta.language = value.into(),
                 "book_id" => meta.identifier = value.into(),
-                "ASIN" => {
-                    if meta.asin.is_none() && !value.is_empty() {
+                "ASIN"
+                    if meta.asin.is_none() && !value.is_empty() => {
                         meta.asin = Some(value.into());
                     }
-                }
-                "issue_date" => {
-                    if meta.issue_date.is_none() && !value.is_empty() {
+                "issue_date"
+                    if meta.issue_date.is_none() && !value.is_empty() => {
                         meta.issue_date = Some(value.into());
                     }
-                }
                 "cover_image" => {
                     if let Some(name) = resolve_cover_value(value_raw, symbols) {
                         meta.cover_resource_name = Some(name);
                     }
                 }
-                "title_pronunciation" => {
-                    if !value.is_empty() {
+                "title_pronunciation"
+                    if !value.is_empty() => {
                         meta.title_pronunciation = Some(value.into());
                     }
-                }
                 // KFX emits one `author_pronunciation` per `author` in source
                 // order. `import::kfx` keeps the last value; mirror that so the
                 // OPF `opf:file-as` matches what `boko info` reports.
-                "author_pronunciation" => {
-                    if !value.is_empty() {
+                "author_pronunciation"
+                    if !value.is_empty() => {
                         meta.author_pronunciation = Some(value.into());
                     }
-                }
                 _ => {}
             }
         }
@@ -398,7 +392,7 @@ fn parse_imports_max_id(doc_bytes: &[u8]) -> Option<u64> {
 /// hold a `SymbolTable`. Mirrors `kfx::container::resolve_symbol` for
 /// `Vec<String>`-shaped doc_symbols.
 #[allow(dead_code)]
-pub fn resolve_in_table<'a>(id: u64, base_len: u64, doc_symbols: &'a [String]) -> Option<&'a str> {
+pub fn resolve_in_table(id: u64, base_len: u64, doc_symbols: &[String]) -> Option<&str> {
     if id < base_len {
         KFX_SYMBOL_TABLE.get(id as usize).copied()
     } else {

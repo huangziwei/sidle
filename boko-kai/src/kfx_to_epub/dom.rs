@@ -127,13 +127,12 @@ impl Dom {
 
     /// Replace `old`'s position in its parent with `new`. Both must exist.
     pub fn replace(&mut self, old: NodeId, new: NodeId) {
-        if let Some(parent) = self.nodes[old].parent {
-            if let Some(idx) = self.child_index(parent, old) {
+        if let Some(parent) = self.nodes[old].parent
+            && let Some(idx) = self.child_index(parent, old) {
                 self.nodes[parent].children[idx] = new;
                 self.nodes[new].parent = Some(parent);
                 self.nodes[old].parent = None;
             }
-        }
     }
 
     /// Serialize the subtree rooted at `id` to an XHTML string.
@@ -177,6 +176,11 @@ impl Dom {
     /// Number of nodes (debug / metrics).
     pub fn len(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// True when the DOM holds no nodes.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
     }
 }
 

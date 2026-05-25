@@ -144,13 +144,11 @@ impl LocalSymbolTable {
     /// `LocalSymbolTable.get_id`. Returns 0 for unknown names (calibre uses
     /// 0 as the "undefined" sentinel).
     pub fn get_id(&self, name: &str) -> u32 {
-        if let Some(rest) = name.strip_prefix('$') {
-            if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
-                if let Ok(id) = rest.parse::<u32>() {
+        if let Some(rest) = name.strip_prefix('$')
+            && !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+                && let Ok(id) = rest.parse::<u32>() {
                     return id;
                 }
-            }
-        }
         self.name_to_id.get(name).copied().unwrap_or(0)
     }
 

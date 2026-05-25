@@ -6,6 +6,9 @@
 //! reader.
 
 #![allow(non_snake_case)]
+// See decoder.rs: JPEG-XR spec port — explicit index loops over parallel state
+// arrays and the wide constructor parameter list are intentional.
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 use super::consts::*;
 use super::math::clip;
@@ -330,7 +333,7 @@ impl MB {
         let is_left_edge = mbxt == 0;
         let is_top_edge = mbyt == 0;
         let initialize_context = is_left_edge && is_top_edge;
-        let reset_totals = mbxt % 16 == 0;
+        let reset_totals = mbxt.is_multiple_of(16);
         let reset_context = reset_totals || mbxt == tile_width_mb - 1;
 
         Self {

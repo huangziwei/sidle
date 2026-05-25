@@ -550,11 +550,10 @@ fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
             if let Some(value) = parse_entity(kfx_bytes, ent) {
                 extract_from_book_nav(&value, &resolve_sym, &mut nav);
             }
-        } else if ent.type_id == storyline_type {
-            if let Some(value) = parse_entity(kfx_bytes, ent) {
+        } else if ent.type_id == storyline_type
+            && let Some(value) = parse_entity(kfx_bytes, ent) {
                 collect_element_ids(&value, &resolve_sym, &mut nav.element_ids);
             }
-        }
     }
 
     Ok(nav)

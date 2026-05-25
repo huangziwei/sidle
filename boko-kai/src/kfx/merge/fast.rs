@@ -596,11 +596,10 @@ fn find_asset_id(
                 };
                 for kv in kvs {
                     let k = kv.get_field("$492").and_then(|n| n.as_string()).unwrap_or("");
-                    if k == "asset_id" {
-                        if let Some(v) = kv.get_field("$307").and_then(|n| n.as_string()) {
+                    if k == "asset_id"
+                        && let Some(v) = kv.get_field("$307").and_then(|n| n.as_string()) {
                             return Ok(Some(v.to_string()));
                         }
-                    }
                 }
             }
         }
@@ -747,21 +746,16 @@ fn emit_container_streaming(
 
     // Build container_info struct. Same field ordering as the mechanical
     // path so calibre's deserializer sees the same shape.
-    let mut ci_fields: Vec<(String, IonNode)> = Vec::new();
-    ci_fields.push((
-        "$409".into(),
-        IonNode::String(merged_id.to_string()),
-    ));
-    ci_fields.push(("$410".into(), IonNode::Int(0)));
-    ci_fields.push(("$411".into(), IonNode::Int(0)));
-    ci_fields.push(("$413".into(), IonNode::Int(entity_table_off as i64)));
-    ci_fields.push((
-        "$414".into(),
-        IonNode::Int(entity_table_size as i64),
-    ));
-    ci_fields.push(("$415".into(), IonNode::Int(doc_symbols_off as i64)));
-    ci_fields.push(("$416".into(), IonNode::Int(ds_len as i64)));
-    ci_fields.push(("$412".into(), IonNode::Int(DEFAULT_CHUNK_SIZE)));
+    let mut ci_fields: Vec<(String, IonNode)> = vec![
+        ("$409".into(), IonNode::String(merged_id.to_string())),
+        ("$410".into(), IonNode::Int(0)),
+        ("$411".into(), IonNode::Int(0)),
+        ("$413".into(), IonNode::Int(entity_table_off as i64)),
+        ("$414".into(), IonNode::Int(entity_table_size as i64)),
+        ("$415".into(), IonNode::Int(doc_symbols_off as i64)),
+        ("$416".into(), IonNode::Int(ds_len as i64)),
+        ("$412".into(), IonNode::Int(DEFAULT_CHUNK_SIZE)),
+    ];
     if fc_len > 0 && symtab.local_min_id() > 595 {
         ci_fields.push(("$594".into(), IonNode::Int(format_caps_off as i64)));
         ci_fields.push(("$595".into(), IonNode::Int(fc_len as i64)));

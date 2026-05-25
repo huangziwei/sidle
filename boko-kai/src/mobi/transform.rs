@@ -600,9 +600,7 @@ fn extract_attr_value<'a>(attrs: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
         } else {
             // Require a whitespace boundary so `xml:lang` doesn't match `lang`.
             let rest = &attrs[pos..];
-            let Some(off) = rest.iter().position(|b| b.is_ascii_whitespace()) else {
-                return None;
-            };
+            let off = rest.iter().position(|b| b.is_ascii_whitespace())?;
             pos + off + 1
         };
         if abs >= attrs.len() {

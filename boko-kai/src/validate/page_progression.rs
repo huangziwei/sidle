@@ -284,11 +284,10 @@ fn walk_doc_data<F>(
             if let Some(s) = resolve_v(v) {
                 *raw_direction = s;
             }
-        } else if name == "writing_mode" && raw_writing_mode.is_empty() {
-            if let Some(s) = resolve_v(v) {
+        } else if name == "writing_mode" && raw_writing_mode.is_empty()
+            && let Some(s) = resolve_v(v) {
                 *raw_writing_mode = s;
             }
-        }
     }
 }
 

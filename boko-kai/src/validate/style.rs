@@ -327,13 +327,12 @@ fn class_selector_count_in_list(selectors: &str) -> usize {
             let bytes = s.as_bytes();
             let mut i = 0;
             while i < bytes.len() {
-                if bytes[i] == b'.' {
-                    if i + 1 < bytes.len()
+                if bytes[i] == b'.'
+                    && i + 1 < bytes.len()
                         && (bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_' || bytes[i + 1] == b'-')
                     {
                         return true;
                     }
-                }
                 i += 1;
             }
             false
@@ -399,11 +398,10 @@ fn scan_xhtml_richness(xhtml: &str, richness: &mut ClassRichness, class_names: &
                     .unwrap_or("")
                     .to_ascii_lowercase();
                 let is_block = block_tags.iter().any(|t| t == &tag.as_bytes());
-                if is_block {
-                    if let Some(parent) = stack.last_mut() {
+                if is_block
+                    && let Some(parent) = stack.last_mut() {
                         parent.has_block_child = true;
                     }
-                }
                 stack.push(Frame {
                     tag,
                     has_block_child: false,
@@ -415,11 +413,10 @@ fn scan_xhtml_richness(xhtml: &str, richness: &mut ClassRichness, class_names: &
                     .unwrap_or("")
                     .to_ascii_lowercase();
                 let is_block = block_tags.iter().any(|t| t == &tag.as_bytes());
-                if is_block {
-                    if let Some(parent) = stack.last_mut() {
+                if is_block
+                    && let Some(parent) = stack.last_mut() {
                         parent.has_block_child = true;
                     }
-                }
             }
             Ok(Event::Text(t)) => {
                 let s = String::from_utf8_lossy(t.as_ref());
@@ -620,8 +617,8 @@ fn parse_css_blob(css: &str, out: &mut Vec<(String, String)>) {
             _start: &cssparser::ParserState,
             input: &mut Parser<'i, 't>,
         ) -> Result<Self::QualifiedRule, Err<'i>> {
-            let mut body = RuleBodyParser::new(input, self);
-            while let Some(result) = body.next() {
+            let body = RuleBodyParser::new(input, self);
+            for result in body {
                 let _ = result;
             }
             Ok(())
@@ -640,8 +637,8 @@ fn parse_css_blob(css: &str, out: &mut Vec<(String, String)>) {
     let mut input = ParserInput::new(css);
     let mut parser = Parser::new(&mut input);
     let mut visitor = Collect { out };
-    let mut rules = StyleSheetParser::new(&mut parser, &mut visitor);
-    while let Some(result) = rules.next() {
+    let rules = StyleSheetParser::new(&mut parser, &mut visitor);
+    for result in rules {
         let _ = result;
     }
 }

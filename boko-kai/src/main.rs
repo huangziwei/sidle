@@ -1171,11 +1171,9 @@ fn convert(
         && std::path::Path::new(input)
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
-    {
-        if let Some(()) = aozora_dispatch(input, output, to_stdout, quiet)? {
+        && let Some(()) = aozora_dispatch(input, output, to_stdout, quiet)? {
             return Ok(());
         }
-    }
 
     // Fast path: .kfx-zip -> .kfx merges fragments without touching the IR
     // pipeline. This avoids storyline/section resolution (and the
