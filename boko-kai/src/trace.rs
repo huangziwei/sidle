@@ -9,11 +9,41 @@
 //!  - `BOKO_MERGE_TRACE=1` — `.kfx-zip` → `.kfx` merge (mechanical + fast)
 //!  - `BOKO_KFX2EPUB_TRACE=1` — `.kfx` → `.epub` mechanical port
 
-use std::time::Instant;
+/// Monotonic stopwatch that is wasm-safe.
+///
+/// On native it wraps `std::time::Instant`. On `wasm32` there is no monotonic
+/// clock and `Instant::now()` panics at runtime, so it degrades to a no-op that
+/// always reports `Duration::ZERO`. The only consumers of these timings are the
+/// env-gated traces (`BOKO_*_TRACE`), which never run in a browser, so zero
+/// durations on wasm are harmless.
+#[derive(Debug, Clone, Copy)]
+pub struct Stopwatch {
+    #[cfg(not(target_arch = "wasm32"))]
+    start: std::time::Instant,
+}
+
+impl Stopwatch {
+    #[inline]
+    pub fn start() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            start: std::time::Instant::now(),
+        }
+    }
+
+    #[inline]
+    pub fn elapsed(&self) -> std::time::Duration {
+        #[cfg(not(target_arch = "wasm32"))]
+        let elapsed = self.start.elapsed();
+        #[cfg(target_arch = "wasm32")]
+        let elapsed = std::time::Duration::ZERO;
+        elapsed
+    }
+}
 
 pub struct Trace {
     name: &'static str,
-    start: Instant,
+    start: Stopwatch,
     enabled: bool,
 }
 
@@ -23,7 +53,7 @@ impl Trace {
     pub fn new(name: &'static str, env_var: &str) -> Self {
         Self {
             name,
-            start: Instant::now(),
+            start: Stopwatch::start(),
             enabled: std::env::var(env_var).is_ok(),
         }
     }

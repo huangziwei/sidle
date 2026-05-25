@@ -48,6 +48,15 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
     merge_kfx_zip_with_mode(path, MergeMode::default())
 }
 
+/// Merge in-memory `.kfx-zip` bytes into a single `.kfx` payload — no
+/// filesystem. Always uses the thread-free [`MergeMode::Mechanical`] path so it
+/// runs on wasm32 (the [`MergeMode::Fast`] path relies on `std::thread::scope`).
+/// Mechanical is the correctness ground truth, so the output is the same
+/// calibre-accepted `.kfx`. Used by the `boko.html` wasm binding.
+pub fn merge_kfx_zip_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
+    mechanical::merge_kfx_zip_reader(io::Cursor::new(data))
+}
+
 /// Merge using the specified mode. Falls back from [`MergeMode::Fast`] to
 /// [`MergeMode::Mechanical`] if the fast path's preconditions don't hold
 /// (e.g. multiple sources carry `doc_symbols`).

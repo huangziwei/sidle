@@ -42,6 +42,7 @@ pub mod io;
 pub mod model;
 pub mod style;
 
+#[cfg(feature = "aozora")]
 pub mod aozora;
 pub mod epub;
 pub mod kfx;

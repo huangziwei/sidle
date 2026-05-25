@@ -129,10 +129,10 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn decode(mut self) -> Result<DecodedImage> {
-        use std::time::Instant;
+        use crate::trace::Stopwatch;
         let mut timing = DecodeTiming::default();
 
-        let t_hdr = Instant::now();
+        let t_hdr = Stopwatch::start();
         self.image_header()?;
 
         // Primary plane.
@@ -160,23 +160,23 @@ impl<'a> Decoder<'a> {
         }
         timing.header = t_hdr.elapsed();
 
-        let t_tiles = Instant::now();
+        let t_tiles = Stopwatch::start();
         self.coded_tiles(num_bands_primary)?;
         self.ds.discard_remainder_bits();
         timing.coded_tiles = t_tiles.elapsed();
 
         // SampleReconstruction + OutputFormatting per plane.
         for p in 0..self.planes.len() {
-            let t_sr = Instant::now();
+            let t_sr = Stopwatch::start();
             self.sample_reconstruction(p);
             timing.sample_recon += t_sr.elapsed();
 
-            let t_of = Instant::now();
+            let t_of = Stopwatch::start();
             self.output_formatting(p)?;
             timing.output_fmt += t_of.elapsed();
         }
 
-        let t_out = Instant::now();
+        let t_out = Stopwatch::start();
         let mut img = self.construct_image();
         timing.output_fmt += t_out.elapsed();
         img.timing = timing;

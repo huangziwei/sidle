@@ -15,7 +15,11 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["cli"]
-cli = ["dep:clap", "dep:serde", "dep:serde_json"]
+# `cli` implies `aozora`: the CLI bin (`main.rs`) calls `boko::aozora::*`.
+cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:ion-rs", "aozora"]
+# Aozora Bunko TXT → EPUB. Pulls the heavy SVG/text stack (resvg + its font /
+# raster deps) plus `regex`; gated off for wasm to shrink the binary.
+aozora = ["dep:resvg", "dep:regex"]
 wasm = ["wasm-bindgen", "console_error_panic_hook"]
 
 [dependencies]
@@ -40,7 +44,7 @@ encoding_rs = "0.8"
 # Regex engine. Used by the Aozora Bunko TXT parser (annotations.rs and
 # parser_txt.rs) — the source format is markup-heavy and the JS reference
 # tool we're porting relies on ~40 regex patterns.
-regex = "1.11"
+regex = { version = "1.11", optional = true }
 
 # SVG rasterization for Aozora cover generation. We build the cover as
 # pure SVG (port of `buildCoverSvg` from `aozora-epub.html`) and rasterize
@@ -48,7 +52,7 @@ regex = "1.11"
 # (Hiragino Mincho ProN etc.) into usvg's fontdb at runtime — Aozora is
 # personal software per [[feedback_personal_software_no_other_users]], no
 # bundled fallback font needed.
-resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"] }
+resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"], optional = true }
 
 # Base64 encoding for KFX raw media
 base64 = "0.22"
@@ -75,7 +79,7 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 
 # Ion binary format parsing for KFX dump tool
-ion-rs = { version = "1.0.0-rc.11", features = ["experimental-reader-writer"] }
+ion-rs = { version = "1.0.0-rc.11", features = ["experimental-reader-writer"], optional = true }
 
 # SHA1 hashing for KFX content hashes (minimal, WASM-compatible).
 # Used by the kfx-zip → kfx fast path. RustCrypto's `sha1 = "0.10"` with

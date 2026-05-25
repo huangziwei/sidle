@@ -51,10 +51,10 @@ pub fn transcode(
     jxr_bytes: &[u8],
     resource_name: &str,
 ) -> Result<(Vec<u8>, String, TranscodeTiming), ConvertError> {
-    use std::time::Instant;
+    use crate::trace::Stopwatch;
     let mut t = TranscodeTiming::default();
 
-    let t0 = Instant::now();
+    let t0 = Stopwatch::start();
     let container = match container::parse(jxr_bytes) {
         Ok(c) => c,
         Err(e) => {
@@ -66,7 +66,7 @@ pub fn transcode(
     };
     t.container_parse = t0.elapsed();
 
-    let t1 = Instant::now();
+    let t1 = Stopwatch::start();
     let decoded = match decoder::Decoder::new(container.image_data).decode() {
         Ok(d) => d,
         Err(e) => {
@@ -79,7 +79,7 @@ pub fn transcode(
     t.jxr_decode = t1.elapsed();
     t.jxr_decode_breakdown = decoded.timing;
 
-    let t2 = Instant::now();
+    let t2 = Stopwatch::start();
     let bytes = encode_jpeg(&decoded)?;
     t.jpeg_encode = t2.elapsed();
     Ok((bytes, "jpg".into(), t))

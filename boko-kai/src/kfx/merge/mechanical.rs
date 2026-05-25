@@ -9,7 +9,7 @@
 //! [`IonNode`]: super::node::IonNode
 //! [`fast`]: super::fast
 
-use std::io::{self, Read};
+use std::io::{self, Read, Seek};
 use std::path::Path;
 
 use super::container::{
@@ -21,9 +21,15 @@ use super::symtab::LocalSymbolTable;
 use crate::trace::Trace;
 
 pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
+    merge_kfx_zip_reader(std::fs::File::open(path)?)
+}
+
+/// Same as [`merge_kfx_zip`] but reads the `.kfx-zip` from any `Read + Seek`
+/// source instead of a path — lets the wasm bindings merge in-memory bytes
+/// (`Cursor<&[u8]>`) with no filesystem. Thread-free, so it runs on wasm32.
+pub fn merge_kfx_zip_reader<R: Read + Seek>(reader: R) -> io::Result<Vec<u8>> {
     let trace = Trace::new("merge-mechanical", "BOKO_MERGE_TRACE");
-    let file = std::fs::File::open(path)?;
-    let mut archive = zip::ZipArchive::new(file)
+    let mut archive = zip::ZipArchive::new(reader)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
     let mut kfx_names: Vec<String> = Vec::new();

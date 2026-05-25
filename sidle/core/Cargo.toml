@@ -15,7 +15,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 dirs = "6"
 
-boko-kai = { path = "../../boko-kai", default-features = false }
+boko-kai = { path = "../../boko-kai", default-features = false, features = ["aozora"] }
 
 # image: cover thumbnail decode + grayscale + downscale, produced at import
 # time (see library::thumbnail). Host-only (server/desktop), so unlike

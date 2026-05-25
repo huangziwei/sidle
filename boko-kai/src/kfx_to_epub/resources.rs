@@ -277,33 +277,49 @@ fn parallel_transcode(
     if prepared.is_empty() {
         return Vec::new();
     }
-    let n_workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(prepared.len());
-    if n_workers <= 1 {
-        return prepared.iter().map(transcode_one).collect();
-    }
-    let mut out: Vec<Option<Result<TranscodedBytes, ConvertError>>> =
-        (0..prepared.len()).map(|_| None).collect();
-    std::thread::scope(|scope| {
-        let chunk_size = prepared.len().div_ceil(n_workers);
-        let mut handles = Vec::with_capacity(n_workers);
-        for chunk in prepared.chunks(chunk_size) {
-            handles.push(scope.spawn(move || -> Vec<Result<TranscodedBytes, ConvertError>> {
-                chunk.iter().map(transcode_one).collect()
-            }));
+
+    // Browser wasm has no threads — `available_parallelism()` and
+    // `std::thread::scope` panic at runtime — so run the same per-image
+    // `transcode_one` sequentially. Slower on image-heavy KFX, but correct.
+    #[cfg(target_arch = "wasm32")]
+    let result: Vec<Result<TranscodedBytes, ConvertError>> =
+        prepared.iter().map(transcode_one).collect();
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let result: Vec<Result<TranscodedBytes, ConvertError>> = {
+        let n_workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(prepared.len());
+        if n_workers <= 1 {
+            prepared.iter().map(transcode_one).collect()
+        } else {
+            let mut out: Vec<Option<Result<TranscodedBytes, ConvertError>>> =
+                (0..prepared.len()).map(|_| None).collect();
+            std::thread::scope(|scope| {
+                let chunk_size = prepared.len().div_ceil(n_workers);
+                let mut handles = Vec::with_capacity(n_workers);
+                for chunk in prepared.chunks(chunk_size) {
+                    handles.push(scope.spawn(
+                        move || -> Vec<Result<TranscodedBytes, ConvertError>> {
+                            chunk.iter().map(transcode_one).collect()
+                        },
+                    ));
+                }
+                let mut write_idx = 0;
+                for h in handles {
+                    let results = h.join().expect("transcode worker panicked");
+                    for r in results {
+                        out[write_idx] = Some(r);
+                        write_idx += 1;
+                    }
+                }
+            });
+            out.into_iter().map(|slot| slot.expect("filled")).collect()
         }
-        let mut write_idx = 0;
-        for h in handles {
-            let results = h.join().expect("transcode worker panicked");
-            for r in results {
-                out[write_idx] = Some(r);
-                write_idx += 1;
-            }
-        }
-    });
-    out.into_iter().map(|slot| slot.expect("filled")).collect()
+    };
+
+    result
 }
 
 fn transcode_one(p: &PreparedResource<'_>) -> Result<TranscodedBytes, ConvertError> {

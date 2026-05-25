@@ -41,6 +41,11 @@ I want a faster, mor streamline process to manage my books:
 2. imported EPUB will be auto-converted to KFX;
 3. imported AZW3 and MOBI will be auto-converted to EPUB then KFX;
 4. (bonus) imported ZIP from [Aozora/青空文庫](https://www.aozora.gr.jp) will be auto-converted to EPUB then KFX;
-5. while mouted, the desktop app can push a KUAL app to Kinde, which can be used to view the library and download the KFX from the host within the same network.
+5. while mouted, the desktop app can push a KUAL app to Kinde, which can be used to view the library and download the KFX from the host within the same network;
+6. and most importantly, all format conversion should work for CJK typography (vertical writing mode, page progression direction, etc.), which made possible with `boko-kai`, a [fork of boko](./boko-kai/README.md).
 
 This is basically what Sidle does for now.
+
+## Bonus
+
+for format conversion only without library management, you can use this [client-side html tool](https://hzwei.dev/tools/boko.html).
