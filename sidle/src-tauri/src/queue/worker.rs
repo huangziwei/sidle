@@ -16,6 +16,7 @@ use crate::library::LibraryPaths;
 use crate::library::db::{self, BookRow};
 use crate::library::epub_cover;
 use crate::library::import::{extract_cover_from_epub, sha256_of_file, write_bytes_atomic};
+use crate::library::kfx_cover;
 use crate::library::paths::format_basename;
 use crate::queue::emit_status;
 use crate::state::DbHandle;
@@ -119,6 +120,35 @@ pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_
                                     ),
                                     Err(e) => eprintln!(
                                         "[sidle/queue] book {book_id} epub cover \
+                                         swap failed: {e:#}"
+                                    ),
+                                }
+                            }
+
+                            // Swap the cover inside the imported KFX too — that's
+                            // the copy we push to the Kindle, and its embedded
+                            // cover is what the home tile / sleep-screen renders.
+                            // A store KFX can ship a publisher placeholder there
+                            // (e.g. a house-logo) instead of the real art. The
+                            // rewrite changes the file's bytes, so we re-stamp
+                            // `kfx_sha256` (the on-device filename infix); a prior
+                            // push keyed on the old hash is now stale and a
+                            // re-push lands a fresh file, same as any reconvert.
+                            if let Some(kfx) = book.kfx_path.as_deref() {
+                                match kfx_cover::replace_cover(Path::new(kfx), &bytes) {
+                                    Ok(new_sha) => {
+                                        let conn = db.lock().await;
+                                        let _ = db::set_kfx_path_and_sha(
+                                            &conn, book_id, kfx, &new_sha,
+                                        );
+                                        drop(conn);
+                                        eprintln!(
+                                            "[sidle/queue] book {book_id} color cover \
+                                             swapped inside kfx (kfx_sha256 re-stamped)"
+                                        );
+                                    }
+                                    Err(e) => eprintln!(
+                                        "[sidle/queue] book {book_id} kfx cover \
                                          swap failed: {e:#}"
                                     ),
                                 }

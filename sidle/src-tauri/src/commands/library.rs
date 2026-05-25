@@ -13,6 +13,7 @@ use crate::cover_fetch;
 use crate::library::db::{self, BookRow};
 use crate::library::epub_cover;
 use crate::library::import::{self, ImportOutcome};
+use crate::library::kfx_cover;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -472,6 +473,18 @@ pub async fn library_recrawl_cover(
             eprintln!("[sidle/recrawl] book {book_id} epub cover swap failed: {e:#}");
         }
     }
+    // And into the imported KFX — that's the copy we push to the Kindle, and
+    // its embedded cover drives the home tile / sleep-screen art. Rewriting it
+    // changes the bytes, so re-stamp `kfx_sha256` (the on-device filename infix).
+    if let Some(kfx) = book.kfx_path.as_deref() {
+        match kfx_cover::replace_cover(std::path::Path::new(kfx), &bytes) {
+            Ok(new_sha) => {
+                let conn = state.db.lock().await;
+                let _ = db::set_kfx_path_and_sha(&conn, book_id, kfx, &new_sha);
+            }
+            Err(e) => eprintln!("[sidle/recrawl] book {book_id} kfx cover swap failed: {e:#}"),
+        }
+    }
     Ok(RecrawlResult::Updated {
         cover_path: out_str,
     })
@@ -564,6 +577,18 @@ pub async fn library_set_cover(
             epub_cover::replace_cover(std::path::Path::new(epub), &bytes, ext)
     {
         eprintln!("[sidle/set-cover] book {book_id} epub cover swap failed: {e:#}");
+    }
+
+    // And into the imported KFX (boko normalizes png/webp → jpeg). This is the
+    // copy pushed to the Kindle; re-stamp `kfx_sha256` after the rewrite.
+    if let Some(kfx) = book.kfx_path.as_deref() {
+        match kfx_cover::replace_cover(std::path::Path::new(kfx), &bytes) {
+            Ok(new_sha) => {
+                let conn = state.db.lock().await;
+                let _ = db::set_kfx_path_and_sha(&conn, book_id, kfx, &new_sha);
+            }
+            Err(e) => eprintln!("[sidle/set-cover] book {book_id} kfx cover swap failed: {e:#}"),
+        }
     }
 
     let updated = {
