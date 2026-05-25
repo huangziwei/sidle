@@ -4,5 +4,6 @@ pub mod import;
 pub mod kfx_cover;
 pub mod paths;
 pub mod thumbnail;
+pub mod yjr;
 
 pub use paths::LibraryPaths;
