@@ -6,7 +6,7 @@
 //! `META-INF/container.xml`, `OEBPS/style.css`, per-chapter XHTML split at
 //! `<h2>` boundaries, EPUB-3 nav doc + NCX (for older readers), OPF with
 //! `xml:lang="ja"` and `page-progression-direction="rtl"`. Cover is a
-//! pre-rendered JPEG supplied by the caller (Phase 4 produces it).
+//! pre-rendered JPEG supplied by the caller.
 
 use std::io::{self, Write};
 

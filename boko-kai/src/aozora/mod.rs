@@ -7,11 +7,11 @@
 //! The pipeline lives entirely upstream of the EPUB importer:
 //!
 //! ```text
-//! .zip → parse (txt | xhtml) → Document → EpubBuilder → EPUB bytes
+//! .zip → parse (txt) → Document → EpubBuilder → EPUB bytes
 //! ```
 //!
 //! `EpubImporter::from_source` then takes over and the existing
-//! EPUB → KFX path runs unmodified. See `.claude/plans/aozora-to-epub-port.md`.
+//! EPUB → KFX path runs unmodified.
 
 pub mod cover;
 pub mod epub_builder;

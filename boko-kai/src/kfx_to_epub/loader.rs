@@ -23,8 +23,7 @@ use super::ConvertError;
 /// Book-wide metadata pulled out of `book_metadata` ($490).
 ///
 /// This is the parsed shape we hand to the output stage. It's intentionally
-/// minimal for step 1; the proper metadata port (phase 1 step 3) will
-/// expand this.
+/// minimal; a fuller metadata port can expand it later.
 #[derive(Debug, Clone, Default)]
 pub struct BookMetadata {
     pub title: String,
@@ -185,7 +184,7 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, ConvertError> {
 
         // bcRawFont ($418): also raw bytes; treat the same as bcRawMedia
         // since calibre's process_fonts pulls from book_data["$418"] as bytes.
-        // Phase 1 step 6 (properties/CSS) will use these.
+        // Kept for the (still-deferred) font handling.
         if ent.type_id == KfxSymbol::Bcrawfont as u32 {
             let key = symbols.resolve(ent.id as u64).to_string();
             if !key.is_empty() && key != "?" {

@@ -4,7 +4,7 @@
 //! ordered spine, a flat map of OEBPS files, and emits a valid EPUB3 zip on
 //! `finalize`. The full calibre class is ~1.5K LOC and does a lot more
 //! (NCX/nav3, beautify, dedupe, viewport, cover-detection); we add those
-//! pieces as later phase 1 steps need them.
+//! pieces as the port needs them.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Write};
@@ -43,7 +43,7 @@ pub struct ManifestEntry {
     pub is_nav: bool,
 }
 
-/// EPUB output state shared across phase 1 steps.
+/// EPUB output state shared across the conversion.
 pub struct EpubOutput {
     /// File path under `OEBPS/` → bytes. Insertion order tracked separately.
     oebps_files: HashMap<String, OebpsFile>,

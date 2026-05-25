@@ -1,4 +1,4 @@
-//! Phase 1 step 6: KFX style → CSS property translation.
+//! KFX style → CSS property translation.
 //!
 //! Port of `yj_to_epub_properties.py`. The original is ~2500 LOC; this
 //! starts with a minimal-viable port covering the property table, value

@@ -1,4 +1,4 @@
-//! Phase 1 step 4: storyline → XHTML.
+//! Storyline → XHTML.
 //!
 //! Mechanical port of calibre's `yj_to_epub_content.py`. The orchestrator
 //! drives this via `process_reading_order`, which walks each
@@ -9,7 +9,7 @@
 //! match has many branches, one per KFX content type, each emitting the
 //! appropriate XHTML element with the right attributes/style.
 //!
-//! Ruby (one of phase 1's hardest gates) is handled via `style_events`
+//! Ruby is handled via `style_events`
 //! attached to text containers: each event names a ruby_content fragment
 //! whose annotation text becomes the `<rt>`, and the base text under the
 //! event becomes `<rb>`.

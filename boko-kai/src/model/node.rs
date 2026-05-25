@@ -17,7 +17,7 @@ impl NodeId {
 /// Visual styling (bold, italic, font-size) is handled by `ComputedStyle`.
 /// Semantic attributes (href, src, alt, epub:type) are in `SemanticMap`.
 ///
-/// Design principle: Roles map to markdown concepts:
+/// Design principle: Roles map to structural document concepts:
 /// - Text (leaf text content)
 /// - Paragraph (block-level text container)
 /// - Heading(level) (h1-h6)

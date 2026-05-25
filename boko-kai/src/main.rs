@@ -1136,8 +1136,7 @@ fn convert(
 
     // Mechanical port: .kfx -> .epub via the dedicated `kfx_to_epub` module
     // (parallel to the generic IR pipeline). Selected automatically when the
-    // input file has a `.kfx` extension. Phase 1 of the port is in progress;
-    // see `.claude/plans/kfx-to-epub-port.md`.
+    // input file has a `.kfx` extension.
     if !from_stdin
         && output_format == Format::Epub
         && std::path::Path::new(input)

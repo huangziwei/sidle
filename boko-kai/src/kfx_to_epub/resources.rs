@@ -1,4 +1,4 @@
-//! Phase 1 step 1: image + raw media extraction + cover declaration.
+//! Image + raw media extraction + cover declaration.
 //!
 //! Port of (the image-handling parts of) calibre's `yj_to_epub_resources.py`.
 //! Walks every `external_resource` ($164) entity, locates the matching
@@ -6,8 +6,8 @@
 //! adds the result to the EPUB manifest under `OEBPS/<filename>`. Marks the
 //! cover image as such on the way out.
 //!
-//! Fonts (`process_fonts` in calibre) are intentionally deferred to phase 1
-//! step 6 (properties / CSS) where they're consumed.
+//! Fonts (`process_fonts` in calibre) are intentionally deferred to the
+//! properties / CSS pass where they're consumed.
 
 use std::collections::HashMap;
 
@@ -426,9 +426,9 @@ fn build_image_filename(location: &str, format: &str, out: &EpubOutput) -> Strin
     candidate
 }
 
-/// Scaffolding for phase 1 step 1's validator gate. Emits one minimal XHTML
-/// chapter per bundled image so the validator sees an `<img src>` for each.
-/// Replaced by the real content pipeline in step 4.
+/// Fallback when the content pipeline emits no chapters: one minimal XHTML
+/// chapter per bundled image so the validator still sees an `<img src>` for
+/// each.
 pub fn emit_image_scaffold_chapters(out: &mut EpubOutput) {
     // We need to discover which resources we just added. Re-walk the OEBPS
     // files: anything with an image/* mime is fair game.

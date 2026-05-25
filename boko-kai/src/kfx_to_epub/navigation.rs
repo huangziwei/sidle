@@ -1,4 +1,4 @@
-//! Phase 1 step 2: book_navigation → NCX.
+//! book_navigation → NCX.
 //!
 //! Mechanical port of `yj_to_epub_navigation.py`. Walks the
 //! `book_navigation` ($389) fragment to extract TOC entries

@@ -2,7 +2,7 @@
 //!
 //! Parallel path from boko's generic `KfxImporter` + `EpubExporter` IR
 //! pipeline. Mirrors `ref/calibre-kfx-input/kfxlib/yj_to_epub_*.py` as
-//! closely as Rust syntax allows. See `.claude/plans/kfx-to-epub-port.md`.
+//! closely as Rust syntax allows.
 
 pub mod content;
 pub mod dom;
@@ -66,11 +66,11 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
     trace.mark("loader::load");
     let mut out = EpubOutput::new();
 
-    // Phase 1 step 1 — resources (images, cover).
+    // Resources (images, cover).
     let resources = resources::process(&book, &mut out)?;
     trace.mark("resources::process (JXR → JPEG)");
 
-    // Phase 1 step 4 — content (storyline → XHTML).
+    // Content (storyline → XHTML).
     let mut content_state = content::ContentState::new(&book, &resources);
     content_state.process_reading_order()?;
     trace.mark("content::process_reading_order");
@@ -141,7 +141,7 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
         out.prepend_spine_chapter("titlepage.xhtml", titlepage);
     }
 
-    // Phase 1 step 2 — navigation. Build NCX from book_navigation, using the
+    // Navigation. Build NCX from book_navigation, using the
     // element-id → chapter-filename map populated by `process_section` to
     // resolve `nav_unit.target_position.id` to a real chapter file.
     let toc = navigation::extract_toc(

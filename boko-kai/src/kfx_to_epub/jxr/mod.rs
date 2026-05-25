@@ -18,8 +18,7 @@
 //! (Japanese light novels especially). EPUB readers don't support JXR;
 //! calibre transcodes via Pillow → libjxr. We don't want a C FFI dep or
 //! a system magick binary for sidle/Tauri distribution, so we ported
-//! calibre's pure-Python decoder line-by-line. See
-//! `.claude/plans/kfx-to-epub-port.md` for the larger context.
+//! calibre's pure-Python decoder line-by-line.
 
 pub mod consts;
 pub mod container;
@@ -121,9 +120,9 @@ fn pack_pixels(
     let h = img.height as usize;
 
     // YONLY -> Luma. RGB / NCOMPONENT(3) -> Rgb. RGBA-shaped images cannot
-    // round-trip through JPEG; we drop alpha to keep step 1 simple — phase 1
-    // step 1 has no JXR+alpha image in the horror fixture. Revisit when
-    // a real fixture appears.
+    // round-trip through JPEG; we drop alpha to keep things simple — no
+    // JXR+alpha image has shown up in a real fixture yet. Revisit when
+    // one appears.
     let is_rgb_like = matches!(img.output_clr_fmt, OUT_RGB)
         || (matches!(img.output_clr_fmt, OUT_NCOMPONENT) && img.num_components >= 3);
     let is_y_like = matches!(img.output_clr_fmt, OUT_YONLY)

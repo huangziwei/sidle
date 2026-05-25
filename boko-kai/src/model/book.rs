@@ -563,10 +563,9 @@ impl Book {
     /// | Format   | Support |
     /// |----------|---------|
     /// | EPUB     | ✓       |
-    /// | AZW3     | ✓       |
+    /// | KFX      | ✓       |
+    /// | AZW3     | ✗       |
     /// | MOBI     | ✗       |
-    /// | Text     | ✓       |
-    /// | Markdown | ✓       |
     ///
     /// # Example
     ///

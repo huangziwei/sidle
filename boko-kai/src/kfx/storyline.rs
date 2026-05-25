@@ -4,7 +4,7 @@
 //! structures and boko's IR, using a schema-driven approach:
 //!
 //! Import: Ion → TokenStream → IR
-//! Export: IR → TokenStream → Ion (TODO)
+//! Export: IR → TokenStream → Ion
 //!
 //! ## Key Design: Generic Interpreter
 //!

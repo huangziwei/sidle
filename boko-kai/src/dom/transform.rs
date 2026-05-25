@@ -211,7 +211,7 @@ impl<'a> TransformContext<'a> {
 
                 // Skip hidden elements, but preserve Break nodes
                 // CSS may hide <br> (e.g., in verse: "span + br { display: none }") but
-                // we still need them for line breaks in text/markdown export
+                // we still need them for line breaks in the exported EPUB/KFX
                 if computed.display == Display::None && role != Role::Break {
                     return;
                 }

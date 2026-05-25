@@ -10,7 +10,7 @@
 //!    synthesizes only `$270` and `$419`. Produces a different byte stream
 //!    that calibre still accepts (verified to produce identical EPUBs).
 //!
-//! Default is [`MergeMode::Mechanical`]. Switch via CLI flag or the
+//! Default is [`MergeMode::Fast`]. Switch via CLI flag or the
 //! `merge_kfx_zip_with_mode` entry point.
 
 mod catalog;
