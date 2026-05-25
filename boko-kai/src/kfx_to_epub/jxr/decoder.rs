@@ -11,6 +11,11 @@
 //! into helpers to keep the borrow checker happy.
 
 #![allow(non_snake_case)]
+// JPEG-XR is a faithful port of the spec's decode pipeline: explicit index
+// loops over parallel per-sample/per-band arrays and the codec's wide
+// block-decode parameter lists are intentional, and read clearer than iterator
+// or param-struct rewrites would. Allowed deliberately, not by neglect.
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 use super::consts::*;
 use super::math::*;
@@ -935,7 +940,7 @@ impl<'a> Decoder<'a> {
         if int_fmt == INT_YUV444 {
             let i_max = (i_full_planes as i32 * 4) - 5;
             if self.planes[p].count_zero_cbplp <= 0 || self.planes[p].count_max_cbplp < 0 {
-                let cbplp_yuv1 = self.ds.huff(tables::cbplp_yuv1_444())? as i32;
+                let cbplp_yuv1 = self.ds.huff(tables::cbplp_yuv1_444())?;
                 i_cbplp = if self.planes[p].count_max_cbplp < self.planes[p].count_zero_cbplp {
                     (i_max - cbplp_yuv1) as u32
                 } else {
@@ -1049,7 +1054,7 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    fn adaptive_lp_scan(&mut self, p: usize, n: usize, i: usize, value: i32, lp_input: &mut Vec<Vec<i32>>) {
+    fn adaptive_lp_scan(&mut self, p: usize, n: usize, i: usize, value: i32, lp_input: &mut [Vec<i32>]) {
         let scan = self.planes[p].lowpass_scan.as_mut().unwrap();
         lp_input[n][scan.translate(i)] = value;
         scan.adapt(i);
@@ -1124,7 +1129,7 @@ impl<'a> Decoder<'a> {
         for i_comp in 0..outer_iters {
             let num_cbphp = {
                 let idx = self.planes[p].dec_num_cbphp.table_index as usize;
-                let v = self.ds.huff(tables::num_cbphp(idx))? as i32;
+                let v = self.ds.huff(tables::num_cbphp(idx))?;
                 let dt = self.planes[p].dec_num_cbphp.delta_table_index as usize;
                 self.planes[p].dec_num_cbphp.discrim_val1 += NUM_CBPHP_DELTA[dt][v as usize];
                 v
@@ -1137,7 +1142,7 @@ impl<'a> Decoder<'a> {
                 }
                 let idx = self.planes[p].dec_num_blk_cbphp.table_index as usize;
                 let table = if use_table1 { tables::num_cbphp(idx) } else { tables::num_blkcbphp2(idx) };
-                let num_blk_cbphp = self.ds.huff(table)? as i32;
+                let num_blk_cbphp = self.ds.huff(table)?;
                 let dt = self.planes[p].dec_num_blk_cbphp.delta_table_index as usize;
                 let delta_table: &[i32] = if use_delta1 {
                     &NUM_BLK_CBPHP_DELTA1[dt][..]
@@ -1149,7 +1154,7 @@ impl<'a> Decoder<'a> {
                 let mut i_val = (num_blk_cbphp + 1) as u32;
                 let mut i_blk_cbphp: i32 = 0;
                 if i_val >= 6 {
-                    let chr = self.ds.huff(tables::chr_cbphp())? as i32;
+                    let chr = self.ds.huff(tables::chr_cbphp())?;
                     i_blk_cbphp = 0x10 * (chr + 1);
                     if i_val >= 9 {
                         i_val += self.ds.huff(tables::val_inc())? as u32;
@@ -1540,7 +1545,7 @@ impl<'a> Decoder<'a> {
         };
         let level = signed_value(level_val, level_sign_flag);
         let run = if run_is_zero != 0 { 0 } else { self.decode_run((15 - i_location) as u32)? };
-        let mut block = vec![(run as u32, level)];
+        let mut block = vec![(run, level)];
         let mut i_loc = i_location + run as usize + 1;
 
         let mut next_is_immediate = next_is_immediate;
@@ -1577,7 +1582,7 @@ impl<'a> Decoder<'a> {
                 1
             };
             let lvl_signed = signed_value(lvl, sign);
-            block.push((run as u32, lvl_signed));
+            block.push((run, lvl_signed));
             next_is_immediate = next_is_immediate_new;
         }
 
@@ -1696,7 +1701,7 @@ impl<'a> Decoder<'a> {
         let i_remap = [2i32, 3, 4, 6, 10, 14];
         let i_fixed_len = [0u32, 0, 1, 2, 2, 2];
 
-        let abs_level_index = self.ds.huff(tables::abs_level_index(vlc_idx as usize))? as i32;
+        let abs_level_index = self.ds.huff(tables::abs_level_index(vlc_idx as usize))?;
         self.abs_level_apply_delta(p, b_chroma, i_context, band, ABS_LEVEL_INDEX_DELTA[0][abs_level_index as usize]);
 
         let i_level = if abs_level_index < 6 {
@@ -2205,13 +2210,13 @@ impl<'a> Decoder<'a> {
         }
 
         // Same-color-format passthrough.
-        let same = match (int_fmt, out_fmt) {
+        let same = matches!(
+            (int_fmt, out_fmt),
             (INT_YONLY, OUT_YONLY)
-            | (INT_YUV444, OUT_YUV444)
-            | (INT_YUVK, OUT_CMYK)
-            | (INT_NCOMPONENT, OUT_NCOMPONENT) => true,
-            _ => false,
-        };
+                | (INT_YUV444, OUT_YUV444)
+                | (INT_YUVK, OUT_CMYK)
+                | (INT_NCOMPONENT, OUT_NCOMPONENT)
+        );
         if !same {
             return Err(DecodeError::Unsupported(format!(
                 "color {} -> {} not supported",

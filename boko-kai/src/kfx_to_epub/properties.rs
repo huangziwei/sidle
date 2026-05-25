@@ -560,8 +560,8 @@ pub fn layout_hints_from_element_fields(
     use crate::kfx::symbols::KfxSymbol;
     let mut hints: Vec<String> = Vec::new();
     let mut heading_level: Option<String> = None;
-    if let Some(layout_hints) = get_field(fields, KfxSymbol::LayoutHints as u64) {
-        if let IonValue::List(items) = layout_hints.unwrap_annotated() {
+    if let Some(layout_hints) = get_field(fields, KfxSymbol::LayoutHints as u64)
+        && let IonValue::List(items) = layout_hints.unwrap_annotated() {
             for item in items {
                 let IonValue::Symbol(id) = item.unwrap_annotated() else {
                     continue;
@@ -578,7 +578,6 @@ pub fn layout_hints_from_element_fields(
                 hints.push(name.to_string());
             }
         }
-    }
     if let Some(level) = get_field(fields, KfxSymbol::YjSemanticsHeadingLevel as u64) {
         match level.unwrap_annotated() {
             IonValue::Int(n) => heading_level = Some(n.to_string()),

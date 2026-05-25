@@ -74,13 +74,13 @@ pub fn build_epub(input: EpubInput<'_>) -> io::Result<Vec<u8>> {
 
     // 6. Chapter XHTML files
     for ch in &chapters {
-        zip.start_file(&format!("OEBPS/text/{}", ch.file), deflated)?;
+        zip.start_file(format!("OEBPS/text/{}", ch.file), deflated)?;
         zip.write_all(wrap_chapter_xhtml(&ch.title, &ch.body).as_bytes())?;
     }
 
     // 7. Asset images (referenced by the body)
     for (name, bytes) in input.images {
-        zip.start_file(&format!("OEBPS/images/{}", name), stored)?;
+        zip.start_file(format!("OEBPS/images/{}", name), stored)?;
         zip.write_all(bytes)?;
     }
 
@@ -104,7 +104,7 @@ pub fn build_epub(input: EpubInput<'_>) -> io::Result<Vec<u8>> {
             &uuid,
             &doc.title,
             &doc.author,
-            &publisher,
+            publisher,
             &pub_date,
             &chapters,
             input.images,

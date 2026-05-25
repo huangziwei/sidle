@@ -312,7 +312,7 @@ pub fn rebuild_symbol_table(fragments: &mut Vec<YJFragment>, symtab: &mut LocalS
         .filter(|s| !is_canonical_id_form(s))
         .collect();
 
-    book_symbols.sort_by(|a, b| natural_sort_key(a).cmp(&natural_sort_key(b)));
+    book_symbols.sort_by_key(|a| natural_sort_key(a));
 
     symtab.replace_local_symbols(book_symbols.clone());
 
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn natural_key_orders_numerics() {
         let mut v = vec!["a10".to_string(), "a2".to_string(), "a1".to_string()];
-        v.sort_by(|a, b| natural_sort_key(a).cmp(&natural_sort_key(b)));
+        v.sort_by_key(|a| natural_sort_key(a));
         assert_eq!(v, vec!["a1", "a2", "a10"]);
     }
 

@@ -481,7 +481,7 @@ pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<EpubImage>, Str
         let detected = head_cache.entry(path.clone()).or_insert_with(|| {
             // Try both decoded and re-encoded forms against the zip.
             let head_bytes = read_zip_head(&mut archive, &path)
-                .or_else(|| {
+                .or({
                     // Some zips use the un-decoded form; try the raw normalized
                     // name too. We don't have the un-decoded version here; just
                     // try `path` as a fallback (already attempted above).
@@ -731,8 +731,8 @@ pub fn extract_image_data_from_kfx(kfx_bytes: &[u8]) -> Result<KfxImageData, Str
             if !name.is_empty() && name != "?" {
                 raw_media_names.insert(name);
             }
-        } else if ent.type_id == storyline_type {
-            if let Some(value) = parse_entity(kfx_bytes, ent) {
+        } else if ent.type_id == storyline_type
+            && let Some(value) = parse_entity(kfx_bytes, ent) {
                 walk_storyline_for_images(
                     &value,
                     &resolve_sym,
@@ -740,7 +740,6 @@ pub fn extract_image_data_from_kfx(kfx_bytes: &[u8]) -> Result<KfxImageData, Str
                     &mut image_element_count,
                 );
             }
-        }
     }
 
     Ok(KfxImageData {

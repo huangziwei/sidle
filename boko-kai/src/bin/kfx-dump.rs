@@ -6048,8 +6048,8 @@ fn walk_for_ruby_pairs<F>(
                 }
             }
 
-            if let (Some(events), false) = (style_events, content_name.is_empty()) {
-                if let Some(text_vec) = content_map.get(&content_name)
+            if let (Some(events), false) = (style_events, content_name.is_empty())
+                && let Some(text_vec) = content_map.get(&content_name)
                     && content_index >= 0
                     && let Some(text) = text_vec.get(content_index as usize)
                 {
@@ -6108,7 +6108,6 @@ fn walk_for_ruby_pairs<F>(
                         }
                     }
                 }
-            }
 
             // Recurse into fields (e.g. content_list)
             for (_, v) in fields {

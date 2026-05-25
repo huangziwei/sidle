@@ -199,7 +199,7 @@ pub fn extract_landmarks(
         return Vec::new();
     };
     let mut out: Vec<GuideRef> = Vec::new();
-    for (_, value) in nav {
+    for value in nav.values() {
         let unwrapped = value.unwrap_annotated();
         let candidates: Vec<IonValue> = match unwrapped {
             IonValue::List(items) => items.clone(),
@@ -325,7 +325,7 @@ pub fn extract_toc(
     // book_navigation is typically a list of reading orders, each with
     // nav_containers. The container with nav_type=$214 (= "toc") holds the
     // TOC entries.
-    for (_, value) in nav {
+    for value in nav.values() {
         let unwrapped = value.unwrap_annotated();
         let candidates: Vec<IonValue> = match unwrapped {
             IonValue::List(items) => items.clone(),
@@ -358,7 +358,7 @@ pub fn extract_toc(
                     .unwrap_or_default();
                 for entry in &entries {
                     if let Some(np) =
-                        nav_unit_to_navpoint(entry, book, element_id_to_filename, anchors)
+                        nav_unit_to_navpoint(entry, element_id_to_filename, anchors)
                     {
                         toc.push(np);
                     }
@@ -371,7 +371,6 @@ pub fn extract_toc(
 
 fn nav_unit_to_navpoint(
     entry: &IonValue,
-    book: &BookData,
     element_id_to_filename: &HashMap<i64, String>,
     anchors: &AnchorTable,
 ) -> Option<NavPoint> {
@@ -424,7 +423,7 @@ fn nav_unit_to_navpoint(
     {
         for child in child_entries {
             if let Some(np) =
-                nav_unit_to_navpoint(child, book, element_id_to_filename, anchors)
+                nav_unit_to_navpoint(child, element_id_to_filename, anchors)
             {
                 children.push(np);
             }

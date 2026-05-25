@@ -168,8 +168,8 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
             only_in_kfx.push((*c, kc - ec));
         }
     }
-    only_in_epub.sort_by(|a, b| b.1.cmp(&a.1));
-    only_in_kfx.sort_by(|a, b| b.1.cmp(&a.1));
+    only_in_epub.sort_by_key(|b| std::cmp::Reverse(b.1));
+    only_in_kfx.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     Ok(Report {
         epub_chars: epub_total,
@@ -393,45 +393,42 @@ where
         IonValue::Annotated(_, inner) => inner.as_ref(),
         _ => value,
     };
-    match inner {
-        IonValue::Struct(fields) => {
-            for (k, v) in fields {
-                match resolve_sym(*k).as_str() {
-                    // `$145 content`: leaf text. Direct string is the
-                    // common case; struct (`$176 name` + `$169 index`)
-                    // is a content_ref, resolved when its target Content
-                    // entity is iterated by the outer loop.
-                    "content" => {
-                        if let IonValue::String(s) = v.unwrap_annotated() {
-                            out.push_str(s);
-                            out.push(' ');
-                        }
+    if let IonValue::Struct(fields) = inner {
+        for (k, v) in fields {
+            match resolve_sym(*k).as_str() {
+                // `$145 content`: leaf text. Direct string is the
+                // common case; struct (`$176 name` + `$169 index`)
+                // is a content_ref, resolved when its target Content
+                // entity is iterated by the outer loop.
+                "content" => {
+                    if let IonValue::String(s) = v.unwrap_annotated() {
+                        out.push_str(s);
+                        out.push(' ');
                     }
-                    // `$146 content_list`: structural children. Strings
-                    // are leaf text; structs may carry their own
-                    // `content` / `content_list` fields and must be
-                    // walked recursively.
-                    "content_list" => {
-                        if let IonValue::List(items) = v {
-                            for item in items {
-                                match item.unwrap_annotated() {
-                                    IonValue::String(s) => {
-                                        out.push_str(s);
-                                        out.push(' ');
-                                    }
-                                    IonValue::Struct(_) => {
-                                        collect_content_text(item, resolve_sym, out);
-                                    }
-                                    _ => {}
+                }
+                // `$146 content_list`: structural children. Strings
+                // are leaf text; structs may carry their own
+                // `content` / `content_list` fields and must be
+                // walked recursively.
+                "content_list" => {
+                    if let IonValue::List(items) = v {
+                        for item in items {
+                            match item.unwrap_annotated() {
+                                IonValue::String(s) => {
+                                    out.push_str(s);
+                                    out.push(' ');
                                 }
+                                IonValue::Struct(_) => {
+                                    collect_content_text(item, resolve_sym, out);
+                                }
+                                _ => {}
                             }
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
-        _ => {}
     }
 }
 

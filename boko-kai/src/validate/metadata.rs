@@ -823,11 +823,10 @@ fn extract_kfx_metadata(kfx_bytes: &[u8]) -> Result<KfxMetadata, String> {
             if let Some(value) = parse_entity(kfx_bytes, ent) {
                 extract_ppd(&value, &resolve_sym, &mut out.ppd);
             }
-        } else if ent.type_id == book_metadata_type {
-            if let Some(value) = parse_entity(kfx_bytes, ent) {
+        } else if ent.type_id == book_metadata_type
+            && let Some(value) = parse_entity(kfx_bytes, ent) {
                 extract_categorised(&value, &resolve_sym, &mut kvs);
             }
-        }
     }
 
     // Singleton fields take the first occurrence (matches calibre's "if not X"

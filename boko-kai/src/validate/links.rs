@@ -669,8 +669,8 @@ pub fn extract_anchors_and_link_tos_from_kfx(
             {
                 anchors.push(a);
             }
-        } else if ent.type_id == storyline_type {
-            if let Some(value) = parse_entity(kfx_bytes, ent) {
+        } else if ent.type_id == storyline_type
+            && let Some(value) = parse_entity(kfx_bytes, ent) {
                 walk_storyline(
                     &value,
                     &resolve_sym,
@@ -679,7 +679,6 @@ pub fn extract_anchors_and_link_tos_from_kfx(
                     &mut element_ids,
                 );
             }
-        }
     }
 
     Ok(KfxLinkData {

@@ -209,7 +209,6 @@ impl<'a> ContentState<'a> {
             part_index,
             body_id,
             &writing_mode,
-            None,
             true,
         )?;
         Ok(())
@@ -239,7 +238,6 @@ impl<'a> ContentState<'a> {
         part_index: usize,
         parent_id: NodeId,
         writing_mode: &str,
-        content_layout: Option<&str>,
         is_top_level: bool,
     ) -> Result<(), ConvertError> {
         let inner = content.unwrap_annotated();
@@ -261,7 +259,6 @@ impl<'a> ContentState<'a> {
                     part_index,
                     parent_id,
                     writing_mode,
-                    content_layout,
                     is_top_level,
                 );
             }
@@ -461,7 +458,7 @@ impl<'a> ContentState<'a> {
         self.book_parts[part_index]
             .element_styles
             .entry(id)
-            .or_insert_with(CssDecl::new)
+            .or_default()
             .set("display", "none");
         Ok(id)
     }
@@ -601,7 +598,7 @@ impl<'a> ContentState<'a> {
         // $146 = content_list
         if let Some(list) = get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list()) {
             for child in list {
-                self.process_content(child, part_index, parent_id, writing_mode, None, false)?;
+                self.process_content(child, part_index, parent_id, writing_mode, false)?;
             }
             return Ok(());
         }
@@ -717,7 +714,9 @@ impl<'a> ContentState<'a> {
         // any ruby events inside `[0, N)` are silently skipped — the bug
         // that lost 5 ruby pairs after task #10 wired up link_to.
         let mut links: Vec<(usize, usize, String)> = Vec::new();
-        let mut rubies: Vec<(usize, usize, String, Vec<(i64, i64, String)>)> = Vec::new();
+        // (base_start, base_end, base_text, [(rt_start, rt_end, rt_text)])
+        type RubySpan = (usize, usize, String, Vec<(i64, i64, String)>);
+        let mut rubies: Vec<RubySpan> = Vec::new();
         for ev in collected {
             match ev {
                 Ev::Link(off, len, name) => {
@@ -871,7 +870,7 @@ impl<'a> ContentState<'a> {
         if let Some(list) = get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list()) {
             let list_clone = list.to_vec();
             for child in &list_clone {
-                self.process_content(child, part_index, parent_id, writing_mode, None, false)?;
+                self.process_content(child, part_index, parent_id, writing_mode, false)?;
             }
         }
         Ok(())
@@ -1046,7 +1045,7 @@ fn extract_reading_orders(book: &BookData) -> Vec<Vec<String>> {
         let Some(map) = book.by_type.get(&type_id) else {
             continue;
         };
-        for (_, value) in map {
+        for value in map.values() {
             let inner = value.unwrap_annotated();
             let Some(fields) = inner.as_struct() else {
                 continue;
@@ -1113,25 +1112,21 @@ fn walk_ids_recursive(
     match inner {
         IonValue::Struct(fields) => {
             // Capture this struct's id field, if any.
-            if let Some(id_value) = get_field(fields, KfxSymbol::Id as u64) {
-                if let Some(n) = id_value.as_int() {
+            if let Some(id_value) = get_field(fields, KfxSymbol::Id as u64)
+                && let Some(n) = id_value.as_int() {
                     out.push(n);
                 }
-            }
             // Follow story_name references — these point at storylines in
             // book.by_type[storyline], whose content_list holds the actual
             // body of the chapter.
-            if let Some(story_value) = get_field(fields, KfxSymbol::StoryName as u64) {
-                if let Some(name) = book.symbols.text_of(story_value) {
-                    if visited.insert(name.to_string()) {
-                        if let Some(storyline) =
+            if let Some(story_value) = get_field(fields, KfxSymbol::StoryName as u64)
+                && let Some(name) = book.symbols.text_of(story_value)
+                    && visited.insert(name.to_string())
+                        && let Some(storyline) =
                             lookup_fragment(book, KfxSymbol::Storyline, name)
                         {
                             walk_ids_recursive(&storyline, book, visited, out);
                         }
-                    }
-                }
-            }
             // Recurse into every field value (covers content_list, nested
             // structs, etc.).
             for (_, v) in fields {
@@ -1216,7 +1211,7 @@ const BLOCK_TAGS: &[&str] = &[
 ];
 
 fn is_block_tag(tag: &str) -> bool {
-    BLOCK_TAGS.iter().any(|t| *t == tag)
+    BLOCK_TAGS.contains(&tag)
 }
 
 /// Strip every `<span>` whose attribute list is empty (or carries only an

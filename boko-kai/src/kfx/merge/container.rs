@@ -336,12 +336,11 @@ fn entity_to_fragment(
     //    in `kfx_container.py`.
     let mut fid = fid_initial.clone();
     if fid_initial == "$348" {
-        if let IonNode::Annotated(anns, inner) = &value {
-            if anns.len() == 1 && anns[0] == ftype {
+        if let IonNode::Annotated(anns, inner) = &value
+            && anns.len() == 1 && anns[0] == ftype {
                 let inner_owned = (**inner).clone();
                 value = inner_owned;
             }
-        }
         fid = ftype.clone();
     }
 
@@ -441,13 +440,13 @@ pub fn serialize_container(fragments: &[YJFragment], symtab: &LocalSymbolTable) 
     //   $415/$416 (doc_symbols off/len),
     //   $412 (bcChunkSize),
     //   $594/$595 (format_capabilities off/len, only if symtab has locals).
-    let mut ci_fields: Vec<(String, IonNode)> = Vec::new();
-    ci_fields.push(("$409".into(), IonNode::String(container_id.clone())));
-    ci_fields.push(("$410".into(), IonNode::Int(DEFAULT_COMPRESSION_TYPE)));
-    ci_fields.push(("$411".into(), IonNode::Int(DEFAULT_DRM_SCHEME)));
-
-    ci_fields.push(("$413".into(), IonNode::Int(container.len() as i64)));
-    ci_fields.push(("$414".into(), IonNode::Int(entity_table.len() as i64)));
+    let mut ci_fields: Vec<(String, IonNode)> = vec![
+        ("$409".into(), IonNode::String(container_id.clone())),
+        ("$410".into(), IonNode::Int(DEFAULT_COMPRESSION_TYPE)),
+        ("$411".into(), IonNode::Int(DEFAULT_DRM_SCHEME)),
+        ("$413".into(), IonNode::Int(container.len() as i64)),
+        ("$414".into(), IonNode::Int(entity_table.len() as i64)),
+    ];
     container.extend_from_slice(&entity_table);
 
     // doc_symbols: calibre deep-copies the fragment, bumps every import's
@@ -599,8 +598,8 @@ fn bump_imports_max_id(value: &IonNode, delta: i64) -> IonNode {
         return out;
     };
     for (k, v) in fields.iter_mut() {
-        if k == "imports" {
-            if let IonNode::List(items) = v {
+        if k == "imports"
+            && let IonNode::List(items) = v {
                 for item in items {
                     if let IonNode::Struct(f) = item {
                         for (kk, vv) in f.iter_mut() {
@@ -613,7 +612,6 @@ fn bump_imports_max_id(value: &IonNode, delta: i64) -> IonNode {
                     }
                 }
             }
-        }
     }
     out
 }

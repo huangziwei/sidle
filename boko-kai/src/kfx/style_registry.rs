@@ -705,8 +705,10 @@ mod tests {
         let schema = StyleSchema::standard();
         let mut builder = StyleBuilder::new(schema);
 
-        let mut ir = IrStyle::default();
-        ir.writing_mode = WritingMode::VerticalRl;
+        let ir = IrStyle {
+            writing_mode: WritingMode::VerticalRl,
+            ..Default::default()
+        };
 
         builder.ingest_ir_style(&ir, WritingMode::default());
         let style = builder.build();
