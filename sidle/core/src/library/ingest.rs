@@ -351,8 +351,91 @@ pub struct DeviceImportReport {
     pub relinked: usize,
 }
 
+/// One `.yjr` pulled off a device, tagged with the `.sdr` directory it came
+/// from (the directory name carries the `kfx_sha256` infix that matches it to a
+/// library book). Bytes are read on the device side — `std::fs` for
+/// mass-storage, MTP `GetObject` for Scribe-class — so [`import_collected`]
+/// stays transport-agnostic and the device-IO half can live wherever the
+/// transport does (the app's `device` module).
+pub struct CollectedYjr {
+    pub sdr_name: String,
+    pub yjr_bytes: Vec<u8>,
+}
+
+/// Import device annotations a caller has already pulled off the device: match
+/// each `.yjr` to a library book by its `.sdr` `kfx_sha256` infix, skip the ones
+/// whose bytes are unchanged since last import, resolve highlight text from the
+/// library's own readable KFX, and archive any `My Clippings.txt` orphans. This
+/// is the pure DB + parse half shared by both transports; the device-side scan
+/// lives in the caller — [`import_from_device`] is the mass-storage `std::fs`
+/// scanner, and the app has a `Transport`-based one (`collect_device_yjr`) for
+/// MTP (Scribe).
+pub fn import_collected(
+    conn: &Connection,
+    collected: Vec<CollectedYjr>,
+    clippings_txt: Option<&str>,
+    now: &str,
+) -> anyhow::Result<DeviceImportReport> {
+    let mut report = DeviceImportReport::default();
+
+    for item in collected {
+        report.yjr_books += 1;
+        let book = match sdr_infix(&item.sdr_name) {
+            Some(infix) => db::find_by_kfx_sha_prefix(conn, infix)
+                .with_context(|| format!("kfx_sha lookup for {}", item.sdr_name))?,
+            None => None,
+        };
+        let Some(book) = book else {
+            report.unmatched.push(item.sdr_name);
+            continue;
+        };
+        report.matched += 1;
+
+        // Cheap skip before the expensive `build_index` (which parses the full
+        // library KFX): if this book's on-device `.yjr` is byte-for-byte what we
+        // imported last time, there's nothing new. The bytes are already in hand
+        // (the `.yjr` is tiny — KB), so this is just a hash + compare.
+        let yjr_sha = super::import::sha256_of_bytes(&item.yjr_bytes);
+        if db::get_yjr_sync_sha(conn, book.id)
+            .context("read yjr sync checkpoint")?
+            .as_deref()
+            == Some(yjr_sha.as_str())
+        {
+            report.unchanged += 1;
+            continue;
+        }
+
+        let idx = build_index(book.kfx_path.as_deref());
+        let anns = super::yjr::parse(&item.yjr_bytes);
+        let stats = import_yjr(
+            conn,
+            &anns,
+            &idx,
+            Some(book.id),
+            Some(&book.title),
+            Some(&book.author),
+            now,
+        )
+        .context("import yjr annotations")?;
+        report.annotations.merge(stats);
+        // Checkpoint so the next connect skips this `.yjr` unless it changes.
+        db::set_yjr_sync_sha(conn, book.id, &yjr_sha, now)
+            .context("record yjr sync checkpoint")?;
+    }
+
+    if let Some(txt) = clippings_txt {
+        let clips = super::clippings::parse(txt);
+        let stats = import_clipping_orphans(conn, &clips, now).context("import clipping orphans")?;
+        report.clippings.merge(stats);
+    }
+
+    report.relinked = relink_unmatched(conn).context("relink unmatched")?;
+    Ok(report)
+}
+
 /// Scan a mounted Kindle (`device_root` = the volume, e.g. `/Volumes/Kindle`)
-/// and import its annotations.
+/// and import its annotations — the mass-storage `std::fs` collector for
+/// [`import_collected`].
 ///
 /// Only `documents/Sidle/` is scanned: those `.sdr` dirs are named
 /// `<stem>.<8hex>.sdr` where `<8hex>` is the library `kfx_sha256` prefix, so each
@@ -366,8 +449,8 @@ pub fn import_from_device(
     device_root: &Path,
     now: &str,
 ) -> anyhow::Result<DeviceImportReport> {
-    let mut report = DeviceImportReport::default();
     let sidle_dir = device_root.join("documents").join("Sidle");
+    let mut collected = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(&sidle_dir) {
         for entry in entries.flatten() {
@@ -378,66 +461,26 @@ pub fn import_from_device(
             let Some(yjr_path) = find_yjr_in(&sdr) else {
                 continue; // a pagination-cache `.sdr` with no annotations
             };
-            report.yjr_books += 1;
-            let sdr_name = sdr.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-
-            let book = match sdr_infix(sdr_name) {
-                Some(infix) => db::find_by_kfx_sha_prefix(conn, infix)
-                    .with_context(|| format!("kfx_sha lookup for {sdr_name}"))?,
-                None => None,
-            };
-            let Some(book) = book else {
-                report.unmatched.push(sdr_name.to_string());
-                continue;
-            };
-            report.matched += 1;
-
-            // Cheap skip, before the expensive `build_index` (which parses the
-            // full library KFX): if this book's on-device `.yjr` is byte-for-byte
-            // what we imported last time, there's nothing new. The `.yjr` is tiny
-            // (KB), so hashing it every connect is negligible — same approach as
-            // the dedrm autopull skipping files whose content hash is already in
-            // the library.
+            let sdr_name = sdr
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
             let yjr_bytes = std::fs::read(&yjr_path)
                 .with_context(|| format!("read {}", yjr_path.display()))?;
-            let yjr_sha = super::import::sha256_of_bytes(&yjr_bytes);
-            if db::get_yjr_sync_sha(conn, book.id)
-                .context("read yjr sync checkpoint")?
-                .as_deref()
-                == Some(yjr_sha.as_str())
-            {
-                report.unchanged += 1;
-                continue;
-            }
-
-            let idx = build_index(book.kfx_path.as_deref());
-            let anns = super::yjr::parse(&yjr_bytes);
-            let stats = import_yjr(
-                conn,
-                &anns,
-                &idx,
-                Some(book.id),
-                Some(&book.title),
-                Some(&book.author),
-                now,
-            )
-            .context("import yjr annotations")?;
-            report.annotations.merge(stats);
-            // Checkpoint so the next connect skips this `.yjr` unless it changes.
-            db::set_yjr_sync_sha(conn, book.id, &yjr_sha, now)
-                .context("record yjr sync checkpoint")?;
+            collected.push(CollectedYjr { sdr_name, yjr_bytes });
         }
     }
 
+    // Orphan archive: read it on the device side and hand the text to the shared
+    // importer. `from_utf8_lossy` matches `clippings::parse_file`; a read error
+    // (vs. simply absent) just means no orphans, never a failed import.
     let clip_path = device_root.join("documents").join("My Clippings.txt");
-    if clip_path.exists() {
-        let clips = super::clippings::parse_file(&clip_path).context("parse My Clippings")?;
-        let stats = import_clipping_orphans(conn, &clips, now).context("import clipping orphans")?;
-        report.clippings.merge(stats);
-    }
+    let clippings_txt = std::fs::read(&clip_path)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned());
 
-    report.relinked = relink_unmatched(conn).context("relink unmatched")?;
-    Ok(report)
+    import_collected(conn, collected, clippings_txt.as_deref(), now)
 }
 
 /// The `.sdr` filename's `kfx_sha256` infix: the hex segment before `.sdr`. Only

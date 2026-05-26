@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use crate::device::dedrm::{self, PullResult};
 use crate::device::detect;
 use crate::device::{DeviceInfo, TransportKind};
-use crate::library::{LibraryPaths, db, ingest};
+use crate::library::{LibraryPaths, ingest};
 use crate::queue::QueueHandle;
 use crate::state::DbHandle;
 
@@ -99,15 +99,16 @@ pub fn spawn(
                         ));
                     }
                     TransportKind::Mtp { .. } => {
-                        // DeDRM auto-pull doesn't apply: non-jailbroken
-                        // (MTP-class) Kindles have no `/dedrm` folder, and
-                        // the jailbreak that creates it isn't available for
-                        // Scribe-and-later firmware. Instead, do a one-shot
-                        // `GetStorageInfo` so the popover stops showing "—"
-                        // for free space.
-                        tauri::async_runtime::spawn(refresh_mtp_storage_info(
+                        // No DeDRM auto-pull: non-jailbroken (MTP-class)
+                        // Kindles have no `/dedrm` folder, and the jailbreak
+                        // that creates it isn't available for Scribe-and-later
+                        // firmware. Refresh free space, then sync annotations —
+                        // sequentially, since MTP allows only one USB session
+                        // at a time.
+                        tauri::async_runtime::spawn(on_mtp_connect(
                             app.clone(),
                             state.clone(),
+                            db.clone(),
                             device,
                         ));
                     }
@@ -138,7 +139,21 @@ async fn on_mass_storage_connect(
     sync_annotations_on_connect(app, db, device).await;
 }
 
-/// Import highlights / notes / bookmarks off the connected mass-storage Kindle.
+/// Everything that should happen when an MTP Kindle (Scribe, 2024+) connects.
+/// Sequential, not concurrent: MTP exposes a single USB session, so the
+/// free-space `GetStorageInfo` and the annotation pull must not overlap.
+///   1. One-shot `GetStorageInfo` so the popover stops showing "—" for space.
+///   2. Sync highlights / notes / bookmarks off the device.
+///
+/// Whether step 2 finds anything depends on the device exposing its `.sdr/.yjr`
+/// sidecars over MTP; if it doesn't, the import is a harmless no-op (0 books).
+async fn on_mtp_connect(app: AppHandle, state: DeviceState, db: DbHandle, device: DeviceInfo) {
+    refresh_mtp_storage_info(app.clone(), state, device.clone()).await;
+    sync_annotations_on_connect(app, db, device).await;
+}
+
+/// Import highlights / notes / bookmarks off the connected Kindle — either
+/// transport (mass-storage reads the volume; MTP pulls the `.yjr` over USB).
 /// Runs on the blocking pool; the import is idempotent (`dedup_hash`), so
 /// re-running on every connect is safe and cheap.
 ///
@@ -146,16 +161,12 @@ async fn on_mass_storage_connect(
 /// [`ingest::DeviceImportReport`]) / `annotations:sync-error` after, so the
 /// status bar can show progress without a modal or stealing focus.
 async fn sync_annotations_on_connect(app: AppHandle, db: DbHandle, device: DeviceInfo) {
-    let Some(mount) = device.mass_storage_mount() else {
-        return;
-    };
     let serial = device.serial.clone();
 
     let _ = app.emit("annotations:sync-start", ());
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ingest::DeviceImportReport> {
-        let conn = db.blocking_lock();
-        ingest::import_from_device(&conn, &mount, &db::now_iso())
+        crate::device::annotations::import_device_annotations(&device, &db)
     })
     .await;
 

@@ -143,29 +143,28 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
     .map_err(|e| e.to_string())
 }
 
-/// Import highlights / notes / bookmarks from the connected **mass-storage**
-/// Kindle. Scans `documents/Sidle/`, matches each annotated `.sdr` to a library
-/// book by its `kfx_sha256` infix, extracts the highlighted text from the book's
-/// own (readable) KFX, and archives `My Clippings.txt` orphans, then relinks. The
-/// dedup hash makes it idempotent — safe to re-run on every connect.
+/// Import highlights / notes / bookmarks from the connected Kindle — either
+/// transport. Mass-storage reads `documents/Sidle/` off the volume; MTP (Scribe)
+/// pulls the `.yjr` over USB. Matches each annotated `.sdr` to a library book by
+/// its `kfx_sha256` infix, extracts the highlighted text from the book's own
+/// (readable) KFX, archives `My Clippings.txt` orphans, then relinks. The dedup
+/// hash makes it idempotent — safe to re-run on every connect.
 ///
-/// MTP devices aren't supported here (the import reads the device filesystem
-/// directly); the frontend gates this on a mass-storage connection.
+/// MTP import only yields records if the device exposes its `.sdr/.yjr` sidecars
+/// over MTP; if it doesn't, the report is simply 0 books.
 #[tauri::command]
 pub async fn annotations_import_from_device(
     state: State<'_, AppState>,
 ) -> Result<ingest::DeviceImportReport, String> {
-    let mount = state
+    let device = state
         .device
         .lock()
         .await
-        .as_ref()
-        .and_then(|d| d.mass_storage_mount())
-        .ok_or_else(|| "annotation import needs a mass-storage Kindle".to_string())?;
+        .clone()
+        .ok_or_else(|| "no Kindle connected".to_string())?;
     let db_handle = state.db.clone();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<ingest::DeviceImportReport> {
-        let conn = db_handle.blocking_lock();
-        ingest::import_from_device(&conn, &mount, &db::now_iso())
+    tokio::task::spawn_blocking(move || {
+        crate::device::annotations::import_device_annotations(&device, &db_handle)
     })
     .await
     .map_err(|e| e.to_string())?

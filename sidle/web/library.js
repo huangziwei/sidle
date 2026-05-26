@@ -1465,9 +1465,11 @@ function updateDeviceUI(info) {
       ejectBtn.hidden = info.transport !== "mass_storage";
       ejectBtn.disabled = false;
     }
-    // Annotation sync reads the device filesystem directly → mass-storage only.
+    // Annotation sync works on both transports: mass-storage reads the volume,
+    // MTP (Scribe) pulls the .yjr over USB. Enabled whenever a Kindle is
+    // connected. (MTP yields records only if the device exposes .sdr/.yjr.)
     const syncBtn = $("#btn-sync-annotations");
-    if (syncBtn) syncBtn.disabled = info.transport !== "mass_storage";
+    if (syncBtn) syncBtn.disabled = false;
     $("#device-model").textContent = info.model || "Kindle";
     $("#device-serial").textContent = info.serial || "—";
     $("#device-transport").textContent = transportLabel(info.transport);
@@ -1835,8 +1837,8 @@ async function syncAnnotations() {
     showToast(`highlight sync failed: ${e}`, true);
   } finally {
     btn.textContent = prevLabel;
-    // Re-enable based on whether a mass-storage device is still connected.
-    btn.disabled = state.device?.transport !== "mass_storage";
+    // Re-enable as long as a Kindle (either transport) is still connected.
+    btn.disabled = !state.device;
     if (prog) setTimeout(() => (prog.hidden = true), 2000);
   }
 }

@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::Serialize;
 
+pub mod annotations;
 pub mod dedrm;
 pub mod detect;
 pub mod kual;
