@@ -24,7 +24,21 @@ use crate::state::DbHandle;
 /// Run a single conversion job: mark `converting`, run boko, write file,
 /// update `done` or `error`. Errors are recorded in the DB; never propagated
 /// to the caller (this is a fire-and-forget worker).
-pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_id: i64) {
+///
+/// `reconvert` = a forced re-run of the format conversion (the "Force
+/// re-convert" button), as opposed to a first import. It does **only**
+/// source→target: the import-time cover-enrichment tail-step (which re-fetches
+/// the Amazon cover and rewrites the *source* KFX, re-stamping `kfx_sha256`) is
+/// skipped — re-stamping would change the on-device filename infix and break
+/// annotation-sync matching for a book already pushed to the Kindle. The EPUB
+/// still gets the right cover: it's extracted from the (already-enriched) KFX.
+pub async fn run_job(
+    app: &AppHandle,
+    db: &DbHandle,
+    paths: &LibraryPaths,
+    book_id: i64,
+    reconvert: bool,
+) {
     let Some(book) = lookup_book(db, book_id).await else {
         eprintln!("[sidle/queue] book {book_id} vanished before conversion");
         return;
@@ -62,13 +76,16 @@ pub async fn run_job(app: &AppHandle, db: &DbHandle, paths: &LibraryPaths, book_
         }
     };
 
-    // Tail step (kfx_to_epub only): if the KFX came from Amazon's monochrome-
-    // device build (KOA2 + friends), its embedded cover is grayscale-baked
-    // and there's no way to recover color from the file itself — refetch from
-    // the product page by ASIN. KFXes boko-kai produced from a color EPUB
-    // already have the original color cover; the ASIN is fabricated there,
-    // so cover_fetch skips and we just keep what's in the KFX.
-    if kind == "kfx_to_epub" {
+    // Tail step (kfx_to_epub, first import only — skipped on a forced
+    // re-convert): if the KFX came from Amazon's monochrome-device build (KOA2 +
+    // friends), its embedded cover is grayscale-baked and there's no way to
+    // recover color from the file itself — refetch from the product page by
+    // ASIN. KFXes boko-kai produced from a color EPUB already have the original
+    // color cover; the ASIN is fabricated there, so cover_fetch skips and we
+    // just keep what's in the KFX. Skipped on `reconvert` because it rewrites
+    // the source KFX (re-stamping `kfx_sha256`), which a force re-convert must
+    // not do — see `run_job`.
+    if kind == "kfx_to_epub" && !reconvert {
         match book.asin.as_deref() {
             None => eprintln!(
                 "[sidle/queue] book {book_id} color cover: no ASIN on row \
