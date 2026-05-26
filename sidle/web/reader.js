@@ -577,11 +577,14 @@ const FONT_STACKS = {
 };
 const LINE_HEIGHTS = { auto: 0, tight: 1.35, normal: 1.6, relaxed: 1.9, loose: 2.2 };
 const WEIGHTS = { "": 0, light: 300, normal: 400, medium: 500, semibold: 600 };
-// Margin presets → [max-inline-size px = text measure, block-margin px]. Both
-// move the same way in vertical and horizontal books because the paginator
-// swaps its axes by writing mode — so this stays "adaptive to writing mode"
-// without per-mode branching here.
-const MARGINS = { narrow: [900, 28], normal: [720, 48], wide: [560, 80] };
+// Margin presets, adaptive to writing mode (applied in `applyLayout`): the
+// control adds whitespace at the line ends — TOP/BOTTOM for vertical text,
+// LEFT/RIGHT for horizontal — the same logical axis, rotated. Vertical varies
+// the block (top/bottom) margin in px; horizontal varies a single column's width
+// in px (the leftover is the left/right margin). "normal" reproduces the old
+// vertical layout.
+const VMARGIN = { narrow: 24, normal: 48, wide: 112 }; // vertical top/bottom margin px
+const HMEASURE = { narrow: 940, normal: 760, wide: 560 }; // horizontal column width px
 
 // Defaults reproduce the pre-customization look exactly: publisher fonts, the
 // iframe's 16px root, white page, near-black ink, the paginator's own margins.
@@ -719,19 +722,40 @@ function applyLayout(index, force) {
   if (!paginator || !styleSettings) return;
   const mode = imageSections.has(index) ? "image" : "text";
   if (!force && mode === layoutMode) return;
+  // These attributes feed CSS vars used inside minmax()/calc(), so lengths MUST
+  // carry a unit — a bare "48" makes `minmax(48, 1fr)` invalid and the margin
+  // silently collapses. (0 is the one length that's valid unitless.)
   layoutMode = mode;
   if (mode === "image") {
-    paginator.setAttribute("margin", "0");
-    paginator.setAttribute("gap", "0");
-    paginator.setAttribute("max-inline-size", String(HUGE_MEASURE));
+    paginator.setAttribute("margin", "0px");
+    paginator.setAttribute("gap", "0%");
+    paginator.setAttribute("max-inline-size", `${HUGE_MEASURE}px`);
     paginator.setAttribute("max-column-count", "1");
   } else {
-    const [measure, block] = MARGINS[styleSettings.margin] || MARGINS.normal;
-    paginator.setAttribute("margin", String(block));
+    // Text. The margin preset adds whitespace at the line ends, on the axis the
+    // writing mode runs across.
+    const vertical = (book?.writingMode || "").startsWith("vertical");
     paginator.setAttribute("gap", "7%");
-    paginator.setAttribute("max-inline-size", String(measure));
-    paginator.setAttribute("max-column-count", "2");
+    if (vertical) {
+      // Vary the block (top/bottom) margin. The measure (column height) is left
+      // UNCAPPED so the content fills the page height and the `margin` attribute
+      // is the *actual* top/bottom margin — not just a floor. With the default
+      // 720 cap, a tall/fullscreen window would cap the content and center it,
+      // splitting the leftover as fixed margins that ignore the setting.
+      paginator.setAttribute("margin", `${VMARGIN[styleSettings.margin] ?? VMARGIN.normal}px`);
+      paginator.setAttribute("max-inline-size", `${HUGE_MEASURE}px`);
+      paginator.setAttribute("max-column-count", "2");
+    } else {
+      // A single column narrower than the window; the leftover is the L/R margin.
+      paginator.setAttribute("margin", "48px");
+      paginator.setAttribute("max-inline-size", `${HMEASURE[styleSettings.margin] ?? HMEASURE.normal}px`);
+      paginator.setAttribute("max-column-count", "1");
+    }
   }
+  // The block-`margin` attribute only re-paginates via a ResizeObserver, which
+  // can miss; force it so a vertical top/bottom-margin change always takes hold.
+  // (No-op before the first section loads — render() bails without a view.)
+  paginator.render?.();
 }
 
 // Push the current settings into the live view: section CSS + chrome + layout
