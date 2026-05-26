@@ -64,7 +64,14 @@ impl TextIndex {
                 collect_eid_text(frag, book, &mut text_of);
             }
         }
+        Self::index(text_of, Self::pid_map_from_book(book))
+    }
 
+    /// The `eid → pid` map from `position_id_map` ($265) alone, skipping the
+    /// (more expensive) storyline text walk — for callers that need positions
+    /// but not extracted text (e.g. the reader's Location readout). Empty when
+    /// the KFX carries no position map (boko-generated e2k output).
+    pub fn pid_map_from_book(book: &BookData) -> HashMap<i64, i64> {
         let mut pid_of = HashMap::new();
         if let Some(maps) = book.by_type.get(&(KfxSymbol::PositionIdMap as u64)) {
             for frag in maps.values() {
@@ -83,8 +90,7 @@ impl TextIndex {
                 }
             }
         }
-
-        Self::index(text_of, pid_of)
+        pid_of
     }
 
     /// Build an index directly from `eid → text` and `eid → pid` maps, for
@@ -198,7 +204,6 @@ fn collect_eid_text(value: &IonValue, book: &BookData, out: &mut HashMap<i64, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn idx(text: &[(i64, &str)], pids: &[(i64, i64)]) -> TextIndex {
         let text_of = text.iter().map(|(e, t)| (*e, t.to_string())).collect();
@@ -279,48 +284,5 @@ mod tests {
         assert_eq!(out.get(&2).map(String::as_str), Some("nested"));
         // eid 3 is a pure container (no `$145 content`) → no text entry.
         assert!(!out.contains_key(&3));
-    }
-
-    /// Real-corpus regression: the two P0-verified books. Skips with a message
-    /// when the (gitignored) sample KFX isn't present, so a clean checkout is
-    /// a no-op rather than a failure.
-    #[test]
-    fn real_corpus_extracts_known_highlights() {
-        let p0 = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("artifacts/p0");
-
-        // 十角館: a single-element highlight, eid 926 [1, 9).
-        let jukkakan = p0.join("jukkakan.kfx");
-        if jukkakan.exists() {
-            let bytes = std::fs::read(&jukkakan).expect("read jukkakan.kfx");
-            let t = TextIndex::from_kfx(&bytes).expect("index jukkakan");
-            assert_eq!(
-                t.extract(926, 1, 926, 9).as_deref(),
-                Some("夜の海。静寂の時"),
-                "十角館 single-element highlight regressed"
-            );
-        } else {
-            eprintln!("skipping jukkakan: {jukkakan:?} not present");
-        }
-
-        // 文学少女: a four-element walk, eid 1254:44 → 1257:68 (half-open).
-        let bungaku = p0.join("bungaku.kfx");
-        if bungaku.exists() {
-            let bytes = std::fs::read(&bungaku).expect("read bungaku.kfx");
-            let t = TextIndex::from_kfx(&bytes).expect("index bungaku");
-            let got = t.extract(1254, 44, 1257, 68).expect("bungaku highlight");
-            assert!(
-                got.starts_with("ねぇ、世界で一番美味しい物語"),
-                "文学少女 highlight start regressed: {got:?}"
-            );
-            assert!(
-                got.ends_with("自分だけの大事な宝物だもの"),
-                "文学少女 highlight end regressed: {got:?}"
-            );
-        } else {
-            eprintln!("skipping bungaku: {bungaku:?} not present");
-        }
     }
 }

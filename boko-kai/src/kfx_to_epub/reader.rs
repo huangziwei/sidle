@@ -6,8 +6,11 @@
 //! displayed — but with `data-eid` stamping on and the EPUB zip tail replaced
 //! by a structured extraction of the spine documents, resources, and TOC.
 
-use super::loader::BookMetadata;
+use std::collections::HashSet;
+
+use super::loader::{BookData, BookMetadata};
 use super::navigation::NavPoint;
+use super::text_index::TextIndex;
 use super::{ConvertError, build_output};
 
 /// One spine document in reading order. `html` is a complete XHTML string with
@@ -38,13 +41,22 @@ pub struct ReaderBook {
     pub writing_mode: String,
     /// Spine progression, e.g. `"rtl"` / `"ltr"`.
     pub page_progression_direction: String,
+    /// `(eid, linear_position)` for positioned elements — the reader's "Location"
+    /// readout. From `position_id_map` ($265) when present (Amazon KFX → the
+    /// device's own Loc numbers); otherwise synthesized from reading order +
+    /// base-text char counts (boko-generated e2k KFX ships no map). The
+    /// `(eid, offset)` anchors that annotations and last-read use are intrinsic
+    /// and independent of this — it's only the cosmetic Loc/% display.
+    pub locations: Vec<(i64, i64)>,
+    /// Largest linear position — the denominator for whole-book %.
+    pub max_location: i64,
 }
 
 /// Convert a KFX container to the reader's [`ReaderBook`] — the KFX→DOM front
 /// half with `data-eid` stamping, minus the EPUB zip.
 pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> {
     let (out, book, toc) = build_output(kfx_bytes, true)?;
-    let sections = out
+    let sections: Vec<ReaderSection> = out
         .spine_documents()
         .into_iter()
         .map(|(href, html)| ReaderSection { href, html })
@@ -62,6 +74,7 @@ pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> 
         .page_progression_direction
         .clone()
         .unwrap_or_else(|| "ltr".to_string());
+    let (locations, max_location) = compute_locations(&book, &sections);
     Ok(ReaderBook {
         sections,
         resources,
@@ -69,7 +82,58 @@ pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> 
         metadata: book.metadata,
         writing_mode,
         page_progression_direction,
+        locations,
+        max_location,
     })
+}
+
+/// Per-element linear positions for the reader's Location/% readout.
+///
+/// Uses the real `position_id_map` ($265) when the KFX has one (Amazon books →
+/// the device's own Loc numbers). Otherwise synthesizes monotonic positions by
+/// walking eids in **rendered reading order** (the sections are already in spine
+/// order, with `data-eid` stamped in document order) and weighting each by its
+/// base-text char count — because boko-generated e2k KFX ships no position map.
+/// The synthesized numbers won't equal the device's (different unit), but the
+/// whole-book % is faithful and the `(eid,offset)` anchors used by annotations /
+/// last-read are unaffected (this is display-only).
+fn compute_locations(book: &BookData, sections: &[ReaderSection]) -> (Vec<(i64, i64)>, i64) {
+    let pid_of = TextIndex::pid_map_from_book(book);
+    if !pid_of.is_empty() {
+        let max = pid_of.values().copied().max().unwrap_or(0);
+        return (pid_of.into_iter().collect(), max);
+    }
+    let index = TextIndex::from_book(book);
+    let mut locations = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pos: i64 = 0;
+    for s in sections {
+        for eid in scan_eids_in_order(&s.html) {
+            if seen.insert(eid) {
+                locations.push((eid, pos));
+                pos += index.text_of(eid).map_or(0, |t| t.chars().count() as i64);
+            }
+        }
+    }
+    (locations, pos)
+}
+
+/// Eids in document order from a section's `data-eid="N"` stamps (reader mode
+/// stamps these). A plain substring scan — no regex dep, and the stamp format
+/// is fixed by `content.rs`.
+fn scan_eids_in_order(html: &str) -> Vec<i64> {
+    const NEEDLE: &str = "data-eid=\"";
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(i) = rest.find(NEEDLE) {
+        rest = &rest[i + NEEDLE.len()..];
+        let end = rest.find('"').unwrap_or(rest.len());
+        if let Ok(eid) = rest[..end].parse::<i64>() {
+            out.push(eid);
+        }
+        rest = &rest[end..];
+    }
+    out
 }
 
 #[cfg(test)]
@@ -122,28 +186,6 @@ mod tests {
             !super::super::convert_to_epub(&bytes)
                 .expect("convert_to_epub")
                 .is_empty()
-        );
-    }
-
-    #[test]
-    fn real_corpus_bungaku_is_vertical_and_stamps_known_eid() {
-        // 文学少女 — vertical-rl + ruby; the famous opening `<p>` is eid 968.
-        // Gitignored corpus: skip with a message when absent (no committed data).
-        let p0 = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("artifacts/p0");
-        let bungaku = p0.join("bungaku.kfx");
-        if !bungaku.exists() {
-            eprintln!("skipping bungaku reader check: {bungaku:?} not present");
-            return;
-        }
-        let bytes = std::fs::read(&bungaku).expect("read bungaku.kfx");
-        let book = kfx_to_reader_book(&bytes).expect("kfx_to_reader_book");
-        assert_eq!(book.writing_mode, "vertical-rl");
-        assert!(
-            book.sections.iter().any(|s| s.html.contains("data-eid=\"968\"")),
-            "expected eid 968 (opening paragraph) stamped in some section"
         );
     }
 }

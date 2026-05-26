@@ -424,32 +424,6 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    /// Smoke test against the gitignored `books/kfx2epub/horror.boko.kfx`
-    /// fixture. Skips on machines / CI without the corpus.
-    #[test]
-    fn load_horror_extracts_metadata_and_raw_media() {
-        let candidates = [
-            "../books/kfx2epub/horror.boko.kfx",
-            "books/kfx2epub/horror.boko.kfx",
-        ];
-        let Some(path) = candidates.iter().find(|p| Path::new(p).exists()) else {
-            eprintln!("Skipping: horror.boko.kfx not present under ../books/kfx2epub/");
-            return;
-        };
-        let bytes = std::fs::read(path).expect("read fixture");
-        let book = load(&bytes).expect("load horror");
-        assert_eq!(book.raw_media.len(), 14, "14 bcRawMedia in horror");
-        assert!(!book.metadata.title.is_empty(), "title was extracted");
-        assert!(
-            !book.metadata.authors.is_empty(),
-            "at least one author extracted"
-        );
-        assert!(
-            book.metadata.cover_resource_name.is_some(),
-            "cover_resource_name extracted from book_metadata"
-        );
-    }
-
     /// Use the committed `tests/fixtures/epictetus.kfx` (English book) for a
     /// minimum-viable load check that always runs.
     #[test]

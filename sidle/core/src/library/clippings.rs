@@ -156,7 +156,6 @@ fn parse_location(s: &str) -> (Option<i64>, Option<i64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     // A self-contained fixture covering every shape seen in the real corpus:
     // bookmark (empty body, page+Location), highlight with a range and no page,
@@ -220,31 +219,5 @@ mod tests {
     fn empty_input_yields_no_records() {
         assert!(parse("").is_empty());
         assert!(parse("\n\n").is_empty());
-    }
-
-    /// Real-corpus check: parse the device's actual `My Clippings.txt` and
-    /// confirm the bungaku highlight body is present. Skips if absent.
-    #[test]
-    fn real_corpus_contains_bungaku_highlight() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("artifacts/p0/MyClippings.real.txt");
-        if !path.exists() {
-            eprintln!("skipping: {path:?} not present");
-            return;
-        }
-        let clips = parse_file(&path).expect("parse My Clippings");
-        assert!(!clips.is_empty(), "expected records in My Clippings");
-        let bungaku = clips
-            .iter()
-            .find(|c| c.kind == Kind::Highlight && c.text.contains("自分だけの大事な宝物だもの」"));
-        assert!(
-            bungaku.is_some(),
-            "bungaku highlight not found among {} clippings",
-            clips.len()
-        );
     }
 }

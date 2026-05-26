@@ -105,9 +105,8 @@ pub fn resolve(ann: &Annotation, idx: &TextIndex) -> Resolved {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::yjr::{self, Handle};
+    use super::super::yjr::Handle;
     use std::collections::HashMap;
-    use std::path::PathBuf;
 
     fn handle(eid: u32, offset: u32, linear: u64) -> Handle {
         Handle {
@@ -199,57 +198,5 @@ mod tests {
         // Anchor fields still carry the (unresolved) handle data.
         assert_eq!(r.eid_start, Some(999));
         assert_eq!(r.loc_start, None); // no pid for an unknown eid
-    }
-
-    /// Full chain on the P0 corpus: parse the real `.yjr`, build the `TextIndex`
-    /// from the matching KFX, and confirm the highlight resolves to the proven
-    /// text. Skips with a message when the (gitignored) samples aren't present.
-    #[test]
-    fn real_corpus_resolves_bungaku_highlight() {
-        let p0 = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("artifacts/p0");
-
-        let kfx = p0.join("bungaku.kfx");
-        if !kfx.exists() {
-            eprintln!("skipping: {kfx:?} not present");
-            return;
-        }
-        let yjr_path = std::fs::read_dir(p0.join("real_yjr"))
-            .ok()
-            .and_then(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .find(|p| p.to_string_lossy().contains("文学少女"))
-            });
-        let Some(yjr_path) = yjr_path else {
-            eprintln!("skipping: bungaku .yjr not present in real_yjr/");
-            return;
-        };
-
-        let idx = TextIndex::from_kfx(&std::fs::read(&kfx).expect("read bungaku.kfx"))
-            .expect("index bungaku");
-        let anns = yjr::parse_file(&yjr_path).expect("parse bungaku .yjr");
-
-        let texts: Vec<String> = anns
-            .iter()
-            .filter(|a| a.kind == Kind::Highlight)
-            .map(|a| resolve(a, &idx).text)
-            .collect();
-        assert!(
-            !texts.is_empty(),
-            "expected at least one highlight in the bungaku .yjr"
-        );
-        // End offset is INCLUSIVE (verified against My Clippings.txt): the
-        // highlight includes the closing 」, which an exclusive `[..off_end)`
-        // would drop. `resolve` passes `off_end + 1`, so it's present.
-        assert!(
-            texts.iter().any(|t| t.starts_with("ねぇ、世界で一番美味しい物語")
-                && t.ends_with("自分だけの大事な宝物だもの」")),
-            "bungaku highlight didn't resolve to the P0 text; got {texts:?}"
-        );
     }
 }

@@ -22,6 +22,9 @@ let overlays = []; // [{ doc, overlayer }] — one per loaded section, for repai
 let eidToSection = null; // Map<eid, sectionIndex>, built lazily for jumps
 let keyHandler = null;
 let tocEntries = []; // flat [{ li, sectionIndex }] in TOC order, for active-marking
+let locByEid = null; // Map<eid, linear position> — Kindle "Location" per element
+let maxLoc = 0; // largest position, denominator for whole-book %
+let positionedByDoc = new WeakMap(); // section doc → [{ el, loc }] in doc order (cached)
 
 const view = () => $("#reader-view");
 
@@ -385,6 +388,54 @@ function hideTocPanel() {
   if (p) p.hidden = true;
 }
 
+// ---- progress: Loc + whole-book % ------------------------------------------
+
+// Positioned [data-eid] elements in a section doc, with their linear position,
+// in document order. Cached per doc (the set is stable once the section loads).
+function positionedFor(doc) {
+  let arr = positionedByDoc.get(doc);
+  if (!arr) {
+    arr = [...doc.querySelectorAll("[data-eid]")]
+      .map((el) => ({ el, loc: locByEid?.get(Number(el.getAttribute("data-eid"))) }))
+      .filter((x) => x.loc != null);
+    positionedByDoc.set(doc, arr);
+  }
+  return arr;
+}
+
+// Location at the top of the current page: the last positioned element at or
+// before the visible range's start.
+function locAt(doc, range) {
+  const arr = positionedFor(doc);
+  if (!arr.length) return null;
+  const start = range?.startContainer;
+  if (!start) return arr[0].loc;
+  let best = arr[0].loc;
+  for (const { el, loc } of arr) {
+    const following = (el.compareDocumentPosition(start) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    if (el === start || el.contains(start) || following) best = loc;
+    else break;
+  }
+  return best;
+}
+
+// Update the bottom bar from a relocate event: "Loc N" lower-left, whole-book
+// "P%" lower-right. Loc is hidden when the book carries no positions at all.
+function updateProgress(detail) {
+  const locEl = $("#reader-loc");
+  const pctEl = $("#reader-percent");
+  if (!maxLoc) {
+    if (locEl) locEl.textContent = "";
+    if (pctEl) pctEl.textContent = "";
+    return;
+  }
+  const doc = detail?.range?.startContainer?.ownerDocument;
+  const loc = doc ? locAt(doc, detail.range) : null;
+  if (locEl) locEl.textContent = loc != null ? `Loc ${loc}` : "";
+  const frac = (loc ?? 0) / maxLoc;
+  if (pctEl) pctEl.textContent = `${Math.min(100, Math.max(0, Math.round(frac * 100)))}%`;
+}
+
 // ---- navigation -----------------------------------------------------------
 
 const forward = () => {
@@ -452,10 +503,14 @@ async function open(id) {
   annotations = anns || [];
   eidToSection = null;
   overlays = [];
+  locByEid = new Map(dto.locations || []);
+  maxLoc = dto.max_location || 0;
+  positionedByDoc = new WeakMap();
   book = makeKfxBook(dto);
 
   $("#reader-title").textContent = dto.title || "Untitled";
-  $("#reader-progress").textContent = "";
+  $("#reader-loc").textContent = "";
+  $("#reader-percent").textContent = "";
   view().hidden = false;
   view().classList.add("open");
   renderAnnotationsPanel();
@@ -463,7 +518,7 @@ async function open(id) {
 
   paginator = document.createElement("foliate-paginator");
   paginator.setAttribute("flow", "paginated");
-  $("#reader-stage").replaceChildren(paginator);
+  $("#reader-paginator-host").replaceChildren(paginator);
 
   paginator.addEventListener("create-overlayer", ({ detail: { doc, attach } }) => {
     const overlayer = new Overlayer();
@@ -478,8 +533,7 @@ async function open(id) {
     doc.addEventListener("keydown", onKey, true);
   });
   paginator.addEventListener("relocate", ({ detail }) => {
-    const pct = Math.round((detail.fraction ?? 0) * 100);
-    $("#reader-progress").textContent = `${pct}%`;
+    updateProgress(detail);
     markTocActive(detail.index);
     hideNotePopover();
   });
@@ -497,7 +551,7 @@ async function close() {
     keyHandler = null;
   }
   if (paginator) {
-    $("#reader-stage")?.replaceChildren();
+    $("#reader-paginator-host")?.replaceChildren();
     paginator = null;
   }
   if (book) {
@@ -510,6 +564,11 @@ async function close() {
   overlays = [];
   eidToSection = null;
   tocEntries = [];
+  locByEid = null;
+  maxLoc = 0;
+  positionedByDoc = new WeakMap();
+  if ($("#reader-loc")) $("#reader-loc").textContent = "";
+  if ($("#reader-percent")) $("#reader-percent").textContent = "";
   hideNotePopover();
   hideAnnotationsPanel();
   hideTocPanel();
@@ -522,8 +581,10 @@ async function close() {
 
 function wire() {
   $("#reader-close")?.addEventListener("click", () => close());
-  $("#reader-prev")?.addEventListener("click", () => back());
-  $("#reader-next")?.addEventListener("click", () => forward());
+  // Page-turn margins: the left margin goes to the physically-left page (= next
+  // in a vertical-rl / RTL book, prev otherwise), mirroring the arrow keys.
+  $("#reader-nav-left")?.addEventListener("click", () => (book?.ppd === "rtl" ? forward() : back()));
+  $("#reader-nav-right")?.addEventListener("click", () => (book?.ppd === "rtl" ? back() : forward()));
   $("#reader-annotations")?.addEventListener("click", () => toggleAnnotationsPanel());
   $("#reader-annotations-close")?.addEventListener("click", () => hideAnnotationsPanel());
   $("#reader-toc")?.addEventListener("click", () => toggleTocPanel());

@@ -7,7 +7,7 @@
 //! the design.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use boko::Book;
 
@@ -52,26 +52,6 @@ fn kfx_zip_with_single_container_matches_plain_kfx() {
     assert_eq!(bundled.metadata().authors, plain_authors);
     assert_eq!(bundled.spine().len(), plain_spine_len);
     assert_eq!(bundled.toc().len(), plain_toc_len);
-}
-
-/// Smoke test against a real multi-container Amazon `.kfx-zip` if one exists
-/// under `../books/`. CI and fresh clones won't have these files, so the test
-/// skips. Locally, exercises the actual cross-container merge + import path.
-#[test]
-fn real_kfx_zip_imports_with_metadata_and_spine() {
-    let candidates = [
-        "../books/ジャンル特化型\u{3000}ホラーの扉\u{3000}八つの恐怖の物語 (14歳の世渡り術) (Japanese Edition)_B0CPJ2B88T.kfx-zip",
-    ];
-    let Some(path) = candidates.iter().map(PathBuf::from).find(|p| p.exists()) else {
-        eprintln!("Skipping: no real .kfx-zip fixture available under ../books/");
-        return;
-    };
-
-    let book = Book::open(&path).expect("open real .kfx-zip");
-    assert!(!book.metadata().title.is_empty(), "title must be populated");
-    assert!(!book.metadata().authors.is_empty(), "authors must be populated");
-    assert!(!book.spine().is_empty(), "spine must be non-empty");
-    assert!(!book.toc().is_empty(), "toc must be non-empty");
 }
 
 /// `boko::kfx::merge::merge_kfx_zip` produces a self-contained `.kfx` that

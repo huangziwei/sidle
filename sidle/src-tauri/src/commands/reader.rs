@@ -51,6 +51,11 @@ pub struct ReaderBookDto {
     pub writing_mode: String,
     /// `"rtl"` / `"ltr"` — spine progression / page-turn direction.
     pub page_progression_direction: String,
+    /// `[eid, linear]` pairs for the Location/% readout (real device Loc when the
+    /// KFX has a position map, else reader-synthesized). See `ReaderBook::locations`.
+    pub locations: Vec<(i64, i64)>,
+    /// Largest linear position — the denominator for whole-book %.
+    pub max_location: i64,
 }
 
 fn map_toc(points: Vec<boko::kfx_to_epub::navigation::NavPoint>) -> Vec<ReaderTocDto> {
@@ -90,6 +95,8 @@ impl From<boko::kfx_to_epub::ReaderBook> for ReaderBookDto {
             language: b.metadata.language,
             writing_mode: b.writing_mode,
             page_progression_direction: b.page_progression_direction,
+            locations: b.locations,
+            max_location: b.max_location,
         }
     }
 }

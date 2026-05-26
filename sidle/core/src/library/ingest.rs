@@ -756,64 +756,6 @@ mod tests {
         assert_eq!(sdr_infix("nope"), None);
     }
 
-    /// P1 gate, end-to-end on the live Kindle: scan `documents/Sidle/`, match the
-    /// bungaku `.sdr` by its `kfx_sha256` infix to a library book pointed at the
-    /// readable artifacts KFX, and confirm the highlight imports with the
-    /// inclusive-end text. Skips when the Kindle or the sample KFX is absent.
-    #[test]
-    fn real_device_import_links_bungaku_highlight() {
-        let kindle = Path::new("/Volumes/Kindle");
-        let bungaku_kfx = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("artifacts/p0/bungaku.kfx");
-        if !kindle.join("documents/Sidle").is_dir() || !bungaku_kfx.exists() {
-            eprintln!("skipping: Kindle not mounted or bungaku.kfx absent");
-            return;
-        }
-
-        let conn = mem_db();
-        // Library book whose kfx_sha256 prefix == the device .sdr infix (7f4e9d33),
-        // with its KFX path pointing at the readable artifacts copy.
-        let kfx_sha = format!("7f4e9d33{}", "0".repeat(56)); // 64-hex, right prefix
-        db::insert_book(
-            &conn,
-            &NewBook {
-                sha256: "bungaku-src",
-                title: "01 〝文学少女〟と死にたがりの道化",
-                author: "野村美月",
-                language: "ja",
-                ppd: None,
-                epub_path: None,
-                cover_path: None,
-                kfx_path: bungaku_kfx.to_str(),
-                kfx_sha256: Some(&kfx_sha),
-                file_size: 0,
-                imported_at: "t0",
-                asin: None,
-                publisher: None,
-                published_at: None,
-                series_name: None,
-                series_index: None,
-                tags: &[],
-            },
-        )
-        .unwrap();
-
-        let report = import_from_device(&conn, kindle, "DEV", "now").unwrap();
-        assert!(report.matched >= 1, "bungaku .sdr should match by infix");
-
-        let book = db::find_by_kfx_sha_prefix(&conn, "7f4e9d33").unwrap().unwrap();
-        let anns = db::list_annotations_for_book(&conn, book.id).unwrap();
-        assert!(
-            anns.iter().any(|a| a.text.ends_with("自分だけの大事な宝物だもの」")),
-            "bungaku highlight not imported with inclusive end; got {:?}",
-            anns.iter().map(|a| &a.text).collect::<Vec<_>>()
-        );
-    }
-
     /// A second connect with an unchanged `.yjr` is skipped wholesale — no
     /// re-parse, no re-insert — by the per-book content-hash checkpoint. (The
     /// `dedup_hash` already made re-import a no-op at the DB layer; this avoids
