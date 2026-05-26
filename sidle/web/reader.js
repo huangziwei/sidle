@@ -8,7 +8,7 @@
 import "./foliate-kfx/paginator.js"; // defines <foliate-paginator>
 import { Overlayer } from "./foliate-kfx/overlayer.js";
 import { makeKfxBook } from "./foliate-kfx/kfx-book.js";
-import { rangeFor } from "./foliate-kfx/anchor.js";
+import { rangeFor, textBoundary } from "./foliate-kfx/anchor.js";
 
 const $ = (sel) => document.querySelector(sel);
 const toast = (msg, isError) => window.showToast?.(msg, isError);
@@ -26,21 +26,63 @@ const view = () => $("#reader-view");
 
 // Named Kindle highlight colors → CSS; falls back to a literal color or yellow.
 const COLORS = { yellow: "#f4d03f", blue: "#5dade2", pink: "#ec7fa9", orange: "#e59866" };
-const NOTE_CUE = "#b5651d"; // underline under a note's highlight
+const NOTE_CUE = "#b5651d"; // edge line marking a highlight that carries a note
 const BOOKMARK_COLOR = "#e07b39";
 const KIND_ICON = { highlight: "🖍", note: "📝", bookmark: "🔖" };
 
 const NS = "http://www.w3.org/2000/svg";
+const svgEl = (tag) => document.createElementNS(NS, tag);
+const svgRect = (x, y, w, h) => {
+  const el = svgEl("rect");
+  el.setAttribute("x", x);
+  el.setAttribute("y", y);
+  el.setAttribute("width", w);
+  el.setAttribute("height", h);
+  return el;
+};
+
+function highlightGroup(color) {
+  const g = svgEl("g");
+  g.setAttribute("fill", color);
+  g.style.opacity = "var(--overlayer-highlight-opacity, .3)";
+  g.style.mixBlendMode = "var(--overlayer-highlight-blend-mode, normal)";
+  return g;
+}
+
+// Draw the rects as-is — their thickness (≈1em cross-axis) is already correct.
+// The rects come from `annotationRects` (per element), so each one already stops
+// at its element's text rather than running to the line end.
+function drawHighlight(rects, options = {}) {
+  const g = highlightGroup(options.color || COLORS.yellow);
+  for (const { left, top, width, height } of rects) g.append(svgRect(left, top, width, height));
+  return g;
+}
+
+// A note = the same band + a solid cue line along its trailing edge, so a noted
+// highlight reads differently from a plain one. The cue is a sibling group at
+// full opacity (not inside the .3-opacity band).
+function drawNote(rects, options = {}) {
+  const wrap = svgEl("g");
+  wrap.append(drawHighlight(rects, options));
+  const cue = svgEl("g");
+  cue.setAttribute("fill", NOTE_CUE);
+  const t = 2;
+  for (const { left, top, width, height } of rects) {
+    if (options.vertical) cue.append(svgRect(left, top, t, height)); // left edge of the column
+    else cue.append(svgRect(left, top + height - t, width, t)); // under the line
+  }
+  wrap.append(cue);
+  return wrap;
+}
 
 // A small filled marker at the block-start corner of a bookmark's anchor char,
 // so bookmarks are visible on the page (the jump-list is the primary surface).
 function drawBookmarkMarker(rects, options = {}) {
-  const g = document.createElementNS(NS, "g");
+  const g = svgEl("g");
   const r = rects[0];
   if (!r) return g;
-  const vertical = (options.writingMode || "").startsWith("vertical");
-  const cx = vertical ? r.right - 5 : r.left + 5;
-  const dot = document.createElementNS(NS, "circle");
+  const cx = options.vertical ? r.right - 5 : r.left + 5;
+  const dot = svgEl("circle");
   dot.setAttribute("cx", cx);
   dot.setAttribute("cy", r.top + 5);
   dot.setAttribute("r", "5");
@@ -49,31 +91,69 @@ function drawBookmarkMarker(rects, options = {}) {
   return g;
 }
 
+// A range within ONE element's base text (ruby excluded), clamped to its end.
+function subRange(doc, el, from, to) {
+  const s = textBoundary(el, from);
+  const e = textBoundary(el, to); // textBoundary clamps when `to` overruns the element
+  if (!s || !e) return null;
+  const r = doc.createRange();
+  try {
+    r.setStart(s.node, s.offset);
+    r.setEnd(e.node, e.offset);
+  } catch {
+    return null;
+  }
+  return r;
+}
+
+// Client rects for an annotation, computed PER `data-eid` element. A single
+// Range spanning several block elements makes getClientRects fill the blank tail
+// of each element's short last line (it's a continuous selection), which paints
+// the highlight onto the whitespace up to the line end. Splitting per element —
+// each sub-range ending at its own element's text — stops the band at the text.
+// Returns [] when the annotation isn't in this section.
+function annotationRects(doc, ann) {
+  if (ann.eid_start == null) return [];
+  const all = [...doc.querySelectorAll("[data-eid]")];
+  if (!all.length) return [];
+  const startEl = doc.querySelector(`[data-eid="${ann.eid_start}"]`);
+  const endEl = ann.eid_end != null ? doc.querySelector(`[data-eid="${ann.eid_end}"]`) : startEl;
+  if (!startEl && !endEl) return [];
+  let si = startEl ? all.indexOf(startEl) : 0;
+  let ei = endEl ? all.indexOf(endEl) : all.length - 1;
+  if (si < 0) si = 0;
+  if (ei < 0) ei = all.length - 1;
+  if (ei < si) return [];
+  const rects = [];
+  for (let i = si; i <= ei; i++) {
+    const el = all[i];
+    const from = el === startEl ? (ann.off_start ?? 0) : 0;
+    const to = el === endEl ? (ann.off_end ?? 0) + 1 : Number.MAX_SAFE_INTEGER;
+    const r = subRange(doc, el, from, to);
+    if (r) rects.push(...r.getClientRects());
+  }
+  return rects;
+}
+
 // Paint every resolvable annotation into one section's overlayer. Idempotent:
 // `overlayer.add` replaces an existing key, so re-running after a sync just
 // refreshes (device import is add-only, so nothing needs removing).
 function paintAnnotations(doc, overlayer) {
-  const writingMode = book?.writingMode;
+  const vertical = (book?.writingMode || "").startsWith("vertical");
   for (const ann of annotations) {
-    const range = rangeFor(doc, ann);
-    if (!range) continue;
     if (ann.kind === "bookmark") {
-      overlayer.add(`ann-${ann.id}-bm`, range, drawBookmarkMarker, {
-        color: BOOKMARK_COLOR,
-        writingMode,
-      });
+      const range = rangeFor(doc, ann);
+      if (range) {
+        overlayer.add(`ann-${ann.id}`, range, drawBookmarkMarker, { color: BOOKMARK_COLOR, vertical });
+      }
       continue;
     }
+    if (!annotationRects(doc, ann).length) continue; // not in this section
     const color = (ann.color && COLORS[ann.color]) || ann.color || COLORS.yellow;
-    overlayer.add(`ann-${ann.id}`, range, Overlayer.highlight, { color });
-    if (ann.kind === "note") {
-      // A second cue so a note reads differently from a plain highlight.
-      overlayer.add(`ann-${ann.id}-u`, range, Overlayer.underline, {
-        color: NOTE_CUE,
-        width: 2,
-        writingMode,
-      });
-    }
+    // overlayer.add (and redraw on resize) calls range.getClientRects(); hand it
+    // a range-like that recomputes our per-element rects each time.
+    const rangeLike = { getClientRects: () => annotationRects(doc, ann) };
+    overlayer.add(`ann-${ann.id}`, rangeLike, ann.kind === "note" ? drawNote : drawHighlight, { color, vertical });
   }
 }
 
@@ -84,9 +164,7 @@ function paintAnnotations(doc, overlayer) {
 function noteAt(doc, x, y) {
   for (const ann of annotations) {
     if (ann.kind !== "note" || !ann.note_body) continue;
-    const range = rangeFor(doc, ann);
-    if (!range) continue;
-    for (const r of range.getClientRects()) {
+    for (const r of annotationRects(doc, ann)) {
       if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return ann;
     }
   }
