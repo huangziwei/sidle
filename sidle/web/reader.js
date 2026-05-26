@@ -28,7 +28,10 @@ let positionedByDoc = new WeakMap(); // section doc → [{ el, loc }] in doc ord
 let sectionChars = []; // base-text char count per section, for time estimates
 let charsBefore = []; // cumulative chars before section i
 let totalChars = 0;
-let readSpeed = 500; // chars/min reading-speed assumption (language-tuned)
+let readSpeed = 0; // chars/min, learned per book (0 until the first valid sample)
+let sampleCount = 0; // valid pace samples for the open book — gates "Estimating…"
+let lastTurnTime = null; // ms timestamp of the last relocate, for pace sampling
+let lastCharPos = null; // char position at the last relocate, for pace sampling
 let lastPos = null; // { loc, index, frac } from the last relocate, for mode cycling
 let progressMode = readSavedProgressMode(); // 0 loc · 1 chapter · 2 book · 3 hidden
 
@@ -434,21 +437,83 @@ function locAt(doc, range) {
   return best;
 }
 
-// Reading-speed estimate for the "N min left" modes — chars/min, tuned by
-// script (CJK reads slower per character). A fixed assumption (we don't track
-// the user's real pace yet), so it's an estimate, not Kindle's adaptive one.
-function minsLeft(chars, where) {
-  const m = Math.round(Math.max(0, chars) / readSpeed);
-  if (m < 1) return `Less than a minute left in ${where}`;
-  return `${m} min${m === 1 ? "" : "s"} left in ${where}`;
+// Char position (base-text) of a (section index, intra-section fraction) — the
+// content measure behind both the time estimates and the adaptive pace sampler.
+function charPosOf(index, frac) {
+  return (charsBefore[index] || 0) + (sectionChars[index] || 0) * frac;
 }
 
-// Remember the resolved Location + section position on each relocate, then
-// render per the current mode.
+// Remaining reading time from a char count and the live `readSpeed`. Under a
+// minute → words; ≥ an hour → "H hr M min(s)".
+function timeLeft(chars, where) {
+  const m = Math.round(Math.max(0, chars) / readSpeed);
+  if (m < 1) return `Less than a minute left in ${where}`;
+  if (m < 60) return `${m} min${m === 1 ? "" : "s"} left in ${where}`;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  const mPart = mm > 0 ? ` ${mm} min${mm === 1 ? "" : "s"}` : "";
+  return `${h} hr${mPart} left in ${where}`;
+}
+
+const clampSpeed = (v) => Math.min(5000, Math.max(30, v));
+const READY_SAMPLES = 5; // valid page-turns before a time is shown (else "Estimating…")
+const paceKey = () => `sidle.reader.pace.${bookId}`;
+const paceReady = () => sampleCount >= READY_SAMPLES && readSpeed > 0;
+
+// Per-book reading pace, persisted as { s: chars/min, n: sample count }.
+function loadPace() {
+  try {
+    const raw = localStorage.getItem(paceKey());
+    if (raw) {
+      const { s, n } = JSON.parse(raw);
+      if (Number.isFinite(s) && Number.isFinite(n)) return { speed: clampSpeed(s), count: n };
+    }
+  } catch {
+    /* ignore */
+  }
+  return { speed: 0, count: 0 };
+}
+
+function savePace() {
+  try {
+    localStorage.setItem(paceKey(), JSON.stringify({ s: Math.round(readSpeed), n: sampleCount }));
+  } catch {
+    /* ignore */
+  }
+}
+
+// Fold one page-turn into the per-book `readSpeed` (EMA, seeded by the FIRST
+// sample so it's purely the user's measured pace — no language guess). Rejects
+// outliers like the device's `timer.average.calculator.outliers`: only forward
+// sequential reading counts — skip backward/jumps (non-positive or implausibly
+// large chars), quick flips (<1.5s), and idle gaps (>5min).
+function sampleReadingSpeed(charPos) {
+  const now = Date.now();
+  if (lastTurnTime != null && lastCharPos != null) {
+    const dtMs = now - lastTurnTime;
+    const dChars = charPos - lastCharPos;
+    if (dChars > 0 && dtMs >= 1500 && dtMs <= 300000) {
+      const sample = dChars / (dtMs / 60000); // chars per minute
+      if (sample >= 30 && sample <= 5000) {
+        readSpeed = sampleCount === 0 ? sample : clampSpeed(readSpeed * 0.85 + sample * 0.15);
+        sampleCount += 1;
+        savePace();
+      }
+    }
+  }
+  lastTurnTime = now;
+  lastCharPos = charPos;
+}
+
+// On each relocate: feed the adaptive pace sampler, remember the resolved
+// Location + section position, then render per the current mode.
 function updateProgress(detail) {
   const doc = detail?.range?.startContainer?.ownerDocument;
   const loc = doc ? locAt(doc, detail.range) : null;
-  lastPos = { loc, index: detail?.index ?? 0, frac: detail?.fraction ?? 0 };
+  const index = detail?.index ?? 0;
+  const frac = Number.isFinite(detail?.fraction) ? Math.min(1, Math.max(0, detail.fraction)) : 0;
+  sampleReadingSpeed(charPosOf(index, frac));
+  lastPos = { loc, index, frac };
   renderProgress();
 }
 
@@ -465,16 +530,16 @@ function renderProgress() {
     pctEl.textContent = "";
     return;
   }
-  const { loc, index } = lastPos;
-  const frac = Number.isFinite(lastPos.frac) ? Math.min(1, Math.max(0, lastPos.frac)) : 0;
+  const { loc, index, frac } = lastPos;
   pctEl.textContent = `${Math.min(100, Math.max(0, Math.round(((loc ?? 0) / maxLoc) * 100)))}%`;
   if (progressMode === 0) {
     locEl.textContent = loc != null ? `Loc ${loc}` : "";
+  } else if (!paceReady()) {
+    locEl.textContent = "Estimating\u2026";
   } else if (progressMode === 1) {
-    locEl.textContent = minsLeft((sectionChars[index] || 0) * (1 - frac), "chapter");
+    locEl.textContent = timeLeft((sectionChars[index] || 0) * (1 - frac), "chapter");
   } else {
-    const read = (charsBefore[index] || 0) + (sectionChars[index] || 0) * frac;
-    locEl.textContent = minsLeft(totalChars - read, "book");
+    locEl.textContent = timeLeft(totalChars - charPosOf(index, frac), "book");
   }
 }
 
@@ -575,7 +640,11 @@ async function open(id) {
     cumChars += n;
   }
   totalChars = cumChars;
-  readSpeed = /^(ja|zh|ko)/i.test(dto.language || "") ? 500 : 1100;
+  const pace = loadPace();
+  readSpeed = pace.speed;
+  sampleCount = pace.count;
+  lastTurnTime = null;
+  lastCharPos = null;
   lastPos = null;
   book = makeKfxBook(dto);
 
@@ -642,6 +711,10 @@ async function close() {
   charsBefore = [];
   totalChars = 0;
   lastPos = null;
+  lastTurnTime = null;
+  lastCharPos = null;
+  readSpeed = 0;
+  sampleCount = 0;
   if ($("#reader-loc")) $("#reader-loc").textContent = "";
   if ($("#reader-percent")) $("#reader-percent").textContent = "";
   hideNotePopover();
