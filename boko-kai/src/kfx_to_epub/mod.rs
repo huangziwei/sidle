@@ -267,7 +267,7 @@ fn build_titlepage(out: &EpubOutput) -> Option<String> {
          </head>\n\
          <body>\n\
          <div>\n\
-         <svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" version=\"1.1\" width=\"100%\" height=\"100%\" viewBox=\"0 0 {w} {h}\" preserveAspectRatio=\"none\">\n\
+         <svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" version=\"1.1\" width=\"100%\" height=\"100%\" viewBox=\"0 0 {w} {h}\" preserveAspectRatio=\"xMidYMid meet\">\n\
          <image width=\"{w}\" height=\"{h}\" xlink:href=\"{href}\"/>\n\
          </svg>\n\
          </div>\n\

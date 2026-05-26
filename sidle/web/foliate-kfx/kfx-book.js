@@ -12,6 +12,24 @@ const b64ToBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
 const XLINK = "http://www.w3.org/1999/xlink";
 
+// Injected into every section. (1) Force light mode: the reader is always light
+// regardless of the OS theme, so a book's `color: black` text never lands on a
+// dark UA background. (2) Fit images/SVG to the page so illustrations and the
+// cover aren't squeezed, stretched, or cropped. Appended last so it wins over
+// the book's own stylesheet.
+const READER_CSS = `
+:root { color-scheme: light !important; }
+html, body { background: #ffffff !important; }
+body { color: #111111; }
+img, image, svg, video {
+  max-width: 100% !important;
+  max-height: 100% !important;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+`;
+
 export function makeKfxBook(dto) {
   // href → blob: URL for every non-spine resource.
   const resourceUrls = new Map();
@@ -38,6 +56,10 @@ export function makeKfxBook(dto) {
       const xl = el.getAttributeNS(XLINK, "href") || el.getAttribute("xlink:href");
       if (xl && resourceUrls.has(xl)) el.setAttributeNS(XLINK, "href", resourceUrls.get(xl));
     });
+    // Reader stylesheet, appended last so it overrides the book's own styles.
+    const style = doc.createElement("style");
+    style.textContent = READER_CSS;
+    doc.head.appendChild(style);
     return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
   };
 
