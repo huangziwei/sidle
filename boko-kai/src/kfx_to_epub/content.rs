@@ -1052,6 +1052,20 @@ fn extract_doc_data(book: &BookData) -> (String, String) {
             other => other.to_string(),
         };
     }
+    // `document_data`'s book-level `writing_mode` is an unreliable default: a
+    // mixed book can report `horizontal_tb` here while every text block is
+    // styled vertical-rl (the doc-level field tracks the first/dominant section,
+    // not the body). When it reads the `horizontal-tb` default, fall back to the
+    // mode the book's own `$style` structs predominantly declare. The reader
+    // keys `<body>`'s writing mode — and thus vertical vs horizontal pagination
+    // — off this (via the synthesized `body { writing-mode }` rule, which
+    // `emit_stylesheet` omits for `horizontal-tb`), so an undetected vertical
+    // book paginates horizontally: columns clipped left/right, no page margins.
+    if writing_mode == "horizontal-tb"
+        && let Some(vmode) = majority_vertical_style_mode(book)
+    {
+        writing_mode = vmode;
+    }
     // Calibre's writing-mode → ppd override (yj_to_epub_metadata.py:131): any
     // vertical-RL writing mode forces the page to read right-to-left, even if
     // the KFX `direction` field literally says `ltr` (which is the common case
@@ -1072,6 +1086,59 @@ fn extract_doc_data(book: &BookData) -> (String, String) {
         page_progression_direction = explicit;
     }
     (writing_mode, page_progression_direction)
+}
+
+/// The vertical writing mode (`"vertical-rl"` / `"vertical-lr"`) the book's
+/// `$style` pool predominantly declares, or `None` when horizontal text
+/// dominates (or no style declares a mode). Used only to correct
+/// `document_data`'s unreliable `horizontal_tb` default. Counting the style
+/// pool — not every entity — keeps the cost bounded and matches what becomes
+/// CSS classes; a book whose document-level mode is genuinely horizontal is
+/// left alone unless its own styles say otherwise by majority.
+fn majority_vertical_style_mode(book: &BookData) -> Option<String> {
+    let styles = book.by_type.get(&(KfxSymbol::Style as u64))?;
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for style in styles.values() {
+        count_writing_modes(style, book, &mut counts);
+    }
+    let vrl = *counts.get("vertical-rl").unwrap_or(&0);
+    let vlr = *counts.get("vertical-lr").unwrap_or(&0);
+    let htb = *counts.get("horizontal-tb").unwrap_or(&0);
+    let vertical = vrl + vlr;
+    if vertical > 0 && vertical > htb {
+        Some(if vlr > vrl { "vertical-lr" } else { "vertical-rl" }.to_string())
+    } else {
+        None
+    }
+}
+
+/// Tally every `writing_mode` ($560) symbol value reachable from `value`
+/// (normalised to its CSS spelling) into `out`.
+fn count_writing_modes(value: &IonValue, book: &BookData, out: &mut HashMap<String, usize>) {
+    match value.unwrap_annotated() {
+        IonValue::Struct(fields) => {
+            for (k, v) in fields {
+                if *k == KfxSymbol::WritingMode as u64
+                    && let Some(name) = book.symbols.text_of(v)
+                {
+                    let css = match name {
+                        "horizontal_tb" => "horizontal-tb",
+                        "vertical_rl" => "vertical-rl",
+                        "vertical_lr" => "vertical-lr",
+                        other => other,
+                    };
+                    *out.entry(css.to_string()).or_insert(0) += 1;
+                }
+                count_writing_modes(v, book, out);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                count_writing_modes(item, book, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The book-level page-progression direction as declared in the explicit
