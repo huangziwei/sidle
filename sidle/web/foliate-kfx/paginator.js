@@ -180,14 +180,7 @@ const getDirection = doc => {
     const { writingMode, direction } = defaultView.getComputedStyle(doc.body)
     const vertical = writingMode === 'vertical-rl'
         || writingMode === 'vertical-lr'
-    // `vertical-rl` advances columns/pages right-to-left by definition, so it is
-    // rtl even when nothing declares `dir`/`direction` — which is the norm for
-    // our synthesized CJK sections (they carry `writing-mode` but no `dir`).
-    // Without this the paginator's page offset (`±page * size`) takes the wrong
-    // sign and the book reads left-to-right in a multi-column (wide-window)
-    // spread. `vertical-lr` is genuinely ltr, so it is excluded.
-    const rtl = writingMode === 'vertical-rl'
-        || doc.body.dir === 'rtl'
+    const rtl = doc.body.dir === 'rtl'
         || direction === 'rtl'
         || doc.documentElement.dir === 'rtl'
     return { vertical, rtl }
