@@ -340,18 +340,32 @@ class View {
     }
     setImageSize() {
         const { width, height, margin } = this.#layout
-        const vertical = this.#vertical
         const doc = this.document
+        // Page content box in physical px. Before the first layout these can be
+        // 0/NaN — skip then (a later render() re-runs with real values).
+        if (!(width > 0) || !(height > 0)) return
+        const maxW = `${Math.max(0, width - margin * 2)}px`
+        const maxH = `${Math.max(0, height - margin * 2)}px`
         for (const el of doc.body.querySelectorAll('img, svg, video')) {
-            // preserve max size if they are already set
-            const { maxHeight, maxWidth } = doc.defaultView.getComputedStyle(el)
             setStylesImportant(el, {
-                'max-height': vertical
-                    ? (maxHeight !== 'none' && maxHeight !== '0px' ? maxHeight : '100%')
-                    : `${height - margin * 2}px`,
-                'max-width': vertical
-                    ? `${width - margin * 2}px`
-                    : (maxWidth !== 'none' && maxWidth !== '0px' ? maxWidth : '100%'),
+                // Bound the image to the page content box on BOTH axes, in
+                // definite px. The old code capped only one axis in px and left
+                // the cross axis at `100%` — which silently fails to resolve
+                // whenever the image's containing block has no definite size.
+                // Full-page illustrations are exactly that case: the <img> sits
+                // in `writing-mode: horizontal-tb` wrapper <div>s nested inside a
+                // vertical-rl body, with no definite height anywhere in the
+                // chain. The unresolved cap left the portrait image to grow to
+                // the full page width and overflow the page height — cropped
+                // top/bottom in a landscape window. Two physical px caps +
+                // `object-fit: contain` make it fit to height instead (centered,
+                // with left/right margins). `width/height: auto` neutralises any
+                // intrinsic-attribute or inherited sizing so only the caps and
+                // the aspect ratio decide the box.
+                'width': 'auto',
+                'height': 'auto',
+                'max-width': maxW,
+                'max-height': maxH,
                 'object-fit': 'contain',
                 'page-break-inside': 'avoid',
                 'break-inside': 'avoid',
