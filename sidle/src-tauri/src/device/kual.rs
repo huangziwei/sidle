@@ -376,11 +376,10 @@ fn walk_newest_mtime(dir: &Path) -> Option<u64> {
             };
             if ft.is_dir() {
                 stack.push(path);
-            } else if ft.is_file() {
-                if let Some(ms) = mtime_ms(&path) {
+            } else if ft.is_file()
+                && let Some(ms) = mtime_ms(&path) {
                     newest = Some(newest.map_or(ms, |n| n.max(ms)));
                 }
-            }
         }
     }
     newest
@@ -436,13 +435,12 @@ fn install_one(slot: &Slot<'_>, dest: &Path) -> KualFileInstallResult {
     };
 
     let source_hash = sha256_bytes(&bytes);
-    if let Ok(Some(device_hash)) = sha256_file_opt(dest) {
-        if device_hash == source_hash {
+    if let Ok(Some(device_hash)) = sha256_file_opt(dest)
+        && device_hash == source_hash {
             return KualFileInstallResult::Skipped {
                 device_path: slot.device_rel.to_string(),
             };
         }
-    }
 
     if let Err(e) = atomic_write(dest, &bytes) {
         return KualFileInstallResult::Failed {

@@ -119,7 +119,7 @@ impl Transport for MassStorageTransport {
             out.push(TEntry {
                 name,
                 is_dir: meta.is_dir(),
-                size: meta.is_file().then(|| meta.len()),
+                size: meta.is_file().then_some(meta.len()),
             });
         }
         Ok(out)
@@ -133,7 +133,7 @@ impl Transport for MassStorageTransport {
                 return None;
             }
             let s = s.assume_init();
-            let frsize = s.f_frsize as u64;
+            let frsize = s.f_frsize;
             let free = (s.f_bavail as u64).checked_mul(frsize)?;
             let total = (s.f_blocks as u64).checked_mul(frsize)?;
             Some((free, total))

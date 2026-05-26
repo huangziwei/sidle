@@ -1144,7 +1144,7 @@ fn walk_ids_recursive(
 
 /// Resolve `$145` text: either a literal string or a struct
 /// `{name, $403: index}` pointing at a `book_data["$145"][name].$146[i]`.
-fn resolve_content_text(value: &IonValue, book: &BookData) -> String {
+pub(crate) fn resolve_content_text(value: &IonValue, book: &BookData) -> String {
     let inner = value.unwrap_annotated();
     if let Some(s) = inner.as_string() {
         return s.to_string();

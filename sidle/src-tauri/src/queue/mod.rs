@@ -36,7 +36,7 @@ impl QueueHandle {
     }
 
     pub async fn set_workers(&self, n: usize) -> Result<()> {
-        let n = n.max(1).min(16);
+        let n = n.clamp(1, 16);
         self.tx.send(QueueMsg::SetWorkers(n)).await?;
         *self.workers.lock().await = n;
         Ok(())

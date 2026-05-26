@@ -49,7 +49,11 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn parse(suffix: &str) -> Self {
+    /// Map a lowercase kind label to a `Kind`. The label is the
+    /// `annotation.personal.<suffix>` segment in a `.yjr`, and equivalently the
+    /// lowercased `Your <Kind>` word in `My Clippings.txt` — the same three
+    /// names, so `clippings.rs` reuses this rather than duplicating the match.
+    pub fn parse(suffix: &str) -> Self {
         match suffix {
             "highlight" => Kind::Highlight,
             "note" => Kind::Note,

@@ -12,11 +12,13 @@ pub mod navigation;
 pub mod output;
 pub mod properties;
 pub mod resources;
+pub mod text_index;
 
 use std::io;
 
 pub use loader::BookData;
 pub use output::EpubOutput;
+pub use text_index::TextIndex;
 
 /// Failure modes for the mechanical port.
 #[derive(Debug)]

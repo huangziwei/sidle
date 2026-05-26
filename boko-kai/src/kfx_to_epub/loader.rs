@@ -215,6 +215,22 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, ConvertError> {
     })
 }
 
+/// An empty `BookData` for unit tests that only exercise logic which doesn't
+/// read fragments (e.g. resolving inline `IonValue::String` content). The
+/// `SymbolTable` fields are private to this module, so this lives here.
+#[cfg(test)]
+pub(crate) fn empty_book_for_test() -> BookData {
+    BookData {
+        by_type: HashMap::new(),
+        raw_media: HashMap::new(),
+        symbols: SymbolTable {
+            base_len: FALLBACK_BASE_LEN,
+            doc_symbols: Vec::new(),
+        },
+        metadata: BookMetadata::default(),
+    }
+}
+
 /// Pick the fragment id for an entity. KFX entities carry their name via the
 /// symbol-table-resolvable `id` field on the index entry; some types nest
 /// the name inside the payload (`resource_name`, `style_name`, etc.) for

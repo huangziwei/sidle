@@ -134,7 +134,7 @@ pub fn pull_one(
     }
 }
 
-fn is_kfx_input(path: &PathBuf) -> bool {
+fn is_kfx_input(path: &Path) -> bool {
     matches!(
         path.extension()
             .and_then(|e| e.to_str())

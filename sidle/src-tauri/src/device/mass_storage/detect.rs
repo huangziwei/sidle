@@ -152,7 +152,7 @@ fn fs_usage(path: &Path) -> Option<(Option<u64>, Option<u64>)> {
             return None;
         }
         let s = s.assume_init();
-        let frsize = s.f_frsize as u64;
+        let frsize = s.f_frsize;
         let free = (s.f_bavail as u64).checked_mul(frsize);
         let total = (s.f_blocks as u64).checked_mul(frsize);
         Some((free, total))

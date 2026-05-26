@@ -108,38 +108,29 @@ pub async fn library_update_metadata(
     patch.title = patch.title.trim().to_string();
     patch.author = patch.author.trim().to_string();
     patch.language = patch.language.trim().to_string();
-    match &mut patch.publisher {
-        Some(s) => {
-            let trimmed = s.trim().to_string();
-            if trimmed.is_empty() {
-                patch.publisher = None;
-            } else {
-                *s = trimmed;
-            }
+    if let Some(s) = &mut patch.publisher {
+        let trimmed = s.trim().to_string();
+        if trimmed.is_empty() {
+            patch.publisher = None;
+        } else {
+            *s = trimmed;
         }
-        None => {}
     }
-    match &mut patch.published_at {
-        Some(s) => {
-            let trimmed = s.trim().to_string();
-            if trimmed.is_empty() {
-                patch.published_at = None;
-            } else {
-                *s = trimmed;
-            }
+    if let Some(s) = &mut patch.published_at {
+        let trimmed = s.trim().to_string();
+        if trimmed.is_empty() {
+            patch.published_at = None;
+        } else {
+            *s = trimmed;
         }
-        None => {}
     }
-    match &mut patch.series_name {
-        Some(s) => {
-            let trimmed = s.trim().to_string();
-            if trimmed.is_empty() {
-                patch.series_name = None;
-            } else {
-                *s = trimmed;
-            }
+    if let Some(s) = &mut patch.series_name {
+        let trimmed = s.trim().to_string();
+        if trimmed.is_empty() {
+            patch.series_name = None;
+        } else {
+            *s = trimmed;
         }
-        None => {}
     }
 
     // Validate.
@@ -468,11 +459,10 @@ pub async fn library_recrawl_cover(
     // color version. Best-effort: log to stderr and continue if the swap
     // fails — the sidecar is what the sidle gallery uses, so a failed
     // EPUB swap doesn't invalidate the user's "Re-fetch cover" action.
-    if let Some(epub) = book.epub_path.as_deref() {
-        if let Err(e) = epub_cover::replace_cover(std::path::Path::new(epub), &bytes, "jpg") {
+    if let Some(epub) = book.epub_path.as_deref()
+        && let Err(e) = epub_cover::replace_cover(std::path::Path::new(epub), &bytes, "jpg") {
             eprintln!("[sidle/recrawl] book {book_id} epub cover swap failed: {e:#}");
         }
-    }
     // And into the imported KFX — that's the copy we push to the Kindle, and
     // its embedded cover drives the home tile / sleep-screen art. Rewriting it
     // changes the bytes, so re-stamp `kfx_sha256` (the on-device filename infix).

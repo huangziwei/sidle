@@ -325,11 +325,10 @@ fn convert_kfx_to_epub(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<P
 /// `[Author] Title (Year)` (import writes it that way), so we fall back to
 /// the stem and only re-derive from metadata if the stem is missing or empty.
 fn derived_basename(book: &BookRow, source: &Path) -> String {
-    if let Some(stem) = source.file_stem().and_then(|s| s.to_str()) {
-        if !stem.is_empty() {
+    if let Some(stem) = source.file_stem().and_then(|s| s.to_str())
+        && !stem.is_empty() {
             return stem.to_string();
         }
-    }
     let authors: Vec<String> = if book.author.is_empty() {
         Vec::new()
     } else {
