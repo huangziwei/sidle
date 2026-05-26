@@ -312,22 +312,26 @@ impl<'a> ContentState<'a> {
             "image" => self.emit_image(fields, part_index)?,
             // $270 container (the most common wrapper).
             "container" => self.emit_container(fields, part_index, &wm, &style_name)?,
-            // $276 list / $277 list_item.
+            // $276 list / $277 listitem. (Match on the KFX symbol NAME that
+            // `text_of` returns — it's "listitem", not "list_item".)
             "list" => self.emit_list(fields, part_index, &wm, &style_name)?,
-            "list_item" => self.emit_list_item(fields, part_index, &wm, &style_name)?,
+            "listitem" => self.emit_list_item(fields, part_index, &wm, &style_name)?,
             // $278 table.
             "table" => self.emit_table(fields, part_index, &wm, &style_name)?,
-            // $454 tbody / $151 thead / $455 tfoot / $279 tr.
-            "table_body" => self.emit_simple_container(fields, part_index, &wm, &style_name, "tbody")?,
-            "table_head" => self.emit_simple_container(fields, part_index, &wm, &style_name, "thead")?,
-            "table_foot" => self.emit_simple_container(fields, part_index, &wm, &style_name, "tfoot")?,
+            // Table sections — KFX symbol names are body/header/footer (NOT
+            // table_body etc.): $454 body→tbody / $151 header→thead /
+            // $455 footer→tfoot / $279 table_row→tr. (calibre yj_to_epub_content
+            // maps $454→tbody, $151→thead, $455→tfoot.)
+            "body" => self.emit_simple_container(fields, part_index, &wm, &style_name, "tbody")?,
+            "header" => self.emit_simple_container(fields, part_index, &wm, &style_name, "thead")?,
+            "footer" => self.emit_simple_container(fields, part_index, &wm, &style_name, "tfoot")?,
             "table_row" => self.emit_table_row(fields, part_index, &wm, &style_name)?,
-            // $596 hr.
+            // $596 horizontal_rule → hr.
             "horizontal_rule" => self.emit_void(fields, part_index, &style_name, "hr")?,
-            // $272 SVG container — emit minimal svg.
-            "kvg_container" => self.emit_svg_container(fields, part_index, &wm)?,
-            // $439 excerpt: hidden div.
-            "excerpt" => self.emit_excerpt(fields, part_index, &wm, &style_name)?,
+            // $272 kvg → minimal svg.
+            "kvg" => self.emit_svg_container(fields, part_index, &wm)?,
+            // $439 zoom_target → hidden div (calibre $439: tag=div, display:none).
+            "zoom_target" => self.emit_excerpt(fields, part_index, &wm, &style_name)?,
             // Unknown / not yet ported: emit a div with the children, log.
             other => {
                 eprintln!("kfx_to_epub: content type {other:?} not yet ported, emitting div");
@@ -1861,4 +1865,42 @@ pub fn emit_stylesheet(state: &ContentState) -> String {
         s.push_str(&format!(".{} {{ {} }}\n", class_name, decl.to_inline()));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::kfx::symbols::KFX_SYMBOL_TABLE;
+
+    /// `process_content`'s dispatch matches on the KFX symbol NAME that
+    /// `text_of` returns. Every arm string must therefore be a real symbol name
+    /// — a mismatch (e.g. matching "list_item" when the symbol is "listitem")
+    /// never fires and the content silently falls to the div fallback, losing
+    /// its semantics. This guards that class of bug. Keep in sync with the match
+    /// in `process_content`.
+    #[test]
+    fn content_type_dispatch_arms_are_real_kfx_symbols() {
+        const ARMS: &[&str] = &[
+            "text",
+            "image",
+            "container",
+            "list",
+            "listitem",
+            "table",
+            "body",
+            "header",
+            "footer",
+            "table_row",
+            "horizontal_rule",
+            "kvg",
+            "zoom_target",
+        ];
+        for arm in ARMS {
+            assert!(
+                KFX_SYMBOL_TABLE.contains(arm),
+                "content-type arm {arm:?} is not a KFX symbol name — it would never \
+                 match and would fall to the div fallback (the 'list_item' vs \
+                 'listitem' bug class)"
+            );
+        }
+    }
 }
