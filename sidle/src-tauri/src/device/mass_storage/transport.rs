@@ -185,7 +185,7 @@ mod tests {
     fn delete_missing_returns_false() {
         let (_tmp, t) = temp_transport();
         let p = TPath::parse("nope.txt");
-        assert_eq!(t.delete(&p).unwrap(), false);
+        assert!(!t.delete(&p).unwrap());
     }
 
     #[test]
@@ -193,7 +193,7 @@ mod tests {
         let (_tmp, t) = temp_transport();
         let p = TPath::parse("x.txt");
         t.write_atomic(&p, b"x").unwrap();
-        assert_eq!(t.delete(&p).unwrap(), true);
+        assert!(t.delete(&p).unwrap());
         assert!(!t.exists(&p).unwrap());
     }
 

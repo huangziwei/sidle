@@ -47,6 +47,9 @@ boko-kai = { path = "../../boko-kai", default-features = false }
 sidle-core = { path = "../core" }
 sidle-server = { path = "../server" }
 tracing = "0.1"
+# Reader resources (images, css) are returned base64-encoded in the reader_open
+# DTO. 0.22 matches sidle-core so we don't pull in two base64 crates.
+base64 = "0.22"
 
 # Pure-Rust MTP transport for Scribe and other 2024+ Kindles that dropped USB
 # mass storage. Pinned exact (young crate, recent API churn) — bump

@@ -84,6 +84,7 @@ pub fn run() {
             commands::server::server_status,
             commands::server::server_start,
             commands::server::server_stop,
+            commands::reader::reader_open,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

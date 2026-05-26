@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn ordinary_io_error_passes_through() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "bus reset");
+        let io_err = std::io::Error::other("bus reset");
         let mapped = map_mtp_err(mtp_rs::Error::Io(io_err));
         let msg = format!("{mapped:#}");
         // No exclusive-access hint for unrelated IO errors.
