@@ -328,6 +328,9 @@ function onKey(e) {
     e.preventDefault();
     return;
   }
+  // Don't hijack modified combos — shift+arrow extends a text selection in the
+  // section iframe, ⌘/ctrl/alt are shortcuts. Let those through.
+  if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
   const rtl = book?.ppd === "rtl"; // vertical-rl / RTL: next page is to the left
   let handled = true;
   switch (e.key) {
@@ -389,6 +392,11 @@ async function open(id) {
     overlays.push({ doc, overlayer });
     paintAnnotations(doc, overlayer);
     doc.addEventListener("click", (e) => onDocClick(e, doc));
+    // The paginator focuses the section iframe after navigating (`focusView`),
+    // so arrow/space keydowns land in the iframe document, not the parent — the
+    // parent-document listener alone would go deaf until you click out (the bug
+    // where arrows stop turning pages). Listen on each section's doc too.
+    doc.addEventListener("keydown", onKey, true);
   });
   paginator.addEventListener("relocate", ({ detail }) => {
     const pct = Math.round((detail.fraction ?? 0) * 100);
