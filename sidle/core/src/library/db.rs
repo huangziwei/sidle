@@ -1010,11 +1010,15 @@ pub fn set_yjr_sync_sha(
 /// rows that were garbage-collected (no device asserts them anymore).
 ///
 /// 1. Mark each current hash seen-now (upsert presence with `last_seen = now`).
-/// 2. Anything still tagged for this `(device, book)` with an older `last_seen`
-///    was deleted on the device since last sync — drop those presence rows.
-/// 3. GC: for each dropped hash, if no device asserts it anymore, delete the
-///    `'yjr'`-sourced annotation row. Native (`'sidle'`) and clipping rows are
-///    never touched. A row still asserted by another device survives.
+/// 2. Drop this `(device, book)`'s presence rows with an older `last_seen` —
+///    those were deleted on the device since the last sync.
+/// 3. GC every `'yjr'` annotation **for this book** that no device asserts (no
+///    presence row left). This reconciles both freshly-deleted rows *and* legacy
+///    rows imported before presence tracking existed — a book still on the
+///    device is mirrored exactly. A row still asserted by another device
+///    survives; native (`'sidle'`) and clipping rows are never touched. Books
+///    not on any connected device are never reconciled (not passed here), so
+///    their annotations are preserved.
 ///
 /// `now` must be unique per sync pass (an ISO timestamp is — two passes never
 /// share one), since step 2 uses it as the "seen this pass" marker.
@@ -1036,37 +1040,30 @@ pub fn reconcile_device_book(
         )?;
     }
 
-    // Stale = this (device, book)'s presence rows not touched this pass.
-    let stale: Vec<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT dedup_hash FROM annotation_device \
-             WHERE device_serial = ?1 AND book_id = ?2 AND last_seen <> ?3",
-        )?;
-        let rows = stmt.query_map(params![device_serial, book_id, now], |r| r.get(0))?;
-        rows.collect::<rusqlite::Result<_>>()?
-    };
+    // Drop this (device, book)'s presence rows not touched this pass (deleted on
+    // the device since last sync).
     conn.execute(
         "DELETE FROM annotation_device \
          WHERE device_serial = ?1 AND book_id = ?2 AND last_seen <> ?3",
         params![device_serial, book_id, now],
     )?;
 
-    let mut removed = Vec::new();
-    for hash in stale {
-        let still_asserted: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM annotation_device WHERE dedup_hash = ?1)",
-            params![hash],
-            |r| r.get(0),
+    // GC every device-sourced annotation for this book that no device asserts
+    // anymore — including legacy rows that predate presence tracking.
+    let removed: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT dedup_hash FROM annotations \
+             WHERE book_id = ?1 AND source = 'yjr' \
+               AND NOT EXISTS (SELECT 1 FROM annotation_device ad WHERE ad.dedup_hash = annotations.dedup_hash)",
         )?;
-        if !still_asserted {
-            let n = conn.execute(
-                "DELETE FROM annotations WHERE dedup_hash = ?1 AND source = 'yjr'",
-                params![hash],
-            )?;
-            if n > 0 {
-                removed.push(hash);
-            }
-        }
+        let rows = stmt.query_map(params![book_id], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for hash in &removed {
+        conn.execute(
+            "DELETE FROM annotations WHERE dedup_hash = ?1 AND source = 'yjr'",
+            params![hash],
+        )?;
     }
     Ok(removed)
 }
@@ -1293,6 +1290,60 @@ mod tests {
         let removed = reconcile_device_book(&conn, "DEV2", book_id, &v(&[]), "t4").unwrap();
         assert_eq!(removed, vec!["h3".to_string()]);
         assert_eq!(hashes(&conn), vec!["h1".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_gcs_legacy_rows_but_spares_native_and_clips() {
+        let conn = fresh_db();
+        let book_id = insert_minimal(&conn, "sha-legacy", "本");
+        let mk = |hash: &str, source: &str| {
+            insert_annotation(
+                &conn,
+                &NewAnnotation {
+                    dedup_hash: hash,
+                    book_id: Some(book_id),
+                    kind: "highlight",
+                    eid_start: Some(1),
+                    off_start: Some(0),
+                    eid_end: Some(1),
+                    off_end: Some(2),
+                    loc_start: None,
+                    loc_end: None,
+                    linear_pos: None,
+                    text: "x",
+                    note_body: None,
+                    color: None,
+                    clip_title: None,
+                    clip_author: None,
+                    added_at: None,
+                    added_raw: None,
+                    imported_at: "t",
+                    source,
+                },
+            )
+            .expect("insert");
+        };
+        // `keep`/`gone` are legacy device imports (no annotation_device rows yet);
+        // `native` is a Sidle-made annotation; `clip` is an orphan archive entry.
+        mk("keep", "yjr");
+        mk("gone", "yjr");
+        mk("native", "sidle");
+        mk("clip", "clippings");
+
+        // The device's current set has only `keep` — `gone` was deleted on-device
+        // before presence tracking existed.
+        let removed =
+            reconcile_device_book(&conn, "DEV1", book_id, &["keep".to_string()], "t1").unwrap();
+        assert_eq!(removed, vec!["gone".to_string()], "legacy device delete reconciled");
+
+        let mut left: Vec<String> = list_annotations_for_book(&conn, book_id)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.dedup_hash)
+            .collect();
+        left.sort();
+        // `gone` removed; `keep` (still on device) + `native` + `clip` survive.
+        assert_eq!(left, vec!["clip".to_string(), "keep".to_string(), "native".to_string()]);
     }
 
     #[test]
