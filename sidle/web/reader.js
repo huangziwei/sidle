@@ -25,6 +25,21 @@ let tocEntries = []; // flat [{ li, sectionIndex }] in TOC order, for active-mar
 let locByEid = null; // Map<eid, linear position> — Kindle "Location" per element
 let maxLoc = 0; // largest position, denominator for whole-book %
 let positionedByDoc = new WeakMap(); // section doc → [{ el, loc }] in doc order (cached)
+let sectionChars = []; // base-text char count per section, for time estimates
+let charsBefore = []; // cumulative chars before section i
+let totalChars = 0;
+let readSpeed = 500; // chars/min reading-speed assumption (language-tuned)
+let lastPos = null; // { loc, index, frac } from the last relocate, for mode cycling
+let progressMode = readSavedProgressMode(); // 0 loc · 1 chapter · 2 book · 3 hidden
+
+function readSavedProgressMode() {
+  try {
+    const n = Number(localStorage.getItem("sidle.reader.progressMode"));
+    return Number.isInteger(n) && n >= 0 && n <= 3 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
 
 const view = () => $("#reader-view");
 
@@ -419,21 +434,67 @@ function locAt(doc, range) {
   return best;
 }
 
-// Update the bottom bar from a relocate event: "Loc N" lower-left, whole-book
-// "P%" lower-right. Loc is hidden when the book carries no positions at all.
+// Reading-speed estimate for the "N min left" modes — chars/min, tuned by
+// script (CJK reads slower per character). A fixed assumption (we don't track
+// the user's real pace yet), so it's an estimate, not Kindle's adaptive one.
+function minsLeft(chars, where) {
+  const m = Math.round(Math.max(0, chars) / readSpeed);
+  if (m < 1) return `Less than a minute left in ${where}`;
+  return `${m} min${m === 1 ? "" : "s"} left in ${where}`;
+}
+
+// Remember the resolved Location + section position on each relocate, then
+// render per the current mode.
 function updateProgress(detail) {
-  const locEl = $("#reader-loc");
-  const pctEl = $("#reader-percent");
-  if (!maxLoc) {
-    if (locEl) locEl.textContent = "";
-    if (pctEl) pctEl.textContent = "";
-    return;
-  }
   const doc = detail?.range?.startContainer?.ownerDocument;
   const loc = doc ? locAt(doc, detail.range) : null;
-  if (locEl) locEl.textContent = loc != null ? `Loc ${loc}` : "";
-  const frac = (loc ?? 0) / maxLoc;
-  if (pctEl) pctEl.textContent = `${Math.min(100, Math.max(0, Math.round(frac * 100)))}%`;
+  lastPos = { loc, index: detail?.index ?? 0, frac: detail?.fraction ?? 0 };
+  renderProgress();
+}
+
+// Four click-cycled modes: 0 Loc · 1 min-left-in-chapter · 2 min-left-in-book ·
+// 3 hidden (both sides blank, bar dimmed but still tappable to cycle back). The
+// right side is the whole-book % in modes 0–2.
+function renderProgress() {
+  const locEl = $("#reader-loc");
+  const pctEl = $("#reader-percent");
+  if (!locEl || !pctEl) return;
+  $("#reader-statusbar")?.classList.toggle("is-hidden", progressMode === 3);
+  if (progressMode === 3 || !lastPos || !maxLoc) {
+    locEl.textContent = "";
+    pctEl.textContent = "";
+    return;
+  }
+  const { loc, index } = lastPos;
+  const frac = Number.isFinite(lastPos.frac) ? Math.min(1, Math.max(0, lastPos.frac)) : 0;
+  pctEl.textContent = `${Math.min(100, Math.max(0, Math.round(((loc ?? 0) / maxLoc) * 100)))}%`;
+  if (progressMode === 0) {
+    locEl.textContent = loc != null ? `Loc ${loc}` : "";
+  } else if (progressMode === 1) {
+    locEl.textContent = minsLeft((sectionChars[index] || 0) * (1 - frac), "chapter");
+  } else {
+    const read = (charsBefore[index] || 0) + (sectionChars[index] || 0) * frac;
+    locEl.textContent = minsLeft(totalChars - read, "book");
+  }
+}
+
+// Cycle 0→1→2→3→0 on a tap; remembered across books/sessions.
+function cycleProgressMode() {
+  progressMode = (progressMode + 1) % 4;
+  try {
+    localStorage.setItem("sidle.reader.progressMode", String(progressMode));
+  } catch {
+    /* ignore storage errors */
+  }
+  renderProgress();
+}
+
+// Base-text char count of a section (ruby `<rt>` excluded, whitespace collapsed)
+// — the content measure behind the time estimates.
+function baseTextLen(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("rt").forEach((el) => el.remove());
+  return (doc.body?.textContent || "").replace(/\s+/g, " ").trim().length;
 }
 
 // ---- navigation -----------------------------------------------------------
@@ -506,6 +567,16 @@ async function open(id) {
   locByEid = new Map(dto.locations || []);
   maxLoc = dto.max_location || 0;
   positionedByDoc = new WeakMap();
+  sectionChars = dto.sections.map((sec) => baseTextLen(sec.html));
+  charsBefore = [];
+  let cumChars = 0;
+  for (const n of sectionChars) {
+    charsBefore.push(cumChars);
+    cumChars += n;
+  }
+  totalChars = cumChars;
+  readSpeed = /^(ja|zh|ko)/i.test(dto.language || "") ? 500 : 1100;
+  lastPos = null;
   book = makeKfxBook(dto);
 
   $("#reader-title").textContent = dto.title || "Untitled";
@@ -567,6 +638,10 @@ async function close() {
   locByEid = null;
   maxLoc = 0;
   positionedByDoc = new WeakMap();
+  sectionChars = [];
+  charsBefore = [];
+  totalChars = 0;
+  lastPos = null;
   if ($("#reader-loc")) $("#reader-loc").textContent = "";
   if ($("#reader-percent")) $("#reader-percent").textContent = "";
   hideNotePopover();
@@ -585,6 +660,7 @@ function wire() {
   // in a vertical-rl / RTL book, prev otherwise), mirroring the arrow keys.
   $("#reader-nav-left")?.addEventListener("click", () => (book?.ppd === "rtl" ? forward() : back()));
   $("#reader-nav-right")?.addEventListener("click", () => (book?.ppd === "rtl" ? back() : forward()));
+  $("#reader-statusbar")?.addEventListener("click", () => cycleProgressMode());
   $("#reader-annotations")?.addEventListener("click", () => toggleAnnotationsPanel());
   $("#reader-annotations-close")?.addEventListener("click", () => hideAnnotationsPanel());
   $("#reader-toc")?.addEventListener("click", () => toggleTocPanel());

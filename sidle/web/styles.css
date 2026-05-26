@@ -1803,6 +1803,12 @@ button {
   color: #5a544b;
   background: #ffffff;
   border-top: 1px solid #e2ddd4;
+  cursor: pointer;
+  user-select: none;
+}
+.reader-statusbar.is-hidden {
+  background: transparent;
+  border-top-color: transparent;
 }
 .reader-status-loc,
 .reader-status-pct { white-space: nowrap; }
