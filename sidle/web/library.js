@@ -1806,15 +1806,21 @@ function subscribePullProgress() {
 // when the auto sync didn't catch something. Either way it's idempotent.
 // ---------------------------------------------------------------------------
 
-// Turn a DeviceImportReport into a one-line summary for the toast.
+// Turn a DeviceImportReport into a one-line summary for the toast. Reports both
+// new annotations and ones removed because they were deleted on the device
+// (full-mirror sync), so a delete-only sync isn't silently "up to date".
 function annotationSyncSummary(report) {
   const added = (report?.annotations?.inserted ?? 0) + (report?.clippings?.inserted ?? 0);
-  if (added === 0) return "Highlights already up to date";
+  const removed = report?.annotations?.removed ?? 0;
+  if (added === 0 && removed === 0) return "Highlights already up to date";
   const books = report?.matched ?? 0;
-  const noun = added === 1 ? "annotation" : "annotations";
-  return books > 0
-    ? `Synced ${added} ${noun} from ${books} book${books === 1 ? "" : "s"}`
-    : `Synced ${added} ${noun}`;
+  const from = books > 0 ? ` across ${books} book${books === 1 ? "" : "s"}` : "";
+  const noun = added + removed === 1 ? "annotation" : "annotations";
+  const bits = [];
+  if (added > 0) bits.push(`synced ${added}`);
+  if (removed > 0) bits.push(`removed ${removed}`);
+  const s = `${bits.join(", ")} ${noun}${from}`;
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 // Manual re-sync from the device popover button.
@@ -1854,9 +1860,10 @@ function subscribeAnnotationSync() {
     renderQueue();
     const report = e.payload;
     const added = (report?.annotations?.inserted ?? 0) + (report?.clippings?.inserted ?? 0);
-    // Only toast when the auto sync actually brought something new in — a
-    // no-op reconnect shouldn't nag.
-    if (added > 0) showToast(annotationSyncSummary(report));
+    const removed = report?.annotations?.removed ?? 0;
+    // Only toast when the auto sync actually changed something (added or removed
+    // on the device) — a no-op reconnect shouldn't nag.
+    if (added > 0 || removed > 0) showToast(annotationSyncSummary(report));
     // If the user is reading one of the synced books, repaint in place.
     window.sidleReader?.reloadAnnotations?.();
   });

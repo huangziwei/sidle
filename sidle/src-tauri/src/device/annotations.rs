@@ -83,13 +83,13 @@ pub fn import_device_annotations(
     match device.mass_storage_mount() {
         Some(mount) => {
             let conn = db.blocking_lock();
-            ingest::import_from_device(&conn, &mount, &now)
+            ingest::import_from_device(&conn, &mount, &device.serial, &now)
         }
         None => {
             let transport = device.open_transport()?;
             let (collected, clippings) = collect_device_yjr(transport.as_ref())?;
             let conn = db.blocking_lock();
-            ingest::import_collected(&conn, collected, clippings.as_deref(), &now)
+            ingest::import_collected(&conn, collected, clippings.as_deref(), &device.serial, &now)
         }
     }
 }

@@ -45,6 +45,9 @@ pub struct ImportStats {
     /// Span-bearing records (highlight/note) whose text didn't resolve (eid not
     /// in this book's KFX) — still inserted, but flagged here for the caller.
     pub unresolved: usize,
+    /// Annotation rows removed because they were deleted on the device and no
+    /// other device still asserts them (full-mirror delete-propagation).
+    pub removed: usize,
 }
 
 impl ImportStats {
@@ -53,6 +56,7 @@ impl ImportStats {
         self.inserted += other.inserted;
         self.duplicate += other.duplicate;
         self.unresolved += other.unresolved;
+        self.removed += other.removed;
     }
 }
 
@@ -175,10 +179,13 @@ pub fn import_yjr(
     book_id: Option<i64>,
     clip_title: Option<&str>,
     clip_author: Option<&str>,
+    device_serial: Option<&str>,
     now: &str,
 ) -> rusqlite::Result<ImportStats> {
     let book_key = clip_title.map(match_key).unwrap_or_default();
     let mut stats = ImportStats::default();
+    // The device's full current set for this book — feeds delete-reconcile.
+    let mut current_hashes = Vec::with_capacity(annotations.len());
 
     for ann in annotations {
         let r = anchor::resolve(ann, idx);
@@ -214,7 +221,18 @@ pub fn import_yjr(
         } else {
             stats.duplicate += 1;
         }
+        current_hashes.push(hash);
     }
+
+    // Delete-propagation: reconcile this device's asserted set for the book, so
+    // annotations deleted on the device (and held by no other device) are
+    // removed. Only when both device and book are known — orphan imports
+    // (`book_id` None) and clipping archives carry no device authority.
+    if let (Some(serial), Some(bid)) = (device_serial, book_id) {
+        let removed = db::reconcile_device_book(conn, serial, bid, &current_hashes, now)?;
+        stats.removed += removed.len();
+    }
+
     Ok(stats)
 }
 
@@ -374,6 +392,7 @@ pub fn import_collected(
     conn: &Connection,
     collected: Vec<CollectedYjr>,
     clippings_txt: Option<&str>,
+    device_serial: &str,
     now: &str,
 ) -> anyhow::Result<DeviceImportReport> {
     let mut report = DeviceImportReport::default();
@@ -392,11 +411,12 @@ pub fn import_collected(
         report.matched += 1;
 
         // Cheap skip before the expensive `build_index` (which parses the full
-        // library KFX): if this book's on-device `.yjr` is byte-for-byte what we
-        // imported last time, there's nothing new. The bytes are already in hand
-        // (the `.yjr` is tiny — KB), so this is just a hash + compare.
+        // library KFX): if this device's on-device `.yjr` is byte-for-byte what
+        // we imported last time, there's nothing new (no inserts, and no deletes
+        // to reconcile). The bytes are already in hand (the `.yjr` is tiny — KB),
+        // so this is just a hash + compare. Keyed per device.
         let yjr_sha = super::import::sha256_of_bytes(&item.yjr_bytes);
-        if db::get_yjr_sync_sha(conn, book.id)
+        if db::get_yjr_sync_sha(conn, device_serial, book.id)
             .context("read yjr sync checkpoint")?
             .as_deref()
             == Some(yjr_sha.as_str())
@@ -414,12 +434,14 @@ pub fn import_collected(
             Some(book.id),
             Some(&book.title),
             Some(&book.author),
+            Some(device_serial),
             now,
         )
         .context("import yjr annotations")?;
         report.annotations.merge(stats);
-        // Checkpoint so the next connect skips this `.yjr` unless it changes.
-        db::set_yjr_sync_sha(conn, book.id, &yjr_sha, now)
+        // Checkpoint so this device's next connect skips this `.yjr` unless it
+        // changes.
+        db::set_yjr_sync_sha(conn, device_serial, book.id, &yjr_sha, now)
             .context("record yjr sync checkpoint")?;
     }
 
@@ -447,6 +469,7 @@ pub fn import_collected(
 pub fn import_from_device(
     conn: &Connection,
     device_root: &Path,
+    device_serial: &str,
     now: &str,
 ) -> anyhow::Result<DeviceImportReport> {
     let sidle_dir = device_root.join("documents").join("Sidle");
@@ -480,7 +503,7 @@ pub fn import_from_device(
         .ok()
         .map(|b| String::from_utf8_lossy(&b).into_owned());
 
-    import_collected(conn, collected, clippings_txt.as_deref(), now)
+    import_collected(conn, collected, clippings_txt.as_deref(), device_serial, now)
 }
 
 /// The `.sdr` filename's `kfx_sha256` infix: the hex segment before `.sdr`. Only
@@ -606,10 +629,10 @@ mod tests {
         let conn = mem_db();
         let book = add_book(&conn, "B");
         let anns = vec![highlight(10, 0, 4)]; // "Hello" (inclusive end → +1)
-        let s1 = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, "t0").unwrap();
+        let s1 = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, None, "t0").unwrap();
         assert_eq!((s1.inserted, s1.duplicate), (1, 0));
         // Re-import: same dedup_hash → no new row.
-        let s2 = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, "t1").unwrap();
+        let s2 = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, None, "t1").unwrap();
         assert_eq!((s2.inserted, s2.duplicate), (0, 1));
 
         let stored = db::list_annotations_for_book(&conn, book).unwrap();
@@ -619,11 +642,39 @@ mod tests {
     }
 
     #[test]
+    fn device_delete_propagates_through_import_yjr() {
+        let conn = mem_db();
+        let book = add_book(&conn, "B");
+
+        // DEV1's first sync: two annotations.
+        let first = vec![highlight(10, 0, 4), highlight(20, 0, 4)];
+        let s1 = import_yjr(&conn, &first, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t1").unwrap();
+        assert_eq!((s1.inserted, s1.removed), (2, 0));
+        assert_eq!(db::list_annotations_for_book(&conn, book).unwrap().len(), 2);
+
+        // Next DEV1 sync: the second annotation was deleted on the device → GC'd.
+        let second = vec![highlight(10, 0, 4)];
+        let s2 = import_yjr(&conn, &second, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t2").unwrap();
+        assert_eq!(s2.removed, 1, "deleted-on-device annotation is removed");
+        assert_eq!(db::list_annotations_for_book(&conn, book).unwrap().len(), 1);
+
+        // An import with no device serial (orphan/clipping path) never reconciles
+        // — add-only, as before. An empty set must not wipe the survivor.
+        let s3 = import_yjr(&conn, &[], &idx(), Some(book), Some("B"), None, None, "t3").unwrap();
+        assert_eq!(s3.removed, 0);
+        assert_eq!(
+            db::list_annotations_for_book(&conn, book).unwrap().len(),
+            1,
+            "deviceless import never deletes"
+        );
+    }
+
+    #[test]
     fn unresolved_highlight_is_counted_but_still_stored() {
         let conn = mem_db();
         let book = add_book(&conn, "B");
         let anns = vec![highlight(999, 0, 4)]; // eid not in the index
-        let s = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, "t").unwrap();
+        let s = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, None, "t").unwrap();
         assert_eq!(s.unresolved, 1);
         assert_eq!(s.inserted, 1);
         assert_eq!(db::list_annotations_for_book(&conn, book).unwrap()[0].text, "");
@@ -686,7 +737,7 @@ mod tests {
             ],
             note_body: Some("a thought".to_string()),
         });
-        import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, "t").unwrap();
+        import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, None, "t").unwrap();
         let md = export_book_markdown(&conn, book).unwrap();
         assert!(md.contains("# B"));
         assert!(md.contains("- Hello"));
@@ -751,7 +802,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = import_from_device(&conn, kindle, "now").unwrap();
+        let report = import_from_device(&conn, kindle, "DEV", "now").unwrap();
         assert!(report.matched >= 1, "bungaku .sdr should match by infix");
 
         let book = db::find_by_kfx_sha_prefix(&conn, "7f4e9d33").unwrap().unwrap();
@@ -824,14 +875,14 @@ mod tests {
         )
         .unwrap();
 
-        let r1 = import_from_device(&conn, root.path(), "now").unwrap();
+        let r1 = import_from_device(&conn, root.path(), "DEV", "now").unwrap();
         assert_eq!(r1.matched, 1);
         assert_eq!(r1.unchanged, 0);
         assert!(r1.annotations.inserted >= 1, "first import should insert the bookmark");
-        assert!(db::get_yjr_sync_sha(&conn, book_id).unwrap().is_some(), "checkpoint recorded");
+        assert!(db::get_yjr_sync_sha(&conn, "DEV", book_id).unwrap().is_some(), "checkpoint recorded");
 
         // Identical `.yjr` on the next connect → skipped, nothing inserted.
-        let r2 = import_from_device(&conn, root.path(), "now").unwrap();
+        let r2 = import_from_device(&conn, root.path(), "DEV", "now").unwrap();
         assert_eq!(r2.matched, 1);
         assert_eq!(r2.unchanged, 1);
         assert_eq!(r2.annotations.inserted, 0);

@@ -169,16 +169,21 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             updated_at  TEXT NOT NULL
         );
 
-        -- Per-book checkpoint of the last `.yjr` we imported, keyed by its
-        -- content hash. Lets the device sync skip rebuilding a book's TextIndex
-        -- (the expensive part — it parses the full library KFX) when the
-        -- on-device annotations haven't changed since the last connect. Same
-        -- idea as the dedrm autopull skipping files already in the library.
-        CREATE TABLE IF NOT EXISTS yjr_sync (
-            book_id    INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
-            yjr_sha    TEXT NOT NULL,
-            synced_at  TEXT NOT NULL
+        -- Which devices currently assert each annotation (stable dedup_hash +
+        -- USB serial). A device import is a per-(device,book) authoritative
+        -- set: on sync we mark the current ones seen, drop the rest, and GC any
+        -- annotation no device asserts anymore — so deleting on a device (e.g. a
+        -- transient bookmark) propagates, while one still present on another
+        -- device survives. Additive; never part of the destructive reset.
+        CREATE TABLE IF NOT EXISTS annotation_device (
+            dedup_hash    TEXT NOT NULL,
+            device_serial TEXT NOT NULL,
+            book_id       INTEGER,
+            last_seen     TEXT NOT NULL,
+            PRIMARY KEY (dedup_hash, device_serial)
         );
+        CREATE INDEX IF NOT EXISTS idx_annotation_device_dev
+            ON annotation_device(device_serial, book_id);
         "#,
     )?;
 
@@ -209,6 +214,25 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "books", "kfx_sha256")? {
         conn.execute("ALTER TABLE books ADD COLUMN kfx_sha256 TEXT", [])?;
     }
+
+    // `yjr_sync` gained a per-device dimension: the checkpoint of the last
+    // imported `.yjr` is now keyed by (device_serial, book_id), so two devices
+    // holding the same book no longer clobber each other's "unchanged" marker.
+    // The old shape was keyed by book_id alone; drop it if found (it's only a
+    // cache — a lost checkpoint just re-syncs once) and recreate.
+    if !has_column(conn, "yjr_sync", "device_serial")? {
+        conn.execute("DROP TABLE IF EXISTS yjr_sync", [])?;
+    }
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS yjr_sync (
+            device_serial TEXT NOT NULL,
+            book_id       INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            yjr_sha       TEXT NOT NULL,
+            synced_at     TEXT NOT NULL,
+            PRIMARY KEY (device_serial, book_id)
+        )"#,
+        [],
+    )?;
 
     Ok(())
 }
@@ -944,33 +968,107 @@ pub fn set_reading_position(
     Ok(())
 }
 
-/// The content hash of the `.yjr` last imported for `book_id`, if we've ever
-/// synced it. The device import compares this against the hash of the file on
-/// the Kindle to decide whether anything changed.
-pub fn get_yjr_sync_sha(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<String>> {
+/// The content hash of the `.yjr` last imported for `(device_serial, book_id)`,
+/// if that device has ever synced it. The device import compares this against
+/// the hash of the file on the Kindle to decide whether anything changed. Keyed
+/// per device so two Kindles holding the same book don't clobber each other's
+/// checkpoint.
+pub fn get_yjr_sync_sha(
+    conn: &Connection,
+    device_serial: &str,
+    book_id: i64,
+) -> rusqlite::Result<Option<String>> {
     conn.query_row(
-        "SELECT yjr_sha FROM yjr_sync WHERE book_id = ?1",
-        params![book_id],
+        "SELECT yjr_sha FROM yjr_sync WHERE device_serial = ?1 AND book_id = ?2",
+        params![device_serial, book_id],
         |row| row.get(0),
     )
     .optional()
 }
 
-/// Record the `.yjr` content hash imported for `book_id` (upsert).
+/// Record the `.yjr` content hash imported for `(device_serial, book_id)` (upsert).
 pub fn set_yjr_sync_sha(
     conn: &Connection,
+    device_serial: &str,
     book_id: i64,
     yjr_sha: &str,
     now: &str,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        r#"INSERT INTO yjr_sync (book_id, yjr_sha, synced_at) VALUES (?1, ?2, ?3)
-            ON CONFLICT(book_id) DO UPDATE SET
+        r#"INSERT INTO yjr_sync (device_serial, book_id, yjr_sha, synced_at) VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(device_serial, book_id) DO UPDATE SET
                 yjr_sha = excluded.yjr_sha,
                 synced_at = excluded.synced_at"#,
-        params![book_id, yjr_sha, now],
+        params![device_serial, book_id, yjr_sha, now],
     )?;
     Ok(())
+}
+
+/// Reconcile one device's annotation presence for a book against the set it
+/// currently asserts (`current_hashes` = the dedup_hashes in the device's
+/// `.yjr` for this book, just imported). Returns the dedup_hashes of annotation
+/// rows that were garbage-collected (no device asserts them anymore).
+///
+/// 1. Mark each current hash seen-now (upsert presence with `last_seen = now`).
+/// 2. Anything still tagged for this `(device, book)` with an older `last_seen`
+///    was deleted on the device since last sync — drop those presence rows.
+/// 3. GC: for each dropped hash, if no device asserts it anymore, delete the
+///    `'yjr'`-sourced annotation row. Native (`'sidle'`) and clipping rows are
+///    never touched. A row still asserted by another device survives.
+///
+/// `now` must be unique per sync pass (an ISO timestamp is — two passes never
+/// share one), since step 2 uses it as the "seen this pass" marker.
+pub fn reconcile_device_book(
+    conn: &Connection,
+    device_serial: &str,
+    book_id: i64,
+    current_hashes: &[String],
+    now: &str,
+) -> rusqlite::Result<Vec<String>> {
+    for hash in current_hashes {
+        conn.execute(
+            r#"INSERT INTO annotation_device (dedup_hash, device_serial, book_id, last_seen)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(dedup_hash, device_serial) DO UPDATE SET
+                    book_id = excluded.book_id,
+                    last_seen = excluded.last_seen"#,
+            params![hash, device_serial, book_id, now],
+        )?;
+    }
+
+    // Stale = this (device, book)'s presence rows not touched this pass.
+    let stale: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT dedup_hash FROM annotation_device \
+             WHERE device_serial = ?1 AND book_id = ?2 AND last_seen <> ?3",
+        )?;
+        let rows = stmt.query_map(params![device_serial, book_id, now], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    conn.execute(
+        "DELETE FROM annotation_device \
+         WHERE device_serial = ?1 AND book_id = ?2 AND last_seen <> ?3",
+        params![device_serial, book_id, now],
+    )?;
+
+    let mut removed = Vec::new();
+    for hash in stale {
+        let still_asserted: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM annotation_device WHERE dedup_hash = ?1)",
+            params![hash],
+            |r| r.get(0),
+        )?;
+        if !still_asserted {
+            let n = conn.execute(
+                "DELETE FROM annotations WHERE dedup_hash = ?1 AND source = 'yjr'",
+                params![hash],
+            )?;
+            if n > 0 {
+                removed.push(hash);
+            }
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -1114,14 +1212,87 @@ mod tests {
     fn yjr_sync_sha_upserts() {
         let conn = fresh_db();
         let book_id = insert_minimal(&conn, "sha-yjr", "栞本");
-        assert!(get_yjr_sync_sha(&conn, book_id).expect("get").is_none());
+        assert!(get_yjr_sync_sha(&conn, "DEV1", book_id).expect("get").is_none());
 
-        set_yjr_sync_sha(&conn, book_id, "abc123", "t1").expect("set");
-        assert_eq!(get_yjr_sync_sha(&conn, book_id).expect("get").as_deref(), Some("abc123"));
+        set_yjr_sync_sha(&conn, "DEV1", book_id, "abc123", "t1").expect("set");
+        assert_eq!(get_yjr_sync_sha(&conn, "DEV1", book_id).expect("get").as_deref(), Some("abc123"));
 
-        // A changed `.yjr` overwrites the checkpoint (PRIMARY KEY upsert).
-        set_yjr_sync_sha(&conn, book_id, "def456", "t2").expect("set2");
-        assert_eq!(get_yjr_sync_sha(&conn, book_id).expect("get").as_deref(), Some("def456"));
+        // A changed `.yjr` overwrites this device's checkpoint (composite-PK upsert).
+        set_yjr_sync_sha(&conn, "DEV1", book_id, "def456", "t2").expect("set2");
+        assert_eq!(get_yjr_sync_sha(&conn, "DEV1", book_id).expect("get").as_deref(), Some("def456"));
+
+        // A different device keeps its own checkpoint — no clobber.
+        assert!(get_yjr_sync_sha(&conn, "DEV2", book_id).expect("get").is_none());
+        set_yjr_sync_sha(&conn, "DEV2", book_id, "zzz", "t3").expect("set3");
+        assert_eq!(get_yjr_sync_sha(&conn, "DEV1", book_id).expect("get").as_deref(), Some("def456"));
+        assert_eq!(get_yjr_sync_sha(&conn, "DEV2", book_id).expect("get").as_deref(), Some("zzz"));
+    }
+
+    #[test]
+    fn reconcile_propagates_device_deletes_but_keeps_shared() {
+        let conn = fresh_db();
+        let book_id = insert_minimal(&conn, "sha-recon", "本");
+        let mk = |hash: &str| {
+            insert_annotation(
+                &conn,
+                &NewAnnotation {
+                    dedup_hash: hash,
+                    book_id: Some(book_id),
+                    kind: "bookmark",
+                    eid_start: Some(1),
+                    off_start: Some(0),
+                    eid_end: None,
+                    off_end: None,
+                    loc_start: None,
+                    loc_end: None,
+                    linear_pos: None,
+                    text: "",
+                    note_body: None,
+                    color: None,
+                    clip_title: None,
+                    clip_author: None,
+                    added_at: None,
+                    added_raw: None,
+                    imported_at: "t",
+                    source: "yjr",
+                },
+            )
+            .expect("insert");
+        };
+        mk("h1");
+        mk("h2");
+        mk("h3");
+        let hashes = |conn: &Connection| -> Vec<String> {
+            list_annotations_for_book(conn, book_id)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.dedup_hash)
+                .collect()
+        };
+        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+
+        // DEV1's first sync asserts all three — nothing removed.
+        let removed = reconcile_device_book(&conn, "DEV1", book_id, &v(&["h1", "h2", "h3"]), "t1").unwrap();
+        assert!(removed.is_empty());
+        // DEV2 also holds h3 (same bookmark on both devices).
+        reconcile_device_book(&conn, "DEV2", book_id, &v(&["h3"]), "t1b").unwrap();
+
+        // h2 deleted on DEV1 → no other device holds it → GC'd.
+        let removed = reconcile_device_book(&conn, "DEV1", book_id, &v(&["h1", "h3"]), "t2").unwrap();
+        assert_eq!(removed, vec!["h2".to_string()]);
+        let h = hashes(&conn);
+        assert!(!h.contains(&"h2".to_string()));
+        assert!(h.contains(&"h1".to_string()) && h.contains(&"h3".to_string()));
+
+        // h3 deleted on DEV1, but DEV2 still asserts it → survives.
+        let removed = reconcile_device_book(&conn, "DEV1", book_id, &v(&["h1"]), "t3").unwrap();
+        assert!(removed.is_empty(), "h3 is still on DEV2");
+        assert!(hashes(&conn).contains(&"h3".to_string()));
+
+        // Now DEV2 drops h3 too → no device holds it → GC'd.
+        let removed = reconcile_device_book(&conn, "DEV2", book_id, &v(&[]), "t4").unwrap();
+        assert_eq!(removed, vec!["h3".to_string()]);
+        assert_eq!(hashes(&conn), vec!["h1".to_string()]);
     }
 
     #[test]

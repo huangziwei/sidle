@@ -284,14 +284,25 @@ function hideAnnotationsPanel() {
 }
 
 // Re-fetch + repaint when a device sync lands while this book is open, so new
-// highlights show up without forcing the reader closed. No-op for other books.
+// highlights show up — and ones deleted on the device (full-mirror sync)
+// disappear — without forcing the reader closed. No-op for other books.
 async function reloadAnnotations(forBookId) {
   if (bookId == null) return;
   if (forBookId != null && forBookId !== bookId) return;
+  const prevIds = annotations.map((a) => a.id);
+  let next;
   try {
-    annotations = (await window.api.invoke("annotations_for_book", { bookId })) || [];
+    next = (await window.api.invoke("annotations_for_book", { bookId })) || [];
   } catch {
     return;
+  }
+  annotations = next;
+  // Clear overlays for annotations the sync removed (overlayer.add only adds /
+  // replaces by key, so a vanished annotation would otherwise linger painted).
+  const live = new Set(annotations.map((a) => a.id));
+  const gone = prevIds.filter((id) => !live.has(id));
+  for (const { overlayer } of overlays) {
+    for (const id of gone) overlayer.remove(`ann-${id}`);
   }
   for (const { doc, overlayer } of overlays) paintAnnotations(doc, overlayer);
   renderAnnotationsPanel();
