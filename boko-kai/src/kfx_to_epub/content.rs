@@ -77,6 +77,13 @@ pub struct ContentState<'a> {
 
     /// Tracks which KFX styles have been used (for emit-only-used-classes).
     pub used_kfx_styles: Vec<String>,
+
+    /// Reader render mode: when true, every content element with a `$155 id`
+    /// (the KFX `eid`) is stamped with `data-eid="<eid>"` so the Sidle reader
+    /// can resolve an annotation's `(eid, offset)` to a live DOM `Range`. The
+    /// shippable EPUB export leaves this `false` (no attribute bloat). Set by
+    /// `kfx_to_reader_book` via `build_output(.., stamp_eids = true)`.
+    pub stamp_eids: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +127,7 @@ impl<'a> ContentState<'a> {
             link_ids: HashMap::new(),
             used_kfx_styles: Vec::new(),
             element_id_to_filename: HashMap::new(),
+            stamp_eids: false,
         }
     }
 
@@ -362,7 +370,23 @@ impl<'a> ContentState<'a> {
         // Partial-offset positions (offset > 0 from `locate_offset`)
         // are deferred to task #11 (split_span for partial-text ruby
         // covers the same machinery).
-        if let Some(loc_id) = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int())
+        let loc_id = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int());
+
+        // `data-eid` stamping (reader render mode only). Every content struct
+        // with a `$155 id` carries its eid into the DOM so the reader can map
+        // an annotation's `(eid, offset)` to a `Range`. These are exactly the
+        // addressable elements: annotation eids and `position_id_map` keys are
+        // the same `$155 id`s. Off for the shippable EPUB export.
+        if self.stamp_eids
+            && let Some(eid) = loc_id
+        {
+            self.book_parts[part_index]
+                .dom
+                .get_mut(elem_id)
+                .set("data-eid", eid.to_string());
+        }
+
+        if let Some(loc_id) = loc_id
             && let Some(anchor_id) = self.anchors.id_at(loc_id, 0)
         {
             let dom_ref = &mut self.book_parts[part_index].dom;

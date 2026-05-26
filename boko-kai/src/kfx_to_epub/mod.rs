@@ -11,6 +11,7 @@ pub mod loader;
 pub mod navigation;
 pub mod output;
 pub mod properties;
+pub mod reader;
 pub mod resources;
 pub mod text_index;
 
@@ -18,6 +19,7 @@ use std::io;
 
 pub use loader::BookData;
 pub use output::EpubOutput;
+pub use reader::{ReaderBook, ReaderResource, ReaderSection, kfx_to_reader_book};
 pub use text_index::TextIndex;
 
 /// Failure modes for the mechanical port.
@@ -63,6 +65,21 @@ impl From<io::Error> for ConvertError {
 ///
 /// We follow the same shape; missing steps are TODOs in the relevant modules.
 pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
+    let (out, book, _toc) = build_output(kfx_bytes, false)?;
+    out.finalize(&book.metadata).map_err(ConvertError::Io)
+}
+
+/// Shared front half of the pipeline: load → resources → content → stylesheet →
+/// per-section XHTML → navigation, stopping *before* the EPUB zip.
+/// `convert_to_epub` finalizes the returned [`EpubOutput`] into a zip;
+/// [`reader::kfx_to_reader_book`] instead extracts the sections / resources /
+/// toc for the Sidle reader. `stamp_eids` toggles `data-eid` attributes — on for
+/// the reader (so `(eid, offset)` annotations resolve to DOM Ranges), off for the
+/// shippable EPUB export (no attribute bloat).
+pub(crate) fn build_output(
+    kfx_bytes: &[u8],
+    stamp_eids: bool,
+) -> Result<(EpubOutput, BookData, Vec<navigation::NavPoint>), ConvertError> {
     let trace = crate::trace::Trace::new("kfx2epub", "BOKO_KFX2EPUB_TRACE");
     let book = loader::load(kfx_bytes)?;
     trace.mark("loader::load");
@@ -74,6 +91,7 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
 
     // Content (storyline → XHTML).
     let mut content_state = content::ContentState::new(&book, &resources);
+    content_state.stamp_eids = stamp_eids;
     content_state.process_reading_order()?;
     trace.mark("content::process_reading_order");
     // Rewrite `<a href="anchor:NAME">` placeholders (emitted by
@@ -202,9 +220,10 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
     // OPF hint for vertical books (calibre's `epub_output.py:955`).
     out.writing_mode = Some(content_state.writing_mode.clone());
 
-    let bytes = out.finalize(&book.metadata).map_err(ConvertError::Io)?;
-    trace.mark("output::finalize (zip)");
-    Ok(bytes)
+    // Release the `&book` / `&resources` borrows held by `content_state` so we
+    // can move `book` into the return tuple.
+    drop(content_state);
+    Ok((out, book, toc))
 }
 
 /// Build calibre-style `titlepage.xhtml`: an SVG viewBox sized to the

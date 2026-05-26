@@ -674,7 +674,7 @@ function galleryCard(b) {
   card.appendChild(meta);
 
   card.addEventListener("click", (e) => onItemClick(e, b));
-  card.addEventListener("dblclick", () => openInFinder(b.id));
+  card.addEventListener("dblclick", () => openReader(b));
   card.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     onItemContext(e, b);
@@ -793,7 +793,7 @@ function listRow(b, visibleCols) {
   }
 
   tr.addEventListener("click", (e) => onItemClick(e, b));
-  tr.addEventListener("dblclick", () => openInFinder(b.id));
+  tr.addEventListener("dblclick", () => openReader(b));
   tr.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     onItemContext(e, b);
@@ -1925,6 +1925,7 @@ function openContextMenu(x, y, b) {
     add(menu, `Remove ${sel.length} from library`, () => bulkRemove(), true);
   } else {
     // Single-item menu.
+    add(menu, "Read", () => openReader(b));
     if (state.device && b.status === "done") {
       if (state.sentSet.has(b.sha256)) {
         const row = state.sent.find(
@@ -2275,6 +2276,14 @@ async function openInFinder(bookId) {
   } catch (e) {
     showToast(`open failed: ${e}`, true);
   }
+}
+
+// Open a book in the built-in reader. `reader.js` (an ES module) installs
+// `window.sidleReader`; it loads after this classic script, so it's always
+// present by the time a card is clicked.
+function openReader(b) {
+  if (window.sidleReader) window.sidleReader.open(b.id);
+  else showToast("reader not ready", true);
 }
 
 async function retryConvert(bookId) {

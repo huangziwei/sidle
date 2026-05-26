@@ -11,7 +11,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde::Serialize;
 use tauri::State;
 
-use crate::library::db;
+use crate::library::db::{self, AnnotationRow};
 use crate::state::AppState;
 
 /// One spine document in reading order. `html` carries `data-eid` attributes.
@@ -119,4 +119,56 @@ pub async fn reader_open(
     })
     .await
     .map_err(|e| format!("reader task join error: {e}"))?
+}
+
+/// One stored annotation, shaped for the reader's painter + sidebar.
+#[derive(Debug, Serialize)]
+pub struct AnnotationDto {
+    pub id: i64,
+    /// `"highlight"` | `"note"` | `"bookmark"` | other.
+    pub kind: String,
+    pub eid_start: Option<i64>,
+    pub off_start: Option<i64>,
+    pub eid_end: Option<i64>,
+    pub off_end: Option<i64>,
+    pub loc_start: Option<i64>,
+    pub loc_end: Option<i64>,
+    /// Highlighted text (or bookmark/element preview).
+    pub text: String,
+    pub note_body: Option<String>,
+    /// CSS color hint, if the source carried one.
+    pub color: Option<String>,
+    /// `"yjr"` | `"clippings"` — provenance.
+    pub source: String,
+}
+
+impl From<AnnotationRow> for AnnotationDto {
+    fn from(a: AnnotationRow) -> Self {
+        AnnotationDto {
+            id: a.id,
+            kind: a.kind,
+            eid_start: a.eid_start,
+            off_start: a.off_start,
+            eid_end: a.eid_end,
+            off_end: a.off_end,
+            loc_start: a.loc_start,
+            loc_end: a.loc_end,
+            text: a.text,
+            note_body: a.note_body,
+            color: a.color,
+            source: a.source,
+        }
+    }
+}
+
+/// List a book's stored annotations, ordered by reading position. The reader
+/// paints highlights/notes and lists them in the sidebar.
+#[tauri::command]
+pub async fn annotations_for_book(
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<Vec<AnnotationDto>, String> {
+    let conn = state.db.lock().await;
+    let rows = db::list_annotations_for_book(&conn, book_id).map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(AnnotationDto::from).collect())
 }

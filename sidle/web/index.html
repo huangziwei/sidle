@@ -265,7 +265,21 @@
 
     <div id="toast" class="toast" hidden></div>
 
+    <div id="reader-view" class="reader-view" hidden>
+      <header class="reader-topbar">
+        <button id="reader-close" class="reader-btn" title="Close (Esc)" aria-label="Close reader">←</button>
+        <div id="reader-title" class="reader-title"></div>
+        <div class="reader-topbar-right">
+          <button id="reader-prev" class="reader-btn" title="Previous page" aria-label="Previous page">‹</button>
+          <span id="reader-progress" class="reader-progress"></span>
+          <button id="reader-next" class="reader-btn" title="Next page" aria-label="Next page">›</button>
+        </div>
+      </header>
+      <div id="reader-stage" class="reader-stage"></div>
+    </div>
+
     <script src="api.js"></script>
     <script src="library.js"></script>
+    <script type="module" src="reader.js"></script>
   </body>
 </html>

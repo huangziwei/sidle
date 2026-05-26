@@ -267,6 +267,41 @@ impl EpubOutput {
         self.spine.push(id);
     }
 
+    /// Reader-mode extraction: the spine chapters in reading order as
+    /// `(href, xhtml)`. The Sidle reader renders these directly instead of
+    /// zipping them into an EPUB. Chapter data is always UTF-8 (we add it via
+    /// `xhtml.into_bytes()`), so the conversion is lossless.
+    pub fn spine_documents(&self) -> Vec<(String, String)> {
+        self.spine
+            .iter()
+            .filter_map(|id| {
+                let idx = *self.manifest_by_id.get(id)?;
+                let href = self.manifest[idx].href.clone();
+                let file = self.oebps_files.get(&href)?;
+                Some((href, String::from_utf8_lossy(&file.data).into_owned()))
+            })
+            .collect()
+    }
+
+    /// Reader-mode extraction: every non-spine file (images, `style.css`) as
+    /// `(href, mimetype, bytes)`, in insertion order. The reader serves these
+    /// to the render iframe (the chapters reference them by relative href).
+    pub fn non_spine_resources(&self) -> Vec<(String, String, Vec<u8>)> {
+        let spine_hrefs: std::collections::HashSet<&str> = self
+            .spine
+            .iter()
+            .filter_map(|id| self.manifest_by_id.get(id).map(|&i| self.manifest[i].href.as_str()))
+            .collect();
+        self.oebps_order
+            .iter()
+            .filter(|href| !spine_hrefs.contains(href.as_str()))
+            .filter_map(|href| {
+                let file = self.oebps_files.get(href)?;
+                Some((href.clone(), file.mimetype.clone(), file.data.clone()))
+            })
+            .collect()
+    }
+
     /// Finalize: build the EPUB zip in memory.
     pub fn finalize(&self, meta: &BookMetadata) -> std::io::Result<Vec<u8>> {
         let mut buf = Cursor::new(Vec::new());
