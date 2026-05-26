@@ -1059,7 +1059,59 @@ fn extract_doc_data(book: &BookData) -> (String, String) {
     if writing_mode.ends_with("-rl") {
         page_progression_direction = "rtl".to_string();
     }
+    // Writing mode is per-element and heterogeneous (a single book — even a
+    // single section — mixes horizontal and vertical runs), so the document
+    // -level `writing_mode` above is only a default and the `-rl` override
+    // misses books whose document-level mode is `horizontal_tb` while the spine
+    // genuinely reads right-to-left. PPD, by contrast, is a single book-level
+    // value with an explicit field: `reading_orders[*].page_progression_direction`
+    // ($425). Calibre never reads it (it relies solely on the heuristic above —
+    // its blind spot), but it is the authoritative source, so trust it when
+    // present. This is what `validate::metadata::extract_ppd` already reads.
+    if let Some(explicit) = reading_order_ppd(book) {
+        page_progression_direction = explicit;
+    }
     (writing_mode, page_progression_direction)
+}
+
+/// The book-level page-progression direction as declared in the explicit
+/// `reading_orders[*].page_progression_direction` ($425) field — `"rtl"` /
+/// `"ltr"` when found, else `None`. Checks `document_data` ($538) then
+/// `metadata` ($258) reading orders (the field usually lives on the latter).
+/// PPD is one value per book; the first order that declares it wins.
+fn reading_order_ppd(book: &BookData) -> Option<String> {
+    for type_id in [KfxSymbol::DocumentData as u64, KfxSymbol::Metadata as u64] {
+        let Some(map) = book.by_type.get(&type_id) else {
+            continue;
+        };
+        for value in map.values() {
+            let inner = value.unwrap_annotated();
+            let Some(fields) = inner.as_struct() else {
+                continue;
+            };
+            let Some(orders) =
+                get_field(fields, KfxSymbol::ReadingOrders as u64).and_then(|v| v.as_list())
+            else {
+                continue;
+            };
+            for order in orders {
+                let Some(order_fields) = order.as_struct() else {
+                    continue;
+                };
+                if let Some(dir) =
+                    get_field(order_fields, KfxSymbol::PageProgressionDirection as u64)
+                        .and_then(|v| book.symbols.text_of(v))
+                {
+                    match dir {
+                        "rtl" => return Some("rtl".to_string()),
+                        "ltr" => return Some("ltr".to_string()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn extract_reading_orders(book: &BookData) -> Vec<Vec<String>> {

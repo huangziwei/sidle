@@ -219,11 +219,13 @@ fn extract_kfx_ppd(kfx_bytes: &[u8]) -> Result<(Direction, String, String), Stri
         parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
     let doc_data_type = KfxSymbol::DocumentData as u32;
+    let metadata_type = KfxSymbol::Metadata as u32;
     let mut raw_direction = String::new();
     let mut raw_writing_mode = String::new();
+    let mut explicit_ppd: Option<Direction> = None;
 
     for ent in &entities {
-        if ent.type_id != doc_data_type {
+        if ent.type_id != doc_data_type && ent.type_id != metadata_type {
             continue;
         }
         if ent.offset + ent.length > kfx_bytes.len() {
@@ -234,7 +236,10 @@ fn extract_kfx_ppd(kfx_bytes: &[u8]) -> Result<(Direction, String, String), Stri
         let Ok(value) = IonParser::new(ion).parse() else {
             continue;
         };
-        walk_doc_data(&value, &resolve_sym, &mut raw_direction, &mut raw_writing_mode);
+        if ent.type_id == doc_data_type {
+            walk_doc_data(&value, &resolve_sym, &mut raw_direction, &mut raw_writing_mode);
+        }
+        walk_reading_order_ppd(&value, &resolve_sym, &mut explicit_ppd);
     }
 
     // Calibre rule: start with `direction` (default ltr), then override to rtl
@@ -248,6 +253,14 @@ fn extract_kfx_ppd(kfx_bytes: &[u8]) -> Result<(Direction, String, String), Stri
         || raw_writing_mode.trim_start_matches('$').ends_with("-rl")
     {
         ppd = Direction::Rtl;
+    }
+    // The explicit `reading_orders[*].page_progression_direction` ($425) is the
+    // authoritative book-level PPD. Calibre never reads it — it relies solely on
+    // the direction + writing-mode heuristic above, which misses rtl books whose
+    // *document-level* writing mode is `horizontal_tb` (so the `-rl` override
+    // never fires) even though the spine reads right-to-left. Trust it when set.
+    if let Some(explicit) = explicit_ppd {
+        ppd = explicit;
     }
 
     Ok((ppd, raw_direction, raw_writing_mode))
@@ -291,6 +304,42 @@ fn walk_doc_data<F>(
     }
 }
 
+/// Pull the explicit `reading_orders[*].page_progression_direction` ($425) out
+/// of a `document_data` ($538) or `metadata` ($258) Ion struct. PPD is a single
+/// book-level value, so the first order that declares one wins. Mirrors
+/// `validate::metadata::extract_ppd`.
+fn walk_reading_order_ppd<F>(value: &IonValue, resolve_sym: &F, out: &mut Option<Direction>)
+where
+    F: Fn(u64) -> String,
+{
+    let inner = match value {
+        IonValue::Annotated(_, b) => b.as_ref(),
+        v => v,
+    };
+    let IonValue::Struct(fields) = inner else {
+        return;
+    };
+    for (k, v) in fields {
+        if resolve_sym(*k) == "reading_orders"
+            && let IonValue::List(items) = v
+        {
+            for r in items {
+                let IonValue::Struct(rfields) = r else {
+                    continue;
+                };
+                for (rk, rv) in rfields {
+                    if out.is_none()
+                        && resolve_sym(*rk) == "page_progression_direction"
+                        && let IonValue::Symbol(s) = rv
+                    {
+                        *out = Some(Direction::from_kfx_direction(&resolve_sym(*s)));
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +358,66 @@ mod tests {
         assert_eq!(Direction::from_kfx_direction("rtl"), Direction::Rtl);
         assert_eq!(Direction::from_kfx_direction("ltr"), Direction::Ltr);
         assert_eq!(Direction::from_kfx_direction(""), Direction::Ltr);
+    }
+
+    /// Mock symbol resolver for the `walk_reading_order_ppd` tests.
+    fn resolve(id: u64) -> String {
+        match id {
+            100 => "reading_orders",
+            101 => "page_progression_direction",
+            102 => "rtl",
+            103 => "ltr",
+            104 => "sections",
+            _ => "other",
+        }
+        .to_string()
+    }
+
+    /// The case these books hit: document_data says `horizontal_tb`/`ltr`, so
+    /// the heuristic resolves `ltr`, but the explicit reading-orders field
+    /// declares `rtl` — and that must win.
+    #[test]
+    fn reading_order_ppd_reads_explicit_rtl() {
+        // {reading_orders: [{page_progression_direction: $rtl}]}
+        let v = IonValue::Struct(vec![(
+            100,
+            IonValue::List(vec![IonValue::Struct(vec![(101, IonValue::Symbol(102))])]),
+        )]);
+        let mut out = None;
+        walk_reading_order_ppd(&v, &resolve, &mut out);
+        assert_eq!(out, Some(Direction::Rtl));
+    }
+
+    /// No explicit field → leave `None` so the caller falls back to the
+    /// direction + writing-mode heuristic.
+    #[test]
+    fn reading_order_ppd_absent_leaves_none() {
+        // {reading_orders: [{sections: []}]}
+        let v = IonValue::Struct(vec![(
+            100,
+            IonValue::List(vec![IonValue::Struct(vec![(104, IonValue::List(vec![]))])]),
+        )]);
+        let mut out = None;
+        walk_reading_order_ppd(&v, &resolve, &mut out);
+        assert_eq!(out, None);
+    }
+
+    /// PPD is one value per book: the first declaring order wins, and an
+    /// `Annotated` wrapper (how entities arrive) is transparent.
+    #[test]
+    fn reading_order_ppd_first_value_wins_through_annotation() {
+        let v = IonValue::Annotated(
+            vec![258],
+            Box::new(IonValue::Struct(vec![(
+                100,
+                IonValue::List(vec![
+                    IonValue::Struct(vec![(101, IonValue::Symbol(102))]), // rtl
+                    IonValue::Struct(vec![(101, IonValue::Symbol(103))]), // ltr
+                ]),
+            )])),
+        );
+        let mut out = None;
+        walk_reading_order_ppd(&v, &resolve, &mut out);
+        assert_eq!(out, Some(Direction::Rtl));
     }
 }
