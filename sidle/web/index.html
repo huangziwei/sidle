@@ -270,6 +270,9 @@
     <div id="reader-view" class="reader-view" hidden>
       <header class="reader-topbar">
         <button id="reader-close" class="reader-btn" title="Close (Esc)" aria-label="Close reader">←</button>
+        <button id="reader-toc" class="reader-btn" title="Contents" aria-label="Table of contents" hidden>
+          <span aria-hidden="true">☰</span>
+        </button>
         <div id="reader-title" class="reader-title"></div>
         <div class="reader-topbar-right">
           <button id="reader-annotations" class="reader-btn" title="Annotations" aria-label="Annotations">
@@ -282,6 +285,14 @@
         </div>
       </header>
       <div class="reader-body">
+        <aside id="reader-toc-panel" class="reader-toc-panel" hidden aria-label="Table of contents">
+          <header class="reader-panel-header">
+            <strong>Contents</strong>
+            <button id="reader-toc-close" class="btn-link" type="button">Hide</button>
+          </header>
+          <ul id="reader-toc-list" class="reader-toc-list"></ul>
+          <div id="reader-toc-empty" class="reader-toc-empty" hidden>No table of contents.</div>
+        </aside>
         <div id="reader-stage" class="reader-stage"></div>
         <aside id="reader-annotations-panel" class="reader-annotations-panel" hidden aria-label="Annotations">
           <header class="reader-panel-header">

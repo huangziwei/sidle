@@ -21,6 +21,7 @@ let annotations = []; // AnnotationDto[] for the open book
 let overlays = []; // [{ doc, overlayer }] — one per loaded section, for repaint
 let eidToSection = null; // Map<eid, sectionIndex>, built lazily for jumps
 let keyHandler = null;
+let tocEntries = []; // flat [{ li, sectionIndex }] in TOC order, for active-marking
 
 const view = () => $("#reader-view");
 
@@ -308,6 +309,82 @@ async function reloadAnnotations(forBookId) {
   renderAnnotationsPanel();
 }
 
+// ---- TOC panel + jump -------------------------------------------------------
+
+// Resolve a TOC href ("c5.xhtml#frag") to a section index + optional fragment.
+// boko emits TOC hrefs in the same OEBPS-relative form as the spine section
+// hrefs (both from one `build_output`), so `book.hrefs.indexOf` matches.
+function tocTarget(href) {
+  const [path, frag] = String(href || "").split("#");
+  const index = book?.hrefs?.indexOf(path) ?? -1;
+  return { index, frag: frag || null };
+}
+
+async function goToToc(href) {
+  if (!paginator) return;
+  const { index, frag } = tocTarget(href);
+  if (index < 0) {
+    toast("Couldn't locate that chapter in the book");
+    return;
+  }
+  hideNotePopover();
+  // The paginator accepts a fraction, Range, or Element as the anchor: hand it
+  // the fragment's element when present, else 0 (the section start).
+  await paginator.goTo({ index, anchor: (doc) => (frag && doc.getElementById(frag)) || 0 });
+}
+
+// Build rows depth-first, indenting by depth. Each row remembers its section
+// index so `markTocActive` can highlight the current chapter on relocate.
+function tocRowsFor(point, depth, out) {
+  const li = document.createElement("li");
+  li.className = "toc-row";
+  li.style.paddingLeft = `${14 + depth * 14}px`; // UI chrome is always LTR
+  li.textContent = point.label || "—";
+  li.addEventListener("click", () => goToToc(point.href));
+  tocEntries.push({ li, sectionIndex: tocTarget(point.href).index });
+  out.push(li);
+  for (const child of point.children || []) tocRowsFor(child, depth + 1, out);
+}
+
+function renderTocPanel() {
+  tocEntries = [];
+  const toc = book?.toc || [];
+  const btn = $("#reader-toc");
+  if (btn) btn.hidden = toc.length === 0; // no TOC → no button (panel unreachable)
+  const list = $("#reader-toc-list");
+  if (!list) return;
+  const rows = [];
+  for (const p of toc) tocRowsFor(p, 0, rows);
+  list.replaceChildren(...rows);
+  $("#reader-toc-empty").hidden = rows.length > 0;
+}
+
+// Highlight the TOC entry for the current section: the first entry landing in
+// it, else the last entry before it. (Most books are one entry per section.)
+function markTocActive(currentIndex) {
+  if (typeof currentIndex !== "number" || !tocEntries.length) return;
+  let active = tocEntries.findIndex((e) => e.sectionIndex === currentIndex);
+  if (active < 0) {
+    for (let i = 0; i < tocEntries.length; i++) {
+      if (tocEntries[i].sectionIndex >= 0 && tocEntries[i].sectionIndex < currentIndex) active = i;
+    }
+  }
+  tocEntries.forEach(({ li }, i) => li.classList.toggle("active", i === active));
+  if (active >= 0 && !$("#reader-toc-panel")?.hidden) {
+    tocEntries[active].li.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function toggleTocPanel() {
+  const p = $("#reader-toc-panel");
+  if (p) p.hidden = !p.hidden;
+}
+
+function hideTocPanel() {
+  const p = $("#reader-toc-panel");
+  if (p) p.hidden = true;
+}
+
 // ---- navigation -----------------------------------------------------------
 
 const forward = () => {
@@ -324,6 +401,7 @@ function onKey(e) {
     // Peel back overlays first, then close the reader.
     if (!$("#reader-note-popover")?.hidden) hideNotePopover();
     else if (!$("#reader-annotations-panel")?.hidden) hideAnnotationsPanel();
+    else if (!$("#reader-toc-panel")?.hidden) hideTocPanel();
     else close();
     e.preventDefault();
     return;
@@ -381,6 +459,7 @@ async function open(id) {
   view().hidden = false;
   view().classList.add("open");
   renderAnnotationsPanel();
+  renderTocPanel();
 
   paginator = document.createElement("foliate-paginator");
   paginator.setAttribute("flow", "paginated");
@@ -401,6 +480,7 @@ async function open(id) {
   paginator.addEventListener("relocate", ({ detail }) => {
     const pct = Math.round((detail.fraction ?? 0) * 100);
     $("#reader-progress").textContent = `${pct}%`;
+    markTocActive(detail.index);
     hideNotePopover();
   });
 
@@ -429,8 +509,10 @@ async function close() {
   annotations = [];
   overlays = [];
   eidToSection = null;
+  tocEntries = [];
   hideNotePopover();
   hideAnnotationsPanel();
+  hideTocPanel();
   const v = view();
   if (v) {
     v.classList.remove("open");
@@ -444,6 +526,8 @@ function wire() {
   $("#reader-next")?.addEventListener("click", () => forward());
   $("#reader-annotations")?.addEventListener("click", () => toggleAnnotationsPanel());
   $("#reader-annotations-close")?.addEventListener("click", () => hideAnnotationsPanel());
+  $("#reader-toc")?.addEventListener("click", () => toggleTocPanel());
+  $("#reader-toc-close")?.addEventListener("click", () => hideTocPanel());
   // Click anywhere in the app chrome (outside the popover) dismisses it. Clicks
   // inside the section iframe live in a separate document and don't reach here,
   // so this never fights the in-text click that opened the popover.
