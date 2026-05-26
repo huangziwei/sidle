@@ -7,12 +7,20 @@ use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use nusb::MaybeFuture;
+
 use crate::device::{DeviceInfo, TransportKind};
 
 #[cfg(target_os = "macos")]
 const VOLUMES_ROOT: &str = "/Volumes";
 #[cfg(target_os = "linux")]
 const VOLUMES_ROOT_FALLBACK: &str = "/media";
+
+/// Amazon's USB vendor ID — every Kindle, mass-storage or MTP.
+const AMAZON_VID: u16 = 0x1949;
+/// USB Mass Storage class code (`bInterfaceClass`). Distinguishes a mounted
+/// KOA2-class Kindle from a Scribe (MTP, image/PTP class) when both are plugged.
+const USB_CLASS_MASS_STORAGE: u8 = 0x08;
 
 /// Scan mount points for the first connected mass-storage Kindle. None if
 /// none found. MTP-class Kindles (Scribe, 2024+) never show up here — they
@@ -57,8 +65,11 @@ fn candidate_roots() -> Vec<PathBuf> {
 fn inspect(mount: &Path) -> Option<DeviceInfo> {
     let version_path = mount.join("system").join("version.txt");
     let raw = std::fs::read_to_string(&version_path).ok()?;
-    // version.txt is the Kindle-only marker; serial is best-effort.
-    let serial = parse_serial(&raw)
+    // version.txt is the Kindle-only marker + firmware/model line; it carries
+    // NO serial. The serial lives in the USB `iSerial` descriptor (read via
+    // nusb), with the persisted `.sidle/device_id` and then an anon id as
+    // fallbacks if USB enumeration is unavailable.
+    let serial = usb_kindle_serial()
         .or_else(|| ensure_device_id(mount))
         .unwrap_or_else(|| anon_serial(mount));
     let model = parse_model(&raw);
@@ -121,19 +132,34 @@ fn anon_serial(mount: &Path) -> String {
     format!("anon-{name}")
 }
 
-fn parse_serial(raw: &str) -> Option<String> {
-    for line in raw.lines() {
-        let line = line.trim();
-        for prefix in ["S/N:", "Serial Number:", "Serial:"] {
-            if let Some(rest) = line.strip_prefix(prefix) {
-                let s = rest.trim();
-                if !s.is_empty() {
-                    return Some(s.to_string());
-                }
-            }
-        }
-    }
-    None
+/// The Kindle's real serial, read from its USB `iSerial` descriptor — the same
+/// identity Amazon exposes over MTP, and the only on-device source (it is NOT in
+/// `system/version.txt`). `nusb::list_devices` enumerates without opening the
+/// device, so the serial comes straight from the cached descriptor.
+///
+/// Filters to Amazon (VID 0x1949). With one Kindle attached that's
+/// unambiguous; with two (a KOA2 *and* a Scribe), the mounted mass-storage one
+/// is the device presenting a Mass Storage interface, so we prefer that to
+/// avoid reading the Scribe's serial for the mounted volume. `None` if USB
+/// enumeration is unavailable or no Amazon device is present.
+fn usb_kindle_serial() -> Option<String> {
+    let amazon: Vec<nusb::DeviceInfo> = nusb::list_devices()
+        .wait()
+        .ok()?
+        .filter(|d| d.vendor_id() == AMAZON_VID)
+        .collect();
+    let pick = match amazon.as_slice() {
+        [] => return None,
+        [only] => only,
+        many => many
+            .iter()
+            .find(|d| d.interfaces().any(|i| i.class() == USB_CLASS_MASS_STORAGE))
+            .unwrap_or(&many[0]),
+    };
+    pick.serial_number()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn parse_model(raw: &str) -> Option<String> {
@@ -164,24 +190,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_serial_from_sn_line() {
-        let raw = "Kindle 5.16.10.4.0\nS/N: G090G105073700XX\n";
-        assert_eq!(parse_serial(raw).as_deref(), Some("G090G105073700XX"));
-    }
-
-    #[test]
-    fn parses_serial_with_serial_number_label() {
-        let raw = "Kindle\nSerial Number:  G09XXX\n";
-        assert_eq!(parse_serial(raw).as_deref(), Some("G09XXX"));
-    }
-
-    #[test]
-    fn no_serial_returns_none() {
-        let raw = "Kindle 5.16.10.4.0\nOther garbage\n";
-        assert_eq!(parse_serial(raw), None);
-    }
-
-    #[test]
     fn parses_model_from_first_line() {
         let raw = "Kindle 5.16.10.4.0\nS/N: X\n";
         assert_eq!(parse_model(raw).as_deref(), Some("Kindle 5.16.10.4.0"));
@@ -204,8 +212,10 @@ mod tests {
         std::fs::create_dir_all(&sys).unwrap();
         std::fs::write(sys.join("version.txt"), "Kindle 5.16.2.1.1 (409745 002)\n").unwrap();
 
-        let info = inspect(tmp.path()).expect("should detect even without S/N:");
-        assert!(!info.serial.is_empty(), "fell back to device_id or anon");
+        let info = inspect(tmp.path()).expect("should detect even without a serial in version.txt");
+        // Serial comes from USB (real device) or the device_id/anon fallback —
+        // never from version.txt. Either way it must be non-empty.
+        assert!(!info.serial.is_empty());
         assert_eq!(info.model.as_deref(), Some("Kindle 5.16.2.1.1 (409745 002)"));
         match info.transport {
             TransportKind::MassStorage { mount } => {

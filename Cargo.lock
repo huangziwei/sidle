@@ -4480,6 +4480,7 @@ dependencies = [
  "hex",
  "libc",
  "mtp-rs",
+ "nusb",
  "objc2-foundation",
  "reqwest 0.12.28",
  "rusqlite",
