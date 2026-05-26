@@ -275,6 +275,9 @@
         </button>
         <div id="reader-title" class="reader-title"></div>
         <div class="reader-topbar-right">
+          <button id="reader-style" class="reader-btn reader-btn-aa" title="Display settings" aria-label="Display settings">
+            <span aria-hidden="true">Aa</span>
+          </button>
           <button id="reader-annotations" class="reader-btn" title="Annotations" aria-label="Annotations">
             <span aria-hidden="true">🔖</span>
             <span id="reader-annotations-count" class="reader-annotations-count" hidden>0</span>
@@ -310,6 +313,73 @@
         <span id="reader-loc" class="reader-status-loc"></span>
         <span id="reader-percent" class="reader-status-pct"></span>
       </footer>
+      <div id="reader-style-panel" class="reader-style-panel" hidden aria-label="Display settings">
+        <div class="rs-row">
+          <label for="rs-font">Font</label>
+          <select id="rs-font">
+            <option value="">Publisher default</option>
+            <option value="serif">Serif</option>
+            <option value="sans">Sans-serif</option>
+            <option value="mincho">明朝 Mincho</option>
+            <option value="gothic">ゴシック Gothic</option>
+            <option value="maru">丸ゴ Maru</option>
+          </select>
+        </div>
+        <div class="rs-row">
+          <label for="rs-size">Size</label>
+          <div class="rs-slider">
+            <input type="range" id="rs-size" min="12" max="26" step="1" />
+            <span id="rs-size-val" class="rs-val"></span>
+          </div>
+        </div>
+        <div class="rs-row">
+          <label for="rs-weight">Weight</label>
+          <select id="rs-weight">
+            <option value="">Default</option>
+            <option value="light">Light</option>
+            <option value="normal">Normal</option>
+            <option value="medium">Medium</option>
+            <option value="semibold">Semibold</option>
+          </select>
+        </div>
+        <div class="rs-row">
+          <label for="rs-spacing">Line spacing</label>
+          <select id="rs-spacing">
+            <option value="auto">Auto</option>
+            <option value="tight">Tight</option>
+            <option value="normal">Normal</option>
+            <option value="relaxed">Relaxed</option>
+            <option value="loose">Loose</option>
+          </select>
+        </div>
+        <div class="rs-row">
+          <label for="rs-margin">Margins</label>
+          <select id="rs-margin">
+            <option value="narrow">Narrow</option>
+            <option value="normal">Normal</option>
+            <option value="wide">Wide</option>
+          </select>
+        </div>
+        <div class="rs-row">
+          <label for="rs-align">Alignment</label>
+          <select id="rs-align">
+            <option value="">Default</option>
+            <option value="justify">Justify</option>
+            <option value="left">Left</option>
+          </select>
+        </div>
+        <div class="rs-row">
+          <label for="rs-fg">Text color</label>
+          <input type="color" id="rs-fg" />
+        </div>
+        <div class="rs-row">
+          <label for="rs-bg">Background</label>
+          <input type="color" id="rs-bg" />
+        </div>
+        <div class="rs-footer">
+          <button type="button" id="rs-reset" class="btn-link">Reset to defaults</button>
+        </div>
+      </div>
       <div id="reader-note-popover" class="reader-note-popover" hidden>
         <div id="reader-note-quote" class="reader-note-quote"></div>
         <div id="reader-note-body" class="reader-note-body"></div>

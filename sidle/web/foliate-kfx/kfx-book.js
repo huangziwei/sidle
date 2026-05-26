@@ -12,15 +12,13 @@ const b64ToBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
 const XLINK = "http://www.w3.org/1999/xlink";
 
-// Injected into every section. (1) Force light mode: the reader is always light
-// regardless of the OS theme, so a book's `color: black` text never lands on a
-// dark UA background. (2) Fit images/SVG to the page so illustrations and the
-// cover aren't squeezed, stretched, or cropped. Appended last so it wins over
-// the book's own stylesheet.
+// Injected into every section: fit images/SVG to the page so illustrations and
+// the cover aren't squeezed, stretched, or cropped. Appended last so it wins
+// over the book's own stylesheet. Page COLORS, font, and color-scheme are NOT
+// set here — the reader's per-book style settings own those via the paginator's
+// `setStyles` hook (a later <style>, so it overrides), which lets them change
+// live as the user drags a slider.
 const READER_CSS = `
-:root { color-scheme: light !important; }
-html, body { background: #ffffff !important; }
-body { color: #111111; }
 img, image, svg, video {
   max-width: 100% !important;
   max-height: 100% !important;
@@ -60,6 +58,22 @@ export function makeKfxBook(dto) {
     const style = doc.createElement("style");
     style.textContent = READER_CSS;
     doc.head.appendChild(style);
+    // A full-page-image section (cover, full-bleed art) has no text. Force
+    // horizontal single-block flow so the paginator lays the image across the
+    // whole page — in a vertical-rl book the default columnar flow would trap a
+    // single image in one column pinned to the right edge instead of filling.
+    // Read by `getDirection` (which runs after this CSS applies), so the whole
+    // section paginates as horizontal; the reader pairs this with a zero-margin
+    // single-column layout (see `applyLayout`).
+    const text = (doc.body?.textContent || "").replace(/\s+/g, "");
+    if (!text && doc.body?.querySelector("img, image, svg")) {
+      const fb = doc.createElement("style");
+      fb.textContent =
+        "html, body { writing-mode: horizontal-tb !important; direction: ltr !important; }" +
+        "body { margin: 0 !important; text-align: center !important; }" +
+        "img, image, svg { display: block !important; margin: 0 auto !important; }";
+      doc.head.appendChild(fb);
+    }
     return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
   };
 

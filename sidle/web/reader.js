@@ -562,6 +562,243 @@ function baseTextLen(html) {
   return (doc.body?.textContent || "").replace(/\s+/g, " ").trim().length;
 }
 
+// ---- display style (per-book: font, size, colors, spacing, margins) --------
+
+// Bi-script font stacks: each renders Latin and Japanese in a fitting face, so
+// one global pick works for vertical-JP and horizontal-EN books alike. "" means
+// no override — the publisher's own fonts stay.
+const FONT_STACKS = {
+  "": "",
+  serif: 'Georgia, "Hiragino Mincho ProN", serif',
+  sans: '"Helvetica Neue", Helvetica, "Hiragino Sans", sans-serif',
+  mincho: '"Hiragino Mincho ProN", "YuMincho", serif',
+  gothic: '"Hiragino Sans", "Hiragino Kaku Gothic ProN", sans-serif',
+  maru: '"Hiragino Maru Gothic ProN", sans-serif',
+};
+const LINE_HEIGHTS = { auto: 0, tight: 1.35, normal: 1.6, relaxed: 1.9, loose: 2.2 };
+const WEIGHTS = { "": 0, light: 300, normal: 400, medium: 500, semibold: 600 };
+// Margin presets → [max-inline-size px = text measure, block-margin px]. Both
+// move the same way in vertical and horizontal books because the paginator
+// swaps its axes by writing mode — so this stays "adaptive to writing mode"
+// without per-mode branching here.
+const MARGINS = { narrow: [900, 28], normal: [720, 48], wide: [560, 80] };
+
+// Defaults reproduce the pre-customization look exactly: publisher fonts, the
+// iframe's 16px root, white page, near-black ink, the paginator's own margins.
+const DEFAULT_STYLE = {
+  font: "",
+  size: 16,
+  weight: "",
+  spacing: "auto",
+  align: "",
+  fg: "#111111",
+  bg: "#ffffff",
+  margin: "normal",
+};
+let styleSettings = null;
+let imageSections = new Set(); // section indices that are a single full-page image
+let layoutMode = null; // current paginator layout: "text" | "image"
+const styleKey = () => `sidle.reader.style.${bookId}`;
+
+function loadStyle() {
+  try {
+    const raw = localStorage.getItem(styleKey());
+    if (raw) return { ...DEFAULT_STYLE, ...JSON.parse(raw) };
+  } catch {
+    /* ignore */
+  }
+  return { ...DEFAULT_STYLE };
+}
+function saveStyle() {
+  try {
+    localStorage.setItem(styleKey(), JSON.stringify(styleSettings));
+  } catch {
+    /* ignore */
+  }
+}
+
+// #rrggbb / #rgb → [r,g,b].
+function hexRgb(hex) {
+  const c = String(hex || "").replace("#", "");
+  const h = c.length === 3 ? c.replace(/./g, (x) => x + x) : c;
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) || 0);
+}
+const luminance = (hex) => {
+  const [r, g, b] = hexRgb(hex);
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+};
+const isDark = (hex) => luminance(hex) < 0.5;
+// Blend two hex colors: `a` toward `b` by t (0..1) → "#rrggbb".
+function mix(a, b, t) {
+  const ca = hexRgb(a);
+  const cb = hexRgb(b);
+  const ch = ca.map((v, i) => Math.round(v + (cb[i] - v) * t).toString(16).padStart(2, "0"));
+  return `#${ch.join("")}`;
+}
+
+// A section that is just a full-page image (the cover, a full-bleed
+// illustration) — no real text. Such sections get a zero-margin, single-column
+// layout so the image fills the page instead of shrinking into one text column.
+function isImageOnlySection(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("rt").forEach((el) => el.remove());
+  const text = (doc.body?.textContent || "").replace(/\s+/g, "");
+  return text.length === 0 && (doc.body?.querySelector("img, image, svg") != null);
+}
+
+// The CSS injected into each section iframe via the paginator's `setStyles`. It
+// lands in the last <style> of the head, so `!important` here beats both the
+// book's synthesized stylesheet and the static READER_CSS. font-size rides the
+// root because boko emits text sizes in rem/% (root-relative) — one anchor
+// scales everything, like Kindle's slider. At DEFAULT settings this emits the
+// exact equivalent of the old READER_CSS (white bg, non-important #111 body
+// color, no font-size/family override) so a default book renders identically to
+// before customization existed; only changed fields override.
+function buildSectionCss(s) {
+  const customFg = s.fg.toLowerCase() !== DEFAULT_STYLE.fg;
+  const out = [
+    `:root { color-scheme: ${isDark(s.bg) ? "dark" : "light"}; }`,
+    `html, body { background: ${s.bg} !important; }`,
+    // Default = non-important so the book's own text colors still win (as before);
+    // a custom color forces over them.
+    customFg ? `html, body { color: ${s.fg} !important; }` : `body { color: ${s.fg}; }`,
+  ];
+  // Anchor the root size only when changed, so a default book keeps its shipped
+  // root sizing untouched.
+  if (s.size !== DEFAULT_STYLE.size) out.push(`html { font-size: ${s.size}px !important; }`);
+  const stack = FONT_STACKS[s.font];
+  if (stack) out.push(`* { font-family: ${stack} !important; }`);
+  const w = WEIGHTS[s.weight];
+  if (w) out.push(`body, p, li, blockquote, dd { font-weight: ${w} !important; }`);
+  const lh = LINE_HEIGHTS[s.spacing];
+  if (lh) out.push(`p, li, blockquote, dd { line-height: ${lh} !important; }`);
+  if (s.align) out.push(`p, li, blockquote, dd { text-align: ${s.align} !important; }`);
+  return out.join("\n");
+}
+
+// Tint the reader chrome (gutter, bars, panels) to the page colors so a sepia or
+// dark page doesn't sit framed by white UI. At DEFAULT colors we set nothing —
+// the CSS `--reader-*` defaults (the original warm-light palette) stay, so the
+// chrome is identical to before. Custom colors derive coherent fg→bg blends.
+function applyChrome(s) {
+  const v = view();
+  if (!v) return;
+  const props = [
+    "color-scheme",
+    "--reader-bg",
+    "--reader-fg",
+    "--reader-gutter",
+    "--reader-border",
+    "--reader-muted",
+    "--overlayer-highlight-blend-mode",
+  ];
+  const isDefault =
+    s.bg.toLowerCase() === DEFAULT_STYLE.bg && s.fg.toLowerCase() === DEFAULT_STYLE.fg;
+  if (isDefault) {
+    for (const p of props) v.style.removeProperty(p);
+    return;
+  }
+  const dark = isDark(s.bg);
+  v.style.colorScheme = dark ? "dark" : "light"; // adapt the panel's <select>/color inputs
+  v.style.setProperty("--reader-bg", s.bg);
+  v.style.setProperty("--reader-fg", s.fg);
+  v.style.setProperty("--reader-gutter", mix(s.bg, s.fg, 0.06));
+  v.style.setProperty("--reader-border", mix(s.bg, s.fg, 0.16));
+  v.style.setProperty("--reader-muted", mix(s.bg, s.fg, 0.5));
+  v.style.setProperty("--overlayer-highlight-blend-mode", dark ? "screen" : "multiply");
+}
+
+const HUGE_MEASURE = 100000; // forces a single full-width column for image pages
+
+// Set the paginator's layout attributes for `index`'s mode. Text pages use the
+// user's margin preset (= the original 720/48/7%/2-col defaults at the default
+// setting). Image-only pages (cover) go full-bleed: zero margin/gap, one column,
+// unbounded measure — so the image fits the whole page, no frame. Skips redundant
+// work unless `force` (used when a settings change must re-apply the same mode).
+function applyLayout(index, force) {
+  if (!paginator || !styleSettings) return;
+  const mode = imageSections.has(index) ? "image" : "text";
+  if (!force && mode === layoutMode) return;
+  layoutMode = mode;
+  if (mode === "image") {
+    paginator.setAttribute("margin", "0");
+    paginator.setAttribute("gap", "0");
+    paginator.setAttribute("max-inline-size", String(HUGE_MEASURE));
+    paginator.setAttribute("max-column-count", "1");
+  } else {
+    const [measure, block] = MARGINS[styleSettings.margin] || MARGINS.normal;
+    paginator.setAttribute("margin", String(block));
+    paginator.setAttribute("gap", "7%");
+    paginator.setAttribute("max-inline-size", String(measure));
+    paginator.setAttribute("max-column-count", "2");
+  }
+}
+
+// Push the current settings into the live view: section CSS + chrome + layout
+// for the section in view (forced, since margins may have just changed).
+function applyStyle() {
+  if (!styleSettings) return;
+  if (paginator) paginator.setStyles(buildSectionCss(styleSettings));
+  applyChrome(styleSettings);
+  applyLayout(lastPos?.index ?? 0, true);
+}
+
+// Reflect settings into the panel controls (on open + reset).
+function syncStylePanel() {
+  if (!styleSettings) return;
+  const s = styleSettings;
+  const set = (id, val) => {
+    const el = $(id);
+    if (el) el.value = val;
+  };
+  set("#rs-font", s.font);
+  set("#rs-size", s.size);
+  const sv = $("#rs-size-val");
+  if (sv) sv.textContent = `${s.size}px`;
+  set("#rs-weight", s.weight);
+  set("#rs-spacing", s.spacing);
+  set("#rs-margin", s.margin);
+  set("#rs-align", s.align);
+  set("#rs-fg", s.fg);
+  set("#rs-bg", s.bg);
+}
+
+// One control changed → fold into settings, persist, re-apply live.
+function onStyleInput() {
+  if (!styleSettings) return;
+  const val = (id, fallback) => $(id)?.value ?? fallback;
+  styleSettings = {
+    font: val("#rs-font", ""),
+    size: Number(val("#rs-size", 16)) || 16,
+    weight: val("#rs-weight", ""),
+    spacing: val("#rs-spacing", "auto"),
+    margin: val("#rs-margin", "normal"),
+    align: val("#rs-align", ""),
+    fg: val("#rs-fg", "#111111"),
+    bg: val("#rs-bg", "#ffffff"),
+  };
+  const sv = $("#rs-size-val");
+  if (sv) sv.textContent = `${styleSettings.size}px`;
+  saveStyle();
+  applyStyle();
+}
+
+function resetStyle() {
+  styleSettings = { ...DEFAULT_STYLE };
+  saveStyle();
+  syncStylePanel();
+  applyStyle();
+}
+
+function toggleStylePanel() {
+  const p = $("#reader-style-panel");
+  if (p) p.hidden = !p.hidden;
+}
+function hideStylePanel() {
+  const p = $("#reader-style-panel");
+  if (p) p.hidden = true;
+}
+
 // ---- navigation -----------------------------------------------------------
 
 const forward = () => {
@@ -577,12 +814,16 @@ function onKey(e) {
   if (e.key === "Escape") {
     // Peel back overlays first, then close the reader.
     if (!$("#reader-note-popover")?.hidden) hideNotePopover();
+    else if (!$("#reader-style-panel")?.hidden) hideStylePanel();
     else if (!$("#reader-annotations-panel")?.hidden) hideAnnotationsPanel();
     else if (!$("#reader-toc-panel")?.hidden) hideTocPanel();
     else close();
     e.preventDefault();
     return;
   }
+  // A focused settings control (select/slider/color) owns its own arrow keys —
+  // don't steal them to turn pages.
+  if (e.target?.closest?.("#reader-style-panel")) return;
   // Don't hijack modified combos — shift+arrow extends a text selection in the
   // section iframe, ⌘/ctrl/alt are shortcuts. Let those through.
   if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -640,12 +881,18 @@ async function open(id) {
     cumChars += n;
   }
   totalChars = cumChars;
+  imageSections = new Set();
+  dto.sections.forEach((sec, i) => {
+    if (isImageOnlySection(sec.html)) imageSections.add(i);
+  });
+  layoutMode = null;
   const pace = loadPace();
   readSpeed = pace.speed;
   sampleCount = pace.count;
   lastTurnTime = null;
   lastCharPos = null;
   lastPos = null;
+  styleSettings = loadStyle();
   book = makeKfxBook(dto);
 
   $("#reader-title").textContent = dto.title || "Untitled";
@@ -676,8 +923,14 @@ async function open(id) {
     updateProgress(detail);
     markTocActive(detail.index);
     hideNotePopover();
+    // Switch to/from full-bleed layout for image-only pages. A mode change
+    // re-paginates and fires a fresh relocate with the new geometry, which
+    // updates progress again — so this runs last.
+    applyLayout(detail.index);
   });
 
+  applyStyle(); // seed #styles + layout attrs before the first section loads
+  syncStylePanel();
   paginator.open(book);
   await paginator.goTo({ index: 0 }); // TODO(T2): restore saved reading position
   paginator.focus?.();
@@ -715,15 +968,32 @@ async function close() {
   lastCharPos = null;
   readSpeed = 0;
   sampleCount = 0;
+  styleSettings = null;
+  imageSections = new Set();
+  layoutMode = null;
   if ($("#reader-loc")) $("#reader-loc").textContent = "";
   if ($("#reader-percent")) $("#reader-percent").textContent = "";
   hideNotePopover();
   hideAnnotationsPanel();
   hideTocPanel();
+  hideStylePanel();
   const v = view();
   if (v) {
     v.classList.remove("open");
     v.hidden = true;
+    // Drop the per-book tint so the next book opens on defaults until its own
+    // settings apply (no flash of the previous book's theme).
+    for (const p of [
+      "color-scheme",
+      "--reader-bg",
+      "--reader-fg",
+      "--reader-gutter",
+      "--reader-border",
+      "--reader-muted",
+      "--overlayer-highlight-blend-mode",
+    ]) {
+      v.style.removeProperty(p);
+    }
   }
 }
 
@@ -738,12 +1008,34 @@ function wire() {
   $("#reader-annotations-close")?.addEventListener("click", () => hideAnnotationsPanel());
   $("#reader-toc")?.addEventListener("click", () => toggleTocPanel());
   $("#reader-toc-close")?.addEventListener("click", () => hideTocPanel());
-  // Click anywhere in the app chrome (outside the popover) dismisses it. Clicks
+  // Display-settings popover: the Aa button toggles it; every control writes
+  // through to the live view; reset restores defaults.
+  $("#reader-style")?.addEventListener("click", () => toggleStylePanel());
+  $("#rs-reset")?.addEventListener("click", () => resetStyle());
+  $("#reader-style-panel")
+    ?.querySelectorAll("select, input")
+    .forEach((el) => {
+      // `input` for live drag of the slider/color; `change` as a fallback for
+      // WebKit color inputs that only commit on close. Idempotent, so both is fine.
+      el.addEventListener("input", onStyleInput);
+      el.addEventListener("change", onStyleInput);
+    });
+  // Click anywhere in the app chrome (outside a popover) dismisses it. Clicks
   // inside the section iframe live in a separate document and don't reach here,
-  // so this never fights the in-text click that opened the popover.
+  // so this never fights the in-text click that opened the note popover.
   document.addEventListener("mousedown", (e) => {
     const pop = $("#reader-note-popover");
     if (pop && !pop.hidden && !pop.contains(e.target)) hideNotePopover();
+    const stylePanel = $("#reader-style-panel");
+    const styleBtn = $("#reader-style");
+    if (
+      stylePanel &&
+      !stylePanel.hidden &&
+      !stylePanel.contains(e.target) &&
+      !styleBtn?.contains(e.target)
+    ) {
+      hideStylePanel();
+    }
   });
 }
 

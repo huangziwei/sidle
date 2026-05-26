@@ -1690,10 +1690,11 @@ button {
 }
 
 /* ---- Reader -------------------------------------------------------------- */
-/* The reader is ALWAYS light, regardless of the OS theme: books are black ink
-   on a white page, so the chrome + gutter are fixed light colors (no theme
-   vars, no prefers-color-scheme). `color-scheme: light` also keeps the iframe's
-   UA backdrop white. */
+/* The reader's chrome follows the open book's per-book page colors, set by
+   reader.js (`applyChrome`) as inline `--reader-*` vars on `.reader-view`. The
+   defaults below reproduce the original always-light look (white page, near-
+   black ink) so a book with no saved settings looks exactly as before; a sepia
+   or dark page retints the gutter, bars, and side panels to match. */
 .reader-view {
   position: fixed;
   inset: 0;
@@ -1701,7 +1702,14 @@ button {
   display: flex;
   flex-direction: column;
   color-scheme: light;
-  background: #e8e4dd; /* gutter behind the white page */
+  --reader-bg: #ffffff; /* page + chrome + the area around the page */
+  --reader-fg: #1c1a17; /* text + icons */
+  --reader-gutter: #efece6; /* panel row hover only — NOT the page surround */
+  --reader-border: #e2ddd4; /* hairlines */
+  --reader-muted: #5a544b; /* secondary text */
+  /* The whole reading area is the page color, edge to edge — no separate gutter
+     band, so the page extends to the window's ends as one color. */
+  background: var(--reader-bg);
   --overlayer-highlight-opacity: 0.3;
   --overlayer-highlight-blend-mode: multiply;
 }
@@ -1714,15 +1722,15 @@ button {
   flex: 0 0 auto;
   height: 44px;
   padding: 0 12px;
-  border-bottom: 1px solid #e2ddd4;
-  background: #ffffff;
+  border-bottom: 1px solid var(--reader-border);
+  background: var(--reader-bg);
 }
 .reader-title {
   flex: 1 1 auto;
   min-width: 0;
   font-size: 14px;
   font-weight: 600;
-  color: #1c1a17;
+  color: var(--reader-fg);
   text-align: center;
   white-space: nowrap;
   overflow: hidden;
@@ -1738,7 +1746,7 @@ button {
   appearance: none;
   border: 1px solid transparent;
   background: transparent;
-  color: #1c1a17;
+  color: var(--reader-fg);
   font-size: 18px;
   line-height: 1;
   width: 32px;
@@ -1746,7 +1754,9 @@ button {
   border-radius: var(--radius);
   cursor: pointer;
 }
-.reader-btn:hover { background: #ece8e1; }
+.reader-btn:hover { background: var(--reader-border); }
+/* The "Aa" display-settings button is text, not a glyph — size it to fit. */
+.reader-btn-aa { font-size: 15px; font-weight: 600; }
 
 .reader-body {
   flex: 1 1 auto;
@@ -1759,7 +1769,7 @@ button {
   min-height: 0;
   min-width: 0; /* shrink in the flex row so the panel fits beside it */
   position: relative;
-  background: #e8e4dd;
+  background: var(--reader-bg);
 }
 .reader-stage foliate-paginator {
   width: 100%;
@@ -1768,19 +1778,23 @@ button {
 /* The paginator lives in a host that fills the stage; nav zones overlay it. */
 .reader-paginator-host { position: absolute; inset: 0; }
 
-/* Prev/next as hover-revealed overlays in the left/right page margins. */
+/* Prev/next: slim hover-revealed arrows pinned to the page's OUTER margin. The
+   width tracks the paginator's outer track (its --_half-gap is gap/2 = 3.5% of
+   the stage), so the zone stays in the margin and never overlaps the text
+   columns. Invisible until the margin is hovered; the background is the page
+   color so the strip blends into the page rather than the gutter. */
 .reader-nav-zone {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 12%;
-  max-width: 120px;
+  width: clamp(28px, 3.5%, 48px);
   display: flex;
   align-items: center;
+  justify-content: center;
   border: none;
-  background: transparent;
-  color: #1c1a17;
-  font-size: 40px;
+  background: var(--reader-bg);
+  color: var(--reader-fg);
+  font-size: 28px;
   line-height: 1;
   cursor: pointer;
   opacity: 0;
@@ -1788,8 +1802,8 @@ button {
   z-index: 5;
 }
 .reader-nav-zone:hover { opacity: 0.5; }
-.reader-nav-left { left: 0; justify-content: flex-start; padding-left: 10px; }
-.reader-nav-right { right: 0; justify-content: flex-end; padding-right: 10px; }
+.reader-nav-left { left: 0; }
+.reader-nav-right { right: 0; }
 
 /* Bottom progress bar — Loc lower-left, whole-book % lower-right (Kindle-style). */
 .reader-statusbar {
@@ -1800,9 +1814,9 @@ button {
   height: 28px;
   padding: 0 18px;
   font-size: 12px;
-  color: #5a544b;
-  background: #ffffff;
-  border-top: 1px solid #e2ddd4;
+  color: var(--reader-muted);
+  background: var(--reader-bg);
+  border-top: 1px solid var(--reader-border);
   cursor: pointer;
   user-select: none;
 }
@@ -1838,9 +1852,9 @@ button {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid #e2ddd4;
-  background: #ffffff;
-  color: #1c1a17;
+  border-left: 1px solid var(--reader-border);
+  background: var(--reader-bg);
+  color: var(--reader-fg);
   overflow: hidden;
 }
 .reader-annotations-panel[hidden] { display: none; }
@@ -1850,7 +1864,7 @@ button {
   justify-content: space-between;
   flex: 0 0 auto;
   padding: 10px 14px;
-  border-bottom: 1px solid #e2ddd4;
+  border-bottom: 1px solid var(--reader-border);
   font-size: 13px;
 }
 .reader-annotations-list {
@@ -1864,34 +1878,34 @@ button {
   padding: 16px 14px;
   font-size: 12px;
   line-height: 1.5;
-  color: #7a736a;
+  color: var(--reader-muted);
 }
 .ann-row {
   display: flex;
   gap: 8px;
   padding: 10px 14px;
-  border-bottom: 1px solid #f0ece4;
+  border-bottom: 1px solid var(--reader-border);
   cursor: pointer;
 }
-.ann-row:hover { background: #f7f4ee; }
+.ann-row:hover { background: var(--reader-gutter); }
 .ann-icon { flex: 0 0 auto; font-size: 13px; line-height: 1.5; }
 .ann-row-body { min-width: 0; }
 .ann-quote {
   font-size: 13px;
   line-height: 1.5;
-  color: #1c1a17;
+  color: var(--reader-fg);
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.ann-bookmark .ann-quote { color: #7a736a; font-style: italic; }
+.ann-bookmark .ann-quote { color: var(--reader-muted); font-style: italic; }
 .ann-note {
   margin-top: 4px;
   padding-left: 8px;
   border-left: 2px solid #b5651d;
   font-size: 12px;
-  color: #5a534a;
+  color: var(--reader-muted);
   white-space: pre-wrap;
 }
 
@@ -1902,9 +1916,9 @@ button {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid #e2ddd4;
-  background: #ffffff;
-  color: #1c1a17;
+  border-right: 1px solid var(--reader-border);
+  background: var(--reader-bg);
+  color: var(--reader-fg);
   overflow: hidden;
 }
 .reader-toc-panel[hidden] { display: none; }
@@ -1919,20 +1933,20 @@ button {
   padding: 16px 14px;
   font-size: 12px;
   line-height: 1.5;
-  color: #7a736a;
+  color: var(--reader-muted);
 }
 .reader-toc-empty[hidden] { display: none; }
 .toc-row {
   padding: 7px 14px;
   font-size: 13px;
   line-height: 1.4;
-  color: #1c1a17;
+  color: var(--reader-fg);
   cursor: pointer;
-  border-bottom: 1px solid #f6f3ec;
+  border-bottom: 1px solid var(--reader-border);
   overflow-wrap: anywhere;
 }
-.toc-row:hover { background: #f7f4ee; }
-.toc-row.active { background: #f0ebe0; font-weight: 600; }
+.toc-row:hover { background: var(--reader-gutter); }
+.toc-row.active { background: var(--reader-gutter); font-weight: 600; }
 
 /* Note popover — body shown when a note's highlight is clicked in the text */
 .reader-note-popover {
@@ -1940,16 +1954,16 @@ button {
   z-index: 1100;
   max-width: 320px;
   padding: 10px 12px;
-  border: 1px solid #d8d2c8;
+  border: 1px solid var(--reader-border);
   border-radius: var(--radius);
-  background: #fffdf8;
-  color: #1c1a17;
+  background: var(--reader-bg);
+  color: var(--reader-fg);
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
 }
 .reader-note-popover[hidden] { display: none; }
 .reader-note-quote {
   font-size: 12px;
-  color: #7a736a;
+  color: var(--reader-muted);
   border-left: 2px solid #f4d03f;
   padding-left: 8px;
   margin-bottom: 6px;
@@ -1963,3 +1977,81 @@ button {
   line-height: 1.5;
   white-space: pre-wrap;
 }
+
+/* Display-settings popover (the "Aa" button). Anchored under the topbar-right,
+   tinted to the page colors like the rest of the chrome. */
+.reader-style-panel {
+  position: absolute;
+  top: 50px;
+  right: 12px;
+  z-index: 1100;
+  width: 268px;
+  padding: 8px 14px 12px;
+  background: var(--reader-bg);
+  color: var(--reader-fg);
+  border: 1px solid var(--reader-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+}
+.reader-style-panel[hidden] { display: none; }
+.rs-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+}
+.rs-row + .rs-row { border-top: 1px solid var(--reader-border); }
+.rs-row > label {
+  font-size: 13px;
+  color: var(--reader-fg);
+  flex: 0 0 auto;
+}
+.rs-row select {
+  flex: 1 1 auto;
+  max-width: 150px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--reader-fg);
+  background: var(--reader-bg);
+  border: 1px solid var(--reader-border);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+.rs-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  max-width: 150px;
+}
+.rs-slider input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+.rs-val {
+  flex: 0 0 auto;
+  width: 38px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--reader-muted);
+}
+.rs-row input[type="color"] {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--reader-border);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.rs-footer {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--reader-border);
+  text-align: right;
+}
+.rs-footer .btn-link { font-size: 12px; }
