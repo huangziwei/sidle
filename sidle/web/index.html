@@ -38,6 +38,8 @@
           </header>
           <div class="device-actions">
             <button type="button" id="btn-send-unsent" class="btn-link" disabled>Send all unsent</button>
+            <button type="button" id="btn-sync-annotations" class="btn-link" disabled
+                    title="Import highlights, notes, and bookmarks off the Kindle">Sync highlights</button>
             <span id="device-send-progress" class="device-send-progress" hidden></span>
           </div>
           <dl class="device-fields">
@@ -270,12 +272,32 @@
         <button id="reader-close" class="reader-btn" title="Close (Esc)" aria-label="Close reader">←</button>
         <div id="reader-title" class="reader-title"></div>
         <div class="reader-topbar-right">
+          <button id="reader-annotations" class="reader-btn" title="Annotations" aria-label="Annotations">
+            <span aria-hidden="true">🔖</span>
+            <span id="reader-annotations-count" class="reader-annotations-count" hidden>0</span>
+          </button>
           <button id="reader-prev" class="reader-btn" title="Previous page" aria-label="Previous page">‹</button>
           <span id="reader-progress" class="reader-progress"></span>
           <button id="reader-next" class="reader-btn" title="Next page" aria-label="Next page">›</button>
         </div>
       </header>
-      <div id="reader-stage" class="reader-stage"></div>
+      <div class="reader-body">
+        <div id="reader-stage" class="reader-stage"></div>
+        <aside id="reader-annotations-panel" class="reader-annotations-panel" hidden aria-label="Annotations">
+          <header class="reader-panel-header">
+            <strong>Annotations</strong>
+            <button id="reader-annotations-close" class="btn-link" type="button">Hide</button>
+          </header>
+          <ul id="reader-annotations-list" class="reader-annotations-list"></ul>
+          <div id="reader-annotations-empty" class="reader-annotations-empty">
+            No highlights, notes, or bookmarks yet. Sync from your Kindle to import them.
+          </div>
+        </aside>
+      </div>
+      <div id="reader-note-popover" class="reader-note-popover" hidden>
+        <div id="reader-note-quote" class="reader-note-quote"></div>
+        <div id="reader-note-body" class="reader-note-body"></div>
+      </div>
     </div>
 
     <script src="api.js"></script>

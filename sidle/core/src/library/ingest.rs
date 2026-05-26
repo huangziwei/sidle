@@ -331,7 +331,7 @@ pub fn export_book_json(conn: &Connection, book_id: i64) -> rusqlite::Result<Str
 // ---------------------------------------------------------------------------
 
 /// Summary of one device import, returned to the UI.
-#[derive(Debug, Default, serde::Serialize)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct DeviceImportReport {
     /// `.sdr` dirs in `documents/Sidle/` that carried a `.yjr`.
     pub yjr_books: usize,
@@ -340,6 +340,9 @@ pub struct DeviceImportReport {
     /// `.sdr` names with a `.yjr` but no library match — skipped (no readable
     /// KFX to resolve text; `My Clippings.txt` is the fallback for these).
     pub unmatched: Vec<String>,
+    /// Matched books whose `.yjr` was byte-identical to the last import, so the
+    /// (expensive) TextIndex rebuild + re-parse was skipped entirely.
+    pub unchanged: usize,
     /// Counts from `.yjr` imports, summed across matched books.
     pub annotations: ImportStats,
     /// Counts from `My Clippings.txt` orphan archiving.
@@ -389,9 +392,26 @@ pub fn import_from_device(
             };
             report.matched += 1;
 
+            // Cheap skip, before the expensive `build_index` (which parses the
+            // full library KFX): if this book's on-device `.yjr` is byte-for-byte
+            // what we imported last time, there's nothing new. The `.yjr` is tiny
+            // (KB), so hashing it every connect is negligible — same approach as
+            // the dedrm autopull skipping files whose content hash is already in
+            // the library.
+            let yjr_bytes = std::fs::read(&yjr_path)
+                .with_context(|| format!("read {}", yjr_path.display()))?;
+            let yjr_sha = super::import::sha256_of_bytes(&yjr_bytes);
+            if db::get_yjr_sync_sha(conn, book.id)
+                .context("read yjr sync checkpoint")?
+                .as_deref()
+                == Some(yjr_sha.as_str())
+            {
+                report.unchanged += 1;
+                continue;
+            }
+
             let idx = build_index(book.kfx_path.as_deref());
-            let anns = super::yjr::parse_file(&yjr_path)
-                .with_context(|| format!("parse {}", yjr_path.display()))?;
+            let anns = super::yjr::parse(&yjr_bytes);
             let stats = import_yjr(
                 conn,
                 &anns,
@@ -403,6 +423,9 @@ pub fn import_from_device(
             )
             .context("import yjr annotations")?;
             report.annotations.merge(stats);
+            // Checkpoint so the next connect skips this `.yjr` unless it changes.
+            db::set_yjr_sync_sha(conn, book.id, &yjr_sha, now)
+                .context("record yjr sync checkpoint")?;
         }
     }
 
@@ -695,5 +718,79 @@ mod tests {
             "bungaku highlight not imported with inclusive end; got {:?}",
             anns.iter().map(|a| &a.text).collect::<Vec<_>>()
         );
+    }
+
+    /// A second connect with an unchanged `.yjr` is skipped wholesale — no
+    /// re-parse, no re-insert — by the per-book content-hash checkpoint. (The
+    /// `dedup_hash` already made re-import a no-op at the DB layer; this avoids
+    /// the expensive TextIndex rebuild that precedes it.)
+    #[test]
+    fn device_import_skips_unchanged_yjr() {
+        use base64::Engine as _;
+
+        // `.yjr` token = [marker][len:3 BE][payload]; one bookmark record is a
+        // key followed by a single anchor-handle string value.
+        fn token(marker: u8, payload: &[u8]) -> Vec<u8> {
+            let len = payload.len();
+            let mut v = vec![marker, (len >> 16) as u8, (len >> 8) as u8, len as u8];
+            v.extend_from_slice(payload);
+            v
+        }
+        fn handle(eid: u32, off: u32, linear: u64) -> String {
+            let mut raw = vec![1u8];
+            raw.extend_from_slice(&eid.to_le_bytes());
+            raw.extend_from_slice(&off.to_le_bytes());
+            let b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&raw);
+            format!("{b64}:{linear}")
+        }
+        let mut yjr = Vec::new();
+        yjr.extend(token(0xfe, b"annotation.personal.bookmark"));
+        yjr.extend(token(0x03, handle(1492, 0, 9).as_bytes()));
+
+        // Device tree: documents/Sidle/<stem>.<sha8>.sdr/<file>.yjr
+        let root = tempfile::tempdir().unwrap();
+        let sdr = root.path().join("documents/Sidle/book.deadbeef.sdr");
+        std::fs::create_dir_all(&sdr).unwrap();
+        std::fs::write(sdr.join("book.deadbeef0000.yjr"), &yjr).unwrap();
+
+        // A library book whose kfx_sha256 the `.sdr` infix prefix-matches.
+        let conn = mem_db();
+        let book_id = db::insert_book(
+            &conn,
+            &NewBook {
+                sha256: "book-sha",
+                title: "栞のある本",
+                author: "Author",
+                language: "ja",
+                ppd: None,
+                epub_path: None,
+                cover_path: None,
+                kfx_path: None, // empty TextIndex; a bookmark imports on anchor alone
+                kfx_sha256: Some(
+                    "deadbeef00000000000000000000000000000000000000000000000000000000",
+                ),
+                file_size: 0,
+                imported_at: "t0",
+                asin: None,
+                publisher: None,
+                published_at: None,
+                series_name: None,
+                series_index: None,
+                tags: &[],
+            },
+        )
+        .unwrap();
+
+        let r1 = import_from_device(&conn, root.path(), "now").unwrap();
+        assert_eq!(r1.matched, 1);
+        assert_eq!(r1.unchanged, 0);
+        assert!(r1.annotations.inserted >= 1, "first import should insert the bookmark");
+        assert!(db::get_yjr_sync_sha(&conn, book_id).unwrap().is_some(), "checkpoint recorded");
+
+        // Identical `.yjr` on the next connect → skipped, nothing inserted.
+        let r2 = import_from_device(&conn, root.path(), "now").unwrap();
+        assert_eq!(r2.matched, 1);
+        assert_eq!(r2.unchanged, 1);
+        assert_eq!(r2.annotations.inserted, 0);
     }
 }

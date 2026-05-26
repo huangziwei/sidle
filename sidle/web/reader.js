@@ -1,8 +1,9 @@
 // reader.js — the built-in reader coordinator. Replaces foliate's view.js with
 // a thin layer over the vendored paginator: open a library book (KFX→DOM via
-// the `reader_open` Tauri command), paginate it, and paint imported
-// annotations as overlay highlights. Exposed as `window.sidleReader` so the
-// (classic-script) library.js can drive it across the module boundary.
+// the `reader_open` Tauri command), paginate it, and surface imported
+// annotations — highlights painted in place, notes with a note cue + popover,
+// bookmarks as margin markers and a jump-list. Exposed as `window.sidleReader`
+// so the (classic-script) library.js can drive it across the module boundary.
 
 import "./foliate-kfx/paginator.js"; // defines <foliate-paginator>
 import { Overlayer } from "./foliate-kfx/overlayer.js";
@@ -13,33 +14,229 @@ const $ = (sel) => document.querySelector(sel);
 const toast = (msg, isError) => window.showToast?.(msg, isError);
 
 let book = null; // current kfx-book
+let dto = null; // raw reader_open DTO (kept for the eid→section index)
+let bookId = null; // library id of the open book (for reload-on-sync)
 let paginator = null; // <foliate-paginator>
 let annotations = []; // AnnotationDto[] for the open book
+let overlays = []; // [{ doc, overlayer }] — one per loaded section, for repaint
+let eidToSection = null; // Map<eid, sectionIndex>, built lazily for jumps
 let keyHandler = null;
 
 const view = () => $("#reader-view");
 
 // Named Kindle highlight colors → CSS; falls back to a literal color or yellow.
 const COLORS = { yellow: "#f4d03f", blue: "#5dade2", pink: "#ec7fa9", orange: "#e59866" };
+const NOTE_CUE = "#b5651d"; // underline under a note's highlight
+const BOOKMARK_COLOR = "#e07b39";
+const KIND_ICON = { highlight: "🖍", note: "📝", bookmark: "🔖" };
 
+const NS = "http://www.w3.org/2000/svg";
+
+// A small filled marker at the block-start corner of a bookmark's anchor char,
+// so bookmarks are visible on the page (the jump-list is the primary surface).
+function drawBookmarkMarker(rects, options = {}) {
+  const g = document.createElementNS(NS, "g");
+  const r = rects[0];
+  if (!r) return g;
+  const vertical = (options.writingMode || "").startsWith("vertical");
+  const cx = vertical ? r.right - 5 : r.left + 5;
+  const dot = document.createElementNS(NS, "circle");
+  dot.setAttribute("cx", cx);
+  dot.setAttribute("cy", r.top + 5);
+  dot.setAttribute("r", "5");
+  dot.setAttribute("fill", options.color || BOOKMARK_COLOR);
+  g.append(dot);
+  return g;
+}
+
+// Paint every resolvable annotation into one section's overlayer. Idempotent:
+// `overlayer.add` replaces an existing key, so re-running after a sync just
+// refreshes (device import is add-only, so nothing needs removing).
 function paintAnnotations(doc, overlayer) {
+  const writingMode = book?.writingMode;
   for (const ann of annotations) {
-    if (ann.kind === "bookmark") continue; // margin markers handled later
     const range = rangeFor(doc, ann);
     if (!range) continue;
+    if (ann.kind === "bookmark") {
+      overlayer.add(`ann-${ann.id}-bm`, range, drawBookmarkMarker, {
+        color: BOOKMARK_COLOR,
+        writingMode,
+      });
+      continue;
+    }
     const color = (ann.color && COLORS[ann.color]) || ann.color || COLORS.yellow;
     overlayer.add(`ann-${ann.id}`, range, Overlayer.highlight, { color });
+    if (ann.kind === "note") {
+      // A second cue so a note reads differently from a plain highlight.
+      overlayer.add(`ann-${ann.id}-u`, range, Overlayer.underline, {
+        color: NOTE_CUE,
+        width: 2,
+        writingMode,
+      });
+    }
   }
+}
+
+// ---- note popover ----------------------------------------------------------
+
+// The overlay SVG is pointer-transparent, so clicks land on the iframe doc.
+// Find a note whose live rects contain the click and pop its body.
+function noteAt(doc, x, y) {
+  for (const ann of annotations) {
+    if (ann.kind !== "note" || !ann.note_body) continue;
+    const range = rangeFor(doc, ann);
+    if (!range) continue;
+    for (const r of range.getClientRects()) {
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return ann;
+    }
+  }
+  return null;
+}
+
+function onDocClick(e, doc) {
+  const ann = noteAt(doc, e.clientX, e.clientY);
+  if (!ann) {
+    hideNotePopover();
+    return;
+  }
+  showNotePopover(ann, doc, e.clientX, e.clientY);
+}
+
+function showNotePopover(ann, doc, clientX, clientY) {
+  const pop = $("#reader-note-popover");
+  if (!pop) return;
+  $("#reader-note-quote").textContent = ann.text || "";
+  $("#reader-note-body").textContent = ann.note_body || "";
+  // The click is in the iframe's own viewport; offset by the iframe's box to
+  // land in the main document's coordinate space.
+  const fr = doc.defaultView?.frameElement?.getBoundingClientRect() || { left: 0, top: 0 };
+  pop.hidden = false; // unhide first so offsetWidth/Height are real
+  let left = fr.left + clientX;
+  let top = fr.top + clientY + 14;
+  left = Math.max(8, Math.min(left, window.innerWidth - pop.offsetWidth - 8));
+  if (top + pop.offsetHeight > window.innerHeight - 8) {
+    top = fr.top + clientY - pop.offsetHeight - 14;
+  }
+  pop.style.left = `${left}px`;
+  pop.style.top = `${Math.max(8, top)}px`;
+}
+
+function hideNotePopover() {
+  const p = $("#reader-note-popover");
+  if (p) p.hidden = true;
+}
+
+// ---- annotations panel + jump ----------------------------------------------
+
+function buildEidIndex(d) {
+  const map = new Map();
+  for (let i = 0; i < (d?.sections?.length || 0); i++) {
+    const html = d.sections[i].html || "";
+    for (const m of html.matchAll(/data-eid="(\d+)"/g)) {
+      const eid = Number(m[1]);
+      if (!map.has(eid)) map.set(eid, i);
+    }
+  }
+  return map;
+}
+
+async function jumpTo(ann) {
+  if (ann.eid_start == null || !paginator) return;
+  if (!eidToSection) eidToSection = buildEidIndex(dto);
+  const index = eidToSection.get(ann.eid_start);
+  if (index == null) {
+    toast("Couldn't locate that annotation in the book");
+    return;
+  }
+  hideNotePopover();
+  await paginator.goTo({ index, anchor: (d) => rangeFor(d, ann) || 0 });
+}
+
+function annotationRow(ann) {
+  const li = document.createElement("li");
+  li.className = `ann-row ann-${ann.kind}`;
+
+  const icon = document.createElement("span");
+  icon.className = "ann-icon";
+  icon.textContent = KIND_ICON[ann.kind] || "•";
+
+  const body = document.createElement("div");
+  body.className = "ann-row-body";
+  const quote = document.createElement("div");
+  quote.className = "ann-quote";
+  quote.textContent = ann.text || (ann.kind === "bookmark" ? "Bookmark" : "");
+  body.appendChild(quote);
+  if (ann.note_body) {
+    const note = document.createElement("div");
+    note.className = "ann-note";
+    note.textContent = ann.note_body;
+    body.appendChild(note);
+  }
+
+  li.append(icon, body);
+  li.addEventListener("click", () => jumpTo(ann));
+  return li;
+}
+
+function renderAnnotationsPanel() {
+  const list = $("#reader-annotations-list");
+  if (!list) return;
+  const sorted = [...annotations].sort(
+    (a, b) => (a.loc_start ?? a.eid_start ?? 0) - (b.loc_start ?? b.eid_start ?? 0),
+  );
+  list.replaceChildren(...sorted.map(annotationRow));
+
+  const n = sorted.length;
+  $("#reader-annotations-empty").hidden = n > 0;
+  const countEl = $("#reader-annotations-count");
+  if (countEl) {
+    countEl.textContent = String(n);
+    countEl.hidden = n === 0;
+  }
+}
+
+function toggleAnnotationsPanel() {
+  const p = $("#reader-annotations-panel");
+  if (p) p.hidden = !p.hidden;
+}
+
+function hideAnnotationsPanel() {
+  const p = $("#reader-annotations-panel");
+  if (p) p.hidden = true;
+}
+
+// Re-fetch + repaint when a device sync lands while this book is open, so new
+// highlights show up without forcing the reader closed. No-op for other books.
+async function reloadAnnotations(forBookId) {
+  if (bookId == null) return;
+  if (forBookId != null && forBookId !== bookId) return;
+  try {
+    annotations = (await window.api.invoke("annotations_for_book", { bookId })) || [];
+  } catch {
+    return;
+  }
+  for (const { doc, overlayer } of overlays) paintAnnotations(doc, overlayer);
+  renderAnnotationsPanel();
 }
 
 // ---- navigation -----------------------------------------------------------
 
-const forward = () => paginator?.next();
-const back = () => paginator?.prev();
+const forward = () => {
+  hideNotePopover();
+  paginator?.next();
+};
+const back = () => {
+  hideNotePopover();
+  paginator?.prev();
+};
 
 function onKey(e) {
   if (e.key === "Escape") {
-    close();
+    // Peel back overlays first, then close the reader.
+    if (!$("#reader-note-popover")?.hidden) hideNotePopover();
+    else if (!$("#reader-annotations-panel")?.hidden) hideAnnotationsPanel();
+    else close();
+    e.preventDefault();
     return;
   }
   const rtl = book?.ppd === "rtl"; // vertical-rl / RTL: next page is to the left
@@ -68,25 +265,30 @@ function onKey(e) {
 
 // ---- open / close ---------------------------------------------------------
 
-async function open(bookId) {
+async function open(id) {
   await close(); // tear down any prior session
-  let dto, anns;
+  let openDto, anns;
   try {
-    [dto, anns] = await Promise.all([
-      window.api.invoke("reader_open", { bookId }),
-      window.api.invoke("annotations_for_book", { bookId }),
+    [openDto, anns] = await Promise.all([
+      window.api.invoke("reader_open", { bookId: id }),
+      window.api.invoke("annotations_for_book", { bookId: id }),
     ]);
   } catch (err) {
     toast(`Couldn't open reader: ${err}`, true);
     return;
   }
+  bookId = id;
+  dto = openDto;
   annotations = anns || [];
+  eidToSection = null;
+  overlays = [];
   book = makeKfxBook(dto);
 
   $("#reader-title").textContent = dto.title || "Untitled";
   $("#reader-progress").textContent = "";
   view().hidden = false;
   view().classList.add("open");
+  renderAnnotationsPanel();
 
   paginator = document.createElement("foliate-paginator");
   paginator.setAttribute("flow", "paginated");
@@ -95,11 +297,14 @@ async function open(bookId) {
   paginator.addEventListener("create-overlayer", ({ detail: { doc, attach } }) => {
     const overlayer = new Overlayer();
     attach(overlayer);
+    overlays.push({ doc, overlayer });
     paintAnnotations(doc, overlayer);
+    doc.addEventListener("click", (e) => onDocClick(e, doc));
   });
   paginator.addEventListener("relocate", ({ detail }) => {
     const pct = Math.round((detail.fraction ?? 0) * 100);
     $("#reader-progress").textContent = `${pct}%`;
+    hideNotePopover();
   });
 
   paginator.open(book);
@@ -122,7 +327,13 @@ async function close() {
     book.destroy();
     book = null;
   }
+  dto = null;
+  bookId = null;
   annotations = [];
+  overlays = [];
+  eidToSection = null;
+  hideNotePopover();
+  hideAnnotationsPanel();
   const v = view();
   if (v) {
     v.classList.remove("open");
@@ -134,6 +345,15 @@ function wire() {
   $("#reader-close")?.addEventListener("click", () => close());
   $("#reader-prev")?.addEventListener("click", () => back());
   $("#reader-next")?.addEventListener("click", () => forward());
+  $("#reader-annotations")?.addEventListener("click", () => toggleAnnotationsPanel());
+  $("#reader-annotations-close")?.addEventListener("click", () => hideAnnotationsPanel());
+  // Click anywhere in the app chrome (outside the popover) dismisses it. Clicks
+  // inside the section iframe live in a separate document and don't reach here,
+  // so this never fights the in-text click that opened the popover.
+  document.addEventListener("mousedown", (e) => {
+    const pop = $("#reader-note-popover");
+    if (pop && !pop.hidden && !pop.contains(e.target)) hideNotePopover();
+  });
 }
 
 if (document.readyState === "loading") {
@@ -142,4 +362,4 @@ if (document.readyState === "loading") {
   wire();
 }
 
-window.sidleReader = { open, close };
+window.sidleReader = { open, close, reloadAnnotations };

@@ -42,6 +42,10 @@ const state = {
   // flight. `{ message, failed }` — shown in the status bar with priority
   // over the autopull and queue summary lines.
   importing: null,
+  // True while a Kindle annotation sync (auto-on-connect or manual) is
+  // running. Surfaced in the status bar; lower priority than importing /
+  // autopull so a book pull's progress isn't hidden behind it.
+  annotationSync: false,
 };
 
 // Sort keys exposed in the gallery-visible sort popover and as
@@ -141,6 +145,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   refreshServerStatus();
   subscribeSendProgress();
   subscribePullProgress();
+  subscribeAnnotationSync();
   subscribeLibraryRowUpdated();
 });
 
@@ -1183,6 +1188,7 @@ function wireDevice() {
     }
   });
   $("#btn-send-unsent").addEventListener("click", () => sendUnsent());
+  $("#btn-sync-annotations").addEventListener("click", () => syncAnnotations());
   $("#btn-import-all-orphans").addEventListener("click", () => importAllOrphans());
   $("#btn-device-eject").addEventListener("click", () => ejectDevice());
   // Clicks INSIDE the popover shouldn't close it.
@@ -1459,6 +1465,9 @@ function updateDeviceUI(info) {
       ejectBtn.hidden = info.transport !== "mass_storage";
       ejectBtn.disabled = false;
     }
+    // Annotation sync reads the device filesystem directly → mass-storage only.
+    const syncBtn = $("#btn-sync-annotations");
+    if (syncBtn) syncBtn.disabled = info.transport !== "mass_storage";
     $("#device-model").textContent = info.model || "Kindle";
     $("#device-serial").textContent = info.serial || "—";
     $("#device-transport").textContent = transportLabel(info.transport);
@@ -1505,6 +1514,8 @@ function updateDeviceUI(info) {
     // Hide eject button on disconnect — nothing to eject.
     const ejectBtn = $("#btn-device-eject");
     if (ejectBtn) ejectBtn.hidden = true;
+    const syncBtn = $("#btn-sync-annotations");
+    if (syncBtn) syncBtn.disabled = true;
     render();
   }
 }
@@ -1786,6 +1797,75 @@ function subscribePullProgress() {
 }
 
 // ---------------------------------------------------------------------------
+// Kindle annotation sync (highlights / notes / bookmarks)
+//
+// Auto-runs in the background on mass-storage connect (the backend monitor
+// fires `annotations:sync-*`); the popover button is the manual re-run for
+// when the auto sync didn't catch something. Either way it's idempotent.
+// ---------------------------------------------------------------------------
+
+// Turn a DeviceImportReport into a one-line summary for the toast.
+function annotationSyncSummary(report) {
+  const added = (report?.annotations?.inserted ?? 0) + (report?.clippings?.inserted ?? 0);
+  if (added === 0) return "Highlights already up to date";
+  const books = report?.matched ?? 0;
+  const noun = added === 1 ? "annotation" : "annotations";
+  return books > 0
+    ? `Synced ${added} ${noun} from ${books} book${books === 1 ? "" : "s"}`
+    : `Synced ${added} ${noun}`;
+}
+
+// Manual re-sync from the device popover button.
+async function syncAnnotations() {
+  const btn = $("#btn-sync-annotations");
+  const prog = $("#device-send-progress");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const prevLabel = btn.textContent;
+  btn.textContent = "Syncing…";
+  if (prog) {
+    prog.hidden = false;
+    prog.textContent = "syncing highlights…";
+  }
+  try {
+    const report = await window.api.invoke("annotations_import_from_device");
+    showToast(annotationSyncSummary(report));
+    window.sidleReader?.reloadAnnotations?.();
+  } catch (e) {
+    showToast(`highlight sync failed: ${e}`, true);
+  } finally {
+    btn.textContent = prevLabel;
+    // Re-enable based on whether a mass-storage device is still connected.
+    btn.disabled = state.device?.transport !== "mass_storage";
+    if (prog) setTimeout(() => (prog.hidden = true), 2000);
+  }
+}
+
+// Background sync driven by the device monitor on connect.
+function subscribeAnnotationSync() {
+  window.api.listen("annotations:sync-start", () => {
+    state.annotationSync = true;
+    renderQueue();
+  });
+  window.api.listen("annotations:sync-done", (e) => {
+    state.annotationSync = false;
+    renderQueue();
+    const report = e.payload;
+    const added = (report?.annotations?.inserted ?? 0) + (report?.clippings?.inserted ?? 0);
+    // Only toast when the auto sync actually brought something new in — a
+    // no-op reconnect shouldn't nag.
+    if (added > 0) showToast(annotationSyncSummary(report));
+    // If the user is reading one of the synced books, repaint in place.
+    window.sidleReader?.reloadAnnotations?.();
+  });
+  window.api.listen("annotations:sync-error", (e) => {
+    state.annotationSync = false;
+    renderQueue();
+    showToast(`Kindle highlight sync failed: ${e.payload}`, true);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Queue drawer
 // ---------------------------------------------------------------------------
 
@@ -1818,7 +1898,8 @@ function renderQueue() {
   // Priority order in the status bar:
   //   1. foreground import (state.importing) — user-initiated drop / add
   //   2. autopull from Kindle's /dedrm folder (state.autopull)
-  //   3. background conversion queue summary (the default)
+  //   3. Kindle annotation sync (state.annotationSync)
+  //   4. background conversion queue summary (the default)
   if (state.importing) {
     summary.textContent = state.importing.message;
     if (state.importing.failed) toggle.classList.add("errors");
@@ -1826,6 +1907,9 @@ function renderQueue() {
   } else if (state.autopull) {
     summary.textContent =
       `Pulling ${state.autopull.done}/${state.autopull.total} from Kindle…`;
+    toggle.classList.add("active");
+  } else if (state.annotationSync) {
+    summary.textContent = "Syncing Kindle highlights…";
     toggle.classList.add("active");
   } else {
     const parts = [];

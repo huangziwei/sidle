@@ -168,6 +168,17 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             source      TEXT NOT NULL,
             updated_at  TEXT NOT NULL
         );
+
+        -- Per-book checkpoint of the last `.yjr` we imported, keyed by its
+        -- content hash. Lets the device sync skip rebuilding a book's TextIndex
+        -- (the expensive part — it parses the full library KFX) when the
+        -- on-device annotations haven't changed since the last connect. Same
+        -- idea as the dedrm autopull skipping files already in the library.
+        CREATE TABLE IF NOT EXISTS yjr_sync (
+            book_id    INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+            yjr_sha    TEXT NOT NULL,
+            synced_at  TEXT NOT NULL
+        );
         "#,
     )?;
 
@@ -933,6 +944,35 @@ pub fn set_reading_position(
     Ok(())
 }
 
+/// The content hash of the `.yjr` last imported for `book_id`, if we've ever
+/// synced it. The device import compares this against the hash of the file on
+/// the Kindle to decide whether anything changed.
+pub fn get_yjr_sync_sha(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT yjr_sha FROM yjr_sync WHERE book_id = ?1",
+        params![book_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+/// Record the `.yjr` content hash imported for `book_id` (upsert).
+pub fn set_yjr_sync_sha(
+    conn: &Connection,
+    book_id: i64,
+    yjr_sha: &str,
+    now: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        r#"INSERT INTO yjr_sync (book_id, yjr_sha, synced_at) VALUES (?1, ?2, ?3)
+            ON CONFLICT(book_id) DO UPDATE SET
+                yjr_sha = excluded.yjr_sha,
+                synced_at = excluded.synced_at"#,
+        params![book_id, yjr_sha, now],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1068,6 +1108,20 @@ mod tests {
         set_reading_position(&conn, book_id, Some(200), Some(0), Some(3000), "sidle").expect("set2");
         let p = get_reading_position(&conn, book_id).expect("get").expect("present");
         assert_eq!((p.eid, p.linear_pos, p.source.as_str()), (Some(200), Some(3000), "sidle"));
+    }
+
+    #[test]
+    fn yjr_sync_sha_upserts() {
+        let conn = fresh_db();
+        let book_id = insert_minimal(&conn, "sha-yjr", "栞本");
+        assert!(get_yjr_sync_sha(&conn, book_id).expect("get").is_none());
+
+        set_yjr_sync_sha(&conn, book_id, "abc123", "t1").expect("set");
+        assert_eq!(get_yjr_sync_sha(&conn, book_id).expect("get").as_deref(), Some("abc123"));
+
+        // A changed `.yjr` overwrites the checkpoint (PRIMARY KEY upsert).
+        set_yjr_sync_sha(&conn, book_id, "def456", "t2").expect("set2");
+        assert_eq!(get_yjr_sync_sha(&conn, book_id).expect("get").as_deref(), Some("def456"));
     }
 
     #[test]

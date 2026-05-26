@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use crate::device::dedrm::{self, PullResult};
 use crate::device::detect;
 use crate::device::{DeviceInfo, TransportKind};
-use crate::library::LibraryPaths;
+use crate::library::{LibraryPaths, db, ingest};
 use crate::queue::QueueHandle;
 use crate::state::DbHandle;
 
@@ -88,9 +88,9 @@ pub fn spawn(
                 match device.transport {
                     TransportKind::MassStorage { .. } => {
                         // Fire-and-forget — keep the poll loop ticking even
-                        // while the auto-pull is doing IO. Each spawned task
+                        // while the connect work is doing IO. Each spawned task
                         // owns clones of the shared handles.
-                        tauri::async_runtime::spawn(autopull_on_connect(
+                        tauri::async_runtime::spawn(on_mass_storage_connect(
                             app.clone(),
                             db.clone(),
                             paths.clone(),
@@ -117,6 +117,69 @@ pub fn spawn(
             tokio::time::sleep(POLL_INTERVAL).await;
         }
     });
+}
+
+/// Everything that should happen the moment a mass-storage Kindle is plugged
+/// in, in the background so the user can keep working:
+///   1. Auto-pull any new DeDRM'd books off `/dedrm` (and enqueue conversions).
+///   2. Sync highlights / notes / bookmarks off the device into the library.
+///
+/// The pull runs first so a freshly added book is already in the DB (and so
+/// matchable by `kfx_sha256` infix) before the annotation sync tries to link
+/// its `.yjr` to a library row.
+async fn on_mass_storage_connect(
+    app: AppHandle,
+    db: DbHandle,
+    paths: LibraryPaths,
+    queue: QueueHandle,
+    device: DeviceInfo,
+) {
+    autopull_on_connect(app.clone(), db.clone(), paths, queue, device.clone()).await;
+    sync_annotations_on_connect(app, db, device).await;
+}
+
+/// Import highlights / notes / bookmarks off the connected mass-storage Kindle.
+/// Runs on the blocking pool; the import is idempotent (`dedup_hash`), so
+/// re-running on every connect is safe and cheap.
+///
+/// Emits `annotations:sync-start` before and `annotations:sync-done` (with the
+/// [`ingest::DeviceImportReport`]) / `annotations:sync-error` after, so the
+/// status bar can show progress without a modal or stealing focus.
+async fn sync_annotations_on_connect(app: AppHandle, db: DbHandle, device: DeviceInfo) {
+    let Some(mount) = device.mass_storage_mount() else {
+        return;
+    };
+    let serial = device.serial.clone();
+
+    let _ = app.emit("annotations:sync-start", ());
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ingest::DeviceImportReport> {
+        let conn = db.blocking_lock();
+        ingest::import_from_device(&conn, &mount, &db::now_iso())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(report)) => {
+            eprintln!(
+                "[sidle/annsync] {serial}: {} books, {} matched ({} unchanged), {} new (annotations), {} new (clips)",
+                report.yjr_books,
+                report.matched,
+                report.unchanged,
+                report.annotations.inserted,
+                report.clippings.inserted,
+            );
+            let _ = app.emit("annotations:sync-done", report);
+        }
+        Ok(Err(e)) => {
+            eprintln!("[sidle/annsync] {serial}: import failed: {e:#}");
+            let _ = app.emit("annotations:sync-error", format!("{e:#}"));
+        }
+        Err(e) => {
+            eprintln!("[sidle/annsync] {serial}: import task panicked: {e}");
+            let _ = app.emit("annotations:sync-error", e.to_string());
+        }
+    }
 }
 
 /// Scan the device's `/dedrm` folder, import every file not already in the
