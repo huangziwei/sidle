@@ -129,6 +129,48 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         "#,
     )?;
 
+    // Annotations + last-read position. ADDITIVE and precious: created here and
+    // NEVER dropped by the destructive reset above (which only drops books /
+    // conversion_jobs / device_history). `book_id` is nullable with ON DELETE
+    // SET NULL so deleting a book unlinks its imported annotations instead of
+    // destroying them; `dedup_hash UNIQUE` makes re-import idempotent.
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS annotations (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            dedup_hash   TEXT NOT NULL UNIQUE,
+            book_id      INTEGER REFERENCES books(id) ON DELETE SET NULL,
+            kind         TEXT NOT NULL,
+            eid_start    INTEGER,
+            off_start    INTEGER,
+            eid_end      INTEGER,
+            off_end      INTEGER,
+            loc_start    INTEGER,
+            loc_end      INTEGER,
+            linear_pos   INTEGER,
+            text         TEXT NOT NULL DEFAULT '',
+            note_body    TEXT,
+            color        TEXT,
+            clip_title   TEXT,
+            clip_author  TEXT,
+            added_at     TEXT,
+            added_raw    TEXT,
+            imported_at  TEXT NOT NULL,
+            source       TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_annotations_book ON annotations(book_id);
+
+        CREATE TABLE IF NOT EXISTS reading_position (
+            book_id     INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+            eid         INTEGER,
+            "offset"    INTEGER,
+            linear_pos  INTEGER,
+            source      TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        "#,
+    )?;
+
     // Idempotent column adds for installs that already migrated past the
     // v1 schema. `CREATE IF NOT EXISTS` above is a no-op for an existing
     // table, so we have to ALTER out-of-band.
@@ -678,6 +720,219 @@ fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Annotations + last-read position (imported off the Kindle; see
+// .claude/plans/sidle-reader.md). The tables live in `migrate` outside the
+// destructive reset.
+// ---------------------------------------------------------------------------
+
+/// One stored annotation. `book_id == None` means unlinked — the book isn't in
+/// the library (an orphan-inbox entry).
+#[derive(Debug, Clone, Serialize)]
+pub struct AnnotationRow {
+    pub id: i64,
+    pub dedup_hash: String,
+    pub book_id: Option<i64>,
+    pub kind: String,
+    pub eid_start: Option<i64>,
+    pub off_start: Option<i64>,
+    pub eid_end: Option<i64>,
+    pub off_end: Option<i64>,
+    pub loc_start: Option<i64>,
+    pub loc_end: Option<i64>,
+    pub linear_pos: Option<i64>,
+    pub text: String,
+    pub note_body: Option<String>,
+    pub color: Option<String>,
+    pub clip_title: Option<String>,
+    pub clip_author: Option<String>,
+    pub added_at: Option<String>,
+    pub added_raw: Option<String>,
+    pub imported_at: String,
+    pub source: String,
+}
+
+/// Insert payload for one annotation; borrows so ingest can build these from
+/// parsed records without cloning.
+pub struct NewAnnotation<'a> {
+    pub dedup_hash: &'a str,
+    pub book_id: Option<i64>,
+    pub kind: &'a str,
+    pub eid_start: Option<i64>,
+    pub off_start: Option<i64>,
+    pub eid_end: Option<i64>,
+    pub off_end: Option<i64>,
+    pub loc_start: Option<i64>,
+    pub loc_end: Option<i64>,
+    pub linear_pos: Option<i64>,
+    pub text: &'a str,
+    pub note_body: Option<&'a str>,
+    pub color: Option<&'a str>,
+    pub clip_title: Option<&'a str>,
+    pub clip_author: Option<&'a str>,
+    pub added_at: Option<&'a str>,
+    pub added_raw: Option<&'a str>,
+    pub imported_at: &'a str,
+    pub source: &'a str,
+}
+
+/// Insert an annotation, ignoring exact duplicates (same `dedup_hash`). Returns
+/// `true` if a new row landed, `false` if it was already present — so an import
+/// can count inserted vs duplicate.
+pub fn insert_annotation(conn: &Connection, a: &NewAnnotation<'_>) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        r#"INSERT INTO annotations
+            (dedup_hash, book_id, kind, eid_start, off_start, eid_end, off_end,
+             loc_start, loc_end, linear_pos, text, note_body, color,
+             clip_title, clip_author, added_at, added_raw, imported_at, source)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?17, ?18, ?19)
+            ON CONFLICT(dedup_hash) DO NOTHING"#,
+        params![
+            a.dedup_hash,
+            a.book_id,
+            a.kind,
+            a.eid_start,
+            a.off_start,
+            a.eid_end,
+            a.off_end,
+            a.loc_start,
+            a.loc_end,
+            a.linear_pos,
+            a.text,
+            a.note_body,
+            a.color,
+            a.clip_title,
+            a.clip_author,
+            a.added_at,
+            a.added_raw,
+            a.imported_at,
+            a.source,
+        ],
+    )?;
+    Ok(n > 0)
+}
+
+const SELECT_ANNOTATION: &str = r#"
+    SELECT id, dedup_hash, book_id, kind, eid_start, off_start, eid_end, off_end,
+           loc_start, loc_end, linear_pos, text, note_body, color,
+           clip_title, clip_author, added_at, added_raw, imported_at, source
+    FROM annotations
+"#;
+
+fn row_to_annotation(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnnotationRow> {
+    Ok(AnnotationRow {
+        id: row.get(0)?,
+        dedup_hash: row.get(1)?,
+        book_id: row.get(2)?,
+        kind: row.get(3)?,
+        eid_start: row.get(4)?,
+        off_start: row.get(5)?,
+        eid_end: row.get(6)?,
+        off_end: row.get(7)?,
+        loc_start: row.get(8)?,
+        loc_end: row.get(9)?,
+        linear_pos: row.get(10)?,
+        text: row.get(11)?,
+        note_body: row.get(12)?,
+        color: row.get(13)?,
+        clip_title: row.get(14)?,
+        clip_author: row.get(15)?,
+        added_at: row.get(16)?,
+        added_raw: row.get(17)?,
+        imported_at: row.get(18)?,
+        source: row.get(19)?,
+    })
+}
+
+/// Annotations for one book, ordered by reading position.
+pub fn list_annotations_for_book(
+    conn: &Connection,
+    book_id: i64,
+) -> rusqlite::Result<Vec<AnnotationRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "{SELECT_ANNOTATION} WHERE book_id = ?1 ORDER BY linear_pos, loc_start, id"
+    ))?;
+    stmt.query_map(params![book_id], row_to_annotation)?.collect()
+}
+
+/// Unlinked annotations (book not in the library) — the orphan inbox.
+pub fn list_unlinked_annotations(conn: &Connection) -> rusqlite::Result<Vec<AnnotationRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "{SELECT_ANNOTATION} WHERE book_id IS NULL ORDER BY clip_title, linear_pos, loc_start, id"
+    ))?;
+    stmt.query_map([], row_to_annotation)?.collect()
+}
+
+/// Point an annotation at a (newly matched) book. Used by ingest's relink pass.
+pub fn set_annotation_book_id(
+    conn: &Connection,
+    annotation_id: i64,
+    book_id: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE annotations SET book_id = ?1 WHERE id = ?2",
+        params![book_id, annotation_id],
+    )?;
+    Ok(())
+}
+
+/// Last-read position for a book (device-imported or Sidle's own).
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadingPosition {
+    pub book_id: i64,
+    pub eid: Option<i64>,
+    pub offset: Option<i64>,
+    pub linear_pos: Option<i64>,
+    pub source: String,
+    pub updated_at: String,
+}
+
+pub fn get_reading_position(
+    conn: &Connection,
+    book_id: i64,
+) -> rusqlite::Result<Option<ReadingPosition>> {
+    conn.query_row(
+        r#"SELECT book_id, eid, "offset", linear_pos, source, updated_at
+           FROM reading_position WHERE book_id = ?1"#,
+        params![book_id],
+        |row| {
+            Ok(ReadingPosition {
+                book_id: row.get(0)?,
+                eid: row.get(1)?,
+                offset: row.get(2)?,
+                linear_pos: row.get(3)?,
+                source: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// Upsert a book's last-read position.
+pub fn set_reading_position(
+    conn: &Connection,
+    book_id: i64,
+    eid: Option<i64>,
+    offset: Option<i64>,
+    linear_pos: Option<i64>,
+    source: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        r#"INSERT INTO reading_position (book_id, eid, "offset", linear_pos, source, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(book_id) DO UPDATE SET
+                eid = excluded.eid,
+                "offset" = excluded."offset",
+                linear_pos = excluded.linear_pos,
+                source = excluded.source,
+                updated_at = excluded.updated_at"#,
+        params![book_id, eid, offset, linear_pos, source, now_iso()],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,6 +967,107 @@ mod tests {
             },
         )
         .expect("insert")
+    }
+
+    #[test]
+    fn annotation_insert_is_idempotent_on_dedup_hash() {
+        let conn = fresh_db();
+        let book_id = insert_minimal(&conn, "sha-anno", "テスト本");
+        let insert = |hash: &str| {
+            insert_annotation(
+                &conn,
+                &NewAnnotation {
+                    dedup_hash: hash,
+                    book_id: Some(book_id),
+                    kind: "highlight",
+                    eid_start: Some(1254),
+                    off_start: Some(44),
+                    eid_end: Some(1257),
+                    off_end: Some(68),
+                    loc_start: None,
+                    loc_end: None,
+                    linear_pos: Some(12937),
+                    text: "走れメロス",
+                    note_body: None,
+                    color: None,
+                    clip_title: None,
+                    clip_author: None,
+                    added_at: None,
+                    added_raw: None,
+                    imported_at: "2026-05-25T00:00:00Z",
+                    source: "yjr",
+                },
+            )
+        };
+        assert!(insert("h1").expect("insert")); // new
+        assert!(!insert("h1").expect("dup")); // same dedup_hash → ignored
+        assert!(insert("h2").expect("insert2")); // distinct
+        let rows = list_annotations_for_book(&conn, book_id).expect("list");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].text, "走れメロス");
+        assert_eq!((rows[0].eid_start, rows[0].off_end), (Some(1254), Some(68)));
+    }
+
+    #[test]
+    fn deleting_book_unlinks_annotations_rather_than_destroying() {
+        let conn = fresh_db();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let book_id = insert_minimal(&conn, "sha-gone", "消える本");
+        insert_annotation(
+            &conn,
+            &NewAnnotation {
+                dedup_hash: "k1",
+                book_id: Some(book_id),
+                kind: "bookmark",
+                eid_start: Some(1492),
+                off_start: Some(0),
+                eid_end: Some(1492),
+                off_end: Some(0),
+                loc_start: None,
+                loc_end: None,
+                linear_pos: Some(22364),
+                text: "",
+                note_body: None,
+                color: None,
+                clip_title: Some("消える本"),
+                clip_author: None,
+                added_at: None,
+                added_raw: None,
+                imported_at: "2026-05-25T00:00:00Z",
+                source: "yjr",
+            },
+        )
+        .expect("insert");
+        remove_book(&conn, book_id).expect("remove");
+        // The book row is gone, but the annotation survives — now unlinked.
+        assert!(
+            list_annotations_for_book(&conn, book_id)
+                .expect("by book")
+                .is_empty()
+        );
+        let orphans = list_unlinked_annotations(&conn).expect("orphans");
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].book_id, None);
+        assert_eq!(orphans[0].clip_title.as_deref(), Some("消える本"));
+    }
+
+    #[test]
+    fn reading_position_upserts() {
+        let conn = fresh_db();
+        let book_id = insert_minimal(&conn, "sha-pos", "位置本");
+        assert!(get_reading_position(&conn, book_id).expect("get").is_none());
+
+        set_reading_position(&conn, book_id, Some(100), Some(5), Some(2000), "device").expect("set");
+        let p = get_reading_position(&conn, book_id).expect("get").expect("present");
+        assert_eq!(
+            (p.eid, p.offset, p.linear_pos, p.source.as_str()),
+            (Some(100), Some(5), Some(2000), "device")
+        );
+
+        // Second write for the same book overwrites (PRIMARY KEY upsert).
+        set_reading_position(&conn, book_id, Some(200), Some(0), Some(3000), "sidle").expect("set2");
+        let p = get_reading_position(&conn, book_id).expect("get").expect("present");
+        assert_eq!((p.eid, p.linear_pos, p.source.as_str()), (Some(200), Some(3000), "sidle"));
     }
 
     #[test]
