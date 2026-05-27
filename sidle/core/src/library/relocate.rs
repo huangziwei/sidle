@@ -88,23 +88,25 @@ pub fn move_library(src_conn: &Connection, src_root: &Path, dest_root: &Path) ->
 /// committed, so a stubborn file logs rather than fails.
 pub fn finish_move(src_root: &Path, state_dir: &Path, books_renamed: bool) {
     let src_books = src_root.join("books");
-    if !books_renamed && src_books.is_dir() {
-        if let Err(e) = std::fs::remove_dir_all(&src_books) {
-            eprintln!("[sidle/relocate] left old {}: {e}", src_books.display());
-        }
+    if !books_renamed
+        && src_books.is_dir()
+        && let Err(e) = std::fs::remove_dir_all(&src_books)
+    {
+        eprintln!("[sidle/relocate] left old {}: {e}", src_books.display());
     }
     for name in ["library.db", "library.db-wal", "library.db-shm"] {
         let f = src_root.join(name);
-        if f.exists() {
-            if let Err(e) = std::fs::remove_file(&f) {
-                eprintln!("[sidle/relocate] left old {}: {e}", f.display());
-            }
+        if f.exists()
+            && let Err(e) = std::fs::remove_file(&f)
+        {
+            eprintln!("[sidle/relocate] left old {}: {e}", f.display());
         }
     }
-    if src_root != state_dir && dir_is_empty(src_root) {
-        if let Err(e) = std::fs::remove_dir(src_root) {
-            eprintln!("[sidle/relocate] left old root {}: {e}", src_root.display());
-        }
+    if src_root != state_dir
+        && dir_is_empty(src_root)
+        && let Err(e) = std::fs::remove_dir(src_root)
+    {
+        eprintln!("[sidle/relocate] left old root {}: {e}", src_root.display());
     }
 }
 
@@ -122,8 +124,9 @@ pub fn validate_existing(dir: &Path) -> Result<i64> {
 
 /// `VACUUM INTO` — a transactionally-consistent, WAL-free single-file copy of
 /// the live DB. Tolerates concurrent writers (snapshots committed state; later
-/// commits simply aren't included).
-fn snapshot_db(src: &Connection, dest_db: &Path) -> Result<()> {
+/// commits simply aren't included). Shared with [`crate::library::backup`],
+/// which snapshots into a temp file before zipping it.
+pub(crate) fn snapshot_db(src: &Connection, dest_db: &Path) -> Result<()> {
     src.execute("VACUUM INTO ?1", [dest_db.to_string_lossy().as_ref()])
         .with_context(|| format!("VACUUM INTO {}", dest_db.display()))?;
     Ok(())

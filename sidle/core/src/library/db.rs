@@ -129,6 +129,10 @@ fn relativize_for_store(root: Option<&Path>, abs: &str) -> String {
     }
 }
 
+/// `(id, epub_path, cover_path, kfx_path)` for the §4a path-relativization
+/// migration sweep.
+type PathColumns = (i64, Option<String>, Option<String>, Option<String>);
+
 /// One-time migration: rewrite absolute `*_path` columns (pre-§4a rows stored
 /// `<root>/books/<sha>/...`) to root-relative. Gated on actually finding an
 /// absolute value, so steady-state opens short-circuit after the first. No-op
@@ -147,7 +151,7 @@ fn relativize_existing_paths(conn: &Connection, db_path: &Path) -> rusqlite::Res
     if !any_absolute {
         return Ok(());
     }
-    let rows: Vec<(i64, Option<String>, Option<String>, Option<String>)> = {
+    let rows: Vec<PathColumns> = {
         let mut stmt = conn.prepare("SELECT id, epub_path, cover_path, kfx_path FROM books")?;
         stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<rusqlite::Result<_>>()?

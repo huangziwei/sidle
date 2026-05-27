@@ -14,7 +14,7 @@ use crate::library::db::{self, BookRow};
 use crate::library::epub_cover;
 use crate::library::import::{self, ImportOutcome};
 use crate::library::kfx_cover;
-use crate::library::{LibraryPaths, relocate};
+use crate::library::{LibraryPaths, backup, relocate};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -749,6 +749,138 @@ pub async fn library_relocate_use(
     }
     relocate::validate_existing(&dir).map_err(|e| format!("{e:#}"))?;
     LibraryPaths::set_root(&dir).map_err(|e| format!("{e:#}"))?;
+    app.restart()
+}
+
+/// Summary of a completed backup, shown in the Settings panel.
+#[derive(Debug, Serialize)]
+pub struct BackupSummary {
+    pub books: i64,
+    pub annotations: i64,
+    pub path: String,
+}
+
+/// Pick a destination for a backup archive (save dialog). Defaults the name to
+/// `sidle-library-<date>.sidlebak`. Returns the chosen path, or `None` if
+/// cancelled. Exposed from Rust for the same reason as `library_pick_files`.
+#[tauri::command]
+pub async fn library_backup_pick_dest(app: AppHandle) -> Result<Option<String>, String> {
+    let default_name = format!("sidle-library-{}.sidlebak", chrono::Local::now().format("%Y-%m-%d"));
+    let (tx, rx) = oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Sidle backup", &["sidlebak"])
+        .set_file_name(default_name)
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let result = rx.await.map_err(|e| e.to_string())?;
+    Ok(result.map(|p| p.to_string()))
+}
+
+/// Write a full backup of the current library to `dest`. Holds the DB lock only
+/// for the consistent snapshot, then zips the `books/` tree lock-free so a large
+/// backup doesn't stall the app. Non-destructive — nothing here touches the live
+/// library, so no queue gate or relaunch is needed.
+#[tauri::command]
+pub async fn library_backup(
+    state: State<'_, AppState>,
+    dest: String,
+) -> Result<BackupSummary, String> {
+    let dest = PathBuf::from(dest);
+    let dest_label = dest.to_string_lossy().to_string();
+    let books_dir = state.paths.root.join("books");
+    let source_root = state.paths.root.clone();
+
+    // Snapshot under the lock (fast — just the metadata DB), then release.
+    let (snapshot, db_user_version) = {
+        let conn = state.db.lock().await;
+        let snap = backup::snapshot(&conn).map_err(|e| format!("{e:#}"))?;
+        let uv = db::user_version(&conn).map_err(|e| e.to_string())?;
+        (snap, uv)
+    };
+
+    // Zip on a blocking thread — lock-free (it reads only the snapshot file + the
+    // on-disk book tree) AND off the async runtime, so a large backup doesn't
+    // stall other commands or freeze the UI. The snapshot guard moves in and
+    // cleans up there.
+    let manifest = tokio::task::spawn_blocking(move || {
+        backup::create_archive(
+            &snapshot,
+            &books_dir,
+            &source_root,
+            env!("CARGO_PKG_VERSION"),
+            db_user_version,
+            &dest,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))?;
+
+    Ok(BackupSummary {
+        books: manifest.counts.books,
+        annotations: manifest.counts.annotations,
+        path: dest_label,
+    })
+}
+
+/// Pick a `.sidlebak` to restore (open dialog). Returns the path, or `None`.
+#[tauri::command]
+pub async fn library_restore_pick_src(app: AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Sidle backup", &["sidlebak"])
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let result = rx.await.map_err(|e| e.to_string())?;
+    Ok(result.map(|p| p.to_string()))
+}
+
+/// Restore a `.sidlebak` over the current library, then relaunch. Replaces the
+/// library; the pre-restore copy is kept at `<root>.bak-<timestamp>` as the undo
+/// (the confirm UI states this). Refuses while a conversion is in flight (the
+/// swap would strand its output), validates + verifies before the swap (so a bad
+/// archive leaves the target untouched), then relaunches onto the restored files
+/// — the same restore-then-relaunch path as relocate (H5), since the live
+/// `Connection` can't be repointed in place.
+#[tauri::command]
+pub async fn library_restore(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    src: String,
+) -> Result<(), String> {
+    let src = PathBuf::from(src);
+    let dest_root = state.paths.root.clone();
+
+    // Gate on an idle queue before mutating anything (same reasoning as
+    // relocate). Lock only for the check.
+    {
+        let conn = state.db.lock().await;
+        if !db::pending_or_error_book_ids(&conn)
+            .map_err(|e| e.to_string())?
+            .is_empty()
+        {
+            return Err(
+                "A conversion is still running — wait for the queue to finish, then try again."
+                    .into(),
+            );
+        }
+    }
+
+    // Extraction + verify + swap. No live connection needed; the open DB handle
+    // keeps working off the old (now set-aside) inode until we relaunch.
+    let outcome = backup::restore(&src, &dest_root, db::SCHEMA_VERSION)
+        .map_err(|e| format!("{e:#}"))?;
+    eprintln!(
+        "[sidle/backup] restored {} books; previous library kept at {}",
+        outcome.books,
+        outcome.safety_copy.display()
+    );
+
+    // Relaunch onto the restored library; `restart` diverges.
     app.restart()
 }
 

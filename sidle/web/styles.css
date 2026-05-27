@@ -2367,10 +2367,17 @@ button {
   justify-content: flex-end;
   gap: 8px;
 }
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .settings-status {
   margin: 12px 0 0;
   font-size: 13px;
   color: var(--muted);
+  white-space: pre-line;
+  word-break: break-all;
 }
 .settings-status.error {
   color: var(--accent);

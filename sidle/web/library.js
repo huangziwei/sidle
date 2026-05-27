@@ -226,6 +226,8 @@ function wireToolbar() {
   $("#settings-modal .modal-backdrop").addEventListener("click", closeSettings);
   $("#settings-move").addEventListener("click", () => pickRelocate("move"));
   $("#settings-use").addEventListener("click", () => pickRelocate("use"));
+  $("#settings-backup").addEventListener("click", doBackup);
+  $("#settings-restore").addEventListener("click", pickRestore);
   $("#settings-confirm-cancel").addEventListener("click", resetRelocateConfirm);
   $("#settings-confirm-ok").addEventListener("click", confirmRelocate);
 }
@@ -2518,10 +2520,16 @@ async function confirmRelocate() {
   if (!relocatePending) return;
   const { mode, dest } = relocatePending;
   $("#settings-confirm-ok").disabled = true;
-  setSettingsStatus(mode === "move" ? "Copying library…" : "Switching library…");
+  setSettingsStatus(
+    mode === "move" ? "Copying library…"
+    : mode === "restore" ? "Restoring… this can take a while for a large backup."
+    : "Switching library…",
+  );
   try {
     if (mode === "move") {
       await window.api.invoke("library_relocate_move", { dest });
+    } else if (mode === "restore") {
+      await window.api.invoke("library_restore", { src: dest });
     } else {
       await window.api.invoke("library_relocate_use", { dir: dest });
     }
@@ -2539,6 +2547,43 @@ function setSettingsStatus(msg, isError = false) {
   el.textContent = msg;
   el.classList.toggle("error", isError);
   el.hidden = false;
+}
+
+// Backup is non-destructive — a direct action, not part of the confirm/restart
+// flow. Picks a destination, writes the archive, reports the counts.
+async function doBackup() {
+  const dest = await window.api.invoke("library_backup_pick_dest");
+  if (!dest) return;
+  resetRelocateConfirm();
+  const btn = $("#settings-backup");
+  btn.disabled = true;
+  setSettingsStatus("Backing up… this can take a while for a large library.");
+  try {
+    const r = await window.api.invoke("library_backup", { dest });
+    setSettingsStatus(
+      `Backed up ${plural(r.books, "book")} and ${plural(r.annotations, "highlight")} to:\n${r.path}`,
+    );
+  } catch (e) {
+    setSettingsStatus(String(e?.message ?? e), true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Restore IS destructive and restarts, so it routes through the shared
+// confirm box (mode "restore"), handled in confirmRelocate.
+async function pickRestore() {
+  const src = await window.api.invoke("library_restore_pick_src");
+  if (!src) return;
+  relocatePending = { mode: "restore", dest: src };
+  $("#settings-confirm-text").textContent =
+    `Restore from:\n${src}\n\nThis replaces your current library. A dated safety copy is kept next to it, and sidle restarts.`;
+  $("#settings-confirm").hidden = false;
+  $("#settings-status").hidden = true;
+}
+
+function plural(n, word) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
 // ---------------------------------------------------------------------------
