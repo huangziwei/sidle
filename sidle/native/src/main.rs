@@ -426,6 +426,48 @@ fn run() -> anyhow::Result<()> {
                                 )?;
                             }
                         }
+                        PagerHit::Sync => {
+                            // Push this device's reading-state sidecars to the Mac
+                            // — the LAN twin of a USB annotation sync. The library
+                            // grid doesn't change, so just toast the report and
+                            // repaint the page underneath.
+                            log("sync-button tap");
+                            let dirty =
+                                toast::draw(&mut fb, &mut renderer, "Syncing annotations…");
+                            fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+
+                            let sync_t0 = Instant::now();
+                            let banner_msg = match api::push_annotations(
+                                &agent,
+                                &cfg,
+                                std::path::Path::new(DOWNLOAD_DIR),
+                            ) {
+                                Ok(report) => {
+                                    let summary = report.summary();
+                                    log(format!(
+                                        "annotation sync ok in {:?}: {summary}",
+                                        sync_t0.elapsed()
+                                    ));
+                                    summary
+                                }
+                                Err(api::SidleError::TokenMismatch) => {
+                                    log("token rejected during sync — resync via sidle desktop app".to_string());
+                                    "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
+                                        .to_string()
+                                }
+                                Err(api::SidleError::Other(err)) => {
+                                    log(format!("annotation sync failed: {err:#}"));
+                                    format!("Sync failed: {err}")
+                                }
+                            };
+                            let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
+                            fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                            thread::sleep(TOAST_LINGER);
+                            draw_gallery_page(
+                                &mut fb, &mut renderer, &books, &covers, page,
+                                total_pages, grid_left, grid_top, sort, filters.active_facets(),
+                            )?;
+                        }
                     }
                 }
             }

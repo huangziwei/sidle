@@ -20,10 +20,13 @@
 
 use std::fmt;
 use std::io::Read;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use serde::Deserialize;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use serde::{Deserialize, Serialize};
 
 use crate::config::ServerConfig;
 
@@ -336,6 +339,212 @@ fn looks_like_sha8_kfx(name: &str) -> bool {
     sha.len() == SHA_INFIX_LEN && sha.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+// ---------------------------------------------------------------------------
+// Annotation push — POST /sync/annotations (the LAN twin of a USB sync)
+// ---------------------------------------------------------------------------
+
+/// The push bundle: each `.sdr`'s reading-state sidecars (base64) plus the
+/// orphan archive. Mirrors `sidle-server`'s `SyncRequest` DTO. `device_serial`
+/// comes from `server.conf` (`ServerConfig::serial`), written by the desktop app
+/// at install — so the picker needs no on-device serial lookup.
+#[derive(Serialize)]
+struct SyncRequest {
+    device_serial: String,
+    sdrs: Vec<SyncSdr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clippings_txt: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SyncSdr {
+    sdr_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    yjr_b64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    yjf_b64: Option<String>,
+}
+
+/// The server's import report, the subset the picker surfaces in a toast. serde
+/// ignores the report fields we don't read, so this stays compatible as the
+/// server's `DeviceImportReport` grows.
+#[derive(Debug, Default, Deserialize)]
+pub struct SyncReport {
+    #[serde(default)]
+    pub positions: usize,
+    /// `.sdr` dirs whose book isn't in the library (highlights archived as
+    /// orphans). Normally empty — everything under `documents/Sidle/` was
+    /// sideloaded from the library — so a non-zero count is worth surfacing.
+    #[serde(default)]
+    pub unmatched: Vec<String>,
+    #[serde(default)]
+    pub annotations: SyncStats,
+    #[serde(default)]
+    pub clippings: SyncStats,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct SyncStats {
+    #[serde(default)]
+    pub inserted: usize,
+    #[serde(default)]
+    pub removed: usize,
+}
+
+impl SyncReport {
+    /// One-line toast summary, e.g. `annotation sync: 3 new, 1 removed, 2
+    /// positions`. `nothing new` when an idempotent re-sync changed nothing. A
+    /// trailing `(N unmatched)` flags orphaned highlights when any.
+    pub fn summary(&self) -> String {
+        let new = self.annotations.inserted + self.clippings.inserted;
+        let removed = self.annotations.removed + self.clippings.removed;
+
+        let mut parts = Vec::new();
+        if new > 0 {
+            parts.push(format!("{new} new"));
+        }
+        if removed > 0 {
+            parts.push(format!("{removed} removed"));
+        }
+        if self.positions > 0 {
+            parts.push(format!("{} positions", self.positions));
+        }
+        let mut s = if parts.is_empty() {
+            "annotation sync: nothing new".to_string()
+        } else {
+            format!("annotation sync: {}", parts.join(", "))
+        };
+        if !self.unmatched.is_empty() {
+            s.push_str(&format!(" ({} unmatched)", self.unmatched.len()));
+        }
+        s
+    }
+}
+
+/// The import can rebuild a TextIndex per changed book server-side; give it
+/// generous headroom over the list/cover timeouts (still LAN-only).
+const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Scan the on-device reading-state sidecars and push them to sidle-server's
+/// `POST /sync/annotations` — the LAN twin of a USB sync. `sidle_dir` is
+/// `/mnt/us/documents/Sidle` (the download dir); `My Clippings.txt` is read from
+/// its parent, `documents/`. Returns the server's [`SyncReport`].
+///
+/// Errors with a re-install breadcrumb if `server.conf` carries no `SERIAL=`
+/// (a pre-sync install): annotations are keyed per device, so the serial is
+/// mandatory for the push (but not for boot/list/download, hence it's optional
+/// in [`ServerConfig`]).
+pub fn push_annotations(
+    agent: &ureq::Agent,
+    cfg: &ServerConfig,
+    sidle_dir: &Path,
+) -> Result<SyncReport> {
+    if cfg.serial.is_empty() {
+        return Err(anyhow!(
+            "server.conf has no SERIAL= — re-run Update KUAL in the desktop app \
+             (annotations are keyed per device)"
+        )
+        .into());
+    }
+
+    let (sdrs, clippings_txt) = collect_sidecars(sidle_dir)?;
+    if sdrs.is_empty() && clippings_txt.is_none() {
+        // Nothing on the device to sync — skip the round-trip, report empty.
+        return Ok(SyncReport::default());
+    }
+
+    let req = SyncRequest {
+        device_serial: cfg.serial.clone(),
+        sdrs,
+        clippings_txt,
+    };
+    let body = serde_json::to_vec(&req).context("serialize sync request")?;
+
+    let url = format!("http://{}:{}/sync/annotations", cfg.host, cfg.port);
+    let res = match agent
+        .post(&url)
+        .set("X-Sidle-Token", &cfg.token)
+        .set("Content-Type", "application/json")
+        .timeout(SYNC_TIMEOUT)
+        .send_bytes(&body)
+    {
+        Ok(res) => res,
+        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            return Err(SidleError::TokenMismatch);
+        }
+        Err(e) => return Err(anyhow!("POST {url}: {e}").into()),
+    };
+    let body = res
+        .into_string()
+        .with_context(|| format!("read body of {url}"))?;
+    let report: SyncReport =
+        serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
+    Ok(report)
+}
+
+/// Read the `.yjr`/`.yjf` sidecars from every `*.sdr` under `sidle_dir`, base64
+/// each, and read `My Clippings.txt` from the parent `documents/`. Mirrors the
+/// device-side scan in `sidle_core::library::ingest::import_from_device` (which
+/// sidle-native can't call — no sidle-core dep across the cross-compile
+/// boundary). A `.sdr` with neither sidecar (a pagination cache) is skipped.
+fn collect_sidecars(sidle_dir: &Path) -> Result<(Vec<SyncSdr>, Option<String>)> {
+    let mut sdrs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(sidle_dir) {
+        for entry in entries.flatten() {
+            let sdr = entry.path();
+            if sdr.extension().and_then(|e| e.to_str()) != Some("sdr") {
+                continue;
+            }
+            let yjr = read_sidecar(&sdr, ".yjr")?;
+            let yjf = read_sidecar(&sdr, ".yjf")?;
+            if yjr.is_none() && yjf.is_none() {
+                continue; // pagination-cache .sdr — nothing to sync
+            }
+            let sdr_name = sdr
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            sdrs.push(SyncSdr {
+                sdr_name,
+                yjr_b64: yjr.map(|b| BASE64.encode(b)),
+                yjf_b64: yjf.map(|b| BASE64.encode(b)),
+            });
+        }
+    }
+
+    // My Clippings.txt lives in documents/, the parent of documents/Sidle.
+    // `from_utf8_lossy` matches the desktop's clippings reader; a read error
+    // (vs. simply absent) just means no orphan archive, never a failed push.
+    let clippings_txt = sidle_dir
+        .parent()
+        .map(|docs| docs.join("My Clippings.txt"))
+        .and_then(|p| std::fs::read(&p).ok())
+        .map(|b| String::from_utf8_lossy(&b).into_owned());
+
+    Ok((sdrs, clippings_txt))
+}
+
+/// The first file in `sdr_dir` whose name ends with `suffix` (e.g. `.yjr`),
+/// read into bytes — matching `find_sidecar`'s `ends_with` rule in sidle-core.
+fn read_sidecar(sdr_dir: &Path, suffix: &str) -> Result<Option<Vec<u8>>> {
+    let Ok(entries) = std::fs::read_dir(sdr_dir) else {
+        return Ok(None);
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_match = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(suffix));
+        if is_match {
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            return Ok(Some(bytes));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,5 +620,74 @@ mod tests {
         assert_eq!(clean("\u{FEFF}\u{200B}"), "");
         // Plain text is untouched.
         assert_eq!(clean("Normal Title 7"), "Normal Title 7");
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("sidle-sync-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn collect_sidecars_reads_sidecars_and_skips_pagination_cache() {
+        let base = scratch("collect");
+        let docs = base.join("documents");
+        let sidle = docs.join("Sidle");
+
+        // A .sdr with both sidecars (annotations + last-read position).
+        let sdr = sidle.join("book.deadbeef.sdr");
+        std::fs::create_dir_all(&sdr).unwrap();
+        std::fs::write(sdr.join("book.deadbeef0000.yjr"), b"yjr-bytes").unwrap();
+        std::fs::write(sdr.join("book.deadbeef0000.yjf"), b"yjf-bytes").unwrap();
+        // A pagination-cache .sdr (neither sidecar) — must be skipped.
+        let cache = sidle.join("other.cafe.sdr");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("page.cache"), b"x").unwrap();
+        // My Clippings.txt in documents/, the parent of Sidle.
+        std::fs::write(docs.join("My Clippings.txt"), b"clip").unwrap();
+
+        let (sdrs, clippings) = collect_sidecars(&sidle).unwrap();
+        assert_eq!(sdrs.len(), 1, "pagination-cache .sdr should be skipped");
+        assert_eq!(sdrs[0].sdr_name, "book.deadbeef.sdr");
+        let yjr_expected = BASE64.encode(b"yjr-bytes");
+        let yjf_expected = BASE64.encode(b"yjf-bytes");
+        assert_eq!(sdrs[0].yjr_b64.as_deref(), Some(yjr_expected.as_str()));
+        assert_eq!(sdrs[0].yjf_b64.as_deref(), Some(yjf_expected.as_str()));
+        assert_eq!(clippings.as_deref(), Some("clip"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn collect_sidecars_empty_when_no_tree() {
+        let base = scratch("empty");
+        // documents/Sidle doesn't exist → empty bundle, no error, no clippings.
+        let (sdrs, clippings) = collect_sidecars(&base.join("documents/Sidle")).unwrap();
+        assert!(sdrs.is_empty());
+        assert!(clippings.is_none());
+    }
+
+    #[test]
+    fn summary_reports_counts_and_nothing_new() {
+        let r = SyncReport::default();
+        assert_eq!(r.summary(), "annotation sync: nothing new");
+
+        let mut r = SyncReport::default();
+        r.annotations.inserted = 3;
+        r.positions = 2;
+        assert_eq!(r.summary(), "annotation sync: 3 new, 2 positions");
+
+        let mut r = SyncReport::default();
+        r.annotations.removed = 1;
+        assert_eq!(r.summary(), "annotation sync: 1 removed");
+
+        // Orphaned highlights flagged with a trailing count.
+        let mut r = SyncReport::default();
+        r.annotations.inserted = 2;
+        r.unmatched = vec!["a.sdr".into(), "b.sdr".into()];
+        assert_eq!(r.summary(), "annotation sync: 2 new (2 unmatched)");
+        // Unmatched-only (nothing imported) still reads sensibly.
+        let r = SyncReport { unmatched: vec!["a.sdr".into()], ..Default::default() };
+        assert_eq!(r.summary(), "annotation sync: nothing new (1 unmatched)");
     }
 }

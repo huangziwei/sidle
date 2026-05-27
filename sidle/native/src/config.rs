@@ -16,6 +16,13 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub token: String,
+    /// This Kindle's USB iSerial, written by the desktop app at KUAL-install
+    /// time (it read it off the mounted device). Echoed back as `device_serial`
+    /// in the `/sync/annotations` push so the server keys annotations per
+    /// device. Empty when loaded from a pre-sync `server.conf` (older install) —
+    /// the push path errors clearly and asks for a re-install rather than
+    /// blocking boot/list/download, which don't need it.
+    pub serial: String,
 }
 
 pub fn load(path: &Path) -> Result<ServerConfig> {
@@ -25,6 +32,7 @@ pub fn load(path: &Path) -> Result<ServerConfig> {
     let mut host = String::new();
     let mut port_str = String::new();
     let mut token = String::new();
+    let mut serial = String::new();
 
     for line in raw.lines() {
         let line = line.trim();
@@ -39,6 +47,7 @@ pub fn load(path: &Path) -> Result<ServerConfig> {
             "HOST" => host = v.to_string(),
             "PORT" => port_str = v.to_string(),
             "TOKEN" => token = v.to_string(),
+            "SERIAL" => serial = v.to_string(),
             _ => {} // ignore unknown keys for forward compatibility
         }
     }
@@ -51,5 +60,5 @@ pub fn load(path: &Path) -> Result<ServerConfig> {
     }
     let port: u16 = port_str.parse().context("server.conf PORT= invalid")?;
 
-    Ok(ServerConfig { host, port, token })
+    Ok(ServerConfig { host, port, token, serial })
 }

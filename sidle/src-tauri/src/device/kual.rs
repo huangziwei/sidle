@@ -69,6 +69,13 @@ impl KualSource {
 pub struct ServerConfRender {
     pub host: String,
     pub port: u16,
+    /// The Kindle's own USB iSerial (`DeviceInfo.serial`, read by the Mac at
+    /// mount). The picker echoes it as `device_serial` in its `POST
+    /// /sync/annotations` push, so the server keys the pushed annotations to
+    /// this device — same per-device keying a USB sync uses. Resolved Mac-side
+    /// (the device is mounted at install time) so the picker needs no on-device
+    /// serial lookup.
+    pub serial: String,
     pub token: String,
 }
 
@@ -85,8 +92,9 @@ impl ServerConfRender {
              \n\
              HOST={}\n\
              PORT={}\n\
+             SERIAL={}\n\
              TOKEN={}\n",
-            self.host, self.port, self.token,
+            self.host, self.port, self.serial, self.token,
         )
     }
 }
@@ -523,6 +531,7 @@ mod tests {
         ServerConfRender {
             host: "192.168.0.42".into(),
             port: 8731,
+            serial: "G000TESTSERIAL".into(),
             token: "abc123".into(),
         }
     }
@@ -534,6 +543,7 @@ mod tests {
         assert!(out.ends_with('\n'));
         assert!(out.contains("HOST=192.168.0.42"));
         assert!(out.contains("PORT=8731"));
+        assert!(out.contains("SERIAL=G000TESTSERIAL"));
         assert!(out.contains("TOKEN=abc123"));
     }
 

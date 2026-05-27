@@ -4524,6 +4524,7 @@ name = "sidle-native"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "fontdue",
  "image",
  "libc",
@@ -4539,6 +4540,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "clap",
  "hex",
  "mime_guess",
@@ -4549,6 +4551,7 @@ dependencies = [
  "sidle-core",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

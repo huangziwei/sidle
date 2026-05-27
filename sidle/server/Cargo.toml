@@ -19,6 +19,9 @@ sidle-core = { path = "../core" }
 
 anyhow = "1"
 axum = "0.8"
+# Annotation `.yjr`/`.yjf` blobs ride in the `POST /sync/annotations` JSON body
+# as base64. 0.22 matches sidle-core / src-tauri so we don't pull a second copy.
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs"] }
@@ -33,3 +36,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+# `Router::oneshot` for in-process handler tests (the `/sync/annotations` gate)
+# without binding a socket — drives the full route + DefaultBodyLimit layer.
+tower = { version = "0.5", features = ["util"] }

@@ -324,13 +324,15 @@ pub async fn device_import_orphan(
 /// Resolve the live `ServerConfRender` from app state. Same shape used
 /// by both `kual_status` and `kual_install` — keeping it in one place
 /// guarantees the staleness check and the actual install agree on
-/// what `server.conf` *should* contain.
-async fn render_conf(state: &AppState) -> Option<ServerConfRender> {
+/// what `server.conf` *should* contain. `serial` is the connected device's
+/// USB iSerial, threaded in from the same `DeviceInfo` snapshot the mount came
+/// from (the picker pushes it back as `device_serial`).
+async fn render_conf(state: &AppState, serial: String) -> Option<ServerConfRender> {
     let server_status = state.server.status(&state.paths).await;
     let host = kual::detect_lan_ipv4()?.to_string();
     let token = server_status.token?;
     let port = server_status.port.unwrap_or(server_status.default_port);
-    Some(ServerConfRender { host, port, token })
+    Some(ServerConfRender { host, port, serial, token })
 }
 
 #[tauri::command]
@@ -354,9 +356,11 @@ pub async fn kual_status(state: State<'_, AppState>) -> Result<KualStatus, Strin
     // to a placeholder so the binary/bundle slots still get checked.
     // The status will read "server.conf stale" but at least the user
     // sees which other files need pushing.
-    let conf = render_conf(&state).await.unwrap_or(ServerConfRender {
+    let serial = device.as_ref().map(|d| d.serial.clone()).unwrap_or_default();
+    let conf = render_conf(&state, serial).await.unwrap_or(ServerConfRender {
         host: String::new(),
         port: 0,
+        serial: String::new(),
         token: String::new(),
     });
 
@@ -380,7 +384,8 @@ pub async fn kual_install(
 
     // Hard-fail if any input the conf needs is missing — better than
     // writing a broken server.conf that'd silently 403 the picker.
-    let conf = render_conf(&state).await.ok_or_else(|| {
+    let serial = device.as_ref().map(|d| d.serial.clone()).unwrap_or_default();
+    let conf = render_conf(&state, serial).await.ok_or_else(|| {
         "couldn't resolve server.conf inputs (need a running server with token + a LAN IP)"
             .to_string()
     })?;
