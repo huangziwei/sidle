@@ -367,17 +367,26 @@ pub struct DeviceImportReport {
     pub clippings: ImportStats,
     /// Orphans linked to a book by the post-import relink pass.
     pub relinked: usize,
+    /// Matched books whose `.yjf` last-read position was imported (stored as the
+    /// `(book_id, 'device')` `reading_position` row — a Resume jump target).
+    pub positions: usize,
 }
 
-/// One `.yjr` pulled off a device, tagged with the `.sdr` directory it came
-/// from (the directory name carries the `kfx_sha256` infix that matches it to a
+/// The reading-state sidecars pulled from one `.sdr` directory, tagged with the
+/// directory name (which carries the `kfx_sha256` infix that matches it to a
 /// library book). Bytes are read on the device side — `std::fs` for
 /// mass-storage, MTP `GetObject` for Scribe-class — so [`import_collected`]
 /// stays transport-agnostic and the device-IO half can live wherever the
-/// transport does (the app's `device` module).
+/// transport does (the app's `device` module). At least one of the two is
+/// present (a `.sdr` with neither is a pagination cache, not collected):
+/// `.yjr` carries annotations, `.yjf` the last-read position — and a book read
+/// without highlighting has a `.yjf` but no `.yjr`.
 pub struct CollectedYjr {
     pub sdr_name: String,
-    pub yjr_bytes: Vec<u8>,
+    /// `<book>.yjr` bytes (annotations), if present.
+    pub yjr_bytes: Option<Vec<u8>>,
+    /// `<book>.yjf` bytes (last-read position `lpr`/`fpr`), if present.
+    pub yjf_bytes: Option<Vec<u8>>,
 }
 
 /// Import device annotations a caller has already pulled off the device: match
@@ -398,14 +407,41 @@ pub fn import_collected(
     let mut report = DeviceImportReport::default();
 
     for item in collected {
-        report.yjr_books += 1;
-        let book = match sdr_infix(&item.sdr_name) {
+        let CollectedYjr { sdr_name, yjr_bytes, yjf_bytes } = item;
+        let book = match sdr_infix(&sdr_name) {
             Some(infix) => db::find_by_kfx_sha_prefix(conn, infix)
-                .with_context(|| format!("kfx_sha lookup for {}", item.sdr_name))?,
+                .with_context(|| format!("kfx_sha lookup for {sdr_name}"))?,
             None => None,
         };
+
+        // Last-read position (`.yjf` `lpr`) — stored for every matched book on
+        // EVERY sync, before the unchanged-`.yjr` skip below: position moves
+        // independently of highlights (you can read on without highlighting), so
+        // gating it on the `.yjr` would freeze it. Cheap and idempotent — a handle
+        // decode + single-row upsert, no TextIndex. Lands in the `(book_id,
+        // 'device')` row; never auto-applied (it's a Resume jump target).
+        if let (Some(book), Some(yjf)) = (book.as_ref(), yjf_bytes.as_ref())
+            && let Some(h) = super::yjr::decode_position(yjf, "lpr")
+        {
+            db::set_reading_position(
+                conn,
+                book.id,
+                Some(i64::from(h.eid)),
+                Some(i64::from(h.offset)),
+                Some(h.linear as i64),
+                "device",
+                device_serial,
+            )
+            .context("store device reading position")?;
+            report.positions += 1;
+        }
+
+        // Annotations (`.yjr`). A `.sdr` carrying only a `.yjf` (read, never
+        // highlighted) has no annotations to import — its position is done above.
+        let Some(yjr_bytes) = yjr_bytes else { continue };
+        report.yjr_books += 1;
         let Some(book) = book else {
-            report.unmatched.push(item.sdr_name);
+            report.unmatched.push(sdr_name);
             continue;
         };
         report.matched += 1;
@@ -415,7 +451,7 @@ pub fn import_collected(
         // we imported last time, there's nothing new (no inserts, and no deletes
         // to reconcile). The bytes are already in hand (the `.yjr` is tiny — KB),
         // so this is just a hash + compare. Keyed per device.
-        let yjr_sha = super::import::sha256_of_bytes(&item.yjr_bytes);
+        let yjr_sha = super::import::sha256_of_bytes(&yjr_bytes);
         if db::get_yjr_sync_sha(conn, device_serial, book.id)
             .context("read yjr sync checkpoint")?
             .as_deref()
@@ -426,7 +462,7 @@ pub fn import_collected(
         }
 
         let idx = build_index(book.kfx_path.as_deref());
-        let anns = super::yjr::parse(&item.yjr_bytes);
+        let anns = super::yjr::parse(&yjr_bytes);
         let stats = import_yjr(
             conn,
             &anns,
@@ -481,17 +517,25 @@ pub fn import_from_device(
             if sdr.extension().and_then(|e| e.to_str()) != Some("sdr") {
                 continue;
             }
-            let Some(yjr_path) = find_yjr_in(&sdr) else {
-                continue; // a pagination-cache `.sdr` with no annotations
-            };
+            let yjr_path = find_sidecar(&sdr, ".yjr");
+            let yjf_path = find_sidecar(&sdr, ".yjf");
+            if yjr_path.is_none() && yjf_path.is_none() {
+                continue; // a pagination-cache `.sdr` — no annotations, no position
+            }
             let sdr_name = sdr
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or_default()
                 .to_string();
-            let yjr_bytes = std::fs::read(&yjr_path)
-                .with_context(|| format!("read {}", yjr_path.display()))?;
-            collected.push(CollectedYjr { sdr_name, yjr_bytes });
+            let read = |p: Option<PathBuf>| -> anyhow::Result<Option<Vec<u8>>> {
+                p.map(|p| std::fs::read(&p).with_context(|| format!("read {}", p.display())))
+                    .transpose()
+            };
+            collected.push(CollectedYjr {
+                sdr_name,
+                yjr_bytes: read(yjr_path)?,
+                yjf_bytes: read(yjf_path)?,
+            });
         }
     }
 
@@ -515,9 +559,10 @@ fn sdr_infix(sdr_name: &str) -> Option<&str> {
     (infix.len() >= 8 && infix.bytes().all(|b| b.is_ascii_hexdigit())).then_some(infix)
 }
 
-/// The live `.yjr` inside a `.sdr` dir, if any. Excludes `.yjr.bad_file` (a
-/// device-rejected write) since that doesn't end in `.yjr`.
-fn find_yjr_in(sdr_dir: &Path) -> Option<PathBuf> {
+/// The live sidecar matching `suffix` (`.yjr` / `.yjf`) inside a `.sdr` dir, if
+/// any. The `ends_with` test excludes `.yjr.bad_file` (a device-rejected write)
+/// since that doesn't end in `.yjr`.
+fn find_sidecar(sdr_dir: &Path, suffix: &str) -> Option<PathBuf> {
     std::fs::read_dir(sdr_dir)
         .ok()?
         .flatten()
@@ -525,7 +570,7 @@ fn find_yjr_in(sdr_dir: &Path) -> Option<PathBuf> {
         .find(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with(".yjr"))
+                .is_some_and(|n| n.ends_with(suffix))
         })
 }
 
@@ -828,5 +873,79 @@ mod tests {
         assert_eq!(r2.matched, 1);
         assert_eq!(r2.unchanged, 1);
         assert_eq!(r2.annotations.inserted, 0);
+    }
+
+    #[test]
+    fn device_import_pulls_yjf_last_position() {
+        use base64::Engine as _;
+        fn token(marker: u8, payload: &[u8]) -> Vec<u8> {
+            let len = payload.len();
+            let mut v = vec![marker, (len >> 16) as u8, (len >> 8) as u8, len as u8];
+            v.extend_from_slice(payload);
+            v
+        }
+        fn handle(eid: u32, off: u32, linear: u64) -> String {
+            let mut raw = vec![1u8];
+            raw.extend_from_slice(&eid.to_le_bytes());
+            raw.extend_from_slice(&off.to_le_bytes());
+            let b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&raw);
+            format!("{b64}:{linear}")
+        }
+        // A `.yjf` carrying an `lpr` position (eid 978, off 170) — and NO `.yjr`,
+        // i.e. a book read but never highlighted. Its position must still import.
+        let mut yjf = Vec::new();
+        yjf.extend(token(0xfe, b"lpr"));
+        yjf.extend(token(0x03, handle(978, 170, 12345).as_bytes()));
+
+        let root = tempfile::tempdir().unwrap();
+        let sdr = root.path().join("documents/Sidle/book.deadbeef.sdr");
+        std::fs::create_dir_all(&sdr).unwrap();
+        std::fs::write(sdr.join("book.deadbeef0000.yjf"), &yjf).unwrap();
+
+        let conn = mem_db();
+        let book_id = db::insert_book(
+            &conn,
+            &NewBook {
+                sha256: "book-sha",
+                title: "位置だけの本",
+                author: "Author",
+                language: "ja",
+                ppd: None,
+                epub_path: None,
+                cover_path: None,
+                kfx_path: None,
+                kfx_sha256: Some(
+                    "deadbeef00000000000000000000000000000000000000000000000000000000",
+                ),
+                file_size: 0,
+                imported_at: "t0",
+                asin: None,
+                publisher: None,
+                published_at: None,
+                series_name: None,
+                series_index: None,
+                tags: &[],
+            },
+        )
+        .unwrap();
+
+        let r = import_from_device(&conn, root.path(), "DEV", "now").unwrap();
+        assert_eq!(r.positions, 1, "the .yjf lpr position imported");
+        assert_eq!(r.yjr_books, 0, "no .yjr present");
+        assert_eq!(r.matched, 0, "matched counts .yjr books; a position-only .sdr isn't one");
+
+        let pos = db::list_reading_positions(&conn, book_id).unwrap();
+        assert_eq!(pos.len(), 1);
+        assert_eq!(pos[0].source, "device");
+        assert_eq!(pos[0].device_serial, "DEV", "tagged with the importing device's serial");
+        assert_eq!(
+            (pos[0].eid, pos[0].offset, pos[0].linear_pos),
+            (Some(978), Some(170), Some(12345)),
+        );
+
+        // Re-sync is idempotent: same single 'device' row (upsert, not a 2nd row).
+        let r2 = import_from_device(&conn, root.path(), "DEV", "now").unwrap();
+        assert_eq!(r2.positions, 1);
+        assert_eq!(db::list_reading_positions(&conn, book_id).unwrap().len(), 1);
     }
 }

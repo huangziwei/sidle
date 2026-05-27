@@ -35,7 +35,7 @@ let lastCharPos = null; // char position at the last relocate, for pace sampling
 let lastPos = null; // { loc, index, frac } from the last relocate, for mode cycling
 let livePosition = null; // { eid, offset, linear_pos } at the top of the current page — saved on close
 let sidleResume = null; // Sidle's last-read spot (frozen this session): auto-restored on open + Resume target
-let deviceResume = null; // Kindle's imported .yjf position (frozen): a Resume target, never auto-applied
+let deviceResumes = []; // [{ eid, offset, linear_pos, device_serial }] — each Kindle's imported .yjf spot; Resume targets, never auto-applied
 let progressMode = readSavedProgressMode(); // 0 loc · 1 chapter · 2 book · 3 hidden
 
 function readSavedProgressMode() {
@@ -274,11 +274,18 @@ async function jumpToPosition(pos) {
 }
 
 // The Resume targets in menu order — Sidle's own spot first (the common case),
-// then the Kindle's imported position. Each is present only if it has an eid.
+// then each Kindle's imported position. Each is present only if it has an eid;
+// device rows are labeled by a short serial tail when more than one device has
+// synced this book (so two Kindles are distinguishable).
 function resumeTargets() {
   const out = [];
   if (sidleResume?.eid != null) out.push({ label: "Sidle", pos: sidleResume });
-  if (deviceResume?.eid != null) out.push({ label: "Kindle", pos: deviceResume });
+  const devices = deviceResumes.filter((p) => p?.eid != null);
+  for (const pos of devices) {
+    const tail = pos.device_serial ? pos.device_serial.slice(-4) : "";
+    const label = devices.length > 1 && tail ? `Kindle ${tail}` : "Kindle";
+    out.push({ label, pos });
+  }
   return out;
 }
 
@@ -1010,7 +1017,7 @@ async function open(id) {
   lastPos = null;
   livePosition = null;
   sidleResume = (positions || []).find((p) => p.source === "sidle") || null;
-  deviceResume = (positions || []).find((p) => p.source === "device") || null;
+  deviceResumes = (positions || []).filter((p) => p.source === "device");
   styleSettings = loadStyle();
   book = makeKfxBook(dto);
 
@@ -1072,7 +1079,6 @@ async function close() {
         eid: livePosition.eid,
         offset: livePosition.offset ?? 0,
         linearPos: livePosition.linear_pos ?? null,
-        source: "sidle",
       });
     } catch {
       /* ignore — position save is best-effort */
@@ -1105,7 +1111,7 @@ async function close() {
   lastPos = null;
   livePosition = null;
   sidleResume = null;
-  deviceResume = null;
+  deviceResumes = [];
   hideResumeMenu();
   if ($("#reader-resume")) $("#reader-resume").hidden = true;
   lastTurnTime = null;

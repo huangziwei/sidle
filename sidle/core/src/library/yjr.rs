@@ -21,10 +21,12 @@
 //! `U+FFFC`) — it is recovered as the book substring between the anchors via the
 //! boko KFX→DOM `eid→text` map (see `anchor.rs`). Note *bodies* ARE inline here.
 //!
-//! Scope: this module decodes annotation records only. Last-read **position**
-//! (`sync_lpr` / `ReaderMetrics`) is a separate, not-yet-decoded value — in the
-//! files sampled its payload is not a `0x03` string, so the position import (T2)
-//! needs its own decode pass and is deliberately out of scope here.
+//! Scope: annotation records (`.yjr`) plus the `.yjf` sidecar's last-read
+//! **position**. The `.yjf` is the same container, and its `lpr` (last page
+//! read) / `fpr` (first) keys carry the same `base64(type,eid,offset):linear`
+//! handle as an annotation anchor — decoded by [`decode_position`]. (The
+//! `.yjr`'s own `sync_lpr` was a dead end — a 3-byte `00 01 ff` token with no
+//! anchor — so the real device position lives in the `.yjf`.)
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
@@ -213,6 +215,29 @@ pub fn parse_file(path: &std::path::Path) -> std::io::Result<Vec<Annotation>> {
     Ok(parse(&std::fs::read(path)?))
 }
 
+/// Decode a named position handle from a `.yjf` sidecar — `lpr` (last page read)
+/// or `fpr` (first/start). The `.yjf` shares the `.yjr` container grammar; the
+/// key is a top-level `0xfe` symbol whose following `0x03` value is the same
+/// `base64(type,eid,offset):linear` handle as an annotation anchor. Returns the
+/// first decodable handle after `key`, or `None` if the key/handle is absent
+/// (so a state-only `.yjf` with no `lpr` is simply skipped).
+pub fn decode_position(bytes: &[u8], key: &str) -> Option<Handle> {
+    let mut armed = false;
+    for (marker, txt) in tokens(bytes) {
+        match marker {
+            MARKER_KEY => armed = txt == key,
+            MARKER_STRING if armed => {
+                if let Some(handle) = decode_handle(txt) {
+                    return Some(handle);
+                }
+                armed = false; // the value after `key` wasn't a handle; stop waiting
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*; // also re-exports the parent's `base64::Engine` + `STANDARD_NO_PAD`
@@ -332,5 +357,30 @@ mod tests {
         let anns = parse(&bytes);
         assert_eq!(anns.len(), 1);
         assert_eq!(anns[0].start().unwrap().eid, 7);
+    }
+
+    #[test]
+    fn decodes_yjf_lpr_position() {
+        // A `.yjf` is the same container: `lpr`/`fpr` keys each followed by a
+        // handle value, interleaved with non-position keys (timer.*) that must
+        // not be picked up. `lpr` values mirror ブギーポップ (eid 978, off 170 —
+        // a character-precise mid-element position).
+        let bytes: Vec<u8> = [
+            key("fpr"),
+            val(&handle(910, 0, 100)),
+            key("lpr"),
+            val(&handle(978, 170, 12345)),
+            key("timer.average.calculator.outliers"),
+            val("3"),
+        ]
+        .concat();
+
+        let lpr = decode_position(&bytes, "lpr").expect("lpr present");
+        assert_eq!((lpr.eid, lpr.offset, lpr.linear), (978, 170, 12345));
+        let fpr = decode_position(&bytes, "fpr").expect("fpr present");
+        assert_eq!((fpr.eid, fpr.offset), (910, 0));
+        // An absent key (or a state-only `.yjf`) yields nothing, never a misread.
+        assert!(decode_position(&bytes, "sync_lpr").is_none());
+        assert!(decode_position(b"", "lpr").is_none());
     }
 }

@@ -16,11 +16,12 @@ use crate::library::db;
 use crate::state::DbHandle;
 
 /// Scan `documents/Sidle/` over `transport`, returning each `.sdr` directory's
-/// `.yjr` bytes plus the `My Clippings.txt` text (if present). Mirrors the
+/// `.yjr` (annotations) and `.yjf` (last-read position) bytes — either may be
+/// absent — plus the `My Clippings.txt` text (if present). Mirrors the
 /// mass-storage `std::fs` scan in `ingest::import_from_device`: `.yjr.bad_file`
-/// is excluded (doesn't end in `.yjr`), pagination-cache `.sdr` dirs with no
-/// `.yjr` are skipped, and `documents/Downloads/Items01/` (DRM'd Amazon KFX) is
-/// never touched.
+/// is excluded (doesn't end in `.yjr`), `.sdr` dirs with NEITHER sidecar (pure
+/// pagination caches) are skipped, and `documents/Downloads/Items01/` (DRM'd
+/// Amazon KFX) is never touched.
 ///
 /// Whether the device exposes its `.sdr/*.yjr` sidecars at all is up to its MTP
 /// responder — `documents/Sidle/*.kfx` is always enumerable (that's where we
@@ -38,20 +39,25 @@ pub fn collect_device_yjr(
         }
         let sdr = sidle.join(&entry.name);
         // `unwrap_or_default`: a `.sdr` that's somehow a file (or a transient
-        // list failure) is skipped, matching core's `find_yjr_in` graceful skip.
-        let yjr_name = transport
-            .list(&sdr)
-            .unwrap_or_default()
-            .into_iter()
-            .find(|e| e.name.ends_with(".yjr"))
-            .map(|e| e.name);
-        let Some(yjr_name) = yjr_name else {
-            continue; // pagination-cache `.sdr`, no annotations
+        // list failure) is skipped, matching core's `find_sidecar` graceful skip.
+        let listing = transport.list(&sdr).unwrap_or_default();
+        let yjr_name = listing.iter().find(|e| e.name.ends_with(".yjr")).map(|e| e.name.clone());
+        let yjf_name = listing.iter().find(|e| e.name.ends_with(".yjf")).map(|e| e.name.clone());
+        if yjr_name.is_none() && yjf_name.is_none() {
+            continue; // pagination-cache `.sdr` — no annotations, no position
+        }
+        let yjr_bytes = match &yjr_name {
+            Some(n) => Some(transport.read(&sdr.join(n))?),
+            None => None,
         };
-        let yjr_bytes = transport.read(&sdr.join(&yjr_name))?;
+        let yjf_bytes = match &yjf_name {
+            Some(n) => Some(transport.read(&sdr.join(n))?),
+            None => None,
+        };
         collected.push(CollectedYjr {
             sdr_name: entry.name,
             yjr_bytes,
+            yjf_bytes,
         });
     }
 
@@ -100,22 +106,31 @@ mod tests {
     use crate::device::mass_storage::transport::MassStorageTransport;
 
     // Drives the collector through the mass-storage transport (MTP can't be
-    // unit-tested without a device). Confirms it finds the `.yjr` inside a
-    // `.sdr`, skips a pagination-cache `.sdr`, ignores `.yjr.bad_file`, and
-    // reads `My Clippings.txt`.
+    // unit-tested without a device). Confirms it finds both sidecars inside a
+    // `.sdr`, STILL collects a `.yjf`-only (read, never highlighted) `.sdr`,
+    // skips a pure pagination-cache `.sdr`, ignores `.yjr.bad_file`, and reads
+    // `My Clippings.txt`.
     #[test]
-    fn collects_yjr_and_clippings_over_transport() {
+    fn collects_yjr_yjf_and_clippings_over_transport() {
         let tmp = tempfile::tempdir().unwrap();
         let sidle = tmp.path().join("documents").join("Sidle");
 
+        // Annotated + read: both `.yjr` (highlights) and `.yjf` (position).
         let annotated = sidle.join("book.deadbeef.sdr");
         std::fs::create_dir_all(&annotated).unwrap();
         std::fs::write(annotated.join("book.deadbeef0000.yjr"), b"YJR-BYTES").unwrap();
+        std::fs::write(annotated.join("book.deadbeef0000.yjf"), b"YJF-BYTES").unwrap();
         // A device-rejected write must NOT be picked up (doesn't end in `.yjr`).
         std::fs::write(annotated.join("book.deadbeef0000.yjr.bad_file"), b"junk").unwrap();
 
-        // A pagination-cache `.sdr` with no `.yjr` — skipped.
-        std::fs::create_dir_all(sidle.join("other.cafef00d.sdr")).unwrap();
+        // Read but never highlighted: `.yjf` only — must STILL be collected so
+        // its position imports even with no annotations.
+        let posonly = sidle.join("read.cafef00d.sdr");
+        std::fs::create_dir_all(&posonly).unwrap();
+        std::fs::write(posonly.join("read.cafef00d0000.yjf"), b"POS-ONLY").unwrap();
+
+        // A pure pagination-cache `.sdr` (neither sidecar) — skipped.
+        std::fs::create_dir_all(sidle.join("cache.feedface.sdr")).unwrap();
 
         std::fs::write(
             tmp.path().join("documents").join("My Clippings.txt"),
@@ -124,11 +139,21 @@ mod tests {
         .unwrap();
 
         let transport = MassStorageTransport::new(tmp.path().to_path_buf());
-        let (collected, clippings) = collect_device_yjr(&transport).unwrap();
+        let (mut collected, clippings) = collect_device_yjr(&transport).unwrap();
+        collected.sort_by(|a, b| a.sdr_name.cmp(&b.sdr_name)); // dir order is unspecified
 
-        assert_eq!(collected.len(), 1, "one annotated .sdr");
-        assert_eq!(collected[0].sdr_name, "book.deadbeef.sdr");
-        assert_eq!(collected[0].yjr_bytes, b"YJR-BYTES");
+        assert_eq!(collected.len(), 2, "annotated + position-only; cache skipped");
+
+        let annotated = &collected[0];
+        assert_eq!(annotated.sdr_name, "book.deadbeef.sdr");
+        assert_eq!(annotated.yjr_bytes.as_deref(), Some(&b"YJR-BYTES"[..]));
+        assert_eq!(annotated.yjf_bytes.as_deref(), Some(&b"YJF-BYTES"[..]));
+
+        let posonly = &collected[1];
+        assert_eq!(posonly.sdr_name, "read.cafef00d.sdr");
+        assert!(posonly.yjr_bytes.is_none(), "no .yjr for a never-highlighted book");
+        assert_eq!(posonly.yjf_bytes.as_deref(), Some(&b"POS-ONLY"[..]));
+
         assert_eq!(clippings.as_deref(), Some("clip text"));
     }
 
