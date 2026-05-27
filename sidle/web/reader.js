@@ -43,6 +43,7 @@ let searchSeq = 0; // request token — late responses for stale queries are dro
 let searchDebounceTimer = null;
 let searchComposing = false; // true between compositionstart/end (JP IME)
 let lastPaintedCount = 0; // count from last search-paint, so `clearSearchPaint` knows how many keys to remove
+let selectedSearchIndex = -1; // -1 = none picked yet; otherwise the index of the row the user last clicked
 
 function readSavedProgressMode() {
   try {
@@ -433,7 +434,9 @@ async function reloadAnnotations(forBookId) {
 
 // ---- search panel + paint --------------------------------------------------
 
-const SEARCH_COLOR = "#5ad1e3"; // cyan — distinct from yellow highlight + orange bookmark
+const SEARCH_COLOR = "#5ad1e3"; // cyan — every match
+const SEARCH_COLOR_SELECTED = "#ff5722"; // deep-orange — the row the user last clicked,
+// so when a page carries multiple hits of the same word it's clear which one was jumped to
 
 // One painted search match keyed `search-<i>`, so closing search can remove
 // only its own rects and leave annotation paint untouched.
@@ -441,8 +444,9 @@ function paintOneSearchMatch(doc, overlayer, m, i) {
   const matchAsAnn = { eid_start: m.eid, eid_end: m.eid, off_start: m.off_start, off_end: m.off_end };
   if (!annotationRects(doc, matchAsAnn).length) return; // not in this section
   const vertical = (book?.writingMode || "").startsWith("vertical");
+  const color = i === selectedSearchIndex ? SEARCH_COLOR_SELECTED : SEARCH_COLOR;
   const rangeLike = { getClientRects: () => annotationRects(doc, matchAsAnn) };
-  overlayer.add(`search-${i}`, rangeLike, drawHighlight, { color: SEARCH_COLOR, vertical });
+  overlayer.add(`search-${i}`, rangeLike, drawHighlight, { color, vertical });
 }
 
 // Paint every current match into one overlayer. Called from the
@@ -477,6 +481,7 @@ function renderSearchPanel() {
 function searchRow(m, i) {
   const li = document.createElement("li");
   li.className = "search-row";
+  if (i === selectedSearchIndex) li.classList.add("search-row-selected");
   li.tabIndex = 0;
   const preview = document.createElement("div");
   preview.className = "search-preview";
@@ -492,17 +497,17 @@ function searchRow(m, i) {
     loc.textContent = `Loc ${m.linear_pos}`;
     li.append(loc);
   }
-  li.addEventListener("click", () => jumpToSearchMatch(m));
+  li.addEventListener("click", () => jumpToSearchMatch(m, i));
   li.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      jumpToSearchMatch(m);
+      jumpToSearchMatch(m, i);
     }
   });
   return li;
 }
 
-async function jumpToSearchMatch(m) {
+async function jumpToSearchMatch(m, i) {
   if (!paginator) return;
   if (!eidToSection) eidToSection = buildEidIndex(dto);
   const index = eidToSection.get(m.eid);
@@ -510,6 +515,16 @@ async function jumpToSearchMatch(m) {
     toast("Couldn't locate that match in the book");
     return;
   }
+  // Mark this match as the selected one BEFORE repainting + jumping, so:
+  //   - every loaded overlayer redraws this i in the selected color (and any
+  //     previously-selected i goes back to the base color);
+  //   - the panel row gets the .selected class;
+  //   - the new section, when it loads, also paints this i selected
+  //     (paintOneSearchMatch reads `selectedSearchIndex` at paint time).
+  selectedSearchIndex = i;
+  for (const { doc, overlayer } of overlays) paintSearchMatches(doc, overlayer);
+  renderSearchPanel();
+  $(".search-row-selected")?.scrollIntoView({ block: "nearest" });
   const matchAsAnn = { eid_start: m.eid, eid_end: m.eid, off_start: m.off_start, off_end: m.off_end };
   await paginator.goTo({ index, anchor: (d) => rangeFor(d, matchAsAnn) || 0 });
 }
@@ -518,6 +533,8 @@ async function runSearch(q) {
   if (bookId == null) return;
   const trimmed = (q || "").trim();
   searchQuery = trimmed;
+  // A new query drops any prior selection — the indices don't carry over.
+  selectedSearchIndex = -1;
   // Empty query: clear results + paint immediately, don't hit the backend.
   if (!trimmed) {
     searchResults = [];
@@ -574,6 +591,7 @@ function hideSearchPanel() {
   searchSeq++; // invalidate any in-flight request
   searchResults = [];
   searchQuery = "";
+  selectedSearchIndex = -1;
   clearSearchPaint();
   const input = $("#reader-search-input");
   if (input) input.value = "";
@@ -1295,6 +1313,7 @@ async function close() {
   searchSeq++;
   clearTimeout(searchDebounceTimer);
   lastPaintedCount = 0;
+  selectedSearchIndex = -1;
   hideSearchPanel();
   hideResumeMenu();
   if ($("#reader-resume")) $("#reader-resume").hidden = true;

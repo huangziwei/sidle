@@ -2019,6 +2019,14 @@ button {
   line-height: 1.5;
 }
 .search-row:hover { background: var(--reader-gutter); }
+/* The row the user last clicked — paired with the painted match also flipping
+   to deep-orange, so it's clear which on-page hit was jumped to. Uses an inset
+   box-shadow as a left-edge bar so the row's text doesn't shift. */
+.search-row-selected {
+  background: rgba(255, 87, 34, 0.10);
+  box-shadow: inset 3px 0 0 #ff5722;
+}
+.search-row-selected:hover { background: rgba(255, 87, 34, 0.16); }
 .search-preview {
   color: var(--reader-fg);
   display: -webkit-box;
