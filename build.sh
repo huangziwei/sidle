@@ -1,9 +1,12 @@
 #!/bin/sh
 # Build sidle desktop app + on-Kindle native picker, install to /Applications.
 #
-# Two cargo invocations, run sequentially from the workspace root:
+# Three cargo invocations, run sequentially from the workspace root:
 #   1. Cross-compile sidle-native for the Kindle (armv7 musl static).
-#   2. Build the Tauri desktop app for the host Mac.
+#   2. Build sidle-server (the LAN daemon the release app spawns as a detached
+#      child — the app resolves it at target/release/sidle-server, and unlike the
+#      debug build it does NOT build it on demand).
+#   3. Build the Tauri desktop app for the host Mac.
 # Then ditto the bundle into /Applications, replacing any prior copy.
 #
 # Why a script and not `cargo tauri build`'s build.rs: nesting cargo
@@ -26,6 +29,9 @@ fi
 
 echo "==> Cross-compiling sidle-native for Kindle ($KUAL_TARGET)"
 cargo build --release --target "$KUAL_TARGET" -p sidle-native
+
+echo "==> Building sidle-server (LAN daemon: app spawns it; sakabar + Kindle reach it)"
+cargo build --release -p sidle-server
 
 echo "==> Building sidle desktop app"
 cargo tauri build

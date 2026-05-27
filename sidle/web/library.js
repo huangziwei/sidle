@@ -1201,6 +1201,10 @@ function wireDevice() {
       // KUAL section staleness can change between opens (server token
       // rotates, native rebuilt, etc.) so always re-pull on show.
       refreshKualStatus();
+      // The LAN server can start/stop out-of-band (sakabar, CLI, or it outlived a
+      // previous app session), so re-probe on every open — the toggle is
+      // observation-based, not pinned to this app's own start/stop actions.
+      refreshServerStatus();
     }
   });
   $("#btn-send-unsent").addEventListener("click", () => sendUnsent());
