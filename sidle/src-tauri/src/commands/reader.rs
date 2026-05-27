@@ -179,3 +179,53 @@ pub async fn annotations_for_book(
     let rows = db::list_annotations_for_book(&conn, book_id).map_err(|e| e.to_string())?;
     Ok(rows.into_iter().map(AnnotationDto::from).collect())
 }
+
+/// One stored last-read position (`source` = `"sidle"` or `"device"`). The
+/// anchor is an `(eid, offset)` pair, resolved to a DOM element exactly like an
+/// annotation; `linear_pos` is the human "Location" for the menu label.
+#[derive(Debug, Serialize)]
+pub struct ReadingPositionDto {
+    pub eid: Option<i64>,
+    pub offset: Option<i64>,
+    pub linear_pos: Option<i64>,
+    pub source: String,
+    pub updated_at: String,
+}
+
+/// A book's saved positions — at most one per source. The reader auto-restores
+/// the `"sidle"` one on open and offers both as Resume jump targets.
+#[tauri::command]
+pub async fn reading_position_get(
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<Vec<ReadingPositionDto>, String> {
+    let conn = state.db.lock().await;
+    let rows = db::list_reading_positions(&conn, book_id).map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|p| ReadingPositionDto {
+            eid: p.eid,
+            offset: p.offset,
+            linear_pos: p.linear_pos,
+            source: p.source,
+            updated_at: p.updated_at,
+        })
+        .collect())
+}
+
+/// Upsert a book's last-read position for one `source`. The reader calls this on
+/// close with `source = "sidle"` (so the Sidle position only moves between
+/// sessions); the device-sync path writes `source = "device"`.
+#[tauri::command]
+pub async fn reading_position_set(
+    state: State<'_, AppState>,
+    book_id: i64,
+    eid: Option<i64>,
+    offset: Option<i64>,
+    linear_pos: Option<i64>,
+    source: String,
+) -> Result<(), String> {
+    let conn = state.db.lock().await;
+    db::set_reading_position(&conn, book_id, eid, offset, linear_pos, &source)
+        .map_err(|e| e.to_string())
+}

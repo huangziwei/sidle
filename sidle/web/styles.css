@@ -1827,6 +1827,63 @@ button {
 .reader-status-loc,
 .reader-status-pct { white-space: nowrap; }
 
+/* Resume control: its own tap region (the Loc keeps its click-to-cycle), and
+   invisible until the status bar is hovered — like the page-turn nav zones.
+   `pointer-events: none` while hidden so a click in its slot still cycles. */
+.reader-status-resume {
+  white-space: nowrap;
+  margin: 0;
+  padding: 1px 8px;
+  border: 1px solid var(--reader-border);
+  border-radius: 11px;
+  background: var(--reader-bg);
+  color: var(--reader-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.reader-statusbar:hover .reader-status-resume:not([hidden]) {
+  opacity: 1;
+  pointer-events: auto;
+}
+.reader-status-resume:hover { color: var(--reader-fg); }
+.reader-status-resume[hidden] { display: none; }
+
+/* The Resume chooser: a small popover anchored above its button. */
+.reader-resume-menu {
+  position: fixed;
+  z-index: 1100;
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--reader-border);
+  border-radius: var(--radius);
+  background: var(--reader-bg);
+  color: var(--reader-fg);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+.reader-resume-menu[hidden] { display: none; }
+.reader-resume-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.reader-resume-item:hover { background: var(--reader-border); }
+.reader-resume-item .rri-label { font-weight: 500; }
+.reader-resume-item .rri-loc { font-size: 12px; color: var(--reader-muted); }
+
 /* Annotation count badge on the 🔖 topbar button */
 .reader-btn { position: relative; }
 .reader-annotations-count {

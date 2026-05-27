@@ -129,11 +129,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         "#,
     )?;
 
-    // Annotations + last-read position. ADDITIVE and precious: created here and
-    // NEVER dropped by the destructive reset above (which only drops books /
-    // conversion_jobs / device_history). `book_id` is nullable with ON DELETE
-    // SET NULL so deleting a book unlinks its imported annotations instead of
-    // destroying them; `dedup_hash UNIQUE` makes re-import idempotent.
+    // Annotations. ADDITIVE and precious: created here and NEVER dropped by the
+    // destructive reset above (which only drops books / conversion_jobs /
+    // device_history). `book_id` is nullable with ON DELETE SET NULL so deleting
+    // a book unlinks its imported annotations instead of destroying them;
+    // `dedup_hash UNIQUE` makes re-import idempotent. (`reading_position` is also
+    // additive but lives out-of-band below — it needs a one-time PK migration.)
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS annotations (
@@ -234,6 +235,29 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
+    // `reading_position` gained a composite PK `(book_id, source)` so a book can
+    // hold BOTH its Sidle-native last position (auto-restored on open) AND the
+    // device's imported position (a jump target, never auto-applied) at once. The
+    // old shape was keyed by `book_id` alone (one row/book). It has never been
+    // written to before this (no command populated it), so dropping the old
+    // single-PK table loses nothing — same reasoning as the `yjr_sync` migration.
+    // ADDITIVE and precious otherwise: the destructive reset never touches it.
+    if has_table(conn, "reading_position")? && !column_is_pk(conn, "reading_position", "source")? {
+        conn.execute("DROP TABLE IF EXISTS reading_position", [])?;
+    }
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS reading_position (
+            book_id     INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            eid         INTEGER,
+            "offset"    INTEGER,
+            linear_pos  INTEGER,
+            source      TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (book_id, source)
+        )"#,
+        [],
+    )?;
+
     Ok(())
 }
 
@@ -244,6 +268,22 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<
         let name: String = row.get(1)?;
         if name == column {
             return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `column` is part of `table`'s PRIMARY KEY (the `pk` ordinal in
+/// `PRAGMA table_info` is > 0 for PK members). Used to detect the pre-migration
+/// `reading_position` shape (PK was `book_id` alone, so `source` had `pk = 0`).
+fn column_is_pk(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        let pk: i64 = row.get(5)?;
+        if name == column {
+            return Ok(pk > 0);
         }
     }
     Ok(false)
@@ -923,29 +963,32 @@ pub struct ReadingPosition {
     pub updated_at: String,
 }
 
-pub fn get_reading_position(
+/// A book's stored last-read positions — at most one per `source` (`"sidle"` =
+/// the reader's own last spot, auto-restored on open; `"device"` = the Kindle's
+/// imported `.yjf` position, offered as a jump target but never auto-applied).
+pub fn list_reading_positions(
     conn: &Connection,
     book_id: i64,
-) -> rusqlite::Result<Option<ReadingPosition>> {
-    conn.query_row(
+) -> rusqlite::Result<Vec<ReadingPosition>> {
+    let mut stmt = conn.prepare(
         r#"SELECT book_id, eid, "offset", linear_pos, source, updated_at
            FROM reading_position WHERE book_id = ?1"#,
-        params![book_id],
-        |row| {
-            Ok(ReadingPosition {
-                book_id: row.get(0)?,
-                eid: row.get(1)?,
-                offset: row.get(2)?,
-                linear_pos: row.get(3)?,
-                source: row.get(4)?,
-                updated_at: row.get(5)?,
-            })
-        },
-    )
-    .optional()
+    )?;
+    let rows = stmt.query_map(params![book_id], |row| {
+        Ok(ReadingPosition {
+            book_id: row.get(0)?,
+            eid: row.get(1)?,
+            offset: row.get(2)?,
+            linear_pos: row.get(3)?,
+            source: row.get(4)?,
+            updated_at: row.get(5)?,
+        })
+    })?;
+    rows.collect()
 }
 
-/// Upsert a book's last-read position.
+/// Upsert one of a book's last-read positions, keyed by `(book_id, source)` so
+/// the Sidle-native and device positions coexist instead of clobbering.
 pub fn set_reading_position(
     conn: &Connection,
     book_id: i64,
@@ -957,11 +1000,10 @@ pub fn set_reading_position(
     conn.execute(
         r#"INSERT INTO reading_position (book_id, eid, "offset", linear_pos, source, updated_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            ON CONFLICT(book_id) DO UPDATE SET
+            ON CONFLICT(book_id, source) DO UPDATE SET
                 eid = excluded.eid,
                 "offset" = excluded."offset",
                 linear_pos = excluded.linear_pos,
-                source = excluded.source,
                 updated_at = excluded.updated_at"#,
         params![book_id, eid, offset, linear_pos, source, now_iso()],
     )?;
@@ -1190,19 +1232,32 @@ mod tests {
     fn reading_position_upserts() {
         let conn = fresh_db();
         let book_id = insert_minimal(&conn, "sha-pos", "位置本");
-        assert!(get_reading_position(&conn, book_id).expect("get").is_none());
+        let by_source = |c: &Connection, src: &str| {
+            list_reading_positions(c, book_id)
+                .expect("list")
+                .into_iter()
+                .find(|p| p.source == src)
+        };
+        assert!(list_reading_positions(&conn, book_id).expect("list").is_empty());
 
+        // The device's imported position and Sidle's own position coexist —
+        // composite PK `(book_id, source)`, so writing one never clobbers the other.
         set_reading_position(&conn, book_id, Some(100), Some(5), Some(2000), "device").expect("set");
-        let p = get_reading_position(&conn, book_id).expect("get").expect("present");
-        assert_eq!(
-            (p.eid, p.offset, p.linear_pos, p.source.as_str()),
-            (Some(100), Some(5), Some(2000), "device")
-        );
-
-        // Second write for the same book overwrites (PRIMARY KEY upsert).
         set_reading_position(&conn, book_id, Some(200), Some(0), Some(3000), "sidle").expect("set2");
-        let p = get_reading_position(&conn, book_id).expect("get").expect("present");
-        assert_eq!((p.eid, p.linear_pos, p.source.as_str()), (Some(200), Some(3000), "sidle"));
+        assert_eq!(list_reading_positions(&conn, book_id).expect("list").len(), 2);
+        let dev = by_source(&conn, "device").expect("device row");
+        assert_eq!((dev.eid, dev.offset, dev.linear_pos), (Some(100), Some(5), Some(2000)));
+        let sidle = by_source(&conn, "sidle").expect("sidle row");
+        assert_eq!((sidle.eid, sidle.linear_pos), (Some(200), Some(3000)));
+
+        // A second write for the SAME source overwrites just that row.
+        set_reading_position(&conn, book_id, Some(250), Some(7), Some(3500), "sidle").expect("set3");
+        assert_eq!(list_reading_positions(&conn, book_id).expect("list").len(), 2);
+        let sidle = by_source(&conn, "sidle").expect("sidle row");
+        assert_eq!((sidle.eid, sidle.offset, sidle.linear_pos), (Some(250), Some(7), Some(3500)));
+        // …and leaves the device row untouched.
+        let dev = by_source(&conn, "device").expect("device row");
+        assert_eq!(dev.eid, Some(100));
     }
 
     #[test]

@@ -311,8 +311,12 @@
       </div>
       <footer id="reader-statusbar" class="reader-statusbar" title="Tap to change progress display">
         <span id="reader-loc" class="reader-status-loc"></span>
+        <button id="reader-resume" class="reader-status-resume" type="button" title="Jump to a saved position" hidden>
+          <span aria-hidden="true">⤷</span> Resume
+        </button>
         <span id="reader-percent" class="reader-status-pct"></span>
       </footer>
+      <div id="reader-resume-menu" class="reader-resume-menu" hidden role="menu" aria-label="Saved positions"></div>
       <div id="reader-style-panel" class="reader-style-panel" hidden aria-label="Display settings">
         <div class="rs-row">
           <label for="rs-font">Font</label>

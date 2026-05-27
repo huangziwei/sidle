@@ -33,6 +33,9 @@ let sampleCount = 0; // valid pace samples for the open book — gates "Estimati
 let lastTurnTime = null; // ms timestamp of the last relocate, for pace sampling
 let lastCharPos = null; // char position at the last relocate, for pace sampling
 let lastPos = null; // { loc, index, frac } from the last relocate, for mode cycling
+let livePosition = null; // { eid, offset, linear_pos } at the top of the current page — saved on close
+let sidleResume = null; // Sidle's last-read spot (frozen this session): auto-restored on open + Resume target
+let deviceResume = null; // Kindle's imported .yjf position (frozen): a Resume target, never auto-applied
 let progressMode = readSavedProgressMode(); // 0 loc · 1 chapter · 2 book · 3 hidden
 
 function readSavedProgressMode() {
@@ -252,6 +255,85 @@ async function jumpTo(ann) {
   await paginator.goTo({ index, anchor: (d) => rangeFor(d, ann) || 0 });
 }
 
+// ---- resume: jump to a saved position (Sidle's own / the Kindle's) ----------
+
+// Navigate to an eid's element — resolve the section via the eid index, anchor
+// on the `[data-eid]` element (same path as the annotation jump). Returns false
+// (a no-op) when the eid isn't in the book, e.g. after a re-convert.
+async function goToEid(eid) {
+  if (eid == null || !paginator) return false;
+  if (!eidToSection) eidToSection = buildEidIndex(dto);
+  const index = eidToSection.get(eid);
+  if (index == null) return false;
+  await paginator.goTo({ index, anchor: (d) => d.querySelector(`[data-eid="${eid}"]`) || 0 });
+  return true;
+}
+
+async function jumpToPosition(pos) {
+  if (!(await goToEid(pos?.eid))) toast("Couldn't locate that position in the book");
+}
+
+// The Resume targets in menu order — Sidle's own spot first (the common case),
+// then the Kindle's imported position. Each is present only if it has an eid.
+function resumeTargets() {
+  const out = [];
+  if (sidleResume?.eid != null) out.push({ label: "Sidle", pos: sidleResume });
+  if (deviceResume?.eid != null) out.push({ label: "Kindle", pos: deviceResume });
+  return out;
+}
+
+// Show the Resume button only when there's somewhere to resume to.
+function renderResumeControl() {
+  const btn = $("#reader-resume");
+  if (btn) btn.hidden = resumeTargets().length === 0;
+  hideResumeMenu();
+}
+
+function hideResumeMenu() {
+  const m = $("#reader-resume-menu");
+  if (m) m.hidden = true;
+}
+
+// Toggle the chooser, building a row per target and anchoring it above the
+// button (which lives in the status bar). Clicking a row jumps and dismisses.
+function toggleResumeMenu() {
+  const menu = $("#reader-resume-menu");
+  const btn = $("#reader-resume");
+  if (!menu || !btn) return;
+  if (!menu.hidden) {
+    hideResumeMenu();
+    return;
+  }
+  const targets = resumeTargets();
+  if (!targets.length) return;
+  menu.replaceChildren(
+    ...targets.map(({ label, pos }) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "reader-resume-item";
+      item.setAttribute("role", "menuitem");
+      const name = document.createElement("span");
+      name.className = "rri-label";
+      name.textContent = label;
+      const loc = document.createElement("span");
+      loc.className = "rri-loc";
+      loc.textContent = pos.linear_pos != null ? `Loc ${pos.linear_pos}` : "";
+      item.append(name, loc);
+      item.addEventListener("click", async () => {
+        hideResumeMenu();
+        await jumpToPosition(pos);
+      });
+      return item;
+    }),
+  );
+  menu.hidden = false;
+  const r = btn.getBoundingClientRect();
+  const mw = menu.offsetWidth;
+  const left = Math.max(8, Math.min(r.left + r.width / 2 - mw / 2, window.innerWidth - mw - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${Math.max(8, r.top - menu.offsetHeight - 6)}px`;
+}
+
 function annotationRow(ann) {
   const li = document.createElement("li");
   li.className = `ann-row ann-${ann.kind}`;
@@ -421,20 +503,24 @@ function positionedFor(doc) {
   return arr;
 }
 
-// Location at the top of the current page: the last positioned element at or
-// before the visible range's start.
-function locAt(doc, range) {
+// Anchor at the top of the current page: the last positioned [data-eid] element
+// at or before the visible range's start, with its Location and eid. The loc
+// feeds the progress readout; the eid is what the Sidle-native position saves
+// and restores (the same `data-eid` anchoring a highlight uses).
+function pageAnchor(doc, range) {
   const arr = positionedFor(doc);
-  if (!arr.length) return null;
+  if (!arr.length) return { loc: null, eid: null };
   const start = range?.startContainer;
-  if (!start) return arr[0].loc;
-  let best = arr[0].loc;
-  for (const { el, loc } of arr) {
-    const following = (el.compareDocumentPosition(start) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
-    if (el === start || el.contains(start) || following) best = loc;
-    else break;
+  let best = arr[0];
+  if (start) {
+    for (const item of arr) {
+      const following = (item.el.compareDocumentPosition(start) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+      if (item.el === start || item.el.contains(start) || following) best = item;
+      else break;
+    }
   }
-  return best;
+  const eid = Number(best.el.getAttribute("data-eid"));
+  return { loc: best.loc, eid: Number.isInteger(eid) ? eid : null };
 }
 
 // Char position (base-text) of a (section index, intra-section fraction) — the
@@ -509,11 +595,15 @@ function sampleReadingSpeed(charPos) {
 // Location + section position, then render per the current mode.
 function updateProgress(detail) {
   const doc = detail?.range?.startContainer?.ownerDocument;
-  const loc = doc ? locAt(doc, detail.range) : null;
+  const anchor = doc ? pageAnchor(doc, detail.range) : { loc: null, eid: null };
   const index = detail?.index ?? 0;
   const frac = Number.isFinite(detail?.fraction) ? Math.min(1, Math.max(0, detail.fraction)) : 0;
   sampleReadingSpeed(charPosOf(index, frac));
-  lastPos = { loc, index, frac };
+  lastPos = { loc: anchor.loc, index, frac };
+  // Track the live top-of-page anchor in memory only; it's persisted (source
+  // 'sidle') on close, so the Sidle Resume target stays frozen at where this
+  // session opened until you leave the book.
+  if (anchor.eid != null) livePosition = { eid: anchor.eid, offset: 0, linear_pos: anchor.loc };
   renderProgress();
 }
 
@@ -837,7 +927,8 @@ const back = () => {
 function onKey(e) {
   if (e.key === "Escape") {
     // Peel back overlays first, then close the reader.
-    if (!$("#reader-note-popover")?.hidden) hideNotePopover();
+    if (!$("#reader-resume-menu")?.hidden) hideResumeMenu();
+    else if (!$("#reader-note-popover")?.hidden) hideNotePopover();
     else if (!$("#reader-style-panel")?.hidden) hideStylePanel();
     else if (!$("#reader-annotations-panel")?.hidden) hideAnnotationsPanel();
     else if (!$("#reader-toc-panel")?.hidden) hideTocPanel();
@@ -879,11 +970,12 @@ function onKey(e) {
 
 async function open(id) {
   await close(); // tear down any prior session
-  let openDto, anns;
+  let openDto, anns, positions;
   try {
-    [openDto, anns] = await Promise.all([
+    [openDto, anns, positions] = await Promise.all([
       window.api.invoke("reader_open", { bookId: id }),
       window.api.invoke("annotations_for_book", { bookId: id }),
+      window.api.invoke("reading_position_get", { bookId: id }),
     ]);
   } catch (err) {
     toast(`Couldn't open reader: ${err}`, true);
@@ -916,6 +1008,9 @@ async function open(id) {
   lastTurnTime = null;
   lastCharPos = null;
   lastPos = null;
+  livePosition = null;
+  sidleResume = (positions || []).find((p) => p.source === "sidle") || null;
+  deviceResume = (positions || []).find((p) => p.source === "device") || null;
   styleSettings = loadStyle();
   book = makeKfxBook(dto);
 
@@ -926,6 +1021,7 @@ async function open(id) {
   view().classList.add("open");
   renderAnnotationsPanel();
   renderTocPanel();
+  renderResumeControl();
 
   paginator = document.createElement("foliate-paginator");
   paginator.setAttribute("flow", "paginated");
@@ -956,13 +1052,32 @@ async function open(id) {
   applyStyle(); // seed #styles + layout attrs before the first section loads
   syncStylePanel();
   paginator.open(book);
-  await paginator.goTo({ index: 0 }); // TODO(T2): restore saved reading position
+  // Auto-restore Sidle's OWN last position (never the device's — that's a manual
+  // Resume target). Falls back to the start when nothing's saved or the saved
+  // eid no longer resolves (e.g. the book was re-converted).
+  if (!(await goToEid(sidleResume?.eid))) await paginator.goTo({ index: 0 });
   paginator.focus?.();
   keyHandler = onKey;
   document.addEventListener("keydown", keyHandler, true);
 }
 
 async function close() {
+  // Persist Sidle's own last position — ONLY here, so the Resume target stays
+  // frozen at where this session opened until you leave the book. Best-effort:
+  // a failed write just means the next open falls back to the start.
+  if (bookId != null && livePosition?.eid != null) {
+    try {
+      await window.api.invoke("reading_position_set", {
+        bookId,
+        eid: livePosition.eid,
+        offset: livePosition.offset ?? 0,
+        linearPos: livePosition.linear_pos ?? null,
+        source: "sidle",
+      });
+    } catch {
+      /* ignore — position save is best-effort */
+    }
+  }
   if (keyHandler) {
     document.removeEventListener("keydown", keyHandler, true);
     keyHandler = null;
@@ -988,6 +1103,11 @@ async function close() {
   charsBefore = [];
   totalChars = 0;
   lastPos = null;
+  livePosition = null;
+  sidleResume = null;
+  deviceResume = null;
+  hideResumeMenu();
+  if ($("#reader-resume")) $("#reader-resume").hidden = true;
   lastTurnTime = null;
   lastCharPos = null;
   readSpeed = 0;
@@ -1028,6 +1148,12 @@ function wire() {
   $("#reader-nav-left")?.addEventListener("click", () => (book?.ppd === "rtl" ? forward() : back()));
   $("#reader-nav-right")?.addEventListener("click", () => (book?.ppd === "rtl" ? back() : forward()));
   $("#reader-statusbar")?.addEventListener("click", () => cycleProgressMode());
+  // Resume is its own tap region: open the chooser, and stop the click from
+  // bubbling to the status bar (which would also cycle the progress display).
+  $("#reader-resume")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleResumeMenu();
+  });
   $("#reader-annotations")?.addEventListener("click", () => toggleAnnotationsPanel());
   $("#reader-annotations-close")?.addEventListener("click", () => hideAnnotationsPanel());
   $("#reader-toc")?.addEventListener("click", () => toggleTocPanel());
@@ -1050,6 +1176,16 @@ function wire() {
   document.addEventListener("mousedown", (e) => {
     const pop = $("#reader-note-popover");
     if (pop && !pop.hidden && !pop.contains(e.target)) hideNotePopover();
+    const resumeMenu = $("#reader-resume-menu");
+    const resumeBtn = $("#reader-resume");
+    if (
+      resumeMenu &&
+      !resumeMenu.hidden &&
+      !resumeMenu.contains(e.target) &&
+      !resumeBtn?.contains(e.target)
+    ) {
+      hideResumeMenu();
+    }
     const stylePanel = $("#reader-style-panel");
     const styleBtn = $("#reader-style");
     if (
