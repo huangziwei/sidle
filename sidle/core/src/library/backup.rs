@@ -627,6 +627,55 @@ mod tests {
     }
 
     #[test]
+    fn restore_rejects_corrupt_db_checksum() {
+        let src = tempfile::tempdir().unwrap();
+        let src_root = src.path().canonicalize().unwrap();
+        let (conn, books_dir) = seed_library(&src_root);
+        let out = tempfile::tempdir().unwrap();
+        let good = out.path().join("good.sidlebak");
+        create(&conn, &books_dir, &src_root, "test-1.0", &good).unwrap();
+        drop(conn);
+
+        // Repackage with a manifest whose db_sha256 is wrong but everything else
+        // valid (format/version/schema/counts all fine), so the only thing that
+        // can reject it is the integrity check.
+        let tampered = out.path().join("tampered.sidlebak");
+        {
+            let mut ar = ZipArchive::new(File::open(&good).unwrap()).unwrap();
+            let mut manifest: Manifest = {
+                let mut s = String::new();
+                ar.by_name("manifest.json").unwrap().read_to_string(&mut s).unwrap();
+                serde_json::from_str(&s).unwrap()
+            };
+            manifest.db_sha256 = "0".repeat(64); // not the real hash
+            let mut zw = ZipWriter::new(File::create(&tampered).unwrap());
+            let opts = SimpleFileOptions::default();
+            zw.start_file("manifest.json", opts).unwrap();
+            zw.write_all(&serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+            for i in 0..ar.len() {
+                let mut e = ar.by_index(i).unwrap();
+                let name = e.name().to_string();
+                if name == "manifest.json" {
+                    continue;
+                }
+                zw.start_file(name, opts).unwrap();
+                io::copy(&mut e, &mut zw).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+
+        let dst = tempfile::tempdir().unwrap();
+        let dst_root = dst.path().join("Relocated");
+        fs::create_dir_all(&dst_root).unwrap();
+        let err = restore(&tampered, &dst_root, db::SCHEMA_VERSION).unwrap_err();
+        assert!(err.to_string().contains("checksum"), "got: {err}");
+        // Verify fails AFTER extraction, so the swap never runs: target untouched
+        // and the staging dir is cleaned up.
+        assert!(!dst_root.join("library.db").exists(), "target untouched");
+        assert!(!sibling(&dst_root, "restoring").unwrap().exists(), "staging cleaned up");
+    }
+
+    #[test]
     fn restore_rejects_foreign_archive() {
         let tmp = tempfile::tempdir().unwrap();
         let zpath = tmp.path().join("foreign.zip");
