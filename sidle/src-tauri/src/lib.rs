@@ -89,6 +89,9 @@ pub fn run() {
             commands::reader::reading_position_get,
             commands::reader::reading_position_set,
             commands::reader::book_search,
+            commands::reader::annotation_create,
+            commands::reader::annotation_update,
+            commands::reader::annotation_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

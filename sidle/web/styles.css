@@ -2114,6 +2114,101 @@ button {
   line-height: 1.5;
   white-space: pre-wrap;
 }
+.reader-note-body[hidden] { display: none; }
+
+/* Native annotations (T0): the page-bookmark toggle, the on-selection toolbar,
+   and the editable note popover. All tinted with the --reader-* chrome vars so
+   they retint with the page theme. */
+
+/* Page-bookmark toggle in the topbar — orange flag when the page is bookmarked. */
+#reader-bookmark.is-active { color: #e07b39; }
+
+/* Floating toolbar shown over a text selection: color swatches + Note. */
+.reader-selection-toolbar {
+  position: fixed;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--reader-border);
+  border-radius: var(--radius);
+  background: var(--reader-bg);
+  color: var(--reader-fg);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+.reader-selection-toolbar[hidden] { display: none; }
+.rst-colors,
+.reader-note-colors {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.rst-note {
+  border: none;
+  border-left: 1px solid var(--reader-border);
+  background: transparent;
+  color: var(--reader-fg);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 6px 4px 10px;
+  border-radius: 6px;
+}
+.rst-note:hover { background: var(--reader-gutter); }
+
+/* A color swatch (shared by the selection toolbar + the note editor). */
+.reader-swatch {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+.reader-swatch:hover { transform: scale(1.12); }
+.reader-swatch.active { border-color: var(--reader-fg); }
+
+/* The editable note popover (reuses .reader-note-popover positioning). */
+.reader-note-edit {
+  display: block;
+  width: 260px;
+  max-width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 6px 8px;
+  border: 1px solid var(--reader-border);
+  border-radius: 6px;
+  background: var(--reader-bg);
+  color: var(--reader-fg);
+  resize: vertical;
+}
+.reader-note-edit[hidden] { display: none; }
+.reader-note-edit-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+}
+.reader-note-edit-controls[hidden] { display: none; }
+.reader-note-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.reader-note-save {
+  border: 1px solid var(--reader-fg);
+  background: var(--reader-fg);
+  color: var(--reader-bg);
+  border-radius: 6px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.reader-note-save:hover { opacity: 0.88; }
+.reader-note-delete { color: #c0392b; }
 
 /* Display-settings popover (the "Aa" button). Anchored under the topbar-right,
    tinted to the page colors like the rest of the chrome. */

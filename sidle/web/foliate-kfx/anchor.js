@@ -56,3 +56,102 @@ export function rangeFor(doc, ann) {
   }
   return range;
 }
+
+// ---- reverse: DOM selection → KFX (eid, offset) anchor ----------------------
+// The inverse of the above, for native (Sidle-authored) annotations. A user's
+// DOM selection lands on text nodes; we resolve it back to the same base-text
+// `(eid, offset)` coordinates the device path stores, so a created highlight
+// re-paints (via rangeFor) exactly where it was drawn.
+
+// Concatenated base text of an element (ruby <rt>/<rp> excluded).
+function baseString(el) {
+  let s = "";
+  for (const t of baseTextNodes(el)) s += t.nodeValue;
+  return s;
+}
+
+// Nearest enclosing [data-eid] element for a selection-boundary container (the
+// container is a text node in the common case, an element when the boundary sits
+// between child nodes).
+function eidElementOf(container) {
+  if (!container) return null;
+  const el = container.nodeType === Node.TEXT_NODE ? container.parentElement : container;
+  return el ? el.closest("[data-eid]") : null;
+}
+
+// Inverse of `textBoundary`: the base-text char offset of a (node, nodeOffset)
+// DOM position within `eidEl`. Ruby isn't counted (it isn't a base text node).
+// If the position's node isn't part of the base text (e.g. a boundary inside
+// ruby furigana), clamp to the base-char count just before the next base node in
+// document order.
+export function charOffsetIn(eidEl, node, nodeOffset) {
+  let count = 0;
+  for (const n of baseTextNodes(eidEl)) {
+    if (n === node) return count + nodeOffset;
+    // A base node that follows the boundary node in document order means the
+    // boundary fell in a non-base region (e.g. <rt>) before it → clamp here.
+    if (node.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING) return count;
+    count += n.nodeValue.length;
+  }
+  return count; // boundary at/after the element's last base char
+}
+
+// A DOM Range (a user selection) → { eid_start, off_start, eid_end, off_end }, or
+// null if either boundary isn't inside a [data-eid] element. The Range end is
+// exclusive; stored end offsets are INCLUSIVE, so off_end = endChar − 1. When the
+// selection ends exactly at offset 0 of an element, the last covered char is the
+// previous [data-eid] element's last base char — back up so the highlight doesn't
+// claim an empty leading span.
+export function anchorFromRange(doc, range) {
+  if (!range || range.collapsed) return null;
+  const startEl = eidElementOf(range.startContainer);
+  let endEl = eidElementOf(range.endContainer);
+  if (!startEl || !endEl) return null;
+
+  const eid_start = Number(startEl.getAttribute("data-eid"));
+  const off_start = charOffsetIn(startEl, range.startContainer, range.startOffset);
+
+  let endChar = charOffsetIn(endEl, range.endContainer, range.endOffset);
+  if (endChar <= 0) {
+    const all = [...doc.querySelectorAll("[data-eid]")];
+    const i = all.indexOf(endEl);
+    if (i > 0) {
+      endEl = all[i - 1];
+      endChar = baseString(endEl).length; // exclusive end = full length
+    } else {
+      endChar = 1; // degenerate: keep at least one char
+    }
+  }
+  const eid_end = Number(endEl.getAttribute("data-eid"));
+  const off_end = Math.max(0, endChar - 1);
+
+  if (!Number.isInteger(eid_start) || !Number.isInteger(eid_end)) return null;
+  return { eid_start, off_start, eid_end, off_end };
+}
+
+// Reconstruct an annotation's base text from the live DOM, slicing each
+// [data-eid] element it spans by the stored offsets (ruby excluded, end
+// inclusive) — the same per-element walk `annotationRects` paints over. Used so a
+// freshly-created annotation stores exactly the text rangeFor will re-resolve,
+// NOT range.toString() (which would include ruby <rt> text and desync the
+// base-text offset semantics).
+export function baseTextOf(doc, ann) {
+  if (ann.eid_start == null) return "";
+  const all = [...doc.querySelectorAll("[data-eid]")];
+  const startEl = doc.querySelector(`[data-eid="${ann.eid_start}"]`);
+  const endEl = ann.eid_end != null ? doc.querySelector(`[data-eid="${ann.eid_end}"]`) : startEl;
+  if (!startEl) return "";
+  const si = all.indexOf(startEl);
+  let ei = endEl ? all.indexOf(endEl) : si;
+  if (si < 0) return "";
+  if (ei < si) ei = si;
+  let out = "";
+  for (let i = si; i <= ei; i++) {
+    const el = all[i];
+    const text = baseString(el);
+    const from = el === startEl ? (ann.off_start ?? 0) : 0;
+    const to = el === endEl ? (ann.off_end ?? 0) + 1 : text.length;
+    out += text.slice(from, Math.min(to, text.length));
+  }
+  return out;
+}

@@ -8,7 +8,7 @@
 import "./foliate-kfx/paginator.js"; // defines <foliate-paginator>
 import { Overlayer } from "./foliate-kfx/overlayer.js";
 import { makeKfxBook } from "./foliate-kfx/kfx-book.js";
-import { rangeFor, textBoundary } from "./foliate-kfx/anchor.js";
+import { rangeFor, textBoundary, anchorFromRange, baseTextOf } from "./foliate-kfx/anchor.js";
 
 const $ = (sel) => document.querySelector(sel);
 const toast = (msg, isError) => window.showToast?.(msg, isError);
@@ -44,6 +44,10 @@ let searchDebounceTimer = null;
 let searchComposing = false; // true between compositionstart/end (JP IME)
 let lastPaintedCount = 0; // count from last search-paint, so `clearSearchPaint` knows how many keys to remove
 let selectedSearchIndex = -1; // -1 = none picked yet; otherwise the index of the row the user last clicked
+let pendingSelection = null; // { doc, anchor, text } for the live text selection — fuels createAnnotation
+let editingAnn = null; // the native annotation open in the editable note popover (null = read-only / closed)
+let editorColor = "yellow"; // the color currently chosen in the open editor
+const DEFAULT_HL_COLOR = "yellow"; // a swatch-less highlight (e.g. from "Note") uses this
 
 function readSavedProgressMode() {
   try {
@@ -189,13 +193,125 @@ function paintAnnotations(doc, overlayer) {
   }
 }
 
-// ---- note popover ----------------------------------------------------------
+// ---- create / edit / delete native annotations -----------------------------
+// Reverse of the paint path: a DOM selection → (eid, offset) → a stored 'sidle'
+// annotation. A floating toolbar offers highlight colors + Note on selection;
+// clicking a native highlight/note opens an editable popover (textarea + color +
+// Save/Delete); a topbar button toggles a page bookmark. Imported ('yjr')
+// annotations stay read-only (the device sync owns them).
 
-// The overlay SVG is pointer-transparent, so clicks land on the iframe doc.
-// Find a note whose live rects contain the click and pop its body.
-function noteAt(doc, x, y) {
+// Build 4 color swatches into `container`; the `current` COLORS key (or null) is
+// marked active; `onPick(name)` fires on click.
+function renderColorSwatches(container, current, onPick) {
+  if (!container) return;
+  container.replaceChildren(
+    ...Object.keys(COLORS).map((name) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "reader-swatch" + (name === current ? " active" : "");
+      b.style.background = COLORS[name];
+      b.title = name;
+      b.setAttribute("aria-label", `${name} highlight`);
+      b.addEventListener("click", (e) => {
+        e.preventDefault();
+        onPick(name);
+      });
+      return b;
+    }),
+  );
+}
+
+// --- selection → floating toolbar ---
+
+// Position the highlight/note toolbar above the live selection (in the parent
+// document, over the iframe). Flips below if there's no room above.
+function showSelectionToolbar(doc, range) {
+  const bar = $("#reader-selection-toolbar");
+  if (!bar) return;
+  bar.hidden = false; // unhide first so offset sizes are real
+  const fr = doc.defaultView?.frameElement?.getBoundingClientRect() || { left: 0, top: 0 };
+  const rect = range.getBoundingClientRect();
+  let left = fr.left + rect.left + rect.width / 2 - bar.offsetWidth / 2;
+  left = Math.max(8, Math.min(left, window.innerWidth - bar.offsetWidth - 8));
+  let top = fr.top + rect.top - bar.offsetHeight - 8;
+  if (top < 8) top = fr.top + rect.bottom + 8;
+  bar.style.left = `${left}px`;
+  bar.style.top = `${Math.max(8, top)}px`;
+}
+
+function hideSelectionToolbar() {
+  const bar = $("#reader-selection-toolbar");
+  if (bar) bar.hidden = true;
+  pendingSelection = null;
+}
+
+// On mouseup in a section: a resolvable non-empty selection shows the toolbar
+// (stashing its anchor + base text); anything else dismisses it.
+function onSelection(doc) {
+  const sel = doc.getSelection?.();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+    hideSelectionToolbar();
+    return;
+  }
+  const range = sel.getRangeAt(0);
+  const anchor = anchorFromRange(doc, range);
+  if (!anchor) {
+    hideSelectionToolbar();
+    return;
+  }
+  pendingSelection = { doc, anchor, text: baseTextOf(doc, anchor) };
+  showSelectionToolbar(doc, range);
+}
+
+// Create a native highlight from the pending selection (optionally opening the
+// note editor on it). `text` is the ruby-free base-text slice so it re-paints
+// exactly via rangeFor; loc/linear ride along from the start eid's Location.
+async function createAnnotation(color, openEditor) {
+  if (!pendingSelection || bookId == null) return;
+  const { doc, anchor, text } = pendingSelection;
+  const linear = locByEid?.get(anchor.eid_start) ?? null;
+  // Capture a parent-doc point from the selection rect before clearing it, for
+  // an optional editor.
+  const sel = doc.getSelection?.();
+  const rect = sel && sel.rangeCount ? sel.getRangeAt(0).getBoundingClientRect() : null;
+  const fr = doc.defaultView?.frameElement?.getBoundingClientRect() || { left: 0, top: 0 };
+  const px = rect ? fr.left + rect.left : 16;
+  const py = rect ? fr.top + rect.bottom : 16;
+  let created;
+  try {
+    created = await window.api.invoke("annotation_create", {
+      bookId,
+      kind: "highlight",
+      eidStart: anchor.eid_start,
+      offStart: anchor.off_start,
+      eidEnd: anchor.eid_end,
+      offEnd: anchor.off_end,
+      locStart: linear,
+      linearPos: linear,
+      text,
+      noteBody: null,
+      color,
+    });
+  } catch (err) {
+    toast(`Couldn't save highlight: ${err}`, true);
+    return;
+  }
+  sel?.removeAllRanges();
+  hideSelectionToolbar();
+  await reloadAnnotations(bookId);
+  if (openEditor && created) {
+    const ann = annotations.find((a) => a.id === created.id) || created;
+    openAnnotationEditor(ann, px, py);
+  }
+}
+
+// --- click an annotation: edit (native) or read its note (imported) ---
+
+// The overlay SVG is pointer-transparent, so clicks land on the iframe doc. The
+// topmost highlight/note under the point (bookmarks aren't edit targets here).
+function annotationAt(doc, x, y) {
   for (const ann of annotations) {
-    if (ann.kind !== "note" || !ann.note_body) continue;
+    if (ann.kind === "bookmark") continue;
     for (const r of annotationRects(doc, ann)) {
       if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return ann;
     }
@@ -204,36 +320,167 @@ function noteAt(doc, x, y) {
 }
 
 function onDocClick(e, doc) {
-  const ann = noteAt(doc, e.clientX, e.clientY);
+  const ann = annotationAt(doc, e.clientX, e.clientY);
   if (!ann) {
     hideNotePopover();
     return;
   }
-  showNotePopover(ann, doc, e.clientX, e.clientY);
+  // The click is in the iframe's own viewport; offset by the iframe box to land
+  // in the parent document's coordinate space.
+  const fr = doc.defaultView?.frameElement?.getBoundingClientRect() || { left: 0, top: 0 };
+  const px = fr.left + e.clientX;
+  const py = fr.top + e.clientY;
+  if (ann.source === "sidle") openAnnotationEditor(ann, px, py);
+  else if (ann.note_body) showReadOnlyNote(ann, px, py);
+  else hideNotePopover();
 }
 
-function showNotePopover(ann, doc, clientX, clientY) {
-  const pop = $("#reader-note-popover");
-  if (!pop) return;
-  $("#reader-note-quote").textContent = ann.text || "";
-  $("#reader-note-body").textContent = ann.note_body || "";
-  // The click is in the iframe's own viewport; offset by the iframe's box to
-  // land in the main document's coordinate space.
-  const fr = doc.defaultView?.frameElement?.getBoundingClientRect() || { left: 0, top: 0 };
-  pop.hidden = false; // unhide first so offsetWidth/Height are real
-  let left = fr.left + clientX;
-  let top = fr.top + clientY + 14;
-  left = Math.max(8, Math.min(left, window.innerWidth - pop.offsetWidth - 8));
-  if (top + pop.offsetHeight > window.innerHeight - 8) {
-    top = fr.top + clientY - pop.offsetHeight - 14;
-  }
+// Place the popover near a parent-document point, flipping above if it would
+// overflow the bottom, clamped to the viewport.
+function positionPopover(pop, px, py) {
+  pop.hidden = false; // unhide so offset sizes are real
+  const left = Math.max(8, Math.min(px, window.innerWidth - pop.offsetWidth - 8));
+  let top = py + 14;
+  if (top + pop.offsetHeight > window.innerHeight - 8) top = py - pop.offsetHeight - 14;
   pop.style.left = `${left}px`;
   pop.style.top = `${Math.max(8, top)}px`;
 }
 
+// Read-only popover for an IMPORTED note: quote + body, no controls.
+function showReadOnlyNote(ann, px, py) {
+  const pop = $("#reader-note-popover");
+  if (!pop) return;
+  editingAnn = null;
+  pop.classList.remove("editing");
+  $("#reader-note-quote").textContent = ann.text || "";
+  $("#reader-note-body").textContent = ann.note_body || "";
+  $("#reader-note-body").hidden = false;
+  $("#reader-note-edit").hidden = true;
+  $("#reader-note-edit-controls").hidden = true;
+  positionPopover(pop, px, py);
+}
+
+function renderEditorColors() {
+  renderColorSwatches($("#reader-note-colors"), editorColor, setEditorColor);
+}
+function setEditorColor(name) {
+  editorColor = name;
+  renderEditorColors();
+}
+
+// Editor for a NATIVE annotation: quote + textarea + color swatches + Save/Delete.
+// `px`/`py` are already in the parent document's coordinate space.
+function openAnnotationEditor(ann, px, py) {
+  const pop = $("#reader-note-popover");
+  if (!pop) return;
+  editingAnn = ann;
+  editorColor = ann.color && COLORS[ann.color] ? ann.color : DEFAULT_HL_COLOR;
+  pop.classList.add("editing");
+  $("#reader-note-quote").textContent = ann.text || "";
+  $("#reader-note-body").hidden = true;
+  const ta = $("#reader-note-edit");
+  ta.hidden = false;
+  ta.value = ann.note_body || "";
+  $("#reader-note-edit-controls").hidden = false;
+  renderEditorColors();
+  positionPopover(pop, px, py);
+  ta.focus();
+}
+
+// Persist the editor: a non-empty body promotes a highlight to a note (and an
+// emptied note demotes back to a highlight) — the backend recomputes the hash.
+async function saveEditor() {
+  if (!editingAnn || bookId == null) return;
+  const body = ($("#reader-note-edit")?.value || "").trim();
+  const kind = editingAnn.kind === "bookmark" ? "bookmark" : body ? "note" : "highlight";
+  try {
+    await window.api.invoke("annotation_update", {
+      id: editingAnn.id,
+      kind,
+      noteBody: body || null,
+      color: editorColor,
+    });
+  } catch (err) {
+    toast(`Couldn't save: ${err}`, true);
+    return;
+  }
+  hideNotePopover();
+  await reloadAnnotations(bookId);
+}
+
+async function deleteEditor() {
+  if (!editingAnn || bookId == null) return;
+  const id = editingAnn.id;
+  hideNotePopover();
+  try {
+    await window.api.invoke("annotation_delete", { id });
+  } catch (err) {
+    toast(`Couldn't delete: ${err}`, true);
+    return;
+  }
+  await reloadAnnotations(bookId);
+}
+
 function hideNotePopover() {
   const p = $("#reader-note-popover");
-  if (p) p.hidden = true;
+  if (p) {
+    p.hidden = true;
+    p.classList.remove("editing");
+  }
+  editingAnn = null;
+}
+
+// --- bookmark: toggle on the current page (top-of-page eid) ---
+
+// The native bookmark anchored at the current page's top eid, if any.
+function currentBookmark() {
+  const eid = livePosition?.eid;
+  if (eid == null) return null;
+  return (
+    annotations.find(
+      (a) => a.kind === "bookmark" && a.source === "sidle" && a.eid_start === eid,
+    ) || null
+  );
+}
+
+async function toggleBookmark() {
+  if (bookId == null) return;
+  const eid = livePosition?.eid;
+  if (eid == null) return;
+  const existing = currentBookmark();
+  try {
+    if (existing) {
+      await window.api.invoke("annotation_delete", { id: existing.id });
+    } else {
+      const linear = locByEid?.get(eid) ?? null;
+      await window.api.invoke("annotation_create", {
+        bookId,
+        kind: "bookmark",
+        eidStart: eid,
+        offStart: 0,
+        eidEnd: null,
+        offEnd: null,
+        locStart: linear,
+        linearPos: linear,
+        text: "",
+        noteBody: null,
+        color: null,
+      });
+    }
+  } catch (err) {
+    toast(`Bookmark failed: ${err}`, true);
+    return;
+  }
+  await reloadAnnotations(bookId);
+}
+
+// Reflect whether the current page carries a native bookmark (filled vs empty).
+function updateBookmarkButton() {
+  const btn = $("#reader-bookmark");
+  if (!btn) return;
+  const marked = currentBookmark() != null;
+  btn.classList.toggle("is-active", marked);
+  btn.setAttribute("aria-pressed", marked ? "true" : "false");
 }
 
 // ---- annotations panel + jump ----------------------------------------------
@@ -430,6 +677,7 @@ async function reloadAnnotations(forBookId) {
   }
   for (const { doc, overlayer } of overlays) paintAnnotations(doc, overlayer);
   renderAnnotationsPanel();
+  updateBookmarkButton();
 }
 
 // ---- search panel + paint --------------------------------------------------
@@ -1106,10 +1354,12 @@ function hideStylePanel() {
 
 const forward = () => {
   hideNotePopover();
+  hideSelectionToolbar();
   paginator?.next();
 };
 const back = () => {
   hideNotePopover();
+  hideSelectionToolbar();
   paginator?.prev();
 };
 
@@ -1124,7 +1374,8 @@ function onKey(e) {
   }
   if (e.key === "Escape") {
     // Peel back overlays first, then close the reader.
-    if (!$("#reader-resume-menu")?.hidden) hideResumeMenu();
+    if (!$("#reader-selection-toolbar")?.hidden) hideSelectionToolbar();
+    else if (!$("#reader-resume-menu")?.hidden) hideResumeMenu();
     else if (!$("#reader-note-popover")?.hidden) hideNotePopover();
     else if (!$("#reader-style-panel")?.hidden) hideStylePanel();
     else if (!$("#reader-search-panel")?.hidden) hideSearchPanel();
@@ -1138,6 +1389,9 @@ function onKey(e) {
   // don't steal them to turn pages. Same for the search input.
   if (e.target?.closest?.("#reader-style-panel")) return;
   if (e.target?.closest?.("#reader-search-panel")) return;
+  // Typing in the note editor owns its own keys (arrows/space/etc.) — don't
+  // hijack them to turn pages. (Escape is already handled above, so it closes.)
+  if (e.target?.closest?.("#reader-note-popover")) return;
   // Don't hijack modified combos — shift+arrow extends a text selection in the
   // section iframe, ⌘/ctrl/alt are shortcuts. Let those through.
   if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1236,6 +1490,8 @@ async function open(id) {
     // would leave the matches there invisible until you re-queried.
     if (searchResults.length) paintSearchMatches(doc, overlayer);
     doc.addEventListener("click", (e) => onDocClick(e, doc));
+    // Text selected in the section → offer the highlight/note toolbar.
+    doc.addEventListener("mouseup", () => onSelection(doc));
     // The paginator focuses the section iframe after navigating (`focusView`),
     // so arrow/space keydowns land in the iframe document, not the parent — the
     // parent-document listener alone would go deaf until you click out (the bug
@@ -1245,7 +1501,9 @@ async function open(id) {
   paginator.addEventListener("relocate", ({ detail }) => {
     updateProgress(detail);
     markTocActive(detail.index);
+    updateBookmarkButton(); // after updateProgress sets the page's top eid
     hideNotePopover();
+    hideSelectionToolbar();
     // Switch to/from full-bleed layout for image-only pages. A mode change
     // re-paginates and fires a fresh relocate with the new geometry, which
     // updates progress again — so this runs last.
@@ -1327,6 +1585,7 @@ async function close() {
   if ($("#reader-loc")) $("#reader-loc").textContent = "";
   if ($("#reader-percent")) $("#reader-percent").textContent = "";
   hideNotePopover();
+  hideSelectionToolbar();
   hideAnnotationsPanel();
   hideTocPanel();
   hideStylePanel();
@@ -1365,6 +1624,14 @@ function wire() {
   });
   $("#reader-annotations")?.addEventListener("click", () => toggleAnnotationsPanel());
   $("#reader-annotations-close")?.addEventListener("click", () => hideAnnotationsPanel());
+  // Native annotations: page-bookmark toggle, the selection toolbar (color
+  // swatches create a highlight; Note creates one + opens the editor), and the
+  // editable note popover's Save/Delete.
+  $("#reader-bookmark")?.addEventListener("click", () => toggleBookmark());
+  renderColorSwatches($("#rst-colors"), null, (name) => createAnnotation(name, false));
+  $("#rst-note")?.addEventListener("click", () => createAnnotation(DEFAULT_HL_COLOR, true));
+  $("#reader-note-save")?.addEventListener("click", () => saveEditor());
+  $("#reader-note-delete")?.addEventListener("click", () => deleteEditor());
   $("#reader-search")?.addEventListener("click", () => toggleSearchPanel());
   $("#reader-search-close")?.addEventListener("click", () => hideSearchPanel());
   const searchInput = $("#reader-search-input");
@@ -1402,6 +1669,10 @@ function wire() {
   document.addEventListener("mousedown", (e) => {
     const pop = $("#reader-note-popover");
     if (pop && !pop.hidden && !pop.contains(e.target)) hideNotePopover();
+    // Dismiss the selection toolbar when clicking the app chrome outside it.
+    // (In-iframe clicks don't bubble here; those settle via the mouseup handler.)
+    const selBar = $("#reader-selection-toolbar");
+    if (selBar && !selBar.hidden && !selBar.contains(e.target)) hideSelectionToolbar();
     const resumeMenu = $("#reader-resume-menu");
     const resumeBtn = $("#reader-resume");
     if (

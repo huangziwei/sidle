@@ -12,6 +12,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::library::db::{self, AnnotationRow};
+use crate::library::ingest;
 use crate::state::AppState;
 
 /// One spine document in reading order. `html` carries `data-eid` attributes.
@@ -327,4 +328,138 @@ pub async fn book_search(
         .map_err(|e| format!("search task join error: {e}"))?;
 
     Ok(matches.into_iter().map(SearchMatchDto::from).collect())
+}
+
+// ---------------------------------------------------------------------------
+// Native annotations (T0): create / edit / delete the reader's own annotations.
+// Stored with `source='sidle'`. The anchor `(eid, offset)` comes from the
+// webview's reverse resolution of a DOM selection (foliate-kfx `anchorFromRange`);
+// the highlight `text` is the base-text slice the webview extracted (ruby-free,
+// matching the offset semantics), so the stored text re-paints exactly.
+// ---------------------------------------------------------------------------
+
+/// Create a native annotation. Salts the **shared** content dedup hash with the
+/// book's title key, so a passage highlighted both in Sidle and on a Kindle
+/// collapses to one row. `insert_annotation` is `ON CONFLICT DO NOTHING`, so on a
+/// hash collision (the passage already exists) we return the row already present
+/// rather than erroring. Returns the stored row so the webview gets its real id.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn annotation_create(
+    state: State<'_, AppState>,
+    book_id: i64,
+    kind: String,
+    eid_start: Option<i64>,
+    off_start: Option<i64>,
+    eid_end: Option<i64>,
+    off_end: Option<i64>,
+    loc_start: Option<i64>,
+    linear_pos: Option<i64>,
+    text: String,
+    note_body: Option<String>,
+    color: Option<String>,
+) -> Result<AnnotationDto, String> {
+    let conn = state.db.lock().await;
+    let title = db::get_book(&conn, book_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no book with id {book_id}"))?
+        .title;
+    let book_key = ingest::book_match_key(&title);
+    let hash = ingest::annotation_dedup_hash(
+        &book_key,
+        &kind,
+        eid_start,
+        off_start,
+        eid_end,
+        off_end,
+        loc_start,
+        &text,
+        note_body.as_deref().unwrap_or(""),
+    );
+    let now = db::now_iso();
+    let row = db::NewAnnotation {
+        dedup_hash: &hash,
+        book_id: Some(book_id),
+        kind: &kind,
+        eid_start,
+        off_start,
+        eid_end,
+        off_end,
+        loc_start,
+        loc_end: loc_start, // native annotations carry a single-point Location
+        linear_pos,
+        text: &text,
+        note_body: note_body.as_deref(),
+        color: color.as_deref(),
+        clip_title: None,
+        clip_author: None,
+        added_at: Some(&now),
+        added_raw: None,
+        imported_at: &now,
+        source: ingest::SOURCE_SIDLE,
+    };
+    db::insert_annotation(&conn, &row).map_err(|e| e.to_string())?;
+    // Fresh insert or pre-existing duplicate — the canonical row is the one with
+    // this hash.
+    let stored = db::get_annotation_by_hash(&conn, &hash)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "annotation missing after insert".to_string())?;
+    Ok(AnnotationDto::from(stored))
+}
+
+/// Edit a native annotation's `kind` / `note_body` / `color` (e.g. promote a
+/// highlight to a note, recolor, retype). The content hash folds in kind + note
+/// body, so it's recomputed (salted with the same book key) and moved with the
+/// edit. Returns the refreshed row.
+#[tauri::command]
+pub async fn annotation_update(
+    state: State<'_, AppState>,
+    id: i64,
+    kind: String,
+    note_body: Option<String>,
+    color: Option<String>,
+) -> Result<AnnotationDto, String> {
+    let conn = state.db.lock().await;
+    let row = db::get_annotation(&conn, id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no annotation with id {id}"))?;
+    let book_key = match row.book_id {
+        Some(bid) => db::get_book(&conn, bid)
+            .map_err(|e| e.to_string())?
+            .map(|b| ingest::book_match_key(&b.title))
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    let hash = ingest::annotation_dedup_hash(
+        &book_key,
+        &kind,
+        row.eid_start,
+        row.off_start,
+        row.eid_end,
+        row.off_end,
+        row.loc_start,
+        &row.text,
+        note_body.as_deref().unwrap_or(""),
+    );
+    db::update_annotation(
+        &conn,
+        id,
+        &kind,
+        note_body.as_deref(),
+        color.as_deref(),
+        &hash,
+    )
+    .map_err(|e| e.to_string())?;
+    let updated = db::get_annotation(&conn, id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "annotation missing after update".to_string())?;
+    Ok(AnnotationDto::from(updated))
+}
+
+/// Delete a native annotation by id.
+#[tauri::command]
+pub async fn annotation_delete(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let conn = state.db.lock().await;
+    db::delete_annotation(&conn, id).map_err(|e| e.to_string())?;
+    Ok(())
 }

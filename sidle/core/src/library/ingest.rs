@@ -34,6 +34,8 @@ use super::yjr::{Annotation, Kind};
 pub const SOURCE_YJR: &str = "yjr";
 /// `source` column value for `My Clippings.txt` orphan archive entries.
 pub const SOURCE_CLIPPINGS: &str = "clippings";
+/// `source` column value for native, Sidle-created annotations (T0).
+pub const SOURCE_SIDLE: &str = "sidle";
 
 /// Outcome counts for one import call; sums across calls.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -97,6 +99,14 @@ fn match_key(title: &str) -> String {
     strip_trailing_ascii_paren(&n).unwrap_or(&n).trim().to_string()
 }
 
+/// The `book_key` an annotation's [`annotation_dedup_hash`] is salted with —
+/// exposed so the reader's native-annotation create path derives the SAME key
+/// from a library book's title that device imports use, making a passage
+/// highlighted both natively and on the Kindle hash identically.
+pub fn book_match_key(title: &str) -> String {
+    match_key(title)
+}
+
 /// Match a device/clipping title to a library `book_id`.
 ///
 /// T0: equality of [`match_key`] (normalised, trailing ASCII paren removed on
@@ -123,27 +133,59 @@ pub fn match_book_id(conn: &Connection, title: &str) -> rusqlite::Result<Option<
 // Dedup
 // ---------------------------------------------------------------------------
 
-/// Stable identity for an annotation, so re-importing the same device state is a
-/// no-op. Keyed on the book title + kind + anchor + text, so extending a
-/// highlight (new end anchor) is correctly a *new* record, mirroring the device.
-fn dedup_hash(book_key: &str, kind: &str, r: &Resolved) -> String {
+/// The canonical content identity for an annotation, shared by the device-import
+/// path ([`dedup_hash`]) and native (Sidle-created) annotations, so the same
+/// passage highlighted both on a Kindle and in Sidle hashes identically (→ one
+/// row). Keyed on book + kind + anchor + text + note body — NO timestamp, NO
+/// device id, NO source — so identity is content + anchor only. The byte sequence
+/// (each part NUL-terminated) is load-bearing; do not reorder.
+#[allow(clippy::too_many_arguments)]
+pub fn annotation_dedup_hash(
+    book_key: &str,
+    kind: &str,
+    eid_start: Option<i64>,
+    off_start: Option<i64>,
+    eid_end: Option<i64>,
+    off_end: Option<i64>,
+    loc_start: Option<i64>,
+    text: &str,
+    note_body: &str,
+) -> String {
     let mut h = Sha256::new();
     let i = |x: Option<i64>| x.map(|v| v.to_string()).unwrap_or_default();
     for part in [
         book_key,
         kind,
-        &i(r.eid_start),
-        &i(r.off_start),
-        &i(r.eid_end),
-        &i(r.off_end),
-        &i(r.loc_start),
-        &r.text,
-        r.note_body.as_deref().unwrap_or(""),
+        &i(eid_start),
+        &i(off_start),
+        &i(eid_end),
+        &i(off_end),
+        &i(loc_start),
+        text,
+        note_body,
     ] {
         h.update(part.as_bytes());
         h.update([0u8]);
     }
     format!("{:x}", h.finalize())
+}
+
+/// Stable identity for a device-resolved annotation, so re-importing the same
+/// device state is a no-op. Thin wrapper over [`annotation_dedup_hash`] (the
+/// shared codec) — extending a highlight (new end anchor) is correctly a *new*
+/// record, mirroring the device.
+fn dedup_hash(book_key: &str, kind: &str, r: &Resolved) -> String {
+    annotation_dedup_hash(
+        book_key,
+        kind,
+        r.eid_start,
+        r.off_start,
+        r.eid_end,
+        r.off_end,
+        r.loc_start,
+        &r.text,
+        r.note_body.as_deref().unwrap_or(""),
+    )
 }
 
 /// Dedup identity for a coarse clipping orphan (no `.yjr` anchor): title + kind +
@@ -667,6 +709,39 @@ mod tests {
             match_book_id(&conn, "この恋と、その未来。1 - 森橋 ビンゴ (ファミ通文庫)").unwrap(),
             Some(1)
         );
+    }
+
+    #[test]
+    fn native_and_device_dedup_hash_agree() {
+        // The shared codec (the native create path uses `annotation_dedup_hash`)
+        // and the device wrapper (`dedup_hash`) must produce the SAME hash for the
+        // same book + kind + anchor + text + note — so a passage highlighted both
+        // in Sidle and on a Kindle dedups to one row.
+        let r = Resolved {
+            kind: Kind::Highlight,
+            eid_start: Some(1254),
+            off_start: Some(44),
+            eid_end: Some(1257),
+            off_end: Some(68),
+            loc_start: Some(12937),
+            loc_end: Some(12961),
+            linear_pos: Some(12937),
+            text: "走れメロス".to_string(),
+            note_body: None,
+        };
+        let device = dedup_hash("メロス", "highlight", &r);
+        let native = annotation_dedup_hash(
+            "メロス",
+            "highlight",
+            r.eid_start,
+            r.off_start,
+            r.eid_end,
+            r.off_end,
+            r.loc_start,
+            &r.text,
+            "",
+        );
+        assert_eq!(device, native);
     }
 
     #[test]

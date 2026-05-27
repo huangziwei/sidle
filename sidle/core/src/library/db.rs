@@ -958,6 +958,76 @@ pub fn set_annotation_book_id(
     Ok(())
 }
 
+/// One annotation by id — the native edit/delete path loads it to recompute the
+/// dedup hash and to return the refreshed row.
+pub fn get_annotation(conn: &Connection, id: i64) -> rusqlite::Result<Option<AnnotationRow>> {
+    conn.query_row(
+        &format!("{SELECT_ANNOTATION} WHERE id = ?1"),
+        params![id],
+        row_to_annotation,
+    )
+    .optional()
+}
+
+/// One annotation by its `dedup_hash`. The native create path inserts with
+/// `ON CONFLICT(dedup_hash) DO NOTHING`, so when a created annotation collides
+/// with an existing one (e.g. the same passage already imported from a Kindle)
+/// the command returns the row already present instead of erroring.
+pub fn get_annotation_by_hash(
+    conn: &Connection,
+    dedup_hash: &str,
+) -> rusqlite::Result<Option<AnnotationRow>> {
+    conn.query_row(
+        &format!("{SELECT_ANNOTATION} WHERE dedup_hash = ?1"),
+        params![dedup_hash],
+        row_to_annotation,
+    )
+    .optional()
+}
+
+/// Update a native annotation's editable fields (`kind`, `note_body`, `color`)
+/// together with its recomputed `dedup_hash` (the hash folds in kind + note
+/// body, so they move together). Returns rows changed (0 = no such id). A hash
+/// collision with another row trips the UNIQUE constraint and surfaces as an
+/// `Err` — practically unreachable, since distinct anchors hash distinctly.
+pub fn update_annotation(
+    conn: &Connection,
+    id: i64,
+    kind: &str,
+    note_body: Option<&str>,
+    color: Option<&str>,
+    dedup_hash: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE annotations SET kind = ?1, note_body = ?2, color = ?3, dedup_hash = ?4 \
+         WHERE id = ?5",
+        params![kind, note_body, color, dedup_hash, id],
+    )
+}
+
+/// Delete one annotation by id, also dropping any device-presence rows for its
+/// hash. Native ('sidle') rows carry no `annotation_device` presence, but the
+/// cleanup keeps the side table consistent if the hash was ever shared with a
+/// device import. Returns true if a row was deleted.
+pub fn delete_annotation(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
+    // Read the hash first so the presence side table can be cleaned to match.
+    let hash: Option<String> = conn
+        .query_row(
+            "SELECT dedup_hash FROM annotations WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let n = conn.execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
+    if let Some(h) = hash {
+        conn.execute(
+            "DELETE FROM annotation_device WHERE dedup_hash = ?1",
+            params![h],
+        )?;
+    }
+    Ok(n > 0)
+}
+
 /// Last-read position for a book. `device_serial` is `""` for the Sidle-native
 /// row (`source='sidle'`) and the Kindle's USB/MTP serial for an imported one
 /// (`source='device'`) — so each device keeps its own last-read.
@@ -1241,6 +1311,60 @@ mod tests {
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0].book_id, None);
         assert_eq!(orphans[0].clip_title.as_deref(), Some("消える本"));
+    }
+
+    #[test]
+    fn native_annotation_get_update_delete_round_trip() {
+        let conn = fresh_db();
+        let book_id = insert_minimal(&conn, "sha-native", "自作本");
+        insert_annotation(
+            &conn,
+            &NewAnnotation {
+                dedup_hash: "nh1",
+                book_id: Some(book_id),
+                kind: "highlight",
+                eid_start: Some(10),
+                off_start: Some(0),
+                eid_end: Some(10),
+                off_end: Some(4),
+                loc_start: Some(100),
+                loc_end: Some(100),
+                linear_pos: Some(100),
+                text: "メロス",
+                note_body: None,
+                color: Some("yellow"),
+                clip_title: None,
+                clip_author: None,
+                added_at: Some("2026-05-27T00:00:00Z"),
+                added_raw: None,
+                imported_at: "2026-05-27T00:00:00Z",
+                source: "sidle",
+            },
+        )
+        .expect("insert");
+        let id = get_annotation_by_hash(&conn, "nh1")
+            .expect("by hash")
+            .expect("present")
+            .id;
+
+        // Promote highlight → note + recolor; the hash moves with the content.
+        let changed =
+            update_annotation(&conn, id, "note", Some("a thought"), Some("blue"), "nh1-v2")
+                .expect("update");
+        assert_eq!(changed, 1);
+        let row = get_annotation(&conn, id).expect("get").expect("present");
+        assert_eq!(row.kind, "note");
+        assert_eq!(row.note_body.as_deref(), Some("a thought"));
+        assert_eq!(row.color.as_deref(), Some("blue"));
+        assert_eq!(row.dedup_hash, "nh1-v2");
+        assert!(get_annotation_by_hash(&conn, "nh1").expect("old").is_none());
+        assert!(get_annotation_by_hash(&conn, "nh1-v2").expect("new").is_some());
+
+        // Delete removes it; deleting again is a no-op.
+        assert!(delete_annotation(&conn, id).expect("delete"));
+        assert!(get_annotation(&conn, id).expect("gone").is_none());
+        assert!(!delete_annotation(&conn, id).expect("delete-again"));
+        assert!(list_annotations_for_book(&conn, book_id).expect("list").is_empty());
     }
 
     #[test]

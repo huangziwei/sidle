@@ -275,6 +275,9 @@
         </button>
         <div id="reader-title" class="reader-title"></div>
         <div class="reader-topbar-right">
+          <button id="reader-bookmark" class="reader-btn" title="Bookmark this page" aria-label="Bookmark this page" aria-pressed="false">
+            <span aria-hidden="true">⚑</span>
+          </button>
           <button id="reader-search" class="reader-btn" title="Search in book (⌘F)" aria-label="Search in book">
             <span aria-hidden="true">🔍</span>
           </button>
@@ -406,9 +409,35 @@
           <button type="button" id="rs-reset" class="btn-link">Reset to defaults</button>
         </div>
       </div>
+      <div
+        id="reader-selection-toolbar"
+        class="reader-selection-toolbar"
+        hidden
+        role="toolbar"
+        aria-label="Annotate selection"
+      >
+        <span id="rst-colors" class="rst-colors"></span>
+        <button id="rst-note" class="rst-note" type="button">📝 Note</button>
+      </div>
       <div id="reader-note-popover" class="reader-note-popover" hidden>
         <div id="reader-note-quote" class="reader-note-quote"></div>
         <div id="reader-note-body" class="reader-note-body"></div>
+        <textarea
+          id="reader-note-edit"
+          class="reader-note-edit"
+          rows="3"
+          placeholder="Add a note…"
+          hidden
+        ></textarea>
+        <div id="reader-note-edit-controls" class="reader-note-edit-controls" hidden>
+          <span id="reader-note-colors" class="reader-note-colors"></span>
+          <span class="reader-note-actions">
+            <button id="reader-note-delete" class="btn-link reader-note-delete" type="button">
+              Delete
+            </button>
+            <button id="reader-note-save" class="reader-note-save" type="button">Save</button>
+          </span>
+        </div>
       </div>
     </div>
 
