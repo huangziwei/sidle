@@ -120,8 +120,12 @@ pub fn draw(
     if page > 0 {
         renderer.draw(fb, NAV_LEFT as i32 + 40, baseline, label_prev, false);
     }
+    // Center "N / M" in the nav region (`NAV_LEFT`..xres) — the space left of
+    // which is the fixed Exit/Filter/Sync zones — NOT on the whole screen.
+    // Prev/Next sit at this region's two ends; screen-centering shoved the
+    // indicator left against the Sync separator once Sync widened the fixed zones.
     let mid_w = renderer.measure_width(&label_mid);
-    let mid_x = (fb.var.xres as i32 - mid_w as i32) / 2;
+    let mid_x = (NAV_LEFT as i32 + fb.var.xres as i32) / 2 - mid_w as i32 / 2;
     renderer.draw(fb, mid_x, baseline, &label_mid, false);
     if page + 1 < total_pages {
         let next_w = renderer.measure_width(label_next);

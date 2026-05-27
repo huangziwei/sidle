@@ -171,19 +171,24 @@ impl ServerHandle {
     }
 }
 
-/// Resolve the `sidle-server` binary. Dev: `<workspace>/target/<profile>/
-/// sidle-server`, **built on demand** if missing so there's no manual step.
-/// Packaged: shipped as a Tauri sidecar (TODO — errors clearly until that lands).
+/// Resolve the `sidle-server` binary. Dev: `<workspace>/target/debug/sidle-server`,
+/// **rebuilt unconditionally before every spawn**. `cargo run -p sidle` recompiles
+/// the `sidle_server` *lib* but not this *binary*, and the supervisor adopts an
+/// already-running server — so without an unconditional rebuild the app silently
+/// spawns/adopts stale server code (a pre-route binary once 404'd
+/// `/sync/annotations`). cargo is incremental, so this is a fast freshness check when
+/// nothing changed. Note: a *running* instance is still adopted, not replaced —
+/// toggle the server off→on to pick up an edit. Packaged: shipped as a Tauri sidecar
+/// (TODO — errors clearly until that lands).
 fn server_binary() -> Result<PathBuf> {
     let root = crate::state::find_workspace_root()
         .context("locate workspace root for the sidle-server binary")?;
     let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
     let bin = root.join("target").join(profile).join("sidle-server");
-    if bin.exists() {
-        return Ok(bin);
-    }
+
     if cfg!(debug_assertions) {
-        // Build it ourselves rather than make the dev run a manual command.
+        // Always rebuild before spawning (not just when missing) — otherwise a stale
+        // on-disk binary from before a server-code edit gets spawned as-is.
         let status = Command::new("cargo")
             .args(["build", "-p", "sidle-server"])
             .current_dir(&root)
@@ -196,6 +201,11 @@ fn server_binary() -> Result<PathBuf> {
             "cargo build -p sidle-server did not produce {}",
             bin.display()
         ));
+    }
+
+    // Packaged (release): the binary must already exist — shipped as a sidecar.
+    if bin.exists() {
+        return Ok(bin);
     }
     Err(anyhow!(
         "sidle-server binary missing at {} (packaged builds must ship it as a sidecar)",

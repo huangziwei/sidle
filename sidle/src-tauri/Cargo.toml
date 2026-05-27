@@ -51,6 +51,11 @@ tracing = "0.1"
 # DTO. 0.22 matches sidle-core so we don't pull in two base64 crates.
 base64 = "0.22"
 
+# Watch the daemon's `<data-dir>/.sync-pulse.json` to live-repaint an open reader
+# after a LAN annotation sync (the detached sidle-server can't emit a Tauri event
+# into this process). FSEvents-backed on macOS. See sidle-reader.md P3.
+notify = "8"
+
 # Pure-Rust MTP transport for Scribe and other 2024+ Kindles that dropped USB
 # mass storage. Pinned exact (young crate, recent API churn) — bump
 # deliberately and rerun the device round-trip when upgrading. mtp-rs's

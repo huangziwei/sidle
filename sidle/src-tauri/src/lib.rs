@@ -6,6 +6,7 @@ mod device;
 mod queue;
 mod server;
 mod state;
+mod sync_pulse;
 
 // The on-disk library — db, paths, import pipeline — lives in `sidle-core`
 // so the LAN server crate can share it without pulling Tauri. Re-bind as
