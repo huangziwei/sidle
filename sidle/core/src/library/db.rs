@@ -3,7 +3,7 @@
 //! Single-user, single-process. We hold one `Connection` behind an `Arc<Mutex>`
 //! in `AppState`; rusqlite calls block but the library workload is tiny.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -71,7 +71,92 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     migrate(&conn)?;
+    relativize_existing_paths(&conn, path)?;
     Ok(conn)
+}
+
+// ---------------------------------------------------------------------------
+// Path portability (§4a). The three `*_path` columns are stored ROOT-RELATIVE
+// (`books/<sha>/<file>`) so the library folder can be moved; we resolve to
+// absolute on read and relativize on write. The root is the directory holding
+// `library.db`, derived from the connection itself — so no caller threads it in,
+// and an in-memory test connection (empty filename) skips conversion entirely.
+// ---------------------------------------------------------------------------
+
+/// Library root for `conn` — the directory holding `library.db`. `None` for an
+/// in-memory connection (its filename is empty / `:memory:`), where stored paths
+/// are taken verbatim (tests insert `None`/relative paths, so nothing converts).
+fn conn_root(conn: &Connection) -> Option<PathBuf> {
+    let p = conn.path()?;
+    if p.is_empty() || p == ":memory:" {
+        return None;
+    }
+    Path::new(p).parent().map(Path::to_path_buf)
+}
+
+/// Resolve a stored path to absolute against `root`. A `None` root or an
+/// already-absolute value (the pre-migration window, or a foreign path) is
+/// returned unchanged.
+fn resolve_one(root: Option<&Path>, stored: &str) -> String {
+    match root {
+        Some(r) if !Path::new(stored).is_absolute() => {
+            r.join(stored).to_string_lossy().into_owned()
+        }
+        _ => stored.to_string(),
+    }
+}
+
+fn resolve_opt(root: Option<&Path>, stored: Option<String>) -> Option<String> {
+    stored.map(|s| resolve_one(root, &s))
+}
+
+/// Relativize an absolute managed path to root-relative for storage. A path
+/// outside `root` (or a `None` root) is stored unchanged — defensive; library-
+/// managed files always live under root. Idempotent: an already-relative input
+/// isn't under `root`, so `strip_prefix` fails and it's left as-is.
+fn relativize_for_store(root: Option<&Path>, abs: &str) -> String {
+    match root {
+        Some(r) => match Path::new(abs).strip_prefix(r) {
+            Ok(rel) => rel.to_string_lossy().into_owned(),
+            Err(_) => abs.to_string(),
+        },
+        None => abs.to_string(),
+    }
+}
+
+/// One-time migration: rewrite absolute `*_path` columns (pre-§4a rows stored
+/// `<root>/books/<sha>/...`) to root-relative. Gated on actually finding an
+/// absolute value, so steady-state opens short-circuit after the first. No-op
+/// for an in-memory DB (the path has no parent). Lives in `open()` — which has
+/// the db path, hence the root — not `migrate()`, which only gets the `Connection`.
+fn relativize_existing_paths(conn: &Connection, db_path: &Path) -> rusqlite::Result<()> {
+    let Some(root) = db_path.parent() else {
+        return Ok(());
+    };
+    let any_absolute: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM books \
+         WHERE epub_path LIKE '/%' OR cover_path LIKE '/%' OR kfx_path LIKE '/%')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !any_absolute {
+        return Ok(());
+    }
+    let rows: Vec<(i64, Option<String>, Option<String>, Option<String>)> = {
+        let mut stmt = conn.prepare("SELECT id, epub_path, cover_path, kfx_path FROM books")?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    for (id, epub, cover, kfx) in rows {
+        let e = epub.map(|s| relativize_for_store(Some(root), &s));
+        let c = cover.map(|s| relativize_for_store(Some(root), &s));
+        let k = kfx.map(|s| relativize_for_store(Some(root), &s));
+        conn.execute(
+            "UPDATE books SET epub_path = ?1, cover_path = ?2, kfx_path = ?3 WHERE id = ?4",
+            params![e, c, k, id],
+        )?;
+    }
+    Ok(())
 }
 
 /// Schema setup.
@@ -313,11 +398,12 @@ pub fn find_by_kfx_sha_prefix(
     conn: &Connection,
     prefix: &str,
 ) -> rusqlite::Result<Option<BookRow>> {
+    let root = conn_root(conn);
     let pattern = format!("{prefix}%");
     conn.query_row(
         SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX,
         params![pattern],
-        row_to_book,
+        |row| row_to_book(row, root.as_deref()),
     )
     .optional()
 }
@@ -335,19 +421,29 @@ pub fn job_in_flight(conn: &Connection, book_id: i64) -> rusqlite::Result<bool> 
 }
 
 pub fn find_by_sha(conn: &Connection, sha: &str) -> rusqlite::Result<Option<BookRow>> {
-    conn.query_row(SELECT_BOOK_WITH_JOB_BY_SHA, params![sha], row_to_book)
-        .optional()
+    let root = conn_root(conn);
+    conn.query_row(SELECT_BOOK_WITH_JOB_BY_SHA, params![sha], |row| {
+        row_to_book(row, root.as_deref())
+    })
+    .optional()
 }
 
 pub fn list_books(conn: &Connection) -> rusqlite::Result<Vec<BookRow>> {
+    let root = conn_root(conn);
     let mut stmt = conn.prepare(SELECT_BOOKS_WITH_JOBS)?;
-    let rows = stmt.query_map([], row_to_book)?;
+    let rows = stmt.query_map([], |row| row_to_book(row, root.as_deref()))?;
     rows.collect()
 }
 
 pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i64> {
     let tags_json = serde_json::to_string(book.tags)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    // Store the three file paths root-relative (§4a) so the library is movable;
+    // `row_to_book` resolves them back to absolute on read.
+    let root = conn_root(conn);
+    let epub_rel = book.epub_path.map(|p| relativize_for_store(root.as_deref(), p));
+    let cover_rel = book.cover_path.map(|p| relativize_for_store(root.as_deref(), p));
+    let kfx_rel = book.kfx_path.map(|p| relativize_for_store(root.as_deref(), p));
     conn.execute(
         r#"INSERT INTO books
             (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path,
@@ -360,9 +456,9 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             book.author,
             book.language,
             book.ppd,
-            book.epub_path,
-            book.cover_path,
-            book.kfx_path,
+            epub_rel,
+            cover_rel,
+            kfx_rel,
             book.file_size,
             book.imported_at,
             book.asin,
@@ -432,9 +528,10 @@ pub fn set_kfx_path_and_sha(
     kfx_path: &str,
     kfx_sha256: &str,
 ) -> rusqlite::Result<()> {
+    let kfx_rel = relativize_for_store(conn_root(conn).as_deref(), kfx_path);
     conn.execute(
         "UPDATE books SET kfx_path = ?1, kfx_sha256 = ?2 WHERE id = ?3",
-        params![kfx_path, kfx_sha256, book_id],
+        params![kfx_rel, kfx_sha256, book_id],
     )?;
     Ok(())
 }
@@ -445,11 +542,14 @@ pub fn set_kfx_path_and_sha(
 /// purely for upgrades from a pre-`kfx_sha256` schema; new rows always
 /// land with the hash already set.
 pub fn books_missing_kfx_sha(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
+    let root = conn_root(conn);
     let mut stmt = conn.prepare(
         "SELECT id, kfx_path FROM books \
          WHERE kfx_path IS NOT NULL AND kfx_sha256 IS NULL",
     )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, resolve_one(root.as_deref(), &r.get::<_, String>(1)?)))
+    })?;
     rows.collect()
 }
 
@@ -459,26 +559,31 @@ pub fn books_missing_kfx_sha(conn: &Connection) -> rusqlite::Result<Vec<(i64, St
 /// catalog sidecar. Exists purely for rows converted before the worker
 /// started capturing ASIN; new rows always land with `asin` populated.
 pub fn books_missing_asin(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
+    let root = conn_root(conn);
     let mut stmt = conn.prepare(
         "SELECT id, kfx_path FROM books \
          WHERE kfx_path IS NOT NULL AND (asin IS NULL OR asin = '')",
     )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, resolve_one(root.as_deref(), &r.get::<_, String>(1)?)))
+    })?;
     rows.collect()
 }
 
 pub fn set_epub_path(conn: &Connection, book_id: i64, epub_path: &str) -> rusqlite::Result<()> {
+    let epub_rel = relativize_for_store(conn_root(conn).as_deref(), epub_path);
     conn.execute(
         "UPDATE books SET epub_path = ?1 WHERE id = ?2",
-        params![epub_path, book_id],
+        params![epub_rel, book_id],
     )?;
     Ok(())
 }
 
 pub fn set_cover_path(conn: &Connection, book_id: i64, cover_path: &str) -> rusqlite::Result<()> {
+    let cover_rel = relativize_for_store(conn_root(conn).as_deref(), cover_path);
     conn.execute(
         "UPDATE books SET cover_path = ?1 WHERE id = ?2",
-        params![cover_path, book_id],
+        params![cover_rel, book_id],
     )?;
     Ok(())
 }
@@ -690,8 +795,11 @@ pub fn pending_or_error_book_ids(conn: &Connection) -> rusqlite::Result<Vec<i64>
 }
 
 pub fn get_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<BookRow>> {
-    conn.query_row(SELECT_BOOK_WITH_JOB_BY_ID, params![book_id], row_to_book)
-        .optional()
+    let root = conn_root(conn);
+    conn.query_row(SELECT_BOOK_WITH_JOB_BY_ID, params![book_id], |row| {
+        row_to_book(row, root.as_deref())
+    })
+    .optional()
 }
 
 pub struct NewBook<'a> {
@@ -771,7 +879,7 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX: &str = r#"
     LIMIT 1
 "#;
 
-fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
+fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<BookRow> {
     let tags_json: String = row.get(19)?;
     // Defensive parse: we control writes and only emit canonical JSON
     // arrays, but a corrupt column shouldn't take down the whole list.
@@ -783,9 +891,10 @@ fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRow> {
         author: row.get(3)?,
         language: row.get(4)?,
         ppd: row.get(5)?,
-        epub_path: row.get(6)?,
-        cover_path: row.get(7)?,
-        kfx_path: row.get(8)?,
+        // Stored root-relative (§4a); resolve to absolute against the live root.
+        epub_path: resolve_opt(root, row.get(6)?),
+        cover_path: resolve_opt(root, row.get(7)?),
+        kfx_path: resolve_opt(root, row.get(8)?),
         file_size: row.get(9)?,
         imported_at: row.get(10)?,
         asin: row.get(11)?,
@@ -1797,5 +1906,95 @@ mod tests {
         assert!(
             !apply_bulk_patch(&conn, 9999, &BulkMetadataPatch::default()).expect("apply")
         );
+    }
+
+    /// §4a path portability: paths are stored root-relative, resolved to
+    /// absolute on read, stay relative across a read-modify-write, and a pre-§4a
+    /// absolute row is migrated to relative on the next `open`. Uses an on-disk
+    /// DB because the root is derived from `conn.path()` (empty for in-memory).
+    #[test]
+    fn paths_stored_relative_resolved_absolute_and_migrated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Canonicalize: on macOS the tempdir resolves /var → /private/var, and
+        // SQLite reports that realpath via `conn.path()`; matching it keeps the
+        // test on a normal (non-symlinked) root instead of the symlink artifact.
+        let root = dir.path().canonicalize().expect("canonicalize tempdir");
+        let db_path = root.join("library.db");
+
+        let sha = "abc123";
+        let epub_abs = root.join("books").join(sha).join("[A] T (2024).epub");
+        let kfx_abs = root.join("books").join(sha).join("[A] T (2024).kfx");
+        let cover_abs = root.join("books").join(sha).join("cover.jpg");
+        let rel_epub = "books/abc123/[A] T (2024).epub";
+        let rel_kfx = "books/abc123/[A] T (2024).kfx";
+
+        // Raw stored value, bypassing `row_to_book`'s resolution.
+        let stored = |conn: &Connection, col: &str| -> Option<String> {
+            conn.query_row(
+                &format!("SELECT {col} FROM books WHERE sha256 = ?1"),
+                rusqlite::params![sha],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .expect("query")
+        };
+
+        let book_id = {
+            let conn = open(&db_path).expect("open");
+            let id = insert_book(
+                &conn,
+                &NewBook {
+                    sha256: sha,
+                    title: "T",
+                    author: "A",
+                    language: "",
+                    ppd: None,
+                    epub_path: Some(&epub_abs.to_string_lossy()),
+                    cover_path: Some(&cover_abs.to_string_lossy()),
+                    kfx_path: Some(&kfx_abs.to_string_lossy()),
+                    kfx_sha256: Some("deadbeef"),
+                    file_size: 1,
+                    imported_at: "t",
+                    asin: None,
+                    publisher: None,
+                    published_at: None,
+                    series_name: None,
+                    series_index: None,
+                    tags: &[],
+                },
+            )
+            .expect("insert");
+
+            // Stored relative…
+            assert_eq!(stored(&conn, "epub_path").as_deref(), Some(rel_epub));
+            assert_eq!(stored(&conn, "kfx_path").as_deref(), Some(rel_kfx));
+            assert_eq!(stored(&conn, "cover_path").as_deref(), Some("books/abc123/cover.jpg"));
+
+            // …resolved to absolute on read.
+            let row = get_book(&conn, id).expect("get").expect("present");
+            assert_eq!(row.epub_path.as_deref(), Some(epub_abs.to_string_lossy().as_ref()));
+            assert_eq!(row.kfx_path.as_deref(), Some(kfx_abs.to_string_lossy().as_ref()));
+
+            // Read-modify-write invariant: feeding the resolved ABSOLUTE path back
+            // into the setter must NOT re-absolutize the column (this is the bug
+            // the §4a centralization fixes — set_cover/recrawl/worker all do this).
+            let resolved_kfx = row.kfx_path.clone().unwrap();
+            set_kfx_path_and_sha(&conn, id, &resolved_kfx, "cafe").expect("set kfx");
+            assert_eq!(stored(&conn, "kfx_path").as_deref(), Some(rel_kfx));
+
+            // Simulate a pre-§4a absolute row via a raw UPDATE (bypasses the setter).
+            conn.execute(
+                "UPDATE books SET epub_path = ?1 WHERE id = ?2",
+                rusqlite::params![epub_abs.to_string_lossy(), id],
+            )
+            .expect("set absolute");
+            assert!(stored(&conn, "epub_path").unwrap().starts_with('/'));
+            id
+        };
+
+        // Reopen → relativize_existing_paths migrates the absolute row back to relative.
+        let conn = open(&db_path).expect("reopen");
+        assert_eq!(stored(&conn, "epub_path").as_deref(), Some(rel_epub));
+        let row = get_book(&conn, book_id).expect("get").expect("present");
+        assert_eq!(row.epub_path.as_deref(), Some(epub_abs.to_string_lossy().as_ref()));
     }
 }
