@@ -640,6 +640,81 @@ fn extract_attr_value<'a>(attrs: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
     None
 }
 
+/// Drop `<link>` elements whose `href` escapes the package root (contains
+/// `..`).
+///
+/// KF8 books converted from Aozora HTML carry a verbatim
+/// `<link rel="alternate stylesheet" href="../styles/aNNNNN_h.css" title="横組">`
+/// for the horizontal writing-mode variant — a reference to a stylesheet that
+/// was never embedded as a flow. calibre passes it through and its reader just
+/// ignores the dangling *alternate* sheet, but in boko's flat EPUB layout the
+/// parts and `styles/` are siblings under the OPF root, so a `..` href both
+/// points at a missing file and climbs out of the container: two EPUB-3
+/// violations that make a strict consumer (Apple Books, the downstream
+/// `epub_to_kfx` job, our own `validate::epub3`) reject the book. The
+/// `kindle:flow:` sheets are rewritten to sibling `styles/styleNNNN.css`
+/// paths, so no stylesheet boko actually emits needs `..` — dropping these
+/// dangling links is safe and loses nothing a reader would have applied.
+pub fn strip_root_escaping_links(html: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(html.len());
+    let mut pos = 0;
+
+    while pos < html.len() {
+        let Some(rel) = memchr::memchr(b'<', &html[pos..]) else {
+            output.extend_from_slice(&html[pos..]);
+            break;
+        };
+        let tag_start = pos + rel;
+        output.extend_from_slice(&html[pos..tag_start]);
+
+        let Some(rel_end) = memchr::memchr(b'>', &html[tag_start..]) else {
+            output.extend_from_slice(&html[tag_start..]);
+            break;
+        };
+        let tag_end = tag_start + rel_end + 1;
+
+        if is_root_escaping_link(&html[tag_start..tag_end]) {
+            // Drop the element. Swallow one trailing newline so we don't leave
+            // a blank line where the <link> was (each sits on its own line).
+            pos = tag_end;
+            if html.get(pos) == Some(&b'\n') {
+                pos += 1;
+            }
+        } else {
+            output.extend_from_slice(&html[tag_start..tag_end]);
+            pos = tag_end;
+        }
+    }
+
+    output
+}
+
+/// True for a `<link ...>` start tag whose `href` value contains `..`.
+fn is_root_escaping_link(tag: &[u8]) -> bool {
+    let Some(rest) = tag.strip_prefix(b"<link") else {
+        return false;
+    };
+    // Require a delimiter after the element name so `<linkfoo>` doesn't match.
+    if !matches!(
+        rest.first(),
+        Some(b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>')
+    ) {
+        return false;
+    }
+    let Some(h) = memmem::find(tag, b"href=") else {
+        return false;
+    };
+    let after = &tag[h + 5..];
+    let (quote, body) = match after.first() {
+        Some(&q @ (b'"' | b'\'')) => (q, &after[1..]),
+        _ => return false,
+    };
+    let Some(close) = memchr::memchr(quote, body) else {
+        return false;
+    };
+    memmem::find(&body[..close], b"..").is_some()
+}
+
 pub fn strip_kindle_attributes_fast(html: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(html.len());
     let mut pos = 0;
@@ -835,6 +910,42 @@ mod tests {
             "Expected <p...>Hello</p>, got: {}",
             output_str
         );
+    }
+
+    #[test]
+    fn test_strip_root_escaping_links() {
+        // The exact dangling Aozora horizontal-alternate sheet: dropped.
+        let head = concat!(
+            "<link rel=\"stylesheet\" href=\"styles/style0000.css\" type=\"text/css\"/>\n",
+            "<link class=\"vertical\" rel=\"stylesheet\" href=\"styles/style0002.css\" title=\"縦組\"/>\n",
+            "<link class=\"horizontal\" rel=\"alternate stylesheet\" href=\"../styles/a00301_h.css\" title=\"横組\"/>\n",
+            "<title>人間失格</title>",
+        );
+        let out = strip_root_escaping_links(head.as_bytes());
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.contains("a00301_h.css"), "escaping <link> must be dropped");
+        assert!(!s.contains(".."), "no `..` href should survive");
+        // Valid sibling-relative stylesheet links are untouched.
+        assert!(s.contains("styles/style0000.css"));
+        assert!(s.contains("styles/style0002.css"));
+        assert!(s.contains("<title>人間失格</title>"));
+    }
+
+    #[test]
+    fn test_strip_root_escaping_links_preserves_other_elements() {
+        // `..` in a non-<link> element (a body anchor / an id) is left alone —
+        // we only neutralize stylesheet <link>s, not content or anchor targets.
+        let html = b"<a href=\"../other.html\">x</a><h4 id=\"a00301_0007_n0004\">\xe4\xb8\x80</h4>";
+        let out = strip_root_escaping_links(html);
+        assert_eq!(out, html, "non-<link> elements must pass through verbatim");
+
+        // A <link> whose href is clean is kept.
+        let ok = b"<link rel=\"stylesheet\" href=\"styles/style0001.css\"/>";
+        assert_eq!(strip_root_escaping_links(ok), ok);
+
+        // `<linkfoo>` is not a <link> element.
+        let notlink = b"<linkfoo href=\"../x\"/>";
+        assert_eq!(strip_root_escaping_links(notlink), notlink);
     }
 
     #[test]

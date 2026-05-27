@@ -667,8 +667,15 @@ impl Azw3Importer {
         let transformed =
             transform::transform_kindle_refs(&inlined, &self.kf8.elems, html_text, &file_starts);
 
+        // Drop dangling `<link>`s that escape the package root (e.g. the
+        // Aozora `../styles/aNNNNN_h.css` horizontal alternate stylesheet that
+        // was never embedded as a flow). transform_kindle_refs only rewrites
+        // `kindle:flow:` hrefs, so this verbatim `..` href would otherwise
+        // survive and fail strict EPUB-3 validation on import.
+        let delinked = transform::strip_root_escaping_links(&transformed);
+
         // Strip Amazon-specific attributes (aid, data-Amzn*)
-        let cleaned = transform::strip_kindle_attributes_fast(&transformed);
+        let cleaned = transform::strip_kindle_attributes_fast(&delinked);
 
         // Ensure the root `<html>` carries both `xml:lang` and `lang`.
         // Calibre's AZW3 exporter scrubs `xml:lang` and leaves only `lang=`,
