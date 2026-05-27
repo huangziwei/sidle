@@ -15,12 +15,15 @@ enum DictEntry {
 
 /// HUFF/CDIC decompressor
 pub struct HuffCdicReader {
-    /// dict1: 256 entries of (codelen, term, maxcode)
-    dict1: Vec<(u8, bool, u32)>,
-    /// mincode for each code length (1-32)
-    mincode: Vec<u32>,
-    /// maxcode for each code length (1-32)
-    maxcode: Vec<u32>,
+    /// dict1: 256 entries of (codelen, term, maxcode). `maxcode` is held in
+    /// `u64` because the canonical `((maxcode + 1) << (32 - codelen)) - 1` math
+    /// exceeds 32 bits (calibre/KindleUnpack compute it in arbitrary-precision
+    /// ints).
+    dict1: Vec<(u8, bool, u64)>,
+    /// mincode indexed by code length `0..=31` (canonical enumerate-from-0).
+    mincode: Vec<u64>,
+    /// maxcode indexed by code length `0..=31`.
+    maxcode: Vec<u64>,
     /// Dictionary entries from CDIC records
     dictionary: Vec<DictEntry>,
 }
@@ -69,11 +72,13 @@ impl HuffCdicReader {
 
             let codelen = (v & 0x1f) as u8;
             let term = (v & 0x80) != 0;
-            let maxcode_raw = v >> 8;
+            let maxcode_raw = (v >> 8) as u64;
 
-            // Calculate maxcode for this entry
+            // maxcode = ((maxcode_raw + 1) << (32 - codelen)) - 1, in u64 so the
+            // shift can't overflow. `maxcode_raw` is only 24 bits, so the result
+            // fits comfortably; codelen 0 never occurs in a valid table.
             let maxcode = if codelen > 0 {
-                ((maxcode_raw + 1) << (32 - codelen)).wrapping_sub(1)
+                ((maxcode_raw + 1) << (32 - codelen as u32)) - 1
             } else {
                 0
             };
@@ -89,21 +94,29 @@ impl HuffCdicReader {
             ));
         }
 
-        // Initialize with codelen 0
-        self.mincode.push(0);
-        self.maxcode.push(0);
-
-        for i in 0..32 {
-            let pos = off2 + i * 8;
+        // dict2: 32 interleaved (mincode, maxcode) u32 pairs, indexed by code
+        // length 0..=31 with shift (32 - codelen) — the canonical
+        // KindleUnpack/calibre layout (`enumerate(dict2[0::2])`). All math is in
+        // u64: `mincode << 32` and `(maxcode + 1) << 32` exceed 32 bits. The
+        // codelen-0 maxcode is u64::MAX (Python's bigint `((m+1)<<32)-1` for
+        // m=0xFFFFFFFF), reached here by letting `<< 32` drop the carry bit
+        // before `wrapping_sub(1)`. (codelen 0 is never indexed, but we populate
+        // it to keep the array aligned with codelen.)
+        for codelen in 0u32..32 {
+            let pos = off2 + (codelen as usize) * 8;
             let mincode_raw =
-                u32::from_be_bytes([huff[pos], huff[pos + 1], huff[pos + 2], huff[pos + 3]]);
-            let maxcode_raw =
-                u32::from_be_bytes([huff[pos + 4], huff[pos + 5], huff[pos + 6], huff[pos + 7]]);
+                u32::from_be_bytes([huff[pos], huff[pos + 1], huff[pos + 2], huff[pos + 3]]) as u64;
+            let maxcode_raw = u32::from_be_bytes([
+                huff[pos + 4],
+                huff[pos + 5],
+                huff[pos + 6],
+                huff[pos + 7],
+            ]) as u64;
 
-            let codelen = i + 1;
-            self.mincode.push(mincode_raw << (32 - codelen));
+            let shift = 32 - codelen;
+            self.mincode.push(mincode_raw << shift);
             self.maxcode
-                .push(((maxcode_raw + 1) << (32 - codelen)).wrapping_sub(1));
+                .push(((maxcode_raw + 1) << shift).wrapping_sub(1));
         }
 
         Ok(())
@@ -188,16 +201,26 @@ impl HuffCdicReader {
 
             let code = ((x >> n) & 0xFFFFFFFF) as u32;
 
-            // Look up in dict1 using top 8 bits
+            // Look up in dict1 using top 8 bits.
             let (mut codelen, term, mut maxcode) = self.dict1[(code >> 24) as usize];
 
             if !term {
-                // Need to find the right code length
-                while codelen < 32 && code < self.mincode[codelen as usize] {
+                // Walk up the code lengths. mincode/maxcode are indexed by
+                // codelen 0..=31; the 32-bit `code` is compared in u64 space
+                // because the thresholds routinely exceed 32 bits.
+                while (codelen as usize) < self.mincode.len()
+                    && (code as u64) < self.mincode[codelen as usize]
+                {
                     codelen += 1;
                 }
-                if codelen < 33 {
-                    maxcode = self.maxcode[codelen as usize];
+                match self.maxcode.get(codelen as usize) {
+                    Some(&m) => maxcode = m,
+                    None => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "HUFF code length out of range",
+                        ));
+                    }
                 }
             }
 
@@ -208,9 +231,9 @@ impl HuffCdicReader {
                 break;
             }
 
-            // Calculate dictionary index
+            // Dictionary index: (maxcode - code) >> (32 - codelen).
             let r = if codelen > 0 {
-                (maxcode.wrapping_sub(code) >> (32 - codelen)) as usize
+                (maxcode.wrapping_sub(code as u64) >> (32 - codelen as u32)) as usize
             } else {
                 0
             };

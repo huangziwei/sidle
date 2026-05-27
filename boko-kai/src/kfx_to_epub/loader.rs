@@ -422,26 +422,12 @@ use container as _container; // silence unused warning when modules grow
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
-    /// Use the committed `tests/fixtures/epictetus.kfx` (English book) for a
-    /// minimum-viable load check that always runs.
+    /// Minimum-viable load check on the committed 人間失格 KFX fixture.
     #[test]
-    fn load_epictetus_kfx_smoke() {
-        let path = "tests/fixtures/epictetus.kfx";
-        if !Path::new(path).exists() {
-            // boko-kai might be built from the workspace root; try the
-            // crate-relative path as a fallback before skipping.
-            let alt = "boko-kai/tests/fixtures/epictetus.kfx";
-            if !Path::new(alt).exists() {
-                eprintln!("Skipping: epictetus.kfx fixture missing");
-                return;
-            }
-            let bytes = std::fs::read(alt).expect("read fixture");
-            let _ = load(&bytes).expect("load epictetus");
-            return;
-        }
+    fn load_ningen_shikkaku_kfx_smoke() {
+        let path = "tests/fixtures/[太宰 治] 人間失格.kfx";
         let bytes = std::fs::read(path).expect("read fixture");
-        let _ = load(&bytes).expect("load epictetus");
+        let _ = load(&bytes).expect("load 人間失格.kfx");
     }
 }

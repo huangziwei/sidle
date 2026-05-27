@@ -32,11 +32,7 @@ fn pack_single_kfx_as_zip(kfx_path: &Path) -> tempfile::TempDir {
 /// `.kfx` directly. Proves the merge path preserves metadata and spine.
 #[test]
 fn kfx_zip_with_single_container_matches_plain_kfx() {
-    let kfx_path = "tests/fixtures/epictetus.kfx";
-    if !Path::new(kfx_path).exists() {
-        eprintln!("Skipping: fixture not found at {kfx_path}");
-        return;
-    }
+    let kfx_path = "tests/fixtures/[太宰 治] 人間失格.kfx";
 
     let plain = Book::open(kfx_path).expect("open .kfx");
     let plain_title = plain.metadata().title.clone();
@@ -59,11 +55,7 @@ fn kfx_zip_with_single_container_matches_plain_kfx() {
 /// by `boko convert in.kfx-zip out.kfx`.
 #[test]
 fn merge_produces_loadable_single_kfx() {
-    let kfx_path = "tests/fixtures/epictetus.kfx";
-    if !Path::new(kfx_path).exists() {
-        eprintln!("Skipping: fixture not found at {kfx_path}");
-        return;
-    }
+    let kfx_path = "tests/fixtures/[太宰 治] 人間失格.kfx";
     let dir = pack_single_kfx_as_zip(Path::new(kfx_path));
     let zip_path = dir.path().join("bundle.kfx-zip");
 
@@ -81,4 +73,21 @@ fn merge_produces_loadable_single_kfx() {
     assert_eq!(merged.metadata().title, plain.metadata().title);
     assert_eq!(merged.spine().len(), plain.spine().len());
     assert_eq!(merged.toc().len(), plain.toc().len());
+}
+
+/// The committed Amazon `.kfx-zip` opens to the same book as the monolithic
+/// `.kfx` — exercises the real kfx-zip merge path on an actual bundle (not the
+/// synthetic single-entry zip the tests above build).
+#[test]
+fn real_kfx_zip_fixture_matches_plain_kfx() {
+    let kfx = "tests/fixtures/[太宰 治] 人間失格.kfx";
+    let zip = "tests/fixtures/[太宰 治] 人間失格.kfx-zip";
+
+    let plain = Book::open(kfx).expect("open .kfx");
+    let bundled = Book::open(zip).expect("open .kfx-zip");
+
+    assert_eq!(bundled.metadata().title, plain.metadata().title);
+    assert_eq!(bundled.metadata().authors, plain.metadata().authors);
+    assert_eq!(bundled.spine().len(), plain.spine().len());
+    assert_eq!(bundled.toc().len(), plain.toc().len());
 }

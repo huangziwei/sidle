@@ -10,9 +10,9 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use boko::export::{EpubExporter, Exporter, KfxExporter};
 use boko::{Book, Format, Origin, Stylesheet, compile_html};
 
-const EPUB_BYTES: &[u8] = include_bytes!("../tests/fixtures/epictetus.epub");
-const AZW3_BYTES: &[u8] = include_bytes!("../tests/fixtures/epictetus.azw3");
-const KFX_BYTES: &[u8] = include_bytes!("../tests/fixtures/epictetus.kfx");
+const EPUB_BYTES: &[u8] = include_bytes!("../tests/fixtures/[太宰 治] 人間失格.epub");
+const AZW3_BYTES: &[u8] = include_bytes!("../tests/fixtures/[太宰 治] 人間失格.azw3");
+const KFX_BYTES: &[u8] = include_bytes!("../tests/fixtures/[太宰 治] 人間失格.kfx");
 
 /// Load sample HTML and CSS from the epub fixture for IR benchmarks.
 fn load_sample_content() -> (String, Stylesheet) {

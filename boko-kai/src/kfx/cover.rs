@@ -249,9 +249,9 @@ mod tests {
 
     #[test]
     fn test_is_image_only_chapter_with_css_hidden_text() {
-        // epictetus.epub titlepage has text hidden via CSS (display:none)
-        // so the IR only contains the image
-        let mut book = Book::open("tests/fixtures/epictetus.epub").unwrap();
+        // [太宰 治] 人間失格.epub titlepage is an SVG that only embeds the cover
+        // image (no body text), so the chapter reads as image-only.
+        let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
         let spine = book.spine();
 
         if let Some(first) = spine.first() {
@@ -264,8 +264,8 @@ mod tests {
     }
 
     #[test]
-    fn test_needs_standalone_cover() {
-        let mut book = Book::open("tests/fixtures/epictetus.epub").unwrap();
+    fn test_needs_standalone_cover_false_when_titlepage_is_the_cover() {
+        let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
         let cover_path = book
             .metadata()
             .cover_image
@@ -276,16 +276,17 @@ mod tests {
         let first = spine.first().expect("should have spine");
         let chapter = book.load_chapter(first.id).unwrap();
 
-        // epictetus.epub has cover.jpg but titlepage shows titlepage.png
+        // [太宰 治] 人間失格.epub's titlepage embeds the same image as the cover
+        // (cover.jpeg), so no separate standalone cover section is needed.
         assert!(
-            needs_standalone_cover(&cover_path, &chapter),
-            "should need standalone cover when images differ"
+            !needs_standalone_cover(&cover_path, &chapter),
+            "should NOT need a standalone cover when the titlepage IS the cover image"
         );
     }
 
     #[test]
     fn test_get_chapter_image_path() {
-        let mut book = Book::open("tests/fixtures/epictetus.epub").unwrap();
+        let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
         let spine = book.spine();
 
         if let Some(first) = spine.first() {
@@ -293,8 +294,8 @@ mod tests {
             let path = get_chapter_image_path(&chapter);
             assert!(path.is_some(), "should find image path");
             assert!(
-                path.unwrap().contains("titlepage"),
-                "should be titlepage image"
+                path.unwrap().contains("cover"),
+                "titlepage embeds cover.jpeg, so the chapter image path should be the cover"
             );
         }
     }

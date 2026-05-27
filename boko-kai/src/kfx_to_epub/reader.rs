@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn reader_book_has_sections_and_stamps_data_eid() {
-        let bytes = std::fs::read(fixture("epictetus.kfx")).expect("read epictetus.kfx fixture");
+        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx")).expect("read [太宰 治] 人間失格.kfx fixture");
         let book = kfx_to_reader_book(&bytes).expect("kfx_to_reader_book");
         assert!(!book.sections.is_empty(), "expected at least one section");
         assert!(
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn epub_export_does_not_stamp_data_eid() {
-        let bytes = std::fs::read(fixture("epictetus.kfx")).expect("read epictetus.kfx fixture");
+        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx")).expect("read [太宰 治] 人間失格.kfx fixture");
         // The shippable EPUB path must leave the DOM stamp-free (no bloat).
         let (out, _book, _toc) = build_output(&bytes, false).expect("build_output");
         let stamped: usize = out

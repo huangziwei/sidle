@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_br_in_blockquote_verse() {
-        // Exact structure from epictetus.epub endnote 30
+        // A blockquote of verse with <br/> line breaks between the lines.
         let dom = parse_html(
             r#"<html xmlns="http://www.w3.org/1999/xhtml">
             <body>
