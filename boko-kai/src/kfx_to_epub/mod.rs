@@ -20,7 +20,7 @@ use std::io;
 pub use loader::BookData;
 pub use output::EpubOutput;
 pub use reader::{ReaderBook, ReaderResource, ReaderSection, kfx_to_reader_book};
-pub use text_index::TextIndex;
+pub use text_index::{SearchMatch, TextIndex};
 
 /// Failure modes for the mechanical port.
 #[derive(Debug)]

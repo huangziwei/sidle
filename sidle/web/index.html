@@ -275,6 +275,9 @@
         </button>
         <div id="reader-title" class="reader-title"></div>
         <div class="reader-topbar-right">
+          <button id="reader-search" class="reader-btn" title="Search in book (⌘F)" aria-label="Search in book">
+            <span aria-hidden="true">🔍</span>
+          </button>
           <button id="reader-style" class="reader-btn reader-btn-aa" title="Display settings" aria-label="Display settings">
             <span aria-hidden="true">Aa</span>
           </button>
@@ -307,6 +310,25 @@
           <div id="reader-annotations-empty" class="reader-annotations-empty">
             No highlights, notes, or bookmarks yet. Sync from your Kindle to import them.
           </div>
+        </aside>
+        <aside id="reader-search-panel" class="reader-search-panel" hidden aria-label="Search in book">
+          <header class="reader-panel-header">
+            <strong>Search</strong>
+            <button id="reader-search-close" class="btn-link" type="button">Hide</button>
+          </header>
+          <div class="reader-search-input-row">
+            <input
+              type="search"
+              id="reader-search-input"
+              class="reader-search-input"
+              placeholder="Search in this book…"
+              autocomplete="off"
+              autocorrect="off"
+              spellcheck="false"
+            />
+          </div>
+          <div id="reader-search-status" class="reader-search-status"></div>
+          <ul id="reader-search-list" class="reader-search-list"></ul>
         </aside>
       </div>
       <footer id="reader-statusbar" class="reader-statusbar" title="Tap to change progress display">

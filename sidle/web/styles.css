@@ -1966,6 +1966,78 @@ button {
   white-space: pre-wrap;
 }
 
+/* In-book search panel — shares the right slot with annotations (only one is
+   open at a time). Same chrome as `.reader-annotations-panel`. */
+.reader-search-panel {
+  flex: 0 0 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--reader-border);
+  background: var(--reader-bg);
+  color: var(--reader-fg);
+  overflow: hidden;
+}
+.reader-search-panel[hidden] { display: none; }
+.reader-search-input-row {
+  flex: 0 0 auto;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--reader-border);
+}
+.reader-search-input {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  background: var(--reader-bg);
+  color: var(--reader-fg);
+  border: 1px solid var(--reader-border);
+  border-radius: 4px;
+  outline: none;
+  box-sizing: border-box;
+}
+.reader-search-input:focus { border-color: var(--reader-fg); }
+.reader-search-status {
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--reader-muted);
+  border-bottom: 1px solid var(--reader-border);
+}
+.reader-search-status:empty { display: none; }
+.reader-search-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+.search-row {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--reader-border);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.search-row:hover { background: var(--reader-gutter); }
+.search-preview {
+  color: var(--reader-fg);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.search-preview mark {
+  background: #5ad1e3;
+  color: inherit;
+  padding: 0 1px;
+  border-radius: 2px;
+}
+.search-row-loc {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--reader-muted);
+}
+
 /* Table-of-contents side panel (left of the stage; mirrors the annotations
    panel but on the opposite edge). */
 .reader-toc-panel {

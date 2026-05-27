@@ -37,6 +37,12 @@ let livePosition = null; // { eid, offset, linear_pos } at the top of the curren
 let sidleResume = null; // Sidle's last-read spot (frozen this session): auto-restored on open + Resume target
 let deviceResumes = []; // [{ eid, offset, linear_pos, device_serial }] — each Kindle's imported .yjf spot; Resume targets, never auto-applied
 let progressMode = readSavedProgressMode(); // 0 loc · 1 chapter · 2 book · 3 hidden
+let searchResults = []; // SearchMatchDto[] for the current query (intra-eid matches, ordered by linear_pos)
+let searchQuery = ""; // the query that produced searchResults (for race-checks)
+let searchSeq = 0; // request token — late responses for stale queries are dropped
+let searchDebounceTimer = null;
+let searchComposing = false; // true between compositionstart/end (JP IME)
+let lastPaintedCount = 0; // count from last search-paint, so `clearSearchPaint` knows how many keys to remove
 
 function readSavedProgressMode() {
   try {
@@ -386,7 +392,13 @@ function renderAnnotationsPanel() {
 
 function toggleAnnotationsPanel() {
   const p = $("#reader-annotations-panel");
-  if (p) p.hidden = !p.hidden;
+  if (!p) return;
+  if (p.hidden) {
+    hideSearchPanel(); // shares the right slot with search
+    p.hidden = false;
+  } else {
+    p.hidden = true;
+  }
 }
 
 function hideAnnotationsPanel() {
@@ -417,6 +429,158 @@ async function reloadAnnotations(forBookId) {
   }
   for (const { doc, overlayer } of overlays) paintAnnotations(doc, overlayer);
   renderAnnotationsPanel();
+}
+
+// ---- search panel + paint --------------------------------------------------
+
+const SEARCH_COLOR = "#5ad1e3"; // cyan — distinct from yellow highlight + orange bookmark
+
+// One painted search match keyed `search-<i>`, so closing search can remove
+// only its own rects and leave annotation paint untouched.
+function paintOneSearchMatch(doc, overlayer, m, i) {
+  const matchAsAnn = { eid_start: m.eid, eid_end: m.eid, off_start: m.off_start, off_end: m.off_end };
+  if (!annotationRects(doc, matchAsAnn).length) return; // not in this section
+  const vertical = (book?.writingMode || "").startsWith("vertical");
+  const rangeLike = { getClientRects: () => annotationRects(doc, matchAsAnn) };
+  overlayer.add(`search-${i}`, rangeLike, drawHighlight, { color: SEARCH_COLOR, vertical });
+}
+
+// Paint every current match into one overlayer. Called from the
+// `create-overlayer` handler (when a section first loads with active results)
+// and from `runSearch` (when fresh results arrive).
+function paintSearchMatches(doc, overlayer) {
+  for (let i = 0; i < searchResults.length; i++) {
+    paintOneSearchMatch(doc, overlayer, searchResults[i], i);
+  }
+}
+
+// Remove any painted search rects across all loaded sections (closing the
+// panel, or clearing before a new query's paint). Iterates up to the previously
+// painted count so a longer prior result set doesn't leave orphans behind.
+function clearSearchPaint() {
+  for (const { overlayer } of overlays) {
+    for (let i = 0; i < lastPaintedCount; i++) overlayer.remove(`search-${i}`);
+  }
+  lastPaintedCount = 0;
+}
+
+function renderSearchPanel() {
+  const list = $("#reader-search-list");
+  const status = $("#reader-search-status");
+  if (!list || !status) return;
+  list.replaceChildren(...searchResults.map((m, i) => searchRow(m, i)));
+  if (!searchQuery) status.textContent = "";
+  else if (searchResults.length === 0) status.textContent = "No matches.";
+  else status.textContent = `${searchResults.length} match${searchResults.length === 1 ? "" : "es"}`;
+}
+
+function searchRow(m, i) {
+  const li = document.createElement("li");
+  li.className = "search-row";
+  li.tabIndex = 0;
+  const preview = document.createElement("div");
+  preview.className = "search-preview";
+  preview.append(document.createTextNode(m.preview_before || ""));
+  const mark = document.createElement("mark");
+  mark.textContent = m.preview_match || "";
+  preview.append(mark);
+  preview.append(document.createTextNode(m.preview_after || ""));
+  li.append(preview);
+  if (m.linear_pos != null) {
+    const loc = document.createElement("div");
+    loc.className = "search-row-loc";
+    loc.textContent = `Loc ${m.linear_pos}`;
+    li.append(loc);
+  }
+  li.addEventListener("click", () => jumpToSearchMatch(m));
+  li.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      jumpToSearchMatch(m);
+    }
+  });
+  return li;
+}
+
+async function jumpToSearchMatch(m) {
+  if (!paginator) return;
+  if (!eidToSection) eidToSection = buildEidIndex(dto);
+  const index = eidToSection.get(m.eid);
+  if (index == null) {
+    toast("Couldn't locate that match in the book");
+    return;
+  }
+  const matchAsAnn = { eid_start: m.eid, eid_end: m.eid, off_start: m.off_start, off_end: m.off_end };
+  await paginator.goTo({ index, anchor: (d) => rangeFor(d, matchAsAnn) || 0 });
+}
+
+async function runSearch(q) {
+  if (bookId == null) return;
+  const trimmed = (q || "").trim();
+  searchQuery = trimmed;
+  // Empty query: clear results + paint immediately, don't hit the backend.
+  if (!trimmed) {
+    searchResults = [];
+    clearSearchPaint();
+    renderSearchPanel();
+    return;
+  }
+  // Race token — if a faster later request lands first, ignore this slower one.
+  const seq = ++searchSeq;
+  const requestedBookId = bookId;
+  const status = $("#reader-search-status");
+  if (status) status.textContent = "Searching…";
+  let matches;
+  try {
+    matches = (await window.api.invoke("book_search", { bookId, query: trimmed })) || [];
+  } catch (err) {
+    if (seq !== searchSeq) return;
+    if (status) status.textContent = `Search failed: ${err}`;
+    return;
+  }
+  // Stale response (newer query in flight, or the book was closed/swapped).
+  if (seq !== searchSeq || bookId !== requestedBookId) return;
+  clearSearchPaint();
+  searchResults = matches;
+  renderSearchPanel();
+  for (const { doc, overlayer } of overlays) paintSearchMatches(doc, overlayer);
+  lastPaintedCount = searchResults.length;
+}
+
+function scheduleSearch(value) {
+  clearTimeout(searchDebounceTimer);
+  // 150ms is short enough to feel live, long enough to coalesce typing bursts.
+  searchDebounceTimer = setTimeout(() => runSearch(value), 150);
+}
+
+function toggleSearchPanel() {
+  const p = $("#reader-search-panel");
+  if (!p) return;
+  if (p.hidden) {
+    hideAnnotationsPanel(); // shares the right slot
+    p.hidden = false;
+    $("#reader-search-input")?.focus();
+  } else {
+    hideSearchPanel();
+  }
+}
+
+function hideSearchPanel() {
+  const p = $("#reader-search-panel");
+  if (p) p.hidden = true;
+  // Closing the panel drops the transient paint AND the results. Per the plan,
+  // there's no last-search memory across opens.
+  clearTimeout(searchDebounceTimer);
+  searchSeq++; // invalidate any in-flight request
+  searchResults = [];
+  searchQuery = "";
+  clearSearchPaint();
+  const input = $("#reader-search-input");
+  if (input) input.value = "";
+  const status = $("#reader-search-status");
+  if (status) status.textContent = "";
+  const list = $("#reader-search-list");
+  if (list) list.replaceChildren();
 }
 
 // ---- TOC panel + jump -------------------------------------------------------
@@ -932,11 +1096,20 @@ const back = () => {
 };
 
 function onKey(e) {
+  // ⌘F / Ctrl+F → open search (replacing the browser's find-in-page, which
+  // would search the host doc, not the section iframe's content). Handled
+  // before the modifier filter below.
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === "f" || e.key === "F")) {
+    toggleSearchPanel();
+    e.preventDefault();
+    return;
+  }
   if (e.key === "Escape") {
     // Peel back overlays first, then close the reader.
     if (!$("#reader-resume-menu")?.hidden) hideResumeMenu();
     else if (!$("#reader-note-popover")?.hidden) hideNotePopover();
     else if (!$("#reader-style-panel")?.hidden) hideStylePanel();
+    else if (!$("#reader-search-panel")?.hidden) hideSearchPanel();
     else if (!$("#reader-annotations-panel")?.hidden) hideAnnotationsPanel();
     else if (!$("#reader-toc-panel")?.hidden) hideTocPanel();
     else close();
@@ -944,8 +1117,9 @@ function onKey(e) {
     return;
   }
   // A focused settings control (select/slider/color) owns its own arrow keys —
-  // don't steal them to turn pages.
+  // don't steal them to turn pages. Same for the search input.
   if (e.target?.closest?.("#reader-style-panel")) return;
+  if (e.target?.closest?.("#reader-search-panel")) return;
   // Don't hijack modified combos — shift+arrow extends a text selection in the
   // section iframe, ⌘/ctrl/alt are shortcuts. Let those through.
   if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1039,6 +1213,10 @@ async function open(id) {
     attach(overlayer);
     overlays.push({ doc, overlayer });
     paintAnnotations(doc, overlayer);
+    // If a search is active when a new section first paints, paint its matches
+    // into this section too — otherwise scrolling/navigating into the section
+    // would leave the matches there invisible until you re-queried.
+    if (searchResults.length) paintSearchMatches(doc, overlayer);
     doc.addEventListener("click", (e) => onDocClick(e, doc));
     // The paginator focuses the section iframe after navigating (`focusView`),
     // so arrow/space keydowns land in the iframe document, not the parent — the
@@ -1112,6 +1290,12 @@ async function close() {
   livePosition = null;
   sidleResume = null;
   deviceResumes = [];
+  searchResults = [];
+  searchQuery = "";
+  searchSeq++;
+  clearTimeout(searchDebounceTimer);
+  lastPaintedCount = 0;
+  hideSearchPanel();
   hideResumeMenu();
   if ($("#reader-resume")) $("#reader-resume").hidden = true;
   lastTurnTime = null;
@@ -1162,6 +1346,23 @@ function wire() {
   });
   $("#reader-annotations")?.addEventListener("click", () => toggleAnnotationsPanel());
   $("#reader-annotations-close")?.addEventListener("click", () => hideAnnotationsPanel());
+  $("#reader-search")?.addEventListener("click", () => toggleSearchPanel());
+  $("#reader-search-close")?.addEventListener("click", () => hideSearchPanel());
+  const searchInput = $("#reader-search-input");
+  if (searchInput) {
+    // IME-safe: a composing JP IME fires `input` for every romaji keystroke; we
+    // defer until the user commits (`compositionend`). Outside composition,
+    // debounced `input` runs the live search.
+    searchInput.addEventListener("compositionstart", () => (searchComposing = true));
+    searchInput.addEventListener("compositionend", (e) => {
+      searchComposing = false;
+      scheduleSearch(e.target.value);
+    });
+    searchInput.addEventListener("input", (e) => {
+      if (searchComposing) return;
+      scheduleSearch(e.target.value);
+    });
+  }
   $("#reader-toc")?.addEventListener("click", () => toggleTocPanel());
   $("#reader-toc-close")?.addEventListener("click", () => hideTocPanel());
   // Display-settings popover: the Aa button toggles it; every control writes

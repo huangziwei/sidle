@@ -16,6 +16,12 @@ use crate::server::ServerHandle;
 
 pub type DbHandle = Arc<Mutex<Connection>>;
 
+/// Single-entry cache for the reader's search `TextIndex`. Keyed by `book_id`,
+/// holds at most one — switching books rebuilds. First search per book pays
+/// the parse cost (same as `reader_open`); subsequent are HashMap walks. Lives
+/// for the app session; the keyed-by-`book_id` replacement is the eviction.
+pub type ReaderSearchCache = Arc<Mutex<Option<(i64, Arc<boko::kfx_to_epub::TextIndex>)>>>;
+
 /// Default to all available cores. Conversion is CPU-bound; the OS scheduler
 /// handles contention with other apps better than we can from a guessed cap.
 fn default_workers() -> usize {
@@ -34,6 +40,8 @@ pub struct AppState {
     /// bundle dir). Resolved once at startup by walking up from
     /// `CARGO_MANIFEST_DIR` to the workspace Cargo.toml.
     pub kual_source: KualSource,
+    /// Reader search's per-session `TextIndex` cache (see [`ReaderSearchCache`]).
+    pub reader_search_cache: ReaderSearchCache,
 }
 
 /// Walk up from `CARGO_MANIFEST_DIR` (`<repo>/sidle/src-tauri`) until
@@ -161,6 +169,7 @@ impl AppState {
             device,
             server: ServerHandle::default(),
             kual_source,
+            reader_search_cache: Arc::new(Mutex::new(None)),
         })
     }
 }

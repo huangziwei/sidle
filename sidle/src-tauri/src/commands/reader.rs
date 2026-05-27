@@ -233,3 +233,98 @@ pub async fn reading_position_set(
     db::set_reading_position(&conn, book_id, eid, offset, linear_pos, "sidle", "")
         .map_err(|e| e.to_string())
 }
+
+/// One search hit. `off_end` is the **inclusive** last-char index of the match
+/// (matches the annotation `(eid_start, off_start, eid_end, off_end)` convention,
+/// so JS `rangeFor`'s end-inclusive `+1` walk paints the correct characters).
+/// `preview_*` is a three-piece split for the UI — render before + match + after,
+/// usually with `match` highlighted.
+#[derive(Debug, Serialize)]
+pub struct SearchMatchDto {
+    pub eid: i64,
+    pub off_start: i64,
+    pub off_end: i64,
+    pub linear_pos: i64,
+    pub preview_before: String,
+    pub preview_match: String,
+    pub preview_after: String,
+}
+
+impl From<boko::kfx_to_epub::SearchMatch> for SearchMatchDto {
+    fn from(m: boko::kfx_to_epub::SearchMatch) -> Self {
+        SearchMatchDto {
+            eid: m.eid,
+            off_start: m.off_start as i64,
+            off_end: m.off_end as i64,
+            linear_pos: m.linear_pos,
+            preview_before: m.preview_before,
+            preview_match: m.preview_match,
+            preview_after: m.preview_after,
+        }
+    }
+}
+
+/// In-book full-text search. v1 = strict char match, ASCII case-insensitive,
+/// intra-eid only — see `TextIndex::search`.
+///
+/// Reuses a per-session `TextIndex` cache (one entry, keyed by `book_id`):
+/// the first search per book parses the KFX once on the blocking pool (same
+/// cost as `reader_open`); subsequent searches are pure `HashMap` walks.
+/// Switching to a different `book_id` rebuilds.
+#[tauri::command]
+pub async fn book_search(
+    state: State<'_, AppState>,
+    book_id: i64,
+    query: String,
+) -> Result<Vec<SearchMatchDto>, String> {
+    use std::sync::Arc;
+
+    // Fast path: TextIndex for this book already built this session?
+    let cached: Option<Arc<boko::kfx_to_epub::TextIndex>> = {
+        let guard = state.reader_search_cache.lock().await;
+        match &*guard {
+            Some((id, idx)) if *id == book_id => Some(idx.clone()),
+            _ => None,
+        }
+    };
+
+    let index = match cached {
+        Some(i) => i,
+        None => {
+            // Resolve KFX path under the db lock, then release it before the
+            // CPU-bound parse — same shape as reader_open.
+            let kfx_path = {
+                let conn = state.db.lock().await;
+                db::get_book(&conn, book_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("no book with id {book_id}"))?
+                    .kfx_path
+                    .ok_or_else(|| "this book has no KFX file yet".to_string())?
+            };
+            let built = tokio::task::spawn_blocking(move || {
+                let bytes =
+                    std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
+                boko::kfx_to_epub::TextIndex::from_kfx(&bytes)
+                    .map_err(|e| format!("TextIndex build: {e}"))
+            })
+            .await
+            .map_err(|e| format!("search task join error: {e}"))??;
+            let arc = Arc::new(built);
+            // Store; replaces any other book's cached index (single-entry cache).
+            // A concurrent search for a different book may race us here — harmless,
+            // last writer wins and the loser just rebuilds next time.
+            let mut guard = state.reader_search_cache.lock().await;
+            *guard = Some((book_id, arc.clone()));
+            arc
+        }
+    };
+
+    // search() is HashMap-bounded but on a large book scans the whole corpus
+    // (worst case: ~1M chars across thousands of eids); keep the async runtime
+    // unblocked by hopping to the blocking pool.
+    let matches = tokio::task::spawn_blocking(move || index.search(&query))
+        .await
+        .map_err(|e| format!("search task join error: {e}"))?;
+
+    Ok(matches.into_iter().map(SearchMatchDto::from).collect())
+}

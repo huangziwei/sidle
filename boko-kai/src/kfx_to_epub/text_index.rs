@@ -33,6 +33,21 @@ use super::content::resolve_content_text;
 use super::loader::{self, BookData};
 use super::ConvertError;
 
+/// One occurrence of a search query inside a single reading-order element.
+/// Offsets are character indices into the element's base text. `off_end` is
+/// the **inclusive** last-char index of the match (matches the annotation
+/// `.yjr` convention, so the JS `rangeFor` walk paints the correct range).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub eid: i64,
+    pub off_start: usize,
+    pub off_end: usize,
+    pub linear_pos: i64,
+    pub preview_before: String,
+    pub preview_match: String,
+    pub preview_after: String,
+}
+
 /// eid → text + reading-order index for a single KFX container.
 pub struct TextIndex {
     /// eid → base text of that element. Ruby annotation text is *not* here:
@@ -137,6 +152,69 @@ impl TextIndex {
     /// Whether the index resolved no positioned text elements at all.
     pub fn is_empty(&self) -> bool {
         self.order.is_empty()
+    }
+
+    /// All substring occurrences of `needle` across every indexed element, in
+    /// reading order. v1 = strict char match, ASCII case-insensitive only — no
+    /// NFKC/kata→hira folding (`「ＡＢＣ」` won't match `abc`; カタカナ won't
+    /// match かたかな). v1 = intra-eid only (a match must fit inside one
+    /// element); narrative text is the common case. Ruby `<rt>` text never
+    /// enters `text_of`, so it's skipped for free.
+    ///
+    /// Returns at most `MAX_RESULTS` matches; each carries a `preview_*` triple
+    /// (up to `PREVIEW_CHARS` chars of context on each side of the match,
+    /// drawn from the *original* casing) for the UI's results list. `off_end`
+    /// follows the annotation convention — it's the inclusive last-char index,
+    /// so JS `rangeFor`'s end-inclusive `+1` walk paints the right characters.
+    pub fn search(&self, needle: &str) -> Vec<SearchMatch> {
+        const PREVIEW_CHARS: usize = 32;
+        const MAX_RESULTS: usize = 1000;
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let needle_lower: Vec<char> = needle.chars().map(|c| c.to_ascii_lowercase()).collect();
+        let nlen = needle_lower.len();
+        let mut out = Vec::new();
+
+        for &eid in &self.order {
+            if out.len() >= MAX_RESULTS {
+                break;
+            }
+            let Some(text) = self.text_of.get(&eid) else {
+                continue;
+            };
+            let chars: Vec<char> = text.chars().collect();
+            if chars.len() < nlen {
+                continue;
+            }
+            let lower_chars: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
+            let pid = self.pid_of.get(&eid).copied().unwrap_or(0);
+            // Non-overlapping scan: stepping by `nlen` after a hit avoids
+            // double-reporting `aaa` inside `aaaaa`.
+            let mut i = 0;
+            while i + nlen <= lower_chars.len() {
+                if lower_chars[i..i + nlen] == needle_lower[..] {
+                    let before_start = i.saturating_sub(PREVIEW_CHARS);
+                    let after_end = (i + nlen + PREVIEW_CHARS).min(chars.len());
+                    out.push(SearchMatch {
+                        eid,
+                        off_start: i,
+                        off_end: i + nlen - 1,
+                        linear_pos: pid + i as i64,
+                        preview_before: chars[before_start..i].iter().collect(),
+                        preview_match: chars[i..i + nlen].iter().collect(),
+                        preview_after: chars[i + nlen..after_end].iter().collect(),
+                    });
+                    if out.len() >= MAX_RESULTS {
+                        break;
+                    }
+                    i += nlen;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        out
     }
 
     /// Extract the text spanned by a `[start, end)` highlight: a per-element
@@ -252,6 +330,93 @@ mod tests {
         let t = idx(&[(10, "x")], &[(10, 1000)]);
         assert_eq!(t.position(10, 44), Some(1044));
         assert_eq!(t.position(999, 0), None);
+    }
+
+    #[test]
+    fn search_finds_cjk_substring_with_char_offsets() {
+        // 恥 is at char index 0; 多い at chars 2..4. The byte offsets differ
+        // (JP chars are 3 bytes in UTF-8) — search must return CHAR indices to
+        // match the (eid,offset) anchor convention.
+        let t = idx(&[(10, "恥の多い生涯を送って来ました")], &[(10, 100)]);
+        let m = t.search("多い");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].eid, 10);
+        assert_eq!(m[0].off_start, 2);
+        assert_eq!(m[0].off_end, 3, "inclusive last-char (annotation convention)");
+        assert_eq!(m[0].linear_pos, 102);
+        assert_eq!(m[0].preview_match, "多い");
+        assert_eq!(m[0].preview_before, "恥の");
+    }
+
+    #[test]
+    fn search_is_ascii_case_insensitive_only() {
+        let t = idx(&[(10, "Hello WORLD")], &[(10, 0)]);
+        assert_eq!(t.search("hello").len(), 1, "lowercase query matches mixed");
+        assert_eq!(t.search("WORLD").len(), 1, "uppercase query matches uppercase");
+        assert_eq!(t.search("world").len(), 1, "lowercase query matches uppercase");
+        // No non-ASCII folding: fullwidth ＡＢＣ does NOT match ASCII abc.
+        let t2 = idx(&[(10, "ＡＢＣ")], &[(10, 0)]);
+        assert!(t2.search("abc").is_empty(), "no NFKC folding in v1");
+    }
+
+    #[test]
+    fn search_returns_multiple_non_overlapping_matches_per_eid() {
+        let t = idx(&[(10, "abababab")], &[(10, 0)]);
+        let m = t.search("ab");
+        assert_eq!(m.len(), 4);
+        assert_eq!(m.iter().map(|x| x.off_start).collect::<Vec<_>>(), vec![0, 2, 4, 6]);
+        // Stepping by needle length avoids reporting overlapping `aa` inside `aaa`.
+        let t2 = idx(&[(10, "aaaaa")], &[(10, 0)]);
+        let m2 = t2.search("aa");
+        assert_eq!(m2.len(), 2, "non-overlapping: aa at 0, aa at 2");
+        assert_eq!(m2.iter().map(|x| x.off_start).collect::<Vec<_>>(), vec![0, 2]);
+    }
+
+    #[test]
+    fn search_orders_results_by_linear_pos_across_eids() {
+        // pid order is 5,6,7 → eids 30,20,10 (so out-of-eid-numeric-order, like
+        // the existing extract test). Both have the needle; results must come
+        // in pid order with linear_pos = pid + off.
+        let t = idx(
+            &[(10, "foo BAR baz"), (20, "no hits here"), (30, "first bar match")],
+            &[(30, 5), (20, 10), (10, 20)],
+        );
+        let m = t.search("bar");
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0].eid, 30, "earlier pid first");
+        assert_eq!(m[0].linear_pos, 5 + 6);
+        assert_eq!(m[1].eid, 10);
+        assert_eq!(m[1].linear_pos, 20 + 4);
+    }
+
+    #[test]
+    fn search_truncates_preview_at_element_boundaries() {
+        // Match at the very start of an element: preview_before is empty.
+        let t = idx(&[(10, "abc def")], &[(10, 0)]);
+        let m = t.search("abc");
+        assert_eq!(m[0].preview_before, "");
+        assert!(m[0].preview_after.starts_with(" def"));
+        // Match at the very end: preview_after is empty.
+        let m2 = t.search("def");
+        assert_eq!(m2[0].preview_after, "");
+        assert!(m2[0].preview_before.ends_with("abc "));
+    }
+
+    #[test]
+    fn search_ignores_empty_query_and_too_long_query() {
+        let t = idx(&[(10, "abc")], &[(10, 0)]);
+        assert!(t.search("").is_empty(), "empty query → no matches");
+        assert!(t.search("abcdef").is_empty(), "needle longer than any text");
+    }
+
+    #[test]
+    fn search_skips_ruby_because_text_of_already_does() {
+        // text_of holds only base text (per collect_eid_text). Searching for
+        // ruby-only characters that aren't in the base run finds nothing —
+        // confirms the "ruby skipped for free" claim in the plan.
+        let t = idx(&[(10, "恥の多い生涯")], &[(10, 0)]);
+        assert!(t.search("はじ").is_empty(), "the ruby reading 'はじ' is not in base text_of");
+        assert_eq!(t.search("恥").len(), 1, "base text 恥 is findable");
     }
 
     #[test]
