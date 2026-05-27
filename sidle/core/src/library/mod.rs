@@ -6,6 +6,7 @@ pub mod import;
 pub mod ingest;
 pub mod kfx_cover;
 pub mod paths;
+pub mod relocate;
 pub mod thumbnail;
 pub mod yjr;
 

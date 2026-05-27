@@ -149,20 +149,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   subscribeLibraryRowUpdated();
 });
 
-async function loadPreferences() {
+function loadPreferences() {
   const view = localStorage.getItem("view");
   if (view === "list") state.view = "list";
   const sort = localStorage.getItem("sort");
   if (sort) {
     try {
       state.sort = { ...state.sort, ...JSON.parse(sort) };
-    } catch {}
+    } catch {
+      // malformed JSON in localStorage — keep the default
+    }
   }
   const cols = localStorage.getItem("columnWidths");
   if (cols) {
     try {
       state.columnWidths = JSON.parse(cols) || {};
-    } catch {}
+    } catch {
+      // malformed JSON in localStorage — keep the default
+    }
   }
   const colCfg = localStorage.getItem("columnConfig");
   if (colCfg) {
@@ -183,7 +187,9 @@ async function loadPreferences() {
           state.filters[facet] = new Set(parsed[facet]);
         }
       }
-    } catch {}
+    } catch {
+      // malformed JSON in localStorage — keep the default
+    }
   }
   const search = localStorage.getItem("search");
   if (typeof search === "string") state.search = search;
@@ -214,6 +220,14 @@ function wireToolbar() {
   $("#btn-add").addEventListener("click", onAddClick);
   $("#view-gallery").addEventListener("click", () => setView("gallery"));
   $("#view-list").addEventListener("click", () => setView("list"));
+
+  $("#btn-settings").addEventListener("click", openSettings);
+  $("#settings-close").addEventListener("click", closeSettings);
+  $("#settings-modal .modal-backdrop").addEventListener("click", closeSettings);
+  $("#settings-move").addEventListener("click", () => pickRelocate("move"));
+  $("#settings-use").addEventListener("click", () => pickRelocate("use"));
+  $("#settings-confirm-cancel").addEventListener("click", resetRelocateConfirm);
+  $("#settings-confirm-ok").addEventListener("click", confirmRelocate);
 }
 
 async function onAddClick() {
@@ -2459,6 +2473,75 @@ function showToast(msg, isError = false) {
 }
 
 // ---------------------------------------------------------------------------
+// Library settings (the ⚙ in the status bar): show where the library lives and
+// move it to / adopt one in another folder. Both repoint the root (config.json)
+// and restart the app — see commands::library::library_relocate_*.
+// ---------------------------------------------------------------------------
+
+let relocatePending = null; // { mode: "move" | "use", dest: string }
+
+async function openSettings() {
+  resetRelocateConfirm();
+  $("#settings-status").hidden = true;
+  $("#settings-modal").hidden = false;
+  try {
+    const loc = await window.api.invoke("library_location");
+    $("#settings-location").textContent = loc.is_default ? `${loc.root}  (default)` : loc.root;
+  } catch {
+    $("#settings-location").textContent = "(unavailable)";
+  }
+}
+
+function closeSettings() {
+  $("#settings-modal").hidden = true;
+}
+
+function resetRelocateConfirm() {
+  relocatePending = null;
+  $("#settings-confirm").hidden = true;
+  $("#settings-confirm-ok").disabled = false;
+}
+
+async function pickRelocate(mode) {
+  const dest = await window.api.invoke("library_pick_folder");
+  if (!dest) return;
+  relocatePending = { mode, dest };
+  $("#settings-confirm-text").textContent =
+    mode === "move"
+      ? `Copy your library to:\n${dest}\n\nsidle restarts once the copy is verified.`
+      : `Use the library in:\n${dest}\n\nsidle restarts. Nothing is copied.`;
+  $("#settings-confirm").hidden = false;
+  $("#settings-status").hidden = true;
+}
+
+async function confirmRelocate() {
+  if (!relocatePending) return;
+  const { mode, dest } = relocatePending;
+  $("#settings-confirm-ok").disabled = true;
+  setSettingsStatus(mode === "move" ? "Copying library…" : "Switching library…");
+  try {
+    if (mode === "move") {
+      await window.api.invoke("library_relocate_move", { dest });
+    } else {
+      await window.api.invoke("library_relocate_use", { dir: dest });
+    }
+    // On success the app restarts and this webview reloads, so we normally
+    // never reach here.
+    setSettingsStatus("Restarting…");
+  } catch (e) {
+    $("#settings-confirm-ok").disabled = false;
+    setSettingsStatus(String(e?.message ?? e), true);
+  }
+}
+
+function setSettingsStatus(msg, isError = false) {
+  const el = $("#settings-status");
+  el.textContent = msg;
+  el.classList.toggle("error", isError);
+  el.hidden = false;
+}
+
+// ---------------------------------------------------------------------------
 // Filter bar + sort UI
 //
 // One filter bar serves both gallery and list views — it lives between the
@@ -2482,7 +2565,7 @@ function wireFilterBar() {
 
   // Facet pills.
   document.querySelectorAll(".pill[data-facet]").forEach((pill) => {
-    pill.addEventListener("click", (e) => {
+    pill.addEventListener("click", () => {
       // The × inline button (created lazily in renderFilterBar) handles
       // its own click via stopPropagation; this only fires when the pill
       // body is clicked.

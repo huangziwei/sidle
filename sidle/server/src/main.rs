@@ -17,9 +17,9 @@ use sidle_core::library::LibraryPaths;
     about = "sidle LAN HTTP server — read-only library access for KUAL pulls"
 )]
 struct Cli {
-    /// Override sidle's data directory. Defaults to the same path the
-    /// Tauri desktop app uses (`~/Library/Application Support/sidle` on
-    /// macOS, via the `dirs` crate's `data_dir()`).
+    /// Override sidle's data directory. Without this flag, resolves the same
+    /// root the Tauri desktop app uses — the relocate pointer in `config.json`
+    /// if set, else `~/Library/Application Support/sidle` (via `dirs::data_dir()`).
     #[arg(long, value_name = "DIR")]
     data_dir: Option<PathBuf>,
 
@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
 
     let paths = match cli.data_dir {
         Some(root) => LibraryPaths { root },
-        None => LibraryPaths::default_root().context("resolve default data-dir")?,
+        None => LibraryPaths::resolve().context("resolve library root")?,
     };
 
     let token = sidle_server::load_or_generate_token(&paths.root)

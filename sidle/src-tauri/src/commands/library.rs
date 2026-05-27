@@ -1,7 +1,7 @@
 //! Tauri commands for library operations.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -14,6 +14,7 @@ use crate::library::db::{self, BookRow};
 use crate::library::epub_cover;
 use crate::library::import::{self, ImportOutcome};
 use crate::library::kfx_cover;
+use crate::library::{LibraryPaths, relocate};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -653,6 +654,105 @@ pub async fn library_pick_files(app: tauri::AppHandle) -> Result<Vec<String>, St
         .into_iter()
         .map(|p| p.to_string())
         .collect())
+}
+
+/// Where the library currently lives, and whether that's the default location.
+/// Shown in the Settings (⚙) panel.
+#[derive(Debug, Serialize)]
+pub struct LibraryLocation {
+    pub root: String,
+    pub is_default: bool,
+}
+
+#[tauri::command]
+pub async fn library_location(state: State<'_, AppState>) -> Result<LibraryLocation, String> {
+    let default = LibraryPaths::default_root().map_err(|e| e.to_string())?.root;
+    Ok(LibraryLocation {
+        is_default: state.paths.root == default,
+        root: state.paths.root.to_string_lossy().to_string(),
+    })
+}
+
+/// Open a folder picker; returns the chosen directory, or `None` if cancelled.
+/// Backs both Settings relocate actions. Exposed from Rust for the same reason
+/// as `library_pick_files` — vanilla JS can't import the dialog plugin module.
+#[tauri::command]
+pub async fn library_pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = oneshot::channel();
+    app.dialog().file().pick_folder(move |path| {
+        let _ = tx.send(path);
+    });
+    let result = rx.await.map_err(|e| e.to_string())?;
+    Ok(result.map(|p| p.to_string()))
+}
+
+/// Move the library to `dest`: copy a consistent DB snapshot + the `books/`
+/// tree there, verify the counts match, repoint the root pointer, and relaunch.
+/// Copy (not move) keeps the source intact until the user deletes it. Refuses
+/// when a conversion is in flight (its output would land in the abandoned old
+/// root), when `dest` is already the current root, or when `dest` is non-empty.
+#[tauri::command]
+pub async fn library_relocate_move(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    dest: String,
+) -> Result<(), String> {
+    let dest = PathBuf::from(dest);
+    if dest == state.paths.root {
+        return Err("That's already the current library location.".into());
+    }
+    if dir_has_entries(&dest) {
+        return Err(format!(
+            "{} is not empty — pick a new or empty folder.",
+            dest.display()
+        ));
+    }
+    {
+        let conn = state.db.lock().await;
+        // Gate on an idle queue: a conversion finishing after the snapshot would
+        // write its output into the old root, then be stranded once we relaunch
+        // onto the new one. (Relaunch is why no queue *pause* is needed — §6.)
+        if !db::pending_or_error_book_ids(&conn)
+            .map_err(|e| e.to_string())?
+            .is_empty()
+        {
+            return Err(
+                "A conversion is still running — wait for the queue to finish, then try again."
+                    .into(),
+            );
+        }
+        let src_books = state.paths.root.join("books");
+        relocate::copy_library(&conn, &src_books, &dest).map_err(|e| format!("{e:#}"))?;
+    }
+    LibraryPaths::set_root(&dest).map_err(|e| format!("{e:#}"))?;
+    // Relaunch onto the new root; bootstrap resolves the pointer next launch.
+    // `restart` diverges, so nothing runs after it.
+    app.restart()
+}
+
+/// Adopt a library that already exists at `dir`: validate it, repoint, relaunch.
+/// Copies nothing — for a library moved by hand, or one on an external drive.
+#[tauri::command]
+pub async fn library_relocate_use(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    dir: String,
+) -> Result<(), String> {
+    let dir = PathBuf::from(dir);
+    if dir == state.paths.root {
+        return Err("That's already the current library location.".into());
+    }
+    relocate::validate_existing(&dir).map_err(|e| format!("{e:#}"))?;
+    LibraryPaths::set_root(&dir).map_err(|e| format!("{e:#}"))?;
+    app.restart()
+}
+
+/// True if `dir` exists and holds at least one entry. A non-existent dir is
+/// fine (we create it); a non-empty one we refuse, to avoid clobbering.
+fn dir_has_entries(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|mut it| it.next().is_some())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

@@ -176,6 +176,8 @@
         <span class="dot" id="status-bar-dot"></span>
         <span id="status-bar-summary">No conversions running</span>
       </button>
+      <button id="btn-settings" class="status-bar-gear" type="button"
+              title="Library settings" aria-label="Library settings">⚙</button>
     </footer>
 
     <aside id="queue-drawer" class="queue-drawer" hidden aria-label="Conversion queue">
@@ -263,6 +265,53 @@
           <button type="submit" class="btn" id="metadata-submit">Save</button>
         </footer>
       </form>
+    </div>
+
+    <div id="settings-modal" class="modal" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-panel settings-panel" role="dialog" aria-labelledby="settings-title">
+        <header class="modal-header">
+          <h2 id="settings-title">Library</h2>
+        </header>
+        <div class="modal-body">
+          <div class="settings-loc-row">
+            <span class="settings-loc-label">Location</span>
+            <code id="settings-location" class="settings-location">—</code>
+          </div>
+
+          <section class="settings-section">
+            <h3>Move library</h3>
+            <p class="settings-hint">
+              Copy your library (books + database) into a new, empty folder and switch to it
+              there. sidle restarts once the copy is verified; the old copy is left in place
+              until you delete it.
+            </p>
+            <button type="button" id="settings-move" class="btn">Choose folder &amp; move&hellip;</button>
+          </section>
+
+          <section class="settings-section">
+            <h3>Use a library elsewhere</h3>
+            <p class="settings-hint">
+              Point sidle at a library that already exists in another folder — one you moved by
+              hand, or on an external drive. Nothing is copied. sidle restarts afterward.
+            </p>
+            <button type="button" id="settings-use" class="btn">Choose folder&hellip;</button>
+          </section>
+
+          <div id="settings-confirm" class="settings-confirm" hidden>
+            <p id="settings-confirm-text" class="settings-confirm-text"></p>
+            <div class="settings-confirm-actions">
+              <button type="button" id="settings-confirm-cancel" class="btn-link">Cancel</button>
+              <button type="button" id="settings-confirm-ok" class="btn">Confirm &amp; restart</button>
+            </div>
+          </div>
+
+          <p id="settings-status" class="settings-status" hidden></p>
+        </div>
+        <footer class="modal-footer">
+          <button type="button" class="btn-link" id="settings-close">Close</button>
+        </footer>
+      </div>
     </div>
 
     <div id="toast" class="toast" hidden></div>

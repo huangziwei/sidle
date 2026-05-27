@@ -72,7 +72,7 @@ fn find_workspace_root() -> Result<PathBuf> {
 impl AppState {
     pub fn bootstrap(app: AppHandle) -> Result<Self> {
         let _ = std::fs::write("/tmp/sidle-bootstrap.log", "bootstrap: enter\n");
-        let paths = LibraryPaths::default_root()?;
+        let paths = LibraryPaths::resolve()?;
         let _ = std::fs::write(
             "/tmp/sidle-bootstrap.log",
             format!("bootstrap: paths = {}\n", paths.root.display()),

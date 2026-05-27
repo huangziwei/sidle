@@ -2287,3 +2287,91 @@ button {
   text-align: right;
 }
 .rs-footer .btn-link { font-size: 12px; }
+
+/* ---------------------------------------------------------------------------
+   Library settings: the ⚙ gear at the right of the status bar (the toggle's
+   flex:1 pushes it here) + the relocate modal.
+   --------------------------------------------------------------------------- */
+.status-bar-gear {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 0;
+  padding: 0 14px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+}
+.status-bar-gear:hover {
+  color: var(--fg);
+}
+
+.settings-panel {
+  max-width: 460px;
+}
+/* The base `.modal-body` is a 2-column grid (the metadata editor's cover +
+   fields); the settings body is a single column. */
+.settings-panel .modal-body {
+  display: block;
+}
+.settings-loc-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.settings-loc-label {
+  color: var(--muted);
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+.settings-location {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--fg);
+  word-break: break-all;
+}
+.settings-section {
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+}
+.settings-section:first-of-type {
+  margin-top: 12px;
+}
+.settings-section h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+.settings-hint {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.settings-confirm {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.settings-confirm-text {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-line;
+  word-break: break-all;
+}
+.settings-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.settings-status {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.settings-status.error {
+  color: var(--accent);
+}

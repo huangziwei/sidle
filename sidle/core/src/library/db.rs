@@ -65,6 +65,11 @@ pub struct BookRow {
     pub tags: Vec<String>,
 }
 
+/// Schema version stamped into `PRAGMA user_version` by [`migrate`]. Bump on
+/// each schema change. Backups record it; restore refuses an archive whose
+/// version exceeds the running app's (§4c).
+pub const SCHEMA_VERSION: i64 = 1;
+
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -365,6 +370,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
+    // §4c: stamp the schema version. migrate() always brings the DB up to the
+    // latest schema, so set the current marker; backups gate restores on it.
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+
     Ok(())
 }
 
@@ -387,6 +396,12 @@ fn has_table(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
         |r| r.get(0),
     )?;
     Ok(count > 0)
+}
+
+/// Current schema version (`PRAGMA user_version`). Backups record it in the
+/// manifest; restore refuses an archive whose version exceeds [`SCHEMA_VERSION`].
+pub fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
 }
 
 /// Look up the book whose KFX hash starts with `prefix`. Used by
@@ -1996,5 +2011,11 @@ mod tests {
         assert_eq!(stored(&conn, "epub_path").as_deref(), Some(rel_epub));
         let row = get_book(&conn, book_id).expect("get").expect("present");
         assert_eq!(row.epub_path.as_deref(), Some(epub_abs.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn migrate_stamps_schema_version() {
+        let conn = fresh_db();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 }

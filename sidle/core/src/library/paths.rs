@@ -11,9 +11,20 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
+
 #[derive(Clone, Debug)]
 pub struct LibraryPaths {
     pub root: PathBuf,
+}
+
+/// On-disk pointer to the library data root, stored as `config.json` in the
+/// fixed app-local state dir. An absent file or absent field means "use the
+/// default root" (the state dir itself).
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LibraryConfig {
+    library_root: Option<String>,
 }
 
 impl LibraryPaths {
@@ -22,6 +33,85 @@ impl LibraryPaths {
         let base = dirs::data_dir()
             .ok_or_else(|| anyhow::anyhow!("could not resolve user data directory"))?;
         Ok(Self { root: base.join("sidle") })
+    }
+
+    /// The fixed app-local state dir, `<data_dir>/sidle` — never moves with the
+    /// library. Holds `config.json` (the root pointer), and is also the library
+    /// root the app falls back to when no pointer is set.
+    pub fn state_dir() -> anyhow::Result<PathBuf> {
+        let base = dirs::data_dir()
+            .ok_or_else(|| anyhow::anyhow!("could not resolve user data directory"))?;
+        Ok(base.join("sidle"))
+    }
+
+    /// Path to the root-pointer config in the app-local state dir.
+    pub fn config_path() -> anyhow::Result<PathBuf> {
+        Ok(Self::state_dir()?.join("config.json"))
+    }
+
+    /// Resolve the active library root: the `config.json` pointer if set, else
+    /// the default (the state dir). Errors if the config is present but
+    /// malformed, or names a root that doesn't currently exist (e.g. an
+    /// unplugged external drive, or a hand-edited bad path) — failing loudly
+    /// beats silently opening the empty default library in the wrong place.
+    ///
+    /// Used by `bootstrap` (Tauri app) and the LAN server's default branch, so
+    /// both agree on a relocated library.
+    pub fn resolve() -> anyhow::Result<Self> {
+        Self::resolve_in(&Self::state_dir()?)
+    }
+
+    /// Point the library root at `new` and persist it in `config.json`. Does
+    /// NOT move any files — the relocate flow (§6) copies data to `new` first,
+    /// then calls this, then relaunches.
+    pub fn set_root(new: &Path) -> anyhow::Result<()> {
+        Self::set_root_in(&Self::state_dir()?, new)
+    }
+
+    /// [`resolve`](Self::resolve) against an explicit state dir — the testable
+    /// core, so tests never touch the real `~/Library/Application Support`.
+    fn resolve_in(state_dir: &Path) -> anyhow::Result<Self> {
+        let cfg_path = state_dir.join("config.json");
+        let bytes = match std::fs::read(&cfg_path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self { root: state_dir.to_path_buf() });
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("read {}", cfg_path.display())));
+            }
+        };
+        let cfg: LibraryConfig = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse {}", cfg_path.display()))?;
+        match cfg.library_root {
+            Some(root) => {
+                let root = PathBuf::from(root);
+                if !root.is_dir() {
+                    anyhow::bail!(
+                        "configured library root {} does not exist — reconnect the drive, \
+                         or remove {} to revert to the default library",
+                        root.display(),
+                        cfg_path.display(),
+                    );
+                }
+                Ok(Self { root })
+            }
+            None => Ok(Self { root: state_dir.to_path_buf() }),
+        }
+    }
+
+    /// [`set_root`](Self::set_root) against an explicit state dir (testable core).
+    fn set_root_in(state_dir: &Path, new: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(state_dir)
+            .with_context(|| format!("create state dir {}", state_dir.display()))?;
+        let cfg = LibraryConfig {
+            library_root: Some(new.to_string_lossy().into_owned()),
+        };
+        let json = serde_json::to_vec_pretty(&cfg).context("serialize config.json")?;
+        let cfg_path = state_dir.join("config.json");
+        std::fs::write(&cfg_path, json)
+            .with_context(|| format!("write {}", cfg_path.display()))?;
+        Ok(())
     }
 
     pub fn db(&self) -> PathBuf {
@@ -320,5 +410,39 @@ mod tests {
         // segment before `.kfx` is the sha.
         let name = "[A] Series v1.2 (2024).deadbeef.kfx";
         assert_eq!(parse_sha_infix(name).as_deref(), Some("deadbeef"));
+    }
+
+    // §4b root pointer. Exercised against an explicit state dir so the real
+    // `~/Library/Application Support/sidle/config.json` is never touched.
+
+    #[test]
+    fn resolve_defaults_to_state_dir_when_no_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = LibraryPaths::resolve_in(dir.path()).expect("resolve");
+        assert_eq!(p.root.as_path(), dir.path());
+    }
+
+    #[test]
+    fn set_root_then_resolve_returns_the_pointer() {
+        let state = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap(); // the relocated root — must exist
+        LibraryPaths::set_root_in(state.path(), lib.path()).expect("set_root");
+        let p = LibraryPaths::resolve_in(state.path()).expect("resolve");
+        assert_eq!(p.root.as_path(), lib.path());
+    }
+
+    #[test]
+    fn resolve_errors_on_missing_configured_root() {
+        let state = tempfile::tempdir().unwrap();
+        let missing = state.path().join("not-mounted");
+        LibraryPaths::set_root_in(state.path(), &missing).expect("set_root");
+        assert!(LibraryPaths::resolve_in(state.path()).is_err());
+    }
+
+    #[test]
+    fn resolve_errors_on_malformed_config() {
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(state.path().join("config.json"), b"{ not valid json").unwrap();
+        assert!(LibraryPaths::resolve_in(state.path()).is_err());
     }
 }
