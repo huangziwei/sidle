@@ -4,7 +4,8 @@
 //! `/Users/ziweih/projects/tools/aozora-epub.html` (lines 902-1188).
 //! Output mirrors the HTML tool's package shape: mimetype-first STORE'd,
 //! `META-INF/container.xml`, `OEBPS/style.css`, per-chapter XHTML split at
-//! `<h2>` boundaries, EPUB-3 nav doc + NCX (for older readers), OPF with
+//! the shallowest heading level present, EPUB-3 nav doc + NCX (for older
+//! readers), OPF with
 //! `xml:lang="ja"` and `page-progression-direction="rtl"`. Cover is a
 //! pre-rendered JPEG supplied by the caller.
 
@@ -129,27 +130,44 @@ struct Chapter {
     body: String,
 }
 
-/// Split the document body at `<h2>` boundaries.
+/// Split the document body at the shallowest heading level present.
 ///
-/// First chunk = title page (`<h1>title</h1><p>author</p>` + any body
-/// content before the first `<h2>`). Each subsequent `<h2>` starts a new
-/// chapter. If a colophon is present it gets a trailing chapter.
+/// The parser maps 大見出し→`<h2>`, 中見出し→`<h3>`, 小見出し→`<h4>`, but a
+/// great many Aozora works (especially 中見出し-only books, where 大見出し is
+/// reserved for multi-part collections) carry *no* `<h2>` at all. Splitting on
+/// a hardcoded `<h2>` — as the JS reference tool and boko's first port both did
+/// — then collapses the whole body into the title page, leaving every TOC entry
+/// pointing at `#fragment`s of one giant file (a TOC most readers, and the
+/// downstream KFX conversion, fail to navigate). So we split at the *minimum*
+/// heading level the TOC actually uses: 大見出し parts still split at `<h2>`
+/// (中見出し chapters nested as fragments inside — the intended shape), while a
+/// 中見出し-only book splits at `<h3>` into one file per chapter.
+///
+/// First chunk = title page (`<h1>title</h1><p>author</p>` + any body content
+/// before the first split-level heading). Each subsequent split-level heading
+/// starts a new chapter. A colophon, if present, gets a trailing chapter.
 fn split_into_chapters(doc: &Document) -> Vec<Chapter> {
     let body = &doc.body_xhtml;
-    // JS uses `body.split(/(?=<h2[\s>])/)` — split on positions immediately
-    // before `<h2 ` or `<h2>`. Rust regex has no lookahead but we can scan
-    // manually for `<h2 ` / `<h2>`.
+    // Shallowest level the TOC uses (2/3/4). Empty TOC ⇒ no headings to split
+    // on; default 2 keeps the single-chunk title page.
+    let split_level = doc.toc.iter().map(|e| e.level).min().unwrap_or(2);
+    // Split on positions immediately before `<h{split_level} ` / `<h{N}>`.
+    // Rust regex has no lookahead, so scan manually for the 3-byte tag.
+    let tag = format!("<h{split_level}");
+    let tb = tag.as_bytes();
     let mut splits: Vec<&str> = Vec::new();
     let mut last = 0;
     let bytes = body.as_bytes();
     let mut i = 0;
-    while i + 3 < bytes.len() {
-        if &bytes[i..i + 3] == b"<h2" && matches!(bytes[i + 3], b' ' | b'>' | b'\t' | b'\n') {
+    while i + tb.len() < bytes.len() {
+        if &bytes[i..i + tb.len()] == tb
+            && matches!(bytes[i + tb.len()], b' ' | b'>' | b'\t' | b'\n')
+        {
             if i > last {
                 splits.push(&body[last..i]);
             }
             last = i;
-            i += 3;
+            i += tb.len();
         } else {
             i += 1;
         }
@@ -158,12 +176,24 @@ fn split_into_chapters(doc: &Document) -> Vec<Chapter> {
 
     let mut chapters = Vec::with_capacity(splits.len() + 1);
 
-    // Title page = `<h1>title</h1><p>author</p>` + content before the first h2.
+    // If the body opens directly with a split-level heading (no front matter —
+    // the common case for Aozora novels, which start at chapter 1), the title
+    // page is just title+author and that first heading begins ch1. Otherwise
+    // the leading non-heading content (preface, frontispiece, …) shares the
+    // title page, and the first heading begins ch1.
+    let first_is_heading = splits
+        .first()
+        .is_some_and(|s| s.trim_start().starts_with(tag.as_str()));
+    let preamble = if first_is_heading {
+        ""
+    } else {
+        splits.first().copied().unwrap_or("")
+    };
     let title_body = format!(
         "<h1>{}</h1>\n<p>{}</p>\n{}",
         escape_xml(&doc.title),
         escape_xml(&doc.author),
-        splits.first().copied().unwrap_or(""),
+        preamble,
     );
     chapters.push(Chapter {
         file: "title.xhtml".to_string(),
@@ -171,10 +201,15 @@ fn split_into_chapters(doc: &Document) -> Vec<Chapter> {
         body: title_body,
     });
 
-    for (i, body) in splits.iter().enumerate().skip(1) {
-        let ch_title = extract_h2_text(body).unwrap_or_else(|| format!("Chapter {}", i));
+    // Each remaining split is a chapter. Skip splits[0] only when it was
+    // consumed above as title-page preamble.
+    let first_chapter_split = if first_is_heading { 0 } else { 1 };
+    for (n, body) in splits.iter().skip(first_chapter_split).enumerate() {
+        let ch_idx = n + 1;
+        let ch_title = extract_heading_text(body, split_level)
+            .unwrap_or_else(|| format!("Chapter {}", ch_idx));
         chapters.push(Chapter {
-            file: format!("ch{}.xhtml", i),
+            file: format!("ch{}.xhtml", ch_idx),
             title: ch_title,
             body: body.to_string(),
         });
@@ -199,13 +234,14 @@ fn split_into_chapters(doc: &Document) -> Vec<Chapter> {
     chapters
 }
 
-fn extract_h2_text(body: &str) -> Option<String> {
-    // Find the first `<h2 ...>` / `</h2>` pair and return the inner text with
-    // any nested tags stripped. JS regex: `/<h2[^>]*>(.+?)<\/h2>/`.
-    let open_start = body.find("<h2")?;
+fn extract_heading_text(body: &str, level: u8) -> Option<String> {
+    // First `<h{level} ...>` / `</h{level}>` pair → inner text, tags stripped.
+    let open = format!("<h{level}");
+    let close = format!("</h{level}>");
+    let open_start = body.find(&open)?;
     let open_end = body[open_start..].find('>')? + open_start + 1;
-    let close = body[open_end..].find("</h2>")? + open_end;
-    let inner = &body[open_end..close];
+    let close_idx = body[open_end..].find(&close)? + open_end;
+    let inner = &body[open_end..close_idx];
     Some(strip_tags(inner))
 }
 
@@ -374,7 +410,7 @@ fn build_ncx(
     title: &str,
     toc: &[TocEntry],
     id_to_file: &std::collections::HashMap<String, String>,
-    _has_colophon: bool,
+    has_colophon: bool,
 ) -> String {
     let mut points = String::new();
     points.push_str(&format!(
@@ -396,6 +432,16 @@ fn build_ncx(
             t + 1,
             escape_xml(&entry.text),
             toc_href(entry, id_to_file),
+        ));
+    }
+    if has_colophon {
+        let n = toc.len() + 1;
+        points.push_str(&format!(
+            r#"  <navPoint id="np{n}" playOrder="{n}">
+    <navLabel><text>底本情報</text></navLabel>
+    <content src="text/colophon.xhtml"/>
+  </navPoint>
+"#,
         ));
     }
     format!(
@@ -820,6 +866,95 @@ mod tests {
             "publisher should be 青空文庫, got OPF:\n{}",
             opf
         );
+    }
+
+    #[test]
+    fn splits_at_shallowest_level_when_no_h2() {
+        // 中見出し-only book: parser emits all <h3> (level 3), zero <h2>.
+        // Must split at <h3> into one file per heading — NOT collapse into the
+        // title page (the bug: hardcoded <h2> split → 0 splits → 1 file).
+        let doc = Document {
+            title: "本".to_string(),
+            author: "著".to_string(),
+            body_xhtml: r#"<p>序</p>
+<h3 id="h1">一</h3>
+<p>本文1</p>
+<h3 id="h2">二</h3>
+<p>本文2</p>
+<h3 id="h3">三</h3>
+<p>本文3</p>
+"#
+            .to_string(),
+            toc: vec![
+                TocEntry { id: "h1".to_string(), level: 3, text: "一".to_string() },
+                TocEntry { id: "h2".to_string(), level: 3, text: "二".to_string() },
+                TocEntry { id: "h3".to_string(), level: 3, text: "三".to_string() },
+            ],
+            colophon: String::new(),
+            referenced_images: vec![],
+        };
+        let chapters = split_into_chapters(&doc);
+        assert_eq!(chapters.len(), 4, "title + 3 chapters, got {}", chapters.len());
+        assert_eq!(chapters[0].file, "title.xhtml");
+        assert_eq!(chapters[1].file, "ch1.xhtml");
+        assert_eq!(chapters[1].title, "一");
+        assert_eq!(chapters[3].file, "ch3.xhtml");
+        let map = build_id_to_file_map(&chapters);
+        assert_eq!(map.get("h1").unwrap(), "ch1.xhtml");
+        assert_eq!(map.get("h2").unwrap(), "ch2.xhtml");
+        assert_eq!(map.get("h3").unwrap(), "ch3.xhtml");
+    }
+
+    #[test]
+    fn body_starting_with_heading_gives_ch1_its_own_file() {
+        // Real Aozora novels (e.g. 不連続殺人事件) carry no front matter: the
+        // body opens directly with the first heading. The title page must then
+        // be title+author only, and that first heading must begin ch1 — not be
+        // absorbed into the title page.
+        let doc = Document {
+            title: "本".to_string(),
+            author: "著".to_string(),
+            body_xhtml: r#"<h3 id="h1">一</h3>
+<p>本文1</p>
+<h3 id="h2">二</h3>
+<p>本文2</p>
+"#
+            .to_string(),
+            toc: vec![
+                TocEntry { id: "h1".to_string(), level: 3, text: "一".to_string() },
+                TocEntry { id: "h2".to_string(), level: 3, text: "二".to_string() },
+            ],
+            colophon: String::new(),
+            referenced_images: vec![],
+        };
+        let chapters = split_into_chapters(&doc);
+        assert_eq!(chapters.len(), 3, "title + 2 chapters, got {}", chapters.len());
+        assert_eq!(chapters[0].file, "title.xhtml");
+        assert!(
+            !chapters[0].body.contains(r#"id="h1""#),
+            "first heading must NOT be absorbed into the title page:\n{}",
+            chapters[0].body
+        );
+        assert_eq!(chapters[1].file, "ch1.xhtml");
+        assert_eq!(chapters[1].title, "一");
+        assert!(chapters[1].body.contains(r#"<h3 id="h1">一</h3>"#));
+        let map = build_id_to_file_map(&chapters);
+        assert_eq!(map.get("h1").unwrap(), "ch1.xhtml");
+        assert_eq!(map.get("h2").unwrap(), "ch2.xhtml");
+    }
+
+    #[test]
+    fn ncx_includes_colophon_navpoint() {
+        let mut doc = sample_document();
+        doc.colophon = "底本：「テスト」テスト社".to_string();
+        let chapters = split_into_chapters(&doc);
+        let map = build_id_to_file_map(&chapters);
+        let ncx = build_ncx("uuid", &doc.title, &doc.toc, &map, !doc.colophon.is_empty());
+        assert!(
+            ncx.contains(r#"<content src="text/colophon.xhtml"/>"#),
+            "NCX must include a colophon navPoint:\n{ncx}"
+        );
+        assert!(ncx.contains("<text>底本情報</text>"), "colophon navLabel missing");
     }
 
     fn extract_zip_entry(zip_bytes: &[u8], name: &str) -> String {

@@ -182,8 +182,17 @@ static HEADING_PRECEDES_RE: LazyLock<Regex> =
 /// says the immediately-preceding `TEXT` is a heading. Common in long
 /// Aozora prose (e.g. 夏目漱石『吾輩は猫である』, 寺田寅彦『柿の種』);
 /// without this, those books produce no TOC.
+///
+/// The quoted capture is greedy (`(.+)`, not `([^」]+)`) so a heading whose
+/// own text contains a nested `「…」` still matches — e.g. 坂口安吾『不連続
+/// 殺人事件』ch.22 `二十二　「八月九日　宿命の日」`, whose annotation is
+/// `［＃「二十二　「八月九日　宿命の日」」は中見出し］`. Greedy `.+` backtracks
+/// to the final `」は…見出し］`; the `plain_text_for_heading(head) == target`
+/// guard in `process_line` stops it from over-reaching across other markup.
+/// (A non-greedy/`[^」]`-based capture stopped at the inner `」` and silently
+/// dropped such chapters from the TOC.)
 static POSTFIX_HEADING_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"［＃「([^」]+)」は([大中小])見出し］").unwrap());
+    LazyLock::new(|| Regex::new(r"［＃「(.+)」は([大中小])見出し］").unwrap());
 static HEADING_OOMIDASHI_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃大見出し］(.+?)［＃大見出し終わり］").unwrap());
 static HEADING_NAKAMIDASHI_RE: LazyLock<Regex> =
@@ -562,8 +571,13 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
 
         // Strip editorial notes and heading-reference notes.
         s = re_replace_str_cow(&EDITORIAL_BASE_NOTE_RE, s, "");
+        // Greedy `.*` mirrors POSTFIX_HEADING_RE so a heading-ref marker whose
+        // quoted text contains a nested `「…」` is stripped by this pass rather
+        // than left for the catch-all below. (Functionally a no-op for the
+        // catch-all already removes any leftover `［＃…］`, but keeping the two
+        // heading regexes in lockstep avoids a confusing asymmetry.)
         static HEADING_REF_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"［＃「[^」]*」は[大中小]見出し］").unwrap());
+            LazyLock::new(|| Regex::new(r"［＃「.*」は[大中小]見出し］").unwrap());
         s = re_replace_str_cow(&HEADING_REF_RE, s, "");
 
         // Final catch-all: drop any remaining ［＃...］.
@@ -862,5 +876,22 @@ mod tests {
         assert!(!doc.colophon.contains("青空文庫"));
         // Colophon is not in the body.
         assert!(!doc.body_xhtml.contains("底本"));
+    }
+
+    #[test]
+    fn postfix_heading_with_nested_quotes() {
+        // 坂口安吾『不連続殺人事件』ch.22: the heading text itself contains a
+        // nested 「…」. The greedy quoted capture must still detect it as a
+        // 中見出し (→ <h3>) and emit a TOC entry, not drop it to a plain <p>.
+        let src = "T\nA\n\n-------\n［＃５字下げ］二十二　「八月九日　宿命の日」［＃「二十二　「八月九日　宿命の日」」は中見出し］\n本文\n";
+        let doc = parse_txt(src);
+        assert_eq!(doc.toc.len(), 1, "nested-quote heading must produce a TOC entry");
+        assert_eq!(doc.toc[0].level, 3);
+        assert_eq!(doc.toc[0].text, "二十二　「八月九日　宿命の日」");
+        assert!(
+            doc.body_xhtml.contains(r#"<h3 id="h1">二十二　「八月九日　宿命の日」</h3>"#),
+            "expected <h3> heading, got body:\n{}",
+            doc.body_xhtml
+        );
     }
 }
