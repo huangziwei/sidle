@@ -2508,7 +2508,7 @@ async function pickRelocate(mode) {
   relocatePending = { mode, dest };
   $("#settings-confirm-text").textContent =
     mode === "move"
-      ? `Copy your library to:\n${dest}\n\nsidle restarts once the copy is verified.`
+      ? `Move your library to:\n${dest}\n\nsidle verifies, removes the old location, and restarts.`
       : `Use the library in:\n${dest}\n\nsidle restarts. Nothing is copied.`;
   $("#settings-confirm").hidden = false;
   $("#settings-status").hidden = true;

@@ -686,11 +686,12 @@ pub async fn library_pick_folder(app: AppHandle) -> Result<Option<String>, Strin
     Ok(result.map(|p| p.to_string()))
 }
 
-/// Move the library to `dest`: copy a consistent DB snapshot + the `books/`
-/// tree there, verify the counts match, repoint the root pointer, and relaunch.
-/// Copy (not move) keeps the source intact until the user deletes it. Refuses
-/// when a conversion is in flight (its output would land in the abandoned old
-/// root), when `dest` is already the current root, or when `dest` is non-empty.
+/// Move the library to `dest`: snapshot + verify the DB there, relocate the
+/// `books/` tree (rename when same-volume, else copy), repoint, delete the old
+/// remnants, and relaunch — nothing is left behind except the tiny `config.json`
+/// pointer in the app state dir. Refuses when a conversion is in flight (its
+/// output would be stranded), when `dest` is already the current root, or when
+/// `dest` is non-empty.
 #[tauri::command]
 pub async fn library_relocate_move(
     app: AppHandle,
@@ -707,11 +708,13 @@ pub async fn library_relocate_move(
             dest.display()
         ));
     }
-    {
+    let state_dir = LibraryPaths::state_dir().map_err(|e| e.to_string())?;
+    let src_root = state.paths.root.clone();
+    let books_renamed = {
         let conn = state.db.lock().await;
-        // Gate on an idle queue: a conversion finishing after the snapshot would
-        // write its output into the old root, then be stranded once we relaunch
-        // onto the new one. (Relaunch is why no queue *pause* is needed — §6.)
+        // Gate on an idle queue: a conversion finishing mid-move would write its
+        // output into the old root and be stranded. (Relaunch is why no queue
+        // *pause* is needed — §6.)
         if !db::pending_or_error_book_ids(&conn)
             .map_err(|e| e.to_string())?
             .is_empty()
@@ -721,12 +724,14 @@ pub async fn library_relocate_move(
                     .into(),
             );
         }
-        let src_books = state.paths.root.join("books");
-        relocate::copy_library(&conn, &src_books, &dest).map_err(|e| format!("{e:#}"))?;
-    }
+        relocate::move_library(&conn, &src_root, &dest).map_err(|e| format!("{e:#}"))?
+    };
+    // Repoint FIRST, then delete the old remnants — so the destructive cleanup
+    // runs only once the new root is the live one; `finish_move` preserves the
+    // state dir's `config.json` when the old root was the default location.
     LibraryPaths::set_root(&dest).map_err(|e| format!("{e:#}"))?;
-    // Relaunch onto the new root; bootstrap resolves the pointer next launch.
-    // `restart` diverges, so nothing runs after it.
+    relocate::finish_move(&src_root, &state_dir, books_renamed);
+    // Relaunch onto the new root; `restart` diverges, so nothing runs after it.
     app.restart()
 }
 

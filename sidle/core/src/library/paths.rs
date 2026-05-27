@@ -1,7 +1,7 @@
 //! Library folder layout.
 //!
 //! ```text
-//! ~/Library/Application Support/sidle/
+//! ~/Library/Application Support/Sidle/
 //! ├── library.db
 //! └── books/<sha>/
 //!     ├── [Author] Title (Year).epub
@@ -28,20 +28,21 @@ struct LibraryConfig {
 }
 
 impl LibraryPaths {
-    /// Resolve the default library root: `<data_dir>/sidle`.
+    /// Resolve the default library root: `<data_dir>/Sidle`.
     pub fn default_root() -> anyhow::Result<Self> {
         let base = dirs::data_dir()
             .ok_or_else(|| anyhow::anyhow!("could not resolve user data directory"))?;
-        Ok(Self { root: base.join("sidle") })
+        Ok(Self { root: base.join("Sidle") })
     }
 
-    /// The fixed app-local state dir, `<data_dir>/sidle` — never moves with the
+    /// The fixed app-local state dir, `<data_dir>/Sidle` — never moves with the
     /// library. Holds `config.json` (the root pointer), and is also the library
-    /// root the app falls back to when no pointer is set.
+    /// root the app falls back to when no pointer is set. (Legacy installs used
+    /// a lowercase `sidle`; [`resolve`](Self::resolve) renames it on launch.)
     pub fn state_dir() -> anyhow::Result<PathBuf> {
         let base = dirs::data_dir()
             .ok_or_else(|| anyhow::anyhow!("could not resolve user data directory"))?;
-        Ok(base.join("sidle"))
+        Ok(base.join("Sidle"))
     }
 
     /// Path to the root-pointer config in the app-local state dir.
@@ -56,8 +57,10 @@ impl LibraryPaths {
     /// beats silently opening the empty default library in the wrong place.
     ///
     /// Used by `bootstrap` (Tauri app) and the LAN server's default branch, so
-    /// both agree on a relocated library.
+    /// both agree on a relocated library. First fixes the legacy lowercase
+    /// app-support dir (`sidle` → `Sidle`).
     pub fn resolve() -> anyhow::Result<Self> {
+        Self::migrate_legacy_state_dir();
         Self::resolve_in(&Self::state_dir()?)
     }
 
@@ -112,6 +115,45 @@ impl LibraryPaths {
         std::fs::write(&cfg_path, json)
             .with_context(|| format!("write {}", cfg_path.display()))?;
         Ok(())
+    }
+
+    /// One-time fixup of the legacy lowercase app-support dir (`sidle` → the
+    /// proper-cased `Sidle`). Safe because book paths are stored root-relative
+    /// (§4a), so the library resolves under whatever the root is named. On
+    /// macOS's default case-insensitive APFS this is a case-only rename (same
+    /// inode); on a case-sensitive volume it's a real move. Best-effort and
+    /// idempotent — a no-op once the stored name is `Sidle`, and a failure
+    /// leaves the existing dir in place (still resolvable on a case-insensitive
+    /// volume).
+    fn migrate_legacy_state_dir() {
+        if let Some(base) = dirs::data_dir() {
+            Self::migrate_legacy_state_dir_in(&base);
+        }
+    }
+
+    fn migrate_legacy_state_dir_in(base: &Path) {
+        // Inspect the *stored* case (a case-insensitive FS preserves it) so we
+        // can tell a not-yet-renamed `sidle` from an already-fixed `Sidle`.
+        let (mut has_lower, mut has_proper) = (false, false);
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for e in entries.flatten() {
+                match e.file_name().to_str() {
+                    Some("sidle") => has_lower = true,
+                    Some("Sidle") => has_proper = true,
+                    _ => {}
+                }
+            }
+        }
+        if has_lower && !has_proper {
+            let (old, new) = (base.join("sidle"), base.join("Sidle"));
+            if let Err(e) = std::fs::rename(&old, &new) {
+                eprintln!(
+                    "[sidle/paths] couldn't rename legacy {} -> {}: {e}",
+                    old.display(),
+                    new.display()
+                );
+            }
+        }
     }
 
     pub fn db(&self) -> PathBuf {
@@ -413,7 +455,7 @@ mod tests {
     }
 
     // §4b root pointer. Exercised against an explicit state dir so the real
-    // `~/Library/Application Support/sidle/config.json` is never touched.
+    // `~/Library/Application Support/Sidle/config.json` is never touched.
 
     #[test]
     fn resolve_defaults_to_state_dir_when_no_config() {
@@ -444,5 +486,36 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         std::fs::write(state.path().join("config.json"), b"{ not valid json").unwrap();
         assert!(LibraryPaths::resolve_in(state.path()).is_err());
+    }
+
+    #[test]
+    fn migrate_legacy_state_dir_renames_lowercase_to_proper_case() {
+        let base = tempfile::tempdir().unwrap();
+        let lower = base.path().join("sidle");
+        std::fs::create_dir_all(&lower).unwrap();
+        std::fs::write(lower.join("config.json"), b"{}").unwrap();
+
+        LibraryPaths::migrate_legacy_state_dir_in(base.path());
+
+        let names: Vec<String> = std::fs::read_dir(base.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().any(|n| n == "Sidle"), "renamed to Sidle: {names:?}");
+        assert!(!names.iter().any(|n| n == "sidle"), "no lowercase left: {names:?}");
+        assert!(base.path().join("Sidle/config.json").is_file(), "contents preserved");
+
+        // Idempotent: a second run is a no-op.
+        LibraryPaths::migrate_legacy_state_dir_in(base.path());
+        assert!(base.path().join("Sidle/config.json").is_file());
+    }
+
+    #[test]
+    fn migrate_legacy_state_dir_noop_without_legacy_dir() {
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(base.path().join("Sidle")).unwrap();
+        LibraryPaths::migrate_legacy_state_dir_in(base.path()); // no panic, no change
+        assert!(base.path().join("Sidle").is_dir());
     }
 }
