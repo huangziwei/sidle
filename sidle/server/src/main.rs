@@ -50,10 +50,44 @@ async fn main() -> Result<()> {
 
     let bind = format!("0.0.0.0:{}", cli.port);
 
-    let config = sidle_server::Config {
-        paths,
-        bind,
-        token,
+    // PID file so the desktop app / sakabar / CLI can stop this daemon precisely
+    // and show who's serving. Written here in the standalone binary — never in the
+    // shared `serve()` — so the app's (former) in-process use couldn't write the
+    // app's own PID here. Removed on graceful exit; a SIGKILL leaves it stale,
+    // which the app tolerates (it trusts the `/` probe over the file).
+    let pid_path = paths.root.join("server.pid");
+    if let Err(e) = std::fs::write(&pid_path, std::process::id().to_string()) {
+        tracing::warn!(?e, path = %pid_path.display(), "could not write PID file");
+    }
+
+    let config = sidle_server::Config { paths, bind, token };
+    let result = sidle_server::serve_with_shutdown(config, shutdown_signal()).await;
+    let _ = std::fs::remove_file(&pid_path);
+    result
+}
+
+/// Resolves on SIGINT (Ctrl-C) or SIGTERM so `serve_with_shutdown` drains
+/// in-flight requests before exit. SIGTERM is what the desktop app's stop,
+/// sakabar's port-kill, and a plain `kill` send; SIGINT is an interactive Ctrl-C.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c().await.expect("install Ctrl-C handler");
     };
-    sidle_server::serve(config).await
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    tracing::info!("sidle-server: shutdown signal received, draining");
 }

@@ -10,6 +10,7 @@
 //! - Standalone — `sidle-server` CLI binary parses args, calls `serve()`.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 
@@ -50,7 +51,23 @@ pub(crate) struct AppState {
     pub(crate) token: Arc<str>,
 }
 
+/// Serve until the task is dropped/aborted (embedded mode) — no signal
+/// handling. The Tauri app calls this and stops the server by aborting the
+/// tokio task; installing a process-wide signal handler here would step on the
+/// app's own. The standalone binary uses [`serve_with_shutdown`] instead.
 pub async fn serve(config: Config) -> Result<()> {
+    serve_with_shutdown(config, std::future::pending::<()>()).await
+}
+
+/// [`serve`] with a shutdown trigger threaded in, so axum drains in-flight
+/// requests when the future resolves instead of dropping the listener abruptly.
+/// The standalone `sidle-server` passes a SIGTERM/SIGINT future (so a graceful
+/// `kill`, sakabar's port-kill, an app-initiated stop, and Ctrl-C all drain
+/// cleanly); a test can pass a oneshot to drive shutdown deterministically.
+pub async fn serve_with_shutdown(
+    config: Config,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     config.paths.ensure().context("ensure library paths")?;
 
     // Backfill cover thumbnails for books imported before thumbnails existed
@@ -89,7 +106,10 @@ pub async fn serve(config: Config) -> Result<()> {
         .with_context(|| format!("bind {}", config.bind))?;
     let local = listener.local_addr()?;
     tracing::info!("sidle-server listening on http://{local}");
-    axum::serve(listener, app).await.context("axum::serve")?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+        .context("axum::serve")?;
     Ok(())
 }
 
@@ -368,4 +388,86 @@ fn filename_from_path(p: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("book.kfx")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, load_or_generate_token, serve_with_shutdown};
+    use sidle_core::library::LibraryPaths;
+
+    fn pick_free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// Graceful shutdown: the daemon serves `GET /` (200), then when the
+    /// shutdown future resolves `serve_with_shutdown` returns `Ok(())` and frees
+    /// the port — versus the old `axum::serve(..).await`, which only returned on
+    /// a bind error. This is the wiring SIGTERM/sakabar-stop/app-stop all rely
+    /// on; true in-flight-request drain timing is exercised by the live gate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graceful_shutdown_returns_ok_and_frees_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths { root: tmp.path().to_path_buf() };
+        paths.ensure().unwrap();
+        let token = load_or_generate_token(&paths.root).unwrap();
+        let port = pick_free_port();
+        let config = Config {
+            paths,
+            bind: format!("127.0.0.1:{port}"),
+            token,
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_with_shutdown(config, async move {
+            let _ = rx.await;
+        }));
+
+        // Prove it serves HTTP, with a blocking std client off the runtime so we
+        // don't need tokio's io-util ext traits. Retries until the spawned axum
+        // task has bound + is accepting.
+        let served = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            use std::time::{Duration, Instant};
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                    s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                        .unwrap();
+                    let mut buf = String::new();
+                    let _ = s.read_to_string(&mut buf);
+                    return buf.starts_with("HTTP/1.1 200");
+                }
+                if Instant::now() > deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+        .await
+        .unwrap();
+        assert!(served, "daemon never served a 200 on /");
+
+        // Fire shutdown → serve_with_shutdown must return Ok promptly.
+        tx.send(()).unwrap();
+        let res = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("serve task did not finish after the shutdown signal")
+            .expect("serve task panicked");
+        assert!(res.is_ok(), "serve returned an error: {res:?}");
+
+        // Port released (allow the OS a moment).
+        let mut refused = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused, "port {port} never freed after shutdown");
+    }
 }

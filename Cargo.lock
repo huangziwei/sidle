@@ -4547,6 +4547,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sidle-core",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

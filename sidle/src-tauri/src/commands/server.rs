@@ -25,6 +25,6 @@ pub async fn server_start(
 
 #[tauri::command]
 pub async fn server_stop(state: State<'_, AppState>) -> Result<ServerStatus, String> {
-    state.server.stop().await;
+    state.server.stop(&state.paths).await;
     Ok(state.server.status(&state.paths).await)
 }

@@ -1,166 +1,296 @@
-//! Embedded LAN server lifecycle.
+//! Supervises the standalone `sidle-server` as a **detached child process**, so
+//! the LAN server outlives the desktop GUI — the Kindle can still reach the
+//! library, and (P3) push annotations back, with the app closed. Replaces the
+//! old in-process tokio task.
 //!
-//! Wraps `sidle_server::serve` as a process-wide tokio task. The Tauri app
-//! spawns it on user request (toggle in the device popover); aborting the
-//! task drops axum's listener so the OS releases the port — the standalone
-//! `sidle-server` CLI can then take over if the user prefers that mode.
+//! start/stop/status mirror what sakabar does, so both can manage one shared
+//! daemon and agree on a single instance:
+//! - **start** health-probes `/` and ADOPTS an already-running instance (sakabar-,
+//!   CLI-, or previously-app-started) instead of double-spawning; otherwise spawns
+//!   the binary detached (new session, stdio → `<root>/server.log`).
+//! - **stop** SIGTERMs the daemon via its `<root>/server.pid` file (the daemon
+//!   writes it on start, removes it on graceful exit), then reaps the child if we
+//!   were the one who spawned it.
+//! - **status** is observation-based (`/` probe + PID file), so a daemon started
+//!   anywhere shows as running here, and vice-versa.
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 
 use crate::library::LibraryPaths;
 
-/// Matches `sidle-server`'s clap default so the embedded toggle and the
-/// standalone binary contend for the same port — exactly the single-instance
-/// contract the plan calls for (Phase 2/3).
+/// Matches `sidle-server`'s clap default so the app, the standalone binary, and
+/// sakabar all contend for / adopt one listener.
 pub const DEFAULT_PORT: u16 = 8731;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ServerHandle {
-    inner: Arc<Mutex<Option<Running>>>,
+    inner: Arc<Mutex<Inner>>,
 }
 
-struct Running {
-    task: JoinHandle<()>,
+struct Inner {
+    /// `Some` only while WE hold a spawned child, so `stop` can reap it instead of
+    /// leaking a zombie. `None` when nothing is spawned or the daemon was adopted
+    /// (an adopted daemon isn't our child — there's nothing to reap).
+    child: Option<Child>,
+    /// The port we manage — `DEFAULT_PORT` until a `start` overrides it.
+    /// `status`/`stop` probe this.
     port: u16,
+}
+
+impl Default for ServerHandle {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Inner { child: None, port: DEFAULT_PORT })),
+        }
+    }
 }
 
 #[derive(Serialize, Clone, Debug)]
 pub struct ServerStatus {
     pub running: bool,
     pub port: Option<u16>,
-    /// Bearer secret the KUAL bundle (or curl tests) must send as
-    /// `X-Sidle-Token`. Loaded/generated lazily so the UI can always show it
-    /// even while the server is off (it lives in `.server-token`, persistent
-    /// across runs).
+    /// Bearer secret the KUAL bundle (or curl tests) must send as `X-Sidle-Token`.
+    /// Loaded/generated lazily so the UI can show it even while the server is off
+    /// (it lives in `.server-token`, persistent across runs).
     pub token: Option<String>,
     pub default_port: u16,
+    /// PID of the running daemon (from `server.pid`), so the UI/CLI can show who
+    /// is serving and a stop targets it precisely. `None` when down.
+    pub pid: Option<i32>,
+}
+
+/// Shared HTTP client for liveness probes — built once (reqwest client
+/// construction is non-trivial; the start loop probes repeatedly).
+fn http() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("build reqwest probe client")
+    })
+}
+
+/// "Up" = the liveness page answers (any HTTP response — mirrors sakabar's
+/// "healthy = any HTTPURLResponse"). A down port fails fast (connection refused),
+/// so this is cheap to poll.
+async fn probe(port: u16) -> bool {
+    http()
+        .get(format!("http://127.0.0.1:{port}/"))
+        .send()
+        .await
+        .is_ok()
 }
 
 impl ServerHandle {
+    fn pid_path(paths: &LibraryPaths) -> PathBuf {
+        paths.root.join("server.pid")
+    }
+
+    fn read_pid(paths: &LibraryPaths) -> Option<i32> {
+        std::fs::read_to_string(Self::pid_path(paths))
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+    }
+
     pub async fn status(&self, paths: &LibraryPaths) -> ServerStatus {
-        let running_port = {
-            let guard = self.inner.lock().await;
-            guard.as_ref().and_then(|r| {
-                if r.task.is_finished() {
-                    None
-                } else {
-                    Some(r.port)
-                }
-            })
-        };
+        let port = self.inner.lock().await.port;
+        let up = probe(port).await;
         let token = sidle_server::load_or_generate_token(&paths.root).ok();
         ServerStatus {
-            running: running_port.is_some(),
-            port: running_port,
+            running: up,
+            port: up.then_some(port),
             token,
             default_port: DEFAULT_PORT,
+            pid: if up { Self::read_pid(paths) } else { None },
         }
     }
 
     pub async fn start(&self, paths: LibraryPaths, port: u16) -> Result<ServerStatus> {
-        let mut guard = self.inner.lock().await;
-        if let Some(r) = guard.as_ref()
-            && !r.task.is_finished()
-        {
-            return Err(anyhow!("server already running on port {}", r.port));
+        self.inner.lock().await.port = port;
+
+        // Adopt an already-running daemon — never double-spawn. Mirrors sakabar,
+        // and avoids a port-bind race against a concurrent sakabar/CLI start.
+        if probe(port).await {
+            return Ok(self.status(&paths).await);
         }
 
-        let token = sidle_server::load_or_generate_token(&paths.root)
-            .context("load or generate server token")?;
-        let bind = format!("0.0.0.0:{port}");
-        let config = sidle_server::Config {
-            paths: paths.clone(),
-            bind,
-            token: token.clone(),
-        };
-        // Plain `tokio::spawn`: every caller is already in a tokio context —
-        // Tauri commands run on Tauri's tokio runtime, tests on the test
-        // runtime. Avoids initialising a second runtime via
-        // `tauri::async_runtime::spawn`.
-        let task = tokio::spawn(async move {
-            if let Err(err) = sidle_server::serve(config).await {
-                tracing::error!(?err, "embedded sidle-server exited with error");
-            }
-        });
-        *guard = Some(Running { task, port });
-        Ok(ServerStatus {
-            running: true,
-            port: Some(port),
-            token: Some(token),
-            default_port: DEFAULT_PORT,
+        // Resolving the binary (and a dev build-on-demand) plus the spawn syscall
+        // are blocking, so do them off the reactor.
+        let p = paths.clone();
+        let child = tokio::task::spawn_blocking(move || -> Result<Child> {
+            let bin = server_binary()?;
+            spawn_detached(&bin, &p, port)
         })
+        .await
+        .context("join server-spawn task")?
+        .context("spawn sidle-server")?;
+
+        self.inner.lock().await.child = Some(child);
+
+        // The spawn returns before axum binds — wait until it's accepting. 10 s cap
+        // (the dev build, if any, already happened in the blocking task above).
+        for _ in 0..200 {
+            if probe(port).await {
+                return Ok(self.status(&paths).await);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Err(anyhow!(
+            "sidle-server spawned but never became reachable on :{port} — see server.log"
+        ))
     }
 
-    pub async fn stop(&self) {
-        let mut guard = self.inner.lock().await;
-        if let Some(r) = guard.take() {
-            r.task.abort();
+    pub async fn stop(&self, paths: &LibraryPaths) {
+        let port = self.inner.lock().await.port;
+        // Only signal a server that's actually up — guards against SIGTERM to a
+        // reused PID from a stale `server.pid` (the daemon removes it on graceful
+        // exit, but a SIGKILL/crash could leave one behind).
+        if probe(port).await
+            && let Some(pid) = Self::read_pid(paths)
+        {
+            // SAFETY: plain libc `kill(2)`; `pid` is from the daemon's fresh PID
+            // file and we just confirmed it's serving.
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+        }
+        // Reap our child if we spawned one (else it lingers as a zombie until the
+        // app exits). Adopted daemons aren't our children — nothing to reap.
+        let child = self.inner.lock().await.child.take();
+        if let Some(mut child) = child {
+            let _ = tokio::task::spawn_blocking(move || child.wait()).await;
         }
     }
+}
+
+/// Resolve the `sidle-server` binary. Dev: `<workspace>/target/<profile>/
+/// sidle-server`, **built on demand** if missing so there's no manual step.
+/// Packaged: shipped as a Tauri sidecar (TODO — errors clearly until that lands).
+fn server_binary() -> Result<PathBuf> {
+    let root = crate::state::find_workspace_root()
+        .context("locate workspace root for the sidle-server binary")?;
+    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let bin = root.join("target").join(profile).join("sidle-server");
+    if bin.exists() {
+        return Ok(bin);
+    }
+    if cfg!(debug_assertions) {
+        // Build it ourselves rather than make the dev run a manual command.
+        let status = Command::new("cargo")
+            .args(["build", "-p", "sidle-server"])
+            .current_dir(&root)
+            .status()
+            .context("cargo build -p sidle-server")?;
+        if status.success() && bin.exists() {
+            return Ok(bin);
+        }
+        return Err(anyhow!(
+            "cargo build -p sidle-server did not produce {}",
+            bin.display()
+        ));
+    }
+    Err(anyhow!(
+        "sidle-server binary missing at {} (packaged builds must ship it as a sidecar)",
+        bin.display()
+    ))
+}
+
+/// Spawn the daemon fully detached so it outlives the app: a new session
+/// (`setsid`) drops the controlling terminal and puts it in its own process
+/// group (so the app quitting — or a dev terminal closing — doesn't take it
+/// down), and stdio goes to `<root>/server.log`. No `--data-dir`: the daemon
+/// resolves the same root via `LibraryPaths::resolve()`, so it shares
+/// `library.db` + `.server-token` with the app.
+fn spawn_detached(bin: &Path, paths: &LibraryPaths, port: u16) -> Result<Child> {
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(paths.root.join("server.log"))
+        .context("open server.log")?;
+    let log_err = log.try_clone().context("clone server.log handle")?;
+
+    let mut cmd = Command::new(bin);
+    cmd.arg("--port")
+        .arg(port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `setsid` is async-signal-safe — the only call between fork and
+        // exec, touching no shared state in the forked child.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
+    cmd.spawn().with_context(|| format!("spawn {}", bin.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Picks a currently-free local TCP port by asking the OS for one and
-    /// immediately releasing it. Inherently racy with another process but
-    /// fine for a single-threaded test (which the tokio current-thread
-    /// runtime gives us by default).
-    fn pick_free_port() -> u16 {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
+    /// A throwaway HTTP server on a free port that 200s any request, run on a
+    /// blocking std thread (so the test needs no extra tokio features). Leaks the
+    /// thread — fine for a test process.
+    fn dummy_http_server() -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if let Ok(mut s) = stream {
+                    use std::io::{Read, Write};
+                    let mut buf = [0u8; 1024];
+                    let _ = s.read(&mut buf);
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+                }
+            }
+        });
+        port
     }
 
+    #[test]
+    fn read_pid_parses_and_tolerates_garbage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths { root: tmp.path().to_path_buf() };
+        assert_eq!(ServerHandle::read_pid(&paths), None); // missing file
+        std::fs::write(ServerHandle::pid_path(&paths), "  4321\n").unwrap();
+        assert_eq!(ServerHandle::read_pid(&paths), Some(4321));
+        std::fs::write(ServerHandle::pid_path(&paths), "not-a-pid").unwrap();
+        assert_eq!(ServerHandle::read_pid(&paths), None);
+    }
+
+    /// `start` must ADOPT an already-healthy server (any HTTP response on `/`)
+    /// rather than spawn a duplicate — so an app start finds a sakabar/CLI-started
+    /// daemon. The real spawn path is covered by the live gate (it needs the
+    /// actual binary).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn start_stop_lifecycle() {
+    async fn start_adopts_already_running_without_spawning() {
+        let port = dummy_http_server();
         let tmp = tempfile::tempdir().unwrap();
         let paths = LibraryPaths { root: tmp.path().to_path_buf() };
         paths.ensure().unwrap();
 
         let handle = ServerHandle::default();
-        let port = pick_free_port();
-
-        // Off before start.
-        let s = handle.status(&paths).await;
-        assert!(!s.running);
-        assert_eq!(s.port, None);
-
-        // Start: status flips, port is bound, double-start errors.
         let s = handle.start(paths.clone(), port).await.unwrap();
         assert!(s.running);
         assert_eq!(s.port, Some(port));
-        // Wait for the spawned axum task to actually bind by polling a TCP
-        // connect (bind-collision didn't seem reliable on macOS — possibly
-        // 0.0.0.0 vs 127.0.0.1 + SO_REUSEADDR weirdness).
-        let mut connected = false;
-        for _ in 0..100 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-                connected = true;
-                break;
-            }
-        }
-        assert!(connected, "embedded server never accepted a connection on {port}");
-        assert!(handle.start(paths.clone(), port).await.is_err());
-
-        // Stop: status flips, port frees (allow the OS a moment).
-        handle.stop().await;
-        let s = handle.status(&paths).await;
-        assert!(!s.running);
-        let mut refused = false;
-        for _ in 0..100 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
-                refused = true;
-                break;
-            }
-        }
-        assert!(refused, "embedded server never stopped accepting on {port}");
+        assert!(
+            handle.inner.lock().await.child.is_none(),
+            "an already-running server must be adopted, not re-spawned"
+        );
     }
 }

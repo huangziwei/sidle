@@ -1,7 +1,9 @@
 //! rusqlite-backed library database.
 //!
-//! Single-user, single-process. We hold one `Connection` behind an `Arc<Mutex>`
-//! in `AppState`; rusqlite calls block but the library workload is tiny.
+//! Single-user. The desktop app holds one `Connection` behind an `Arc<Mutex>`
+//! in `AppState`; the standalone `sidle-server` daemon opens its own (per
+//! request). WAL + `busy_timeout` (see [`open`]) let those two processes share
+//! the file safely. rusqlite calls block, but the library workload is tiny.
 
 use std::path::{Path, PathBuf};
 
@@ -75,6 +77,12 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // WAL lets the standalone `sidle-server` daemon share this file with the
+    // desktop app (P3's LAN-sync writer + the GUI). `busy_timeout` makes a second
+    // concurrent writer wait for the lock instead of failing immediately with
+    // SQLITE_BUSY; writes are idempotent (UNIQUE dedup_hash, per-device
+    // checkpoints), so serialized contention converges rather than corrupts.
+    conn.pragma_update(None, "busy_timeout", 5000)?;
     migrate(&conn)?;
     relativize_existing_paths(&conn, path)?;
     Ok(conn)

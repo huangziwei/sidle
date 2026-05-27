@@ -18,12 +18,12 @@ use crate::state::AppState;
 
 /// Opt the whole process out of macOS App Nap.
 ///
-/// When the app window is in the background (the user is reading on the
-/// Kindle, not looking at the Mac), App Nap throttles the process: the tokio
-/// reactor and timers get coalesced by tens of seconds. The embedded LAN
-/// server then answers a request ~30s late, well past the KUAL picker's 3s
-/// `LIST_TIMEOUT`, so the Kindle shows "can't reach server" even though the
-/// server is healthy (it answers in ~50ms once the app is foregrounded).
+/// When the app window is in the background, App Nap throttles the process: the
+/// tokio reactor and timers get coalesced by tens of seconds. The LAN server now
+/// runs as a separate `sidle-server` daemon, so it's unaffected (part of why it
+/// was moved out-of-process); but the app's *own* background work — the USB
+/// device monitor and the conversion queue — would still stall while
+/// backgrounded, so we keep this assertion for them.
 ///
 /// We hold an `NSProcessInfo` activity assertion for the life of the process.
 /// `UserInitiatedAllowingIdleSystemSleep` disables App Nap but still lets the

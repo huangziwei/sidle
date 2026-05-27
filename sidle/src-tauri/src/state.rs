@@ -50,7 +50,7 @@ pub struct AppState {
 /// manifest. If the desktop app is ever shipped packaged (outside the
 /// dev workspace), this returns Err and KualSource paths will report
 /// `SourceMissing` to the UI.
-fn find_workspace_root() -> Result<PathBuf> {
+pub(crate) fn find_workspace_root() -> Result<PathBuf> {
     let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut p: &Path = start.as_path();
     loop {
