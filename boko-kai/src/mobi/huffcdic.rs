@@ -20,9 +20,10 @@ pub struct HuffCdicReader {
     /// exceeds 32 bits (calibre/KindleUnpack compute it in arbitrary-precision
     /// ints).
     dict1: Vec<(u8, bool, u64)>,
-    /// mincode indexed by code length `0..=31` (canonical enumerate-from-0).
+    /// mincode indexed by code length `0..=32` (33 entries: a codelen-0
+    /// sentinel plus calibre's `(0,) + dict2[0::2]` layout).
     mincode: Vec<u64>,
-    /// maxcode indexed by code length `0..=31`.
+    /// maxcode indexed by code length `0..=32` (33 entries; see `mincode`).
     maxcode: Vec<u64>,
     /// Dictionary entries from CDIC records
     dictionary: Vec<DictEntry>,
@@ -94,16 +95,25 @@ impl HuffCdicReader {
             ));
         }
 
-        // dict2: 32 interleaved (mincode, maxcode) u32 pairs, indexed by code
-        // length 0..=31 with shift (32 - codelen) — the canonical
-        // KindleUnpack/calibre layout (`enumerate(dict2[0::2])`). All math is in
-        // u64: `mincode << 32` and `(maxcode + 1) << 32` exceed 32 bits. The
-        // codelen-0 maxcode is u64::MAX (Python's bigint `((m+1)<<32)-1` for
-        // m=0xFFFFFFFF), reached here by letting `<< 32` drop the carry bit
-        // before `wrapping_sub(1)`. (codelen 0 is never indexed, but we populate
-        // it to keep the array aligned with codelen.)
-        for codelen in 0u32..32 {
-            let pos = off2 + (codelen as usize) * 8;
+        // Build mincode/maxcode indexed by code length 0..=32 (33 entries).
+        // Faithful port of calibre's `huffcdic.Reader.load_huff`:
+        //
+        //     dict2 = struct.unpack_from('>64L', huff, off2)   # 32 (min,max) pairs
+        //     for codelen, mincode in enumerate((0,) + dict2[0::2]):
+        //         self.mincode += (mincode << (32 - codelen),)
+        //     for codelen, maxcode in enumerate((0,) + dict2[1::2]):
+        //         self.maxcode += (((maxcode + 1) << (32 - codelen)) - 1,)
+        //
+        // The prepended `(0,)` is a codelen-0 sentinel, so the dict2 pair used
+        // for code length `k` (k>=1) is pair `k-1`, NOT pair `k`. A prior
+        // rewrite dropped the sentinel and indexed pair `k` — an off-by-one
+        // that left most codes correct but mis-thresholded the rest, splicing
+        // wrong dictionary phrases into the text. All math is u64; with codelen
+        // 1..=32 the shift is 0..=31, so nothing overflows.
+        self.mincode.push(0); // codelen 0: 0 << 32
+        self.maxcode.push((1u64 << 32) - 1); // codelen 0: ((0 + 1) << 32) - 1
+        for codelen in 1u32..=32 {
+            let pos = off2 + (codelen as usize - 1) * 8;
             let mincode_raw =
                 u32::from_be_bytes([huff[pos], huff[pos + 1], huff[pos + 2], huff[pos + 3]]) as u64;
             let maxcode_raw = u32::from_be_bytes([
@@ -115,8 +125,7 @@ impl HuffCdicReader {
 
             let shift = 32 - codelen;
             self.mincode.push(mincode_raw << shift);
-            self.maxcode
-                .push(((maxcode_raw + 1) << shift).wrapping_sub(1));
+            self.maxcode.push(((maxcode_raw + 1) << shift) - 1);
         }
 
         Ok(())
