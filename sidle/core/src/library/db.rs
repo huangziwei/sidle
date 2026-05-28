@@ -70,7 +70,10 @@ pub struct BookRow {
 /// Schema version stamped into `PRAGMA user_version` by [`migrate`]. Bump on
 /// each schema change. Backups record it; restore refuses an archive whose
 /// version exceeds the running app's (§4c).
-pub const SCHEMA_VERSION: i64 = 1;
+///
+/// v2: dropped the `My Clippings.txt` ingest path entirely — see the DELETE
+/// near the end of [`migrate`].
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -382,6 +385,13 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
+    // v2: scrub any rows from the (now-removed) `My Clippings.txt` ingest path.
+    // It only ever wrote orphans (`book_id IS NULL`), so this never touches a
+    // linked annotation. Idempotent: a no-op on a DB that never had any. Kept
+    // unconditional rather than version-gated so a stray test fixture or a
+    // restored backup is cleaned up on next open.
+    conn.execute("DELETE FROM annotations WHERE source = 'clippings'", [])?;
+
     // §4c: stamp the schema version. migrate() always brings the DB up to the
     // latest schema, so set the current marker; backups gate restores on it.
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -429,6 +439,27 @@ pub fn find_by_kfx_sha_prefix(
     let pattern = format!("{prefix}%");
     conn.query_row(
         SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX,
+        params![pattern],
+        |row| row_to_book(row, root.as_deref()),
+    )
+    .optional()
+}
+
+/// Look up the book whose `kfx_path` ends in `/<filename>`. The fallback for
+/// on-device files that predate the `.<sha8>.kfx` naming — those carry the
+/// library row's kfx basename verbatim, so we match by suffix against the
+/// stored relative path (`books/<sha>/<basename>`). Returns the first row
+/// that matches; identical basenames across two books are extremely rare in
+/// practice (each lives under its own sha-named directory) and arbitrary
+/// pick is acceptable here.
+pub fn find_by_kfx_filename(
+    conn: &Connection,
+    filename: &str,
+) -> rusqlite::Result<Option<BookRow>> {
+    let root = conn_root(conn);
+    let pattern = format!("%/{filename}");
+    conn.query_row(
+        SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME,
         params![pattern],
         |row| row_to_book(row, root.as_deref()),
     )
@@ -903,6 +934,23 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX: &str = r#"
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_sha256 LIKE ?1
+    LIMIT 1
+"#;
+
+/// Match by the **basename** of `kfx_path` — used by `device_list_ours` to
+/// recognize on-device files pushed before the `.<sha8>.kfx` naming convention
+/// existed (their device filename is just the library row's kfx basename).
+/// LIKE `%/<filename>` so we ignore the `books/<sha>/` prefix the row stores.
+const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
+    SELECT b.id, b.sha256, b.title, b.author, b.language, b.ppd,
+           b.epub_path, b.cover_path, b.kfx_path,
+           b.file_size, b.imported_at, b.asin,
+           COALESCE(j.status, 'pending') AS status, j.error, j.kind,
+           b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
+           b.kfx_sha256
+    FROM books b
+    LEFT JOIN conversion_jobs j ON j.book_id = b.id
+    WHERE b.kfx_path LIKE ?1
     LIMIT 1
 "#;
 
@@ -1622,7 +1670,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_gcs_legacy_rows_but_spares_native_and_clips() {
+    fn reconcile_gcs_legacy_rows_but_spares_native() {
         let conn = fresh_db();
         let book_id = insert_minimal(&conn, "sha-legacy", "本");
         let mk = |hash: &str, source: &str| {
@@ -1653,11 +1701,10 @@ mod tests {
             .expect("insert");
         };
         // `keep`/`gone` are legacy device imports (no annotation_device rows yet);
-        // `native` is a Sidle-made annotation; `clip` is an orphan archive entry.
+        // `native` is a Sidle-made annotation that must survive a device GC.
         mk("keep", "yjr");
         mk("gone", "yjr");
         mk("native", "sidle");
-        mk("clip", "clippings");
 
         // The device's current set has only `keep` — `gone` was deleted on-device
         // before presence tracking existed.
@@ -1671,8 +1718,81 @@ mod tests {
             .map(|r| r.dedup_hash)
             .collect();
         left.sort();
-        // `gone` removed; `keep` (still on device) + `native` + `clip` survive.
-        assert_eq!(left, vec!["clip".to_string(), "keep".to_string(), "native".to_string()]);
+        // `gone` removed; `keep` (still on device) + `native` survive.
+        assert_eq!(left, vec!["keep".to_string(), "native".to_string()]);
+    }
+
+    /// Migration scrubs any legacy `source='clippings'` rows on `open()` — the
+    /// `My Clippings.txt` ingest path was removed; this prevents stale orphans
+    /// from a pre-v2 DB lingering in the library.
+    #[test]
+    fn migrate_purges_legacy_clipping_rows() {
+        let conn = fresh_db();
+        let book_id = insert_minimal(&conn, "sha-mig", "本");
+        // Backdoor in a v1-shaped clippings orphan (no ingest path produces these
+        // anymore, but a restored v1 backup or a stale test fixture might).
+        insert_annotation(
+            &conn,
+            &NewAnnotation {
+                dedup_hash: "legacy-clip",
+                book_id: Some(book_id),
+                kind: "highlight",
+                eid_start: None,
+                off_start: None,
+                eid_end: None,
+                off_end: None,
+                loc_start: Some(42),
+                loc_end: Some(43),
+                linear_pos: Some(42),
+                text: "from My Clippings.txt",
+                note_body: None,
+                color: None,
+                clip_title: Some("Some Book"),
+                clip_author: None,
+                added_at: None,
+                added_raw: None,
+                imported_at: "t",
+                source: "clippings",
+            },
+        )
+        .expect("insert");
+        // A native row alongside, to prove the DELETE is scoped to clippings.
+        insert_annotation(
+            &conn,
+            &NewAnnotation {
+                dedup_hash: "native-keep",
+                book_id: Some(book_id),
+                kind: "highlight",
+                eid_start: Some(1),
+                off_start: Some(0),
+                eid_end: Some(1),
+                off_end: Some(2),
+                loc_start: None,
+                loc_end: None,
+                linear_pos: None,
+                text: "y",
+                note_body: None,
+                color: None,
+                clip_title: None,
+                clip_author: None,
+                added_at: None,
+                added_raw: None,
+                imported_at: "t",
+                source: "sidle",
+            },
+        )
+        .expect("insert");
+
+        // Re-run migrate() — the next `open()` would call it; here we invoke
+        // directly since the connection is already in memory.
+        migrate(&conn).expect("migrate");
+
+        let left: Vec<String> = list_annotations_for_book(&conn, book_id)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.dedup_hash)
+            .collect();
+        assert_eq!(left, vec!["native-keep".to_string()]);
     }
 
     #[test]

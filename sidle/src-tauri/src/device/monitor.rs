@@ -15,15 +15,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
 use crate::device::dedrm::{self, PullResult};
 use crate::device::detect;
-use crate::device::{DeviceInfo, TransportKind};
+use crate::device::{DeviceInfo, Transport, TransportKind};
 use crate::library::{LibraryPaths, ingest};
 use crate::queue::QueueHandle;
-use crate::state::DbHandle;
+use crate::state::{DbHandle, SharedTransport};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -36,6 +37,7 @@ pub fn new_state() -> DeviceState {
 pub fn spawn(
     app: AppHandle,
     state: DeviceState,
+    transport: SharedTransport,
     db: DbHandle,
     paths: LibraryPaths,
     queue: QueueHandle,
@@ -49,7 +51,7 @@ pub fn spawn(
         loop {
             let mut next = detect::detect();
 
-            let (just_connected, changed) = {
+            let (just_connected, just_disconnected, changed) = {
                 let mut guard = state.lock().await;
                 let prev = guard.clone();
 
@@ -72,13 +74,25 @@ pub fn spawn(
 
                 let current_serial = next.as_ref().map(|d| d.serial.clone());
                 let is_new = current_serial != last_serial;
+                // Disconnect = had a serial last tick, no serial now, OR the
+                // serial changed (a different device replaced it).
+                let just_disconnected = last_serial.is_some()
+                    && (current_serial.is_none() || current_serial != last_serial);
                 last_serial = current_serial;
                 let just_connected = if is_new { next.clone() } else { None };
 
                 let changed = prev != next;
                 *guard = next.clone();
-                (just_connected, changed)
+                (just_connected, just_disconnected, changed)
             };
+
+            // Release the shared MTP/mass-storage transport as soon as the
+            // device goes away — keeping the `Arc` alive would block re-open
+            // on the next plug-in (MTP holds the USB session exclusively).
+            if just_disconnected {
+                *transport.lock().await = None;
+            }
+
             if changed || first_tick {
                 let _ = app.emit("device:status", &next);
             }
@@ -92,6 +106,7 @@ pub fn spawn(
                         // owns clones of the shared handles.
                         tauri::async_runtime::spawn(on_mass_storage_connect(
                             app.clone(),
+                            transport.clone(),
                             db.clone(),
                             paths.clone(),
                             queue.clone(),
@@ -108,6 +123,7 @@ pub fn spawn(
                         tauri::async_runtime::spawn(on_mtp_connect(
                             app.clone(),
                             state.clone(),
+                            transport.clone(),
                             db.clone(),
                             device,
                         ));
@@ -120,6 +136,53 @@ pub fn spawn(
     });
 }
 
+/// Borrow the shared on-device transport, opening it the first time anyone
+/// asks. Subsequent callers reuse the same `Arc<dyn Transport>` — so two
+/// simultaneous Tauri commands or an on-connect monitor task all share the one
+/// MTP session, and `MtpTransport::op_lock` serializes their on-wire ops
+/// inside it. The session is released when the monitor clears the cell on
+/// disconnect (see `just_disconnected` in [`spawn`]).
+///
+/// Opening the MTP transport calls `mtp_rs` synchronously (it wraps an internal
+/// `block_on`), so we route through the blocking pool — calling from a Tauri
+/// async command directly would block the executor.
+pub async fn ensure_transport(
+    cell: &SharedTransport,
+    device: &DeviceInfo,
+) -> anyhow::Result<Arc<dyn Transport>> {
+    // Hold the lock through the open. mtp-rs cannot tolerate two concurrent
+    // `MtpDevice::open_by_location` calls against the same USB device — the
+    // PTP transaction-ID counters interleave and the device returns mismatched
+    // response containers ("Transaction ID mismatch: expected 1, got 0"). The
+    // 2024+ Kindle Scribe firmware is especially picky here. Tokio's `Mutex`
+    // is .await-aware, so holding it across `spawn_blocking` is fine; serial
+    // waiters wake up in order and either reuse the cached Arc (if the first
+    // succeeded) or take their own turn at opening (if it failed).
+    let mut guard = cell.lock().await;
+    if let Some(t) = guard.as_ref() {
+        return Ok(t.clone());
+    }
+    let device_owned = device.clone();
+    let opened = tokio::task::spawn_blocking(move || device_owned.open_transport())
+        .await
+        .map_err(|e| anyhow!("transport-open task panicked: {e}"))??;
+    let arc: Arc<dyn Transport> = Arc::from(opened);
+    *guard = Some(arc.clone());
+    Ok(arc)
+}
+
+/// Drop the cached transport so the next [`ensure_transport`] opens fresh.
+/// Called from a command's error path when on-wire IO threw — the cached `Arc`
+/// is likely talking to a wedged USB endpoint (e.g. mtp-rs's reaction to an
+/// "endpoint stalled" or a TXID desync), and reusing it just multiplies
+/// errors. The next caller pays one fresh `MtpDevice::open_by_location`,
+/// which lets mtp-rs renegotiate the session against the device — recovers
+/// the common-case stall, surfaces a clear error if the firmware is still
+/// confused (in which case the user needs to physically replug).
+pub async fn evict_transport(cell: &SharedTransport) {
+    *cell.lock().await = None;
+}
+
 /// Everything that should happen the moment a mass-storage Kindle is plugged
 /// in, in the background so the user can keep working:
 ///   1. Auto-pull any new DeDRM'd books off `/dedrm` (and enqueue conversions).
@@ -130,13 +193,14 @@ pub fn spawn(
 /// its `.yjr` to a library row.
 async fn on_mass_storage_connect(
     app: AppHandle,
+    transport: SharedTransport,
     db: DbHandle,
     paths: LibraryPaths,
     queue: QueueHandle,
     device: DeviceInfo,
 ) {
     autopull_on_connect(app.clone(), db.clone(), paths, queue, device.clone()).await;
-    sync_annotations_on_connect(app, db, device).await;
+    sync_annotations_on_connect(app, transport, db, device).await;
 }
 
 /// Everything that should happen when an MTP Kindle (Scribe, 2024+) connects.
@@ -147,9 +211,15 @@ async fn on_mass_storage_connect(
 ///
 /// Whether step 2 finds anything depends on the device exposing its `.sdr/.yjr`
 /// sidecars over MTP; if it doesn't, the import is a harmless no-op (0 books).
-async fn on_mtp_connect(app: AppHandle, state: DeviceState, db: DbHandle, device: DeviceInfo) {
-    refresh_mtp_storage_info(app.clone(), state, device.clone()).await;
-    sync_annotations_on_connect(app, db, device).await;
+async fn on_mtp_connect(
+    app: AppHandle,
+    state: DeviceState,
+    transport: SharedTransport,
+    db: DbHandle,
+    device: DeviceInfo,
+) {
+    refresh_mtp_storage_info(app.clone(), state, transport.clone(), device.clone()).await;
+    sync_annotations_on_connect(app, transport, db, device).await;
 }
 
 /// Import highlights / notes / bookmarks off the connected Kindle — either
@@ -160,34 +230,61 @@ async fn on_mtp_connect(app: AppHandle, state: DeviceState, db: DbHandle, device
 /// Emits `annotations:sync-start` before and `annotations:sync-done` (with the
 /// [`ingest::DeviceImportReport`]) / `annotations:sync-error` after, so the
 /// status bar can show progress without a modal or stealing focus.
-async fn sync_annotations_on_connect(app: AppHandle, db: DbHandle, device: DeviceInfo) {
+async fn sync_annotations_on_connect(
+    app: AppHandle,
+    transport: SharedTransport,
+    db: DbHandle,
+    device: DeviceInfo,
+) {
     let serial = device.serial.clone();
 
     let _ = app.emit("annotations:sync-start", ());
 
+    // Borrow the shared transport up front (async path, since opening MTP
+    // routes through `spawn_blocking` itself). Failure here means the device
+    // came + went before the connect task fired — surface it like any other
+    // sync error rather than panicking.
+    let shared = match ensure_transport(&transport, &device).await {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("[sidle/annsync] {serial}: open transport failed: {e:#}");
+            let _ = app.emit("annotations:sync-error", format!("{e:#}"));
+            return;
+        }
+    };
+
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ingest::DeviceImportReport> {
-        crate::device::annotations::import_device_annotations(&device, &db)
+        crate::device::annotations::import_device_annotations(&device, shared.as_ref(), &db)
     })
     .await;
+
+    // Same MTP-stall recovery as the Tauri commands: on any error the cached
+    // session is likely talking to a wedged USB endpoint, so drop it. The
+    // monitor itself doesn't auto-retry — the next user action (popover
+    // refresh, manual re-sync) will trigger a fresh open via
+    // `ensure_transport`.
+    let evicted = matches!(result, Err(_) | Ok(Err(_)));
+    if evicted {
+        evict_transport(&transport).await;
+    }
 
     match result {
         Ok(Ok(report)) => {
             eprintln!(
-                "[sidle/annsync] {serial}: {} books, {} matched ({} unchanged), {} new (annotations), {} new (clips)",
+                "[sidle/annsync] {serial}: {} books, {} matched ({} unchanged), {} new",
                 report.yjr_books,
                 report.matched,
                 report.unchanged,
                 report.annotations.inserted,
-                report.clippings.inserted,
             );
             let _ = app.emit("annotations:sync-done", report);
         }
         Ok(Err(e)) => {
-            eprintln!("[sidle/annsync] {serial}: import failed: {e:#}");
+            eprintln!("[sidle/annsync] {serial}: import failed (transport evicted): {e:#}");
             let _ = app.emit("annotations:sync-error", format!("{e:#}"));
         }
         Err(e) => {
-            eprintln!("[sidle/annsync] {serial}: import task panicked: {e}");
+            eprintln!("[sidle/annsync] {serial}: import task panicked (transport evicted): {e}");
             let _ = app.emit("annotations:sync-error", e.to_string());
         }
     }
@@ -337,27 +434,24 @@ struct AutoPullSummary {
 /// pattern (occasional manual push); if it becomes annoying, the push
 /// command can refresh in-place via `mtp_rs::Storage::refresh` before
 /// dropping its transport.
-async fn refresh_mtp_storage_info(app: AppHandle, state: DeviceState, device: DeviceInfo) {
+async fn refresh_mtp_storage_info(
+    app: AppHandle,
+    state: DeviceState,
+    transport: SharedTransport,
+    device: DeviceInfo,
+) {
     let serial = device.serial.clone();
-    let snapshot = {
-        let device = device.clone();
-        tokio::task::spawn_blocking(move || -> Option<(u64, u64)> {
-            let transport = match device.open_transport() {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!(
-                        "[sidle/mtp] free-space refresh: open failed for {}: {e:#}",
-                        device.serial
-                    );
-                    return None;
-                }
-            };
-            transport.free_space()
-        })
+    let shared = match ensure_transport(&transport, &device).await {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("[sidle/mtp] free-space refresh: open failed for {serial}: {e:#}");
+            return;
+        }
+    };
+    let snapshot = tokio::task::spawn_blocking(move || shared.free_space())
         .await
         .ok()
-        .flatten()
-    };
+        .flatten();
 
     let Some((free, total)) = snapshot else {
         eprintln!("[sidle/mtp] free-space refresh: no storage info for {serial}");

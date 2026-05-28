@@ -126,9 +126,9 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/list.json", get(list_json))
         .route("/get/{id}", get(get_book))
         .route("/cover/{id}", get(get_cover))
-        // P3 write surface: the Kindle pushes its `.yjr`/`.yjf` (+ My Clippings.txt)
-        // here for ingest — the LAN twin of the USB import. Token-gated like the
-        // reads; body-limited so an oversized POST can't exhaust memory.
+        // P3 write surface: the Kindle pushes its `.yjr`/`.yjf` here for ingest —
+        // the LAN twin of the USB import. Token-gated like the reads; body-limited
+        // so an oversized POST can't exhaust memory.
         .route(
             "/sync/annotations",
             post(sync_annotations).layer(DefaultBodyLimit::max(SYNC_BODY_LIMIT)),
@@ -396,9 +396,6 @@ struct SyncRequest {
     /// `server.conf` (the Mac reads the USB iSerial at mount time).
     device_serial: String,
     sdrs: Vec<SyncSdr>,
-    /// `My Clippings.txt` (the orphan archive), if the device has one.
-    #[serde(default)]
-    clippings_txt: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -442,7 +439,6 @@ async fn sync_annotations(
 
     let paths = state.paths.clone();
     let device_serial = req.device_serial;
-    let clippings_txt = req.clippings_txt;
 
     // rusqlite is blocking; run the whole import (and the pulse write) off the
     // async executor. Per-request `db::open` is the server's existing pattern;
@@ -455,7 +451,6 @@ async fn sync_annotations(
         let report = ingest::import_collected(
             &conn,
             collected,
-            clippings_txt.as_deref(),
             &device_serial,
             &db::now_iso(),
         )
@@ -499,7 +494,7 @@ fn decode_b64_opt(s: Option<&str>) -> Result<Option<Vec<u8>>, StatusCode> {
 /// of `inserted`, so checking `inserted` already covers them.)
 fn import_changed_anything(r: &DeviceImportReport) -> bool {
     let touched = |s: &ImportStats| s.inserted > 0 || s.removed > 0;
-    touched(&r.annotations) || touched(&r.clippings) || r.positions > 0 || r.relinked > 0
+    touched(&r.annotations) || r.positions > 0 || r.relinked > 0
 }
 
 /// Atomically write `<root>/.sync-pulse.json` — the cross-process signal the GUI
@@ -748,7 +743,6 @@ mod tests {
                 yjr_bytes: Some(yjr.clone()),
                 yjf_bytes: None,
             }],
-            None,
             device_serial,
             "now",
         )
@@ -835,8 +829,13 @@ mod tests {
         let state = AppState { paths, token: Arc::from(token.as_str()) };
         // A body past the 32 MB cap → rejected by DefaultBodyLimit before the
         // handler runs (413), regardless of token validity.
+        // A body past the 32 MB cap is built by inflating a sdr_name string —
+        // anything inside the JSON suffices; the layer trips before our handler.
         let huge = "a".repeat(super::SYNC_BODY_LIMIT + 1024);
-        let body = serde_json::json!({ "device_serial": "X", "sdrs": [], "clippings_txt": huge });
+        let body = serde_json::json!({
+            "device_serial": "X",
+            "sdrs": [ { "sdr_name": huge } ],
+        });
         let resp = build_router(state)
             .oneshot(sync_request(Some(&token), body))
             .await

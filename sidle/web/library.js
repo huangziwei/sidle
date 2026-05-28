@@ -1830,7 +1830,7 @@ function subscribePullProgress() {
 // new annotations and ones removed because they were deleted on the device
 // (full-mirror sync), so a delete-only sync isn't silently "up to date".
 function annotationSyncSummary(report) {
-  const added = (report?.annotations?.inserted ?? 0) + (report?.clippings?.inserted ?? 0);
+  const added = report?.annotations?.inserted ?? 0;
   const removed = report?.annotations?.removed ?? 0;
   if (added === 0 && removed === 0) return "Highlights already up to date";
   const books = report?.matched ?? 0;
@@ -1879,7 +1879,7 @@ function subscribeAnnotationSync() {
     state.annotationSync = false;
     renderQueue();
     const report = e.payload;
-    const added = (report?.annotations?.inserted ?? 0) + (report?.clippings?.inserted ?? 0);
+    const added = report?.annotations?.inserted ?? 0;
     const removed = report?.annotations?.removed ?? 0;
     // Only toast when the auto sync actually changed something (added or removed
     // on the device) — a no-op reconnect shouldn't nag.

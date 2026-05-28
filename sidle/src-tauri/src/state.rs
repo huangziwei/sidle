@@ -8,6 +8,7 @@ use rusqlite::Connection;
 use tauri::AppHandle;
 use tokio::sync::Mutex;
 
+use crate::device::Transport;
 use crate::device::kual::KualSource;
 use crate::device::monitor::{self, DeviceState};
 use crate::library::{LibraryPaths, db};
@@ -15,6 +16,20 @@ use crate::queue::{self, QueueHandle};
 use crate::server::ServerHandle;
 
 pub type DbHandle = Arc<Mutex<Connection>>;
+
+/// Long-lived, shared on-device IO handle. Opened once per device-connect by the
+/// monitor and cleared on disconnect; every Tauri command and the on-connect
+/// sync borrow this same `Arc<dyn Transport>` instead of calling
+/// `DeviceInfo::open_transport()` themselves.
+///
+/// Two reasons it has to be shared, not per-call: MTP-class Kindles expose a
+/// single USB session — a second `open_transport` while the first is live races
+/// the first one's bulk transfers and the device returns `exclusive_access` to
+/// whichever loses. Mass-storage doesn't care (the transport is a `PathBuf`
+/// wrapper), but using the same lifecycle for both keeps the call sites uniform.
+/// Concurrency inside the shared session is already serialized by
+/// `MtpTransport::op_lock`, so multiple borrowers don't need to coordinate here.
+pub type SharedTransport = Arc<Mutex<Option<Arc<dyn Transport>>>>;
 
 /// Single-entry cache for the reader's search `TextIndex`. Keyed by `book_id`,
 /// holds at most one — switching books rebuilds. First search per book pays
@@ -35,6 +50,8 @@ pub struct AppState {
     pub paths: LibraryPaths,
     pub queue: QueueHandle,
     pub device: DeviceState,
+    /// The shared device IO handle. See [`SharedTransport`].
+    pub transport: SharedTransport,
     pub server: ServerHandle,
     /// Source-of-truth paths for the KUAL deploy button (binary +
     /// bundle dir). Resolved once at startup by walking up from
@@ -146,9 +163,11 @@ impl AppState {
         crate::sync_pulse::spawn(app.clone(), paths.clone());
 
         let device = monitor::new_state();
+        let transport: SharedTransport = Arc::new(Mutex::new(None));
         monitor::spawn(
             app,
             device.clone(),
+            transport.clone(),
             db.clone(),
             paths.clone(),
             queue.clone(),
@@ -172,6 +191,7 @@ impl AppState {
             paths,
             queue,
             device,
+            transport,
             server: ServerHandle::default(),
             kual_source,
             reader_search_cache: Arc::new(Mutex::new(None)),

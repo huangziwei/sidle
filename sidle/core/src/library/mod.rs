@@ -1,6 +1,5 @@
 pub mod anchor;
 pub mod backup;
-pub mod clippings;
 pub mod db;
 pub mod epub_cover;
 pub mod import;

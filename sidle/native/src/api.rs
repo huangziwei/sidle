@@ -343,16 +343,14 @@ fn looks_like_sha8_kfx(name: &str) -> bool {
 // Annotation push — POST /sync/annotations (the LAN twin of a USB sync)
 // ---------------------------------------------------------------------------
 
-/// The push bundle: each `.sdr`'s reading-state sidecars (base64) plus the
-/// orphan archive. Mirrors `sidle-server`'s `SyncRequest` DTO. `device_serial`
-/// comes from `server.conf` (`ServerConfig::serial`), written by the desktop app
-/// at install — so the picker needs no on-device serial lookup.
+/// The push bundle: each `.sdr`'s reading-state sidecars (base64). Mirrors
+/// `sidle-server`'s `SyncRequest` DTO. `device_serial` comes from `server.conf`
+/// (`ServerConfig::serial`), written by the desktop app at install — so the
+/// picker needs no on-device serial lookup.
 #[derive(Serialize)]
 struct SyncRequest {
     device_serial: String,
     sdrs: Vec<SyncSdr>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    clippings_txt: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -378,8 +376,6 @@ pub struct SyncReport {
     pub unmatched: Vec<String>,
     #[serde(default)]
     pub annotations: SyncStats,
-    #[serde(default)]
-    pub clippings: SyncStats,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -395,8 +391,8 @@ impl SyncReport {
     /// positions`. `nothing new` when an idempotent re-sync changed nothing. A
     /// trailing `(N unmatched)` flags orphaned highlights when any.
     pub fn summary(&self) -> String {
-        let new = self.annotations.inserted + self.clippings.inserted;
-        let removed = self.annotations.removed + self.clippings.removed;
+        let new = self.annotations.inserted;
+        let removed = self.annotations.removed;
 
         let mut parts = Vec::new();
         if new > 0 {
@@ -426,8 +422,8 @@ const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Scan the on-device reading-state sidecars and push them to sidle-server's
 /// `POST /sync/annotations` — the LAN twin of a USB sync. `sidle_dir` is
-/// `/mnt/us/documents/Sidle` (the download dir); `My Clippings.txt` is read from
-/// its parent, `documents/`. Returns the server's [`SyncReport`].
+/// `/mnt/us/documents/Sidle` (the download dir). Returns the server's
+/// [`SyncReport`].
 ///
 /// Errors with a re-install breadcrumb if `server.conf` carries no `SERIAL=`
 /// (a pre-sync install): annotations are keyed per device, so the serial is
@@ -446,8 +442,8 @@ pub fn push_annotations(
         .into());
     }
 
-    let (sdrs, clippings_txt) = collect_sidecars(sidle_dir)?;
-    if sdrs.is_empty() && clippings_txt.is_none() {
+    let sdrs = collect_sidecars(sidle_dir)?;
+    if sdrs.is_empty() {
         // Nothing on the device to sync — skip the round-trip, report empty.
         return Ok(SyncReport::default());
     }
@@ -455,7 +451,6 @@ pub fn push_annotations(
     let req = SyncRequest {
         device_serial: cfg.serial.clone(),
         sdrs,
-        clippings_txt,
     };
     let body = serde_json::to_vec(&req).context("serialize sync request")?;
 
@@ -482,11 +477,11 @@ pub fn push_annotations(
 }
 
 /// Read the `.yjr`/`.yjf` sidecars from every `*.sdr` under `sidle_dir`, base64
-/// each, and read `My Clippings.txt` from the parent `documents/`. Mirrors the
-/// device-side scan in `sidle_core::library::ingest::import_from_device` (which
-/// sidle-native can't call — no sidle-core dep across the cross-compile
-/// boundary). A `.sdr` with neither sidecar (a pagination cache) is skipped.
-fn collect_sidecars(sidle_dir: &Path) -> Result<(Vec<SyncSdr>, Option<String>)> {
+/// each. Mirrors the device-side scan in
+/// `sidle_core::library::ingest::import_from_device` (which sidle-native can't
+/// call — no sidle-core dep across the cross-compile boundary). A `.sdr` with
+/// neither sidecar (a pagination cache) is skipped.
+fn collect_sidecars(sidle_dir: &Path) -> Result<Vec<SyncSdr>> {
     let mut sdrs = Vec::new();
     if let Ok(entries) = std::fs::read_dir(sidle_dir) {
         for entry in entries.flatten() {
@@ -512,16 +507,7 @@ fn collect_sidecars(sidle_dir: &Path) -> Result<(Vec<SyncSdr>, Option<String>)> 
         }
     }
 
-    // My Clippings.txt lives in documents/, the parent of documents/Sidle.
-    // `from_utf8_lossy` matches the desktop's clippings reader; a read error
-    // (vs. simply absent) just means no orphan archive, never a failed push.
-    let clippings_txt = sidle_dir
-        .parent()
-        .map(|docs| docs.join("My Clippings.txt"))
-        .and_then(|p| std::fs::read(&p).ok())
-        .map(|b| String::from_utf8_lossy(&b).into_owned());
-
-    Ok((sdrs, clippings_txt))
+    Ok(sdrs)
 }
 
 /// The first file in `sdr_dir` whose name ends with `suffix` (e.g. `.yjr`),
@@ -643,17 +629,14 @@ mod tests {
         let cache = sidle.join("other.cafe.sdr");
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("page.cache"), b"x").unwrap();
-        // My Clippings.txt in documents/, the parent of Sidle.
-        std::fs::write(docs.join("My Clippings.txt"), b"clip").unwrap();
 
-        let (sdrs, clippings) = collect_sidecars(&sidle).unwrap();
+        let sdrs = collect_sidecars(&sidle).unwrap();
         assert_eq!(sdrs.len(), 1, "pagination-cache .sdr should be skipped");
         assert_eq!(sdrs[0].sdr_name, "book.deadbeef.sdr");
         let yjr_expected = BASE64.encode(b"yjr-bytes");
         let yjf_expected = BASE64.encode(b"yjf-bytes");
         assert_eq!(sdrs[0].yjr_b64.as_deref(), Some(yjr_expected.as_str()));
         assert_eq!(sdrs[0].yjf_b64.as_deref(), Some(yjf_expected.as_str()));
-        assert_eq!(clippings.as_deref(), Some("clip"));
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -661,10 +644,9 @@ mod tests {
     #[test]
     fn collect_sidecars_empty_when_no_tree() {
         let base = scratch("empty");
-        // documents/Sidle doesn't exist → empty bundle, no error, no clippings.
-        let (sdrs, clippings) = collect_sidecars(&base.join("documents/Sidle")).unwrap();
+        // documents/Sidle doesn't exist → empty bundle, no error.
+        let sdrs = collect_sidecars(&base.join("documents/Sidle")).unwrap();
         assert!(sdrs.is_empty());
-        assert!(clippings.is_none());
     }
 
     #[test]

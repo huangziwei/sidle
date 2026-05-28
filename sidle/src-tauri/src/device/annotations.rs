@@ -1,6 +1,6 @@
-//! Pull a device's annotations (`.yjr` + `My Clippings.txt`) through the
-//! [`Transport`] abstraction so the same import works on both mass-storage
-//! (KOA2 and other jailbroken/pre-2024 Kindles) and MTP (Scribe, 2024+).
+//! Pull a device's annotations (`.yjr` + `.yjf`) through the [`Transport`]
+//! abstraction so the same import works on both mass-storage (KOA2 and other
+//! jailbroken/pre-2024 Kindles) and MTP (Scribe, 2024+).
 //!
 //! The transport-agnostic import logic lives in `sidle_core::library::ingest`
 //! ([`ingest::import_collected`]); this module is the *device-side scan* that
@@ -17,19 +17,18 @@ use crate::state::DbHandle;
 
 /// Scan `documents/Sidle/` over `transport`, returning each `.sdr` directory's
 /// `.yjr` (annotations) and `.yjf` (last-read position) bytes — either may be
-/// absent — plus the `My Clippings.txt` text (if present). Mirrors the
-/// mass-storage `std::fs` scan in `ingest::import_from_device`: `.yjr.bad_file`
-/// is excluded (doesn't end in `.yjr`), `.sdr` dirs with NEITHER sidecar (pure
-/// pagination caches) are skipped, and `documents/Downloads/Items01/` (DRM'd
-/// Amazon KFX) is never touched.
+/// absent. Mirrors the mass-storage `std::fs` scan in
+/// `ingest::import_from_device`: `.yjr.bad_file` is excluded (doesn't end in
+/// `.yjr`), `.sdr` dirs with NEITHER sidecar (pure pagination caches) are
+/// skipped, and `documents/Downloads/Items01/` (DRM'd Amazon KFX) is never
+/// touched. The global `documents/My Clippings.txt` is deliberately ignored
+/// — it would conflate Amazon-store books with Sidle-sideloaded ones.
 ///
 /// Whether the device exposes its `.sdr/*.yjr` sidecars at all is up to its MTP
 /// responder — `documents/Sidle/*.kfx` is always enumerable (that's where we
 /// sideload), but Amazon's private reading-state dirs may or may not be. An
 /// empty result on a Scribe means they aren't.
-pub fn collect_device_yjr(
-    transport: &dyn Transport,
-) -> Result<(Vec<CollectedYjr>, Option<String>)> {
+pub fn collect_device_yjr(transport: &dyn Transport) -> Result<Vec<CollectedYjr>> {
     let sidle = TPath::parse("documents/Sidle");
     let mut collected = Vec::new();
 
@@ -61,15 +60,7 @@ pub fn collect_device_yjr(
         });
     }
 
-    // Orphan archive — best-effort. `from_utf8_lossy` matches core's
-    // `clippings::parse_file`; absent or unreadable just means no orphans.
-    let clip = TPath::parse("documents/My Clippings.txt");
-    let clippings_txt = transport
-        .read(&clip)
-        .ok()
-        .map(|b| String::from_utf8_lossy(&b).into_owned());
-
-    Ok((collected, clippings_txt))
+    Ok(collected)
 }
 
 /// Import annotations off any connected Kindle into the library — mass-storage
@@ -83,19 +74,24 @@ pub fn collect_device_yjr(
 /// fast local `std::fs` scan under the lock).
 pub fn import_device_annotations(
     device: &DeviceInfo,
+    transport: &dyn Transport,
     db: &DbHandle,
 ) -> Result<DeviceImportReport> {
     let now = db::now_iso();
     match device.mass_storage_mount() {
         Some(mount) => {
+            // Mass-storage has a real volume — bypass the transport and use
+            // the `std::fs` scanner so the USB scan + DB import can happen
+            // under one lock (the volume IO is local-fast).
             let conn = db.blocking_lock();
             ingest::import_from_device(&conn, &mount, &device.serial, &now)
         }
         None => {
-            let transport = device.open_transport()?;
-            let (collected, clippings) = collect_device_yjr(transport.as_ref())?;
+            // MTP: the USB walk is slow enough that we deliberately do it
+            // BEFORE taking the DB lock — see `collect_device_yjr` above.
+            let collected = collect_device_yjr(transport)?;
             let conn = db.blocking_lock();
-            ingest::import_collected(&conn, collected, clippings.as_deref(), &device.serial, &now)
+            ingest::import_collected(&conn, collected, &device.serial, &now)
         }
     }
 }
@@ -108,10 +104,9 @@ mod tests {
     // Drives the collector through the mass-storage transport (MTP can't be
     // unit-tested without a device). Confirms it finds both sidecars inside a
     // `.sdr`, STILL collects a `.yjf`-only (read, never highlighted) `.sdr`,
-    // skips a pure pagination-cache `.sdr`, ignores `.yjr.bad_file`, and reads
-    // `My Clippings.txt`.
+    // skips a pure pagination-cache `.sdr`, and ignores `.yjr.bad_file`.
     #[test]
-    fn collects_yjr_yjf_and_clippings_over_transport() {
+    fn collects_yjr_and_yjf_over_transport() {
         let tmp = tempfile::tempdir().unwrap();
         let sidle = tmp.path().join("documents").join("Sidle");
 
@@ -132,14 +127,8 @@ mod tests {
         // A pure pagination-cache `.sdr` (neither sidecar) — skipped.
         std::fs::create_dir_all(sidle.join("cache.feedface.sdr")).unwrap();
 
-        std::fs::write(
-            tmp.path().join("documents").join("My Clippings.txt"),
-            b"clip text",
-        )
-        .unwrap();
-
         let transport = MassStorageTransport::new(tmp.path().to_path_buf());
-        let (mut collected, clippings) = collect_device_yjr(&transport).unwrap();
+        let mut collected = collect_device_yjr(&transport).unwrap();
         collected.sort_by(|a, b| a.sdr_name.cmp(&b.sdr_name)); // dir order is unspecified
 
         assert_eq!(collected.len(), 2, "annotated + position-only; cache skipped");
@@ -153,16 +142,13 @@ mod tests {
         assert_eq!(posonly.sdr_name, "read.cafef00d.sdr");
         assert!(posonly.yjr_bytes.is_none(), "no .yjr for a never-highlighted book");
         assert_eq!(posonly.yjf_bytes.as_deref(), Some(&b"POS-ONLY"[..]));
-
-        assert_eq!(clippings.as_deref(), Some("clip text"));
     }
 
     #[test]
     fn empty_when_no_sidle_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let transport = MassStorageTransport::new(tmp.path().to_path_buf());
-        let (collected, clippings) = collect_device_yjr(&transport).unwrap();
+        let collected = collect_device_yjr(&transport).unwrap();
         assert!(collected.is_empty());
-        assert!(clippings.is_none());
     }
 }

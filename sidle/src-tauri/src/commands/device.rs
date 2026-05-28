@@ -9,6 +9,7 @@ use crate::device::dedrm::{self, PullResult};
 use crate::device::kual::{
     self, KualInstallReport, KualOverall, KualStatus, ServerConfRender,
 };
+use crate::device::monitor::{ensure_transport, evict_transport};
 use crate::device::push::{self, DeleteResult, PushResult};
 use crate::library::{db, ingest};
 use crate::state::AppState;
@@ -97,16 +98,43 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
     let Some(device) = state.device.lock().await.clone() else {
         return Ok(Vec::new());
     };
+    let transport = ensure_transport(&state.transport, &device)
+        .await
+        .map_err(|e| {
+            eprintln!("[sidle/device_list] open transport failed: {e:#}");
+            e.to_string()
+        })?;
     let db_handle = state.db.clone();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<DeviceRow>> {
-        let transport = device.open_transport()?;
+    let serial = device.serial.clone();
+    let cell = state.transport.clone();
+    let inner_serial = serial.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<DeviceRow>> {
         let docs = crate::device::TPath::parse("documents/Sidle");
-        let entries = transport.list(&docs).unwrap_or_default();
+        // Surface USB/MTP errors instead of swallowing them — a silent
+        // empty `list` is exactly the "popover shows 0 books while files
+        // exist" symptom we're trying to make debuggable.
+        let entries = match transport.list(&docs) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "[sidle/device_list] {inner_serial}: list(documents/Sidle) failed: {e:#}"
+                );
+                return Err(e);
+            }
+        };
+        let total = entries.len();
         let conn = db_handle.blocking_lock();
 
         let mut out = Vec::new();
+        let mut skipped_meta = 0usize;
+        let mut sent = 0usize;
+        let mut orphan = 0usize;
+        let mut legacy_matched = 0usize;
+        let mut legacy_unmatched = 0usize;
+        let mut dirs = 0usize;
         for entry in entries {
             if entry.is_dir {
+                dirs += 1;
                 continue;
             }
             if is_macos_metadata(&entry.name) {
@@ -114,41 +142,84 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
                 // sha8 suffix as the real file and would otherwise be
                 // emitted as a duplicate row pointing at the same book.
                 // Same logic for `.DS_Store` etc.
+                skipped_meta += 1;
                 continue;
             }
-            let Some(sha8) = parse_sha_infix(&entry.name) else {
-                // Not one of ours (no sha8 infix). Shouldn't happen in
-                // practice — anything under Sidle/ was put there by us —
-                // but skip rather than treat as an orphan.
-                continue;
+            // Primary match: the modern `<basename>.<sha8>.kfx` shape, by
+            // `kfx_sha256` prefix. Fallback: legacy Sidle pushes (pre-sha8
+            // naming) whose on-device filename is just the library row's
+            // kfx basename — match by `kfx_path` suffix.
+            let resolved = match parse_sha_infix(&entry.name) {
+                Some(sha8) => match db::find_by_kfx_sha_prefix(&conn, &sha8)
+                    .map_err(anyhow::Error::from)?
+                {
+                    Some(book) => Some(book),
+                    None => None,
+                },
+                None => match db::find_by_kfx_filename(&conn, &entry.name)
+                    .map_err(anyhow::Error::from)?
+                {
+                    Some(book) => {
+                        legacy_matched += 1;
+                        Some(book)
+                    }
+                    None => {
+                        legacy_unmatched += 1;
+                        None
+                    }
+                },
             };
-            match db::find_by_kfx_sha_prefix(&conn, &sha8).map_err(anyhow::Error::from)? {
-                Some(book) => out.push(DeviceRow::Sent {
-                    book_id: book.id,
-                    sha256: book.sha256,
-                    title: book.title,
-                    author: book.author,
-                    filename: entry.name,
-                }),
-                None => out.push(DeviceRow::Orphan {
-                    sha8,
-                    filename: entry.name,
-                }),
+            match resolved {
+                Some(book) => {
+                    sent += 1;
+                    out.push(DeviceRow::Sent {
+                        book_id: book.id,
+                        sha256: book.sha256,
+                        title: book.title,
+                        author: book.author,
+                        filename: entry.name,
+                    });
+                }
+                None => {
+                    orphan += 1;
+                    // Carry the parsed sha8 when we have one; for legacy
+                    // un-prefixed files there is no sha8 and the empty
+                    // string is the explicit sentinel for "unknown".
+                    let sha8 = parse_sha_infix(&entry.name).unwrap_or_default();
+                    out.push(DeviceRow::Orphan {
+                        sha8,
+                        filename: entry.name,
+                    });
+                }
             }
         }
+        eprintln!(
+            "[sidle/device_list] {inner_serial}: {total} entries → {} rows ({sent} sent, {orphan} orphan; {dirs} dirs, {skipped_meta} mac-meta skipped; legacy: {legacy_matched} matched / {legacy_unmatched} unmatched)",
+            out.len(),
+        );
         Ok(out)
     })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    .await;
+
+    // Drop the cached MTP transport on USB/MTP error so the next caller's
+    // `ensure_transport` opens a fresh session — a stalled endpoint or
+    // post-error mtp-rs state isn't recoverable by reusing the same `Arc`.
+    if matches!(result, Err(_) | Ok(Err(_))) {
+        evict_transport(&cell).await;
+        eprintln!("[sidle/device_list] {serial}: transport evicted after error");
+    }
+
+    result
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 /// Import highlights / notes / bookmarks from the connected Kindle — either
 /// transport. Mass-storage reads `documents/Sidle/` off the volume; MTP (Scribe)
 /// pulls the `.yjr` over USB. Matches each annotated `.sdr` to a library book by
-/// its `kfx_sha256` infix, extracts the highlighted text from the book's own
-/// (readable) KFX, archives `My Clippings.txt` orphans, then relinks. The dedup
-/// hash makes it idempotent — safe to re-run on every connect.
+/// its `kfx_sha256` infix and extracts the highlighted text from the book's own
+/// (readable) KFX. The dedup hash makes it idempotent — safe to re-run on every
+/// connect.
 ///
 /// MTP import only yields records if the device exposes its `.sdr/.yjr` sidecars
 /// over MTP; if it doesn't, the report is simply 0 books.
@@ -162,13 +233,23 @@ pub async fn annotations_import_from_device(
         .await
         .clone()
         .ok_or_else(|| "no Kindle connected".to_string())?;
+    let transport = ensure_transport(&state.transport, &device)
+        .await
+        .map_err(|e| e.to_string())?;
     let db_handle = state.db.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::device::annotations::import_device_annotations(&device, &db_handle)
+    let cell = state.transport.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::device::annotations::import_device_annotations(&device, transport.as_ref(), &db_handle)
     })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    .await;
+
+    if matches!(result, Err(_) | Ok(Err(_))) {
+        evict_transport(&cell).await;
+    }
+
+    result
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 /// Skip files macOS scatters into FAT/exFAT mounts as a side effect of
@@ -188,10 +269,13 @@ pub async fn device_delete(
     let Some(device) = state.device.lock().await.clone() else {
         return Err("no Kindle connected".to_string());
     };
+    let transport = ensure_transport(&state.transport, &device)
+        .await
+        .map_err(|e| e.to_string())?;
     let db_handle = state.db.clone();
+    let cell = state.transport.clone();
 
-    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<DeleteResult>> {
-        let transport = device.open_transport()?;
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<DeleteResult>> {
         let conn = db_handle.blocking_lock();
         let mut out = Vec::with_capacity(filenames.len());
         for name in filenames {
@@ -215,9 +299,25 @@ pub async fn device_delete(
         }
         Ok(out)
     })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    .await;
+
+    // Any per-file `Failed` (or a panic) means the cached MTP transport is
+    // likely wedged — drop it so the next on-wire call ( the refreshDeviceList
+    // that the frontend fires right after delete) opens a fresh session
+    // instead of compounding errors against a stalled endpoint.
+    let needs_evict = match &result {
+        Err(_) => true,
+        Ok(Err(_)) => true,
+        Ok(Ok(rs)) => rs.iter().any(|r| matches!(r, DeleteResult::Failed { .. })),
+    };
+    if needs_evict {
+        evict_transport(&cell).await;
+        eprintln!("[sidle/device_delete] transport evicted after error");
+    }
+
+    result
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -229,10 +329,13 @@ pub async fn device_send(
     let Some(device) = state.device.lock().await.clone() else {
         return Err("no Kindle connected".to_string());
     };
+    let transport = ensure_transport(&state.transport, &device)
+        .await
+        .map_err(|e| e.to_string())?;
     let db_handle = state.db.clone();
+    let cell = state.transport.clone();
 
-    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<PushResult>> {
-        let transport = device.open_transport()?;
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<PushResult>> {
         let conn = db_handle.blocking_lock();
         let mut out = Vec::with_capacity(book_ids.len());
         for book_id in book_ids {
@@ -256,9 +359,23 @@ pub async fn device_send(
         }
         Ok(out)
     })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    .await;
+
+    // Same MTP-stall recovery dance as `device_delete` — drop the cached
+    // transport on any failure so the next call gets a fresh session.
+    let needs_evict = match &result {
+        Err(_) => true,
+        Ok(Err(_)) => true,
+        Ok(Ok(rs)) => rs.iter().any(|r| matches!(r, PushResult::Failed { .. })),
+    };
+    if needs_evict {
+        evict_transport(&cell).await;
+        eprintln!("[sidle/device_send] transport evicted after error");
+    }
+
+    result
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 /// Pull an orphan `.kfx` off the device and into the local library.
@@ -277,13 +394,16 @@ pub async fn device_import_orphan(
     let Some(device) = state.device.lock().await.clone() else {
         return Err("no Kindle connected".to_string());
     };
+    let transport = ensure_transport(&state.transport, &device)
+        .await
+        .map_err(|e| e.to_string())?;
     let db_handle = state.db.clone();
     let paths = state.paths.clone();
     let queue = state.queue.clone();
+    let cell = state.transport.clone();
 
-    let (result, enqueue) = tokio::task::spawn_blocking(
+    let outer = tokio::task::spawn_blocking(
         move || -> anyhow::Result<(PullResult, Option<i64>)> {
-            let transport = device.open_transport()?;
             let on_device = crate::device::TPath::parse("documents/Sidle").join(&filename);
             let bytes = transport.read(&on_device)?;
 
@@ -306,9 +426,16 @@ pub async fn device_import_orphan(
             Ok(pair)
         },
     )
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
+    .await;
+
+    if matches!(outer, Err(_) | Ok(Err(_))) {
+        evict_transport(&cell).await;
+        eprintln!("[sidle/device_import_orphan] transport evicted after error");
+    }
+
+    let (result, enqueue) = outer
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
 
     if let Some(book_id) = enqueue {
         let _ = queue.enqueue(book_id).await;
