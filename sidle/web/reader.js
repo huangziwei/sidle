@@ -1380,6 +1380,38 @@ const back = () => {
   paginator?.prev();
 };
 
+// Jump to section `idx` clamped to the spine. `anchor` is a fraction: 0 = start
+// of section (default), 1 = last page of section (used for "jump to book end").
+function jumpToSection(idx, anchor = 0) {
+  if (!paginator || !dto?.sections?.length) return;
+  const max = dto.sections.length - 1;
+  const i = Math.max(0, Math.min(max, idx));
+  hideNotePopover();
+  hideSelectionToolbar();
+  paginator.goTo({ index: i, anchor });
+}
+
+// Nudge the font-size slider by `delta` px (clamped to the slider's 12-26
+// range) and re-apply styles. Lets `[` / `]` shortcuts work without opening
+// the Aa panel.
+function bumpFontSize(delta) {
+  if (!styleSettings) return;
+  const next = Math.max(12, Math.min(26, (styleSettings.size || 16) + delta));
+  if (next === styleSettings.size) return;
+  styleSettings = { ...styleSettings, size: next };
+  const sizeInput = $("#rs-size");
+  if (sizeInput) sizeInput.value = String(next);
+  const sv = $("#rs-size-val");
+  if (sv) sv.textContent = `${next}px`;
+  saveStyle();
+  applyStyle();
+}
+
+// `g g` chord state: timestamp of the most recent armed `g`. A second `g`
+// within G_CHORD_MS fires "jump to start"; anything else resets.
+const G_CHORD_MS = 1500;
+let gArmed = 0;
+
 function onKey(e) {
   // ⌘F / Ctrl+F → open search (replacing the browser's find-in-page, which
   // would search the host doc, not the section iframe's content). Handled
@@ -1409,9 +1441,28 @@ function onKey(e) {
   // Typing in the note editor owns its own keys (arrows/space/etc.) — don't
   // hijack them to turn pages. (Escape is already handled above, so it closes.)
   if (e.target?.closest?.("#reader-note-popover")) return;
+  // `Shift+G` → jump to last page of the book. Must run BEFORE the modifier
+  // filter (which would skip it as a shifted key). All other unmodified
+  // shortcuts go through the switch below.
+  if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === "G") {
+    jumpToSection((dto?.sections?.length ?? 1) - 1, 1);
+    gArmed = 0;
+    e.preventDefault();
+    return;
+  }
   // Don't hijack modified combos — shift+arrow extends a text selection in the
   // section iframe, ⌘/ctrl/alt are shortcuts. Let those through.
   if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+  // `g g` chord (vim): first `g` arms; second within G_CHORD_MS jumps to start.
+  if (e.key === "g") {
+    const now = Date.now();
+    if (now - gArmed < G_CHORD_MS) { jumpToSection(0, 0); gArmed = 0; }
+    else gArmed = now;
+    e.preventDefault();
+    return;
+  }
+  // Any non-`g` key resets the chord — pressing `g` then `t` shouldn't fire.
+  gArmed = 0;
   const rtl = book?.ppd === "rtl"; // vertical-rl / RTL: next page is to the left
   let handled = true;
   switch (e.key) {
@@ -1429,6 +1480,33 @@ function onKey(e) {
     case "ArrowUp":
     case "PageUp":
       back();
+      break;
+    case "t":
+      toggleTocPanel();
+      break;
+    case "a":
+      toggleAnnotationsPanel();
+      break;
+    case "b":
+      toggleBookmark();
+      break;
+    case "s":
+      toggleStylePanel();
+      break;
+    case "/":
+      toggleSearchPanel();
+      break;
+    case "n":
+      jumpToSection((lastPos?.index ?? 0) + 1);
+      break;
+    case "p":
+      jumpToSection((lastPos?.index ?? 0) - 1);
+      break;
+    case "]":
+      bumpFontSize(1);
+      break;
+    case "[":
+      bumpFontSize(-1);
       break;
     default:
       handled = false;
