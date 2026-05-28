@@ -1584,59 +1584,46 @@ pub fn consolidate_html(state: &mut ContentState) {
 /// they get collapsed by HTML whitespace rules and the source `<br/>`s
 /// disappear from the rendered output.
 ///
-/// Restart the per-part scan after each split because (a) the newly
-/// created `<br/>`'s tail may itself contain more EOLs, (b) the
-/// in-place insertion shifts indices.
+/// One linear pass per part. After each split, the remainder of the source
+/// text (which may still contain EOLs) rides on the new `<br/>`'s tail. The
+/// new node is appended at the end of the arena — its id is past the cursor,
+/// so the same walk visits it later. NodeIds are stable (the underlying
+/// `Vec<Element>` is push-only), so insertion never shifts existing ids and
+/// no restart is needed.
 pub fn replace_eol_with_br(state: &mut ContentState) {
     const EOL_CHARS: &[char] = &['\n', '\r', '\u{2028}', '\u{2029}'];
     for part in &mut state.book_parts {
-        loop {
-            let n = part.dom.len();
-            let mut changed = false;
-            for id in 0..n {
-                // Element text — split at the first EOL, insert `<br/>` as
-                // the new first child, drop the EOL.
-                if let Some(text) = part.dom.get(id).text.clone()
-                    && let Some(idx) = text.find(EOL_CHARS)
-                {
-                    let (head, rest) = text.split_at(idx);
-                    let head = head.to_string();
-                    let tail = rest.chars().skip(1).collect::<String>();
-                    let br = part.dom.create_element("br");
-                    part.dom.get_mut(br).tail = if tail.is_empty() { None } else { Some(tail) };
-                    part.dom.get_mut(id).text =
-                        if head.is_empty() { None } else { Some(head) };
-                    part.dom.insert(id, 0, br);
-                    changed = true;
-                    break;
-                }
-                // Element tail — split, insert `<br/>` as the next sibling.
-                if let Some(tail_text) = part.dom.get(id).tail.clone()
-                    && let Some(idx) = tail_text.find(EOL_CHARS)
-                {
-                    let parent = match part.dom.get(id).parent {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    let pos = match part.dom.child_index(parent, id) {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    let (head, rest) = tail_text.split_at(idx);
-                    let head = head.to_string();
-                    let tail = rest.chars().skip(1).collect::<String>();
-                    let br = part.dom.create_element("br");
-                    part.dom.get_mut(br).tail = if tail.is_empty() { None } else { Some(tail) };
-                    part.dom.get_mut(id).tail =
-                        if head.is_empty() { None } else { Some(head) };
-                    part.dom.insert(parent, pos + 1, br);
-                    changed = true;
-                    break;
-                }
+        let mut id = 0;
+        while id < part.dom.len() {
+            // Element text — split at the first EOL, insert `<br/>` as the
+            // new first child. The new br's id is the highest in the arena,
+            // so the same walk visits it later and handles its tail.
+            if let Some(text) = part.dom.get(id).text.clone()
+                && let Some(idx) = text.find(EOL_CHARS)
+            {
+                let eol_len = text[idx..].chars().next().unwrap().len_utf8();
+                let head = text[..idx].to_string();
+                let tail = text[idx + eol_len..].to_string();
+                let br = part.dom.create_element("br");
+                part.dom.get_mut(br).tail = if tail.is_empty() { None } else { Some(tail) };
+                part.dom.get_mut(id).text = if head.is_empty() { None } else { Some(head) };
+                part.dom.insert(id, 0, br);
             }
-            if !changed {
-                break;
+            // Element tail — split, insert `<br/>` as the next sibling.
+            if let Some(tail_text) = part.dom.get(id).tail.clone()
+                && let Some(idx) = tail_text.find(EOL_CHARS)
+                && let Some(parent) = part.dom.get(id).parent
+                && let Some(pos) = part.dom.child_index(parent, id)
+            {
+                let eol_len = tail_text[idx..].chars().next().unwrap().len_utf8();
+                let head = tail_text[..idx].to_string();
+                let tail = tail_text[idx + eol_len..].to_string();
+                let br = part.dom.create_element("br");
+                part.dom.get_mut(br).tail = if tail.is_empty() { None } else { Some(tail) };
+                part.dom.get_mut(id).tail = if head.is_empty() { None } else { Some(head) };
+                part.dom.insert(parent, pos + 1, br);
             }
+            id += 1;
         }
     }
 }
