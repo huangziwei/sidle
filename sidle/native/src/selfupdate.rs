@@ -86,6 +86,12 @@ pub fn download_file(agent: &ureq::Agent, cfg: &ServerConfig, name: &str) -> Res
     Ok(bytes)
 }
 
+/// First 8 hex chars (or fewer) of a hash, for readable logs — never the full
+/// digest.
+fn short(hex: &str) -> &str {
+    &hex[..hex.len().min(8)]
+}
+
 /// Hex sha256 of `bytes`. Same recipe as the desktop's `kual::sha256_bytes`
 /// (`Sha256` + `hex::encode`), so a device-computed hash equals the manifest's
 /// — the equality the "LAN deploy == USB deploy" gate hinges on.
@@ -148,18 +154,42 @@ pub fn stage_update(bundle: &Path, name: &str, bytes: &[u8]) -> anyhow::Result<P
 /// each: compare (skip if already current) → download → sha256/size-verify →
 /// atomic-stage as `<name>.new`. `bundle` is the on-device extension dir
 /// (`/mnt/us/extensions/sidle`). A verify failure aborts that file (and the
-/// pull) rather than staging a bad binary.
-pub fn run_pull(agent: &ureq::Agent, cfg: &ServerConfig, bundle: &Path) -> Result<UpdateOutcome> {
+/// pull) rather than staging a bad binary. `log` receives step breadcrumbs
+/// (manifest count, per-file device-vs-manifest hash, download/verify/stage) —
+/// the picker routes them to the dedicated `sidle-update.log`.
+pub fn run_pull(
+    agent: &ureq::Agent,
+    cfg: &ServerConfig,
+    bundle: &Path,
+    log: impl Fn(&str),
+) -> Result<UpdateOutcome> {
     let manifest = fetch_manifest(agent, cfg)?;
+    log(&format!("manifest: {} file(s)", manifest.files.len()));
     let mut staged = Vec::new();
     for entry in &manifest.files {
         let dest = bundle.join(&entry.name);
         let on_device = std::fs::read(&dest).ok();
+        let have = on_device.as_deref().map(sha256_hex);
+        log(&format!(
+            "{}: device={} manifest={} ({} bytes)",
+            entry.name,
+            have.as_deref().map(short).unwrap_or("absent"),
+            short(&entry.sha256),
+            entry.size,
+        ));
         if !needs_update(on_device.as_deref(), entry) {
+            log(&format!("{}: already current — skip", entry.name));
             continue;
         }
+        log(&format!("{}: downloading…", entry.name));
         let bytes = download_file(agent, cfg, &entry.name)?;
         if !verify_download(&bytes, entry) {
+            log(&format!(
+                "{}: VERIFY FAILED — got {} bytes sha={} — not staging",
+                entry.name,
+                bytes.len(),
+                short(&sha256_hex(&bytes)),
+            ));
             return Err(anyhow!(
                 "downloaded {} failed its sha256/size check ({} bytes vs {} expected) \
                  — not staging",
@@ -169,7 +199,8 @@ pub fn run_pull(agent: &ureq::Agent, cfg: &ServerConfig, bundle: &Path) -> Resul
             )
             .into());
         }
-        stage_update(bundle, &entry.name, &bytes)?;
+        let staged_path = stage_update(bundle, &entry.name, &bytes)?;
+        log(&format!("{}: verified + staged {}", entry.name, staged_path.display()));
         staged.push(entry.name.clone());
     }
     Ok(if staged.is_empty() {

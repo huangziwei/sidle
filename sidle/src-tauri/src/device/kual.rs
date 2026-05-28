@@ -218,6 +218,12 @@ fn slots<'a>(source: &'a KualSource, conf: &ServerConfRender) -> Vec<Slot<'a>> {
             source: Source::File(source.bundle_dir.join("bin/sidle.sh")),
         },
         Slot {
+            // The "Update Sidle (Wi-Fi)" launcher — runs `sidle --update`
+            // argless (KUAL didn't reliably pass `--update` via the menu action).
+            device_rel: "bin/update.sh",
+            source: Source::File(source.bundle_dir.join("bin/update.sh")),
+        },
+        Slot {
             device_rel: "config.xml",
             source: Source::File(source.bundle_dir.join("config.xml")),
         },
@@ -261,7 +267,7 @@ pub fn compute_status(
     device_mount: &Path,
 ) -> Result<KualStatus> {
     let device_root = device_mount.join(DEVICE_BUNDLE_REL);
-    let mut files = Vec::with_capacity(5);
+    let mut files = Vec::with_capacity(6);
     let mut binary_missing = false;
 
     for slot in slots(source, conf) {
@@ -413,7 +419,7 @@ pub fn install_all(
     std::fs::create_dir_all(device_root.join("etc"))
         .with_context(|| format!("mkdir {}", device_root.join("etc").display()))?;
 
-    let mut results = Vec::with_capacity(5);
+    let mut results = Vec::with_capacity(6);
     for slot in slots(source, conf) {
         let dest = device_root.join(slot.device_rel);
         let result = install_one(&slot, &dest);
@@ -673,6 +679,7 @@ mod tests {
         write_file(&bundle.join("config.xml"), b"<config/>");
         write_file(&bundle.join("menu.json"), b"{\"items\":[]}");
         write_file(&bundle.join("bin/sidle.sh"), b"#!/bin/sh\nexec sidle\n");
+        write_file(&bundle.join("bin/update.sh"), b"#!/bin/sh\nexec sidle --update\n");
         if include_binary {
             write_file(
                 &repo
@@ -798,6 +805,7 @@ mod tests {
         install_all(&source, &make_conf(), device.path(), |_| {}).unwrap();
         assert!(device.path().join("extensions/sidle/bin/sidle").exists());
         assert!(device.path().join("extensions/sidle/bin/sidle.sh").exists());
+        assert!(device.path().join("extensions/sidle/bin/update.sh").exists());
         assert!(device.path().join("extensions/sidle/etc/server.conf").exists());
         assert!(device.path().join("extensions/sidle/config.xml").exists());
         assert!(device.path().join("extensions/sidle/menu.json").exists());
@@ -811,7 +819,8 @@ mod tests {
 
         let mut events = 0;
         install_all(&source, &make_conf(), device.path(), |_| events += 1).unwrap();
-        assert_eq!(events, 5); // bin/sidle, bin/sidle.sh, config.xml, menu.json, etc/server.conf
+        // bin/sidle, bin/sidle.sh, bin/update.sh, config.xml, menu.json, etc/server.conf
+        assert_eq!(events, 6);
     }
 
     #[test]

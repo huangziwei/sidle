@@ -37,6 +37,10 @@ use ui::text::TextRenderer;
 use ui::toast;
 
 const LOG_PATH: &str = "/mnt/us/sidle-native.log";
+/// Dedicated log for the "Update over Wi-Fi" flow (`--update`), so its trail
+/// isn't interleaved with the gallery's `LOG_PATH`. Written by `update_log` +
+/// `bin/update.sh` (which also redirects the binary's stderr here).
+const UPDATE_LOG_PATH: &str = "/mnt/us/sidle-update.log";
 const CONFIG_PATH: &str = "/mnt/us/extensions/sidle/etc/server.conf";
 /// On-device KUAL bundle root. `--update` stages its pulled binary under here as
 /// `bin/sidle.new` (manifest names are relative to this dir), and the launcher
@@ -118,9 +122,10 @@ fn draw_panel(fb: &mut Framebuffer, renderer: &mut TextRenderer, message: &str) 
 /// graphics-init failure ends `--update`; only the network/list/grid failures
 /// it's launched separately from are dodged.
 fn run_update() -> anyhow::Result<()> {
-    log("sidle-native --update: start");
+    update_log("=== Update over Wi-Fi: start ===");
+    update_log(format!("argv: {:?}", std::env::args().collect::<Vec<_>>()));
     let cfg = config::load(Path::new(CONFIG_PATH))?;
-    log(format!("--update server: http://{}:{}", cfg.host, cfg.port));
+    update_log(format!("server: http://{}:{}", cfg.host, cfg.port));
     let agent = ureq::AgentBuilder::new().build();
 
     let mut renderer = TextRenderer::load(FONT_PX)?;
@@ -135,7 +140,8 @@ fn run_update() -> anyhow::Result<()> {
     // a sleepy radio.
     draw_panel(&mut fb, &mut renderer, "Checking for update…")?;
 
-    let message = match selfupdate::run_pull(&agent, &cfg, Path::new(BUNDLE_DIR)) {
+    // Step-level breadcrumbs go to the dedicated update log via the closure.
+    let message = match selfupdate::run_pull(&agent, &cfg, Path::new(BUNDLE_DIR), |m| update_log(m)) {
         Ok(selfupdate::UpdateOutcome::UpToDate) => "Already up to date".to_string(),
         Ok(selfupdate::UpdateOutcome::Staged(_)) => {
             "Update staged — relaunch to apply".to_string()
@@ -145,11 +151,11 @@ fn run_update() -> anyhow::Result<()> {
             "Plug Kindle into sidle, click Update KUAL".to_string()
         }
         Err(e) => {
-            log(format!("--update failed: {e}"));
+            update_log(format!("FAILED: {e}"));
             "Update failed — see log".to_string()
         }
     };
-    log(format!("--update result: {message}"));
+    update_log(format!("result: {message}"));
 
     // Result panel, then block until a tap or page button. On return the window
     // tears down and the framework recomposites the home screen (every exit
@@ -863,4 +869,20 @@ fn log(line: impl AsRef<str>) {
         let _ = writeln!(f, "{line}");
     }
     let _ = writeln!(std::io::stderr(), "{line}");
+}
+
+/// Append a line to the dedicated "Update over Wi-Fi" log (`--update`), so the
+/// self-update trail isn't buried in the gallery's `LOG_PATH`. File only (no
+/// stderr echo) — `bin/update.sh` redirects the binary's stderr to this same
+/// file, so panics still land without double-logging these explicit lines.
+fn update_log(line: impl AsRef<str>) {
+    let line = line.as_ref();
+    let path = if std::path::Path::new("/mnt/us").is_dir() {
+        UPDATE_LOG_PATH
+    } else {
+        "./sidle-update.log"
+    };
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
+    }
 }
