@@ -1265,14 +1265,26 @@ function applyLayout(index, force) {
     const vertical = (book?.writingMode || "").startsWith("vertical");
     paginator.setAttribute("gap", "7%");
     if (vertical) {
-      // Vary the block (top/bottom) margin. The measure (column height) is left
-      // UNCAPPED so the content fills the page height and the `margin` attribute
-      // is the *actual* top/bottom margin — not just a floor. With the default
-      // 720 cap, a tall/fullscreen window would cap the content and center it,
-      // splitting the leftover as fixed margins that ignore the setting.
-      paginator.setAttribute("margin", `${VMARGIN[styleSettings.margin] ?? VMARGIN.normal}px`);
-      paginator.setAttribute("max-inline-size", `${HUGE_MEASURE}px`);
-      paginator.setAttribute("max-column-count", "2");
+      // Block (top/bottom) margin from the preset. For the measure (= column
+      // height), branch on the page's orientation — matching the paginator's own
+      // container-query rule (`#top.vertical` in `@container (portrait)`):
+      //   - LANDSCAPE: one tall column. Leave the measure UNCAPPED so content
+      //     fills the page height and the `margin` attribute is the *actual*
+      //     top/bottom margin, not just a floor.
+      //   - PORTRAIT with columns=auto: two STACKED columns. Cap the measure at
+      //     (pageH - 2*margin) / 2 so max-height = cap * 2 ≈ pageH - 2*margin
+      //     (margin honored exactly) AND ceil(avail/cap) = 2 so the divisor
+      //     formula picks two columns. (Uncapped would yield ceil≈1 → one col.)
+      //   - PORTRAIT with columns=1: same as Single — max-column-count=1 forces
+      //     one column regardless of orientation, so leave the measure uncapped.
+      const vm = VMARGIN[styleSettings.margin] ?? VMARGIN.normal;
+      const rect = paginator.getBoundingClientRect();
+      const portrait = rect.height > rect.width;
+      const twoCol = styleSettings.columns !== "1" && portrait;
+      const pageH = rect.height || window.innerHeight;
+      paginator.setAttribute("margin", `${vm}px`);
+      paginator.setAttribute("max-inline-size", twoCol ? `${Math.floor((pageH - 2 * vm) / 2)}px` : `${HUGE_MEASURE}px`);
+      paginator.setAttribute("max-column-count", styleSettings.columns === "1" ? "1" : "2");
     } else {
       // A column at most maxInlineSize wide; leftover is L/R margin. With
       // columns=auto, the paginator splits to 2 once the window is wide
@@ -1668,6 +1680,17 @@ function wire() {
       el.addEventListener("input", onStyleInput);
       el.addEventListener("change", onStyleInput);
     });
+  // Vertical 2-col mode keys off the paginator's live aspect ratio + height, so
+  // we re-apply layout on window resize. rAF coalesces drag-resize bursts into
+  // one apply per frame.
+  let resizeTick = null;
+  window.addEventListener("resize", () => {
+    if (resizeTick) cancelAnimationFrame(resizeTick);
+    resizeTick = requestAnimationFrame(() => {
+      resizeTick = null;
+      if (paginator && styleSettings) applyLayout(lastPos?.index ?? 0, true);
+    });
+  });
   // Click anywhere in the app chrome (outside a popover) dismisses it. Clicks
   // inside the section iframe live in a separate document and don't reach here,
   // so this never fights the in-text click that opened the note popover.
