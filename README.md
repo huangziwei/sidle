@@ -4,6 +4,7 @@ Sideload and sidedump books in and out of your (jailbroken) Kindle.
 
 <p align="center">
   <img src=".github/assets/Sidle-Tauri.png" height="300" />
+  <img src=".github/assets/Sidle-Reader.png" height="300" />
   <img src=".github/assets/Sidle-KUAL.png" height="300" />
 </p>
 
