@@ -1,27 +1,25 @@
 # Sidle 蛇行
 
-<p align="center"><img src="./sidle/src-tauri/icons/128x128@2x.png"/></p>
+<p align="center"><img src=".github/assets/icon.png" width="128" height="128"/></p>
 
-Sideload and sidedump books in and out of your (jailbroken) Kindle.
+Sideload/dump books in and out of a (jailbroken) Kindle.
 
 ## TL;DR
 
 Sidle contains two parts:
 
-1. a Rust/Tauri app for managing books and converting various formats to EPUB and KFX on MacOS;
-2. a KUAL app to pull books from the library via WIFI.
+1. a Rust/Tauri app for managing books, converting various formats to EPUB and KFX, and read them on MacOS;
+2. a KUAL app to pull books from the library and sync annotations back to the library via WIFI.
 
-The Tauri app doesn't require the Kindle being jailbroken, but the second one does (for installing KUAL, to begin with). 
+The Tauri app doesn't require the Kindle being jailbroken, but the KUAL app does (to begin with, you need jailbreaking to install KUAL per se). 
 
 ## Screenshots
-
 
 <p align="center">
   <img src=".github/assets/Sidle-Tauri.png" height="300" />
   <img src=".github/assets/Sidle-Reader.png" height="300" />
   <img src=".github/assets/Sidle-KUAL.png" height="300" />
 </p>
-
 
 ## Build
 
