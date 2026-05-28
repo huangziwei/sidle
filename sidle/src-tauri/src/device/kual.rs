@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Where on the device the KUAL bundle lives, relative to the mount.
@@ -420,6 +420,14 @@ pub fn install_all(
         on_progress(&result);
         results.push(result);
     }
+
+    // A USB push is authoritative: the `bin/sidle` we just wrote supersedes any
+    // pending LAN self-update staged as `bin/sidle.new` by an earlier "Update
+    // over Wi-Fi". Leaving the stale `.new` would let the launcher's
+    // unconditional swap (`sidle.sh`) clobber this freshly-pushed binary on the
+    // next launch — a silent regression. Best-effort; NotFound is the norm.
+    let _ = std::fs::remove_file(device_root.join("bin/sidle.new"));
+
     Ok(KualInstallReport { results })
 }
 
@@ -517,6 +525,100 @@ pub fn detect_lan_ipv4() -> Option<Ipv4Addr> {
         }
         SocketAddr::V6(_) => None,
     }
+}
+
+// ----------------------------------------------------------------------------
+// LAN self-update staging (the `kual-dist/` bundle the server serves)
+// ----------------------------------------------------------------------------
+
+/// One entry in the LAN self-update manifest — a single deployable file.
+///
+/// `name` is the **device-relative** path (the `slots()` `device_rel`, e.g.
+/// `bin/sidle`): the picker saves it under `<extensions/sidle>/<name>` and
+/// `sidle-server` serves it from `<kual-dist>/<name>`, so the one string keys
+/// the staged file, the served route, and the on-device destination. `sha256`
+/// is computed with the same [`sha256_file_opt`]/[`sha256_bytes`] the USB push
+/// uses, so a LAN pull and a USB push report identical hashes (the gate).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KualManifestEntry {
+    pub name: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
+/// The `kual-dist/manifest.json` contract. `sidle-server` mirrors a minimal
+/// `Deserialize` view of this (it only needs `name` for the served-file
+/// whitelist) rather than sharing the type across the crate boundary — the
+/// same mirror-struct convention `SyncReport`/`DeviceImportReport` use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KualManifest {
+    pub files: Vec<KualManifestEntry>,
+}
+
+/// Outcome of a [`stage_dist`] call, surfaced so callers can log/skip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageOutcome {
+    /// Copied fresh bytes (staged copy was missing or older than the source).
+    Staged,
+    /// Staged copy already current (source not newer + manifest present).
+    UpToDate,
+    /// Source binary doesn't exist yet — run the armv7 cross-build first.
+    SourceMissing,
+}
+
+/// Stage the deployable picker binary + a `manifest.json` into `dist_dir`
+/// (`<data-dir>/kual-dist/`), where `sidle-server` serves it over `/kual/...`
+/// for an untethered "Update over Wi-Fi" pull.
+///
+/// v1 stages exactly one file: `bin/sidle`, the armv7 picker. **mtime-gated** —
+/// re-copies only when the freshly cross-built `KualSource.binary_path` is newer
+/// than the staged copy (or the manifest is absent), so the startup /
+/// popover-open / post-install calls are near-instant no-ops once warm. Writes
+/// via [`atomic_write`] (temp + rename) so a concurrent server read never sees a
+/// half-written binary or manifest.
+///
+/// Returns [`StageOutcome::SourceMissing`] (not an error) when the binary hasn't
+/// been built — the same graceful "run cargo build first" signal `compute_status`
+/// gives, so a startup call on a fresh checkout doesn't fail bootstrap.
+pub fn stage_dist(source: &KualSource, dist_dir: &Path) -> Result<StageOutcome> {
+    let src_bin = source.binary_path.as_path();
+    let Some(src_mtime) = mtime_ms(src_bin) else {
+        return Ok(StageOutcome::SourceMissing);
+    };
+
+    let dest_bin = dist_dir.join("bin").join("sidle");
+    let manifest_path = dist_dir.join("manifest.json");
+
+    // mtime-gate: skip the copy when the staged binary is already at least as new
+    // as the source AND the manifest is present (a torn prior run could have
+    // written the binary but not the manifest).
+    if manifest_path.exists()
+        && let Some(dest_mtime) = mtime_ms(&dest_bin)
+        && dest_mtime >= src_mtime
+    {
+        return Ok(StageOutcome::UpToDate);
+    }
+
+    let bytes = std::fs::read(src_bin)
+        .with_context(|| format!("read source binary {}", src_bin.display()))?;
+    let sha256 = sha256_bytes(&bytes);
+    let size = bytes.len() as u64;
+
+    std::fs::create_dir_all(dist_dir.join("bin"))
+        .with_context(|| format!("mkdir {}", dist_dir.join("bin").display()))?;
+    atomic_write(&dest_bin, &bytes)?;
+
+    let manifest = KualManifest {
+        files: vec![KualManifestEntry {
+            name: "bin/sidle".to_string(),
+            sha256,
+            size,
+        }],
+    };
+    let json = serde_json::to_vec_pretty(&manifest).context("serialize kual manifest")?;
+    atomic_write(&manifest_path, &json)?;
+
+    Ok(StageOutcome::Staged)
 }
 
 // ----------------------------------------------------------------------------
@@ -726,5 +828,72 @@ mod tests {
         // Can't assert a specific IP in CI, just that the call is
         // side-effect-free and doesn't panic on either outcome.
         let _ = detect_lan_ipv4();
+    }
+
+    #[test]
+    fn install_all_clears_stale_sidle_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let device = tempfile::tempdir().unwrap();
+
+        // A pending LAN self-update staged on the device before this USB push.
+        let bin_dir = device.path().join("extensions/sidle/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let stale = bin_dir.join("sidle.new");
+        std::fs::write(&stale, b"stale-lan-stage").unwrap();
+
+        install_all(&source, &make_conf(), device.path(), |_| {}).unwrap();
+
+        assert!(!stale.exists(), "USB install must clear a pending bin/sidle.new");
+        assert!(bin_dir.join("sidle").exists(), "the authoritative bin/sidle is written");
+    }
+
+    #[test]
+    fn stage_dist_writes_binary_and_matching_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let dist = tempfile::tempdir().unwrap();
+
+        assert_eq!(stage_dist(&source, dist.path()).unwrap(), StageOutcome::Staged);
+
+        let staged = dist.path().join("bin/sidle");
+        let src_bytes = std::fs::read(&source.binary_path).unwrap();
+        assert_eq!(std::fs::read(&staged).unwrap(), src_bytes, "staged == source bytes");
+
+        let manifest: KualManifest =
+            serde_json::from_slice(&std::fs::read(dist.path().join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest.files.len(), 1);
+        let entry = &manifest.files[0];
+        // The name is the device-relative slot path, and the hash matches what
+        // the USB push would report for the very same bytes (the LAN==USB gate).
+        assert_eq!(entry.name, "bin/sidle");
+        assert_eq!(entry.sha256, sha256_bytes(&src_bytes));
+        assert_eq!(entry.size, src_bytes.len() as u64);
+    }
+
+    #[test]
+    fn stage_dist_source_missing_is_graceful() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), false); // binary not built
+        let dist = tempfile::tempdir().unwrap();
+
+        assert_eq!(stage_dist(&source, dist.path()).unwrap(), StageOutcome::SourceMissing);
+        assert!(!dist.path().join("manifest.json").exists());
+        assert!(!dist.path().join("bin/sidle").exists());
+    }
+
+    #[test]
+    fn stage_dist_is_mtime_gated_and_restages_when_manifest_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = make_source(tmp.path(), true);
+        let dist = tempfile::tempdir().unwrap();
+
+        assert_eq!(stage_dist(&source, dist.path()).unwrap(), StageOutcome::Staged);
+        // Source unchanged + manifest present → near-instant no-op.
+        assert_eq!(stage_dist(&source, dist.path()).unwrap(), StageOutcome::UpToDate);
+        // A torn prior run (binary written, manifest lost) must re-stage.
+        std::fs::remove_file(dist.path().join("manifest.json")).unwrap();
+        assert_eq!(stage_dist(&source, dist.path()).unwrap(), StageOutcome::Staged);
     }
 }

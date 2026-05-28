@@ -519,12 +519,39 @@ pub async fn kual_install(
 
     let source = state.kual_source.clone();
     let app_handle = app.clone();
-    tokio::task::spawn_blocking(move || {
-        kual::install_all(&source, &conf, &mount, |progress| {
+    let dist_dir = state.paths.kual_dist();
+    tokio::task::spawn_blocking(move || -> Result<KualInstallReport, String> {
+        let report = kual::install_all(&source, &conf, &mount, |progress| {
             let _ = app_handle.emit("kual:install-progress", progress);
         })
+        .map_err(|e| format!("{e:#}"))?;
+        // Refresh the LAN dist so an untethered "Update over Wi-Fi" pulls the
+        // exact binary this USB push just wrote. Non-fatal — a staging miss
+        // doesn't undo a successful device install.
+        if let Err(e) = kual::stage_dist(&source, &dist_dir) {
+            eprintln!("[sidle/kual_install] kual-dist staging failed: {e:#}");
+        }
+        Ok(report)
     })
     .await
     .map_err(|e| e.to_string())?
-    .map_err(|e| format!("{e:#}"))
+}
+
+/// Re-stage the LAN self-update bundle (`<data-dir>/kual-dist/`) when the
+/// freshly cross-built picker binary is newer than the staged copy. Called on
+/// the device-popover-open path alongside [`kual_status`], so the dev loop is
+/// "rebuild armv7 → open the popover → device pulls" — no cable, no app restart.
+/// mtime-gated (a near-instant no-op once warm) and device-independent (it
+/// stages the repo binary into the data dir), so it works whether or not a
+/// Kindle is plugged in. Errors are surfaced but the frontend treats them as
+/// non-fatal.
+#[tauri::command]
+pub async fn kual_stage_dist(state: State<'_, AppState>) -> Result<(), String> {
+    let source = state.kual_source.clone();
+    let dist_dir = state.paths.kual_dist();
+    tokio::task::spawn_blocking(move || kual::stage_dist(&source, &dist_dir))
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|_| ())
+        .map_err(|e| format!("{e:#}"))
 }

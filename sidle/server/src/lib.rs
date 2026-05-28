@@ -133,6 +133,11 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/sync/annotations",
             post(sync_annotations).layer(DefaultBodyLimit::max(SYNC_BODY_LIMIT)),
         )
+        // KUAL self-update pull: the picker fetches its own next binary from the
+        // staged `kual-dist/` bundle (written by the desktop app). Reads only,
+        // token-gated like the rest — no new write surface.
+        .route("/kual/manifest.json", get(get_kual_manifest))
+        .route("/kual/file/{*name}", get(get_kual_file))
         .with_state(state)
 }
 
@@ -523,6 +528,60 @@ fn write_sync_pulse(paths: &LibraryPaths, device_serial: &str, report: &DeviceIm
     }
 }
 
+/// Minimal `Deserialize` view of `kual-dist/manifest.json`: the server only
+/// needs each entry's `name` to whitelist the served files. Mirrors the
+/// desktop's `KualManifest` (which also carries `sha256`/`size`) rather than
+/// sharing the type across the crate boundary — the same mirror-struct
+/// convention the sync DTOs use; serde drops the extra fields.
+#[derive(serde::Deserialize)]
+struct KualManifest {
+    files: Vec<KualManifestEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct KualManifestEntry {
+    name: String,
+}
+
+fn read_kual_manifest(dist_dir: &StdPath) -> Option<KualManifest> {
+    let bytes = std::fs::read(dist_dir.join("manifest.json")).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// `GET /kual/manifest.json` → the staged manifest verbatim (token-gated). 404
+/// when nothing's been staged yet; the picker reads that as "no update".
+async fn get_kual_manifest(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    check_token(&headers, &query, &state.token)?;
+    let path = state.paths.kual_dist().join("manifest.json");
+    serve_file(path, "application/json", None).await
+}
+
+/// `GET /kual/file/{*name}` → bytes from `kual-dist/<name>` (token-gated).
+///
+/// `name` is whitelisted against the manifest's entries: only a file the
+/// manifest declares is servable. That's both the access bound (just the staged
+/// set) and the path-traversal guard — a `name` like `../library.db` isn't a
+/// manifest entry, so it 404s before any path join. The catch-all `{*name}` is
+/// needed because entries carry a `/` (e.g. `bin/sidle`).
+async fn get_kual_file(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    check_token(&headers, &query, &state.token)?;
+    let dist = state.paths.kual_dist();
+    let manifest = read_kual_manifest(&dist).ok_or(StatusCode::NOT_FOUND)?;
+    if !manifest.files.iter().any(|f| f.name == name) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    serve_file(dist.join(&name), "application/octet-stream", None).await
+}
+
 async fn serve_file(
     path: PathBuf,
     content_type: &str,
@@ -849,5 +908,111 @@ mod tests {
         assert!(!import_changed_anything(&r), "empty report → no pulse");
         r.annotations.inserted = 1;
         assert!(import_changed_anything(&r), "a new annotation → pulse");
+    }
+
+    // --- GET /kual/... (LAN self-update pull) ------------------------------
+
+    /// A `GET` request with an optional `x-sidle-token` header.
+    fn get_request(uri: &str, token: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("GET").uri(uri);
+        if let Some(t) = token {
+            b = b.header("x-sidle-token", t);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// Stage a `kual-dist/` bundle (one binary + manifest) under `paths`,
+    /// mirroring what the desktop app's `stage_dist` writes. Returns the bytes.
+    fn stage_fake_dist(paths: &LibraryPaths) -> Vec<u8> {
+        let dist = paths.kual_dist();
+        std::fs::create_dir_all(dist.join("bin")).unwrap();
+        let bytes = b"\x7fELF-fake-armv7-picker".to_vec();
+        std::fs::write(dist.join("bin/sidle"), &bytes).unwrap();
+        let manifest = serde_json::json!({
+            "files": [ { "name": "bin/sidle", "sha256": "deadbeef", "size": bytes.len() } ]
+        });
+        std::fs::write(
+            dist.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        bytes
+    }
+
+    fn staged_state(root: &Path) -> (AppState, String, Vec<u8>) {
+        let paths = LibraryPaths { root: root.to_path_buf() };
+        paths.ensure().unwrap();
+        let token = load_or_generate_token(&paths.root).unwrap();
+        let bytes = stage_fake_dist(&paths);
+        let state = AppState { paths, token: Arc::from(token.as_str()) };
+        (state, token, bytes)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kual_manifest_and_file_serve_staged_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token, bin_bytes) = staged_state(tmp.path());
+
+        let resp = build_router(state.clone())
+            .oneshot(get_request("/kual/manifest.json", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(manifest["files"][0]["name"], "bin/sidle");
+
+        // The catch-all `{*name}` captures the `bin/sidle` path and the bytes
+        // come back byte-identical to what was staged.
+        let resp = build_router(state)
+            .oneshot(get_request("/kual/file/bin/sidle", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), bin_bytes.as_slice(), "served == staged binary");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kual_file_404s_names_absent_from_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, token, _) = staged_state(tmp.path());
+        // Real bundle files that the v1 manifest deliberately does NOT list —
+        // the whitelist is what keeps the token + other device files unreachable
+        // (and, by the same check, blocks any traversal name).
+        for uri in ["/kual/file/etc/server.conf", "/kual/file/bin/sidle.sh"] {
+            let resp = build_router(state.clone())
+                .oneshot(get_request(uri, Some(&token)))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "unlisted {uri} must 404");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kual_endpoints_reject_missing_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _, _) = staged_state(tmp.path());
+        for uri in ["/kual/manifest.json", "/kual/file/bin/sidle"] {
+            let resp = build_router(state.clone())
+                .oneshot(get_request(uri, None))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{uri} must require a token");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kual_manifest_404_when_nothing_staged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths { root: tmp.path().to_path_buf() };
+        paths.ensure().unwrap();
+        let token = load_or_generate_token(&paths.root).unwrap();
+        let state = AppState { paths, token: Arc::from(token.as_str()) };
+        let resp = build_router(state)
+            .oneshot(get_request("/kual/manifest.json", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

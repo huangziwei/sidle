@@ -81,7 +81,7 @@ pub type Result<T> = std::result::Result<T, SidleError>;
 /// call — that meant every one of the 9 covers on a page opened a *new* TCP
 /// connection, re-waking the Kindle's power-saving radio each time. One agent
 /// = HTTP keep-alive across the page's fetches over a single warm connection.
-fn get_with_token(
+pub(crate) fn get_with_token(
     agent: &ureq::Agent,
     url: &str,
     token: &str,

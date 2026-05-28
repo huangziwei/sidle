@@ -178,6 +178,15 @@ impl LibraryPaths {
         self.book_dir(sha).join("cover.thumb.jpg")
     }
 
+    /// Directory the desktop app stages the KUAL self-update bundle into, and
+    /// `sidle-server` serves over `/kual/...` for an untethered LAN pull. Keyed
+    /// off the active library root so the app (writer) and the server (reader)
+    /// agree on one location even after a relocate — the same way both already
+    /// share [`db`](Self::db). Holds `bin/sidle` + `manifest.json`.
+    pub fn kual_dist(&self) -> PathBuf {
+        self.root.join("kual-dist")
+    }
+
     /// Ensure base subdirectories exist.
     pub fn ensure(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.root)?;

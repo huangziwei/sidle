@@ -9,7 +9,7 @@ use tauri::AppHandle;
 use tokio::sync::Mutex;
 
 use crate::device::Transport;
-use crate::device::kual::KualSource;
+use crate::device::kual::{self, KualSource};
 use crate::device::monitor::{self, DeviceState};
 use crate::library::{LibraryPaths, db};
 use crate::queue::{self, QueueHandle};
@@ -185,6 +185,15 @@ impl AppState {
                 KualSource::from_workspace_root(Path::new("/__no_workspace__"))
             }
         };
+
+        // Stage the LAN self-update bundle so a detached `sidle-server` can serve
+        // the current picker binary over `/kual/...` without a cable. mtime-gated
+        // (a no-op once warm); `SourceMissing` (binary not cross-built yet) and IO
+        // errors are non-fatal — they must never block app launch.
+        match kual::stage_dist(&kual_source, &paths.kual_dist()) {
+            Ok(outcome) => eprintln!("[sidle/bootstrap] kual-dist: {outcome:?}"),
+            Err(e) => eprintln!("[sidle/bootstrap] kual-dist staging failed: {e:#}"),
+        }
 
         Ok(Self {
             db,

@@ -90,6 +90,7 @@ pub fn run() {
             commands::device::annotations_import_from_device,
             commands::device::kual_status,
             commands::device::kual_install,
+            commands::device::kual_stage_dist,
             commands::server::server_status,
             commands::server::server_start,
             commands::server::server_stop,

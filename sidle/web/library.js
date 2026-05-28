@@ -1201,6 +1201,13 @@ function wireDevice() {
       // KUAL section staleness can change between opens (server token
       // rotates, native rebuilt, etc.) so always re-pull on show.
       refreshKualStatus();
+      // Re-stage the LAN self-update bundle so an untethered "Update over Wi-Fi"
+      // serves the latest cross-built picker: the dev loop is "rebuild armv7 →
+      // open this popover → device pulls", no cable, no app restart.
+      // Fire-and-forget + mtime-gated (a no-op once warm); non-fatal on error.
+      window.api
+        .invoke("kual_stage_dist")
+        .catch((err) => console.warn("kual_stage_dist failed:", err));
       // The LAN server can start/stop out-of-band (sakabar, CLI, or it outlived a
       // previous app session), so re-probe on every open — the toggle is
       // observation-based, not pinned to this app's own start/stop actions.

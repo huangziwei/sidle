@@ -4,5 +4,13 @@
 EXT=/mnt/us/extensions/sidle
 LOG=/mnt/us/sidle-native.log
 echo "[$(date)] launch $(uname -m)" >> "$LOG"
+# Apply a staged self-update (written by the picker's "Update over Wi-Fi") before
+# we exec — never overwrite the running binary on FAT (ETXTBSY/corruption). The
+# picker sha256-verifies the download before staging it as .new, so this swap is
+# unconditional; a USB "Update KUAL" clears any pending .new, so it can't clobber
+# a newer USB push. No chmod needed — FAT has no mode bits and exec already works.
+if [ -f "$EXT/bin/sidle.new" ]; then
+    mv -f "$EXT/bin/sidle.new" "$EXT/bin/sidle" && echo "[$(date)] applied LAN self-update" >> "$LOG"
+fi
 "$EXT/bin/sidle" "$@" 2>> "$LOG"
 echo "[$(date)] exit=$?" >> "$LOG"

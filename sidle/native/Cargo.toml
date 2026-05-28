@@ -31,6 +31,13 @@ serde_json = "1"
 # (STANDARD alphabet, with padding — matches the server's decoder). Pure Rust,
 # no_std-capable, so the musl cross-link stays static. 0.22 matches the desktop.
 base64 = "0.22"
+# sha2 + hex: hash the on-device picker binary to compare against the LAN
+# self-update manifest, and sha256-verify a download before staging it as
+# `bin/sidle.new`. Both pure Rust (sha2 uses its portable soft backend on armv7,
+# the `asm` feature is off by default), so the musl cross-link stays static.
+# Versions match the desktop side so device and Mac hashes are byte-identical.
+sha2 = "0.10"
+hex = "0.4"
 # fontdue: TTF rasterizer. Pure Rust, no system deps. We load the Kindle's
 # bundled Japanese font (TBGothic) at /usr/java/lib/fonts/ — no need to
 # ship our own CJK font. Coverage bitmap gets thresholded for crisp eink

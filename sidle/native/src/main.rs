@@ -18,6 +18,7 @@ mod cover_cache;
 mod device_state;
 mod eink;
 mod orientation;
+mod selfupdate;
 mod ui;
 mod wrap;
 
@@ -37,6 +38,10 @@ use ui::toast;
 
 const LOG_PATH: &str = "/mnt/us/sidle-native.log";
 const CONFIG_PATH: &str = "/mnt/us/extensions/sidle/etc/server.conf";
+/// On-device KUAL bundle root. `--update` stages its pulled binary under here as
+/// `bin/sidle.new` (manifest names are relative to this dir), and the launcher
+/// swaps it in. Parent of [`CONFIG_PATH`]'s `etc/`.
+const BUNDLE_DIR: &str = "/mnt/us/extensions/sidle";
 const FONT_PX: f32 = 28.0;
 /// Quit moved off the implicit top-left corner (too easy to trigger
 /// accidentally with stray touch events near the panel edge) — exit is
@@ -77,8 +82,90 @@ fn main() {
         log(format!("x11poc done: {r:?}"));
         return;
     }
+    // "Update over Wi-Fi": a dedicated KUAL menu entry runs `bin/sidle.sh
+    // --update`. A separate, focused launch — so it doubles as a recovery path
+    // when the gallery is crashing in its list/grid logic — that pulls the
+    // picker's own next binary from sidle-server and stages it for the launcher.
+    if std::env::args().any(|a| a == "--update") {
+        let result = run_update();
+        log(format!("--update done: {result:?}"));
+        return;
+    }
     let result = run();
     log(format!("done: {result:?}"));
+}
+
+/// Paint a clean centered banner panel: white-fill the screen, draw `message`,
+/// then one full-screen GC16 refresh so it lands without DU ghosting from
+/// whatever the framework left on screen. Used for both the `--update` progress
+/// and result toasts (mirrors `diag`'s clean-panel approach).
+fn draw_panel(fb: &mut Framebuffer, renderer: &mut TextRenderer, message: &str) -> anyhow::Result<()> {
+    fb.fill_rect(0, 0, fb.var.xres, fb.var.yres, 0xFF);
+    let _ = toast::draw(fb, renderer, message);
+    fb.send_update(
+        MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: fb.var.yres },
+        WAVEFORM_MODE_GC16,
+    )?;
+    Ok(())
+}
+
+/// `--update` mode: pull a staged self-update from sidle-server over the LAN and
+/// stage it as `bin/sidle.new` for the launcher to swap in on next start. Shares
+/// the HTTP + config code with the gallery (`api`/`config`/`selfupdate`) and
+/// reuses the gallery's device setup (framebuffer + X11 window + renderer +
+/// input) to show a result toast and block on a tap to exit — the same shape as
+/// `diag::run`. Not a recovery path for a crash in this device setup itself: a
+/// graphics-init failure ends `--update`; only the network/list/grid failures
+/// it's launched separately from are dodged.
+fn run_update() -> anyhow::Result<()> {
+    log("sidle-native --update: start");
+    let cfg = config::load(Path::new(CONFIG_PATH))?;
+    log(format!("--update server: http://{}:{}", cfg.host, cfg.port));
+    let agent = ureq::AgentBuilder::new().build();
+
+    let mut renderer = TextRenderer::load(FONT_PX)?;
+    let orient = orientation::Orientation::detect();
+    let mut fb = Framebuffer::open()?;
+    let touch = Touch::open(orient, fb.var.xres, fb.var.yres)?;
+    let buttons = Buttons::open().ok().flatten();
+    let mut input = Input::new(touch, buttons);
+    input.set_orientation(orient);
+
+    // Progress banner — the manifest fetch + ~1.8 MB download can take a beat on
+    // a sleepy radio.
+    draw_panel(&mut fb, &mut renderer, "Checking for update…")?;
+
+    let message = match selfupdate::run_pull(&agent, &cfg, Path::new(BUNDLE_DIR)) {
+        Ok(selfupdate::UpdateOutcome::UpToDate) => "Already up to date".to_string(),
+        Ok(selfupdate::UpdateOutcome::Staged(_)) => {
+            "Update staged — relaunch to apply".to_string()
+        }
+        // Reuse the gallery's token-mismatch breadcrumb verbatim (see `diag`).
+        Err(api::SidleError::TokenMismatch) => {
+            "Plug Kindle into sidle, click Update KUAL".to_string()
+        }
+        Err(e) => {
+            log(format!("--update failed: {e}"));
+            "Update failed — see log".to_string()
+        }
+    };
+    log(format!("--update result: {message}"));
+
+    // Result panel, then block until a tap or page button. On return the window
+    // tears down and the framework recomposites the home screen (every exit
+    // path's behavior).
+    draw_panel(&mut fb, &mut renderer, &message)?;
+    loop {
+        match input.next()? {
+            InputEvent::Touch(TouchEvent::Up { .. }) => break,
+            InputEvent::Touch(TouchEvent::Screenshot) => {
+                let _ = eink::screenshot::capture(&mut fb);
+            }
+            InputEvent::Page(_) => break,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn run() -> anyhow::Result<()> {
