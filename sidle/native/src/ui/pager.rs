@@ -3,13 +3,15 @@
 //! Always-visible 80px strip at the bottom of the panel with tap zones,
 //! left-to-right:
 //!
-//! - `✕ Exit` — always shown, fixed-width left zone.
+//! - `Exit` — always shown, fixed-width left zone.
 //! - `Filter` — always shown, fixed-width zone; opens the filter & sort menu,
 //!   shows `(N)` when N facets are active.
-//! - `⟳ Sync` — always shown, fixed-width zone; pushes this device's
+//! - `Sync` — always shown, fixed-width zone; pushes this device's
 //!   `.yjr`/`.yjf` + My Clippings.txt to sidle-server (the LAN twin of a USB
 //!   annotation sync).
-//! - `← Prev / N / Next →` — the remaining width, only when n_pages > 1.
+//! - `← Prev / N / Next →` — the remaining width, split in half: left half pages
+//!   back, right half pages forward (shown only when n_pages > 1). Touch nav is
+//!   essential on the Paperwhite, which has no bezel page buttons.
 //!
 //! Replaces the earlier hidden top-left-corner quit gesture, which was
 //! ambiguous with stray touch events near the panel edge.
@@ -37,6 +39,8 @@ pub enum PagerHit {
     Filter,
     /// Push this device's reading-state sidecars to sidle-server.
     Sync,
+    /// Page back / forward — the nav region's left / right half (see `hit`).
+    /// Touch nav is the only paging on the Paperwhite (no bezel buttons).
     Prev,
     Next,
 }
@@ -55,7 +59,7 @@ pub fn hit(tx: u32, ty: u32, fb_xres: u32, fb_yres: u32, total_pages: usize) -> 
         return None;
     }
     // Exit, Filter, and Sync take the three leftmost fixed slices; the rest of
-    // the strip is split for page nav only when there's somewhere to navigate to.
+    // the strip is the page-nav zone, live only when there's somewhere to go.
     if tx < EXIT_ZONE_W {
         return Some(PagerHit::Exit);
     }
@@ -68,7 +72,13 @@ pub fn hit(tx: u32, ty: u32, fb_xres: u32, fb_yres: u32, total_pages: usize) -> 
     if total_pages <= 1 {
         return None;
     }
-    if tx < fb_xres / 2 {
+    // Split the NAV REGION (NAV_LEFT..xres) in half: left = Prev, right = Next.
+    // The bug was splitting at `fb_xres / 2` (~632px) — the whole *screen's*
+    // midpoint, which sits just left of NAV_LEFT (620) on the 1264px panel, so
+    // the Prev zone was a ~12px sliver and every nav tap fell through to Next.
+    // Splitting the region itself gives two real halves on any panel width.
+    let nav_mid = (NAV_LEFT + fb_xres) / 2;
+    if tx < nav_mid {
         Some(PagerHit::Prev)
     } else {
         Some(PagerHit::Next)
@@ -90,7 +100,7 @@ pub fn draw(
     let baseline = (strip_y + STRIP_H * 70 / 100) as i32;
 
     // Exit on the left. Always visible.
-    renderer.draw(fb, 40, baseline, "✕ Exit", false);
+    renderer.draw(fb, 40, baseline, "Exit", false);
     // Vertical separator after exit zone.
     fb.fill_rect(strip_y + 12, EXIT_ZONE_W - 2, 2, STRIP_H - 24, 0x00);
 
@@ -106,7 +116,7 @@ pub fn draw(
     fb.fill_rect(strip_y + 12, SYNC_LEFT - 2, 2, STRIP_H - 24, 0x00);
 
     // Sync zone, right of Filter. Always visible — pushes annotations to the Mac.
-    renderer.draw(fb, SYNC_LEFT as i32 + 40, baseline, "⟳ Sync", false);
+    renderer.draw(fb, SYNC_LEFT as i32 + 40, baseline, "Sync", false);
     fb.fill_rect(strip_y + 12, NAV_LEFT - 2, 2, STRIP_H - 24, 0x00);
 
     if total_pages <= 1 {
@@ -117,13 +127,14 @@ pub fn draw(
     let label_next = "Next →";
     let label_mid = format!("{} / {}", page + 1, total_pages);
 
+    // Prev = left half of the nav region, Next = right half (see `hit`). Show
+    // each label only when that direction exists, so a dead edge reads as dead.
     if page > 0 {
         renderer.draw(fb, NAV_LEFT as i32 + 40, baseline, label_prev, false);
     }
-    // Center "N / M" in the nav region (`NAV_LEFT`..xres) — the space left of
-    // which is the fixed Exit/Filter/Sync zones — NOT on the whole screen.
-    // Prev/Next sit at this region's two ends; screen-centering shoved the
-    // indicator left against the Sync separator once Sync widened the fixed zones.
+    // Center "N / M" in the nav region (`NAV_LEFT`..xres, NOT the whole screen —
+    // screen-centering shoved it left against the Sync separator once Sync
+    // widened the fixed zones).
     let mid_w = renderer.measure_width(&label_mid);
     let mid_x = (NAV_LEFT as i32 + fb.var.xres as i32) / 2 - mid_w as i32 / 2;
     renderer.draw(fb, mid_x, baseline, &label_mid, false);
