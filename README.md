@@ -24,7 +24,7 @@ The Tauri app doesn't require the Kindle being jailbroken, but the KUAL app does
 ## Build
 
 ```sh
-git clone https://github.com/huangziwei/sidle
+git clone https://github.com/huangziwei/sidle && cd sidle/
 ./build.sh
 ```
 
