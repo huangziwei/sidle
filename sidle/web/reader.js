@@ -1124,6 +1124,7 @@ const DEFAULT_STYLE = {
   fg: "#111111",
   bg: "#ffffff",
   margin: "normal",
+  columns: "auto",
 };
 let styleSettings = null;
 let imageSections = new Set(); // section indices that are a single full-page image
@@ -1273,10 +1274,12 @@ function applyLayout(index, force) {
       paginator.setAttribute("max-inline-size", `${HUGE_MEASURE}px`);
       paginator.setAttribute("max-column-count", "2");
     } else {
-      // A single column narrower than the window; the leftover is the L/R margin.
+      // A column at most maxInlineSize wide; leftover is L/R margin. With
+      // columns=auto, the paginator splits to 2 once the window is wide
+      // enough (≈ window > maxInlineSize); columns=1 forces single regardless.
       paginator.setAttribute("margin", "48px");
       paginator.setAttribute("max-inline-size", `${HMEASURE[styleSettings.margin] ?? HMEASURE.normal}px`);
-      paginator.setAttribute("max-column-count", "1");
+      paginator.setAttribute("max-column-count", styleSettings.columns === "1" ? "1" : "2");
     }
   }
   // The block-`margin` attribute only re-paginates via a ResizeObserver, which
@@ -1309,6 +1312,7 @@ function syncStylePanel() {
   set("#rs-weight", s.weight);
   set("#rs-spacing", s.spacing);
   set("#rs-margin", s.margin);
+  set("#rs-columns", s.columns);
   set("#rs-align", s.align);
   set("#rs-fg", s.fg);
   set("#rs-bg", s.bg);
@@ -1324,6 +1328,7 @@ function onStyleInput() {
     weight: val("#rs-weight", ""),
     spacing: val("#rs-spacing", "auto"),
     margin: val("#rs-margin", "normal"),
+    columns: val("#rs-columns", "auto"),
     align: val("#rs-align", ""),
     fg: val("#rs-fg", "#111111"),
     bg: val("#rs-bg", "#ffffff"),
