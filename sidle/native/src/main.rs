@@ -92,7 +92,7 @@ fn main() {
     // picker's own next binary from sidle-server and stages it for the launcher.
     if std::env::args().any(|a| a == "--update") {
         let result = run_update();
-        log(format!("--update done: {result:?}"));
+        update_log(format!("--update done: {result:?}"));
         return;
     }
     let result = run();
@@ -865,10 +865,13 @@ fn log(line: impl AsRef<str>) {
     } else {
         "./sidle-native.log"
     };
+    // File only — NOT also stderr. `sidle.sh` runs the binary with `2>> "$LOG"`
+    // (to capture panics), so writing to stderr here too would land a SECOND
+    // copy of every line in the same file — the double-entry bug. Genuine stderr
+    // (panics, library output) is still captured once via that redirect.
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(log_path) {
         let _ = writeln!(f, "{line}");
     }
-    let _ = writeln!(std::io::stderr(), "{line}");
 }
 
 /// Append a line to the dedicated "Update over Wi-Fi" log (`--update`), so the
