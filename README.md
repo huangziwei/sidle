@@ -1,12 +1,8 @@
 # Sidle 蛇行
 
-Sideload and sidedump books in and out of your (jailbroken) Kindle.
+<p align="center"><img src="./sidle/src-tauri/icons/128x128@2x.png"/></p>
 
-<p align="center">
-  <img src=".github/assets/Sidle-Tauri.png" height="300" />
-  <img src=".github/assets/Sidle-Reader.png" height="300" />
-  <img src=".github/assets/Sidle-KUAL.png" height="300" />
-</p>
+Sideload and sidedump books in and out of your (jailbroken) Kindle.
 
 ## TL;DR
 
@@ -16,6 +12,16 @@ Sidle contains two parts:
 2. a KUAL app to pull books from the library via WIFI.
 
 The Tauri app doesn't require the Kindle being jailbroken, but the second one does (for installing KUAL, to begin with). 
+
+## Screenshots
+
+
+<p align="center">
+  <img src=".github/assets/Sidle-Tauri.png" height="300" />
+  <img src=".github/assets/Sidle-Reader.png" height="300" />
+  <img src=".github/assets/Sidle-KUAL.png" height="300" />
+</p>
+
 
 ## Build
 
