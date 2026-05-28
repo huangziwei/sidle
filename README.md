@@ -1,4 +1,6 @@
-# Sidle: Sideload and sidedump books in and out of your (jailbroken) Kindle.
+# Sidle 蛇行
+
+Sideload and sidedump books in and out of your (jailbroken) Kindle.
 
 <p align="center">
   <img src=".github/assets/Sidle-Tauri.png" height="300" />
