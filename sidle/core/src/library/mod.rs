@@ -1,4 +1,5 @@
 pub mod anchor;
+pub mod authors;
 pub mod backup;
 pub mod db;
 pub mod epub_cover;

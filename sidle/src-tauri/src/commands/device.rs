@@ -150,12 +150,7 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
             // naming) whose on-device filename is just the library row's
             // kfx basename — match by `kfx_path` suffix.
             let resolved = match parse_sha_infix(&entry.name) {
-                Some(sha8) => match db::find_by_kfx_sha_prefix(&conn, &sha8)
-                    .map_err(anyhow::Error::from)?
-                {
-                    Some(book) => Some(book),
-                    None => None,
-                },
+                Some(sha8) => db::find_by_kfx_sha_prefix(&conn, &sha8).map_err(anyhow::Error::from)?,
                 None => match db::find_by_kfx_filename(&conn, &entry.name)
                     .map_err(anyhow::Error::from)?
                 {

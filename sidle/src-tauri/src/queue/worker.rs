@@ -346,11 +346,7 @@ fn derived_basename(book: &BookRow, source: &Path) -> String {
         && !stem.is_empty() {
             return stem.to_string();
         }
-    let authors: Vec<String> = if book.author.is_empty() {
-        Vec::new()
-    } else {
-        book.author.split(", ").map(|s| s.to_string()).collect()
-    };
+    let authors = crate::library::authors::split_display(&book.author);
     format_basename(&authors, &book.title, None)
 }
 

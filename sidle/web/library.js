@@ -526,10 +526,11 @@ function seriesText(b) {
 //     so selecting language=jp narrows the Author pill's options, but the
 //     Language pill itself still shows every language in the library.
 //
-// CJK support: extractFacetValues for authors splits on /\s*[,、]\s*/ so a
-// Japanese OPF that emits "村上春樹、夏目漱石" inside one <dc:creator> still
-// yields two distinct authors in the facet. Everywhere else is just JS
-// Unicode-native string ops (.includes, .toLowerCase no-op for CJK, etc.).
+// Author splitting: extractFacetValues splits on /\s*[&、]\s*/ — " & " (the
+// import/editor join, matching calibre/KFX) or the CJK ideographic comma 「、」.
+// NEVER a plain comma: that separates "Surname, Given" inside a single Western
+// name (e.g. "Kafka, Franz"), which import flips to "Franz Kafka". Everywhere
+// else is just JS Unicode-native string ops (.includes, .toLowerCase, etc.).
 // ---------------------------------------------------------------------------
 
 function extractFacetValues(book, facet) {
@@ -539,9 +540,9 @@ function extractFacetValues(book, facet) {
     case "author": {
       const trimmed = (book.author || "").trim();
       if (!trimmed) return ["—"];
-      // ASCII comma OR CJK ideographic comma U+3001. Japanese EPUBs often
-      // pack multiple creators into one <dc:creator> separated by 「、」.
-      const parts = trimmed.split(/\s*[,、]\s*/).filter(Boolean);
+      // " & " (multi-author join) OR CJK ideographic comma 「、」. A plain comma
+      // stays inside the name — it's the "Surname, Given" separator, not a join.
+      const parts = trimmed.split(/\s*[&、]\s*/).filter(Boolean);
       return parts.length ? [...new Set(parts)] : ["—"];
     }
     case "on_kindle":
@@ -3111,8 +3112,8 @@ async function submitMetadataForm() {
       form.series_name.value.trim() === "" ? null : form.series_name.value.trim(),
     series_index:
       form.series_index.value === "" ? null : Number(form.series_index.value),
-    // Accept ASCII or CJK comma — same as the author facet split. The
-    // backend lowercases + dedupes + drops empties.
+    // Tags split on ASCII or CJK comma (tags have no "Surname, Given" hazard,
+    // unlike authors). The backend lowercases + dedupes + drops empties.
     tags:
       tagsRaw === ""
         ? []

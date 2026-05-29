@@ -107,7 +107,11 @@ pub async fn library_update_metadata(
 
     // Trim text fields.
     patch.title = patch.title.trim().to_string();
-    patch.author = patch.author.trim().to_string();
+    // Canonicalize authors: split the field on `&`/「、」 (never a plain comma —
+    // that's the intra-name "Surname, Given" separator), flip Western names to
+    // natural order, and re-join with the unambiguous display separator.
+    patch.author =
+        crate::library::authors::join_display(&crate::library::authors::parse_input(&patch.author));
     patch.language = patch.language.trim().to_string();
     if let Some(s) = &mut patch.publisher {
         let trimmed = s.trim().to_string();
@@ -303,6 +307,13 @@ pub async fn library_bulk_update_metadata(
 ) -> Result<Vec<BookRow>, String> {
     let mut patch = patch;
     normalize_opt(&mut patch.author);
+    // Canonicalize the bulk author the same way as a single edit (split on
+    // `&`/「、」, flip Western names, re-join); empty result clears it back to None.
+    if let Some(a) = patch.author.take() {
+        let canon =
+            crate::library::authors::join_display(&crate::library::authors::parse_input(&a));
+        patch.author = (!canon.is_empty()).then_some(canon);
+    }
     normalize_opt(&mut patch.language);
     normalize_opt(&mut patch.publisher);
     normalize_opt(&mut patch.published_at);

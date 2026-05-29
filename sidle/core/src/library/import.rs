@@ -43,6 +43,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
+use crate::library::authors;
 use crate::library::db::{self, BookRow, NewBook};
 use crate::library::paths::{LibraryPaths, cover_ext_from, format_basename};
 
@@ -350,7 +351,10 @@ fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
     };
     BookMeta {
         title,
-        authors: m.authors.clone(),
+        // Flip Western "Surname, Given" → "Given Surname" and unpack CJK
+        // 「、」-packed creators, so the stored list (and the filename derived
+        // from it) is the natural-order display form. See [`authors`].
+        authors: authors::from_metadata(&m.authors),
         language: m.language.clone(),
         ppd: m.page_progression_direction.clone(),
         date: m.date.clone(),
@@ -379,7 +383,10 @@ fn insert_row(
     let epub_path_str = files.epub_path.map(|p| p.to_string_lossy().to_string());
     let cover_path_str = files.cover_path.map(|p| p.to_string_lossy().to_string());
     let kfx_path_str = files.kfx_path.map(|p| p.to_string_lossy().to_string());
-    let authors_joined = meta.authors.join(", ");
+    // `meta.authors` is already canonical (flipped, 「、」-unpacked) from
+    // `extract_meta`; join with the unambiguous display separator so readers
+    // split on `[&、]`, never a comma. See [`authors`].
+    let authors_joined = authors::join_display(&meta.authors);
     let now = db::now_iso();
     let id = db::insert_book(
         conn,
