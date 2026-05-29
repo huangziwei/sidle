@@ -1592,6 +1592,13 @@ async function open(id) {
     // parent-document listener alone would go deaf until you click out (the bug
     // where arrows stop turning pages). Listen on each section's doc too.
     doc.addEventListener("keydown", onKey, true);
+    // Kill the native context menu inside the section iframe — its only items
+    // are the useless "Open Frame in New Window" and a Reload that boots you
+    // back to the library. Book content isn't editable and selection is handled
+    // by our own toolbar (mouseup above), so suppress it unconditionally. The
+    // parent-document suppressor in library.js can't reach here: contextmenu
+    // events don't bubble out of an iframe to the host document.
+    doc.addEventListener("contextmenu", (e) => e.preventDefault());
   });
   paginator.addEventListener("relocate", ({ detail }) => {
     updateProgress(detail);

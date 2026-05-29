@@ -2016,6 +2016,22 @@ function queueRow(b) {
 // ---------------------------------------------------------------------------
 
 function wireContextMenu() {
+  // Suppress the WebView's native right-click menu (Reload, Open Frame in New
+  // Window, …) app-wide — it exposes nothing useful and its Reload reloads
+  // index.html, dropping you out of the reader back to the library. Our own
+  // card/row/header handlers preventDefault and open #ctx-menu in the target
+  // phase, before this bubble-phase listener runs, so they're unaffected; this
+  // just kills the native menu everywhere they don't. Editable fields are the
+  // exception — there the native Cut/Copy/Paste/spellcheck menu is genuinely
+  // useful (metadata editor, search boxes). (Reader section iframes are
+  // separate documents whose events don't bubble here; they're handled in
+  // reader.js's create-overlayer hook.)
+  document.addEventListener("contextmenu", (e) => {
+    const t = e.target;
+    const inField =
+      t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+    if (!inField) e.preventDefault();
+  });
   document.addEventListener("click", () => ($("#ctx-menu").hidden = true));
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") $("#ctx-menu").hidden = true;
