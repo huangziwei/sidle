@@ -568,6 +568,7 @@ mod tests {
                 cover_path: None,
                 kfx_path: None,
                 kfx_sha256: None,
+                pdf_path: None,
                 file_size: 0,
                 imported_at: "t0",
                 asin: None,
@@ -798,6 +799,7 @@ mod tests {
                 kfx_sha256: Some(
                     "deadbeef00000000000000000000000000000000000000000000000000000000",
                 ),
+                pdf_path: None,
                 file_size: 0,
                 imported_at: "t0",
                 asin: None,
@@ -865,6 +867,7 @@ mod tests {
                 kfx_sha256: Some(
                     "deadbeef00000000000000000000000000000000000000000000000000000000",
                 ),
+                pdf_path: None,
                 file_size: 0,
                 imported_at: "t0",
                 asin: None,

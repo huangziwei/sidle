@@ -34,6 +34,10 @@ pub struct BookRow {
     /// `Some(_)` iff `kfx_path` is `Some(_)` — they're always written
     /// together.
     pub kfx_sha256: Option<String>,
+    /// Path to the PDF on disk, for a PDF-backed (container) book. This is the
+    /// non-KFX side of a PDF↔KFX book (the EPUB↔KFX analogue of `epub_path`);
+    /// `None` for reflowable (EPUB↔KFX) books. See .claude/plans/pdf-to-kfx.md.
+    pub pdf_path: Option<String>,
     pub file_size: i64,
     pub imported_at: String,
     pub status: String,
@@ -73,7 +77,9 @@ pub struct BookRow {
 ///
 /// v2: dropped the `My Clippings.txt` ingest path entirely — see the DELETE
 /// near the end of [`migrate`].
-pub const SCHEMA_VERSION: i64 = 2;
+/// v3: added `books.pdf_path` — the PDF side of a PDF↔KFX book (PDF-backed
+/// container KFX). See .claude/plans/pdf-to-kfx.md.
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -211,6 +217,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             cover_path        TEXT,
             kfx_path          TEXT,
             kfx_sha256        TEXT,
+            pdf_path          TEXT,
             file_size         INTEGER NOT NULL,
             imported_at       TEXT NOT NULL,
             asin              TEXT,
@@ -319,6 +326,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !has_column(conn, "books", "kfx_sha256")? {
         conn.execute("ALTER TABLE books ADD COLUMN kfx_sha256 TEXT", [])?;
+    }
+    if !has_column(conn, "books", "pdf_path")? {
+        conn.execute("ALTER TABLE books ADD COLUMN pdf_path TEXT", [])?;
     }
 
     // `yjr_sync` gained a per-device dimension: the checkpoint of the last
@@ -502,12 +512,13 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
     let epub_rel = book.epub_path.map(|p| relativize_for_store(root.as_deref(), p));
     let cover_rel = book.cover_path.map(|p| relativize_for_store(root.as_deref(), p));
     let kfx_rel = book.kfx_path.map(|p| relativize_for_store(root.as_deref(), p));
+    let pdf_rel = book.pdf_path.map(|p| relativize_for_store(root.as_deref(), p));
     conn.execute(
         r#"INSERT INTO books
             (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path,
              file_size, imported_at, asin, publisher, published_at,
-             series_name, series_index, tags, kfx_sha256)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"#,
+             series_name, series_index, tags, kfx_sha256, pdf_path)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"#,
         params![
             book.sha256,
             book.title,
@@ -526,6 +537,7 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             book.series_index,
             tags_json,
             book.kfx_sha256,
+            pdf_rel,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -633,6 +645,17 @@ pub fn set_epub_path(conn: &Connection, book_id: i64, epub_path: &str) -> rusqli
     conn.execute(
         "UPDATE books SET epub_path = ?1 WHERE id = ?2",
         params![epub_rel, book_id],
+    )?;
+    Ok(())
+}
+
+/// Set the PDF side of a PDF↔KFX book (written by the `kfx_to_pdf` worker job
+/// and by import when the PDF is the canonical side).
+pub fn set_pdf_path(conn: &Connection, book_id: i64, pdf_path: &str) -> rusqlite::Result<()> {
+    let pdf_rel = relativize_for_store(conn_root(conn).as_deref(), pdf_path);
+    conn.execute(
+        "UPDATE books SET pdf_path = ?1 WHERE id = ?2",
+        params![pdf_rel, book_id],
     )?;
     Ok(())
 }
@@ -872,6 +895,8 @@ pub struct NewBook<'a> {
     /// Hash of the KFX bytes — required iff `kfx_path` is `Some`.
     /// See `BookRow::kfx_sha256` for the reasoning.
     pub kfx_sha256: Option<&'a str>,
+    /// PDF side of a PDF↔KFX book; `None` for EPUB↔KFX books.
+    pub pdf_path: Option<&'a str>,
     pub file_size: i64,
     pub imported_at: &'a str,
     pub asin: Option<&'a str>,
@@ -894,7 +919,7 @@ const SELECT_BOOKS_WITH_JOBS: &str = r#"
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
-           b.kfx_sha256
+           b.kfx_sha256, b.pdf_path
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     ORDER BY b.imported_at DESC
@@ -906,7 +931,7 @@ const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
-           b.kfx_sha256
+           b.kfx_sha256, b.pdf_path
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.sha256 = ?1
@@ -918,7 +943,7 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
-           b.kfx_sha256
+           b.kfx_sha256, b.pdf_path
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
@@ -930,7 +955,7 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX: &str = r#"
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
-           b.kfx_sha256
+           b.kfx_sha256, b.pdf_path
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_sha256 LIKE ?1
@@ -947,7 +972,7 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
-           b.kfx_sha256
+           b.kfx_sha256, b.pdf_path
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_path LIKE ?1
@@ -982,6 +1007,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         series_index: row.get(18)?,
         tags,
         kfx_sha256: row.get(20)?,
+        pdf_path: resolve_opt(root, row.get(21)?),
     })
 }
 
@@ -1402,6 +1428,7 @@ mod tests {
                 cover_path: None,
                 kfx_path: None,
                 kfx_sha256: None,
+                pdf_path: None,
                 file_size: 0,
                 imported_at: "2026-05-19T00:00:00Z",
                 asin: None,
@@ -1413,6 +1440,44 @@ mod tests {
             },
         )
         .expect("insert")
+    }
+
+    #[test]
+    fn pdf_path_roundtrips_through_get_book() {
+        let conn = fresh_db();
+        let id = insert_book(
+            &conn,
+            &NewBook {
+                sha256: "sha-pdf",
+                title: "PDF Book",
+                author: "",
+                language: "en",
+                ppd: None,
+                epub_path: None,
+                cover_path: None,
+                kfx_path: Some("books/sha-pdf/x.kfx"),
+                kfx_sha256: Some("abc"),
+                pdf_path: Some("books/sha-pdf/x.pdf"),
+                file_size: 0,
+                imported_at: "t",
+                asin: None,
+                publisher: None,
+                published_at: None,
+                series_name: None,
+                series_index: None,
+                tags: &[],
+            },
+        )
+        .expect("insert");
+        let row = get_book(&conn, id).expect("query").expect("row");
+        // PDF-backed book: PDF + KFX sides set, no EPUB side.
+        assert_eq!(row.pdf_path.as_deref(), Some("books/sha-pdf/x.pdf"));
+        assert_eq!(row.kfx_path.as_deref(), Some("books/sha-pdf/x.kfx"));
+        assert_eq!(row.epub_path, None);
+
+        set_pdf_path(&conn, id, "books/sha-pdf/renamed.pdf").expect("set_pdf_path");
+        let row = get_book(&conn, id).expect("query").expect("row");
+        assert_eq!(row.pdf_path.as_deref(), Some("books/sha-pdf/renamed.pdf"));
     }
 
     #[test]
@@ -2099,6 +2164,7 @@ mod tests {
                     cover_path: Some(&cover_abs.to_string_lossy()),
                     kfx_path: Some(&kfx_abs.to_string_lossy()),
                     kfx_sha256: Some("deadbeef"),
+                    pdf_path: None,
                     file_size: 1,
                     imported_at: "t",
                     asin: None,

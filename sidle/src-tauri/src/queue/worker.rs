@@ -210,6 +210,9 @@ pub async fn run_job(
                 }
             }
         }
+        if let Some(pdf) = &produced.pdf_path {
+            let _ = db::set_pdf_path(&conn, book_id, &pdf.to_string_lossy());
+        }
         if let Some(cover) = &produced.cover_path {
             let _ = db::set_cover_path(&conn, book_id, &cover.to_string_lossy());
             // Refresh the picker thumbnail to match the produced cover.
@@ -252,6 +255,7 @@ async fn mark_status(
 struct Produced {
     epub_path: Option<PathBuf>,
     kfx_path: Option<PathBuf>,
+    pdf_path: Option<PathBuf>,
     cover_path: Option<PathBuf>,
     /// ASIN boko stamped into the produced KFX. For EPUB→KFX this is the
     /// fabricated 32-char value (unless the source EPUB carried a real
@@ -264,6 +268,8 @@ fn run_direction(paths: &LibraryPaths, book: &BookRow, kind: &str) -> anyhow::Re
     match kind {
         "epub_to_kfx" => convert_epub_to_kfx(paths, book),
         "kfx_to_epub" => convert_kfx_to_epub(paths, book),
+        "pdf_to_kfx" => convert_pdf_to_kfx(paths, book),
+        "kfx_to_pdf" => convert_kfx_to_pdf(paths, book),
         other => Err(anyhow::anyhow!("unknown job kind: {other}")),
     }
 }
@@ -334,6 +340,73 @@ fn convert_kfx_to_epub(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<P
     Ok(Produced {
         epub_path: Some(out_path),
         cover_path,
+        ..Default::default()
+    })
+}
+
+/// PDF → KFX: wrap the PDF verbatim into a fixed-layout PDOC KFX for the Scribe.
+/// The book's PDF side is the source; the produced KFX is what gets pushed to
+/// the device. See .claude/plans/pdf-to-kfx.md.
+fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Produced> {
+    let source = book
+        .pdf_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("pdf_to_kfx job has no pdf_path"))?;
+    let source_path = Path::new(source);
+
+    paths.ensure_sha(&book.sha256)?;
+    let dir = paths.book_dir(&book.sha256);
+    let base = derived_basename(book, source_path);
+    let out_path = dir.join(format!("{base}.kfx"));
+
+    let bytes = std::fs::read(source_path)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
+    let doc = boko::import::probe_pdf(bytes).map_err(|e| anyhow::anyhow!("probe pdf: {e}"))?;
+    let meta = boko::export::PdfKfxMeta {
+        title: book.title.clone(),
+        author: (!book.author.trim().is_empty()).then(|| book.author.clone()),
+        language: if book.language.is_empty() {
+            "en".to_string()
+        } else {
+            book.language.clone()
+        },
+    };
+    let kfx = boko::export::pdf_to_kfx(&doc, &meta);
+    write_bytes_atomic(&out_path, &kfx)?;
+
+    // The KFX's ASIN is synthesized inside `pdf_to_kfx` (PDOC content_id); we
+    // don't surface it onto the row yet. That only feeds device-delete `.sdr`
+    // cleanup, not sideloading — a follow-up once the cover work (P2) settles
+    // the PDOC ASIN shape. The on-device content_id is baked into the KFX.
+    Ok(Produced {
+        kfx_path: Some(out_path),
+        ..Default::default()
+    })
+}
+
+/// KFX → PDF: extract the verbatim embedded PDF from a PDF-backed container KFX
+/// (a synced-back PDF book, or the return side of a `.kfx` import). The PDF is
+/// byte-identical to what was embedded.
+fn convert_kfx_to_pdf(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Produced> {
+    let source = book
+        .kfx_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("kfx_to_pdf job has no kfx_path"))?;
+    let source_path = Path::new(source);
+
+    paths.ensure_sha(&book.sha256)?;
+    let dir = paths.book_dir(&book.sha256);
+    let base = derived_basename(book, source_path);
+    let out_path = dir.join(format!("{base}.pdf"));
+
+    let kfx_bytes = std::fs::read(source_path)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
+    let pdf = boko::kfx::pdf_container::kfx_extract_pdf(&kfx_bytes)
+        .map_err(|e| anyhow::anyhow!("kfx→pdf extract: {e}"))?;
+    write_bytes_atomic(&out_path, &pdf)?;
+
+    Ok(Produced {
+        pdf_path: Some(out_path),
         ..Default::default()
     })
 }

@@ -71,7 +71,7 @@ pub fn import_file(
     let src_kind = SourceKind::detect(src);
     if matches!(src_kind, SourceKind::Unknown) {
         bail!(
-            "unsupported file type: {} (expected .epub, .kfx, .kfx-zip, .azw3, or .mobi)",
+            "unsupported file type: {} (expected .epub, .kfx, .kfx-zip, .azw3, .mobi, or .pdf)",
             src.display()
         );
     }
@@ -94,6 +94,11 @@ enum SourceKind {
     /// extension. Japanese MOBIs carry vertical-writing-mode and PPD in
     /// EXTH 525/527, which the boko importer propagates into the EPUB.
     Mobi,
+    /// `.pdf` — wrapped verbatim into a fixed-layout PDOC KFX for the Scribe
+    /// (the device renders the PDF; the pen draws over it). PDF is the
+    /// canonical non-KFX side, paired with KFX (the EPUB↔KFX analogue), and
+    /// the background job is `pdf_to_kfx`. See .claude/plans/pdf-to-kfx.md.
+    Pdf,
     /// `.zip` extension — tentatively an Aozora Bunko archive. The actual
     /// aozora sniff (底本/［＃ markers) happens in `convert_aozora_zip`
     /// during canonical-bytes extraction; a non-aozora zip fails out
@@ -106,6 +111,8 @@ enum SourceKind {
 enum Canonical {
     Epub,
     Kfx,
+    /// A PDF-backed book's non-KFX side (paired with KFX, never EPUB).
+    Pdf,
 }
 
 impl SourceKind {
@@ -121,6 +128,7 @@ impl SourceKind {
             Some("kfx-zip") => Self::KfxZip,
             Some("azw3") => Self::Azw3,
             Some("mobi") => Self::Mobi,
+            Some("pdf") => Self::Pdf,
             Some("zip") => Self::AozoraZip,
             _ => Self::Unknown,
         }
@@ -130,26 +138,35 @@ impl SourceKind {
         match self {
             Self::Epub | Self::AozoraZip | Self::Azw3 | Self::Mobi => Canonical::Epub,
             Self::Kfx | Self::KfxZip => Canonical::Kfx,
+            Self::Pdf => Canonical::Pdf,
             Self::Unknown => unreachable!("filtered by import_file"),
         }
     }
 }
 
 impl Canonical {
+    /// `boko::Format` for reading metadata from the canonical bytes. PDF has
+    /// none — its metadata comes from `probe_pdf` `/Info`, so this is never
+    /// called for `Pdf`.
     fn boko_format(self) -> boko::Format {
         match self {
             Self::Epub => boko::Format::Epub,
             Self::Kfx => boko::Format::Kfx,
+            Self::Pdf => unreachable!("PDF metadata comes from probe_pdf, not boko::Book"),
         }
     }
+}
 
-    /// Direction the queue needs to run to fill the *other* side of a row
-    /// imported in this canonical format.
-    fn job_kind_for_other_side(self) -> &'static str {
-        match self {
-            Self::Epub => "epub_to_kfx",
-            Self::Kfx => "kfx_to_epub",
-        }
+/// The background job that converts a book imported in `from` into its `to`
+/// partner side.
+fn job_kind(from: Canonical, to: Canonical) -> &'static str {
+    use Canonical::*;
+    match (from, to) {
+        (Epub, Kfx) => "epub_to_kfx",
+        (Pdf, Kfx) => "pdf_to_kfx",
+        (Kfx, Epub) => "kfx_to_epub",
+        (Kfx, Pdf) => "kfx_to_pdf",
+        _ => unreachable!("unsupported conversion {from:?} -> {to:?}"),
     }
 }
 
@@ -174,7 +191,7 @@ fn import_one(
 
     // 2. Normalize → canonical bytes.
     let canonical_bytes: Vec<u8> = match src_kind {
-        SourceKind::Epub | SourceKind::Kfx => {
+        SourceKind::Epub | SourceKind::Kfx | SourceKind::Pdf => {
             fs::read(src).with_context(|| format!("read {}", src.display()))?
         }
         SourceKind::KfxZip => boko::kfx::merge::merge_kfx_zip(src)
@@ -188,81 +205,96 @@ fn import_one(
         SourceKind::Unknown => unreachable!("filtered above"),
     };
 
-    // 3. Metadata from the canonical bytes (no file re-open).
-    let meta = {
-        let book = boko::Book::from_bytes(&canonical_bytes, canonical.boko_format())
-            .with_context(|| format!("read metadata from {}", src.display()))?;
-        extract_meta(book.metadata(), src.file_stem().and_then(|s| s.to_str()))
+    // 3. Metadata from the canonical bytes (no file re-open). PDF metadata
+    //    comes from `/Info` via `probe_pdf`; everything else from boko.
+    let meta = match canonical {
+        Canonical::Pdf => {
+            let doc = boko::import::probe_pdf(canonical_bytes.clone())
+                .with_context(|| format!("probe pdf {}", src.display()))?;
+            extract_meta_from_pdf(&doc, src.file_stem().and_then(|s| s.to_str()))
+        }
+        _ => {
+            let book = boko::Book::from_bytes(&canonical_bytes, canonical.boko_format())
+                .with_context(|| format!("read metadata from {}", src.display()))?;
+            extract_meta(book.metadata(), src.file_stem().and_then(|s| s.to_str()))
+        }
     };
     let basename = format_basename(&meta.authors, &meta.title, meta.date.as_deref());
+
+    // The non-KFX partner of a KFX is EPUB for a reflowable book, but PDF for a
+    // PDF-backed (container) KFX — extracting that PDF, not mangling it into an
+    // EPUB. EPUB and PDF imports always pair with KFX.
+    let partner = match canonical {
+        Canonical::Epub | Canonical::Pdf => Canonical::Kfx,
+        Canonical::Kfx => {
+            if boko::kfx::pdf_container::kfx_is_pdf_backed(&canonical_bytes) {
+                Canonical::Pdf
+            } else {
+                Canonical::Epub
+            }
+        }
+    };
 
     // 4. Persist canonical to the library slot.
     paths.ensure_sha(&sha)?;
     let dest_epub = paths.book_dir(&sha).join(format!("{basename}.epub"));
     let dest_kfx = paths.book_dir(&sha).join(format!("{basename}.kfx"));
+    let dest_pdf = paths.book_dir(&sha).join(format!("{basename}.pdf"));
     let own_dest: &Path = match canonical {
         Canonical::Epub => &dest_epub,
         Canonical::Kfx => &dest_kfx,
+        Canonical::Pdf => &dest_pdf,
     };
-    let other_dest: &Path = match canonical {
-        Canonical::Epub => &dest_kfx,
-        Canonical::Kfx => &dest_epub,
+    let other_dest: &Path = match partner {
+        Canonical::Epub => &dest_epub,
+        Canonical::Kfx => &dest_kfx,
+        Canonical::Pdf => &dest_pdf,
     };
     if !own_dest.exists() {
         write_bytes_atomic(own_dest, &canonical_bytes)?;
     }
 
-    // 5. Cover sidecar — only when we have EPUB bytes on hand. KFX input
-    //    without a pre-existing EPUB defers to the worker.
+    // 5. Cover sidecar — only when we have EPUB bytes on hand. A KFX/PDF input
+    //    without a pre-existing EPUB defers to the worker; a PDF-backed book has
+    //    no EPUB side at all, so its cover (page 1) waits on P2.
     let cover_path: Option<PathBuf> = match canonical {
         Canonical::Epub => write_cover_from_epub_bytes(paths, &sha, &canonical_bytes),
-        Canonical::Kfx if other_dest.exists() => fs::read(other_dest)
+        Canonical::Kfx if partner == Canonical::Epub && other_dest.exists() => fs::read(other_dest)
             .ok()
             .and_then(|b| write_cover_from_epub_bytes(paths, &sha, &b)),
-        Canonical::Kfx => None,
+        _ => None,
     };
 
     // 6. Insert book row + job.
     let other_ready = other_dest.exists();
-    // When this import lands a KFX (either as canonical or because the
-    // other side was already on disk from a prior import), record the
-    // hash of *its* bytes. That hash drives the on-device filename
-    // infix; without it, a re-import of the same file off the Kindle
-    // can't be linked back to the local row.
+    // Record the KFX byte-hash whenever a KFX is on disk (canonical or the
+    // already-present partner). That hash drives the on-device filename infix;
+    // without it a re-import off the Kindle can't be linked back to the row.
     let kfx_bytes_sha: Option<String> = match canonical {
         Canonical::Kfx => Some(sha256_of_bytes(&canonical_bytes)),
-        Canonical::Epub if other_ready => match fs::read(&dest_kfx) {
-            Ok(bytes) => Some(sha256_of_bytes(&bytes)),
-            Err(_) => None,
-        },
+        // EPUB/PDF canonical → partner is KFX; hash it if already present.
+        _ if other_ready => fs::read(&dest_kfx).ok().map(|b| sha256_of_bytes(&b)),
         _ => None,
     };
+    // Which sides are on disk now: the canonical always, the partner only on an
+    // idempotent re-import where it already existed.
+    let has = |c: Canonical| canonical == c || (partner == c && other_ready);
     let book_id = insert_row(
         conn,
         &sha,
         &meta,
         file_size,
         &Persisted {
-            epub_path: match canonical {
-                Canonical::Epub => Some(dest_epub.as_path()),
-                Canonical::Kfx => other_ready.then_some(dest_epub.as_path()),
-            },
+            epub_path: has(Canonical::Epub).then_some(dest_epub.as_path()),
             cover_path: cover_path.as_deref(),
-            kfx_path: match canonical {
-                Canonical::Kfx => Some(dest_kfx.as_path()),
-                Canonical::Epub => other_ready.then_some(dest_kfx.as_path()),
-            },
+            kfx_path: has(Canonical::Kfx).then_some(dest_kfx.as_path()),
+            pdf_path: has(Canonical::Pdf).then_some(dest_pdf.as_path()),
             kfx_sha256: kfx_bytes_sha.as_deref(),
         },
     )?;
 
     let job_status = if other_ready { "done" } else { "pending" };
-    db::insert_job(
-        conn,
-        book_id,
-        job_status,
-        canonical.job_kind_for_other_side(),
-    )?;
+    db::insert_job(conn, book_id, job_status, job_kind(canonical, partner))?;
 
     let row = db::get_book(conn, book_id)?.expect("just inserted");
     Ok(ImportOutcome::Imported {
@@ -363,6 +395,54 @@ fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
     }
 }
 
+/// Metadata for a `.pdf` import: title/author from the PDF `/Info` dict
+/// (title-cased if ALL CAPS, as Amazon's S2K does), falling back to the file
+/// stem for the title. No language/date/asin/publisher in PDF `/Info`.
+fn extract_meta_from_pdf(doc: &boko::import::PdfDoc, fallback_stem: Option<&str>) -> BookMeta {
+    let title = doc
+        .title
+        .as_deref()
+        .map(title_case_if_shouting)
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| fallback_stem.map(str::to_string))
+        .unwrap_or_else(|| "Untitled".to_string());
+    let authors = match doc.author.as_deref() {
+        Some(a) if !a.trim().is_empty() => authors::from_metadata(&[a.to_string()]),
+        _ => Vec::new(),
+    };
+    BookMeta {
+        title,
+        authors,
+        language: "en".to_string(),
+        ppd: None,
+        date: None,
+        asin: None,
+        publisher: None,
+    }
+}
+
+/// Title-case a string only if it is "shouting" (has letters, no lowercase),
+/// matching what Amazon does to an ALL-CAPS PDF `/Info` title.
+fn title_case_if_shouting(s: &str) -> String {
+    let has_lower = s.chars().any(|c| c.is_lowercase());
+    let has_alpha = s.chars().any(|c| c.is_alphabetic());
+    if has_lower || !has_alpha {
+        return s.to_string();
+    }
+    s.split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The on-disk artifacts an import produced (or found already present): the
 /// paths and KFX hash to persist on the book row. Grouped into one struct so
 /// `insert_row` stays under clippy's argument-count lint.
@@ -370,6 +450,7 @@ struct Persisted<'a> {
     epub_path: Option<&'a Path>,
     cover_path: Option<&'a Path>,
     kfx_path: Option<&'a Path>,
+    pdf_path: Option<&'a Path>,
     kfx_sha256: Option<&'a str>,
 }
 
@@ -383,6 +464,7 @@ fn insert_row(
     let epub_path_str = files.epub_path.map(|p| p.to_string_lossy().to_string());
     let cover_path_str = files.cover_path.map(|p| p.to_string_lossy().to_string());
     let kfx_path_str = files.kfx_path.map(|p| p.to_string_lossy().to_string());
+    let pdf_path_str = files.pdf_path.map(|p| p.to_string_lossy().to_string());
     // `meta.authors` is already canonical (flipped, 「、」-unpacked) from
     // `extract_meta`; join with the unambiguous display separator so readers
     // split on `[&、]`, never a comma. See [`authors`].
@@ -400,6 +482,7 @@ fn insert_row(
             cover_path: cover_path_str.as_deref(),
             kfx_path: kfx_path_str.as_deref(),
             kfx_sha256: files.kfx_sha256,
+            pdf_path: pdf_path_str.as_deref(),
             file_size,
             imported_at: &now,
             asin: meta.asin.as_deref(),
@@ -558,4 +641,85 @@ fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
         bail!("aozora epub failed validation:\n{report}");
     }
     Ok(epub_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn pdf_detects_and_pairs_with_kfx() {
+        assert_eq!(SourceKind::detect(Path::new("/x/Doc.pdf")), SourceKind::Pdf);
+        assert_eq!(SourceKind::detect(Path::new("/x/DOC.PDF")), SourceKind::Pdf);
+        assert_eq!(SourceKind::Pdf.canonical(), Canonical::Pdf);
+        // A PDF book's canonical sibling is KFX, filled by `pdf_to_kfx`.
+        assert_eq!(job_kind(Canonical::Pdf, Canonical::Kfx), "pdf_to_kfx");
+        // A PDF-backed KFX returns to PDF, never EPUB.
+        assert_eq!(job_kind(Canonical::Kfx, Canonical::Pdf), "kfx_to_pdf");
+        // Reflowable directions are unchanged.
+        assert_eq!(job_kind(Canonical::Epub, Canonical::Kfx), "epub_to_kfx");
+        assert_eq!(job_kind(Canonical::Kfx, Canonical::Epub), "kfx_to_epub");
+    }
+
+    #[test]
+    fn pdf_info_title_is_title_cased_else_filename() {
+        // ALL-CAPS /Info title gets title-cased (Amazon's S2K behavior).
+        let doc = boko::import::PdfDoc {
+            bytes: b"%PDF-1.4\n".to_vec(),
+            pages: vec![boko::import::PdfPage { width: 612.0, height: 792.0 }],
+            title: Some("THE STREET WAS MINE".to_string()),
+            author: Some("MEGAN E. ABBOTT".to_string()),
+        };
+        let meta = extract_meta_from_pdf(&doc, Some("fallback"));
+        assert_eq!(meta.title, "The Street Was Mine");
+        assert_eq!(meta.authors, vec!["MEGAN E. ABBOTT".to_string()]);
+
+        // No /Info title → file stem.
+        let doc2 = boko::import::PdfDoc {
+            bytes: b"%PDF-1.4\n".to_vec(),
+            pages: vec![boko::import::PdfPage { width: 1.0, height: 1.0 }],
+            title: None,
+            author: None,
+        };
+        let meta2 = extract_meta_from_pdf(&doc2, Some("My File"));
+        assert_eq!(meta2.title, "My File");
+        assert!(meta2.authors.is_empty());
+    }
+
+    #[test]
+    fn import_pdf_routes_to_pdf_to_kfx_and_persists_pdf() {
+        use crate::library::db;
+        use crate::library::paths::LibraryPaths;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
+        paths.ensure().unwrap();
+        let conn = db::open(&paths.db()).unwrap();
+
+        let outcome =
+            import_file(&conn, &paths, Path::new("tests/fixtures/minimal.pdf")).unwrap();
+        let ImportOutcome::Imported {
+            book,
+            needs_enqueue,
+        } = outcome
+        else {
+            panic!("expected a fresh import, got a duplicate");
+        };
+
+        // Routed as a PDF↔KFX book: PDF is the canonical side, KFX is filled by
+        // the background `pdf_to_kfx` job; there is no EPUB side.
+        assert_eq!(book.kind.as_deref(), Some("pdf_to_kfx"));
+        assert!(needs_enqueue);
+        assert!(book.pdf_path.is_some(), "PDF side must be persisted");
+        assert!(book.kfx_path.is_none(), "KFX is produced later by the worker");
+        assert!(book.epub_path.is_none(), "a PDF book has no EPUB side");
+        // Metadata came from the PDF `/Info` dict.
+        assert_eq!(book.title, "Tiny Test PDF");
+        assert_eq!(book.author, "A. Tester");
+        // The PDF bytes landed in the library slot.
+        assert!(Path::new(book.pdf_path.as_ref().unwrap()).exists());
+    }
 }

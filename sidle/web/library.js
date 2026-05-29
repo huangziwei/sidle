@@ -284,6 +284,10 @@ function wireDragDrop() {
           lower.endsWith(".kfx-zip") ||
           lower.endsWith(".azw3") ||
           lower.endsWith(".mobi") ||
+          // PDF → wrapped into a fixed-layout PDOC KFX for the Scribe (the
+          // device renders the PDF; the pen draws over it). See
+          // .claude/plans/pdf-to-kfx.md.
+          lower.endsWith(".pdf") ||
           // Plain .zip is accepted silently so an Aozora Bunko archive can
           // be dropped in. Non-aozora .zips fail at the backend with a
           // standard import-failed toast; no special UI signal that .zip
@@ -292,7 +296,7 @@ function wireDragDrop() {
         );
       });
       if (accepted.length === 0) {
-        showToast("only .epub, .kfx, .kfx-zip, .azw3, .mobi are supported", true);
+        showToast("only .epub, .kfx, .kfx-zip, .azw3, .mobi, .pdf are supported", true);
         return;
       }
       importPaths(accepted);
@@ -396,6 +400,7 @@ function importInitialMessage(paths) {
     if (lower.endsWith(".kfx")) return "Importing KFX…";
     if (lower.endsWith(".azw3")) return "Importing AZW3…";
     if (lower.endsWith(".mobi")) return "Importing MOBI…";
+    if (lower.endsWith(".pdf")) return "Importing PDF…";
   }
   return `Importing ${paths.length} file${paths.length === 1 ? "" : "s"}…`;
 }
