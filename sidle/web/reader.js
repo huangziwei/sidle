@@ -60,6 +60,59 @@ function readSavedProgressMode() {
 
 const view = () => $("#reader-view");
 
+// ---- top bar auto-hide ------------------------------------------------------
+// While reading, the top bar fades away after a few idle seconds and comes back
+// when you click the top of the page. It keeps its layout slot the whole time
+// (see styles.css), so this never resizes the stage. It won't fade out while the
+// pointer is over it or while a panel/popover it opened is showing, so it can't
+// vanish mid-interaction.
+const TOPBAR_HIDE_DELAY = 3000; // ms idle before the bar fades out
+let topbarHideTimer = null;
+let topbarHovered = false;
+
+const topbarEl = () => $(".reader-topbar");
+
+function cancelTopbarHide() {
+  if (topbarHideTimer) {
+    clearTimeout(topbarHideTimer);
+    topbarHideTimer = null;
+  }
+}
+
+// Panels/popovers the top bar's buttons summon — while one is open the bar is
+// "in use", so it should stay put.
+function readerChromeOpen() {
+  return [
+    "#reader-toc-panel",
+    "#reader-annotations-panel",
+    "#reader-search-panel",
+    "#reader-style-panel",
+    "#reader-resume-menu",
+  ].some((sel) => {
+    const el = $(sel);
+    return el && !el.hidden;
+  });
+}
+
+function scheduleTopbarHide() {
+  cancelTopbarHide();
+  topbarHideTimer = setTimeout(() => {
+    topbarHideTimer = null;
+    // Re-arm instead of hiding if the user is still on the bar or mid-task; the
+    // next idle window (or a panel close) lets it fade.
+    if (topbarHovered || readerChromeOpen()) {
+      scheduleTopbarHide();
+      return;
+    }
+    topbarEl()?.classList.add("is-hidden");
+  }, TOPBAR_HIDE_DELAY);
+}
+
+function revealTopbar() {
+  topbarEl()?.classList.remove("is-hidden");
+  scheduleTopbarHide();
+}
+
 // Named Kindle highlight colors → CSS; falls back to a literal color or yellow.
 const COLORS = { yellow: "#f4d03f", blue: "#5dade2", pink: "#ec7fa9", orange: "#e59866" };
 const NOTE_CUE = "#b5651d"; // edge line marking a highlight that carries a note
@@ -1567,6 +1620,7 @@ async function open(id) {
   $("#reader-percent").textContent = "";
   view().hidden = false;
   view().classList.add("open");
+  revealTopbar(); // shown now; fades out after the idle delay
   renderAnnotationsPanel();
   renderTocPanel();
   renderResumeControl();
@@ -1691,6 +1745,11 @@ async function close() {
   hideAnnotationsPanel();
   hideTocPanel();
   hideStylePanel();
+  // Stop the auto-hide timer and un-fade, so a stray timeout can't fire after
+  // teardown and the next book opens with its bar shown.
+  cancelTopbarHide();
+  topbarHovered = false;
+  topbarEl()?.classList.remove("is-hidden");
   const v = view();
   if (v) {
     v.classList.remove("open");
@@ -1713,6 +1772,33 @@ async function close() {
 
 function wire() {
   $("#reader-close")?.addEventListener("click", () => close());
+  // Top bar auto-hide: hovering it pauses the fade; leaving re-arms it; and a
+  // click on the dormant (faded) bar just brings it back. The capture-phase
+  // click + stopPropagation means that revealing click doesn't also fire the
+  // invisible button under the cursor — e.g. it can't accidentally hit the ←
+  // close button and drop you out of the book.
+  const topbar = topbarEl();
+  if (topbar) {
+    topbar.addEventListener("mouseenter", () => {
+      topbarHovered = true;
+      cancelTopbarHide();
+    });
+    topbar.addEventListener("mouseleave", () => {
+      topbarHovered = false;
+      scheduleTopbarHide();
+    });
+    topbar.addEventListener(
+      "click",
+      (e) => {
+        if (topbar.classList.contains("is-hidden")) {
+          e.stopPropagation();
+          e.preventDefault();
+          revealTopbar();
+        }
+      },
+      true,
+    );
+  }
   // Page-turn margins: the left margin goes to the physically-left page (= next
   // in a vertical-rl / RTL book, prev otherwise), mirroring the arrow keys.
   $("#reader-nav-left")?.addEventListener("click", () => (book?.ppd === "rtl" ? forward() : back()));

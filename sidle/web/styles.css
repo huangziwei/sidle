@@ -1724,6 +1724,16 @@ button {
   padding: 0 12px;
   border-bottom: 1px solid var(--reader-border);
   background: var(--reader-bg);
+  transition: opacity 0.3s ease;
+}
+/* Auto-hidden while reading (armed by reader.js). The bar fades out but keeps
+   its 44px slot — and that slot is the page color, so it reads as a clean top
+   margin rather than an empty gap. Because the slot stays in flow, hiding never
+   resizes the stage and the paginator never re-columnizes. The slot also stays
+   in place to catch the click that brings the bar back (reader.js swallows that
+   click so it doesn't also hit an invisible button). */
+.reader-topbar.is-hidden {
+  opacity: 0;
 }
 .reader-title {
   flex: 1 1 auto;
