@@ -210,18 +210,16 @@ impl Framebuffer {
     }
 
     /// Encode the current backing (8bpp gray, white=255) as a PNG at `path`.
-    /// `flip_180` rotates it to match the displayed orientation: we render
-    /// identity and the compositor rotates the window 180° when the framework
-    /// is page-bezel-up (the same condition that mirrors touch — see the module
-    /// header). The `png` encoder ships with the `image` dep (pure Rust).
-    pub fn capture_png(&self, path: &Path, flip_180: bool) -> Result<()> {
+    /// No rotation: the backing is the upright UI as rendered — we draw identity
+    /// and the lab126 compositor rotates the *display* to the grip, so the
+    /// encoded file already matches what the user saw in either orientation.
+    /// (Pre-X11 we rotated raw `/dev/fb0` writes ourselves and undid that here;
+    /// the pre-rotation is gone, so undoing it now would flip the file upside
+    /// down — that was the screenshot-bug.) The `png` encoder ships with the
+    /// `image` dep (pure Rust).
+    pub fn capture_png(&self, path: &Path) -> Result<()> {
         let img = image::GrayImage::from_raw(self.var.xres, self.var.yres, self.backing.clone())
             .context("backing buffer size != xres*yres")?;
-        let img = if flip_180 {
-            image::imageops::rotate180(&img)
-        } else {
-            img
-        };
         img.save(path)
             .with_context(|| format!("write screenshot {}", path.display()))?;
         Ok(())

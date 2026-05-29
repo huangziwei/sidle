@@ -15,7 +15,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 
 use super::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_GC16};
-use crate::orientation::Orientation;
 
 /// Where screenshots land — the same directory stock Kindle screenshots use,
 /// so they show up where expected when the Kindle is plugged in over USB.
@@ -26,8 +25,10 @@ const SCREENSHOT_DIR: &str = "/mnt/us/screenshots";
 const FLASH_MS: u64 = 120;
 
 /// Save the current screen to a timestamped PNG, flash white as feedback, then
-/// restore the screen. Returns the written path. Orientation is detected here
-/// (rare, user-initiated action — no need to thread it through every caller).
+/// restore the screen. Returns the written path. No rotation is applied: the
+/// backing already holds the upright UI (we render identity and the compositor
+/// rotates the *display* to the grip), so the file matches what the user saw in
+/// either orientation — see [`Framebuffer::capture_png`].
 ///
 /// Best-effort by construction: the white flash and restore run regardless of
 /// whether the encode succeeded, so a write failure never leaves the screen
@@ -41,11 +42,10 @@ pub fn capture(fb: &mut Framebuffer) -> Result<PathBuf> {
         .unwrap_or(0);
     let path = dir.join(format!("screenshot_{secs}.png"));
 
-    let flip = matches!(Orientation::detect(), Orientation::Down);
     // Snapshot before anything touches the backing: `capture_png` reads the
     // live screen, and we restore this exact buffer after the flash.
     let snap = fb.backing_snapshot();
-    let cap = fb.capture_png(&path, flip);
+    let cap = fb.capture_png(&path);
 
     // White flash → brief hold → restore. send_update widens to full rows, so a
     // full-screen rect repaints everything; GC16 is the clean full refresh.
