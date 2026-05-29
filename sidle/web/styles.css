@@ -1167,6 +1167,27 @@ button {
   border-color: var(--accent);
 }
 
+/* PDF side (PDF-backed books) — distinct violet, with the same
+   pending/converting/error states as KFX for when the queue produces it. */
+.fmt-badge.pdf.done {
+  background: #f1e9fb;
+  color: #6d4bb8;
+  border-color: #dcccf0;
+}
+
+.fmt-badge.pdf.pending,
+.fmt-badge.pdf.converting {
+  color: #b8851b;
+  background: #fbf5e6;
+  border-color: #e8d8a7;
+}
+
+.fmt-badge.pdf.error {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 @media (prefers-color-scheme: dark) {
   .fmt-badge.epub {
     background: #1f3247;
@@ -1180,6 +1201,17 @@ button {
   }
   .fmt-badge.kfx.pending,
   .fmt-badge.kfx.converting {
+    color: #d4a957;
+    background: #3c2f12;
+    border-color: #594928;
+  }
+  .fmt-badge.pdf.done {
+    background: #2c2240;
+    color: #b69ae0;
+    border-color: #443764;
+  }
+  .fmt-badge.pdf.pending,
+  .fmt-badge.pdf.converting {
     color: #d4a957;
     background: #3c2f12;
     border-color: #594928;

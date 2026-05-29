@@ -717,7 +717,7 @@ function metaBadges(b) {
   // The side that the import wrote directly is always "done". The other
   // side (whichever direction the background job runs) carries the row's
   // status. `b.kind` tells us which side that is.
-  wrap.appendChild(formatBadge("epub", b, /*compact=*/ true));
+  wrap.appendChild(formatBadge(nonKfxFormat(b), b, /*compact=*/ true));
   wrap.appendChild(formatBadge("kfx", b, /*compact=*/ true));
 
   if (state.sentSet.has(b.sha256)) {
@@ -730,12 +730,19 @@ function metaBadges(b) {
   return wrap;
 }
 
+// A book pairs KFX with exactly one non-KFX side: EPUB for reflowable books,
+// PDF for PDF-backed (container) books. Derived from the conversion `kind`.
+function nonKfxFormat(b) {
+  return b.kind === "pdf_to_kfx" || b.kind === "kfx_to_pdf" ? "pdf" : "epub";
+}
+
 // Returns the conversion status as it applies to the given format side
-// (`"epub"` or `"kfx"`). The format that the import wrote directly is
-// always "done"; the format being produced by the queue follows b.status.
+// (`"epub"`, `"pdf"`, or `"kfx"`). The format the import wrote directly is
+// always "done"; the format the queue produces follows b.status. `b.kind` is
+// "<source>_to_<target>" — the queue produces the target.
 function formatStatusFor(format, b) {
-  const producing = b.kind === "kfx_to_epub" ? "epub" : "kfx";
-  return format === producing ? b.status : "done";
+  const target = (b.kind || "epub_to_kfx").split("_to_")[1] || "kfx";
+  return format === target ? b.status : "done";
 }
 
 function formatLabel(format, status, compact) {
@@ -877,7 +884,7 @@ function formatsCell(b) {
   // Verbose badges in the list (`KFX · converting` etc.) — the format that
   // the queue is producing carries the row's status; the other side stays
   // "done". See `formatStatusFor` above.
-  wrap.appendChild(formatBadge("epub", b, /*compact=*/ false));
+  wrap.appendChild(formatBadge(nonKfxFormat(b), b, /*compact=*/ false));
   wrap.appendChild(formatBadge("kfx", b, /*compact=*/ false));
   td.appendChild(wrap);
   return td;
