@@ -2,7 +2,6 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Sidle",
   "mainBinaryName": "sidle",
-  "version": "0.1.0",
   "identifier": "app.sidle.desktop",
   "build": {
     "frontendDist": "../web"

@@ -1,6 +1,6 @@
 [package]
 name = "sidle"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "sidle: EPUB library + KFX converter + Kindle sync"
 publish = false

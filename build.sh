@@ -27,6 +27,17 @@ if ! rustup target list --installed | grep -qx "$KUAL_TARGET"; then
     exit 1
 fi
 
+# Stamp the unified workspace version into the KUAL extension's config.xml —
+# the one release artifact outside Cargo's reach. The desktop app pushes this
+# file verbatim to the Kindle, and KUAL shows <version> on its info screen.
+# Source of truth is [workspace.package].version in the root Cargo.toml; the
+# sidle-* crates (incl. the on-device binary) inherit it via
+# `version.workspace = true`, so this keeps the cosmetic XML in lockstep.
+VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\1/')"
+[ -n "$VERSION" ] || { echo "error: no version found in root Cargo.toml [workspace.package]" >&2; exit 1; }
+echo "==> Stamping KUAL config.xml version ($VERSION)"
+sed -i '' -E "s#<version>[^<]*</version>#<version>${VERSION}</version>#" kual/sidle/config.xml
+
 echo "==> Cross-compiling sidle-native for Kindle ($KUAL_TARGET)"
 cargo build --release --target "$KUAL_TARGET" -p sidle-native
 
