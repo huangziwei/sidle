@@ -31,6 +31,7 @@ pub mod image_transcode;
 pub mod ion;
 pub mod merge;
 pub mod metadata;
+pub mod pdf_container;
 pub mod schema;
 pub mod serialization;
 pub mod storyline;

@@ -212,6 +212,22 @@ pub fn skip_enty_header(data: &[u8]) -> &[u8] {
     data
 }
 
+/// The raw payload bytes of an entity (after its ENTY header). For media
+/// entities (e.g. `bcRawMedia`) this is the stored bytes verbatim.
+pub fn entity_media<'a>(data: &'a [u8], ent: &EntityLoc) -> Option<&'a [u8]> {
+    if ent.offset + ent.length > data.len() {
+        return None;
+    }
+    Some(skip_enty_header(&data[ent.offset..ent.offset + ent.length]))
+}
+
+/// Parse an entity's payload as an Ion value (for structured fragments).
+/// Returns `None` if the entity is out of bounds or not valid Ion.
+pub fn parse_entity(data: &[u8], ent: &EntityLoc) -> Option<IonValue> {
+    let media = entity_media(data, ent)?;
+    IonParser::new(media).parse().ok()
+}
+
 // --- Document symbols parsing ---
 
 /// Extract document-specific symbols from the doc symbols section.

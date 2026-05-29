@@ -1076,6 +1076,23 @@ fn convert(
     // Check if reading from stdin
     let from_stdin = input == "-";
 
+    // KFX → PDF (the return leg of the PDF↔KFX dual format): extract the
+    // verbatim embedded PDF from a PDF-backed/container KFX. Dispatched here by
+    // extension, before format parsing (PDF isn't in the `Format` enum). See
+    // .claude/plans/pdf-to-kfx.md.
+    if !from_stdin
+        && std::path::Path::new(input)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx"))
+        && let Some(out) = output
+        && out != "-"
+        && std::path::Path::new(out)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+    {
+        return convert_kfx_to_pdf(input, out, quiet);
+    }
+
     // Determine input format
     let input_format = if let Some(fmt) = from_format {
         Some(parse_format(fmt)?)
@@ -1145,6 +1162,15 @@ fn convert(
     {
         let kfx_bytes = std::fs::read(input)
             .map_err(|e| format!("Failed to read input: {e}"))?;
+        // A PDF-backed container KFX must round-trip through PDF, not EPUB.
+        // Refuse rather than mangle the PDF into reflowed text.
+        if boko::kfx::pdf_container::kfx_is_pdf_backed(&kfx_bytes) {
+            return Err(
+                "this KFX is a PDF-backed container; extract it with a .pdf output \
+                 (e.g. `boko convert in.kfx out.pdf`), not EPUB"
+                    .to_string(),
+            );
+        }
         let bytes = boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
             .map_err(|e| format!("Conversion failed: {e}"))?;
         if to_stdout {
@@ -1657,6 +1683,18 @@ fn convert_pdf_to_kfx(
     }
     if !quiet && !to_stdout {
         eprintln!("Done ({} bytes).", kfx.len());
+    }
+    Ok(())
+}
+
+/// KFX → PDF: extract the verbatim embedded PDF from a PDF-backed container KFX.
+fn convert_kfx_to_pdf(input: &str, output: &str, quiet: bool) -> Result<(), String> {
+    let kfx = std::fs::read(input).map_err(|e| format!("Failed to read input: {e}"))?;
+    let pdf = boko::kfx::pdf_container::kfx_extract_pdf(&kfx)
+        .map_err(|e| format!("PDF extraction failed: {e}"))?;
+    std::fs::write(output, &pdf).map_err(|e| format!("Failed to write output: {e}"))?;
+    if !quiet {
+        eprintln!("Extracted embedded PDF: {} bytes", pdf.len());
     }
     Ok(())
 }
