@@ -3,7 +3,7 @@
 //! Two blocking sub-loops in the `ui/sortmenu.rs` / `ui/diag.rs` mold:
 //!
 //! - [`run`] — the **menu**: a row per facet (showing its selected-count), a
-//!   `Sort:` row, and a `[ Clear all | Done ]` strip. Tapping a facet row opens
+//!   `Sort:` row, and a `[ Done | Clear all ]` strip. Tapping a facet row opens
 //!   its value picker; tapping `Sort:` opens [`crate::ui::sortmenu`]. Mutates
 //!   the caller's `Filters` + `SortState` in place.
 //! - [`value_picker`] — a **paged checklist** of one facet's options
@@ -31,8 +31,10 @@ use crate::ui::text::TextRenderer;
 
 const STRIP_H: u32 = 120;
 const MARGIN_X: u32 = 60;
-/// Two fixed left zones (Back, Clear) in the value-picker strip, each this wide;
-/// page nav fills the rest. Mirrors the gallery strip's Exit/Sort layout.
+/// Fixed-width left zones in the filter-menu and value-picker strips, each this
+/// wide: the leave action (Done / Back) then a Clear action. In the picker, page
+/// nav fills the rest. Mirrors the gallery strip's Exit/Filter/Sync zones, so the
+/// leave action lands in the same left slot on every screen.
 const ZONE_W: u32 = 200;
 
 fn row_h(lh: u32) -> u32 {
@@ -59,7 +61,7 @@ fn draw_title(fb: &mut Framebuffer, renderer: &mut TextRenderer, lh: u32, title:
 }
 
 // ===========================================================================
-// Menu (facet rows + Sort row + Clear all / Done)
+// Menu (facet rows + Sort row + Done / Clear all)
 // ===========================================================================
 
 enum MenuTap {
@@ -70,9 +72,18 @@ enum MenuTap {
 }
 
 /// Menu rows: `Facet::ALL` then one Sort row.
-fn menu_hit(tx: u32, ty: u32, xres: u32, yres: u32, lh: u32) -> Option<MenuTap> {
+fn menu_hit(tx: u32, ty: u32, yres: u32, lh: u32) -> Option<MenuTap> {
     if ty >= strip_top(yres) {
-        return Some(if tx < xres / 2 { MenuTap::ClearAll } else { MenuTap::Done });
+        // Leave action (Done) leftmost — same ZONE_W slot as the gallery's Exit
+        // and the value picker's Back; Clear all in the next zone. The rest of
+        // the strip is empty (this menu has no page nav).
+        if tx < ZONE_W {
+            return Some(MenuTap::Done);
+        }
+        if tx < ZONE_W * 2 {
+            return Some(MenuTap::ClearAll);
+        }
+        return None;
     }
     let rt = rows_top(lh);
     if ty < rt {
@@ -118,15 +129,17 @@ fn render_menu(
     let baseline = (sort_top + rh * 60 / 100) as i32;
     renderer.draw(fb, MARGIN_X as i32, baseline, &format!("Sort:  {}", sort.header()), false);
 
-    // [ Clear all | Done ] strip.
+    // [ Done | Clear all ] strip — leave action leftmost, in the same ZONE_W slot
+    // as the value picker's Back and the gallery's Exit; Clear all beside it. Two
+    // zones, page-nav region left empty (the menu never pages).
     let top = strip_top(fb.var.yres);
-    let mid = xres / 2;
     fb.fill_rect(top, 0, xres, 2, 0x00);
     fb.fill_rect(top + 2, 0, xres, STRIP_H - 2, 0xFF);
-    fb.fill_rect(top + 12, mid.saturating_sub(1), 2, STRIP_H - 24, 0x00);
+    fb.fill_rect(top + 12, ZONE_W - 2, 2, STRIP_H - 24, 0x00);
+    fb.fill_rect(top + 12, ZONE_W * 2 - 2, 2, STRIP_H - 24, 0x00);
     let baseline = (top + STRIP_H * 60 / 100) as i32;
-    draw_centered_in(fb, renderer, "Clear all", 0, mid, baseline);
-    draw_centered_in(fb, renderer, "[ Done ]", mid, xres, baseline);
+    draw_centered_in(fb, renderer, "[ Done ]", 0, ZONE_W, baseline);
+    draw_centered_in(fb, renderer, "Clear all", ZONE_W, ZONE_W * 2, baseline);
 }
 
 /// Draw `s` horizontally centered within `[x0, x1)`.
@@ -163,7 +176,7 @@ pub fn run(
     loop {
         match input.next()? {
             InputEvent::Touch(TouchEvent::Up { x, y }) => {
-                match menu_hit(x, y, fb.var.xres, fb.var.yres, lh) {
+                match menu_hit(x, y, fb.var.yres, lh) {
                     Some(MenuTap::Facet(f)) => {
                         value_picker(fb, input, renderer, all_books, filters, f, orient)?;
                         // The picker overwrote the screen; repaint the menu
