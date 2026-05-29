@@ -30,7 +30,7 @@ git clone https://github.com/huangziwei/sidle && cd sidle/
 
 The app will be built and put into `/Applications/Sidle`
 
-Book data and library database will be stored in `~/Library/Application Support/sidle/`
+Book data and library database will be stored in `~/Library/Application Support/Sidle/`, and can be changed to other locations.
 
 To install the KUAL app, plug in the Kindle via USB, then in the Kindle tab, enter `KUAL extension`, then click `push KUAL`. 
 
