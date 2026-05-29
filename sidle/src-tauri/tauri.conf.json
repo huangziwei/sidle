@@ -32,6 +32,8 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "externalBin": ["binaries/sidle-server"],
+    "resources": ["resources/kual"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

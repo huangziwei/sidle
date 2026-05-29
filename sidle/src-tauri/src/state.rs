@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use rusqlite::Connection;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
 use crate::device::Transport;
@@ -97,6 +97,11 @@ impl AppState {
         paths.ensure()?;
         let _ = std::fs::write("/tmp/sidle-bootstrap.log", "bootstrap: paths ensured\n");
 
+        // Capture the bundle resource dir while `app` is still ours — it's moved
+        // into the device monitor below, but the KUAL source resolution further
+        // down (packaged builds) needs it. `None` in dev / if Tauri can't resolve.
+        let resource_dir = app.path().resource_dir().ok();
+
         let conn = db::open(&paths.db())?;
         // Recover from crash: any job stuck mid-convert should re-pend.
         let _ = conn.execute(
@@ -173,16 +178,33 @@ impl AppState {
             queue.clone(),
         );
 
-        let kual_source = match find_workspace_root() {
-            Ok(root) => KualSource::from_workspace_root(&root),
-            Err(e) => {
-                eprintln!(
-                    "[sidle/bootstrap] kual: workspace root not found ({e}); \
-                     KUAL deploy section will show SourceMissing for all files"
-                );
-                // Synthesize a path that won't resolve — compute_status
-                // handles missing source files gracefully.
-                KualSource::from_workspace_root(Path::new("/__no_workspace__"))
+        // Dev reads the KUAL source straight from the checkout (a live `cargo
+        // build`/armv7 cross-build shows up, and the staleness hint works);
+        // a packaged build carries the assets as bundle resources. `resource_dir`
+        // is captured above because `app` is moved into the monitor before this.
+        let kual_source = if cfg!(debug_assertions) {
+            match find_workspace_root() {
+                Ok(root) => KualSource::from_workspace_root(&root),
+                Err(e) => {
+                    eprintln!(
+                        "[sidle/bootstrap] kual: workspace root not found ({e}); \
+                         KUAL deploy section will show SourceMissing for all files"
+                    );
+                    // Synthesize a path that won't resolve — compute_status
+                    // handles missing source files gracefully.
+                    KualSource::from_workspace_root(Path::new("/__no_workspace__"))
+                }
+            }
+        } else {
+            match resource_dir {
+                Some(dir) => KualSource::from_resource_root(&dir),
+                None => {
+                    eprintln!(
+                        "[sidle/bootstrap] kual: bundle resource dir unavailable; \
+                         KUAL deploy section will show SourceMissing for all files"
+                    );
+                    KualSource::from_resource_root(Path::new("/__no_resources__"))
+                }
             }
         };
 

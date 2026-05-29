@@ -171,22 +171,27 @@ impl ServerHandle {
     }
 }
 
-/// Resolve the `sidle-server` binary. Dev: `<workspace>/target/debug/sidle-server`,
+/// Resolve the `sidle-server` binary.
+///
+/// **Dev** (`debug_assertions`): `<workspace>/target/debug/sidle-server`,
 /// **rebuilt unconditionally before every spawn**. `cargo run -p sidle` recompiles
 /// the `sidle_server` *lib* but not this *binary*, and the supervisor adopts an
 /// already-running server — so without an unconditional rebuild the app silently
 /// spawns/adopts stale server code (a pre-route binary once 404'd
 /// `/sync/annotations`). cargo is incremental, so this is a fast freshness check when
 /// nothing changed. Note: a *running* instance is still adopted, not replaced —
-/// toggle the server off→on to pick up an edit. Packaged: shipped as a Tauri sidecar
-/// (TODO — errors clearly until that lands).
+/// toggle the server off→on to pick up an edit.
+///
+/// **Packaged** (release): the daemon rides along as a Tauri sidecar, copied into
+/// `Sidle.app/Contents/MacOS/sidle-server` next to our own binary (build.sh stages
+/// `binaries/sidle-server-<host-triple>`; `externalBin` strips the suffix on bundle).
+/// Resolved relative to `current_exe` so the bundle is self-contained — no reach-back
+/// into a dev checkout's `target/`.
 fn server_binary() -> Result<PathBuf> {
-    let root = crate::state::find_workspace_root()
-        .context("locate workspace root for the sidle-server binary")?;
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
-    let bin = root.join("target").join(profile).join("sidle-server");
-
     if cfg!(debug_assertions) {
+        let root = crate::state::find_workspace_root()
+            .context("locate workspace root for the sidle-server binary")?;
+        let bin = root.join("target").join("debug").join("sidle-server");
         // Always rebuild before spawning (not just when missing) — otherwise a stale
         // on-disk binary from before a server-code edit gets spawned as-is.
         let status = Command::new("cargo")
@@ -203,12 +208,17 @@ fn server_binary() -> Result<PathBuf> {
         ));
     }
 
-    // Packaged (release): the binary must already exist — shipped as a sidecar.
+    // Packaged (release): the sidecar sits next to the app's own executable.
+    let exe = std::env::current_exe().context("locate the running executable")?;
+    let bin = exe
+        .parent()
+        .context("running executable has no parent directory")?
+        .join("sidle-server");
     if bin.exists() {
         return Ok(bin);
     }
     Err(anyhow!(
-        "sidle-server binary missing at {} (packaged builds must ship it as a sidecar)",
+        "sidle-server sidecar missing at {} — packaged build is incomplete (build.sh stages it)",
         bin.display()
     ))
 }

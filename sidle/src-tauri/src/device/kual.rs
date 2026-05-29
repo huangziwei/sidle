@@ -59,6 +59,22 @@ impl KualSource {
                 .join("sidle"),
         }
     }
+
+    /// Packaged builds: the KUAL source assets ride along as Tauri bundle
+    /// resources instead of living in a dev checkout. build.sh stages them under
+    /// `Contents/Resources/resources/kual/`, mirroring the `kual/sidle` layout
+    /// `from_workspace_root` points at — the pushed extension files under `sidle/`
+    /// plus the cross-compiled armv7 picker at `native/sidle` — so `slots`,
+    /// `compute_status`, and `stage_dist` behave identically dev vs packaged.
+    /// `res_dir` is `app.path().resource_dir()`. The "binary older than source"
+    /// mtime hint silently no-ops here (no `sidle/native/src` tree alongside).
+    pub fn from_resource_root(res_dir: &Path) -> Self {
+        let kual = res_dir.join("resources").join("kual");
+        Self {
+            bundle_dir: kual.join("sidle"),
+            binary_path: kual.join("native").join("sidle"),
+        }
+    }
 }
 
 /// Fields rendered into `etc/server.conf` on the device. Held as a

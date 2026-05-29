@@ -15,3 +15,8 @@ artifacts/
 # values fill in `etc/server.conf` at install time and stay out of git.
 kual/sidle/etc/server.conf
 kual/sidle/bin/sidle
+
+# build.sh staging: the sidle-server sidecar and KUAL resources copied here for
+# `cargo tauri build` to fold into the bundle. Regenerated each build; never committed.
+sidle/src-tauri/binaries/
+sidle/src-tauri/resources/
