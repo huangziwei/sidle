@@ -41,17 +41,18 @@ fn btn_top(yres: u32) -> u32 {
 }
 
 /// Map a tap to a button. Anything above the button row is dead space
-/// (no action); the row splits left = Retry, right = Exit. Pure integer
-/// geometry so it can be reasoned about without a framebuffer (mirrors
+/// (no action); the row splits left = Exit, right = Retry — the leave action
+/// sits leftmost, matching the gallery's Exit and the filter screens. Pure
+/// integer geometry so it can be reasoned about without a framebuffer (mirrors
 /// `pager::hit`).
 pub fn hit(tx: u32, ty: u32, xres: u32, yres: u32) -> Option<Action> {
     if ty < btn_top(yres) {
         return None;
     }
     if tx < xres / 2 {
-        Some(Action::Retry)
-    } else {
         Some(Action::Exit)
+    } else {
+        Some(Action::Retry)
     }
 }
 
@@ -133,9 +134,10 @@ fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, cfg: &ServerConfig, e
     Ok(())
 }
 
-/// Two-zone button row at the bottom: `[ Retry ]` left half, `[ Exit ]`
+/// Two-zone button row at the bottom: `[ Exit ]` left half, `[ Retry ]`
 /// right half, a 2px top divider + a vertical mid divider in `pager`'s
-/// style. Labels are bracketed ASCII (no glyph-coverage risk on a screen
+/// style. Exit (leave) is leftmost so it matches the gallery and the filter
+/// screens. Labels are bracketed ASCII (no glyph-coverage risk on a screen
 /// whose whole job is to be readable when things are broken).
 fn draw_buttons(fb: &mut Framebuffer, renderer: &mut TextRenderer) {
     let xres = fb.var.xres;
@@ -147,15 +149,17 @@ fn draw_buttons(fb: &mut Framebuffer, renderer: &mut TextRenderer) {
     fb.fill_rect(top + 12, mid.saturating_sub(1), 2, BTN_H - 24, 0x00); // mid divider
 
     let baseline = (top + BTN_H * 60 / 100) as i32;
-    let retry = "[ Retry ]";
-    let rw = renderer.measure_width(retry);
-    let rx = ((mid as i32 - rw as i32) / 2).max(0);
-    renderer.draw(fb, rx, baseline, retry, false);
-
+    // Exit (leave) in the left half — leftmost, matching every other screen.
     let exit = "[ Exit ]";
     let ew = renderer.measure_width(exit);
-    let ex = (mid as i32 + (mid as i32 - ew as i32) / 2).max(mid as i32);
+    let ex = ((mid as i32 - ew as i32) / 2).max(0);
     renderer.draw(fb, ex, baseline, exit, false);
+
+    // Retry in the right half.
+    let retry = "[ Retry ]";
+    let rw = renderer.measure_width(retry);
+    let rx = (mid as i32 + (mid as i32 - rw as i32) / 2).max(mid as i32);
+    renderer.draw(fb, rx, baseline, retry, false);
 }
 
 /// Draw the panel for `err`, then block until the user taps Retry or
