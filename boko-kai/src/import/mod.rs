@@ -8,11 +8,13 @@ mod azw3;
 mod epub;
 mod kfx;
 mod mobi;
+pub mod pdf;
 
 pub use azw3::Azw3Importer;
 pub use epub::EpubImporter;
 pub use kfx::KfxImporter;
 pub use mobi::MobiImporter;
+pub use pdf::{PdfDoc, PdfPage, probe_pdf};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

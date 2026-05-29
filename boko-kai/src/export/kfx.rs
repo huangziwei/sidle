@@ -2427,6 +2427,595 @@ fn serialize_fragments(
         .collect()
 }
 
+// ============================================================================
+// PDF → KFX (fixed-layout, PDF-backed PDOC) — see .claude/plans/pdf-to-kfx.md
+//
+// This is NOT a content conversion. The PDF is embedded verbatim as a single
+// `bcRawMedia` and the *device* renders each page (which is what lets the
+// Scribe pen draw over it). We author only the thin fixed-layout skeleton:
+// one section/storyline/external_resource per page, all referencing the shared
+// PDF blob with a `page_index`, plus PDOC metadata and the `yj_pdf_support` /
+// `yj_fixed_layout` feature flags.
+//
+// P0 scope (round-trip proof): embed + skeleton only. Deferred to later phases:
+//   - portrait+landscape page_template pair (needs an SExp IonValue variant for
+//     the `condition:(isPortrait)` s-expression) — P1
+//   - page-1 cover render — P2
+//   - selectable text layer + per-word auxiliary_data — P3
+// ============================================================================
+
+/// Metadata stamped into a PDF→KFX (PDOC) conversion.
+pub struct PdfKfxMeta {
+    pub title: String,
+    pub author: Option<String>,
+    pub language: String,
+}
+
+/// Per-page bookkeeping gathered in the survey pass.
+struct PdfPageRec {
+    section_name: String,
+    section_sym: u64,
+    story_sym: u64,
+    res_sym: u64,
+    /// `id` of the section's page_template container.
+    pt_id: u64,
+    /// `id` of the storyline's outer (page-sized) container.
+    container_id: u64,
+    /// `id` of the image node — the renderable content EID for this page.
+    image_id: u64,
+}
+
+/// Symbolic name of the single shared PDF raw-media resource.
+const PDF_RSRC_NAME: &str = "rsrc0";
+
+/// Convert a probed PDF into a fixed-layout, PDF-backed KFX (PDOC).
+///
+/// P0: embed + skeleton only — no cover, no selectable text, a single
+/// `page_template` per section. See the plan for the deferred pieces.
+pub fn pdf_to_kfx(pdf: &crate::import::pdf::PdfDoc, meta: &PdfKfxMeta) -> Vec<u8> {
+    let container_id = generate_container_id();
+    let mut ctx = ExportContext::new();
+    let n = pdf.pages.len();
+
+    // The whole PDF lives in one bcRawMedia entity addressed by this location;
+    // every page's external_resource points here, differing only by page_index.
+    let raw_location = format!("resource/{PDF_RSRC_NAME}");
+
+    // ---- Survey: register section/story/resource symbols, allocate IDs ----
+    let mut recs: Vec<PdfPageRec> = Vec::with_capacity(n);
+    for i in 0..n {
+        let section_name = format!("c{i}");
+        let section_sym = ctx.register_section(&section_name);
+        let story_sym = ctx.symbols.get_or_intern(&format!("story_c{i}"));
+        let res_name = format!("e{i}");
+        let res_sym = ctx.symbols.get_or_intern(&res_name);
+        ctx.record_section_image_ref(&section_name, &res_name);
+
+        let pt_id = ctx.next_fragment_id();
+        let container_id_num = ctx.next_fragment_id();
+        let image_id = ctx.next_fragment_id();
+        ctx.record_content_length(image_id, 1);
+
+        recs.push(PdfPageRec {
+            section_name,
+            section_sym,
+            story_sym,
+            res_sym,
+            pt_id,
+            container_id: container_id_num,
+            image_id,
+        });
+    }
+    // Intern the shared raw-media location so the bcRawMedia entity resolves.
+    ctx.symbols.get_or_intern(&raw_location);
+
+    // ---- Synthesis: build fragments in reference entity order ----
+    let mut fragments: Vec<KfxFragment> = Vec::new();
+
+    // 1. content_features ($585)
+    fragments.push(build_pdf_content_features_fragment());
+    // 2. book_metadata ($490) — PDOC
+    fragments.push(build_pdf_book_metadata_fragment(meta, &container_id, pdf));
+    // 3. metadata ($258) — reading order
+    fragments.push(build_pdf_metadata_fragment(&ctx));
+    // 4. document_data ($538) — inserted here later, once max_id is known.
+    let document_data_index = fragments.len();
+
+    // Sections, storylines, external_resources (grouped like the EPUB path).
+    let mut sections = Vec::with_capacity(n);
+    let mut storylines = Vec::with_capacity(n);
+    let mut resources = Vec::with_capacity(n);
+    for (i, rec) in recs.iter().enumerate() {
+        let page = pdf.pages[i];
+        sections.push(build_pdf_page_section(rec));
+        storylines.push(build_pdf_page_storyline(rec, page.width, page.height));
+        resources.push(build_pdf_external_resource(
+            rec,
+            i,
+            page.width,
+            page.height,
+            &raw_location,
+        ));
+    }
+    fragments.extend(sections);
+    fragments.extend(storylines);
+
+    // auxiliary_data ($597): mark each section as a navigation target.
+    let section_names: Vec<String> = recs.iter().map(|r| r.section_name.clone()).collect();
+    for name in &section_names {
+        fragments.push(build_auxiliary_data_fragment(name, &mut ctx));
+    }
+
+    // external_resource entities, then the single shared bcRawMedia.
+    fragments.extend(resources);
+    fragments.push(KfxFragment::raw(
+        KfxSymbol::Bcrawmedia as u64,
+        &raw_location,
+        pdf.bytes.clone(),
+    ));
+
+    // Navigation / position maps (one position per page).
+    fragments.push(build_pdf_position_map_fragment(&recs));
+    fragments.push(build_pdf_position_id_map_fragment(&recs));
+    fragments.push(build_pdf_location_map_fragment(&recs));
+
+    // Container metadata.
+    fragments.push(build_resource_path_fragment());
+    fragments.push(build_pdf_container_entity_map_fragment(
+        &container_id,
+        &fragments,
+        &recs,
+        &raw_location,
+        &ctx,
+    ));
+
+    // document_data now that every fragment ID is allocated (max_id correct).
+    fragments.insert(document_data_index, build_pdf_document_data_fragment(&ctx));
+
+    // ---- Serialize ----
+    let symtab_ion = build_symbol_table_ion(ctx.symbols.local_symbols());
+    let format_caps_ion = build_format_capabilities_ion();
+    let entities = serialize_fragments(&fragments, ctx.symbols.local_symbols());
+    serialize_container(&container_id, &entities, &symtab_ion, &format_caps_ion)
+}
+
+/// A percent dimension struct: `{ value: 100, unit: percent }`.
+fn pdf_percent_100() -> IonValue {
+    IonValue::Struct(vec![
+        (KfxSymbol::Value as u64, IonValue::Int(100)),
+        (
+            KfxSymbol::Unit as u64,
+            IonValue::Symbol(KfxSymbol::Percent as u64),
+        ),
+    ])
+}
+
+/// Build the storyline ($259) for one PDF page: a page-sized container holding
+/// the PDF page as a 100%×100% image. Mirrors Amazon's `l2` storyline minus the
+/// text-layer sub-container (P3).
+fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> KfxFragment {
+    // Amazon sizes the page container in points×100.
+    let fixed_w = (width_pt * 100.0).round() as i64;
+    let fixed_h = (height_pt * 100.0).round() as i64;
+
+    let image = IonValue::Struct(vec![
+        (KfxSymbol::Id as u64, IonValue::Int(rec.image_id as i64)),
+        (KfxSymbol::Width as u64, pdf_percent_100()),
+        (KfxSymbol::Height as u64, pdf_percent_100()),
+        (
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::Image as u64),
+        ),
+        (KfxSymbol::ResourceName as u64, IonValue::Symbol(rec.res_sym)),
+    ]);
+
+    let container = IonValue::Struct(vec![
+        (KfxSymbol::Id as u64, IonValue::Int(rec.container_id as i64)),
+        (KfxSymbol::FixedWidth as u64, IonValue::Int(fixed_w)),
+        (KfxSymbol::FixedHeight as u64, IonValue::Int(fixed_h)),
+        (
+            KfxSymbol::FitText as u64,
+            IonValue::Symbol(KfxSymbol::Force as u64),
+        ),
+        (
+            KfxSymbol::Layout as u64,
+            IonValue::Symbol(KfxSymbol::ScaleFit as u64),
+        ),
+        (
+            KfxSymbol::Float as u64,
+            IonValue::Symbol(KfxSymbol::Center as u64),
+        ),
+        (
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::Container as u64),
+        ),
+        (KfxSymbol::ContentList as u64, IonValue::List(vec![image])),
+    ]);
+
+    let ion = IonValue::Struct(vec![
+        (KfxSymbol::StoryName as u64, IonValue::Symbol(rec.story_sym)),
+        (KfxSymbol::ContentList as u64, IonValue::List(vec![container])),
+    ]);
+    KfxFragment::new(
+        KfxSymbol::Storyline,
+        format!("story_{}", rec.section_name),
+        ion,
+    )
+}
+
+/// Build the section ($260) for one PDF page. P0 emits a single
+/// (conditionless) portrait-style page_template; the portrait+landscape pair
+/// is P1.
+fn build_pdf_page_section(rec: &PdfPageRec) -> KfxFragment {
+    let page_template = IonValue::Struct(vec![
+        (KfxSymbol::Id as u64, IonValue::Int(rec.pt_id as i64)),
+        (KfxSymbol::StoryName as u64, IonValue::Symbol(rec.story_sym)),
+        (
+            KfxSymbol::Layout as u64,
+            IonValue::Symbol(KfxSymbol::Vertical as u64),
+        ),
+        (
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::Container as u64),
+        ),
+    ]);
+    let ion = IonValue::Struct(vec![
+        (
+            KfxSymbol::SectionName as u64,
+            IonValue::Symbol(rec.section_sym),
+        ),
+        (
+            KfxSymbol::PageTemplates as u64,
+            IonValue::List(vec![page_template]),
+        ),
+    ]);
+    KfxFragment::new(KfxSymbol::Section, &rec.section_name, ion)
+}
+
+/// Build the external_resource ($164) for one PDF page: a `format: pdf` view of
+/// the shared blob at `page_index`, sized to the page.
+fn build_pdf_external_resource(
+    rec: &PdfPageRec,
+    page_index: usize,
+    width_pt: f32,
+    height_pt: f32,
+    raw_location: &str,
+) -> KfxFragment {
+    let ion = IonValue::Struct(vec![
+        (
+            KfxSymbol::Format as u64,
+            IonValue::Symbol(KfxSymbol::Pdf as u64),
+        ),
+        (KfxSymbol::PageIndex as u64, IonValue::Int(page_index as i64)),
+        (
+            KfxSymbol::Location as u64,
+            IonValue::String(raw_location.to_string()),
+        ),
+        (
+            KfxSymbol::ResourceWidth as u64,
+            IonValue::Int(width_pt.round() as i64),
+        ),
+        (
+            KfxSymbol::ResourceHeight as u64,
+            IonValue::Int(height_pt.round() as i64),
+        ),
+        (KfxSymbol::ResourceName as u64, IonValue::Symbol(rec.res_sym)),
+    ]);
+    KfxFragment::new(KfxSymbol::ExternalResource, format!("e{page_index}"), ion)
+}
+
+/// content_features ($585) for a PDF-backed fixed-layout book. Mirrors Amazon's
+/// set minus `yj_custom_word_iterator` (which needs the P3 text layer).
+fn build_pdf_content_features_fragment() -> KfxFragment {
+    fn feature(namespace: &str, key: &str, major: i64) -> IonValue {
+        IonValue::Struct(vec![
+            (
+                KfxSymbol::Namespace as u64,
+                IonValue::String(namespace.to_string()),
+            ),
+            (KfxSymbol::Key as u64, IonValue::String(key.to_string())),
+            (
+                KfxSymbol::VersionInfo as u64,
+                IonValue::Struct(vec![(
+                    KfxSymbol::Version as u64,
+                    IonValue::Struct(vec![
+                        (KfxSymbol::MajorVersion as u64, IonValue::Int(major)),
+                        (KfxSymbol::MinorVersion as u64, IonValue::Int(0)),
+                    ]),
+                )]),
+            ),
+        ])
+    }
+    const YJ: &str = "com.amazon.yjconversion";
+    let features = IonValue::List(vec![
+        feature("SDK.Marker", "CanonicalFormat", 2),
+        feature(YJ, "yj_fixed_layout", 1),
+        feature(YJ, "yj_graphical_highlights", 1),
+        feature(YJ, "yj_textbook", 1),
+        feature(YJ, "yj_pdf_support", 1),
+    ]);
+    let ion = IonValue::Struct(vec![(KfxSymbol::Features as u64, features)]);
+    KfxFragment::singleton(KfxSymbol::ContentFeatures, ion)
+}
+
+/// book_metadata ($490) for a PDOC, mirroring "Send to Kindle" categories.
+fn build_pdf_book_metadata_fragment(
+    meta: &PdfKfxMeta,
+    container_id: &str,
+    pdf: &crate::import::pdf::PdfDoc,
+) -> KfxFragment {
+    fn kv(key: &str, value: IonValue) -> IonValue {
+        IonValue::Struct(vec![
+            (KfxSymbol::Key as u64, IonValue::String(key.to_string())),
+            (KfxSymbol::Value as u64, value),
+        ])
+    }
+    fn category(name: &str, entries: Vec<IonValue>) -> IonValue {
+        IonValue::Struct(vec![
+            (
+                KfxSymbol::Category as u64,
+                IonValue::String(name.to_string()),
+            ),
+            (KfxSymbol::Metadata as u64, IonValue::List(entries)),
+        ])
+    }
+
+    let content_id = synth_pdoc_content_id(meta, pdf);
+    let book_id = generate_book_id(&content_id);
+
+    let mut title_entries = vec![
+        kv("book_id", IonValue::String(book_id)),
+        kv("content_id", IonValue::String(content_id.clone())),
+    ];
+    if let Some(author) = &meta.author {
+        title_entries.push(kv("author", IonValue::String(author.clone())));
+    }
+    title_entries.extend([
+        kv("cde_content_type", IonValue::String("PDOC".to_string())),
+        kv("ASIN", IonValue::String(content_id.clone())),
+        kv("publisher", IonValue::String(String::new())),
+        kv("language", IonValue::String(meta.language.clone())),
+        kv("title", IonValue::String(meta.title.clone())),
+        kv("is_sample", IonValue::Bool(false)),
+        kv("asset_id", IonValue::String(container_id.to_string())),
+    ]);
+
+    let categorised = IonValue::List(vec![
+        category(
+            "kindle_audit_metadata",
+            vec![
+                kv("file_creator", IonValue::String("boko".to_string())),
+                kv(
+                    "creator_version",
+                    IonValue::String(env!("CARGO_PKG_VERSION").to_string()),
+                ),
+            ],
+        ),
+        category("kindle_title_metadata", title_entries),
+        category(
+            "kindle_capability_metadata",
+            vec![
+                kv("yj_fixed_layout", IonValue::Int(1)),
+                kv("yj_textbook", IonValue::Int(1)),
+                kv("graphical_highlights", IonValue::Int(1)),
+            ],
+        ),
+        category(
+            "kindle_ebook_metadata",
+            vec![
+                kv(
+                    "book_orientation_lock",
+                    IonValue::String("none".to_string()),
+                ),
+                kv(
+                    "user_visible_labeling",
+                    IonValue::String("page_exclusive".to_string()),
+                ),
+            ],
+        ),
+    ]);
+
+    let ion = IonValue::Struct(vec![(KfxSymbol::CategorisedMetadata as u64, categorised)]);
+    KfxFragment::singleton(KfxSymbol::BookMetadata, ion)
+}
+
+/// Deterministic 32-hex-uppercase content_id/ASIN for a PDOC, derived from the
+/// title + PDF size so re-imports are stable. (P0 mirrors Amazon's 32-hex
+/// ASIN==content_id; the 10-char tile-cache shape is revisited with the cover
+/// in P2 — see [[reference_kfx_asin_pdoc_cover]].)
+fn synth_pdoc_content_id(meta: &PdfKfxMeta, pdf: &crate::import::pdf::PdfDoc) -> String {
+    let mut seed = Vec::new();
+    seed.extend_from_slice(meta.title.as_bytes());
+    seed.extend_from_slice(meta.author.as_deref().unwrap_or("").as_bytes());
+    seed.extend_from_slice(&(pdf.bytes.len() as u64).to_le_bytes());
+    seed.extend_from_slice(&(pdf.pages.len() as u64).to_le_bytes());
+    let digest = sha1_smol::Sha1::from(&seed).digest().bytes();
+    let mut s = String::with_capacity(32);
+    for b in &digest[..16] {
+        s.push_str(&format!("{b:02X}"));
+    }
+    s
+}
+
+/// metadata ($258): the default reading order over all sections.
+fn build_pdf_metadata_fragment(ctx: &ExportContext) -> KfxFragment {
+    let sections: Vec<IonValue> = ctx
+        .section_ids
+        .iter()
+        .map(|&id| IonValue::Symbol(id))
+        .collect();
+    let reading_order = IonValue::Struct(vec![
+        (
+            KfxSymbol::ReadingOrderName as u64,
+            IonValue::Symbol(KfxSymbol::Default as u64),
+        ),
+        (KfxSymbol::Sections as u64, IonValue::List(sections)),
+    ]);
+    let ion = IonValue::Struct(vec![(
+        KfxSymbol::ReadingOrders as u64,
+        IonValue::List(vec![reading_order]),
+    )]);
+    KfxFragment::singleton(KfxSymbol::Metadata, ion)
+}
+
+/// document_data ($538): minimal fixed-layout document — max_id, pan_zoom,
+/// reading order. (Reflow fields like font_size/line_height are irrelevant to a
+/// PDF-backed book and omitted, matching Amazon's PDF document_data.)
+fn build_pdf_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
+    let sections: Vec<IonValue> = ctx
+        .section_ids
+        .iter()
+        .map(|&id| IonValue::Symbol(id))
+        .collect();
+    let reading_order = IonValue::Struct(vec![
+        (
+            KfxSymbol::ReadingOrderName as u64,
+            IonValue::Symbol(KfxSymbol::Default as u64),
+        ),
+        (KfxSymbol::Sections as u64, IonValue::List(sections)),
+    ]);
+    let ion = IonValue::Struct(vec![
+        (KfxSymbol::MaxId as u64, IonValue::Int(ctx.max_eid() as i64)),
+        (
+            KfxSymbol::PanZoom as u64,
+            IonValue::Symbol(KfxSymbol::Enabled as u64),
+        ),
+        (
+            KfxSymbol::ReadingOrders as u64,
+            IonValue::List(vec![reading_order]),
+        ),
+    ]);
+    KfxFragment::singleton(KfxSymbol::DocumentData, ion)
+}
+
+/// position_map ($264): one entry per page mapping section → its content EIDs.
+fn build_pdf_position_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
+    let entries: Vec<IonValue> = recs
+        .iter()
+        .map(|rec| {
+            let contains = IonValue::List(vec![
+                IonValue::Int(rec.pt_id as i64),
+                IonValue::Int(rec.container_id as i64),
+                IonValue::Int(rec.image_id as i64),
+            ]);
+            IonValue::Struct(vec![
+                (KfxSymbol::Contains as u64, contains),
+                (
+                    KfxSymbol::SectionName as u64,
+                    IonValue::Symbol(rec.section_sym),
+                ),
+            ])
+        })
+        .collect();
+    KfxFragment::singleton(KfxSymbol::PositionMap, IonValue::List(entries))
+}
+
+/// position_id_map ($265): sequential PIDs, one per page, plus a terminator.
+fn build_pdf_position_id_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
+    let mut entries: Vec<IonValue> = Vec::with_capacity(recs.len() + 1);
+    let mut pid = 0i64;
+    for rec in recs {
+        entries.push(IonValue::Struct(vec![
+            (KfxSymbol::Eid as u64, IonValue::Int(rec.image_id as i64)),
+            (KfxSymbol::Pid as u64, IonValue::Int(pid)),
+        ]));
+        pid += 1;
+    }
+    entries.push(IonValue::Struct(vec![
+        (KfxSymbol::Eid as u64, IonValue::Int(0)),
+        (KfxSymbol::Pid as u64, IonValue::Int(pid)),
+    ]));
+    KfxFragment::singleton(KfxSymbol::PositionIdMap, IonValue::List(entries))
+}
+
+/// location_map ($550): one entry per page at offset 0.
+fn build_pdf_location_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
+    let locations: Vec<IonValue> = recs
+        .iter()
+        .map(|rec| {
+            IonValue::Struct(vec![
+                (KfxSymbol::Id as u64, IonValue::Int(rec.image_id as i64)),
+                (KfxSymbol::Offset as u64, IonValue::Int(0)),
+            ])
+        })
+        .collect();
+    let ion = IonValue::List(vec![IonValue::Struct(vec![(
+        KfxSymbol::Locations as u64,
+        IonValue::List(locations),
+    )])]);
+    KfxFragment::singleton(KfxSymbol::LocationMap, ion)
+}
+
+/// container_entity_map ($419): the entity list plus the dependency graph
+/// section → external_resource → shared bcRawMedia. The PDF variant differs
+/// from the EPUB one in that every page's external_resource depends on the
+/// *single* shared raw-media location, not a per-resource `resource/<name>`.
+fn build_pdf_container_entity_map_fragment(
+    container_id: &str,
+    fragments: &[KfxFragment],
+    recs: &[PdfPageRec],
+    raw_location: &str,
+    ctx: &ExportContext,
+) -> KfxFragment {
+    let mut entity_names: Vec<IonValue> = Vec::new();
+    for frag in fragments {
+        if frag.fid.starts_with('$') {
+            continue;
+        }
+        if let Some(sym) = ctx.symbols.get(&frag.fid) {
+            entity_names.push(IonValue::Symbol(sym));
+        }
+    }
+    let container_entry = IonValue::Struct(vec![
+        (
+            KfxSymbol::Id as u64,
+            IonValue::String(container_id.to_string()),
+        ),
+        (KfxSymbol::Contains as u64, IonValue::List(entity_names)),
+    ]);
+
+    let Some(raw_sym) = ctx.symbols.get(raw_location) else {
+        // Should never happen — interned in the survey pass.
+        let ion = IonValue::Struct(vec![(
+            KfxSymbol::ContainerList as u64,
+            IonValue::List(vec![container_entry]),
+        )]);
+        return KfxFragment::singleton(KfxSymbol::ContainerEntityMap, ion);
+    };
+
+    let mut dependencies: Vec<IonValue> = Vec::with_capacity(recs.len() * 2);
+    for rec in recs {
+        // section → [external_resource]
+        dependencies.push(IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Symbol(rec.section_sym)),
+            (
+                KfxSymbol::MandatoryDependencies as u64,
+                IonValue::List(vec![IonValue::Symbol(rec.res_sym)]),
+            ),
+        ]));
+        // external_resource → [shared bcRawMedia]
+        dependencies.push(IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Symbol(rec.res_sym)),
+            (
+                KfxSymbol::MandatoryDependencies as u64,
+                IonValue::List(vec![IonValue::Symbol(raw_sym)]),
+            ),
+        ]));
+    }
+
+    let ion = IonValue::Struct(vec![
+        (
+            KfxSymbol::ContainerList as u64,
+            IonValue::List(vec![container_entry]),
+        ),
+        (
+            KfxSymbol::EntityDependencies as u64,
+            IonValue::List(dependencies),
+        ),
+    ]);
+    KfxFragment::singleton(KfxSymbol::ContainerEntityMap, ion)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

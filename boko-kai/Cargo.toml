@@ -95,6 +95,12 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 xml5ever = "0.39.0"
 
+# Pure-Rust PDF parser. Used by the PDF→KFX path to read page count, per-page
+# MediaBox dimensions, and /Info title+author. We only parse structure (the
+# PDF is embedded verbatim and the device renders it), so the datetime/rayon
+# default features are dropped; nom parser + flate2/crypto stay (hard deps).
+lopdf = { version = "0.40", default-features = false }
+
 # Native: use fast zlib-rs
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }

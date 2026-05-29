@@ -43,7 +43,7 @@ pub use html_synth::{
     SynthesisResult, escape_xml, escape_xml_into, synthesize_html, synthesize_html_with_class_list,
     synthesize_xhtml_document, synthesize_xhtml_document_with_class_list,
 };
-pub use kfx::{KfxConfig, KfxExporter};
+pub use kfx::{KfxConfig, KfxExporter, PdfKfxMeta, pdf_to_kfx};
 pub use normalize::{ChapterContent, GlobalStylePool, NormalizedContent, normalize_book};
 
 /// Trait for exporting books to specific formats.

@@ -1209,6 +1209,19 @@ fn convert(
         return Ok(());
     }
 
+    // PDF → KFX: wrap the PDF verbatim into a fixed-layout PDOC KFX. The PDF
+    // is embedded and the *device* renders each page (which lets the Scribe
+    // pen draw over it). Not a content conversion — see
+    // .claude/plans/pdf-to-kfx.md.
+    if !from_stdin
+        && output_format == Format::Kfx
+        && std::path::Path::new(input)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+    {
+        return convert_pdf_to_kfx(input, output, to_stdout, quiet);
+    }
+
     // Open the book (from file or stdin)
     let mut book = if from_stdin {
         use std::io::Read;
@@ -1593,6 +1606,89 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
         let truncated: String = normalized.chars().take(max_chars).collect();
         format!("{}...", truncated)
     }
+}
+
+// =========================================================================
+// PDF → KFX dispatch (called from `convert` when input is .pdf → .kfx)
+// =========================================================================
+
+fn convert_pdf_to_kfx(
+    input: &str,
+    output: Option<&str>,
+    to_stdout: bool,
+    quiet: bool,
+) -> Result<(), String> {
+    let bytes = std::fs::read(input).map_err(|e| format!("Failed to read input: {e}"))?;
+    let doc = boko::import::probe_pdf(bytes).map_err(|e| format!("PDF parse failed: {e}"))?;
+
+    // Title: PDF /Info (title-cased if ALL CAPS, as Amazon does), else file
+    // stem. Author: PDF /Info, if present.
+    let title = doc
+        .title
+        .clone()
+        .map(|t| title_case_if_shouting(&t))
+        .unwrap_or_else(|| pdf_file_stem(input));
+    let author = doc.author.clone();
+
+    let meta = boko::export::PdfKfxMeta {
+        title: title.clone(),
+        author: author.clone(),
+        language: "en".to_string(),
+    };
+
+    if !quiet && !to_stdout {
+        eprintln!(
+            "PDF: {} pages → fixed-layout PDOC KFX\n  title:  {title}\n  author: {}",
+            doc.pages.len(),
+            author.as_deref().unwrap_or("(none)"),
+        );
+    }
+
+    let kfx = boko::export::pdf_to_kfx(&doc, &meta);
+
+    if to_stdout {
+        use std::io::Write;
+        std::io::stdout()
+            .write_all(&kfx)
+            .map_err(|e| format!("Write failed: {e}"))?;
+    } else {
+        std::fs::write(output.unwrap(), &kfx)
+            .map_err(|e| format!("Failed to write output: {e}"))?;
+    }
+    if !quiet && !to_stdout {
+        eprintln!("Done ({} bytes).", kfx.len());
+    }
+    Ok(())
+}
+
+/// Title-case a string only if it is "shouting" (has letters and no lowercase),
+/// matching what Amazon does to an ALL-CAPS `/Info` title.
+fn title_case_if_shouting(s: &str) -> String {
+    let has_lower = s.chars().any(|c| c.is_lowercase());
+    let has_alpha = s.chars().any(|c| c.is_alphabetic());
+    if has_lower || !has_alpha {
+        return s.to_string();
+    }
+    s.split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn pdf_file_stem(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Untitled")
+        .to_string()
 }
 
 // =========================================================================
