@@ -78,6 +78,16 @@ struct Armed {
 }
 
 fn main() {
+    // `--version`/`-V`: print the compiled version and exit. Cheap — no device
+    // setup, no framebuffer. `bin/update.sh` calls this on its launch line to
+    // record which picker version is actually on the Kindle: the binary is the
+    // only source that stays accurate after a Wi-Fi self-update (that swaps the
+    // binary but not config.xml). Inherits the workspace version through
+    // `version.workspace = true`.
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("sidle {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     // X11-window proof-of-concept (see eink::x11poc): validates that a
     // Sidle-created window is WM-managed + recomposited on teardown before we
     // port the renderer off raw /dev/fb0. Bypasses all fb/config setup.
