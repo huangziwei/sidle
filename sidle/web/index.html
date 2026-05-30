@@ -482,6 +482,23 @@
           <button type="button" id="rs-reset" class="btn-link">Reset to defaults</button>
         </div>
       </div>
+      <!-- Display settings for PDF-backed (fixed-layout) books: page layout +
+           night mode. Toggled by the same Aa button / `s` key as the reflowable
+           panel; only one of the two is ever shown (by reader mode). -->
+      <div id="reader-pdf-style-panel" class="reader-style-panel" hidden aria-label="Display settings">
+        <div class="rs-row">
+          <label for="rps-spread">Page layout</label>
+          <select id="rps-spread">
+            <option value="auto">Auto</option>
+            <option value="single">Single page</option>
+            <option value="double">Two pages</option>
+          </select>
+        </div>
+        <div class="rs-row">
+          <label for="rps-invert">Night mode</label>
+          <input type="checkbox" id="rps-invert" />
+        </div>
+      </div>
       <div
         id="reader-selection-toolbar"
         class="reader-selection-toolbar"

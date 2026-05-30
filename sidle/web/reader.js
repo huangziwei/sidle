@@ -1414,6 +1414,7 @@ function resetStyle() {
 }
 
 function toggleStylePanel() {
+  if (readerMode === "pdf") return togglePdfStylePanel();
   const p = $("#reader-style-panel");
   if (p) p.hidden = !p.hidden;
 }
@@ -1425,13 +1426,13 @@ function hideStylePanel() {
 // ---- navigation -----------------------------------------------------------
 
 const forward = () => {
-  if (readerMode === "pdf") return pdfGoTo(pdf.page + 1);
+  if (readerMode === "pdf") return pdfGoTo(pdf.page + pdfStep());
   hideNotePopover();
   hideSelectionToolbar();
   paginator?.next();
 };
 const back = () => {
-  if (readerMode === "pdf") return pdfGoTo(pdf.page - 1);
+  if (readerMode === "pdf") return pdfGoTo(pdf.page - pdfStep());
   hideNotePopover();
   hideSelectionToolbar();
   paginator?.prev();
@@ -1583,19 +1584,51 @@ function onKey(e) {
 // are hidden since they have no meaning on a fixed page image. Reading position
 // is the page index, persisted through the same `reading_position` model.
 
-// Topbar buttons hidden while a PDF book is open; restored on close.
-const PDF_ONLY_HIDDEN = [
-  "#reader-bookmark",
-  "#reader-search",
-  "#reader-style",
-  "#reader-annotations",
-];
+// Topbar buttons with no meaning on a fixed page image — hidden in PDF mode.
+// (`#reader-style` stays: it carries the spread + night-mode controls.)
+const PDF_ONLY_HIDDEN = ["#reader-bookmark", "#reader-search", "#reader-annotations"];
 
 let pdfTocRows = []; // [{ li, page }] in TOC order, for active-marking
+
+// PDF display settings — a global reading preference (not per-book), persisted.
+// `spread`: auto | single | double; `invert`: night mode (invert the page image).
+const PDF_STYLE_KEY = "sidle.reader.pdf-style";
+const PDF_STYLE_DEFAULT = { spread: "auto", invert: false };
+const pdfStyle = loadPdfStyle();
+function loadPdfStyle() {
+  try {
+    return { ...PDF_STYLE_DEFAULT, ...JSON.parse(localStorage.getItem(PDF_STYLE_KEY) || "{}") };
+  } catch {
+    return { ...PDF_STYLE_DEFAULT };
+  }
+}
+function savePdfStyle() {
+  try {
+    localStorage.setItem(PDF_STYLE_KEY, JSON.stringify(pdfStyle));
+  } catch {
+    /* ignore */
+  }
+}
 
 function clampPage(i, count) {
   const n = count || 1;
   return Math.max(0, Math.min(n - 1, Math.floor(i) || 0));
+}
+
+// Effective single/double for the current stage size + setting. `auto` picks
+// double only when two full-height pages actually fit side by side — the same
+// "let the window decide" behaviour the reflowable Columns:auto uses.
+function pdfSpreadMode() {
+  if (pdfStyle.spread === "single" || pdfStyle.spread === "double") return pdfStyle.spread;
+  const stage = $("#reader-stage");
+  const sw = stage?.clientWidth || 0;
+  const sh = stage?.clientHeight || 1;
+  const p = pdf?.pages[pdf.page] || { width: 612, height: 792 };
+  const aspect = p.width / Math.max(1, p.height);
+  return sw >= 2 * sh * aspect * 0.98 ? "double" : "single";
+}
+function pdfStep() {
+  return pdfSpreadMode() === "double" ? 2 : 1;
 }
 
 async function openPdf(id, openDto, positions) {
@@ -1606,20 +1639,28 @@ async function openPdf(id, openDto, positions) {
     positions.find((p) => p.source === "sidle")?.linear_pos ?? 0,
     openDto.page_count,
   );
-  const img = document.createElement("img");
-  img.id = "reader-pdf-page";
-  img.className = "reader-pdf-page";
-  img.alt = "";
-  img.draggable = false;
+  // One spread = up to two page images (left/right) in a flex host. Persistent
+  // <img> elements (src swapped per turn) avoid the decode flash a rebuild gives.
+  const host = document.createElement("div");
+  host.className = "reader-pdf-spread";
+  const imgL = document.createElement("img");
+  const imgR = document.createElement("img");
+  for (const im of [imgL, imgR]) {
+    im.className = "reader-pdf-page";
+    im.alt = "";
+    im.draggable = false;
+  }
+  host.append(imgL, imgR);
   pdf = {
     pageCount: openDto.page_count,
     pages: openDto.pages || [],
     labels: openDto.page_labels || [],
     toc: openDto.toc || [],
     page: start,
-    img,
+    host,
+    imgL,
+    imgR,
     token: 0,
-    onResize: null,
     cache: new Map(), // `${page}@${width}` → data URL (bounded; LRU-ish by insertion)
     inflight: new Map(), // key → Promise<url|null>, so a turn can await a prefetch
   };
@@ -1635,12 +1676,12 @@ async function openPdf(id, openDto, positions) {
   view().classList.add("open");
   revealTopbar();
   renderPdfTocPanel();
+  syncPdfStylePanel();
+  applyPdfStyle(); // night-mode class before the first paint
 
-  $("#reader-paginator-host").replaceChildren(img);
-  // Re-render the current page at the new resolution on resize (debounced via
-  // the render token — a stale response is dropped).
-  pdf.onResize = () => pdfRenderCurrent();
-  window.addEventListener("resize", pdf.onResize);
+  $("#reader-paginator-host").replaceChildren(host);
+  // (Resize handling — re-render the spread at the new size — is folded into the
+  // shared rAF-debounced window resize listener wired in init.)
 
   await pdfRenderCurrent();
   pdfUpdateProgress();
@@ -1668,12 +1709,12 @@ async function closePdf() {
     document.removeEventListener("keydown", keyHandler, true);
     keyHandler = null;
   }
-  if (pdf?.onResize) window.removeEventListener("resize", pdf.onResize);
   $("#reader-paginator-host")?.replaceChildren();
   for (const sel of PDF_ONLY_HIDDEN) {
     const el = $(sel);
     if (el) el.hidden = false; // restore for the next (possibly reflowable) book
   }
+  if ($("#reader-pdf-style-panel")) $("#reader-pdf-style-panel").hidden = true;
   pdf = null;
   pdfTocRows = [];
   dto = null;
@@ -1694,23 +1735,28 @@ async function closePdf() {
 function pdfGoTo(i) {
   if (!pdf) return;
   const p = clampPage(i, pdf.pageCount);
-  if (p === pdf.page && pdf.img.src) return;
+  if (p === pdf.page && pdf.imgL.src) return;
   pdf.page = p;
   pdfRenderCurrent();
   pdfUpdateProgress();
   markPdfTocActive();
 }
 
-// Render width to request for the given page: fit it to the stage height at
-// device resolution, capped (so a huge HiDPI window doesn't ask for an absurd
-// bitmap) and quantized to 50px so tiny layout jitter doesn't bust the cache.
-function pdfRenderWidth(page) {
+// Render width to request for a page: fit it to the stage height, but in a
+// `half` (double-page) layout also cap to half the stage width so the spread
+// fits. At device resolution, capped (so a huge HiDPI window doesn't ask for an
+// absurd bitmap) and quantized to 50px so layout jitter doesn't bust the cache.
+function pdfRenderWidth(page, half) {
   const stage = $("#reader-stage");
-  const h = (stage?.clientHeight || 800) - 16; // a little breathing room
+  const sw = stage?.clientWidth || 1200;
+  const sh = (stage?.clientHeight || 800) - 16; // a little breathing room
   const p = pdf.pages[page] || { width: 612, height: 792 };
   const aspect = p.width / Math.max(1, p.height);
   const dpr = window.devicePixelRatio || 1;
-  const raw = Math.max(200, Math.min(Math.round(h * aspect * dpr), 3000));
+  let dispW = sh * aspect; // fit to height
+  const budget = half ? (sw - 24) / 2 : sw; // ...but never exceed the width share
+  if (dispW > budget) dispW = budget;
+  const raw = Math.max(200, Math.min(Math.round(dispW * dpr), 3000));
   return Math.round(raw / 50) * 50;
 }
 
@@ -1751,77 +1797,149 @@ function pdfFetchPage(page, width) {
   return p;
 }
 
-// Render the current page (instant if cached), then warm the neighbours so the
-// next turn is immediate. A render token guards against a fast sequence of
-// turns painting a stale page.
+// Paint `img` with `page` (instant if cached). The token guards against a fast
+// sequence of turns painting a stale page.
+async function pdfSetImg(img, page, half, token) {
+  const width = pdfRenderWidth(page, half);
+  const cached = pdf.cache.get(`${page}@${width}`);
+  if (cached) {
+    img.src = cached;
+    return;
+  }
+  const url = await pdfFetchPage(page, width);
+  if (!pdf || pdf.token !== token) return; // a newer turn superseded us
+  if (url) img.src = url;
+  else if (img === pdf.imgL) toast(`Couldn't render page ${page + 1}`, true);
+}
+
+// Render the current spread (1 or 2 pages by the spread mode), then warm the
+// next + previous spread so a turn is immediate.
 async function pdfRenderCurrent() {
   if (!pdf) return;
-  const page = pdf.page;
-  const width = pdfRenderWidth(page);
   const token = ++pdf.token;
-  const key = `${page}@${width}`;
+  const half = pdfSpreadMode() === "double";
+  const left = pdf.page;
+  const hasRight = half && left + 1 < pdf.pageCount;
+  pdf.host.classList.toggle("double", half);
+  pdf.imgR.style.display = hasRight ? "" : "none";
 
-  const cached = pdf.cache.get(key);
-  if (cached) {
-    pdf.img.src = cached;
-  } else {
-    const url = await pdfFetchPage(page, width);
-    if (!pdf || pdf.token !== token) return; // a newer turn superseded us
-    if (url) pdf.img.src = url;
-    else {
-      toast(`Couldn't render page ${page + 1}`, true);
-      return;
-    }
-  }
+  await pdfSetImg(pdf.imgL, left, half, token);
+  if (hasRight) await pdfSetImg(pdf.imgR, left + 1, true, token);
+  if (!pdf || pdf.token !== token) return;
 
-  // Prefetch neighbours (next first) off the critical path. Best-effort.
-  for (const n of [page + 1, page - 1]) {
-    if (n >= 0 && n < pdf.pageCount) pdfFetchPage(n, pdfRenderWidth(n));
+  // Prefetch the next and previous spread (best-effort, off the critical path).
+  const step = half ? 2 : 1;
+  const warm = [left + step, left - step];
+  if (half) warm.push(left + step + 1);
+  for (const n of warm) {
+    if (n >= 0 && n < pdf.pageCount) pdfFetchPage(n, pdfRenderWidth(n, half));
   }
 }
 
 function pdfUpdateProgress() {
   if (!pdf) return;
-  const human = pdf.page + 1;
-  const label = pdf.labels[pdf.page];
-  // Show the PDF's own page label when it differs from the ordinal ("Cover",
-  // "xvii"); otherwise just the page number.
+  // The PDF's own label when it differs from the ordinal ("Cover", "xvii").
+  const lbl = (i) => {
+    const human = String(i + 1);
+    const l = pdf.labels[i];
+    return l && l !== human ? l : human;
+  };
+  const left = pdf.page;
+  const right = pdfSpreadMode() === "double" && left + 1 < pdf.pageCount ? left + 1 : null;
   $("#reader-loc").textContent =
-    label && label !== String(human) ? `Page ${label}` : `Page ${human}`;
+    right != null ? `Pages ${lbl(left)}–${lbl(right)}` : `Page ${lbl(left)}`;
+  const human = (right != null ? right : left) + 1;
   const pct = Math.round((human / pdf.pageCount) * 100);
   $("#reader-percent").textContent = `${human} / ${pdf.pageCount} · ${pct}%`;
 }
 
+// Mirrors the reflowable reader's key map (`onKey`) for the shortcuts that apply
+// to a fixed page image. Same keys, same actions; drops the ones with no PDF
+// meaning (search `⌘F`//`, annotations `a`, bookmark `b`, font `[`/`]`).
 function pdfOnKey(e) {
+  // A focused style-panel control owns its keys — only Esc (close it) is ours.
+  if (e.target?.closest?.("#reader-pdf-style-panel")) {
+    if (e.key === "Escape") {
+      togglePdfStylePanel();
+      e.preventDefault();
+    }
+    return;
+  }
   if (e.key === "Escape") {
-    if (!$("#reader-toc-panel")?.hidden) hideTocPanel();
+    // Peel back panels first, then close the reader.
+    if (!$("#reader-pdf-style-panel")?.hidden) togglePdfStylePanel();
+    else if (!$("#reader-toc-panel")?.hidden) hideTocPanel();
     else close();
     e.preventDefault();
     return;
   }
+  // `Shift+G` → last page (before the modifier filter, as the reflowable does).
+  if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === "G") {
+    pdfGoTo(pdf.pageCount - 1);
+    gArmed = 0;
+    e.preventDefault();
+    return;
+  }
   if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+  // `g g` chord → first page (shares the reflowable reader's arm timer).
+  if (e.key === "g") {
+    const now = Date.now();
+    if (now - gArmed < G_CHORD_MS) {
+      pdfGoTo(0);
+      gArmed = 0;
+    } else {
+      gArmed = now;
+    }
+    e.preventDefault();
+    return;
+  }
+  gArmed = 0;
+  let handled = true;
   switch (e.key) {
     case "ArrowRight":
+    case "ArrowDown":
     case "PageDown":
     case " ":
-    case "j":
-      pdfGoTo(pdf.page + 1);
-      e.preventDefault();
+      forward(); // steps by the spread (1 or 2 pages)
       break;
     case "ArrowLeft":
+    case "ArrowUp":
     case "PageUp":
-    case "k":
-      pdfGoTo(pdf.page - 1);
-      e.preventDefault();
+      back();
       break;
-    case "Home":
-      pdfGoTo(0);
-      e.preventDefault();
+    case "t":
+      toggleTocPanel();
       break;
-    case "End":
-      pdfGoTo(pdf.pageCount - 1);
-      e.preventDefault();
+    case "s":
+      togglePdfStylePanel();
       break;
+    case "n":
+      pdfJumpBookmark(1);
+      break;
+    case "p":
+      pdfJumpBookmark(-1);
+      break;
+    default:
+      handled = false;
+  }
+  if (handled) e.preventDefault();
+}
+
+// `n`/`p` analogue of the reflowable next/prev-chapter: jump to the next or
+// previous TOC bookmark's page. No-op when the PDF has no outline.
+function pdfJumpBookmark(dir) {
+  const pages = pdf?.tocPages;
+  if (!pages?.length) return;
+  if (dir > 0) {
+    const next = pages.find((p) => p > pdf.page);
+    if (next != null) pdfGoTo(next);
+  } else {
+    let prev = null;
+    for (const p of pages) {
+      if (p < pdf.page) prev = p;
+      else break;
+    }
+    if (prev != null) pdfGoTo(prev);
   }
 }
 
@@ -1835,6 +1953,8 @@ function renderPdfTocPanel() {
   for (const t of pdf.toc) pdfTocRowsFor(t, 0, rows);
   list.replaceChildren(...rows);
   $("#reader-toc-empty").hidden = rows.length > 0;
+  // Sorted unique bookmark pages, for `n`/`p` next/prev-bookmark navigation.
+  pdf.tocPages = [...new Set(pdfTocRows.map((r) => r.page))].sort((a, b) => a - b);
 }
 
 function pdfTocRowsFor(entry, depth, rows) {
@@ -1858,6 +1978,38 @@ function markPdfTocActive() {
     if (pdfTocRows[i].page <= pdf.page) active = i;
   }
   pdfTocRows.forEach(({ li }, i) => li.classList.toggle("active", i === active));
+}
+
+// ---- PDF display settings (spread + night mode) ---------------------------
+
+function togglePdfStylePanel() {
+  const p = $("#reader-pdf-style-panel");
+  if (p) p.hidden = !p.hidden;
+}
+
+function syncPdfStylePanel() {
+  const sp = $("#rps-spread");
+  if (sp) sp.value = pdfStyle.spread;
+  const inv = $("#rps-invert");
+  if (inv) inv.checked = !!pdfStyle.invert;
+}
+
+// Night mode = CSS-invert the page image (white→black). Re-render isn't needed.
+function applyPdfStyle() {
+  if (pdf) pdf.host.classList.toggle("invert", !!pdfStyle.invert);
+}
+
+function setPdfSpread(v) {
+  pdfStyle.spread = v;
+  savePdfStyle();
+  pdfRenderCurrent();
+  pdfUpdateProgress();
+}
+
+function setPdfInvert(on) {
+  pdfStyle.invert = !!on;
+  savePdfStyle();
+  applyPdfStyle();
 }
 
 async function open(id) {
@@ -2143,6 +2295,9 @@ function wire() {
   }
   $("#reader-toc")?.addEventListener("click", () => toggleTocPanel());
   $("#reader-toc-close")?.addEventListener("click", () => hideTocPanel());
+  // PDF display settings (spread + night mode). Persist + apply on change.
+  $("#rps-spread")?.addEventListener("change", (e) => setPdfSpread(e.target.value));
+  $("#rps-invert")?.addEventListener("change", (e) => setPdfInvert(e.target.checked));
   // Display-settings popover: the Aa button toggles it; every control writes
   // through to the live view; reset restores defaults.
   $("#reader-style")?.addEventListener("click", () => toggleStylePanel());
@@ -2164,6 +2319,9 @@ function wire() {
     resizeTick = requestAnimationFrame(() => {
       resizeTick = null;
       if (paginator && styleSettings) applyLayout(lastPos?.index ?? 0, true);
+      // PDF mode: re-render the current spread (auto single/double + crisp at
+      // the new size). Shares this rAF so drag-resize coalesces to one apply.
+      if (readerMode === "pdf" && pdf) pdfRenderCurrent();
     });
   });
   // Click anywhere in the app chrome (outside a popover) dismisses it. Clicks

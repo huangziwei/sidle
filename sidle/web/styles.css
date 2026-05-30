@@ -1832,14 +1832,26 @@ button {
 /* The paginator lives in a host that fills the stage; nav zones overlay it. */
 .reader-paginator-host { position: absolute; inset: 0; }
 
-/* PDF (fixed-layout) mode: a single page image centered in the host, fit to the
-   stage. The :has guard only applies when the host holds a page image, leaving
-   the reflowable paginator layout untouched. Nav zones still overlay (siblings). */
-.reader-paginator-host:has(> .reader-pdf-page) {
+/* PDF (fixed-layout) mode: a spread of one or two page images, centered in the
+   host and fit to the stage. The :has guard only applies when the host holds a
+   spread, leaving the reflowable paginator layout untouched. Nav zones still
+   overlay (siblings of the host). */
+.reader-paginator-host:has(> .reader-pdf-spread) {
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 8px;
+}
+.reader-pdf-spread {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  width: 100%;
+  height: 100%;
+}
+.reader-pdf-spread.double {
+  gap: 12px; /* the gutter between two facing pages */
 }
 .reader-pdf-page {
   display: block;
@@ -1852,6 +1864,15 @@ button {
   -webkit-user-select: none;
   background: #fff;
   box-shadow: 0 1px 10px rgba(0, 0, 0, 0.3);
+}
+/* In a two-page spread each page may take at most half the width. */
+.reader-pdf-spread.double .reader-pdf-page {
+  max-width: calc(50% - 6px);
+}
+/* Night mode: invert the rendered page (white → black). Photos read as
+   negatives — the accepted trade for dark reading of a fixed image. */
+.reader-pdf-spread.invert .reader-pdf-page {
+  filter: invert(1) hue-rotate(180deg);
 }
 
 /* Prev/next: slim hover-revealed arrows pinned to the page's OUTER margin. The
