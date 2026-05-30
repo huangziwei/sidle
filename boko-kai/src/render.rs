@@ -93,13 +93,19 @@ pub fn render_pdf_page_jpeg(
         return Err(RenderError::Render(format!("unusable bitmap size {w}x{h}")));
     }
     let (w, h) = (w as usize, h as usize);
-    let raw = bitmap.as_raw_bytes();
 
-    // pdfium's BGRA buffer is normally tightly packed (stride == w*4), but
-    // strip any row padding defensively so jpeg-encoder sees exact rows.
+    // Normalize to true R,G,B,A. pdfium-render reverses byte order during
+    // render, so `as_raw_bytes()` with a BGRA format actually yields RGBA —
+    // encoding that as BGRA swaps red/blue (a blue cover came out brown).
+    // `as_rgba_bytes()` accounts for the format + reverse flag authoritatively,
+    // so colors are always correct.
+    let raw = bitmap.as_rgba_bytes();
+
+    // The buffer is normally tightly packed (stride == w*4), but strip any row
+    // padding defensively so we read exact rows.
     let row = w * 4;
     let expected = row * h;
-    let bgra = if raw.len() == expected {
+    let rgba = if raw.len() == expected {
         raw
     } else {
         if h == 0 || raw.len() / h < row {
@@ -117,10 +123,22 @@ pub fn render_pdf_page_jpeg(
         packed
     };
 
+    // Composite over white and drop alpha. pdfium leaves unpainted areas
+    // transparent (straight alpha); JPEG has no alpha, so without this a PDF
+    // whose page background isn't explicitly painted would get black margins.
+    let mut rgb: Vec<u8> = Vec::with_capacity(w * h * 3);
+    for px in rgba.chunks_exact(4) {
+        let a = px[3] as u32;
+        let over_white = |c: u8| (((c as u32) * a + 255 * (255 - a)) / 255) as u8;
+        rgb.push(over_white(px[0]));
+        rgb.push(over_white(px[1]));
+        rgb.push(over_white(px[2]));
+    }
+
     let mut out: Vec<u8> = Vec::with_capacity(128 * 1024);
     let encoder = jpeg_encoder::Encoder::new(&mut out, quality);
     encoder
-        .encode(&bgra, w as u16, h as u16, jpeg_encoder::ColorType::Bgra)
+        .encode(&rgb, w as u16, h as u16, jpeg_encoder::ColorType::Rgb)
         .map_err(|e| RenderError::Encode(e.to_string()))?;
     Ok(out)
 }
@@ -143,19 +161,32 @@ pub fn render_pdf_page_jpeg(
 mod native {
     use super::RenderError;
     use pdfium_render::prelude::*;
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
 
     // pdfium keeps its bindings in a process-global (`Pdfium::new` sets a global
-    // `OnceCell`), so we bind exactly once and reuse. With the `thread_safe`
-    // feature `Pdfium` is `Sync`, so it can live in a static; the bindings are
+    // `OnceCell`), so we bind once and reuse. With the `thread_safe` feature
+    // `Pdfium` is `Sync`, so it can live in a static; the bindings are
     // mutex-guarded for the Sidle worker's threads.
-    static PDFIUM: OnceLock<Result<Pdfium, String>> = OnceLock::new();
+    static PDFIUM: OnceLock<Pdfium> = OnceLock::new();
+    static BIND_LOCK: Mutex<()> = Mutex::new(());
 
     pub(super) fn pdfium() -> Result<&'static Pdfium, RenderError> {
-        match PDFIUM.get_or_init(bind) {
-            Ok(p) => Ok(p),
-            Err(e) => Err(RenderError::Unavailable(e.clone())),
+        if let Some(p) = PDFIUM.get() {
+            return Ok(p);
         }
+        // Bind under a lock so `Pdfium::new` (which sets pdfium's process-global
+        // bindings, and panics if set twice) runs at most once. We cache only
+        // SUCCESS — pdfium's global is set only when binding fully succeeds, so a
+        // failed attempt leaves it unset and a later call retries. That means
+        // staging the dylib after a cold failure works without restarting the
+        // process (the dev `cargo run -p sidle` footgun).
+        let _guard = BIND_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = PDFIUM.get() {
+            return Ok(p);
+        }
+        let pdfium = bind().map_err(RenderError::Unavailable)?;
+        let _ = PDFIUM.set(pdfium);
+        Ok(PDFIUM.get().expect("just set"))
     }
 
     /// Bind to `libpdfium`, trying in order: `BOKO_PDFIUM_LIB`, a copy beside the
