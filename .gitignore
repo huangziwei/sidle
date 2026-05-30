@@ -20,3 +20,8 @@ kual/sidle/bin/sidle
 # `cargo tauri build` to fold into the bundle. Regenerated each build; never committed.
 sidle/src-tauri/binaries/
 sidle/src-tauri/resources/
+
+# build.sh cache: host-arch libpdfium.dylib for the PDF→KFX cover renderer,
+# downloaded from bblanchon/pdfium-binaries once per machine. A 3rd-party
+# binary, not source — out of git.
+vendor/

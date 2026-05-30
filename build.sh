@@ -58,6 +58,28 @@ cargo build --release -p sidle-server
 HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 [ -n "$HOST_TRIPLE" ] || { echo "error: could not read host target triple from rustc -vV" >&2; exit 1; }
 
+# Fetch the host-arch libpdfium for the PDF→KFX cover renderer. The worker
+# renders page 1 via pdfium (boko `render`), which dlopen's libpdfium at runtime;
+# we bundle it beside the app binary below so the installed app finds it (else
+# PDF imports produce a cover-less KFX). pdfium is Chrome's engine (no pure-Rust
+# renderer); the binary is from bblanchon/pdfium-binaries (Apache/BSD, loaded
+# dynamically). Cached per-machine under vendor/ (gitignored); `latest` is always
+# >= our `pdfium_7543` binding ABI (pdfium only adds symbols).
+PDFIUM_CACHE="vendor/pdfium/$HOST_TRIPLE"
+PDFIUM_LIB="$PDFIUM_CACHE/libpdfium.dylib"
+if [ ! -f "$PDFIUM_LIB" ]; then
+    case "$HOST_TRIPLE" in
+        aarch64-apple-darwin) PDFIUM_ASSET="pdfium-mac-arm64.tgz" ;;
+        x86_64-apple-darwin)  PDFIUM_ASSET="pdfium-mac-x64.tgz" ;;
+        *) echo "error: no pdfium binary mapping for host '$HOST_TRIPLE'" >&2; exit 1 ;;
+    esac
+    echo "==> Fetching libpdfium ($PDFIUM_ASSET) for the cover renderer"
+    mkdir -p "$PDFIUM_CACHE"
+    curl -fsSL "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/$PDFIUM_ASSET" \
+        | tar -xzf - -C "$PDFIUM_CACHE" --strip-components=1 lib/libpdfium.dylib
+    [ -f "$PDFIUM_LIB" ] || { echo "error: libpdfium extract failed ($PDFIUM_LIB missing)" >&2; exit 1; }
+fi
+
 echo "==> Staging sidle-server sidecar ($HOST_TRIPLE) + KUAL resources for bundling"
 SIDECAR_DIR="sidle/src-tauri/binaries"
 RES_KUAL="sidle/src-tauri/resources/kual"
@@ -80,6 +102,16 @@ if [ ! -d "$SRC" ]; then
     echo "error: expected bundle not found at $SRC" >&2
     exit 1
 fi
+
+# Bundle libpdfium beside the app binary (Contents/MacOS) so boko's cover
+# renderer finds it via its beside-exe search at runtime. Tauri has already
+# signed the bundle, so ad-hoc-sign the added dylib and re-seal the bundle —
+# otherwise dyld refuses to load an unsigned library into the signed process.
+echo "==> Bundling libpdfium into the app + re-signing (ad-hoc)"
+cp "$PDFIUM_LIB" "$SRC/Contents/MacOS/libpdfium.dylib"
+codesign --force --sign - "$SRC/Contents/MacOS/libpdfium.dylib"
+codesign --force --deep --sign - "$SRC"
+
 rm -rf "$DST"
 ditto "$SRC" "$DST"
 
