@@ -64,6 +64,9 @@ pub fn render_pdf_page_jpeg(
 ) -> Result<Vec<u8>, RenderError> {
     use pdfium_render::prelude::*;
 
+    // Serialize the whole render: pdfium can't have two document operations in
+    // flight at once (see RENDER_LOCK). Held until this function returns.
+    let _render_guard = native::render_guard();
     let pdfium = native::pdfium()?;
     let doc = pdfium
         .load_pdf_from_byte_slice(pdf_bytes, None)
@@ -169,6 +172,22 @@ mod native {
     // mutex-guarded for the Sidle worker's threads.
     static PDFIUM: OnceLock<Pdfium> = OnceLock::new();
     static BIND_LOCK: Mutex<()> = Mutex::new(());
+
+    // pdfium is NOT thread-safe across a *sequence* of calls — a render is many
+    // FFI calls (load doc → get page → rasterize), and the `thread_safe` feature
+    // only guards each individual call, not the whole sequence. Two renders
+    // interleaving on different documents corrupt pdfium's global state and one
+    // deadlocks *inside* a held FFI lock, wedging every later render process-wide
+    // (the reader's prefetch fires several renders at once → freeze; white pages
+    // after reopen). So every document operation takes this lock for its whole
+    // duration: pdfium sees one caller at a time.
+    static RENDER_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Hold for the entire duration of any pdfium document operation (render /
+    /// text). Poison-tolerant: a panicked render must not wedge the lock forever.
+    pub(super) fn render_guard() -> std::sync::MutexGuard<'static, ()> {
+        RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     pub(super) fn pdfium() -> Result<&'static Pdfium, RenderError> {
         if let Some(p) = PDFIUM.get() {

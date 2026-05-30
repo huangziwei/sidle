@@ -1661,6 +1661,7 @@ async function openPdf(id, openDto, positions) {
     imgL,
     imgR,
     token: 0,
+    renderTimer: null, // debounce handle for pdfScheduleRender
     cache: new Map(), // `${page}@${width}` → data URL (bounded; LRU-ish by insertion)
     inflight: new Map(), // key → Promise<url|null>, so a turn can await a prefetch
   };
@@ -1709,6 +1710,7 @@ async function closePdf() {
     document.removeEventListener("keydown", keyHandler, true);
     keyHandler = null;
   }
+  if (pdf?.renderTimer) clearTimeout(pdf.renderTimer);
   $("#reader-paginator-host")?.replaceChildren();
   for (const sel of PDF_ONLY_HIDDEN) {
     const el = $(sel);
@@ -1737,9 +1739,23 @@ function pdfGoTo(i) {
   const p = clampPage(i, pdf.pageCount);
   if (p === pdf.page && pdf.imgL.src) return;
   pdf.page = p;
-  pdfRenderCurrent();
-  pdfUpdateProgress();
+  pdfUpdateProgress(); // cheap — reflect the new page number immediately
   markPdfTocActive();
+  pdfScheduleRender();
+}
+
+// Render the current spread — instant when it's already cached (the prefetched
+// common case), else debounced. Holding the page-turn key then flips through
+// cached pages smoothly and coalesces past the cache to the page you land on,
+// so renders don't pile onto the serialized pdfium backend.
+function pdfScheduleRender() {
+  clearTimeout(pdf.renderTimer);
+  const half = pdfSpreadMode() === "double";
+  if (pdf.cache.has(`${pdf.page}@${pdfRenderWidth(pdf.page, half)}`)) {
+    pdfRenderCurrent();
+  } else {
+    pdf.renderTimer = setTimeout(() => pdf && pdfRenderCurrent(), 90);
+  }
 }
 
 // Render width to request for a page: fit it to the stage height, but in a
@@ -1797,23 +1813,10 @@ function pdfFetchPage(page, width) {
   return p;
 }
 
-// Paint `img` with `page` (instant if cached). The token guards against a fast
-// sequence of turns painting a stale page.
-async function pdfSetImg(img, page, half, token) {
-  const width = pdfRenderWidth(page, half);
-  const cached = pdf.cache.get(`${page}@${width}`);
-  if (cached) {
-    img.src = cached;
-    return;
-  }
-  const url = await pdfFetchPage(page, width);
-  if (!pdf || pdf.token !== token) return; // a newer turn superseded us
-  if (url) img.src = url;
-  else if (img === pdf.imgL) toast(`Couldn't render page ${page + 1}`, true);
-}
-
 // Render the current spread (1 or 2 pages by the spread mode), then warm the
-// next + previous spread so a turn is immediate.
+// next + previous spread so a turn is immediate. Both pages of a spread are
+// fetched concurrently and their <img> srcs swapped **together** — so a
+// two-page turn updates as one frame, never left-then-right.
 async function pdfRenderCurrent() {
   if (!pdf) return;
   const token = ++pdf.token;
@@ -1823,9 +1826,14 @@ async function pdfRenderCurrent() {
   pdf.host.classList.toggle("double", half);
   pdf.imgR.style.display = hasRight ? "" : "none";
 
-  await pdfSetImg(pdf.imgL, left, half, token);
-  if (hasRight) await pdfSetImg(pdf.imgR, left + 1, true, token);
-  if (!pdf || pdf.token !== token) return;
+  const [urlL, urlR] = await Promise.all([
+    pdfFetchPage(left, pdfRenderWidth(left, half)),
+    hasRight ? pdfFetchPage(left + 1, pdfRenderWidth(left + 1, true)) : Promise.resolve(null),
+  ]);
+  if (!pdf || pdf.token !== token) return; // a newer turn superseded us
+  if (urlL) pdf.imgL.src = urlL;
+  else toast(`Couldn't render page ${left + 1}`, true);
+  if (hasRight && urlR) pdf.imgR.src = urlR;
 
   // Prefetch the next and previous spread (best-effort, off the critical path).
   const step = half ? 2 : 1;
