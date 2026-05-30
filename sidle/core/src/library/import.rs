@@ -670,6 +670,7 @@ mod tests {
             pages: vec![boko::import::PdfPage { width: 612.0, height: 792.0 }],
             title: Some("THE STREET WAS MINE".to_string()),
             author: Some("MEGAN E. ABBOTT".to_string()),
+            outline: Vec::new(),
         };
         let meta = extract_meta_from_pdf(&doc, Some("fallback"));
         assert_eq!(meta.title, "The Street Was Mine");
@@ -681,6 +682,7 @@ mod tests {
             pages: vec![boko::import::PdfPage { width: 1.0, height: 1.0 }],
             title: None,
             author: None,
+            outline: Vec::new(),
         };
         let meta2 = extract_meta_from_pdf(&doc2, Some("My File"));
         assert_eq!(meta2.title, "My File");

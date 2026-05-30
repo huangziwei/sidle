@@ -2607,6 +2607,13 @@ pub fn pdf_to_kfx(
         ));
     }
 
+    // Navigation: a `nav_container` ($391) holding the TOC, plus a thin
+    // `book_navigation` ($389) that references it by name (Amazon's PDF shape;
+    // the fixed-layout reader rejects an inline nav_container). Each TOC entry
+    // targets its page's image EID — the EID `position_id_map` registers, so the
+    // device can resolve the nav position.
+    fragments.extend(build_pdf_nav_fragments(&pdf.outline, &recs, &mut ctx));
+
     // Navigation / position maps (one position per page).
     fragments.push(build_pdf_position_map_fragment(&recs));
     fragments.push(build_pdf_position_id_map_fragment(&recs));
@@ -3079,6 +3086,103 @@ fn build_pdf_location_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
         IonValue::List(locations),
     )])]);
     KfxFragment::singleton(KfxSymbol::LocationMap, ion)
+}
+
+/// Navigation fragments for the PDF TOC, matching Amazon's PDF KFX shape: a
+/// separate `nav_container` ($391) **entity** holding the table of contents, and
+/// a thin `book_navigation` ($389) that merely *references* it by name. The
+/// fixed-layout/PDOC reader requires this referenced form — an inline
+/// nav_container (as the reflowable EPUB path emits, which that reader tolerates)
+/// makes the device reject the whole book ("An error occurred…"). Returns an
+/// empty vec when there's no usable outline.
+fn build_pdf_nav_fragments(
+    outline: &[crate::import::pdf::PdfOutlineItem],
+    recs: &[PdfPageRec],
+    ctx: &mut ExportContext,
+) -> Vec<KfxFragment> {
+    if outline.is_empty() {
+        return Vec::new();
+    }
+    let entries = build_pdf_toc_entries(outline, recs);
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    // The nav_container is a named entity; book_navigation points at it by name.
+    let toc_name = "ntoc";
+    let toc_sym = ctx.symbols.get_or_intern(toc_name);
+
+    let nav_container = KfxFragment::new(
+        KfxSymbol::NavContainer,
+        toc_name,
+        IonValue::Struct(vec![
+            (
+                KfxSymbol::NavType as u64,
+                IonValue::Symbol(KfxSymbol::Toc as u64),
+            ),
+            (KfxSymbol::NavContainerName as u64, IonValue::Symbol(toc_sym)),
+            (KfxSymbol::Entries as u64, IonValue::List(entries)),
+        ]),
+    );
+
+    let book_navigation = KfxFragment::singleton(
+        KfxSymbol::BookNavigation,
+        IonValue::List(vec![IonValue::Struct(vec![
+            (
+                KfxSymbol::ReadingOrderName as u64,
+                IonValue::Symbol(KfxSymbol::Default as u64),
+            ),
+            (
+                KfxSymbol::NavContainers as u64,
+                IonValue::List(vec![IonValue::Symbol(toc_sym)]),
+            ),
+        ])]),
+    );
+
+    vec![nav_container, book_navigation]
+}
+
+/// Convert resolved outline items into nested KFX TOC entries — plain
+/// `{representation:{label}, target_position:{id, offset}, [entries]}` structs
+/// (no `nav_unit::` annotation, matching Amazon's PDF TOC). `target_position.id`
+/// is the page's **image EID**, which is what `position_id_map` registers as a
+/// reading position — the device resolves every nav target through that map, so
+/// targeting an unregistered EID (e.g. the page container) makes it reject the
+/// whole book. An item whose page is out of range is skipped along with its
+/// subtree.
+fn build_pdf_toc_entries(
+    items: &[crate::import::pdf::PdfOutlineItem],
+    recs: &[PdfPageRec],
+) -> Vec<IonValue> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let rec = recs.get(item.page_index)?;
+            let mut fields = vec![
+                (
+                    KfxSymbol::Representation as u64,
+                    IonValue::Struct(vec![(
+                        KfxSymbol::Label as u64,
+                        IonValue::String(item.title.clone()),
+                    )]),
+                ),
+                (
+                    KfxSymbol::TargetPosition as u64,
+                    IonValue::Struct(vec![
+                        (KfxSymbol::Id as u64, IonValue::Int(rec.image_id as i64)),
+                        (KfxSymbol::Offset as u64, IonValue::Int(0)),
+                    ]),
+                ),
+            ];
+            if !item.children.is_empty() {
+                let kids = build_pdf_toc_entries(&item.children, recs);
+                if !kids.is_empty() {
+                    fields.push((KfxSymbol::Entries as u64, IonValue::List(kids)));
+                }
+            }
+            Some(IonValue::Struct(fields))
+        })
+        .collect()
 }
 
 /// container_entity_map ($419): the entity list plus the dependency graph

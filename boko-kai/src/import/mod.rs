@@ -14,7 +14,7 @@ pub use azw3::Azw3Importer;
 pub use epub::EpubImporter;
 pub use kfx::KfxImporter;
 pub use mobi::MobiImporter;
-pub use pdf::{PdfDoc, PdfPage, probe_pdf};
+pub use pdf::{PdfDoc, PdfOutlineItem, PdfPage, probe_pdf};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -130,7 +130,7 @@ pub fn kfx_extract_pdf(kfx: &[u8]) -> Result<Vec<u8>, PdfExtractError> {
 mod tests {
     use super::*;
     use crate::export::{PdfKfxMeta, pdf_to_kfx};
-    use crate::import::pdf::{PdfDoc, PdfPage};
+    use crate::import::pdf::{PdfDoc, PdfOutlineItem, PdfPage};
 
     /// A byte string that passes the `%PDF-` magic check. The round-trip gate
     /// is about *embedding fidelity*, so we embed these bytes directly via a
@@ -153,6 +153,7 @@ mod tests {
             ],
             title: Some("Round Trip".to_string()),
             author: Some("Tester".to_string()),
+            outline: Vec::new(),
         };
         let meta = PdfKfxMeta {
             title: doc.title.clone().unwrap(),
@@ -180,6 +181,7 @@ mod tests {
             pages: vec![PdfPage { width: 612.0, height: 792.0 }],
             title: Some("With Cover".to_string()),
             author: None,
+            outline: Vec::new(),
         };
         let meta = PdfKfxMeta {
             title: "With Cover".to_string(),
@@ -197,6 +199,48 @@ mod tests {
         assert!(
             kfx.windows(cover.len()).any(|w| w == cover.as_slice()),
             "the cover JPEG must be embedded verbatim in the KFX"
+        );
+    }
+
+    #[test]
+    fn outline_becomes_nested_toc_in_kfx() {
+        // A 2-page book with a one-level-nested outline → a book_navigation TOC
+        // whose labels are embedded verbatim. Targets are exercised structurally
+        // by the on-corpus harness; here we assert the labels land and that the
+        // TOC doesn't disturb the byte-identical PDF round-trip.
+        let bytes = fake_pdf();
+        let doc = PdfDoc {
+            bytes: bytes.clone(),
+            pages: vec![
+                PdfPage { width: 612.0, height: 792.0 },
+                PdfPage { width: 612.0, height: 792.0 },
+            ],
+            title: Some("Nav".to_string()),
+            author: None,
+            outline: vec![PdfOutlineItem {
+                title: "Chapter One".to_string(),
+                page_index: 0,
+                children: vec![PdfOutlineItem {
+                    title: "Section 1.1".to_string(),
+                    page_index: 1,
+                    children: Vec::new(),
+                }],
+            }],
+        };
+        let meta = PdfKfxMeta {
+            title: "Nav".to_string(),
+            author: None,
+            language: "en".to_string(),
+        };
+        let kfx = pdf_to_kfx(&doc, &meta, None);
+
+        let has = |needle: &[u8]| kfx.windows(needle.len()).any(|w| w == needle);
+        assert!(has(b"Chapter One"), "TOC parent label must be embedded");
+        assert!(has(b"Section 1.1"), "nested TOC child label must be embedded");
+        assert_eq!(
+            kfx_extract_pdf(&kfx).unwrap(),
+            bytes,
+            "TOC must not disturb the byte-identical PDF round-trip"
         );
     }
 
