@@ -376,6 +376,10 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
         } else {
             book.language.clone()
         },
+        // Edited publication year/publisher reach the KFX book_metadata too —
+        // not just the renamed filename — so the device's book details match.
+        date: book.published_at.clone(),
+        publisher: book.publisher.clone(),
     };
     // Cover precedence: an existing sidecar — a cover the user fixed via
     // "Change cover…", or the page-1 render from a prior convert — wins over a

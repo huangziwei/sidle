@@ -1660,6 +1660,10 @@ fn convert_pdf_to_kfx(
         title: title.clone(),
         author: author.clone(),
         language: "en".to_string(),
+        // The CLI carries no edited library metadata; leave date/publisher
+        // unset (the Sidle worker fills them from the DB row).
+        date: None,
+        publisher: None,
     };
 
     if !quiet && !to_stdout {

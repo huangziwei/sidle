@@ -2449,6 +2449,14 @@ pub struct PdfKfxMeta {
     pub title: String,
     pub author: Option<String>,
     pub language: String,
+    /// Publication date — any of `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or a full ISO
+    /// timestamp. Emitted as the `issue_date` title-metadata entry (truncated to
+    /// the date part). `None` → no `issue_date` (optional for a PDOC; Amazon
+    /// stamps the send date there, we stamp the work's date when known).
+    pub date: Option<String>,
+    /// Publisher imprint. Emitted as the `publisher` entry; `None`/blank yields
+    /// the empty value Amazon's PDOC also carries.
+    pub publisher: Option<String>,
 }
 
 /// Per-page bookkeeping gathered in the survey pass.
@@ -2895,17 +2903,30 @@ fn build_pdf_book_metadata_fragment(
     let content_id = synth_pdoc_content_id(meta, pdf);
     let book_id = generate_book_id(&content_id);
 
-    let mut title_entries = vec![
-        kv("book_id", IonValue::String(book_id)),
-        kv("content_id", IonValue::String(content_id.clone())),
-    ];
+    let mut title_entries = vec![kv("book_id", IonValue::String(book_id))];
+    // `issue_date` sits right after `book_id` (Amazon's PDOC field order). Emit
+    // it only when the library carries a date, truncated to the YYYY-MM-DD the
+    // KFX expects (a bare year passes through unchanged).
+    if let Some(date) = meta
+        .date
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        title_entries.push(kv(
+            "issue_date",
+            IonValue::String(crate::util::truncate_to_date(date)),
+        ));
+    }
+    title_entries.push(kv("content_id", IonValue::String(content_id.clone())));
     if let Some(author) = &meta.author {
         title_entries.push(kv("author", IonValue::String(author.clone())));
     }
+    let publisher = meta.publisher.as_deref().map(str::trim).unwrap_or("");
     title_entries.extend([
         kv("cde_content_type", IonValue::String("PDOC".to_string())),
         kv("ASIN", IonValue::String(content_id.clone())),
-        kv("publisher", IonValue::String(String::new())),
+        kv("publisher", IonValue::String(publisher.to_string())),
         kv("language", IonValue::String(meta.language.clone())),
         kv("title", IonValue::String(meta.title.clone())),
     ]);

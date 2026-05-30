@@ -159,6 +159,8 @@ mod tests {
             title: doc.title.clone().unwrap(),
             author: doc.author.clone(),
             language: "en".to_string(),
+            date: None,
+            publisher: None,
         };
 
         // No cover here: it doesn't affect the embedded-PDF extraction we test
@@ -187,6 +189,8 @@ mod tests {
             title: "With Cover".to_string(),
             author: None,
             language: "en".to_string(),
+            date: None,
+            publisher: None,
         };
 
         // A stand-in cover blob with JPEG magic (real rendering needs pdfium).
@@ -231,6 +235,8 @@ mod tests {
             title: "Nav".to_string(),
             author: None,
             language: "en".to_string(),
+            date: None,
+            publisher: None,
         };
         let kfx = pdf_to_kfx(&doc, &meta, None);
 
@@ -241,6 +247,59 @@ mod tests {
             kfx_extract_pdf(&kfx).unwrap(),
             bytes,
             "TOC must not disturb the byte-identical PDF round-trip"
+        );
+    }
+
+    #[test]
+    fn edited_date_and_publisher_land_in_book_metadata() {
+        // The library's edited year/publisher must reach the PDOC book_metadata
+        // (as `issue_date`/`publisher`), not only the renamed filename. The date
+        // is truncated to YYYY-MM-DD.
+        let bytes = fake_pdf();
+        let doc = PdfDoc {
+            bytes,
+            pages: vec![PdfPage { width: 612.0, height: 792.0 }],
+            title: Some("Dated".to_string()),
+            author: None,
+            outline: Vec::new(),
+        };
+        let meta = PdfKfxMeta {
+            title: "Dated".to_string(),
+            author: None,
+            language: "en".to_string(),
+            date: Some("2021-03-15T09:00:00Z".to_string()),
+            publisher: Some("Acme Press".to_string()),
+        };
+        let kfx = pdf_to_kfx(&doc, &meta, None);
+        let has = |needle: &[u8]| kfx.windows(needle.len()).any(|w| w == needle);
+        assert!(has(b"issue_date"), "issue_date key must be emitted");
+        assert!(has(b"2021-03-15"), "date truncated to YYYY-MM-DD must be present");
+        assert!(!has(b"T09:00:00"), "the ISO time part must be stripped");
+        assert!(has(b"Acme Press"), "edited publisher must be embedded");
+    }
+
+    #[test]
+    fn no_date_omits_issue_date() {
+        // `None` date ⇒ no `issue_date` entry at all (it's optional for PDOC).
+        let bytes = fake_pdf();
+        let doc = PdfDoc {
+            bytes,
+            pages: vec![PdfPage { width: 612.0, height: 792.0 }],
+            title: Some("Undated".to_string()),
+            author: None,
+            outline: Vec::new(),
+        };
+        let meta = PdfKfxMeta {
+            title: "Undated".to_string(),
+            author: None,
+            language: "en".to_string(),
+            date: None,
+            publisher: None,
+        };
+        let kfx = pdf_to_kfx(&doc, &meta, None);
+        assert!(
+            !kfx.windows(b"issue_date".len()).any(|w| w == b"issue_date"),
+            "no issue_date entry when the library has no date"
         );
     }
 
