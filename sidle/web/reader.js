@@ -1620,6 +1620,8 @@ async function openPdf(id, openDto, positions) {
     img,
     token: 0,
     onResize: null,
+    cache: new Map(), // `${page}@${width}` → data URL (bounded; LRU-ish by insertion)
+    inflight: new Map(), // key → Promise<url|null>, so a turn can await a prefetch
   };
 
   $("#reader-title").textContent = openDto.title || "Untitled";
@@ -1699,28 +1701,82 @@ function pdfGoTo(i) {
   markPdfTocActive();
 }
 
-// Render width: fit the page to the stage height at device resolution (capped
-// so a huge HiDPI window doesn't request an absurd bitmap).
-function pdfRenderWidth() {
+// Render width to request for the given page: fit it to the stage height at
+// device resolution, capped (so a huge HiDPI window doesn't ask for an absurd
+// bitmap) and quantized to 50px so tiny layout jitter doesn't bust the cache.
+function pdfRenderWidth(page) {
   const stage = $("#reader-stage");
   const h = (stage?.clientHeight || 800) - 16; // a little breathing room
-  const page = pdf.pages[pdf.page] || { width: 612, height: 792 };
-  const aspect = page.width / Math.max(1, page.height);
+  const p = pdf.pages[page] || { width: 612, height: 792 };
+  const aspect = p.width / Math.max(1, p.height);
   const dpr = window.devicePixelRatio || 1;
-  return Math.max(200, Math.min(Math.round(h * aspect * dpr), 3000));
+  const raw = Math.max(200, Math.min(Math.round(h * aspect * dpr), 3000));
+  return Math.round(raw / 50) * 50;
 }
 
+const PDF_CACHE_MAX = 12; // rendered pages kept in memory (current ± neighbours)
+
+function pdfTrimCache() {
+  // Map preserves insertion order — drop the oldest entries past the cap.
+  while (pdf.cache.size > PDF_CACHE_MAX) {
+    pdf.cache.delete(pdf.cache.keys().next().value);
+  }
+}
+
+// Fetch (and cache) a page's image, returning its data URL (or null on error).
+// Coalesces with an in-flight request for the same key — so navigating onto a
+// page whose prefetch is still running awaits that prefetch instead of erroring.
+function pdfFetchPage(page, width) {
+  const key = `${page}@${width}`;
+  const hit = pdf.cache.get(key);
+  if (hit) return Promise.resolve(hit);
+  const pending = pdf.inflight.get(key);
+  if (pending) return pending;
+  const p = (async () => {
+    try {
+      const b64 = await window.api.invoke("reader_pdf_page", { bookId, page, width });
+      const url = `data:image/jpeg;base64,${b64}`;
+      if (pdf) {
+        pdf.cache.set(key, url);
+        pdfTrimCache();
+      }
+      return url;
+    } catch {
+      return null;
+    } finally {
+      pdf?.inflight.delete(key);
+    }
+  })();
+  pdf.inflight.set(key, p);
+  return p;
+}
+
+// Render the current page (instant if cached), then warm the neighbours so the
+// next turn is immediate. A render token guards against a fast sequence of
+// turns painting a stale page.
 async function pdfRenderCurrent() {
   if (!pdf) return;
   const page = pdf.page;
-  const width = pdfRenderWidth();
+  const width = pdfRenderWidth(page);
   const token = ++pdf.token;
-  try {
-    const b64 = await window.api.invoke("reader_pdf_page", { bookId, page, width });
-    if (!pdf || pdf.token !== token) return; // superseded by a newer render
-    pdf.img.src = `data:image/jpeg;base64,${b64}`;
-  } catch (err) {
-    if (pdf && pdf.token === token) toast(`Couldn't render page ${page + 1}: ${err}`, true);
+  const key = `${page}@${width}`;
+
+  const cached = pdf.cache.get(key);
+  if (cached) {
+    pdf.img.src = cached;
+  } else {
+    const url = await pdfFetchPage(page, width);
+    if (!pdf || pdf.token !== token) return; // a newer turn superseded us
+    if (url) pdf.img.src = url;
+    else {
+      toast(`Couldn't render page ${page + 1}`, true);
+      return;
+    }
+  }
+
+  // Prefetch neighbours (next first) off the critical path. Best-effort.
+  for (const n of [page + 1, page - 1]) {
+    if (n >= 0 && n < pdf.pageCount) pdfFetchPage(n, pdfRenderWidth(n));
   }
 }
 
@@ -1782,22 +1838,14 @@ function renderPdfTocPanel() {
 }
 
 function pdfTocRowsFor(entry, depth, rows) {
+  // Same DOM/class/indent as the reflowable `tocRowsFor`, so the panel looks and
+  // behaves identically — only the target differs (a page index, not an href).
   const li = document.createElement("li");
-  li.className = "reader-toc-item";
-  li.style.paddingLeft = `${8 + depth * 14}px`;
+  li.className = "toc-row";
+  li.style.paddingLeft = `${14 + depth * 14}px`; // UI chrome is always LTR
   li.textContent = entry.label || "—";
-  li.tabIndex = 0;
-  const go = () => {
-    pdfGoTo(entry.page_index);
-    hideTocPanel();
-  };
-  li.addEventListener("click", go);
-  li.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") {
-      go();
-      e.preventDefault();
-    }
-  });
+  // Match the reflowable TOC: jump but leave the panel open (pick another entry).
+  li.addEventListener("click", () => pdfGoTo(entry.page_index));
   rows.push(li);
   pdfTocRows.push({ li, page: entry.page_index });
   for (const c of entry.children || []) pdfTocRowsFor(c, depth + 1, rows);
