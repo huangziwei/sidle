@@ -288,6 +288,12 @@ fn convert_epub_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<P
     let tmp_path = dir.join(format!("{base}.kfx.partial"));
 
     let mut handle = boko::Book::open(source_path)?;
+    // Bake the library's (possibly user-edited) metadata into the KFX without
+    // rewriting the source EPUB: clone the parsed metadata, overlay the DB
+    // fields, and install it as an override the KFX exporter reads. A first
+    // import is a no-op (DB == source); only edits diverge. See
+    // `book_metadata_override`.
+    handle.set_metadata_override(book_metadata_override(handle.metadata(), book));
     let mut writer = File::create(&tmp_path)?;
     handle.export(boko::Format::Kfx, &mut writer)?;
     writer.sync_all().ok();
@@ -371,37 +377,66 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
             book.language.clone()
         },
     };
-    // Render page 1 as the cover (PDOC library tile + sleep-screen art). One
-    // render serves both: it's embedded in the KFX *and* saved as the row's
-    // cover for the gallery. pdfium is optional — on failure log and proceed
-    // cover-less. See .claude/plans/pdf-to-kfx.md (P2).
-    let cover_jpeg = match boko::render::render_pdf_page_jpeg(
-        &doc.bytes,
-        0,
-        boko::render::COVER_TARGET_WIDTH_PX,
-        boko::render::COVER_JPEG_QUALITY,
-    ) {
-        Ok(jpeg) => Some(jpeg),
-        Err(e) => {
-            eprintln!("[sidle/queue] book {} pdf cover: skipped ({e})", book.id);
-            None
-        }
+    // Cover precedence: an existing sidecar — a cover the user fixed via
+    // "Change cover…", or the page-1 render from a prior convert — wins over a
+    // fresh page-1 render, so a force-reconvert never clobbers a corrected
+    // cover. (The original page-1 of a coverless PDF is just a title page; the
+    // whole point of the edit is to replace it.) Whatever we use is normalized
+    // to a sleep-screen-safe JFIF JPEG via `sanitize_for_kfx`, which also
+    // transcodes a PNG/WebP sidecar. Only when there's no usable sidecar (first
+    // import, or an unreadable file) do we render page 1. pdfium is optional —
+    // on render failure log and proceed cover-less. See pdf-to-kfx.md (P2).
+    let existing_cover = book
+        .cover_path
+        .as_deref()
+        .map(Path::new)
+        .filter(|p| p.exists())
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|raw| {
+            let jpeg = boko::kfx::image_transcode::sanitize_for_kfx(&raw).unwrap_or(raw);
+            is_jpeg(&jpeg).then_some(jpeg)
+        });
+    let cover_jpeg = match existing_cover {
+        Some(jpeg) => Some(jpeg),
+        None => match boko::render::render_pdf_page_jpeg(
+            &doc.bytes,
+            0,
+            boko::render::COVER_TARGET_WIDTH_PX,
+            boko::render::COVER_JPEG_QUALITY,
+        ) {
+            Ok(jpeg) => Some(jpeg),
+            Err(e) => {
+                eprintln!("[sidle/queue] book {} pdf cover: skipped ({e})", book.id);
+                None
+            }
+        },
     };
 
     let kfx = boko::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref());
     write_bytes_atomic(&out_path, &kfx)?;
 
-    // Persist the same JPEG as the library tile cover.
-    let cover_path = cover_jpeg.and_then(|jpeg| {
-        let out = paths.cover(&book.sha256, "jpg");
-        match write_bytes_atomic(&out, &jpeg) {
-            Ok(()) => Some(out),
-            Err(e) => {
-                eprintln!("[sidle/queue] book {} pdf cover write failed: {e}", book.id);
-                None
+    // Sidecar for the library tile. Reuse an existing sidecar verbatim (it's the
+    // user's chosen image, possibly png/webp — keep its bytes for the gallery
+    // even though the KFX got a JPEG-normalized copy); only write a fresh
+    // `cover.jpg` when we rendered page 1.
+    let cover_path = match book
+        .cover_path
+        .as_deref()
+        .map(Path::new)
+        .filter(|p| p.exists())
+    {
+        Some(existing) => Some(existing.to_path_buf()),
+        None => cover_jpeg.and_then(|jpeg| {
+            let out = paths.cover(&book.sha256, "jpg");
+            match write_bytes_atomic(&out, &jpeg) {
+                Ok(()) => Some(out),
+                Err(e) => {
+                    eprintln!("[sidle/queue] book {} pdf cover write failed: {e}", book.id);
+                    None
+                }
             }
-        }
-    });
+        }),
+    };
 
     // The KFX's ASIN is synthesized inside `pdf_to_kfx` (PDOC content_id); we
     // don't surface it onto the row yet. That only feeds device-delete `.sdr`
@@ -441,6 +476,37 @@ fn convert_kfx_to_pdf(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
     })
 }
 
+/// JPEG magic (`FF D8 FF`). `pdf_to_kfx` embeds the cover as a `format:jpg`
+/// resource and reads its JPEG dimensions, so a non-JPEG cover would corrupt it
+/// — gate on this and fall back to a page-1 render when a sidecar isn't (and
+/// couldn't be normalized to) a JPEG.
+fn is_jpeg(bytes: &[u8]) -> bool {
+    bytes.len() >= 3 && bytes[0..3] == [0xFF, 0xD8, 0xFF]
+}
+
+/// Overlay the library row's metadata onto the source's parsed metadata,
+/// producing the [`boko::Metadata`] the KFX export should write. Cloned from
+/// `source` so fields the DB doesn't track (identifier, ASIN, cover_image,
+/// description, writing-mode…) survive untouched; the tracked fields take the
+/// edited DB value. For an unedited book the DB still equals what import read
+/// from the source, so this is a no-op.
+fn book_metadata_override(source: &boko::Metadata, book: &BookRow) -> boko::Metadata {
+    let mut m = source.clone();
+    m.title = book.title.clone();
+    m.authors = crate::library::authors::split_display(&book.author);
+    if !book.language.trim().is_empty() {
+        m.language = book.language.clone();
+    }
+    m.publisher = book.publisher.clone();
+    m.date = book.published_at.clone();
+    m.collection = book.series_name.clone().map(|name| boko::model::CollectionInfo {
+        name,
+        collection_type: Some("series".to_string()),
+        position: book.series_index,
+    });
+    m
+}
+
 /// Reproduce the import-time basename. The source file's stem already encodes
 /// `[Author] Title (Year)` (import writes it that way), so we fall back to
 /// the stem and only re-derive from metadata if the stem is missing or empty.
@@ -451,5 +517,91 @@ fn derived_basename(book: &BookRow, source: &Path) -> String {
         }
     let authors = crate::library::authors::split_display(&book.author);
     format_basename(&authors, &book.title, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(title: &str, author: &str) -> BookRow {
+        BookRow {
+            id: 1,
+            sha256: "sha".into(),
+            title: title.into(),
+            author: author.into(),
+            language: "en".into(),
+            ppd: None,
+            epub_path: None,
+            cover_path: None,
+            kfx_path: None,
+            kfx_sha256: None,
+            pdf_path: None,
+            file_size: 0,
+            imported_at: "2026-01-01".into(),
+            status: "done".into(),
+            error: None,
+            kind: Some("epub_to_kfx".into()),
+            asin: None,
+            publisher: None,
+            published_at: None,
+            series_name: None,
+            series_index: None,
+            tags: vec![],
+        }
+    }
+
+    #[test]
+    fn override_applies_db_fields_but_preserves_untracked() {
+        let mut src = boko::Metadata {
+            title: "Old Title".into(),
+            authors: vec!["Old Author".into()],
+            language: "ja".into(),
+            ..Default::default()
+        };
+        // Untracked-by-DB fields that must survive the overlay.
+        src.identifier = "urn:isbn:9999".into();
+        src.asin = Some("B00REALASIN".into());
+        src.cover_image = Some("OEBPS/cover.xhtml".into());
+
+        let mut r = row("New Title", "Ann Author & Bob Writer");
+        r.publisher = Some("New Press".into());
+        r.published_at = Some("2021".into());
+        r.series_name = Some("Saga".into());
+        r.series_index = Some(2.0);
+
+        let m = book_metadata_override(&src, &r);
+
+        // Edited fields take the DB value.
+        assert_eq!(m.title, "New Title");
+        assert_eq!(m.authors, vec!["Ann Author".to_string(), "Bob Writer".to_string()]);
+        assert_eq!(m.language, "en");
+        assert_eq!(m.publisher.as_deref(), Some("New Press"));
+        assert_eq!(m.date.as_deref(), Some("2021"));
+        assert_eq!(m.collection.as_ref().map(|c| c.name.as_str()), Some("Saga"));
+        assert_eq!(m.collection.as_ref().and_then(|c| c.position), Some(2.0));
+        // Untracked identity fields are untouched, so the KFX keeps its identity.
+        assert_eq!(m.identifier, "urn:isbn:9999");
+        assert_eq!(m.asin.as_deref(), Some("B00REALASIN"));
+        assert_eq!(m.cover_image.as_deref(), Some("OEBPS/cover.xhtml"));
+    }
+
+    #[test]
+    fn override_keeps_source_language_when_db_blank() {
+        let src = boko::Metadata {
+            language: "ja".into(),
+            ..Default::default()
+        };
+        let mut r = row("T", "A");
+        r.language = String::new();
+        assert_eq!(book_metadata_override(&src, &r).language, "ja");
+    }
+
+    #[test]
+    fn is_jpeg_gates_on_magic() {
+        assert!(is_jpeg(&[0xFF, 0xD8, 0xFF, 0xE0]));
+        assert!(!is_jpeg(&[0x89, 0x50, 0x4E, 0x47])); // PNG
+        assert!(!is_jpeg(&[0xFF, 0xD8])); // truncated
+        assert!(!is_jpeg(&[]));
+    }
 }
 

@@ -161,7 +161,11 @@ pub async fn library_update_metadata(
     let updated = {
         let conn = state.db.lock().await;
         db::update_metadata(&conn, book_id, &patch).map_err(|e| e.to_string())?;
-        db::get_book(&conn, book_id)
+        // Rename the on-disk files to match the edited `[Author] Title (Year)`
+        // (best-effort; returns the refreshed row with any new paths). Keeps the
+        // library folder and a future force-reconvert's derived basename in sync
+        // with the metadata.
+        crate::library::rename::rename_book_files(&conn, &state.paths, book_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("book {book_id} not found"))?
     };

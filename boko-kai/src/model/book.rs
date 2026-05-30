@@ -202,6 +202,12 @@ pub struct Book {
     /// Cache of parsed IR chapters to avoid re-parsing during normalized export.
     /// Uses RwLock for thread-safe access and Arc for cheap cloning.
     ir_cache: Arc<RwLock<HashMap<ChapterId, Arc<Chapter>>>>,
+    /// Caller-supplied metadata that shadows the backend's parsed metadata.
+    /// When set, [`Book::metadata`] returns this instead — so an exporter writes
+    /// the override (e.g. Sidle's edited title/author from its library DB)
+    /// without touching the source file. `None` = use the backend's metadata
+    /// verbatim (the default).
+    meta_override: Option<Metadata>,
 }
 
 impl Format {
@@ -291,6 +297,7 @@ impl Book {
         Ok(Self {
             backend,
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
+            meta_override: None,
         })
     }
 
@@ -318,12 +325,29 @@ impl Book {
         Ok(Self {
             backend,
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
+            meta_override: None,
         })
     }
 
-    /// Book metadata.
+    /// Book metadata. Returns the [override][Book::set_metadata_override] when
+    /// one has been installed, otherwise the backend's parsed metadata.
     pub fn metadata(&self) -> &Metadata {
-        self.backend.metadata()
+        self.meta_override
+            .as_ref()
+            .unwrap_or_else(|| self.backend.metadata())
+    }
+
+    /// Shadow the backend's parsed metadata with `meta`. Every later
+    /// [`metadata`][Book::metadata] call — including the ones exporters make to
+    /// build the output's title/author/identifier — sees `meta` instead. The
+    /// source file is untouched: this only changes what *this* handle reports.
+    ///
+    /// Sidle uses it to bake edited library metadata into a (re)converted KFX
+    /// without rewriting the source EPUB. Build the override by cloning
+    /// `metadata()` and overwriting just the fields you mean to change, so
+    /// untouched fields (identifier, ASIN, cover) survive.
+    pub fn set_metadata_override(&mut self, meta: Metadata) {
+        self.meta_override = Some(meta);
     }
 
     /// Table of contents.
@@ -603,5 +627,28 @@ impl TocEntry {
             play_order: None,
             target: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_override_shadows_backend_keeps_other_fields() {
+        let bytes = std::fs::read("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
+        let mut book = Book::from_bytes(&bytes, Format::Epub).unwrap();
+
+        let backend_lang = book.metadata().language.clone();
+        assert_ne!(book.metadata().title, "SHADOWED", "fixture sanity");
+
+        let mut over = book.metadata().clone();
+        over.title = "SHADOWED".into();
+        book.set_metadata_override(over);
+
+        // The override is what every later read (and thus every exporter) sees…
+        assert_eq!(book.metadata().title, "SHADOWED");
+        // …while fields we copied from the backend are unchanged.
+        assert_eq!(book.metadata().language, backend_lang);
     }
 }
