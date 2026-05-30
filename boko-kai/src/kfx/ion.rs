@@ -73,6 +73,12 @@ pub enum IonValue {
     String(String),
     Blob(Vec<u8>),
     List(Vec<IonValue>),
+    /// S-expression (Ion type 12). Encoded exactly like a list but with a
+    /// distinct type code; used for KFX `condition: (isPortrait)` page-template
+    /// selectors. The parser maps incoming sexps onto `List` (boko never needs
+    /// to distinguish them on read), so this variant only appears on the write
+    /// side.
+    Sexp(Vec<IonValue>),
     /// Struct fields as (symbol_id, value) pairs in parse order.
     /// Order is preserved for both parsing and serialization.
     Struct(Vec<(u64, IonValue)>),
@@ -559,6 +565,7 @@ impl IonWriter {
             IonValue::String(s) => self.write_string(s),
             IonValue::Blob(data) => self.write_blob(data),
             IonValue::List(items) => self.write_list(items),
+            IonValue::Sexp(items) => self.write_sexp(items),
             IonValue::Struct(fields) => self.write_struct(fields),
             IonValue::Annotated(annotations, inner) => self.write_annotated(annotations, inner),
         }
@@ -704,6 +711,19 @@ impl IonWriter {
         let inner_bytes = inner.into_bytes();
 
         self.write_type_descriptor(11, inner_bytes.len());
+        self.buffer.extend_from_slice(&inner_bytes);
+    }
+
+    /// Write an s-expression (Ion type 12). Body is a value stream identical to
+    /// a list's — only the type code differs.
+    pub fn write_sexp(&mut self, items: &[IonValue]) {
+        let mut inner = IonWriter::new();
+        for item in items {
+            inner.write_value(item);
+        }
+        let inner_bytes = inner.into_bytes();
+
+        self.write_type_descriptor(12, inner_bytes.len());
         self.buffer.extend_from_slice(&inner_bytes);
     }
 
@@ -1042,6 +1062,37 @@ mod tests {
 
         assert_eq!(parsed.get(1).and_then(|v| v.as_string()), Some("title"));
         assert_eq!(parsed.get(3).and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn test_writer_sexp_type_code_and_parse() {
+        // `condition: (isPortrait)` — a one-symbol sexp. The writer must emit Ion
+        // type 12 (sexp); the parser maps it back onto List (boko never needs to
+        // distinguish sexps on read — see the IonValue::Sexp doc comment).
+        let value = IonValue::Struct(vec![(
+            171,                                         // condition
+            IonValue::Sexp(vec![IonValue::Symbol(526)]), // (isPortrait)
+        )]);
+
+        let mut writer = IonWriter::new();
+        writer.write_bvm();
+        writer.write_value(&value);
+        let data = writer.into_bytes();
+
+        assert!(
+            data.iter().any(|&b| b >> 4 == 12),
+            "serialized bytes must contain an Ion sexp (type 12) descriptor"
+        );
+
+        let mut parser = IonParser::new(&data);
+        let parsed = parser.parse().unwrap();
+        match parsed.get(171) {
+            Some(IonValue::List(items)) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].as_symbol(), Some(526));
+            }
+            other => panic!("expected sexp to parse back as List, got {other:?}"),
+        }
     }
 
     #[test]

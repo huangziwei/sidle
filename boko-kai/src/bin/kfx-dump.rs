@@ -3524,6 +3524,18 @@ where
                 format!("[{}]", parts.join(", "))
             }
         }
+        IonValue::Sexp(items) => {
+            let parts: Vec<String> = items
+                .iter()
+                .take(5)
+                .map(|v| format_ion_value_simple(v, resolve_sym))
+                .collect();
+            if items.len() > 5 {
+                format!("({}, ... ({} more))", parts.join(", "), items.len() - 5)
+            } else {
+                format!("({})", parts.join(", "))
+            }
+        }
         IonValue::Struct(fields) => {
             let parts: Vec<String> = fields
                 .iter()
@@ -5470,6 +5482,17 @@ where
                 .map(|v| format!("{}{}", inner_pad, format_ion_value_full(v, indent + 1, resolve_sym)))
                 .collect();
             format!("[\n{}\n{}]", parts.join(",\n"), pad)
+        }
+        IonValue::Sexp(items) => {
+            if items.is_empty() {
+                return "()".to_string();
+            }
+            let inner_pad = "  ".repeat(indent + 1);
+            let parts: Vec<String> = items
+                .iter()
+                .map(|v| format!("{}{}", inner_pad, format_ion_value_full(v, indent + 1, resolve_sym)))
+                .collect();
+            format!("(\n{}\n{})", parts.join(",\n"), pad)
         }
         IonValue::Struct(fields) => {
             if fields.is_empty() {

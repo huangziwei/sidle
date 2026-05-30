@@ -2457,8 +2457,11 @@ struct PdfPageRec {
     section_sym: u64,
     story_sym: u64,
     res_sym: u64,
-    /// `id` of the section's page_template container.
+    /// `id` of the section's portrait page_template container.
     pt_id: u64,
+    /// `id` of the section's landscape page_template container (the Amazon
+    /// portrait+landscape pair; shares the same storyline as portrait).
+    pt_landscape_id: u64,
     /// `id` of the storyline's outer (page-sized) container.
     container_id: u64,
     /// `id` of the image node — the renderable content EID for this page.
@@ -2507,6 +2510,7 @@ pub fn pdf_to_kfx(
         ctx.record_section_image_ref(&section_name, &res_name);
 
         let pt_id = ctx.next_fragment_id();
+        let pt_landscape_id = ctx.next_fragment_id();
         let container_id_num = ctx.next_fragment_id();
         let image_id = ctx.next_fragment_id();
         ctx.record_content_length(image_id, 1);
@@ -2517,6 +2521,7 @@ pub fn pdf_to_kfx(
             story_sym,
             res_sym,
             pt_id,
+            pt_landscape_id,
             container_id: container_id_num,
             image_id,
         });
@@ -2692,16 +2697,44 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
     )
 }
 
-/// Build the section ($260) for one PDF page. P0 emits a single
-/// (conditionless) portrait-style page_template; the portrait+landscape pair
-/// is P1.
+/// Build the section ($260) for one PDF page. Emits Amazon's portrait+landscape
+/// `page_template` pair, both referencing the same storyline, selected on device
+/// by the `condition: (isPortrait)` / `(isLandscape)` s-expression:
+/// - portrait:  `{ id, story_name, condition:(isPortrait),  layout:vertical }`
+/// - landscape: `{ id, width:100%, story_name, fixed_width:100%,
+///                 condition:(isLandscape), layout:overflow }`
 fn build_pdf_page_section(rec: &PdfPageRec) -> KfxFragment {
-    let page_template = IonValue::Struct(vec![
+    let portrait = IonValue::Struct(vec![
         (KfxSymbol::Id as u64, IonValue::Int(rec.pt_id as i64)),
         (KfxSymbol::StoryName as u64, IonValue::Symbol(rec.story_sym)),
         (
+            KfxSymbol::Condition as u64,
+            IonValue::Sexp(vec![IonValue::Symbol(KfxSymbol::Isportrait as u64)]),
+        ),
+        (
             KfxSymbol::Layout as u64,
             IonValue::Symbol(KfxSymbol::Vertical as u64),
+        ),
+        (
+            KfxSymbol::Type as u64,
+            IonValue::Symbol(KfxSymbol::Container as u64),
+        ),
+    ]);
+    let landscape = IonValue::Struct(vec![
+        (
+            KfxSymbol::Id as u64,
+            IonValue::Int(rec.pt_landscape_id as i64),
+        ),
+        (KfxSymbol::Width as u64, pdf_percent_100()),
+        (KfxSymbol::StoryName as u64, IonValue::Symbol(rec.story_sym)),
+        (KfxSymbol::FixedWidth as u64, pdf_percent_100()),
+        (
+            KfxSymbol::Condition as u64,
+            IonValue::Sexp(vec![IonValue::Symbol(KfxSymbol::Islandscape as u64)]),
+        ),
+        (
+            KfxSymbol::Layout as u64,
+            IonValue::Symbol(KfxSymbol::Overflow as u64),
         ),
         (
             KfxSymbol::Type as u64,
@@ -2715,7 +2748,7 @@ fn build_pdf_page_section(rec: &PdfPageRec) -> KfxFragment {
         ),
         (
             KfxSymbol::PageTemplates as u64,
-            IonValue::List(vec![page_template]),
+            IonValue::List(vec![portrait, landscape]),
         ),
     ]);
     KfxFragment::new(KfxSymbol::Section, &rec.section_name, ion)
@@ -2996,6 +3029,7 @@ fn build_pdf_position_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
         .map(|rec| {
             let contains = IonValue::List(vec![
                 IonValue::Int(rec.pt_id as i64),
+                IonValue::Int(rec.pt_landscape_id as i64),
                 IonValue::Int(rec.container_id as i64),
                 IonValue::Int(rec.image_id as i64),
             ]);
