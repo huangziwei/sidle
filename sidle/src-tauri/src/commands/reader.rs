@@ -39,6 +39,60 @@ pub struct ReaderTocDto {
     pub children: Vec<ReaderTocDto>,
 }
 
+/// What `reader_open` returns: either today's reflowable HTML book or a
+/// fixed-layout PDF-backed book. Serialized internally-tagged, so the frontend
+/// branches on `mode` (`"reflowable"` | `"pdf"`) and the reflowable variant
+/// still exposes its fields at the top level (no change for that path).
+#[derive(Debug, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ReaderOpen {
+    Reflowable(ReaderBookDto),
+    Pdf(ReaderPdfDto),
+}
+
+/// A PDF-backed book for the reader's fixed-layout view. Pages are rendered
+/// on demand by [`reader_pdf_page`]; this carries only the structure the chrome
+/// needs (count, sizes, outline, page labels).
+#[derive(Debug, Serialize)]
+pub struct ReaderPdfDto {
+    pub page_count: usize,
+    pub title: String,
+    pub authors: Vec<String>,
+    /// PDF outline → TOC, each entry pointing at a 0-based page index.
+    pub toc: Vec<ReaderPdfTocDto>,
+    /// Per-page point size (`width`/`height`) for the viewer's aspect ratio.
+    pub pages: Vec<ReaderPdfPageDto>,
+    /// Per-page display label (`/PageLabels`: "Cover", "i", "1", …) for the
+    /// location readout. One per page.
+    pub page_labels: Vec<String>,
+}
+
+/// One PDF page's display size in points.
+#[derive(Debug, Serialize)]
+pub struct ReaderPdfPageDto {
+    pub width: f32,
+    pub height: f32,
+}
+
+/// A PDF TOC entry, targeting a 0-based page index (not an eid/href).
+#[derive(Debug, Serialize)]
+pub struct ReaderPdfTocDto {
+    pub label: String,
+    pub page_index: usize,
+    pub children: Vec<ReaderPdfTocDto>,
+}
+
+fn map_pdf_toc(items: &[boko::import::PdfOutlineItem]) -> Vec<ReaderPdfTocDto> {
+    items
+        .iter()
+        .map(|it| ReaderPdfTocDto {
+            label: it.title.clone(),
+            page_index: it.page_index,
+            children: map_pdf_toc(&it.children),
+        })
+        .collect()
+}
+
 /// The reader's view of a book, ready for the webview paginator.
 #[derive(Debug, Serialize)]
 pub struct ReaderBookDto {
@@ -102,31 +156,118 @@ impl From<boko::kfx_to_epub::ReaderBook> for ReaderBookDto {
     }
 }
 
-/// Open a library book for the reader: KFX → DOM sections + resources + TOC.
+/// Open a library book for the reader. A PDF-backed (container) book opens in
+/// the fixed-layout PDF view (`mode: "pdf"`, pages rendered on demand by
+/// [`reader_pdf_page`]); everything else takes the reflowable KFX→DOM path
+/// (`mode: "reflowable"`, unchanged).
 #[tauri::command]
-pub async fn reader_open(
-    state: State<'_, AppState>,
-    book_id: i64,
-) -> Result<ReaderBookDto, String> {
-    // Fetch the KFX path under the lock, then release it before the CPU-bound
-    // parse/render (which can take a beat on a large book).
-    let kfx_path = {
+pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<ReaderOpen, String> {
+    // Snapshot the paths + display metadata under the lock, then release it
+    // before the CPU-bound parse/render (which can take a beat on a large book).
+    let (kfx_path, pdf_path, title, author) = {
         let conn = state.db.lock().await;
-        db::get_book(&conn, book_id)
+        let row = db::get_book(&conn, book_id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("no book with id {book_id}"))?
+            .ok_or_else(|| format!("no book with id {book_id}"))?;
+        let kfx_path = row
             .kfx_path
-            .ok_or_else(|| "this book has no KFX file yet".to_string())?
+            .ok_or_else(|| "this book has no KFX file yet".to_string())?;
+        (kfx_path, row.pdf_path, row.title, row.author)
     };
 
     tokio::task::spawn_blocking(move || {
-        let bytes = std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
-        let book = boko::kfx_to_epub::kfx_to_reader_book(&bytes)
+        // PDF-backed? Prefer the verbatim PDF sidecar; fall back to extracting it
+        // from a PDF-backed KFX (a synced-back book whose kfx→pdf job hasn't run).
+        let pdf_bytes: Option<Vec<u8>> = match pdf_path.as_deref().map(std::fs::read) {
+            Some(Ok(bytes)) => Some(bytes),
+            _ => {
+                let kfx = std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
+                if boko::kfx::pdf_container::kfx_is_pdf_backed(&kfx) {
+                    Some(
+                        boko::kfx::pdf_container::kfx_extract_pdf(&kfx)
+                            .map_err(|e| format!("extract embedded PDF: {e:?}"))?,
+                    )
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(bytes) = pdf_bytes {
+            let doc = boko::import::probe_pdf(bytes)
+                .map_err(|e| format!("probe PDF for reader: {e}"))?;
+            let authors = crate::library::authors::split_display(&author);
+            let dto = ReaderPdfDto {
+                page_count: doc.pages.len(),
+                title,
+                authors,
+                toc: map_pdf_toc(&doc.outline),
+                pages: doc
+                    .pages
+                    .iter()
+                    .map(|p| ReaderPdfPageDto {
+                        width: p.width,
+                        height: p.height,
+                    })
+                    .collect(),
+                page_labels: doc.page_labels,
+            };
+            return Ok(ReaderOpen::Pdf(dto));
+        }
+
+        // Reflowable KFX → DOM (unchanged).
+        let kfx = std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
+        let book = boko::kfx_to_epub::kfx_to_reader_book(&kfx)
             .map_err(|e| format!("KFX→DOM render failed: {e}"))?;
-        Ok::<ReaderBookDto, String>(ReaderBookDto::from(book))
+        Ok::<ReaderOpen, String>(ReaderOpen::Reflowable(ReaderBookDto::from(book)))
     })
     .await
     .map_err(|e| format!("reader task join error: {e}"))?
+}
+
+/// Render one page of a PDF-backed book to a JPEG, scaled to `width` device
+/// pixels wide, returned base64 (data-URL payload) for the fixed-layout viewer.
+/// Stateless: re-resolves the PDF bytes each call (sidecar, else extracted from
+/// the KFX). pdfium is bound once per process; a render is ~tens of ms.
+#[tauri::command]
+pub async fn reader_pdf_page(
+    state: State<'_, AppState>,
+    book_id: i64,
+    page: usize,
+    width: u32,
+) -> Result<String, String> {
+    let (kfx_path, pdf_path) = {
+        let conn = state.db.lock().await;
+        let row = db::get_book(&conn, book_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no book with id {book_id}"))?;
+        (row.kfx_path, row.pdf_path)
+    };
+    // Clamp to a sane render width (the viewport rarely exceeds a few thousand
+    // device px; guard against a runaway request).
+    let width = width.clamp(200, 4000);
+
+    tokio::task::spawn_blocking(move || {
+        let bytes: Vec<u8> = match pdf_path.as_deref().map(std::fs::read) {
+            Some(Ok(b)) => b,
+            _ => {
+                let kfx_path = kfx_path.ok_or("book has no KFX or PDF to render")?;
+                let kfx = std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
+                boko::kfx::pdf_container::kfx_extract_pdf(&kfx)
+                    .map_err(|e| format!("extract embedded PDF: {e:?}"))?
+            }
+        };
+        let jpeg = boko::render::render_pdf_page_jpeg(
+            &bytes,
+            page,
+            width,
+            boko::render::COVER_JPEG_QUALITY,
+        )
+        .map_err(|e| format!("render page {page}: {e}"))?;
+        Ok::<String, String>(B64.encode(&jpeg))
+    })
+    .await
+    .map_err(|e| format!("reader render task join error: {e}"))?
 }
 
 /// One stored annotation, shaped for the reader's painter + sidebar.

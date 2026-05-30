@@ -1832,6 +1832,28 @@ button {
 /* The paginator lives in a host that fills the stage; nav zones overlay it. */
 .reader-paginator-host { position: absolute; inset: 0; }
 
+/* PDF (fixed-layout) mode: a single page image centered in the host, fit to the
+   stage. The :has guard only applies when the host holds a page image, leaving
+   the reflowable paginator layout untouched. Nav zones still overlay (siblings). */
+.reader-paginator-host:has(> .reader-pdf-page) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+}
+.reader-pdf-page {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-select: none;
+  background: #fff;
+  box-shadow: 0 1px 10px rgba(0, 0, 0, 0.3);
+}
+
 /* Prev/next: slim hover-revealed arrows pinned to the page's OUTER margin. The
    width tracks the paginator's outer track (its --_half-gap is gap/2 = 3.5% of
    the stage), so the zone stays in the margin and never overlaps the text

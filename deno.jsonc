@@ -1,14 +1,16 @@
 {
   // `deno lint` is used only as a JS syntax/quality check for the browser code
   // in sidle/web/ (Node isn't available in the sandbox). That code runs in the
-  // Tauri webview, where `window` is a valid global — Deno's `no-window` rule
-  // assumes the Deno runtime and is a false positive here, so exclude it.
+  // Tauri webview, where `window` is a valid global — Deno's `no-window` and
+  // `no-window-prefix` rules assume the Deno runtime and are false positives
+  // here (`window.addEventListener`, `window.removeEventListener`), so exclude
+  // both.
   "lint": {
     // sidle/web/foliate-kfx/ is the vendored foliate paginator (third-party);
     // not held to our lint gate.
     "exclude": ["sidle/web/foliate-kfx/"],
     "rules": {
-      "exclude": ["no-window"]
+      "exclude": ["no-window", "no-window-prefix"]
     }
   }
 }

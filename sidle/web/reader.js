@@ -16,6 +16,8 @@ const toast = (msg, isError) => window.showToast?.(msg, isError);
 let book = null; // current kfx-book
 let dto = null; // raw reader_open DTO (kept for the eid→section index)
 let bookId = null; // library id of the open book (for reload-on-sync)
+let readerMode = "reflowable"; // "reflowable" (KFX→DOM) | "pdf" (fixed-layout page images)
+let pdf = null; // PDF-mode state: { pageCount, pages, labels, toc, page, img, token } — see openPdf
 let paginator = null; // <foliate-paginator>
 let annotations = []; // AnnotationDto[] for the open book
 let overlays = []; // [{ doc, overlayer }] — one per loaded section, for repaint
@@ -1423,11 +1425,13 @@ function hideStylePanel() {
 // ---- navigation -----------------------------------------------------------
 
 const forward = () => {
+  if (readerMode === "pdf") return pdfGoTo(pdf.page + 1);
   hideNotePopover();
   hideSelectionToolbar();
   paginator?.next();
 };
 const back = () => {
+  if (readerMode === "pdf") return pdfGoTo(pdf.page - 1);
   hideNotePopover();
   hideSelectionToolbar();
   paginator?.prev();
@@ -1466,6 +1470,8 @@ const G_CHORD_MS = 1500;
 let gArmed = 0;
 
 function onKey(e) {
+  // PDF (fixed-layout) books use a simpler key map — no search/highlight/style.
+  if (readerMode === "pdf") return pdfOnKey(e);
   // ⌘F / Ctrl+F → open search (replacing the browser's find-in-page, which
   // would search the host doc, not the section iframe's content). Handled
   // before the modifier filter below.
@@ -1569,6 +1575,243 @@ function onKey(e) {
 
 // ---- open / close ---------------------------------------------------------
 
+// ---- PDF (fixed-layout) mode ----------------------------------------------
+//
+// A PDF-backed book renders server-side via pdfium (`reader_pdf_page`): one page
+// image at a time, fit to the stage height. We reuse the topbar / TOC / status
+// chrome; reflowable-only affordances (bookmark, search, style, annotations)
+// are hidden since they have no meaning on a fixed page image. Reading position
+// is the page index, persisted through the same `reading_position` model.
+
+// Topbar buttons hidden while a PDF book is open; restored on close.
+const PDF_ONLY_HIDDEN = [
+  "#reader-bookmark",
+  "#reader-search",
+  "#reader-style",
+  "#reader-annotations",
+];
+
+let pdfTocRows = []; // [{ li, page }] in TOC order, for active-marking
+
+function clampPage(i, count) {
+  const n = count || 1;
+  return Math.max(0, Math.min(n - 1, Math.floor(i) || 0));
+}
+
+async function openPdf(id, openDto, positions) {
+  readerMode = "pdf";
+  bookId = id;
+  dto = openDto;
+  const start = clampPage(
+    positions.find((p) => p.source === "sidle")?.linear_pos ?? 0,
+    openDto.page_count,
+  );
+  const img = document.createElement("img");
+  img.id = "reader-pdf-page";
+  img.className = "reader-pdf-page";
+  img.alt = "";
+  img.draggable = false;
+  pdf = {
+    pageCount: openDto.page_count,
+    pages: openDto.pages || [],
+    labels: openDto.page_labels || [],
+    toc: openDto.toc || [],
+    page: start,
+    img,
+    token: 0,
+    onResize: null,
+  };
+
+  $("#reader-title").textContent = openDto.title || "Untitled";
+  $("#reader-loc").textContent = "";
+  $("#reader-percent").textContent = "";
+  for (const sel of PDF_ONLY_HIDDEN) {
+    const el = $(sel);
+    if (el) el.hidden = true;
+  }
+  view().hidden = false;
+  view().classList.add("open");
+  revealTopbar();
+  renderPdfTocPanel();
+
+  $("#reader-paginator-host").replaceChildren(img);
+  // Re-render the current page at the new resolution on resize (debounced via
+  // the render token — a stale response is dropped).
+  pdf.onResize = () => pdfRenderCurrent();
+  window.addEventListener("resize", pdf.onResize);
+
+  await pdfRenderCurrent();
+  pdfUpdateProgress();
+  markPdfTocActive();
+
+  keyHandler = onKey; // onKey forwards to pdfOnKey while readerMode === "pdf"
+  document.addEventListener("keydown", keyHandler, true);
+}
+
+async function closePdf() {
+  // Save the page index as Sidle's own last position (best-effort).
+  if (bookId != null && pdf) {
+    try {
+      await window.api.invoke("reading_position_set", {
+        bookId,
+        eid: null,
+        offset: null,
+        linearPos: pdf.page,
+      });
+    } catch {
+      /* best-effort */
+    }
+  }
+  if (keyHandler) {
+    document.removeEventListener("keydown", keyHandler, true);
+    keyHandler = null;
+  }
+  if (pdf?.onResize) window.removeEventListener("resize", pdf.onResize);
+  $("#reader-paginator-host")?.replaceChildren();
+  for (const sel of PDF_ONLY_HIDDEN) {
+    const el = $(sel);
+    if (el) el.hidden = false; // restore for the next (possibly reflowable) book
+  }
+  pdf = null;
+  pdfTocRows = [];
+  dto = null;
+  bookId = null;
+  readerMode = "reflowable";
+  if ($("#reader-loc")) $("#reader-loc").textContent = "";
+  if ($("#reader-percent")) $("#reader-percent").textContent = "";
+  hideTocPanel();
+  cancelTopbarHide();
+  topbarEl()?.classList.remove("is-hidden");
+  const v = view();
+  if (v) {
+    v.classList.remove("open");
+    v.hidden = true;
+  }
+}
+
+function pdfGoTo(i) {
+  if (!pdf) return;
+  const p = clampPage(i, pdf.pageCount);
+  if (p === pdf.page && pdf.img.src) return;
+  pdf.page = p;
+  pdfRenderCurrent();
+  pdfUpdateProgress();
+  markPdfTocActive();
+}
+
+// Render width: fit the page to the stage height at device resolution (capped
+// so a huge HiDPI window doesn't request an absurd bitmap).
+function pdfRenderWidth() {
+  const stage = $("#reader-stage");
+  const h = (stage?.clientHeight || 800) - 16; // a little breathing room
+  const page = pdf.pages[pdf.page] || { width: 612, height: 792 };
+  const aspect = page.width / Math.max(1, page.height);
+  const dpr = window.devicePixelRatio || 1;
+  return Math.max(200, Math.min(Math.round(h * aspect * dpr), 3000));
+}
+
+async function pdfRenderCurrent() {
+  if (!pdf) return;
+  const page = pdf.page;
+  const width = pdfRenderWidth();
+  const token = ++pdf.token;
+  try {
+    const b64 = await window.api.invoke("reader_pdf_page", { bookId, page, width });
+    if (!pdf || pdf.token !== token) return; // superseded by a newer render
+    pdf.img.src = `data:image/jpeg;base64,${b64}`;
+  } catch (err) {
+    if (pdf && pdf.token === token) toast(`Couldn't render page ${page + 1}: ${err}`, true);
+  }
+}
+
+function pdfUpdateProgress() {
+  if (!pdf) return;
+  const human = pdf.page + 1;
+  const label = pdf.labels[pdf.page];
+  // Show the PDF's own page label when it differs from the ordinal ("Cover",
+  // "xvii"); otherwise just the page number.
+  $("#reader-loc").textContent =
+    label && label !== String(human) ? `Page ${label}` : `Page ${human}`;
+  const pct = Math.round((human / pdf.pageCount) * 100);
+  $("#reader-percent").textContent = `${human} / ${pdf.pageCount} · ${pct}%`;
+}
+
+function pdfOnKey(e) {
+  if (e.key === "Escape") {
+    if (!$("#reader-toc-panel")?.hidden) hideTocPanel();
+    else close();
+    e.preventDefault();
+    return;
+  }
+  if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+  switch (e.key) {
+    case "ArrowRight":
+    case "PageDown":
+    case " ":
+    case "j":
+      pdfGoTo(pdf.page + 1);
+      e.preventDefault();
+      break;
+    case "ArrowLeft":
+    case "PageUp":
+    case "k":
+      pdfGoTo(pdf.page - 1);
+      e.preventDefault();
+      break;
+    case "Home":
+      pdfGoTo(0);
+      e.preventDefault();
+      break;
+    case "End":
+      pdfGoTo(pdf.pageCount - 1);
+      e.preventDefault();
+      break;
+  }
+}
+
+function renderPdfTocPanel() {
+  pdfTocRows = [];
+  const btn = $("#reader-toc");
+  if (btn) btn.hidden = (pdf.toc?.length ?? 0) === 0;
+  const list = $("#reader-toc-list");
+  if (!list) return;
+  const rows = [];
+  for (const t of pdf.toc) pdfTocRowsFor(t, 0, rows);
+  list.replaceChildren(...rows);
+  $("#reader-toc-empty").hidden = rows.length > 0;
+}
+
+function pdfTocRowsFor(entry, depth, rows) {
+  const li = document.createElement("li");
+  li.className = "reader-toc-item";
+  li.style.paddingLeft = `${8 + depth * 14}px`;
+  li.textContent = entry.label || "—";
+  li.tabIndex = 0;
+  const go = () => {
+    pdfGoTo(entry.page_index);
+    hideTocPanel();
+  };
+  li.addEventListener("click", go);
+  li.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      go();
+      e.preventDefault();
+    }
+  });
+  rows.push(li);
+  pdfTocRows.push({ li, page: entry.page_index });
+  for (const c of entry.children || []) pdfTocRowsFor(c, depth + 1, rows);
+}
+
+function markPdfTocActive() {
+  if (!pdfTocRows.length) return;
+  let active = -1;
+  for (let i = 0; i < pdfTocRows.length; i++) {
+    if (pdfTocRows[i].page <= pdf.page) active = i;
+  }
+  pdfTocRows.forEach(({ li }, i) => li.classList.toggle("active", i === active));
+}
+
 async function open(id) {
   await close(); // tear down any prior session
   let openDto, anns, positions;
@@ -1582,6 +1825,13 @@ async function open(id) {
     toast(`Couldn't open reader: ${err}`, true);
     return;
   }
+  // PDF-backed (fixed-layout) books take the page-image path, reusing the same
+  // topbar / TOC / status chrome. The reflowable setup below is skipped.
+  if (openDto.mode === "pdf") {
+    await openPdf(id, openDto, positions || []);
+    return;
+  }
+  readerMode = "reflowable";
   bookId = id;
   dto = openDto;
   annotations = anns || [];
@@ -1679,6 +1929,12 @@ async function open(id) {
 }
 
 async function close() {
+  // PDF mode has its own teardown (page index as the saved position); do it and
+  // skip the reflowable path entirely.
+  if (readerMode === "pdf") {
+    await closePdf();
+    return;
+  }
   // Persist Sidle's own last position — ONLY here, so the Resume target stays
   // frozen at where this session opened until you leave the book. Best-effort:
   // a failed write just means the next open falls back to the start.
