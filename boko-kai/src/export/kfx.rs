@@ -2615,12 +2615,13 @@ pub fn pdf_to_kfx(
         ));
     }
 
-    // Navigation: a `nav_container` ($391) holding the TOC, plus a thin
-    // `book_navigation` ($389) that references it by name (Amazon's PDF shape;
-    // the fixed-layout reader rejects an inline nav_container). Each TOC entry
-    // targets its page's image EID — the EID `position_id_map` registers, so the
-    // device can resolve the nav position.
-    fragments.extend(build_pdf_nav_fragments(&pdf.outline, &recs, &mut ctx));
+    // Navigation: `nav_container` ($391) entities — a `page_list` (page-number
+    // navigation, one entry per page) and, when the PDF has bookmarks, a `toc` —
+    // plus a thin `book_navigation` ($389) that references them by name (Amazon's
+    // PDF shape; the fixed-layout reader rejects an inline nav_container). Every
+    // entry targets its page's image EID — the EID `position_id_map` registers,
+    // so the device can resolve the nav position.
+    fragments.extend(build_pdf_nav_fragments(pdf, &recs, &mut ctx));
 
     // Navigation / position maps (one position per page).
     fragments.push(build_pdf_position_map_fragment(&recs));
@@ -3117,36 +3118,50 @@ fn build_pdf_location_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
 /// makes the device reject the whole book ("An error occurred…"). Returns an
 /// empty vec when there's no usable outline.
 fn build_pdf_nav_fragments(
-    outline: &[crate::import::pdf::PdfOutlineItem],
+    pdf: &crate::import::pdf::PdfDoc,
     recs: &[PdfPageRec],
     ctx: &mut ExportContext,
 ) -> Vec<KfxFragment> {
-    if outline.is_empty() {
+    // A named nav_container entity holding `entries` of the given `nav_type`.
+    // book_navigation references it by the returned symbol.
+    let mut make_container = |name: &str, nav_type: KfxSymbol, entries: Vec<IonValue>| {
+        let sym = ctx.symbols.get_or_intern(name);
+        let frag = KfxFragment::new(
+            KfxSymbol::NavContainer,
+            name,
+            IonValue::Struct(vec![
+                (KfxSymbol::NavType as u64, IonValue::Symbol(nav_type as u64)),
+                (KfxSymbol::NavContainerName as u64, IonValue::Symbol(sym)),
+                (KfxSymbol::Entries as u64, IonValue::List(entries)),
+            ]),
+        );
+        (sym, frag)
+    };
+
+    let mut fragments = Vec::new();
+    let mut container_syms = Vec::new();
+
+    // page_list first (Amazon's order): page-number nav, one flat entry per page.
+    let page_entries = build_pdf_page_list_entries(&pdf.page_labels, recs);
+    if !page_entries.is_empty() {
+        let (sym, frag) = make_container("npag", KfxSymbol::PageList, page_entries);
+        container_syms.push(sym);
+        fragments.push(frag);
+    }
+
+    // toc second: nested chapter navigation, only when the PDF has bookmarks.
+    let toc_entries = build_pdf_toc_entries(&pdf.outline, recs);
+    if !toc_entries.is_empty() {
+        let (sym, frag) = make_container("ntoc", KfxSymbol::Toc, toc_entries);
+        container_syms.push(sym);
+        fragments.push(frag);
+    }
+
+    if container_syms.is_empty() {
         return Vec::new();
     }
-    let entries = build_pdf_toc_entries(outline, recs);
-    if entries.is_empty() {
-        return Vec::new();
-    }
 
-    // The nav_container is a named entity; book_navigation points at it by name.
-    let toc_name = "ntoc";
-    let toc_sym = ctx.symbols.get_or_intern(toc_name);
-
-    let nav_container = KfxFragment::new(
-        KfxSymbol::NavContainer,
-        toc_name,
-        IonValue::Struct(vec![
-            (
-                KfxSymbol::NavType as u64,
-                IonValue::Symbol(KfxSymbol::Toc as u64),
-            ),
-            (KfxSymbol::NavContainerName as u64, IonValue::Symbol(toc_sym)),
-            (KfxSymbol::Entries as u64, IonValue::List(entries)),
-        ]),
-    );
-
-    let book_navigation = KfxFragment::singleton(
+    fragments.push(KfxFragment::singleton(
         KfxSymbol::BookNavigation,
         IonValue::List(vec![IonValue::Struct(vec![
             (
@@ -3155,12 +3170,44 @@ fn build_pdf_nav_fragments(
             ),
             (
                 KfxSymbol::NavContainers as u64,
-                IonValue::List(vec![IonValue::Symbol(toc_sym)]),
+                IonValue::List(container_syms.into_iter().map(IonValue::Symbol).collect()),
             ),
         ])]),
-    );
+    ));
+    fragments
+}
 
-    vec![nav_container, book_navigation]
+/// Flat `page_list` entries — one per page, `{representation:{label},
+/// target_position:{id, offset}}` (same shape as a TOC entry, no nesting). The
+/// label is the PDF's page label (`pdf.page_labels`); the target is the page's
+/// image EID, which `position_id_map` registers (an unregistered target would
+/// make the device reject the book — see `build_pdf_toc_entries`).
+fn build_pdf_page_list_entries(labels: &[String], recs: &[PdfPageRec]) -> Vec<IonValue> {
+    recs.iter()
+        .enumerate()
+        .map(|(i, rec)| {
+            let label = labels
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| (i + 1).to_string());
+            IonValue::Struct(vec![
+                (
+                    KfxSymbol::Representation as u64,
+                    IonValue::Struct(vec![(
+                        KfxSymbol::Label as u64,
+                        IonValue::String(label),
+                    )]),
+                ),
+                (
+                    KfxSymbol::TargetPosition as u64,
+                    IonValue::Struct(vec![
+                        (KfxSymbol::Id as u64, IonValue::Int(rec.image_id as i64)),
+                        (KfxSymbol::Offset as u64, IonValue::Int(0)),
+                    ]),
+                ),
+            ])
+        })
+        .collect()
 }
 
 /// Convert resolved outline items into nested KFX TOC entries — plain

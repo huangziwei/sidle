@@ -154,6 +154,7 @@ mod tests {
             title: Some("Round Trip".to_string()),
             author: Some("Tester".to_string()),
             outline: Vec::new(),
+            page_labels: Vec::new(),
         };
         let meta = PdfKfxMeta {
             title: doc.title.clone().unwrap(),
@@ -184,6 +185,7 @@ mod tests {
             title: Some("With Cover".to_string()),
             author: None,
             outline: Vec::new(),
+            page_labels: Vec::new(),
         };
         let meta = PdfKfxMeta {
             title: "With Cover".to_string(),
@@ -230,6 +232,7 @@ mod tests {
                     children: Vec::new(),
                 }],
             }],
+            page_labels: Vec::new(),
         };
         let meta = PdfKfxMeta {
             title: "Nav".to_string(),
@@ -262,6 +265,7 @@ mod tests {
             title: Some("Dated".to_string()),
             author: None,
             outline: Vec::new(),
+            page_labels: Vec::new(),
         };
         let meta = PdfKfxMeta {
             title: "Dated".to_string(),
@@ -288,6 +292,7 @@ mod tests {
             title: Some("Undated".to_string()),
             author: None,
             outline: Vec::new(),
+            page_labels: Vec::new(),
         };
         let meta = PdfKfxMeta {
             title: "Undated".to_string(),
@@ -301,6 +306,73 @@ mod tests {
             !kfx.windows(b"issue_date".len()).any(|w| w == b"issue_date"),
             "no issue_date entry when the library has no date"
         );
+    }
+
+    #[test]
+    fn page_labels_become_page_list_alongside_toc() {
+        // Page labels → a `page_list` nav_container (`npag`) that coexists with
+        // the TOC (`ntoc`); both are referenced and the labels land verbatim.
+        let bytes = fake_pdf();
+        let doc = PdfDoc {
+            bytes: bytes.clone(),
+            pages: vec![
+                PdfPage { width: 612.0, height: 792.0 },
+                PdfPage { width: 612.0, height: 792.0 },
+            ],
+            title: Some("Paged".to_string()),
+            author: None,
+            outline: vec![PdfOutlineItem {
+                title: "Chapter".to_string(),
+                page_index: 0,
+                children: Vec::new(),
+            }],
+            page_labels: vec!["Cover".to_string(), "xvii".to_string()],
+        };
+        let meta = PdfKfxMeta {
+            title: "Paged".to_string(),
+            author: None,
+            language: "en".to_string(),
+            date: None,
+            publisher: None,
+        };
+        let kfx = pdf_to_kfx(&doc, &meta, None);
+        let has = |n: &[u8]| kfx.windows(n.len()).any(|w| w == n);
+        assert!(has(b"npag"), "page_list container must exist");
+        assert!(has(b"ntoc"), "toc container must coexist");
+        assert!(has(b"Cover"), "first page label embedded");
+        assert!(has(b"xvii"), "second page label embedded");
+        assert_eq!(
+            kfx_extract_pdf(&kfx).unwrap(),
+            bytes,
+            "nav must not disturb the byte-identical PDF round-trip"
+        );
+    }
+
+    #[test]
+    fn page_list_emitted_without_an_outline() {
+        // No bookmarks ⇒ still a `page_list` (page-number nav is unconditional),
+        // and no `ntoc`.
+        let bytes = fake_pdf();
+        let doc = PdfDoc {
+            bytes,
+            pages: vec![PdfPage { width: 612.0, height: 792.0 }],
+            title: Some("NoToc".to_string()),
+            author: None,
+            outline: Vec::new(),
+            page_labels: vec!["folio-7".to_string()],
+        };
+        let meta = PdfKfxMeta {
+            title: "NoToc".to_string(),
+            author: None,
+            language: "en".to_string(),
+            date: None,
+            publisher: None,
+        };
+        let kfx = pdf_to_kfx(&doc, &meta, None);
+        let has = |n: &[u8]| kfx.windows(n.len()).any(|w| w == n);
+        assert!(has(b"npag"), "page_list present without an outline");
+        assert!(has(b"folio-7"), "page label embedded");
+        assert!(!has(b"ntoc"), "no toc container when there are no bookmarks");
     }
 
     #[test]
