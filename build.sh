@@ -104,13 +104,12 @@ if [ ! -d "$SRC" ]; then
 fi
 
 # Bundle libpdfium beside the app binary (Contents/MacOS) so boko's cover
-# renderer finds it via its beside-exe search at runtime. Tauri has already
-# signed the bundle, so ad-hoc-sign the added dylib and re-seal the bundle —
-# otherwise dyld refuses to load an unsigned library into the signed process.
-echo "==> Bundling libpdfium into the app + re-signing (ad-hoc)"
+# renderer finds it via its beside-exe search at runtime. No signing: the app is
+# unsigned (an unsigned process loads dylibs freely), and the bblanchon binary is
+# already ad-hoc (linker-)signed upstream, which is the only signature arm64's
+# dyld needs to map it. We add nothing.
+echo "==> Bundling libpdfium into the app (Contents/MacOS)"
 cp "$PDFIUM_LIB" "$SRC/Contents/MacOS/libpdfium.dylib"
-codesign --force --sign - "$SRC/Contents/MacOS/libpdfium.dylib"
-codesign --force --deep --sign - "$SRC"
 
 rm -rf "$DST"
 ditto "$SRC" "$DST"
