@@ -1670,7 +1670,30 @@ fn convert_pdf_to_kfx(
         );
     }
 
-    let kfx = boko::export::pdf_to_kfx(&doc, &meta);
+    // Render page 1 as the cover (PDOC library tile / sleep-screen art). pdfium
+    // is optional — if it can't be loaded, log and ship a cover-less KFX.
+    let cover = boko::render::render_pdf_page_jpeg(
+        &doc.bytes,
+        0,
+        boko::render::COVER_TARGET_WIDTH_PX,
+        boko::render::COVER_JPEG_QUALITY,
+    );
+    let cover_jpeg = match &cover {
+        Ok(jpeg) => {
+            if !quiet && !to_stdout {
+                eprintln!("  cover:  page 1 rendered ({} bytes)", jpeg.len());
+            }
+            Some(jpeg.as_slice())
+        }
+        Err(e) => {
+            if !quiet && !to_stdout {
+                eprintln!("  cover:  skipped ({e})");
+            }
+            None
+        }
+    };
+
+    let kfx = boko::export::pdf_to_kfx(&doc, &meta, cover_jpeg);
 
     if to_stdout {
         use std::io::Write;

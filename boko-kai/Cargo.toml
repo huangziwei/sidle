@@ -105,10 +105,30 @@ lopdf = { version = "0.40", default-features = false }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 
+# PDF page rasterizer (PDF→KFX page-1 cover; later the desktop reader). pdfium
+# is Chrome's PDF engine — no mature pure-Rust renderer exists. `pdfium-render`
+# binds to a `libpdfium.dylib` at RUNTIME (so this compiles without it; the lib
+# is bundled in Sidle.app / found via BOKO_PDFIUM_LIB or the system path). We
+# take raw bitmap bytes and JPEG-encode via `jpeg-encoder`, so the heavy `image`
+# integration features are off. We pin the binding ABI to `pdfium_7543` rather
+# than `pdfium_latest` (7763): pdfium only ever *adds* C symbols, so a 7543
+# binding loads cleanly against any pdfium >= 7543 — the bblanchon binary we
+# ship (7763) AND the older system pdfium used for in-sandbox tests — whereas a
+# 7763 binding fails to bind an older dylib (missing symbols). We don't call any
+# post-7543 API. `thread_safe` mutex-guards the bindings for the Sidle worker.
+# Native-only for now — the wasm/boko.html cover path (pdfium.wasm + JS glue) is
+# a documented P2 follow-up; see .claude/plans/pdf-to-kfx.md.
+pdfium-render = { version = "0.9.1", default-features = false, features = ["pdfium_7543", "thread_safe"] }
+
 # WASM: use pure-Rust backend
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 js-sys = "0.3"
+# lopdf's encrypted-PDF crypto deps pull `getrandom`, which has no default
+# backend on wasm32-unknown-unknown. lopdf's `wasm_js` feature forwards to
+# `getrandom/wasm_js` (the browser backend) so the PDF→KFX path builds for the
+# boko.html tool too. Enabled only for the wasm target.
+lopdf = { version = "0.40", default-features = false, features = ["wasm_js"] }
 
 [dev-dependencies]
 tempfile = "3.14"

@@ -160,11 +160,44 @@ mod tests {
             language: "en".to_string(),
         };
 
-        let kfx = pdf_to_kfx(&doc, &meta);
+        // No cover here: it doesn't affect the embedded-PDF extraction we test
+        // (rendering needs pdfium, which isn't available in unit tests).
+        let kfx = pdf_to_kfx(&doc, &meta, None);
         assert!(kfx_is_pdf_backed(&kfx), "boko PDF KFX must be detected as PDF-backed");
 
         let extracted = kfx_extract_pdf(&kfx).expect("extraction should succeed");
         assert_eq!(extracted, bytes, "extracted PDF must be byte-identical to the source");
+    }
+
+    #[test]
+    fn cover_jpeg_does_not_break_pdf_extraction() {
+        // With a cover, the KFX has *two* bcRawMedia blobs (the PDF and the
+        // cover JPEG). `kfx_extract_pdf` must still return the PDF, picking it by
+        // the `%PDF-` magic and skipping the JPEG — not raise `MultipleSlices`.
+        let bytes = fake_pdf();
+        let doc = PdfDoc {
+            bytes: bytes.clone(),
+            pages: vec![PdfPage { width: 612.0, height: 792.0 }],
+            title: Some("With Cover".to_string()),
+            author: None,
+        };
+        let meta = PdfKfxMeta {
+            title: "With Cover".to_string(),
+            author: None,
+            language: "en".to_string(),
+        };
+
+        // A stand-in cover blob with JPEG magic (real rendering needs pdfium).
+        let cover = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4, 0xFF, 0xD9];
+        let kfx = pdf_to_kfx(&doc, &meta, Some(&cover));
+
+        assert!(kfx_is_pdf_backed(&kfx), "still PDF-backed with a cover");
+        let extracted = kfx_extract_pdf(&kfx).expect("extraction should succeed past the cover");
+        assert_eq!(extracted, bytes, "extracted PDF must skip the cover JPEG and be exact");
+        assert!(
+            kfx.windows(cover.len()).any(|w| w == cover.as_slice()),
+            "the cover JPEG must be embedded verbatim in the KFX"
+        );
     }
 
     #[test]

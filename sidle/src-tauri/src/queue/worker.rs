@@ -371,15 +371,45 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
             book.language.clone()
         },
     };
-    let kfx = boko::export::pdf_to_kfx(&doc, &meta);
+    // Render page 1 as the cover (PDOC library tile + sleep-screen art). One
+    // render serves both: it's embedded in the KFX *and* saved as the row's
+    // cover for the gallery. pdfium is optional — on failure log and proceed
+    // cover-less. See .claude/plans/pdf-to-kfx.md (P2).
+    let cover_jpeg = match boko::render::render_pdf_page_jpeg(
+        &doc.bytes,
+        0,
+        boko::render::COVER_TARGET_WIDTH_PX,
+        boko::render::COVER_JPEG_QUALITY,
+    ) {
+        Ok(jpeg) => Some(jpeg),
+        Err(e) => {
+            eprintln!("[sidle/queue] book {} pdf cover: skipped ({e})", book.id);
+            None
+        }
+    };
+
+    let kfx = boko::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref());
     write_bytes_atomic(&out_path, &kfx)?;
+
+    // Persist the same JPEG as the library tile cover.
+    let cover_path = cover_jpeg.and_then(|jpeg| {
+        let out = paths.cover(&book.sha256, "jpg");
+        match write_bytes_atomic(&out, &jpeg) {
+            Ok(()) => Some(out),
+            Err(e) => {
+                eprintln!("[sidle/queue] book {} pdf cover write failed: {e}", book.id);
+                None
+            }
+        }
+    });
 
     // The KFX's ASIN is synthesized inside `pdf_to_kfx` (PDOC content_id); we
     // don't surface it onto the row yet. That only feeds device-delete `.sdr`
-    // cleanup, not sideloading — a follow-up once the cover work (P2) settles
-    // the PDOC ASIN shape. The on-device content_id is baked into the KFX.
+    // cleanup, not sideloading — a follow-up once the PDOC ASIN shape settles.
+    // The on-device content_id is baked into the KFX.
     Ok(Produced {
         kfx_path: Some(out_path),
+        cover_path,
         ..Default::default()
     })
 }

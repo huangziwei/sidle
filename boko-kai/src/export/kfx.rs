@@ -2468,11 +2468,25 @@ struct PdfPageRec {
 /// Symbolic name of the single shared PDF raw-media resource.
 const PDF_RSRC_NAME: &str = "rsrc0";
 
+/// Symbolic name of the optional page-1 cover JPEG resource.
+const COVER_RSRC_NAME: &str = "ecover";
+
 /// Convert a probed PDF into a fixed-layout, PDF-backed KFX (PDOC).
 ///
-/// P0: embed + skeleton only — no cover, no selectable text, a single
-/// `page_template` per section. See the plan for the deferred pieces.
-pub fn pdf_to_kfx(pdf: &crate::import::pdf::PdfDoc, meta: &PdfKfxMeta) -> Vec<u8> {
+/// `cover_jpeg`, when present, is embedded as a loose JPEG resource referenced
+/// by `book_metadata.cover_image` — the library tile / PDOC sleep-screen art
+/// (keyed by the synthesized ASIN). It is *not* a reading-order page; the PDF
+/// pages remain the only sections. Render it with [`crate::render`]. When
+/// `None` (e.g. pdfium unavailable, or the wasm build), the KFX is cover-less
+/// but otherwise identical — the embedded PDF is unaffected either way.
+///
+/// Still deferred: selectable text layer (P3), portrait+landscape page_template
+/// pair (P1). See the plan.
+pub fn pdf_to_kfx(
+    pdf: &crate::import::pdf::PdfDoc,
+    meta: &PdfKfxMeta,
+    cover_jpeg: Option<&[u8]>,
+) -> Vec<u8> {
     let container_id = generate_container_id();
     let mut ctx = ExportContext::new();
     let n = pdf.pages.len();
@@ -2480,6 +2494,7 @@ pub fn pdf_to_kfx(pdf: &crate::import::pdf::PdfDoc, meta: &PdfKfxMeta) -> Vec<u8
     // The whole PDF lives in one bcRawMedia entity addressed by this location;
     // every page's external_resource points here, differing only by page_index.
     let raw_location = format!("resource/{PDF_RSRC_NAME}");
+    let cover_location = format!("resource/{COVER_RSRC_NAME}");
 
     // ---- Survey: register section/story/resource symbols, allocate IDs ----
     let mut recs: Vec<PdfPageRec> = Vec::with_capacity(n);
@@ -2509,13 +2524,29 @@ pub fn pdf_to_kfx(pdf: &crate::import::pdf::PdfDoc, meta: &PdfKfxMeta) -> Vec<u8
     // Intern the shared raw-media location so the bcRawMedia entity resolves.
     ctx.symbols.get_or_intern(&raw_location);
 
+    // Optional page-1 cover: a loose JPEG resource (external_resource +
+    // bcRawMedia) referenced by `book_metadata.cover_image`. Survey its symbols
+    // now so the entity map and metadata resolve. `(res_sym, width_px,
+    // height_px)`.
+    let cover: Option<(u64, u32, u32)> = cover_jpeg.map(|jpeg| {
+        let res_sym = ctx.symbols.get_or_intern(COVER_RSRC_NAME);
+        ctx.symbols.get_or_intern(&cover_location);
+        let (w, h) = crate::util::extract_image_dimensions(jpeg).unwrap_or((0, 0));
+        (res_sym, w, h)
+    });
+
     // ---- Synthesis: build fragments in reference entity order ----
     let mut fragments: Vec<KfxFragment> = Vec::new();
 
     // 1. content_features ($585)
     fragments.push(build_pdf_content_features_fragment());
-    // 2. book_metadata ($490) — PDOC
-    fragments.push(build_pdf_book_metadata_fragment(meta, &container_id, pdf));
+    // 2. book_metadata ($490) — PDOC (with cover_image when a cover is present)
+    fragments.push(build_pdf_book_metadata_fragment(
+        meta,
+        &container_id,
+        pdf,
+        cover.map(|_| COVER_RSRC_NAME),
+    ));
     // 3. metadata ($258) — reading order
     fragments.push(build_pdf_metadata_fragment(&ctx));
     // 4. document_data ($538) — inserted here later, once max_id is known.
@@ -2546,13 +2577,30 @@ pub fn pdf_to_kfx(pdf: &crate::import::pdf::PdfDoc, meta: &PdfKfxMeta) -> Vec<u8
         fragments.push(build_auxiliary_data_fragment(name, &mut ctx));
     }
 
-    // external_resource entities, then the single shared bcRawMedia.
+    // external_resource entities (pages, then the cover), then the bcRawMedia
+    // blobs (shared PDF, then the cover JPEG).
     fragments.extend(resources);
+    if let (Some((res_sym, w, h)), Some(jpeg)) = (cover, cover_jpeg) {
+        fragments.push(build_pdf_cover_external_resource(
+            res_sym,
+            w,
+            h,
+            &cover_location,
+            jpeg,
+        ));
+    }
     fragments.push(KfxFragment::raw(
         KfxSymbol::Bcrawmedia as u64,
         &raw_location,
         pdf.bytes.clone(),
     ));
+    if let Some(jpeg) = cover_jpeg {
+        fragments.push(KfxFragment::raw(
+            KfxSymbol::Bcrawmedia as u64,
+            &cover_location,
+            jpeg.to_vec(),
+        ));
+    }
 
     // Navigation / position maps (one position per page).
     fragments.push(build_pdf_position_map_fragment(&recs));
@@ -2566,6 +2614,7 @@ pub fn pdf_to_kfx(pdf: &crate::import::pdf::PdfDoc, meta: &PdfKfxMeta) -> Vec<u8
         &fragments,
         &recs,
         &raw_location,
+        cover.map(|(res_sym, _, _)| (res_sym, cover_location.as_str())),
         &ctx,
     ));
 
@@ -2704,6 +2753,48 @@ fn build_pdf_external_resource(
     KfxFragment::new(KfxSymbol::ExternalResource, format!("e{page_index}"), ion)
 }
 
+/// Build the external_resource ($164) for the page-1 cover JPEG: a loose image
+/// resource (a real JPEG, no `page_index`) referenced by
+/// `book_metadata.cover_image`. Unlike the page resources it is not part of any
+/// section — it exists only to give the library tile / sleep screen its art.
+fn build_pdf_cover_external_resource(
+    res_sym: u64,
+    width_px: u32,
+    height_px: u32,
+    location: &str,
+    jpeg: &[u8],
+) -> KfxFragment {
+    let mut fields = vec![
+        (KfxSymbol::ResourceName as u64, IonValue::Symbol(res_sym)),
+        (
+            KfxSymbol::Location as u64,
+            IonValue::String(location.to_string()),
+        ),
+        (
+            KfxSymbol::Format as u64,
+            IonValue::Symbol(detect_format_symbol("cover.jpg", jpeg)),
+        ),
+    ];
+    if width_px > 0 && height_px > 0 {
+        fields.push((
+            KfxSymbol::ResourceWidth as u64,
+            IonValue::Int(width_px as i64),
+        ));
+        fields.push((
+            KfxSymbol::ResourceHeight as u64,
+            IonValue::Int(height_px as i64),
+        ));
+    }
+    if let Some(mime) = crate::util::detect_mime_type("cover.jpg", jpeg) {
+        fields.push((KfxSymbol::Mime as u64, IonValue::String(mime.to_string())));
+    }
+    KfxFragment::new(
+        KfxSymbol::ExternalResource,
+        COVER_RSRC_NAME,
+        IonValue::Struct(fields),
+    )
+}
+
 /// content_features ($585) for a PDF-backed fixed-layout book. Mirrors Amazon's
 /// set minus `yj_custom_word_iterator` (which needs the P3 text layer).
 fn build_pdf_content_features_fragment() -> KfxFragment {
@@ -2743,6 +2834,7 @@ fn build_pdf_book_metadata_fragment(
     meta: &PdfKfxMeta,
     container_id: &str,
     pdf: &crate::import::pdf::PdfDoc,
+    cover_resource_name: Option<&str>,
 ) -> KfxFragment {
     fn kv(key: &str, value: IonValue) -> IonValue {
         IonValue::Struct(vec![
@@ -2776,6 +2868,15 @@ fn build_pdf_book_metadata_fragment(
         kv("publisher", IonValue::String(String::new())),
         kv("language", IonValue::String(meta.language.clone())),
         kv("title", IonValue::String(meta.title.clone())),
+    ]);
+    // The cover_image value is the cover resource's symbolic name (a string the
+    // device matches against an external_resource), mirroring the EPUB path.
+    // PDOC + a synthesized ASIN is what makes the Kindle render the tile from
+    // this embedded image (see reference_kfx_asin_pdoc_cover).
+    if let Some(name) = cover_resource_name {
+        title_entries.push(kv("cover_image", IonValue::String(name.to_string())));
+    }
+    title_entries.extend([
         kv("is_sample", IonValue::Bool(false)),
         kv("asset_id", IonValue::String(container_id.to_string())),
     ]);
@@ -2955,6 +3056,7 @@ fn build_pdf_container_entity_map_fragment(
     fragments: &[KfxFragment],
     recs: &[PdfPageRec],
     raw_location: &str,
+    cover_dep: Option<(u64, &str)>,
     ctx: &ExportContext,
 ) -> KfxFragment {
     let mut entity_names: Vec<IonValue> = Vec::new();
@@ -2999,6 +3101,19 @@ fn build_pdf_container_entity_map_fragment(
             (
                 KfxSymbol::MandatoryDependencies as u64,
                 IonValue::List(vec![IonValue::Symbol(raw_sym)]),
+            ),
+        ]));
+    }
+
+    // cover external_resource → [cover bcRawMedia], when a cover is present.
+    if let Some((cover_res_sym, cover_location)) = cover_dep
+        && let Some(cover_media_sym) = ctx.symbols.get(cover_location)
+    {
+        dependencies.push(IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Symbol(cover_res_sym)),
+            (
+                KfxSymbol::MandatoryDependencies as u64,
+                IonValue::List(vec![IonValue::Symbol(cover_media_sym)]),
             ),
         ]));
     }
