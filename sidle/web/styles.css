@@ -1443,6 +1443,18 @@ button {
   object-fit: cover;
 }
 
+/* Drag-and-drop cover target: lit while an image is dragged over the open
+   editor. The whole editor accepts the drop; this is the "drop here" cue. */
+.metadata-cover-preview.drag-over {
+  border: 2px dashed var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.metadata-cover-preview.drag-over img {
+  opacity: 0.55;
+}
+
 .metadata-fields {
   display: flex;
   flex-direction: column;

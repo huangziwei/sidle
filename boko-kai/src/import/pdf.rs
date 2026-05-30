@@ -247,32 +247,6 @@ fn pdfdoc_to_char(b: u8) -> char {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decode_pdfdoc_typographic_bytes() {
-        // The bug this fixes: 0x8F/0x90 are curly single quotes in
-        // PDFDocEncoding, not C1 control codes. 0x97=Scaron, 0x96=OE.
-        let s = decode_pdf_string(b"\x8fHello\x90 \x97 \x96 \x84dash");
-        assert_eq!(s, "\u{2018}Hello\u{2019} \u{0160} \u{0152} \u{2014}dash");
-    }
-
-    #[test]
-    fn decode_utf16be_with_bom() {
-        let s = decode_pdf_string(&[0xFE, 0xFF, 0x00, b'H', 0x00, b'i']);
-        assert_eq!(s, "Hi");
-    }
-
-    #[test]
-    fn decode_ascii_and_latin1_unchanged() {
-        assert_eq!(decode_pdf_string(b"Plain ASCII"), "Plain ASCII");
-        // 0xE9 = é in both Latin-1 and PDFDocEncoding.
-        assert_eq!(decode_pdf_string(b"caf\xe9"), "caf\u{00E9}");
-    }
-}
-
 /// Walk the document outline (`/Outlines`) into a resolved bookmark tree. Each
 /// item carries its title and the 0-based page its destination jumps to. Empty
 /// if the PDF has no outline or none of it resolves to a page.
@@ -519,4 +493,30 @@ fn walk_outline_siblings(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_pdfdoc_typographic_bytes() {
+        // The bug this fixes: 0x8F/0x90 are curly single quotes in
+        // PDFDocEncoding, not C1 control codes. 0x97=Scaron, 0x96=OE.
+        let s = decode_pdf_string(b"\x8fHello\x90 \x97 \x96 \x84dash");
+        assert_eq!(s, "\u{2018}Hello\u{2019} \u{0160} \u{0152} \u{2014}dash");
+    }
+
+    #[test]
+    fn decode_utf16be_with_bom() {
+        let s = decode_pdf_string(&[0xFE, 0xFF, 0x00, b'H', 0x00, b'i']);
+        assert_eq!(s, "Hi");
+    }
+
+    #[test]
+    fn decode_ascii_and_latin1_unchanged() {
+        assert_eq!(decode_pdf_string(b"Plain ASCII"), "Plain ASCII");
+        // 0xE9 = é in both Latin-1 and PDFDocEncoding.
+        assert_eq!(decode_pdf_string(b"caf\xe9"), "caf\u{00E9}");
+    }
 }

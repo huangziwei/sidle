@@ -265,17 +265,70 @@ function applyView() {
 // Drag and drop
 // ---------------------------------------------------------------------------
 
+// True while an in-flight OS drag carries at least one image file. Latched on
+// `enter` (the only phase before `drop` that reports paths) so `over` can light
+// up the cover drop target without re-sniffing.
+let dragHasImage = false;
+
+// The cover preview element when it can accept a dropped image — i.e. the
+// single-book metadata editor is open. `null` (no cover target) otherwise, so
+// drops fall through to the normal library import.
+function coverDropTarget() {
+  const modal = $("#metadata-modal");
+  if (!modal || modal.hidden || !metadataBook || metadataBulk) return null;
+  return $("#metadata-cover-preview");
+}
+
+function isImagePath(p) {
+  return /\.(jpe?g|png|webp)$/i.test(p || "");
+}
+
 function wireDragDrop() {
   const veil = $("#drop-veil");
   window.api.onDragDrop((event) => {
-    const t = event.payload?.type;
+    const payload = event.payload || {};
+    const t = payload.type;
+
+    // Cover drop target: while the single-book editor is open, an image dropped
+    // anywhere on it replaces the cover (OS file drags arrive through Tauri, not
+    // HTML5 drop, so we route them here instead of a DOM dropzone). Non-image
+    // files fall through to the normal import below — so dropping a book while
+    // the editor happens to be open still imports it.
+    const coverBox = coverDropTarget();
+    if (coverBox) {
+      if (t === "enter") dragHasImage = (payload.paths || []).some(isImagePath);
+      if ((t === "enter" || t === "over") && dragHasImage) {
+        veil.hidden = true; // keep the editor focused; no full-screen veil
+        // Arm the preview regardless of cursor position: the drop is accepted
+        // anywhere on the open editor, so the lit target truthfully says "this
+        // image becomes the cover" (and dodges window-vs-webview coord skew).
+        coverBox.classList.add("drag-over");
+        return;
+      }
+      if (t === "leave") {
+        coverBox.classList.remove("drag-over");
+        dragHasImage = false;
+      }
+      if (t === "drop") {
+        coverBox.classList.remove("drag-over");
+        dragHasImage = false;
+        const img = (payload.paths || []).find(isImagePath);
+        if (img) {
+          veil.hidden = true;
+          applyCoverFromPath(img);
+          return;
+        }
+        // no image in the drop → fall through to import handling
+      }
+    }
+
     if (t === "enter" || t === "over") {
       veil.hidden = false;
     } else if (t === "leave") {
       veil.hidden = true;
     } else if (t === "drop") {
       veil.hidden = true;
-      const paths = event.payload.paths || [];
+      const paths = payload.paths || [];
       const accepted = paths.filter((p) => {
         const lower = p.toLowerCase();
         return (
@@ -3245,7 +3298,14 @@ async function onCoverChangeClick() {
     return;
   }
   if (!src) return; // user cancelled
+  await applyCoverFromPath(src);
+}
 
+// Set the open book's cover from a local image path (shared by the "Change
+// cover…" picker and the drag-and-drop onto the preview). On success bumps the
+// cache-buster and refreshes the preview + gallery in place.
+async function applyCoverFromPath(src) {
+  if (!metadataBook) return;
   try {
     const result = await window.api.invoke("library_set_cover", {
       bookId: metadataBook.id,
