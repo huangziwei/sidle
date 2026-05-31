@@ -28,8 +28,6 @@ const state = {
   // order and show/hide state. Built from localStorage in loadPreferences;
   // defaults to defaultColumnConfig() on first install.
   columnConfig: [],
-  selected: new Set(), // book ids currently selected
-  lastClicked: null,   // last single-clicked book id, anchor for shift-range
   // Bumped every time a cover is overwritten (worker tail-step fetch, manual
   // recrawl, conversion completion). Appended as `?v=N` to each cover URL so
   // the browser doesn't keep serving the stale grayscale image from cache
@@ -48,6 +46,35 @@ const state = {
   // autopull so a book pull's progress isn't hidden behind it.
   annotationSync: false,
 };
+
+// The Books section's multi-select. The Notes section owns a second instance of
+// the SAME SelectionController (see notebooks.js) so click / cmd / shift / lasso
+// / select-all behave identically across both. Only the adapter differs: which
+// ids, which DOM containers, which selection bar.
+const booksSelection = new window.SelectionController({
+  idAttr: "bookId",
+  // Same order as books' original selectRangeTo (`sortedBooks()` = all books,
+  // sorted) so shift-range + select-all are unchanged.
+  orderedIds: () => sortedBooks().map((b) => b.id),
+  containers: () =>
+    state.view === "gallery" ? $$("#gallery-grid .book-card") : $$("#list-body tr"),
+  // Both views stay in sync (the gallery + list DOM both persist across a view
+  // switch), matching the old applyLassoVisuals which painted both.
+  paintContainers: () => [...$$("#gallery-grid .book-card"), ...$$("#list-body tr")],
+  lassoEl: () => $("#lasso"),
+  skipSelector: ".book-card, .book-table tbody tr, .book-table thead, .resizer",
+  onChange: () => renderSelectionBar(),
+});
+
+// The selection controller for the currently active section. The lasso +
+// keyboard handlers in wireSelection() are written against this, so they're
+// section-agnostic.
+function activeController() {
+  if (state.section === "notes") {
+    return window.Notebooks ? window.Notebooks.selection() : null;
+  }
+  return booksSelection;
+}
 
 // Sort keys exposed in the gallery-visible sort popover and as
 // data-sort attrs on the list-view column headers. Order here is the
@@ -560,15 +587,7 @@ function setSent(rows) {
 
 function render() {
   // Prune selection of any books that no longer exist (e.g. after a refresh).
-  if (state.selected.size > 0) {
-    const live = new Set(state.books.map((b) => b.id));
-    for (const id of [...state.selected]) {
-      if (!live.has(id)) state.selected.delete(id);
-    }
-    if (state.lastClicked != null && !live.has(state.lastClicked)) {
-      state.lastClicked = null;
-    }
-  }
+  booksSelection.prune(new Set(state.books.map((b) => b.id)));
   const books = sortedBooks(visibleBooks(state.books));
   renderGallery(books);
   renderList(books);
@@ -786,7 +805,7 @@ function renderGallery(books) {
 function galleryCard(b) {
   const card = document.createElement("div");
   card.className = "book-card";
-  if (state.selected.has(b.id)) card.classList.add("selected");
+  if (booksSelection.has(b.id)) card.classList.add("selected");
   card.dataset.bookId = b.id;
   card.title = `${b.title}\n${b.author}`;
 
@@ -938,7 +957,7 @@ function renderList(books) {
 
 function listRow(b, visibleCols) {
   const tr = document.createElement("tr");
-  if (state.selected.has(b.id)) tr.classList.add("selected");
+  if (booksSelection.has(b.id)) tr.classList.add("selected");
   tr.dataset.bookId = b.id;
 
   for (const col of visibleCols) {
@@ -2174,7 +2193,7 @@ function openContextMenu(x, y, b) {
   const menu = $("#ctx-menu");
   menu.innerHTML = "";
 
-  if (state.selected.size > 1) {
+  if (booksSelection.count() > 1) {
     // Multi-selection menu — bulk actions.
     const sel = selectedBooks();
     const send = sel.filter(
@@ -2259,194 +2278,62 @@ function wireSelection() {
   // (→ clear selection).
   $("#main").addEventListener("mousedown", onMainMouseDown);
 
-  // Esc clears selection. Cmd/Ctrl-A selects all. Books only — the Notes
-  // section runs its own equivalents in notebooks.js.
+  // Esc clears selection; Cmd/Ctrl-A selects all — dispatched to whichever
+  // section (Books or Notes) is active via its SelectionController.
   document.addEventListener("keydown", (e) => {
-    if (state.section !== "books") return;
+    const ctrl = activeController();
+    if (!ctrl) return;
+    if (state.section === "notes" && window.Notebooks.viewerOpen()) return;
     const t = e.target;
     const inField =
       t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
-    if (e.key === "Escape" && state.selected.size > 0) {
-      clearSelection();
+    if (e.key === "Escape" && ctrl.count() > 0) {
+      ctrl.clear();
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key === "a" && !inField) {
       e.preventDefault();
-      state.selected = new Set(state.books.map((b) => b.id));
-      render();
+      ctrl.selectAll();
     }
   });
 }
 
-const LASSO_THRESHOLD = 4; // px before a mousedown promotes to a drag
-
+// Lasso / empty-click for whichever section is active. The mechanics live in the
+// SelectionController; this just routes the mousedown to the active one and skips
+// when the target is actionable (a card/row/header handles its own click).
 function onMainMouseDown(e) {
   if (e.button !== 0) return; // primary button only
-  if (state.section !== "books") return; // Notes runs its own click-to-clear
-  // Anything actionable: let the card/row/header/resizer handler take it.
-  if (
-    e.target.closest(
-      ".book-card, .book-table tbody tr, .book-table thead, .resizer",
-    )
-  ) {
-    return;
-  }
-
-  const startX = e.clientX;
-  const startY = e.clientY;
-  const additive = e.metaKey || e.ctrlKey || e.shiftKey;
-  const baseSelection = additive ? new Set(state.selected) : new Set();
-  let active = false;
-  const lasso = $("#lasso");
-
-  const onMove = (ev) => {
-    if (!active) {
-      const dx = ev.clientX - startX;
-      const dy = ev.clientY - startY;
-      if (Math.hypot(dx, dy) < LASSO_THRESHOLD) return;
-      active = true;
-      lasso.hidden = false;
-    }
-    positionLasso(lasso, startX, startY, ev.clientX, ev.clientY);
-    const rect = makeRect(startX, startY, ev.clientX, ev.clientY);
-    const hits = computeLassoHits(rect);
-    state.selected = new Set([...baseSelection, ...hits]);
-    applyLassoVisuals();
-  };
-
-  const onUp = () => {
-    document.removeEventListener("mousemove", onMove);
-    document.removeEventListener("mouseup", onUp);
-    if (active) {
-      lasso.hidden = true;
-      state.lastClicked = null;
-      render();
-    } else {
-      // No drag — treat as a click on empty area: clear unless additive.
-      if (!additive) clearSelection();
-    }
-  };
-
-  document.addEventListener("mousemove", onMove);
-  document.addEventListener("mouseup", onUp);
-  e.preventDefault();
+  const ctrl = activeController();
+  if (!ctrl) return;
+  // Don't start a lasso over the open notebook viewer overlay.
+  if (state.section === "notes" && window.Notebooks.viewerOpen()) return;
+  if (e.target.closest(ctrl.cfg.skipSelector)) return;
+  ctrl.beginLasso(e);
 }
 
-function positionLasso(el, x1, y1, x2, y2) {
-  const left = Math.min(x1, x2);
-  const top = Math.min(y1, y2);
-  el.style.left = `${left}px`;
-  el.style.top = `${top}px`;
-  el.style.width = `${Math.abs(x2 - x1)}px`;
-  el.style.height = `${Math.abs(y2 - y1)}px`;
-}
-
-function makeRect(x1, y1, x2, y2) {
-  return {
-    left: Math.min(x1, x2),
-    top: Math.min(y1, y2),
-    right: Math.max(x1, x2),
-    bottom: Math.max(y1, y2),
-  };
-}
-
-function computeLassoHits(rect) {
-  const items =
-    state.view === "gallery"
-      ? $$("#gallery-grid .book-card")
-      : $$("#list-body tr");
-  const hits = new Set();
-  for (const el of items) {
-    const r = el.getBoundingClientRect();
-    if (rectsIntersect(rect, r)) {
-      const id = Number(el.dataset.bookId);
-      if (id) hits.add(id);
-    }
-  }
-  return hits;
-}
-
-function rectsIntersect(a, b) {
-  return !(
-    a.right < b.left ||
-    a.left > b.right ||
-    a.bottom < b.top ||
-    a.top > b.bottom
-  );
-}
-
-/// Update only the .selected classes + the action bar during a drag — avoids
-/// a full re-render (which would tear down + rebuild every card/row on every
-/// mousemove frame).
-function applyLassoVisuals() {
-  const sel = state.selected;
-  $$("#gallery-grid .book-card").forEach((el) => {
-    const id = Number(el.dataset.bookId);
-    el.classList.toggle("selected", sel.has(id));
-  });
-  $$("#list-body tr").forEach((el) => {
-    const id = Number(el.dataset.bookId);
-    el.classList.toggle("selected", sel.has(id));
-  });
-  renderSelectionBar();
-}
-
+// Thin wrappers so the book card/row handlers read naturally; the logic is the
+// shared controller's. Notes wires its cards straight to its own controller.
 function onItemClick(e, b) {
-  e.stopPropagation();
-  if (e.shiftKey && state.lastClicked != null) {
-    selectRangeTo(b.id);
-  } else if (e.metaKey || e.ctrlKey) {
-    toggleSelected(b.id);
-    state.lastClicked = b.id;
-  } else {
-    state.selected = new Set([b.id]);
-    state.lastClicked = b.id;
-  }
-  render();
+  booksSelection.click(e, b.id);
 }
 
-/// Context menu (right-click) behavior:
-/// - if right-click hits an already-selected book, keep the selection as-is
-///   so the menu can operate on the multi-selection
-/// - if it hits an unselected book, reset selection to just that one
+/// Context menu (right-click): keep an existing multi-selection so the menu can
+/// act on it; otherwise reset to just the clicked book.
 function onItemContext(_e, b) {
-  if (state.selected.has(b.id)) return;
-  state.selected = new Set([b.id]);
-  state.lastClicked = b.id;
-  render();
-}
-
-function selectRangeTo(toId) {
-  const ordered = sortedBooks();
-  const from = ordered.findIndex((b) => b.id === state.lastClicked);
-  const to = ordered.findIndex((b) => b.id === toId);
-  if (from === -1 || to === -1) {
-    state.selected.add(toId);
-    return;
-  }
-  const [lo, hi] = from < to ? [from, to] : [to, from];
-  for (let i = lo; i <= hi; i++) state.selected.add(ordered[i].id);
-}
-
-function toggleSelected(id) {
-  if (state.selected.has(id)) state.selected.delete(id);
-  else state.selected.add(id);
+  booksSelection.context(b.id);
 }
 
 function clearSelection() {
-  if (state.selected.size === 0) return;
-  state.selected.clear();
-  state.lastClicked = null;
-  render();
+  booksSelection.clear();
 }
 
 function selectedBooks() {
-  return state.books.filter((b) => state.selected.has(b.id));
+  return state.books.filter((b) => booksSelection.has(b.id));
 }
 
 function renderSelectionBar() {
   const bar = $("#selection-bar");
-  const n = state.selected.size;
+  const n = booksSelection.count();
   if (n === 0) {
     bar.hidden = true;
     return;
@@ -2532,8 +2419,8 @@ async function bulkRemove() {
       console.error("remove failed:", b.id, e);
     }
   }
-  state.selected.clear();
-  state.lastClicked = null;
+  booksSelection.selected.clear();
+  booksSelection.lastClicked = null;
   await refresh();
 }
 

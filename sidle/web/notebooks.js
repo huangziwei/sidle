@@ -17,10 +17,29 @@
     list: [],
     loaded: false,
     view: "gallery", // "gallery" | "list" — driven by library.js's view toggle
-    selected: new Set(), // notebook ids in the current multi-selection
-    lastClicked: null, // anchor id for shift-range selection
     viewer: null, // { id, title, pageCount, page, cache: Map<page, svgString> }
   };
+
+  // The Notes section's multi-select — the SAME SelectionController the Books
+  // section uses (library.js), so click / cmd / shift / lasso / select-all all
+  // behave identically. library.js's #main mousedown + keydown handlers route to
+  // this via window.Notebooks.selection() when Notes is the active section.
+  const sel = new window.SelectionController({
+    idAttr: "notebookId",
+    orderedIds: () => nb.list.map((n) => n.id),
+    containers: () =>
+      document.querySelectorAll(
+        nb.view === "list" ? "#notes-list tbody tr" : "#notes-grid .notebook-card",
+      ),
+    // render() empties the inactive view, but paint both for symmetry with Books.
+    paintContainers: () => [
+      ...document.querySelectorAll("#notes-grid .notebook-card"),
+      ...document.querySelectorAll("#notes-list tbody tr"),
+    ],
+    lassoEl: () => document.querySelector("#lasso"),
+    skipSelector: ".notebook-card, #notes-list tbody tr, #notes-list thead",
+    onChange: () => renderSelectionBar(),
+  });
 
   // Two-click arm for the selection bar's destructive "Remove from library"
   // (the app avoids native confirm() dialogs — see the context-menu remove).
@@ -55,9 +74,7 @@
     }
     // Drop selection entries for notebooks that no longer exist (after a
     // remove/import the list changes underneath us).
-    const live = new Set(nb.list.map((n) => n.id));
-    for (const id of [...nb.selected]) if (!live.has(id)) nb.selected.delete(id);
-    if (nb.lastClicked != null && !live.has(nb.lastClicked)) nb.lastClicked = null;
+    sel.prune(new Set(nb.list.map((n) => n.id)));
     nb.loaded = true;
     render();
   }
@@ -82,8 +99,8 @@
   // independent of the tab. Drop the selection so its bar doesn't linger over
   // the Books view.
   function hide() {
-    nb.selected.clear();
-    nb.lastClicked = null;
+    sel.selected.clear();
+    sel.lastClicked = null;
     const bar = q("#notebook-selection-bar");
     if (bar) bar.hidden = true;
     removeArmed = false;
@@ -118,7 +135,7 @@
     el.className = "book-card notebook-card";
     el.dataset.notebookId = n.id;
     el.title = n.title || "Notebook";
-    if (nb.selected.has(n.id)) el.classList.add("selected");
+    if (sel.has(n.id)) el.classList.add("selected");
 
     const cover = document.createElement("div");
     cover.className = "cover notebook-cover";
@@ -137,11 +154,11 @@
     el.appendChild(meta);
 
     // Single click selects (mirrors Books); double click opens the viewer.
-    el.addEventListener("click", (e) => onItemClick(e, n));
+    el.addEventListener("click", (e) => sel.click(e, n.id));
     el.addEventListener("dblclick", () => openViewer(n));
     el.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      onItemContext(n);
+      sel.context(n.id);
       openMenu(e.clientX, e.clientY, n);
     });
     return el;
@@ -150,7 +167,7 @@
   function row(n) {
     const tr = document.createElement("tr");
     tr.dataset.notebookId = n.id;
-    if (nb.selected.has(n.id)) tr.classList.add("selected");
+    if (sel.has(n.id)) tr.classList.add("selected");
 
     const title = document.createElement("td");
     title.textContent = n.title || "Notebook";
@@ -166,85 +183,29 @@
 
     tr.append(title, pages, updated);
 
-    tr.addEventListener("click", (e) => onItemClick(e, n));
+    tr.addEventListener("click", (e) => sel.click(e, n.id));
     tr.addEventListener("dblclick", () => openViewer(n));
     tr.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      onItemContext(n);
+      sel.context(n.id);
       openMenu(e.clientX, e.clientY, n);
     });
     return tr;
   }
 
-  // ── Selection (multi-select + bulk remove) ──────────────────────────────────
-
-  function onItemClick(e, n) {
-    e.stopPropagation();
-    if (e.shiftKey && nb.lastClicked != null) {
-      selectRangeTo(n.id);
-    } else if (e.metaKey || e.ctrlKey) {
-      toggleSel(n.id);
-      nb.lastClicked = n.id;
-    } else {
-      nb.selected = new Set([n.id]);
-      nb.lastClicked = n.id;
-    }
-    applySelectionVisuals();
-  }
-
-  // Right-click keeps an existing multi-selection (so the menu can act on it);
-  // otherwise it resets the selection to just the clicked notebook.
-  function onItemContext(n) {
-    if (nb.selected.has(n.id)) return;
-    nb.selected = new Set([n.id]);
-    nb.lastClicked = n.id;
-    applySelectionVisuals();
-  }
-
-  function selectRangeTo(toId) {
-    const from = nb.list.findIndex((x) => x.id === nb.lastClicked);
-    const to = nb.list.findIndex((x) => x.id === toId);
-    if (from === -1 || to === -1) {
-      nb.selected.add(toId);
-      return;
-    }
-    const [lo, hi] = from < to ? [from, to] : [to, from];
-    for (let i = lo; i <= hi; i++) nb.selected.add(nb.list[i].id);
-  }
-
-  function toggleSel(id) {
-    if (nb.selected.has(id)) nb.selected.delete(id);
-    else nb.selected.add(id);
-  }
-
-  function clearSel() {
-    nb.selected.clear();
-    nb.lastClicked = null;
-    applySelectionVisuals();
-  }
+  // ── Selection bar + bulk remove ─────────────────────────────────────────────
+  // The selection MECHANICS (click / cmd / shift / lasso / select-all / clear)
+  // are the shared `sel` controller; only the bar's content and the bulk-remove
+  // action are notebook-specific.
 
   function selectedNotebooks() {
-    return nb.list.filter((n) => nb.selected.has(n.id));
-  }
-
-  // Toggle .selected on the live cards/rows + refresh the bar WITHOUT a full
-  // render — a rebuild would re-fetch every tile thumbnail (notebook_thumbnail
-  // is an IPC call per card), so selection changes must stay DOM-cheap.
-  function applySelectionVisuals() {
-    const sel = nb.selected;
-    document.querySelectorAll("#notes-grid .notebook-card").forEach((el) => {
-      el.classList.toggle("selected", sel.has(Number(el.dataset.notebookId)));
-    });
-    document.querySelectorAll("#notes-list tbody tr").forEach((el) => {
-      el.classList.toggle("selected", sel.has(Number(el.dataset.notebookId)));
-    });
-    renderSelectionBar();
+    return nb.list.filter((n) => sel.has(n.id));
   }
 
   function renderSelectionBar() {
     const bar = q("#notebook-selection-bar");
     if (!bar) return;
-    const n = nb.selected.size;
+    const n = sel.count();
     removeArmed = false; // any re-render disarms the two-click remove
     if (n === 0) {
       bar.hidden = true;
@@ -257,10 +218,10 @@
   }
 
   async function bulkRemove() {
-    const sel = selectedNotebooks();
-    if (sel.length === 0) return;
+    const picked = selectedNotebooks();
+    if (picked.length === 0) return;
     let failed = 0;
-    for (const n of sel) {
+    for (const n of picked) {
       try {
         await api.invoke("notebook_remove", { notebookId: n.id });
       } catch (e) {
@@ -269,10 +230,10 @@
         console.error("notebook remove failed:", n.id, e);
       }
     }
-    const removed = sel.length - failed;
+    const removed = picked.length - failed;
     if (removed > 0) toast(`removed ${removed} notebook${removed === 1 ? "" : "s"}`);
-    nb.selected.clear();
-    nb.lastClicked = null;
+    sel.selected.clear();
+    sel.lastClicked = null;
     await refresh();
   }
 
@@ -326,13 +287,13 @@
     if (!menu) return;
     menu.innerHTML = "";
 
-    const multi = nb.selected.size > 1 && nb.selected.has(n.id);
+    const multi = sel.count() > 1 && sel.has(n.id);
     if (multi) {
       // Bulk remove for the whole selection. Two-click confirm (no native
       // dialog), same convention as the single-item remove below.
       const remove = document.createElement("li");
       remove.className = "danger";
-      remove.textContent = `Remove ${nb.selected.size} from library`;
+      remove.textContent = `Remove ${sel.count()} from library`;
       let armed = false;
       remove.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -586,13 +547,16 @@
     const emptyImport = q("#notes-empty-import");
     if (emptyImport) emptyImport.addEventListener("click", importFolder);
 
-    // Selection bar.
+    // Selection bar. The selection mechanics (click / lasso / Esc / Cmd-A /
+    // empty-click) come from the shared controller, driven by library.js's #main
+    // + document handlers when Notes is active — only these two buttons are
+    // notebook-specific.
     const selDelete = q("#nb-sel-delete");
     if (selDelete) {
       selDelete.addEventListener("click", () => {
         if (!removeArmed) {
           removeArmed = true;
-          selDelete.textContent = `Click again to remove ${nb.selected.size}`;
+          selDelete.textContent = `Click again to remove ${sel.count()}`;
           return;
         }
         removeArmed = false;
@@ -600,36 +564,7 @@
       });
     }
     const selClear = q("#nb-sel-clear");
-    if (selClear) selClear.addEventListener("click", clearSel);
-
-    // Click an empty area of the Notes view to clear the selection (mirrors the
-    // Books tap-to-clear). Cards/rows stopPropagation via their own handlers.
-    const notesSection = q("#notes");
-    if (notesSection) {
-      notesSection.addEventListener("mousedown", (e) => {
-        if (e.button !== 0) return;
-        if (e.target.closest(".notebook-card, #notes-list tbody tr")) return;
-        if (!(e.metaKey || e.ctrlKey || e.shiftKey)) clearSel();
-      });
-    }
-
-    // Esc clears selection; Cmd/Ctrl-A selects all — only while Notes is the
-    // active section and the paged viewer overlay is closed.
-    document.addEventListener("keydown", (e) => {
-      if (!isVisible() || nb.viewer) return;
-      const t = e.target;
-      const inField =
-        t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
-      if (e.key === "Escape" && nb.selected.size > 0) {
-        clearSel();
-        return;
-      }
-      if ((e.metaKey || e.ctrlKey) && e.key === "a" && !inField) {
-        e.preventDefault();
-        nb.selected = new Set(nb.list.map((n) => n.id));
-        applySelectionVisuals();
-      }
-    });
+    if (selClear) selClear.addEventListener("click", () => sel.clear());
   }
 
   if (document.readyState === "loading") {
@@ -638,5 +573,15 @@
     wire();
   }
 
-  window.Notebooks = { refresh, show, hide, importFolder, setView };
+  // `selection` + `viewerOpen` let library.js's shared #main mousedown + keydown
+  // handlers drive the Notes controller when Notes is the active section.
+  window.Notebooks = {
+    refresh,
+    show,
+    hide,
+    importFolder,
+    setView,
+    selection: () => sel,
+    viewerOpen: () => !!nb.viewer,
+  };
 })();
