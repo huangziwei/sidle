@@ -149,7 +149,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   subscribeAnnotationSync();
   subscribeLibraryRowUpdated();
   // If the user left off in the Notes tab, populate it now that boot is done.
-  if (state.section === "notes" && window.Notebooks) window.Notebooks.show();
+  if (state.section === "notes" && window.Notebooks) {
+    window.Notebooks.setView(state.view);
+    window.Notebooks.show();
+  }
 });
 
 function loadPreferences() {
@@ -278,18 +281,28 @@ function applyView() {
   $("#list").classList.toggle("active", listActive);
   $("#gallery").hidden = !galleryActive;
   $("#list").hidden = !listActive;
+  // The Gallery/List toggle drives the Notes section too; hand the choice off
+  // so notebooks.js can swap its grid/table. No-op while Notes isn't visible.
+  if (window.Notebooks) window.Notebooks.setView(state.view);
 }
 
-// Top-level Books / Notes split. Books shows the gallery/list + filter chrome;
-// Notes shows the Scribe handwritten-notebook grid (owned by notebooks.js) and
-// swaps the toolbar (Add… → Import notebooks…, hides the view toggle + filters).
+// Top-level Books / Notes split. Both share the Gallery/List view toggle;
+// switching swaps the action button (Add → Import) and hides the Books-only
+// filter chrome. Notes shows the Scribe notebook grid/list (owned by
+// notebooks.js).
 function setSection(s) {
   state.section = s;
   applySection();
   localStorage.setItem("section", s);
   if (window.Notebooks) {
-    if (s === "notes") window.Notebooks.show();
-    else window.Notebooks.hide();
+    if (s === "notes") {
+      // Drop any book selection so the Books selection bar doesn't linger over
+      // the Notes view; notebooks.js owns its own selection + bar.
+      clearSelection();
+      window.Notebooks.show();
+    } else {
+      window.Notebooks.hide();
+    }
   }
 }
 
@@ -299,11 +312,10 @@ function applySection() {
   $("#section-notes").classList.toggle("active", notes);
   $("#section-books").setAttribute("aria-selected", String(!notes));
   $("#section-notes").setAttribute("aria-selected", String(notes));
-  // Books-only chrome.
+  // Add… (Books) and Import (Notes) swap; the Gallery/List toggle now drives
+  // both sections, so it stays visible across the split.
   $("#btn-add").hidden = notes;
   $("#btn-notes-import").hidden = !notes;
-  $("#view-sep").hidden = notes;
-  $("#view-seg").hidden = notes;
   $("#filter-bar").hidden = notes;
   const search = document.querySelector(".filter-search");
   if (search) search.hidden = notes;
@@ -2247,8 +2259,10 @@ function wireSelection() {
   // (→ clear selection).
   $("#main").addEventListener("mousedown", onMainMouseDown);
 
-  // Esc clears selection. Cmd/Ctrl-A selects all.
+  // Esc clears selection. Cmd/Ctrl-A selects all. Books only — the Notes
+  // section runs its own equivalents in notebooks.js.
   document.addEventListener("keydown", (e) => {
+    if (state.section !== "books") return;
     const t = e.target;
     const inField =
       t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
@@ -2268,6 +2282,7 @@ const LASSO_THRESHOLD = 4; // px before a mousedown promotes to a drag
 
 function onMainMouseDown(e) {
   if (e.button !== 0) return; // primary button only
+  if (state.section !== "books") return; // Notes runs its own click-to-clear
   // Anything actionable: let the card/row/header/resizer handler take it.
   if (
     e.target.closest(

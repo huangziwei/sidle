@@ -81,7 +81,10 @@ pub struct BookRow {
 /// container KFX). See .claude/plans/pdf-to-kfx.md.
 /// v4: added the `notebooks` table — Scribe handwritten-notebook backup +
 /// render. See .claude/plans/scribe-notebook-backup.md.
-pub const SCHEMA_VERSION: i64 = 4;
+/// v5: added `notebooks.updated_at` — the source `nbk`'s on-device mtime (the
+/// Kindle's Date Modified, which only advances on a real edit), captured at
+/// import. The displayed "when" for a notebook; `imported_at` is bookkeeping.
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -413,6 +416,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )"#,
         [],
     )?;
+
+    // v5: the notebook's on-device "Date Modified" (source `nbk` mtime, captured
+    // at import). Nullable — rows imported before v5 backfill on next re-import.
+    if !has_column(conn, "notebooks", "updated_at")? {
+        conn.execute("ALTER TABLE notebooks ADD COLUMN updated_at TEXT", [])?;
+    }
 
     // v2: scrub any rows from the (now-removed) `My Clippings.txt` ingest path.
     // It only ever wrote orphans (`book_id IS NULL`), so this never touches a
@@ -1046,10 +1055,13 @@ pub struct NotebookRow {
     /// SHA-256 of the backed-up `nbk` bytes — change-detects an edited notebook.
     pub nbk_sha256: Option<String>,
     pub imported_at: String,
+    /// On-device "Date Modified" of the source `nbk` (RFC 3339), captured at
+    /// import. `None` for notebooks imported before this column existed.
+    pub updated_at: Option<String>,
 }
 
 const SELECT_NOTEBOOKS: &str =
-    "SELECT id, uuid, title, page_count, nbk_sha256, imported_at FROM notebooks";
+    "SELECT id, uuid, title, page_count, nbk_sha256, imported_at, updated_at FROM notebooks";
 
 fn row_to_notebook(row: &rusqlite::Row<'_>) -> rusqlite::Result<NotebookRow> {
     Ok(NotebookRow {
@@ -1059,6 +1071,7 @@ fn row_to_notebook(row: &rusqlite::Row<'_>) -> rusqlite::Result<NotebookRow> {
         page_count: row.get(3)?,
         nbk_sha256: row.get(4)?,
         imported_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -1099,21 +1112,38 @@ pub fn upsert_notebook(
     page_count: i64,
     nbk_sha256: &str,
     imported_at: &str,
+    updated_at: &str,
 ) -> rusqlite::Result<i64> {
     conn.execute(
-        r#"INSERT INTO notebooks (uuid, title, page_count, nbk_sha256, imported_at)
-            VALUES (?1, 'Notebook', ?2, ?3, ?4)
+        r#"INSERT INTO notebooks (uuid, title, page_count, nbk_sha256, imported_at, updated_at)
+            VALUES (?1, 'Notebook', ?2, ?3, ?4, ?5)
             ON CONFLICT(uuid) DO UPDATE SET
                 page_count  = excluded.page_count,
                 nbk_sha256  = excluded.nbk_sha256,
-                imported_at = excluded.imported_at"#,
-        params![uuid, page_count, nbk_sha256, imported_at],
+                imported_at = excluded.imported_at,
+                updated_at  = excluded.updated_at"#,
+        params![uuid, page_count, nbk_sha256, imported_at, updated_at],
     )?;
     conn.query_row(
         "SELECT id FROM notebooks WHERE uuid = ?1",
         params![uuid],
         |r| r.get(0),
     )
+}
+
+/// Backfill `updated_at` for a notebook that predates the column (NULL only),
+/// without re-extracting it. Used on the import "unchanged" fast path so an
+/// existing row still gets its on-device Date Modified.
+pub fn backfill_notebook_updated_at(
+    conn: &Connection,
+    uuid: &str,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE notebooks SET updated_at = ?1 WHERE uuid = ?2 AND updated_at IS NULL",
+        params![updated_at, uuid],
+    )?;
+    Ok(())
 }
 
 pub fn rename_notebook(conn: &Connection, id: i64, title: &str) -> rusqlite::Result<()> {

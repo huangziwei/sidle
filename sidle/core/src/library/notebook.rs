@@ -39,10 +39,23 @@ pub fn import_notebook(
         std::fs::read(src_nbk).with_context(|| format!("read nbk {}", src_nbk.display()))?;
     let sha = sha256_hex(&bytes);
 
+    // On-device "Date Modified" of the source nbk — the Kindle advances this only
+    // when the notebook is actually written, so it IS the notebook's updated_at.
+    // Falls back to the import time if the source mtime can't be read.
+    let updated_at = mtime_iso(src_nbk).unwrap_or_else(db::now_iso);
+
     if let Some(existing) = db::get_notebook_by_uuid(conn, uuid)? {
         if existing.nbk_sha256.as_deref() == Some(sha.as_str())
             && paths.notebook_page_svg(uuid, 0).exists()
         {
+            // Unchanged content. Backfill updated_at for a row imported before
+            // the column existed — no re-extraction needed.
+            if existing.updated_at.is_none() {
+                db::backfill_notebook_updated_at(conn, uuid, &updated_at)?;
+                if let Some(refreshed) = db::get_notebook_by_uuid(conn, uuid)? {
+                    return Ok(NotebookOutcome::Unchanged(refreshed));
+                }
+            }
             return Ok(NotebookOutcome::Unchanged(existing));
         }
     }
@@ -70,10 +83,18 @@ pub fn import_notebook(
     }
 
     let now = db::now_iso();
-    let id = db::upsert_notebook(conn, uuid, svgs.len() as i64, &sha, &now)?;
+    let id = db::upsert_notebook(conn, uuid, svgs.len() as i64, &sha, &now, &updated_at)?;
     let row = db::get_notebook(conn, id)?
         .ok_or_else(|| anyhow::anyhow!("notebook row missing after upsert"))?;
     Ok(NotebookOutcome::Imported(row))
+}
+
+/// The source file's mtime as an RFC 3339 string — the device "Date Modified"
+/// when the import source preserved it (a normal copy / MTP pull does). `None`
+/// if the filesystem can't report a modification time.
+fn mtime_iso(path: &Path) -> Option<String> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
 }
 
 /// SHA-256 hex of a byte buffer (same digest shape as `import::sha256_of_file`).

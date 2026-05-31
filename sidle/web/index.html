@@ -14,13 +14,13 @@
           <button id="section-notes" class="seg-btn" role="tab" aria-selected="false">Notes</button>
         </div>
         <div class="toolbar-sep" aria-hidden="true"></div>
-        <button id="btn-add" class="btn">Add&hellip;</button>
-        <button id="btn-notes-import" class="btn" hidden>Import notebooks&hellip;</button>
-        <div class="toolbar-sep" id="view-sep" aria-hidden="true"></div>
         <div class="seg" id="view-seg" role="tablist" aria-label="View">
           <button id="view-gallery" class="seg-btn active" role="tab" aria-selected="true">Gallery</button>
           <button id="view-list" class="seg-btn" role="tab" aria-selected="false">List</button>
         </div>
+        <div class="toolbar-sep" id="view-sep" aria-hidden="true"></div>
+        <button id="btn-add" class="btn">Add</button>
+        <button id="btn-notes-import" class="btn" hidden>Import</button>
       </div>
 
       <div class="toolbar-spacer"></div>
@@ -167,6 +167,16 @@
 
       <section id="notes" class="view" aria-label="Notes" hidden>
         <div id="notes-grid" class="notes-grid"></div>
+        <table id="notes-list" class="book-table notebook-table" hidden>
+          <thead>
+            <tr>
+              <th class="col-title">Title</th>
+              <th class="nb-pages">Pages</th>
+              <th class="col-updated">Updated</th>
+            </tr>
+          </thead>
+          <tbody id="notes-list-body"></tbody>
+        </table>
         <div id="notes-empty" class="empty" hidden>
           <p>No notebooks yet.</p>
           <p>
@@ -186,6 +196,14 @@
         <button type="button" id="sel-edit" class="btn-link">Edit metadata</button>
         <button type="button" id="sel-delete" class="btn-link sel-danger">Remove from library</button>
         <button type="button" id="sel-clear" class="btn-link">Clear</button>
+      </div>
+    </div>
+
+    <div id="notebook-selection-bar" class="selection-bar" hidden>
+      <span id="notebook-selection-count" class="selection-count">0 selected</span>
+      <div class="selection-actions">
+        <button type="button" id="nb-sel-delete" class="btn-link sel-danger">Remove from library</button>
+        <button type="button" id="nb-sel-clear" class="btn-link">Clear</button>
       </div>
     </div>
 

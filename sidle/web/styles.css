@@ -2516,6 +2516,16 @@ button {
   gap: 18px;
 }
 
+/* Notebook list view — reuses .book-table; the fixed layout splits columns by
+   these header widths (Title takes the remainder). No sort/resize/reorder. */
+.notebook-table .nb-pages {
+  width: 90px;
+  text-align: right;
+}
+.notebook-table .col-updated {
+  width: 160px;
+}
+
 /* Scribe page is 15624×20832 (≈ 3:4) — taller-but-wider than a book cover. */
 .notebook-cover {
   aspect-ratio: 3 / 4;

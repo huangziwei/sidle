@@ -1,9 +1,11 @@
-// Notes section: Scribe handwritten-notebook grid + paged SVG viewer.
+// Notes section: Scribe handwritten-notebook grid/list + paged SVG viewer.
 //
 // Classic script loaded AFTER library.js. Self-contained IIFE that exposes
-// `window.Notebooks` ({ refresh, show, hide, importFolder }); library.js's
-// Books/Notes toggle drives it. Reuses the global `window.api` (IPC + fileUrl)
-// and `window.showToast` when present. Backend: commands/notebook.rs —
+// `window.Notebooks` ({ refresh, show, hide, importFolder, setView }); library.js's
+// Books/Notes toggle drives it, and its Gallery/List toggle calls setView().
+// Multi-select (click / cmd / shift) + bulk remove mirror the Books side, with
+// a dedicated #notebook-selection-bar. Reuses the global `window.api` (IPC +
+// fileUrl) and `window.showToast` when present. Backend: commands/notebook.rs —
 // notebook_list / notebook_page_svg / notebook_thumbnail / notebook_rename /
 // notebook_remove / notebook_import_folder.
 (function () {
@@ -14,8 +16,27 @@
   const nb = {
     list: [],
     loaded: false,
+    view: "gallery", // "gallery" | "list" — driven by library.js's view toggle
+    selected: new Set(), // notebook ids in the current multi-selection
+    lastClicked: null, // anchor id for shift-range selection
     viewer: null, // { id, title, pageCount, page, cache: Map<page, svgString> }
   };
+
+  // Two-click arm for the selection bar's destructive "Remove from library"
+  // (the app avoids native confirm() dialogs — see the context-menu remove).
+  let removeArmed = false;
+
+  function fmtDate(iso) {
+    if (typeof window.formatDate === "function") return window.formatDate(iso);
+    return iso || "";
+  }
+
+  // The Notes section is the active `.view` (not `hidden`) only while the user
+  // is on the Notes tab. Used to skip selection/keyboard work in Books mode.
+  function isVisible() {
+    const el = q("#notes");
+    return !!el && !el.hidden;
+  }
 
   function toast(msg, isError = false) {
     if (typeof window.showToast === "function") window.showToast(msg, isError);
@@ -32,8 +53,22 @@
       toast(`failed to load notebooks: ${e}`, true);
       nb.list = [];
     }
+    // Drop selection entries for notebooks that no longer exist (after a
+    // remove/import the list changes underneath us).
+    const live = new Set(nb.list.map((n) => n.id));
+    for (const id of [...nb.selected]) if (!live.has(id)) nb.selected.delete(id);
+    if (nb.lastClicked != null && !live.has(nb.lastClicked)) nb.lastClicked = null;
     nb.loaded = true;
     render();
+  }
+
+  // Mirror the library's Gallery/List toggle. Stores the choice; re-renders only
+  // when Notes is actually on screen so Books-side toggles don't refetch thumbs.
+  function setView(view) {
+    if (view !== "gallery" && view !== "list") return;
+    if (view === nb.view) return;
+    nb.view = view;
+    if (nb.loaded && isVisible()) render();
   }
 
   // Called when the Notes tab is shown. Loads lazily on first show, re-renders
@@ -44,19 +79,38 @@
   }
 
   // Called when leaving the Notes tab. The viewer (if open) is a fixed overlay
-  // independent of the tab, so there's nothing to tear down here.
-  function hide() {}
+  // independent of the tab. Drop the selection so its bar doesn't linger over
+  // the Books view.
+  function hide() {
+    nb.selected.clear();
+    nb.lastClicked = null;
+    const bar = q("#notebook-selection-bar");
+    if (bar) bar.hidden = true;
+    removeArmed = false;
+  }
 
   // ── Grid ───────────────────────────────────────────────────────────────────
 
   function render() {
     const grid = q("#notes-grid");
+    const list = q("#notes-list");
+    const body = q("#notes-list-body");
     const empty = q("#notes-empty");
-    if (!grid) return;
-    grid.innerHTML = "";
-    for (const n of nb.list) grid.appendChild(card(n));
-    grid.hidden = nb.list.length === 0;
-    if (empty) empty.hidden = nb.list.length > 0;
+    const isList = nb.view === "list";
+    const hasItems = nb.list.length > 0;
+
+    if (grid) {
+      grid.innerHTML = "";
+      if (!isList) for (const n of nb.list) grid.appendChild(card(n));
+      grid.hidden = isList || !hasItems;
+    }
+    if (list && body) {
+      body.innerHTML = "";
+      if (isList) for (const n of nb.list) body.appendChild(row(n));
+      list.hidden = !isList || !hasItems;
+    }
+    if (empty) empty.hidden = hasItems;
+    renderSelectionBar();
   }
 
   function card(n) {
@@ -64,6 +118,7 @@
     el.className = "book-card notebook-card";
     el.dataset.notebookId = n.id;
     el.title = n.title || "Notebook";
+    if (nb.selected.has(n.id)) el.classList.add("selected");
 
     const cover = document.createElement("div");
     cover.className = "cover notebook-cover";
@@ -81,13 +136,144 @@
     meta.append(t, a);
     el.appendChild(meta);
 
-    el.addEventListener("click", () => openViewer(n));
+    // Single click selects (mirrors Books); double click opens the viewer.
+    el.addEventListener("click", (e) => onItemClick(e, n));
     el.addEventListener("dblclick", () => openViewer(n));
     el.addEventListener("contextmenu", (e) => {
       e.preventDefault();
+      onItemContext(n);
       openMenu(e.clientX, e.clientY, n);
     });
     return el;
+  }
+
+  function row(n) {
+    const tr = document.createElement("tr");
+    tr.dataset.notebookId = n.id;
+    if (nb.selected.has(n.id)) tr.classList.add("selected");
+
+    const title = document.createElement("td");
+    title.textContent = n.title || "Notebook";
+
+    const pages = document.createElement("td");
+    pages.className = "nb-pages";
+    pages.textContent = String(n.page_count);
+
+    // On-device Date Modified (mtime of the source nbk), captured at import.
+    // Empty for notebooks imported before updated_at existed (re-import fills it).
+    const updated = document.createElement("td");
+    updated.textContent = fmtDate(n.updated_at);
+
+    tr.append(title, pages, updated);
+
+    tr.addEventListener("click", (e) => onItemClick(e, n));
+    tr.addEventListener("dblclick", () => openViewer(n));
+    tr.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      onItemContext(n);
+      openMenu(e.clientX, e.clientY, n);
+    });
+    return tr;
+  }
+
+  // ── Selection (multi-select + bulk remove) ──────────────────────────────────
+
+  function onItemClick(e, n) {
+    e.stopPropagation();
+    if (e.shiftKey && nb.lastClicked != null) {
+      selectRangeTo(n.id);
+    } else if (e.metaKey || e.ctrlKey) {
+      toggleSel(n.id);
+      nb.lastClicked = n.id;
+    } else {
+      nb.selected = new Set([n.id]);
+      nb.lastClicked = n.id;
+    }
+    applySelectionVisuals();
+  }
+
+  // Right-click keeps an existing multi-selection (so the menu can act on it);
+  // otherwise it resets the selection to just the clicked notebook.
+  function onItemContext(n) {
+    if (nb.selected.has(n.id)) return;
+    nb.selected = new Set([n.id]);
+    nb.lastClicked = n.id;
+    applySelectionVisuals();
+  }
+
+  function selectRangeTo(toId) {
+    const from = nb.list.findIndex((x) => x.id === nb.lastClicked);
+    const to = nb.list.findIndex((x) => x.id === toId);
+    if (from === -1 || to === -1) {
+      nb.selected.add(toId);
+      return;
+    }
+    const [lo, hi] = from < to ? [from, to] : [to, from];
+    for (let i = lo; i <= hi; i++) nb.selected.add(nb.list[i].id);
+  }
+
+  function toggleSel(id) {
+    if (nb.selected.has(id)) nb.selected.delete(id);
+    else nb.selected.add(id);
+  }
+
+  function clearSel() {
+    nb.selected.clear();
+    nb.lastClicked = null;
+    applySelectionVisuals();
+  }
+
+  function selectedNotebooks() {
+    return nb.list.filter((n) => nb.selected.has(n.id));
+  }
+
+  // Toggle .selected on the live cards/rows + refresh the bar WITHOUT a full
+  // render — a rebuild would re-fetch every tile thumbnail (notebook_thumbnail
+  // is an IPC call per card), so selection changes must stay DOM-cheap.
+  function applySelectionVisuals() {
+    const sel = nb.selected;
+    document.querySelectorAll("#notes-grid .notebook-card").forEach((el) => {
+      el.classList.toggle("selected", sel.has(Number(el.dataset.notebookId)));
+    });
+    document.querySelectorAll("#notes-list tbody tr").forEach((el) => {
+      el.classList.toggle("selected", sel.has(Number(el.dataset.notebookId)));
+    });
+    renderSelectionBar();
+  }
+
+  function renderSelectionBar() {
+    const bar = q("#notebook-selection-bar");
+    if (!bar) return;
+    const n = nb.selected.size;
+    removeArmed = false; // any re-render disarms the two-click remove
+    if (n === 0) {
+      bar.hidden = true;
+      return;
+    }
+    bar.hidden = false;
+    q("#notebook-selection-count").textContent = `${n} selected`;
+    const del = q("#nb-sel-delete");
+    if (del) del.textContent = "Remove from library";
+  }
+
+  async function bulkRemove() {
+    const sel = selectedNotebooks();
+    if (sel.length === 0) return;
+    let failed = 0;
+    for (const n of sel) {
+      try {
+        await api.invoke("notebook_remove", { notebookId: n.id });
+      } catch (e) {
+        failed += 1;
+        if (failed === 1) toast(`remove failed for “${n.title || "Notebook"}”: ${e}`, true);
+        console.error("notebook remove failed:", n.id, e);
+      }
+    }
+    const removed = sel.length - failed;
+    if (removed > 0) toast(`removed ${removed} notebook${removed === 1 ? "" : "s"}`);
+    nb.selected.clear();
+    nb.lastClicked = null;
+    await refresh();
   }
 
   // Tile thumbnail: prefer the device cover PNG; fall back to page 0's SVG; then
@@ -140,32 +326,53 @@
     if (!menu) return;
     menu.innerHTML = "";
 
-    const rename = document.createElement("li");
-    rename.textContent = "Rename…";
-    rename.addEventListener("click", (e) => {
-      e.stopPropagation();
-      closeMenu();
-      startRename(n);
-    });
+    const multi = nb.selected.size > 1 && nb.selected.has(n.id);
+    if (multi) {
+      // Bulk remove for the whole selection. Two-click confirm (no native
+      // dialog), same convention as the single-item remove below.
+      const remove = document.createElement("li");
+      remove.className = "danger";
+      remove.textContent = `Remove ${nb.selected.size} from library`;
+      let armed = false;
+      remove.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (!armed) {
+          armed = true;
+          remove.textContent = "Click again to remove";
+          return;
+        }
+        closeMenu();
+        bulkRemove();
+      });
+      menu.append(remove);
+    } else {
+      const rename = document.createElement("li");
+      rename.textContent = "Rename…";
+      rename.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeMenu();
+        startRename(n);
+      });
 
-    // Two-click confirm for the destructive action (no window.confirm — the app
-    // avoids native dialogs; see the inline confirm in Settings).
-    const remove = document.createElement("li");
-    remove.className = "danger";
-    remove.textContent = "Remove from library";
-    let armed = false;
-    remove.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (!armed) {
-        armed = true;
-        remove.textContent = "Click again to remove";
-        return;
-      }
-      closeMenu();
-      doRemove(n);
-    });
+      // Two-click confirm for the destructive action (no window.confirm — the
+      // app avoids native dialogs; see the inline confirm in Settings).
+      const remove = document.createElement("li");
+      remove.className = "danger";
+      remove.textContent = "Remove from library";
+      let armed = false;
+      remove.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (!armed) {
+          armed = true;
+          remove.textContent = "Click again to remove";
+          return;
+        }
+        closeMenu();
+        doRemove(n);
+      });
 
-    menu.append(rename, remove);
+      menu.append(rename, remove);
+    }
     menu.hidden = false;
     menu.style.left = `${x}px`;
     menu.style.top = `${y}px`;
@@ -378,6 +585,51 @@
       right.addEventListener("click", () => nb.viewer && showPage(nb.viewer.page + 1));
     const emptyImport = q("#notes-empty-import");
     if (emptyImport) emptyImport.addEventListener("click", importFolder);
+
+    // Selection bar.
+    const selDelete = q("#nb-sel-delete");
+    if (selDelete) {
+      selDelete.addEventListener("click", () => {
+        if (!removeArmed) {
+          removeArmed = true;
+          selDelete.textContent = `Click again to remove ${nb.selected.size}`;
+          return;
+        }
+        removeArmed = false;
+        bulkRemove();
+      });
+    }
+    const selClear = q("#nb-sel-clear");
+    if (selClear) selClear.addEventListener("click", clearSel);
+
+    // Click an empty area of the Notes view to clear the selection (mirrors the
+    // Books tap-to-clear). Cards/rows stopPropagation via their own handlers.
+    const notesSection = q("#notes");
+    if (notesSection) {
+      notesSection.addEventListener("mousedown", (e) => {
+        if (e.button !== 0) return;
+        if (e.target.closest(".notebook-card, #notes-list tbody tr")) return;
+        if (!(e.metaKey || e.ctrlKey || e.shiftKey)) clearSel();
+      });
+    }
+
+    // Esc clears selection; Cmd/Ctrl-A selects all — only while Notes is the
+    // active section and the paged viewer overlay is closed.
+    document.addEventListener("keydown", (e) => {
+      if (!isVisible() || nb.viewer) return;
+      const t = e.target;
+      const inField =
+        t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+      if (e.key === "Escape" && nb.selected.size > 0) {
+        clearSel();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "a" && !inField) {
+        e.preventDefault();
+        nb.selected = new Set(nb.list.map((n) => n.id));
+        applySelectionVisuals();
+      }
+    });
   }
 
   if (document.readyState === "loading") {
@@ -386,5 +638,5 @@
     wire();
   }
 
-  window.Notebooks = { refresh, show, hide, importFolder };
+  window.Notebooks = { refresh, show, hide, importFolder, setView };
 })();
