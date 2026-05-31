@@ -20,6 +20,10 @@ cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:ion-rs", "aozora"]
 # Aozora Bunko TXT → EPUB. Pulls the heavy SVG/text stack (resvg + its font /
 # raster deps) plus `regex`; gated off for wasm to shrink the binary.
 aozora = ["dep:resvg", "dep:regex"]
+# Kindle Scribe handwritten-notebook (.nbk) decode → SVG. Pulls `rusqlite`
+# (bundled C SQLite, native-only — declared in the non-wasm target table). Off
+# by default; sidle enables it. Never combine with `wasm`.
+nbk = ["dep:rusqlite"]
 wasm = ["wasm-bindgen", "console_error_panic_hook"]
 
 [dependencies]
@@ -104,6 +108,10 @@ lopdf = { version = "0.40", default-features = false }
 # Native: use fast zlib-rs
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+# KDF/KPF SQLite reader for the `nbk` feature (Scribe notebooks). `bundled`
+# compiles SQLite from source — native-only; same rusqlite 0.32 already used
+# across sidle/*. Optional: only pulled in when `nbk` is enabled.
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 # WASM: use pure-Rust backend
 [target.'cfg(target_arch = "wasm32")'.dependencies]
