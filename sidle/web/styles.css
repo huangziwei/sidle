@@ -135,6 +135,13 @@ button {
   flex-wrap: wrap;
 }
 
+/* applySection() hides the book-only filter pills on the Notes tab via the
+   `hidden` attribute; the author `display: flex` above would otherwise win over
+   the UA `[hidden]` rule, so restore it. */
+.filter-bar[hidden] {
+  display: none;
+}
+
 .filter-spacer {
   flex: 1;
 }
@@ -200,6 +207,11 @@ button {
 .filter-search {
   display: flex;
   align-items: center;
+}
+
+/* Same as .filter-bar: the book-field search box is hidden on the Notes tab. */
+.filter-search[hidden] {
+  display: none;
 }
 
 .filter-search input[type="search"] {
@@ -2516,15 +2528,18 @@ button {
   gap: 18px;
 }
 
-/* Notebook list view — reuses .book-table; the fixed layout splits columns by
-   these header widths (Title takes the remainder). No sort/resize/reorder. */
-.notebook-table .nb-pages {
-  width: 90px;
-  text-align: right;
+/* render() toggles the grid vs the list table via the `hidden` attribute; the
+   author `display: grid` above would otherwise win over the UA `[hidden]` rule,
+   leaving the grid visible behind the list. (The list `<table>` sets no display,
+   so its UA `[hidden]` already wins — but pin it too so it can't regress.) */
+.notes-grid[hidden],
+#notes-list[hidden] {
+  display: none;
 }
-.notebook-table .col-updated {
-  width: 160px;
-}
+
+/* The Notes list view reuses .book-table wholesale via the shared TableView —
+   sortable headers, drag-reorder, and resizable widths, no notebook-specific
+   column CSS. */
 
 /* Scribe page is 15624×20832 (≈ 3:4) — taller-but-wider than a book cover. */
 .notebook-cover {

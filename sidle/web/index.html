@@ -153,13 +153,13 @@
       </section>
 
       <section id="list" class="view" aria-label="List" hidden>
+        <!-- colgroup + header + rows are built by the shared TableView (table.js)
+             from the Books column schema (the same component the Notes list uses),
+             honoring the user's drag-to-reorder + resize + show/hide choices. -->
         <table class="book-table">
-          <!-- colgroup + thead are built by renderList() from
-               state.columnConfig so the user's drag-to-reorder + show/hide
-               choices are honored. -->
-          <colgroup id="book-cols"></colgroup>
-          <thead><tr id="list-head"></tr></thead>
-          <tbody id="list-body"></tbody>
+          <colgroup></colgroup>
+          <thead><tr></tr></thead>
+          <tbody></tbody>
         </table>
         <div id="list-empty" class="empty" hidden>
           <p>Drop an EPUB, KFX, or AZW3 anywhere to import.</p>
@@ -168,15 +168,12 @@
 
       <section id="notes" class="view" aria-label="Notes" hidden>
         <div id="notes-grid" class="notes-grid"></div>
-        <table id="notes-list" class="book-table notebook-table" hidden>
-          <thead>
-            <tr>
-              <th class="col-title">Title</th>
-              <th class="nb-pages">Pages</th>
-              <th class="col-updated">Updated</th>
-            </tr>
-          </thead>
-          <tbody id="notes-list-body"></tbody>
+        <!-- colgroup + header + rows are built by the shared TableView (table.js)
+             from notebooks.js's column schema — same as the Books list. -->
+        <table id="notes-list" class="book-table" hidden>
+          <colgroup></colgroup>
+          <thead><tr></tr></thead>
+          <tbody></tbody>
         </table>
         <div id="notes-empty" class="empty" hidden>
           <p>No notebooks yet.</p>
@@ -585,6 +582,7 @@
 
     <script src="api.js"></script>
     <script src="selection.js"></script>
+    <script src="table.js"></script>
     <script src="library.js"></script>
     <script src="notebooks.js"></script>
     <script type="module" src="reader.js"></script>

@@ -17,6 +17,7 @@
     list: [],
     loaded: false,
     view: "gallery", // "gallery" | "list" — driven by library.js's view toggle
+    sort: loadNbSort(), // { key, asc } — list-header sort, applied to grid + list
     viewer: null, // { id, title, pageCount, page, cache: Map<page, svgString> }
   };
 
@@ -41,6 +42,41 @@
     onChange: () => renderSelectionBar(),
   });
 
+  // The Notes list view uses the SAME shared TableView as Books (table.js): its
+  // columns become sortable, drag-to-reorder, and resizable, with order + widths
+  // persisted — no bespoke notebook table. Sort lives in nb.sort (applied to the
+  // grid too), so the table only renders the indicator + reports header clicks.
+  const NOTEBOOK_COLUMNS = [
+    { key: "title", label: "Title", sortable: true, render: (n) => n.title || "Notebook" },
+    { key: "pages", label: "Pages", sortable: true, render: (n) => String(n.page_count) },
+    { key: "updated", label: "Updated", sortable: true, render: (n) => fmtDate(n.updated_at) },
+  ];
+
+  const nbTable = new window.TableView({
+    table: q("#notes-list"),
+    columns: NOTEBOOK_COLUMNS,
+    idOf: (n) => n.id,
+    idAttr: "notebookId",
+    configKey: "notebooks.columnConfig",
+    widthsKey: "notebooks.columnWidths",
+    getSort: () => nb.sort,
+    onSort: (key) => {
+      if (nb.sort.key === key) nb.sort.asc = !nb.sort.asc;
+      else nb.sort = { key, asc: true };
+      persistNbSort();
+      render();
+    },
+    isSelected: (id) => sel.has(id),
+    onRowClick: (e, n) => sel.click(e, n.id),
+    onRowDblClick: (n) => openViewer(n),
+    onRowContext: (e, n) => {
+      sel.context(n.id);
+      openMenu(e.clientX, e.clientY, n);
+    },
+    onChange: () => render(),
+    ctxMenu: q("#ctx-menu"),
+  });
+
   // Two-click arm for the selection bar's destructive "Remove from library"
   // (the app avoids native confirm() dialogs — see the context-menu remove).
   let removeArmed = false;
@@ -51,6 +87,37 @@
   function fmtDate(iso) {
     if (typeof window.formatDate === "function") return window.formatDate(iso);
     return iso || "";
+  }
+
+  function loadNbSort() {
+    try {
+      const s = JSON.parse(localStorage.getItem("notebooks.sort") || "null");
+      if (s && typeof s.key === "string") return { key: s.key, asc: !!s.asc };
+    } catch {
+      // malformed — fall through to default
+    }
+    return { key: "updated", asc: false }; // most-recently-edited first
+  }
+  function persistNbSort() {
+    localStorage.setItem("notebooks.sort", JSON.stringify(nb.sort));
+  }
+
+  // nb.list in the current sort order — drives BOTH the grid and the list view.
+  function sortedList() {
+    const { key, asc } = nb.sort;
+    const dir = asc ? 1 : -1;
+    const val = (n) =>
+      key === "pages"
+        ? n.page_count
+        : key === "updated"
+          ? n.updated_at || ""
+          : (n.title || "Notebook").toLowerCase();
+    return [...nb.list].sort((a, b) => {
+      const av = val(a);
+      const bv = val(b);
+      if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
+      return String(av).localeCompare(String(bv)) * dir;
+    });
   }
 
   // The Notes section is the active `.view` (not `hidden`) only while the user
@@ -114,23 +181,31 @@
   function render() {
     const grid = q("#notes-grid");
     const list = q("#notes-list");
-    const body = q("#notes-list-body");
     const empty = q("#notes-empty");
     const isList = nb.view === "list";
     const hasItems = nb.list.length > 0;
+    const items = sortedList();
 
+    // Only the ACTIVE view is (re)built — rebuilding the grid would re-fetch every
+    // tile thumbnail, and the hidden view is rebuilt when it next becomes active.
     if (grid) {
-      grid.innerHTML = "";
-      if (!isList) for (const n of nb.list) grid.appendChild(card(n));
+      if (!isList) {
+        grid.innerHTML = "";
+        for (const n of items) grid.appendChild(card(n));
+      }
       grid.hidden = isList || !hasItems;
     }
-    if (list && body) {
-      body.innerHTML = "";
-      if (isList) for (const n of nb.list) body.appendChild(row(n));
+    if (list) {
+      if (isList) nbTable.render(items); // shared TableView: sort/reorder/resize
       list.hidden = !isList || !hasItems;
     }
     if (empty) empty.hidden = hasItems;
     renderSelectionBar();
+
+    // Seed column widths once the list is actually on screen with rows.
+    if (isList && hasItems && isVisible()) {
+      requestAnimationFrame(() => nbTable.ensureWidths());
+    }
   }
 
   function card(n) {
@@ -165,35 +240,6 @@
       openMenu(e.clientX, e.clientY, n);
     });
     return el;
-  }
-
-  function row(n) {
-    const tr = document.createElement("tr");
-    tr.dataset.notebookId = n.id;
-    if (sel.has(n.id)) tr.classList.add("selected");
-
-    const title = document.createElement("td");
-    title.textContent = n.title || "Notebook";
-
-    const pages = document.createElement("td");
-    pages.className = "nb-pages";
-    pages.textContent = String(n.page_count);
-
-    // On-device Date Modified (mtime of the source nbk), captured at import.
-    // Empty for notebooks imported before updated_at existed (re-import fills it).
-    const updated = document.createElement("td");
-    updated.textContent = fmtDate(n.updated_at);
-
-    tr.append(title, pages, updated);
-
-    tr.addEventListener("click", (e) => sel.click(e, n.id));
-    tr.addEventListener("dblclick", () => openViewer(n));
-    tr.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      sel.context(n.id);
-      openMenu(e.clientX, e.clientY, n);
-    });
-    return tr;
   }
 
   // ── Selection bar + bulk remove ─────────────────────────────────────────────
