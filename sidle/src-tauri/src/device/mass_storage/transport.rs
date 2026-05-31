@@ -32,6 +32,17 @@ impl MassStorageTransport {
     }
 }
 
+/// Filesystem mtime → naive local-wall-clock ISO `YYYY-MM-DDTHH:MM:SS`, the same
+/// shape `mtp::transport::mtp_modified_iso` produces, so `TEntry::modified` reads
+/// consistently regardless of transport.
+fn systime_naive_local(t: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(t)
+        .with_timezone(&chrono::Local)
+        .naive_local()
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string()
+}
+
 impl Transport for MassStorageTransport {
     fn read(&self, path: &TPath) -> Result<Vec<u8>> {
         let p = self.resolve(path);
@@ -120,6 +131,7 @@ impl Transport for MassStorageTransport {
                 name,
                 is_dir: meta.is_dir(),
                 size: meta.is_file().then_some(meta.len()),
+                modified: meta.modified().ok().map(systime_naive_local),
             });
         }
         Ok(out)

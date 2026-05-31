@@ -24,6 +24,7 @@ pub mod kual;
 pub mod mass_storage;
 pub mod monitor;
 pub mod mtp;
+pub mod notebooks;
 pub mod push;
 pub mod transport;
 

@@ -88,6 +88,12 @@ pub struct TEntry {
     pub name: String,
     pub is_dir: bool,
     pub size: Option<u64>,
+    /// On-device "Date Modified" as a naive wall-clock ISO string
+    /// (`YYYY-MM-DDTHH:MM:SS`), when the transport reports one. MTP carries it in
+    /// the `GetObjectInfo` the listing already fetched; mass-storage reads the
+    /// filesystem mtime. `None` when unavailable. Used as a notebook's
+    /// `updated_at` (the Kindle advances it only on a real edit).
+    pub modified: Option<String>,
 }
 
 /// On-device IO surface. Each method is logically atomic from the caller's

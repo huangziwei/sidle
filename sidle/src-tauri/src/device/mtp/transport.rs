@@ -271,6 +271,9 @@ impl Transport for MtpTransport {
                     name: o.filename.clone(),
                     is_dir: o.is_folder(),
                     size: o.is_file().then_some(o.size),
+                    // `list_objects` already did a GetObjectInfo per child, so the
+                    // DateModified is in hand — no extra round-trip.
+                    modified: o.modified.as_ref().map(mtp_modified_iso),
                 })
                 .collect())
         })
@@ -292,6 +295,17 @@ impl Transport for MtpTransport {
 
 /// Map mtp-rs errors to anyhow with actionable text for the common
 /// "another app owns the device" case.
+/// MTP `DateModified` (`YYYYMMDDThhmmss`, the device's wall clock) → a naive ISO
+/// string `YYYY-MM-DDTHH:MM:SS`. Deliberately no timezone: the value renders as
+/// the Kindle's own clock (matching Finder / Image Capture), which is what the
+/// user expects for "last edited on the device".
+fn mtp_modified_iso(dt: &mtp_rs::ptp::DateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
+    )
+}
+
 fn map_mtp_err(err: mtp_rs::Error) -> anyhow::Error {
     if err.is_exclusive_access() {
         anyhow!(

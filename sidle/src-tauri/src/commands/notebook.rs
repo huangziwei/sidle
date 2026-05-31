@@ -8,10 +8,11 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 
+use crate::device::monitor::{ensure_transport, evict_transport};
 use crate::library::LibraryPaths;
 use crate::library::db::{self, NotebookRow};
 use crate::library::notebook;
@@ -164,7 +165,8 @@ fn import_dir(conn: &rusqlite::Connection, paths: &LibraryPaths, folder: &Path) 
         }
         let nbk = dir.join("nbk");
         let cover = find_cover(&dir, &uuid);
-        match notebook::import_notebook(conn, paths, &uuid, &nbk, cover.as_deref()) {
+        let updated_at = folder_updated_at(&nbk);
+        match notebook::import_notebook(conn, paths, &uuid, &nbk, cover.as_deref(), &updated_at) {
             Ok(notebook::NotebookOutcome::Imported(_)) => summary.imported += 1,
             Ok(notebook::NotebookOutcome::Unchanged(_)) => summary.unchanged += 1,
             Err(e) => summary.failed.push(format!("{uuid}: {e:#}")),
@@ -186,4 +188,87 @@ fn find_cover(dir: &Path, uuid: &str) -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|p| p.is_file())
+}
+
+/// The `nbk` file's mtime as a naive local-wall-clock ISO string — the notebook's
+/// `updated_at` for a folder import. Same shape as the device pull's
+/// `TEntry::modified`, so both render identically. Falls back to the import time
+/// when the mtime can't be read.
+fn folder_updated_at(nbk: &Path) -> String {
+    std::fs::metadata(nbk)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(|t| {
+            chrono::DateTime::<chrono::Utc>::from(t)
+                .with_timezone(&chrono::Local)
+                .naive_local()
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(db::now_iso)
+}
+
+/// Progress for a notebook device-import: emitted as `notebook:import-progress`
+/// after each candidate so the frontend can show "Importing N/M…". The pull +
+/// decode of each notebook over USB is slow, so this is the difference between
+/// the button looking dead and looking busy.
+#[derive(Clone, Serialize)]
+struct NotebookImportProgress {
+    done: usize,
+    total: usize,
+}
+
+/// Import notebooks straight off the connected Kindle — the toolbar's Import
+/// button. Pulls `.notebooks/<uuid>/nbk` over the device transport (MTP for the
+/// Scribe), capturing each notebook's on-device Date Modified as `updated_at`,
+/// and emits `notebook:import-progress` as it goes. Errors with "no Kindle
+/// connected" when nothing is plugged in; a device that doesn't expose
+/// `.notebooks/` over MTP simply yields 0 imported.
+#[tauri::command]
+pub async fn notebook_import_device(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<NotebookImportSummary, String> {
+    let device = state
+        .device
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "no Kindle connected".to_string())?;
+    let transport = ensure_transport(&state.transport, &device)
+        .await
+        .map_err(|e| e.to_string())?;
+    let db = state.db.clone();
+    let paths = state.paths.clone();
+    let cell = state.transport.clone();
+    let serial = device.serial.clone();
+    eprintln!("[sidle/nbk-import] {serial}: scanning .notebooks/ on device…");
+    let emitter = app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let on_progress = |done: usize, total: usize| {
+            let _ = emitter.emit("notebook:import-progress", NotebookImportProgress { done, total });
+        };
+        crate::device::notebooks::import_device_notebooks(
+            transport.as_ref(),
+            &paths,
+            &db,
+            &on_progress,
+        )
+    })
+    .await;
+
+    // On a wire error the cached transport may be talking to a wedged endpoint —
+    // drop it so the next attempt reopens fresh (mirrors the annotation sync).
+    if matches!(result, Err(_) | Ok(Err(_))) {
+        evict_transport(&cell).await;
+    }
+
+    let summary = result.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    eprintln!(
+        "[sidle/nbk-import] {serial}: {} imported, {} unchanged, {} failed",
+        summary.imported,
+        summary.unchanged,
+        summary.failed.len()
+    );
+    Ok(summary)
 }

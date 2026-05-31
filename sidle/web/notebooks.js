@@ -1,7 +1,7 @@
 // Notes section: Scribe handwritten-notebook grid/list + paged SVG viewer.
 //
 // Classic script loaded AFTER library.js. Self-contained IIFE that exposes
-// `window.Notebooks` ({ refresh, show, hide, importFolder, setView }); library.js's
+// `window.Notebooks` ({ refresh, show, hide, importDevice, setView, … }); library.js's
 // Books/Notes toggle drives it, and its Gallery/List toggle calls setView().
 // Multi-select (click / cmd / shift) + bulk remove mirror the Books side, with
 // a dedicated #notebook-selection-bar. Reuses the global `window.api` (IPC +
@@ -44,6 +44,9 @@
   // Two-click arm for the selection bar's destructive "Remove from library"
   // (the app avoids native confirm() dialogs — see the context-menu remove).
   let removeArmed = false;
+
+  // True while a device import is in flight — gates re-entry and progress paints.
+  let importing = false;
 
   function fmtDate(iso) {
     if (typeof window.formatDate === "function") return window.formatDate(iso);
@@ -415,8 +418,47 @@
     }
   }
 
-  // ── Manual folder import ────────────────────────────────────────────────────
+  // ── Import ──────────────────────────────────────────────────────────────────
 
+  // Default path (the toolbar + empty-state buttons): pull notebooks straight
+  // off the connected Kindle over MTP. Each notebook's on-device Date Modified
+  // becomes its `updated_at`. The pull + decode is slow over USB, so the button
+  // shows live "Importing N/M…" progress (see the listener in wire()).
+  async function importDevice() {
+    if (importing) return; // already running — ignore a double click
+    importing = true;
+    setImportBusy("Importing…");
+    toast("Importing notebooks from Kindle…");
+    let summary;
+    try {
+      summary = await api.invoke("notebook_import_device");
+    } catch (e) {
+      toast(`${e}`, true); // e.g. "no Kindle connected"
+      return;
+    } finally {
+      importing = false;
+      setImportBusy(null);
+    }
+    reportImport(summary, "no notebooks on the Kindle");
+    await refresh();
+  }
+
+  // Reflect import state on the Import buttons: a non-null label busies + disables
+  // the toolbar button (where the user clicked) and disables the empty-state
+  // button; `null` restores the idle "Import".
+  function setImportBusy(label) {
+    const btn = q("#btn-notes-import");
+    const empty = q("#notes-empty-import");
+    const busy = label !== null;
+    if (btn) {
+      btn.disabled = busy;
+      btn.textContent = busy ? label : "Import";
+    }
+    if (empty) empty.disabled = busy;
+  }
+
+  // Fallback path (not wired to a button): import from a picked `.notebooks/`
+  // folder. Kept for importing a backup when no device is attached.
   async function importFolder() {
     let summary;
     try {
@@ -426,14 +468,19 @@
       return;
     }
     if (!summary) return; // picker cancelled
+    reportImport(summary, "no notebooks found in that folder");
+    await refresh();
+  }
+
+  function reportImport(summary, emptyMsg) {
+    if (!summary) return;
     const failed = (summary.failed && summary.failed.length) || 0;
     const parts = [];
     if (summary.imported) parts.push(`${summary.imported} imported`);
     if (summary.unchanged) parts.push(`${summary.unchanged} unchanged`);
     if (failed) parts.push(`${failed} failed`);
-    toast(parts.join(" · ") || "no notebooks found in that folder", failed > 0);
+    toast(parts.join(" · ") || emptyMsg, failed > 0);
     if (failed) console.error("notebook import failures:", summary.failed);
-    await refresh();
   }
 
   // ── Paged SVG viewer ────────────────────────────────────────────────────────
@@ -545,7 +592,16 @@
     if (right)
       right.addEventListener("click", () => nb.viewer && showPage(nb.viewer.page + 1));
     const emptyImport = q("#notes-empty-import");
-    if (emptyImport) emptyImport.addEventListener("click", importFolder);
+    if (emptyImport) emptyImport.addEventListener("click", importDevice);
+
+    // Live device-import progress → the Import button shows "Importing N/M…".
+    if (typeof api.listen === "function") {
+      api.listen("notebook:import-progress", (e) => {
+        if (!importing) return;
+        const p = e && e.payload;
+        if (p && p.total) setImportBusy(`Importing ${p.done}/${p.total}…`);
+      });
+    }
 
     // Selection bar. The selection mechanics (click / lasso / Esc / Cmd-A /
     // empty-click) come from the shared controller, driven by library.js's #main
@@ -579,6 +635,7 @@
     refresh,
     show,
     hide,
+    importDevice,
     importFolder,
     setView,
     selection: () => sel,

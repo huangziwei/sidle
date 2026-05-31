@@ -109,6 +109,7 @@ pub fn run() {
             commands::notebook::notebook_rename,
             commands::notebook::notebook_remove,
             commands::notebook::notebook_import_folder,
+            commands::notebook::notebook_import_device,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

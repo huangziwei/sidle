@@ -258,7 +258,7 @@ function wireToolbar() {
   $("#section-books").addEventListener("click", () => setSection("books"));
   $("#section-notes").addEventListener("click", () => setSection("notes"));
   $("#btn-notes-import").addEventListener("click", () => {
-    if (window.Notebooks) window.Notebooks.importFolder();
+    if (window.Notebooks) window.Notebooks.importDevice();
   });
 
   $("#btn-settings").addEventListener("click", openSettings);
