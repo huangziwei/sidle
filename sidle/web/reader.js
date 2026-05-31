@@ -553,14 +553,24 @@ function buildEidIndex(d) {
 }
 
 async function jumpTo(ann) {
-  if (ann.eid_start == null || !paginator) return;
+  if (ann.eid_start == null) return;
+  hideNotePopover();
+  if (readerMode === "pdf") {
+    const page = pdf?.eidToPage.get(ann.eid_start);
+    if (page == null) {
+      toast("Couldn't locate that annotation in the book");
+      return;
+    }
+    pdfGoTo(page);
+    return;
+  }
+  if (!paginator) return;
   if (!eidToSection) eidToSection = buildEidIndex(dto);
   const index = eidToSection.get(ann.eid_start);
   if (index == null) {
     toast("Couldn't locate that annotation in the book");
     return;
   }
-  hideNotePopover();
   await paginator.goTo({ index, anchor: (d) => rangeFor(d, ann) || 0 });
 }
 
@@ -570,7 +580,14 @@ async function jumpTo(ann) {
 // on the `[data-eid]` element (same path as the annotation jump). Returns false
 // (a no-op) when the eid isn't in the book, e.g. after a re-convert.
 async function goToEid(eid) {
-  if (eid == null || !paginator) return false;
+  if (eid == null) return false;
+  if (readerMode === "pdf") {
+    const page = pdf?.eidToPage.get(eid);
+    if (page == null) return false;
+    pdfGoTo(page);
+    return true;
+  }
+  if (!paginator) return false;
   if (!eidToSection) eidToSection = buildEidIndex(dto);
   const index = eidToSection.get(eid);
   if (index == null) return false;
@@ -723,6 +740,14 @@ async function reloadAnnotations(forBookId) {
     return;
   }
   annotations = next;
+  if (readerMode === "pdf") {
+    // PDF repaints the whole overlay from `annotations` (incl. page-level
+    // bookmark markers), so a removed annotation drops with the fresh overlayer.
+    repaintPdfOverlay();
+    renderAnnotationsPanel();
+    updateBookmarkButton();
+    return;
+  }
   // Clear overlays for annotations the sync removed (overlayer.add only adds /
   // replaces by key, so a vanished annotation would otherwise linger painted).
   const live = new Set(annotations.map((a) => a.id));
@@ -811,6 +836,19 @@ function searchRow(m, i) {
 }
 
 async function jumpToSearchMatch(m, i) {
+  if (readerMode === "pdf") {
+    selectedSearchIndex = i;
+    renderSearchPanel();
+    $(".search-row-selected")?.scrollIntoView({ block: "nearest" });
+    const page = pdf?.eidToPage.get(m.eid);
+    if (page == null) {
+      toast("Couldn't locate that match in the book");
+      return;
+    }
+    pdfGoTo(page); // re-render → repaintPdfOverlay paints the match in the selected color
+    repaintPdfOverlay(); // also repaint in place when the match is already on-page
+    return;
+  }
   if (!paginator) return;
   if (!eidToSection) eidToSection = buildEidIndex(dto);
   const index = eidToSection.get(m.eid);
@@ -1578,15 +1616,20 @@ function onKey(e) {
 
 // ---- PDF (fixed-layout) mode ----------------------------------------------
 //
-// A PDF-backed book renders server-side via PDFKit (`reader_pdf_page`): one page
-// image at a time, fit to the stage height. We reuse the topbar / TOC / status
-// chrome; reflowable-only affordances (bookmark, search, style, annotations)
-// are hidden since they have no meaning on a fixed page image. Reading position
-// is the page index, persisted through the same `reading_position` model.
+// A PDF-backed book renders server-side via PDFKit (`reader_pdf_page`) as a page
+// image, with the KFX text layer laid over it as transparent, selectable
+// `data-eid` spans — so select / highlight / bookmark / search work exactly as
+// the reflowable reader (the page image is the backdrop, the spans host the same
+// eid-anchored overlay machinery). An image-only / scanned page has no spans:
+// it shows the image with page-level bookmarking only. We reuse the topbar / TOC
+// / status chrome; reading position rides the same `reading_position` model,
+// anchored to a page's representative eid so it maps back to a page.
 
-// Topbar buttons with no meaning on a fixed page image — hidden in PDF mode.
-// (`#reader-style` stays: it carries the spread + night-mode controls.)
-const PDF_ONLY_HIDDEN = ["#reader-bookmark", "#reader-search", "#reader-annotations"];
+// Search has nothing to find on an image-only book, so it's hidden there;
+// bookmark + annotations apply to both. (`#reader-style` carries the spread +
+// night-mode controls.) Computed per book in `openPdf` from whether any page
+// carries a text layer.
+const PDF_NO_TEXT_HIDDEN = ["#reader-search"];
 
 let pdfTocRows = []; // [{ li, page }] in TOC order, for active-marking
 
@@ -1631,56 +1674,105 @@ function pdfStep() {
   return pdfSpreadMode() === "double" ? 2 : 1;
 }
 
-async function openPdf(id, openDto, positions) {
+async function openPdf(id, openDto, anns, positions) {
   readerMode = "pdf";
   bookId = id;
   dto = openDto;
+  annotations = anns || [];
+  sidleResume = (positions || []).find((p) => p.source === "sidle") || null;
+  deviceResumes = (positions || []).filter((p) => p.source === "device");
+  const pages = openDto.pages || [];
+  const eidToPage = buildPdfEidIndex(pages);
+  const hasText = pages.some((p) => p.words?.length);
+  // Auto-restore Sidle's own last spot: its eid → page when it resolves (the new
+  // anchor model), else the legacy page index stored in linear_pos.
+  const resumeEid = sidleResume?.eid;
   const start = clampPage(
-    positions.find((p) => p.source === "sidle")?.linear_pos ?? 0,
+    (resumeEid != null ? eidToPage.get(resumeEid) : undefined) ?? sidleResume?.linear_pos ?? 0,
     openDto.page_count,
   );
-  // One spread = up to two page images (left/right) in a flex host. Persistent
-  // <img> elements (src swapped per turn) avoid the decode flash a rebuild gives.
+
+  // One spread = up to two pages (left/right) in a flex host. Each page is a
+  // positioned wrapper: the rendered <img> backdrop + a text layer of selectable
+  // spans over it. Persistent elements (content swapped per turn) avoid a decode
+  // flash. A single viewport-fixed overlay paints highlights/bookmarks/search,
+  // so its SVG coordinates match the spans' `getClientRects()` directly.
   const host = document.createElement("div");
   host.className = "reader-pdf-spread";
-  const imgL = document.createElement("img");
-  const imgR = document.createElement("img");
-  for (const im of [imgL, imgR]) {
-    im.className = "reader-pdf-page";
-    im.alt = "";
-    im.draggable = false;
-  }
-  host.append(imgL, imgR);
+  const mkPage = () => {
+    const wrap = document.createElement("div");
+    wrap.className = "reader-pdf-page";
+    const img = document.createElement("img");
+    img.className = "reader-pdf-img";
+    img.alt = "";
+    img.draggable = false;
+    const text = document.createElement("div");
+    text.className = "reader-pdf-text";
+    wrap.append(img, text);
+    return { wrap, img, text };
+  };
+  const L = mkPage();
+  const R = mkPage();
+  host.append(L.wrap, R.wrap);
+
   pdf = {
     pageCount: openDto.page_count,
-    pages: openDto.pages || [],
+    pages,
     labels: openDto.page_labels || [],
     toc: openDto.toc || [],
     page: start,
     host,
-    imgL,
-    imgR,
+    pageL: L.wrap,
+    pageR: R.wrap,
+    imgL: L.img,
+    imgR: R.img,
+    textL: L.text,
+    textR: R.text,
+    overlayer: null,
+    eidToPage,
+    hasText,
     token: 0,
     renderTimer: null, // debounce handle for pdfScheduleRender
     cache: new Map(), // `${page}@${width}` → data URL (bounded; LRU-ish by insertion)
     inflight: new Map(), // key → Promise<url|null>, so a turn can await a prefetch
   };
 
+  // PDF books have no reflowable Location map; native annotations carry a null
+  // Loc (the device computes its own). eidToSection is reflowable-only.
+  locByEid = null;
+  eidToSection = null;
+
   $("#reader-title").textContent = openDto.title || "Untitled";
   $("#reader-loc").textContent = "";
   $("#reader-percent").textContent = "";
-  for (const sel of PDF_ONLY_HIDDEN) {
+  // Search applies only when there's a text layer; bookmark + annotations apply
+  // to both. Reset everything visible first (a prior book may have hidden them).
+  for (const sel of ["#reader-bookmark", "#reader-search", "#reader-annotations"]) {
     const el = $(sel);
-    if (el) el.hidden = true;
+    if (el) el.hidden = false;
+  }
+  if (!hasText) {
+    for (const sel of PDF_NO_TEXT_HIDDEN) {
+      const el = $(sel);
+      if (el) el.hidden = true;
+    }
   }
   view().hidden = false;
   view().classList.add("open");
   revealTopbar();
   renderPdfTocPanel();
+  renderAnnotationsPanel();
+  renderResumeControl();
   syncPdfStylePanel();
   applyPdfStyle(); // night-mode class before the first paint
 
   $("#reader-paginator-host").replaceChildren(host);
+  clearPdfOverlay(); // create + mount the viewport overlay
+  // Selection / click on the spread reuse the reflowable handlers against the
+  // main document (the spans live there, not in an iframe).
+  host.addEventListener("mouseup", () => onSelection(document));
+  host.addEventListener("click", (e) => onDocClick(e, document));
+  host.addEventListener("contextmenu", (e) => e.preventDefault());
   // (Resize handling — re-render the spread at the new size — is folded into the
   // shared rAF-debounced window resize listener wired in init.)
 
@@ -1692,14 +1784,57 @@ async function openPdf(id, openDto, positions) {
   document.addEventListener("keydown", keyHandler, true);
 }
 
+// eid → page index for a PDF book: every word's eid and every page's structural
+// eids (image/container/page_template) map to that page. First page wins, so an
+// eid shared structurally resolves to its earliest page. Backs annotation /
+// search / resume → page navigation, including image-only pages (whose bookmark
+// anchors to a page eid that has no word).
+function buildPdfEidIndex(pages) {
+  const map = new Map();
+  pages.forEach((p, i) => {
+    for (const w of p.words || []) if (!map.has(w.eid)) map.set(w.eid, i);
+    for (const e of p.eids || []) if (!map.has(e)) map.set(e, i);
+  });
+  return map;
+}
+
+// (Re)create the single viewport-fixed overlay that paints PDF highlights /
+// bookmarks / search. A fresh Overlayer per call drops ranges that point at the
+// previous spread's now-detached spans (cheaper + safer than tracking keys).
+function clearPdfOverlay() {
+  if (!pdf) return;
+  pdf.overlayer?.element.remove();
+  const ov = new Overlayer();
+  // The Overlayer sets `position:absolute; width:100%` inline; override to a
+  // viewport-fixed box so its SVG user-coords match the spans' viewport
+  // `getClientRects()` directly. Inline (beats any class). Below topbar/panels
+  // (z 1100), above the page image; pointer-transparent so selection reaches
+  // the spans.
+  Object.assign(ov.element.style, {
+    position: "fixed",
+    inset: "0",
+    top: "0",
+    left: "0",
+    width: "100vw",
+    height: "100vh",
+    pointerEvents: "none",
+    zIndex: "6",
+  });
+  ($("#reader-stage") || document.body).appendChild(ov.element);
+  pdf.overlayer = ov;
+  overlays = [{ doc: document, overlayer: ov }];
+}
+
 async function closePdf() {
-  // Save the page index as Sidle's own last position (best-effort).
+  // Save Sidle's own last position (best-effort): the current page's
+  // representative eid (so it maps back to a page on reopen, like the device's
+  // last-read), plus the page index in linear_pos as a legacy fallback.
   if (bookId != null && pdf) {
     try {
       await window.api.invoke("reading_position_set", {
         bookId,
-        eid: null,
-        offset: null,
+        eid: pdfRepresentativeEid(pdf.page),
+        offset: 0,
         linearPos: pdf.page,
       });
     } catch {
@@ -1711,12 +1846,22 @@ async function closePdf() {
     keyHandler = null;
   }
   if (pdf?.renderTimer) clearTimeout(pdf.renderTimer);
+  pdf?.overlayer?.element.remove();
   $("#reader-paginator-host")?.replaceChildren();
-  for (const sel of PDF_ONLY_HIDDEN) {
+  // Restore any buttons hidden for an image-only book (next book may need them).
+  for (const sel of ["#reader-bookmark", "#reader-search", "#reader-annotations"]) {
     const el = $(sel);
-    if (el) el.hidden = false; // restore for the next (possibly reflowable) book
+    if (el) el.hidden = false;
   }
+  hideAnnotationsPanel();
+  hideSearchPanel();
   if ($("#reader-pdf-style-panel")) $("#reader-pdf-style-panel").hidden = true;
+  overlays = [];
+  annotations = [];
+  sidleResume = null;
+  deviceResumes = [];
+  searchResults = [];
+  searchQuery = "";
   pdf = null;
   pdfTocRows = [];
   dto = null;
@@ -1813,9 +1958,115 @@ function pdfFetchPage(page, width) {
   return p;
 }
 
+// The displayed size (CSS px) of a page in the current spread: fit to the stage
+// height, capped to its width share (half the stage in a double spread). Matches
+// the contained-image box exactly, so the wrapper holds the image *and* the text
+// layer with no letterboxing — spans positioned by page-fraction then align.
+function pdfDisplaySize(page, half) {
+  const stage = $("#reader-stage");
+  const sw = (stage?.clientWidth || 1200) - 16; // paginator-host padding (8×2)
+  const sh = (stage?.clientHeight || 800) - 16;
+  const p = pdf.pages[page] || { width: 612, height: 792 };
+  const aspect = (p.width || 612) / Math.max(1, p.height || 792);
+  let h = Math.max(1, sh);
+  let w = h * aspect;
+  const budget = half ? (sw - 12) / 2 : sw; // .double gap is 12px
+  if (w > budget) {
+    w = budget;
+    h = w / aspect;
+  }
+  return { w: Math.floor(w), h: Math.floor(h) };
+}
+
+function sizePdfPage(wrap, page, half) {
+  const { w, h } = pdfDisplaySize(page, half);
+  wrap.style.width = `${w}px`;
+  wrap.style.height = `${h}px`;
+}
+
+// Lay a page's KFX text layer over its image as transparent, selectable spans:
+// each run absolutely positioned by its page-fraction box, the text scaled
+// horizontally (scaleX) to fill the run width so selection + highlight rects
+// track the underlying glyphs. Empty for an image-only page.
+function renderPdfTextLayer(textEl, page) {
+  textEl.replaceChildren();
+  const words = pdf.pages[page]?.words;
+  if (!words?.length) return;
+  const box = textEl.getBoundingClientRect();
+  const frag = document.createDocumentFragment();
+  const spans = [];
+  for (const w of words) {
+    const s = document.createElement("span");
+    s.className = "reader-pdf-word";
+    s.setAttribute("data-eid", w.eid);
+    s.textContent = w.text;
+    s.style.left = `${w.left * 100}%`;
+    s.style.top = `${w.top * 100}%`;
+    s.style.height = `${w.height * 100}%`;
+    s.style.fontSize = `${Math.max(1, w.height * box.height)}px`;
+    frag.appendChild(s);
+    spans.push([s, w]);
+  }
+  textEl.appendChild(frag);
+  // Batch the reads (one reflow) then the writes, so fitting N runs doesn't
+  // thrash layout.
+  const natW = spans.map(([s]) => s.getBoundingClientRect().width);
+  spans.forEach(([s, w], i) => {
+    const target = w.width * box.width;
+    if (natW[i] > 0 && target > 0) s.style.transform = `scaleX(${target / natW[i]})`;
+  });
+}
+
+// The page's representative eid: its first text run, else its first structural
+// eid (image-only). Anchors the live position (bookmark) + saved last-read so
+// they map back to a page.
+function pdfRepresentativeEid(page) {
+  const p = pdf?.pages[page];
+  if (!p) return null;
+  if (p.words?.length) return p.words[0].eid;
+  if (p.eids?.length) return p.eids[0];
+  return null;
+}
+
+// The visible wrapper holding `page`, or null if `page` isn't in the spread.
+function pdfVisibleWrapper(page) {
+  if (page == null || !pdf) return null;
+  if (page === pdf.page) return pdf.pageL;
+  if (pdf.pageR.style.display !== "none" && page === pdf.page + 1) return pdf.pageR;
+  return null;
+}
+
+// Repaint the overlay for the visible spread: a fresh overlayer (dropping the
+// previous spread's stale ranges), then highlights/notes + bookmarks + any
+// active search, all resolved against the live spans.
+function repaintPdfOverlay() {
+  if (!pdf) return;
+  clearPdfOverlay();
+  const ov = pdf.overlayer;
+  paintAnnotations(document, ov); // highlights/notes + text-anchored bookmarks
+  paintPdfPageBookmarks(ov); // corner marker for page-level (image-only) bookmarks
+  if (searchResults.length) paintSearchMatches(document, ov);
+}
+
+// A bookmark whose anchor eid has no span (an image-only page, or a structural
+// page eid) gets a small corner marker on its visible page — paintAnnotations
+// can't, since it resolves bookmarks through a text range.
+function paintPdfPageBookmarks(ov) {
+  for (const ann of annotations) {
+    if (ann.kind !== "bookmark" || ann.eid_start == null) continue;
+    if (document.querySelector(`[data-eid="${ann.eid_start}"]`)) continue; // painted as a text marker
+    const wrap = pdfVisibleWrapper(pdf.eidToPage.get(ann.eid_start));
+    if (!wrap) continue;
+    const r = wrap.getBoundingClientRect();
+    const rect = { left: r.right - 22, top: r.top + 6, right: r.right - 6, bottom: r.top + 22, width: 16, height: 16 };
+    ov.add(`ann-${ann.id}`, { getClientRects: () => [rect] }, drawBookmarkMarker, { color: BOOKMARK_COLOR });
+  }
+}
+
 // Render the current spread (1 or 2 pages by the spread mode), then warm the
-// next + previous spread so a turn is immediate. Both pages of a spread are
-// fetched concurrently and their <img> srcs swapped **together** — so a
+// next + previous spread so a turn is immediate. The page wrapper(s) + text
+// layer(s) are placed synchronously (so selection + the overlay are live before
+// the image arrives); both <img> srcs swap **together** when fetched — so a
 // two-page turn updates as one frame, never left-then-right.
 async function pdfRenderCurrent() {
   if (!pdf) return;
@@ -1824,7 +2075,21 @@ async function pdfRenderCurrent() {
   const left = pdf.page;
   const hasRight = half && left + 1 < pdf.pageCount;
   pdf.host.classList.toggle("double", half);
-  pdf.imgR.style.display = hasRight ? "" : "none";
+  pdf.pageR.style.display = hasRight ? "" : "none";
+
+  // Wrappers + text layers first — independent of the image fetch.
+  sizePdfPage(pdf.pageL, left, half);
+  renderPdfTextLayer(pdf.textL, left);
+  if (hasRight) {
+    sizePdfPage(pdf.pageR, left + 1, half);
+    renderPdfTextLayer(pdf.textR, left + 1);
+  } else {
+    pdf.textR.replaceChildren();
+  }
+  // The current page's eid is the live position (drives the bookmark toggle).
+  livePosition = { eid: pdfRepresentativeEid(left), offset: 0, linear_pos: null };
+  updateBookmarkButton();
+  repaintPdfOverlay();
 
   const [urlL, urlR] = await Promise.all([
     pdfFetchPage(left, pdfRenderWidth(left, half)),
@@ -1834,6 +2099,7 @@ async function pdfRenderCurrent() {
   if (urlL) pdf.imgL.src = urlL;
   else toast(`Couldn't render page ${left + 1}`, true);
   if (hasRight && urlR) pdf.imgR.src = urlR;
+  pdf.overlayer?.redraw(); // wrapper size is final now — settle any sub-pixel drift
 
   // Prefetch the next and previous spread (best-effort, off the critical path).
   const step = half ? 2 : 1;
@@ -1874,13 +2140,28 @@ function pdfOnKey(e) {
     return;
   }
   if (e.key === "Escape") {
-    // Peel back panels first, then close the reader.
-    if (!$("#reader-pdf-style-panel")?.hidden) togglePdfStylePanel();
+    // Peel back overlays/panels first, then close the reader.
+    if (!$("#reader-selection-toolbar")?.hidden) hideSelectionToolbar();
+    else if (!$("#reader-note-popover")?.hidden) hideNotePopover();
+    else if (!$("#reader-pdf-style-panel")?.hidden) togglePdfStylePanel();
+    else if (!$("#reader-search-panel")?.hidden) hideSearchPanel();
+    else if (!$("#reader-annotations-panel")?.hidden) hideAnnotationsPanel();
     else if (!$("#reader-toc-panel")?.hidden) hideTocPanel();
     else close();
     e.preventDefault();
     return;
   }
+  // ⌘F / Ctrl+F → open search (text books only), before the modifier filter —
+  // mirrors the reflowable reader, replacing the browser's find-in-page.
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === "f" || e.key === "F")) {
+    if (pdf?.hasText) toggleSearchPanel();
+    e.preventDefault();
+    return;
+  }
+  // A focused search input / note editor owns its keys (arrows/space/typing) —
+  // don't steal them to turn pages. (Escape above already closes them.)
+  if (e.target?.closest?.("#reader-search-panel")) return;
+  if (e.target?.closest?.("#reader-note-popover")) return;
   // `Shift+G` → last page (before the modifier filter, as the reflowable does).
   if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === "G") {
     pdfGoTo(pdf.pageCount - 1);
@@ -1920,6 +2201,13 @@ function pdfOnKey(e) {
       break;
     case "s":
       togglePdfStylePanel();
+      break;
+    case "b":
+      toggleBookmark();
+      break;
+    case "/":
+      if (pdf?.hasText) toggleSearchPanel();
+      else handled = false;
       break;
     case "n":
       pdfJumpBookmark(1);
@@ -2036,7 +2324,7 @@ async function open(id) {
   // PDF-backed (fixed-layout) books take the page-image path, reusing the same
   // topbar / TOC / status chrome. The reflowable setup below is skipped.
   if (openDto.mode === "pdf") {
-    await openPdf(id, openDto, positions || []);
+    await openPdf(id, openDto, anns || [], positions || []);
     return;
   }
   readerMode = "reflowable";

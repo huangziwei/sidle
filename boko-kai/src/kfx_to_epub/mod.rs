@@ -10,6 +10,7 @@ pub mod jxr;
 pub mod loader;
 pub mod navigation;
 pub mod output;
+pub mod pdf_text;
 pub mod properties;
 pub mod reader;
 pub mod resources;
@@ -19,6 +20,7 @@ use std::io;
 
 pub use loader::BookData;
 pub use output::EpubOutput;
+pub use pdf_text::{PdfPageText, PdfWord, pdf_text_layer, pdf_text_layer_from_book};
 pub use reader::{ReaderBook, ReaderResource, ReaderSection, kfx_to_reader_book};
 pub use text_index::{SearchMatch, TextIndex};
 

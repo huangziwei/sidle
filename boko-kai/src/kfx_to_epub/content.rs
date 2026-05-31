@@ -1185,7 +1185,7 @@ fn reading_order_ppd(book: &BookData) -> Option<String> {
     None
 }
 
-fn extract_reading_orders(book: &BookData) -> Vec<Vec<String>> {
+pub(super) fn extract_reading_orders(book: &BookData) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = Vec::new();
     // Try $538 document_data.reading_orders first, then $258 metadata.reading_orders.
     for type_id in [KfxSymbol::DocumentData as u64, KfxSymbol::Metadata as u64] {
@@ -1230,7 +1230,7 @@ fn extract_reading_orders(book: &BookData) -> Vec<Vec<String>> {
 }
 
 /// Look up a fragment of the given KFX type by name.
-fn lookup_fragment(book: &BookData, ftype: KfxSymbol, fid: &str) -> Option<IonValue> {
+pub(super) fn lookup_fragment(book: &BookData, ftype: KfxSymbol, fid: &str) -> Option<IonValue> {
     book.by_type
         .get(&(ftype as u64))
         .and_then(|m| m.get(fid))
@@ -1244,7 +1244,7 @@ fn lookup_fragment(book: &BookData, ftype: KfxSymbol, fid: &str) -> Option<IonVa
 /// field, look it up in `book.by_type[storyline]` and recurse into its
 /// `content_list`. The walk is depth-first and idempotent against cycles
 /// (tracks visited story names).
-fn collect_element_ids(template: &IonValue, book: &BookData, out: &mut Vec<i64>) {
+pub(super) fn collect_element_ids(template: &IonValue, book: &BookData, out: &mut Vec<i64>) {
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
     walk_ids_recursive(template, book, &mut visited, out);
 }

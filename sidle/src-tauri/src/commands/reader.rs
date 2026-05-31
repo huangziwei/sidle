@@ -67,11 +67,30 @@ pub struct ReaderPdfDto {
     pub page_labels: Vec<String>,
 }
 
-/// One PDF page's display size in points.
+/// One PDF page's display size in points plus its selectable text layer: the
+/// per-run words to overlay as transparent `data-eid` spans, and every eid
+/// anchored on the page (so the reader maps an annotation / last-read eid to
+/// its page — including image-only pages, where a bookmark anchors to a page
+/// eid that has no word).
 #[derive(Debug, Serialize)]
 pub struct ReaderPdfPageDto {
     pub width: f32,
     pub height: f32,
+    pub words: Vec<ReaderPdfWordDto>,
+    pub eids: Vec<i64>,
+}
+
+/// One text run positioned over the page image. Geometry is a fraction of the
+/// page box (`left`/`top`/`width`/`height` in `[0, 1]`, top-left origin), so the
+/// frontend drops it onto the rendered image as a percentage-positioned span.
+#[derive(Debug, Serialize)]
+pub struct ReaderPdfWordDto {
+    pub eid: i64,
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+    pub text: String,
 }
 
 /// A PDF TOC entry, targeting a 0-based page index (not an eid/href).
@@ -196,6 +215,15 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
         if let Some(bytes) = pdf_bytes {
             let doc = boko::import::probe_pdf(bytes)
                 .map_err(|e| format!("probe PDF for reader: {e}"))?;
+            // The selectable text layer lives in the KFX text storylines (the
+            // PDF sidecar has none), so always read it from the KFX. One run per
+            // section, in reading order — zipped to the probe's pages by index.
+            // Best-effort: a KFX without a text layer (image-only / scanned)
+            // yields empty layers and the reader shows image-only pages.
+            let layer: Vec<boko::kfx_to_epub::PdfPageText> = std::fs::read(&kfx_path)
+                .ok()
+                .and_then(|k| boko::kfx_to_epub::pdf_text_layer(&k).ok())
+                .unwrap_or_default();
             let authors = crate::library::authors::split_display(&author);
             let dto = ReaderPdfDto {
                 page_count: doc.pages.len(),
@@ -205,9 +233,31 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
                 pages: doc
                     .pages
                     .iter()
-                    .map(|p| ReaderPdfPageDto {
-                        width: p.width,
-                        height: p.height,
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let (words, eids) = match layer.get(i) {
+                            Some(pt) => (
+                                pt.words
+                                    .iter()
+                                    .map(|w| ReaderPdfWordDto {
+                                        eid: w.eid,
+                                        left: w.left,
+                                        top: w.top,
+                                        width: w.width,
+                                        height: w.height,
+                                        text: w.text.clone(),
+                                    })
+                                    .collect(),
+                                pt.eids.clone(),
+                            ),
+                            None => (Vec::new(), Vec::new()),
+                        };
+                        ReaderPdfPageDto {
+                            width: p.width,
+                            height: p.height,
+                            words,
+                            eids,
+                        }
                     })
                     .collect(),
                 page_labels: doc.page_labels,

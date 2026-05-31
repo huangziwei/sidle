@@ -105,6 +105,13 @@ impl TextIndex {
                 }
             }
         }
+        // Fixed-layout (PDF-backed) KFX: `position_id_map` is
+        // `{contains:[{section_name,pid,length}]}`, not the reflowable
+        // `{eid,pid}` list, so the loop above finds nothing. Rebuild `eid→pid`
+        // by replaying each `section_position_id_map` walk.
+        if pid_of.is_empty() {
+            pid_of = fixed_layout_pid_map(&book.by_type);
+        }
         pid_of
     }
 
@@ -251,6 +258,100 @@ impl TextIndex {
     }
 }
 
+/// `eid → pid` for a FIXED-LAYOUT (PDF-backed) KFX. There `position_id_map`
+/// ($265) is `{contains:[{section_name, pid, length}]}` (one span per section)
+/// and every section carries a `section_position_id_map` ($609) with the compact
+/// position→eid walk. Map each section to its base pid, then replay the walk —
+/// the inverse of boko's `build_pdf_section_position_id_map_fragments`: a
+/// `[advance, eid]` pair names an explicit eid; a bare int names the previous
+/// eid + 1 (consecutive); `[advance, 0]` terminates at `pid == section length`.
+/// Each element advances the running pid by the PREVIOUS element's span (so the
+/// advance is already baked into the encoding). Empty for a reflowable book
+/// (no $609 fragments).
+fn fixed_layout_pid_map(
+    by_type: &std::collections::HashMap<u64, HashMap<String, IonValue>>,
+) -> HashMap<i64, i64> {
+    fn sym_id(v: &IonValue) -> Option<u64> {
+        match v.unwrap_annotated() {
+            IonValue::Symbol(s) => Some(*s),
+            _ => None,
+        }
+    }
+
+    // section-name symbol → base (absolute) pid, from `position_id_map`.
+    let mut base_pid: HashMap<u64, i64> = HashMap::new();
+    if let Some(maps) = by_type.get(&(KfxSymbol::PositionIdMap as u64)) {
+        for frag in maps.values() {
+            let Some(fields) = frag.unwrap_annotated().as_struct() else {
+                continue;
+            };
+            let Some(contains) =
+                get_field(fields, KfxSymbol::Contains as u64).and_then(|v| v.as_list())
+            else {
+                continue;
+            };
+            for entry in contains {
+                let Some(ef) = entry.unwrap_annotated().as_struct() else {
+                    continue;
+                };
+                if let Some(sym) = get_field(ef, KfxSymbol::SectionName as u64).and_then(sym_id)
+                    && let Some(pid) = get_field(ef, KfxSymbol::Pid as u64).and_then(|v| v.as_int())
+                {
+                    base_pid.insert(sym, pid);
+                }
+            }
+        }
+    }
+
+    let mut pid_of: HashMap<i64, i64> = HashMap::new();
+    let Some(maps) = by_type.get(&(KfxSymbol::SectionPositionIdMap as u64)) else {
+        return pid_of;
+    };
+    for frag in maps.values() {
+        let Some(fields) = frag.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let start = get_field(fields, KfxSymbol::SectionName as u64)
+            .and_then(sym_id)
+            .and_then(|s| base_pid.get(&s).copied())
+            .unwrap_or(0);
+        let Some(contains) =
+            get_field(fields, KfxSymbol::Contains as u64).and_then(|v| v.as_list())
+        else {
+            continue;
+        };
+        let mut pid = start;
+        let mut prev_eid: Option<i64> = None;
+        for elem in contains {
+            let inner = elem.unwrap_annotated();
+            if let Some(pair) = inner.as_list() {
+                // `[advance, eid]` — explicit eid (`[advance, 0]` = terminator).
+                let (Some(advance), Some(eid)) = (
+                    pair.first().and_then(|v| v.as_int()),
+                    pair.get(1).and_then(|v| v.as_int()),
+                ) else {
+                    continue;
+                };
+                pid += advance;
+                if eid == 0 {
+                    break; // terminator: pid now == section length
+                }
+                pid_of.insert(eid, pid);
+                prev_eid = Some(eid);
+            } else if let Some(advance) = inner.as_int() {
+                // bare int — consecutive: the previous eid + 1.
+                let Some(eid) = prev_eid.map(|e| e + 1) else {
+                    continue;
+                };
+                pid += advance;
+                pid_of.insert(eid, pid);
+                prev_eid = Some(eid);
+            }
+        }
+    }
+    pid_of
+}
+
 /// Recursively walk a storyline fragment. Every struct that carries a
 /// `$155 id` and a `$145 content` reference contributes `eid → base text`;
 /// `$146 content_list` children are recursed into. `$176 story_name`
@@ -287,6 +388,71 @@ mod tests {
         let text_of = text.iter().map(|(e, t)| (*e, t.to_string())).collect();
         let pid_of = pids.iter().copied().collect();
         TextIndex::index(text_of, pid_of)
+    }
+
+    // Replays the page-0 `section_position_id_map` walk decoded from Amazon's
+    // (and boko's) "The Street Was Mine" KFX — the inverse of
+    // `build_pdf_section_position_id_map_fragments`. Section c0 base pid 0,
+    // length 97; text-run eids 262/263/264/265 land at pids 4/24/45/78.
+    #[test]
+    fn fixed_layout_pid_map_replays_section_walk() {
+        let sec = 853u64; // a "c0" section-name symbol
+        let pidmap = IonValue::Struct(vec![(
+            KfxSymbol::Contains as u64,
+            IonValue::List(vec![IonValue::Struct(vec![
+                (KfxSymbol::SectionName as u64, IonValue::Symbol(sec)),
+                (KfxSymbol::Pid as u64, IonValue::Int(0)),
+                (KfxSymbol::Length as u64, IonValue::Int(97)),
+            ])]),
+        )]);
+        let pair = |a: i64, e: i64| IonValue::List(vec![IonValue::Int(a), IonValue::Int(e)]);
+        let spidmap = IonValue::Struct(vec![
+            (KfxSymbol::SectionName as u64, IonValue::Symbol(sec)),
+            (
+                KfxSymbol::Contains as u64,
+                IonValue::List(vec![
+                    pair(0, 11635),
+                    pair(1, 2),
+                    pair(1, 260),
+                    IonValue::Int(1),
+                    IonValue::Int(1),
+                    IonValue::Int(20),
+                    IonValue::Int(21),
+                    IonValue::Int(33),
+                    IonValue::Int(16),
+                    IonValue::Int(1),
+                    pair(1, 11636),
+                    pair(1, 0),
+                ]),
+            ),
+        ]);
+        let mut by_type: HashMap<u64, HashMap<String, IonValue>> = HashMap::new();
+        by_type
+            .entry(KfxSymbol::PositionIdMap as u64)
+            .or_default()
+            .insert("$348".into(), pidmap);
+        by_type
+            .entry(KfxSymbol::SectionPositionIdMap as u64)
+            .or_default()
+            .insert("c0".into(), spidmap);
+
+        let pid = fixed_layout_pid_map(&by_type);
+        for (eid, want) in [
+            (11635, 0),
+            (2, 1),
+            (260, 2),
+            (261, 3),
+            (262, 4),
+            (263, 24),
+            (264, 45),
+            (265, 78),
+            (266, 94),
+            (267, 95),
+            (11636, 96),
+        ] {
+            assert_eq!(pid.get(&eid), Some(&want), "eid {eid}");
+        }
+        assert!(!pid.contains_key(&0), "terminator eid 0 must not be recorded");
     }
 
     #[test]
