@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Vendored from foliate-js (https://github.com/johnfactotum/foliate-js),
+// Copyright (c) 2022 John Factotum. May be modified for sidle.
+// See ./LICENSE for the MIT terms.
+
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 const debounce = (f, wait, immediate) => {

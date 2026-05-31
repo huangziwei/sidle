@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Vendored from foliate-js (https://github.com/johnfactotum/foliate-js),
+// Copyright (c) 2022 John Factotum. May be modified for sidle.
+// See ./LICENSE for the MIT terms.
+
 const createSVGElement = tag =>
     document.createElementNS('http://www.w3.org/2000/svg', tag)
 

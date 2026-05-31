@@ -1,6 +1,7 @@
 [package]
 name = "sidle-core"
 version.workspace = true
+license.workspace = true
 edition = "2024"
 description = "Tauri-independent core for sidle: library DB, paths, import helpers."
 publish = false

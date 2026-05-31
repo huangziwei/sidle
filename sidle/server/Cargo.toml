@@ -1,6 +1,7 @@
 [package]
 name = "sidle-server"
 version.workspace = true
+license.workspace = true
 edition = "2024"
 description = "sidle LAN HTTP server — read-only library access for KUAL pulls and (later) browser-based management."
 publish = false

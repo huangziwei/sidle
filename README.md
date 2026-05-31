@@ -57,3 +57,15 @@ This is basically what Sidle does for now.
 ## Bonus
 
 For format conversion only without library management, you can use this [client-side html tool](https://hzwei.dev/tools/boko.html).
+
+## License
+
+Sidle is licensed under the **GNU Affero General Public License v3.0 or later**
+(AGPL-3.0-or-later); see [`LICENSE`](./LICENSE). This covers the Tauri desktop
+app, its web frontend, the LAN server, the on-device native picker, and the
+KUAL app.
+
+Two bundled components keep their own, separate licenses:
+
+- [`boko-kai`](./boko-kai/) — a fork of [boko](https://github.com/zacharydenton/boko); retains its upstream **GPL-3.0-or-later** ([`boko-kai/LICENSE`](./boko-kai/LICENSE)). GPLv3 §13 permits combining it with sidle's AGPLv3 code into a single conveyed work.
+- [`sidle/web/foliate-kfx/`](./sidle/web/foliate-kfx/) — `paginator.js` and `overlayer.js` are vendored from [foliate-js](https://github.com/johnfactotum/foliate-js) under the **MIT** license ([`sidle/web/foliate-kfx/LICENSE`](./sidle/web/foliate-kfx/LICENSE)); the other files in that directory are sidle's own and are AGPL-licensed.
