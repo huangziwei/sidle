@@ -35,6 +35,11 @@ pub struct PdfPageText {
     /// last-read eid to its page through this set — essential for an image-only
     /// page, where a bookmark anchors to a page eid that has no text run.
     pub eids: Vec<i64>,
+    /// The page box (`fixed_width`/`fixed_height`) in **points** — the box the
+    /// `words` fractions are relative to. The reader renders the page image to
+    /// span exactly this box so the spans line up with the glyphs.
+    pub box_w: f32,
+    pub box_h: f32,
 }
 
 /// One text run positioned over the page image. Geometry is a page fraction.
@@ -100,6 +105,8 @@ fn page_text(book: &BookData, section_name: &str) -> PdfPageText {
             && bw > 0.0
             && bh > 0.0
         {
+            out.box_w = bw / 100.0; // pt×100 → pt
+            out.box_h = bh / 100.0;
             for mut w in runs {
                 w.left /= bw;
                 w.top /= bh;

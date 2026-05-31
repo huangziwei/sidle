@@ -233,6 +233,10 @@ function paintAnnotations(doc, overlayer) {
   const vertical = (book?.writingMode || "").startsWith("vertical");
   for (const ann of annotations) {
     if (ann.kind === "bookmark") {
+      // PDF mode draws bookmarks as a page-corner marker (paintPdfPageBookmarks),
+      // matching the Kindle's top-right corner ribbon — consistent whether the
+      // bookmark is native or imported, never at the anchor char.
+      if (readerMode === "pdf") continue;
       const range = rangeFor(doc, ann);
       if (range) {
         overlayer.add(`ann-${ann.id}`, range, drawBookmarkMarker, { color: BOOKMARK_COLOR, vertical });
@@ -2048,13 +2052,15 @@ function repaintPdfOverlay() {
   if (searchResults.length) paintSearchMatches(document, ov);
 }
 
-// A bookmark whose anchor eid has no span (an image-only page, or a structural
-// page eid) gets a small corner marker on its visible page — paintAnnotations
-// can't, since it resolves bookmarks through a text range.
+// Paint a corner marker at the top-right of each bookmarked page in the spread —
+// the Kindle's bookmark-ribbon convention, applied to every PDF bookmark
+// (native or imported) so they're consistent. A bookmark's anchor eid resolves
+// only to its *page* here (not a text range), matching how a fixed-layout
+// bookmark reads on the device. Same `ann-<id>` key as the reflowable painter,
+// so a removed bookmark clears with the fresh overlayer.
 function paintPdfPageBookmarks(ov) {
   for (const ann of annotations) {
     if (ann.kind !== "bookmark" || ann.eid_start == null) continue;
-    if (document.querySelector(`[data-eid="${ann.eid_start}"]`)) continue; // painted as a text marker
     const wrap = pdfVisibleWrapper(pdf.eidToPage.get(ann.eid_start));
     if (!wrap) continue;
     const r = wrap.getBoundingClientRect();

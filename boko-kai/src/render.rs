@@ -213,12 +213,26 @@ mod macos {
             .ok_or_else(|| RenderError::Render("CGBitmapContext create failed".into()))?;
             let ctx: &CGContext = &ctx_owned;
 
-            // Points → pixels, accounting for a non-(0,0) MediaBox origin. Both
-            // PDF and the bitmap context use a bottom-left origin, so the page
-            // draws upright and the buffer reads top-row-first.
+            // Draw in **absolute** PDF coordinates (origin 0,0, the page's
+            // bottom-left), scaled into the bitmap (sized to the MediaBox
+            // *dimensions*, origin reset to 0). Amazon's KFX text layer positions
+            // glyphs by absolute PDF coordinate over a box of the page's
+            // dimensions — e.g. a page with MediaBox `[9 9 441 657]` stores a glyph
+            // at x=63, not x=54 — and `extract_text` mirrors that (box_left=0,
+            // box_top=size.height). The overlay spans use those coordinates, so
+            // the image must too, or they drift by the MediaBox origin.
+            //
+            // Drawing is via Core Graphics' `CGContextDrawPDFPage`, NOT PDFKit's
+            // `drawWithBox(MediaBox)` — the latter clips to the MediaBox, which
+            // hides content a malformed PDF places in the gutter (outside an
+            // offset MediaBox) even though its text-layer span still shows.
+            // `drawPDFPage` clips only to the CropBox, which contains the content.
             CGContext::scale_ctm(Some(ctx), scale, scale);
-            CGContext::translate_ctm(Some(ctx), -bounds.origin.x, -bounds.origin.y);
-            unsafe { page.drawWithBox_toContext(PDFDisplayBox::MediaBox, ctx) };
+            match unsafe { page.pageRef() } {
+                Some(cgpage) => CGContext::draw_pdf_page(Some(ctx), Some(&cgpage)),
+                // Fallback (no CGPDFPage): PDFKit draw — clips to MediaBox.
+                None => unsafe { page.drawWithBox_toContext(PDFDisplayBox::MediaBox, ctx) },
+            }
             drop(ctx_owned); // flush + release before we read `buf`
 
             // Composite premultiplied-RGBA over white, drop alpha → RGB. For
@@ -274,10 +288,15 @@ mod macos {
 
     fn extract_page(page: &PDFPage) -> PageText {
         let bounds = unsafe { page.boundsForBox(PDFDisplayBox::MediaBox) };
-        // The page's top-left in PDF space (Y up) and left edge — KFX positions
-        // are measured from here, Y down.
-        let box_left = bounds.origin.x as f32;
-        let box_top = (bounds.origin.y + bounds.size.height) as f32;
+        // KFX positions are **absolute** PDF coordinates over a box of the page's
+        // dimensions with the origin reset to (0,0) — matching Amazon's S2K text
+        // layer (verified: a page with MediaBox `[9 9 441 657]` stores a glyph at
+        // x=63, the absolute PDF x, not x=54). So measure from x=0 and from the
+        // box *height* (not origin.y+height), Y down. The renderer
+        // (`render_page_jpeg`) draws in the same absolute frame, so glyph boxes
+        // and the rendered image line up.
+        let box_left = 0.0_f32;
+        let box_top = bounds.size.height as f32;
 
         let text = match unsafe { page.string() } {
             Some(s) => s.to_string(),
