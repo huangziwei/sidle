@@ -1683,22 +1683,12 @@ fn convert_pdf_to_kfx(
         boko::render::COVER_TARGET_WIDTH_PX,
         boko::render::COVER_JPEG_QUALITY,
     );
-    // BOKO_PDF_NO_COVER strips the cover so the output structurally matches
-    // Amazon's S2K KFX (which has no separate cover resource — it uses page 1).
-    // Used to isolate device-reject causes; the cover stays the shipping default.
-    let no_cover = std::env::var_os("BOKO_PDF_NO_COVER").is_some();
     let cover_jpeg = match &cover {
-        Ok(jpeg) if !no_cover => {
+        Ok(jpeg) => {
             if !quiet && !to_stdout {
                 eprintln!("  cover:  page 1 rendered ({} bytes)", jpeg.len());
             }
             Some(jpeg.as_slice())
-        }
-        Ok(_) => {
-            if !quiet && !to_stdout {
-                eprintln!("  cover:  disabled (BOKO_PDF_NO_COVER)");
-            }
-            None
         }
         Err(e) => {
             if !quiet && !to_stdout {
