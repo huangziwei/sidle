@@ -1578,7 +1578,7 @@ function onKey(e) {
 
 // ---- PDF (fixed-layout) mode ----------------------------------------------
 //
-// A PDF-backed book renders server-side via pdfium (`reader_pdf_page`): one page
+// A PDF-backed book renders server-side via PDFKit (`reader_pdf_page`): one page
 // image at a time, fit to the stage height. We reuse the topbar / TOC / status
 // chrome; reflowable-only affordances (bookmark, search, style, annotations)
 // are hidden since they have no meaning on a fixed page image. Reading position
@@ -1747,7 +1747,7 @@ function pdfGoTo(i) {
 // Render the current spread — instant when it's already cached (the prefetched
 // common case), else debounced. Holding the page-turn key then flips through
 // cached pages smoothly and coalesces past the cache to the page you land on,
-// so renders don't pile onto the serialized pdfium backend.
+// so renders don't pile onto the PDFKit render backend.
 function pdfScheduleRender() {
   clearTimeout(pdf.renderTimer);
   const half = pdfSpreadMode() === "double";

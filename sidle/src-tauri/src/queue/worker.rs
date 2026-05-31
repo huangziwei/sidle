@@ -388,8 +388,8 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
     // whole point of the edit is to replace it.) Whatever we use is normalized
     // to a sleep-screen-safe JFIF JPEG via `sanitize_for_kfx`, which also
     // transcodes a PNG/WebP sidecar. Only when there's no usable sidecar (first
-    // import, or an unreadable file) do we render page 1. pdfium is optional —
-    // on render failure log and proceed cover-less. See pdf-to-kfx.md (P2).
+    // import, or an unreadable file) do we render page 1. The PDF engine
+    // (PDFKit) is optional — on render failure log and proceed cover-less.
     let existing_cover = book
         .cover_path
         .as_deref()
@@ -416,7 +416,22 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
         },
     };
 
-    let kfx = boko::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref());
+    // Selectable text layer (PDFKit) — optional, like the cover; on failure the
+    // book is converted visual-only.
+    let text = boko::render::extract_pdf_text(&doc.bytes).ok();
+    match &text {
+        Some(pages) => {
+            let runs: usize = pages.iter().map(|p| p.runs.len()).sum();
+            eprintln!(
+                "[sidle/queue] book {} pdf text: {runs} runs / {} pages",
+                book.id,
+                pages.len()
+            );
+        }
+        None => eprintln!("[sidle/queue] book {} pdf text: skipped", book.id),
+    }
+
+    let kfx = boko::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref(), text.as_deref());
     write_bytes_atomic(&out_path, &kfx)?;
 
     // Sidecar for the library tile. Reuse an existing sidecar verbatim (it's the

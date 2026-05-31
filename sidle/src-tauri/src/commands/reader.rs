@@ -228,7 +228,7 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
 /// Render one page of a PDF-backed book to a JPEG, scaled to `width` device
 /// pixels wide, returned base64 (data-URL payload) for the fixed-layout viewer.
 /// Stateless: re-resolves the PDF bytes each call (sidecar, else extracted from
-/// the KFX). pdfium is bound once per process; a render is ~tens of ms.
+/// the KFX). Rendered via macOS PDFKit (the system PDF engine); ~tens of ms.
 #[tauri::command]
 pub async fn reader_pdf_page(
     state: State<'_, AppState>,

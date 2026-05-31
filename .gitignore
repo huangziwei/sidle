@@ -21,7 +21,7 @@ kual/sidle/bin/sidle
 sidle/src-tauri/binaries/
 sidle/src-tauri/resources/
 
-# build.sh cache: host-arch libpdfium.dylib for the PDF→KFX cover renderer,
-# downloaded from bblanchon/pdfium-binaries once per machine. A 3rd-party
-# binary, not source — out of git.
+# Per-machine vendored 3rd-party binaries (not source). Previously the
+# bblanchon libpdfium cache; the PDF engine is now macOS PDFKit (no bundled
+# dylib), so this is only kept ignored for any stale cache from older builds.
 vendor/

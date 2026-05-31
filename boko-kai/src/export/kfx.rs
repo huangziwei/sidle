@@ -2474,6 +2474,24 @@ struct PdfPageRec {
     container_id: u64,
     /// `id` of the image node — the renderable content EID for this page.
     image_id: u64,
+    /// Text layer for this page (empty when no text was extracted). The
+    /// secondary "text" storyline's name symbol, the EID of the `{story_name,
+    /// ignore}` child that pulls it into the page container, the page's
+    /// `links_extracted` aux symbol, and one record per extracted run. All zero
+    /// / empty when `runs` is empty — emission is gated on `!runs.is_empty()`.
+    text_story_sym: u64,
+    text_ref_id: u64,
+    links_aux_sym: u64,
+    runs: Vec<PdfRunRec>,
+}
+
+/// Per-text-run bookkeeping: the text item's EID, the symbol naming its
+/// `text_baseline` auxiliary_data entity, and the run's UTF-16 length (its span
+/// in the section position map — each character is one reading position).
+struct PdfRunRec {
+    id: u64,
+    baseline_aux_sym: u64,
+    len: usize,
 }
 
 /// Symbolic name of the single shared PDF raw-media resource.
@@ -2488,15 +2506,21 @@ const COVER_RSRC_NAME: &str = "ecover";
 /// by `book_metadata.cover_image` — the library tile / PDOC sleep-screen art
 /// (keyed by the synthesized ASIN). It is *not* a reading-order page; the PDF
 /// pages remain the only sections. Render it with [`crate::render`]. When
-/// `None` (e.g. pdfium unavailable, or the wasm build), the KFX is cover-less
-/// but otherwise identical — the embedded PDF is unaffected either way.
+/// `None` (e.g. the PDF engine is unavailable, or the wasm build), the KFX is
+/// cover-less but otherwise identical — the embedded PDF is unaffected.
 ///
-/// Still deferred: selectable text layer (P3), portrait+landscape page_template
-/// pair (P1). See the plan.
+/// `text`, when present, is the per-page selectable text layer extracted by
+/// [`crate::render::extract_pdf_text`]. Each page with runs gets a second,
+/// **invisible** "text" storyline (positioned, word-segmented) pulled into the
+/// page container, plus the `auxiliary_data` + capability flags that make the
+/// fixed-layout text live on device (select / search / dictionary / highlight) —
+/// matching Amazon's Send-to-Kindle structure. When `None`/empty for a page, that
+/// page stays visual-only (e.g. a scanned/image page, or a non-macOS build).
 pub fn pdf_to_kfx(
     pdf: &crate::import::pdf::PdfDoc,
     meta: &PdfKfxMeta,
     cover_jpeg: Option<&[u8]>,
+    text: Option<&[crate::render::PageText]>,
 ) -> Vec<u8> {
     let container_id = generate_container_id();
     let mut ctx = ExportContext::new();
@@ -2506,6 +2530,12 @@ pub fn pdf_to_kfx(
     // every page's external_resource points here, differing only by page_index.
     let raw_location = format!("resource/{PDF_RSRC_NAME}");
     let cover_location = format!("resource/{COVER_RSRC_NAME}");
+
+    // The runs extracted for page `i` (empty when no text layer / scanned page).
+    let page_runs = |i: usize| -> &[crate::render::TextRun] {
+        text.and_then(|t| t.get(i))
+            .map_or(&[][..], |pt| pt.runs.as_slice())
+    };
 
     // ---- Survey: register section/story/resource symbols, allocate IDs ----
     let mut recs: Vec<PdfPageRec> = Vec::with_capacity(n);
@@ -2523,6 +2553,29 @@ pub fn pdf_to_kfx(
         let image_id = ctx.next_fragment_id();
         ctx.record_content_length(image_id, 1);
 
+        // Text layer: when this page has extracted runs, allocate the text
+        // storyline's name, the `{story_name, ignore}` child EID, the page's
+        // `links_extracted` aux symbol, and one EID + `text_baseline` aux symbol
+        // per run (storing each run's UTF-16 length as its position span).
+        let runs = page_runs(i);
+        let (text_story_sym, text_ref_id, links_aux_sym, run_recs) = if runs.is_empty() {
+            (0, 0, 0, Vec::new())
+        } else {
+            let tss = ctx.symbols.get_or_intern(&format!("tstory_c{i}"));
+            let tref = ctx.next_fragment_id();
+            let laux = ctx.symbols.get_or_intern(&format!("dp{i}"));
+            let rrecs: Vec<PdfRunRec> = runs
+                .iter()
+                .enumerate()
+                .map(|(j, run)| PdfRunRec {
+                    id: ctx.next_fragment_id(),
+                    baseline_aux_sym: ctx.symbols.get_or_intern(&format!("dt{i}_{j}")),
+                    len: run.content.encode_utf16().count(),
+                })
+                .collect();
+            (tss, tref, laux, rrecs)
+        };
+
         recs.push(PdfPageRec {
             section_name,
             section_sym,
@@ -2532,6 +2585,10 @@ pub fn pdf_to_kfx(
             pt_landscape_id,
             container_id: container_id_num,
             image_id,
+            text_story_sym,
+            text_ref_id,
+            links_aux_sym,
+            runs: run_recs,
         });
     }
     // Intern the shared raw-media location so the bcRawMedia entity resolves.
@@ -2548,46 +2605,109 @@ pub fn pdf_to_kfx(
         (res_sym, w, h)
     });
 
+    // Any page with extracted runs makes the book's text live — gates the
+    // `selection` / `yj_custom_word_iterator` capability flags.
+    let has_text = recs.iter().any(|r| !r.runs.is_empty());
+
+    // Resource-descriptor aux (Amazon's `d6`/`d7`): `d6` describes the embedded
+    // PDF resource (every page's external_resource references it via
+    // `auxiliary_data`), `d7` lists `[d6]`, and `document_data` points at `d7`.
+    // Replicating this is part of full structural parity with Amazon's S2K KFX.
+    let pdf_rsrc_desc_sym = ctx.symbols.get_or_intern("d6");
+    let aux_list_sym = ctx.symbols.get_or_intern("d7");
+
     // ---- Synthesis: build fragments in reference entity order ----
     let mut fragments: Vec<KfxFragment> = Vec::new();
 
     // 1. content_features ($585)
-    fragments.push(build_pdf_content_features_fragment());
+    fragments.push(build_pdf_content_features_fragment(has_text));
     // 2. book_metadata ($490) — PDOC (with cover_image when a cover is present)
     fragments.push(build_pdf_book_metadata_fragment(
         meta,
         &container_id,
         pdf,
         cover.map(|_| COVER_RSRC_NAME),
+        has_text,
     ));
     // 3. metadata ($258) — reading order
     fragments.push(build_pdf_metadata_fragment(&ctx));
     // 4. document_data ($538) — inserted here later, once max_id is known.
     let document_data_index = fragments.len();
 
-    // Sections, storylines, external_resources (grouped like the EPUB path).
+    // Sections, storylines, external_resources (grouped like the EPUB path). A
+    // page with extracted runs gets a second, invisible "text" storyline holding
+    // the selectable overlay; its page-image storyline references that by name.
     let mut sections = Vec::with_capacity(n);
     let mut storylines = Vec::with_capacity(n);
+    let mut text_storylines = Vec::new();
     let mut resources = Vec::with_capacity(n);
     for (i, rec) in recs.iter().enumerate() {
         let page = pdf.pages[i];
         sections.push(build_pdf_page_section(rec));
         storylines.push(build_pdf_page_storyline(rec, page.width, page.height));
+        if !rec.runs.is_empty() {
+            text_storylines.push(build_pdf_text_storyline(rec, page_runs(i)));
+        }
         resources.push(build_pdf_external_resource(
             rec,
             i,
             page.width,
             page.height,
             &raw_location,
+            pdf_rsrc_desc_sym,
         ));
     }
     fragments.extend(sections);
     fragments.extend(storylines);
+    fragments.extend(text_storylines);
 
-    // auxiliary_data ($597): mark each section as a navigation target.
-    let section_names: Vec<String> = recs.iter().map(|r| r.section_name.clone()).collect();
-    for name in &section_names {
-        fragments.push(build_auxiliary_data_fragment(name, &mut ctx));
+    // auxiliary_data ($597) resource descriptors: `d6` describes the embedded
+    // PDF (the single shared resource), `d7` lists `[d6]`. Amazon's
+    // external_resources + document_data reference these. (Replaces boko's old
+    // per-section `IS_TARGET_SECTION` aux, which Amazon's PDF KFX does not have.)
+    fragments.push(build_aux_fragment(
+        "d6",
+        pdf_rsrc_desc_sym,
+        vec![
+            (
+                "resource_stream",
+                IonValue::String(PDF_RSRC_NAME.to_string()),
+            ),
+            ("type", IonValue::String("resource".to_string())),
+            ("size", IonValue::String(pdf.bytes.len().to_string())),
+        ],
+    ));
+    fragments.push(build_aux_fragment(
+        "d7",
+        aux_list_sym,
+        vec![(
+            "auxData_resource_list",
+            IonValue::List(vec![IonValue::Symbol(pdf_rsrc_desc_sym)]),
+        )],
+    ));
+
+    // auxiliary_data ($597) for the text layer: per page a `links_extracted`
+    // entry (referenced by the page container's `auxiliary_data.default`), and
+    // per run a `text_baseline` entry (referenced by the text item's
+    // `auxiliary_data.'yj.conversion'`). Mirrors Amazon's ~10.9k aux entities.
+    for (i, rec) in recs.iter().enumerate() {
+        if rec.runs.is_empty() {
+            continue;
+        }
+        fragments.push(build_kv_aux_fragment(
+            &format!("dp{i}"),
+            rec.links_aux_sym,
+            "links_extracted",
+            IonValue::Bool(true),
+        ));
+        for (j, (rr, run)) in rec.runs.iter().zip(page_runs(i)).enumerate() {
+            fragments.push(build_kv_aux_fragment(
+                &format!("dt{i}_{j}"),
+                rr.baseline_aux_sym,
+                "text_baseline",
+                IonValue::Int(run.baseline),
+            ));
+        }
     }
 
     // external_resource entities (pages, then the cover), then the bcRawMedia
@@ -2623,10 +2743,16 @@ pub fn pdf_to_kfx(
     // so the device can resolve the nav position.
     fragments.extend(build_pdf_nav_fragments(pdf, &recs, &mut ctx));
 
-    // Navigation / position maps (one position per page).
+    // Position system. For a fixed-layout book the reader resolves a
+    // text-selection touch through `position_id_map` (section → pid range) +
+    // `section_position_id_map` (per-section position → EID); both are required
+    // for the overlay text to be selectable.
     fragments.push(build_pdf_position_map_fragment(&recs));
     fragments.push(build_pdf_position_id_map_fragment(&recs));
-    fragments.push(build_pdf_location_map_fragment(&recs));
+    fragments.extend(build_pdf_section_position_id_map_fragments(&recs));
+    // NB: no `location_map` ($550) — Amazon's PDF KFX has none, and ours would
+    // reference page `image_id`s that the section-keyed `position_id_map` no
+    // longer maps to PIDs, leaving dangling refs the reader rejects.
 
     // Container metadata.
     fragments.push(build_resource_path_fragment());
@@ -2640,7 +2766,10 @@ pub fn pdf_to_kfx(
     ));
 
     // document_data now that every fragment ID is allocated (max_id correct).
-    fragments.insert(document_data_index, build_pdf_document_data_fragment(&ctx));
+    fragments.insert(
+        document_data_index,
+        build_pdf_document_data_fragment(&ctx, aux_list_sym),
+    );
 
     // ---- Serialize ----
     let symtab_ion = build_symbol_table_ion(ctx.symbols.local_symbols());
@@ -2661,8 +2790,10 @@ fn pdf_percent_100() -> IonValue {
 }
 
 /// Build the storyline ($259) for one PDF page: a page-sized container holding
-/// the PDF page as a 100%×100% image. Mirrors Amazon's `l2` storyline minus the
-/// text-layer sub-container (P3).
+/// the PDF page as a 100%×100% image (Amazon's `l2`). When the page has a text
+/// layer (`rec.runs`), the container also carries an `auxiliary_data.default`
+/// (`links_extracted`) marker and a second, invisible `{story_name, ignore}`
+/// child that pulls in the page's text storyline as a positioned overlay.
 fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> KfxFragment {
     // Amazon sizes the page container in points×100.
     let fixed_w = (width_pt * 100.0).round() as i64;
@@ -2679,7 +2810,29 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
         (KfxSymbol::ResourceName as u64, IonValue::Symbol(rec.res_sym)),
     ]);
 
-    let container = IonValue::Struct(vec![
+    // Container content: the PDF page image, plus (for a text page) the
+    // text-storyline reference marked `ignore: true` (invisible overlay).
+    let mut content = vec![image];
+    if !rec.runs.is_empty() {
+        content.push(IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Int(rec.text_ref_id as i64)),
+            (
+                KfxSymbol::StoryName as u64,
+                IonValue::Symbol(rec.text_story_sym),
+            ),
+            (
+                KfxSymbol::Layout as u64,
+                IonValue::Symbol(KfxSymbol::Fixed as u64),
+            ),
+            (KfxSymbol::Ignore as u64, IonValue::Bool(true)),
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Container as u64),
+            ),
+        ]));
+    }
+
+    let mut container_fields = vec![
         (KfxSymbol::Id as u64, IonValue::Int(rec.container_id as i64)),
         (KfxSymbol::FixedWidth as u64, IonValue::Int(fixed_w)),
         (KfxSymbol::FixedHeight as u64, IonValue::Int(fixed_h)),
@@ -2695,12 +2848,24 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
             KfxSymbol::Float as u64,
             IonValue::Symbol(KfxSymbol::Center as u64),
         ),
-        (
-            KfxSymbol::Type as u64,
-            IonValue::Symbol(KfxSymbol::Container as u64),
-        ),
-        (KfxSymbol::ContentList as u64, IonValue::List(vec![image])),
-    ]);
+    ];
+    // Amazon puts `auxiliary_data: {default: d…}` on the page container (before
+    // `type`) when there's a text layer.
+    if !rec.runs.is_empty() {
+        container_fields.push((
+            KfxSymbol::AuxiliaryData as u64,
+            IonValue::Struct(vec![(
+                KfxSymbol::Default as u64,
+                IonValue::Symbol(rec.links_aux_sym),
+            )]),
+        ));
+    }
+    container_fields.push((
+        KfxSymbol::Type as u64,
+        IonValue::Symbol(KfxSymbol::Container as u64),
+    ));
+    container_fields.push((KfxSymbol::ContentList as u64, IonValue::List(content)));
+    let container = IonValue::Struct(container_fields);
 
     let ion = IonValue::Struct(vec![
         (KfxSymbol::StoryName as u64, IonValue::Symbol(rec.story_sym)),
@@ -2711,6 +2876,108 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
         format!("story_{}", rec.section_name),
         ion,
     )
+}
+
+/// Build the invisible "text" storyline ($259) for one PDF page — the
+/// selectable overlay (Amazon's `l1SJ`). Each extracted run becomes a
+/// `type: text` item positioned at fixed `top`/`left` with `visibility: false`
+/// in its `style_events`, word-segmented for the custom word iterator, and
+/// linked to its `text_baseline` aux entry. The page-image storyline pulls this
+/// in by `story_name` (see [`build_pdf_page_storyline`]).
+fn build_pdf_text_storyline(rec: &PdfPageRec, runs: &[crate::render::TextRun]) -> KfxFragment {
+    let items: Vec<IonValue> = rec
+        .runs
+        .iter()
+        .zip(runs)
+        .map(|(rr, run)| {
+            let style_events: Vec<IonValue> = run
+                .words
+                .iter()
+                .map(|w| {
+                    let mut ev = vec![
+                        (KfxSymbol::Offset as u64, IonValue::Int(w.offset as i64)),
+                        (KfxSymbol::Length as u64, IonValue::Int(w.length as i64)),
+                        (KfxSymbol::Width as u64, IonValue::Int(w.width)),
+                        (KfxSymbol::Visibility as u64, IonValue::Bool(false)),
+                    ];
+                    if w.is_word {
+                        ev.push((
+                            KfxSymbol::Model as u64,
+                            IonValue::Symbol(KfxSymbol::Word as u64),
+                        ));
+                    }
+                    IonValue::Struct(ev)
+                })
+                .collect();
+
+            IonValue::Struct(vec![
+                (KfxSymbol::Id as u64, IonValue::Int(rr.id as i64)),
+                (
+                    KfxSymbol::AuxiliaryData as u64,
+                    IonValue::Struct(vec![(
+                        KfxSymbol::YjConversion as u64,
+                        IonValue::Symbol(rr.baseline_aux_sym),
+                    )]),
+                ),
+                (
+                    KfxSymbol::Position as u64,
+                    IonValue::Symbol(KfxSymbol::Fixed as u64),
+                ),
+                (KfxSymbol::Width as u64, IonValue::Int(run.width)),
+                (KfxSymbol::Height as u64, IonValue::Int(run.height)),
+                (KfxSymbol::Top as u64, IonValue::Int(run.top)),
+                (KfxSymbol::Left as u64, IonValue::Int(run.left)),
+                (
+                    KfxSymbol::WordIterationType as u64,
+                    IonValue::Symbol(KfxSymbol::Model as u64),
+                ),
+                (
+                    KfxSymbol::Type as u64,
+                    IonValue::Symbol(KfxSymbol::Text as u64),
+                ),
+                (KfxSymbol::StyleEvents as u64, IonValue::List(style_events)),
+                (KfxSymbol::Content as u64, IonValue::String(run.content.clone())),
+            ])
+        })
+        .collect();
+
+    let ion = IonValue::Struct(vec![
+        (
+            KfxSymbol::StoryName as u64,
+            IonValue::Symbol(rec.text_story_sym),
+        ),
+        (KfxSymbol::ContentList as u64, IonValue::List(items)),
+    ]);
+    KfxFragment::new(
+        KfxSymbol::Storyline,
+        format!("tstory_{}", rec.section_name),
+        ion,
+    )
+}
+
+/// Build an `auxiliary_data` ($597) fragment: `{kfx_id: <sym>, metadata: [{key,
+/// value}, …]}`. `fid` must be the string the `kfx_id` symbol was interned from.
+fn build_aux_fragment(fid: &str, kfx_id_sym: u64, entries: Vec<(&str, IonValue)>) -> KfxFragment {
+    let metadata: Vec<IonValue> = entries
+        .into_iter()
+        .map(|(key, value)| {
+            IonValue::Struct(vec![
+                (KfxSymbol::Key as u64, IonValue::String(key.to_string())),
+                (KfxSymbol::Value as u64, value),
+            ])
+        })
+        .collect();
+    let ion = IonValue::Struct(vec![
+        (KfxSymbol::KfxId as u64, IonValue::Symbol(kfx_id_sym)),
+        (KfxSymbol::Metadata as u64, IonValue::List(metadata)),
+    ]);
+    KfxFragment::new(KfxSymbol::AuxiliaryData, fid, ion)
+}
+
+/// Build a one-entry `auxiliary_data` fragment (the text layer's
+/// `links_extracted` / `text_baseline` entries).
+fn build_kv_aux_fragment(fid: &str, kfx_id_sym: u64, key: &str, value: IonValue) -> KfxFragment {
+    build_aux_fragment(fid, kfx_id_sym, vec![(key, value)])
 }
 
 /// Build the section ($260) for one PDF page. Emits Amazon's portrait+landscape
@@ -2771,13 +3038,16 @@ fn build_pdf_page_section(rec: &PdfPageRec) -> KfxFragment {
 }
 
 /// Build the external_resource ($164) for one PDF page: a `format: pdf` view of
-/// the shared blob at `page_index`, sized to the page.
+/// the shared blob at `page_index`, sized to the page. References the shared
+/// resource descriptor (`d6`) via `auxiliary_data` and carries `margin: 0`, both
+/// matching Amazon's per-page resources.
 fn build_pdf_external_resource(
     rec: &PdfPageRec,
     page_index: usize,
     width_pt: f32,
     height_pt: f32,
     raw_location: &str,
+    rsrc_desc_sym: u64,
 ) -> KfxFragment {
     let ion = IonValue::Struct(vec![
         (
@@ -2790,6 +3060,10 @@ fn build_pdf_external_resource(
             IonValue::String(raw_location.to_string()),
         ),
         (
+            KfxSymbol::AuxiliaryData as u64,
+            IonValue::Symbol(rsrc_desc_sym),
+        ),
+        (
             KfxSymbol::ResourceWidth as u64,
             IonValue::Int(width_pt.round() as i64),
         ),
@@ -2798,6 +3072,7 @@ fn build_pdf_external_resource(
             IonValue::Int(height_pt.round() as i64),
         ),
         (KfxSymbol::ResourceName as u64, IonValue::Symbol(rec.res_sym)),
+        (KfxSymbol::Margin as u64, IonValue::Int(0)),
     ]);
     KfxFragment::new(KfxSymbol::ExternalResource, format!("e{page_index}"), ion)
 }
@@ -2846,7 +3121,7 @@ fn build_pdf_cover_external_resource(
 
 /// content_features ($585) for a PDF-backed fixed-layout book. Mirrors Amazon's
 /// set minus `yj_custom_word_iterator` (which needs the P3 text layer).
-fn build_pdf_content_features_fragment() -> KfxFragment {
+fn build_pdf_content_features_fragment(has_text: bool) -> KfxFragment {
     fn feature(namespace: &str, key: &str, major: i64) -> IonValue {
         IonValue::Struct(vec![
             (
@@ -2867,14 +3142,19 @@ fn build_pdf_content_features_fragment() -> KfxFragment {
         ])
     }
     const YJ: &str = "com.amazon.yjconversion";
-    let features = IonValue::List(vec![
+    let mut feats = vec![
         feature("SDK.Marker", "CanonicalFormat", 2),
         feature(YJ, "yj_fixed_layout", 1),
         feature(YJ, "yj_graphical_highlights", 1),
         feature(YJ, "yj_textbook", 1),
         feature(YJ, "yj_pdf_support", 1),
-    ]);
-    let ion = IonValue::Struct(vec![(KfxSymbol::Features as u64, features)]);
+    ];
+    // The custom word iterator backs the selectable text layer's word model;
+    // only advertise it when there actually is a text layer.
+    if has_text {
+        feats.push(feature(YJ, "yj_custom_word_iterator", 1));
+    }
+    let ion = IonValue::Struct(vec![(KfxSymbol::Features as u64, IonValue::List(feats))]);
     KfxFragment::singleton(KfxSymbol::ContentFeatures, ion)
 }
 
@@ -2884,6 +3164,7 @@ fn build_pdf_book_metadata_fragment(
     container_id: &str,
     pdf: &crate::import::pdf::PdfDoc,
     cover_resource_name: Option<&str>,
+    has_text: bool,
 ) -> KfxFragment {
     fn kv(key: &str, value: IonValue) -> IonValue {
         IonValue::Struct(vec![
@@ -2963,9 +3244,8 @@ fn build_pdf_book_metadata_fragment(
                 kv("graphical_highlights", IonValue::Int(1)),
             ],
         ),
-        category(
-            "kindle_ebook_metadata",
-            vec![
+        category("kindle_ebook_metadata", {
+            let mut e = vec![
                 kv(
                     "book_orientation_lock",
                     IonValue::String("none".to_string()),
@@ -2974,8 +3254,18 @@ fn build_pdf_book_metadata_fragment(
                     "user_visible_labeling",
                     IonValue::String("page_exclusive".to_string()),
                 ),
-            ],
-        ),
+            ];
+            // The selectable text layer (Amazon's `selection: enabled`,
+            // `multipage_selection: disabled`) — only when there's live text.
+            if has_text {
+                e.push(kv("selection", IonValue::String("enabled".to_string())));
+                e.push(kv(
+                    "multipage_selection",
+                    IonValue::String("disabled".to_string()),
+                ));
+            }
+            e
+        }),
     ]);
 
     let ion = IonValue::Struct(vec![(KfxSymbol::CategorisedMetadata as u64, categorised)]);
@@ -3022,9 +3312,10 @@ fn build_pdf_metadata_fragment(ctx: &ExportContext) -> KfxFragment {
 }
 
 /// document_data ($538): minimal fixed-layout document — max_id, pan_zoom,
+/// `auxiliary_data: {'yj.authoring': d7}` (the resource-descriptor list), and the
 /// reading order. (Reflow fields like font_size/line_height are irrelevant to a
 /// PDF-backed book and omitted, matching Amazon's PDF document_data.)
-fn build_pdf_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
+fn build_pdf_document_data_fragment(ctx: &ExportContext, aux_list_sym: u64) -> KfxFragment {
     let sections: Vec<IonValue> = ctx
         .section_ids
         .iter()
@@ -3044,6 +3335,13 @@ fn build_pdf_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
             IonValue::Symbol(KfxSymbol::Enabled as u64),
         ),
         (
+            KfxSymbol::AuxiliaryData as u64,
+            IonValue::Struct(vec![(
+                KfxSymbol::YjAuthoring as u64,
+                IonValue::Symbol(aux_list_sym),
+            )]),
+        ),
+        (
             KfxSymbol::ReadingOrders as u64,
             IonValue::List(vec![reading_order]),
         ),
@@ -3051,19 +3349,44 @@ fn build_pdf_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
     KfxFragment::singleton(KfxSymbol::DocumentData, ion)
 }
 
-/// position_map ($264): one entry per page mapping section → its content EIDs.
+/// position_map ($264): one entry per page enumerating the section's content
+/// EIDs. For a text page that includes the text-ref child + every text item, so
+/// the device registers the text positions (Amazon does this via a
+/// `[content_start, count]` run covering image..last-text-item).
+/// The number of reading positions a section spans — one each for the portrait
+/// page_template, container, image, the optional text-ref, and the landscape
+/// page_template, plus one per character (UTF-16 unit) of every text run. Drives
+/// both `position_id_map`'s section `length` and the `section_position_id_map`
+/// terminator, which must agree. Keep in sync with
+/// [`build_pdf_section_position_id_map_fragments`].
+fn pdf_section_span(rec: &PdfPageRec) -> i64 {
+    let mut span = 4i64; // pt_id + container + image + pt_landscape
+    if !rec.runs.is_empty() {
+        span += 1; // text_ref
+        span += rec.runs.iter().map(|r| r.len as i64).sum::<i64>();
+    }
+    span
+}
+
+/// position_map ($264): one entry per page enumerating the section's EIDs — both
+/// page templates, container, image, and (for a text page) the text-ref child +
+/// every text item. Tells the device which EIDs belong to each section.
 fn build_pdf_position_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
     let entries: Vec<IonValue> = recs
         .iter()
         .map(|rec| {
-            let contains = IonValue::List(vec![
+            let mut ids = vec![
                 IonValue::Int(rec.pt_id as i64),
                 IonValue::Int(rec.pt_landscape_id as i64),
                 IonValue::Int(rec.container_id as i64),
                 IonValue::Int(rec.image_id as i64),
-            ]);
+            ];
+            if !rec.runs.is_empty() {
+                ids.push(IonValue::Int(rec.text_ref_id as i64));
+                ids.extend(rec.runs.iter().map(|r| IonValue::Int(r.id as i64)));
+            }
             IonValue::Struct(vec![
-                (KfxSymbol::Contains as u64, contains),
+                (KfxSymbol::Contains as u64, IonValue::List(ids)),
                 (
                     KfxSymbol::SectionName as u64,
                     IonValue::Symbol(rec.section_sym),
@@ -3074,40 +3397,103 @@ fn build_pdf_position_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
     KfxFragment::singleton(KfxSymbol::PositionMap, IonValue::List(entries))
 }
 
-/// position_id_map ($265): sequential PIDs, one per page, plus a terminator.
+/// position_id_map ($265) for a fixed-layout (PDF) book: `{contains:
+/// [{section_name, pid, length}, …]}` — the **section-keyed** shape the
+/// fixed-layout reader needs (NOT the reflowable `{eid, pid}` form, which leaves
+/// the overlay text unselectable). `pid` is the section's cumulative start
+/// position; `length` is its span. Paired with `section_position_id_map`, this is
+/// what makes the text live.
 fn build_pdf_position_id_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
-    let mut entries: Vec<IonValue> = Vec::with_capacity(recs.len() + 1);
+    let mut entries: Vec<IonValue> = Vec::with_capacity(recs.len());
     let mut pid = 0i64;
     for rec in recs {
+        let length = pdf_section_span(rec);
         entries.push(IonValue::Struct(vec![
-            (KfxSymbol::Eid as u64, IonValue::Int(rec.image_id as i64)),
+            (
+                KfxSymbol::SectionName as u64,
+                IonValue::Symbol(rec.section_sym),
+            ),
             (KfxSymbol::Pid as u64, IonValue::Int(pid)),
+            (KfxSymbol::Length as u64, IonValue::Int(length)),
         ]));
-        pid += 1;
+        pid += length;
     }
-    entries.push(IonValue::Struct(vec![
-        (KfxSymbol::Eid as u64, IonValue::Int(0)),
-        (KfxSymbol::Pid as u64, IonValue::Int(pid)),
-    ]));
-    KfxFragment::singleton(KfxSymbol::PositionIdMap, IonValue::List(entries))
+    let ion = IonValue::Struct(vec![(KfxSymbol::Contains as u64, IonValue::List(entries))]);
+    KfxFragment::singleton(KfxSymbol::PositionIdMap, ion)
 }
 
-/// location_map ($550): one entry per page at offset 0.
-fn build_pdf_location_map_fragment(recs: &[PdfPageRec]) -> KfxFragment {
-    let locations: Vec<IonValue> = recs
-        .iter()
+/// section_position_id_map ($609): one entity per section mapping reading
+/// positions to EIDs within that section — the fine index the fixed-layout reader
+/// resolves a text-selection touch through (absent ⇒ no selection). The compact
+/// `contains` walk, decoded from Amazon's S2K KFX: each element advances the
+/// running pid by the PREVIOUS EID's span and names the current EID — a bare int
+/// when that EID is the previous + 1, else `[advance, eid]`. Span is 1 for the
+/// page templates / container / image / text-ref and the run's UTF-16 length for
+/// a text item; an `[advance, 0]` terminator lands at `pid == length` (agreeing
+/// with `position_id_map`).
+fn build_pdf_section_position_id_map_fragments(recs: &[PdfPageRec]) -> Vec<KfxFragment> {
+    recs.iter()
         .map(|rec| {
-            IonValue::Struct(vec![
-                (KfxSymbol::Id as u64, IonValue::Int(rec.image_id as i64)),
-                (KfxSymbol::Offset as u64, IonValue::Int(0)),
-            ])
+            // (eid, span) in reading-position order: the portrait page_template
+            // opens the section, the landscape page_template closes it — Amazon's
+            // section "anchors" are exactly these page_template EIDs (real, backed
+            // elements; inventing fresh anchor EIDs gives dangling references the
+            // device rejects with "An error occurred").
+            let mut order: Vec<(u64, i64)> = vec![
+                (rec.pt_id, 1),
+                (rec.container_id, 1),
+                (rec.image_id, 1),
+            ];
+            if !rec.runs.is_empty() {
+                order.push((rec.text_ref_id, 1));
+                order.extend(rec.runs.iter().map(|r| (r.id, r.len as i64)));
+            }
+            order.push((rec.pt_landscape_id, 1));
+
+            let mut contains: Vec<IonValue> = Vec::with_capacity(order.len() + 1);
+            let mut prev: Option<(u64, i64)> = None;
+            for &(eid, span) in &order {
+                let advance = prev.map_or(0, |(_, s)| s);
+                let consecutive = prev.is_some_and(|(p, _)| eid == p + 1);
+                if consecutive {
+                    contains.push(IonValue::Int(advance));
+                } else {
+                    contains.push(IonValue::List(vec![
+                        IonValue::Int(advance),
+                        IonValue::Int(eid as i64),
+                    ]));
+                }
+                prev = Some((eid, span));
+            }
+            // Terminator: advance by the last EID's span; eid 0.
+            let last_span = prev.map_or(0, |(_, s)| s);
+            contains.push(IonValue::List(vec![
+                IonValue::Int(last_span),
+                IonValue::Int(0),
+            ]));
+
+            let ion = IonValue::Struct(vec![
+                (
+                    KfxSymbol::SectionName as u64,
+                    IonValue::Symbol(rec.section_sym),
+                ),
+                (KfxSymbol::Contains as u64, IonValue::List(contains)),
+            ]);
+            // Key the entity by the SECTION NAME symbol — exactly as Amazon does
+            // (the `section` and its `section_position_id_map` share the
+            // section-name symbol as their entity id). Using a distinct
+            // `spid_*` name was never interned, so `serialize_fragments` fell
+            // through to id $0 (kProperty_Invalid): the device couldn't address
+            // any section's position map by name, so every text-layer build was
+            // rejected ("An error occurred") while embed-only builds (which have
+            // no section_position_id_map) opened fine.
+            KfxFragment::new(
+                KfxSymbol::SectionPositionIdMap,
+                rec.section_name.clone(),
+                ion,
+            )
         })
-        .collect();
-    let ion = IonValue::List(vec![IonValue::Struct(vec![(
-        KfxSymbol::Locations as u64,
-        IonValue::List(locations),
-    )])]);
-    KfxFragment::singleton(KfxSymbol::LocationMap, ion)
+        .collect()
 }
 
 /// Navigation fragments for the PDF TOC, matching Amazon's PDF KFX shape: a

@@ -164,13 +164,189 @@ mod tests {
             publisher: None,
         };
 
-        // No cover here: it doesn't affect the embedded-PDF extraction we test
-        // (rendering needs pdfium, which isn't available in unit tests).
-        let kfx = pdf_to_kfx(&doc, &meta, None);
+        // No cover/text here: neither affects the embedded-PDF extraction we test
+        // (both need the PDFKit engine, exercised by the gitignored harness).
+        let kfx = pdf_to_kfx(&doc, &meta, None, None);
         assert!(kfx_is_pdf_backed(&kfx), "boko PDF KFX must be detected as PDF-backed");
 
         let extracted = kfx_extract_pdf(&kfx).expect("extraction should succeed");
         assert_eq!(extracted, bytes, "extracted PDF must be byte-identical to the source");
+    }
+
+    #[test]
+    fn text_layer_adds_text_storyline_without_breaking_extraction() {
+        use crate::kfx::symbols::KfxSymbol;
+        use crate::render::{PageText, StyleSeg, TextRun};
+
+        let bytes = fake_pdf();
+        let doc = PdfDoc {
+            bytes: bytes.clone(),
+            pages: vec![PdfPage { width: 612.0, height: 792.0 }],
+            title: Some("T".to_string()),
+            author: None,
+            outline: Vec::new(),
+            page_labels: Vec::new(),
+        };
+        let meta = PdfKfxMeta {
+            title: "T".to_string(),
+            author: None,
+            language: "en".to_string(),
+            date: None,
+            publisher: None,
+        };
+        // One page, one run "THE FOX" → word / space / word.
+        let text = vec![PageText {
+            runs: vec![TextRun {
+                content: "THE FOX".to_string(),
+                left: 7000,
+                top: 17000,
+                width: 12000,
+                height: 1700,
+                baseline: 18700,
+                words: vec![
+                    StyleSeg { offset: 0, length: 3, width: 4000, is_word: true },
+                    StyleSeg { offset: 3, length: 1, width: 600, is_word: false },
+                    StyleSeg { offset: 4, length: 3, width: 4200, is_word: true },
+                ],
+            }],
+        }];
+
+        let with_text = pdf_to_kfx(&doc, &meta, None, Some(&text));
+        let without = pdf_to_kfx(&doc, &meta, None, None);
+
+        // The text layer must not disturb the embedded PDF (byte-identical out).
+        assert!(kfx_is_pdf_backed(&with_text));
+        assert_eq!(kfx_extract_pdf(&with_text).unwrap(), bytes);
+
+        let count = |k: &[u8], t: u32| entities(k).unwrap().iter().filter(|e| e.type_id == t).count();
+        let storyline = KfxSymbol::Storyline as u32;
+        let aux = KfxSymbol::AuxiliaryData as u32;
+        // A text page gets a second, invisible "text" storyline beside the image.
+        assert_eq!(count(&without, storyline), 1, "no-text page: image storyline only");
+        assert_eq!(count(&with_text, storyline), 2, "text page: image + text storyline");
+        // ...plus links_extracted (per page) + text_baseline (per run) aux entries.
+        assert!(
+            count(&with_text, aux) >= count(&without, aux) + 2,
+            "text layer adds links_extracted + text_baseline aux"
+        );
+    }
+
+    #[test]
+    fn fixed_layout_position_maps_resolve_for_selection() {
+        use crate::kfx::container::parse_entity;
+        use crate::kfx::ion::IonValue;
+        use crate::kfx::symbols::KfxSymbol;
+        use crate::render::{PageText, StyleSeg, TextRun};
+
+        let bytes = fake_pdf();
+        let mk_run = |content: &str| TextRun {
+            content: content.to_string(),
+            left: 100,
+            top: 100,
+            width: 1000,
+            height: 100,
+            baseline: 180,
+            words: vec![StyleSeg {
+                offset: 0,
+                length: content.encode_utf16().count(),
+                width: 1000,
+                is_word: true,
+            }],
+        };
+        let doc = PdfDoc {
+            bytes: bytes.clone(),
+            pages: vec![
+                PdfPage { width: 600.0, height: 800.0 },
+                PdfPage { width: 600.0, height: 800.0 },
+            ],
+            title: Some("T".to_string()),
+            author: None,
+            outline: Vec::new(),
+            page_labels: Vec::new(),
+        };
+        let meta = PdfKfxMeta {
+            title: "T".to_string(),
+            author: None,
+            language: "en".to_string(),
+            date: None,
+            publisher: None,
+        };
+        // Page 0: two runs ("hello"=5, "worldly"=7); page 1: no text.
+        let text = vec![
+            PageText { runs: vec![mk_run("hello"), mk_run("worldly")] },
+            PageText { runs: vec![] },
+        ];
+        let kfx = pdf_to_kfx(&doc, &meta, None, Some(&text));
+        let ents = entities(&kfx).unwrap();
+
+        let field = |s: &IonValue, k: KfxSymbol| -> Option<IonValue> {
+            match s {
+                IonValue::Struct(fs) => fs
+                    .iter()
+                    .find(|(id, _)| *id == k as u64)
+                    .map(|(_, v)| v.clone()),
+                _ => None,
+            }
+        };
+        let int = |v: &IonValue| -> i64 {
+            match v {
+                IonValue::Int(n) => *n,
+                other => panic!("expected int, got {other:?}"),
+            }
+        };
+
+        // position_id_map ($265): section-keyed {section_name, pid, length}.
+        let pim = ents
+            .iter()
+            .find(|e| e.type_id == KfxSymbol::PositionIdMap as u32)
+            .and_then(|e| parse_entity(&kfx, e))
+            .expect("position_id_map present");
+        let secs = match field(&pim, KfxSymbol::Contains) {
+            Some(IonValue::List(l)) => l,
+            _ => panic!("position_id_map has no contains list"),
+        };
+        assert_eq!(secs.len(), 2, "one position_id_map entry per section");
+        let lengths: Vec<i64> = secs
+            .iter()
+            .map(|s| int(&field(s, KfxSymbol::Length).expect("length")))
+            .collect();
+        let pids: Vec<i64> = secs
+            .iter()
+            .map(|s| int(&field(s, KfxSymbol::Pid).expect("pid")))
+            .collect();
+        // Page 0 span = anchor+container+image+textref+anchor_end (5) + 5 + 7;
+        // page 1 (no text) = anchor+container+image+anchor_end (4).
+        assert_eq!(lengths, vec![5 + 5 + 7, 4]);
+        assert_eq!(pids[0], 0, "first section starts at pid 0");
+        assert_eq!(pids[1], lengths[0], "pids are cumulative");
+
+        // section_position_id_map ($609): one per section; the summed advances
+        // (terminator pid) MUST equal the matching position_id_map length — the
+        // invariant the fixed-layout reader relies on to resolve a selection.
+        let spms: Vec<IonValue> = ents
+            .iter()
+            .filter(|e| e.type_id == KfxSymbol::SectionPositionIdMap as u32)
+            .filter_map(|e| parse_entity(&kfx, e))
+            .collect();
+        assert_eq!(spms.len(), 2, "one section_position_id_map per section");
+        for (k, spm) in spms.iter().enumerate() {
+            let contains = match field(spm, KfxSymbol::Contains) {
+                Some(IonValue::List(l)) => l,
+                _ => panic!("section_position_id_map has no contains list"),
+            };
+            let sum: i64 = contains
+                .iter()
+                .map(|el| match el {
+                    IonValue::Int(n) => *n,
+                    IonValue::List(pair) => int(&pair[0]),
+                    other => panic!("bad section map element: {other:?}"),
+                })
+                .sum();
+            assert_eq!(
+                sum, lengths[k],
+                "section {k}: section_position_id_map terminator pid must equal position_id_map length"
+            );
+        }
     }
 
     #[test]
@@ -195,9 +371,9 @@ mod tests {
             publisher: None,
         };
 
-        // A stand-in cover blob with JPEG magic (real rendering needs pdfium).
+        // A stand-in cover blob with JPEG magic (real rendering needs PDFKit).
         let cover = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4, 0xFF, 0xD9];
-        let kfx = pdf_to_kfx(&doc, &meta, Some(&cover));
+        let kfx = pdf_to_kfx(&doc, &meta, Some(&cover), None);
 
         assert!(kfx_is_pdf_backed(&kfx), "still PDF-backed with a cover");
         let extracted = kfx_extract_pdf(&kfx).expect("extraction should succeed past the cover");
@@ -241,7 +417,7 @@ mod tests {
             date: None,
             publisher: None,
         };
-        let kfx = pdf_to_kfx(&doc, &meta, None);
+        let kfx = pdf_to_kfx(&doc, &meta, None, None);
 
         let has = |needle: &[u8]| kfx.windows(needle.len()).any(|w| w == needle);
         assert!(has(b"Chapter One"), "TOC parent label must be embedded");
@@ -274,7 +450,7 @@ mod tests {
             date: Some("2021-03-15T09:00:00Z".to_string()),
             publisher: Some("Acme Press".to_string()),
         };
-        let kfx = pdf_to_kfx(&doc, &meta, None);
+        let kfx = pdf_to_kfx(&doc, &meta, None, None);
         let has = |needle: &[u8]| kfx.windows(needle.len()).any(|w| w == needle);
         assert!(has(b"issue_date"), "issue_date key must be emitted");
         assert!(has(b"2021-03-15"), "date truncated to YYYY-MM-DD must be present");
@@ -301,7 +477,7 @@ mod tests {
             date: None,
             publisher: None,
         };
-        let kfx = pdf_to_kfx(&doc, &meta, None);
+        let kfx = pdf_to_kfx(&doc, &meta, None, None);
         assert!(
             !kfx.windows(b"issue_date".len()).any(|w| w == b"issue_date"),
             "no issue_date entry when the library has no date"
@@ -335,7 +511,7 @@ mod tests {
             date: None,
             publisher: None,
         };
-        let kfx = pdf_to_kfx(&doc, &meta, None);
+        let kfx = pdf_to_kfx(&doc, &meta, None, None);
         let has = |n: &[u8]| kfx.windows(n.len()).any(|w| w == n);
         assert!(has(b"npag"), "page_list container must exist");
         assert!(has(b"ntoc"), "toc container must coexist");
@@ -368,7 +544,7 @@ mod tests {
             date: None,
             publisher: None,
         };
-        let kfx = pdf_to_kfx(&doc, &meta, None);
+        let kfx = pdf_to_kfx(&doc, &meta, None, None);
         let has = |n: &[u8]| kfx.windows(n.len()).any(|w| w == n);
         assert!(has(b"npag"), "page_list present without an outline");
         assert!(has(b"folio-7"), "page label embedded");

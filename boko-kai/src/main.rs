@@ -1674,20 +1674,31 @@ fn convert_pdf_to_kfx(
         );
     }
 
-    // Render page 1 as the cover (PDOC library tile / sleep-screen art). pdfium
-    // is optional — if it can't be loaded, log and ship a cover-less KFX.
+    // Render page 1 as the cover (PDOC library tile / sleep-screen art) via the
+    // PDF engine (PDFKit). Optional — if it's unavailable, log and ship a
+    // cover-less KFX.
     let cover = boko::render::render_pdf_page_jpeg(
         &doc.bytes,
         0,
         boko::render::COVER_TARGET_WIDTH_PX,
         boko::render::COVER_JPEG_QUALITY,
     );
+    // BOKO_PDF_NO_COVER strips the cover so the output structurally matches
+    // Amazon's S2K KFX (which has no separate cover resource — it uses page 1).
+    // Used to isolate device-reject causes; the cover stays the shipping default.
+    let no_cover = std::env::var_os("BOKO_PDF_NO_COVER").is_some();
     let cover_jpeg = match &cover {
-        Ok(jpeg) => {
+        Ok(jpeg) if !no_cover => {
             if !quiet && !to_stdout {
                 eprintln!("  cover:  page 1 rendered ({} bytes)", jpeg.len());
             }
             Some(jpeg.as_slice())
+        }
+        Ok(_) => {
+            if !quiet && !to_stdout {
+                eprintln!("  cover:  disabled (BOKO_PDF_NO_COVER)");
+            }
+            None
         }
         Err(e) => {
             if !quiet && !to_stdout {
@@ -1697,7 +1708,26 @@ fn convert_pdf_to_kfx(
         }
     };
 
-    let kfx = boko::export::pdf_to_kfx(&doc, &meta, cover_jpeg);
+    // Extract the selectable text layer (PDFKit). Like the cover it's optional —
+    // on failure (or a non-macOS build) we ship a visual-only KFX.
+    let text = boko::render::extract_pdf_text(&doc.bytes);
+    let text_pages = match &text {
+        Ok(pages) => {
+            if !quiet && !to_stdout {
+                let runs: usize = pages.iter().map(|p| p.runs.len()).sum();
+                eprintln!("  text:   {runs} runs across {} pages", pages.len());
+            }
+            Some(pages.as_slice())
+        }
+        Err(e) => {
+            if !quiet && !to_stdout {
+                eprintln!("  text:   skipped ({e})");
+            }
+            None
+        }
+    };
+
+    let kfx = boko::export::pdf_to_kfx(&doc, &meta, cover_jpeg, text_pages);
 
     if to_stdout {
         use std::io::Write;

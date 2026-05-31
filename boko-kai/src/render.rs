@@ -1,19 +1,21 @@
-//! PDF page rasterization via pdfium (Chrome's PDF engine).
+//! PDF page rasterization + text extraction via **Apple PDFKit / Core Graphics**
+//! — the system engine Preview uses. No bundled `libpdfium`: we call the OS.
 //!
-//! Used by the PDF→KFX path to render page 1 as a JPEG cover, and (later) by the
-//! Sidle desktop reader to paint PDF pages. pdfium is a C++ library bound at
-//! runtime; no mature pure-Rust PDF *renderer* exists (lopdf only parses
-//! structure). The emit path ([`crate::export::pdf_to_kfx`]) stays pure — it
-//! takes the rendered cover bytes as an argument — so this module is the *only*
-//! place that depends on pdfium, and a failure here just means "no cover", never
-//! a failed conversion.
+//! Two jobs, one engine:
+//! - **Cover** ([`render_pdf_page_jpeg`]): `PDFPage.draw(with:to:)` into a Core
+//!   Graphics bitmap context → JPEG. This is exactly Preview's "export page as
+//!   image", and the one thing we do that Amazon's cover-less PDOC doesn't.
+//! - **Text layer** ([`extract_pdf_text`]): `PDFPage.string` +
+//!   `characterBounds(at:)` give Unicode + per-glyph boxes — Apple's Core Text
+//!   does the font/encoding/CMap work — which the KFX emit path turns into the
+//!   invisible, selectable text storylines.
 //!
-//! Native builds bind to a `libpdfium.{dylib,so,dll}` found via, in order: the
-//! `BOKO_PDFIUM_LIB` env var (Sidle.app and the test harness stage the bundled
-//! binary here), alongside the running executable, then the system library path.
-//! The wasm/boko.html cover path (pdfium.wasm + JS glue) is a documented P2
-//! follow-up; there the render returns [`RenderError::Unavailable`] and the
-//! cover is simply omitted. See `.claude/plans/pdf-to-kfx.md`.
+//! macOS-only by design (`cfg(target_os = "macos")`): the wasm / Kindle builds
+//! don't rasterize (the Kindle never *converts* — conversion is always Mac-side),
+//! and a future Linux build would slot Poppler (`poppler_page_get_text_layout` =
+//! the same per-char boxes) behind these same two functions. Every other target
+//! gets an `Unavailable` stub, and the emit path treats that as "no cover / no
+//! text layer", never a failed conversion. See `.claude/plans/pdf-to-kfx.md`.
 
 use std::fmt;
 
@@ -25,13 +27,63 @@ pub const COVER_TARGET_WIDTH_PX: u32 = 1000;
 /// JPEG quality (1..=100) for the rendered cover.
 pub const COVER_JPEG_QUALITY: u8 = 85;
 
-/// Why a render didn't produce an image. Callers treat every variant as
-/// "proceed without a cover", so this never aborts a conversion.
+/// One PDF page's extracted text as positioned runs — the **invisible,
+/// selectable overlay** the device draws over the rendered page image. This is
+/// how Amazon's PDF→KFX makes a "fixed-layout" page's text *live*
+/// (select / search / dictionary / highlight) rather than a flat picture: each
+/// run is laid out at a fixed position with `visibility: false`, so the reader
+/// hit-tests against it while showing the crisp PDF glyphs underneath.
+///
+/// All geometry is in **points × 100** (the KFX fixed-layout unit), with a
+/// **top-left origin and Y increasing downward** — the same space as the page
+/// storyline's `fixed_width`/`fixed_height`. PDFKit's native page space (points,
+/// bottom-left origin, Y up) is flipped during extraction.
+#[derive(Debug, Clone, Default)]
+pub struct PageText {
+    /// Text runs (≈ visual lines), in reading order.
+    pub runs: Vec<TextRun>,
+}
+
+/// One run of text — roughly a visual line fragment — placed on the page.
+#[derive(Debug, Clone)]
+pub struct TextRun {
+    /// The run's text in reading order (UTF-8).
+    pub content: String,
+    /// Left edge, pt×100 from the page's left.
+    pub left: i64,
+    /// Top edge, pt×100 from the page's top.
+    pub top: i64,
+    /// Width, pt×100.
+    pub width: i64,
+    /// Height, pt×100.
+    pub height: i64,
+    /// Baseline distance from the page top, pt×100 (Amazon's `text_baseline`).
+    pub baseline: i64,
+    /// Word / inter-word-space segmentation of `content`, in order — drives the
+    /// custom word iterator (double-tap-to-select-word, dictionary lookup).
+    pub words: Vec<StyleSeg>,
+}
+
+/// One `style_events` entry: a `[offset, offset+length)` slice of the run's
+/// `content` with its rendered `width` (pt×100). Offsets/lengths are **UTF-16
+/// code units** (KFX's string-indexing convention — and PDFKit's native unit).
+/// `is_word` marks a word (Amazon's `model: word`) versus an inter-word run of
+/// whitespace (no model).
+#[derive(Debug, Clone)]
+pub struct StyleSeg {
+    pub offset: usize,
+    pub length: usize,
+    pub width: i64,
+    pub is_word: bool,
+}
+
+/// Why a render/extract didn't produce output. Callers treat every variant as
+/// "proceed without a cover / text layer", so this never aborts a conversion.
 #[derive(Debug, Clone)]
 pub enum RenderError {
-    /// No usable `libpdfium` could be loaded in this process/build.
+    /// No usable PDF engine in this build/platform (non-macOS today).
     Unavailable(String),
-    /// pdfium loaded but failed on this document/page.
+    /// The engine loaded but failed on this document/page.
     Render(String),
     /// The rendered bitmap couldn't be JPEG-encoded.
     Encode(String),
@@ -40,7 +92,7 @@ pub enum RenderError {
 impl fmt::Display for RenderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RenderError::Unavailable(e) => write!(f, "pdfium unavailable: {e}"),
+            RenderError::Unavailable(e) => write!(f, "PDF engine unavailable: {e}"),
             RenderError::Render(e) => write!(f, "pdf render failed: {e}"),
             RenderError::Encode(e) => write!(f, "cover JPEG encode failed: {e}"),
         }
@@ -50,105 +102,23 @@ impl fmt::Display for RenderError {
 impl std::error::Error for RenderError {}
 
 /// Render one PDF page to a JPEG, scaled to `target_width_px` wide (height
-/// follows the page aspect ratio). `page_index` is 0-based; `quality` is the
-/// JPEG quality 1..=100.
-///
-/// Returns the JPEG bytes, or a [`RenderError`] the caller can downgrade to
-/// "no cover". The whole PDF is passed by slice; only the one page is rendered.
-#[cfg(not(target_arch = "wasm32"))]
+/// follows the page aspect). `page_index` is 0-based; `quality` is 1..=100.
+/// Returns the JPEG bytes, or a [`RenderError`] the caller downgrades to
+/// "no cover".
+#[cfg(target_os = "macos")]
 pub fn render_pdf_page_jpeg(
     pdf_bytes: &[u8],
     page_index: usize,
     target_width_px: u32,
     quality: u8,
 ) -> Result<Vec<u8>, RenderError> {
-    use pdfium_render::prelude::*;
-
-    // Serialize the whole render: pdfium can't have two document operations in
-    // flight at once (see RENDER_LOCK). Held until this function returns.
-    let _render_guard = native::render_guard();
-    let pdfium = native::pdfium()?;
-    let doc = pdfium
-        .load_pdf_from_byte_slice(pdf_bytes, None)
-        .map_err(|e| RenderError::Render(e.to_string()))?;
-
-    // `PdfPageIndex` (and `Pixels`) are `c_int` (i32) in pdfium-render.
-    let index: i32 = page_index
-        .try_into()
-        .map_err(|_| RenderError::Render(format!("page index {page_index} out of range")))?;
-    let page = doc
-        .pages()
-        .get(index)
-        .map_err(|e| RenderError::Render(format!("page {page_index}: {e}")))?;
-
-    let width: i32 = target_width_px.try_into().unwrap_or(i32::MAX);
-    let config = PdfRenderConfig::new()
-        .set_target_width(width)
-        .set_format(PdfBitmapFormat::BGRA)
-        .render_form_data(false);
-    let bitmap = page
-        .render_with_config(&config)
-        .map_err(|e| RenderError::Render(e.to_string()))?;
-
-    let w = bitmap.width();
-    let h = bitmap.height();
-    if w <= 0 || h <= 0 || w > u16::MAX as i32 || h > u16::MAX as i32 {
-        return Err(RenderError::Render(format!("unusable bitmap size {w}x{h}")));
-    }
-    let (w, h) = (w as usize, h as usize);
-
-    // Normalize to true R,G,B,A. pdfium-render reverses byte order during
-    // render, so `as_raw_bytes()` with a BGRA format actually yields RGBA —
-    // encoding that as BGRA swaps red/blue (a blue cover came out brown).
-    // `as_rgba_bytes()` accounts for the format + reverse flag authoritatively,
-    // so colors are always correct.
-    let raw = bitmap.as_rgba_bytes();
-
-    // The buffer is normally tightly packed (stride == w*4), but strip any row
-    // padding defensively so we read exact rows.
-    let row = w * 4;
-    let expected = row * h;
-    let rgba = if raw.len() == expected {
-        raw
-    } else {
-        if h == 0 || raw.len() / h < row {
-            return Err(RenderError::Render(format!(
-                "short bitmap buffer: {} bytes for {w}x{h}",
-                raw.len()
-            )));
-        }
-        let stride = raw.len() / h;
-        let mut packed = Vec::with_capacity(expected);
-        for y in 0..h {
-            let start = y * stride;
-            packed.extend_from_slice(&raw[start..start + row]);
-        }
-        packed
-    };
-
-    // Composite over white and drop alpha. pdfium leaves unpainted areas
-    // transparent (straight alpha); JPEG has no alpha, so without this a PDF
-    // whose page background isn't explicitly painted would get black margins.
-    let mut rgb: Vec<u8> = Vec::with_capacity(w * h * 3);
-    for px in rgba.chunks_exact(4) {
-        let a = px[3] as u32;
-        let over_white = |c: u8| (((c as u32) * a + 255 * (255 - a)) / 255) as u8;
-        rgb.push(over_white(px[0]));
-        rgb.push(over_white(px[1]));
-        rgb.push(over_white(px[2]));
-    }
-
-    let mut out: Vec<u8> = Vec::with_capacity(128 * 1024);
-    let encoder = jpeg_encoder::Encoder::new(&mut out, quality);
-    encoder
-        .encode(&rgb, w as u16, h as u16, jpeg_encoder::ColorType::Rgb)
-        .map_err(|e| RenderError::Encode(e.to_string()))?;
-    Ok(out)
+    macos::render_page_jpeg(pdf_bytes, page_index, target_width_px, quality)
 }
 
-/// wasm stub: the browser/boko.html cover path needs pdfium.wasm loaded via JS
-/// glue (a documented P2 follow-up). Until then wasm produces a cover-less KFX.
-#[cfg(target_arch = "wasm32")]
+/// Non-macOS stub: rasterization needs a platform PDF engine (PDFKit on macOS;
+/// Poppler on a future Linux build). The wasm/Kindle builds produce a
+/// visual-only KFX (no cover).
+#[cfg(not(target_os = "macos"))]
 pub fn render_pdf_page_jpeg(
     _pdf_bytes: &[u8],
     _page_index: usize,
@@ -156,86 +126,313 @@ pub fn render_pdf_page_jpeg(
     _quality: u8,
 ) -> Result<Vec<u8>, RenderError> {
     Err(RenderError::Unavailable(
-        "wasm pdfium (pdfium.wasm) not yet wired — see pdf-to-kfx.md".into(),
+        "PDF rasterization needs macOS PDFKit — see pdf-to-kfx.md".into(),
     ))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-mod native {
-    use super::RenderError;
-    use pdfium_render::prelude::*;
-    use std::sync::{Mutex, OnceLock};
+/// Extract every page's selectable text layer from the PDF, in page order.
+///
+/// Returns one [`PageText`] per page (empty `runs` for a page with no
+/// extractable text — e.g. a scanned/image-only page). A whole-document
+/// [`RenderError`] lets the caller ship an embed-only, visual-only KFX.
+#[cfg(target_os = "macos")]
+pub fn extract_pdf_text(pdf_bytes: &[u8]) -> Result<Vec<PageText>, RenderError> {
+    macos::extract_text(pdf_bytes)
+}
 
-    // pdfium keeps its bindings in a process-global (`Pdfium::new` sets a global
-    // `OnceCell`), so we bind once and reuse. With the `thread_safe` feature
-    // `Pdfium` is `Sync`, so it can live in a static; the bindings are
-    // mutex-guarded for the Sidle worker's threads.
-    static PDFIUM: OnceLock<Pdfium> = OnceLock::new();
-    static BIND_LOCK: Mutex<()> = Mutex::new(());
+/// Non-macOS stub: text extraction needs a platform PDF engine. The wasm/Kindle
+/// builds produce a visual-only KFX (no selectable text).
+#[cfg(not(target_os = "macos"))]
+pub fn extract_pdf_text(_pdf_bytes: &[u8]) -> Result<Vec<PageText>, RenderError> {
+    Err(RenderError::Unavailable(
+        "PDF text extraction needs macOS PDFKit — see pdf-to-kfx.md".into(),
+    ))
+}
 
-    // pdfium is NOT thread-safe across a *sequence* of calls — a render is many
-    // FFI calls (load doc → get page → rasterize), and the `thread_safe` feature
-    // only guards each individual call, not the whole sequence. Two renders
-    // interleaving on different documents corrupt pdfium's global state and one
-    // deadlocks *inside* a held FFI lock, wedging every later render process-wide
-    // (the reader's prefetch fires several renders at once → freeze; white pages
-    // after reopen). So every document operation takes this lock for its whole
-    // duration: pdfium sees one caller at a time.
-    static RENDER_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::{PageText, RenderError, StyleSeg, TextRun};
+    use core::ffi::c_void;
+    use objc2::AnyThread; // brings `PDFDocument::alloc()` into scope
+    use objc2::rc::{Retained, autoreleasepool};
+    use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo};
+    use objc2_foundation::NSData;
+    use objc2_pdf_kit::{PDFDisplayBox, PDFDocument, PDFPage};
 
-    /// Hold for the entire duration of any pdfium document operation (render /
-    /// text). Poison-tolerant: a panicked render must not wedge the lock forever.
-    pub(super) fn render_guard() -> std::sync::MutexGuard<'static, ()> {
-        RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    /// KFX fixed-layout unit: points × 100.
+    const SCALE: f32 = 100.0;
+
+    /// Parse the in-memory PDF into a `PDFDocument` (a copy — PDFKit owns it).
+    fn load(pdf_bytes: &[u8]) -> Result<Retained<PDFDocument>, RenderError> {
+        let data = NSData::with_bytes(pdf_bytes);
+        // SAFETY: `data` outlives the init call; PDFKit copies what it needs.
+        unsafe { PDFDocument::initWithData(PDFDocument::alloc(), &data) }
+            .ok_or_else(|| RenderError::Render("PDFKit could not parse the PDF".into()))
     }
 
-    pub(super) fn pdfium() -> Result<&'static Pdfium, RenderError> {
-        if let Some(p) = PDFIUM.get() {
-            return Ok(p);
-        }
-        // Bind under a lock so `Pdfium::new` (which sets pdfium's process-global
-        // bindings, and panics if set twice) runs at most once. We cache only
-        // SUCCESS — pdfium's global is set only when binding fully succeeds, so a
-        // failed attempt leaves it unset and a later call retries. That means
-        // staging the dylib after a cold failure works without restarting the
-        // process (the dev `cargo run -p sidle` footgun).
-        let _guard = BIND_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(p) = PDFIUM.get() {
-            return Ok(p);
-        }
-        let pdfium = bind().map_err(RenderError::Unavailable)?;
-        let _ = PDFIUM.set(pdfium);
-        Ok(PDFIUM.get().expect("just set"))
+    pub(super) fn render_page_jpeg(
+        pdf_bytes: &[u8],
+        page_index: usize,
+        target_width_px: u32,
+        quality: u8,
+    ) -> Result<Vec<u8>, RenderError> {
+        autoreleasepool(|_| {
+            let doc = load(pdf_bytes)?;
+            let page = unsafe { doc.pageAtIndex(page_index) }
+                .ok_or_else(|| RenderError::Render(format!("no page {page_index}")))?;
+
+            let bounds = unsafe { page.boundsForBox(PDFDisplayBox::MediaBox) };
+            let (pw, ph) = (bounds.size.width, bounds.size.height);
+            if pw <= 0.0 || ph <= 0.0 {
+                return Err(RenderError::Render(format!("unusable page size {pw}x{ph}")));
+            }
+            let scale = target_width_px as f64 / pw;
+            let out_w = target_width_px as usize;
+            let out_h = ((ph * scale).round() as usize).max(1);
+            if out_w > u16::MAX as usize || out_h > u16::MAX as usize {
+                return Err(RenderError::Render(format!("bitmap too large {out_w}x{out_h}")));
+            }
+
+            // RGBA bitmap we own; PDFKit draws into it. Premultiplied alpha — we
+            // composite over white below (pages don't paint their paper).
+            let bytes_per_row = out_w * 4;
+            let mut buf = vec![0u8; bytes_per_row * out_h];
+            let cs = CGColorSpace::new_device_rgb()
+                .ok_or_else(|| RenderError::Render("no RGB colorspace".into()))?;
+            let ctx_owned = unsafe {
+                CGBitmapContextCreate(
+                    buf.as_mut_ptr() as *mut c_void,
+                    out_w,
+                    out_h,
+                    8,
+                    bytes_per_row,
+                    Some(&cs),
+                    CGImageAlphaInfo::PremultipliedLast.0,
+                )
+            }
+            .ok_or_else(|| RenderError::Render("CGBitmapContext create failed".into()))?;
+            let ctx: &CGContext = &ctx_owned;
+
+            // Points → pixels, accounting for a non-(0,0) MediaBox origin. Both
+            // PDF and the bitmap context use a bottom-left origin, so the page
+            // draws upright and the buffer reads top-row-first.
+            CGContext::scale_ctm(Some(ctx), scale, scale);
+            CGContext::translate_ctm(Some(ctx), -bounds.origin.x, -bounds.origin.y);
+            unsafe { page.drawWithBox_toContext(PDFDisplayBox::MediaBox, ctx) };
+            drop(ctx_owned); // flush + release before we read `buf`
+
+            // Composite premultiplied-RGBA over white, drop alpha → RGB. For
+            // premultiplied colour `sv = c*a/255`, over white = `sv + (255 - a)`.
+            let mut rgb: Vec<u8> = Vec::with_capacity(out_w * out_h * 3);
+            for px in buf.chunks_exact(4) {
+                let a = px[3] as u32;
+                let over_white = |sv: u8| ((sv as u32) + (255 - a)).min(255) as u8;
+                rgb.push(over_white(px[0]));
+                rgb.push(over_white(px[1]));
+                rgb.push(over_white(px[2]));
+            }
+
+            let mut out: Vec<u8> = Vec::with_capacity(128 * 1024);
+            jpeg_encoder::Encoder::new(&mut out, quality)
+                .encode(&rgb, out_w as u16, out_h as u16, jpeg_encoder::ColorType::Rgb)
+                .map_err(|e| RenderError::Encode(e.to_string()))?;
+            Ok(out)
+        })
     }
 
-    /// Bind to `libpdfium`, trying in order: `BOKO_PDFIUM_LIB`, a copy beside the
-    /// running executable, then the system library path. Runs once (OnceLock).
-    fn bind() -> Result<Pdfium, String> {
-        let mut errors = Vec::new();
-
-        if let Ok(path) = std::env::var("BOKO_PDFIUM_LIB") {
-            match Pdfium::bind_to_library(&path) {
-                Ok(b) => return Ok(Pdfium::new(b)),
-                Err(e) => errors.push(format!("BOKO_PDFIUM_LIB={path}: {e}")),
+    pub(super) fn extract_text(pdf_bytes: &[u8]) -> Result<Vec<PageText>, RenderError> {
+        autoreleasepool(|_| {
+            let doc = load(pdf_bytes)?;
+            let n = unsafe { doc.pageCount() };
+            let mut pages = Vec::with_capacity(n);
+            for i in 0..n {
+                let page = unsafe { doc.pageAtIndex(i) };
+                pages.push(match page {
+                    Some(p) => extract_page(&p),
+                    None => PageText::default(),
+                });
             }
+            Ok(pages)
+        })
+    }
+
+    /// One UTF-16 unit with its page-space box (points, bottom-left origin).
+    struct Unit {
+        unit: u16,
+        left: f32,
+        right: f32,
+        top: f32,
+        bottom: f32,
+        boxed: bool,
+    }
+
+    /// True if a lone UTF-16 unit is whitespace. Surrogate halves (astral chars)
+    /// aren't whitespace, so testing per-unit is safe.
+    fn is_space(u: u16) -> bool {
+        char::from_u32(u as u32).is_some_and(|c| c.is_whitespace())
+    }
+
+    fn extract_page(page: &PDFPage) -> PageText {
+        let bounds = unsafe { page.boundsForBox(PDFDisplayBox::MediaBox) };
+        // The page's top-left in PDF space (Y up) and left edge — KFX positions
+        // are measured from here, Y down.
+        let box_left = bounds.origin.x as f32;
+        let box_top = (bounds.origin.y + bounds.size.height) as f32;
+
+        let text = match unsafe { page.string() } {
+            Some(s) => s.to_string(),
+            None => return PageText::default(),
+        };
+        // PDFKit's `string` inserts line/fragment separators (\n, \r) that the
+        // `characterBoundsAtIndex` index space does NOT contain — leaving them in
+        // drifts the glyph↔bounds alignment by one per line. Drop them so
+        // `utf16[i]` lines up with `characterBoundsAtIndex(i)`; visual lines are
+        // recovered from geometry below, and real inter-word spaces are kept.
+        let utf16: Vec<u16> = text
+            .encode_utf16()
+            .filter(|&u| u != 0x000A && u != 0x000D)
+            .collect();
+        // `numberOfCharacters` is the glyph (bounds) count; clamp defensively.
+        let n = utf16.len().min(unsafe { page.numberOfCharacters() });
+        if n == 0 {
+            return PageText::default();
         }
 
-        if let Ok(exe) = std::env::current_exe()
-            && let Some(dir) = exe.parent()
-        {
-            let candidate = Pdfium::pdfium_platform_library_name_at_path(dir);
-            match Pdfium::bind_to_library(&candidate) {
-                Ok(b) => return Ok(Pdfium::new(b)),
-                Err(e) => errors.push(format!("{}: {e}", candidate.display())),
-            }
+        let mut units: Vec<Unit> = Vec::with_capacity(n);
+        for (i, &u) in utf16.iter().enumerate().take(n) {
+            let r = unsafe { page.characterBoundsAtIndex(i as isize) };
+            let w = r.size.width as f32;
+            let h = r.size.height as f32;
+            let left = r.origin.x as f32;
+            let bottom = r.origin.y as f32;
+            units.push(Unit {
+                unit: u,
+                left,
+                right: left + w,
+                top: bottom + h,
+                bottom,
+                boxed: w > 0.0 && h > 0.0,
+            });
         }
 
-        match Pdfium::bind_to_system_library() {
-            Ok(b) => Ok(Pdfium::new(b)),
-            Err(e) => {
-                errors.push(format!("system: {e}"));
-                Err(errors.join("; "))
+        // Turn one slice of units (a visual line) into a TextRun, or None if it
+        // has no boxed, non-whitespace content.
+        fn finish(us: &[Unit], box_left: f32, box_top: f32) -> Option<TextRun> {
+            let raw: Vec<u16> = us.iter().map(|u| u.unit).collect();
+            let content = String::from_utf16_lossy(&raw);
+            if content.trim().is_empty() {
+                return None;
             }
+            let boxed: Vec<&Unit> = us.iter().filter(|u| u.boxed).collect();
+            if boxed.is_empty() {
+                return None;
+            }
+            let min_left = boxed.iter().map(|u| u.left).fold(f32::INFINITY, f32::min);
+            let max_right = boxed.iter().map(|u| u.right).fold(f32::NEG_INFINITY, f32::max);
+            let max_top = boxed.iter().map(|u| u.top).fold(f32::NEG_INFINITY, f32::max);
+            let min_bottom = boxed.iter().map(|u| u.bottom).fold(f32::INFINITY, f32::min);
+
+            let left = ((min_left - box_left) * SCALE).round() as i64;
+            let top = ((box_top - max_top) * SCALE).round() as i64;
+            let width = ((max_right - min_left) * SCALE).round() as i64;
+            let height = ((max_top - min_bottom) * SCALE).round() as i64;
+            let baseline = ((box_top - min_bottom) * SCALE).round() as i64;
+
+            // Contiguous word / whitespace segments, each `[start, start+len)` in
+            // UTF-16 units, with the left/right ink extent of its boxed chars
+            // (a whitespace run carries no ink box, so its extent stays empty).
+            struct Seg {
+                start: usize,
+                len: usize,
+                space: bool,
+                l: f32,
+                r: f32,
+            }
+            let mut segs: Vec<Seg> = Vec::new();
+            let mut i = 0usize;
+            while i < us.len() {
+                let space = is_space(us[i].unit);
+                let start = i;
+                let mut l = f32::INFINITY;
+                let mut r = f32::NEG_INFINITY;
+                while i < us.len() && is_space(us[i].unit) == space {
+                    if us[i].boxed {
+                        l = l.min(us[i].left);
+                        r = r.max(us[i].right);
+                    }
+                    i += 1;
+                }
+                segs.push(Seg { start, len: i - start, space, l, r });
+            }
+
+            // A word's width is its own ink extent; a space's width is the gap
+            // between the neighbouring words (PDFKit gives spaces no ink box, so
+            // their advance has to come from the surrounding glyphs).
+            let words = segs
+                .iter()
+                .enumerate()
+                .map(|(k, s)| {
+                    let width = if !s.space && s.r > s.l {
+                        ((s.r - s.l) * SCALE).round() as i64
+                    } else if s.space {
+                        let prev_r = segs[..k].iter().rev().find_map(|p| p.r.is_finite().then_some(p.r));
+                        let next_l = segs[k + 1..].iter().find_map(|p| p.l.is_finite().then_some(p.l));
+                        match (prev_r, next_l) {
+                            (Some(pr), Some(nl)) if nl > pr => ((nl - pr) * SCALE).round() as i64,
+                            _ => 0,
+                        }
+                    } else {
+                        0
+                    };
+                    StyleSeg {
+                        offset: s.start,
+                        length: s.len,
+                        width,
+                        is_word: !s.space,
+                    }
+                })
+                .collect();
+
+            Some(TextRun {
+                content,
+                left,
+                top,
+                width,
+                height,
+                baseline,
+                words,
+            })
         }
+
+        // Group units into visual lines by VERTICAL OVERLAP: a char whose whole
+        // box sits below the current line's lowest point starts a new (lower)
+        // line. This is robust to descenders (which dip the bottom but keep their
+        // top within the line) where a baseline-jump threshold over-splits. Run
+        // granularity only needs to track lines — selection/search read the
+        // per-word geometry above, not run boundaries.
+        let mut runs: Vec<TextRun> = Vec::new();
+        let mut cur: Vec<Unit> = Vec::new();
+        let mut line_bottom: Option<f32> = None;
+        for u in units {
+            if u.boxed {
+                match line_bottom {
+                    Some(lb) if u.top < lb && !cur.is_empty() => {
+                        if let Some(r) = finish(&cur, box_left, box_top) {
+                            runs.push(r);
+                        }
+                        cur = Vec::new();
+                        line_bottom = Some(u.bottom);
+                    }
+                    Some(lb) => line_bottom = Some(lb.min(u.bottom)),
+                    None => line_bottom = Some(u.bottom),
+                }
+            }
+            cur.push(u);
+        }
+        if let Some(r) = finish(&cur, box_left, box_top) {
+            runs.push(r);
+        }
+
+        PageText { runs }
     }
 }
