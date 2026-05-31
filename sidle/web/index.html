@@ -9,9 +9,15 @@
   <body>
     <header class="toolbar">
       <div class="toolbar-group">
-        <button id="btn-add" class="btn">Add&hellip;</button>
+        <div class="seg" role="tablist" aria-label="Section">
+          <button id="section-books" class="seg-btn active" role="tab" aria-selected="true">Books</button>
+          <button id="section-notes" class="seg-btn" role="tab" aria-selected="false">Notes</button>
+        </div>
         <div class="toolbar-sep" aria-hidden="true"></div>
-        <div class="seg" role="tablist" aria-label="View">
+        <button id="btn-add" class="btn">Add&hellip;</button>
+        <button id="btn-notes-import" class="btn" hidden>Import notebooks&hellip;</button>
+        <div class="toolbar-sep" id="view-sep" aria-hidden="true"></div>
+        <div class="seg" id="view-seg" role="tablist" aria-label="View">
           <button id="view-gallery" class="seg-btn active" role="tab" aria-selected="true">Gallery</button>
           <button id="view-list" class="seg-btn" role="tab" aria-selected="false">List</button>
         </div>
@@ -156,6 +162,18 @@
         </table>
         <div id="list-empty" class="empty" hidden>
           <p>Drop an EPUB, KFX, or AZW3 anywhere to import.</p>
+        </div>
+      </section>
+
+      <section id="notes" class="view" aria-label="Notes" hidden>
+        <div id="notes-grid" class="notes-grid"></div>
+        <div id="notes-empty" class="empty" hidden>
+          <p>No notebooks yet.</p>
+          <p>
+            <button type="button" id="notes-empty-import" class="btn">
+              Import from a .notebooks folder&hellip;
+            </button>
+          </p>
         </div>
       </section>
     </main>
@@ -531,8 +549,24 @@
       </div>
     </div>
 
+    <div id="notebook-view" class="notebook-view" hidden>
+      <header class="notebook-topbar">
+        <button id="notebook-close" class="reader-btn" title="Close (Esc)" aria-label="Close notebook">←</button>
+        <div id="notebook-title" class="reader-title"></div>
+        <div class="notebook-topbar-right">
+          <span id="notebook-pageinfo" class="notebook-pageinfo"></span>
+        </div>
+      </header>
+      <div id="notebook-stage" class="notebook-stage">
+        <div id="notebook-page-host" class="notebook-page-host"></div>
+        <button id="notebook-nav-left" class="reader-nav-zone reader-nav-left" aria-label="Previous page"><span aria-hidden="true">‹</span></button>
+        <button id="notebook-nav-right" class="reader-nav-zone reader-nav-right" aria-label="Next page"><span aria-hidden="true">›</span></button>
+      </div>
+    </div>
+
     <script src="api.js"></script>
     <script src="library.js"></script>
+    <script src="notebooks.js"></script>
     <script type="module" src="reader.js"></script>
   </body>
 </html>

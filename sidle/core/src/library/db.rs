@@ -79,7 +79,9 @@ pub struct BookRow {
 /// near the end of [`migrate`].
 /// v3: added `books.pdf_path` — the PDF side of a PDF↔KFX book (PDF-backed
 /// container KFX). See .claude/plans/pdf-to-kfx.md.
-pub const SCHEMA_VERSION: i64 = 3;
+/// v4: added the `notebooks` table — Scribe handwritten-notebook backup +
+/// render. See .claude/plans/scribe-notebook-backup.md.
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -391,6 +393,23 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             device_serial TEXT NOT NULL DEFAULT '',
             updated_at    TEXT NOT NULL,
             PRIMARY KEY (book_id, source, device_serial)
+        )"#,
+        [],
+    )?;
+
+    // Scribe handwritten notebooks (.nbk → SVG). ADDITIVE and precious: created
+    // here and never part of the destructive reset above. Keyed by the device
+    // `.notebooks/<uuid>/` dir name; files live under `notebooks/<uuid>/`. Title
+    // is user-editable (titles are cloud-only, so there's no offline source);
+    // `nbk_sha256` change-detects an edited notebook so re-import re-extracts.
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS notebooks (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid        TEXT NOT NULL UNIQUE,
+            title       TEXT NOT NULL DEFAULT 'Notebook',
+            page_count  INTEGER NOT NULL DEFAULT 0,
+            nbk_sha256  TEXT,
+            imported_at TEXT NOT NULL
         )"#,
         [],
     )?;
@@ -1009,6 +1028,115 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         kfx_sha256: row.get(20)?,
         pdf_path: resolve_opt(root, row.get(21)?),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Notebooks (Scribe handwriting; see .claude/plans/scribe-notebook-backup.md).
+// The table lives in `migrate` outside the destructive reset.
+// ---------------------------------------------------------------------------
+
+/// One stored Scribe notebook. Files live at `notebooks/<uuid>/` (derived from
+/// `uuid` via [`crate::library::LibraryPaths`], not stored here).
+#[derive(Debug, Clone, Serialize)]
+pub struct NotebookRow {
+    pub id: i64,
+    pub uuid: String,
+    pub title: String,
+    pub page_count: i64,
+    /// SHA-256 of the backed-up `nbk` bytes — change-detects an edited notebook.
+    pub nbk_sha256: Option<String>,
+    pub imported_at: String,
+}
+
+const SELECT_NOTEBOOKS: &str =
+    "SELECT id, uuid, title, page_count, nbk_sha256, imported_at FROM notebooks";
+
+fn row_to_notebook(row: &rusqlite::Row<'_>) -> rusqlite::Result<NotebookRow> {
+    Ok(NotebookRow {
+        id: row.get(0)?,
+        uuid: row.get(1)?,
+        title: row.get(2)?,
+        page_count: row.get(3)?,
+        nbk_sha256: row.get(4)?,
+        imported_at: row.get(5)?,
+    })
+}
+
+pub fn list_notebooks(conn: &Connection) -> rusqlite::Result<Vec<NotebookRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "{SELECT_NOTEBOOKS} ORDER BY imported_at DESC, id DESC"
+    ))?;
+    stmt.query_map([], row_to_notebook)?.collect()
+}
+
+pub fn get_notebook(conn: &Connection, id: i64) -> rusqlite::Result<Option<NotebookRow>> {
+    conn.query_row(
+        &format!("{SELECT_NOTEBOOKS} WHERE id = ?1"),
+        params![id],
+        row_to_notebook,
+    )
+    .optional()
+}
+
+pub fn get_notebook_by_uuid(
+    conn: &Connection,
+    uuid: &str,
+) -> rusqlite::Result<Option<NotebookRow>> {
+    conn.query_row(
+        &format!("{SELECT_NOTEBOOKS} WHERE uuid = ?1"),
+        params![uuid],
+        row_to_notebook,
+    )
+    .optional()
+}
+
+/// Insert a notebook (default title "Notebook") or, if its uuid already exists,
+/// update its page count / content hash / import time — the user-set title is
+/// preserved across re-imports. Returns the row id.
+pub fn upsert_notebook(
+    conn: &Connection,
+    uuid: &str,
+    page_count: i64,
+    nbk_sha256: &str,
+    imported_at: &str,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        r#"INSERT INTO notebooks (uuid, title, page_count, nbk_sha256, imported_at)
+            VALUES (?1, 'Notebook', ?2, ?3, ?4)
+            ON CONFLICT(uuid) DO UPDATE SET
+                page_count  = excluded.page_count,
+                nbk_sha256  = excluded.nbk_sha256,
+                imported_at = excluded.imported_at"#,
+        params![uuid, page_count, nbk_sha256, imported_at],
+    )?;
+    conn.query_row(
+        "SELECT id FROM notebooks WHERE uuid = ?1",
+        params![uuid],
+        |r| r.get(0),
+    )
+}
+
+pub fn rename_notebook(conn: &Connection, id: i64, title: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE notebooks SET title = ?1 WHERE id = ?2",
+        params![title, id],
+    )?;
+    Ok(())
+}
+
+/// Delete a notebook row, returning its uuid (so the caller removes the files).
+pub fn remove_notebook(conn: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
+    let uuid: Option<String> = conn
+        .query_row(
+            "SELECT uuid FROM notebooks WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if uuid.is_some() {
+        conn.execute("DELETE FROM notebooks WHERE id = ?1", params![id])?;
+    }
+    Ok(uuid)
 }
 
 // ---------------------------------------------------------------------------

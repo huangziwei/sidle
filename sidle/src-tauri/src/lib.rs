@@ -103,6 +103,12 @@ pub fn run() {
             commands::reader::annotation_create,
             commands::reader::annotation_update,
             commands::reader::annotation_delete,
+            commands::notebook::notebook_list,
+            commands::notebook::notebook_page_svg,
+            commands::notebook::notebook_thumbnail,
+            commands::notebook::notebook_rename,
+            commands::notebook::notebook_remove,
+            commands::notebook::notebook_import_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -213,6 +213,48 @@ impl LibraryPaths {
             Err(e) => Err(e),
         }
     }
+
+    // ── Notebooks (Scribe handwriting) ──────────────────────────────────────
+    // Layout: `notebooks/<uuid>/{nbk, cover.png, pages/page-<n>.svg}` — keyed by
+    // the device `.notebooks/<uuid>` dir name (not a content sha; a notebook's
+    // bytes change as it's edited, but its identity is the uuid).
+
+    /// Per-notebook directory: raw `nbk` backup + cover + cached page SVGs.
+    pub fn notebook_dir(&self, uuid: &str) -> PathBuf {
+        self.root.join("notebooks").join(uuid)
+    }
+
+    pub fn notebook_nbk(&self, uuid: &str) -> PathBuf {
+        self.notebook_dir(uuid).join("nbk")
+    }
+
+    /// Device cover thumbnail (PNG). May not exist (cloud-only notebooks).
+    pub fn notebook_cover(&self, uuid: &str) -> PathBuf {
+        self.notebook_dir(uuid).join("cover.png")
+    }
+
+    pub fn notebook_pages_dir(&self, uuid: &str) -> PathBuf {
+        self.notebook_dir(uuid).join("pages")
+    }
+
+    /// Cached SVG for one 0-based page.
+    pub fn notebook_page_svg(&self, uuid: &str, index: usize) -> PathBuf {
+        self.notebook_pages_dir(uuid).join(format!("page-{index}.svg"))
+    }
+
+    /// Create the notebook dir (and its `pages/` subdir).
+    pub fn ensure_notebook(&self, uuid: &str) -> std::io::Result<()> {
+        std::fs::create_dir_all(self.notebook_pages_dir(uuid))
+    }
+
+    /// Remove a notebook's files. `NotFound` is success (idempotent).
+    pub fn remove_notebook(&self, uuid: &str) -> std::io::Result<()> {
+        match std::fs::remove_dir_all(self.notebook_dir(uuid)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// Length of the sha256 prefix used as the on-device filename infix

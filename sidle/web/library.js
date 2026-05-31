@@ -6,6 +6,7 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const state = {
   books: [],
   view: "gallery", // 'gallery' | 'list'
+  section: "books", // 'books' | 'notes' — top-level Books/Notes tab
   sort: { key: "imported_at", asc: false },
   // Facet filters: AND across facets, OR within. Each Set holds the
   // currently-selected values for that facet. See extractFacetValues for
@@ -147,6 +148,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   subscribePullProgress();
   subscribeAnnotationSync();
   subscribeLibraryRowUpdated();
+  // If the user left off in the Notes tab, populate it now that boot is done.
+  if (state.section === "notes" && window.Notebooks) window.Notebooks.show();
 });
 
 function loadPreferences() {
@@ -193,7 +196,9 @@ function loadPreferences() {
   }
   const search = localStorage.getItem("search");
   if (typeof search === "string") state.search = search;
-  applyView();
+  const section = localStorage.getItem("section");
+  if (section === "notes") state.section = "notes";
+  applySection();
 }
 
 function persistPreferences() {
@@ -220,6 +225,11 @@ function wireToolbar() {
   $("#btn-add").addEventListener("click", onAddClick);
   $("#view-gallery").addEventListener("click", () => setView("gallery"));
   $("#view-list").addEventListener("click", () => setView("list"));
+  $("#section-books").addEventListener("click", () => setSection("books"));
+  $("#section-notes").addEventListener("click", () => setSection("notes"));
+  $("#btn-notes-import").addEventListener("click", () => {
+    if (window.Notebooks) window.Notebooks.importFolder();
+  });
 
   $("#btn-settings").addEventListener("click", openSettings);
   $("#settings-close").addEventListener("click", closeSettings);
@@ -251,14 +261,58 @@ function setView(v) {
 }
 
 function applyView() {
+  const notes = state.section === "notes";
+  // Content visibility is driven by `.view.active { display: block }`, an author
+  // rule that OVERRIDES the `hidden` attribute (`[hidden]` is only a UA rule), so
+  // the `active` class — not `hidden` — is what actually shows/hides a section.
+  // It must be cleared on the book views in Notes mode or the gallery shows
+  // through; `hidden` is kept in sync for a11y.
+  const galleryActive = !notes && state.view === "gallery";
+  const listActive = !notes && state.view === "list";
+  // Toolbar toggle buttons reflect the chosen view regardless of section.
   $("#view-gallery").classList.toggle("active", state.view === "gallery");
   $("#view-list").classList.toggle("active", state.view === "list");
   $("#view-gallery").setAttribute("aria-selected", String(state.view === "gallery"));
   $("#view-list").setAttribute("aria-selected", String(state.view === "list"));
-  $("#gallery").classList.toggle("active", state.view === "gallery");
-  $("#list").classList.toggle("active", state.view === "list");
-  $("#gallery").hidden = state.view !== "gallery";
-  $("#list").hidden = state.view !== "list";
+  $("#gallery").classList.toggle("active", galleryActive);
+  $("#list").classList.toggle("active", listActive);
+  $("#gallery").hidden = !galleryActive;
+  $("#list").hidden = !listActive;
+}
+
+// Top-level Books / Notes split. Books shows the gallery/list + filter chrome;
+// Notes shows the Scribe handwritten-notebook grid (owned by notebooks.js) and
+// swaps the toolbar (Add… → Import notebooks…, hides the view toggle + filters).
+function setSection(s) {
+  state.section = s;
+  applySection();
+  localStorage.setItem("section", s);
+  if (window.Notebooks) {
+    if (s === "notes") window.Notebooks.show();
+    else window.Notebooks.hide();
+  }
+}
+
+function applySection() {
+  const notes = state.section === "notes";
+  $("#section-books").classList.toggle("active", !notes);
+  $("#section-notes").classList.toggle("active", notes);
+  $("#section-books").setAttribute("aria-selected", String(!notes));
+  $("#section-notes").setAttribute("aria-selected", String(notes));
+  // Books-only chrome.
+  $("#btn-add").hidden = notes;
+  $("#btn-notes-import").hidden = !notes;
+  $("#view-sep").hidden = notes;
+  $("#view-seg").hidden = notes;
+  $("#filter-bar").hidden = notes;
+  const search = document.querySelector(".filter-search");
+  if (search) search.hidden = notes;
+  // `#notes` uses the same `.view`/`.view.active` system: the `active` class
+  // (not `hidden`) is what `display: block`s it — without it the base
+  // `.view { display: none }` keeps it hidden. applyView() owns gallery/list.
+  $("#notes").classList.toggle("active", notes);
+  $("#notes").hidden = !notes;
+  applyView();
 }
 
 // ---------------------------------------------------------------------------

@@ -2503,3 +2503,124 @@ button {
 .settings-status.error {
   color: var(--accent);
 }
+
+/* ===========================================================================
+   Notes — Scribe handwritten notebooks (Books/Notes tab). Grid reuses the
+   .book-card / .cover primitives; tiles are page-shaped (3:4) instead of the
+   2:3 book cover, and the viewer is a fixed overlay like the reader.
+   =========================================================================== */
+
+.notes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 18px;
+}
+
+/* Scribe page is 15624×20832 (≈ 3:4) — taller-but-wider than a book cover. */
+.notebook-cover {
+  aspect-ratio: 3 / 4;
+  background: var(--bg);
+}
+.notebook-cover img {
+  /* Show the whole page (it's a document, not art to crop). */
+  object-fit: contain;
+}
+.notebook-cover.svg-thumb {
+  padding: 6px;
+  background: #fff;
+}
+.notebook-thumb-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Inline rename input replacing the tile title. */
+.notebook-rename-input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+/* Paged SVG viewer overlay. */
+.notebook-view {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  background: #f4f2ee; /* desk surround behind the white page */
+  color: #1c1a17;
+}
+.notebook-view[hidden] {
+  display: none;
+}
+
+.notebook-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+  height: 44px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: #fff;
+}
+.notebook-topbar .reader-btn {
+  color: #1c1a17;
+}
+.notebook-topbar .reader-btn:hover {
+  background: var(--border);
+}
+.notebook-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.notebook-pageinfo {
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 64px;
+  text-align: right;
+}
+
+.notebook-stage {
+  position: relative;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+.notebook-page-host {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  box-sizing: border-box;
+}
+/* Inline SVG carries a viewBox → intrinsic ratio; max-* contains it to the
+   stage, hugging the white page so the shadow frames the paper. */
+.notebook-page-svg {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+
+/* The reader's nav zones default to invisible-until-hover (opacity:0) and pull
+   their colors from --reader-* vars that only exist inside .reader-view. In the
+   notebook overlay, give them a faint always-on look so multi-page notebooks
+   are obviously pageable. */
+.notebook-view .reader-nav-zone {
+  background: rgba(255, 255, 255, 0.7);
+  color: #1c1a17;
+  opacity: 0.35;
+}
+.notebook-view .reader-nav-zone:hover {
+  opacity: 0.85;
+}
