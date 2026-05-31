@@ -155,7 +155,9 @@ mod macos {
     use core::ffi::c_void;
     use objc2::AnyThread; // brings `PDFDocument::alloc()` into scope
     use objc2::rc::{Retained, autoreleasepool};
-    use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo};
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGPDFBox, CGPDFPage,
+    };
     use objc2_foundation::NSData;
     use objc2_pdf_kit::{PDFDisplayBox, PDFDocument, PDFPage};
 
@@ -180,9 +182,16 @@ mod macos {
             let doc = load(pdf_bytes)?;
             let page = unsafe { doc.pageAtIndex(page_index) }
                 .ok_or_else(|| RenderError::Render(format!("no page {page_index}")))?;
-
-            let bounds = unsafe { page.boundsForBox(PDFDisplayBox::MediaBox) };
-            let (pw, ph) = (bounds.size.width, bounds.size.height);
+            let cgpage = unsafe { page.pageRef() }
+                .ok_or_else(|| RenderError::Render("no CGPDFPage".into()))?;
+            // Size to the **CropBox** — the page region a viewer shows. Use the raw
+            // CGPDF box (unclamped), NOT PDFKit's `boundsForBox`, which clamps the
+            // CropBox to the MediaBox: a malformed PDF whose content sits outside an
+            // offset MediaBox (The Street Was Mine: MediaBox `[76 59 428 651]`,
+            // CropBox `[0 0 504 702]`) needs the CropBox to show all of it. probe_pdf
+            // measures the same CropBox, so the container dims + overlay match.
+            let cropbox = CGPDFPage::box_rect(Some(&cgpage), CGPDFBox::CropBox);
+            let (pw, ph) = (cropbox.size.width, cropbox.size.height);
             if pw <= 0.0 || ph <= 0.0 {
                 return Err(RenderError::Render(format!("unusable page size {pw}x{ph}")));
             }
@@ -214,25 +223,20 @@ mod macos {
             let ctx: &CGContext = &ctx_owned;
 
             // Draw in **absolute** PDF coordinates (origin 0,0, the page's
-            // bottom-left), scaled into the bitmap (sized to the MediaBox
-            // *dimensions*, origin reset to 0). Amazon's KFX text layer positions
-            // glyphs by absolute PDF coordinate over a box of the page's
-            // dimensions — e.g. a page with MediaBox `[9 9 441 657]` stores a glyph
-            // at x=63, not x=54 — and `extract_text` mirrors that (box_left=0,
-            // box_top=size.height). The overlay spans use those coordinates, so
-            // the image must too, or they drift by the MediaBox origin.
+            // bottom-left), scaled into the bitmap (sized to the CropBox dimensions,
+            // origin reset to 0). Amazon's KFX text layer positions glyphs by
+            // absolute PDF coordinate over a box of the page's dimensions — e.g. a
+            // page with MediaBox `[9 9 441 657]` stores a glyph at x=63, not x=54 —
+            // and `extract_text` mirrors that (box_left=0, box_top=CropBox height).
+            // The overlay spans use those coordinates, so the image must too, or
+            // they drift by the box origin.
             //
             // Drawing is via Core Graphics' `CGContextDrawPDFPage`, NOT PDFKit's
-            // `drawWithBox(MediaBox)` — the latter clips to the MediaBox, which
-            // hides content a malformed PDF places in the gutter (outside an
-            // offset MediaBox) even though its text-layer span still shows.
-            // `drawPDFPage` clips only to the CropBox, which contains the content.
+            // `drawWithBox` — the latter clips to the MediaBox, hiding content a
+            // malformed PDF places outside an offset MediaBox even though its
+            // text-layer span still shows. `drawPDFPage` honors the full content.
             CGContext::scale_ctm(Some(ctx), scale, scale);
-            match unsafe { page.pageRef() } {
-                Some(cgpage) => CGContext::draw_pdf_page(Some(ctx), Some(&cgpage)),
-                // Fallback (no CGPDFPage): PDFKit draw — clips to MediaBox.
-                None => unsafe { page.drawWithBox_toContext(PDFDisplayBox::MediaBox, ctx) },
-            }
+            CGContext::draw_pdf_page(Some(ctx), Some(&cgpage));
             drop(ctx_owned); // flush + release before we read `buf`
 
             // Composite premultiplied-RGBA over white, drop alpha → RGB. For
@@ -287,16 +291,18 @@ mod macos {
     }
 
     fn extract_page(page: &PDFPage) -> PageText {
-        let bounds = unsafe { page.boundsForBox(PDFDisplayBox::MediaBox) };
         // KFX positions are **absolute** PDF coordinates over a box of the page's
         // dimensions with the origin reset to (0,0) — matching Amazon's S2K text
         // layer (verified: a page with MediaBox `[9 9 441 657]` stores a glyph at
-        // x=63, the absolute PDF x, not x=54). So measure from x=0 and from the
-        // box *height* (not origin.y+height), Y down. The renderer
-        // (`render_page_jpeg`) draws in the same absolute frame, so glyph boxes
-        // and the rendered image line up.
+        // x=63, the absolute PDF x, not x=54). So measure from x=0 and from the box
+        // *height*, Y down. The box is the **CropBox** (the raw, unclamped CGPDF
+        // box — what the renderer + probe_pdf use), so content outside an offset
+        // MediaBox is still mapped consistently.
+        let box_top = match unsafe { page.pageRef() } {
+            Some(cg) => CGPDFPage::box_rect(Some(&cg), CGPDFBox::CropBox).size.height as f32,
+            None => unsafe { page.boundsForBox(PDFDisplayBox::MediaBox) }.size.height as f32,
+        };
         let box_left = 0.0_f32;
-        let box_top = bounds.size.height as f32;
 
         let text = match unsafe { page.string() } {
             Some(s) => s.to_string(),

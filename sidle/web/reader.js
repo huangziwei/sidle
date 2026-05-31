@@ -205,6 +205,7 @@ function subRange(doc, el, from, to) {
 // Returns [] when the annotation isn't in this section.
 function annotationRects(doc, ann) {
   if (ann.eid_start == null) return [];
+  if (readerMode === "pdf") return pdfAnnotationRects(ann);
   const all = [...doc.querySelectorAll("[data-eid]")];
   if (!all.length) return [];
   const startEl = doc.querySelector(`[data-eid="${ann.eid_start}"]`);
@@ -222,6 +223,50 @@ function annotationRects(doc, ann) {
     const to = el === endEl ? (ann.off_end ?? 0) + 1 : Number.MAX_SAFE_INTEGER;
     const r = subRange(doc, el, from, to);
     if (r) rects.push(...r.getClientRects());
+  }
+  return rects;
+}
+
+// PDF highlight/search rects, computed from the text-layer **spans' own boxes**
+// (`getBoundingClientRect`) rather than a text Range's `getClientRects`. Each
+// span is positioned + sized to its KFX run box, which the renderer aligns to
+// the page image; the Range path instead returns the transparent fallback font's
+// line box, which drifts (notably downward) from the run box. The first/last run
+// is clipped horizontally by char-offset proportion — the transparent text isn't
+// glyph-for-glyph with the image, so proportional is the closest fit. Spans are
+// queried in DOM order (= reading order), so the start→end walk is monotonic.
+function pdfAnnotationRects(ann) {
+  if (ann.eid_start == null) return [];
+  const all = [...document.querySelectorAll(".reader-pdf-text [data-eid]")];
+  if (!all.length) return [];
+  const startEl = document.querySelector(`.reader-pdf-text [data-eid="${ann.eid_start}"]`);
+  const endEl =
+    ann.eid_end != null
+      ? document.querySelector(`.reader-pdf-text [data-eid="${ann.eid_end}"]`)
+      : startEl;
+  let si = startEl ? all.indexOf(startEl) : -1;
+  let ei = endEl ? all.indexOf(endEl) : -1;
+  if (si < 0 && ei < 0) return []; // neither end is on a visible page
+  if (si < 0) si = ei;
+  if (ei < 0) ei = si;
+  if (ei < si) return [];
+  const rects = [];
+  for (let i = si; i <= ei; i++) {
+    const el = all[i];
+    const r = el.getBoundingClientRect();
+    const len = (el.textContent || "").length || 1;
+    let left = r.left;
+    let right = r.right;
+    if (el === startEl && ann.off_start) {
+      left = r.left + (r.width * Math.min(ann.off_start, len)) / len;
+    }
+    if (el === endEl) {
+      const end = Math.min((ann.off_end ?? len - 1) + 1, len);
+      right = r.left + (r.width * end) / len;
+    }
+    if (right > left) {
+      rects.push({ left, top: r.top, right, bottom: r.bottom, width: right - left, height: r.height });
+    }
   }
   return rects;
 }

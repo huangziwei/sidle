@@ -111,15 +111,34 @@ fn deref<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a Object> {
     }
 }
 
-/// Compute a page's displayed size in points: resolve `/MediaBox` (walking the
+/// Compute a page's displayed size in points: resolve the page box (walking the
 /// `/Pages` tree for the inherited value) and apply `/Rotate`.
+///
+/// Prefers `/CropBox` over `/MediaBox` — the CropBox is the region a viewer
+/// displays, and `render.rs` rasterizes it (via the raw, unclamped CGPDF box).
+/// Using it here keeps the container dimensions, the rendered image, and the
+/// text-layer overlay on one coordinate box, including a malformed PDF whose
+/// CropBox is larger than (or offset from) its MediaBox.
 fn page_dimensions(doc: &Document, page_id: ObjectId) -> (f32, f32) {
+    let mut crop: Option<[f32; 4]> = None;
     let mut media: Option<[f32; 4]> = None;
     let mut rotate: i64 = 0;
     let mut found_rotate = false;
 
-    // Walk the page node up through its `/Parent` chain. Both MediaBox and
-    // Rotate are inheritable page-tree attributes.
+    let read_box = |dict: &lopdf::Dictionary, key: &[u8]| -> Option<[f32; 4]> {
+        let arr = deref(doc, dict.get(key).ok()?)?.as_array().ok()?;
+        if arr.len() != 4 {
+            return None;
+        }
+        let v: Vec<f32> = arr
+            .iter()
+            .filter_map(|o| deref(doc, o).and_then(|x| x.as_float().ok()))
+            .collect();
+        (v.len() == 4).then_some([v[0], v[1], v[2], v[3]])
+    };
+
+    // Walk the page node up through its `/Parent` chain. CropBox, MediaBox and
+    // Rotate are all inheritable page-tree attributes.
     let mut node: Option<ObjectId> = Some(page_id);
     let mut seen: HashSet<ObjectId> = HashSet::new();
     while let Some(id) = node {
@@ -130,18 +149,11 @@ fn page_dimensions(doc: &Document, page_id: ObjectId) -> (f32, f32) {
             break;
         };
 
-        if media.is_none()
-            && let Ok(mb) = dict.get(b"MediaBox")
-            && let Some(arr) = deref(doc, mb).and_then(|o| o.as_array().ok())
-            && arr.len() == 4
-        {
-            let v: Vec<f32> = arr
-                .iter()
-                .filter_map(|o| deref(doc, o).and_then(|x| x.as_float().ok()))
-                .collect();
-            if v.len() == 4 {
-                media = Some([v[0], v[1], v[2], v[3]]);
-            }
+        if crop.is_none() {
+            crop = read_box(dict, b"CropBox");
+        }
+        if media.is_none() {
+            media = read_box(dict, b"MediaBox");
         }
 
         if !found_rotate
@@ -155,7 +167,7 @@ fn page_dimensions(doc: &Document, page_id: ObjectId) -> (f32, f32) {
         node = dict.get(b"Parent").and_then(|o| o.as_reference()).ok();
     }
 
-    let [llx, lly, urx, ury] = media.unwrap_or(DEFAULT_MEDIABOX);
+    let [llx, lly, urx, ury] = crop.or(media).unwrap_or(DEFAULT_MEDIABOX);
     let mut w = (urx - llx).abs();
     let mut h = (ury - lly).abs();
 
