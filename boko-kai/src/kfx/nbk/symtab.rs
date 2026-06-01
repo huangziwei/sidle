@@ -39,10 +39,10 @@ impl SymTab {
         let mut import_max: u64 = 0;
         if let Some(IonValue::List(imports)) = field(fields, F_IMPORTS) {
             for imp in imports {
-                if let Some(m) = imp.get(F_MAX_ID).and_then(|v| v.as_int()) {
-                    if m > 0 {
-                        import_max += m as u64;
-                    }
+                if let Some(m) = imp.get(F_MAX_ID).and_then(|v| v.as_int())
+                    && m > 0
+                {
+                    import_max += m as u64;
                 }
             }
         }
@@ -60,11 +60,8 @@ impl SymTab {
     }
 
     /// Resolve a symbol id to its name (base YJ table, then local symbols).
-    /// The id→name counterpart of [`SymTab::id_of`]; used by the upcoming
-    /// template/OCR phases (e.g. resolving `nmdl.template_type` values) and for
-    /// diagnostics. Kept deliberately though the v1 stroke path only needs
-    /// name→id.
-    #[allow(dead_code)]
+    /// The id→name counterpart of [`SymTab::id_of`]; the template layer uses it
+    /// to follow a page's `nmdl.template_id` symbol to its fragment id.
     pub fn name(&self, id: u64) -> Option<&str> {
         if id < self.base {
             symbol_name(id)

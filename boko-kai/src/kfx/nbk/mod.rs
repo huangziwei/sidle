@@ -13,12 +13,14 @@
 //! GPL-3.0-or-later). Gated behind the `nbk` feature: pulls `rusqlite`
 //! (bundled C SQLite, native-only).
 
+mod density;
 mod fingerprint;
 mod kdf;
 mod note_model;
 mod render_svg;
 mod stroke;
 mod symtab;
+mod template;
 
 use std::path::Path;
 

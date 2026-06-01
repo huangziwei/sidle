@@ -13,6 +13,7 @@ use crate::kfx::ion::{IonParser, IonValue};
 
 use super::stroke::decode_stroke_values;
 use super::symtab::SymTab;
+use super::template::{self, Template};
 use super::NbkError;
 
 // Structural YJ symbol ids (stable, below every notebook's local base, so they
@@ -32,6 +33,8 @@ pub struct Stroke {
     pub brush_type: i64,
     pub color: i64,
     pub thickness: f64,
+    /// Seeds the deterministic stipple of the variable-density (pencil) raster.
+    pub random_seed: i64,
     /// `[x0, y0, x1, y1]` in canvas units; point coords are relative to `[x0,y0]`.
     pub bounds: [i64; 4],
     pub num_points: usize,
@@ -49,6 +52,8 @@ pub struct Page {
     pub canvas_width: i64,
     pub canvas_height: i64,
     pub strokes: Vec<Stroke>,
+    /// Ruled/grid/margin background composited under the ink (`None` = blank).
+    pub template: Option<Template>,
 }
 
 /// Resolved local symbol ids for one notebook.
@@ -57,10 +62,12 @@ struct Ids {
     nmdl_stroke: u64,
     canvas_width: u64,
     canvas_height: u64,
+    template_id: u64,
     stroke_bounds: u64,
     color: u64,
     brush_type: u64,
     thickness: u64,
+    random_seed: u64,
     stroke_points: u64,
     num_points: u64,
     position_x: u64,
@@ -80,10 +87,13 @@ impl Ids {
             nmdl_stroke: need("nmdl.stroke")?,
             canvas_width: need("nmdl.canvas_width")?,
             canvas_height: need("nmdl.canvas_height")?,
+            // template_id is optional (a page may be blank); resolve leniently.
+            template_id: sym.id_of("nmdl.template_id").unwrap_or(u64::MAX),
             stroke_bounds: need("nmdl.stroke_bounds")?,
             color: need("nmdl.color")?,
             brush_type: need("nmdl.brush_type")?,
             thickness: need("nmdl.thickness")?,
+            random_seed: sym.id_of("nmdl.random_seed").unwrap_or(u64::MAX),
             stroke_points: need("nmdl.stroke_points")?,
             num_points: need("nmdl.num_points")?,
             position_x: need("nmdl.position_x")?,
@@ -153,10 +163,14 @@ pub fn build_pages(frags: &HashMap<String, Vec<u8>>) -> Result<Vec<Page>, NbkErr
             }
         }
 
+        let template = field(cfields, ids.template_id)
+            .and_then(|tid| template::resolve(tid, &parsed, &sym));
+
         pages.push(Page {
             canvas_width,
             canvas_height,
             strokes,
+            template,
         });
     }
 
@@ -189,24 +203,22 @@ fn process_content<'a>(
             for item in items {
                 process_content(item, parsed, ids, out);
             }
-        } else if let Some(story_ref) = field(fields, STORY_REF).and_then(ref_target) {
-            if let Some(story) = parsed.get(story_ref) {
-                if let Some(sfields) = story.unwrap_annotated().as_struct() {
-                    if let Some(IonValue::List(items)) = field(sfields, STORY_LIST) {
-                        for item in items {
-                            process_content(item, parsed, ids, out);
-                        }
-                    }
-                }
+        } else if let Some(story_ref) = field(fields, STORY_REF).and_then(ref_target)
+            && let Some(story) = parsed.get(story_ref)
+            && let Some(sfields) = story.unwrap_annotated().as_struct()
+            && let Some(IonValue::List(items)) = field(sfields, STORY_LIST)
+        {
+            for item in items {
+                process_content(item, parsed, ids, out);
             }
         }
     }
 
     // Emit if this node is itself a stroke.
-    if field(fields, ids.nmdl_type).and_then(|v| v.as_symbol()) == Some(ids.nmdl_stroke) {
-        if let Some(stroke) = parse_stroke(fields, ids) {
-            out.push(stroke);
-        }
+    if field(fields, ids.nmdl_type).and_then(|v| v.as_symbol()) == Some(ids.nmdl_stroke)
+        && let Some(stroke) = parse_stroke(fields, ids)
+    {
+        out.push(stroke);
     }
 }
 
@@ -225,6 +237,7 @@ fn parse_stroke(fields: &[(u64, IonValue)], ids: &Ids) -> Option<Stroke> {
     let brush_type = field(fields, ids.brush_type).and_then(|v| v.as_int()).unwrap_or(0);
     let color = field(fields, ids.color).and_then(|v| v.as_int()).unwrap_or(0);
     let thickness = field(fields, ids.thickness).and_then(as_f64).unwrap_or(0.0);
+    let random_seed = field(fields, ids.random_seed).and_then(|v| v.as_int()).unwrap_or(0);
 
     let sp = field(fields, ids.stroke_points)?.as_struct()?;
     let num_points = field(sp, ids.num_points)?.as_int()? as usize;
@@ -241,6 +254,7 @@ fn parse_stroke(fields: &[(u64, IonValue)], ids: &Ids) -> Option<Stroke> {
         brush_type,
         color,
         thickness,
+        random_seed,
         bounds,
         num_points,
         position_x,
@@ -264,10 +278,10 @@ fn field(fields: &[(u64, IonValue)], id: u64) -> Option<&IonValue> {
 
 /// A `$598::"id-string"` reference -> the target fragment id.
 fn ref_target(v: &IonValue) -> Option<&str> {
-    if let IonValue::Annotated(anns, inner) = v {
-        if anns.contains(&REF_ANNOT) {
-            return inner.as_string();
-        }
+    if let IonValue::Annotated(anns, inner) = v
+        && anns.contains(&REF_ANNOT)
+    {
+        return inner.as_string();
     }
     None
 }

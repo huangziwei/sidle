@@ -10,6 +10,7 @@
 
 use std::fmt::Write;
 
+use super::density;
 use super::note_model::{Page, Stroke};
 
 const BRUSH_HIGHLIGHTER: i64 = 1;
@@ -24,8 +25,20 @@ pub fn page_to_svg(page: &Page) -> String {
          viewBox=\"0 0 {} {}\">",
         page.canvas_width, page.canvas_height
     );
-    // White page background (templates are a later fidelity pass).
+    // White page background.
     s.push_str("<rect x=\"0\" y=\"0\" width=\"100%\" height=\"100%\" fill=\"white\"/>");
+    // Ruled/grid/margin template, composited under the ink. It is authored at
+    // device-screen scale (its own viewBox), so a nested <svg> rescales it to
+    // fill the high-res page canvas (preserveAspectRatio="none": the aspect
+    // ratios match, so this just fills without distortion).
+    if let Some(t) = &page.template {
+        let _ = write!(
+            s,
+            "<svg x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\" \
+             preserveAspectRatio=\"none\">{}</svg>",
+            page.canvas_width, page.canvas_height, t.width, t.height, t.shapes_svg
+        );
+    }
     for stroke in &page.strokes {
         render_stroke(&mut s, stroke);
     }
@@ -38,10 +51,10 @@ fn render_stroke(s: &mut String, stroke: &Stroke) {
         return;
     }
 
-    let variable_thickness = stroke
-        .thickness_adjust
-        .iter()
-        .any(|&t| t != 100);
+    let variable_thickness = stroke.thickness_adjust.iter().any(|&t| t != 100);
+    // Pencil (variable-density) strokes render as a feathered raster, not a path
+    // — triggered by the data (any density_adjust ≠ 100), not the brush id.
+    let variable_density = stroke.density_adjust.iter().any(|&d| d != 100);
     let base_thickness = stroke.thickness.round() as i64;
     let opacity = if stroke.brush_type == BRUSH_HIGHLIGHTER {
         0.2
@@ -49,8 +62,8 @@ fn render_stroke(s: &mut String, stroke: &Stroke) {
         1.0
     };
 
-    // Build deduplicated points with per-point thickness.
-    let mut points: Vec<(i64, i64, i64)> = Vec::with_capacity(stroke.num_points);
+    // Build deduplicated points with per-point thickness and density.
+    let mut points: Vec<(i64, i64, i64, f64)> = Vec::with_capacity(stroke.num_points);
     let mut last: Option<(i64, i64)> = None;
     for i in 0..stroke.num_points {
         let x = stroke.position_x[i] + stroke.bounds[0];
@@ -62,10 +75,22 @@ fn render_stroke(s: &mut String, stroke: &Stroke) {
         };
         let taf_q = (taf / 10) * 10; // QUANTIZE_THICKNESS
         let t = (stroke.thickness * taf_q as f64 / 100.0).round() as i64;
+        let d = if variable_density {
+            *stroke.density_adjust.get(i).unwrap_or(&100) as f64 / 100.0
+        } else {
+            1.0
+        };
         if last != Some((x, y)) {
-            points.push((x, y, t));
+            points.push((x, y, t, d));
             last = Some((x, y));
         }
+    }
+    if points.is_empty() {
+        return;
+    }
+    if variable_density {
+        density::render(s, stroke, &points);
+        return;
     }
     if points.len() < 2 {
         return;
@@ -102,7 +127,7 @@ fn render_stroke(s: &mut String, stroke: &Stroke) {
         s.push_str("\"/>");
     };
 
-    for (i, &(x, y, t)) in points.iter().enumerate() {
+    for (i, &(x, y, t, _)) in points.iter().enumerate() {
         if i == 0 || Some(t) != prev_t {
             // start a new sub-path
             flush(s, &path, path_t, base_thickness);
@@ -110,7 +135,7 @@ fn render_stroke(s: &mut String, stroke: &Stroke) {
             path_t = t;
             for j in if INCLUDE_PRIOR_LINE_SEGMENT { [2usize, 1] } else { [1, 1] } {
                 if i >= j {
-                    let (px, py, _) = points[i - j];
+                    let (px, py, _, _) = points[i - j];
                     path.push((px, py));
                 }
             }
