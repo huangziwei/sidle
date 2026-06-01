@@ -42,37 +42,33 @@ pub struct SyncProgress {
 /// empty result on a Scribe means they aren't.
 pub fn collect_device_yjr(transport: &dyn Transport) -> Result<Vec<CollectedYjr>> {
     let sidle = TPath::parse("documents/Sidle");
-    let mut collected = Vec::new();
-
-    for entry in transport.list(&sidle)? {
-        if !entry.name.ends_with(".sdr") {
-            continue;
-        }
-        let sdr = sidle.join(&entry.name);
-        // `unwrap_or_default`: a `.sdr` that's somehow a file (or a transient
-        // list failure) is skipped, matching core's `find_sidecar` graceful skip.
-        let listing = transport.list(&sdr).unwrap_or_default();
-        let yjr_name = listing.iter().find(|e| e.name.ends_with(".yjr")).map(|e| e.name.clone());
-        let yjf_name = listing.iter().find(|e| e.name.ends_with(".yjf")).map(|e| e.name.clone());
-        if yjr_name.is_none() && yjf_name.is_none() {
-            continue; // pagination-cache `.sdr` — no annotations, no position
-        }
-        let yjr_bytes = match &yjr_name {
-            Some(n) => Some(transport.read(&sdr.join(n))?),
-            None => None,
-        };
-        let yjf_bytes = match &yjf_name {
-            Some(n) => Some(transport.read(&sdr.join(n))?),
-            None => None,
-        };
-        collected.push(CollectedYjr {
-            sdr_name: entry.name,
-            yjr_bytes,
-            yjf_bytes,
-        });
-    }
-
-    Ok(collected)
+    // Resolve `documents/Sidle` ONCE and read each `.sdr`'s sidecars by handle in
+    // shared sessions (see [`Transport::read_files_in_children`]) — not a
+    // path-based `list` + `read` per `.sdr`, which re-walks the whole Sidle dir on
+    // every call (O(books²), the same blowup the ink walk had). `.yjr.bad_file` is
+    // excluded (it doesn't end in `.yjr`); a `.sdr` with neither sidecar (a
+    // pure pagination cache) yields no matching files and is dropped.
+    let pulled = transport.read_files_in_children(
+        &sidle,
+        &|name| name.ends_with(".sdr"),
+        &|file| file.ends_with(".yjr") || file.ends_with(".yjf"),
+    )?;
+    Ok(pulled
+        .into_iter()
+        .map(|(sdr_name, files)| {
+            let pick = |suffix: &str| {
+                files
+                    .iter()
+                    .find(|(n, _)| n.ends_with(suffix))
+                    .map(|(_, b)| b.clone())
+            };
+            CollectedYjr {
+                sdr_name,
+                yjr_bytes: pick(".yjr"),
+                yjf_bytes: pick(".yjf"),
+            }
+        })
+        .collect())
 }
 
 /// Import annotations off any connected Kindle into the library — mass-storage

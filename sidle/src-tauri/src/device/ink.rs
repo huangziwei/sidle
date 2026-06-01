@@ -45,16 +45,20 @@ pub fn collect_device_ink(
 ) -> Result<Vec<CollectedInk>> {
     let root = TPath::parse(".notebooks");
     // Resolve `.notebooks` ONCE and pull every OUR `nbk` by handle in shared
-    // sessions (see [`Transport::read_leaf_in_children`]) — not a path-based
+    // sessions (see [`Transport::read_files_in_children`]) — not a path-based
     // `read()` per file, which re-walks the whole directory each call (the reason
     // ink sync stayed slow even after pruning orphans down to ~100 entries).
-    let pulled = transport.read_leaf_in_children(&root, "nbk", &|name| {
-        pdoc_asin(name).is_some_and(|id| known_asins.contains(&id))
-    })?;
+    let pulled = transport.read_files_in_children(
+        &root,
+        &|name| pdoc_asin(name).is_some_and(|id| known_asins.contains(&id)),
+        &|file| file == "nbk",
+    )?;
     Ok(pulled
         .into_iter()
-        .filter_map(|(dir_name, nbk_bytes)| {
-            pdoc_asin(&dir_name).map(|asin| CollectedInk { asin, nbk_bytes })
+        .filter_map(|(dir_name, mut files)| {
+            let asin = pdoc_asin(&dir_name)?;
+            let nbk_bytes = files.pop().map(|(_, bytes)| bytes)?; // the single "nbk"
+            Some(CollectedInk { asin, nbk_bytes })
         })
         .collect())
 }
