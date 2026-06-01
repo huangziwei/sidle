@@ -228,3 +228,26 @@ fn as_f64(v: &IonValue) -> Option<f64> {
 fn field(fields: &[(u64, IonValue)], id: u64) -> Option<&IonValue> {
     fields.iter().find(|(k, _)| *k == id).map(|(_, v)| v)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kfx::ion::IonValue::{Float, Int};
+
+    #[test]
+    fn path_opcodes_accept_both_int_and_float() {
+        // Templates encode opcodes as ints; shape paths encode them as floats
+        // (0e0/1e0/…). Both must decode to the same `d` string.
+        let want = "M 0 10 L 20 30";
+        let ints = [Int(0), Int(0), Int(10), Int(1), Int(20), Int(30)];
+        assert_eq!(render_path(&ints), want);
+        let floats = [0.0, 0.0, 10.0, 1.0, 20.0, 30.0].map(Float);
+        assert_eq!(render_path(&floats), want);
+    }
+
+    #[test]
+    fn path_handles_quadratic_and_close() {
+        let cmds = [Float(2.0), Float(1.0), Float(2.0), Float(3.0), Float(4.0), Float(4.0)];
+        assert_eq!(render_path(&cmds), "Q 1 2 3 4 Z");
+    }
+}

@@ -248,3 +248,23 @@ fn as_f64(v: &IonValue) -> Option<f64> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kfx::ion::IonValue::Float;
+
+    #[test]
+    fn matrix_swaps_b_and_c() {
+        // Device affine [a,b,c,d,e,f] is transposed vs SVG: [0,1,-1,0,5,6] must
+        // emit matrix(0 -1 1 0 5 6) (== SVG rotate(-90) about a translated origin).
+        let m = [0.0, 1.0, -1.0, 0.0, 5.0, 6.0].map(Float);
+        assert_eq!(matrix_str(&m).as_deref(), Some("matrix(0 -1 1 0 5 6)"));
+    }
+
+    #[test]
+    fn points_pairs_up_a_flat_vertex_list() {
+        let verts = [1.0, 2.0, -3.5, 4.0].map(Float);
+        assert_eq!(points_str(&verts), "1,2 -3.5,4");
+    }
+}
