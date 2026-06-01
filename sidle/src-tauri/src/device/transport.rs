@@ -152,6 +152,34 @@ pub trait Transport: Send + Sync {
         }
         Ok(deleted)
     }
+    /// Read the file `leaf` from each immediate child directory of `dir` whose
+    /// name `pick` selects, resolving `dir` only ONCE. Returns
+    /// `(child_dir_name, bytes)`; children with no readable / empty `leaf` are
+    /// skipped.
+    ///
+    /// The point is MTP: a path-based [`read`](Self::read) re-walks `dir` from the
+    /// storage root on every call (and reopens the PTP session), so reading N
+    /// files under a big directory like `.notebooks` is O(N × dir-size) — what
+    /// kept ink sync slow even after pruning. The MTP impl resolves `dir` once and
+    /// reads each leaf by handle within a shared session. Default impl
+    /// (mass-storage: local fs, cheap) just lists + `read`s each.
+    fn read_leaf_in_children(
+        &self,
+        dir: &TPath,
+        leaf: &str,
+        pick: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut out = Vec::new();
+        for entry in self.list(dir)? {
+            if entry.is_dir && pick(&entry.name) {
+                match self.read(&dir.join(&entry.name).join(leaf)) {
+                    Ok(bytes) if !bytes.is_empty() => out.push((entry.name, bytes)),
+                    _ => {}
+                }
+            }
+        }
+        Ok(out)
+    }
     /// Existence probe. Unused by the scan-based push/delete path, but kept
     /// as a transport primitive — tests rely on it and a future "is this
     /// file still there" UI check could too.

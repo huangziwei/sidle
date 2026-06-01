@@ -44,39 +44,19 @@ pub fn collect_device_ink(
     known_asins: &HashSet<String>,
 ) -> Result<Vec<CollectedInk>> {
     let root = TPath::parse(".notebooks");
-    let mut out = Vec::new();
-    // TEMP instrumentation: the `.notebooks` listing is suspected to dominate the
-    // sync wait (a global dir of every Send-to-Kindle doc, one GetObjectInfo per
-    // entry, of which only a few are ours). Time the LIST separately from the
-    // per-nbk READs so we know which to optimize. Remove once fixed.
-    let t = std::time::Instant::now();
-    let entries = transport.list(&root).unwrap_or_default();
-    eprintln!(
-        "[sidle/annsync]   .notebooks list: {} entries in {:.2}s",
-        entries.len(),
-        t.elapsed().as_secs_f32()
-    );
-    let t = std::time::Instant::now();
-    let mut reads = 0usize;
-    for entry in entries {
-        let Some(asin) = pdoc_asin(&entry.name) else {
-            continue; // not a `!!PDOC!!` ink dir
-        };
-        if !known_asins.contains(&asin) {
-            continue; // a `!!PDOC!!` dir whose content_id isn't one of our books
-        }
-        let nbk = root.join(&entry.name).join("nbk");
-        reads += 1;
-        match transport.read(&nbk) {
-            Ok(bytes) if !bytes.is_empty() => out.push(CollectedInk { asin, nbk_bytes: bytes }),
-            _ => {} // a PDOC dir with no readable `nbk` — skip
-        }
-    }
-    eprintln!(
-        "[sidle/annsync]   .notebooks reads: {reads} nbk reads in {:.2}s",
-        t.elapsed().as_secs_f32()
-    );
-    Ok(out)
+    // Resolve `.notebooks` ONCE and pull every OUR `nbk` by handle in shared
+    // sessions (see [`Transport::read_leaf_in_children`]) — not a path-based
+    // `read()` per file, which re-walks the whole directory each call (the reason
+    // ink sync stayed slow even after pruning orphans down to ~100 entries).
+    let pulled = transport.read_leaf_in_children(&root, "nbk", &|name| {
+        pdoc_asin(name).is_some_and(|id| known_asins.contains(&id))
+    })?;
+    Ok(pulled
+        .into_iter()
+        .filter_map(|(dir_name, nbk_bytes)| {
+            pdoc_asin(&dir_name).map(|asin| CollectedInk { asin, nbk_bytes })
+        })
+        .collect())
 }
 
 /// Delete orphan `.notebooks/<id>!!PDOC!!notebook` dirs — ink left behind by

@@ -382,6 +382,95 @@ impl Transport for MtpTransport {
         })
     }
 
+    fn read_leaf_in_children(
+        &self,
+        dir: &TPath,
+        leaf: &str,
+        pick: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        // Resolve `dir` ONCE per session and read each matching child's `leaf` by
+        // handle — no per-file re-walk of `dir`. Reads share a session up to the
+        // ~6 MiB per-session cap; crossing it reopens (and re-resolves `dir`,
+        // cheap relative to the bytes moved). `nbk`s are KB-size, so in practice
+        // this is a single session: one `dir` resolve + N small downloads.
+        let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut oversized: Vec<String> = Vec::new(); // leaf > budget → ranged read below
+        {
+            let mut slot = self.session.lock().expect("session lock poisoned");
+            let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+            loop {
+                *slot = None; // fresh session: full budget, fresh (valid) handles
+                let storage = session_storage(&mut slot, self.location_id)?;
+                let need_another = block_on(async {
+                    let Some(parent) = resolve(storage, dir).await? else {
+                        return Ok::<bool, anyhow::Error>(false);
+                    };
+                    let children = storage.list_objects(Some(parent)).await.map_err(map_mtp_err)?;
+                    let mut session_bytes: u64 = 0;
+                    for child in children {
+                        if !child.is_folder()
+                            || done.contains(&child.filename)
+                            || !pick(&child.filename)
+                        {
+                            continue;
+                        }
+                        let obj = storage
+                            .list_objects(Some(child.handle))
+                            .await
+                            .map_err(map_mtp_err)?
+                            .into_iter()
+                            .find(|o| o.filename == leaf && o.is_file());
+                        let Some(obj) = obj else {
+                            done.insert(child.filename.clone()); // no leaf here
+                            continue;
+                        };
+                        if obj.size > SESSION_READ_BUDGET {
+                            // Too big for the single-session batch; pull it ranged
+                            // via the normal `read()` path after the lock releases.
+                            oversized.push(child.filename.clone());
+                            done.insert(child.filename.clone());
+                            continue;
+                        }
+                        if session_bytes > 0 && session_bytes + obj.size > SESSION_READ_BUDGET {
+                            return Ok(true); // budget hit — reopen, continue next pass
+                        }
+                        let mut buf = Vec::with_capacity(obj.size as usize);
+                        let mut got = 0u64;
+                        while got < obj.size {
+                            let want = PARTIAL_CHUNK.min((obj.size - got) as u32);
+                            let bytes = storage
+                                .download_partial(obj.handle, got, want)
+                                .await
+                                .map_err(map_mtp_err)?;
+                            if bytes.is_empty() {
+                                break;
+                            }
+                            buf.extend_from_slice(&bytes);
+                            got += bytes.len() as u64;
+                        }
+                        session_bytes += obj.size;
+                        if !buf.is_empty() {
+                            out.push((child.filename.clone(), buf));
+                        }
+                        done.insert(child.filename.clone());
+                    }
+                    Ok(false)
+                })?;
+                if !need_another {
+                    break;
+                }
+            }
+        } // session lock released before the ranged fallback (which re-locks)
+        for name in oversized {
+            if let Ok(bytes) = self.read(&dir.join(&name).join(leaf)) {
+                if !bytes.is_empty() {
+                    out.push((name, bytes));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn exists(&self, path: &TPath) -> Result<bool> {
         let mut slot = self.session.lock().expect("session lock poisoned");
         let storage = session_storage(&mut slot, self.location_id)?;
