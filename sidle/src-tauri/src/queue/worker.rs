@@ -15,7 +15,9 @@ use crate::cover_fetch;
 use crate::library::LibraryPaths;
 use crate::library::db::{self, BookRow};
 use crate::library::epub_cover;
-use crate::library::import::{extract_cover_from_epub, sha256_of_file, write_bytes_atomic};
+use crate::library::import::{
+    extract_cover_from_epub, extract_cover_from_kfx_bytes, sha256_of_file, write_bytes_atomic,
+};
 use crate::library::kfx_cover;
 use crate::library::paths::format_basename;
 use crate::queue::emit_status;
@@ -489,8 +491,30 @@ fn convert_kfx_to_pdf(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
         .map_err(|e| anyhow::anyhow!("kfx→pdf extract: {e}"))?;
     write_bytes_atomic(&out_path, &pdf)?;
 
+    // Cover sidecar. Import already writes one (it pulls the cover the KFX
+    // carries built-in), so on the normal path the row has it and the worker
+    // leaves it alone; this is the self-sufficient fallback (force-reconvert, or
+    // a row that somehow lacks one). An existing sidecar — including a user's
+    // "Change cover…" — wins; only when there's none do we extract from the KFX.
+    // The PDF-backed container embeds its cover the same way a reflowable one
+    // does, so this recovers it without re-rendering page 1 (which would discard
+    // a custom cover). Best-effort: a coverless KFX just yields no sidecar.
+    let cover_path = match book
+        .cover_path
+        .as_deref()
+        .map(Path::new)
+        .filter(|p| p.exists())
+    {
+        Some(existing) => Some(existing.to_path_buf()),
+        None => extract_cover_from_kfx_bytes(&kfx_bytes).and_then(|(bytes, ext)| {
+            let out = paths.cover(&book.sha256, ext);
+            std::fs::write(&out, &bytes).ok().map(|_| out)
+        }),
+    };
+
     Ok(Produced {
         pdf_path: Some(out_path),
+        cover_path,
         ..Default::default()
     })
 }

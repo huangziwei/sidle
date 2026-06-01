@@ -103,6 +103,26 @@ pub struct TEntry {
 /// mass-storage; `SendObjectInfo`/`SendObject` on MTP).
 pub trait Transport: Send + Sync {
     fn read(&self, path: &TPath) -> Result<Vec<u8>>;
+
+    /// Like [`read`](Self::read), but reports progress as the read advances:
+    /// `on_progress(bytes_read_so_far, total_bytes)` is invoked one or more
+    /// times, ending with `bytes_read_so_far == total_bytes`. For transports
+    /// whose read is slow enough to look hung without a live counter — MTP pulls
+    /// a large object across several PTP sessions (the Scribe's per-session
+    /// cap), so a multi-MiB book takes seconds. The default reads the whole
+    /// object via [`read`](Self::read) and reports a single final tick; only MTP
+    /// overrides it. `total` of 0 means the size wasn't known up front.
+    fn read_with_progress(
+        &self,
+        path: &TPath,
+        on_progress: &dyn Fn(u64, u64),
+    ) -> Result<Vec<u8>> {
+        let bytes = self.read(path)?;
+        let n = bytes.len() as u64;
+        on_progress(n, n);
+        Ok(bytes)
+    }
+
     fn write_atomic(&self, path: &TPath, bytes: &[u8]) -> Result<()>;
     /// Copy a local file into the transport at `dest`. Atomic on success;
     /// no observable `dest` if interrupted mid-copy.

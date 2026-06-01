@@ -187,6 +187,10 @@ async fn ensure_folder(storage: &Storage, path: &TPath) -> Result<Option<ObjectH
 
 impl Transport for MtpTransport {
     fn read(&self, path: &TPath) -> Result<Vec<u8>> {
+        self.read_with_progress(path, &|_, _| {})
+    }
+
+    fn read_with_progress(&self, path: &TPath, on_progress: &dyn Fn(u64, u64)) -> Result<Vec<u8>> {
         let mut slot = self.session.lock().expect("session lock poisoned");
         let mut buf: Vec<u8> = Vec::new();
         loop {
@@ -221,6 +225,9 @@ impl Transport for MtpTransport {
                     }
                     buf.extend_from_slice(&bytes);
                     got += bytes.len() as u64;
+                    // Per-MiB tick so the UI shows the read advancing across the
+                    // session reopens, instead of a long silent gap.
+                    on_progress(got, total);
                 }
                 Ok::<bool, anyhow::Error>(got >= total)
             })?;

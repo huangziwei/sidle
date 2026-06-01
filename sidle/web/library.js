@@ -1475,6 +1475,26 @@ async function ejectDevice() {
   }
 }
 
+// Status-bar feedback for a device orphan import. The backend's read is the
+// slow part (an MTP pull spans several PTP sessions), so we light up the status
+// bar the instant the user clicks — closing the gap that used to look like
+// nothing was happening between the click and the final toast. `importBase` is
+// the label the handler sets ("Importing X…"); the `device:import-progress`
+// listener appends a live MiB counter to it (see `subscribePullProgress`).
+let importBase = null;
+
+function setImportStatus(label) {
+  importBase = label;
+  state.importing = label ? { message: label, failed: false } : null;
+  renderQueue();
+}
+
+// Display name for the status line: drop the extension; the device filename's
+// `_<sha8>` infix is harmless to keep and helps disambiguate.
+function importDisplayName(filename) {
+  return String(filename || "").replace(/\.[^./\\]+$/, "");
+}
+
 async function importAllOrphans() {
   if (!state.device) {
     showToast("no Kindle connected", true);
@@ -1488,19 +1508,27 @@ async function importAllOrphans() {
   let imported = 0;
   let duplicate = 0;
   let failed = 0;
-  for (const r of orphans) {
-    try {
-      const result = await window.api.invoke("device_import_orphan", {
-        filename: r.filename,
-      });
-      if (result.kind === "imported") imported++;
-      else if (result.kind === "duplicate") duplicate++;
-      else failed++;
-    } catch (e) {
-      failed++;
-      console.error("import_orphan failed:", r.filename, e);
+  try {
+    for (let i = 0; i < orphans.length; i++) {
+      const r = orphans[i];
+      setImportStatus(
+        `Importing ${i + 1}/${orphans.length}: ${importDisplayName(r.filename)}…`,
+      );
+      try {
+        const result = await window.api.invoke("device_import_orphan", {
+          filename: r.filename,
+        });
+        if (result.kind === "imported") imported++;
+        else if (result.kind === "duplicate") duplicate++;
+        else failed++;
+      } catch (e) {
+        failed++;
+        console.error("import_orphan failed:", r.filename, e);
+      }
+      btn.textContent = `Importing… ${imported + duplicate + failed}/${orphans.length}`;
     }
-    btn.textContent = `Importing… ${imported + duplicate + failed}/${orphans.length}`;
+  } finally {
+    setImportStatus(null);
   }
   const parts = [];
   if (imported) parts.push(`${imported} imported`);
@@ -1516,13 +1544,16 @@ async function importOrphan(filename) {
     showToast("no Kindle connected", true);
     return;
   }
+  setImportStatus(`Importing ${importDisplayName(filename)}…`);
   let result;
   try {
     result = await window.api.invoke("device_import_orphan", { filename });
   } catch (e) {
+    setImportStatus(null);
     showToast(`import failed: ${e}`, true);
     return;
   }
+  setImportStatus(null);
   if (result.kind === "imported") {
     showToast(`imported: ${filename}`);
   } else if (result.kind === "duplicate") {
@@ -1560,6 +1591,19 @@ function subscribePullProgress() {
     prog.hidden = false;
     prog.textContent = line;
     if (r.kind === "imported") await refresh();
+  });
+
+  // Live byte-progress for a manual orphan import (the per-book "Import" /
+  // "Import all orphans" buttons). The handler sets the base label; here we
+  // append a MiB counter as the device read advances. Gated on `importBase` so
+  // stray events after an import finishes don't resurrect the status line.
+  window.api.listen("device:import-progress", (e) => {
+    const p = e.payload;
+    if (!p || importBase === null) return;
+    const mib = (n) => (n / 1048576).toFixed(1);
+    const suffix = p.total ? `  ·  ${mib(p.done)} / ${mib(p.total)} MiB` : "";
+    state.importing = { message: importBase + suffix, failed: false };
+    renderQueue();
   });
 
   // Status-bar progress counter. The backend emits this once on autopull

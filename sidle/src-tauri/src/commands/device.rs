@@ -373,6 +373,16 @@ pub async fn device_send(
         .map_err(|e| e.to_string())
 }
 
+/// Live progress for a single orphan import, emitted as `device:import-progress`
+/// while the object is pulled off the device. `done`/`total` are byte counts;
+/// `total` is 0 when the size wasn't known up front.
+#[derive(Clone, Serialize)]
+struct ImportProgress {
+    filename: String,
+    done: u64,
+    total: u64,
+}
+
 /// Pull an orphan `.kfx` off the device and into the local library.
 ///
 /// The orphan flow exists for the "I removed it from the library but it's
@@ -396,11 +406,22 @@ pub async fn device_import_orphan(
     let paths = state.paths.clone();
     let queue = state.queue.clone();
     let cell = state.transport.clone();
+    let app_progress = app.clone();
 
     let outer = tokio::task::spawn_blocking(
         move || -> anyhow::Result<(PullResult, Option<i64>)> {
             let on_device = crate::device::TPath::parse("documents/Sidle").join(&filename);
-            let bytes = transport.read(&on_device)?;
+            // Live byte-progress for the slow part: pulling the object off the
+            // device. Over MTP this spans several PTP sessions (the Scribe's
+            // per-session cap) and takes seconds for a multi-MiB book, which
+            // otherwise looks hung between the click and the final toast.
+            let on_progress = |done: u64, total: u64| {
+                let _ = app_progress.emit(
+                    "device:import-progress",
+                    ImportProgress { filename: filename.clone(), done, total },
+                );
+            };
+            let bytes = transport.read_with_progress(&on_device, &on_progress)?;
 
             // Stage to a temp file with the original extension preserved so
             // the import pipeline's extension-based dispatch routes

@@ -25,6 +25,7 @@ pub mod auxiliary;
 pub mod container;
 pub mod context;
 pub mod cover;
+pub mod cover_extract;
 pub mod cover_replace;
 pub mod fragment;
 pub mod image_transcode;

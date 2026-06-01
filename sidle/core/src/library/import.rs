@@ -254,15 +254,18 @@ fn import_one(
         write_bytes_atomic(own_dest, &canonical_bytes)?;
     }
 
-    // 5. Cover sidecar — only when we have EPUB bytes on hand. A KFX/PDF input
-    //    without a pre-existing EPUB defers to the worker; a PDF-backed book has
-    //    no EPUB side at all, so its cover (page 1) waits on P2.
+    // 5. Cover sidecar. A KFX always carries its cover built-in (reflowable
+    //    books embed the EPUB's cover, PDF-backed books the PDF's, and a "Change
+    //    cover…" override replaces either), so pull it straight from the
+    //    container — that gives a PDF-backed re-import a cover (its kfx→pdf side
+    //    has no EPUB to harvest, which is why these used to land cover-less) and
+    //    a reflowable one its cover immediately, instead of after the kfx→epub
+    //    job. A direct PDF import has no embedded cover; its page-1 render waits
+    //    on the pdf→kfx worker.
     let cover_path: Option<PathBuf> = match canonical {
         Canonical::Epub => write_cover_from_epub_bytes(paths, &sha, &canonical_bytes),
-        Canonical::Kfx if partner == Canonical::Epub && other_dest.exists() => fs::read(other_dest)
-            .ok()
-            .and_then(|b| write_cover_from_epub_bytes(paths, &sha, &b)),
-        _ => None,
+        Canonical::Kfx => write_cover_from_kfx_bytes(paths, &sha, &canonical_bytes),
+        Canonical::Pdf => None,
     };
 
     // 6. Insert book row + job.
@@ -336,6 +339,30 @@ pub fn extract_cover_from_epub(epub_bytes: &[u8]) -> Option<(Vec<u8>, &'static s
     }
     let bytes = book.load_asset(&PathBuf::from(&cref)).ok()?;
     Some((bytes, cover_ext_from(&cref)))
+}
+
+/// KFX parallel of [`write_cover_from_epub_bytes`]: persist the cover a KFX
+/// carries built-in as the `cover.<ext>` sidecar + picker thumbnail. Best-effort
+/// — returns `None` (no sidecar written) for a coverless or unparseable KFX.
+fn write_cover_from_kfx_bytes(
+    paths: &LibraryPaths,
+    sha: &str,
+    kfx_bytes: &[u8],
+) -> Option<PathBuf> {
+    let (bytes, ext) = extract_cover_from_kfx_bytes(kfx_bytes)?;
+    let out = paths.cover(sha, ext);
+    fs::write(&out, &bytes).ok()?;
+    let _ = super::thumbnail::ensure_thumbnail(paths, sha, &out);
+    Some(out)
+}
+
+/// Pull the cover bytes (and extension) out of an in-memory KFX. Mirrors
+/// [`extract_cover_from_epub`] for the KFX side; the container surgery lives in
+/// boko (`kfx::cover_extract`). A load error or a coverless container → `None`.
+pub fn extract_cover_from_kfx_bytes(kfx_bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
+    boko::kfx::cover_extract::kfx_extract_cover(kfx_bytes)
+        .ok()
+        .flatten()
 }
 
 pub fn write_bytes_atomic(dest: &Path, bytes: &[u8]) -> Result<()> {
