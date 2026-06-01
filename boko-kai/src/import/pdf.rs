@@ -15,7 +15,8 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 
-use lopdf::{Dictionary, Document, Object, ObjectId};
+use lopdf::xref::XrefEntry;
+use lopdf::{Dictionary, Document, Object, ObjectId, ObjectStream, Stream};
 
 /// One PDF page's display size, in PDF points (1/72 inch).
 #[derive(Debug, Clone, Copy)]
@@ -58,8 +59,14 @@ const DEFAULT_MEDIABOX: [f32; 4] = [0.0, 0.0, 612.0, 792.0];
 
 /// Probe a PDF's structure without altering its bytes.
 pub fn probe_pdf(bytes: Vec<u8>) -> io::Result<PdfDoc> {
-    let doc = Document::load_mem(&bytes)
+    let mut doc = Document::load_mem(&bytes)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("PDF parse failed: {e}")))?;
+
+    // Recover objects lopdf silently dropped from NUL-separated object streams
+    // (see `recover_nul_object_streams`). A no-op unless that bug actually bit —
+    // when it does, the catalog and entire page tree are among the casualties, so
+    // this must run before `get_pages()`.
+    recover_nul_object_streams(&mut doc);
 
     // `get_pages()` is a BTreeMap<page_number, ObjectId>, so iterating values
     // yields pages in reading order (1..=N).
@@ -100,6 +107,92 @@ pub fn probe_pdf(bytes: Vec<u8>) -> io::Result<PdfDoc> {
         outline,
         page_labels,
     })
+}
+
+/// Work around a lopdf limitation: an object stream (`/ObjStm`) whose index uses
+/// NUL (`0x00`) as the number separator is dropped wholesale. lopdf parses that
+/// index with `str::split_whitespace()`, which doesn't treat NUL — a legal PDF
+/// whitespace byte (PDF 32000-1 Table 1) — as whitespace, so it reads one giant
+/// token instead of the `2·N` integers, extracts zero inner objects, and every
+/// object stored in the stream goes missing. In modern PDFs (xref-stream +
+/// object-stream layout) that usually includes the document catalog and the
+/// whole page tree, leaving `get_pages()` empty ("PDF has no pages").
+///
+/// Re-expand those streams ourselves using lopdf's public API: for each
+/// compressed xref entry lopdf left unresolved, decompress its container,
+/// normalize NUL→space in the *index region only* (byte-for-byte, so the
+/// data-region offsets the index points at stay valid), and re-parse through
+/// `ObjectStream` — which `decompress()`-no-ops on our already-inflated,
+/// filterless stream, then splits the now-space-separated index correctly.
+/// Recovered objects are inserted without overwriting anything lopdf already
+/// has. Entirely a no-op when no compressed object is missing (the common case),
+/// so it costs nothing for well-behaved PDFs.
+fn recover_nul_object_streams(doc: &mut Document) {
+    use std::collections::{BTreeMap, HashSet};
+
+    // container object id -> the compressed obj numbers lopdf failed to load.
+    let mut missing: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for (&id, entry) in doc.reference_table.entries.iter() {
+        if let XrefEntry::Compressed { container, .. } = *entry
+            && !doc.objects.contains_key(&(id, 0))
+        {
+            missing.entry(container).or_default().push(id);
+        }
+    }
+    if missing.is_empty() {
+        return;
+    }
+
+    let mut recovered: Vec<(ObjectId, Object)> = Vec::new();
+    for (container_id, wanted) in &missing {
+        let Some(Object::Stream(s)) = doc.objects.get(&(*container_id, 0)) else {
+            continue;
+        };
+        // lopdf inflates the ObjStm in place during its (failed) load — content
+        // becomes the decompressed bytes and `/Filter` is stripped — so prefer the
+        // raw `content` and only inflate if it's still compressed.
+        let content = s.decompressed_content().unwrap_or_else(|_| s.content.clone());
+        let Ok(first) = s.dict.get(b"First").and_then(Object::as_i64) else {
+            continue;
+        };
+        let first = first as usize;
+        if first > content.len() {
+            continue;
+        }
+        let n = s.dict.get(b"N").and_then(Object::as_i64).unwrap_or(0);
+
+        // NUL → space across the index so split_whitespace sees the integers.
+        // Same length, so every offset in the index still lands correctly.
+        let mut fixed = content;
+        for b in &mut fixed[..first] {
+            if *b == 0 {
+                *b = b' ';
+            }
+        }
+
+        // A filterless stream carrying the already-inflated, normalized bytes:
+        // `ObjectStream::new` ignores the (now absent) filter and parses directly.
+        let mut dict = Dictionary::new();
+        dict.set("N", n);
+        dict.set("First", first as i64);
+        let mut stream = Stream::new(dict, fixed);
+        let Ok(os) = ObjectStream::new(&mut stream) else {
+            continue;
+        };
+
+        // Only adopt objects the xref says belong to THIS container (guards
+        // against a stale duplicate in some other stream).
+        let want: HashSet<u32> = wanted.iter().copied().collect();
+        for (id, obj) in os.objects {
+            if want.contains(&id.0) {
+                recovered.push((id, obj));
+            }
+        }
+    }
+
+    for (id, obj) in recovered {
+        doc.objects.entry(id).or_insert(obj);
+    }
 }
 
 /// Resolve an object one indirection deep (a value may be an inline object or
@@ -744,5 +837,54 @@ mod tests {
         assert_eq!(decode_pdf_string(b"Plain ASCII"), "Plain ASCII");
         // 0xE9 = é in both Latin-1 and PDFDocEncoding.
         assert_eq!(decode_pdf_string(b"caf\xe9"), "caf\u{00E9}");
+    }
+
+    #[test]
+    fn recovers_objects_from_nul_separated_object_stream() {
+        use lopdf::xref::XrefEntry;
+        use lopdf::{Document, Stream};
+
+        // A decompressed ObjStm payload whose index uses NUL (0x00) as the
+        // separator — the exact shape lopdf's split_whitespace silently drops.
+        // Two objects: 10 -> Boolean(true) at objects-offset 0, 11 -> Integer(42)
+        // at offset 5 (in the "true 42" region that follows the index).
+        let mut content: Vec<u8> = Vec::new();
+        content.extend_from_slice(b"10\x000\x0011\x005"); // index pairs (10,0) (11,5)
+        let first = content.len() as i64;
+        content.extend_from_slice(b"true 42");
+
+        let mut dict = Dictionary::new();
+        dict.set("Type", Object::Name(b"ObjStm".to_vec()));
+        dict.set("N", 2i64);
+        dict.set("First", first);
+        // No /Filter: stands in for the stream lopdf already inflated in place
+        // (it strips the filter when it decompresses during load).
+
+        let mut doc = Document::new();
+        doc.objects
+            .insert((2, 0), Object::Stream(Stream::new(dict, content)));
+        doc.reference_table
+            .entries
+            .insert(10, XrefEntry::Compressed { container: 2, index: 0 });
+        doc.reference_table
+            .entries
+            .insert(11, XrefEntry::Compressed { container: 2, index: 1 });
+
+        // Precondition: the compressed objects are unresolved (as after a real
+        // lopdf load that hit the NUL-index bug).
+        assert!(!doc.objects.contains_key(&(10, 0)));
+
+        recover_nul_object_streams(&mut doc);
+
+        assert!(matches!(doc.get_object((10, 0)), Ok(Object::Boolean(true))));
+        assert!(matches!(doc.get_object((11, 0)), Ok(Object::Integer(42))));
+    }
+
+    #[test]
+    fn recover_is_noop_without_missing_compressed_objects() {
+        let mut doc = Document::new();
+        let before = doc.objects.len();
+        recover_nul_object_streams(&mut doc); // must not panic or change anything
+        assert_eq!(doc.objects.len(), before);
     }
 }

@@ -135,7 +135,24 @@ impl Transport for MtpTransport {
                 .resolve(path)
                 .await?
                 .ok_or_else(|| anyhow!("MTP read: object not found at `{path}`"))?;
-            self.storage.download(handle).await.map_err(map_mtp_err)
+            // Stream the object in bounded (64 KiB) chunks instead of `download()`,
+            // which asks for the entire payload in ONE bulk-IN transfer. The Scribe
+            // stalls a multi-MB single-transfer GetObject — the host sees IOKit
+            // `kIOReturnNotResponding` (0xe00002ed) and the transport gets evicted
+            // ("disconnect"). Small files (a notebook `nbk`) fit one transfer and
+            // were unaffected, which is why notebooks imported but books didn't.
+            // `download_stream` issues many small `receive_bulk(64 KiB)` reads, each
+            // well within what the device serves.
+            let mut dl = self
+                .storage
+                .download_stream(handle)
+                .await
+                .map_err(map_mtp_err)?;
+            let mut buf = Vec::with_capacity(dl.size() as usize);
+            while let Some(chunk) = dl.next_chunk().await {
+                buf.extend_from_slice(&chunk.map_err(map_mtp_err)?);
+            }
+            Ok(buf)
         })
     }
 
