@@ -169,6 +169,14 @@ impl LibraryPaths {
         self.book_dir(sha).join(format!("cover.{ext}"))
     }
 
+    /// Cached per-page anchor geometry for a PDF-backed KFX (eid→page map + page
+    /// boxes), keyed by the book's `kfx_sha256` inside the file. See
+    /// [`crate::library::pdf_geom`] — a derived-asset sidecar so ink sync needn't
+    /// re-parse the whole KFX on every connect.
+    pub fn pdf_geom(&self, sha: &str) -> PathBuf {
+        self.book_dir(sha).join("pdf_geom.json")
+    }
+
     /// Thumbnail sidecar: the small grayscale JPEG derived from the cover at
     /// import time and served to the Kindle picker (`/cover/{id}?thumb=1`).
     /// Always `.jpg` regardless of the source cover's extension — the

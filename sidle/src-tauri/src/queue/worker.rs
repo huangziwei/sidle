@@ -16,9 +16,11 @@ use crate::library::LibraryPaths;
 use crate::library::db::{self, BookRow};
 use crate::library::epub_cover;
 use crate::library::import::{
-    extract_cover_from_epub, extract_cover_from_kfx_bytes, sha256_of_file, write_bytes_atomic,
+    extract_cover_from_epub, extract_cover_from_kfx_bytes, sha256_of_bytes, sha256_of_file,
+    write_bytes_atomic,
 };
 use crate::library::kfx_cover;
+use crate::library::pdf_geom;
 use crate::library::paths::format_basename;
 use crate::queue::emit_status;
 use crate::state::DbHandle;
@@ -435,6 +437,24 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
 
     let kfx = boko::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref(), text.as_deref());
     write_bytes_atomic(&out_path, &kfx)?;
+
+    // Warm the ink-anchor geometry cache (eid→page map + page boxes) for this
+    // KFX, keyed by the same kfx_sha256 the row will carry. Without this, the
+    // first ink sync after a (re)convert re-parses the whole KFX per book
+    // (~0.5 s release / ~1.4 s debug each) under the DB lock — what made
+    // "sync annotations" slow. Computed from the in-memory bytes (no re-read of
+    // the 15 MB file); best-effort — a miss just falls back to the lazy parse.
+    let kfx_sha = sha256_of_bytes(&kfx);
+    let geom = pdf_geom::compute(&kfx);
+    if let Err(e) = pdf_geom::write_sidecar(paths, &book.sha256, &kfx_sha, &geom) {
+        eprintln!("[sidle/queue] book {} pdf geom cache: skipped ({e:#})", book.id);
+    } else {
+        eprintln!(
+            "[sidle/queue] book {} pdf geom cache: {} pages",
+            book.id,
+            geom.len()
+        );
+    }
 
     // Capture the content_id boko baked into the KFX — the device names its
     // per-book `.sdr` / `.notebooks/<id>!!PDOC!!` dir after it, so `books.asin`

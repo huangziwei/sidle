@@ -122,6 +122,7 @@ pub fn import_collected_ink(
             &book.sha256,
             asin,
             book.kfx_path.as_deref(),
+            book.kfx_sha256.as_deref(),
             nbk_bytes,
             notes,
             Some(device_serial),

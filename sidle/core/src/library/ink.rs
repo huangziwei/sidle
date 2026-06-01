@@ -26,6 +26,7 @@
 //! parsed annotations).
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -33,6 +34,7 @@ use sha2::{Digest, Sha256};
 
 use crate::library::LibraryPaths;
 use crate::library::db::{self, NewBookInk};
+use crate::library::pdf_geom::{self, PageGeom};
 use crate::library::yjr::Annotation;
 
 /// Outcome of one ink import.
@@ -55,9 +57,10 @@ pub struct InkImportStats {
 /// - `notes` are the book's `.yjr` `handwritten_note` records ([`crate::library::yjr::Kind::Handwritten`]);
 ///   each names its ink page via its inline body (`== container_id`) and carries
 ///   the host-page anchor `(eid, linear)`.
-/// - `kfx_path` is the host KFX, read for the `eid → page` map (the same
-///   `pdf_text_layer` the reader uses); `None`/unreadable → pages store
-///   page-unanchored.
+/// - `kfx_path` is the host KFX, read for the `eid → page` map + page boxes;
+///   `kfx_sha` keys the cached geometry sidecar ([`crate::library::pdf_geom`]) so
+///   a warm sync is a few-KB JSON read, not a full KFX re-parse. `None`/
+///   unreadable → pages store page-unanchored.
 /// - the raw `nbk` is backed up under `books/<sha>/ink/<asin>/` (so the ink
 ///   survives a device wipe) and each page is rendered to a transparent overlay
 ///   SVG (for the reader) plus a white-bg plain SVG (for the gallery), cached
@@ -73,6 +76,7 @@ pub fn import_ink(
     book_sha: &str,
     asin: &str,
     kfx_path: Option<&str>,
+    kfx_sha: Option<&str>,
     nbk_bytes: &[u8],
     notes: &[Annotation],
     device_serial: Option<&str>,
@@ -91,12 +95,18 @@ pub fn import_ink(
     let nb = boko::kfx::nbk::open(&nbk_path)
         .map_err(|e| anyhow::anyhow!("decode ink notebook for {asin}: {e:?}"))?;
 
-    // The host KFX's per-page text layer: gives the eid → host-page map (the very
-    // map the reader uses to place annotations) AND each page's box size, which we
-    // need to align the ink overlay to the page. Best-effort: no/unreadable KFX →
-    // empty → pages stay page-unanchored.
-    let layer = read_pdf_text_layer(kfx_path);
-    let eid_page = eid_page_map(&layer);
+    // The host KFX's per-page anchor geometry: the eid → host-page map (the very
+    // map the reader uses to place annotations) AND each page's box size, to
+    // align the ink overlay to the page. Served from the geometry sidecar (cached
+    // by kfx_sha) so this is a few-KB JSON read on a warm cache, not the ~0.5–
+    // 1.4 s full-KFX parse that made every sync slow. Best-effort: no/unreadable
+    // KFX → empty → pages stay page-unanchored.
+    let geom: Vec<PageGeom> = match (kfx_path, kfx_sha) {
+        (Some(p), Some(sha)) => pdf_geom::ensure(paths, book_sha, Path::new(p), sha),
+        (Some(p), None) => pdf_geom::compute_from_file(Path::new(p)),
+        (None, _) => Vec::new(),
+    };
+    let eid_page = eid_page_map(&geom);
 
     // container id (a note's inline body) → the host anchor that names it.
     let note_by_container: HashMap<&str, &Annotation> = notes
@@ -122,9 +132,9 @@ pub fn import_ink(
             // canvas. Crop the overlay's viewBox to that sub-rect so the ink lands
             // on the page without the horizontal squish a flat canvas→page stretch
             // causes (it pushed margin ink into the text).
-            let svg = match host_page.and_then(|hp| layer.get(hp as usize)) {
-                Some(pt) if pt.box_w > 0.0 && pt.box_h > 0.0 => {
-                    crop_overlay_to_page(&svg, page.canvas_width, page.canvas_height, pt.box_w, pt.box_h)
+            let svg = match host_page.and_then(|hp| geom.get(hp as usize)) {
+                Some(pg) if pg.box_w > 0.0 && pg.box_h > 0.0 => {
+                    crop_overlay_to_page(&svg, page.canvas_width, page.canvas_height, pg.box_w, pg.box_h)
                 }
                 _ => svg,
             };
@@ -191,24 +201,14 @@ pub fn relink_ink(conn: &Connection) -> rusqlite::Result<usize> {
     Ok(linked)
 }
 
-/// The host KFX's per-page PDF text layer, or empty if there's no/unreadable KFX.
-fn read_pdf_text_layer(kfx_path: Option<&str>) -> Vec<boko::kfx_to_epub::PdfPageText> {
-    kfx_path
-        .and_then(|p| std::fs::read(p).ok())
-        .and_then(|bytes| boko::kfx_to_epub::pdf_text_layer(&bytes).ok())
-        .unwrap_or_default()
-}
-
-/// eid → 0-based host page. Mirrors the reader's `buildPdfEidIndex` EXACTLY: a
-/// page registers both its text-run eids AND its structural eids (image /
-/// container / page_template); the first page that registers an eid wins.
-fn eid_page_map(layer: &[boko::kfx_to_epub::PdfPageText]) -> HashMap<i64, usize> {
+/// eid → 0-based host page. The cached [`PageGeom::eids`] is already the union of
+/// each page's text-run eids and structural eids (image / container /
+/// page_template) — the same set the reader's `buildPdfEidIndex` registers — so
+/// the first page that lists an eid wins, matching the reader.
+fn eid_page_map(geom: &[PageGeom]) -> HashMap<i64, usize> {
     let mut map = HashMap::new();
-    for (page_index, pt) in layer.iter().enumerate() {
-        for w in &pt.words {
-            map.entry(w.eid).or_insert(page_index);
-        }
-        for &eid in &pt.eids {
+    for (page_index, pg) in geom.iter().enumerate() {
+        for &eid in &pg.eids {
             map.entry(eid).or_insert(page_index);
         }
     }

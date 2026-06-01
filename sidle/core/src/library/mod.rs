@@ -9,6 +9,7 @@ pub mod ink;
 pub mod kfx_cover;
 pub mod notebook;
 pub mod paths;
+pub mod pdf_geom;
 pub mod relocate;
 pub mod rename;
 pub mod thumbnail;
