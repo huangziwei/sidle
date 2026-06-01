@@ -138,6 +138,7 @@
       for (const c of visible) {
         const def = this.defs[c.key];
         const td = document.createElement("td");
+        td.dataset.col = c.key; // addressable per-column (mirrors <col>/<th>)
         const out = def.render(item);
         if (out instanceof Node) {
           td.appendChild(out);

@@ -47,15 +47,15 @@ pub fn import_notebook(
         && existing.nbk_sha256.as_deref() == Some(sha.as_str())
         && paths.notebook_page_svg(uuid, 0).exists()
     {
-        // Unchanged content. Backfill updated_at for a row imported before the
-        // column existed — no re-extraction needed.
-        if existing.updated_at.is_none() {
-            db::backfill_notebook_updated_at(conn, uuid, updated_at)?;
-            if let Some(refreshed) = db::get_notebook_by_uuid(conn, uuid)? {
-                return Ok(NotebookOutcome::Unchanged(refreshed));
-            }
-        }
-        return Ok(NotebookOutcome::Unchanged(existing));
+        // Unchanged content — no re-extraction. Still backfill metadata a legacy
+        // row may lack: the on-device mtime (rows imported before that column
+        // existed) and the default title (rows still on the old 'Notebook'
+        // sentinel — the title is the first-import datetime now). Both guard
+        // internally, so this is a no-op for an already-populated row.
+        db::backfill_notebook_updated_at(conn, uuid, updated_at)?;
+        db::backfill_notebook_default_title(conn, uuid, updated_at)?;
+        let refreshed = db::get_notebook_by_uuid(conn, uuid)?.unwrap_or(existing);
+        return Ok(NotebookOutcome::Unchanged(refreshed));
     }
 
     // Decode + render every page up front — this is the cached derived asset.

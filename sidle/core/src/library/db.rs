@@ -1103,9 +1103,37 @@ pub fn get_notebook_by_uuid(
     .optional()
 }
 
-/// Insert a notebook (default title "Notebook") or, if its uuid already exists,
-/// update its page count / content hash / import time — the user-set title is
-/// preserved across re-imports. Returns the row id.
+/// A notebook's default title: its first-import on-device "Date Modified"
+/// (`updated_at`) as local `YYYY-MM-DD HH:MM` — the same string the "Updated"
+/// column shows, frozen into the title so it never drifts. Scribe titles are
+/// cloud-only, so this is the best offline name. `updated_at` is normally a
+/// naive local-wall-clock ISO (`folder_updated_at` / the MTP DateModified),
+/// whose digits we reflect as-is; on the `now_iso()` fallback it's an RFC 3339
+/// instant, which we convert to local. An unparseable value degrades to a
+/// best-effort 16-char slice.
+fn default_notebook_title(updated_at: &str) -> String {
+    use chrono::{DateTime, Local, NaiveDateTime};
+    if let Ok(dt) = DateTime::parse_from_rfc3339(updated_at) {
+        return dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string();
+    }
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(updated_at, "%Y-%m-%dT%H:%M:%S") {
+        return ndt.format("%Y-%m-%d %H:%M").to_string();
+    }
+    updated_at
+        .get(..16)
+        .map(|s| s.replace('T', " "))
+        .unwrap_or_else(|| updated_at.to_string())
+}
+
+/// Insert a notebook, defaulting its title to the first-import datetime
+/// ([`default_notebook_title`]); or, if its uuid already exists, update page
+/// count / content hash / `updated_at`. Returns the row id.
+///
+/// `title` and `imported_at` are both frozen at first import: a re-import never
+/// rewrites them, so an edit's newer mtime doesn't change the displayed name and
+/// a user rename ([`rename_notebook`]) sticks. The lone exception is a legacy row
+/// still on the old literal-'Notebook' sentinel, which is upgraded to the
+/// datetime default once (it has no real title to protect).
 pub fn upsert_notebook(
     conn: &Connection,
     uuid: &str,
@@ -1114,17 +1142,17 @@ pub fn upsert_notebook(
     imported_at: &str,
     updated_at: &str,
 ) -> rusqlite::Result<i64> {
+    let title = default_notebook_title(updated_at);
     conn.execute(
-        // `imported_at` is deliberately NOT updated on conflict: it's the FIRST
-        // import time, which doubles as a notebook's default title (real titles
-        // are cloud-only). `updated_at` (device mtime) tracks edits instead.
         r#"INSERT INTO notebooks (uuid, title, page_count, nbk_sha256, imported_at, updated_at)
-            VALUES (?1, 'Notebook', ?2, ?3, ?4, ?5)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             ON CONFLICT(uuid) DO UPDATE SET
                 page_count  = excluded.page_count,
                 nbk_sha256  = excluded.nbk_sha256,
-                updated_at  = excluded.updated_at"#,
-        params![uuid, page_count, nbk_sha256, imported_at, updated_at],
+                updated_at  = excluded.updated_at,
+                title       = CASE WHEN notebooks.title IN ('Notebook', '')
+                                   THEN excluded.title ELSE notebooks.title END"#,
+        params![uuid, title, page_count, nbk_sha256, imported_at, updated_at],
     )?;
     conn.query_row(
         "SELECT id FROM notebooks WHERE uuid = ?1",
@@ -1144,6 +1172,23 @@ pub fn backfill_notebook_updated_at(
     conn.execute(
         "UPDATE notebooks SET updated_at = ?1 WHERE uuid = ?2 AND updated_at IS NULL",
         params![updated_at, uuid],
+    )?;
+    Ok(())
+}
+
+/// Upgrade a legacy notebook still on the literal-'Notebook' (or empty) title to
+/// the first-import datetime default, without re-extracting it. Mirrors
+/// [`backfill_notebook_updated_at`] for the import "unchanged" fast path; a
+/// notebook with a real title (a datetime default or a user rename) is untouched.
+pub fn backfill_notebook_default_title(
+    conn: &Connection,
+    uuid: &str,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    let title = default_notebook_title(updated_at);
+    conn.execute(
+        "UPDATE notebooks SET title = ?1 WHERE uuid = ?2 AND title IN ('Notebook', '')",
+        params![title, uuid],
     )?;
     Ok(())
 }
@@ -1614,13 +1659,98 @@ mod tests {
         assert_eq!(id, id2, "re-import upserts the same row");
 
         let row = get_notebook_by_uuid(&conn, "uuid-1").expect("query").expect("row");
-        // imported_at must NEVER change on re-import (it's the first-import time,
-        // which doubles as the default title).
+        // imported_at must NEVER change on re-import — it's the first-import
+        // bookkeeping time (and the list-sort tiebreaker).
         assert_eq!(row.imported_at, "2026-06-01T10:00:00Z");
         // Everything else reflects the re-import.
         assert_eq!(row.page_count, 5);
         assert_eq!(row.nbk_sha256.as_deref(), Some("sha-b"));
         assert_eq!(row.updated_at.as_deref(), Some("2026-06-09T19:30:00"));
+    }
+
+    #[test]
+    fn notebook_title_defaults_to_first_import_datetime_and_is_frozen() {
+        let conn = fresh_db();
+        // First import: the title is the on-device Date Modified, minute-precise.
+        upsert_notebook(&conn, "uuid-t", 1, "sha-a", "2026-06-01T10:00:00Z", "2026-06-01T09:05:00")
+            .expect("first import");
+        let row = get_notebook_by_uuid(&conn, "uuid-t").unwrap().unwrap();
+        assert_eq!(row.title, "2026-06-01 09:05");
+
+        // An edit (new content + a newer mtime) must NOT rewrite the title.
+        upsert_notebook(&conn, "uuid-t", 2, "sha-b", "2026-06-09T20:00:00Z", "2026-06-09T19:30:00")
+            .expect("re-import");
+        let row = get_notebook_by_uuid(&conn, "uuid-t").unwrap().unwrap();
+        assert_eq!(row.title, "2026-06-01 09:05", "title frozen at first import");
+        assert_eq!(row.updated_at.as_deref(), Some("2026-06-09T19:30:00"));
+    }
+
+    #[test]
+    fn notebook_rename_survives_reimport() {
+        let conn = fresh_db();
+        let id = upsert_notebook(&conn, "uuid-r", 1, "sha-a", "2026-06-01T10:00:00Z", "2026-06-01T09:05:00")
+            .expect("import");
+        rename_notebook(&conn, id, "Meeting notes").expect("rename");
+        // A later edit must leave the user's chosen title intact.
+        upsert_notebook(&conn, "uuid-r", 2, "sha-b", "2026-06-09T20:00:00Z", "2026-06-09T19:30:00")
+            .expect("re-import");
+        let row = get_notebook_by_uuid(&conn, "uuid-r").unwrap().unwrap();
+        assert_eq!(row.title, "Meeting notes");
+    }
+
+    #[test]
+    fn notebook_legacy_sentinel_title_upgrades_once_then_freezes() {
+        let conn = fresh_db();
+        // A pre-feature row: the old literal-'Notebook' default, no updated_at.
+        conn.execute(
+            "INSERT INTO notebooks (uuid, title, page_count, nbk_sha256, imported_at, updated_at)
+             VALUES ('uuid-l', 'Notebook', 1, 'sha-a', '2026-06-01T10:00:00Z', NULL)",
+            [],
+        )
+        .unwrap();
+        // upsert (changed-content path) upgrades the sentinel to the datetime…
+        upsert_notebook(&conn, "uuid-l", 1, "sha-a", "2026-06-01T10:00:00Z", "2026-06-02T08:15:00")
+            .expect("re-import");
+        let row = get_notebook_by_uuid(&conn, "uuid-l").unwrap().unwrap();
+        assert_eq!(row.title, "2026-06-02 08:15");
+        // …and it's then frozen like any other default.
+        upsert_notebook(&conn, "uuid-l", 2, "sha-b", "2026-06-01T10:00:00Z", "2026-06-09T19:30:00")
+            .expect("edit");
+        let row = get_notebook_by_uuid(&conn, "uuid-l").unwrap().unwrap();
+        assert_eq!(row.title, "2026-06-02 08:15", "upgraded title now frozen");
+    }
+
+    #[test]
+    fn notebook_legacy_sentinel_title_backfills_on_unchanged_path() {
+        // The import "unchanged" fast path uses backfill_notebook_default_title
+        // directly (it never calls upsert_notebook), so cover it too.
+        let conn = fresh_db();
+        conn.execute(
+            "INSERT INTO notebooks (uuid, title, page_count, nbk_sha256, imported_at, updated_at)
+             VALUES ('uuid-u', 'Notebook', 1, 'sha-a', '2026-06-01T10:00:00Z', '2026-06-03T07:00:00')",
+            [],
+        )
+        .unwrap();
+        backfill_notebook_default_title(&conn, "uuid-u", "2026-06-03T07:00:00").unwrap();
+        let row = get_notebook_by_uuid(&conn, "uuid-u").unwrap().unwrap();
+        assert_eq!(row.title, "2026-06-03 07:00");
+        // A real title is left untouched by the backfill.
+        rename_notebook(&conn, row.id, "Kept").unwrap();
+        backfill_notebook_default_title(&conn, "uuid-u", "2026-06-09T19:30:00").unwrap();
+        let row = get_notebook_by_uuid(&conn, "uuid-u").unwrap().unwrap();
+        assert_eq!(row.title, "Kept");
+    }
+
+    #[test]
+    fn default_notebook_title_handles_naive_and_rfc3339() {
+        // Naive local wall-clock (the common import shape) reflects its digits,
+        // dropping seconds — deterministic regardless of the host timezone.
+        assert_eq!(default_notebook_title("2026-06-01T09:05:45"), "2026-06-01 09:05");
+        // RFC 3339 (the now_iso fallback) parses + converts to local without
+        // panicking; the exact minute depends on the host tz, so assert shape.
+        let got = default_notebook_title("2026-06-01T09:05:45Z");
+        assert_eq!(got.len(), 16, "YYYY-MM-DD HH:MM");
+        assert!(got.starts_with("2026-"));
     }
 
     #[test]

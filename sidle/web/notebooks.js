@@ -84,10 +84,12 @@
   // True while a device import is in flight — gates re-entry and progress paints.
   let importing = false;
 
-  // Local wall-clock as "YYYY-MM-DD HH:MM" (24-hour, minute precision) — the
-  // "Updated" column (on-device Date Modified) and a notebook's default title
-  // both use this. Built explicitly rather than via toLocaleString so the format
-  // is fixed (no locale-dependent ordering or AM/PM).
+  // Local wall-clock as "YYYY-MM-DD HH:MM" (24-hour, minute precision) — drives
+  // the "Updated" column (on-device Date Modified) and the legacy-row title
+  // fallback in nbTitle. New rows' default titles are this same format frozen
+  // server-side at first import (db::default_notebook_title). Built explicitly
+  // rather than via toLocaleString so the format is fixed (no locale-dependent
+  // ordering or AM/PM).
   function fmtDate(iso) {
     if (!iso) return "";
     const d = new Date(iso);
@@ -97,14 +99,15 @@
       `${p(d.getHours())}:${p(d.getMinutes())}`;
   }
 
-  // A notebook's display name. Scribe titles are cloud-only, so an un-renamed
-  // notebook has no real title — fall back to its first-import datetime (the
-  // legacy default was the literal "Notebook"; treat that as un-named too) so
-  // notebooks are distinguishable instead of all reading "Notebook".
+  // A notebook's display name. Scribe titles are cloud-only, so the title now
+  // defaults (server-side, frozen at first import) to the on-device datetime.
+  // A legacy row may still hold the old literal "Notebook" sentinel until its
+  // next import backfills it — show its on-device datetime so it reads
+  // consistently with new notebooks instead of all reading "Notebook".
   function nbTitle(n) {
     const t = (n.title || "").trim();
     if (t && t !== "Notebook") return t;
-    return fmtDate(n.imported_at) || "Notebook";
+    return fmtDate(n.updated_at) || "Notebook";
   }
 
   function loadNbSort() {
@@ -429,16 +432,29 @@
     }, 0);
   }
 
-  // Inline rename: swap the card's title for an input (no native prompt dialog).
+  // Inline rename: swap the shown title for an input (no native prompt dialog).
+  // The label lives in whichever view is active — the gallery card's ".meta .t",
+  // or the list row's title cell (`td[data-col="title"]`). This used to look only
+  // in the grid, so rename silently no-opped in list view.
   function startRename(n) {
-    const card = q(`#notes-grid .notebook-card[data-notebook-id="${n.id}"]`);
-    const tEl = card && card.querySelector(".meta .t");
-    if (!tEl) return;
+    const target =
+      q(`#notes-grid .notebook-card[data-notebook-id="${n.id}"] .meta .t`) ||
+      q(`#notes-list tbody tr[data-notebook-id="${n.id}"] td[data-col="title"]`);
+    if (!target) return;
 
     const input = document.createElement("input");
     input.className = "notebook-rename-input";
-    input.value = n.title || "";
-    tEl.replaceWith(input);
+    input.value = nbTitle(n); // pre-fill the shown name (datetime default or rename)
+
+    // The gallery label is a leaf <div> we can swap out; the list target is the
+    // <td> itself, so edit inside it. Either way a commit/cancel re-renders and
+    // restores the original markup.
+    if (target.tagName === "TD") {
+      target.textContent = "";
+      target.appendChild(input);
+    } else {
+      target.replaceWith(input);
+    }
     input.focus();
     input.select();
 
@@ -447,7 +463,7 @@
       if (done) return;
       done = true;
       const title = input.value.trim();
-      if (!title || title === n.title) {
+      if (!title || title === (n.title || "").trim()) {
         render();
         return;
       }
