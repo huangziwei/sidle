@@ -120,11 +120,46 @@ pub fn import_device_annotations(
             };
             // MTP: do BOTH slow USB walks (annotations + ink notebooks) BEFORE
             // taking the DB lock — see `collect_device_yjr` above.
+            // TEMP instrumentation: time each USB phase so we can see on-device
+            // exactly where the pre-import wait goes (yjr walk vs `.notebooks`
+            // walk) before optimizing. Remove once the hotspot is fixed.
+            let t = std::time::Instant::now();
             let collected = collect_device_yjr(transport)?;
+            eprintln!(
+                "[sidle/annsync] PHASE yjr walk: {} .sdr in {:.2}s",
+                collected.len(),
+                t.elapsed().as_secs_f32()
+            );
+            // Auto-clean orphan handwriting before reading ink: delete the
+            // `.notebooks/<id>!!PDOC!!` dirs whose content_id isn't a library book
+            // — ink stranded by deleted sideloads or superseded by a reconvert.
+            // Runs every sync (idempotent: nothing to delete once clean). It also
+            // keeps `.notebooks` small, which matters because every nbk read
+            // re-enumerates that dir during path resolution. Best-effort: a prune
+            // failure (incl. the empty-library guard) must never block the sync.
+            let t = std::time::Instant::now();
+            match ink::prune_orphan_pdoc(transport, &known_asins) {
+                Ok(removed) => eprintln!(
+                    "[sidle/annsync] PHASE prune: removed {} orphan PDOC dir(s) in {:.2}s",
+                    removed.len(),
+                    t.elapsed().as_secs_f32()
+                ),
+                Err(e) => eprintln!(
+                    "[sidle/annsync] PHASE prune: skipped ({e}) in {:.2}s",
+                    t.elapsed().as_secs_f32()
+                ),
+            }
+            let t = std::time::Instant::now();
             let inks = ink::collect_device_ink(transport, &known_asins)?;
+            eprintln!(
+                "[sidle/annsync] PHASE ink walk: {} our nbks in {:.2}s",
+                inks.len(),
+                t.elapsed().as_secs_f32()
+            );
             // The handwritten-ink anchors live in the same `.yjr`s we just pulled.
             let notes = ink::handwritten_notes(&collected);
 
+            let t = std::time::Instant::now();
             let conn = db.blocking_lock();
             let mut report = ingest::import_collected_with_progress(
                 &conn,
@@ -143,6 +178,10 @@ pub fn import_device_annotations(
                 &mut report,
                 &|cur, tot, label| on_progress("ink", cur, tot, label),
             )?;
+            eprintln!(
+                "[sidle/annsync] PHASE import (under lock): {:.2}s",
+                t.elapsed().as_secs_f32()
+            );
             Ok(report)
         }
     }

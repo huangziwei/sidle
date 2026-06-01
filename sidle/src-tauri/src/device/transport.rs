@@ -134,6 +134,24 @@ pub trait Transport: Send + Sync {
     /// `<basename>.sdr/` sidecar (reading progress, annotations, highlights)
     /// next to a `.kfx` on remove.
     fn delete_dir(&self, path: &TPath) -> Result<bool>;
+    /// Delete every immediate child directory of `dir` whose name `prune` selects
+    /// (`prune(name) == true` ⇒ delete it). Returns the deleted child names.
+    ///
+    /// Resolving `dir` ONCE is the point: on MTP a global directory like
+    /// `.notebooks` (every sideloaded doc the device ever held) is expensive to
+    /// enumerate, and `delete_dir` in a loop would re-walk it from the root per
+    /// child. The default impl (mass-storage — local fs, cheap) just lists +
+    /// `delete_dir`s each match; MTP overrides it to resolve `dir` once and delete
+    /// matched subtrees by handle within one session.
+    fn prune_children(&self, dir: &TPath, prune: &dyn Fn(&str) -> bool) -> Result<Vec<String>> {
+        let mut deleted = Vec::new();
+        for entry in self.list(dir)? {
+            if entry.is_dir && prune(&entry.name) && self.delete_dir(&dir.join(&entry.name))? {
+                deleted.push(entry.name);
+            }
+        }
+        Ok(deleted)
+    }
     /// Existence probe. Unused by the scan-based push/delete path, but kept
     /// as a transport primitive — tests rely on it and a future "is this
     /// file still there" UI check could too.

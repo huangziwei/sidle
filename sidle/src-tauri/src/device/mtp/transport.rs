@@ -337,6 +337,51 @@ impl Transport for MtpTransport {
         })
     }
 
+    fn prune_children(&self, dir: &TPath, prune: &dyn Fn(&str) -> bool) -> Result<Vec<String>> {
+        // Resolve `dir` ONCE, then delete each matched child's subtree by handle.
+        // `delete` reuses the live session (unlike `read`, which reopens per
+        // call), so the handles from this single listing stay valid throughout —
+        // no per-child re-walk of a huge `.notebooks`.
+        let mut slot = self.session.lock().expect("session lock poisoned");
+        let storage = session_storage(&mut slot, self.location_id)?;
+        block_on(async {
+            let Some(parent) = resolve(storage, dir).await? else {
+                return Ok(Vec::new());
+            };
+            let children = storage.list_objects(Some(parent)).await.map_err(map_mtp_err)?;
+            let mut deleted = Vec::new();
+            for child in children {
+                if !child.is_folder() || !prune(&child.filename) {
+                    continue;
+                }
+                // Collect the subtree preorder, delete leaves-first (PTP
+                // `DeleteObject` on a non-empty folder is undefined) — same shape
+                // as `delete_dir`, but the root handle came from the cached
+                // listing, not a fresh resolve.
+                let mut stack = vec![child.handle];
+                let mut to_delete: Vec<ObjectHandle> = Vec::new();
+                while let Some(h) = stack.pop() {
+                    to_delete.push(h);
+                    for c in storage.list_objects(Some(h)).await.map_err(map_mtp_err)? {
+                        stack.push(c.handle);
+                    }
+                }
+                let mut ok = true;
+                for h in to_delete.into_iter().rev() {
+                    if let Err(e) = storage.delete(h).await.map_err(map_mtp_err) {
+                        eprintln!("[mtp] prune {}: delete failed: {e:#}", child.filename);
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    deleted.push(child.filename);
+                }
+            }
+            Ok(deleted)
+        })
+    }
+
     fn exists(&self, path: &TPath) -> Result<bool> {
         let mut slot = self.session.lock().expect("session lock poisoned");
         let storage = session_storage(&mut slot, self.location_id)?;
