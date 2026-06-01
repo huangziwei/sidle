@@ -125,6 +125,7 @@ pub fn spawn(
                             state.clone(),
                             transport.clone(),
                             db.clone(),
+                            paths.clone(),
                             device,
                         ));
                     }
@@ -199,8 +200,8 @@ async fn on_mass_storage_connect(
     queue: QueueHandle,
     device: DeviceInfo,
 ) {
-    autopull_on_connect(app.clone(), db.clone(), paths, queue, device.clone()).await;
-    sync_annotations_on_connect(app, transport, db, device).await;
+    autopull_on_connect(app.clone(), db.clone(), paths.clone(), queue, device.clone()).await;
+    sync_annotations_on_connect(app, transport, db, paths, device).await;
 }
 
 /// Everything that should happen when an MTP Kindle (Scribe, 2024+) connects.
@@ -216,10 +217,11 @@ async fn on_mtp_connect(
     state: DeviceState,
     transport: SharedTransport,
     db: DbHandle,
+    paths: LibraryPaths,
     device: DeviceInfo,
 ) {
     refresh_mtp_storage_info(app.clone(), state, transport.clone(), device.clone()).await;
-    sync_annotations_on_connect(app, transport, db, device).await;
+    sync_annotations_on_connect(app, transport, db, paths, device).await;
 }
 
 /// Import highlights / notes / bookmarks off the connected Kindle — either
@@ -234,6 +236,7 @@ async fn sync_annotations_on_connect(
     app: AppHandle,
     transport: SharedTransport,
     db: DbHandle,
+    paths: LibraryPaths,
     device: DeviceInfo,
 ) {
     let serial = device.serial.clone();
@@ -253,8 +256,26 @@ async fn sync_annotations_on_connect(
         }
     };
 
+    let app_progress = app.clone();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ingest::DeviceImportReport> {
-        crate::device::annotations::import_device_annotations(&device, shared.as_ref(), &db)
+        let on_progress = |stage: &str, current: usize, total: usize, label: &str| {
+            let _ = app_progress.emit(
+                "annotations:sync-progress",
+                crate::device::annotations::SyncProgress {
+                    stage: stage.to_string(),
+                    current,
+                    total,
+                    label: label.to_string(),
+                },
+            );
+        };
+        crate::device::annotations::import_device_annotations(
+            &device,
+            shared.as_ref(),
+            &db,
+            &paths,
+            &on_progress,
+        )
     })
     .await;
 
@@ -271,11 +292,16 @@ async fn sync_annotations_on_connect(
     match result {
         Ok(Ok(report)) => {
             eprintln!(
-                "[sidle/annsync] {serial}: {} books, {} matched ({} unchanged), {} new",
+                "[sidle/annsync] {serial}: {} books, {} matched ({} unchanged), {} new; \
+                 ink {} books / {} pages ({} unchanged, {} removed)",
                 report.yjr_books,
                 report.matched,
                 report.unchanged,
                 report.annotations.inserted,
+                report.ink_books,
+                report.ink_pages,
+                report.ink_unchanged,
+                report.ink_removed,
             );
             let _ = app.emit("annotations:sync-done", report);
         }

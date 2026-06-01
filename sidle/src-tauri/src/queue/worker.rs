@@ -436,6 +436,17 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
     let kfx = boko::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref(), text.as_deref());
     write_bytes_atomic(&out_path, &kfx)?;
 
+    // Capture the content_id boko baked into the KFX — the device names its
+    // per-book `.sdr` / `.notebooks/<id>!!PDOC!!` dir after it, so `books.asin`
+    // MUST equal it (annotation + ink sync and device-delete all match on it).
+    // Read it back from the produced file rather than recomputing, so the row
+    // always reflects what's actually in the KFX (a recompute via
+    // `resolve_export_asin` used a different input and never matched). `None` on a
+    // read failure just defers to the bootstrap backfill.
+    let asin = boko::Book::open(&out_path)
+        .ok()
+        .and_then(|b| b.metadata().asin.clone());
+
     // Sidecar for the library tile. Reuse an existing sidecar verbatim (it's the
     // user's chosen image, possibly png/webp — keep its bytes for the gallery
     // even though the KFX got a JPEG-normalized copy); only write a fresh
@@ -459,12 +470,9 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
         }),
     };
 
-    // The KFX's ASIN is synthesized inside `pdf_to_kfx` (PDOC content_id); we
-    // don't surface it onto the row yet. That only feeds device-delete `.sdr`
-    // cleanup, not sideloading — a follow-up once the PDOC ASIN shape settles.
-    // The on-device content_id is baked into the KFX.
     Ok(Produced {
         kfx_path: Some(out_path),
+        asin,
         cover_path,
         ..Default::default()
     })

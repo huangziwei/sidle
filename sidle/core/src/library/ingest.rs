@@ -354,6 +354,16 @@ pub struct DeviceImportReport {
     /// Matched books whose `.yjf` last-read position was imported (stored as the
     /// `(book_id, 'device')` `reading_position` row — a Resume jump target).
     pub positions: usize,
+    /// Handwritten-ink (PDOC) notebooks imported against a host book — Scribe/MTP
+    /// only; the LAN-server + mass-storage paths leave the `ink_*` fields 0. One
+    /// notebook per annotated sideloaded doc (see `.claude/plans/scribe-handwritten-annotations.md`).
+    pub ink_books: usize,
+    /// Ink pages written/refreshed across those notebooks.
+    pub ink_pages: usize,
+    /// Ink pages removed (erased on the device since last sync).
+    pub ink_removed: usize,
+    /// Ink notebooks skipped because their `nbk` was unchanged since last sync.
+    pub ink_unchanged: usize,
 }
 
 /// The reading-state sidecars pulled from one `.sdr` directory, tagged with the
@@ -386,15 +396,37 @@ pub fn import_collected(
     device_serial: &str,
     now: &str,
 ) -> anyhow::Result<DeviceImportReport> {
-    let mut report = DeviceImportReport::default();
+    import_collected_with_progress(conn, collected, device_serial, now, &|_, _, _| {})
+}
 
-    for item in collected {
+/// As [`import_collected`], but reports per-book progress via `on_book(current,
+/// total, label)` so the app's MTP sync can drive the status bar (the LAN server
+/// and tests call the no-op [`import_collected`]). `label` is the book title when
+/// matched, else the `.sdr` stem; `current`/`total` count the collected `.sdr`s.
+pub fn import_collected_with_progress(
+    conn: &Connection,
+    collected: Vec<CollectedYjr>,
+    device_serial: &str,
+    now: &str,
+    on_book: &dyn Fn(usize, usize, &str),
+) -> anyhow::Result<DeviceImportReport> {
+    let mut report = DeviceImportReport::default();
+    let total = collected.len();
+
+    for (i, item) in collected.into_iter().enumerate() {
         let CollectedYjr { sdr_name, yjr_bytes, yjf_bytes } = item;
         let book = match sdr_infix(&sdr_name) {
             Some(infix) => db::find_by_kfx_sha_prefix(conn, infix)
                 .with_context(|| format!("kfx_sha lookup for {sdr_name}"))?,
             None => None,
         };
+
+        // Name what's syncing now — before the costly TextIndex build below.
+        let label = book
+            .as_ref()
+            .map(|b| b.title.clone())
+            .unwrap_or_else(|| sdr_display_name(&sdr_name));
+        on_book(i + 1, total, &label);
 
         // Last-read position (`.yjf` `lpr`) — stored for every matched book on
         // EVERY sync, before the unchanged-`.yjr` skip below: position moves
@@ -515,6 +547,21 @@ pub fn import_from_device(
     }
 
     import_collected(conn, collected, device_serial, now)
+}
+
+/// A human label for a `.sdr` dir: its stem with the trailing `.<sha-infix>`
+/// dropped (`"Linear Models with R.86607ef9.sdr"` → `"Linear Models with R"`).
+/// Used for the sync status line when a book hasn't been matched to a title yet.
+fn sdr_display_name(sdr_name: &str) -> String {
+    let stem = sdr_name.strip_suffix(".sdr").unwrap_or(sdr_name);
+    match stem.rsplit_once('.') {
+        Some((name, infix))
+            if infix.len() >= 8 && infix.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            name.to_string()
+        }
+        _ => stem.to_string(),
+    }
 }
 
 /// The `.sdr` filename's `kfx_sha256` infix: the hex segment before `.sdr`. Only

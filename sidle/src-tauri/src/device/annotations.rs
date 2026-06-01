@@ -11,9 +11,21 @@
 use anyhow::Result;
 
 use crate::device::{DeviceInfo, TPath, Transport};
+use crate::device::ink;
 use crate::library::ingest::{self, CollectedYjr, DeviceImportReport};
-use crate::library::db;
+use crate::library::{LibraryPaths, db};
 use crate::state::DbHandle;
+
+/// Per-item sync progress for the status bar, emitted as `annotations:sync-progress`.
+/// `stage` is `"annotations"` (highlights/notes/bookmarks) or `"ink"` (handwriting);
+/// `current`/`total` count books/notebooks; `label` is the book title.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncProgress {
+    pub stage: String,
+    pub current: usize,
+    pub total: usize,
+    pub label: String,
+}
 
 /// Scan `documents/Sidle/` over `transport`, returning each `.sdr` directory's
 /// `.yjr` (annotations) and `.yjf` (last-read position) bytes — either may be
@@ -68,30 +80,70 @@ pub fn collect_device_yjr(transport: &dyn Transport) -> Result<Vec<CollectedYjr>
 /// (USB / DB IO); call on the blocking pool. Idempotent (`dedup_hash`), so it's
 /// safe on every connect.
 ///
-/// For MTP the USB scan runs *before* the DB lock is taken — `GetObject` over
+/// On MTP this also syncs **handwritten ink** drawn on sideloaded docs (the
+/// `.notebooks/<asin>!!PDOC!!notebook/nbk` pull → [`crate::library::ink`]) in the
+/// SAME pass, folding its counts into the returned report — so one
+/// "sync annotations" covers highlights/notes/bookmarks, last-read position, AND
+/// ink. (Mass-storage Kindles have no handwriting, so that branch skips it.)
+///
+/// For MTP the USB scans run *before* the DB lock is taken — `GetObject` over
 /// USB is slow enough that holding the connection mutex through it would stall
 /// the frontend's DB queries. Mass-storage keeps core's existing behavior (a
 /// fast local `std::fs` scan under the lock).
+/// `on_progress(stage, current, total, label)` reports which item is syncing now,
+/// for the status bar: `stage` is `"annotations"` or `"ink"`, `current`/`total`
+/// count books/notebooks, `label` is the book title. Pass a no-op to ignore it.
 pub fn import_device_annotations(
     device: &DeviceInfo,
     transport: &dyn Transport,
     db: &DbHandle,
+    paths: &LibraryPaths,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> Result<DeviceImportReport> {
     let now = db::now_iso();
     match device.mass_storage_mount() {
         Some(mount) => {
             // Mass-storage has a real volume — bypass the transport and use
             // the `std::fs` scanner so the USB scan + DB import can happen
-            // under one lock (the volume IO is local-fast).
+            // under one lock (the volume IO is local-fast). No ink: handwriting
+            // is a Scribe (MTP) feature.
             let conn = db.blocking_lock();
             ingest::import_from_device(&conn, &mount, &device.serial, &now)
         }
         None => {
-            // MTP: the USB walk is slow enough that we deliberately do it
-            // BEFORE taking the DB lock — see `collect_device_yjr` above.
+            // The library's content_ids — so the ink walk knows which
+            // `.notebooks/<id>!!PDOC!!` dirs are ours (a quick read, lock released
+            // before the slow USB walks).
+            let known_asins: std::collections::HashSet<String> = {
+                let conn = db.blocking_lock();
+                db::book_asins(&conn)?.into_iter().collect()
+            };
+            // MTP: do BOTH slow USB walks (annotations + ink notebooks) BEFORE
+            // taking the DB lock — see `collect_device_yjr` above.
             let collected = collect_device_yjr(transport)?;
+            let inks = ink::collect_device_ink(transport, &known_asins)?;
+            // The handwritten-ink anchors live in the same `.yjr`s we just pulled.
+            let notes = ink::handwritten_notes(&collected);
+
             let conn = db.blocking_lock();
-            ingest::import_collected(&conn, collected, &device.serial, &now)
+            let mut report = ingest::import_collected_with_progress(
+                &conn,
+                collected,
+                &device.serial,
+                &now,
+                &|cur, tot, label| on_progress("annotations", cur, tot, label),
+            )?;
+            ink::import_collected_ink(
+                &conn,
+                paths,
+                &device.serial,
+                &now,
+                &inks,
+                &notes,
+                &mut report,
+                &|cur, tot, label| on_progress("ink", cur, tot, label),
+            )?;
+            Ok(report)
         }
     }
 }

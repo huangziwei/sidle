@@ -220,6 +220,7 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
 /// over MTP; if it doesn't, the report is simply 0 books.
 #[tauri::command]
 pub async fn annotations_import_from_device(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ingest::DeviceImportReport, String> {
     let device = state
@@ -232,9 +233,27 @@ pub async fn annotations_import_from_device(
         .await
         .map_err(|e| e.to_string())?;
     let db_handle = state.db.clone();
+    let paths = state.paths.clone();
     let cell = state.transport.clone();
     let result = tokio::task::spawn_blocking(move || {
-        crate::device::annotations::import_device_annotations(&device, transport.as_ref(), &db_handle)
+        let on_progress = |stage: &str, current: usize, total: usize, label: &str| {
+            let _ = app.emit(
+                "annotations:sync-progress",
+                crate::device::annotations::SyncProgress {
+                    stage: stage.to_string(),
+                    current,
+                    total,
+                    label: label.to_string(),
+                },
+            );
+        };
+        crate::device::annotations::import_device_annotations(
+            &device,
+            transport.as_ref(),
+            &db_handle,
+            &paths,
+            &on_progress,
+        )
     })
     .await;
 

@@ -19,6 +19,7 @@ use serde::Serialize;
 
 pub mod annotations;
 pub mod dedrm;
+pub mod ink;
 pub mod detect;
 pub mod kual;
 pub mod mass_storage;

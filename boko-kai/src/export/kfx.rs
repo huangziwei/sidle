@@ -3272,22 +3272,23 @@ fn build_pdf_book_metadata_fragment(
     KfxFragment::singleton(KfxSymbol::BookMetadata, ion)
 }
 
-/// Deterministic 32-hex-uppercase content_id/ASIN for a PDOC, derived from the
-/// title + PDF size so re-imports are stable. (P0 mirrors Amazon's 32-hex
-/// ASIN==content_id; the 10-char tile-cache shape is revisited with the cover
-/// in P2 — see [[reference_kfx_asin_pdoc_cover]].)
+/// Deterministic content_id/ASIN for a PDOC — in the SAME 32-char Crockford-style
+/// base32 shape as every other sideload, via the single canonical
+/// [`crate::kfx::metadata::generate_content_id`]. (Previously this rolled its own
+/// 32-hex value, so a PDF→KFX baked a *different alphabet* than `resolve_export_asin`
+/// recomputes — `books.asin` never matched the on-device `.sdr`/`.notebooks` key.
+/// One fabricator now.) Seeded by the PDF's stable identity (title + author + byte
+/// size + page count) since a PDF carries no publication identifier, so
+/// re-converting the same PDF yields the same id.
 fn synth_pdoc_content_id(meta: &PdfKfxMeta, pdf: &crate::import::pdf::PdfDoc) -> String {
-    let mut seed = Vec::new();
-    seed.extend_from_slice(meta.title.as_bytes());
-    seed.extend_from_slice(meta.author.as_deref().unwrap_or("").as_bytes());
-    seed.extend_from_slice(&(pdf.bytes.len() as u64).to_le_bytes());
-    seed.extend_from_slice(&(pdf.pages.len() as u64).to_le_bytes());
-    let digest = sha1_smol::Sha1::from(&seed).digest().bytes();
-    let mut s = String::with_capacity(32);
-    for b in &digest[..16] {
-        s.push_str(&format!("{b:02X}"));
-    }
-    s
+    let seed = format!(
+        "{}\u{0}{}\u{0}{}\u{0}{}",
+        meta.title,
+        meta.author.as_deref().unwrap_or(""),
+        pdf.bytes.len(),
+        pdf.pages.len(),
+    );
+    crate::kfx::metadata::generate_content_id(&seed)
 }
 
 /// metadata ($258): the default reading order over all sections.

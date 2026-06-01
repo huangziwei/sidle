@@ -136,7 +136,12 @@ impl AppState {
         for (book_id, kfx_path) in db::books_missing_asin(&conn).unwrap_or_default() {
             match boko::Book::open(std::path::Path::new(&kfx_path)) {
                 Ok(book) => {
-                    if let Some(asin) = boko::kfx::metadata::resolve_export_asin(book.metadata()) {
+                    // The content_id boko BAKED into this KFX — the device's
+                    // `.sdr` / `.notebooks` key. Read it back rather than
+                    // recomputing via `resolve_export_asin` (which used a
+                    // different input and produced a value that never matched the
+                    // baked one for PDF→KFX books).
+                    if let Some(asin) = book.metadata().asin.clone() {
                         let _ = db::set_asin(&conn, book_id, &asin);
                     }
                 }

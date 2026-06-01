@@ -497,6 +497,13 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // restored backup is cleaned up on next open.
     conn.execute("DELETE FROM annotations WHERE source = 'clippings'", [])?;
 
+    // v6: handwritten ink belongs in `book_ink`, never the text `annotations`
+    // table. An older build stored each `handwritten_note` as a `Kind::Other`
+    // text row (its body = the nbk container id, no covered text) — scrub those;
+    // import now routes them to the ink path. Unconditional + idempotent, like
+    // the clippings scrub above.
+    conn.execute("DELETE FROM annotations WHERE kind = 'handwritten_note'", [])?;
+
     // §4c: stamp the schema version. migrate() always brings the DB up to the
     // latest schema, so set the current marker; backups gate restores on it.
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -807,6 +814,17 @@ pub fn book_id_by_asin(conn: &Connection, asin: &str) -> rusqlite::Result<Option
         |r| r.get(0),
     )
     .optional()
+}
+
+/// Every non-empty `books.asin` (the baked content_id). The ink collector uses
+/// this set to recognize which `.notebooks/<id>!!PDOC!!` dirs are OURS — the id
+/// is a content_id whose alphabet (hex vs Crockford-base32) varies per book, so
+/// "is it one of our books' asins?" is the only reliable test (NOT a hex check).
+pub fn book_asins(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT asin FROM books WHERE asin IS NOT NULL AND asin != ''")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect()
 }
 
 /// Full-form metadata patch sent by the editor modal. Every field is

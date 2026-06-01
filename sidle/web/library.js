@@ -1650,14 +1650,22 @@ function subscribePullProgress() {
 function annotationSyncSummary(report) {
   const added = report?.annotations?.inserted ?? 0;
   const removed = report?.annotations?.removed ?? 0;
-  if (added === 0 && removed === 0) return "Highlights already up to date";
+  const inkPages = report?.ink_pages ?? 0;
+  if (added === 0 && removed === 0 && inkPages === 0) return "Annotations already up to date";
   const books = report?.matched ?? 0;
   const from = books > 0 ? ` across ${books} book${books === 1 ? "" : "s"}` : "";
-  const noun = added + removed === 1 ? "annotation" : "annotations";
   const bits = [];
   if (added > 0) bits.push(`synced ${added}`);
   if (removed > 0) bits.push(`removed ${removed}`);
-  const s = `${bits.join(", ")} ${noun}${from}`;
+  let s = "";
+  if (bits.length) {
+    const noun = added + removed === 1 ? "annotation" : "annotations";
+    s = `${bits.join(", ")} ${noun}${from}`;
+  }
+  if (inkPages > 0) {
+    const ink = `${inkPages} handwritten page${inkPages === 1 ? "" : "s"}`;
+    s = s ? `${s}; ${ink}` : `synced ${ink}`;
+  }
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
@@ -1671,15 +1679,21 @@ async function syncAnnotations() {
   btn.textContent = "Syncing…";
   if (prog) {
     prog.hidden = false;
-    prog.textContent = "syncing highlights…";
+    prog.textContent = "syncing annotations…";
   }
+  // Drive the status bar via the same progress state the auto-sync uses; the
+  // command emits `annotations:sync-progress` while it runs.
+  state.annotationSync = { stage: "annotations", current: 0, total: 0, label: "" };
+  renderQueue();
   try {
     const report = await window.api.invoke("annotations_import_from_device");
     showToast(annotationSyncSummary(report));
     window.sidleReader?.reloadAnnotations?.();
   } catch (e) {
-    showToast(`highlight sync failed: ${e}`, true);
+    showToast(`annotation sync failed: ${e}`, true);
   } finally {
+    state.annotationSync = false;
+    renderQueue();
     btn.textContent = prevLabel;
     // Re-enable as long as a Kindle (either transport) is still connected.
     btn.disabled = !state.device;
@@ -1690,8 +1704,15 @@ async function syncAnnotations() {
 // Background sync driven by the device monitor on connect.
 function subscribeAnnotationSync() {
   window.api.listen("annotations:sync-start", () => {
-    state.annotationSync = true;
+    state.annotationSync = { stage: "annotations", current: 0, total: 0, label: "" };
     renderQueue();
+  });
+  // Per-item progress: which book/notebook is syncing now (count + label).
+  window.api.listen("annotations:sync-progress", (e) => {
+    if (state.annotationSync) {
+      state.annotationSync = e.payload;
+      renderQueue();
+    }
   });
   window.api.listen("annotations:sync-done", (e) => {
     state.annotationSync = false;
@@ -1708,7 +1729,7 @@ function subscribeAnnotationSync() {
   window.api.listen("annotations:sync-error", (e) => {
     state.annotationSync = false;
     renderQueue();
-    showToast(`Kindle highlight sync failed: ${e.payload}`, true);
+    showToast(`Kindle annotation sync failed: ${e.payload}`, true);
   });
 }
 
@@ -1756,7 +1777,12 @@ function renderQueue() {
       `Pulling ${state.autopull.done}/${state.autopull.total} from Kindle…`;
     toggle.classList.add("active");
   } else if (state.annotationSync) {
-    summary.textContent = "Syncing Kindle highlights…";
+    const p = state.annotationSync;
+    const noun = p && p.stage === "ink" ? "handwriting" : "annotations";
+    summary.textContent =
+      p && p.total > 0 && p.label
+        ? `Syncing ${noun}: ${p.label} (${p.current}/${p.total})`
+        : "Syncing Kindle annotations…";
     toggle.classList.add("active");
   } else {
     const parts = [];
@@ -2270,7 +2296,7 @@ async function doBackup() {
   try {
     const r = await window.api.invoke("library_backup", { dest });
     setSettingsStatus(
-      `Backed up ${plural(r.books, "book")} and ${plural(r.annotations, "highlight")} to:\n${r.path}`,
+      `Backed up ${plural(r.books, "book")} and ${plural(r.annotations, "annotation")} to:\n${r.path}`,
     );
   } catch (e) {
     setSettingsStatus(String(e?.message ?? e), true);
