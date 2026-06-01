@@ -320,6 +320,61 @@ pub async fn reader_pdf_page(
     .map_err(|e| format!("reader render task join error: {e}"))?
 }
 
+/// One handwritten-ink overlay anchored on a host page: the transparent SVG to
+/// composite over the rendered PDF page, tagged with the source ink page's
+/// container id (stable per-page key, for the toggle/legend).
+#[derive(Debug, Serialize)]
+pub struct ReaderInkDto {
+    pub container_id: String,
+    pub host_page: i64,
+    /// Transparent, ink-only SVG (the cached overlay render). Empty if the cache
+    /// file is missing (it shouldn't be — import writes it beside the row).
+    pub svg: String,
+}
+
+/// The handwritten-ink overlays anchored on one 0-based PDF page (usually one,
+/// possibly more) — for the fixed-layout reader to composite over the rendered
+/// page image behind a show/hide toggle. Empty when the page carries no ink.
+#[tauri::command]
+pub async fn reader_pdf_ink(
+    state: State<'_, AppState>,
+    book_id: i64,
+    page: i64,
+) -> Result<Vec<ReaderInkDto>, String> {
+    let (sha, rows) = {
+        let conn = state.db.lock().await;
+        let sha = db::get_book(&conn, book_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no book with id {book_id}"))?
+            .sha256;
+        let rows = db::list_book_ink_on_page(&conn, book_id, page).map_err(|e| e.to_string())?;
+        (sha, rows)
+    };
+    let svg_for = |asin: &str, cid: &str| {
+        std::fs::read_to_string(state.paths.book_ink_overlay_svg(&sha, asin, cid)).unwrap_or_default()
+    };
+    Ok(rows
+        .into_iter()
+        .map(|r| ReaderInkDto {
+            host_page: r.host_page.unwrap_or(page),
+            svg: svg_for(&r.asin, &r.container_id),
+            container_id: r.container_id,
+        })
+        .collect())
+}
+
+/// The 0-based PDF pages that carry anchored ink for a book — fetched once on
+/// open so the reader knows which pages to overlay (and can mark them in the
+/// scrubber). The per-page SVGs come from [`reader_pdf_ink`] as each page renders.
+#[tauri::command]
+pub async fn reader_pdf_ink_pages(
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<Vec<i64>, String> {
+    let conn = state.db.lock().await;
+    db::book_ink_host_pages(&conn, book_id).map_err(|e| e.to_string())
+}
+
 /// One stored annotation, shaped for the reader's painter + sidebar.
 #[derive(Debug, Serialize)]
 pub struct AnnotationDto {

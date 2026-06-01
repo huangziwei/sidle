@@ -84,7 +84,10 @@ pub struct BookRow {
 /// v5: added `notebooks.updated_at` — the source `nbk`'s on-device mtime (the
 /// Kindle's Date Modified, which only advances on a real edit), captured at
 /// import. The displayed "when" for a notebook; `imported_at` is bookkeeping.
-pub const SCHEMA_VERSION: i64 = 5;
+/// v6: added `book_ink` / `book_ink_device` / `ink_sync` — handwritten ink drawn
+/// on a sideloaded doc (PDOC), keyed per ink page by `(asin, container_id)`. See
+/// .claude/plans/scribe-handwritten-annotations.md.
+pub const SCHEMA_VERSION: i64 = 6;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -423,6 +426,70 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute("ALTER TABLE notebooks ADD COLUMN updated_at TEXT", [])?;
     }
 
+    // v6: handwritten ink drawn ON a sideloaded doc (PDOC), one row per drawn
+    // page. ADDITIVE and precious: created here, never part of the destructive
+    // reset. Identity is `(asin, container_id)` — the book's baked content_id
+    // plus the ink notebook's per-page container kfx_id — which is STABLE as the
+    // device grows the nbk's `local_delta_fragments` (a new page adds a row; it
+    // never re-keys old ones). `book_id` is nullable with ON DELETE SET NULL so
+    // removing a book unlinks its ink instead of destroying it (relink by asin),
+    // mirroring `annotations`. `host_page`/`host_eid`/`host_linear` come from the
+    // `.yjr` `handwritten_note` anchor: the host PDF page the ink overlays, the
+    // anchor eid, and the device linear position (the display sort across pages).
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS book_ink (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id      INTEGER REFERENCES books(id) ON DELETE SET NULL,
+            asin         TEXT NOT NULL,
+            container_id TEXT NOT NULL,
+            host_page    INTEGER,
+            host_eid     INTEGER,
+            host_linear  INTEGER,
+            nbk_sha256   TEXT,
+            imported_at  TEXT NOT NULL,
+            UNIQUE(asin, container_id)
+        )"#,
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_book_ink_book ON book_ink(book_id)",
+        [],
+    )?;
+
+    // Which devices currently assert each ink page — the ink analogue of
+    // `annotation_device`. A page erased on the Scribe drops out of the nbk's
+    // `document_data` (boko excludes orphan containers), so on re-sync the device
+    // asserts fewer `container_id`s; reconcile GCs any `book_ink` row no device
+    // asserts anymore. Keyed per ink page, per device. Additive; never reset.
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS book_ink_device (
+            asin          TEXT NOT NULL,
+            container_id  TEXT NOT NULL,
+            device_serial TEXT NOT NULL,
+            book_id       INTEGER,
+            last_seen     TEXT NOT NULL,
+            PRIMARY KEY (asin, container_id, device_serial)
+        )"#,
+        [],
+    )?;
+
+    // Per-(device, asin) content checkpoint: the sha of the nbk last decoded, so
+    // an unchanged ink notebook skips the (expensive) decode + raster re-render
+    // on every connect — the exact analogue of `yjr_sync`. NOT a dedup key: row
+    // identity is `(asin, container_id)`; this only short-circuits unchanged
+    // pulls. When the nbk DOES change (a page added/edited), the decode runs and
+    // the `(asin, container_id)` upsert keeps old pages stable while adding new.
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS ink_sync (
+            device_serial TEXT NOT NULL,
+            asin          TEXT NOT NULL,
+            nbk_sha       TEXT NOT NULL,
+            synced_at     TEXT NOT NULL,
+            PRIMARY KEY (device_serial, asin)
+        )"#,
+        [],
+    )?;
+
     // v2: scrub any rows from the (now-removed) `My Clippings.txt` ingest path.
     // It only ever wrote orphans (`book_id IS NULL`), so this never touches a
     // linked annotation. Idempotent: a no-op on a DB that never had any. Kept
@@ -725,6 +792,18 @@ pub fn book_id_with_asin(
     conn.query_row(
         "SELECT id FROM books WHERE asin = ?1 AND id != ?2 LIMIT 1",
         params![asin, except_id],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// The id of the book holding `asin`, if any. Used to (re)link handwritten ink to
+/// its host book — the ink's `.notebooks/<asin>!!PDOC!!` dir name is the baked
+/// content_id Sidle stamped into `books.asin`.
+pub fn book_id_by_asin(conn: &Connection, asin: &str) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM books WHERE asin = ?1 LIMIT 1",
+        params![asin],
         |r| r.get(0),
     )
     .optional()
@@ -1214,6 +1293,223 @@ pub fn remove_notebook(conn: &Connection, id: i64) -> rusqlite::Result<Option<St
         conn.execute("DELETE FROM notebooks WHERE id = ?1", params![id])?;
     }
     Ok(uuid)
+}
+
+// ---------------------------------------------------------------------------
+// Handwritten ink on a sideloaded doc (`book_ink`; see
+// .claude/plans/scribe-handwritten-annotations.md). Tables live in `migrate`
+// outside the destructive reset.
+// ---------------------------------------------------------------------------
+
+/// One imported ink page — the user's handwriting on a single host PDF page.
+/// Cached SVGs live at `books/<sha>/ink/<asin>/<container>.{overlay,plain}.svg`
+/// (derived from `asin` + `container_id` via [`crate::library::LibraryPaths`]).
+#[derive(Debug, Clone, Serialize)]
+pub struct BookInkRow {
+    pub id: i64,
+    pub book_id: Option<i64>,
+    pub asin: String,
+    pub container_id: String,
+    /// 0-based host PDF page the ink overlays. `None` if the `.yjr` anchor eid
+    /// didn't resolve to a page (no KFX text layer, or a yjr/book mismatch) — the
+    /// ink is still stored, surfaced only in the gallery until it can be anchored.
+    pub host_page: Option<i64>,
+    pub host_eid: Option<i64>,
+    /// Device linear position of the host anchor — the display sort across pages.
+    pub host_linear: Option<i64>,
+    pub nbk_sha256: Option<String>,
+    pub imported_at: String,
+}
+
+const SELECT_BOOK_INK: &str = "SELECT id, book_id, asin, container_id, host_page, \
+    host_eid, host_linear, nbk_sha256, imported_at FROM book_ink";
+
+fn row_to_book_ink(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookInkRow> {
+    Ok(BookInkRow {
+        id: row.get(0)?,
+        book_id: row.get(1)?,
+        asin: row.get(2)?,
+        container_id: row.get(3)?,
+        host_page: row.get(4)?,
+        host_eid: row.get(5)?,
+        host_linear: row.get(6)?,
+        nbk_sha256: row.get(7)?,
+        imported_at: row.get(8)?,
+    })
+}
+
+/// Insert payload for one ink page.
+pub struct NewBookInk<'a> {
+    pub book_id: Option<i64>,
+    pub asin: &'a str,
+    pub container_id: &'a str,
+    pub host_page: Option<i64>,
+    pub host_eid: Option<i64>,
+    pub host_linear: Option<i64>,
+    pub nbk_sha256: Option<&'a str>,
+    pub imported_at: &'a str,
+}
+
+/// Upsert one ink page, keyed by `(asin, container_id)` — the stable per-page
+/// identity. Re-importing the same page refreshes its host anchor / book link /
+/// content hash in place, never a duplicate, even as the device grows the nbk.
+/// Returns the row id.
+pub fn upsert_book_ink(conn: &Connection, ink: &NewBookInk<'_>) -> rusqlite::Result<i64> {
+    conn.execute(
+        r#"INSERT INTO book_ink
+            (book_id, asin, container_id, host_page, host_eid, host_linear, nbk_sha256, imported_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(asin, container_id) DO UPDATE SET
+                book_id     = excluded.book_id,
+                host_page   = excluded.host_page,
+                host_eid    = excluded.host_eid,
+                host_linear = excluded.host_linear,
+                nbk_sha256  = excluded.nbk_sha256"#,
+        params![
+            ink.book_id,
+            ink.asin,
+            ink.container_id,
+            ink.host_page,
+            ink.host_eid,
+            ink.host_linear,
+            ink.nbk_sha256,
+            ink.imported_at,
+        ],
+    )?;
+    conn.query_row(
+        "SELECT id FROM book_ink WHERE asin = ?1 AND container_id = ?2",
+        params![ink.asin, ink.container_id],
+        |r| r.get(0),
+    )
+}
+
+/// A book's ink pages, display-ordered by the host anchor linear position (then
+/// page, then id) — the device's reading order, NOT the nbk's creation order.
+pub fn list_book_ink(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<BookInkRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "{SELECT_BOOK_INK} WHERE book_id = ?1 ORDER BY host_linear, host_page, id"
+    ))?;
+    stmt.query_map(params![book_id], row_to_book_ink)?.collect()
+}
+
+/// Ink pages overlaying one 0-based host PDF page (usually one; possibly more).
+pub fn list_book_ink_on_page(
+    conn: &Connection,
+    book_id: i64,
+    host_page: i64,
+) -> rusqlite::Result<Vec<BookInkRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "{SELECT_BOOK_INK} WHERE book_id = ?1 AND host_page = ?2 ORDER BY host_linear, id"
+    ))?;
+    stmt.query_map(params![book_id, host_page], row_to_book_ink)?.collect()
+}
+
+/// Distinct host pages that carry anchored ink for a book — the reader chrome's
+/// "these pages have ink" set (drives the per-page overlay fetch + a marker).
+pub fn book_ink_host_pages(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT host_page FROM book_ink \
+         WHERE book_id = ?1 AND host_page IS NOT NULL ORDER BY host_page",
+    )?;
+    stmt.query_map(params![book_id], |r| r.get(0))?.collect()
+}
+
+/// Unlinked ink pages (book not in the library) — the orphan inbox, for relink.
+pub fn list_unlinked_book_ink(conn: &Connection) -> rusqlite::Result<Vec<BookInkRow>> {
+    let mut stmt = conn.prepare(&format!("{SELECT_BOOK_INK} WHERE book_id IS NULL"))?;
+    stmt.query_map([], row_to_book_ink)?.collect()
+}
+
+/// Point an ink page at a (re-)matched book. Used by ingest's relink pass.
+pub fn set_book_ink_book_id(conn: &Connection, id: i64, book_id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE book_ink SET book_id = ?1 WHERE id = ?2",
+        params![book_id, id],
+    )?;
+    Ok(())
+}
+
+/// The nbk content sha last decoded for `(device_serial, asin)`, if that device
+/// has ever synced this book's ink. The ink import compares it against the freshly
+/// pulled nbk to skip an unchanged decode+render. Mirrors [`get_yjr_sync_sha`].
+pub fn get_ink_sync_sha(
+    conn: &Connection,
+    device_serial: &str,
+    asin: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT nbk_sha FROM ink_sync WHERE device_serial = ?1 AND asin = ?2",
+        params![device_serial, asin],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+/// Record the nbk content sha decoded for `(device_serial, asin)` (upsert).
+pub fn set_ink_sync_sha(
+    conn: &Connection,
+    device_serial: &str,
+    asin: &str,
+    nbk_sha: &str,
+    now: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        r#"INSERT INTO ink_sync (device_serial, asin, nbk_sha, synced_at) VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(device_serial, asin) DO UPDATE SET
+                nbk_sha = excluded.nbk_sha,
+                synced_at = excluded.synced_at"#,
+        params![device_serial, asin, nbk_sha, now],
+    )?;
+    Ok(())
+}
+
+/// Reconcile one device's ink-page presence for `asin` against the container ids
+/// it currently asserts (decoded from the nbk just pulled). Returns the
+/// `container_id`s of `book_ink` rows GC'd — no device asserts them anymore, so a
+/// page erased on the Scribe propagates — for the caller to drop their cached
+/// SVGs. The ink analogue of [`reconcile_device_book`].
+pub fn reconcile_ink_device(
+    conn: &Connection,
+    device_serial: &str,
+    asin: &str,
+    book_id: Option<i64>,
+    current_containers: &[String],
+    now: &str,
+) -> rusqlite::Result<Vec<String>> {
+    for cid in current_containers {
+        conn.execute(
+            r#"INSERT INTO book_ink_device (asin, container_id, device_serial, book_id, last_seen)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(asin, container_id, device_serial) DO UPDATE SET
+                    book_id = excluded.book_id,
+                    last_seen = excluded.last_seen"#,
+            params![asin, cid, device_serial, book_id, now],
+        )?;
+    }
+    // Drop this (device, asin)'s presence rows not touched this pass (the pages
+    // erased on the device since last sync).
+    conn.execute(
+        "DELETE FROM book_ink_device \
+         WHERE device_serial = ?1 AND asin = ?2 AND last_seen <> ?3",
+        params![device_serial, asin, now],
+    )?;
+    // GC every ink page for this asin that no device asserts anymore.
+    let removed: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT container_id FROM book_ink WHERE asin = ?1 \
+             AND NOT EXISTS (SELECT 1 FROM book_ink_device d \
+                 WHERE d.asin = book_ink.asin AND d.container_id = book_ink.container_id)",
+        )?;
+        let rows = stmt.query_map(params![asin], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for cid in &removed {
+        conn.execute(
+            "DELETE FROM book_ink WHERE asin = ?1 AND container_id = ?2",
+            params![asin, cid],
+        )?;
+    }
+    Ok(removed)
 }
 
 // ---------------------------------------------------------------------------
@@ -2526,5 +2822,174 @@ mod tests {
     fn migrate_stamps_schema_version() {
         let conn = fresh_db();
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    // ── book_ink (handwritten ink on a sideloaded doc) ──────────────────────
+
+    fn insert_with_asin(conn: &Connection, sha: &str, title: &str, asin: &str) -> i64 {
+        insert_book(
+            conn,
+            &NewBook {
+                sha256: sha,
+                title,
+                author: "",
+                language: "",
+                ppd: None,
+                epub_path: None,
+                cover_path: None,
+                kfx_path: None,
+                kfx_sha256: None,
+                pdf_path: None,
+                file_size: 0,
+                imported_at: "t0",
+                asin: Some(asin),
+                publisher: None,
+                published_at: None,
+                series_name: None,
+                series_index: None,
+                tags: &[],
+            },
+        )
+        .expect("insert")
+    }
+
+    #[test]
+    fn book_ink_upsert_is_idempotent_on_asin_container() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha", "B");
+        let mk = |nbk: &'static str| NewBookInk {
+            book_id: Some(book),
+            asin: "AS1",
+            container_id: "cidA",
+            host_page: Some(8),
+            host_eid: Some(1158),
+            host_linear: Some(9782),
+            nbk_sha256: Some(nbk),
+            imported_at: "t0",
+        };
+        let id1 = upsert_book_ink(&conn, &mk("sha1")).unwrap();
+        // Re-import the same page from a grown nbk (new whole-file sha): same row,
+        // refreshed content hash — NOT a duplicate. (The plan's core idempotency.)
+        let id2 = upsert_book_ink(&conn, &mk("sha2")).unwrap();
+        assert_eq!(id1, id2);
+        let rows = list_book_ink(&conn, book).unwrap();
+        assert_eq!(rows.len(), 1, "same (asin, container) → one row");
+        assert_eq!(rows[0].nbk_sha256.as_deref(), Some("sha2"));
+    }
+
+    #[test]
+    fn book_ink_lists_in_linear_order_with_distinct_host_pages() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha", "B");
+        // Insert OUT of reading order; display must sort by the device linear pos.
+        for (cid, page, lin) in [("c2", 2, 17274), ("c0", 8, 9782), ("c1", 1, 14938)] {
+            upsert_book_ink(
+                &conn,
+                &NewBookInk {
+                    book_id: Some(book),
+                    asin: "AS1",
+                    container_id: cid,
+                    host_page: Some(page),
+                    host_eid: Some(page),
+                    host_linear: Some(lin),
+                    nbk_sha256: Some("s"),
+                    imported_at: "t0",
+                },
+            )
+            .unwrap();
+        }
+        let order: Vec<String> = list_book_ink(&conn, book)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.container_id)
+            .collect();
+        assert_eq!(order, ["c0", "c1", "c2"], "sorted by host_linear, not insert order");
+        assert_eq!(book_ink_host_pages(&conn, book).unwrap(), vec![1, 2, 8]);
+        let on8 = list_book_ink_on_page(&conn, book, 8).unwrap();
+        assert_eq!(on8.len(), 1);
+        assert_eq!(on8[0].container_id, "c0");
+    }
+
+    #[test]
+    fn book_ink_reconcile_propagates_device_erase() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha", "B");
+        let mk = |cid: &'static str| NewBookInk {
+            book_id: Some(book),
+            asin: "AS1",
+            container_id: cid,
+            host_page: Some(1),
+            host_eid: Some(1),
+            host_linear: Some(1),
+            nbk_sha256: Some("s"),
+            imported_at: "t0",
+        };
+        upsert_book_ink(&conn, &mk("c0")).unwrap();
+        upsert_book_ink(&conn, &mk("c1")).unwrap();
+
+        // First sync: the device asserts both pages → nothing GC'd.
+        let removed = reconcile_ink_device(
+            &conn,
+            "DEV",
+            "AS1",
+            Some(book),
+            &["c0".to_string(), "c1".to_string()],
+            "t1",
+        )
+        .unwrap();
+        assert!(removed.is_empty());
+        assert_eq!(list_book_ink(&conn, book).unwrap().len(), 2);
+
+        // Next sync: c1 erased on the device → GC'd; c0 survives.
+        let removed =
+            reconcile_ink_device(&conn, "DEV", "AS1", Some(book), &["c0".to_string()], "t2")
+                .unwrap();
+        assert_eq!(removed, vec!["c1".to_string()]);
+        let rows = list_book_ink(&conn, book).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].container_id, "c0");
+    }
+
+    #[test]
+    fn book_ink_unlinks_on_book_delete_and_relinks_by_asin() {
+        let conn = fresh_db();
+        let book = insert_with_asin(&conn, "sha", "Linear", "AS1");
+        upsert_book_ink(
+            &conn,
+            &NewBookInk {
+                book_id: Some(book),
+                asin: "AS1",
+                container_id: "c0",
+                host_page: Some(1),
+                host_eid: Some(1),
+                host_linear: Some(1),
+                nbk_sha256: Some("s"),
+                imported_at: "t0",
+            },
+        )
+        .unwrap();
+
+        // Removing the book unlinks (ON DELETE SET NULL), never destroys, the ink.
+        remove_book(&conn, book).unwrap();
+        let orphans = list_unlinked_book_ink(&conn).unwrap();
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].book_id, None);
+
+        // Re-add the book with the same asin and relink by asin.
+        let book2 = insert_with_asin(&conn, "sha2", "Linear", "AS1");
+        assert_eq!(book_id_by_asin(&conn, "AS1").unwrap(), Some(book2));
+        set_book_ink_book_id(&conn, orphans[0].id, book2).unwrap();
+        assert_eq!(list_book_ink(&conn, book2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ink_sync_checkpoint_round_trips() {
+        let conn = fresh_db();
+        assert_eq!(get_ink_sync_sha(&conn, "DEV", "AS1").unwrap(), None);
+        set_ink_sync_sha(&conn, "DEV", "AS1", "nbksha", "t0").unwrap();
+        assert_eq!(get_ink_sync_sha(&conn, "DEV", "AS1").unwrap().as_deref(), Some("nbksha"));
+        // Upsert overwrites in place.
+        set_ink_sync_sha(&conn, "DEV", "AS1", "nbksha2", "t1").unwrap();
+        assert_eq!(get_ink_sync_sha(&conn, "DEV", "AS1").unwrap().as_deref(), Some("nbksha2"));
     }
 }

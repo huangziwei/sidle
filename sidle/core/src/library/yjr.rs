@@ -46,6 +46,12 @@ pub enum Kind {
     Highlight,
     Note,
     Bookmark,
+    /// Handwritten ink drawn on a sideloaded doc (`annotation.personal.handwritten_note`).
+    /// One record per drawn page: its anchor handle is the host-page position, and
+    /// its inline "body" is the ink notebook's page-container kfx_id (the per-page
+    /// link). Routed to the ink path ([`crate::library::ink`]), never the text
+    /// `annotations` table — there is no covered text to extract.
+    Handwritten,
     /// Any future/unknown `annotation.personal.<x>` — kept verbatim, not dropped.
     Other(String),
 }
@@ -60,6 +66,7 @@ impl Kind {
             "highlight" => Kind::Highlight,
             "note" => Kind::Note,
             "bookmark" => Kind::Bookmark,
+            "handwritten_note" => Kind::Handwritten,
             other => Kind::Other(other.to_string()),
         }
     }
@@ -70,6 +77,7 @@ impl Kind {
             Kind::Highlight => "highlight",
             Kind::Note => "note",
             Kind::Bookmark => "bookmark",
+            Kind::Handwritten => "handwritten_note",
             Kind::Other(s) => s,
         }
     }
@@ -327,6 +335,28 @@ mod tests {
         assert_eq!(bm.start().unwrap().eid, 1492);
         assert_eq!(bm.end().unwrap().eid, 1492); // repeats the start
         assert_eq!(bm.note_body, None);
+    }
+
+    #[test]
+    fn parses_handwritten_note_with_container_id_body() {
+        // One drawn page on a sideloaded doc: a `handwritten_note` record with a
+        // host-page anchor handle followed by the nbk page-container kfx_id as the
+        // inline "body" (it has no ':' so it never decodes as a handle — it falls
+        // through to note_body, exactly the per-page link Sidle joins on).
+        let bytes: Vec<u8> = [
+            key("annotation.personal.handwritten_note"),
+            val(&handle(1158, 0, 9782)),
+            val("cC9KkbR1zStWRzxfccUugsw0"),
+        ]
+        .concat();
+        let anns = parse(&bytes);
+        assert_eq!(anns.len(), 1);
+        let hw = &anns[0];
+        assert_eq!(hw.kind, Kind::Handwritten);
+        assert_eq!(hw.kind.as_str(), "handwritten_note");
+        assert_eq!((hw.start().unwrap().eid, hw.start().unwrap().linear), (1158, 9782));
+        // The body is the container id, NOT a decoded handle.
+        assert_eq!(hw.note_body.as_deref(), Some("cC9KkbR1zStWRzxfccUugsw0"));
     }
 
     #[test]

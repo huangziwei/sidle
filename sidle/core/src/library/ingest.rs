@@ -209,6 +209,14 @@ pub fn import_yjr(
     let mut current_hashes = Vec::with_capacity(annotations.len());
 
     for ann in annotations {
+        // Handwritten ink is routed to the ink path ([`crate::library::ink`]),
+        // never the text `annotations` table: it covers no text, so a row here
+        // would surface as a bodyless junk entry in the sidebar. The `.yjr`
+        // carries the host-page anchor + the nbk page-container id, which the ink
+        // importer consumes directly.
+        if ann.kind == Kind::Handwritten {
+            continue;
+        }
         let r = anchor::resolve(ann, idx);
         let kind = r.kind.as_str();
         let is_span = matches!(r.kind, Kind::Highlight | Kind::Note);
@@ -704,6 +712,37 @@ mod tests {
             db::list_annotations_for_book(&conn, book).unwrap().len(),
             1,
             "deviceless import never deletes"
+        );
+    }
+
+    #[test]
+    fn handwritten_note_is_not_stored_as_text_annotation() {
+        let conn = mem_db();
+        let book = add_book(&conn, "B");
+        // A handwritten_note (ink) mixed with a real highlight: only the highlight
+        // lands in the text table; the ink is routed elsewhere (library::ink).
+        let anns = vec![
+            highlight(10, 0, 4),
+            Annotation {
+                kind: Kind::Handwritten,
+                handles: vec![Handle {
+                    type_byte: 1,
+                    eid: 10,
+                    offset: 0,
+                    linear: 9782,
+                    b64: String::new(),
+                }],
+                note_body: Some("cC9KkbR1zStWRzxfccUugsw0".to_string()),
+            },
+        ];
+        let s = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, None, "t").unwrap();
+        assert_eq!(s.inserted, 1, "only the highlight is a text annotation");
+        let stored = db::list_annotations_for_book(&conn, book).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].kind, "highlight");
+        assert!(
+            stored.iter().all(|a| a.kind != "handwritten_note"),
+            "no handwritten row in the text annotations table"
         );
     }
 

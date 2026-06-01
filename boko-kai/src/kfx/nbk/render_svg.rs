@@ -16,15 +16,10 @@ use super::note_model::{Page, Stroke};
 const BRUSH_HIGHLIGHTER: i64 = 1;
 const INCLUDE_PRIOR_LINE_SEGMENT: bool = true;
 
-/// Render one page to a standalone SVG document string.
+/// Render one page to a standalone SVG document string (white page background +
+/// ruled/grid template) — the notebook gallery view.
 pub fn page_to_svg(page: &Page) -> String {
-    let mut s = String::new();
-    let _ = write!(
-        s,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" preserveAspectRatio=\"xMidYMid meet\" \
-         viewBox=\"0 0 {} {}\">",
-        page.canvas_width, page.canvas_height
-    );
+    let mut s = svg_open(page);
     // White page background.
     s.push_str("<rect x=\"0\" y=\"0\" width=\"100%\" height=\"100%\" fill=\"white\"/>");
     // Ruled/grid/margin template, composited under the ink. It is authored at
@@ -39,16 +34,46 @@ pub fn page_to_svg(page: &Page) -> String {
             page.canvas_width, page.canvas_height, t.width, t.height, t.shapes_svg
         );
     }
-    // Shape-tool shapes sit over the template and under the ink (they precede
-    // the strokes in page content order — typically guides drawn first).
+    render_ink(&mut s, page);
+    s.push_str("</svg>");
+    s
+}
+
+/// Render one page as a **transparent ink-only overlay** — no white background,
+/// no ruled template — for compositing on top of the host document page in the
+/// reader (the ink the user drew *over* a sideloaded PDF). Keeps ALL ink: the
+/// vector `<path>` pen/marker/highlighter strokes AND the raster `<image>`
+/// pencil strokes (whose PNG is already transparent except where the graphite
+/// lands), so the page shows through everywhere there is no ink.
+pub fn page_to_overlay_svg(page: &Page) -> String {
+    let mut s = svg_open(page);
+    render_ink(&mut s, page);
+    s.push_str("</svg>");
+    s
+}
+
+/// Open an `<svg>` whose user space is the page's canvas units. The fit to the
+/// host box is left to the embedding element (the overlay fills the rendered
+/// page; the gallery letterboxes), so no `preserveAspectRatio` is forced here.
+fn svg_open(page: &Page) -> String {
+    let mut s = String::new();
+    let _ = write!(
+        s,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} {}\">",
+        page.canvas_width, page.canvas_height
+    );
+    s
+}
+
+/// Composite a page's ink: shape-tool shapes first (they precede the strokes in
+/// page content order — typically guides drawn first), then the strokes.
+fn render_ink(s: &mut String, page: &Page) {
     for shape in &page.shapes {
         s.push_str(shape);
     }
     for stroke in &page.strokes {
-        render_stroke(&mut s, stroke);
+        render_stroke(s, stroke);
     }
-    s.push_str("</svg>");
-    s
 }
 
 fn render_stroke(s: &mut String, stroke: &Stroke) {
@@ -156,4 +181,70 @@ fn render_stroke(s: &mut String, stroke: &Stroke) {
 fn color_str(color: i64) -> String {
     let c = (color & 0xff_ff_ff) as u32;
     format!("#{c:06x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::template::Template;
+
+    /// A page with one straight two-point vector stroke and a (dummy) template.
+    fn page_with_one_stroke() -> Page {
+        Page {
+            container_id: "cTESTpage0".to_string(),
+            canvas_width: 1000,
+            canvas_height: 2000,
+            shapes: Vec::new(),
+            template: Some(Template {
+                width: 100,
+                height: 200,
+                shapes_svg: "<line x1=\"0\" y1=\"0\" x2=\"100\" y2=\"0\"/>".to_string(),
+            }),
+            strokes: vec![Stroke {
+                brush_type: 7, // marker → vector path
+                color: 0,
+                thickness: 6.0,
+                random_seed: 0,
+                bounds: [10, 10, 200, 200],
+                num_points: 2,
+                position_x: vec![0, 50],
+                position_y: vec![0, 60],
+                thickness_adjust: Vec::new(),
+                density_adjust: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn overlay_is_transparent_and_template_free_but_keeps_ink() {
+        let page = page_with_one_stroke();
+        let gallery = page_to_svg(&page);
+        let overlay = page_to_overlay_svg(&page);
+
+        // Both share the canvas-unit viewBox.
+        assert!(gallery.contains("viewBox=\"0 0 1000 2000\""));
+        assert!(overlay.contains("viewBox=\"0 0 1000 2000\""));
+
+        // Gallery paints a white page + the ruled template; the overlay paints
+        // neither (the host PDF page must show through).
+        assert!(gallery.contains("fill=\"white\""));
+        assert!(gallery.contains("<line")); // template
+        assert!(!overlay.contains("fill=\"white\""));
+        assert!(!overlay.contains("<line"));
+
+        // The ink itself survives into the overlay (the stroke is a <path>).
+        assert!(overlay.contains("<path"));
+    }
+
+    #[test]
+    fn overlay_keeps_raster_pencil_ink() {
+        // A variable-density (pencil) stroke renders as a transparent <image>;
+        // the overlay must keep it (it's the bulk of real handwriting).
+        let mut page = page_with_one_stroke();
+        page.strokes[0].brush_type = 5;
+        page.strokes[0].density_adjust = vec![40, 80]; // any != 100 → raster branch
+        let overlay = page_to_overlay_svg(&page);
+        assert!(overlay.contains("<image"));
+        assert!(!overlay.contains("fill=\"white\""));
+    }
 }

@@ -51,6 +51,11 @@ pub struct Stroke {
 /// One notebook page.
 #[derive(Debug, Clone)]
 pub struct Page {
+    /// The page-container fragment's `kfx_id` (e.g. `cC9KkbR1zStWRzxfccUugsw0`).
+    /// On a sideloaded-doc (PDOC) notebook this is the per-page link target: the
+    /// book's `.yjr` `handwritten_note` record names it as the note "body", so
+    /// Sidle joins an ink page to its host-page anchor by `container_id == body`.
+    pub container_id: String,
     pub canvas_width: i64,
     pub canvas_height: i64,
     pub strokes: Vec<Stroke>,
@@ -193,6 +198,7 @@ pub fn build_pages(frags: &HashMap<String, Vec<u8>>) -> Result<Vec<Page>, NbkErr
             .and_then(|tid| template::resolve(tid, &parsed, &sym));
 
         pages.push(Page {
+            container_id: cid.to_string(),
             canvas_width,
             canvas_height,
             strokes: sink.strokes,

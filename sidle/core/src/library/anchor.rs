@@ -86,6 +86,10 @@ pub fn resolve(ann: &Annotation, idx: &TextIndex) -> Resolved {
             .and_then(|h| idx.text_of(h.eid as i64))
             .map(str::to_string)
             .unwrap_or_default(),
+        // Handwritten ink covers no text — it's routed to the ink path and never
+        // reaches the text `annotations` table (import_yjr filters it out before
+        // this), but the arm keeps the match exhaustive.
+        Kind::Handwritten => String::new(),
     };
 
     Resolved {

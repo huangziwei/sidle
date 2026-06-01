@@ -255,6 +255,59 @@ impl LibraryPaths {
             Err(e) => Err(e),
         }
     }
+
+    // ── Handwritten ink on a sideloaded doc (PDOC) ──────────────────────────
+    // Layout: `books/<sha>/ink/<asin>/{nbk, <container>.overlay.svg,
+    // <container>.plain.svg}` — the raw nbk backup (survives a device wipe) plus
+    // the per-page renders, keyed by the ink notebook's page-container id.
+    // Nested under the host book's own `books/<sha>/` so removing the book takes
+    // its ink with it.
+
+    /// Per-book ink directory for one ink notebook (one `asin`).
+    pub fn book_ink_dir(&self, sha: &str, asin: &str) -> PathBuf {
+        self.book_dir(sha).join("ink").join(asin)
+    }
+
+    /// Raw `nbk` backup for one ink notebook.
+    pub fn book_ink_nbk(&self, sha: &str, asin: &str) -> PathBuf {
+        self.book_ink_dir(sha, asin).join("nbk")
+    }
+
+    /// Transparent ink-only overlay SVG for one ink page — composited over the
+    /// host PDF page in the reader.
+    pub fn book_ink_overlay_svg(&self, sha: &str, asin: &str, container_id: &str) -> PathBuf {
+        self.book_ink_dir(sha, asin)
+            .join(format!("{}.overlay.svg", sanitize_ink_id(container_id)))
+    }
+
+    /// White-background "plain" SVG for one ink page — the gallery / standalone view.
+    pub fn book_ink_plain_svg(&self, sha: &str, asin: &str, container_id: &str) -> PathBuf {
+        self.book_ink_dir(sha, asin)
+            .join(format!("{}.plain.svg", sanitize_ink_id(container_id)))
+    }
+
+    /// Create the ink dir for one `asin`.
+    pub fn ensure_book_ink(&self, sha: &str, asin: &str) -> std::io::Result<()> {
+        std::fs::create_dir_all(self.book_ink_dir(sha, asin))
+    }
+
+    /// Remove all ink for one `asin`. `NotFound` is success (idempotent).
+    pub fn remove_book_ink(&self, sha: &str, asin: &str) -> std::io::Result<()> {
+        match std::fs::remove_dir_all(self.book_ink_dir(sha, asin)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Filesystem-safe form of an ink page-container id (a KFX `kfx_id`, in practice
+/// already `[A-Za-z0-9_-]`; sanitized defensively). The true id is kept in the
+/// `book_ink` row — this only names the cached SVG on disk.
+fn sanitize_ink_id(id: &str) -> String {
+    id.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') { c } else { '_' })
+        .collect()
 }
 
 /// Length of the sha256 prefix used as the on-device filename infix

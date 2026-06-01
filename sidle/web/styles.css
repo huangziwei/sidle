@@ -1889,6 +1889,26 @@ button {
 .reader-pdf-spread.invert .reader-pdf-img {
   filter: invert(1) hue-rotate(180deg);
 }
+/* Handwritten-ink overlay: the transparent ink the user drew on the Scribe,
+   composited over the page image and *under* the selectable text layer. The
+   inner SVG (canvas-unit viewBox) is stretched to the page box; the layer is
+   pointer-transparent so selection still reaches the text spans. */
+.reader-pdf-ink {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.reader-pdf-ink svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* Night mode inverts the page image; invert the ink too so dark strokes stay
+   visible on the now-dark page. */
+.reader-pdf-spread.invert .reader-pdf-ink {
+  filter: invert(1) hue-rotate(180deg);
+}
 /* The selectable text layer: transparent KFX runs absolutely positioned over
    the page image (mirrors the Scribe's invisible text overlay). It hosts the
    same eid-anchored select / highlight / search machinery as the reflowable

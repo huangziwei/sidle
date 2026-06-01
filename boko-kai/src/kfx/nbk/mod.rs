@@ -48,6 +48,18 @@ impl Notebook {
     pub fn page_svg(&self, index: usize) -> Option<String> {
         self.pages.get(index).map(render_svg::page_to_svg)
     }
+
+    /// Render every page as a transparent, ink-only overlay (no white page, no
+    /// ruled template) — for compositing the user's handwritten ink on top of
+    /// its host document page in the reader. See [`render_svg::page_to_overlay_svg`].
+    pub fn page_overlay_svgs(&self) -> Vec<String> {
+        self.pages.iter().map(render_svg::page_to_overlay_svg).collect()
+    }
+
+    /// Render a single page (0-indexed) as a transparent ink-only overlay.
+    pub fn page_overlay_svg(&self, index: usize) -> Option<String> {
+        self.pages.get(index).map(render_svg::page_to_overlay_svg)
+    }
 }
 
 /// Errors from notebook decoding.

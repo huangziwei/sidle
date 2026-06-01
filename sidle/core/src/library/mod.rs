@@ -5,6 +5,7 @@ pub mod db;
 pub mod epub_cover;
 pub mod import;
 pub mod ingest;
+pub mod ink;
 pub mod kfx_cover;
 pub mod notebook;
 pub mod paths;

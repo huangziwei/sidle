@@ -1685,7 +1685,7 @@ let pdfTocRows = []; // [{ li, page }] in TOC order, for active-marking
 // PDF display settings — a global reading preference (not per-book), persisted.
 // `spread`: auto | single | double; `invert`: night mode (invert the page image).
 const PDF_STYLE_KEY = "sidle.reader.pdf-style";
-const PDF_STYLE_DEFAULT = { spread: "auto", invert: false };
+const PDF_STYLE_DEFAULT = { spread: "auto", invert: false, ink: true };
 const pdfStyle = loadPdfStyle();
 function loadPdfStyle() {
   try {
@@ -1755,10 +1755,13 @@ async function openPdf(id, openDto, anns, positions) {
     img.className = "reader-pdf-img";
     img.alt = "";
     img.draggable = false;
+    // Ink layer sits between the image and the (topmost) text layer.
+    const ink = document.createElement("div");
+    ink.className = "reader-pdf-ink";
     const text = document.createElement("div");
     text.className = "reader-pdf-text";
-    wrap.append(img, text);
-    return { wrap, img, text };
+    wrap.append(img, ink, text);
+    return { wrap, img, ink, text };
   };
   const L = mkPage();
   const R = mkPage();
@@ -1777,6 +1780,8 @@ async function openPdf(id, openDto, anns, positions) {
     imgR: R.img,
     textL: L.text,
     textR: R.text,
+    inkL: L.ink,
+    inkR: R.ink,
     overlayer: null,
     eidToPage,
     hasText,
@@ -1784,7 +1789,19 @@ async function openPdf(id, openDto, anns, positions) {
     renderTimer: null, // debounce handle for pdfScheduleRender
     cache: new Map(), // `${page}@${width}` → data URL (bounded; LRU-ish by insertion)
     inflight: new Map(), // key → Promise<url|null>, so a turn can await a prefetch
+    inkPages: new Set(), // host pages that carry handwritten ink
+    inkCache: new Map(), // page → Promise<string[]> (the overlay SVG(s))
   };
+
+  // Which pages carry handwritten ink drawn on the Scribe — fetched once so the
+  // spread renderer only requests the SVG for pages that actually have it.
+  try {
+    for (const p of (await window.api.invoke("reader_pdf_ink_pages", { bookId })) || []) {
+      pdf.inkPages.add(p);
+    }
+  } catch {
+    /* no ink layer — leave the set empty */
+  }
 
   // PDF books have no reflowable Location map; native annotations carry a null
   // Loc (the device computes its own). eidToSection is reflowable-only.
@@ -2066,6 +2083,46 @@ function renderPdfTextLayer(textEl, page) {
   });
 }
 
+// Lay a page's handwritten-ink SVG(s) over its image, under the text layer.
+// Async (the cached overlay SVG is fetched once per page) and token-guarded so a
+// superseded turn never paints stale ink. A no-ink page — or ink toggled off —
+// clears the layer. The inner SVG (canvas-unit viewBox) is stretched to the page
+// box: the device maps its drawing surface onto the page rectangle.
+async function renderPdfInkLayer(inkEl, page, token) {
+  if (!inkEl) return;
+  inkEl.replaceChildren();
+  if (page == null || !pdfStyle.ink || !pdf?.inkPages.has(page)) return;
+  const svgs = await pdfFetchInk(page);
+  if (!pdf || pdf.token !== token) return; // a newer turn superseded us
+  inkEl.replaceChildren(); // the element may have been reused meanwhile
+  for (const svg of svgs) {
+    if (!svg) continue;
+    const holder = document.createElement("div");
+    holder.innerHTML = svg;
+    const svgEl = holder.querySelector("svg");
+    if (!svgEl) continue;
+    svgEl.setAttribute("preserveAspectRatio", "none");
+    inkEl.appendChild(svgEl);
+  }
+}
+
+// Fetch (and cache) a page's ink overlay SVG(s) — usually one per page. Caches
+// the promise so repeated renders of the same page coalesce.
+function pdfFetchInk(page) {
+  const hit = pdf.inkCache.get(page);
+  if (hit) return hit;
+  const p = (async () => {
+    try {
+      const rows = await window.api.invoke("reader_pdf_ink", { bookId, page });
+      return (rows || []).map((r) => r.svg).filter(Boolean);
+    } catch {
+      return [];
+    }
+  })();
+  pdf.inkCache.set(page, p);
+  return p;
+}
+
 // The page's representative eid: its first text run, else its first structural
 // eid (image-only). Anchors the live position (bookmark) + saved last-read so
 // they map back to a page.
@@ -2137,6 +2194,10 @@ async function pdfRenderCurrent() {
   } else {
     pdf.textR.replaceChildren();
   }
+  // Handwritten-ink overlays (async; token-guarded) — fire-and-forget alongside
+  // the image fetch, so they paint as soon as the cached SVG resolves.
+  renderPdfInkLayer(pdf.inkL, left, token);
+  renderPdfInkLayer(pdf.inkR, hasRight ? left + 1 : null, token);
   // The current page's eid is the live position (drives the bookmark toggle).
   livePosition = { eid: pdfRepresentativeEid(left), offset: 0, linear_pos: null };
   updateBookmarkButton();
@@ -2339,6 +2400,8 @@ function syncPdfStylePanel() {
   if (sp) sp.value = pdfStyle.spread;
   const inv = $("#rps-invert");
   if (inv) inv.checked = !!pdfStyle.invert;
+  const ink = $("#rps-ink");
+  if (ink) ink.checked = pdfStyle.ink !== false;
 }
 
 // Night mode = CSS-invert the page image (white→black). Re-render isn't needed.
@@ -2357,6 +2420,17 @@ function setPdfInvert(on) {
   pdfStyle.invert = !!on;
   savePdfStyle();
   applyPdfStyle();
+}
+
+// Show/hide the handwritten-ink overlay. Re-renders just the visible spread's
+// ink layers (no page re-fetch — the SVGs are cached).
+function setPdfInk(on) {
+  pdfStyle.ink = !!on;
+  savePdfStyle();
+  if (!pdf) return;
+  const half = pdfSpreadMode() === "double";
+  renderPdfInkLayer(pdf.inkL, pdf.page, pdf.token);
+  renderPdfInkLayer(pdf.inkR, half && pdf.page + 1 < pdf.pageCount ? pdf.page + 1 : null, pdf.token);
 }
 
 async function open(id) {
@@ -2645,6 +2719,7 @@ function wire() {
   // PDF display settings (spread + night mode). Persist + apply on change.
   $("#rps-spread")?.addEventListener("change", (e) => setPdfSpread(e.target.value));
   $("#rps-invert")?.addEventListener("change", (e) => setPdfInvert(e.target.checked));
+  $("#rps-ink")?.addEventListener("change", (e) => setPdfInk(e.target.checked));
   // Display-settings popover: the Aa button toggles it; every control writes
   // through to the live view; reset restores defaults.
   $("#reader-style")?.addEventListener("click", () => toggleStylePanel());
