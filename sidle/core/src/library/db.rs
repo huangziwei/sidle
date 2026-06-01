@@ -1115,12 +1115,14 @@ pub fn upsert_notebook(
     updated_at: &str,
 ) -> rusqlite::Result<i64> {
     conn.execute(
+        // `imported_at` is deliberately NOT updated on conflict: it's the FIRST
+        // import time, which doubles as a notebook's default title (real titles
+        // are cloud-only). `updated_at` (device mtime) tracks edits instead.
         r#"INSERT INTO notebooks (uuid, title, page_count, nbk_sha256, imported_at, updated_at)
             VALUES (?1, 'Notebook', ?2, ?3, ?4, ?5)
             ON CONFLICT(uuid) DO UPDATE SET
                 page_count  = excluded.page_count,
                 nbk_sha256  = excluded.nbk_sha256,
-                imported_at = excluded.imported_at,
                 updated_at  = excluded.updated_at"#,
         params![uuid, page_count, nbk_sha256, imported_at, updated_at],
     )?;
@@ -1598,6 +1600,27 @@ mod tests {
             },
         )
         .expect("insert")
+    }
+
+    #[test]
+    fn notebook_imported_at_is_frozen_on_reimport() {
+        let conn = fresh_db();
+        // First import.
+        let id = upsert_notebook(&conn, "uuid-1", 3, "sha-a", "2026-06-01T10:00:00Z", "2026-06-01T09:00:00")
+            .expect("first import");
+        // Re-import of the SAME notebook with edited content + a later import time.
+        let id2 = upsert_notebook(&conn, "uuid-1", 5, "sha-b", "2026-06-09T20:00:00Z", "2026-06-09T19:30:00")
+            .expect("re-import");
+        assert_eq!(id, id2, "re-import upserts the same row");
+
+        let row = get_notebook_by_uuid(&conn, "uuid-1").expect("query").expect("row");
+        // imported_at must NEVER change on re-import (it's the first-import time,
+        // which doubles as the default title).
+        assert_eq!(row.imported_at, "2026-06-01T10:00:00Z");
+        // Everything else reflects the re-import.
+        assert_eq!(row.page_count, 5);
+        assert_eq!(row.nbk_sha256.as_deref(), Some("sha-b"));
+        assert_eq!(row.updated_at.as_deref(), Some("2026-06-09T19:30:00"));
     }
 
     #[test]

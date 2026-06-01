@@ -47,7 +47,7 @@
   // persisted — no bespoke notebook table. Sort lives in nb.sort (applied to the
   // grid too), so the table only renders the indicator + reports header clicks.
   const NOTEBOOK_COLUMNS = [
-    { key: "title", label: "Title", sortable: true, render: (n) => n.title || "Notebook" },
+    { key: "title", label: "Title", sortable: true, render: (n) => nbTitle(n) },
     { key: "pages", label: "Pages", sortable: true, render: (n) => String(n.page_count) },
     { key: "updated", label: "Updated", sortable: true, render: (n) => fmtDate(n.updated_at) },
   ];
@@ -84,9 +84,27 @@
   // True while a device import is in flight — gates re-entry and progress paints.
   let importing = false;
 
+  // Local wall-clock as "YYYY-MM-DD HH:MM" (24-hour, minute precision) — the
+  // "Updated" column (on-device Date Modified) and a notebook's default title
+  // both use this. Built explicitly rather than via toLocaleString so the format
+  // is fixed (no locale-dependent ordering or AM/PM).
   function fmtDate(iso) {
-    if (typeof window.formatDate === "function") return window.formatDate(iso);
-    return iso || "";
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+      `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  // A notebook's display name. Scribe titles are cloud-only, so an un-renamed
+  // notebook has no real title — fall back to its first-import datetime (the
+  // legacy default was the literal "Notebook"; treat that as un-named too) so
+  // notebooks are distinguishable instead of all reading "Notebook".
+  function nbTitle(n) {
+    const t = (n.title || "").trim();
+    if (t && t !== "Notebook") return t;
+    return fmtDate(n.imported_at) || "Notebook";
   }
 
   function loadNbSort() {
@@ -111,7 +129,7 @@
         ? n.page_count
         : key === "updated"
           ? n.updated_at || ""
-          : (n.title || "Notebook").toLowerCase();
+          : (nbTitle(n)).toLowerCase();
     return [...nb.list].sort((a, b) => {
       const av = val(a);
       const bv = val(b);
@@ -212,7 +230,7 @@
     const el = document.createElement("div");
     el.className = "book-card notebook-card";
     el.dataset.notebookId = n.id;
-    el.title = n.title || "Notebook";
+    el.title = nbTitle(n);
     if (sel.has(n.id)) el.classList.add("selected");
 
     const cover = document.createElement("div");
@@ -224,7 +242,7 @@
     meta.className = "meta";
     const t = document.createElement("div");
     t.className = "t";
-    t.textContent = n.title || "Notebook";
+    t.textContent = nbTitle(n);
     const a = document.createElement("div");
     a.className = "a";
     a.textContent = `${n.page_count} page${n.page_count === 1 ? "" : "s"}`;
@@ -275,7 +293,7 @@
         await api.invoke("notebook_remove", { notebookId: n.id });
       } catch (e) {
         failed += 1;
-        if (failed === 1) toast(`remove failed for “${n.title || "Notebook"}”: ${e}`, true);
+        if (failed === 1) toast(`remove failed for “${nbTitle(n)}”: ${e}`, true);
         console.error("notebook remove failed:", n.id, e);
       }
     }
@@ -322,7 +340,7 @@
     }
     const ph = document.createElement("div");
     ph.className = "cover-placeholder";
-    ph.textContent = n.title || "Notebook";
+    ph.textContent = nbTitle(n);
     coverEl.appendChild(ph);
   }
 
@@ -457,7 +475,7 @@
   async function doRemove(n) {
     try {
       await api.invoke("notebook_remove", { notebookId: n.id });
-      toast(`removed “${n.title || "Notebook"}”`);
+      toast(`removed “${nbTitle(n)}”`);
       await refresh();
     } catch (e) {
       toast(`remove failed: ${e}`, true);
@@ -534,7 +552,7 @@
   async function openViewer(n) {
     nb.viewer = {
       id: n.id,
-      title: n.title || "Notebook",
+      title: nbTitle(n),
       pageCount: n.page_count,
       page: 0,
       cache: new Map(),
