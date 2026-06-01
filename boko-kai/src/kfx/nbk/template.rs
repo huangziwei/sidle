@@ -143,11 +143,15 @@ fn render_shape(out: &mut String, shape: &IonValue) {
 
 /// Decode a `$249` path-command list to an SVG `d` string.
 /// Opcodes: `0→M(2 args) 1→L(2) 2→Q(4) 3→C(6) 4→Z(0)` (kfxlib `process_path`).
-fn render_path(cmds: &[IonValue]) -> String {
+/// Shared with [`super::shapes`] (the `line`/`$273` shape primitives reuse it).
+pub(super) fn render_path(cmds: &[IonValue]) -> String {
     let mut d = String::new();
     let mut i = 0;
     while i < cmds.len() {
-        let Some(op) = cmds[i].as_int() else { break };
+        // Opcodes are ints in templates but floats (0e0/1e0/…) in shape paths.
+        let Some(op) = as_f64(&cmds[i]).map(|f| f as i64) else {
+            break;
+        };
         i += 1;
         let (letter, nargs) = match op {
             0 => ('M', 2),
@@ -186,8 +190,8 @@ fn ref_name(v: &IonValue, sym: &SymTab) -> Option<String> {
 }
 
 /// ARGB integer → SVG color. Opaque alpha (`0xff`) emits `#rrggbb`; otherwise
-/// `rgba(...)`. Mirrors kfxlib `color_str`.
-fn argb_str(c: i64) -> String {
+/// `rgba(...)`. Mirrors kfxlib `color_str`. Shared with [`super::shapes`].
+pub(super) fn argb_str(c: i64) -> String {
     let c = c as u64;
     let alpha = ((c >> 24) & 0xff) as u8;
     let rgb = (c & 0x00ff_ffff) as u32;
@@ -202,8 +206,9 @@ fn argb_str(c: i64) -> String {
 }
 
 /// Format a number like kfxlib `value_str`: integers bare, otherwise the
-/// shortest round-tripping decimal (Rust's default `f64` Display).
-fn num_str(v: f64) -> String {
+/// shortest round-tripping decimal (Rust's default `f64` Display). Shared with
+/// [`super::shapes`].
+pub(super) fn num_str(v: f64) -> String {
     if v.fract() == 0.0 {
         format!("{}", v as i64)
     } else {

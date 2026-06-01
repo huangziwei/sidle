@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use crate::kfx::ion::{IonParser, IonValue};
 
+use super::shapes::{self, ShapeIds};
 use super::stroke::decode_stroke_values;
 use super::symtab::SymTab;
 use super::template::{self, Template};
@@ -26,6 +27,7 @@ const STORY_LIST: u64 = 146; // $146 (story -> strokes)
 const STORY_REF: u64 = 176; // $176 (content -> story)
 const CONTENT_TYPE: u64 = 159; // $159
 const CONTENT_CONTAINER: u64 = 270; // $270
+const KVG_SVG: u64 = 272; // $272 (KVG SVG — shape-tool shapes)
 
 /// One decoded stroke (canvas-unit coordinates).
 #[derive(Debug, Clone)]
@@ -52,8 +54,25 @@ pub struct Page {
     pub canvas_width: i64,
     pub canvas_height: i64,
     pub strokes: Vec<Stroke>,
+    /// Pre-rendered SVG for each shape-tool shape (circle/rectangle/line/…),
+    /// composited over the template and under the ink.
+    pub shapes: Vec<String>,
     /// Ruled/grid/margin background composited under the ink (`None` = blank).
     pub template: Option<Template>,
+}
+
+/// Immutable context threaded through the content walk.
+struct Walk<'a> {
+    parsed: &'a HashMap<&'a str, IonValue>,
+    ids: &'a Ids,
+    shape_ids: &'a ShapeIds,
+}
+
+/// Collected page content, in walk order.
+#[derive(Default)]
+struct Sink {
+    strokes: Vec<Stroke>,
+    shapes: Vec<String>,
 }
 
 /// Resolved local symbol ids for one notebook.
@@ -113,6 +132,7 @@ pub fn build_pages(frags: &HashMap<String, Vec<u8>>) -> Result<Vec<Page>, NbkErr
         .ok_or_else(|| NbkError::Format("no $ion_symbol_table fragment".into()))?;
     let sym = SymTab::from_fragment(st_blob)?;
     let ids = Ids::resolve(&sym)?;
+    let shape_ids = ShapeIds::resolve(&sym);
 
     // Parse all fragments once.
     let parsed: HashMap<&str, IonValue> = frags
@@ -141,6 +161,12 @@ pub fn build_pages(frags: &HashMap<String, Vec<u8>>) -> Result<Vec<Page>, NbkErr
         .and_then(|v| v.as_list())
         .ok_or_else(|| NbkError::Format("reading order has no section list".into()))?;
 
+    let walk = Walk {
+        parsed: &parsed,
+        ids: &ids,
+        shape_ids: &shape_ids,
+    };
+
     let mut pages = Vec::new();
     for sref in section_refs {
         let Some(cid) = ref_target(sref) else { continue };
@@ -156,10 +182,10 @@ pub fn build_pages(frags: &HashMap<String, Vec<u8>>) -> Result<Vec<Page>, NbkErr
             .and_then(|v| v.as_int())
             .unwrap_or(20832);
 
-        let mut strokes = Vec::new();
+        let mut sink = Sink::default();
         if let Some(IonValue::List(items)) = field(cfields, PAGE_CONTENT) {
             for item in items {
-                process_content(item, &parsed, &ids, &mut strokes);
+                process_content(item, &walk, &mut sink);
             }
         }
 
@@ -169,7 +195,8 @@ pub fn build_pages(frags: &HashMap<String, Vec<u8>>) -> Result<Vec<Page>, NbkErr
         pages.push(Page {
             canvas_width,
             canvas_height,
-            strokes,
+            strokes: sink.strokes,
+            shapes: sink.shapes,
             template,
         });
     }
@@ -177,17 +204,13 @@ pub fn build_pages(frags: &HashMap<String, Vec<u8>>) -> Result<Vec<Page>, NbkErr
     Ok(pages)
 }
 
-/// Recursively walk a content node, collecting `nmdl.stroke`s.
-fn process_content<'a>(
-    node: &'a IonValue,
-    parsed: &'a HashMap<&'a str, IonValue>,
-    ids: &Ids,
-    out: &mut Vec<Stroke>,
-) {
+/// Recursively walk a content node, collecting `nmdl.stroke`s into
+/// `sink.strokes` and shape-tool shapes (`$272` nodes) into `sink.shapes`.
+fn process_content(node: &IonValue, walk: &Walk, sink: &mut Sink) {
     // A bare reference resolves to the target fragment.
     if let Some(target) = ref_target(node) {
-        if let Some(frag) = parsed.get(target) {
-            process_content(frag, parsed, ids, out);
+        if let Some(frag) = walk.parsed.get(target) {
+            process_content(frag, walk, sink);
         }
         return;
     }
@@ -196,29 +219,37 @@ fn process_content<'a>(
         return;
     };
 
-    // Only $270 containers carry walkable content.
-    if field(fields, CONTENT_TYPE).and_then(|v| v.as_symbol()) == Some(CONTENT_CONTAINER) {
-        // Inline stroke list OR a referenced story whose $146 we walk.
-        if let Some(IonValue::List(items)) = field(fields, STORY_LIST) {
-            for item in items {
-                process_content(item, parsed, ids, out);
-            }
-        } else if let Some(story_ref) = field(fields, STORY_REF).and_then(ref_target)
-            && let Some(story) = parsed.get(story_ref)
-            && let Some(sfields) = story.unwrap_annotated().as_struct()
-            && let Some(IonValue::List(items)) = field(sfields, STORY_LIST)
-        {
-            for item in items {
-                process_content(item, parsed, ids, out);
+    match field(fields, CONTENT_TYPE).and_then(|v| v.as_symbol()) {
+        // $270 containers carry walkable content (inline list or a $176 story).
+        Some(CONTENT_CONTAINER) => {
+            if let Some(IonValue::List(items)) = field(fields, STORY_LIST) {
+                for item in items {
+                    process_content(item, walk, sink);
+                }
+            } else if let Some(story_ref) = field(fields, STORY_REF).and_then(ref_target)
+                && let Some(story) = walk.parsed.get(story_ref)
+                && let Some(sfields) = story.unwrap_annotated().as_struct()
+                && let Some(IonValue::List(items)) = field(sfields, STORY_LIST)
+            {
+                for item in items {
+                    process_content(item, walk, sink);
+                }
             }
         }
+        // $272 KVG-SVG nodes are shape-tool shapes (circle/rectangle/line/…).
+        Some(KVG_SVG) => {
+            if let Some(svg) = shapes::render_kvg_svg(fields, walk.shape_ids) {
+                sink.shapes.push(svg);
+            }
+        }
+        _ => {}
     }
 
     // Emit if this node is itself a stroke.
-    if field(fields, ids.nmdl_type).and_then(|v| v.as_symbol()) == Some(ids.nmdl_stroke)
-        && let Some(stroke) = parse_stroke(fields, ids)
+    if field(fields, walk.ids.nmdl_type).and_then(|v| v.as_symbol()) == Some(walk.ids.nmdl_stroke)
+        && let Some(stroke) = parse_stroke(fields, walk.ids)
     {
-        out.push(stroke);
+        sink.strokes.push(stroke);
     }
 }
 

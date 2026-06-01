@@ -18,6 +18,7 @@ mod fingerprint;
 mod kdf;
 mod note_model;
 mod render_svg;
+mod shapes;
 mod stroke;
 mod symtab;
 mod template;

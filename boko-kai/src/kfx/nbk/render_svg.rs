@@ -39,6 +39,11 @@ pub fn page_to_svg(page: &Page) -> String {
             page.canvas_width, page.canvas_height, t.width, t.height, t.shapes_svg
         );
     }
+    // Shape-tool shapes sit over the template and under the ink (they precede
+    // the strokes in page content order — typically guides drawn first).
+    for shape in &page.shapes {
+        s.push_str(shape);
+    }
     for stroke in &page.strokes {
         render_stroke(&mut s, stroke);
     }
