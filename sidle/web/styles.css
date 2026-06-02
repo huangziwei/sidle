@@ -2002,6 +2002,19 @@ button {
 .reader-status-loc,
 .reader-status-pct { white-space: nowrap; }
 
+/* Go-to-page: replaces the "Page X" readout in place (notebook mode). Sized to sit
+   within the 28px bar without growing it. */
+.reader-goto-input {
+  width: 4.5em;
+  font: inherit;
+  text-align: center;
+  color: var(--reader-fg);
+  background: var(--reader-bg);
+  border: 1px solid var(--reader-border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
 /* Resume control: its own tap region (the Loc keeps its click-to-cycle), and
    invisible until the status bar is hovered — like the page-turn nav zones.
    `pointer-events: none` while hidden so a click in its slot still cycles. */

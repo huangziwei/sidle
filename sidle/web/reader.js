@@ -1745,6 +1745,7 @@ function pdfStep() {
 
 async function openPdf(id, openDto, anns, positions) {
   readerMode = "pdf";
+  pdfStyle.zoom = 1; // zoom is per-open: a book opens at fit, not the last zoom
   bookId = id;
   dto = openDto;
   annotations = anns || [];
@@ -2574,6 +2575,7 @@ const NOTEBOOK_HIDDEN = [
 async function openNotebook(desc) {
   await close(); // tear down any prior session
   readerMode = "notebook";
+  pdfStyle.zoom = 1; // zoom is per-open: a notebook opens at fit, not the last zoom
   nbk = {
     id: desc.id,
     title: desc.title || "Notebook",
@@ -2796,10 +2798,49 @@ function nbkUpdateProgress() {
   $("#reader-percent").textContent = `${human} / ${nbk.pageCount} · ${pct}%`;
 }
 
-// Minimal fixed-layout key map (analog of pdfOnKey): page turns + first/last, Esc
-// closes. Display-settings / go-to-page / bookmark keys arrive with their phases.
+// Go-to-page: swap the footer "Page X" readout for a number input (no native
+// prompt). Enter jumps; Esc/blur cancels — then the readout is restored. notebookOnKey
+// ignores the input's keys (its target guard below), so digits/arrows reach it.
+function openNotebookGoTo() {
+  if (!nbk || !nbk.pageCount) return;
+  const locEl = $("#reader-loc");
+  if (!locEl || locEl.querySelector("input")) return; // already open
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = "1";
+  input.max = String(nbk.pageCount);
+  input.value = String(nbk.page + 1);
+  input.className = "reader-goto-input";
+  input.setAttribute("aria-label", `Go to page (1–${nbk.pageCount})`);
+  locEl.replaceChildren(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (jump) => {
+    if (done) return;
+    done = true;
+    const n = parseInt(input.value, 10);
+    if (jump && Number.isFinite(n)) nbkShowPage(n - 1); // also refreshes the readout
+    else nbkUpdateProgress(); // restore "Page X"
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(false));
+}
+
+// Minimal fixed-layout key map (analog of pdfOnKey): page turns, first/last, go-to-
+// page (`g`), display settings (`s`), zoom; Esc peels the panel/input, then closes.
 function notebookOnKey(e) {
   if (!nbk) return;
+  // The go-to-page input owns its keys (digits, Enter, Esc) while focused.
+  if (e.target?.closest?.(".reader-goto-input")) return;
   // A focused style-panel control owns its keys — only Esc (close it) is ours.
   if (e.target?.closest?.("#reader-pdf-style-panel")) {
     if (e.key === "Escape") {
@@ -2825,19 +2866,13 @@ function notebookOnKey(e) {
   // Zoom in/out/reset (before the modifier filter; "+" is Shift+"=" on many layouts).
   if (!e.ctrlKey && !e.metaKey && !e.altKey && handleZoomKey(e)) return;
   if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
-  // `g g` chord → first page (shares the reader's arm timer).
+  // `g` → go to page by number. Notebooks have no TOC, so this is the jump; Home/
+  // End already cover first/last, so there's no vim `gg` chord here.
   if (e.key === "g") {
-    const now = Date.now();
-    if (now - gArmed < G_CHORD_MS) {
-      nbkShowPage(0);
-      gArmed = 0;
-    } else {
-      gArmed = now;
-    }
+    openNotebookGoTo();
     e.preventDefault();
     return;
   }
-  gArmed = 0;
   let handled = true;
   switch (e.key) {
     case "ArrowRight":
@@ -3127,6 +3162,13 @@ function wire() {
   $("#reader-nav-left")?.addEventListener("click", () => (book?.ppd === "rtl" ? forward() : back()));
   $("#reader-nav-right")?.addEventListener("click", () => (book?.ppd === "rtl" ? back() : forward()));
   $("#reader-statusbar")?.addEventListener("click", () => cycleProgressMode());
+  // The notebook's "Page X" readout is a go-to-page trigger — its own click region,
+  // so it doesn't also cycle the bar; other modes let the click bubble to cycle.
+  $("#reader-loc")?.addEventListener("click", (e) => {
+    if (readerMode !== "notebook" || !nbk?.pageCount) return;
+    e.stopPropagation();
+    openNotebookGoTo();
+  });
   // Resume is its own tap region: open the chooser, and stop the click from
   // bubbling to the status bar (which would also cycle the progress display).
   $("#reader-resume")?.addEventListener("click", (e) => {
