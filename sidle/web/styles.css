@@ -1931,22 +1931,26 @@ button {
   -webkit-user-select: text;
 }
 
-/* Notebook (handwritten Scribe) mode: one inline <svg> page per turn, centered in
-   the host and framed like a PDF page — white page + drop shadow on the white
-   --reader-bg surround (matches .reader-pdf-page). The <svg> carries its own
-   viewBox, so it self-sizes here; no raster, no JS sizing. */
-.reader-paginator-host:has(> .reader-notebook-page) {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 8px;
-}
+/* Notebook (handwritten Scribe) mode renders inside a `.reader-pdf-spread`, so it
+   reuses the PDF host-centering (`:has(> .reader-pdf-spread)`) and `.double`
+   gutter — as one or two self-sizing pages. The viewBox-only SVG contain-fits via
+   max-width/height (no raster, no JS sizing); double halves the width budget. */
 .reader-notebook-page {
   display: block;
   max-width: 100%;
   max-height: 100%;
+  min-width: 0; /* let the flex item shrink to the half-width budget in double mode */
   background: #fff;
   box-shadow: 0 1px 10px rgba(0, 0, 0, 0.3);
+}
+.reader-pdf-spread.double .reader-notebook-page {
+  max-width: calc(50% - 6px); /* two pages share the width minus the 12px gutter */
+}
+/* Night mode: invert the page (white → black, dark strokes → light). Toggled on
+   the host (not the per-page svg) so it survives page turns — mirrors how
+   .reader-pdf-spread.invert drives the PDF ink overlay. */
+.reader-paginator-host.invert .reader-notebook-page {
+  filter: invert(1) hue-rotate(180deg);
 }
 
 /* Prev/next: slim hover-revealed arrows pinned to the page's OUTER margin. The
@@ -2404,6 +2408,9 @@ button {
   gap: 12px;
   min-height: 34px;
 }
+/* A per-mode hidden row (e.g. the ink toggle, absent for notebooks). The author
+   rule beats the UA `[hidden]{display:none}`, which `.rs-row{display:flex}` shadows. */
+.rs-row[hidden] { display: none; }
 .rs-row + .rs-row { border-top: 1px solid var(--reader-border); }
 .rs-row > label {
   font-size: 13px;

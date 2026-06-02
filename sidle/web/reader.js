@@ -90,6 +90,7 @@ function readerChromeOpen() {
     "#reader-annotations-panel",
     "#reader-search-panel",
     "#reader-style-panel",
+    "#reader-pdf-style-panel",
     "#reader-resume-menu",
   ].some((sel) => {
     const el = $(sel);
@@ -1512,7 +1513,9 @@ function resetStyle() {
 }
 
 function toggleStylePanel() {
-  if (readerMode === "pdf") return togglePdfStylePanel();
+  // Fixed-layout modes (PDF, notebook) share the page-layout panel; reflowable
+  // has its own font/size/spacing panel.
+  if (readerMode !== "reflowable") return togglePdfStylePanel();
   const p = $("#reader-style-panel");
   if (p) p.hidden = !p.hidden;
 }
@@ -1525,14 +1528,14 @@ function hideStylePanel() {
 
 const forward = () => {
   if (readerMode === "pdf") return pdfGoTo(pdf.page + pdfStep());
-  if (readerMode === "notebook") return nbkShowPage(nbk.page + 1);
+  if (readerMode === "notebook") return nbkShowPage(nbk.page + nbkStep());
   hideNotePopover();
   hideSelectionToolbar();
   paginator?.next();
 };
 const back = () => {
   if (readerMode === "pdf") return pdfGoTo(pdf.page - pdfStep());
-  if (readerMode === "notebook") return nbkShowPage(nbk.page - 1);
+  if (readerMode === "notebook") return nbkShowPage(nbk.page - nbkStep());
   hideNotePopover();
   hideSelectionToolbar();
   paginator?.prev();
@@ -2418,6 +2421,10 @@ function togglePdfStylePanel() {
 }
 
 function syncPdfStylePanel() {
+  // The notebook shares this panel: page layout (spread) + night mode apply, but
+  // a handwritten page has no separable ink layer, so hide the ink-toggle row.
+  const notebook = readerMode === "notebook";
+  $("#rps-ink")?.closest(".rs-row")?.toggleAttribute("hidden", notebook);
   const sp = $("#rps-spread");
   if (sp) sp.value = pdfStyle.spread;
   const inv = $("#rps-invert");
@@ -2426,16 +2433,22 @@ function syncPdfStylePanel() {
   if (ink) ink.checked = pdfStyle.ink !== false;
 }
 
-// Night mode = CSS-invert the page image (white→black). Re-render isn't needed.
+// Night mode = CSS-invert the page (white→black) on the spread host (PDF) or the
+// paginator host (notebook, where the class survives page turns). No re-render.
 function applyPdfStyle() {
   if (pdf) pdf.host.classList.toggle("invert", !!pdfStyle.invert);
+  else if (nbk) $("#reader-paginator-host")?.classList.toggle("invert", !!pdfStyle.invert);
 }
 
 function setPdfSpread(v) {
   pdfStyle.spread = v;
   savePdfStyle();
-  pdfRenderCurrent();
-  pdfUpdateProgress();
+  if (nbk) {
+    nbkShowPage(nbk.page); // re-render the notebook spread at the new layout
+  } else {
+    pdfRenderCurrent();
+    pdfUpdateProgress();
+  }
 }
 
 function setPdfInvert(on) {
@@ -2466,13 +2479,12 @@ function setPdfInk(on) {
 // and no JS sizing: the renderer is simpler than the PDF's.
 //
 // Phase-gated capability list — everything a handwritten page can't act on is
-// hidden. Display settings (Aa), go-to-page, and the page bookmark arrive in
-// later phases and re-reveal their controls then.
+// hidden. Go-to-page and the page bookmark arrive in later phases and re-reveal
+// their controls then. (Aa / display settings is wired as of Phase 2.)
 const NOTEBOOK_HIDDEN = [
   "#reader-toc",
   "#reader-bookmark",
   "#reader-search",
-  "#reader-style",
   "#reader-annotations",
 ];
 
@@ -2489,6 +2501,7 @@ async function openNotebook(desc) {
     page: 0,
     cache: new Map(), // page → SVG string (prefetched neighbours included)
     token: 0, // bumps per turn so a slow fetch can't paint a stale page
+    aspect: 0.75, // page W/H (portrait default); learned from the first rendered SVG
   };
   $("#reader-title").textContent = nbk.title;
   $("#reader-loc").textContent = "";
@@ -2501,6 +2514,8 @@ async function openNotebook(desc) {
   view().hidden = false;
   view().classList.add("open");
   revealTopbar();
+  syncPdfStylePanel(); // shared fixed-layout panel: sync values + per-mode rows
+  applyPdfStyle(); // night-mode (invert) on the host per the saved global pref
   if (nbk.pageCount > 0) {
     await nbkShowPage(0);
   } else {
@@ -2518,9 +2533,11 @@ function closeNotebook() {
     keyHandler = null;
   }
   $("#reader-paginator-host")?.replaceChildren();
+  $("#reader-paginator-host")?.classList.remove("invert"); // drop night-mode state
+  if ($("#reader-pdf-style-panel")) $("#reader-pdf-style-panel").hidden = true;
   // Restore the chrome hidden on open (the next book needs it). #reader-toc is
   // omitted — every open re-evaluates its visibility via renderTocPanel.
-  for (const sel of ["#reader-bookmark", "#reader-search", "#reader-style", "#reader-annotations"]) {
+  for (const sel of ["#reader-bookmark", "#reader-search", "#reader-annotations"]) {
     const el = $(sel);
     if (el) el.hidden = false;
   }
@@ -2539,34 +2556,67 @@ function closeNotebook() {
   }
 }
 
-// Render page `i` (clamped). The SVG is cached and the next page prefetched, so a
-// forward turn is usually instant. Token-guarded: a slow fetch for a page you've
-// already left can't paint over the current one.
+// Render the spread at page `i` (clamped): one page, or two side by side in double
+// mode. SVGs are cached and the next spread prefetched, so a turn is usually
+// instant. Token-guarded: a slow fetch for a page you've already left can't paint
+// over the current one. The page SVG is viewBox-only and self-sizes via CSS
+// (`.reader-notebook-page`), reusing the PDF `.reader-pdf-spread` host + gutter.
 async function nbkShowPage(i) {
   if (!nbk || nbk.pageCount === 0) return;
   i = clampPage(i, nbk.pageCount);
   nbk.page = i;
-  nbkUpdateProgress();
   const token = ++nbk.token;
-  let svg = nbk.cache.get(i);
-  if (svg == null) {
-    try {
-      svg = await window.api.invoke("notebook_page_svg", { notebookId: nbk.id, page: i });
-      nbk.cache.set(i, svg);
-    } catch (e) {
-      toast(`Couldn't render page ${i + 1}: ${e}`, true);
-      return;
-    }
+  nbkUpdateProgress(); // immediate page readout (uses the cached aspect)
+
+  const leftSvg = await nbkFetch(i);
+  if (leftSvg == null || !nbk || nbk.token !== token || nbk.page !== i) return;
+  const learned = nbkAspect(leftSvg);
+  if (learned && learned !== nbk.aspect) {
+    nbk.aspect = learned; // page geometry now known — may flip an auto spread
+    nbkUpdateProgress();
   }
-  if (!nbk || nbk.token !== token || nbk.page !== i) return; // a newer turn won
+
+  const double = nbkSpreadMode() === "double";
+  let rightSvg = "";
+  if (double && i + 1 < nbk.pageCount) {
+    const r = await nbkFetch(i + 1);
+    if (!nbk || nbk.token !== token || nbk.page !== i) return;
+    rightSvg = r || "";
+  }
+
   const host = $("#reader-paginator-host");
   if (!host) return;
-  host.innerHTML = svg || "";
-  host.querySelector("svg")?.classList.add("reader-notebook-page");
-  nbkPrefetch(i + 1);
+  const spread = document.createElement("div");
+  spread.className = double ? "reader-pdf-spread double" : "reader-pdf-spread";
+  spread.innerHTML = leftSvg + rightSvg;
+  // Only the outermost (page) SVGs — not the nested template SVG inside each.
+  for (const el of spread.querySelectorAll(":scope > svg")) {
+    el.classList.add("reader-notebook-page");
+  }
+  host.replaceChildren(spread);
+
+  const step = double ? 2 : 1;
+  nbkPrefetch(i + step);
+  if (double) nbkPrefetch(i + step + 1);
 }
 
-// Warm the next page's SVG so a forward turn paints without a fetch.
+// Fetch (and cache) one page's SVG string; null + toast on error.
+async function nbkFetch(i) {
+  const v = nbk;
+  let svg = v.cache.get(i);
+  if (svg == null) {
+    try {
+      svg = await window.api.invoke("notebook_page_svg", { notebookId: v.id, page: i });
+      if (nbk === v) v.cache.set(i, svg);
+    } catch (e) {
+      toast(`Couldn't render page ${i + 1}: ${e}`, true);
+      return null;
+    }
+  }
+  return svg;
+}
+
+// Warm a page's SVG so the next turn paints without a fetch.
 function nbkPrefetch(i) {
   const v = nbk;
   if (!v || i < 0 || i >= v.pageCount || v.cache.has(i)) return;
@@ -2576,6 +2626,33 @@ function nbkPrefetch(i) {
       if (nbk === v) v.cache.set(i, svg);
     })
     .catch(() => {});
+}
+
+// Page aspect (W/H) from the outer SVG's viewBox — 0 if unparseable.
+function nbkAspect(svg) {
+  const m =
+    typeof svg === "string" &&
+    svg.match(/viewBox=["']\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)/);
+  if (m) {
+    const w = parseFloat(m[1]);
+    const h = parseFloat(m[2]);
+    if (w > 0 && h > 0) return w / h;
+  }
+  return 0;
+}
+
+// Effective single/double for the current stage + setting — mirrors pdfSpreadMode,
+// using the (uniform) page aspect learned from the rendered SVG.
+function nbkSpreadMode() {
+  if (pdfStyle.spread === "single" || pdfStyle.spread === "double") return pdfStyle.spread;
+  const stage = $("#reader-stage");
+  const sw = stage?.clientWidth || 0;
+  const sh = stage?.clientHeight || 1;
+  const aspect = nbk?.aspect || 0.75;
+  return sw >= 2 * sh * aspect * 0.98 ? "double" : "single";
+}
+function nbkStep() {
+  return nbkSpreadMode() === "double" ? 2 : 1;
 }
 
 // Footer status: `Page X` left, `X / N · P%` right — exactly like pdfUpdateProgress,
@@ -2594,9 +2671,12 @@ function nbkUpdateProgress() {
     $("#reader-percent").textContent = "—";
     return;
   }
-  const human = nbk.page + 1;
+  const left = nbk.page;
+  const right = nbkSpreadMode() === "double" && left + 1 < nbk.pageCount ? left + 1 : null;
+  $("#reader-loc").textContent =
+    right != null ? `Pages ${left + 1}–${right + 1}` : `Page ${left + 1}`;
+  const human = (right != null ? right : left) + 1;
   const pct = Math.round((human / nbk.pageCount) * 100);
-  $("#reader-loc").textContent = `Page ${human}`;
   $("#reader-percent").textContent = `${human} / ${nbk.pageCount} · ${pct}%`;
 }
 
@@ -2604,8 +2684,18 @@ function nbkUpdateProgress() {
 // closes. Display-settings / go-to-page / bookmark keys arrive with their phases.
 function notebookOnKey(e) {
   if (!nbk) return;
+  // A focused style-panel control owns its keys — only Esc (close it) is ours.
+  if (e.target?.closest?.("#reader-pdf-style-panel")) {
+    if (e.key === "Escape") {
+      togglePdfStylePanel();
+      e.preventDefault();
+    }
+    return;
+  }
   if (e.key === "Escape") {
-    close();
+    // Peel the display-settings panel first, then close the reader.
+    if (!$("#reader-pdf-style-panel")?.hidden) togglePdfStylePanel();
+    else close();
     e.preventDefault();
     return;
   }
@@ -2636,18 +2726,21 @@ function notebookOnKey(e) {
     case "ArrowDown":
     case "PageDown":
     case " ":
-      nbkShowPage(nbk.page + 1);
+      nbkShowPage(nbk.page + nbkStep());
       break;
     case "ArrowLeft":
     case "ArrowUp":
     case "PageUp":
-      nbkShowPage(nbk.page - 1);
+      nbkShowPage(nbk.page - nbkStep());
       break;
     case "Home":
       nbkShowPage(0);
       break;
     case "End":
       nbkShowPage(nbk.pageCount - 1);
+      break;
+    case "s":
+      togglePdfStylePanel();
       break;
     default:
       handled = false;
@@ -2976,9 +3069,10 @@ function wire() {
     resizeTick = requestAnimationFrame(() => {
       resizeTick = null;
       if (paginator && styleSettings) applyLayout(lastPos?.index ?? 0, true);
-      // PDF mode: re-render the current spread (auto single/double + crisp at
+      // Fixed-layout modes: re-render the current spread (auto single/double at
       // the new size). Shares this rAF so drag-resize coalesces to one apply.
       if (readerMode === "pdf" && pdf) pdfRenderCurrent();
+      else if (readerMode === "notebook" && nbk) nbkShowPage(nbk.page);
     });
   });
   // Click anywhere in the app chrome (outside a popover) dismisses it. Clicks
@@ -3010,6 +3104,16 @@ function wire() {
       !styleBtn?.contains(e.target)
     ) {
       hideStylePanel();
+    }
+    // The shared fixed-layout (PDF / notebook) panel dismisses on outside-click too.
+    const pdfStylePanel = $("#reader-pdf-style-panel");
+    if (
+      pdfStylePanel &&
+      !pdfStylePanel.hidden &&
+      !pdfStylePanel.contains(e.target) &&
+      !styleBtn?.contains(e.target)
+    ) {
+      pdfStylePanel.hidden = true;
     }
   });
 }
