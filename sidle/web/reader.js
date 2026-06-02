@@ -1541,6 +1541,13 @@ const back = () => {
   paginator?.prev();
 };
 
+// Reading direction of the active book — PDF carries it on `pdf`, reflowable on
+// `book`; anything not "rtl" is ltr. The physical (left/right) inputs use this
+// to map a side to forward/back; `forward`/`back` themselves stay logical.
+function readerPpd() {
+  return (readerMode === "pdf" ? pdf?.ppd : book?.ppd) === "rtl" ? "rtl" : "ltr";
+}
+
 // Jump to section `idx` clamped to the spine. `anchor` is a fraction: 0 = start
 // of section (default), 1 = last page of section (used for "jump to book end").
 function jumpToSection(idx, anchor = 0) {
@@ -1769,6 +1776,10 @@ async function openPdf(id, openDto, anns, positions) {
   // so its SVG coordinates match the spans' `getClientRects()` directly.
   const host = document.createElement("div");
   host.className = "reader-pdf-spread";
+  // RTL (Japanese/manga): the spread renders right-to-left (lower page on the
+  // right). CSS row-reverse flips only the visual order — pageL stays the lower
+  // index, so every coordinate/overlay calc downstream is unchanged.
+  if (openDto.page_progression_direction === "rtl") host.classList.add("rtl");
   const mkPage = () => {
     const wrap = document.createElement("div");
     wrap.className = "reader-pdf-page";
@@ -1791,6 +1802,7 @@ async function openPdf(id, openDto, anns, positions) {
   pdf = {
     pageCount: openDto.page_count,
     pages,
+    ppd: openDto.page_progression_direction === "rtl" ? "rtl" : "ltr",
     labels: openDto.page_labels || [],
     toc: openDto.toc || [],
     page: start,
@@ -2328,14 +2340,19 @@ function pdfOnKey(e) {
   }
   gArmed = 0;
   let handled = true;
+  const rtl = pdf?.ppd === "rtl"; // RTL: the next page is to the left
   switch (e.key) {
-    case "ArrowRight":
+    case "ArrowRight": // physical right
+      rtl ? back() : forward();
+      break;
+    case "ArrowLeft": // physical left
+      rtl ? forward() : back();
+      break;
     case "ArrowDown":
     case "PageDown":
     case " ":
-      forward(); // steps by the spread (1 or 2 pages)
+      forward(); // logical advance (steps by the spread: 1 or 2 pages)
       break;
-    case "ArrowLeft":
     case "ArrowUp":
     case "PageUp":
       back();
@@ -3159,8 +3176,8 @@ function wire() {
   }
   // Page-turn margins: the left margin goes to the physically-left page (= next
   // in a vertical-rl / RTL book, prev otherwise), mirroring the arrow keys.
-  $("#reader-nav-left")?.addEventListener("click", () => (book?.ppd === "rtl" ? forward() : back()));
-  $("#reader-nav-right")?.addEventListener("click", () => (book?.ppd === "rtl" ? back() : forward()));
+  $("#reader-nav-left")?.addEventListener("click", () => (readerPpd() === "rtl" ? forward() : back()));
+  $("#reader-nav-right")?.addEventListener("click", () => (readerPpd() === "rtl" ? back() : forward()));
   $("#reader-statusbar")?.addEventListener("click", () => cycleProgressMode());
   // The notebook's "Page X" readout is a go-to-page trigger — its own click region,
   // so it doesn't also cycle the bar; other modes let the click bubble to cycle.

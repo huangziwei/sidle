@@ -113,6 +113,12 @@ pub async fn library_update_metadata(
     patch.author =
         crate::library::authors::join_display(&crate::library::authors::parse_input(&patch.author));
     patch.language = patch.language.trim().to_string();
+    // Page progression direction: only "rtl"/"ltr" are meaningful; blank or
+    // anything else clears it to None (Auto = device/source default).
+    patch.ppd = match patch.ppd.take().map(|s| s.trim().to_ascii_lowercase()) {
+        Some(s) if s == "rtl" || s == "ltr" => Some(s),
+        _ => None,
+    };
     if let Some(s) = &mut patch.publisher {
         let trimmed = s.trim().to_string();
         if trimmed.is_empty() {
@@ -319,6 +325,16 @@ pub async fn library_bulk_update_metadata(
         patch.author = (!canon.is_empty()).then_some(canon);
     }
     normalize_opt(&mut patch.language);
+    // Page direction: lowercase + validate. Bulk can only set rtl/ltr (the
+    // sparse "leave unchanged" semantics can't express "clear to Auto").
+    if let Some(p) = patch.ppd.take() {
+        let p = p.trim().to_ascii_lowercase();
+        patch.ppd = match p.as_str() {
+            "rtl" | "ltr" => Some(p),
+            "" => None,
+            _ => return Err("page direction must be 'rtl' or 'ltr'".into()),
+        };
+    }
     normalize_opt(&mut patch.publisher);
     normalize_opt(&mut patch.published_at);
     normalize_opt(&mut patch.series_name);

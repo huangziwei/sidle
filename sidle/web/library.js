@@ -2672,6 +2672,7 @@ function wireMetadataModal() {
 const BULK_FIELDS = [
   "author",
   "language",
+  "ppd",
   "publisher",
   "published_at",
   "series_name",
@@ -2725,6 +2726,7 @@ function openMetadataModal(arg, opts = {}) {
   form.title.value = book.title || "";
   form.author.value = book.author || "";
   form.language.value = book.language || "";
+  form.ppd.value = book.ppd || ""; // "" = Auto
   form.publisher.value = book.publisher || "";
   form.published_at.value = book.published_at || "";
   form.series_name.value = book.series_name || "";
@@ -2809,6 +2811,7 @@ async function submitMetadataForm() {
     title: form.title.value.trim(),
     author: form.author.value.trim(),
     language: form.language.value.trim(),
+    ppd: form.ppd.value || null, // "" = Auto → null
     publisher:
       form.publisher.value.trim() === "" ? null : form.publisher.value.trim(),
     published_at:
@@ -2849,18 +2852,27 @@ async function submitMetadataForm() {
     return;
   }
 
+  // Page direction is only honoured once it's baked into a fresh KFX, so a
+  // change kicks off a force-reconvert after the metadata save.
+  const ppdChanged = (form.ppd.value || "") !== (metadataBook.ppd || "");
+  const bookId = metadataBook.id;
+
   try {
     const updated = await window.api.invoke("library_update_metadata", {
-      bookId: metadataBook.id,
+      bookId,
       patch,
     });
     mergeBookRow(updated);
     if (asinChanged && looksLikeRealAsin(asin)) {
       const withAsin = await window.api.invoke("library_set_asin", {
-        bookId: metadataBook.id,
+        bookId,
         asin,
       });
       mergeBookRow(withAsin);
+    }
+    if (ppdChanged) {
+      await retryConvert(bookId);
+      showToast("Page direction changed — reconverting…");
     }
     closeMetadataModal();
     render();
@@ -2884,6 +2896,7 @@ async function submitBulkMetadataForm() {
   };
   setIf("author", "author");
   setIf("language", "language");
+  setIf("ppd", "ppd");
   setIf("publisher", "publisher");
   setIf("published_at", "published_at");
   setIf("series_name", "series_name");
@@ -2906,6 +2919,7 @@ async function submitBulkMetadataForm() {
   const hasScalar = [
     "author",
     "language",
+    "ppd",
     "publisher",
     "published_at",
     "series_name",
@@ -2922,6 +2936,11 @@ async function submitBulkMetadataForm() {
       patch,
     });
     for (const r of rows) mergeBookRow(r);
+    // A bulk page-direction change needs each book's KFX rebuilt; fire the
+    // reconverts off (the queue serializes them) without blocking the close.
+    if ("ppd" in patch) {
+      for (const r of rows) retryConvert(r.id);
+    }
     closeMetadataModal();
     render();
     showToast(`Updated ${rows.length} book${rows.length === 1 ? "" : "s"}.`);

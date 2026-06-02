@@ -840,6 +840,10 @@ pub struct MetadataPatch {
     pub title: String,
     pub author: String,
     pub language: String,
+    /// Page progression direction: `"rtl"` | `"ltr"` | `None` (Auto). Baked into
+    /// the generated KFX's reading order; a change triggers a force-reconvert.
+    #[serde(default)]
+    pub ppd: Option<String>,
     pub publisher: Option<String>,
     pub published_at: Option<String>,
     pub series_name: Option<String>,
@@ -859,16 +863,18 @@ pub fn update_metadata(
               SET title         = ?1,
                   author        = ?2,
                   language      = ?3,
-                  publisher     = ?4,
-                  published_at  = ?5,
-                  series_name   = ?6,
-                  series_index  = ?7,
-                  tags          = ?8
-              WHERE id = ?9"#,
+                  ppd           = ?4,
+                  publisher     = ?5,
+                  published_at  = ?6,
+                  series_name   = ?7,
+                  series_index  = ?8,
+                  tags          = ?9
+              WHERE id = ?10"#,
         params![
             patch.title,
             patch.author,
             patch.language,
+            patch.ppd,
             patch.publisher,
             patch.published_at,
             patch.series_name,
@@ -896,6 +902,8 @@ pub struct BulkMetadataPatch {
     pub author: Option<String>,
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default)]
+    pub ppd: Option<String>,
     #[serde(default)]
     pub publisher: Option<String>,
     #[serde(default)]
@@ -930,6 +938,7 @@ pub fn apply_bulk_patch(
 
     let author = patch.author.clone().unwrap_or(row.author);
     let language = patch.language.clone().unwrap_or(row.language);
+    let ppd = patch.ppd.clone().or(row.ppd);
     let publisher = patch.publisher.clone().or(row.publisher);
     let published_at = patch.published_at.clone().or(row.published_at);
     let series_name = patch.series_name.clone().or(row.series_name);
@@ -959,15 +968,17 @@ pub fn apply_bulk_patch(
         r#"UPDATE books
               SET author       = ?1,
                   language     = ?2,
-                  publisher    = ?3,
-                  published_at = ?4,
-                  series_name  = ?5,
-                  series_index = ?6,
-                  tags         = ?7
-              WHERE id = ?8"#,
+                  ppd          = ?3,
+                  publisher    = ?4,
+                  published_at = ?5,
+                  series_name  = ?6,
+                  series_index = ?7,
+                  tags         = ?8
+              WHERE id = ?9"#,
         params![
             author,
             language,
+            ppd,
             publisher,
             published_at,
             series_name,
@@ -2494,6 +2505,7 @@ mod tests {
             title: "新しいタイトル".into(),
             author: "村上春樹".into(),
             language: "ja".into(),
+            ppd: None,
             publisher: Some("新潮文庫".into()),
             published_at: Some("2024-03-15".into()),
             series_name: Some("ハルキ三部作".into()),
@@ -2526,6 +2538,7 @@ mod tests {
                 title: "x".into(),
                 author: "a".into(),
                 language: "en".into(),
+                ppd: None,
                 publisher: None,
                 published_at: None,
                 series_name: Some("Foundation".into()),
@@ -2543,6 +2556,7 @@ mod tests {
                 title: "x".into(),
                 author: "a".into(),
                 language: "en".into(),
+                ppd: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,
@@ -2570,6 +2584,7 @@ mod tests {
                 title: "x".into(),
                 author: "".into(),
                 language: "".into(),
+                ppd: None,
                 publisher: Some("講談社文庫".into()),
                 published_at: None,
                 series_name: None,
@@ -2589,6 +2604,7 @@ mod tests {
                 title: "x".into(),
                 author: "".into(),
                 language: "".into(),
+                ppd: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,
@@ -2619,6 +2635,7 @@ mod tests {
                 title: "x".into(),
                 author: "".into(),
                 language: "".into(),
+                ppd: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,
@@ -2671,6 +2688,7 @@ mod tests {
                 title: "Original".into(),
                 author: "Asimov".into(),
                 language: "en".into(),
+                ppd: None,
                 publisher: Some("Spectra".into()),
                 published_at: None,
                 series_name: None,

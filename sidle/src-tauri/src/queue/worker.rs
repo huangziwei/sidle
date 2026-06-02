@@ -571,6 +571,11 @@ fn book_metadata_override(source: &boko::Metadata, book: &BookRow) -> boko::Meta
     if !book.language.trim().is_empty() {
         m.language = book.language.clone();
     }
+    // An edited reading direction overrides the source's; left unset (None) the
+    // source's own page_progression_direction (captured at import) survives.
+    if let Some(ppd) = &book.ppd {
+        m.page_progression_direction = Some(ppd.clone());
+    }
     m.publisher = book.publisher.clone();
     m.date = book.published_at.clone();
     m.collection = book.series_name.clone().map(|name| boko::model::CollectionInfo {

@@ -65,6 +65,10 @@ pub struct ReaderPdfDto {
     /// Per-page display label (`/PageLabels`: "Cover", "i", "1", …) for the
     /// location readout. One per page.
     pub page_labels: Vec<String>,
+    /// `"rtl"` / `"ltr"` — page-turn direction, from the library row's `ppd`
+    /// (the same value baked into the KFX). Flips the spread order and the
+    /// physical next/prev mapping for Japanese/manga books.
+    pub page_progression_direction: String,
 }
 
 /// One PDF page's display size in points plus its selectable text layer: the
@@ -183,7 +187,7 @@ impl From<boko::kfx_to_epub::ReaderBook> for ReaderBookDto {
 pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<ReaderOpen, String> {
     // Snapshot the paths + display metadata under the lock, then release it
     // before the CPU-bound parse/render (which can take a beat on a large book).
-    let (kfx_path, pdf_path, title, author) = {
+    let (kfx_path, pdf_path, title, author, ppd) = {
         let conn = state.db.lock().await;
         let row = db::get_book(&conn, book_id)
             .map_err(|e| e.to_string())?
@@ -191,7 +195,7 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
         let kfx_path = row
             .kfx_path
             .ok_or_else(|| "this book has no KFX file yet".to_string())?;
-        (kfx_path, row.pdf_path, row.title, row.author)
+        (kfx_path, row.pdf_path, row.title, row.author, row.ppd)
     };
 
     tokio::task::spawn_blocking(move || {
@@ -261,6 +265,10 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
                     })
                     .collect(),
                 page_labels: doc.page_labels,
+                page_progression_direction: match ppd.as_deref() {
+                    Some("rtl") => "rtl".to_string(),
+                    _ => "ltr".to_string(),
+                },
             };
             return Ok(ReaderOpen::Pdf(dto));
         }
