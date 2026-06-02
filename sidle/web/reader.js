@@ -1703,7 +1703,9 @@ let pdfTocRows = []; // [{ li, page }] in TOC order, for active-marking
 // PDF display settings — a global reading preference (not per-book), persisted.
 // `spread`: auto | single | double; `invert`: night mode (invert the page image).
 const PDF_STYLE_KEY = "sidle.reader.pdf-style";
-const PDF_STYLE_DEFAULT = { spread: "auto", invert: false, ink: true };
+const PDF_STYLE_DEFAULT = { spread: "auto", invert: false, ink: true, zoom: 1 };
+const PDF_ZOOM_MIN = 1; // 1 = fit; below it the page already fits, so no point
+const PDF_ZOOM_MAX = 3;
 const pdfStyle = loadPdfStyle();
 function loadPdfStyle() {
   try {
@@ -2001,7 +2003,8 @@ function pdfRenderWidth(page, half) {
   let dispW = sh * aspect; // fit to height
   const budget = half ? (sw - 24) / 2 : sw; // ...but never exceed the width share
   if (dispW > budget) dispW = budget;
-  const raw = Math.max(200, Math.min(Math.round(dispW * dpr), 3000));
+  const zoom = pdfStyle.zoom || 1; // request a bigger raster when zoomed, so it stays crisp
+  const raw = Math.max(200, Math.min(Math.round(dispW * dpr * zoom), 3000));
   return Math.round(raw / 50) * 50;
 }
 
@@ -2059,7 +2062,8 @@ function pdfDisplaySize(page, half) {
     w = budget;
     h = w / aspect;
   }
-  return { w: Math.floor(w), h: Math.floor(h) };
+  const zoom = pdfStyle.zoom || 1; // enlarge the page box past fit; the viewport scrolls
+  return { w: Math.floor(w * zoom), h: Math.floor(h * zoom) };
 }
 
 function sizePdfPage(wrap, page, half) {
@@ -2306,6 +2310,8 @@ function pdfOnKey(e) {
     e.preventDefault();
     return;
   }
+  // Zoom in/out/reset — shared fixed-layout control (same keys as the notebook).
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && handleZoomKey(e)) return;
   if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
   // `g g` chord → first page (shares the reflowable reader's arm timer).
   if (e.key === "g") {
@@ -2431,10 +2437,22 @@ function syncPdfStylePanel() {
   if (inv) inv.checked = !!pdfStyle.invert;
   const ink = $("#rps-ink");
   if (ink) ink.checked = pdfStyle.ink !== false;
+  syncZoomControl();
+}
+
+// Reflect the current zoom on the panel slider + its "150%" label.
+function syncZoomControl() {
+  const z = pdfStyle.zoom || 1;
+  const sl = $("#rps-zoom");
+  if (sl) sl.value = String(z);
+  const lbl = $("#rps-zoom-val");
+  if (lbl) lbl.textContent = `${Math.round(z * 100)}%`;
 }
 
 // Night mode = CSS-invert the page (white→black) on the spread host (PDF) or the
 // paginator host (notebook, where the class survives page turns). No re-render.
+// (Zoom is applied by the page-sizing math — pdfDisplaySize / nbkDisplaySize — not
+// here, so it scales the box uniformly and the viewport scrolls.)
 function applyPdfStyle() {
   if (pdf) pdf.host.classList.toggle("invert", !!pdfStyle.invert);
   else if (nbk) $("#reader-paginator-host")?.classList.toggle("invert", !!pdfStyle.invert);
@@ -2466,6 +2484,38 @@ function setPdfInk(on) {
   const half = pdfSpreadMode() === "double";
   renderPdfInkLayer(pdf.inkL, pdf.page, pdf.token);
   renderPdfInkLayer(pdf.inkR, half && pdf.page + 1 < pdf.pageCount ? pdf.page + 1 : null, pdf.token);
+}
+
+// Shared fixed-layout zoom (PDF + notebook). Clamped to [1, 3]; quantized so the
+// slider and `+`/`-` keys land on the same stops. Pure CSS via applyPdfStyle —
+// the vector notebook re-rasterizes crisply; a PDF raster just scales.
+function setPdfZoom(z) {
+  const next = Math.max(PDF_ZOOM_MIN, Math.min(PDF_ZOOM_MAX, Math.round((z || 1) * 100) / 100));
+  if (next === pdfStyle.zoom) return;
+  pdfStyle.zoom = next;
+  savePdfStyle();
+  syncZoomControl();
+  // Re-size at the new zoom: PDF re-renders the raster (crisp, debounced); the
+  // notebook re-lays the cached vector SVGs (instant).
+  if (pdf) {
+    pdfScheduleRender();
+    pdfUpdateProgress();
+  } else if (nbk) {
+    nbkShowPage(nbk.page);
+  }
+}
+function bumpZoom(delta) {
+  setPdfZoom((pdfStyle.zoom || 1) + delta);
+}
+// Handle a zoom keystroke (+ / = zoom in · - / _ zoom out · 0 reset to fit).
+// Returns true if `e` was a zoom key (so the caller stops processing it).
+function handleZoomKey(e) {
+  if (e.key === "+" || e.key === "=") bumpZoom(0.25);
+  else if (e.key === "-" || e.key === "_") bumpZoom(-0.25);
+  else if (e.key === "0") setPdfZoom(1);
+  else return false;
+  e.preventDefault();
+  return true;
 }
 
 // ---- notebook (handwritten Scribe) mode -----------------------------------
@@ -2589,9 +2639,13 @@ async function nbkShowPage(i) {
   const spread = document.createElement("div");
   spread.className = double ? "reader-pdf-spread double" : "reader-pdf-spread";
   spread.innerHTML = leftSvg + rightSvg;
-  // Only the outermost (page) SVGs — not the nested template SVG inside each.
+  // Size each page box explicitly (fit × zoom) so it scrolls when zoomed. Only the
+  // outermost (page) SVGs get sized/classed — not the nested template SVG inside.
+  const { w, h } = nbkDisplaySize(nbk.aspect, double);
   for (const el of spread.querySelectorAll(":scope > svg")) {
     el.classList.add("reader-notebook-page");
+    el.style.width = `${w}px`;
+    el.style.height = `${h}px`;
   }
   host.replaceChildren(spread);
 
@@ -2655,6 +2709,26 @@ function nbkStep() {
   return nbkSpreadMode() === "double" ? 2 : 1;
 }
 
+// Display size (CSS px) of one notebook page: fit to the stage height, capped to
+// its width share (half in a double spread), then × zoom. Mirrors pdfDisplaySize —
+// the SVG is sized explicitly (not CSS-contained) so zoom enlarges the box and the
+// viewport scrolls. Aspect is the page's viewBox W/H, so the SVG fills with no gap.
+function nbkDisplaySize(aspect, half) {
+  const stage = $("#reader-stage");
+  const sw = (stage?.clientWidth || 1200) - 16; // paginator-host padding (8×2)
+  const sh = (stage?.clientHeight || 800) - 16;
+  const a = aspect || 0.75;
+  let h = Math.max(1, sh);
+  let w = h * a;
+  const budget = half ? (sw - 12) / 2 : sw; // .double gap is 12px
+  if (w > budget) {
+    w = budget;
+    h = w / a;
+  }
+  const zoom = pdfStyle.zoom || 1;
+  return { w: Math.max(1, Math.floor(w * zoom)), h: Math.max(1, Math.floor(h * zoom)) };
+}
+
 // Footer status: `Page X` left, `X / N · P%` right — exactly like pdfUpdateProgress,
 // honoring the shared hidden mode (3) that the statusbar tap toggles to.
 function nbkUpdateProgress() {
@@ -2706,6 +2780,8 @@ function notebookOnKey(e) {
     e.preventDefault();
     return;
   }
+  // Zoom in/out/reset (before the modifier filter; "+" is Shift+"=" on many layouts).
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && handleZoomKey(e)) return;
   if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
   // `g g` chord → first page (shares the reader's arm timer).
   if (e.key === "g") {
@@ -3048,6 +3124,7 @@ function wire() {
   $("#rps-spread")?.addEventListener("change", (e) => setPdfSpread(e.target.value));
   $("#rps-invert")?.addEventListener("change", (e) => setPdfInvert(e.target.checked));
   $("#rps-ink")?.addEventListener("change", (e) => setPdfInk(e.target.checked));
+  $("#rps-zoom")?.addEventListener("input", (e) => setPdfZoom(parseFloat(e.target.value)));
   // Display-settings popover: the Aa button toggles it; every control writes
   // through to the live view; reset restores defaults.
   $("#reader-style")?.addEventListener("click", () => toggleStylePanel());

@@ -1848,10 +1848,17 @@ button {
    host and fit to the stage. The :has guard only applies when the host holds a
    spread, leaving the reflowable paginator layout untouched. Nav zones still
    overlay (siblings of the host). */
+/* Fixed-layout viewport: flex-centers the spread. Flex (not grid) keeps it a
+   definite-size parent, so the notebook page's max-height:100% contain-fit
+   resolves — a grid's auto track would make the height indefinite and the page
+   would blow up. overflow:auto + `safe` centering then let it scroll WITHOUT
+   clipping the start edge when zoomed past fit (the classic flex-overflow trap).
+   No-op at zoom 1, where the spread fills the viewport exactly. */
 .reader-paginator-host:has(> .reader-pdf-spread) {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: safe center;
+  justify-content: safe center;
+  overflow: auto;
   padding: 8px;
 }
 .reader-pdf-spread {
@@ -1859,8 +1866,7 @@ button {
   align-items: center;
   justify-content: center;
   gap: 0;
-  width: 100%;
-  height: 100%;
+  flex: 0 0 auto; /* size to the (explicitly sized) pages so the viewport scrolls when zoomed */
 }
 .reader-pdf-spread.double {
   gap: 12px; /* the gutter between two facing pages */
@@ -1931,20 +1937,14 @@ button {
   -webkit-user-select: text;
 }
 
-/* Notebook (handwritten Scribe) mode renders inside a `.reader-pdf-spread`, so it
-   reuses the PDF host-centering (`:has(> .reader-pdf-spread)`) and `.double`
-   gutter — as one or two self-sizing pages. The viewBox-only SVG contain-fits via
-   max-width/height (no raster, no JS sizing); double halves the width budget. */
+/* Notebook (handwritten Scribe) mode renders inside a `.reader-pdf-spread`, reusing
+   the PDF viewport-centering + `.double` gutter — as one or two pages. Each page
+   SVG is sized explicitly in reader.js (fit-to-stage × zoom), like a PDF page, so
+   zoom + scroll work uniformly; the vector re-rasterizes crisply at any size. */
 .reader-notebook-page {
   display: block;
-  max-width: 100%;
-  max-height: 100%;
-  min-width: 0; /* let the flex item shrink to the half-width budget in double mode */
   background: #fff;
   box-shadow: 0 1px 10px rgba(0, 0, 0, 0.3);
-}
-.reader-pdf-spread.double .reader-notebook-page {
-  max-width: calc(50% - 6px); /* two pages share the width minus the 12px gutter */
 }
 /* Night mode: invert the page (white → black, dark strokes → light). Toggled on
    the host (not the per-page svg) so it survives page turns — mirrors how
