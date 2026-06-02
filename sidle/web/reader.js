@@ -1707,24 +1707,31 @@ const PDF_NO_TEXT_HIDDEN = ["#reader-search"];
 
 let pdfTocRows = []; // [{ li, page }] in TOC order, for active-marking
 
-// PDF display settings — a global reading preference (not per-book), persisted.
+// PDF display settings — a per-book reading preference, persisted under a key that
+// appends the open document's id, exactly like the reflowable `styleSettings`.
 // `spread`: auto | single | double; `invert`: night mode (invert the page image);
 // `cover`: in double mode, show page 0 as a standalone cover (else pair from 0).
-const PDF_STYLE_KEY = "sidle.reader.pdf-style";
+// `zoom` is per-open (reset to fit on every open). Reloaded per book in openPdf /
+// openNotebook; defaults until then.
+const PDF_STYLE_KEY = "sidle.reader.pdf-style"; // base; the open document id is appended
 const PDF_STYLE_DEFAULT = { spread: "auto", invert: false, ink: true, zoom: 1, cover: true };
 const PDF_ZOOM_MIN = 1; // 1 = fit; below it the page already fits, so no point
 const PDF_ZOOM_MAX = 3;
-const pdfStyle = loadPdfStyle();
+// PDF and notebook share this panel, so key off whichever document is open. A
+// notebook leaves `bookId` null and carries its id on `nbk`; namespace it so a
+// notebook and a PDF book with the same numeric id can't share a style.
+const pdfStyleKey = () => `${PDF_STYLE_KEY}.${nbk ? `nb-${nbk.id}` : bookId}`;
+let pdfStyle = { ...PDF_STYLE_DEFAULT }; // replaced per-book by loadPdfStyle() on open
 function loadPdfStyle() {
   try {
-    return { ...PDF_STYLE_DEFAULT, ...JSON.parse(localStorage.getItem(PDF_STYLE_KEY) || "{}") };
+    return { ...PDF_STYLE_DEFAULT, ...JSON.parse(localStorage.getItem(pdfStyleKey()) || "{}") };
   } catch {
     return { ...PDF_STYLE_DEFAULT };
   }
 }
 function savePdfStyle() {
   try {
-    localStorage.setItem(PDF_STYLE_KEY, JSON.stringify(pdfStyle));
+    localStorage.setItem(pdfStyleKey(), JSON.stringify(pdfStyle));
   } catch {
     /* ignore */
   }
@@ -1776,8 +1783,9 @@ function pdfHasRight() {
 
 async function openPdf(id, openDto, anns, positions) {
   readerMode = "pdf";
-  pdfStyle.zoom = 1; // zoom is per-open: a book opens at fit, not the last zoom
   bookId = id;
+  pdfStyle = loadPdfStyle(); // per-book display prefs (bookId set, no notebook open)
+  pdfStyle.zoom = 1; // zoom is per-open: a book opens at fit, not the last zoom
   dto = openDto;
   annotations = anns || [];
   sidleResume = (positions || []).find((p) => p.source === "sidle") || null;
@@ -2643,7 +2651,6 @@ const NOTEBOOK_HIDDEN = [
 async function openNotebook(desc) {
   await close(); // tear down any prior session
   readerMode = "notebook";
-  pdfStyle.zoom = 1; // zoom is per-open: a notebook opens at fit, not the last zoom
   nbk = {
     id: desc.id,
     title: desc.title || "Notebook",
@@ -2653,6 +2660,8 @@ async function openNotebook(desc) {
     token: 0, // bumps per turn so a slow fetch can't paint a stale page
     aspect: 0.75, // page W/H (portrait default); learned from the first rendered SVG
   };
+  pdfStyle = loadPdfStyle(); // per-notebook display prefs (keyed on nbk.id)
+  pdfStyle.zoom = 1; // zoom is per-open: a notebook opens at fit, not the last zoom
   $("#reader-title").textContent = nbk.title;
   $("#reader-loc").textContent = "";
   $("#reader-percent").textContent = "";
@@ -2665,7 +2674,7 @@ async function openNotebook(desc) {
   view().classList.add("open");
   revealTopbar();
   syncPdfStylePanel(); // shared fixed-layout panel: sync values + per-mode rows
-  applyPdfStyle(); // night-mode (invert) on the host per the saved global pref
+  applyPdfStyle(); // night-mode (invert) on the host per this notebook's saved pref
   if (nbk.pageCount > 0) {
     await nbkShowPage(0);
   } else {
