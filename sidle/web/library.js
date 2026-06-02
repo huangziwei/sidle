@@ -42,6 +42,10 @@ const state = {
   // running. Surfaced in the status bar; lower priority than importing /
   // autopull so a book pull's progress isn't hidden behind it.
   annotationSync: false,
+  // When non-null, the title of a book currently being opened in the reader.
+  // Top priority in the status bar — it's the most immediate user action — and
+  // cleared by openReader once the reader is up (or the open fails).
+  opening: null,
 };
 
 // The Books section's multi-select. The Notes section owns a second instance of
@@ -1768,7 +1772,12 @@ function renderQueue() {
   //   2. autopull from Kindle's /dedrm folder (state.autopull)
   //   3. Kindle annotation sync (state.annotationSync)
   //   4. background conversion queue summary (the default)
-  if (state.importing) {
+  if (state.opening) {
+    // The user just double-clicked a book; a large KFX can take a beat to load,
+    // so name the one being opened (cleared by openReader once it's up).
+    summary.textContent = `Opening ${state.opening}…`;
+    toggle.classList.add("active");
+  } else if (state.importing) {
     summary.textContent = state.importing.message;
     if (state.importing.failed) toggle.classList.add("errors");
     else toggle.classList.add("active");
@@ -2125,9 +2134,26 @@ async function openInFinder(bookId) {
 // Open a book in the built-in reader. `reader.js` (an ES module) installs
 // `window.sidleReader`; it loads after this classic script, so it's always
 // present by the time a card is clicked.
-function openReader(b) {
-  if (window.sidleReader) window.sidleReader.open(b.id);
-  else showToast("reader not ready", true);
+// Monotonic open-request id: only the most recent openReader clears the status
+// line, so opening a second book before the first finishes doesn't blank the
+// "Opening…" message early.
+let openReqSeq = 0;
+async function openReader(b) {
+  if (!window.sidleReader) {
+    showToast("reader not ready", true);
+    return;
+  }
+  const seq = ++openReqSeq;
+  state.opening = b.title || "book";
+  renderQueue(); // paint "Opening …" before the (possibly slow) KFX load
+  try {
+    await window.sidleReader.open(b.id);
+  } finally {
+    if (seq === openReqSeq) {
+      state.opening = null;
+      renderQueue();
+    }
+  }
 }
 
 async function retryConvert(bookId) {
