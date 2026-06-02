@@ -18,7 +18,6 @@
     loaded: false,
     view: "gallery", // "gallery" | "list" — driven by library.js's view toggle
     sort: loadNbSort(), // { key, asc } — list-header sort, applied to grid + list
-    viewer: null, // { id, title, pageCount, page, cache: Map<page, svgString> }
   };
 
   // The Notes section's multi-select — the SAME SelectionController the Books
@@ -68,7 +67,7 @@
     },
     isSelected: (id) => sel.has(id),
     onRowClick: (e, n) => sel.click(e, n.id),
-    onRowDblClick: (n) => openViewer(n),
+    onRowDblClick: (n) => openNotebook(n),
     onRowContext: (e, n) => {
       sel.context(n.id);
       openMenu(e.clientX, e.clientY, n);
@@ -254,7 +253,7 @@
 
     // Single click selects (mirrors Books); double click opens the viewer.
     el.addEventListener("click", (e) => sel.click(e, n.id));
-    el.addEventListener("dblclick", () => openViewer(n));
+    el.addEventListener("dblclick", () => openNotebook(n));
     el.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       sel.context(n.id);
@@ -563,114 +562,23 @@
     if (failed) console.error("notebook import failures:", summary.failed);
   }
 
-  // ── Paged SVG viewer ────────────────────────────────────────────────────────
-
-  async function openViewer(n) {
-    nb.viewer = {
+  // ── Open in the reader ───────────────────────────────────────────────────────
+  // The paged SVG viewer used to live here; it now renders inside the shared
+  // reader shell (#reader-view) as a third content mode, exactly like a PDF —
+  // see reader.js `openNotebook`. We just hand it a small descriptor (resolving
+  // the title here, since the title fallback is ours), mirroring how library.js
+  // opens a book via `sidleReader.open(id)`.
+  function openNotebook(n) {
+    window.sidleReader?.openNotebook?.({
       id: n.id,
       title: nbTitle(n),
       pageCount: n.page_count,
-      page: 0,
-      cache: new Map(),
-    };
-    q("#notebook-title").textContent = nb.viewer.title;
-    q("#notebook-view").hidden = false;
-    document.addEventListener("keydown", onViewerKey);
-    if (nb.viewer.pageCount > 0) {
-      await showPage(0);
-    } else {
-      q("#notebook-page-host").innerHTML = "";
-      updatePageInfo();
-    }
-  }
-
-  function closeViewer() {
-    const view = q("#notebook-view");
-    if (view) view.hidden = true;
-    const host = q("#notebook-page-host");
-    if (host) host.innerHTML = "";
-    document.removeEventListener("keydown", onViewerKey);
-    nb.viewer = null;
-  }
-
-  async function showPage(i) {
-    const v = nb.viewer;
-    if (!v || v.pageCount === 0) return;
-    i = Math.max(0, Math.min(v.pageCount - 1, i));
-    v.page = i;
-    updatePageInfo();
-
-    let svg = v.cache.get(i);
-    if (svg == null) {
-      try {
-        svg = await api.invoke("notebook_page_svg", { notebookId: v.id, page: i });
-        v.cache.set(i, svg);
-      } catch (e) {
-        toast(`failed to render page ${i + 1}: ${e}`, true);
-        return;
-      }
-    }
-    // The user may have paged again while we awaited — only paint if still here.
-    if (!nb.viewer || nb.viewer.page !== i) return;
-    const host = q("#notebook-page-host");
-    host.innerHTML = svg || "";
-    const el = host.querySelector("svg");
-    if (el) el.classList.add("notebook-page-svg");
-    prefetch(i + 1);
-  }
-
-  // Warm the next page's SVG so a forward turn is instant.
-  function prefetch(i) {
-    const v = nb.viewer;
-    if (!v || i < 0 || i >= v.pageCount || v.cache.has(i)) return;
-    api
-      .invoke("notebook_page_svg", { notebookId: v.id, page: i })
-      .then((svg) => {
-        if (nb.viewer === v) v.cache.set(i, svg);
-      })
-      .catch(() => {});
-  }
-
-  function updatePageInfo() {
-    const v = nb.viewer;
-    if (!v) return;
-    q("#notebook-pageinfo").textContent = v.pageCount
-      ? `${v.page + 1} / ${v.pageCount}`
-      : "—";
-    q("#notebook-nav-left").style.visibility = v.page > 0 ? "" : "hidden";
-    q("#notebook-nav-right").style.visibility =
-      v.page < v.pageCount - 1 ? "" : "hidden";
-  }
-
-  function onViewerKey(e) {
-    if (!nb.viewer) return;
-    if (e.key === "Escape") {
-      closeViewer();
-    } else if (e.key === "ArrowLeft" || e.key === "ArrowUp" || e.key === "PageUp") {
-      e.preventDefault();
-      showPage(nb.viewer.page - 1);
-    } else if (
-      e.key === "ArrowRight" ||
-      e.key === "ArrowDown" ||
-      e.key === "PageDown" ||
-      e.key === " "
-    ) {
-      e.preventDefault();
-      showPage(nb.viewer.page + 1);
-    }
+    });
   }
 
   // ── Wiring ──────────────────────────────────────────────────────────────────
 
   function wire() {
-    const close = q("#notebook-close");
-    if (close) close.addEventListener("click", closeViewer);
-    const left = q("#notebook-nav-left");
-    if (left)
-      left.addEventListener("click", () => nb.viewer && showPage(nb.viewer.page - 1));
-    const right = q("#notebook-nav-right");
-    if (right)
-      right.addEventListener("click", () => nb.viewer && showPage(nb.viewer.page + 1));
     const emptyImport = q("#notes-empty-import");
     if (emptyImport) emptyImport.addEventListener("click", importDevice);
 
@@ -719,6 +627,6 @@
     importFolder,
     setView,
     selection: () => sel,
-    viewerOpen: () => !!nb.viewer,
+    viewerOpen: () => !!window.sidleReader?.isNotebookOpen?.(),
   };
 })();

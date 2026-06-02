@@ -18,6 +18,7 @@ let dto = null; // raw reader_open DTO (kept for the eid→section index)
 let bookId = null; // library id of the open book (for reload-on-sync)
 let readerMode = "reflowable"; // "reflowable" (KFX→DOM) | "pdf" (fixed-layout page images)
 let pdf = null; // PDF-mode state: { pageCount, pages, labels, toc, page, img, token } — see openPdf
+let nbk = null; // notebook-mode state: { id, title, pageCount, page, cache, token } — see openNotebook
 let paginator = null; // <foliate-paginator>
 let annotations = []; // AnnotationDto[] for the open book
 let overlays = []; // [{ doc, overlayer }] — one per loaded section, for repaint
@@ -1214,13 +1215,23 @@ function renderProgress() {
 
 // Cycle 0→1→2→3→0 on a tap; remembered across books/sessions.
 function cycleProgressMode() {
-  progressMode = (progressMode + 1) % 4;
+  if (readerMode === "reflowable") {
+    progressMode = (progressMode + 1) % 4;
+  } else {
+    // Fixed-layout (PDF, notebook) has no reading-pace modes (no linear text), so
+    // a tap toggles the page readout shown ↔ hidden — modes 0 ↔ 3.
+    progressMode = progressMode === 3 ? 0 : 3;
+  }
   try {
     localStorage.setItem("sidle.reader.progressMode", String(progressMode));
   } catch {
     /* ignore storage errors */
   }
-  renderProgress();
+  // Re-render via the active mode's own writer — renderProgress is reflowable-only
+  // (it blanks a fixed-layout bar, which has no lastPos).
+  if (readerMode === "pdf") pdfUpdateProgress();
+  else if (readerMode === "notebook") nbkUpdateProgress();
+  else renderProgress();
 }
 
 // Base-text char count of a section (ruby `<rt>` excluded, whitespace collapsed)
@@ -1514,12 +1525,14 @@ function hideStylePanel() {
 
 const forward = () => {
   if (readerMode === "pdf") return pdfGoTo(pdf.page + pdfStep());
+  if (readerMode === "notebook") return nbkShowPage(nbk.page + 1);
   hideNotePopover();
   hideSelectionToolbar();
   paginator?.next();
 };
 const back = () => {
   if (readerMode === "pdf") return pdfGoTo(pdf.page - pdfStep());
+  if (readerMode === "notebook") return nbkShowPage(nbk.page - 1);
   hideNotePopover();
   hideSelectionToolbar();
   paginator?.prev();
@@ -1560,6 +1573,8 @@ let gArmed = 0;
 function onKey(e) {
   // PDF (fixed-layout) books use a simpler key map — no search/highlight/style.
   if (readerMode === "pdf") return pdfOnKey(e);
+  // A handwritten notebook is a fixed-layout SVG page with its own minimal map.
+  if (readerMode === "notebook") return notebookOnKey(e);
   // ⌘F / Ctrl+F → open search (replacing the browser's find-in-page, which
   // would search the host doc, not the section iframe's content). Handled
   // before the modifier filter below.
@@ -2224,6 +2239,13 @@ async function pdfRenderCurrent() {
 
 function pdfUpdateProgress() {
   if (!pdf) return;
+  // Mode 3 = hidden (the fixed-layout footer's only "off" state); else show.
+  $("#reader-statusbar")?.classList.toggle("is-hidden", progressMode === 3);
+  if (progressMode === 3) {
+    $("#reader-loc").textContent = "";
+    $("#reader-percent").textContent = "";
+    return;
+  }
   // The PDF's own label when it differs from the ordinal ("Cover", "xvii").
   const lbl = (i) => {
     const human = String(i + 1);
@@ -2433,6 +2455,213 @@ function setPdfInk(on) {
   renderPdfInkLayer(pdf.inkR, half && pdf.page + 1 < pdf.pageCount ? pdf.page + 1 : null, pdf.token);
 }
 
+// ---- notebook (handwritten Scribe) mode -----------------------------------
+//
+// A Scribe notebook is a fixed-layout handwritten page: one inline SVG per page
+// (`notebook_page_svg`), with no text / search / annotations / reflow. It rides
+// the same reader shell as a book — the PDF pattern taken one step further — so
+// it inherits the topbar + auto-hide, footer progress, nav zones, `--reader-*`
+// tokens, and Esc-peel keyboard skeleton for free. The page SVG carries its own
+// viewBox and self-sizes (`.reader-notebook-page`), so there's no raster pipeline
+// and no JS sizing: the renderer is simpler than the PDF's.
+//
+// Phase-gated capability list — everything a handwritten page can't act on is
+// hidden. Display settings (Aa), go-to-page, and the page bookmark arrive in
+// later phases and re-reveal their controls then.
+const NOTEBOOK_HIDDEN = [
+  "#reader-toc",
+  "#reader-bookmark",
+  "#reader-search",
+  "#reader-style",
+  "#reader-annotations",
+];
+
+// `desc` = `{ id, title, pageCount }`, built by notebooks.js from the library row
+// (it owns the title fallback). Mirrors how library.js opens a book via
+// `sidleReader.open(id)`; keeps the book/PDF entry path untouched.
+async function openNotebook(desc) {
+  await close(); // tear down any prior session
+  readerMode = "notebook";
+  nbk = {
+    id: desc.id,
+    title: desc.title || "Notebook",
+    pageCount: desc.pageCount || 0,
+    page: 0,
+    cache: new Map(), // page → SVG string (prefetched neighbours included)
+    token: 0, // bumps per turn so a slow fetch can't paint a stale page
+  };
+  $("#reader-title").textContent = nbk.title;
+  $("#reader-loc").textContent = "";
+  $("#reader-percent").textContent = "";
+  // Hide every chrome affordance a handwritten page (this phase) can't use.
+  for (const sel of NOTEBOOK_HIDDEN) {
+    const el = $(sel);
+    if (el) el.hidden = true;
+  }
+  view().hidden = false;
+  view().classList.add("open");
+  revealTopbar();
+  if (nbk.pageCount > 0) {
+    await nbkShowPage(0);
+  } else {
+    $("#reader-paginator-host")?.replaceChildren();
+    nbkUpdateProgress();
+  }
+  keyHandler = onKey; // onKey forwards to notebookOnKey while readerMode === "notebook"
+  document.addEventListener("keydown", keyHandler, true);
+}
+
+// Synchronous in this phase; becomes async when Phase 4 saves the last-read page.
+function closeNotebook() {
+  if (keyHandler) {
+    document.removeEventListener("keydown", keyHandler, true);
+    keyHandler = null;
+  }
+  $("#reader-paginator-host")?.replaceChildren();
+  // Restore the chrome hidden on open (the next book needs it). #reader-toc is
+  // omitted — every open re-evaluates its visibility via renderTocPanel.
+  for (const sel of ["#reader-bookmark", "#reader-search", "#reader-style", "#reader-annotations"]) {
+    const el = $(sel);
+    if (el) el.hidden = false;
+  }
+  nbk = null;
+  bookId = null;
+  readerMode = "reflowable";
+  if ($("#reader-loc")) $("#reader-loc").textContent = "";
+  if ($("#reader-percent")) $("#reader-percent").textContent = "";
+  cancelTopbarHide();
+  topbarHovered = false;
+  topbarEl()?.classList.remove("is-hidden");
+  const v = view();
+  if (v) {
+    v.classList.remove("open");
+    v.hidden = true;
+  }
+}
+
+// Render page `i` (clamped). The SVG is cached and the next page prefetched, so a
+// forward turn is usually instant. Token-guarded: a slow fetch for a page you've
+// already left can't paint over the current one.
+async function nbkShowPage(i) {
+  if (!nbk || nbk.pageCount === 0) return;
+  i = clampPage(i, nbk.pageCount);
+  nbk.page = i;
+  nbkUpdateProgress();
+  const token = ++nbk.token;
+  let svg = nbk.cache.get(i);
+  if (svg == null) {
+    try {
+      svg = await window.api.invoke("notebook_page_svg", { notebookId: nbk.id, page: i });
+      nbk.cache.set(i, svg);
+    } catch (e) {
+      toast(`Couldn't render page ${i + 1}: ${e}`, true);
+      return;
+    }
+  }
+  if (!nbk || nbk.token !== token || nbk.page !== i) return; // a newer turn won
+  const host = $("#reader-paginator-host");
+  if (!host) return;
+  host.innerHTML = svg || "";
+  host.querySelector("svg")?.classList.add("reader-notebook-page");
+  nbkPrefetch(i + 1);
+}
+
+// Warm the next page's SVG so a forward turn paints without a fetch.
+function nbkPrefetch(i) {
+  const v = nbk;
+  if (!v || i < 0 || i >= v.pageCount || v.cache.has(i)) return;
+  window.api
+    .invoke("notebook_page_svg", { notebookId: v.id, page: i })
+    .then((svg) => {
+      if (nbk === v) v.cache.set(i, svg);
+    })
+    .catch(() => {});
+}
+
+// Footer status: `Page X` left, `X / N · P%` right — exactly like pdfUpdateProgress,
+// honoring the shared hidden mode (3) that the statusbar tap toggles to.
+function nbkUpdateProgress() {
+  if (!nbk) return;
+  // Mode 3 = hidden (the fixed-layout footer's only "off" state); else show.
+  $("#reader-statusbar")?.classList.toggle("is-hidden", progressMode === 3);
+  if (progressMode === 3) {
+    $("#reader-loc").textContent = "";
+    $("#reader-percent").textContent = "";
+    return;
+  }
+  if (!nbk.pageCount) {
+    $("#reader-loc").textContent = "";
+    $("#reader-percent").textContent = "—";
+    return;
+  }
+  const human = nbk.page + 1;
+  const pct = Math.round((human / nbk.pageCount) * 100);
+  $("#reader-loc").textContent = `Page ${human}`;
+  $("#reader-percent").textContent = `${human} / ${nbk.pageCount} · ${pct}%`;
+}
+
+// Minimal fixed-layout key map (analog of pdfOnKey): page turns + first/last, Esc
+// closes. Display-settings / go-to-page / bookmark keys arrive with their phases.
+function notebookOnKey(e) {
+  if (!nbk) return;
+  if (e.key === "Escape") {
+    close();
+    e.preventDefault();
+    return;
+  }
+  // Shift+G → last page (before the modifier filter, as the reflowable does).
+  if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === "G") {
+    nbkShowPage(nbk.pageCount - 1);
+    gArmed = 0;
+    e.preventDefault();
+    return;
+  }
+  if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+  // `g g` chord → first page (shares the reader's arm timer).
+  if (e.key === "g") {
+    const now = Date.now();
+    if (now - gArmed < G_CHORD_MS) {
+      nbkShowPage(0);
+      gArmed = 0;
+    } else {
+      gArmed = now;
+    }
+    e.preventDefault();
+    return;
+  }
+  gArmed = 0;
+  let handled = true;
+  switch (e.key) {
+    case "ArrowRight":
+    case "ArrowDown":
+    case "PageDown":
+    case " ":
+      nbkShowPage(nbk.page + 1);
+      break;
+    case "ArrowLeft":
+    case "ArrowUp":
+    case "PageUp":
+      nbkShowPage(nbk.page - 1);
+      break;
+    case "Home":
+      nbkShowPage(0);
+      break;
+    case "End":
+      nbkShowPage(nbk.pageCount - 1);
+      break;
+    default:
+      handled = false;
+  }
+  if (handled) e.preventDefault();
+}
+
+// True while the reader is showing a notebook — lets library.js keep suppressing
+// the Notes grid's keyboard/lasso while the overlay is up (notebooks.js owned
+// this when the viewer lived there).
+function isNotebookOpen() {
+  return readerMode === "notebook" && !view().hidden;
+}
+
 async function open(id) {
   await close(); // tear down any prior session
   let openDto, anns, positions;
@@ -2556,6 +2785,11 @@ async function close() {
     await closePdf();
     return;
   }
+  // The notebook mode has its own (lighter) teardown — no reflowable state.
+  if (readerMode === "notebook") {
+    closeNotebook();
+    return;
+  }
   // Persist Sidle's own last position — ONLY here, so the Resume target stays
   // frozen at where this session opened until you leave the book. Best-effort:
   // a failed write just means the next open falls back to the start.
@@ -2649,16 +2883,17 @@ async function close() {
 
 function wire() {
   $("#reader-close")?.addEventListener("click", () => close());
-  // Top bar auto-hide: hovering it pauses the fade; leaving re-arms it; and a
-  // click on the dormant (faded) bar just brings it back. The capture-phase
-  // click + stopPropagation means that revealing click doesn't also fire the
-  // invisible button under the cursor — e.g. it can't accidentally hit the ←
-  // close button and drop you out of the book.
+  // Top bar auto-hide: hovering the top edge brings it back (if faded) and pauses
+  // the fade; leaving re-arms it. A click on the dormant (faded) bar also brings
+  // it back — the capture-phase click + stopPropagation keeps that revealing click
+  // (or a tap, where there's no hover) from also firing the invisible button under
+  // the cursor, so it can't accidentally hit the ← close button and drop you out.
   const topbar = topbarEl();
   if (topbar) {
     topbar.addEventListener("mouseenter", () => {
       topbarHovered = true;
-      cancelTopbarHide();
+      topbarEl()?.classList.remove("is-hidden"); // un-hide on hover, not just click
+      cancelTopbarHide(); // no countdown while the pointer rests on the bar
     });
     topbar.addEventListener("mouseleave", () => {
       topbarHovered = false;
@@ -2785,4 +3020,4 @@ if (document.readyState === "loading") {
   wire();
 }
 
-window.sidleReader = { open, close, reloadAnnotations };
+window.sidleReader = { open, close, openNotebook, isNotebookOpen, reloadAnnotations };
