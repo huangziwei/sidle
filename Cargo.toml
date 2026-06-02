@@ -16,7 +16,7 @@ members = [
 # into the KUAL config.xml. boko-kai is deliberately NOT here — it tracks its
 # upstream fork lineage (0.3.0+kai.N) on its own.
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 # sidle's own crates are AGPL-3.0-or-later. boko-kai is deliberately excluded
 # (it sets its own GPL-3.0-or-later directly, matching its upstream fork), so
 # adding this here does not touch it. The two are link-compatible: GPLv3 §13
