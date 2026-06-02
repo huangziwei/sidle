@@ -1749,6 +1749,20 @@ function pdfSpreadMode() {
 function pdfStep() {
   return pdfSpreadMode() === "double" ? 2 : 1;
 }
+// First page of the spread that contains `p`. In double mode the cover (page 0)
+// stands alone; the rest pair odd-aligned — (1,2), (3,4), … — so the book reads
+// cover → 1·2 → 3·4 …, like a physical book's facing pages. Single mode: `p`.
+function pdfSpreadStart(p) {
+  if (p <= 0) return 0;
+  if (pdfSpreadMode() !== "double") return p;
+  return p % 2 === 1 ? p : p - 1;
+}
+// Whether the current spread shows a right-hand page: never in single mode nor
+// on the standalone cover. Assumes `pdf.page` is on a spread boundary (pdfGoTo /
+// pdfRenderCurrent snap it there).
+function pdfHasRight() {
+  return pdfSpreadMode() === "double" && pdf.page !== 0 && pdf.page + 1 < pdf.pageCount;
+}
 
 async function openPdf(id, openDto, anns, positions) {
   readerMode = "pdf";
@@ -1980,7 +1994,7 @@ async function closePdf() {
 
 function pdfGoTo(i) {
   if (!pdf) return;
-  const p = clampPage(i, pdf.pageCount);
+  const p = pdfSpreadStart(clampPage(i, pdf.pageCount));
   if (p === pdf.page && pdf.imgL.src) return;
   pdf.page = p;
   pdfUpdateProgress(); // cheap — reflect the new page number immediately
@@ -2215,8 +2229,12 @@ async function pdfRenderCurrent() {
   if (!pdf) return;
   const token = ++pdf.token;
   const half = pdfSpreadMode() === "double";
+  // Snap onto a spread boundary (cover alone, then odd-aligned pairs) so a
+  // resize that flips single↔double — or an init/jump straight to a mid-spread
+  // page — still renders a clean spread.
+  pdf.page = pdfSpreadStart(pdf.page);
   const left = pdf.page;
-  const hasRight = half && left + 1 < pdf.pageCount;
+  const hasRight = pdfHasRight();
   pdf.host.classList.toggle("double", half);
   pdf.pageR.style.display = hasRight ? "" : "none";
 
@@ -2248,10 +2266,17 @@ async function pdfRenderCurrent() {
   if (hasRight && urlR) pdf.imgR.src = urlR;
   pdf.overlayer?.redraw(); // wrapper size is final now — settle any sub-pixel drift
 
-  // Prefetch the next and previous spread (best-effort, off the critical path).
+  // Prefetch the neighbouring spreads (best-effort, off the critical path). Use
+  // the spread starts so the warm targets match real turns — notably cover →
+  // (1,2), which the old even-aligned `left ± step` would have missed.
   const step = half ? 2 : 1;
-  const warm = [left + step, left - step];
-  if (half) warm.push(left + step + 1);
+  const nextStart = pdfSpreadStart(left + step);
+  const prevStart = pdfSpreadStart(left - step);
+  const warm = [nextStart, prevStart];
+  if (half) {
+    if (nextStart !== 0) warm.push(nextStart + 1);
+    if (prevStart !== 0) warm.push(prevStart + 1);
+  }
   for (const n of warm) {
     if (n >= 0 && n < pdf.pageCount) pdfFetchPage(n, pdfRenderWidth(n, half));
   }
@@ -2273,7 +2298,7 @@ function pdfUpdateProgress() {
     return l && l !== human ? l : human;
   };
   const left = pdf.page;
-  const right = pdfSpreadMode() === "double" && left + 1 < pdf.pageCount ? left + 1 : null;
+  const right = pdfHasRight() ? left + 1 : null;
   $("#reader-loc").textContent =
     right != null ? `Pages ${lbl(left)}–${lbl(right)}` : `Page ${lbl(left)}`;
   const human = (right != null ? right : left) + 1;
@@ -2499,9 +2524,8 @@ function setPdfInk(on) {
   pdfStyle.ink = !!on;
   savePdfStyle();
   if (!pdf) return;
-  const half = pdfSpreadMode() === "double";
   renderPdfInkLayer(pdf.inkL, pdf.page, pdf.token);
-  renderPdfInkLayer(pdf.inkR, half && pdf.page + 1 < pdf.pageCount ? pdf.page + 1 : null, pdf.token);
+  renderPdfInkLayer(pdf.inkR, pdfHasRight() ? pdf.page + 1 : null, pdf.token);
 }
 
 let zoomCommitTimer = null;
@@ -2549,7 +2573,7 @@ function pdfResize() {
   if (!pdf) return;
   const half = pdfSpreadMode() === "double";
   sizePdfPage(pdf.pageL, pdf.page, half);
-  if (half && pdf.page + 1 < pdf.pageCount) sizePdfPage(pdf.pageR, pdf.page + 1, half);
+  if (pdfHasRight()) sizePdfPage(pdf.pageR, pdf.page + 1, half);
   pdf.overlayer?.redraw();
 }
 function bumpZoom(delta) {
