@@ -22,7 +22,6 @@
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
@@ -32,104 +31,50 @@ use mtp_rs::ptp::{ObjectHandle, ObjectInfo};
 
 use crate::device::transport::{TEntry, TPath, Transport};
 
-/// Largest run of object bytes Sidle pulls within ONE MTP session before
-/// closing and reopening it. The Kindle Scribe's MTP responder serves ~8 MiB of
-/// object data per PTP session and then stalls its bulk pipe — fatally, until
-/// the cable is replugged (IOKit `kIOReturnNotResponding` / 0xe00002ed). A fresh
-/// session resets that budget, so large files are read in sub-8-MiB segments,
-/// reopening the session between each. 6 MiB keeps a safe margin. Verified
-/// on-device: a 15 MiB KFX pulls cleanly in 3 sessions; a single >8 MiB read,
-/// whole or ranged, wedges the device.
-const SESSION_READ_BUDGET: u64 = 6 << 20;
-
-/// One `GetPartialObject` request size. Small enough that no single ranged read
-/// trips the responder; [`SESSION_READ_BUDGET`] is the real limit.
-const PARTIAL_CHUNK: u32 = 1 << 20;
-
-/// A live MTP session: a device handle plus its bound storage. `Storage` keeps
-/// its own `Arc` to the session, so closing it (resetting the device's
-/// per-session transfer budget) requires dropping BOTH — hence both live here
-/// and a `Session` drop ends the session and releases the USB interface.
-struct Session {
-    _device: MtpDevice,
-    storage: Storage,
-}
-
 pub struct MtpTransport {
-    /// IOKit location of the device, so the session can be reopened (after a
-    /// read segment closes it) without re-enumerating — a USB reset would
-    /// unmount the device; a plain reopen does not.
-    location_id: u64,
-    /// The live session, lazily (re)opened. `read()` closes it between segments
-    /// to reset the device's ~8 MiB budget; the next op reopens it. The `Mutex`
-    /// also serializes every high-level operation against the one device — two
-    /// concurrent sessions would collide on the exclusively-claimed interface —
-    /// so it doubles as the op-lock.
-    session: Mutex<Option<Session>>,
-    /// `(free, total)` snapshot taken at first open.
+    storage: Storage,
+    /// Serializes all on-wire MTP operations against one session — the plan's
+    /// "single-session lock". mtp-rs already serializes PTP operations
+    /// internally, but we still want the *high-level* trait calls (which
+    /// chain multiple MTP round-trips: walk, list, upload) to run one at a
+    /// time so concurrent push/delete from the UI doesn't interleave.
+    op_lock: Mutex<()>,
+    /// `(free, total)` snapshot taken at session open. Real-time refresh
+    /// would need an extra `GetStorageInfo` round-trip per call; Phase 4 can
+    /// expose a refresh hook if the UI needs live numbers.
     free_at_open: u64,
     total_capacity: u64,
 }
 
 impl MtpTransport {
-    /// Open the MTP device at `location_id` and bind the first storage.
+    /// Open the MTP device at `location_id` and bind the first storage. The
+    /// bound `Storage` holds the PTP session (and the claimed USB interface)
+    /// open for the transport's lifetime.
     pub fn open(location_id: u64) -> Result<Self> {
-        let session = open_session(location_id)?;
-        let info = session.storage.info();
-        let (free_at_open, total_capacity) = (info.free_space_bytes, info.max_capacity);
+        let (storage, free, total) = block_on(async {
+            let device = MtpDevice::open_by_location(location_id)
+                .await
+                .map_err(map_mtp_err)
+                .context("open MTP device")?;
+            let storage = device
+                .storages()
+                .await
+                .map_err(map_mtp_err)
+                .context("list MTP storages")?
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow!("Kindle reports no MTP storage — try reconnecting"))?;
+            let free = storage.info().free_space_bytes;
+            let total = storage.info().max_capacity;
+            Ok::<_, anyhow::Error>((storage, free, total))
+        })?;
         Ok(Self {
-            location_id,
-            session: Mutex::new(Some(session)),
-            free_at_open,
-            total_capacity,
+            storage,
+            op_lock: Mutex::new(()),
+            free_at_open: free,
+            total_capacity: total,
         })
     }
-}
-
-/// Open a fresh device + storage (a new PTP session). Retries briefly: right
-/// after a prior session drops, the interface can still be releasing, so a
-/// back-to-back reopen (the read-segment path) may need a beat.
-fn open_session(location_id: u64) -> Result<Session> {
-    block_on(async {
-        let mut last: Option<anyhow::Error> = None;
-        for attempt in 0..5 {
-            if attempt > 0 {
-                std::thread::sleep(Duration::from_millis(250));
-            }
-            match try_open_session(location_id).await {
-                Ok(s) => return Ok(s),
-                Err(e) => last = Some(e),
-            }
-        }
-        Err(last.unwrap_or_else(|| anyhow!("open MTP session failed")))
-    })
-}
-
-async fn try_open_session(location_id: u64) -> Result<Session> {
-    let device = MtpDevice::open_by_location(location_id)
-        .await
-        .map_err(map_mtp_err)
-        .context("open MTP device")?;
-    let storage = device
-        .storages()
-        .await
-        .map_err(map_mtp_err)
-        .context("list MTP storages")?
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("Kindle reports no MTP storage — try reconnecting"))?;
-    Ok(Session {
-        _device: device,
-        storage,
-    })
-}
-
-/// Borrow the live session's storage, opening one if the slot is empty.
-fn session_storage(slot: &mut Option<Session>, location_id: u64) -> Result<&Storage> {
-    if slot.is_none() {
-        *slot = Some(open_session(location_id)?);
-    }
-    Ok(&slot.as_ref().expect("just opened").storage)
 }
 
 /// Walk `path` segment-by-segment from storage root, returning the final
@@ -145,22 +90,6 @@ async fn resolve(storage: &Storage, path: &TPath) -> Result<Option<ObjectHandle>
         }
     }
     Ok(parent)
-}
-
-/// Like [`resolve`], but returns the leaf's full [`ObjectInfo`] (handle + size).
-/// `read` needs the size to know how many bytes to pull across its segments.
-async fn resolve_object(storage: &Storage, path: &TPath) -> Result<Option<ObjectInfo>> {
-    let segments = path.segments();
-    let mut parent: Option<ObjectHandle> = None;
-    for (i, segment) in segments.iter().enumerate() {
-        let entries = storage.list_objects(parent).await.map_err(map_mtp_err)?;
-        match entries.into_iter().find(|o| &o.filename == segment) {
-            Some(obj) if i + 1 == segments.len() => return Ok(Some(obj)),
-            Some(obj) => parent = Some(obj.handle),
-            None => return Ok(None),
-        }
-    }
-    Ok(None)
 }
 
 /// Walk `path`, creating any missing folders along the way. Returns the final
@@ -191,55 +120,32 @@ impl Transport for MtpTransport {
     }
 
     fn read_with_progress(&self, path: &TPath, on_progress: &dyn Fn(u64, u64)) -> Result<Vec<u8>> {
-        let mut slot = self.session.lock().expect("session lock poisoned");
-        let mut buf: Vec<u8> = Vec::new();
-        loop {
-            // Run each segment in a FRESH session. The Scribe stalls (fatally,
-            // until replug) past ~8 MiB of object data per session — true of a
-            // whole `GetObject` AND of cumulative `GetPartialObject` ranges — but
-            // a reopened session resets that budget. Closing the slot here drops
-            // the prior `Session` (both Arcs → session closed, interface
-            // released) so `session_storage` opens a clean one. We always start
-            // fresh so a session left part-used by an earlier op can't push us
-            // over mid-read.
-            *slot = None;
-            let storage = session_storage(&mut slot, self.location_id)?;
-            let done = block_on(async {
-                // Re-resolve in this session — object handles are session-scoped;
-                // the byte offset handed to `GetPartialObject` is absolute, so it
-                // stays valid across the reopen.
-                let info = resolve_object(storage, path)
-                    .await?
-                    .ok_or_else(|| anyhow!("MTP read: object not found at `{path}`"))?;
-                let total = info.size;
-                let start = buf.len() as u64;
-                let mut got = start;
-                while got < total && got - start < SESSION_READ_BUDGET {
-                    let want = PARTIAL_CHUNK.min((total - got) as u32);
-                    let bytes = storage
-                        .download_partial(info.handle, got, want)
-                        .await
-                        .map_err(map_mtp_err)?;
-                    if bytes.is_empty() {
-                        bail!("MTP read: device returned an empty range at offset {got}");
-                    }
-                    buf.extend_from_slice(&bytes);
-                    got += bytes.len() as u64;
-                    // Per-MiB tick so the UI shows the read advancing across the
-                    // session reopens, instead of a long silent gap.
-                    on_progress(got, total);
-                }
-                Ok::<bool, anyhow::Error>(got >= total)
-            })?;
-            if done {
-                return Ok(buf);
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        let storage = &self.storage;
+        block_on(async {
+            let handle = resolve(storage, path)
+                .await?
+                .ok_or_else(|| anyhow!("MTP read: object not found at `{path}`"))?;
+            // Stream the object in bounded (64 KiB) chunks instead of `download()`,
+            // which asks for the entire payload in ONE bulk-IN transfer. The Scribe
+            // stalls a multi-MB single-transfer GetObject — the host sees IOKit
+            // `kIOReturnNotResponding` (0xe00002ed) and the transport gets evicted
+            // ("disconnect"). `download_stream` issues many small
+            // `receive_bulk(64 KiB)` reads, each well within what the device serves.
+            let mut dl = storage.download_stream(handle).await.map_err(map_mtp_err)?;
+            let total = dl.size();
+            let mut buf = Vec::with_capacity(total as usize);
+            while let Some(chunk) = dl.next_chunk().await {
+                buf.extend_from_slice(&chunk.map_err(map_mtp_err)?);
+                on_progress(buf.len() as u64, total);
             }
-        }
+            Ok(buf)
+        })
     }
 
     fn write_atomic(&self, path: &TPath, bytes: &[u8]) -> Result<()> {
-        let mut slot = self.session.lock().expect("session lock poisoned");
-        let storage = session_storage(&mut slot, self.location_id)?;
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        let storage = &self.storage;
         block_on(async {
             let parent_path = path.parent().unwrap_or_default();
             let name = path
@@ -289,8 +195,8 @@ impl Transport for MtpTransport {
     }
 
     fn delete(&self, path: &TPath) -> Result<bool> {
-        let mut slot = self.session.lock().expect("session lock poisoned");
-        let storage = session_storage(&mut slot, self.location_id)?;
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        let storage = &self.storage;
         block_on(async {
             let handle = match resolve(storage, path).await? {
                 Some(h) => h,
@@ -310,8 +216,8 @@ impl Transport for MtpTransport {
         // doesn't loop, and device behavior on non-empty folders is undefined.
         // So we walk children, accumulate handles in preorder, and delete in
         // reverse so leaves go before their parents.
-        let mut slot = self.session.lock().expect("session lock poisoned");
-        let storage = session_storage(&mut slot, self.location_id)?;
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        let storage = &self.storage;
         block_on(async {
             let root = match resolve(storage, path).await? {
                 Some(h) => h,
@@ -338,12 +244,11 @@ impl Transport for MtpTransport {
     }
 
     fn prune_children(&self, dir: &TPath, prune: &dyn Fn(&str) -> bool) -> Result<Vec<String>> {
-        // Resolve `dir` ONCE, then delete each matched child's subtree by handle.
-        // `delete` reuses the live session (unlike `read`, which reopens per
-        // call), so the handles from this single listing stay valid throughout —
+        // Resolve `dir` ONCE, then delete each matched child's subtree by handle —
+        // the handles from this single listing stay valid throughout, so there's
         // no per-child re-walk of a huge `.notebooks`.
-        let mut slot = self.session.lock().expect("session lock poisoned");
-        let storage = session_storage(&mut slot, self.location_id)?;
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        let storage = &self.storage;
         block_on(async {
             let Some(parent) = resolve(storage, dir).await? else {
                 return Ok(Vec::new());
@@ -388,118 +293,58 @@ impl Transport for MtpTransport {
         pick_dir: &dyn Fn(&str) -> bool,
         pick_file: &dyn Fn(&str) -> bool,
     ) -> Result<Vec<(String, Vec<(String, Vec<u8>)>)>> {
-        // Resolve `dir` ONCE per session, then list each matching child + read its
-        // matching files BY HANDLE — no per-file re-walk of `dir` (the O(N²) that
-        // made sync scale badly with library size). Reads share a session up to
-        // the ~6 MiB per-session cap; a child whose files would cross it is
-        // deferred to a fresh session (re-resolve `dir` — cheap vs the bytes).
-        // `.yjr`/`.yjf`/`nbk` are tiny, so in practice this is one session: one
-        // `dir` resolve + a quick listing & small read per child.
-        let mut out: Vec<(String, Vec<(String, Vec<u8>)>)> = Vec::new();
-        let mut oversized: Vec<String> = Vec::new(); // child files > budget → ranged read below
-        {
-            let mut slot = self.session.lock().expect("session lock poisoned");
-            let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
-            loop {
-                *slot = None; // fresh session: full budget, fresh (valid) handles
-                let storage = session_storage(&mut slot, self.location_id)?;
-                let need_another = block_on(async {
-                    let Some(parent) = resolve(storage, dir).await? else {
-                        return Ok::<bool, anyhow::Error>(false);
-                    };
-                    let children = storage.list_objects(Some(parent)).await.map_err(map_mtp_err)?;
-                    let mut session_bytes: u64 = 0;
-                    for child in children {
-                        if !child.is_folder()
-                            || done.contains(&child.filename)
-                            || !pick_dir(&child.filename)
-                        {
-                            continue;
-                        }
-                        let files: Vec<ObjectInfo> = storage
-                            .list_objects(Some(child.handle))
-                            .await
-                            .map_err(map_mtp_err)?
-                            .into_iter()
-                            .filter(|o| o.is_file() && pick_file(&o.filename))
-                            .collect();
-                        let total: u64 = files.iter().map(|o| o.size).sum();
-                        if total > SESSION_READ_BUDGET {
-                            // This child's files don't fit a single session; pull
-                            // them ranged via `read()` after the lock releases.
-                            oversized.push(child.filename.clone());
-                            done.insert(child.filename.clone());
-                            continue;
-                        }
-                        // Keep a child's files together in one session: if adding
-                        // them would cross the cap (and we've already read this
-                        // session), reopen and take this child next pass.
-                        if session_bytes > 0 && session_bytes + total > SESSION_READ_BUDGET {
-                            return Ok(true);
-                        }
-                        let mut got_files: Vec<(String, Vec<u8>)> = Vec::new();
-                        for obj in files {
-                            let mut buf = Vec::with_capacity(obj.size as usize);
-                            let mut got = 0u64;
-                            while got < obj.size {
-                                let want = PARTIAL_CHUNK.min((obj.size - got) as u32);
-                                let bytes = storage
-                                    .download_partial(obj.handle, got, want)
-                                    .await
-                                    .map_err(map_mtp_err)?;
-                                if bytes.is_empty() {
-                                    break;
-                                }
-                                buf.extend_from_slice(&bytes);
-                                got += bytes.len() as u64;
-                            }
-                            if !buf.is_empty() {
-                                got_files.push((obj.filename, buf));
-                            }
-                        }
-                        session_bytes += total;
-                        if !got_files.is_empty() {
-                            out.push((child.filename.clone(), got_files));
-                        }
-                        done.insert(child.filename.clone());
-                    }
-                    Ok(false)
-                })?;
-                if !need_another {
-                    break;
+        // Resolve `dir` ONCE, then list each matching child + read its matching
+        // files BY HANDLE — no per-file re-walk of `dir` from the storage root (the
+        // O(N²) that made sync scale badly with library size). `.yjr`/`.yjf`/`nbk`
+        // are tiny; this is one `dir` resolve + a quick listing & small read per
+        // child, all within the one open session.
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        let storage = &self.storage;
+        block_on(async {
+            let Some(parent) = resolve(storage, dir).await? else {
+                return Ok(Vec::new());
+            };
+            let children = storage.list_objects(Some(parent)).await.map_err(map_mtp_err)?;
+            let mut out: Vec<(String, Vec<(String, Vec<u8>)>)> = Vec::new();
+            for child in children {
+                if !child.is_folder() || !pick_dir(&child.filename) {
+                    continue;
                 }
-            }
-        } // session lock released before the ranged fallback (which re-locks)
-        // Rare: a child whose matching files exceed the per-session cap. Fall back
-        // to the path-based ranged `read()` (re-resolves, but only for these).
-        for name in oversized {
-            let child = dir.join(&name);
-            let mut files = Vec::new();
-            for f in self.list(&child).unwrap_or_default() {
-                if !f.is_dir && pick_file(&f.name) {
-                    if let Ok(bytes) = self.read(&child.join(&f.name)) {
-                        if !bytes.is_empty() {
-                            files.push((f.name, bytes));
-                        }
+                let files: Vec<ObjectInfo> = storage
+                    .list_objects(Some(child.handle))
+                    .await
+                    .map_err(map_mtp_err)?
+                    .into_iter()
+                    .filter(|o| o.is_file() && pick_file(&o.filename))
+                    .collect();
+                let mut got_files: Vec<(String, Vec<u8>)> = Vec::new();
+                for obj in files {
+                    let mut dl = storage.download_stream(obj.handle).await.map_err(map_mtp_err)?;
+                    let mut buf = Vec::with_capacity(dl.size() as usize);
+                    while let Some(chunk) = dl.next_chunk().await {
+                        buf.extend_from_slice(&chunk.map_err(map_mtp_err)?);
+                    }
+                    if !buf.is_empty() {
+                        got_files.push((obj.filename, buf));
                     }
                 }
+                if !got_files.is_empty() {
+                    out.push((child.filename.clone(), got_files));
+                }
             }
-            if !files.is_empty() {
-                out.push((name, files));
-            }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     fn exists(&self, path: &TPath) -> Result<bool> {
-        let mut slot = self.session.lock().expect("session lock poisoned");
-        let storage = session_storage(&mut slot, self.location_id)?;
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        let storage = &self.storage;
         block_on(async { Ok(resolve(storage, path).await?.is_some()) })
     }
 
     fn list(&self, dir: &TPath) -> Result<Vec<TEntry>> {
-        let mut slot = self.session.lock().expect("session lock poisoned");
-        let storage = session_storage(&mut slot, self.location_id)?;
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        let storage = &self.storage;
         block_on(async {
             let parent = if dir.is_empty() {
                 None

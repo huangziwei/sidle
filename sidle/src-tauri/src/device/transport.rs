@@ -108,10 +108,10 @@ pub trait Transport: Send + Sync {
     /// `on_progress(bytes_read_so_far, total_bytes)` is invoked one or more
     /// times, ending with `bytes_read_so_far == total_bytes`. For transports
     /// whose read is slow enough to look hung without a live counter — MTP pulls
-    /// a large object across several PTP sessions (the Scribe's per-session
-    /// cap), so a multi-MiB book takes seconds. The default reads the whole
-    /// object via [`read`](Self::read) and reports a single final tick; only MTP
-    /// overrides it. `total` of 0 means the size wasn't known up front.
+    /// a multi-MiB book over USB in many small bulk-IN chunks, which takes
+    /// seconds. The default reads the whole object via [`read`](Self::read) and
+    /// reports a single final tick; only MTP overrides it. `total` of 0 means the
+    /// size wasn't known up front.
     fn read_with_progress(
         &self,
         path: &TPath,
@@ -158,10 +158,10 @@ pub trait Transport: Send + Sync {
     /// omitting children that have no readable / non-empty matching file.
     ///
     /// The point is MTP scaling: a path-based [`read`](Self::read) re-walks `dir`
-    /// from the storage root on every call (and reopens the PTP session), so
-    /// reading files under N children is O(N × dir-size) — quadratic in library
-    /// size. This resolves `dir` once and reads by handle in shared sessions, so
-    /// it's linear. Used for both ink (`.notebooks/<id>/nbk`) and annotations
+    /// from the storage root on every call, so reading files under N children is
+    /// O(N × dir-size) — quadratic in library size. This resolves `dir` once and
+    /// reads by handle in one session, so it's linear. Used for both ink
+    /// (`.notebooks/<id>/nbk`) and annotations
     /// (`documents/Sidle/<book>.sdr/{.yjr,.yjf}`). Default impl (mass-storage:
     /// local fs, cheap) just lists + `read`s each.
     fn read_files_in_children(

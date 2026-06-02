@@ -43,7 +43,7 @@ pub struct SyncProgress {
 pub fn collect_device_yjr(transport: &dyn Transport) -> Result<Vec<CollectedYjr>> {
     let sidle = TPath::parse("documents/Sidle");
     // Resolve `documents/Sidle` ONCE and read each `.sdr`'s sidecars by handle in
-    // shared sessions (see [`Transport::read_files_in_children`]) — not a
+    // one session (see [`Transport::read_files_in_children`]) — not a
     // path-based `list` + `read` per `.sdr`, which re-walks the whole Sidle dir on
     // every call (O(books²), the same blowup the ink walk had). `.yjr.bad_file` is
     // excluded (it doesn't end in `.yjr`); a `.sdr` with neither sidecar (a

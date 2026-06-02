@@ -44,8 +44,8 @@ pub fn collect_device_ink(
     known_asins: &HashSet<String>,
 ) -> Result<Vec<CollectedInk>> {
     let root = TPath::parse(".notebooks");
-    // Resolve `.notebooks` ONCE and pull every OUR `nbk` by handle in shared
-    // sessions (see [`Transport::read_files_in_children`]) — not a path-based
+    // Resolve `.notebooks` ONCE and pull every OUR `nbk` by handle in one
+    // session (see [`Transport::read_files_in_children`]) — not a path-based
     // `read()` per file, which re-walks the whole directory each call (the reason
     // ink sync stayed slow even after pruning orphans down to ~100 entries).
     let pulled = transport.read_files_in_children(
