@@ -2486,23 +2486,35 @@ function setPdfInk(on) {
   renderPdfInkLayer(pdf.inkR, half && pdf.page + 1 < pdf.pageCount ? pdf.page + 1 : null, pdf.token);
 }
 
-// Shared fixed-layout zoom (PDF + notebook). Clamped to [1, 3]; quantized so the
-// slider and `+`/`-` keys land on the same stops. Pure CSS via applyPdfStyle —
-// the vector notebook re-rasterizes crisply; a PDF raster just scales.
+let zoomCommitTimer = null;
+// Shared fixed-layout zoom (PDF + notebook), clamped to [1, 3]. Resizes the visible
+// page(s) immediately and cheaply — no SVG re-parse (notebook) or raster re-fetch
+// (PDF) — so slider drags and trackpad pinches stay smooth. The notebook is vector,
+// so the resize is already crisp; the PDF raster just scales until a debounced
+// re-render redraws it crisply at the settled zoom.
 function setPdfZoom(z) {
   const next = Math.max(PDF_ZOOM_MIN, Math.min(PDF_ZOOM_MAX, Math.round((z || 1) * 100) / 100));
   if (next === pdfStyle.zoom) return;
   pdfStyle.zoom = next;
   savePdfStyle();
   syncZoomControl();
-  // Re-size at the new zoom: PDF re-renders the raster (crisp, debounced); the
-  // notebook re-lays the cached vector SVGs (instant).
   if (pdf) {
-    pdfScheduleRender();
-    pdfUpdateProgress();
+    pdfResize();
+    clearTimeout(zoomCommitTimer);
+    zoomCommitTimer = setTimeout(() => pdf && pdfScheduleRender(), 160);
   } else if (nbk) {
-    nbkShowPage(nbk.page);
+    nbkResize();
   }
+}
+
+// Cheap re-fit of the on-screen PDF page boxes to the current zoom; the existing
+// raster scales until the debounced crisp render lands.
+function pdfResize() {
+  if (!pdf) return;
+  const half = pdfSpreadMode() === "double";
+  sizePdfPage(pdf.pageL, pdf.page, half);
+  if (half && pdf.page + 1 < pdf.pageCount) sizePdfPage(pdf.pageR, pdf.page + 1, half);
+  pdf.overlayer?.redraw();
 }
 function bumpZoom(delta) {
   setPdfZoom((pdfStyle.zoom || 1) + delta);
@@ -2727,6 +2739,18 @@ function nbkDisplaySize(aspect, half) {
   }
   const zoom = pdfStyle.zoom || 1;
   return { w: Math.max(1, Math.floor(w * zoom)), h: Math.max(1, Math.floor(h * zoom)) };
+}
+
+// Cheap re-fit of the on-screen notebook page(s) to the current zoom — resize the
+// existing SVGs (crisp, vector) rather than rebuilding/re-parsing them.
+function nbkResize() {
+  const host = $("#reader-paginator-host");
+  if (!nbk || !host) return;
+  const { w, h } = nbkDisplaySize(nbk.aspect, nbkSpreadMode() === "double");
+  for (const el of host.querySelectorAll(".reader-notebook-page")) {
+    el.style.width = `${w}px`;
+    el.style.height = `${h}px`;
+  }
 }
 
 // Footer status: `Page X` left, `X / N · P%` right — exactly like pdfUpdateProgress,
@@ -3125,6 +3149,40 @@ function wire() {
   $("#rps-invert")?.addEventListener("change", (e) => setPdfInvert(e.target.checked));
   $("#rps-ink")?.addEventListener("change", (e) => setPdfInk(e.target.checked));
   $("#rps-zoom")?.addEventListener("input", (e) => setPdfZoom(parseFloat(e.target.value)));
+  // Trackpad pinch-zoom for fixed-layout modes. macOS WebKit fires the proprietary
+  // gesture* events with a cumulative `scale`; other engines surface a pinch as
+  // ctrl+wheel. Both feed the shared zoom. preventDefault stops the webview's own
+  // magnification / page-zoom; a plain (no-ctrl) wheel is left alone so a zoomed
+  // page still scrolls.
+  const fixedLayout = () => readerMode === "pdf" || readerMode === "notebook";
+  const stageEl = $("#reader-stage");
+  let pinchBase = 0; // zoom captured at gesturestart; >0 while a pinch is active
+  if (stageEl) {
+    stageEl.addEventListener("gesturestart", (e) => {
+      if (!fixedLayout()) return;
+      e.preventDefault();
+      pinchBase = pdfStyle.zoom || 1;
+    });
+    stageEl.addEventListener("gesturechange", (e) => {
+      if (!fixedLayout() || !pinchBase) return;
+      e.preventDefault();
+      setPdfZoom(pinchBase * e.scale);
+    });
+    stageEl.addEventListener("gestureend", (e) => {
+      if (!fixedLayout()) return;
+      e.preventDefault();
+      pinchBase = 0;
+    });
+    stageEl.addEventListener(
+      "wheel",
+      (e) => {
+        if (!fixedLayout() || !e.ctrlKey || pinchBase) return; // gesture* owns it if active
+        e.preventDefault();
+        setPdfZoom((pdfStyle.zoom || 1) * (1 - e.deltaY / 100));
+      },
+      { passive: false },
+    );
+  }
   // Display-settings popover: the Aa button toggles it; every control writes
   // through to the live view; reset restores defaults.
   $("#reader-style")?.addEventListener("click", () => toggleStylePanel());
