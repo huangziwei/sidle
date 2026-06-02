@@ -1646,16 +1646,17 @@ pub fn resolve_link_placeholders(state: &mut ContentState) {
     for part in &mut state.book_parts {
         let n = part.dom.len();
         for id in 0..n {
-            let attrs = part.dom.get(id).attrs.clone();
-            for (k, v) in attrs {
-                if k != "href" {
-                    continue;
-                }
-                if let Some(name) = v.strip_prefix("anchor:")
-                    && let Some(uri) = anchors.resolve_uri(name, &map)
-                {
-                    part.dom.get_mut(id).set("href", uri);
-                }
+            // Read just the `href` (if present) instead of cloning every node's
+            // whole attrs vec: most nodes have no `href`, and the clone-per-node
+            // dominated this pass on link-dense books (~300 ms on a 2.5 MB-HTML
+            // academic title with many cross-references). `resolve_uri` returns
+            // an owned String, so the element borrow ends before `get_mut`.
+            let uri = match part.dom.get(id).get("href").and_then(|v| v.strip_prefix("anchor:")) {
+                Some(name) => anchors.resolve_uri(name, &map),
+                None => None,
+            };
+            if let Some(uri) = uri {
+                part.dom.get_mut(id).set("href", uri);
             }
         }
     }

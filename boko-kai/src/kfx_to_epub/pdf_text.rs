@@ -15,9 +15,12 @@
 //! works on Amazon-authored KFX (the synced-back device corpus) as well as
 //! boko's own output.
 
+use std::collections::HashMap;
+
 use super::ConvertError;
 use super::content::{collect_element_ids, extract_reading_orders, lookup_fragment};
 use super::loader::{self, BookData};
+use crate::import::pdf::PdfOutlineItem;
 use crate::kfx::container::get_field;
 use crate::kfx::ion::IonValue;
 use crate::kfx::symbols::KfxSymbol;
@@ -70,6 +73,206 @@ pub fn pdf_text_layer_from_book(book: &BookData) -> Vec<PdfPageText> {
         return Vec::new();
     };
     order.iter().map(|name| page_text(book, name)).collect()
+}
+
+/// Everything the fixed-layout reader needs from a PDF-backed KFX, from a
+/// **single** container load: the per-page text layer (words + eids + box
+/// size), the document outline, and the per-page labels.
+///
+/// The reader used to derive the outline / page labels / page sizes from a
+/// separate [`crate::import::probe_pdf`] — a full lopdf parse of the *embedded*
+/// PDF, which on a large PDF cost seconds (a 64 MB scanned book measured ~6.7 s)
+/// and ran on every open. But `pdf_to_kfx` bakes the `page_list` (per-page
+/// labels) and `toc` into the KFX `book_navigation`, and the text layer already
+/// carries each page's box size, so the probe is redundant here. Page count is
+/// `pages.len()`.
+#[derive(Debug, Default)]
+pub struct PdfReaderData {
+    /// Per-page text layer, in reading order (see [`PdfPageText`]).
+    pub pages: Vec<PdfPageText>,
+    /// Document outline (bookmarks) → page indices. Empty if the KFX carries no
+    /// `toc` nav container (a PDF without bookmarks).
+    pub outline: Vec<PdfOutlineItem>,
+    /// One display label per page (`page_labels[i]` for page `i`): the PDF's own
+    /// labels (roman front-matter, `Cover`, …) when present, else `"1".."N"`.
+    pub page_labels: Vec<String>,
+}
+
+/// As [`pdf_reader_data_from_book`], loading the container from raw KFX bytes.
+pub fn pdf_reader_data(kfx_bytes: &[u8]) -> Result<PdfReaderData, ConvertError> {
+    let book = loader::load(kfx_bytes)?;
+    Ok(pdf_reader_data_from_book(&book))
+}
+
+/// Extract the reader's PDF view from an already-loaded container (one `load`
+/// shared with the rest of the open path).
+pub fn pdf_reader_data_from_book(book: &BookData) -> PdfReaderData {
+    let pages = pdf_text_layer_from_book(book);
+    // eid → 0-based page index, from each page's registered eids (which include
+    // the page-image eid that nav `target_position`s point at) and its run eids.
+    // First page wins on the (rare) collision.
+    let mut eid_to_page: HashMap<i64, usize> = HashMap::new();
+    for (i, p) in pages.iter().enumerate() {
+        for &eid in &p.eids {
+            eid_to_page.entry(eid).or_insert(i);
+        }
+        for w in &p.words {
+            eid_to_page.entry(w.eid).or_insert(i);
+        }
+    }
+    let (outline, page_labels) = extract_pdf_nav(book, &eid_to_page, pages.len());
+    PdfReaderData {
+        pages,
+        outline,
+        page_labels,
+    }
+}
+
+/// Read the PDF `book_navigation`: the `page_list` container → per-page label
+/// strings, and the `toc` container → nested outline (each `target_position.id`
+/// mapped to a 0-based page index via `eid_to_page`). `pdf_to_kfx` writes the
+/// containers as separate `nav_container` entities referenced by symbol (the
+/// fixed-layout shape — "the device rejects an inline nav_container"), so the
+/// list items are resolved through `lookup_fragment`; an inline struct (the
+/// reflowable shape) is handled too. Falls back to sequential `"1".."N"` labels
+/// and an empty outline when the nav is absent.
+fn extract_pdf_nav(
+    book: &BookData,
+    eid_to_page: &HashMap<i64, usize>,
+    n_pages: usize,
+) -> (Vec<PdfOutlineItem>, Vec<String>) {
+    let mut labels: Vec<String> = (1..=n_pages).map(|n| n.to_string()).collect();
+    let mut outline: Vec<PdfOutlineItem> = Vec::new();
+
+    let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
+        return (outline, labels);
+    };
+    for value in nav.values() {
+        let unwrapped = value.unwrap_annotated();
+        let reading_orders: Vec<IonValue> = match unwrapped {
+            IonValue::List(items) => items.clone(),
+            IonValue::Struct(_) => vec![unwrapped.clone()],
+            _ => Vec::new(),
+        };
+        for ro in reading_orders {
+            let Some(ro_fields) = ro.as_struct() else {
+                continue;
+            };
+            let Some(containers) =
+                get_field(ro_fields, KfxSymbol::NavContainers as u64).and_then(|v| v.as_list())
+            else {
+                continue;
+            };
+            for item in containers {
+                // The list item is either a symbol referencing a separate
+                // nav_container entity (PDF) or an inline container struct
+                // (reflowable). Resolve to the container value either way.
+                let inner = item.unwrap_annotated();
+                let container = match inner {
+                    IonValue::Struct(_) => inner.clone(),
+                    _ => match book
+                        .symbols
+                        .text_of(inner)
+                        .and_then(|name| lookup_fragment(book, KfxSymbol::NavContainer, name))
+                    {
+                        Some(c) => c,
+                        None => continue,
+                    },
+                };
+                let container = container.unwrap_annotated();
+                let Some(cf) = container.as_struct() else {
+                    continue;
+                };
+                let nav_type = get_field(cf, KfxSymbol::NavType as u64)
+                    .and_then(|v| book.symbols.text_of(v))
+                    .unwrap_or("");
+                let entries: Vec<IonValue> = get_field(cf, KfxSymbol::Entries as u64)
+                    .and_then(|v| v.as_list())
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default();
+                match nav_type {
+                    "page_list" => fill_page_labels(&entries, eid_to_page, &mut labels),
+                    "toc" => {
+                        for e in &entries {
+                            if let Some(it) = pdf_nav_item(e, eid_to_page) {
+                                outline.push(it);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    (outline, labels)
+}
+
+/// Overwrite `labels[page]` from each `page_list` entry's
+/// `representation.label`, placing it at the page its `target_position.id`
+/// resolves to (the entries are emitted in page order, so the ordinal is the
+/// fallback when the eid isn't mapped).
+fn fill_page_labels(
+    entries: &[IonValue],
+    eid_to_page: &HashMap<i64, usize>,
+    labels: &mut [String],
+) {
+    for (ordinal, entry) in entries.iter().enumerate() {
+        let Some(fields) = entry.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        let Some(label) = entry_label(fields) else {
+            continue;
+        };
+        let page = entry_target_eid(fields)
+            .and_then(|eid| eid_to_page.get(&eid).copied())
+            .unwrap_or(ordinal);
+        if let Some(slot) = labels.get_mut(page) {
+            *slot = label;
+        }
+    }
+}
+
+/// One `toc` entry → [`PdfOutlineItem`], recursing into nested `entries`. The
+/// target eid maps to a page index (0 when unresolved — a defensive default;
+/// `pdf_to_kfx` registers every toc target in the position map).
+fn pdf_nav_item(entry: &IonValue, eid_to_page: &HashMap<i64, usize>) -> Option<PdfOutlineItem> {
+    let fields = entry.unwrap_annotated().as_struct()?;
+    let title = entry_label(fields).unwrap_or_default();
+    let page_index = entry_target_eid(fields)
+        .and_then(|eid| eid_to_page.get(&eid).copied())
+        .unwrap_or(0);
+    let children = get_field(fields, KfxSymbol::Entries as u64)
+        .and_then(|v| v.as_list())
+        .map(|list| {
+            list.iter()
+                .filter_map(|c| pdf_nav_item(c, eid_to_page))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(PdfOutlineItem {
+        title,
+        page_index,
+        children,
+    })
+}
+
+/// A nav entry's label: `representation.label`, falling back to a direct
+/// `label`. Returns `None` only when neither is present.
+fn entry_label(fields: &[(u64, IonValue)]) -> Option<String> {
+    get_field(fields, KfxSymbol::Representation as u64)
+        .and_then(|v| v.as_struct())
+        .and_then(|s| get_field(s, KfxSymbol::Label as u64))
+        .and_then(|v| v.as_string())
+        .or_else(|| get_field(fields, KfxSymbol::Label as u64).and_then(|v| v.as_string()))
+        .map(|s| s.to_string())
+}
+
+/// A nav entry's `target_position.id` (the target page's element eid).
+fn entry_target_eid(fields: &[(u64, IonValue)]) -> Option<i64> {
+    get_field(fields, KfxSymbol::TargetPosition as u64)
+        .and_then(|v| v.as_struct())
+        .and_then(|pos| get_field(pos, KfxSymbol::Id as u64))
+        .and_then(|v| v.as_int())
 }
 
 /// The text layer for one section (page).
@@ -199,6 +402,85 @@ fn walk(
     } else if let Some(list) = inner.as_list() {
         for item in list {
             walk(item, book, visited, page_box, runs);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::{PdfKfxMeta, pdf_to_kfx};
+    use crate::import::pdf::{PdfDoc, PdfOutlineItem, PdfPage};
+
+    fn fake_pdf() -> Vec<u8> {
+        let mut v = b"%PDF-1.4\n% reader-data fixture\n".to_vec();
+        v.extend_from_slice(b"\n%%EOF\n");
+        v
+    }
+
+    fn flat(items: &[PdfOutlineItem], depth: usize, out: &mut Vec<(usize, String, usize)>) {
+        for it in items {
+            out.push((depth, it.title.clone(), it.page_index));
+            flat(&it.children, depth + 1, out);
+        }
+    }
+
+    /// `pdf_reader_data` must recover the outline + page labels + page sizes that
+    /// `pdf_to_kfx` baked into `book_navigation` — i.e. exactly what `probe_pdf`
+    /// used to hand the reader, but from the KFX itself (no embedded-PDF parse).
+    #[test]
+    fn reader_data_round_trips_nav_from_pdf_to_kfx() {
+        let doc = PdfDoc {
+            bytes: fake_pdf(),
+            pages: vec![
+                PdfPage { width: 612.0, height: 792.0 },
+                PdfPage { width: 595.0, height: 842.0 },
+                PdfPage { width: 612.0, height: 792.0 },
+            ],
+            title: Some("Nav Round Trip".to_string()),
+            author: None,
+            outline: vec![
+                PdfOutlineItem {
+                    title: "Chapter 1".to_string(),
+                    page_index: 0,
+                    children: vec![PdfOutlineItem {
+                        title: "Section 1.1".to_string(),
+                        page_index: 1,
+                        children: Vec::new(),
+                    }],
+                },
+                PdfOutlineItem {
+                    title: "Chapter 2".to_string(),
+                    page_index: 2,
+                    children: Vec::new(),
+                },
+            ],
+            page_labels: vec!["Cover".to_string(), "i".to_string(), "1".to_string()],
+        };
+        let meta = PdfKfxMeta {
+            title: "Nav Round Trip".to_string(),
+            author: None,
+            language: "en".to_string(),
+            date: None,
+            publisher: None,
+            page_progression_direction: None,
+        };
+
+        let kfx = pdf_to_kfx(&doc, &meta, None, None);
+        let rd = pdf_reader_data(&kfx).expect("pdf_reader_data");
+
+        assert_eq!(rd.pages.len(), 3, "one entry per page");
+        assert_eq!(rd.page_labels, vec!["Cover", "i", "1"], "page labels from page_list");
+
+        let (mut want, mut got) = (Vec::new(), Vec::new());
+        flat(&doc.outline, 0, &mut want);
+        flat(&rd.outline, 0, &mut got);
+        assert_eq!(got, want, "outline (title + page index, nested) must round-trip");
+
+        // Page box sizes come back from the KFX page_template (≈ MediaBox pt).
+        for (i, p) in doc.pages.iter().enumerate() {
+            assert!((rd.pages[i].box_w - p.width).abs() < 0.5, "page {i} width");
+            assert!((rd.pages[i].box_h - p.height).abs() < 0.5, "page {i} height");
         }
     }
 }

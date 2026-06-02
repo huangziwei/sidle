@@ -199,72 +199,49 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
     };
 
     tokio::task::spawn_blocking(move || {
-        // PDF-backed? Prefer the verbatim PDF sidecar; fall back to extracting it
-        // from a PDF-backed KFX (a synced-back book whose kfx→pdf job hasn't run).
-        let pdf_bytes: Option<Vec<u8>> = match pdf_path.as_deref().map(std::fs::read) {
-            Some(Ok(bytes)) => Some(bytes),
-            _ => {
-                let kfx = std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
-                if boko::kfx::pdf_container::kfx_is_pdf_backed(&kfx) {
-                    Some(
-                        boko::kfx::pdf_container::kfx_extract_pdf(&kfx)
-                            .map_err(|e| format!("extract embedded PDF: {e:?}"))?,
-                    )
-                } else {
-                    None
-                }
-            }
-        };
+        // One KFX read serves whichever path this book takes.
+        let kfx = std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
 
-        if let Some(bytes) = pdf_bytes {
-            let doc = boko::import::probe_pdf(bytes)
-                .map_err(|e| format!("probe PDF for reader: {e}"))?;
-            // The selectable text layer lives in the KFX text storylines (the
-            // PDF sidecar has none), so always read it from the KFX. One run per
-            // section, in reading order — zipped to the probe's pages by index.
-            // Best-effort: a KFX without a text layer (image-only / scanned)
-            // yields empty layers and the reader shows image-only pages.
-            let layer: Vec<boko::kfx_to_epub::PdfPageText> = std::fs::read(&kfx_path)
-                .ok()
-                .and_then(|k| boko::kfx_to_epub::pdf_text_layer(&k).ok())
-                .unwrap_or_default();
+        // PDF-backed? Serve the fixed-layout view entirely from the KFX. A single
+        // container load yields each page's box size + selectable text layer
+        // (words/eids) AND the outline + page labels — `pdf_to_kfx` bakes the
+        // `page_list` and `toc` into the KFX `book_navigation`, so we no longer
+        // run `probe_pdf` (a full lopdf parse of the *embedded* PDF that cost
+        // seconds on a large book and ran on every open). The embedded PDF is
+        // touched only later, one page at a time, by `reader_pdf_page`. (Verified
+        // offline: this reproduces probe's outline/labels/sizes for every library
+        // PDF — see artifacts/reader-profile.)
+        if pdf_path.is_some() || boko::kfx::pdf_container::kfx_is_pdf_backed(&kfx) {
+            let rd = boko::kfx_to_epub::pdf_reader_data(&kfx)
+                .map_err(|e| format!("read PDF KFX for reader: {e}"))?;
             let authors = crate::library::authors::split_display(&author);
             let dto = ReaderPdfDto {
-                page_count: doc.pages.len(),
+                page_count: rd.pages.len(),
                 title,
                 authors,
-                toc: map_pdf_toc(&doc.outline),
-                pages: doc
+                toc: map_pdf_toc(&rd.outline),
+                pages: rd
                     .pages
                     .iter()
-                    .enumerate()
-                    .map(|(i, p)| {
-                        let (words, eids) = match layer.get(i) {
-                            Some(pt) => (
-                                pt.words
-                                    .iter()
-                                    .map(|w| ReaderPdfWordDto {
-                                        eid: w.eid,
-                                        left: w.left,
-                                        top: w.top,
-                                        width: w.width,
-                                        height: w.height,
-                                        text: w.text.clone(),
-                                    })
-                                    .collect(),
-                                pt.eids.clone(),
-                            ),
-                            None => (Vec::new(), Vec::new()),
-                        };
-                        ReaderPdfPageDto {
-                            width: p.width,
-                            height: p.height,
-                            words,
-                            eids,
-                        }
+                    .map(|p| ReaderPdfPageDto {
+                        width: p.box_w,
+                        height: p.box_h,
+                        words: p
+                            .words
+                            .iter()
+                            .map(|w| ReaderPdfWordDto {
+                                eid: w.eid,
+                                left: w.left,
+                                top: w.top,
+                                width: w.width,
+                                height: w.height,
+                                text: w.text.clone(),
+                            })
+                            .collect(),
+                        eids: p.eids.clone(),
                     })
                     .collect(),
-                page_labels: doc.page_labels,
+                page_labels: rd.page_labels,
                 page_progression_direction: match ppd.as_deref() {
                     Some("rtl") => "rtl".to_string(),
                     _ => "ltr".to_string(),
@@ -273,8 +250,7 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
             return Ok(ReaderOpen::Pdf(dto));
         }
 
-        // Reflowable KFX → DOM (unchanged).
-        let kfx = std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
+        // Reflowable KFX → DOM.
         let book = boko::kfx_to_epub::kfx_to_reader_book(&kfx)
             .map_err(|e| format!("KFX→DOM render failed: {e}"))?;
         Ok::<ReaderOpen, String>(ReaderOpen::Reflowable(ReaderBookDto::from(book)))

@@ -30,6 +30,15 @@ pub struct AnchorTable {
     /// found, sets the HTML element's `id="..."` attribute to a unique
     /// id derived from the first anchor name.
     pub position_anchors: HashMap<i64, HashMap<i64, Vec<String>>>,
+
+    /// Reverse index `anchor_name → location_id`, built alongside
+    /// `position_anchors`. `resolve_uri` used to scan the whole
+    /// `position_anchors` map for every `<a href="anchor:…">` — an
+    /// O(hrefs × anchors) quadratic that cost ~300 ms on a link-dense book.
+    /// This makes resolution O(1). Only the eid is needed (resolve_uri
+    /// discards the offset). First registration wins, matching the prior
+    /// scan's "first match" semantics.
+    pub name_to_eid: HashMap<String, i64>,
 }
 
 impl AnchorTable {
@@ -67,20 +76,13 @@ impl AnchorTable {
         if let Some(uri) = self.anchor_uri.get(anchor_name) {
             return Some(uri.clone());
         }
-        // Internal position anchor.
-        for (eid, offsets) in &self.position_anchors {
-            for (offset, names) in offsets {
-                if names.iter().any(|n| n == anchor_name) {
-                    let file = element_id_to_filename.get(eid)?;
-                    let frag = self.anchor_id(anchor_name);
-                    // `(eid, 0)` and no visible content before the
-                    // element — calibre drops the fragment in that
-                    // case; we keep it for simplicity (validator
-                    // doesn't penalize the extra `#id`).
-                    let _ = offset;
-                    return Some(format!("{}#{}", file, frag));
-                }
-            }
+        // Internal position anchor — O(1) via the reverse index (the offset
+        // is unused: calibre drops the `(eid, 0)` fragment, but we keep the
+        // `#id` for simplicity and the validator doesn't penalize it).
+        if let Some(&eid) = self.name_to_eid.get(anchor_name) {
+            let file = element_id_to_filename.get(&eid)?;
+            let frag = self.anchor_id(anchor_name);
+            return Some(format!("{}#{}", file, frag));
         }
         None
     }
@@ -137,6 +139,8 @@ pub fn extract_anchors(book: &BookData) -> AnchorTable {
                 .entry(offset)
                 .or_default()
                 .push(name.clone());
+            // Reverse index for O(1) resolve_uri; first registration wins.
+            table.name_to_eid.entry(name.clone()).or_insert(eid);
         }
     }
     table
