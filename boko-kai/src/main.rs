@@ -53,6 +53,12 @@ enum Command {
         /// the correctness reference.
         #[arg(long = "mode", default_value = "fast")]
         merge_mode: String,
+
+        /// Page progression direction for PDF → KFX: `rtl` (Japanese/manga,
+        /// turn pages right-to-left) or `ltr`. Omit for the device default
+        /// (ltr). A scanned/text PDF has no such metadata, so set it here.
+        #[arg(long = "ppd")]
+        ppd: Option<String>,
     },
 
     /// Extract hierarchical section tree (JSON)
@@ -231,6 +237,7 @@ fn main() -> ExitCode {
             to_format,
             quiet,
             merge_mode,
+            ppd,
         } => convert(
             &input,
             output.as_deref(),
@@ -238,6 +245,7 @@ fn main() -> ExitCode {
             to_format.as_deref(),
             quiet,
             &merge_mode,
+            ppd.as_deref(),
         ),
         Command::Dump {
             file,
@@ -1072,6 +1080,7 @@ fn convert(
     to_format: Option<&str>,
     quiet: bool,
     merge_mode: &str,
+    ppd: Option<&str>,
 ) -> Result<(), String> {
     // Check if reading from stdin
     let from_stdin = input == "-";
@@ -1245,7 +1254,7 @@ fn convert(
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
     {
-        return convert_pdf_to_kfx(input, output, to_stdout, quiet);
+        return convert_pdf_to_kfx(input, output, to_stdout, quiet, ppd);
     }
 
     // Open the book (from file or stdin)
@@ -1643,7 +1652,19 @@ fn convert_pdf_to_kfx(
     output: Option<&str>,
     to_stdout: bool,
     quiet: bool,
+    ppd: Option<&str>,
 ) -> Result<(), String> {
+    // Normalize/validate the page progression direction up front so a typo
+    // (e.g. `--ppd RTL` or `--ppd r2l`) errors loudly instead of silently
+    // shipping an ltr book.
+    let ppd = match ppd.map(|s| s.trim().to_ascii_lowercase()) {
+        None => None,
+        Some(s) if s == "rtl" || s == "ltr" => Some(s),
+        Some(other) => {
+            return Err(format!("--ppd must be 'rtl' or 'ltr', got '{other}'"));
+        }
+    };
+
     let bytes = std::fs::read(input).map_err(|e| format!("Failed to read input: {e}"))?;
     let doc = boko::import::probe_pdf(bytes).map_err(|e| format!("PDF parse failed: {e}"))?;
 
@@ -1664,13 +1685,15 @@ fn convert_pdf_to_kfx(
         // unset (the Sidle worker fills them from the DB row).
         date: None,
         publisher: None,
+        page_progression_direction: ppd.clone(),
     };
 
     if !quiet && !to_stdout {
         eprintln!(
-            "PDF: {} pages → fixed-layout PDOC KFX\n  title:  {title}\n  author: {}",
+            "PDF: {} pages → fixed-layout PDOC KFX\n  title:  {title}\n  author: {}\n  ppd:    {}",
             doc.pages.len(),
             author.as_deref().unwrap_or("(none)"),
+            ppd.as_deref().unwrap_or("(default: ltr)"),
         );
     }
 

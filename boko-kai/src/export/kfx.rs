@@ -2457,6 +2457,15 @@ pub struct PdfKfxMeta {
     /// Publisher imprint. Emitted as the `publisher` entry; `None`/blank yields
     /// the empty value Amazon's PDOC also carries.
     pub publisher: Option<String>,
+    /// Page progression direction — `Some("rtl")` turns pages right-to-left
+    /// (Japanese/manga), `Some("ltr")` left-to-right, `None` omits it (device
+    /// default, ltr). A scanned/text PDF carries no such hint, so a Japanese
+    /// book must set this explicitly (e.g. from edited library metadata) and be
+    /// force-reconverted. Applied to every reading order's
+    /// `page_progression_direction` ($425) and to `document_data.direction`
+    /// ($192) — see [`build_pdf_metadata_fragment`] /
+    /// [`build_pdf_document_data_fragment`].
+    pub page_progression_direction: Option<String>,
 }
 
 /// Per-page bookkeeping gathered in the survey pass.
@@ -2525,6 +2534,11 @@ pub fn pdf_to_kfx(
     let container_id = generate_container_id();
     let mut ctx = ExportContext::new();
     let n = pdf.pages.len();
+
+    // Page-turn direction for the PDOC: resolve once to a $rtl/$ltr symbol (or
+    // None to omit), then stamp it into both reading orders ($425) and
+    // document_data.direction ($192) below.
+    let ppd_sym = ppd_symbol(meta.page_progression_direction.as_deref());
 
     // The whole PDF lives in one bcRawMedia entity addressed by this location;
     // every page's external_resource points here, differing only by page_index.
@@ -2630,7 +2644,7 @@ pub fn pdf_to_kfx(
         has_text,
     ));
     // 3. metadata ($258) — reading order
-    fragments.push(build_pdf_metadata_fragment(&ctx));
+    fragments.push(build_pdf_metadata_fragment(&ctx, ppd_sym));
     // 4. document_data ($538) — inserted here later, once max_id is known.
     let document_data_index = fragments.len();
 
@@ -2768,7 +2782,7 @@ pub fn pdf_to_kfx(
     // document_data now that every fragment ID is allocated (max_id correct).
     fragments.insert(
         document_data_index,
-        build_pdf_document_data_fragment(&ctx, aux_list_sym),
+        build_pdf_document_data_fragment(&ctx, aux_list_sym, ppd_sym),
     );
 
     // ---- Serialize ----
@@ -3291,23 +3305,46 @@ fn synth_pdoc_content_id(meta: &PdfKfxMeta, pdf: &crate::import::pdf::PdfDoc) ->
     crate::kfx::metadata::generate_content_id(&seed)
 }
 
-/// metadata ($258): the default reading order over all sections.
-fn build_pdf_metadata_fragment(ctx: &ExportContext) -> KfxFragment {
+/// Resolve a page-progression-direction string to its KFX symbol: `"rtl"` →
+/// `$rtl` (375), `"ltr"` → `$ltr` (376); anything else (incl. `None`) → `None`,
+/// meaning "omit the field" — the device then defaults to ltr.
+fn ppd_symbol(ppd: Option<&str>) -> Option<KfxSymbol> {
+    match ppd {
+        Some("rtl") => Some(KfxSymbol::Rtl),
+        Some("ltr") => Some(KfxSymbol::Ltr),
+        _ => None,
+    }
+}
+
+/// Build a default reading order over all sections, appending the
+/// `page_progression_direction` ($425) symbol when `ppd_sym` is set.
+fn pdf_reading_order(ctx: &ExportContext, ppd_sym: Option<KfxSymbol>) -> IonValue {
     let sections: Vec<IonValue> = ctx
         .section_ids
         .iter()
         .map(|&id| IonValue::Symbol(id))
         .collect();
-    let reading_order = IonValue::Struct(vec![
+    let mut fields = vec![
         (
             KfxSymbol::ReadingOrderName as u64,
             IonValue::Symbol(KfxSymbol::Default as u64),
         ),
         (KfxSymbol::Sections as u64, IonValue::List(sections)),
-    ]);
+    ];
+    if let Some(sym) = ppd_sym {
+        fields.push((
+            KfxSymbol::PageProgressionDirection as u64,
+            IonValue::Symbol(sym as u64),
+        ));
+    }
+    IonValue::Struct(fields)
+}
+
+/// metadata ($258): the default reading order over all sections.
+fn build_pdf_metadata_fragment(ctx: &ExportContext, ppd_sym: Option<KfxSymbol>) -> KfxFragment {
     let ion = IonValue::Struct(vec![(
         KfxSymbol::ReadingOrders as u64,
-        IonValue::List(vec![reading_order]),
+        IonValue::List(vec![pdf_reading_order(ctx, ppd_sym)]),
     )]);
     KfxFragment::singleton(KfxSymbol::Metadata, ion)
 }
@@ -3316,20 +3353,13 @@ fn build_pdf_metadata_fragment(ctx: &ExportContext) -> KfxFragment {
 /// `auxiliary_data: {'yj.authoring': d7}` (the resource-descriptor list), and the
 /// reading order. (Reflow fields like font_size/line_height are irrelevant to a
 /// PDF-backed book and omitted, matching Amazon's PDF document_data.)
-fn build_pdf_document_data_fragment(ctx: &ExportContext, aux_list_sym: u64) -> KfxFragment {
-    let sections: Vec<IonValue> = ctx
-        .section_ids
-        .iter()
-        .map(|&id| IonValue::Symbol(id))
-        .collect();
-    let reading_order = IonValue::Struct(vec![
-        (
-            KfxSymbol::ReadingOrderName as u64,
-            IonValue::Symbol(KfxSymbol::Default as u64),
-        ),
-        (KfxSymbol::Sections as u64, IonValue::List(sections)),
-    ]);
-    let ion = IonValue::Struct(vec![
+fn build_pdf_document_data_fragment(
+    ctx: &ExportContext,
+    aux_list_sym: u64,
+    ppd_sym: Option<KfxSymbol>,
+) -> KfxFragment {
+    let reading_order = pdf_reading_order(ctx, ppd_sym);
+    let mut fields = vec![
         (KfxSymbol::MaxId as u64, IonValue::Int(ctx.max_eid() as i64)),
         (
             KfxSymbol::PanZoom as u64,
@@ -3346,8 +3376,15 @@ fn build_pdf_document_data_fragment(ctx: &ExportContext, aux_list_sym: u64) -> K
             KfxSymbol::ReadingOrders as u64,
             IonValue::List(vec![reading_order]),
         ),
-    ]);
-    KfxFragment::singleton(KfxSymbol::DocumentData, ion)
+    ];
+    // Mirror the page progression onto `document_data.direction` ($192) too. The
+    // reflow path hardcodes this to ltr and signals rtl via writing_mode, but a
+    // fixed-layout PDOC has no writing_mode, so the direction field is the
+    // document-level signal that pairs with the reading order's $425.
+    if let Some(sym) = ppd_sym {
+        fields.push((KfxSymbol::Direction as u64, IonValue::Symbol(sym as u64)));
+    }
+    KfxFragment::singleton(KfxSymbol::DocumentData, IonValue::Struct(fields))
 }
 
 /// position_map ($264): one entry per page enumerating the section's content

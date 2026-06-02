@@ -199,6 +199,7 @@ mod tests {
             language: "en".to_string(),
             date: None,
             publisher: None,
+            page_progression_direction: None,
         };
         // A stand-in JPEG cover (magic + EOI). `pdf_to_kfx` declares it
         // `format: jpg`, so the extractor passes it through without transcoding.
@@ -237,6 +238,7 @@ mod tests {
             language: "en".to_string(),
             date: None,
             publisher: None,
+            page_progression_direction: None,
         };
         let kfx = pdf_to_kfx(&doc, &meta, None, None);
         assert_eq!(kfx_extract_cover(&kfx).expect("valid KFX"), None);

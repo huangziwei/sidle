@@ -162,6 +162,7 @@ mod tests {
             language: "en".to_string(),
             date: None,
             publisher: None,
+            page_progression_direction: None,
         };
 
         // No cover/text here: neither affects the embedded-PDF extraction we test
@@ -193,6 +194,7 @@ mod tests {
             language: "en".to_string(),
             date: None,
             publisher: None,
+            page_progression_direction: None,
         };
         // One page, one run "THE FOX" → word / space / word.
         let text = vec![PageText {
@@ -270,6 +272,7 @@ mod tests {
             language: "en".to_string(),
             date: None,
             publisher: None,
+            page_progression_direction: None,
         };
         // Page 0: two runs ("hello"=5, "worldly"=7); page 1: no text.
         let text = vec![
@@ -369,6 +372,7 @@ mod tests {
             language: "en".to_string(),
             date: None,
             publisher: None,
+            page_progression_direction: None,
         };
 
         // A stand-in cover blob with JPEG magic (real rendering needs PDFKit).
@@ -416,6 +420,7 @@ mod tests {
             language: "en".to_string(),
             date: None,
             publisher: None,
+            page_progression_direction: None,
         };
         let kfx = pdf_to_kfx(&doc, &meta, None, None);
 
@@ -449,6 +454,7 @@ mod tests {
             language: "en".to_string(),
             date: Some("2021-03-15T09:00:00Z".to_string()),
             publisher: Some("Acme Press".to_string()),
+            page_progression_direction: None,
         };
         let kfx = pdf_to_kfx(&doc, &meta, None, None);
         let has = |needle: &[u8]| kfx.windows(needle.len()).any(|w| w == needle);
@@ -476,6 +482,7 @@ mod tests {
             language: "en".to_string(),
             date: None,
             publisher: None,
+            page_progression_direction: None,
         };
         let kfx = pdf_to_kfx(&doc, &meta, None, None);
         assert!(
@@ -510,6 +517,7 @@ mod tests {
             language: "en".to_string(),
             date: None,
             publisher: None,
+            page_progression_direction: None,
         };
         let kfx = pdf_to_kfx(&doc, &meta, None, None);
         let has = |n: &[u8]| kfx.windows(n.len()).any(|w| w == n);
@@ -543,6 +551,7 @@ mod tests {
             language: "en".to_string(),
             date: None,
             publisher: None,
+            page_progression_direction: None,
         };
         let kfx = pdf_to_kfx(&doc, &meta, None, None);
         let has = |n: &[u8]| kfx.windows(n.len()).any(|w| w == n);

@@ -384,6 +384,9 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
         // not just the renamed filename — so the device's book details match.
         date: book.published_at.clone(),
         publisher: book.publisher.clone(),
+        // A PDF carries no reading-direction hint, so a Japanese book reads
+        // ltr until the library row's `ppd` is set (then force-reconvert).
+        page_progression_direction: book.ppd.clone(),
     };
     // Cover precedence: an existing sidecar — a cover the user fixed via
     // "Change cover…", or the page-1 render from a prior convert — wins over a
