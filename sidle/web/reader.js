@@ -2492,9 +2492,10 @@ let zoomCommitTimer = null;
 // (PDF) — so slider drags and trackpad pinches stay smooth. The notebook is vector,
 // so the resize is already crisp; the PDF raster just scales until a debounced
 // re-render redraws it crisply at the settled zoom.
-function setPdfZoom(z) {
+function setPdfZoom(z, anchor) {
+  const old = pdfStyle.zoom || 1;
   const next = Math.max(PDF_ZOOM_MIN, Math.min(PDF_ZOOM_MAX, Math.round((z || 1) * 100) / 100));
-  if (next === pdfStyle.zoom) return;
+  if (next === old) return;
   pdfStyle.zoom = next;
   savePdfStyle();
   syncZoomControl();
@@ -2505,6 +2506,23 @@ function setPdfZoom(z) {
   } else if (nbk) {
     nbkResize();
   }
+  zoomAnchorScroll(next / old, anchor); // zoom toward the pinch point, not the corner
+}
+
+// Keep the content point under `anchor` (client coords; falls back to the viewport
+// centre for slider/keys) fixed while the page scales by `f` — so a pinch zooms
+// toward the fingers. A no-op when the page fits (scrollLeft/Top clamp to 0).
+function zoomAnchorScroll(f, anchor) {
+  const host = $("#reader-paginator-host");
+  if (!host) return;
+  const rect = host.getBoundingClientRect();
+  const pad = 8; // .reader-paginator-host padding (keep in sync with styles.css)
+  const ax = anchor && Number.isFinite(anchor.x) ? anchor.x : rect.left + rect.width / 2;
+  const ay = anchor && Number.isFinite(anchor.y) ? anchor.y : rect.top + rect.height / 2;
+  const u = ax - rect.left - pad;
+  const v = ay - rect.top - pad;
+  host.scrollLeft = (host.scrollLeft + u) * f - u;
+  host.scrollTop = (host.scrollTop + v) * f - v;
 }
 
 // Cheap re-fit of the on-screen PDF page boxes to the current zoom; the existing
@@ -3157,16 +3175,19 @@ function wire() {
   const fixedLayout = () => readerMode === "pdf" || readerMode === "notebook";
   const stageEl = $("#reader-stage");
   let pinchBase = 0; // zoom captured at gesturestart; >0 while a pinch is active
+  let pinchAnchor = null; // pinch centre (client coords) to zoom toward
   if (stageEl) {
     stageEl.addEventListener("gesturestart", (e) => {
       if (!fixedLayout()) return;
       e.preventDefault();
       pinchBase = pdfStyle.zoom || 1;
+      pinchAnchor = Number.isFinite(e.clientX) ? { x: e.clientX, y: e.clientY } : null;
     });
     stageEl.addEventListener("gesturechange", (e) => {
       if (!fixedLayout() || !pinchBase) return;
       e.preventDefault();
-      setPdfZoom(pinchBase * e.scale);
+      if (Number.isFinite(e.clientX)) pinchAnchor = { x: e.clientX, y: e.clientY };
+      setPdfZoom(pinchBase * e.scale, pinchAnchor);
     });
     stageEl.addEventListener("gestureend", (e) => {
       if (!fixedLayout()) return;
@@ -3178,7 +3199,7 @@ function wire() {
       (e) => {
         if (!fixedLayout() || !e.ctrlKey || pinchBase) return; // gesture* owns it if active
         e.preventDefault();
-        setPdfZoom((pdfStyle.zoom || 1) * (1 - e.deltaY / 100));
+        setPdfZoom((pdfStyle.zoom || 1) * (1 - e.deltaY / 100), { x: e.clientX, y: e.clientY });
       },
       { passive: false },
     );
