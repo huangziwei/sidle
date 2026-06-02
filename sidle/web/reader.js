@@ -1708,9 +1708,10 @@ const PDF_NO_TEXT_HIDDEN = ["#reader-search"];
 let pdfTocRows = []; // [{ li, page }] in TOC order, for active-marking
 
 // PDF display settings — a global reading preference (not per-book), persisted.
-// `spread`: auto | single | double; `invert`: night mode (invert the page image).
+// `spread`: auto | single | double; `invert`: night mode (invert the page image);
+// `cover`: in double mode, show page 0 as a standalone cover (else pair from 0).
 const PDF_STYLE_KEY = "sidle.reader.pdf-style";
-const PDF_STYLE_DEFAULT = { spread: "auto", invert: false, ink: true, zoom: 1 };
+const PDF_STYLE_DEFAULT = { spread: "auto", invert: false, ink: true, zoom: 1, cover: true };
 const PDF_ZOOM_MIN = 1; // 1 = fit; below it the page already fits, so no point
 const PDF_ZOOM_MAX = 3;
 const pdfStyle = loadPdfStyle();
@@ -1749,19 +1750,28 @@ function pdfSpreadMode() {
 function pdfStep() {
   return pdfSpreadMode() === "double" ? 2 : 1;
 }
-// First page of the spread that contains `p`. In double mode the cover (page 0)
-// stands alone; the rest pair odd-aligned — (1,2), (3,4), … — so the book reads
-// cover → 1·2 → 3·4 …, like a physical book's facing pages. Single mode: `p`.
+// First page of the spread that contains `p`. In double mode pages pair up; the
+// "Cover page" option (default) keeps the cover (page 0) standalone and pairs the
+// rest odd-aligned — cover → 1·2 → 3·4 …, like a physical book's facing pages —
+// while turning it off pairs from page 0 — 0·1 → 2·3 …. Single mode: `p`.
 function pdfSpreadStart(p) {
   if (p <= 0) return 0;
   if (pdfSpreadMode() !== "double") return p;
-  return p % 2 === 1 ? p : p - 1;
+  // Cover-alone shifts the pairing by one: odd-aligned starts vs even-aligned.
+  const wantParity = pdfStyle.cover === false ? 0 : 1;
+  return p % 2 === wantParity ? p : p - 1;
 }
-// Whether the current spread shows a right-hand page: never in single mode nor
-// on the standalone cover. Assumes `pdf.page` is on a spread boundary (pdfGoTo /
-// pdfRenderCurrent snap it there).
+// Whether the spread starting at boundary page `s` shows a right-hand page: never
+// in single mode, nor on a standalone cover (page 0 with "Cover page" on).
+function pdfSpreadHasRight(s) {
+  if (pdfSpreadMode() !== "double") return false;
+  if (pdfStyle.cover !== false && s === 0) return false; // standalone cover
+  return s + 1 < pdf.pageCount;
+}
+// Whether the current spread shows a right-hand page. Assumes `pdf.page` is on a
+// spread boundary (pdfGoTo / pdfRenderCurrent snap it there).
 function pdfHasRight() {
-  return pdfSpreadMode() === "double" && pdf.page !== 0 && pdf.page + 1 < pdf.pageCount;
+  return pdfSpreadHasRight(pdf.page);
 }
 
 async function openPdf(id, openDto, anns, positions) {
@@ -2274,8 +2284,8 @@ async function pdfRenderCurrent() {
   const prevStart = pdfSpreadStart(left - step);
   const warm = [nextStart, prevStart];
   if (half) {
-    if (nextStart !== 0) warm.push(nextStart + 1);
-    if (prevStart !== 0) warm.push(prevStart + 1);
+    if (pdfSpreadHasRight(nextStart)) warm.push(nextStart + 1);
+    if (pdfSpreadHasRight(prevStart)) warm.push(prevStart + 1);
   }
   for (const n of warm) {
     if (n >= 0 && n < pdf.pageCount) pdfFetchPage(n, pdfRenderWidth(n, half));
@@ -2474,8 +2484,12 @@ function syncPdfStylePanel() {
   // a handwritten page has no separable ink layer, so hide the ink-toggle row.
   const notebook = readerMode === "notebook";
   $("#rps-ink")?.closest(".rs-row")?.toggleAttribute("hidden", notebook);
+  // The standalone cover is a PDF concept; a notebook always pairs from page 0.
+  $("#rps-cover")?.closest(".rs-row")?.toggleAttribute("hidden", notebook);
   const sp = $("#rps-spread");
   if (sp) sp.value = pdfStyle.spread;
+  const cov = $("#rps-cover");
+  if (cov) cov.checked = pdfStyle.cover !== false;
   const inv = $("#rps-invert");
   if (inv) inv.checked = !!pdfStyle.invert;
   const ink = $("#rps-ink");
@@ -2507,6 +2521,19 @@ function setPdfSpread(v) {
   if (nbk) {
     nbkShowPage(nbk.page); // re-render the notebook spread at the new layout
   } else {
+    pdfRenderCurrent();
+    pdfUpdateProgress();
+  }
+}
+
+// Toggle the standalone cover (page 0 alone, then odd-aligned pairs) vs pairing
+// from page 0. PDF-only — the notebook always pairs from 0 — and a no-op unless
+// the current spread is double; pdfRenderCurrent re-snaps `pdf.page` to the new
+// boundary so a turn from either alignment lands cleanly.
+function setPdfCover(on) {
+  pdfStyle.cover = !!on;
+  savePdfStyle();
+  if (pdf) {
     pdfRenderCurrent();
     pdfUpdateProgress();
   }
@@ -3247,6 +3274,7 @@ function wire() {
   $("#reader-toc-close")?.addEventListener("click", () => hideTocPanel());
   // PDF display settings (spread + night mode). Persist + apply on change.
   $("#rps-spread")?.addEventListener("change", (e) => setPdfSpread(e.target.value));
+  $("#rps-cover")?.addEventListener("change", (e) => setPdfCover(e.target.checked));
   $("#rps-invert")?.addEventListener("change", (e) => setPdfInvert(e.target.checked));
   $("#rps-ink")?.addEventListener("change", (e) => setPdfInk(e.target.checked));
   $("#rps-zoom")?.addEventListener("input", (e) => setPdfZoom(parseFloat(e.target.value)));
