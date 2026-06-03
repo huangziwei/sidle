@@ -8,7 +8,9 @@ const state = {
   view: "gallery", // 'gallery' | 'list'
   // Grouping axis, orthogonal to view. 'none' = flat (every book); 'series' =
   // collapse same-series books into a collection you drill into. Persisted.
-  group: "none", // 'none' | 'series'
+  // Series is the default — the library reads as Kindle-style collections; a
+  // user can still flip to flat via the toggle (persisted, see loadPreferences).
+  group: "series", // 'none' | 'series'
   // When grouped, the series whose contents are being browsed, or null at the
   // top level. Ephemeral navigation — never persisted.
   seriesView: null, // string | null
@@ -219,8 +221,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 function loadPreferences() {
   const view = localStorage.getItem("view");
   if (view === "list") state.view = "list";
-  const group = localStorage.getItem("group");
-  if (group === "series") state.group = "series";
+  // Grouping default flipped to "series" (2026-06). Read from a NEW key so the
+  // flip lands even where the old "group" key auto-persisted "none" — that key
+  // was rewritten on every preference change, so a stored "none" isn't a
+  // deliberate "flat" choice. An explicit toggle from here on persists under
+  // the new key and is honored on the next load.
+  const group = localStorage.getItem("groupMode");
+  if (group === "none" || group === "series") state.group = group;
+  localStorage.removeItem("group"); // drop the abandoned pre-flip key
   const sort = localStorage.getItem("sort");
   if (sort) {
     try {
@@ -253,7 +261,7 @@ function loadPreferences() {
 
 function persistPreferences() {
   localStorage.setItem("view", state.view);
-  localStorage.setItem("group", state.group);
+  localStorage.setItem("groupMode", state.group);
   localStorage.setItem("sort", JSON.stringify(state.sort));
   const filtersForStorage = {};
   for (const facet of FACETS) {
@@ -1042,6 +1050,10 @@ function seriesCard(entry) {
   card.appendChild(meta);
 
   card.addEventListener("click", () => enterSeries(entry.name));
+  card.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    openSeriesContextMenu(e.clientX, e.clientY, entry);
+  });
   return card;
 }
 
@@ -1067,6 +1079,10 @@ function renderSeriesList(entries) {
       count.textContent = String(e.books.length);
       tr.append(name, author, count);
       tr.addEventListener("click", () => enterSeries(e.name));
+      tr.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        openSeriesContextMenu(ev.clientX, ev.clientY, e);
+      });
     } else {
       const b = e.book;
       tr.className = "book-row";
@@ -2223,10 +2239,34 @@ function openContextMenu(x, y, b) {
     add(menu, "Remove from library", () => removeBook(b), true);
   }
 
+  placeMenu(x, y);
+}
+
+// Right-click on a series collection tile/row (grouped top level). A collection
+// is navigate-only for selection, but the menu gives it the bulk actions that
+// make sense for a whole series — at minimum editing the metadata of every book
+// in it (e.g. fix the author or rename the series across all volumes at once).
+function openSeriesContextMenu(x, y, entry) {
+  const menu = $("#ctx-menu");
+  menu.innerHTML = "";
+  // Edit EVERY book in the series from the full library — not just the
+  // post-filter members this tile happens to show — so a series rename / author
+  // fix never splits the series by touching only a filtered fragment.
+  const members = membersOfSeries(state.books, entry.name);
+  add(menu, "Open series", () => enterSeries(entry.name));
+  add(menu, `Edit metadata (${members.length})…`, () =>
+    openMetadataModal(members, { bulk: true }),
+  );
+  placeMenu(x, y);
+}
+
+// Show #ctx-menu at (x, y), then nudge it back on-screen if it overflows.
+// Shared by the book and series context menus.
+function placeMenu(x, y) {
+  const menu = $("#ctx-menu");
   menu.hidden = false;
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
-  // Keep on-screen
   requestAnimationFrame(() => {
     const r = menu.getBoundingClientRect();
     if (r.right > window.innerWidth) menu.style.left = `${window.innerWidth - r.width - 4}px`;
