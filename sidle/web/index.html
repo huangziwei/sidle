@@ -123,6 +123,15 @@
 
       <div class="filter-spacer"></div>
 
+      <!-- Grouping axis lives in this Books-only row (it has no meaning in Notes),
+           beside Sort — both shape how the result set is presented. -->
+      <div class="seg" id="group-seg" role="tablist" aria-label="Grouping">
+        <button id="group-none" class="seg-btn active" role="tab" aria-selected="true"
+                title="Show every book individually">Flat</button>
+        <button id="group-series" class="seg-btn" role="tab" aria-selected="false"
+                title="Group books into their series collections">Series</button>
+      </div>
+
       <button type="button" class="sort-button" id="sort-button">
         <span class="sort-label">Sort: Date added</span>
         <span class="sort-dir">↓</span>
@@ -145,6 +154,14 @@
     </div>
 
     <main id="main">
+      <!-- Drill-in breadcrumb: shown only while viewing one series' contents
+           (Series grouping). Shared by the gallery + list. -->
+      <nav id="series-crumb" class="series-crumb" hidden aria-label="Series">
+        <button id="series-back" class="crumb-back" type="button">‹ All books</button>
+        <span class="crumb-sep" aria-hidden="true">·</span>
+        <span id="series-crumb-name" class="crumb-name"></span>
+      </nav>
+
       <section id="gallery" class="view active" aria-label="Gallery">
         <div id="gallery-grid" class="gallery-grid"></div>
         <div id="gallery-empty" class="empty" hidden>
@@ -162,6 +179,21 @@
           <tbody></tbody>
         </table>
         <div id="list-empty" class="empty" hidden>
+          <p>Drop an EPUB, KFX, or AZW3 anywhere to import.</p>
+        </div>
+      </section>
+
+      <!-- The List view's top level when grouped by Series: a lightweight index of
+           series (kept separate from the book table, whose columns assume a book).
+           Clicking a row drills in; the drilled-in list reuses the book table. -->
+      <section id="series-list" class="view" aria-label="Series" hidden>
+        <table class="series-table">
+          <thead>
+            <tr><th class="col-series">Series</th><th class="col-author">Author</th><th class="col-count">Books</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div id="series-list-empty" class="empty" hidden>
           <p>Drop an EPUB, KFX, or AZW3 anywhere to import.</p>
         </div>
       </section>

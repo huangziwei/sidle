@@ -122,6 +122,30 @@ button {
   color: white;
 }
 
+/* The grouping toggle reuses the segmented `.seg` markup but lives in the
+   filter bar, so it's restyled to read as part of that pill row rather than as
+   another toolbar tab: fully rounded like the pills, a readable (--fg) inactive
+   label instead of the toolbar's muted one, and an accent-filled active half.
+   The id-scoped rules out-specify the base `.seg`/`.seg-btn` above. */
+#group-seg {
+  border-radius: 999px;
+  background: var(--surface);
+}
+
+#group-seg .seg-btn {
+  padding: 4px 12px;
+  color: var(--fg);
+}
+
+#group-seg .seg-btn:hover {
+  background: var(--bg);
+}
+
+#group-seg .seg-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
 /* Filter bar (facet pills + free-text search) */
 
 .filter-bar {
@@ -1010,6 +1034,168 @@ button {
   background: #6fb361;
   margin-left: auto;
   flex: 0 0 auto;
+}
+
+/* Series collections (grouped gallery). A tile is `.series-card`, NOT
+   `.book-card`, so the SelectionController's `.book-card` queries skip it —
+   collections are navigation, never selectable. No `overflow: hidden` so the
+   stacked edges + count badge can peek past the cover. */
+
+.series-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  position: relative;
+  cursor: pointer;
+  transition: transform 80ms ease, box-shadow 80ms ease;
+}
+
+.series-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow);
+  border-color: var(--border-strong);
+}
+
+.series-stack {
+  position: relative;
+  margin: 8px 12px 0 8px;
+}
+
+/* Two offset layers behind the cover read as a stack of books. */
+.series-stack::before,
+.series-stack::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  z-index: 0;
+}
+
+.series-stack::before {
+  transform: translate(6px, 6px);
+}
+
+.series-stack::after {
+  transform: translate(3px, 3px);
+}
+
+.series-stack .cover {
+  position: relative;
+  z-index: 1;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.series-count {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 2;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* Series drill-in breadcrumb. The explicit `[hidden]` rule out-specifies the
+   base display so toggling the attribute actually hides it (same gotcha as
+   `.view` — an author `display` overrides the UA `[hidden]` rule). */
+.series-crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  font-size: 14px;
+}
+
+.series-crumb[hidden] {
+  display: none;
+}
+
+.crumb-back {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+
+.crumb-back:hover {
+  background: var(--surface);
+}
+
+.crumb-sep {
+  color: var(--muted);
+}
+
+.crumb-name {
+  font-weight: 600;
+}
+
+/* Series index — the List view's top level when grouped. A plain navigation
+   table (not the resizable book table), one row per series. */
+.series-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.series-table thead th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.series-table th.col-count,
+.series-table td.col-count {
+  text-align: right;
+  width: 80px;
+  color: var(--muted);
+}
+
+.series-table th.col-author,
+.series-table td.col-author {
+  width: 34%;
+  color: var(--muted);
+}
+
+.series-table tbody tr {
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.series-table tbody tr:hover {
+  background: var(--surface);
+}
+
+.series-table td {
+  padding: 8px 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.series-table td.col-series {
+  font-weight: 600;
+}
+
+.series-table tbody tr.selected,
+.series-table tbody tr.selected:hover {
+  background: var(--accent-soft);
 }
 
 /* List */

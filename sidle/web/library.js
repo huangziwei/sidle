@@ -6,6 +6,12 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const state = {
   books: [],
   view: "gallery", // 'gallery' | 'list'
+  // Grouping axis, orthogonal to view. 'none' = flat (every book); 'series' =
+  // collapse same-series books into a collection you drill into. Persisted.
+  group: "none", // 'none' | 'series'
+  // When grouped, the series whose contents are being browsed, or null at the
+  // top level. Ephemeral navigation — never persisted.
+  seriesView: null, // string | null
   section: "books", // 'books' | 'notes' — top-level Books/Notes tab
   sort: { key: "imported_at", asc: false },
   // Facet filters: AND across facets, OR within. Each Set holds the
@@ -54,16 +60,29 @@ const state = {
 // ids, which DOM containers, which selection bar.
 const booksSelection = new window.SelectionController({
   idAttr: "bookId",
-  // Same order as books' original selectRangeTo (`sortedBooks()` = all books,
-  // sorted) so shift-range + select-all are unchanged.
-  orderedIds: () => sortedBooks().map((b) => b.id),
-  containers: () =>
-    state.view === "gallery" ? $$("#gallery-grid .book-card") : $$("#list tbody tr"),
+  // The selectable books currently on screen, in display order — so shift-range
+  // and select-all scope to what's shown. Flat = all sorted books (unchanged);
+  // grouped top level = standalone books only (collections aren't selectable);
+  // inside a series = its members.
+  orderedIds: () => displayedSelectableBookIds(),
+  // The selectable elements on the visible surface. In List view the grouped
+  // top level is the series index, where only standalone (`.book-row`) rows are
+  // selectable — series rows are navigation.
+  containers: () => {
+    if (state.view === "gallery") return $$("#gallery-grid .book-card");
+    if (displayMode() === "grouped") return $$("#series-list tbody tr.book-row");
+    return $$("#list tbody tr");
+  },
   // Both views stay in sync (the gallery + list DOM both persist across a view
   // switch), matching the old applyLassoVisuals which painted both.
-  paintContainers: () => [...$$("#gallery-grid .book-card"), ...$$("#list tbody tr")],
+  paintContainers: () => [
+    ...$$("#gallery-grid .book-card"),
+    ...$$("#list tbody tr"),
+    ...$$("#series-list tbody tr.book-row"),
+  ],
   lassoEl: () => $("#lasso"),
-  skipSelector: ".book-card, .book-table tbody tr, .book-table thead, .resizer",
+  skipSelector:
+    ".book-card, .book-table tbody tr, .series-table tbody tr, .series-card, .book-table thead, .resizer",
   onChange: () => renderSelectionBar(),
 });
 
@@ -200,6 +219,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 function loadPreferences() {
   const view = localStorage.getItem("view");
   if (view === "list") state.view = "list";
+  const group = localStorage.getItem("group");
+  if (group === "series") state.group = "series";
   const sort = localStorage.getItem("sort");
   if (sort) {
     try {
@@ -232,6 +253,7 @@ function loadPreferences() {
 
 function persistPreferences() {
   localStorage.setItem("view", state.view);
+  localStorage.setItem("group", state.group);
   localStorage.setItem("sort", JSON.stringify(state.sort));
   const filtersForStorage = {};
   for (const facet of FACETS) {
@@ -250,6 +272,9 @@ function wireToolbar() {
   $("#btn-add").addEventListener("click", onAddClick);
   $("#view-gallery").addEventListener("click", () => setView("gallery"));
   $("#view-list").addEventListener("click", () => setView("list"));
+  $("#group-none").addEventListener("click", () => setGroup("none"));
+  $("#group-series").addEventListener("click", () => setGroup("series"));
+  $("#series-back").addEventListener("click", () => exitSeries());
   $("#section-books").addEventListener("click", () => setSection("books"));
   $("#section-notes").addEventListener("click", () => setSection("notes"));
   $("#btn-notes-import").addEventListener("click", () => {
@@ -286,25 +311,48 @@ function setView(v) {
 
 function applyView() {
   const notes = state.section === "notes";
+  const mode = displayMode(); // 'flat' | 'grouped' | 'series' (books-only)
   // Content visibility is driven by `.view.active { display: block }`, an author
   // rule that OVERRIDES the `hidden` attribute (`[hidden]` is only a UA rule), so
   // the `active` class — not `hidden` — is what actually shows/hides a section.
   // It must be cleared on the book views in Notes mode or the gallery shows
   // through; `hidden` is kept in sync for a11y.
   const galleryActive = !notes && state.view === "gallery";
-  const listActive = !notes && state.view === "list";
+  // In List view the grouped TOP level shows the lightweight series index
+  // (#series-list); flat and drilled-into-a-series both use the book table.
+  const seriesIndexActive = !notes && state.view === "list" && mode === "grouped";
+  const listActive = !notes && state.view === "list" && mode !== "grouped";
   // Toolbar toggle buttons reflect the chosen view regardless of section.
   $("#view-gallery").classList.toggle("active", state.view === "gallery");
   $("#view-list").classList.toggle("active", state.view === "list");
   $("#view-gallery").setAttribute("aria-selected", String(state.view === "gallery"));
   $("#view-list").setAttribute("aria-selected", String(state.view === "list"));
+  // Grouping toggle reflects state.group. It lives in the filter bar, which
+  // applySection() hides wholesale on the Notes tab — no per-control hiding here.
+  $("#group-none").classList.toggle("active", state.group === "none");
+  $("#group-series").classList.toggle("active", state.group === "series");
+  $("#group-none").setAttribute("aria-selected", String(state.group === "none"));
+  $("#group-series").setAttribute("aria-selected", String(state.group === "series"));
   $("#gallery").classList.toggle("active", galleryActive);
   $("#list").classList.toggle("active", listActive);
+  $("#series-list").classList.toggle("active", seriesIndexActive);
   $("#gallery").hidden = !galleryActive;
   $("#list").hidden = !listActive;
+  $("#series-list").hidden = !seriesIndexActive;
   // The Gallery/List toggle drives the Notes section too; hand the choice off
   // so notebooks.js can swap its grid/table. No-op while Notes isn't visible.
   if (window.Notebooks) window.Notebooks.setView(state.view);
+}
+
+// Switch the grouping axis (flat ⇄ by-series). Resets any drill-in and the
+// selection (it's scoped to the on-screen set, which is about to change).
+function setGroup(g) {
+  if (state.group === g) return;
+  state.group = g;
+  state.seriesView = null;
+  clearSelection();
+  persistPreferences();
+  render();
 }
 
 // Top-level Books / Notes split. Both share the Gallery/List view toggle;
@@ -313,6 +361,8 @@ function applyView() {
 // notebooks.js).
 function setSection(s) {
   state.section = s;
+  // Drill-in is a Books-only navigation; don't carry it across the tab switch.
+  state.seriesView = null;
   applySection();
   localStorage.setItem("section", s);
   if (window.Notebooks) {
@@ -582,9 +632,45 @@ function setSent(rows) {
 function render() {
   // Prune selection of any books that no longer exist (e.g. after a refresh).
   booksSelection.prune(new Set(state.books.map((b) => b.id)));
-  const books = sortedBooks(visibleBooks(state.books));
-  renderGallery(books);
-  renderList(books);
+  const visible = sortedBooks(visibleBooks(state.books));
+
+  // Drop a drill-in whose series no longer has any visible book (filtered out,
+  // removed, or its series_name edited away) so we never strand on an empty view.
+  if (
+    state.seriesView != null &&
+    !visible.some((b) => seriesNameOf(b) === state.seriesView)
+  ) {
+    state.seriesView = null;
+  }
+
+  // Grouping is a presentation layer on the already-filtered, already-sorted
+  // `visible`. We always populate BOTH the gallery and the list DOM (they
+  // persist across a view switch) and clear whichever surface this mode doesn't
+  // use, so the SelectionController's container queries never hit stale rows.
+  const mode = displayMode();
+  let count;
+  if (mode === "grouped") {
+    const entries = groupBySeries(visible);
+    renderGalleryGrouped(entries);
+    renderSeriesList(entries);
+    renderList([]); // book table unused at the grouped top level
+    count = entries.length;
+  } else {
+    const books =
+      mode === "series" ? membersOfSeries(visible, state.seriesView) : visible;
+    renderGallery(books);
+    renderList(books);
+    renderSeriesList([]); // series index unused when flat / drilled-in
+    count = books.length;
+  }
+
+  // Breadcrumb: only while drilled into a series.
+  $("#series-crumb").hidden = mode !== "series";
+  if (mode === "series") {
+    $("#series-crumb-name").textContent = `${state.seriesView} (${count})`;
+  }
+
+  applyView(); // sync which container is visible to the current mode
   renderQueue();
   renderSelectionBar();
   updateSendUnsentButton();
@@ -592,8 +678,9 @@ function render() {
   // empty. If the underlying library is non-empty but filters hide
   // everything, the empty state surfaces in the same slot — the user
   // can clear filters via the "All" pill.
-  $("#gallery-empty").hidden = books.length > 0;
-  $("#list-empty").hidden = books.length > 0;
+  $("#gallery-empty").hidden = count > 0;
+  $("#list-empty").hidden = count > 0;
+  $("#series-list-empty").hidden = count > 0;
   renderFilterBar();
   renderSortControl();
   if (state.view === "list") {
@@ -651,6 +738,106 @@ function seriesText(b) {
     return `${name} #${b.series_index}`;
   }
   return name;
+}
+
+// ---------------------------------------------------------------------------
+// Series grouping (flat ⇄ collections). Pure presentation over the
+// already-filtered, already-sorted `visible` list — see render().
+// ---------------------------------------------------------------------------
+
+// A book's series identity, or null when it has none (→ stays standalone).
+function seriesNameOf(b) {
+  return b.series_name?.trim() || null;
+}
+
+// What to show in the Books section right now.
+//   'flat'    — every book individually (also the Notes section)
+//   'grouped' — series collections + standalone books (the grouped top level)
+//   'series'  — the members of the one series being drilled into
+function displayMode() {
+  if (state.section !== "books" || state.group !== "series") return "flat";
+  return state.seriesView != null ? "series" : "grouped";
+}
+
+// Canonical within-series order: by series_index ascending (half-numbers like
+// 1.5 sort correctly), books without an index after those with one, then title.
+function bySeriesIndex(a, b) {
+  const ai = a.series_index;
+  const bi = b.series_index;
+  const an = ai != null && Number.isFinite(ai);
+  const bn = bi != null && Number.isFinite(bi);
+  if (an && bn && ai !== bi) return ai - bi;
+  if (an !== bn) return an ? -1 : 1;
+  return (a.title || "").localeCompare(b.title || "");
+}
+
+function membersOfSeries(books, name) {
+  return books.filter((b) => seriesNameOf(b) === name).sort(bySeriesIndex);
+}
+
+// Fold the already-sorted list into entries: a series collection appears at the
+// position of its FIRST-seen member, so the active sort drives tile/row order
+// for free (Title → first book alphabetically; Date added → newest member;
+// Author → under its author). Books with no series stay standalone.
+function groupBySeries(sortedVisible) {
+  const out = [];
+  const seen = new Map();
+  for (const b of sortedVisible) {
+    const s = seriesNameOf(b);
+    if (!s) {
+      out.push({ type: "book", book: b });
+      continue;
+    }
+    let g = seen.get(s);
+    if (!g) {
+      g = { type: "series", name: s, books: [] };
+      seen.set(s, g);
+      out.push(g);
+    }
+    g.books.push(b);
+  }
+  return out;
+}
+
+// The selectable books currently on screen, in display order. Collections are
+// never selectable, so the grouped top level yields only standalone books.
+function displayedSelectableBookIds() {
+  const visible = sortedBooks(visibleBooks(state.books));
+  const mode = displayMode();
+  if (mode === "series") {
+    return membersOfSeries(visible, state.seriesView).map((b) => b.id);
+  }
+  if (mode === "grouped") {
+    return groupBySeries(visible)
+      .filter((e) => e.type === "book")
+      .map((e) => e.book.id);
+  }
+  return visible.map((b) => b.id);
+}
+
+// Subtitle under a collection: the shared author if every member agrees, else a
+// book count.
+function seriesSubtitle(entry) {
+  const authors = new Set(
+    entry.books.map((b) => (b.author || "").trim()).filter(Boolean),
+  );
+  if (authors.size === 1) return [...authors][0];
+  const n = entry.books.length;
+  return `${n} book${n === 1 ? "" : "s"}`;
+}
+
+// Drill into a series' contents (from a collection tile or series-index row).
+function enterSeries(name) {
+  state.seriesView = name;
+  clearSelection(); // selection is scoped to the on-screen set, which changes
+  render();
+}
+
+// Back out to the grouped top level.
+function exitSeries() {
+  state.seriesView = null;
+  clearSelection();
+  render();
 }
 
 // ---------------------------------------------------------------------------
@@ -792,6 +979,111 @@ function renderGallery(books) {
   grid.innerHTML = "";
   for (const b of books) {
     grid.appendChild(galleryCard(b));
+  }
+}
+
+// Grouped gallery top level: a collection tile per series, a normal card per
+// standalone book.
+function renderGalleryGrouped(entries) {
+  const grid = $("#gallery-grid");
+  grid.innerHTML = "";
+  for (const e of entries) {
+    grid.appendChild(e.type === "series" ? seriesCard(e) : galleryCard(e.book));
+  }
+}
+
+// A series collection tile (navigate-only: click drills in). It's a
+// `.series-card`, NOT a `.book-card`, so the SelectionController skips it.
+function seriesCard(entry) {
+  const ordered = [...entry.books].sort(bySeriesIndex);
+  const lead = ordered.find((b) => coverUrlFor(b)) || ordered[0];
+  const n = entry.books.length;
+
+  const card = document.createElement("div");
+  card.className = "series-card";
+  card.dataset.series = entry.name;
+  card.title = `${entry.name}\n${n} book${n === 1 ? "" : "s"}`;
+
+  const stack = document.createElement("div");
+  stack.className = "series-stack";
+  const cover = document.createElement("div");
+  cover.className = "cover";
+  const coverUrl = coverUrlFor(lead);
+  if (coverUrl) {
+    cover.classList.add("has-image");
+    const img = document.createElement("img");
+    img.src = coverUrl;
+    img.alt = "";
+    img.loading = "lazy";
+    cover.appendChild(img);
+  } else {
+    const ph = document.createElement("div");
+    ph.className = "cover-placeholder";
+    ph.textContent = entry.name;
+    cover.appendChild(ph);
+  }
+  stack.appendChild(cover);
+  const badge = document.createElement("span");
+  badge.className = "series-count";
+  badge.textContent = String(n);
+  stack.appendChild(badge);
+  card.appendChild(stack);
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const t = document.createElement("div");
+  t.className = "t";
+  t.textContent = entry.name;
+  const a = document.createElement("div");
+  a.className = "a";
+  a.textContent = seriesSubtitle(entry);
+  meta.append(t, a);
+  card.appendChild(meta);
+
+  card.addEventListener("click", () => enterSeries(entry.name));
+  return card;
+}
+
+// Grouped list top level: a navigation index. Series rows drill in; standalone
+// (no-series) book rows behave like book-table rows — selectable (class
+// `book-row`, so the SelectionController's `#series-list tbody tr.book-row`
+// query finds them), double-click to read, right-click for the book menu.
+function renderSeriesList(entries) {
+  const tbody = $("#series-list tbody");
+  tbody.innerHTML = "";
+  for (const e of entries) {
+    const tr = document.createElement("tr");
+    const name = document.createElement("td");
+    name.className = "col-series";
+    const author = document.createElement("td");
+    author.className = "col-author";
+    const count = document.createElement("td");
+    count.className = "col-count";
+
+    if (e.type === "series") {
+      name.textContent = e.name;
+      author.textContent = seriesSubtitle(e);
+      count.textContent = String(e.books.length);
+      tr.append(name, author, count);
+      tr.addEventListener("click", () => enterSeries(e.name));
+    } else {
+      const b = e.book;
+      tr.className = "book-row";
+      if (booksSelection.has(b.id)) tr.classList.add("selected");
+      tr.dataset.bookId = b.id;
+      name.textContent = b.title || "Untitled";
+      author.textContent = b.author || "";
+      count.textContent = ""; // a standalone book isn't a collection
+      tr.append(name, author, count);
+      tr.addEventListener("click", (ev) => onItemClick(ev, b));
+      tr.addEventListener("dblclick", () => openReader(b));
+      tr.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        onItemContext(ev, b);
+        openContextMenu(ev.clientX, ev.clientY, b);
+      });
+    }
+    tbody.appendChild(tr);
   }
 }
 
