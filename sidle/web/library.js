@@ -26,6 +26,7 @@ const state = {
     publisher: new Set(),
     series: new Set(),
     tags: new Set(),
+    formats: new Set(), // the non-KFX side per book: "EPUB" | "PDF" (KFX is universal)
   },
   search: "", // global free-text search across title, author, series, tags
   device: null, // DeviceInfo | null
@@ -121,7 +122,7 @@ const SORT_KEYS = [
   ["on_kindle", "On Kindle"],
 ];
 
-const FACETS = ["language", "author", "on_kindle", "publisher", "series", "tags"];
+const FACETS = ["language", "author", "on_kindle", "publisher", "series", "tags", "formats"];
 
 // The Books list-view column schema. The shared TableView (table.js) renders
 // these with sortable headers, drag-to-reorder, resizable widths, and a
@@ -899,6 +900,11 @@ function extractFacetValues(book, facet) {
       return [book.series_name?.trim() || "—"];
     case "tags":
       return book.tags?.length ? book.tags : ["—"];
+    case "formats":
+      // Each book pairs KFX with exactly one non-KFX side (EPUB or PDF); KFX is
+      // universal so it isn't an option. Uppercased so the value doubles as the
+      // dropdown / pill label.
+      return [nonKfxFormat(book).toUpperCase()];
     default:
       return [];
   }
@@ -1060,7 +1066,7 @@ function seriesCard(entry) {
   const a = document.createElement("div");
   a.className = "a";
   a.textContent = seriesSubtitle(entry);
-  meta.append(t, a);
+  meta.append(t, a, seriesMetaBadges(entry));
   card.appendChild(meta);
 
   card.addEventListener("click", () => enterSeries(entry.name));
@@ -1183,6 +1189,40 @@ function metaBadges(b) {
   }
 
   return wrap;
+}
+
+// Format badges for a series collection tile (gallery view): the distinct
+// non-KFX sides present across its members — usually one, since a series is
+// typically uniform, but a mixed series shows both — then the universal KFX.
+// Reuses the per-book `.meta-badges` row, so series tiles read like book cards.
+function seriesMetaBadges(entry) {
+  const wrap = document.createElement("div");
+  wrap.className = "meta-badges";
+  const present = new Set(entry.books.map(nonKfxFormat));
+  for (const fmt of ["epub", "pdf"]) {
+    if (present.has(fmt)) {
+      wrap.appendChild(formatBadge(fmt, worstForFormat(entry.books, fmt), /*compact=*/ true));
+    }
+  }
+  wrap.appendChild(formatBadge("kfx", worstForFormat(entry.books, "kfx"), /*compact=*/ true));
+  return wrap;
+}
+
+// The member whose conversion status for `format` is the most urgent
+// (error > converting > pending > done), so a collection's badge surfaces any
+// still-converting or failed volume. Defaults to the first member.
+const STATUS_RANK = { error: 3, converting: 2, pending: 1, done: 0 };
+function worstForFormat(books, format) {
+  let rep = books[0];
+  let rank = -1;
+  for (const b of books) {
+    const r = STATUS_RANK[formatStatusFor(format, b)] ?? 0;
+    if (r > rank) {
+      rank = r;
+      rep = b;
+    }
+  }
+  return rep;
 }
 
 // A book pairs KFX with exactly one non-KFX side: EPUB for reflowable books,
@@ -3144,6 +3184,7 @@ function facetDisplayLabel(facet) {
     case "publisher": return "Publisher";
     case "series":   return "Series";
     case "tags":     return "Tags";
+    case "formats":  return "Format";
     default:         return facet;
   }
 }
