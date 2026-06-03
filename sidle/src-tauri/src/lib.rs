@@ -79,6 +79,8 @@ pub fn run() {
             commands::library::library_backup,
             commands::library::library_restore_pick_src,
             commands::library::library_restore,
+            commands::library::library_merge_pick_src,
+            commands::library::library_merge,
             commands::queue::conversion_status,
             commands::queue::conversion_retry,
             commands::queue::conversion_set_workers,

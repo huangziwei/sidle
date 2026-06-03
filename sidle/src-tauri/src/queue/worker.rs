@@ -626,6 +626,7 @@ mod tests {
             series_name: None,
             series_index: None,
             tags: vec![],
+            updated_at: "2026-01-01".into(),
         }
     }
 

@@ -288,6 +288,7 @@ function wireToolbar() {
   $("#settings-use").addEventListener("click", () => pickRelocate("use"));
   $("#settings-backup").addEventListener("click", doBackup);
   $("#settings-restore").addEventListener("click", pickRestore);
+  $("#settings-merge").addEventListener("click", doMerge);
   $("#settings-confirm-cancel").addEventListener("click", resetRelocateConfirm);
   $("#settings-confirm-ok").addEventListener("click", confirmRelocate);
 }
@@ -2649,6 +2650,32 @@ async function pickRestore() {
     `Restore from:\n${src}\n\nThis replaces your current library. A dated safety copy is kept next to it, and sidle restarts.`;
   $("#settings-confirm").hidden = false;
   $("#settings-status").hidden = true;
+}
+
+// Merge is additive and non-destructive (no replace, no restart), so — like
+// backup — it's a direct action rather than the confirm/restart flow. Picks a
+// .sidlebak, folds its books/notebooks in, reports what came in, and re-lists.
+async function doMerge() {
+  const src = await window.api.invoke("library_merge_pick_src");
+  if (!src) return;
+  resetRelocateConfirm();
+  const btn = $("#settings-merge");
+  btn.disabled = true;
+  setSettingsStatus("Merging… this can take a while for a large backup.");
+  try {
+    const r = await window.api.invoke("library_merge", { src });
+    const parts = [`${plural(r.books_added, "book")} added`];
+    if (r.books_updated) parts.push(`${plural(r.books_updated, "book")} updated`);
+    if (r.annotations_added) parts.push(`${plural(r.annotations_added, "highlight")} added`);
+    if (r.notebooks_added) parts.push(`${plural(r.notebooks_added, "notebook")} added`);
+    if (r.ink_added) parts.push(`${plural(r.ink_added, "ink page")} added`);
+    setSettingsStatus(`Merged from:\n${r.path}\n\n${parts.join(", ")}.`);
+    await refresh();
+  } catch (e) {
+    setSettingsStatus(String(e?.message ?? e), true);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function plural(n, word) {

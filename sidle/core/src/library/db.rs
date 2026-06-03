@@ -69,6 +69,12 @@ pub struct BookRow {
     /// User-defined tags. Stored as a JSON array TEXT in SQLite; canonicalized
     /// (trimmed, lowercased, deduped in-order, empties dropped) at write time.
     pub tags: Vec<String>,
+    /// Metadata last-edit time (ISO 8601). Stamped at insert (= `imported_at`)
+    /// and bumped by the user-curation mutators; library merge uses it as the
+    /// newest-wins tiebreak when the same book (by `sha256`) exists on both
+    /// sides. Read as `COALESCE(updated_at, imported_at)` so a pre-v7 row that
+    /// somehow escaped the backfill never reads NULL.
+    pub updated_at: String,
 }
 
 /// Schema version stamped into `PRAGMA user_version` by [`migrate`]. Bump on
@@ -87,7 +93,12 @@ pub struct BookRow {
 /// v6: added `book_ink` / `book_ink_device` / `ink_sync` — handwritten ink drawn
 /// on a sideloaded doc (PDOC), keyed per ink page by `(asin, container_id)`. See
 /// .claude/plans/scribe-handwritten-annotations.md.
-pub const SCHEMA_VERSION: i64 = 6;
+/// v7: added `books.updated_at` — the metadata last-edit time (distinct from
+/// `imported_at`, which is first-import and never moves). Stamped at insert,
+/// bumped by the user-curation mutators (`update_metadata` / `apply_bulk_patch`
+/// / the ASIN edit), and used by library merge's newest-wins tiebreak. See
+/// .claude/plans/library-merge.md.
+pub const SCHEMA_VERSION: i64 = 7;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -233,7 +244,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             published_at      TEXT,
             series_name       TEXT,
             series_index      REAL,
-            tags              TEXT NOT NULL DEFAULT '[]'
+            tags              TEXT NOT NULL DEFAULT '[]',
+            updated_at        TEXT
         );
 
         CREATE TABLE IF NOT EXISTS conversion_jobs (
@@ -337,6 +349,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !has_column(conn, "books", "pdf_path")? {
         conn.execute("ALTER TABLE books ADD COLUMN pdf_path TEXT", [])?;
+    }
+    // v7: metadata last-edit time. Seed existing rows from `imported_at` so the
+    // column is never NULL in practice (newest-wins reads still COALESCE as a
+    // belt-and-braces). New rows are stamped by `insert_book`.
+    if !has_column(conn, "books", "updated_at")? {
+        conn.execute("ALTER TABLE books ADD COLUMN updated_at TEXT", [])?;
+        conn.execute(
+            "UPDATE books SET updated_at = imported_at WHERE updated_at IS NULL",
+            [],
+        )?;
     }
 
     // `yjr_sync` gained a per-device dimension: the checkpoint of the last
@@ -629,8 +651,8 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
         r#"INSERT INTO books
             (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path,
              file_size, imported_at, asin, publisher, published_at,
-             series_name, series_index, tags, kfx_sha256, pdf_path)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"#,
+             series_name, series_index, tags, kfx_sha256, pdf_path, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"#,
         params![
             book.sha256,
             book.title,
@@ -650,6 +672,9 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             tags_json,
             book.kfx_sha256,
             pdf_rel,
+            // A fresh book's last-edit time is its import time; the curation
+            // mutators move it forward later.
+            book.imported_at,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -795,6 +820,24 @@ pub fn set_asin(conn: &Connection, book_id: i64, asin: &str) -> rusqlite::Result
     Ok(())
 }
 
+/// Stamp a book's metadata `updated_at` (v7). Two callers: the ASIN-edit command
+/// (a user curation, but it routes through the mechanical-safe [`set_asin`],
+/// which bootstrap/worker also call, so the bump can't live *inside* `set_asin`);
+/// and library merge, which carries a source book's original edit time onto the
+/// freshly inserted local row so a later re-merge compares correctly.
+/// [`update_metadata`] / [`apply_bulk_patch`] bump it inline instead.
+pub fn set_book_updated_at(
+    conn: &Connection,
+    book_id: i64,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE books SET updated_at = ?1 WHERE id = ?2",
+        params![updated_at, book_id],
+    )?;
+    Ok(())
+}
+
 /// Return the id of another book (≠ `except_id`) that already holds `asin`, if
 /// any. The metadata editor uses this to keep ASIN unique across the library:
 /// a duplicate would make the device-delete `_<ASIN>.sdr` catalog-sidecar scan
@@ -878,8 +921,9 @@ pub fn update_metadata(
                   published_at  = ?6,
                   series_name   = ?7,
                   series_index  = ?8,
-                  tags          = ?9
-              WHERE id = ?10"#,
+                  tags          = ?9,
+                  updated_at    = ?10
+              WHERE id = ?11"#,
         params![
             patch.title,
             patch.author,
@@ -890,6 +934,7 @@ pub fn update_metadata(
             patch.series_name,
             patch.series_index,
             tags_json,
+            now_iso(),
             book_id,
         ],
     )?;
@@ -983,8 +1028,9 @@ pub fn apply_bulk_patch(
                   published_at = ?5,
                   series_name  = ?6,
                   series_index = ?7,
-                  tags         = ?8
-              WHERE id = ?9"#,
+                  tags         = ?8,
+                  updated_at   = ?9
+              WHERE id = ?10"#,
         params![
             author,
             language,
@@ -994,6 +1040,7 @@ pub fn apply_bulk_patch(
             series_name,
             series_index,
             tags_json,
+            now_iso(),
             book_id,
         ],
     )?;
@@ -1108,7 +1155,8 @@ const SELECT_BOOKS_WITH_JOBS: &str = r#"
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
-           b.kfx_sha256, b.pdf_path
+           b.kfx_sha256, b.pdf_path,
+           COALESCE(b.updated_at, b.imported_at)
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     ORDER BY b.imported_at DESC
@@ -1120,7 +1168,8 @@ const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
-           b.kfx_sha256, b.pdf_path
+           b.kfx_sha256, b.pdf_path,
+           COALESCE(b.updated_at, b.imported_at)
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.sha256 = ?1
@@ -1132,7 +1181,8 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
-           b.kfx_sha256, b.pdf_path
+           b.kfx_sha256, b.pdf_path,
+           COALESCE(b.updated_at, b.imported_at)
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
@@ -1144,7 +1194,8 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX: &str = r#"
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
-           b.kfx_sha256, b.pdf_path
+           b.kfx_sha256, b.pdf_path,
+           COALESCE(b.updated_at, b.imported_at)
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_sha256 LIKE ?1
@@ -1161,7 +1212,8 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
            b.file_size, b.imported_at, b.asin,
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
-           b.kfx_sha256, b.pdf_path
+           b.kfx_sha256, b.pdf_path,
+           COALESCE(b.updated_at, b.imported_at)
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_path LIKE ?1
@@ -1197,6 +1249,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         tags,
         kfx_sha256: row.get(20)?,
         pdf_path: resolve_opt(root, row.get(21)?),
+        updated_at: row.get(22)?,
     })
 }
 

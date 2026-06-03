@@ -137,7 +137,9 @@ fn count_books(conn: &Connection) -> rusqlite::Result<i64> {
 }
 
 /// Recursively copy the contents of `src` into `dest` (created if absent).
-fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
+/// `pub(crate)` so merge can copy a staged `books/<sha>/` or `notebooks/<uuid>/`
+/// dir into the live root.
+pub(crate) fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
     for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
         let entry = entry?;

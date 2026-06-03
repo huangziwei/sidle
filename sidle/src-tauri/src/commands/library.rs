@@ -14,7 +14,7 @@ use crate::library::db::{self, BookRow};
 use crate::library::epub_cover;
 use crate::library::import::{self, ImportOutcome};
 use crate::library::kfx_cover;
-use crate::library::{LibraryPaths, backup, relocate};
+use crate::library::{LibraryPaths, backup, merge, relocate};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -229,6 +229,10 @@ pub async fn library_set_asin(
             ));
         }
         db::set_asin(&conn, book_id, &asin).map_err(|e| e.to_string())?;
+        // A user ASIN edit is curation, so move `updated_at` forward (the bump
+        // can't live in `db::set_asin` — bootstrap and the conversion worker call
+        // it mechanically). Merge's newest-wins then sees this edit.
+        db::set_book_updated_at(&conn, book_id, &db::now_iso()).map_err(|e| e.to_string())?;
         db::get_book(&conn, book_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("book {book_id} not found"))?
@@ -925,6 +929,72 @@ pub async fn library_restore(
 
     // Relaunch onto the restored library; `restart` diverges.
     app.restart()
+}
+
+/// What a merge brought in, surfaced to the UI.
+#[derive(Debug, Serialize)]
+pub struct MergeSummary {
+    pub books_added: i64,
+    pub books_updated: i64,
+    pub annotations_added: i64,
+    pub ink_added: i64,
+    pub notebooks_added: i64,
+    pub path: String,
+}
+
+/// Pick a `.sidlebak` to merge (open dialog). Returns the path, or `None`.
+#[tauri::command]
+pub async fn library_merge_pick_src(app: AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Sidle backup", &["sidlebak"])
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let result = rx.await.map_err(|e| e.to_string())?;
+    Ok(result.map(|p| p.to_string()))
+}
+
+/// Merge a `.sidlebak`'s books, annotations, ink, and notebooks into the current
+/// library. **Additive** — only inserts rows + copies new files, never deletes or
+/// overwrites — so, unlike restore, there's no swap and no relaunch; the UI just
+/// re-lists. Validation + extraction + the (potentially large) file copy run on a
+/// blocking thread with no DB lock held; only the row transaction takes the lock,
+/// and it's metadata-only (fast). Duplicate books (same content sha) keep the
+/// newer side's metadata; everything else unions by its content key.
+#[tauri::command]
+pub async fn library_merge(
+    state: State<'_, AppState>,
+    src: String,
+) -> Result<MergeSummary, String> {
+    let src = PathBuf::from(src);
+    let src_label = src.to_string_lossy().to_string();
+    let dest_root = state.paths.root.clone();
+
+    // Validate → extract → copy new files, off the runtime and lock-free (mirrors
+    // backup's snapshot/zip split). Yields the in-memory inventory to apply.
+    let prepared = tokio::task::spawn_blocking(move || {
+        merge::prepare(&src, &dest_root, db::SCHEMA_VERSION)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))?;
+
+    // Apply the rows in one transaction under the lock (fast — metadata only).
+    let outcome = {
+        let conn = state.db.lock().await;
+        merge::commit(&conn, &prepared).map_err(|e| format!("{e:#}"))?
+    };
+
+    Ok(MergeSummary {
+        books_added: outcome.books_added,
+        books_updated: outcome.books_updated,
+        annotations_added: outcome.annotations_added,
+        ink_added: outcome.ink_added,
+        notebooks_added: outcome.notebooks_added,
+        path: src_label,
+    })
 }
 
 /// True if `dir` exists and holds at least one entry. A non-existent dir is

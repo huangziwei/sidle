@@ -34,7 +34,12 @@ use crate::library::{db, import, relocate};
 const FORMAT_TAG: &str = "sidle-library-backup";
 /// Archive layout version (independent of the DB schema's `user_version`). Bump
 /// only if the archive *shape* changes; restore refuses a newer one.
-const FORMAT_VERSION: u32 = 1;
+///
+/// v2: the archive now also carries the `notebooks/<uuid>/` tree (Scribe
+/// handwriting). v1 archives stored only `library.db` + `books/`, so a restore
+/// of one silently dropped notebook files; v2 closes that. A v1 archive still
+/// restores into a v2 app — it simply has no `notebooks/` entries to extract.
+const FORMAT_VERSION: u32 = 2;
 
 /// The archive's `manifest.json`: enough to validate integrity, gate the schema
 /// version on restore, and report what's inside without unzipping.
@@ -62,6 +67,10 @@ pub struct Counts {
     /// Number of `books/<sha>/` directories actually archived (a freshly
     /// inserted row whose files aren't on disk yet contributes a book but no dir).
     pub book_dirs: i64,
+    /// Scribe notebooks (`notebooks/<uuid>/` dirs) archived. `#[serde(default)]`
+    /// so a v1 manifest (which predates this field) still parses — it reads 0.
+    #[serde(default)]
+    pub notebooks: i64,
 }
 
 /// Result of a restore, surfaced to the UI: what came in, and where the
@@ -97,11 +106,16 @@ pub fn create_archive(
     db_user_version: i64,
     dest_zip: &Path,
 ) -> Result<Manifest> {
-    // (1) Counts + the sha set read FROM THE SNAPSHOT (read-only, so we don't
+    // (1) Counts + the dir keys read FROM THE SNAPSHOT (read-only, so we don't
     //     mutate the bytes we're about to hash), so the manifest is internally
     //     consistent with the archived DB + file set.
-    let (books, annotations, shas) = read_snapshot_inventory(&snapshot.path)?;
-    let book_dirs = shas.iter().filter(|s| books_dir.join(s).is_dir()).count() as i64;
+    let inv = read_snapshot_inventory(&snapshot.path)?;
+    let book_dirs = inv.shas.iter().filter(|s| books_dir.join(s).is_dir()).count() as i64;
+    // Notebook dirs live a level up from `books/` — a `notebooks/` sibling under
+    // the same root.
+    let notebooks_dir = source_root.join("notebooks");
+    let notebook_dirs =
+        inv.notebook_uuids.iter().filter(|u| notebooks_dir.join(u).is_dir()).count() as i64;
 
     // (2) Integrity hash over the snapshot bytes.
     let db_sha256 = import::sha256_of_file(&snapshot.path)
@@ -114,7 +128,12 @@ pub fn create_archive(
         app_version: app_version.to_string(),
         db_user_version,
         source_root: source_root.to_string_lossy().into_owned(),
-        counts: Counts { books, annotations, book_dirs },
+        counts: Counts {
+            books: inv.books,
+            annotations: inv.annotations,
+            book_dirs,
+            notebooks: notebook_dirs,
+        },
         db_sha256,
     };
 
@@ -133,10 +152,20 @@ pub fn create_archive(
 
     add_file(&mut zw, "library.db", &snapshot.path, deflated)?;
 
-    for sha in &shas {
+    for sha in &inv.shas {
         let dir = books_dir.join(sha);
         if dir.is_dir() {
             add_dir(&mut zw, &format!("books/{sha}"), &dir, stored)?;
+        }
+    }
+
+    // The notebook tree (Scribe handwriting) — a `notebooks/<uuid>/` sibling of
+    // `books/`. Stored, like the book tree: the page SVGs are text but small,
+    // and `nbk`/`cover.png` are already compact. v2 of the archive format.
+    for uuid in &inv.notebook_uuids {
+        let dir = notebooks_dir.join(uuid);
+        if dir.is_dir() {
+            add_dir(&mut zw, &format!("notebooks/{uuid}"), &dir, stored)?;
         }
     }
 
@@ -159,24 +188,28 @@ pub fn create(
     create_archive(&snap, books_dir, source_root, app_version, db_user_version, dest_zip)
 }
 
-/// Restore a `.sidlebak` into `dest_root` (the current library root), replacing
-/// its contents. `app_user_version` is the running app's [`db::SCHEMA_VERSION`].
+/// The shared front-half of any consumer of a `.sidlebak` (restore and merge):
+/// validate + version-gate the manifest BEFORE any disk mutation, extract into
+/// `staging`, and verify the extracted `library.db` checksum. Returns the
+/// manifest. On any failure after extraction the staging dir is cleared, so the
+/// caller's target is never touched. The gates run before extraction, so a
+/// foreign / forward-incompatible archive leaves no staging behind either.
 ///
-/// Validates the manifest and gates the schema BEFORE touching disk, extracts to
-/// a sibling staging dir, verifies the DB (checksum + opens as a sidle library
-/// with the manifest's book count), then swaps: the current `library.db*` +
-/// `books/` are moved aside to a `<root>.bak-<ts>` safety copy (the undo) and the
-/// staged payload moved into place — renames only (staging + safety are siblings
-/// of `dest_root`, hence same volume). `config.json` (if `dest_root` is the state
-/// dir) is left untouched. The caller relaunches afterward (H5).
-pub fn restore(src_zip: &Path, dest_root: &Path, app_user_version: i64) -> Result<RestoreOutcome> {
+/// Factored out so merge reuses the exact validation/extraction restore uses,
+/// rather than a parallel copy that could drift (the gate is security-relevant:
+/// zip-slip is handled in [`extract_all`], the schema gate refuses a
+/// forward-incompatible DB).
+pub(crate) fn stage_archive(
+    src_zip: &Path,
+    staging: &Path,
+    app_user_version: i64,
+) -> Result<Manifest> {
     let file = File::open(src_zip).with_context(|| format!("open {}", src_zip.display()))?;
     let mut archive =
         ZipArchive::new(file).with_context(|| format!("{} is not a zip", src_zip.display()))?;
 
-    // (1) Manifest: validate shape, then gate on schema — all before any disk
-    //     mutation, so a foreign/forward-incompatible archive leaves the target
-    //     untouched.
+    // Manifest: validate shape, then gate on format + schema version — all before
+    // any disk mutation.
     let manifest = read_manifest(&mut archive)?;
     if manifest.format != FORMAT_TAG {
         bail!("not a sidle library backup (format = {:?})", manifest.format);
@@ -196,25 +229,46 @@ pub fn restore(src_zip: &Path, dest_root: &Path, app_user_version: i64) -> Resul
         );
     }
 
-    // (2) Extract into a sibling staging dir (same volume → the swap is a rename).
-    let staging = sibling(dest_root, "restoring")?;
+    // Extract into the (freshly cleared) staging dir.
     if staging.exists() {
-        fs::remove_dir_all(&staging)
+        fs::remove_dir_all(staging)
             .with_context(|| format!("clear stale staging {}", staging.display()))?;
     }
-    extract_all(&mut archive, &staging)?;
+    extract_all(&mut archive, staging)?;
 
-    // (3) Verify the extracted DB: checksum matches the manifest, and it opens as
-    //     a sidle library with the expected count. Paths are already relative
-    //     (§4a), so there is nothing to rewrite. Any failure clears staging and
-    //     leaves the target untouched.
+    // Integrity: the extracted DB's bytes must match the manifest's hash.
     let staged_db = staging.join("library.db");
     let got = import::sha256_of_file(&staged_db)
         .with_context(|| format!("hash extracted {}", staged_db.display()))?;
     if got != manifest.db_sha256 {
-        let _ = fs::remove_dir_all(&staging);
+        let _ = fs::remove_dir_all(staging);
         bail!("backup is corrupt: library.db checksum mismatch");
     }
+
+    Ok(manifest)
+}
+
+/// Restore a `.sidlebak` into `dest_root` (the current library root), replacing
+/// its contents. `app_user_version` is the running app's [`db::SCHEMA_VERSION`].
+///
+/// Validates the manifest and gates the schema BEFORE touching disk, extracts to
+/// a sibling staging dir, verifies the DB (checksum + opens as a sidle library
+/// with the manifest's book count), then swaps: the current `library.db*` +
+/// `books/` are moved aside to a `<root>.bak-<ts>` safety copy (the undo) and the
+/// staged payload moved into place — renames only (staging + safety are siblings
+/// of `dest_root`, hence same volume). `config.json` (if `dest_root` is the state
+/// dir) is left untouched. The caller relaunches afterward (H5).
+pub fn restore(src_zip: &Path, dest_root: &Path, app_user_version: i64) -> Result<RestoreOutcome> {
+    // (1)+(2) Validate + gate the manifest, extract into a sibling staging dir,
+    //     verify the DB checksum — the shared front-half, identical to merge
+    //     (see [`stage_archive`]). Same volume → the later swap is a rename.
+    let staging = sibling(dest_root, "restoring")?;
+    let manifest = stage_archive(src_zip, &staging, app_user_version)?;
+
+    // (3) Restore-specific verify: the staged DB opens as a sidle library with
+    //     the manifest's book count. Paths are already relative (§4a), so there
+    //     is nothing to rewrite. Failure clears staging, leaving the target
+    //     untouched.
     let staged_books = match relocate::validate_existing(&staging) {
         Ok(n) => n,
         Err(e) => {
@@ -268,7 +322,14 @@ impl TempSnapshot {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let name = format!("sidle-backup-{}-{nanos}.db", std::process::id());
+        // A process-wide counter guarantees uniqueness even when two snapshots
+        // start within the same clock tick (parallel callers, or the test suite
+        // running many `create`s at once): `{nanos}` alone can collide, and a
+        // collision would let one `TempSnapshot`'s `Drop` delete a sibling's
+        // file mid-read.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("sidle-backup-{}-{nanos}-{seq}.db", std::process::id());
         Ok(Self { path: std::env::temp_dir().join(name) })
     }
 }
@@ -286,8 +347,9 @@ impl Drop for TempSnapshot {
 }
 
 /// Open the snapshot read-only and read book/annotation counts + the full sha
-/// list, so the file set we archive matches the DB snapshot exactly.
-fn read_snapshot_inventory(db_path: &Path) -> Result<(i64, i64, Vec<String>)> {
+/// list + the notebook uuid list, so the file set we archive matches the DB
+/// snapshot exactly.
+fn read_snapshot_inventory(db_path: &Path) -> Result<SnapshotInventory> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open snapshot {}", db_path.display()))?;
     let books: i64 = conn
@@ -302,7 +364,26 @@ fn read_snapshot_inventory(db_path: &Path) -> Result<(i64, i64, Vec<String>)> {
         .context("query shas")?
         .collect::<rusqlite::Result<Vec<_>>>()
         .context("collect shas")?;
-    Ok((books, annotations, shas))
+    // `notebooks` is additive and may be absent on a very old snapshot; tolerate
+    // a missing table by reporting no uuids rather than erroring.
+    let notebook_uuids = match conn.prepare("SELECT uuid FROM notebooks") {
+        Ok(mut stmt) => stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .context("query notebook uuids")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collect notebook uuids")?,
+        Err(_) => Vec::new(),
+    };
+    Ok(SnapshotInventory { books, annotations, shas, notebook_uuids })
+}
+
+/// What [`read_snapshot_inventory`] returns: the counts plus the on-disk
+/// directory keys (book shas, notebook uuids) to archive.
+struct SnapshotInventory {
+    books: i64,
+    annotations: i64,
+    shas: Vec<String>,
+    notebook_uuids: Vec<String>,
 }
 
 /// Stream a single file into the zip under `name`.
@@ -367,8 +448,9 @@ fn extract_all(archive: &mut ZipArchive<File>, dest: &Path) -> Result<()> {
 }
 
 /// A sibling path of `root` named `<root_name>.<suffix>`. Same parent → same
-/// volume, so moving between it and `root` is a rename, not a copy.
-fn sibling(root: &Path, suffix: &str) -> Result<PathBuf> {
+/// volume, so moving between it and `root` is a rename, not a copy. `pub(crate)`
+/// so merge can stage alongside the live root the same way restore does.
+pub(crate) fn sibling(root: &Path, suffix: &str) -> Result<PathBuf> {
     let parent = root.parent().ok_or_else(|| anyhow!("root {} has no parent", root.display()))?;
     let base = root.file_name().ok_or_else(|| anyhow!("root {} has no name", root.display()))?;
     let mut name = base.to_os_string();
@@ -377,9 +459,9 @@ fn sibling(root: &Path, suffix: &str) -> Result<PathBuf> {
     Ok(parent.join(name))
 }
 
-/// Move the library *payload* — `library.db` (+ WAL sidecars) and `books/` — from
-/// `from` to `to` by rename. Leaves anything else (notably `config.json`, the
-/// root pointer when `from` is the state dir) in place.
+/// Move the library *payload* — `library.db` (+ WAL sidecars), `books/`, and
+/// `notebooks/` — from `from` to `to` by rename. Leaves anything else (notably
+/// `config.json`, the root pointer when `from` is the state dir) in place.
 fn move_payload(from: &Path, to: &Path) -> Result<()> {
     for name in ["library.db", "library.db-wal", "library.db-shm"] {
         let src = from.join(name);
@@ -389,11 +471,13 @@ fn move_payload(from: &Path, to: &Path) -> Result<()> {
                 .with_context(|| format!("move {} -> {}", src.display(), dst.display()))?;
         }
     }
-    let books = from.join("books");
-    if books.exists() {
-        let dst = to.join("books");
-        fs::rename(&books, &dst)
-            .with_context(|| format!("move {} -> {}", books.display(), dst.display()))?;
+    for tree in ["books", "notebooks"] {
+        let src = from.join(tree);
+        if src.exists() {
+            let dst = to.join(tree);
+            fs::rename(&src, &dst)
+                .with_context(|| format!("move {} -> {}", src.display(), dst.display()))?;
+        }
     }
     Ok(())
 }
@@ -469,6 +553,14 @@ mod tests {
             .unwrap();
             db::set_reading_position(&conn, id, Some(2), Some(7), Some(42), "sidle", "").unwrap();
         }
+        // One Scribe notebook with a rendered page — guards the v2 archive: the
+        // `notebooks/` tree was previously omitted, so a restore silently dropped
+        // notebook files. It lives a level up from `books/`, under the same root.
+        let pages = root.join("notebooks").join("nb-1").join("pages");
+        fs::create_dir_all(&pages).unwrap();
+        fs::write(pages.join("page-0.svg"), "svg-nb-1").unwrap();
+        db::upsert_notebook(&conn, "nb-1", 1, "nbk-sha", "t", "2026-02-02T00:00:00+00:00")
+            .unwrap();
         (conn, books)
     }
 
@@ -485,6 +577,7 @@ mod tests {
         assert_eq!(manifest.counts.books, 2);
         assert_eq!(manifest.counts.annotations, 2);
         assert_eq!(manifest.counts.book_dirs, 2);
+        assert_eq!(manifest.counts.notebooks, 1, "notebook tree archived (format v2)");
         drop(conn);
 
         // Restore into a fresh root with a DIFFERENT absolute path.
@@ -522,6 +615,16 @@ mod tests {
             assert_eq!(pos.len(), 1, "reading position carried");
             assert_eq!(pos[0].eid, Some(2));
         }
+
+        // The notebook row AND its rendered page survive — the v2 gap fix (a v1
+        // archive carried the row in the DB but lost the files).
+        let nb = db::get_notebook_by_uuid(&rconn, "nb-1").unwrap().expect("notebook row carried");
+        assert_eq!(nb.page_count, 1);
+        assert_eq!(
+            fs::read_to_string(dst_root.join("notebooks/nb-1/pages/page-0.svg")).unwrap(),
+            "svg-nb-1",
+            "notebook page bytes identical after roundtrip"
+        );
 
         // Relativization invariant: the stored columns remain root-relative after
         // a backup→restore roundtrip (a regression here would dangle on the next move).
