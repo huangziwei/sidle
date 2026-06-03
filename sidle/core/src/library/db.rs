@@ -538,6 +538,16 @@ pub fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("PRAGMA user_version", [], |r| r.get(0))
 }
 
+/// Compact the database file, returning freed pages to the OS. A `DELETE` only
+/// moves pages onto SQLite's free-list — the file never shrinks on its own — so
+/// a `VACUUM` after a removal is what actually reclaims the disk space. Must run
+/// outside any transaction (callers hold none; [`remove_book`] commits before
+/// returning). Cheap in practice: the library DB is metadata-only (book files
+/// live on disk), so the file is small even for a large library.
+pub fn vacuum(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("VACUUM")
+}
+
 /// Look up the book whose KFX hash starts with `prefix`. Used by
 /// `device_list_ours` to link an on-device `<basename>.<sha8>.kfx` back
 /// to a library row: the sha8 in the filename was generated from the
@@ -990,18 +1000,61 @@ pub fn apply_bulk_patch(
     Ok(true)
 }
 
+/// Remove a book and *everything* tied to it, returning its `sha256` (so the
+/// caller can delete the on-disk `books/<sha>/` dir) or `None` if the id was
+/// already absent.
+///
+/// A removal is a FULL cascade — the book and all of its derived data go:
+///   * `conversion_jobs`, `reading_position`, `yjr_sync` — cleared by their
+///     `ON DELETE CASCADE` when the `books` row goes (foreign_keys is ON; see
+///     [`open`]).
+///   * `annotations` + `annotation_device` — its highlights/notes and their
+///     per-device presence, deleted explicitly by `book_id`. Their FK is
+///     `ON DELETE SET NULL` (which would merely *unlink* them into the orphan
+///     inbox), and `annotation_device` has no FK at all, so neither is cleaned
+///     by the cascade above — we delete them outright first.
+///   * `book_ink` + `book_ink_device` + `ink_sync` — handwritten ink, its
+///     per-device presence, and the per-asin decode checkpoint, all keyed by the
+///     book's `asin` (the ink model's identity; see [`reconcile_ink_device`]).
+///
+/// The orphan inbox (`book_id IS NULL`) is intentionally left untouched: those
+/// rows come from a *different* source — annotations/ink imported off a device
+/// whose book isn't in the library yet — and were never associated with *this*
+/// book, so re-linking on a later import still works.
+///
+/// All deletes run in one transaction so a removal is all-or-nothing.
 pub fn remove_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<String>> {
-    let sha: Option<String> = conn
+    // Read sha (for the caller) and asin (the ink key) before anything is gone.
+    let row: Option<(String, Option<String>)> = conn
         .query_row(
-            "SELECT sha256 FROM books WHERE id = ?1",
+            "SELECT sha256, asin FROM books WHERE id = ?1",
             params![book_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    if sha.is_some() {
-        conn.execute("DELETE FROM books WHERE id = ?1", params![book_id])?;
+    let Some((sha, asin)) = row else {
+        return Ok(None);
+    };
+
+    let tx = conn.unchecked_transaction()?;
+    // Text annotations + their per-device presence (book_id-keyed).
+    tx.execute(
+        "DELETE FROM annotation_device WHERE book_id = ?1",
+        params![book_id],
+    )?;
+    tx.execute("DELETE FROM annotations WHERE book_id = ?1", params![book_id])?;
+    // Handwritten ink + presence + checkpoint (asin-keyed). A book with no asin
+    // can have no ink, so skip these when it's absent/empty.
+    if let Some(asin) = asin.as_deref().filter(|a| !a.is_empty()) {
+        tx.execute("DELETE FROM book_ink_device WHERE asin = ?1", params![asin])?;
+        tx.execute("DELETE FROM ink_sync WHERE asin = ?1", params![asin])?;
+        tx.execute("DELETE FROM book_ink WHERE asin = ?1", params![asin])?;
     }
-    Ok(sha)
+    // The book row last; its CASCADE clears conversion_jobs / reading_position /
+    // yjr_sync.
+    tx.execute("DELETE FROM books WHERE id = ?1", params![book_id])?;
+    tx.commit()?;
+    Ok(Some(sha))
 }
 
 pub fn pending_or_error_book_ids(conn: &Connection) -> rusqlite::Result<Vec<i64>> {
@@ -2156,7 +2209,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_book_unlinks_annotations_rather_than_destroying() {
+    fn deleting_book_destroys_its_annotations_and_presence() {
         let conn = fresh_db();
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
         let book_id = insert_minimal(&conn, "sha-gone", "消える本");
@@ -2185,17 +2238,28 @@ mod tests {
             },
         )
         .expect("insert");
+        // A device asserts it → a row lands in `annotation_device`.
+        reconcile_device_book(&conn, "DEV", book_id, &["k1".to_string()], "2026-05-25T00:00:01Z")
+            .expect("reconcile");
+
         remove_book(&conn, book_id).expect("remove");
-        // The book row is gone, but the annotation survives — now unlinked.
+
+        // The annotation is destroyed outright — not moved to the orphan inbox.
         assert!(
             list_annotations_for_book(&conn, book_id)
                 .expect("by book")
                 .is_empty()
         );
-        let orphans = list_unlinked_annotations(&conn).expect("orphans");
-        assert_eq!(orphans.len(), 1);
-        assert_eq!(orphans[0].book_id, None);
-        assert_eq!(orphans[0].clip_title.as_deref(), Some("消える本"));
+        assert!(
+            list_unlinked_annotations(&conn)
+                .expect("orphans")
+                .is_empty()
+        );
+        // ...and its per-device presence row is gone with it.
+        let presence: i64 = conn
+            .query_row("SELECT COUNT(*) FROM annotation_device", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(presence, 0);
     }
 
     #[test]
@@ -2987,7 +3051,7 @@ mod tests {
     }
 
     #[test]
-    fn book_ink_unlinks_on_book_delete_and_relinks_by_asin() {
+    fn deleting_book_destroys_its_ink_presence_and_checkpoint() {
         let conn = fresh_db();
         let book = insert_with_asin(&conn, "sha", "Linear", "AS1");
         upsert_book_ink(
@@ -3004,18 +3068,31 @@ mod tests {
             },
         )
         .unwrap();
+        // A device asserts the page + records a decode checkpoint.
+        reconcile_ink_device(&conn, "DEV", "AS1", Some(book), &["c0".to_string()], "t1").unwrap();
+        set_ink_sync_sha(&conn, "DEV", "AS1", "nbksha", "t1").unwrap();
 
-        // Removing the book unlinks (ON DELETE SET NULL), never destroys, the ink.
         remove_book(&conn, book).unwrap();
-        let orphans = list_unlinked_book_ink(&conn).unwrap();
-        assert_eq!(orphans.len(), 1);
-        assert_eq!(orphans[0].book_id, None);
 
-        // Re-add the book with the same asin and relink by asin.
-        let book2 = insert_with_asin(&conn, "sha2", "Linear", "AS1");
-        assert_eq!(book_id_by_asin(&conn, "AS1").unwrap(), Some(book2));
-        set_book_ink_book_id(&conn, orphans[0].id, book2).unwrap();
-        assert_eq!(list_book_ink(&conn, book2).unwrap().len(), 1);
+        // Ink, its per-device presence, and its checkpoint are all destroyed —
+        // nothing is left orphaned.
+        assert!(list_book_ink(&conn, book).unwrap().is_empty());
+        assert!(list_unlinked_book_ink(&conn).unwrap().is_empty());
+        let presence: i64 = conn
+            .query_row("SELECT COUNT(*) FROM book_ink_device", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(presence, 0);
+        assert_eq!(get_ink_sync_sha(&conn, "DEV", "AS1").unwrap(), None);
+    }
+
+    #[test]
+    fn vacuum_runs_after_removal_and_leaves_db_usable() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-v", "本");
+        remove_book(&conn, book).expect("remove");
+        vacuum(&conn).expect("vacuum");
+        // The DB is still queryable after compaction.
+        assert!(list_books(&conn).expect("list").is_empty());
     }
 
     #[test]

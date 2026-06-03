@@ -63,6 +63,7 @@ pub fn run() {
             commands::library::library_set_asin,
             commands::library::library_bulk_update_metadata,
             commands::library::library_remove,
+            commands::library::library_compact,
             commands::library::library_open_in_finder,
             commands::library::library_amazon_search,
             commands::library::library_cover_path,

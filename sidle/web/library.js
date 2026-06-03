@@ -2114,9 +2114,23 @@ async function bulkRemove() {
       console.error("remove failed:", b.id, e);
     }
   }
+  // One VACUUM for the whole batch (not one per book), and only if something
+  // was actually removed.
+  if (failed < sel.length) await compactLibrary();
   booksSelection.selected.clear();
   booksSelection.lastClicked = null;
   await refresh();
+}
+
+// Reclaim DB file space freed by deletions (VACUUM). Best-effort: a transient
+// failure shouldn't surface as a delete error, so we only log it. Called once
+// per delete operation — see removeBook / bulkRemove.
+async function compactLibrary() {
+  try {
+    await window.api.invoke("library_compact");
+  } catch (e) {
+    console.error("library compact failed:", e);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2192,10 +2206,12 @@ async function removeBook(b) {
   }
   try {
     await window.api.invoke("library_remove", { bookId: b.id });
-    await refresh();
   } catch (e) {
     showToast(`remove failed: ${e}`, true);
+    return;
   }
+  await compactLibrary();
+  await refresh();
 }
 
 // ---------------------------------------------------------------------------

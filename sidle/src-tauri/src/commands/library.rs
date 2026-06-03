@@ -388,6 +388,18 @@ pub async fn library_remove(state: State<'_, AppState>, book_id: i64) -> Result<
     Ok(())
 }
 
+/// Compact the library DB file (`VACUUM`), reclaiming the disk space freed by
+/// removals. Deleting a book frees its rows but not the file's pages (SQLite
+/// keeps them on a free-list), so the gallery calls this once per delete
+/// *operation* — after a single remove, and after a bulk remove finishes. A
+/// multi-select delete therefore pays one VACUUM, not one per book. Best-effort
+/// from the caller's side: a transient failure here doesn't undo the deletes.
+#[tauri::command]
+pub async fn library_compact(state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state.db.lock().await;
+    db::vacuum(&conn).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn library_open_in_finder(
     app: tauri::AppHandle,
