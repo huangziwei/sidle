@@ -11,4 +11,5 @@ pub mod config;
 pub mod cover_cache;
 pub mod device_state;
 pub mod selfupdate;
+pub mod series;
 pub mod wrap;

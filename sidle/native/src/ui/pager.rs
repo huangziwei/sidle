@@ -37,6 +37,10 @@ const NAV_LEFT: u32 = EXIT_ZONE_W + FILTER_ZONE_W + SYNC_ZONE_W;
 pub enum PagerHit {
     Exit,
     Filter,
+    /// Pop a series drill-in back to the grouped top level. Occupies the same
+    /// strip slot as `Filter` (which is moot inside one series), swapped in when
+    /// drilled in — bezel buttons are Prev/Next only, so Back must be on-screen.
+    Back,
     /// Push this device's reading-state sidecars to sidle-server.
     Sync,
     /// Page back / forward — the nav region's left / right half (see `hit`).
@@ -54,17 +58,26 @@ pub fn strip_top(fb_yres: u32) -> u32 {
     fb_yres.saturating_sub(STRIP_H)
 }
 
-pub fn hit(tx: u32, ty: u32, fb_xres: u32, fb_yres: u32, total_pages: usize) -> Option<PagerHit> {
+pub fn hit(
+    tx: u32,
+    ty: u32,
+    fb_xres: u32,
+    fb_yres: u32,
+    total_pages: usize,
+    drilled: bool,
+) -> Option<PagerHit> {
     if ty < strip_top(fb_yres) {
         return None;
     }
-    // Exit, Filter, and Sync take the three leftmost fixed slices; the rest of
-    // the strip is the page-nav zone, live only when there's somewhere to go.
+    // Exit, Filter/Back, and Sync take the three leftmost fixed slices; the rest
+    // of the strip is the page-nav zone, live only when there's somewhere to go.
     if tx < EXIT_ZONE_W {
         return Some(PagerHit::Exit);
     }
     if tx < SYNC_LEFT {
-        return Some(PagerHit::Filter);
+        // Inside a drilled-in series this slot is Back (Filter is moot — you're
+        // already scoped to one series); at the top level it opens the filter menu.
+        return Some(if drilled { PagerHit::Back } else { PagerHit::Filter });
     }
     if tx < NAV_LEFT {
         return Some(PagerHit::Sync);
@@ -91,6 +104,7 @@ pub fn draw(
     page: usize,
     total_pages: usize,
     filter_count: usize,
+    drilled: bool,
 ) {
     let strip_y = strip_top(fb.var.yres);
     // 2px black divider, white strip body below.
@@ -104,10 +118,13 @@ pub fn draw(
     // Vertical separator after exit zone.
     fb.fill_rect(strip_y + 12, EXIT_ZONE_W - 2, 2, STRIP_H - 24, 0x00);
 
-    // Filter zone, right of Exit. Always visible (filter/sort work on a single
-    // page too). Shows `(N)` when N facets are active so a filtered state is
-    // obvious; the active sort key/dir lives in the grid header.
-    let filter_label = if filter_count > 0 {
+    // Filter/Back zone, right of Exit. Drilled into a series → "← Back" (reusing
+    // the proven `←` glyph rather than a `‹` that may be absent from the font).
+    // At the top level → "Filter", with `(N)` when N facets are active so a
+    // filtered state is obvious; the active sort key/dir lives in the grid header.
+    let filter_label = if drilled {
+        "← Back".to_string()
+    } else if filter_count > 0 {
         format!("Filter ({filter_count})")
     } else {
         "Filter".to_string()

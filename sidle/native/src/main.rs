@@ -19,6 +19,7 @@ mod device_state;
 mod eink;
 mod orientation;
 mod selfupdate;
+mod series;
 mod ui;
 mod wrap;
 
@@ -35,6 +36,7 @@ use ui::pager::{self, PAGE_SIZE, PagerHit};
 use ui::sort::SortState;
 use ui::text::TextRenderer;
 use ui::toast;
+use series::{Cell, CellKind};
 
 const LOG_PATH: &str = "/mnt/us/sidle-native.log";
 /// Dedicated log for the "Update over Wi-Fi" flow (`--update`), so its trail
@@ -70,10 +72,14 @@ const TOAST_LINGER: Duration = Duration::from_millis(1200);
 /// hardware if it feels sluggish.
 const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(1000);
 
-/// Cell currently outlined and awaiting either a long-enough hold to
-/// fire a download or a too-short release to fire the discovery hint.
+/// Cell currently outlined and awaiting release. On a book cell, release
+/// decides between a long-enough hold (download) and a too-short tap (discovery
+/// hint); on a series cell, any release drills in (collections aren't
+/// downloadable, only navigable — so hold time is irrelevant there).
 struct Armed {
-    book_idx: usize,
+    /// Index into the current `cells` view (top-level entries when at the
+    /// grouped top level, or drilled-in members) of the outlined tile.
+    cell_idx: usize,
     down_at: Instant,
 }
 
@@ -283,21 +289,28 @@ fn run() -> anyhow::Result<()> {
         })
         .collect();
 
-    // `all_books` is the master (hide-downloaded) set; `books` is the view the
-    // grid actually pages over — `all_books` sorted (and, in phase 2, filtered).
-    // A re-sort rebuilds the view from the master, and `total_pages`/`covers`/
-    // `page` all re-derive from it (see the `PagerHit::Sort` handler below).
-    // Default sort is Date-added-desc: the same order the server already returns
-    // (`ORDER BY imported_at DESC`), but now labelled in the grid header instead
-    // of reading as random. (Phase 3 will seed `sort` from a persisted file.)
+    // `all_books` is the master (hide-downloaded) set. The picker is **grouped
+    // by series, always** (no flat toggle — see series-grouping.md): the master
+    // is filtered+sorted by `rebuild_view`, then folded into `entries` (series
+    // collections + standalone books) at each series' first-seen position so the
+    // active sort drives tile order for free. `cells` is what the grid pages over
+    // — the top-level entries, or a drilled-in series' members. `series_view` is
+    // the ephemeral drill-in target (None = top level); nothing is persisted, so
+    // a drill-in resets each launch. A re-sort/filter rebuilds `entries` from the
+    // master and `total_pages`/`covers`/`page` re-derive (see `PagerHit::Filter`).
+    // Default sort is Date-added-desc — the order the server already returns
+    // (`ORDER BY imported_at DESC`), now labelled in the grid header.
     let mut sort = SortState::default();
     let mut filters = Filters::default();
-    let mut books = rebuild_view(&all_books, &filters, sort);
+    let mut entries = series::group_by_series(rebuild_view(&all_books, &filters, sort));
+    let mut series_view: Option<String> = None;
+    let mut cells = series::cells_for_top(&entries);
 
-    let mut total_pages = pager::n_pages(books.len());
+    let mut total_pages = pager::n_pages(cells.len());
     log(format!(
-        "books: {} of {} ({} on device, {} pages, list in {:?})",
-        books.len(),
+        "books: {} in {} tiles of {} ({} on device, {} pages, list in {:?})",
+        all_books.len(),
+        cells.len(),
         total_from_server,
         downloaded.len(),
         total_pages,
@@ -305,30 +318,19 @@ fn run() -> anyhow::Result<()> {
     ));
 
     // Lazy cover fetch: start with all None, populate per-page as the
-    // user navigates. Initial paint shows placeholders + titles
-    // immediately so the picker never blanks during boot; each cover
-    // arrives via a per-cell GC16 partial refresh from
-    // fetch_and_paint_page. Cached across page revisits, so paging
-    // back is instant.
-    let mut covers: Vec<Option<DynamicImage>> = vec![None; books.len()];
+    // user navigates. `covers` is parallel to `cells` (a series cell's cover is
+    // its lead member). Initial paint shows placeholders + titles immediately so
+    // the picker never blanks during boot; each cover arrives via a per-cell
+    // GC16 partial refresh from `fetch_and_paint_page`, cached on disk so paging
+    // back and re-grouping are instant.
+    let mut covers: Vec<Option<DynamicImage>> = vec![None; cells.len()];
 
     let (grid_left, grid_top) = grid::grid_origin(fb.var.xres, TOP_MARGIN);
     let mut page: usize = 0;
-    draw_gallery_page(
-        &mut fb,
-        &mut renderer,
-        &books,
-        &covers,
-        page,
-        total_pages,
-        grid_left,
-        grid_top,
-        sort,
-        filters.active_facets(),
-    )?;
     log("initial render (placeholders)");
-    fetch_and_paint_page(
-        &agent, &cfg, cache_dir, &mut fb, &books, &mut covers, page, grid_left, grid_top,
+    repaint_page(
+        &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells, &mut covers, page,
+        total_pages, grid_left, grid_top, sort, filters.active_facets(), series_view.as_deref(),
     )?;
 
     let mut armed: Option<Armed> = None;
@@ -341,15 +343,15 @@ fn run() -> anyhow::Result<()> {
                 // Down on a cell arms it. Down on the strip or in margins
                 // is a no-op — strip actions fire on Up regardless of
                 // hold time, so they don't need to arm.
-                let visible_count = books
+                let visible_count = cells
                     .len()
                     .saturating_sub(page * PAGE_SIZE)
                     .min(PAGE_SIZE);
-                if let Some(cell_idx) =
+                if let Some(cell_pos) =
                     grid::cell_at_tap(x, y, grid_left, grid_top, visible_count)
                 {
-                    let book_idx = page * PAGE_SIZE + cell_idx;
-                    let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_idx);
+                    let cell_idx = page * PAGE_SIZE + cell_pos;
+                    let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_pos);
                     if cx >= 0 && cy >= 0 {
                         grid::outline_cell(&mut fb, cx, cy, true);
                         fb.send_update(
@@ -362,28 +364,58 @@ fn run() -> anyhow::Result<()> {
                             WAVEFORM_MODE_DU,
                         )?;
                         armed = Some(Armed {
-                            book_idx,
+                            cell_idx,
                             down_at: Instant::now(),
                         });
-                        log(format!(
-                            "armed cell {} (book {}: {})",
-                            cell_idx,
-                            books[book_idx].id,
-                            books[book_idx].title,
-                        ));
+                        match &cells[cell_idx].kind {
+                            CellKind::Series { name, count } => log(format!(
+                                "armed cell {cell_pos} (series {name}, {count} books)"
+                            )),
+                            CellKind::Book => log(format!(
+                                "armed cell {cell_pos} (book {}: {})",
+                                cells[cell_idx].cover_book.id, cells[cell_idx].cover_book.title,
+                            )),
+                        }
                     }
                 }
             }
             InputEvent::Touch(TouchEvent::Up { x, y }) => {
                 log(format!("up: ({x},{y})"));
                 if let Some(a) = armed.take() {
+                    // Resolve the armed tile to an owned decision *before* acting:
+                    // a `match &cells[..]` borrow would otherwise still be live when
+                    // a drill-in reassigns `cells`. Series → drill (hold time
+                    // irrelevant, collections aren't downloadable); book → the
+                    // existing long-press-vs-tap split below.
+                    let drill_target = match &cells[a.cell_idx].kind {
+                        CellKind::Series { name, .. } => Some(name.clone()),
+                        CellKind::Book => None,
+                    };
+                    if let Some(name) = drill_target {
+                        log(format!("drill into series: {name}"));
+                        // The series we just tapped is in `entries` by construction,
+                        // so `members_of` is Some; the `if let` is defensive.
+                        if let Some(members) = series::members_of(&entries, &name) {
+                            cells = series::cells_for_series(members);
+                            total_pages = pager::n_pages(cells.len());
+                            covers = vec![None; cells.len()];
+                            page = 0;
+                            series_view = Some(name);
+                            repaint_page(
+                                &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
+                                &mut covers, page, total_pages, grid_left, grid_top, sort,
+                                filters.active_facets(), series_view.as_deref(),
+                            )?;
+                        }
+                        continue;
+                    }
                     let held = a.down_at.elapsed();
                     if held >= LONG_PRESS_THRESHOLD {
                         // Long press → download. No need to clear the
                         // outline first — the download toast paints
                         // over the gallery, and the post-download
-                        // redraw paints the clean cell.
-                        let book = &books[a.book_idx];
+                        // repaint paints the clean cell.
+                        let book = &cells[a.cell_idx].cover_book;
                         log(format!(
                             "long press fired ({held:?}) on book {}: {}",
                             book.id, book.title,
@@ -415,8 +447,7 @@ fn run() -> anyhow::Result<()> {
                             },
                             Err(api::SidleError::TokenMismatch) => {
                                 log(
-                                    "token rejected during download — resync via sidle desktop app"
-                                        .to_string(),
+                                    "token rejected during download — resync via sidle desktop app",
                                 );
                                 "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
                                     .to_string()
@@ -429,9 +460,10 @@ fn run() -> anyhow::Result<()> {
                         let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                         thread::sleep(TOAST_LINGER);
-                        draw_gallery_page(
-                            &mut fb, &mut renderer, &books, &covers, page,
-                            total_pages, grid_left, grid_top, sort, filters.active_facets(),
+                        repaint_page(
+                            &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
+                            &mut covers, page, total_pages, grid_left, grid_top, sort,
+                            filters.active_facets(), series_view.as_deref(),
                         )?;
                     } else {
                         // Short tap on a cover — discovery hint. Without
@@ -445,19 +477,23 @@ fn run() -> anyhow::Result<()> {
                         );
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                         thread::sleep(TOAST_LINGER);
-                        // Redraw the page to clear both the toast and
-                        // the cell outline that Down left behind.
-                        draw_gallery_page(
-                            &mut fb, &mut renderer, &books, &covers, page,
-                            total_pages, grid_left, grid_top, sort, filters.active_facets(),
+                        // Repaint to clear both the toast and the cell
+                        // outline that Down left behind.
+                        repaint_page(
+                            &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
+                            &mut covers, page, total_pages, grid_left, grid_top, sort,
+                            filters.active_facets(), series_view.as_deref(),
                         )?;
                     }
                     continue;
                 }
 
                 // No armed cell — Up on the strip means a strip action.
-                // Off-cell-off-strip is ignored.
-                if let Some(hit) = pager::hit(x, y, fb.var.xres, fb.var.yres, total_pages) {
+                // Off-cell-off-strip is ignored. `drilled` swaps the Filter slot
+                // for Back (see pager::hit).
+                if let Some(hit) =
+                    pager::hit(x, y, fb.var.xres, fb.var.yres, total_pages, series_view.is_some())
+                {
                     match hit {
                         PagerHit::Exit => {
                             log("exit-button tap");
@@ -467,8 +503,10 @@ fn run() -> anyhow::Result<()> {
                             log("filter-button tap");
                             // Blocking overlay (filter menu → value pickers / sort
                             // picker). Mutates `filters`/`sort` in place and keeps
-                            // `current_orient` in sync. Snapshot to detect whether
-                            // the view actually needs rebuilding.
+                            // `current_orient` in sync. Only reachable at the top
+                            // level (drilled in, this slot is Back), so the rebuild
+                            // always re-folds from the top. Snapshot to detect
+                            // whether the view actually needs rebuilding.
                             let before_filters = filters.clone();
                             let before_sort = sort;
                             filtermenu::run(
@@ -476,42 +514,54 @@ fn run() -> anyhow::Result<()> {
                                 &mut filters, &mut sort, &mut current_orient,
                             )?;
                             if filters != before_filters || sort != before_sort {
-                                // Rebuild the view from the master, reset paging,
-                                // and drop the positional cover vec — it re-fills
-                                // from the id-keyed disk cache on the paint below
-                                // (no re-fetch). See `rebuild_view` / cover_cache.
-                                books = rebuild_view(&all_books, &filters, sort);
-                                total_pages = pager::n_pages(books.len());
-                                covers = vec![None; books.len()];
+                                // Re-filter+sort the master, re-fold into series
+                                // collections, reset paging, and drop the positional
+                                // cover vec — it re-fills from the id-keyed disk
+                                // cache on the paint below (no re-fetch).
+                                entries = series::group_by_series(
+                                    rebuild_view(&all_books, &filters, sort),
+                                );
+                                cells = series::cells_for_top(&entries);
+                                total_pages = pager::n_pages(cells.len());
+                                covers = vec![None; cells.len()];
                                 page = 0;
                                 log(format!(
-                                    "view rebuilt: {} of {} books, {total_pages} pages, {}",
-                                    books.len(),
+                                    "view rebuilt: {} tiles from {} books, {total_pages} pages, {}",
+                                    cells.len(),
                                     all_books.len(),
                                     sort.header(),
                                 ));
                             }
                             // Repaint regardless — the overlay painted over the grid.
-                            draw_gallery_page(
-                                &mut fb, &mut renderer, &books, &covers, page,
-                                total_pages, grid_left, grid_top, sort, filters.active_facets(),
+                            repaint_page(
+                                &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
+                                &mut covers, page, total_pages, grid_left, grid_top, sort,
+                                filters.active_facets(), series_view.as_deref(),
                             )?;
-                            fetch_and_paint_page(
-                                &agent, &cfg, cache_dir, &mut fb, &books,
-                                &mut covers, page, grid_left, grid_top,
+                        }
+                        PagerHit::Back => {
+                            // Pop the drill-in back to the grouped top level. Same
+                            // strip slot as Filter, swapped in while drilled.
+                            log("back to series top level");
+                            series_view = None;
+                            cells = series::cells_for_top(&entries);
+                            total_pages = pager::n_pages(cells.len());
+                            covers = vec![None; cells.len()];
+                            page = 0;
+                            repaint_page(
+                                &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
+                                &mut covers, page, total_pages, grid_left, grid_top, sort,
+                                filters.active_facets(), series_view.as_deref(),
                             )?;
                         }
                         PagerHit::Prev => {
                             let new_page = page.saturating_sub(1);
                             if new_page != page {
                                 page = new_page;
-                                draw_gallery_page(
-                                    &mut fb, &mut renderer, &books, &covers, page,
-                                    total_pages, grid_left, grid_top, sort, filters.active_facets(),
-                                )?;
-                                fetch_and_paint_page(
-                                    &agent, &cfg, cache_dir, &mut fb, &books,
-                                    &mut covers, page, grid_left, grid_top,
+                                repaint_page(
+                                    &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
+                                    &mut covers, page, total_pages, grid_left, grid_top, sort,
+                                    filters.active_facets(), series_view.as_deref(),
                                 )?;
                             }
                         }
@@ -519,21 +569,18 @@ fn run() -> anyhow::Result<()> {
                             let new_page = (page + 1).min(total_pages.saturating_sub(1));
                             if new_page != page {
                                 page = new_page;
-                                draw_gallery_page(
-                                    &mut fb, &mut renderer, &books, &covers, page,
-                                    total_pages, grid_left, grid_top, sort, filters.active_facets(),
-                                )?;
-                                fetch_and_paint_page(
-                                    &agent, &cfg, cache_dir, &mut fb, &books,
-                                    &mut covers, page, grid_left, grid_top,
+                                repaint_page(
+                                    &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
+                                    &mut covers, page, total_pages, grid_left, grid_top, sort,
+                                    filters.active_facets(), series_view.as_deref(),
                                 )?;
                             }
                         }
                         PagerHit::Sync => {
                             // Push this device's reading-state sidecars to the Mac
-                            // — the LAN twin of a USB annotation sync. The library
-                            // grid doesn't change, so just toast the report and
-                            // repaint the page underneath.
+                            // — the LAN twin of a USB annotation sync. The grid
+                            // doesn't change, so toast the report and repaint the
+                            // page underneath (in whichever view is showing).
                             log("sync-button tap");
                             let dirty =
                                 toast::draw(&mut fb, &mut renderer, "Syncing annotations…");
@@ -554,7 +601,7 @@ fn run() -> anyhow::Result<()> {
                                     summary
                                 }
                                 Err(api::SidleError::TokenMismatch) => {
-                                    log("token rejected during sync — resync via sidle desktop app".to_string());
+                                    log("token rejected during sync — resync via sidle desktop app");
                                     "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
                                         .to_string()
                                 }
@@ -566,9 +613,10 @@ fn run() -> anyhow::Result<()> {
                             let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
                             fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                             thread::sleep(TOAST_LINGER);
-                            draw_gallery_page(
-                                &mut fb, &mut renderer, &books, &covers, page,
-                                total_pages, grid_left, grid_top, sort, filters.active_facets(),
+                            repaint_page(
+                                &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
+                                &mut covers, page, total_pages, grid_left, grid_top, sort,
+                                filters.active_facets(), series_view.as_deref(),
                             )?;
                         }
                     }
@@ -596,13 +644,10 @@ fn run() -> anyhow::Result<()> {
                 };
                 if new_page != page {
                     page = new_page;
-                    draw_gallery_page(
-                        &mut fb, &mut renderer, &books, &covers, page,
-                        total_pages, grid_left, grid_top, sort, filters.active_facets(),
-                    )?;
-                    fetch_and_paint_page(
-                        &agent, &cfg, cache_dir, &mut fb, &books,
-                        &mut covers, page, grid_left, grid_top,
+                    repaint_page(
+                        &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
+                        &mut covers, page, total_pages, grid_left, grid_top, sort,
+                        filters.active_facets(), series_view.as_deref(),
                     )?;
                 }
             }
@@ -619,13 +664,10 @@ fn run() -> anyhow::Result<()> {
                         log(format!("orientation: {current_orient:?} -> {o:?}"));
                         current_orient = o;
                         input.set_orientation(o);
-                        draw_gallery_page(
-                            &mut fb, &mut renderer, &books, &covers, page,
-                            total_pages, grid_left, grid_top, sort, filters.active_facets(),
-                        )?;
-                        fetch_and_paint_page(
-                            &agent, &cfg, cache_dir, &mut fb, &books,
-                            &mut covers, page, grid_left, grid_top,
+                        repaint_page(
+                            &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
+                            &mut covers, page, total_pages, grid_left, grid_top, sort,
+                            filters.active_facets(), series_view.as_deref(),
                         )?;
                     }
                 }
@@ -635,10 +677,9 @@ fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build the view the grid pages over: the master `all_books` filtered by the
-/// active facets, then sorted. Cloning a few hundred small `Book` structs per
-/// rebuild is trivial and keeps the `draw_gallery_page` / `fetch_and_paint_page`
-/// signatures (`&[Book]`) unchanged versus threading index lists through them.
+/// The filtered+sorted master view, ready to fold into series collections
+/// (`series::group_by_series`): `all_books` filtered by the active facets, then
+/// sorted. Cloning a few hundred small `Book` structs per rebuild is trivial.
 fn rebuild_view(all_books: &[api::Book], filters: &Filters, sort: SortState) -> Vec<api::Book> {
     let mut view: Vec<api::Book> = all_books
         .iter()
@@ -649,54 +690,61 @@ fn rebuild_view(all_books: &[api::Book], filters: &Filters, sort: SortState) -> 
     view
 }
 
+/// Draw one page of `cells` with placeholders, the header, and the bottom
+/// strip, then one full GC16 refresh. Series cells get the collection art
+/// (`grid::draw_series_cell`); book cells the cover-or-title-placeholder.
+/// `header` is the precomputed top-margin line (series name when drilled in,
+/// else the sort order); `drilled` swaps the strip's Filter slot for Back.
+#[allow(clippy::too_many_arguments)]
 fn draw_gallery_page(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
-    books: &[api::Book],
+    cells: &[Cell],
     covers: &[Option<DynamicImage>],
     page: usize,
     total_pages: usize,
     grid_left: i32,
     grid_top: i32,
-    sort: SortState,
+    header: &str,
     filter_count: usize,
+    drilled: bool,
 ) -> anyhow::Result<()> {
     fb.fill_rect(0, 0, fb.var.xres, fb.var.yres, 0xFF);
 
-    // Header line in the top margin (above the grid): name the sort order so it
-    // isn't a mystery — the default (newest import first) otherwise reads as a
-    // random shuffle, especially with the hide-downloaded gaps.
-    let header = format!("Sorted by {}", sort.header());
-    let hw = renderer.measure_width(&header);
-    let hx = ((fb.var.xres as i32 - hw as i32) / 2).max(0);
-    let hbaseline = grid_top * 60 / 100;
-    renderer.draw(fb, hx, hbaseline, &header, false);
+    // Header line in the top margin: the sort order (top level) or the drilled-in
+    // series name. Clamp to one line so a long series name can't overrun the panel.
+    let hlines = renderer.wrap_and_clamp(header, fb.var.xres.saturating_sub(80), 1);
+    if let Some(h) = hlines.first() {
+        let hw = renderer.measure_width(h);
+        let hx = ((fb.var.xres as i32 - hw as i32) / 2).max(0);
+        let hbaseline = grid_top * 60 / 100;
+        renderer.draw(fb, hx, hbaseline, h, false);
+    }
 
     let start = page * PAGE_SIZE;
-    let end = (start + PAGE_SIZE).min(books.len());
-    for (cell_idx, book_idx) in (start..end).enumerate() {
-        let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_idx);
+    let end = (start + PAGE_SIZE).min(cells.len());
+    for (cell_pos, idx) in (start..end).enumerate() {
+        let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_pos);
         if cx < 0 || cy < 0 {
             continue;
         }
-        match &covers[book_idx] {
-            Some(img) => grid::blit_cell(fb, cx, cy, img),
-            None => {
-                grid::blit_placeholder(fb, cx, cy, 0xDD);
-                draw_placeholder_title(
-                    fb,
-                    renderer,
-                    cx,
-                    cy,
-                    &books[book_idx].title,
-                );
+        match &cells[idx].kind {
+            CellKind::Book => match &covers[idx] {
+                Some(img) => grid::blit_cell(fb, cx, cy, img),
+                None => {
+                    grid::blit_placeholder(fb, cx, cy, 0xDD);
+                    draw_placeholder_title(fb, renderer, cx, cy, &cells[idx].cover_book.title);
+                }
+            },
+            CellKind::Series { name, count } => {
+                grid::draw_series_cell(fb, renderer, cx, cy, covers[idx].as_ref(), *count, name);
             }
         }
     }
     // Strip is the only path to Exit — always draw, even on a single
     // page. `pager::draw` internally returns early after Exit when
     // total_pages <= 1, so no prev/next labels are shown then.
-    pager::draw(fb, renderer, page, total_pages, filter_count);
+    pager::draw(fb, renderer, page, total_pages, filter_count, drilled);
     fb.send_update(
         MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: fb.var.yres },
         WAVEFORM_MODE_GC16,
@@ -740,84 +788,80 @@ fn draw_placeholder_title(
     }
 }
 
-/// Populate `covers[start..end]` for the given page by HTTP-fetching
-/// any cells whose slot is still `None`, painting each into its cell
-/// with a GC16 partial refresh as it arrives. Already-loaded cells
-/// (page revisits) are skipped — paint is no-op since the cached cover
-/// is already on screen from the preceding `draw_gallery_page` call.
-fn fetch_and_paint_page(
+/// Draw the current page and then lazily fill its covers — the draw+fetch pair
+/// every navigation/redraw path runs. `series_view` (Some = drilled into that
+/// series) decides the header and the Filter↔Back strip slot; the fetch is a
+/// no-op when the page's covers are already loaded (e.g. a post-toast repaint),
+/// so call sites use this uniformly.
+#[allow(clippy::too_many_arguments)]
+fn repaint_page(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
     agent: &ureq::Agent,
     cfg: &config::ServerConfig,
     cache_dir: &Path,
+    cells: &[Cell],
+    covers: &mut [Option<DynamicImage>],
+    page: usize,
+    total_pages: usize,
+    grid_left: i32,
+    grid_top: i32,
+    sort: SortState,
+    filter_count: usize,
+    series_view: Option<&str>,
+) -> anyhow::Result<()> {
+    let drilled = series_view.is_some();
+    let header = match series_view {
+        Some(name) => format!("{name}  ({})", cells.len()),
+        None => format!("Sorted by {}", sort.header()),
+    };
+    draw_gallery_page(
+        fb, renderer, cells, covers, page, total_pages, grid_left, grid_top, &header,
+        filter_count, drilled,
+    )?;
+    fetch_and_paint_page(fb, renderer, agent, cfg, cache_dir, cells, covers, page, grid_left, grid_top)?;
+    Ok(())
+}
+
+/// Populate `covers[start..end]` for the given page by fetching any cell whose
+/// slot is still `None`, painting each into its cell with a GC16 partial refresh
+/// as it arrives. Already-loaded cells (page revisits) are skipped — paint is a
+/// no-op since the cached cover is already on screen from the `draw_gallery_page`
+/// call. A series cell paints its full collection art; a book cell the cover.
+#[allow(clippy::too_many_arguments)]
+fn fetch_and_paint_page(
     fb: &mut Framebuffer,
-    books: &[api::Book],
+    renderer: &mut TextRenderer,
+    agent: &ureq::Agent,
+    cfg: &config::ServerConfig,
+    cache_dir: &Path,
+    cells: &[Cell],
     covers: &mut [Option<DynamicImage>],
     page: usize,
     grid_left: i32,
     grid_top: i32,
 ) -> anyhow::Result<()> {
     let start = page * PAGE_SIZE;
-    let end = (start + PAGE_SIZE).min(books.len());
+    let end = (start + PAGE_SIZE).min(cells.len());
     let t_pg = Instant::now();
     let mut fetched = 0usize;
-    for book_idx in start..end {
-        if covers[book_idx].is_some() {
+    for idx in start..end {
+        if covers[idx].is_some() {
             continue;
         }
-        let book = &books[book_idx];
-
-        // Disk cache first (instant, no network); on a miss, fetch over the LAN
-        // and write through so the next launch is a hit. Timing is split into
-        // get (cache-read or network) vs decode so a hardware log tells us
-        // where the per-cover cost actually lands — the whole point of the
-        // thumbnail change was to shrink both.
-        let t_get = Instant::now();
-        let (bytes, source) = match cover_cache::load(cache_dir, book.id, book.cover_rev) {
-            Some(b) => (Some(b), "cache"),
-            None => match api::fetch_cover(agent, cfg, book.id) {
-                Ok(b) => {
-                    if let Err(e) = cover_cache::store(cache_dir, book.id, book.cover_rev, &b) {
-                        log(format!("cover {}: cache store failed: {e}", book.id));
-                    }
-                    (Some(b), "net")
-                }
-                Err(err) => {
-                    log(format!("cover {}: {err}", book.id));
-                    (None, "net")
-                }
-            },
-        };
-        let get_ms = t_get.elapsed();
-
-        let img = match bytes {
-            Some(b) => {
-                let t_dec = Instant::now();
-                match grid::decode_resize(&b) {
-                    Ok(img) => {
-                        log(format!(
-                            "cover {} {} ({}B) get={:?} decode={:?}",
-                            book.id,
-                            source,
-                            b.len(),
-                            get_ms,
-                            t_dec.elapsed()
-                        ));
-                        Some(img)
-                    }
-                    Err(err) => {
-                        log(format!("cover {}: decode {err}", book.id));
-                        None
-                    }
-                }
-            }
-            None => None,
-        };
+        // The cover source is the cell's own book (standalone) or its series'
+        // lead member — one fetch per collection, not one per member.
+        let img = load_cover(agent, cfg, cache_dir, &cells[idx].cover_book);
 
         if let Some(img) = img.as_ref() {
-            let cell_idx = book_idx - start;
-            let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_idx);
+            let (cx, cy) = grid::cell_xy(grid_left, grid_top, idx - start);
             if cx >= 0 && cy >= 0 {
-                grid::blit_cell(fb, cx, cy, img);
+                match &cells[idx].kind {
+                    CellKind::Book => grid::blit_cell(fb, cx, cy, img),
+                    CellKind::Series { name, count } => {
+                        grid::draw_series_cell(fb, renderer, cx, cy, Some(img), *count, name)
+                    }
+                }
                 fb.send_update(
                     MxcfbRect {
                         top: cy as u32,
@@ -829,7 +873,7 @@ fn fetch_and_paint_page(
                 )?;
             }
         }
-        covers[book_idx] = img;
+        covers[idx] = img;
         fetched += 1;
     }
     if fetched > 0 {
@@ -841,6 +885,56 @@ fn fetch_and_paint_page(
         ));
     }
     Ok(())
+}
+
+/// Load one book's cover into a decoded image: disk cache first (instant, no
+/// network); on a miss, fetch over the LAN and write through so the next launch
+/// is a hit. Returns `None` on a fetch or decode failure (cell stays a
+/// placeholder). Timing is split into get (cache-read or network) vs decode so a
+/// hardware log shows where the per-cover cost lands.
+fn load_cover(
+    agent: &ureq::Agent,
+    cfg: &config::ServerConfig,
+    cache_dir: &Path,
+    book: &api::Book,
+) -> Option<DynamicImage> {
+    let t_get = Instant::now();
+    let (bytes, source) = match cover_cache::load(cache_dir, book.id, book.cover_rev) {
+        Some(b) => (Some(b), "cache"),
+        None => match api::fetch_cover(agent, cfg, book.id) {
+            Ok(b) => {
+                if let Err(e) = cover_cache::store(cache_dir, book.id, book.cover_rev, &b) {
+                    log(format!("cover {}: cache store failed: {e}", book.id));
+                }
+                (Some(b), "net")
+            }
+            Err(err) => {
+                log(format!("cover {}: {err}", book.id));
+                (None, "net")
+            }
+        },
+    };
+    let get_ms = t_get.elapsed();
+
+    let bytes = bytes?;
+    let t_dec = Instant::now();
+    match grid::decode_resize(&bytes) {
+        Ok(img) => {
+            log(format!(
+                "cover {} {} ({}B) get={:?} decode={:?}",
+                book.id,
+                source,
+                bytes.len(),
+                get_ms,
+                t_dec.elapsed()
+            ));
+            Some(img)
+        }
+        Err(err) => {
+            log(format!("cover {}: decode {err}", book.id));
+            None
+        }
+    }
 }
 
 /// Persist downloaded bytes to `/mnt/us/documents/Sidle/<filename>`. Creates
