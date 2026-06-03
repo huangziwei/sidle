@@ -109,6 +109,18 @@
       this.applyVisuals();
     }
 
+    // Replace the selection with the inclusive range anchorId..toId over the
+    // current display order. Drives keyboard Shift+arrow extension: the anchor is
+    // where the range began, `toId` the item the cursor just reached. Both must
+    // be selectable (present in orderedIds); a non-selectable cursor target (a
+    // series tile) is filtered out by the caller before this runs.
+    selectRangeFromAnchor(anchorId, toId) {
+      this.lastClicked = anchorId;
+      this.selected = new Set();
+      this.rangeTo(toId); // ranges anchorId..toId, adding into the cleared set
+      this.applyVisuals();
+    }
+
     clear() {
       if (this.selected.size === 0) {
         this.cfg.onChange(this);

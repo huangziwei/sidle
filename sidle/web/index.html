@@ -408,6 +408,49 @@
       </div>
     </div>
 
+    <div id="shortcuts-modal" class="modal" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-panel shortcuts-panel" role="dialog" aria-labelledby="shortcuts-title">
+        <header class="modal-header">
+          <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+          <button type="button" class="btn-link" id="shortcuts-close">Close</button>
+        </header>
+        <div class="modal-body shortcuts-grid">
+          <section>
+            <h3>Navigate</h3>
+            <dl>
+              <dt><kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd></dt><dd>Move focus</dd>
+              <dt><kbd>Enter</kbd></dt><dd>Read book / open series</dd>
+              <dt><kbd>⌫</kbd></dt><dd>Back to library (inside a series)</dd>
+              <dt><kbd>Home</kbd> <kbd>End</kbd></dt><dd>First / last</dd>
+              <dt><kbd>PgUp</kbd> <kbd>PgDn</kbd></dt><dd>Jump up / down</dd>
+            </dl>
+          </section>
+          <section>
+            <h3>Select</h3>
+            <dl>
+              <dt><kbd>Space</kbd></dt><dd>Select / deselect focused</dd>
+              <dt><kbd>⇧</kbd> + arrows</dt><dd>Extend selection</dd>
+              <dt><kbd>⌘</kbd><kbd>A</kbd></dt><dd>Select all</dd>
+              <dt><kbd>Esc</kbd></dt><dd>Clear selection</dd>
+            </dl>
+          </section>
+          <section>
+            <h3>Find &amp; view</h3>
+            <dl>
+              <dt><kbd>/</kbd> · <kbd>⌘</kbd><kbd>F</kbd></dt><dd>Search</dd>
+              <dt><kbd>⌘</kbd><kbd>O</kbd></dt><dd>Add books</dd>
+              <dt><kbd>1</kbd> <kbd>2</kbd></dt><dd>Gallery / List</dd>
+              <dt><kbd>G</kbd></dt><dd>Group by series on/off</dd>
+              <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Books / Notes</dd>
+              <dt><kbd>⌘</kbd><kbd>,</kbd></dt><dd>Settings</dd>
+              <dt><kbd>?</kbd></dt><dd>This help</dd>
+            </dl>
+          </section>
+        </div>
+      </div>
+    </div>
+
     <div id="toast" class="toast" hidden></div>
 
     <div id="reader-view" class="reader-view" hidden>

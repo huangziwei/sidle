@@ -964,6 +964,73 @@ button {
   border-color: var(--accent);
 }
 
+/* Keyboard focus cursor — a ring distinct from the selection outline (an inset
+   accent border), so a focused tile reads clearly whether or not it's also
+   selected. Box-shadow coexists with the outline and overrides the hover shadow. */
+.book-card.focused,
+.series-card.focused {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+  border-color: var(--accent);
+}
+.book-table tbody tr.focused,
+.series-table tbody tr.focused {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Keyboard-shortcuts cheat sheet (#shortcuts-modal) — reuses the .modal shell. */
+.shortcuts-panel {
+  width: min(720px, 92vw);
+  max-width: 720px;
+}
+.shortcuts-panel .modal-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 20px 32px;
+}
+.shortcuts-grid h3 {
+  margin: 0 0 10px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.shortcuts-grid dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 14px;
+  margin: 0;
+  align-items: baseline;
+}
+.shortcuts-grid dt {
+  white-space: nowrap;
+  color: var(--muted);
+}
+.shortcuts-grid dd {
+  margin: 0;
+  color: var(--fg);
+}
+kbd {
+  display: inline-block;
+  min-width: 1.5em;
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--fg);
+  font: 11px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: center;
+}
+.shortcuts-grid dt kbd + kbd {
+  margin-left: 3px;
+}
+
 .cover {
   aspect-ratio: 2 / 3;
   display: flex;

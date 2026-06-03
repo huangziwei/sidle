@@ -54,6 +54,15 @@ const state = {
   // Top priority in the status bar — it's the most immediate user action — and
   // cleared by openReader once the reader is up (or the open fails).
   opening: null,
+  // Keyboard focus cursor (Books section) — a stable key for the currently
+  // highlighted tile, distinct from selection so the cursor can land on series
+  // collections (which are navigate-only, never selected). "book:<id>" or
+  // "series:<name>", or null when nothing is focused. Re-applied across renders
+  // by paintFocus(); ephemeral, never persisted.
+  focusKey: null,
+  // Anchor for Shift+arrow range extension — the book key where the current
+  // range began. Cleared by any plain (non-shift) cursor move or selection edit.
+  focusAnchorKey: null,
 };
 
 // The Books section's multi-select. The Notes section owns a second instance of
@@ -202,6 +211,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireFilterBar();
   wireSortPopover();
   wireMetadataModal();
+  wireLibraryShortcuts();
   await refresh();
   subscribeStatus();
   subscribeDeviceStatus();
@@ -351,6 +361,10 @@ function applyView() {
   // The Gallery/List toggle drives the Notes section too; hand the choice off
   // so notebooks.js can swap its grid/table. No-op while Notes isn't visible.
   if (window.Notebooks) window.Notebooks.setView(state.view);
+  // Re-apply the keyboard focus ring to its tile: applyView runs on every render
+  // AND on a bare view switch (which rebuilds no DOM), so this keeps the cursor
+  // visible across both — and across the gallery/list DOM, which both persist.
+  paintFocus();
 }
 
 // Switch the grouping axis (flat ⇄ by-series). Resets any drill-in and the
@@ -1074,6 +1088,7 @@ function renderSeriesList(entries) {
     count.className = "col-count";
 
     if (e.type === "series") {
+      tr.dataset.series = e.name; // keyboard focus cursor keys off this
       name.textContent = e.name;
       author.textContent = seriesSubtitle(e);
       count.textContent = String(e.books.length);
@@ -2343,6 +2358,7 @@ function onMainMouseDown(e) {
 // shared controller's. Notes wires its cards straight to its own controller.
 function onItemClick(e, b) {
   booksSelection.click(e, b.id);
+  setFocusKey(`book:${b.id}`); // keyboard cursor follows the clicked book
 }
 
 /// Context menu (right-click): keep an existing multi-selection so the menu can
@@ -2357,6 +2373,265 @@ function clearSelection() {
 
 function selectedBooks() {
   return state.books.filter((b) => booksSelection.has(b.id));
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard shortcuts + focus cursor (Books section)
+// ---------------------------------------------------------------------------
+//
+// A focus cursor — a highlighted tile, distinct from selection so it can land on
+// series collections (navigate-only, never selected). Arrows move it; Enter
+// reads a book / drills a series; Backspace exits a series; Space and
+// Shift+arrows drive selection. Plus app-level keys (search, view, group,
+// section, settings, and a `?` cheat sheet). The reader owns the keyboard while
+// open, and modals/text fields are exempt — see onLibraryKeydown's gating.
+
+// Focusable tiles in the ACTIVE view, in display order (for cursor movement):
+// gallery cards (book + series) or list / series-index rows.
+function focusableEls() {
+  if (state.view === "gallery") {
+    return $$("#gallery-grid .book-card, #gallery-grid .series-card");
+  }
+  if (displayMode() === "grouped") return $$("#series-list tbody tr");
+  return $$("#list tbody tr");
+}
+
+// Every focusable element across BOTH the gallery and list DOM (both persist),
+// so the focus ring is correct after a view switch — used only for painting.
+function allFocusableEls() {
+  return [
+    ...$$("#gallery-grid .book-card, #gallery-grid .series-card"),
+    ...$$("#list tbody tr"),
+    ...$$("#series-list tbody tr"),
+  ];
+}
+
+// Stable key for a focusable element, surviving re-render: "book:<id>" or
+// "series:<name>" (book cards/rows carry data-book-id; series tiles data-series).
+function focusKeyOf(el) {
+  if (!el) return null;
+  if (el.dataset.bookId) return `book:${el.dataset.bookId}`;
+  if (el.dataset.series != null) return `series:${el.dataset.series}`;
+  return null;
+}
+function keyBookId(key) {
+  return key && key.startsWith("book:") ? Number(key.slice(5)) : null;
+}
+
+// Re-apply `.focused` to the tile matching state.focusKey (both DOMs); drop a
+// stale focus whose tile is gone (filtered/regrouped away). Called from applyView.
+function paintFocus() {
+  let found = false;
+  for (const el of allFocusableEls()) {
+    const on = state.focusKey != null && focusKeyOf(el) === state.focusKey;
+    el.classList.toggle("focused", on);
+    if (on) found = true;
+  }
+  if (!found) state.focusKey = null;
+}
+
+// Point the cursor at `key` (e.g. after a click) and repaint, without scrolling.
+function setFocusKey(key) {
+  state.focusKey = key;
+  state.focusAnchorKey = null;
+  paintFocus();
+}
+
+// Columns in the gallery grid, read from its computed track list (robust to the
+// responsive auto-fill). 1 in list view (linear).
+function galleryColumns() {
+  if (state.view !== "gallery") return 1;
+  const grid = $("#gallery-grid");
+  if (!grid) return 1;
+  const tracks = getComputedStyle(grid).gridTemplateColumns;
+  const n = tracks ? tracks.split(" ").filter(Boolean).length : 1;
+  return Math.max(1, n);
+}
+
+// Move the cursor one step in `dir`, scroll it into view, repaint. With `extend`
+// (Shift) it grows a selection range over the book tiles it passes.
+function moveFocus(dir, extend) {
+  const els = focusableEls();
+  if (els.length === 0) return;
+  let idx = els.findIndex((el) => focusKeyOf(el) === state.focusKey);
+  if (idx === -1) {
+    idx = 0; // first cursor move just focuses the first tile
+  } else {
+    const cols = galleryColumns();
+    switch (dir) {
+      case "left": idx -= 1; break;
+      case "right": idx += 1; break;
+      case "up": idx -= cols; break;
+      case "down": idx += cols; break;
+      case "first": idx = 0; break;
+      case "last": idx = els.length - 1; break;
+      case "pageup": idx -= cols * 3; break;
+      case "pagedown": idx += cols * 3; break;
+    }
+  }
+  idx = Math.max(0, Math.min(els.length - 1, idx));
+  const el = els[idx];
+  state.focusKey = focusKeyOf(el);
+  els.forEach((e) => e.classList.toggle("focused", e === el));
+  el.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (extend) extendSelectionTo(el);
+  else state.focusAnchorKey = null; // a plain move ends a Shift-range
+}
+
+// Shift+arrow: extend the selection from the range anchor to the focused tile.
+// A series tile (not selectable) just moves the cursor — no selection change.
+function extendSelectionTo(el) {
+  const bookId = el.dataset.bookId ? Number(el.dataset.bookId) : null;
+  if (bookId == null) return;
+  if (keyBookId(state.focusAnchorKey) == null) state.focusAnchorKey = `book:${bookId}`;
+  booksSelection.selectRangeFromAnchor(keyBookId(state.focusAnchorKey), bookId);
+}
+
+// Space: toggle selection of the focused book (no-op on a series tile).
+function toggleFocusSelection() {
+  const id = keyBookId(state.focusKey);
+  if (id == null) return;
+  booksSelection.toggle(id);
+  booksSelection.lastClicked = id;
+  booksSelection.applyVisuals();
+  state.focusAnchorKey = null;
+}
+
+// Enter: read the focused book, or drill into the focused series.
+function activateFocus() {
+  const key = state.focusKey;
+  if (!key) return;
+  if (key.startsWith("book:")) {
+    const b = state.books.find((x) => x.id === keyBookId(key));
+    if (b) openReader(b);
+  } else if (key.startsWith("series:")) {
+    enterSeries(key.slice("series:".length));
+  }
+}
+
+function focusSearch() {
+  const s = $("#search-input");
+  if (s) {
+    s.focus();
+    s.select();
+  }
+}
+
+function openShortcuts() {
+  $("#shortcuts-modal").hidden = false;
+}
+function closeShortcuts() {
+  $("#shortcuts-modal").hidden = true;
+}
+
+function wireLibraryShortcuts() {
+  document.addEventListener("keydown", onLibraryKeydown);
+  $("#shortcuts-close").addEventListener("click", closeShortcuts);
+  $("#shortcuts-modal .modal-backdrop").addEventListener("click", closeShortcuts);
+}
+
+// True when the library — not the reader or a modal — should receive shortcuts.
+function libraryKeysReady() {
+  return (
+    $("#reader-view").hidden &&
+    $("#metadata-modal").hidden &&
+    $("#settings-modal").hidden
+  );
+}
+
+function onLibraryKeydown(e) {
+  // The cheat sheet, while open, swallows keys (Esc closes it).
+  if (!$("#shortcuts-modal").hidden) {
+    if (e.key === "Escape") closeShortcuts();
+    return;
+  }
+  if (!libraryKeysReady()) return; // reader / metadata / settings own the keyboard
+
+  const t = e.target;
+  const inField =
+    t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+  const mod = e.metaKey || e.ctrlKey;
+
+  // Modifier combos that work even from a text field.
+  if (mod && !e.altKey && (e.key === "f" || e.key === "F")) {
+    e.preventDefault();
+    focusSearch();
+    return;
+  }
+  if (mod && (e.key === "o" || e.key === "O")) {
+    e.preventDefault();
+    onAddClick();
+    return;
+  }
+  if (mod && e.key === ",") {
+    e.preventDefault();
+    openSettings();
+    return;
+  }
+
+  if (inField || mod) return; // below: bare keys only, never while typing
+
+  const books = state.section === "books";
+  switch (e.key) {
+    // Cursor navigation + activation — Books section only. preventDefault on all
+    // of these (incl. Backspace) also blocks the WebView's stray scroll / back-nav.
+    case "ArrowLeft":
+    case "ArrowRight":
+    case "ArrowUp":
+    case "ArrowDown":
+    case "Home":
+    case "End":
+    case "PageUp":
+    case "PageDown":
+    case "Enter":
+    case " ":
+    case "Backspace":
+      if (!books) return;
+      e.preventDefault();
+      handleBooksNavKey(e);
+      return;
+    // App-level keys (any Books/Notes context).
+    case "/":
+      e.preventDefault();
+      focusSearch();
+      return;
+    case "1":
+      setView("gallery");
+      return;
+    case "2":
+      setView("list");
+      return;
+    case "g":
+    case "G":
+      if (books) setGroup(state.group === "series" ? "none" : "series");
+      return;
+    case "[":
+      setSection("books");
+      return;
+    case "]":
+      setSection("notes");
+      return;
+    case "?":
+      e.preventDefault();
+      openShortcuts();
+      return;
+  }
+}
+
+function handleBooksNavKey(e) {
+  switch (e.key) {
+    case "ArrowLeft": moveFocus("left", e.shiftKey); break;
+    case "ArrowRight": moveFocus("right", e.shiftKey); break;
+    case "ArrowUp": moveFocus("up", e.shiftKey); break;
+    case "ArrowDown": moveFocus("down", e.shiftKey); break;
+    case "Home": moveFocus("first", e.shiftKey); break;
+    case "End": moveFocus("last", e.shiftKey); break;
+    case "PageUp": moveFocus("pageup", e.shiftKey); break;
+    case "PageDown": moveFocus("pagedown", e.shiftKey); break;
+    case "Enter": activateFocus(); break;
+    case " ": toggleFocusSelection(); break;
+    case "Backspace": if (state.seriesView != null) exitSeries(); break;
+  }
 }
 
 function renderSelectionBar() {
