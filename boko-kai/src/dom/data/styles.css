@@ -399,3 +399,17 @@ pre, xmp, plaintext, listing {
 head, script, style, link, meta, title, template {
   display: none;
 }
+
+/* ==========================================================================
+   Hidden Content
+   ========================================================================== */
+
+/* The HTML `hidden` attribute — the standard EPUB3 way to keep a nav (e.g. an
+   `epub:type="page-list"`) machine-readable but unrendered. As a UA-origin rule
+   it stays overridable by author CSS (`[hidden] { display: block }`), matching
+   real browsers. `hidden="until-found"` content is meant to stay hidden until
+   find-in-page reveals it — which a static converter can't do — so collapsing
+   it here is acceptable. */
+[hidden] {
+  display: none;
+}

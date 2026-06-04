@@ -426,6 +426,21 @@ function annotationAt(doc, x, y) {
 }
 
 function onDocClick(e, doc) {
+  // In-content hyperlink → spine navigation. The paginator does no link
+  // handling, and a relative href can't resolve inside the section's blob: URL,
+  // so internal links would otherwise be dead. Route cross-section links
+  // (cN.xhtml#frag) through the same resolver the TOC panel uses; leave
+  // same-page (#frag) and external links to the iframe's native handling.
+  const a = e.target?.closest?.("a[href]");
+  if (a) {
+    const href = a.getAttribute("href");
+    if (tocTarget(href).index >= 0) {
+      e.preventDefault();
+      goToToc(href);
+      return;
+    }
+  }
+
   const ann = annotationAt(doc, e.clientX, e.clientY);
   if (!ann) {
     hideNotePopover();
