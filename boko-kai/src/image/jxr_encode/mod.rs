@@ -8,6 +8,8 @@
 //! which [`encode`] becomes real and the `#[ignore]`d round-trip test below is
 //! enabled.
 
+pub mod bitstream;
+pub mod entropy;
 pub mod transform;
 
 /// How color is handled on the way into the KFX.
