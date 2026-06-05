@@ -162,23 +162,10 @@ pub fn import_device_annotations(
                 report
             }; // DB lock released here, before the USB cleanup below
 
-            // Cleanup LAST (lowest priority): delete `.notebooks/<id>!!PDOC!!` dirs
-            // whose content_id isn't a library book — ink stranded by deleted
-            // sideloads or superseded by a reconvert. Idempotent (nothing to delete
-            // once clean) and best-effort: a prune failure (incl. the empty-library
-            // guard) must never affect the sync result we already have.
-            let t = std::time::Instant::now();
-            match ink::prune_orphan_pdoc(transport, &known_asins) {
-                Ok(removed) => eprintln!(
-                    "[sidle/annsync] PHASE prune: removed {} orphan PDOC dir(s) in {:.2}s",
-                    removed.len(),
-                    t.elapsed().as_secs_f32()
-                ),
-                Err(e) => eprintln!(
-                    "[sidle/annsync] PHASE prune: skipped ({e}) in {:.2}s",
-                    t.elapsed().as_secs_f32()
-                ),
-            }
+            // No on-device cleanup: Sidle never deletes data on the device (a
+            // backup must not mutate its source). Stranded `.notebooks/<id>!!PDOC!!`
+            // dirs are the device owner's to clear. See
+            // .claude/plans/backup-source-of-truth.md.
             Ok(report)
         }
     }

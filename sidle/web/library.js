@@ -2012,23 +2012,19 @@ function subscribePullProgress() {
 // when the auto sync didn't catch something. Either way it's idempotent.
 // ---------------------------------------------------------------------------
 
-// Turn a DeviceImportReport into a one-line summary for the toast. Reports both
-// new annotations and ones removed because they were deleted on the device
-// (full-mirror sync), so a delete-only sync isn't silently "up to date".
+// Turn a DeviceImportReport into a one-line summary for the toast. Sidle is an
+// additive backup — sync only adds (never deletes), so this reports new
+// annotations + handwritten pages; a no-op sync reads "already up to date".
 function annotationSyncSummary(report) {
   const added = report?.annotations?.inserted ?? 0;
-  const removed = report?.annotations?.removed ?? 0;
   const inkPages = report?.ink_pages ?? 0;
-  if (added === 0 && removed === 0 && inkPages === 0) return "Annotations already up to date";
+  if (added === 0 && inkPages === 0) return "Annotations already up to date";
   const books = report?.matched ?? 0;
   const from = books > 0 ? ` across ${books} book${books === 1 ? "" : "s"}` : "";
-  const bits = [];
-  if (added > 0) bits.push(`synced ${added}`);
-  if (removed > 0) bits.push(`removed ${removed}`);
   let s = "";
-  if (bits.length) {
-    const noun = added + removed === 1 ? "annotation" : "annotations";
-    s = `${bits.join(", ")} ${noun}${from}`;
+  if (added > 0) {
+    const noun = added === 1 ? "annotation" : "annotations";
+    s = `synced ${added} ${noun}${from}`;
   }
   if (inkPages > 0) {
     const ink = `${inkPages} handwritten page${inkPages === 1 ? "" : "s"}`;
@@ -2087,10 +2083,10 @@ function subscribeAnnotationSync() {
     renderQueue();
     const report = e.payload;
     const added = report?.annotations?.inserted ?? 0;
-    const removed = report?.annotations?.removed ?? 0;
-    // Only toast when the auto sync actually changed something (added or removed
-    // on the device) — a no-op reconnect shouldn't nag.
-    if (added > 0 || removed > 0) showToast(annotationSyncSummary(report));
+    const inkPages = report?.ink_pages ?? 0;
+    // Only toast when the sync actually added something — a no-op reconnect
+    // shouldn't nag.
+    if (added > 0 || inkPages > 0) showToast(annotationSyncSummary(report));
     // If the user is reading one of the synced books, repaint in place.
     window.sidleReader?.reloadAnnotations?.();
   });

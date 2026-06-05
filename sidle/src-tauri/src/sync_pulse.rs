@@ -90,7 +90,7 @@ mod tests {
     fn parse_pulse_extracts_ts_and_report() {
         // Mirrors `sidle_server::write_sync_pulse`'s shape: {ts, device_serial, report}.
         let blob = br#"{"ts":"2026-05-27T20:00:00Z","device_serial":"G000X",
-            "report":{"yjr_books":1,"matched":1,"annotations":{"inserted":2,"removed":0}}}"#;
+            "report":{"yjr_books":1,"matched":1,"annotations":{"inserted":2}}}"#;
         let (ts, report) = parse_pulse(blob).expect("valid pulse parses");
         assert_eq!(ts.as_deref(), Some("2026-05-27T20:00:00Z"));
         // The emitted payload carries the report the frontend handler reads.

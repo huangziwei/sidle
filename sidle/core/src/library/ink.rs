@@ -46,9 +46,6 @@ pub struct InkImportStats {
     /// stored page-unanchored — gallery-only — until a KFX / matching `.yjr`
     /// note appears).
     pub anchored: usize,
-    /// Ink pages removed because they were erased on the device (delete-prop;
-    /// only on a real device sync — `device_serial` set).
-    pub removed: usize,
 }
 
 /// Decode one sideloaded doc's ink notebook and store its pages against the host
@@ -66,8 +63,8 @@ pub struct InkImportStats {
 ///   SVG (for the reader) plus a white-bg plain SVG (for the gallery), cached
 ///   beside it ([[feedback_derived_assets_at_import]]).
 /// - idempotent on `(asin, container_id)`; orphan-capable (`book_id` may be
-///   `None`); delete-propagating when `device_serial` is set (mirrors
-///   [`crate::library::ingest::import_yjr`]).
+///   `None`); records device presence when `device_serial` is set, but never
+///   deletes a backup page (mirrors [`crate::library::ingest::import_yjr`]).
 #[allow(clippy::too_many_arguments)]
 pub fn import_ink(
     conn: &Connection,
@@ -168,18 +165,11 @@ pub fn import_ink(
         current_containers.push(cid.to_string());
     }
 
-    // Delete-propagation: a page erased on the device drops out of the nbk's
-    // `document_data`, so its row + cached SVGs are GC'd. Only on a real device
-    // sync (a deviceless import — e.g. a re-decode of a backup — stays add-only).
+    // Record this device's asserted set (provenance only — never deletes a backup
+    // page; Sidle is the durable backup). A deviceless import carries no identity.
     if let Some(serial) = device_serial {
-        let removed =
-            db::reconcile_ink_device(conn, serial, asin, book_id, &current_containers, now)
-                .context("reconcile ink device presence")?;
-        for cid in &removed {
-            let _ = std::fs::remove_file(paths.book_ink_overlay_svg(book_sha, asin, cid));
-            let _ = std::fs::remove_file(paths.book_ink_plain_svg(book_sha, asin, cid));
-        }
-        stats.removed = removed.len();
+        db::record_ink_device_presence(conn, serial, asin, book_id, &current_containers, now)
+            .context("record ink device presence")?;
     }
 
     Ok(stats)

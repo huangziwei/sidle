@@ -382,24 +382,18 @@ pub struct SyncReport {
 pub struct SyncStats {
     #[serde(default)]
     pub inserted: usize,
-    #[serde(default)]
-    pub removed: usize,
 }
 
 impl SyncReport {
-    /// One-line toast summary, e.g. `annotation sync: 3 new, 1 removed, 2
-    /// positions`. `nothing new` when an idempotent re-sync changed nothing. A
-    /// trailing `(N unmatched)` flags orphaned highlights when any.
+    /// One-line toast summary, e.g. `annotation sync: 3 new, 2 positions`.
+    /// `nothing new` when an idempotent re-sync changed nothing. A trailing
+    /// `(N unmatched)` flags orphaned highlights when any.
     pub fn summary(&self) -> String {
         let new = self.annotations.inserted;
-        let removed = self.annotations.removed;
 
         let mut parts = Vec::new();
         if new > 0 {
             parts.push(format!("{new} new"));
-        }
-        if removed > 0 {
-            parts.push(format!("{removed} removed"));
         }
         if self.positions > 0 {
             parts.push(format!("{} positions", self.positions));
@@ -658,10 +652,6 @@ mod tests {
         r.annotations.inserted = 3;
         r.positions = 2;
         assert_eq!(r.summary(), "annotation sync: 3 new, 2 positions");
-
-        let mut r = SyncReport::default();
-        r.annotations.removed = 1;
-        assert_eq!(r.summary(), "annotation sync: 1 removed");
 
         // Orphaned highlights flagged with a trailing count.
         let mut r = SyncReport::default();

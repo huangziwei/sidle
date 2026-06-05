@@ -43,9 +43,6 @@ pub struct ImportStats {
     /// Span-bearing records (highlight/note) whose text didn't resolve (eid not
     /// in this book's KFX) — still inserted, but flagged here for the caller.
     pub unresolved: usize,
-    /// Annotation rows removed because they were deleted on the device and no
-    /// other device still asserts them (full-mirror delete-propagation).
-    pub removed: usize,
 }
 
 impl ImportStats {
@@ -54,7 +51,6 @@ impl ImportStats {
         self.inserted += other.inserted;
         self.duplicate += other.duplicate;
         self.unresolved += other.unresolved;
-        self.removed += other.removed;
     }
 }
 
@@ -205,7 +201,7 @@ pub fn import_yjr(
 ) -> rusqlite::Result<ImportStats> {
     let book_key = clip_title.map(match_key).unwrap_or_default();
     let mut stats = ImportStats::default();
-    // The device's full current set for this book — feeds delete-reconcile.
+    // The device's full current set for this book — feeds presence recording.
     let mut current_hashes = Vec::with_capacity(annotations.len());
 
     for ann in annotations {
@@ -253,13 +249,12 @@ pub fn import_yjr(
         current_hashes.push(hash);
     }
 
-    // Delete-propagation: reconcile this device's asserted set for the book, so
-    // annotations deleted on the device (and held by no other device) are
-    // removed. Only when both device and book are known — a deviceless import
-    // (no `device_serial`) carries no per-device authority and must stay add-only.
+    // Record this device's asserted set for the book — provenance only; it never
+    // deletes a backup row (Sidle is the durable backup, so a delete on the
+    // device keeps its Sidle copy). Only when both device and book are known — a
+    // deviceless import carries no per-device identity.
     if let (Some(serial), Some(bid)) = (device_serial, book_id) {
-        let removed = db::reconcile_device_book(conn, serial, bid, &current_hashes, now)?;
-        stats.removed += removed.len();
+        db::record_device_book_presence(conn, serial, bid, &current_hashes, now)?;
     }
 
     Ok(stats)
@@ -360,8 +355,6 @@ pub struct DeviceImportReport {
     pub ink_books: usize,
     /// Ink pages written/refreshed across those notebooks.
     pub ink_pages: usize,
-    /// Ink pages removed (erased on the device since last sync).
-    pub ink_removed: usize,
     /// Ink notebooks skipped because their `nbk` was unchanged since last sync.
     pub ink_unchanged: usize,
 }
@@ -462,9 +455,9 @@ pub fn import_collected_with_progress(
 
         // Cheap skip before the expensive `build_index` (which parses the full
         // library KFX): if this device's on-device `.yjr` is byte-for-byte what
-        // we imported last time, there's nothing new (no inserts, and no deletes
-        // to reconcile). The bytes are already in hand (the `.yjr` is tiny — KB),
-        // so this is just a hash + compare. Keyed per device.
+        // we imported last time, there's nothing new to add. The bytes are
+        // already in hand (the `.yjr` is tiny — KB), so this is just a hash +
+        // compare. Keyed per device.
         let yjr_sha = super::import::sha256_of_bytes(&yjr_bytes);
         if db::get_yjr_sync_sha(conn, device_serial, book.id)
             .context("read yjr sync checkpoint")?
@@ -735,29 +728,32 @@ mod tests {
     }
 
     #[test]
-    fn device_delete_propagates_through_import_yjr() {
+    fn device_import_is_additive_never_deletes() {
         let conn = mem_db();
         let book = add_book(&conn, "B");
 
         // DEV1's first sync: two annotations.
         let first = vec![highlight(10, 0, 4), highlight(20, 0, 4)];
         let s1 = import_yjr(&conn, &first, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t1").unwrap();
-        assert_eq!((s1.inserted, s1.removed), (2, 0));
+        assert_eq!(s1.inserted, 2);
         assert_eq!(db::list_annotations_for_book(&conn, book).unwrap().len(), 2);
 
-        // Next DEV1 sync: the second annotation was deleted on the device → GC'd.
+        // Next DEV1 sync drops the second annotation. Sidle is a backup, so its
+        // copy is KEPT — a delete on the device never deletes the backup.
         let second = vec![highlight(10, 0, 4)];
-        let s2 = import_yjr(&conn, &second, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t2").unwrap();
-        assert_eq!(s2.removed, 1, "deleted-on-device annotation is removed");
-        assert_eq!(db::list_annotations_for_book(&conn, book).unwrap().len(), 1);
-
-        // An import with no device serial never reconciles — add-only, as
-        // before. An empty set must not wipe the survivor.
-        let s3 = import_yjr(&conn, &[], &idx(), Some(book), Some("B"), None, None, "t3").unwrap();
-        assert_eq!(s3.removed, 0);
+        import_yjr(&conn, &second, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t2").unwrap();
         assert_eq!(
             db::list_annotations_for_book(&conn, book).unwrap().len(),
-            1,
+            2,
+            "a delete on the device must not delete the Sidle backup"
+        );
+
+        // A deviceless import is likewise add-only.
+        let s3 = import_yjr(&conn, &[], &idx(), Some(book), Some("B"), None, None, "t3").unwrap();
+        assert_eq!(s3.inserted, 0);
+        assert_eq!(
+            db::list_annotations_for_book(&conn, book).unwrap().len(),
+            2,
             "deviceless import never deletes"
         );
     }

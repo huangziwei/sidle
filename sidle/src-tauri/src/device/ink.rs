@@ -63,38 +63,6 @@ pub fn collect_device_ink(
         .collect())
 }
 
-/// Delete orphan `.notebooks/<id>!!PDOC!!notebook` dirs — ink left behind by
-/// sideloaded docs that were since deleted, or by Sidle pushes a reconvert
-/// superseded (the content_id changed). A dir is an orphan iff its `<id>` is a
-/// `!!PDOC!!` content_id NOT in the current library (`known_asins`). Returns the
-/// deleted dir names.
-///
-/// Deliberately conservative about what it spares:
-/// - **library books' PDOC** (`id ∈ known_asins`) — kept (live ink).
-/// - **Amazon Store handwriting** (`!!EBOK!!notebook`) — kept (different suffix;
-///   `pdoc_asin` returns `None`, so it never matches).
-/// - **standalone notebooks** (uuid dirs) — kept (not `!!PDOC!!`).
-///
-/// REFUSES to run when `known_asins` is empty: a transient empty library (DB not
-/// loaded) must never be read as "every PDOC dir is an orphan" and wipe them all.
-/// Scribe/MTP only — a `documents/Sidle`-only Kindle has no `.notebooks`.
-pub fn prune_orphan_pdoc(
-    transport: &dyn Transport,
-    known_asins: &HashSet<String>,
-) -> Result<Vec<String>> {
-    if known_asins.is_empty() {
-        anyhow::bail!(
-            "refusing to prune .notebooks: no library content_ids known \
-             (would treat every PDOC dir as an orphan)"
-        );
-    }
-    let root = TPath::parse(".notebooks");
-    transport.prune_children(&root, &|name| match pdoc_asin(name) {
-        Some(id) => !known_asins.contains(&id),
-        None => false, // not a `!!PDOC!!` dir (EBOK / standalone notebook) — keep
-    })
-}
-
 /// The content_id of a `<id>!!PDOC!!notebook` dir (sideloaded-doc ink), or `None`
 /// for any other entry (a standalone-notebook uuid dir, etc.). Whether the id is
 /// OURS is decided by the caller via the library's asin set — NOT a hex test (our
@@ -165,7 +133,6 @@ pub fn import_collected_ink(
         db::set_ink_sync_sha(conn, device_serial, asin, &nbk_sha, now)?;
         report.ink_books += 1;
         report.ink_pages += stats.pages;
-        report.ink_removed += stats.removed;
     }
     Ok(())
 }
@@ -222,43 +189,5 @@ mod tests {
         assert_eq!(got[0].asin, "97870D063206CBA0CDD733367F356508");
         assert_eq!(got[0].nbk_bytes, b"HEX");
         assert_eq!(got[1].asin, "LXOGKNCCHUP7BXFVEMCJPWBQHRP6HXOP");
-    }
-
-    #[test]
-    fn prune_orphan_pdoc_removes_only_non_library_pdoc_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let nb = tmp.path().join(".notebooks");
-        let mk_pdoc = |id: &str| {
-            let d = nb.join(format!("{id}!!PDOC!!notebook"));
-            std::fs::create_dir_all(&d).unwrap();
-            std::fs::write(d.join("nbk"), b"ink").unwrap();
-        };
-        // One library book (kept), one orphan PDOC (deleted), an Amazon Store
-        // book's handwriting (EBOK — kept), and a standalone notebook (kept).
-        mk_pdoc("LXOGKNCCHUP7BXFVEMCJPWBQHRP6HXOP"); // in library
-        mk_pdoc("DEADBEEFDEADBEEFDEADBEEFDEADBEEF"); // orphan (deleted sideload)
-        std::fs::create_dir_all(nb.join("B000S1LWWG!!EBOK!!notebook")).unwrap();
-        std::fs::write(nb.join("B000S1LWWG!!EBOK!!notebook").join("nbk"), b"ebok").unwrap();
-        std::fs::create_dir_all(nb.join("a1b2c3d4-e5f6-7890-abcd-ef0123456789")).unwrap();
-
-        let known: HashSet<String> =
-            ["LXOGKNCCHUP7BXFVEMCJPWBQHRP6HXOP".to_string()].into_iter().collect();
-        let transport = MassStorageTransport::new(tmp.path().to_path_buf());
-
-        let deleted = prune_orphan_pdoc(&transport, &known).unwrap();
-        assert_eq!(deleted, vec!["DEADBEEFDEADBEEFDEADBEEFDEADBEEF!!PDOC!!notebook"]);
-        assert!(nb.join("LXOGKNCCHUP7BXFVEMCJPWBQHRP6HXOP!!PDOC!!notebook").exists(), "library PDOC kept");
-        assert!(!nb.join("DEADBEEFDEADBEEFDEADBEEFDEADBEEF!!PDOC!!notebook").exists(), "orphan PDOC gone");
-        assert!(nb.join("B000S1LWWG!!EBOK!!notebook").exists(), "Amazon EBOK handwriting kept");
-        assert!(nb.join("a1b2c3d4-e5f6-7890-abcd-ef0123456789").exists(), "standalone notebook kept");
-    }
-
-    #[test]
-    fn prune_orphan_pdoc_refuses_empty_library() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".notebooks")).unwrap();
-        let transport = MassStorageTransport::new(tmp.path().to_path_buf());
-        // Empty known_asins must NOT be read as "everything is an orphan".
-        assert!(prune_orphan_pdoc(&transport, &HashSet::new()).is_err());
     }
 }

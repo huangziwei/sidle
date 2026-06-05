@@ -293,7 +293,7 @@ async fn sync_annotations_on_connect(
         Ok(Ok(report)) => {
             eprintln!(
                 "[sidle/annsync] {serial}: {} books, {} matched ({} unchanged), {} new; \
-                 ink {} books / {} pages ({} unchanged, {} removed)",
+                 ink {} books / {} pages ({} unchanged)",
                 report.yjr_books,
                 report.matched,
                 report.unchanged,
@@ -301,7 +301,6 @@ async fn sync_annotations_on_connect(
                 report.ink_books,
                 report.ink_pages,
                 report.ink_unchanged,
-                report.ink_removed,
             );
             let _ = app.emit("annotations:sync-done", report);
         }

@@ -27,7 +27,7 @@ use tokio::net::TcpListener;
 
 use sidle_core::library::{
     LibraryPaths, db,
-    ingest::{self, CollectedYjr, DeviceImportReport, ImportStats},
+    ingest::{self, CollectedYjr, DeviceImportReport},
     paths::kfx_device_filename,
 };
 
@@ -498,8 +498,7 @@ fn decode_b64_opt(s: Option<&str>) -> Result<Option<Vec<u8>>, StatusCode> {
 /// of unchanged `.yjr` (pure duplicates) does not. (`unresolved` rows are a subset
 /// of `inserted`, so checking `inserted` already covers them.)
 fn import_changed_anything(r: &DeviceImportReport) -> bool {
-    let touched = |s: &ImportStats| s.inserted > 0 || s.removed > 0;
-    touched(&r.annotations) || r.positions > 0 || r.relinked > 0
+    r.annotations.inserted > 0 || r.positions > 0 || r.relinked > 0
 }
 
 /// Atomically write `<root>/.sync-pulse.json` — the cross-process signal the GUI

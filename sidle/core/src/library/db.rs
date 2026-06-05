@@ -303,11 +303,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         );
 
         -- Which devices currently assert each annotation (stable dedup_hash +
-        -- USB serial). A device import is a per-(device,book) authoritative
-        -- set: on sync we mark the current ones seen, drop the rest, and GC any
-        -- annotation no device asserts anymore — so deleting on a device (e.g. a
-        -- transient bookmark) propagates, while one still present on another
-        -- device survives. Additive; never part of the destructive reset.
+        -- USB serial) — PROVENANCE only. On sync we mark the current ones seen
+        -- and drop this device's stale rows, so the table mirrors what each
+        -- device holds now. It never drives deletion of an `annotations` row:
+        -- Sidle is the durable backup, so a delete on the device keeps its Sidle
+        -- copy (see .claude/plans/backup-source-of-truth.md). Additive; never
+        -- part of the destructive reset.
         CREATE TABLE IF NOT EXISTS annotation_device (
             dedup_hash    TEXT NOT NULL,
             device_serial TEXT NOT NULL,
@@ -479,10 +480,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     // Which devices currently assert each ink page — the ink analogue of
-    // `annotation_device`. A page erased on the Scribe drops out of the nbk's
-    // `document_data` (boko excludes orphan containers), so on re-sync the device
-    // asserts fewer `container_id`s; reconcile GCs any `book_ink` row no device
-    // asserts anymore. Keyed per ink page, per device. Additive; never reset.
+    // `annotation_device`, PROVENANCE only. A page erased on the Scribe drops out
+    // of the nbk's `document_data`, so on re-sync the device asserts fewer
+    // `container_id`s and its stale presence rows are dropped — but the `book_ink`
+    // backup row is kept (Sidle is the durable backup). Keyed per ink page, per
+    // device. Additive; never reset.
     conn.execute(
         r#"CREATE TABLE IF NOT EXISTS book_ink_device (
             asin          TEXT NOT NULL,
@@ -1062,7 +1064,7 @@ pub fn apply_bulk_patch(
 ///     by the cascade above — we delete them outright first.
 ///   * `book_ink` + `book_ink_device` + `ink_sync` — handwritten ink, its
 ///     per-device presence, and the per-asin decode checkpoint, all keyed by the
-///     book's `asin` (the ink model's identity; see [`reconcile_ink_device`]).
+///     book's `asin` (the ink model's identity; see [`record_ink_device_presence`]).
 ///
 /// The orphan inbox (`book_id IS NULL`) is intentionally left untouched: those
 /// rows come from a *different* source — annotations/ink imported off a device
@@ -1598,19 +1600,18 @@ pub fn set_ink_sync_sha(
     Ok(())
 }
 
-/// Reconcile one device's ink-page presence for `asin` against the container ids
-/// it currently asserts (decoded from the nbk just pulled). Returns the
-/// `container_id`s of `book_ink` rows GC'd — no device asserts them anymore, so a
-/// page erased on the Scribe propagates — for the caller to drop their cached
-/// SVGs. The ink analogue of [`reconcile_device_book`].
-pub fn reconcile_ink_device(
+/// Record one device's ink-page presence for `asin`: which `container_id`s the
+/// device currently asserts (decoded from the nbk just pulled). **Provenance
+/// only** — it never deletes a backup row; an erased-on-device page keeps its
+/// Sidle backup. The ink analogue of [`record_device_book_presence`].
+pub fn record_ink_device_presence(
     conn: &Connection,
     device_serial: &str,
     asin: &str,
     book_id: Option<i64>,
     current_containers: &[String],
     now: &str,
-) -> rusqlite::Result<Vec<String>> {
+) -> rusqlite::Result<()> {
     for cid in current_containers {
         conn.execute(
             r#"INSERT INTO book_ink_device (asin, container_id, device_serial, book_id, last_seen)
@@ -1621,30 +1622,14 @@ pub fn reconcile_ink_device(
             params![asin, cid, device_serial, book_id, now],
         )?;
     }
-    // Drop this (device, asin)'s presence rows not touched this pass (the pages
-    // erased on the device since last sync).
+    // Drop this (device, asin)'s presence rows not touched this pass (no longer on
+    // the device). Side-table only — the ink page it referenced is preserved.
     conn.execute(
         "DELETE FROM book_ink_device \
          WHERE device_serial = ?1 AND asin = ?2 AND last_seen <> ?3",
         params![device_serial, asin, now],
     )?;
-    // GC every ink page for this asin that no device asserts anymore.
-    let removed: Vec<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT container_id FROM book_ink WHERE asin = ?1 \
-             AND NOT EXISTS (SELECT 1 FROM book_ink_device d \
-                 WHERE d.asin = book_ink.asin AND d.container_id = book_ink.container_id)",
-        )?;
-        let rows = stmt.query_map(params![asin], |r| r.get(0))?;
-        rows.collect::<rusqlite::Result<_>>()?
-    };
-    for cid in &removed {
-        conn.execute(
-            "DELETE FROM book_ink WHERE asin = ?1 AND container_id = ?2",
-            params![asin, cid],
-        )?;
-    }
-    Ok(removed)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1977,31 +1962,27 @@ pub fn set_yjr_sync_sha(
     Ok(())
 }
 
-/// Reconcile one device's annotation presence for a book against the set it
-/// currently asserts (`current_hashes` = the dedup_hashes in the device's
-/// `.yjr` for this book, just imported). Returns the dedup_hashes of annotation
-/// rows that were garbage-collected (no device asserts them anymore).
+/// Record one device's annotation presence for a book: which `dedup_hash`es the
+/// device currently asserts (`current_hashes` = the hashes in the device's `.yjr`
+/// for this book, just imported). This is **provenance only** — it never deletes
+/// a backup row. Sidle is the durable backup; a delete on the device must not
+/// delete Sidle's copy (see `.claude/plans/backup-source-of-truth.md`).
 ///
 /// 1. Mark each current hash seen-now (upsert presence with `last_seen = now`).
-/// 2. Drop this `(device, book)`'s presence rows with an older `last_seen` —
-///    those were deleted on the device since the last sync.
-/// 3. GC every `'yjr'` annotation **for this book** that no device asserts (no
-///    presence row left). This reconciles both freshly-deleted rows *and* legacy
-///    rows imported before presence tracking existed — a book still on the
-///    device is mirrored exactly. A row still asserted by another device
-///    survives; native (`'sidle'`) and clipping rows are never touched. Books
-///    not on any connected device are never reconciled (not passed here), so
-///    their annotations are preserved.
+/// 2. Drop this `(device, book)`'s presence rows with an older `last_seen` — they
+///    are no longer on the device, so the side table stays an accurate mirror of
+///    what each device currently holds. (Only the presence row is dropped; the
+///    `annotations` row it pointed at is kept.)
 ///
 /// `now` must be unique per sync pass (an ISO timestamp is — two passes never
 /// share one), since step 2 uses it as the "seen this pass" marker.
-pub fn reconcile_device_book(
+pub fn record_device_book_presence(
     conn: &Connection,
     device_serial: &str,
     book_id: i64,
     current_hashes: &[String],
     now: &str,
-) -> rusqlite::Result<Vec<String>> {
+) -> rusqlite::Result<()> {
     for hash in current_hashes {
         conn.execute(
             r#"INSERT INTO annotation_device (dedup_hash, device_serial, book_id, last_seen)
@@ -2013,32 +1994,14 @@ pub fn reconcile_device_book(
         )?;
     }
 
-    // Drop this (device, book)'s presence rows not touched this pass (deleted on
-    // the device since last sync).
+    // Drop this (device, book)'s presence rows not touched this pass (no longer on
+    // the device). Side-table only — the annotation it referenced is preserved.
     conn.execute(
         "DELETE FROM annotation_device \
          WHERE device_serial = ?1 AND book_id = ?2 AND last_seen <> ?3",
         params![device_serial, book_id, now],
     )?;
-
-    // GC every device-sourced annotation for this book that no device asserts
-    // anymore — including legacy rows that predate presence tracking.
-    let removed: Vec<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT dedup_hash FROM annotations \
-             WHERE book_id = ?1 AND source = 'yjr' \
-               AND NOT EXISTS (SELECT 1 FROM annotation_device ad WHERE ad.dedup_hash = annotations.dedup_hash)",
-        )?;
-        let rows = stmt.query_map(params![book_id], |r| r.get(0))?;
-        rows.collect::<rusqlite::Result<_>>()?
-    };
-    for hash in &removed {
-        conn.execute(
-            "DELETE FROM annotations WHERE dedup_hash = ?1 AND source = 'yjr'",
-            params![hash],
-        )?;
-    }
-    Ok(removed)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2292,8 +2255,8 @@ mod tests {
         )
         .expect("insert");
         // A device asserts it → a row lands in `annotation_device`.
-        reconcile_device_book(&conn, "DEV", book_id, &["k1".to_string()], "2026-05-25T00:00:01Z")
-            .expect("reconcile");
+        record_device_book_presence(&conn, "DEV", book_id, &["k1".to_string()], "2026-05-25T00:00:01Z")
+            .expect("record presence");
 
         remove_book(&conn, book_id).expect("remove");
 
@@ -2421,7 +2384,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_propagates_device_deletes_but_keeps_shared() {
+    fn presence_tracks_devices_without_deleting_backup() {
         let conn = fresh_db();
         let book_id = insert_minimal(&conn, "sha-recon", "本");
         let mk = |hash: &str| {
@@ -2455,40 +2418,48 @@ mod tests {
         mk("h2");
         mk("h3");
         let hashes = |conn: &Connection| -> Vec<String> {
-            list_annotations_for_book(conn, book_id)
+            let mut v: Vec<String> = list_annotations_for_book(conn, book_id)
                 .unwrap()
                 .into_iter()
                 .map(|r| r.dedup_hash)
-                .collect()
+                .collect();
+            v.sort();
+            v
         };
         let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let presence = |conn: &Connection, dev: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM annotation_device WHERE device_serial = ?1",
+                params![dev],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
 
-        // DEV1's first sync asserts all three — nothing removed.
-        let removed = reconcile_device_book(&conn, "DEV1", book_id, &v(&["h1", "h2", "h3"]), "t1").unwrap();
-        assert!(removed.is_empty());
-        // DEV2 also holds h3 (same bookmark on both devices).
-        reconcile_device_book(&conn, "DEV2", book_id, &v(&["h3"]), "t1b").unwrap();
+        // DEV1 asserts all three; DEV2 also holds h3.
+        record_device_book_presence(&conn, "DEV1", book_id, &v(&["h1", "h2", "h3"]), "t1").unwrap();
+        record_device_book_presence(&conn, "DEV2", book_id, &v(&["h3"]), "t1b").unwrap();
+        assert_eq!(presence(&conn, "DEV1"), 3);
 
-        // h2 deleted on DEV1 → no other device holds it → GC'd.
-        let removed = reconcile_device_book(&conn, "DEV1", book_id, &v(&["h1", "h3"]), "t2").unwrap();
-        assert_eq!(removed, vec!["h2".to_string()]);
-        let h = hashes(&conn);
-        assert!(!h.contains(&"h2".to_string()));
-        assert!(h.contains(&"h1".to_string()) && h.contains(&"h3".to_string()));
+        // h2 dropped on DEV1: its presence row goes, but the BACKUP row stays.
+        record_device_book_presence(&conn, "DEV1", book_id, &v(&["h1", "h3"]), "t2").unwrap();
+        assert_eq!(presence(&conn, "DEV1"), 2, "DEV1 presence mirrors the device");
+        assert_eq!(
+            hashes(&conn),
+            v(&["h1", "h2", "h3"]),
+            "no backup row is ever deleted by a device dropping it"
+        );
 
-        // h3 deleted on DEV1, but DEV2 still asserts it → survives.
-        let removed = reconcile_device_book(&conn, "DEV1", book_id, &v(&["h1"]), "t3").unwrap();
-        assert!(removed.is_empty(), "h3 is still on DEV2");
-        assert!(hashes(&conn).contains(&"h3".to_string()));
-
-        // Now DEV2 drops h3 too → no device holds it → GC'd.
-        let removed = reconcile_device_book(&conn, "DEV2", book_id, &v(&[]), "t4").unwrap();
-        assert_eq!(removed, vec!["h3".to_string()]);
-        assert_eq!(hashes(&conn), vec!["h1".to_string()]);
+        // Dropped on both devices — backup still intact.
+        record_device_book_presence(&conn, "DEV1", book_id, &v(&[]), "t3").unwrap();
+        record_device_book_presence(&conn, "DEV2", book_id, &v(&[]), "t4").unwrap();
+        assert_eq!(presence(&conn, "DEV1"), 0);
+        assert_eq!(presence(&conn, "DEV2"), 0);
+        assert_eq!(hashes(&conn), v(&["h1", "h2", "h3"]), "backup survives");
     }
 
     #[test]
-    fn reconcile_gcs_legacy_rows_but_spares_native() {
+    fn presence_never_deletes_legacy_or_native() {
         let conn = fresh_db();
         let book_id = insert_minimal(&conn, "sha-legacy", "本");
         let mk = |hash: &str, source: &str| {
@@ -2519,16 +2490,14 @@ mod tests {
             .expect("insert");
         };
         // `keep`/`gone` are legacy device imports (no annotation_device rows yet);
-        // `native` is a Sidle-made annotation that must survive a device GC.
+        // `native` is a Sidle-made annotation. None may be deleted by a sync.
         mk("keep", "yjr");
         mk("gone", "yjr");
         mk("native", "sidle");
 
-        // The device's current set has only `keep` — `gone` was deleted on-device
-        // before presence tracking existed.
-        let removed =
-            reconcile_device_book(&conn, "DEV1", book_id, &["keep".to_string()], "t1").unwrap();
-        assert_eq!(removed, vec!["gone".to_string()], "legacy device delete reconciled");
+        // The device's current set has only `keep`. `gone` is no longer on the
+        // device, but Sidle is a backup — nothing is deleted.
+        record_device_book_presence(&conn, "DEV1", book_id, &["keep".to_string()], "t1").unwrap();
 
         let mut left: Vec<String> = list_annotations_for_book(&conn, book_id)
             .unwrap()
@@ -2536,8 +2505,11 @@ mod tests {
             .map(|r| r.dedup_hash)
             .collect();
         left.sort();
-        // `gone` removed; `keep` (still on device) + `native` survive.
-        assert_eq!(left, vec!["keep".to_string(), "native".to_string()]);
+        // All survive — including the device-dropped `gone` and the native row.
+        assert_eq!(
+            left,
+            vec!["gone".to_string(), "keep".to_string(), "native".to_string()]
+        );
     }
 
     /// Migration scrubs any legacy `source='clippings'` rows on `open()` — the
@@ -3064,7 +3036,7 @@ mod tests {
     }
 
     #[test]
-    fn book_ink_reconcile_propagates_device_erase() {
+    fn book_ink_presence_tracks_device_without_deleting_backup() {
         let conn = fresh_db();
         let book = insert_minimal(&conn, "sha", "B");
         let mk = |cid: &'static str| NewBookInk {
@@ -3080,8 +3052,8 @@ mod tests {
         upsert_book_ink(&conn, &mk("c0")).unwrap();
         upsert_book_ink(&conn, &mk("c1")).unwrap();
 
-        // First sync: the device asserts both pages → nothing GC'd.
-        let removed = reconcile_ink_device(
+        // First sync: the device asserts both pages.
+        record_ink_device_presence(
             &conn,
             "DEV",
             "AS1",
@@ -3090,17 +3062,25 @@ mod tests {
             "t1",
         )
         .unwrap();
-        assert!(removed.is_empty());
         assert_eq!(list_book_ink(&conn, book).unwrap().len(), 2);
 
-        // Next sync: c1 erased on the device → GC'd; c0 survives.
-        let removed =
-            reconcile_ink_device(&conn, "DEV", "AS1", Some(book), &["c0".to_string()], "t2")
-                .unwrap();
-        assert_eq!(removed, vec!["c1".to_string()]);
-        let rows = list_book_ink(&conn, book).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].container_id, "c0");
+        // Next sync: c1 erased on the device. Its presence row goes, but the ink
+        // BACKUP page is kept (Sidle is the durable backup).
+        record_ink_device_presence(&conn, "DEV", "AS1", Some(book), &["c0".to_string()], "t2")
+            .unwrap();
+        assert_eq!(
+            list_book_ink(&conn, book).unwrap().len(),
+            2,
+            "an erased-on-device page keeps its backup"
+        );
+        let presence: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM book_ink_device WHERE device_serial = 'DEV'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(presence, 1, "presence mirrors the device (only c0 left)");
     }
 
     #[test]
@@ -3122,7 +3102,7 @@ mod tests {
         )
         .unwrap();
         // A device asserts the page + records a decode checkpoint.
-        reconcile_ink_device(&conn, "DEV", "AS1", Some(book), &["c0".to_string()], "t1").unwrap();
+        record_ink_device_presence(&conn, "DEV", "AS1", Some(book), &["c0".to_string()], "t1").unwrap();
         set_ink_sync_sha(&conn, "DEV", "AS1", "nbksha", "t1").unwrap();
 
         remove_book(&conn, book).unwrap();
