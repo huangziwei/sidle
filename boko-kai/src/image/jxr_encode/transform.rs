@@ -155,6 +155,141 @@ pub fn fdct4x4_stage2(c: &mut [i32; 16]) {
     c[2] = a; c[3] = b; c[6] = cc; c[7] = d;
 }
 
+// ---- Overlap pre-filter (inverse of the decoder's overlap *post* filter) ----
+
+/// Inverse of [`crate::image::jxr_decode::math::t2x2h`] (same `val_round`).
+#[inline]
+pub fn undo_t2x2h(input: [i32; 4], val_round: i32) -> [i32; 4] {
+    let (c0p, c1p, c2p, c3p) = (input[0], input[1], input[2], input[3]);
+    let a = c0p.wrapping_add(c3p);
+    let b = c1p.wrapping_sub(c2p);
+    let t1 = (a.wrapping_sub(b).wrapping_add(val_round)) >> 1;
+    let c3 = t1.wrapping_sub(c2p);
+    let c2 = t1.wrapping_sub(c3p);
+    let c0 = a.wrapping_sub(c3);
+    let c1 = b.wrapping_add(c2);
+    [c0, c1, c2, c3]
+}
+
+/// Inverse of [`crate::image::jxr_decode::math::t2x2h_post`].
+#[inline]
+pub fn undo_t2x2h_post(input: [i32; 4]) -> [i32; 4] {
+    let mut c0 = input[0];
+    let mut c1 = input[1];
+    let mut c2 = input[2];
+    let mut c3 = input[3];
+    c1 = c1.wrapping_sub(c2); // undo `c1 += c2`
+    c0 = c0.wrapping_add(c3); // undo `c0 -= c3`
+    std::mem::swap(&mut c2, &mut c3); // undo the swap
+    c2 = ((c0.wrapping_sub(c1)) >> 1).wrapping_sub(c2); // self-inverse
+    c3 = c3.wrapping_add(c1 >> 1); // undo `c3 -= c1>>1`
+    c0 = c0.wrapping_sub((c3.wrapping_mul(3).wrapping_add(4)) >> 3); // undo `c0 += (3c3+4)>>3`
+    c1 = c1.wrapping_add(c2); // undo `c1 -= c2`
+    [c0, c1, c2, c3]
+}
+
+/// Inverse of [`crate::image::jxr_decode::math::inv_scale`].
+#[inline]
+pub fn undo_scale(c0: i32, c1: i32) -> (i32, i32) {
+    let mut c0 = c0;
+    let mut c1 = c1;
+    c1 = c1.wrapping_add(c0 >> 10);
+    c1 = c1.wrapping_sub(c0 >> 7);
+    c1 = c1.wrapping_sub((c0.wrapping_mul(3)) >> 4);
+    c0 = c0.wrapping_sub((c1.wrapping_mul(3)) >> 3);
+    c1 = (c0 >> 1).wrapping_sub(c1);
+    c0 = c0.wrapping_sub(c1);
+    (c0, c1)
+}
+
+/// Inverse of [`crate::image::jxr_decode::math::inv_toddodd_post`]. Same
+/// `t1`/`t2` reconstruction trick as [`fwd_odd_odd`], different constants and
+/// no output negation.
+#[inline]
+pub fn undo_toddodd_post(input: [i32; 4]) -> [i32; 4] {
+    let mut c0 = input[0];
+    let mut c1 = input[1];
+    let mut c2 = input[2];
+    let mut c3 = input[3];
+    c3 = c3.wrapping_add(c0); // undo `c3 -= c0`
+    let t1 = c3 >> 1;
+    c2 = c2.wrapping_sub(c1); // undo `c2 += c1`
+    let t2 = c2 >> 1;
+    c0 = c0.wrapping_sub(t1); // undo `c0 += t1`
+    c1 = c1.wrapping_add(t2); // undo `c1 -= t2`
+    c0 = c0.wrapping_add((c1.wrapping_mul(3).wrapping_add(4)) >> 3); // undo `c0 -= (3c1+4)>>3`
+    c1 = c1.wrapping_sub((c0.wrapping_mul(3).wrapping_add(2)) >> 2); // undo `c1 += (3c0+2)>>2`
+    c0 = c0.wrapping_add((c1.wrapping_mul(3).wrapping_add(6)) >> 3); // undo `c0 -= (3c1+6)>>3`
+    c1 = c1.wrapping_sub(t2); // undo `c1 += t2`
+    c0 = c0.wrapping_add(t1); // undo `c0 -= t1`
+    c2 = c2.wrapping_add(c1); // undo `c2 -= c1`
+    c3 = c3.wrapping_sub(c0); // undo `c3 += c0`
+    [c0, c1, c2, c3]
+}
+
+/// Forward of [`crate::image::jxr_decode::math::overlap_post_filter_4x4`]:
+/// the decoder's stages applied in reverse, each inverted.
+pub fn overlap_pre_filter_4x4(input: [i32; 16]) -> [i32; 16] {
+    let mut c = input;
+    // undo t2x2h_post
+    let r = undo_t2x2h_post([c[0], c[3], c[12], c[15]]);
+    c[0] = r[0]; c[3] = r[1]; c[12] = r[2]; c[15] = r[3];
+    let r = undo_t2x2h_post([c[1], c[2], c[13], c[14]]);
+    c[1] = r[0]; c[2] = r[1]; c[13] = r[2]; c[14] = r[3];
+    let r = undo_t2x2h_post([c[4], c[7], c[8], c[11]]);
+    c[4] = r[0]; c[7] = r[1]; c[8] = r[2]; c[11] = r[3];
+    let r = undo_t2x2h_post([c[5], c[6], c[9], c[10]]);
+    c[5] = r[0]; c[6] = r[1]; c[9] = r[2]; c[10] = r[3];
+    // undo inv_scale
+    let (a, b) = undo_scale(c[0], c[15]); c[0] = a; c[15] = b;
+    let (a, b) = undo_scale(c[1], c[14]); c[1] = a; c[14] = b;
+    let (a, b) = undo_scale(c[4], c[11]); c[4] = a; c[11] = b;
+    let (a, b) = undo_scale(c[5], c[10]); c[5] = a; c[10] = b;
+    // undo inv_toddodd_post
+    let r = undo_toddodd_post([c[10], c[11], c[14], c[15]]);
+    c[10] = r[0]; c[11] = r[1]; c[14] = r[2]; c[15] = r[3];
+    // undo inv_rotate (== fwd_rotate1)
+    let (a, b) = fwd_rotate1(c[13], c[12]); c[13] = a; c[12] = b;
+    let (a, b) = fwd_rotate1(c[9], c[8]); c[9] = a; c[8] = b;
+    let (a, b) = fwd_rotate1(c[7], c[3]); c[7] = a; c[3] = b;
+    let (a, b) = fwd_rotate1(c[6], c[2]); c[6] = a; c[2] = b;
+    // undo t2x2h
+    let r = undo_t2x2h([c[0], c[3], c[12], c[15]], 0);
+    c[0] = r[0]; c[3] = r[1]; c[12] = r[2]; c[15] = r[3];
+    let r = undo_t2x2h([c[1], c[2], c[13], c[14]], 0);
+    c[1] = r[0]; c[2] = r[1]; c[13] = r[2]; c[14] = r[3];
+    let r = undo_t2x2h([c[4], c[7], c[8], c[11]], 0);
+    c[4] = r[0]; c[7] = r[1]; c[8] = r[2]; c[11] = r[3];
+    let r = undo_t2x2h([c[5], c[6], c[9], c[10]], 0);
+    c[5] = r[0]; c[6] = r[1]; c[9] = r[2]; c[10] = r[3];
+    c
+}
+
+/// Forward of [`crate::image::jxr_decode::math::overlap_post_filter_4`].
+pub fn overlap_pre_filter_4(input: [i32; 4]) -> [i32; 4] {
+    let mut c = input;
+    c[1] = c[1].wrapping_add(c[2]);
+    c[0] = c[0].wrapping_add(c[3]);
+    c[2] = c[2].wrapping_sub((c[1].wrapping_add(1)) >> 1);
+    c[3] = c[3].wrapping_sub((c[0].wrapping_add(1)) >> 1);
+    let (a, b) = fwd_rotate1(c[2], c[3]); c[2] = a; c[3] = b;
+    c[2] = c[2].wrapping_neg();
+    c[3] = c[3].wrapping_neg();
+    c[1] = c[1].wrapping_sub(c[2]);
+    c[0] = c[0].wrapping_sub(c[3]);
+    c[2] = c[2].wrapping_add(c[1] >> 1);
+    c[3] = c[3].wrapping_add(c[0] >> 1);
+    c[1] = c[1].wrapping_sub((c[2].wrapping_mul(3).wrapping_add(4)) >> 3);
+    c[0] = c[0].wrapping_sub((c[3].wrapping_mul(3).wrapping_add(4)) >> 3);
+    let (a, b) = undo_scale(c[1], c[2]); c[1] = a; c[2] = b;
+    let (a, b) = undo_scale(c[0], c[3]); c[0] = a; c[3] = b;
+    c[2] = c[2].wrapping_add((c[1].wrapping_add(1)) >> 1);
+    c[3] = c[3].wrapping_add((c[0].wrapping_add(1)) >> 1);
+    c[1] = c[1].wrapping_sub(c[2]);
+    c[0] = c[0].wrapping_sub(c[3]);
+    c
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +396,61 @@ mod tests {
             fdct4x4_stage2(&mut y);
             dec::str_idct4x4_stage2(&mut y);
             assert_eq!(y, x);
+        }
+    }
+
+    #[test]
+    fn t2x2h_inverts_decoder() {
+        let mut r = Lcg(0xeeee);
+        for _ in 0..5000 {
+            let x = [r.next(), r.next(), r.next(), r.next()];
+            assert_eq!(dec::t2x2h(undo_t2x2h(x, 0), 0), x);
+        }
+    }
+
+    #[test]
+    fn t2x2h_post_inverts_decoder() {
+        let mut r = Lcg(0xbbbb);
+        for _ in 0..5000 {
+            let x = [r.next(), r.next(), r.next(), r.next()];
+            assert_eq!(dec::t2x2h_post(undo_t2x2h_post(x)), x);
+        }
+    }
+
+    #[test]
+    fn scale_inverts_decoder() {
+        let mut r = Lcg(0xdddd);
+        for _ in 0..5000 {
+            let (a, b) = (r.next(), r.next());
+            let (pa, pb) = undo_scale(a, b);
+            assert_eq!(dec::inv_scale(pa, pb), (a, b));
+        }
+    }
+
+    #[test]
+    fn toddodd_post_inverts_decoder() {
+        let mut r = Lcg(0xcccc);
+        for _ in 0..5000 {
+            let x = [r.next(), r.next(), r.next(), r.next()];
+            assert_eq!(dec::inv_toddodd_post(undo_toddodd_post(x)), x);
+        }
+    }
+
+    #[test]
+    fn overlap4x4_inverts_decoder() {
+        let mut r = Lcg(0x9999);
+        for _ in 0..5000 {
+            let x = r.block();
+            assert_eq!(dec::overlap_post_filter_4x4(overlap_pre_filter_4x4(x)), x);
+        }
+    }
+
+    #[test]
+    fn overlap4_inverts_decoder() {
+        let mut r = Lcg(0xaaaa);
+        for _ in 0..5000 {
+            let x = [r.next(), r.next(), r.next(), r.next()];
+            assert_eq!(dec::overlap_post_filter_4(overlap_pre_filter_4(x)), x);
         }
     }
 }
