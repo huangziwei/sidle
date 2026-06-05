@@ -169,6 +169,7 @@ fn import_dir(conn: &rusqlite::Connection, paths: &LibraryPaths, folder: &Path) 
         match notebook::import_notebook(conn, paths, &uuid, &nbk, cover.as_deref(), &updated_at) {
             Ok(notebook::NotebookOutcome::Imported(_)) => summary.imported += 1,
             Ok(notebook::NotebookOutcome::Unchanged(_)) => summary.unchanged += 1,
+            Ok(notebook::NotebookOutcome::Suppressed) => {} // deleted in Sidle — don't resurrect
             Err(e) => summary.failed.push(format!("{uuid}: {e:#}")),
         }
     }

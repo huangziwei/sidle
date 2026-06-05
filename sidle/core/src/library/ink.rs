@@ -116,6 +116,15 @@ pub fn import_ink(
 
     for (i, page) in nb.pages.iter().enumerate() {
         let cid = page.container_id.as_str();
+        current_containers.push(cid.to_string());
+        // Honor a Sidle-side deletion: don't re-add an ink page the user removed
+        // in Sidle (Restore from device clears the record). Presence above keeps
+        // provenance accurate — the device still holds the page.
+        if db::is_deleted(conn, db::DELETION_INK, &db::ink_deletion_key(asin, cid))
+            .context("check ink deletion record")?
+        {
+            continue;
+        }
         let anchor = note_by_container.get(cid).and_then(|n| n.start());
         let host_eid = anchor.map(|h| h.eid as i64);
         let host_linear = anchor.map(|h| h.linear as i64);
@@ -162,7 +171,6 @@ pub fn import_ink(
         if host_page.is_some() {
             stats.anchored += 1;
         }
-        current_containers.push(cid.to_string());
     }
 
     // Record this device's asserted set (provenance only — never deletes a backup

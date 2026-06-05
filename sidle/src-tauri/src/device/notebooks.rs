@@ -118,6 +118,7 @@ pub fn import_device_notebooks(
                 match import_pulled(&conn, paths, &p) {
                     Ok(NotebookOutcome::Imported(_)) => summary.imported += 1,
                     Ok(NotebookOutcome::Unchanged(_)) => summary.unchanged += 1,
+                    Ok(NotebookOutcome::Suppressed) => {} // deleted in Sidle — don't resurrect
                     Err(e) => summary.failed.push(format!("{name}: {e:#}")),
                 }
             }

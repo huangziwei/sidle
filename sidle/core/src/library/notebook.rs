@@ -21,6 +21,10 @@ pub enum NotebookOutcome {
     Imported(NotebookRow),
     /// Same uuid + content hash already present; nothing rewritten.
     Unchanged(NotebookRow),
+    /// Skipped: the user deleted this notebook in Sidle (a deletion record
+    /// exists), so a device/folder re-import must not resurrect it. "Restore
+    /// from device" clears the record.
+    Suppressed,
 }
 
 /// Import a single Scribe notebook into the library from a source `nbk` file
@@ -39,6 +43,11 @@ pub fn import_notebook(
     src_cover: Option<&Path>,
     updated_at: &str,
 ) -> Result<NotebookOutcome> {
+    // Honor a Sidle-side deletion: don't resurrect a notebook the user removed
+    // in Sidle (Restore from device clears the record).
+    if db::is_deleted(conn, db::DELETION_NOTEBOOK, uuid).context("check notebook deletion record")? {
+        return Ok(NotebookOutcome::Suppressed);
+    }
     let bytes =
         std::fs::read(src_nbk).with_context(|| format!("read nbk {}", src_nbk.display()))?;
     let sha = sha256_hex(&bytes);

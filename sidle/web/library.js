@@ -1351,6 +1351,7 @@ function wireDevice() {
   });
   $("#btn-send-unsent").addEventListener("click", () => sendUnsent());
   $("#btn-sync-annotations").addEventListener("click", () => syncAnnotations());
+  $("#btn-restore-annotations")?.addEventListener("click", () => restoreFromDevice());
   $("#btn-import-all-orphans").addEventListener("click", () => importAllOrphans());
   $("#btn-device-eject").addEventListener("click", () => ejectDevice());
   // Clicks INSIDE the popover shouldn't close it.
@@ -1632,6 +1633,8 @@ function updateDeviceUI(info) {
     // connected. (MTP yields records only if the device exposes .sdr/.yjr.)
     const syncBtn = $("#btn-sync-annotations");
     if (syncBtn) syncBtn.disabled = false;
+    const restoreBtn = $("#btn-restore-annotations");
+    if (restoreBtn) restoreBtn.disabled = false;
     $("#device-model").textContent = info.model || "Kindle";
     $("#device-serial").textContent = info.serial || "—";
     $("#device-transport").textContent = transportLabel(info.transport);
@@ -1680,6 +1683,8 @@ function updateDeviceUI(info) {
     if (ejectBtn) ejectBtn.hidden = true;
     const syncBtn = $("#btn-sync-annotations");
     if (syncBtn) syncBtn.disabled = true;
+    const restoreBtn = $("#btn-restore-annotations");
+    if (restoreBtn) restoreBtn.disabled = true;
     render();
   }
 }
@@ -2060,6 +2065,59 @@ async function syncAnnotations() {
     renderQueue();
     btn.textContent = prevLabel;
     // Re-enable as long as a Kindle (either transport) is still connected.
+    btn.disabled = !state.device;
+    if (prog) setTimeout(() => (prog.hidden = true), 2000);
+  }
+}
+
+// "Restore from device" — re-import everything the Kindle holds and UNDO
+// Sidle-side deletions (so an accidental delete is recoverable). Two-click
+// confirm, since it reverses deletions: first click arms, second runs.
+async function restoreFromDevice() {
+  const btn = $("#btn-restore-annotations");
+  if (!btn || btn.disabled) return;
+  if (btn.dataset.armed !== "1") {
+    btn.dataset.armed = "1";
+    btn.dataset.label = btn.textContent;
+    btn.textContent = "Click again to restore";
+    setTimeout(() => {
+      if (btn.dataset.armed === "1") {
+        btn.dataset.armed = "";
+        btn.textContent = btn.dataset.label || "Restore from device";
+      }
+    }, 3000);
+    return;
+  }
+  btn.dataset.armed = "";
+  const label = btn.dataset.label || "Restore from device";
+  btn.disabled = true;
+  btn.textContent = "Restoring…";
+  const prog = $("#device-send-progress");
+  if (prog) {
+    prog.hidden = false;
+    prog.textContent = "restoring from device…";
+  }
+  state.annotationSync = { stage: "annotations", current: 0, total: 0, label: "" };
+  renderQueue();
+  try {
+    const report = await window.api.invoke("device_restore");
+    const added = report?.annotations?.inserted ?? 0;
+    const ink = report?.ink_pages ?? 0;
+    if (added > 0 || ink > 0) {
+      const parts = [];
+      if (added > 0) parts.push(`${added} annotation${added === 1 ? "" : "s"}`);
+      if (ink > 0) parts.push(`${ink} handwritten page${ink === 1 ? "" : "s"}`);
+      showToast(`Restored ${parts.join(" + ")}`);
+    } else {
+      showToast("Nothing to restore — backup already matches the device");
+    }
+    window.sidleReader?.reloadAnnotations?.();
+  } catch (e) {
+    showToast(`restore failed: ${e}`, true);
+  } finally {
+    state.annotationSync = false;
+    renderQueue();
+    btn.textContent = label;
     btn.disabled = !state.device;
     if (prog) setTimeout(() => (prog.hidden = true), 2000);
   }

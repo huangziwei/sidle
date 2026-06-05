@@ -628,6 +628,9 @@ pub async fn annotation_create(
         imported_at: &now,
         source: ingest::SOURCE_SIDLE,
     };
+    // Manually (re)creating an annotation is explicit intent — clear any prior
+    // Sidle-side deletion record for this hash so the device sync won't suppress it.
+    db::clear_deletion(&conn, db::DELETION_ANNOTATION, &hash).map_err(|e| e.to_string())?;
     db::insert_annotation(&conn, &row).map_err(|e| e.to_string())?;
     // Fresh insert or pre-existing duplicate — the canonical row is the one with
     // this hash.

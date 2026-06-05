@@ -98,7 +98,10 @@ pub struct BookRow {
 /// bumped by the user-curation mutators (`update_metadata` / `apply_bulk_patch`
 /// / the ASIN edit), and used by library merge's newest-wins tiebreak. See
 /// .claude/plans/library-merge.md.
-pub const SCHEMA_VERSION: i64 = 7;
+/// v8: added `artifact_deletions` — tombstones for Sidle-side deletes so the
+/// additive device sync won't re-add a removed annotation / ink page / notebook
+/// (Sidle is the curated backup). See .claude/plans/backup-source-of-truth.md.
+pub const SCHEMA_VERSION: i64 = 8;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -510,6 +513,22 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             nbk_sha       TEXT NOT NULL,
             synced_at     TEXT NOT NULL,
             PRIMARY KEY (device_serial, asin)
+        )"#,
+        [],
+    )?;
+
+    // Deletion records (tombstones). A Sidle-side delete of an annotation / ink
+    // page / notebook records its stable identity here; the additive device sync
+    // skips re-adding a recorded key, so a manual delete in Sidle sticks (Sidle is
+    // the curated backup). "Restore from device" clears these. `key` is the
+    // annotation `dedup_hash`, the ink `asin\x1fcontainer_id`, or the notebook
+    // `uuid`. ADDITIVE and precious: never part of the destructive reset.
+    conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS artifact_deletions (
+            kind       TEXT NOT NULL,
+            key        TEXT NOT NULL,
+            deleted_at TEXT NOT NULL,
+            PRIMARY KEY (kind, key)
         )"#,
         [],
     )?;
@@ -1426,8 +1445,11 @@ pub fn remove_notebook(conn: &Connection, id: i64) -> rusqlite::Result<Option<St
             |r| r.get(0),
         )
         .optional()?;
-    if uuid.is_some() {
+    if let Some(u) = &uuid {
         conn.execute("DELETE FROM notebooks WHERE id = ?1", params![id])?;
+        // Tombstone it so a device/folder re-import won't resurrect it (Restore
+        // from device clears this).
+        record_deletion(conn, DELETION_NOTEBOOK, u)?;
     }
     Ok(uuid)
 }
@@ -1855,6 +1877,9 @@ pub fn delete_annotation(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
             "DELETE FROM annotation_device WHERE dedup_hash = ?1",
             params![h],
         )?;
+        // Tombstone it so the additive device sync won't re-add it (Restore from
+        // device clears this).
+        record_deletion(conn, DELETION_ANNOTATION, &h)?;
     }
     Ok(n > 0)
 }
@@ -1960,6 +1985,94 @@ pub fn set_yjr_sync_sha(
         params![device_serial, book_id, yjr_sha, now],
     )?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Deletion records (tombstones) — a Sidle-side delete records the artifact's
+// stable identity so the additive device sync won't re-add it (Sidle is the
+// curated backup). "Restore from device" clears them. See
+// .claude/plans/backup-source-of-truth.md.
+// ---------------------------------------------------------------------------
+
+/// `artifact_deletions.kind` discriminators.
+pub const DELETION_ANNOTATION: &str = "annotation";
+pub const DELETION_INK: &str = "ink";
+pub const DELETION_NOTEBOOK: &str = "notebook";
+
+/// The `artifact_deletions` key for an ink page: `asin` + US (0x1f) + `container_id`.
+pub fn ink_deletion_key(asin: &str, container_id: &str) -> String {
+    format!("{asin}\u{1f}{container_id}")
+}
+
+/// Record a Sidle-side deletion so the additive sync won't re-add this artifact.
+pub fn record_deletion(conn: &Connection, kind: &str, key: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO artifact_deletions (kind, key, deleted_at) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(kind, key) DO UPDATE SET deleted_at = excluded.deleted_at",
+        params![kind, key, now_iso()],
+    )?;
+    Ok(())
+}
+
+/// Whether the user deleted this artifact in Sidle (so sync must not re-add it).
+pub fn is_deleted(conn: &Connection, kind: &str, key: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT 1 FROM artifact_deletions WHERE kind = ?1 AND key = ?2",
+        params![kind, key],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|o| o.is_some())
+}
+
+/// Clear one deletion record (un-delete a single artifact).
+pub fn clear_deletion(conn: &Connection, kind: &str, key: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM artifact_deletions WHERE kind = ?1 AND key = ?2",
+        params![kind, key],
+    )?;
+    Ok(())
+}
+
+/// Clear every deletion record — "Restore from device" un-suppresses all
+/// Sidle-side deletions so anything still on a device is re-imported. Returns
+/// how many records were cleared.
+pub fn clear_all_deletions(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute("DELETE FROM artifact_deletions", [])
+}
+
+/// Drop a device's import checkpoints (`yjr_sync` + `ink_sync`) so the next sync
+/// re-pulls everything — used by "Restore from device" to bypass the unchanged
+/// fast-path, so a Sidle-deleted item still on the device is actually re-imported.
+pub fn clear_device_sync_checkpoints(
+    conn: &Connection,
+    device_serial: &str,
+) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM yjr_sync WHERE device_serial = ?1", params![device_serial])?;
+    conn.execute("DELETE FROM ink_sync WHERE device_serial = ?1", params![device_serial])?;
+    Ok(())
+}
+
+/// Delete one ink page by id: removes the row, its device-presence rows, and
+/// tombstones it (so a re-sync won't re-add it; Restore clears it). Returns its
+/// `(asin, container_id)` so the caller can drop the cached SVGs.
+pub fn delete_book_ink(conn: &Connection, id: i64) -> rusqlite::Result<Option<(String, String)>> {
+    let key: Option<(String, String)> = conn
+        .query_row(
+            "SELECT asin, container_id FROM book_ink WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((asin, cid)) = &key {
+        conn.execute("DELETE FROM book_ink WHERE id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM book_ink_device WHERE asin = ?1 AND container_id = ?2",
+            params![asin, cid],
+        )?;
+        record_deletion(conn, DELETION_INK, &ink_deletion_key(asin, cid))?;
+    }
+    Ok(key)
 }
 
 /// Record one device's annotation presence for a book: which `dedup_hash`es the
@@ -3081,6 +3194,47 @@ mod tests {
             )
             .unwrap();
         assert_eq!(presence, 1, "presence mirrors the device (only c0 left)");
+    }
+
+    #[test]
+    fn delete_book_ink_records_tombstone() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha", "B");
+        upsert_book_ink(
+            &conn,
+            &NewBookInk {
+                book_id: Some(book),
+                asin: "AS1",
+                container_id: "c0",
+                host_page: Some(1),
+                host_eid: Some(1),
+                host_linear: Some(1),
+                nbk_sha256: Some("s"),
+                imported_at: "t0",
+            },
+        )
+        .unwrap();
+        let id = list_book_ink(&conn, book).unwrap()[0].id;
+
+        let key = delete_book_ink(&conn, id).unwrap();
+        assert_eq!(key, Some(("AS1".to_string(), "c0".to_string())));
+        assert!(list_book_ink(&conn, book).unwrap().is_empty());
+        assert!(
+            is_deleted(&conn, DELETION_INK, &ink_deletion_key("AS1", "c0")).unwrap(),
+            "deleting an ink page tombstones it"
+        );
+    }
+
+    #[test]
+    fn remove_notebook_records_tombstone_and_clear_undoes_it() {
+        let conn = fresh_db();
+        let id = upsert_notebook(&conn, "uuid-1", 3, "sha", "t0", "t0").unwrap();
+        let uuid = remove_notebook(&conn, id).unwrap();
+        assert_eq!(uuid.as_deref(), Some("uuid-1"));
+        assert!(is_deleted(&conn, DELETION_NOTEBOOK, "uuid-1").unwrap());
+
+        clear_deletion(&conn, DELETION_NOTEBOOK, "uuid-1").unwrap();
+        assert!(!is_deleted(&conn, DELETION_NOTEBOOK, "uuid-1").unwrap());
     }
 
     #[test]

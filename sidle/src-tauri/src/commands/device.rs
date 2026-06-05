@@ -266,6 +266,77 @@ pub async fn annotations_import_from_device(
         .map_err(|e| e.to_string())
 }
 
+/// "Restore from device" — re-import everything the connected Kindle holds and
+/// UNDO Sidle-side deletions: clear all deletion records so accidentally-deleted
+/// annotations / ink / notebooks the device still has come back, then force a full
+/// re-pull (clear this device's sync checkpoints). NEVER deletes a Sidle row. See
+/// .claude/plans/backup-source-of-truth.md.
+#[tauri::command]
+pub async fn device_restore(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ingest::DeviceImportReport, String> {
+    let device = state
+        .device
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "no Kindle connected".to_string())?;
+    let transport = ensure_transport(&state.transport, &device)
+        .await
+        .map_err(|e| e.to_string())?;
+    let db_handle = state.db.clone();
+    let paths = state.paths.clone();
+    let cell = state.transport.clone();
+    let serial = device.serial.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ingest::DeviceImportReport> {
+        // Undo every Sidle-side deletion + force a full re-pull, so anything still
+        // on the device is re-imported.
+        {
+            let conn = db_handle.blocking_lock();
+            db::clear_all_deletions(&conn)?;
+            db::clear_device_sync_checkpoints(&conn, &serial)?;
+        }
+        let on_progress = |stage: &str, current: usize, total: usize, label: &str| {
+            let _ = app.emit(
+                "annotations:sync-progress",
+                crate::device::annotations::SyncProgress {
+                    stage: stage.to_string(),
+                    current,
+                    total,
+                    label: label.to_string(),
+                },
+            );
+        };
+        let report = crate::device::annotations::import_device_annotations(
+            &device,
+            transport.as_ref(),
+            &db_handle,
+            &paths,
+            &on_progress,
+        )?;
+        // Notebooks ride a separate import path; re-pull them too (their records
+        // were just cleared, so any deleted ones come back).
+        let _ = crate::device::notebooks::import_device_notebooks(
+            transport.as_ref(),
+            &paths,
+            &db_handle,
+            &|_done, _total| {},
+        );
+        Ok(report)
+    })
+    .await;
+
+    if matches!(result, Err(_) | Ok(Err(_))) {
+        evict_transport(&cell).await;
+    }
+
+    result
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
 /// Skip files macOS scatters into FAT/exFAT mounts as a side effect of
 /// xattr/Finder-metadata handling: `._<filename>` AppleDouble companions
 /// (the real bug — they'd otherwise be parsed as a second copy of the

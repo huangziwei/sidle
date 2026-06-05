@@ -220,6 +220,13 @@ pub fn import_yjr(
             stats.unresolved += 1;
         }
         let hash = dedup_hash(&book_key, kind, &r);
+        // Honor a Sidle-side deletion: the user removed this in Sidle, so the
+        // backup must not re-add it (Restore from device clears the record).
+        // Presence is still recorded below — the device does hold it.
+        if db::is_deleted(conn, db::DELETION_ANNOTATION, &hash)? {
+            current_hashes.push(hash);
+            continue;
+        }
         let row = NewAnnotation {
             dedup_hash: &hash,
             book_id,
@@ -755,6 +762,36 @@ mod tests {
             db::list_annotations_for_book(&conn, book).unwrap().len(),
             2,
             "deviceless import never deletes"
+        );
+    }
+
+    #[test]
+    fn device_import_honors_and_restores_deletion_record() {
+        let conn = mem_db();
+        let book = add_book(&conn, "B");
+        let anns = vec![highlight(10, 0, 4)];
+        let s1 = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t1").unwrap();
+        assert_eq!(s1.inserted, 1);
+
+        // Delete it in Sidle → writes a deletion record.
+        let id = db::list_annotations_for_book(&conn, book).unwrap()[0].id;
+        assert!(db::delete_annotation(&conn, id).unwrap());
+
+        // Re-sync the same device set → the deletion sticks (not re-added).
+        import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t2").unwrap();
+        assert_eq!(
+            db::list_annotations_for_book(&conn, book).unwrap().len(),
+            0,
+            "a Sidle-side delete must survive re-sync"
+        );
+
+        // Restore (clear records) → re-sync re-adds it.
+        db::clear_all_deletions(&conn).unwrap();
+        import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t3").unwrap();
+        assert_eq!(
+            db::list_annotations_for_book(&conn, book).unwrap().len(),
+            1,
+            "Restore from device re-adds a previously-deleted annotation"
         );
     }
 

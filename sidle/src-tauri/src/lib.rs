@@ -91,6 +91,7 @@ pub fn run() {
             commands::device::device_delete,
             commands::device::device_import_orphan,
             commands::device::annotations_import_from_device,
+            commands::device::device_restore,
             commands::device::kual_status,
             commands::device::kual_install,
             commands::device::kual_stage_dist,
