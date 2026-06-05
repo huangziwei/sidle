@@ -56,16 +56,64 @@ pub struct ImageInput<'a> {
 }
 
 /// Encode 8-bit pixels into a JPEG-XR file (TIFF container + WMPHOTO
-/// codestream). `quality` is `0..=100` (maps to QP; 100 = lossless).
+/// codestream). `quality` is reserved (lossless DC for now).
 ///
-/// Scaffolding: the codestream stages land in Phases 1–4.
+/// Current support: grayscale, a single 16×16 macroblock, **DCONLY** (so it is
+/// exact only for flat blocks — the LP/HP bands and multi-MB land next). This
+/// is the first end-to-end slice: container + headers + forward transform + DC
+/// coding, decodable by `jxr_decode`.
 pub fn encode(
-    _input: &ImageInput<'_>,
-    _mode: ColorMode,
+    input: &ImageInput<'_>,
+    mode: ColorMode,
     _quality: u8,
 ) -> Result<Vec<u8>, EncodeError> {
-    Err(EncodeError::NotImplemented(
-        "codestream assembly (quant/entropy/container pending)",
+    if mode == ColorMode::Color {
+        return Err(EncodeError::NotImplemented("color mode (Phase 6)"));
+    }
+    if input.planes.len() != 1 {
+        return Err(EncodeError::Unsupported(format!(
+            "grayscale expects 1 plane, got {}",
+            input.planes.len()
+        )));
+    }
+    let (w, h) = (input.width, input.height);
+    if (w, h) != (16, 16) {
+        return Err(EncodeError::Unsupported(
+            "only a single 16×16 macroblock is supported so far".into(),
+        ));
+    }
+    let luma = &input.planes[0];
+    if luma.len() != 256 {
+        return Err(EncodeError::Unsupported("plane len != width*height".into()));
+    }
+
+    // Pixels → samples (BD8 bias) → forward transform → DC coefficient.
+    let mut samples = [0i32; 256];
+    for (s, &px) in samples.iter_mut().zip(luma.iter()) {
+        *s = px as i32 - 128;
+    }
+    let mb_buffer = transform::forward_transform_mb(&samples);
+    let dc = mb_buffer[0]; // mb_dclp[0]; DC QP = 0 ⇒ coded value == this
+
+    // Assemble the codestream.
+    let mut bw = bitstream::BitWriter::new();
+    codestream::write_image_header(&mut bw, w, h);
+    codestream::write_image_plane_header_gray_dconly(&mut bw, 0); // dc_quant 0 ⇒ scaling 1
+    codestream::write_vlw_esc(&mut bw, 0); // subsequent_bytes = 0 (no profile/level)
+    codestream::write_common_tile_header(&mut bw);
+    // Single top-left MB: NO_PREDICTION, fresh model (m_bits = (2-DC)*4 = 8),
+    // fresh abs-level table (index 0).
+    let model_bits = 8;
+    let abs_table = crate::image::jxr_decode::tables::abs_level_index(0);
+    coeff::encode_dc_value(&mut bw, dc, model_bits, abs_table);
+    bw.align_to_byte(); // discard_remainder_bits after the tile
+
+    let codestream = bw.finish();
+    Ok(container::write_container(
+        &codestream,
+        w,
+        h,
+        &container::pixel_format::GRAY8,
     ))
 }
 
@@ -75,7 +123,6 @@ mod tests {
 
     /// Round-trip oracle: decode JXR bytes straight to i32 planes via the
     /// decoder, bypassing its JPEG re-encode in `jxr_decode::transcode`.
-    #[allow(dead_code)]
     fn decode_to_planes(jxr: &[u8]) -> crate::image::jxr_decode::decoder::DecodedImage {
         let container = crate::image::jxr_decode::container::parse(jxr).expect("container parse");
         crate::image::jxr_decode::decoder::Decoder::new(container.image_data)
@@ -84,20 +131,22 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "encoder codestream not implemented yet (phases 1-4); harness wired, enable when encode() is real"]
-    fn roundtrip_grayscale_pixels() {
-        let (w, h) = (16u32, 16u32);
-        let plane: Vec<u8> = (0..w * h).map(|i| (i % 251) as u8).collect();
-        let input = ImageInput {
-            width: w,
-            height: h,
-            planes: std::slice::from_ref(&plane),
-        };
-        let jxr = encode(&input, ColorMode::Grayscale, 100).expect("encode");
-        let decoded = decode_to_planes(&jxr);
-        assert_eq!((decoded.width, decoded.height), (w, h));
-        for (i, &px) in plane.iter().enumerate() {
-            assert_eq!(decoded.image_plane[0][i], px as i32, "pixel {i} mismatch");
+    fn roundtrip_constant_grayscale_dconly() {
+        // DCONLY reconstructs a flat block exactly (LP/HP are zero): encode each
+        // constant value, decode with the real decoder, expect identical pixels.
+        for val in [128u8, 0, 255, 64, 100, 200] {
+            let plane = vec![val; 256];
+            let input = ImageInput {
+                width: 16,
+                height: 16,
+                planes: std::slice::from_ref(&plane),
+            };
+            let jxr = encode(&input, ColorMode::Grayscale, 0).expect("encode");
+            let decoded = decode_to_planes(&jxr);
+            assert_eq!((decoded.width, decoded.height), (16, 16));
+            for (i, &got) in decoded.image_plane[0].iter().enumerate() {
+                assert_eq!(got, val as i32, "val={val} pixel {i}");
+            }
         }
     }
 }

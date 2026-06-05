@@ -9,6 +9,82 @@
 //! directly.
 
 use super::bitstream::BitWriter;
+use std::collections::HashMap;
+
+/// Encode-side inverse of the decoder's `decode_abs_level` (value path only;
+/// the adaptive table *index* is chosen by the caller and the discriminator
+/// update is the caller's responsibility across MBs). Emits `level` (`>= 2`)
+/// with the abs-level Huffman `table` plus the fixed/escape suffix bits.
+pub fn encode_abs_level(bw: &mut BitWriter, table: &HashMap<u64, i32>, level: i32) {
+    use super::entropy::write_huff;
+    const REMAP: [i32; 6] = [2, 3, 4, 6, 10, 14];
+    const FIXED: [u32; 6] = [0, 0, 1, 2, 2, 2];
+    debug_assert!(level >= 2);
+    if level <= 17 {
+        let idx = match level {
+            2 => 0,
+            3 => 1,
+            4..=5 => 2,
+            6..=9 => 3,
+            10..=13 => 4,
+            _ => 5, // 14..=17
+        };
+        write_huff(bw, table, idx as i32);
+        if FIXED[idx] > 0 {
+            bw.write_bits((level - REMAP[idx]) as u64, FIXED[idx]);
+        }
+    } else {
+        write_huff(bw, table, 6); // escape index
+        // i_fixed = floor(log2(level - 2)); level = 2 + 2^i_fixed + extra.
+        let mut i_fixed = 4u32;
+        while 2 + (1i64 << (i_fixed + 1)) <= level as i64 {
+            i_fixed += 1;
+        }
+        // Nested length code: 4 bits (i_fixed-4), escaping at 19 (+2 bits) and 22 (+3 bits).
+        if i_fixed <= 18 {
+            bw.write_bits((i_fixed - 4) as u64, 4);
+        } else if i_fixed <= 21 {
+            bw.write_bits(15, 4);
+            bw.write_bits((i_fixed - 19) as u64, 2);
+        } else {
+            bw.write_bits(15, 4);
+            bw.write_bits(3, 2);
+            bw.write_bits((i_fixed - 22) as u64, 3);
+        }
+        let extra = level as i64 - 2 - (1i64 << i_fixed);
+        bw.write_bits(extra as u64, i_fixed);
+    }
+}
+
+/// Encode one DC coefficient for a single component with no spatial prediction
+/// (e.g. the first macroblock), as `mb_dc` + `decode_dc` expect: the
+/// `b_abs_level` flag, an optional abs-level VLC for the high part, the
+/// `model_bits` low-part refinement, then a sign bit iff the value is nonzero.
+/// `abs_table` is the abs-level Huffman table for the current adaptive index.
+/// Returns `b_abs_level` (the caller folds it into the model update).
+pub fn encode_dc_value(
+    bw: &mut BitWriter,
+    value: i32,
+    model_bits: i32,
+    abs_table: &HashMap<u64, i32>,
+) -> bool {
+    let mag = value.unsigned_abs() as i64;
+    let m = model_bits as u32;
+    let high = (mag >> m) as i32; // i_dc >> model_bits
+    let b_abs_level = high > 0;
+    bw.write_flag(b_abs_level); // mb_dc reads this before decode_dc
+    if b_abs_level {
+        // decode_dc computes i_dc_high = decode_abs_level() - 1, so level = high + 1.
+        encode_abs_level(bw, abs_table, high + 1);
+    }
+    if m > 0 {
+        bw.write_bits((mag & ((1i64 << m) - 1)) as u64, m);
+    }
+    if mag != 0 {
+        bw.write_flag(value < 0);
+    }
+    b_abs_level
+}
 
 /// Encode-side inverse of the decoder's `refine_lp`.
 ///

@@ -12,6 +12,8 @@
 //! All arithmetic is `wrapping_*`, matching the decoder, so the round trip is
 //! exact for every `i32` input.
 
+use crate::image::jxr_decode::consts::MB_PIXEL_MAP;
+
 /// Inverse of [`crate::image::jxr_decode::math::irotate1`].
 #[inline]
 pub fn fwd_rotate1(a: i32, b: i32) -> (i32, i32) {
@@ -153,6 +155,48 @@ pub fn fdct4x4_stage2(c: &mut [i32; 16]) {
     c[8] = a; c[12] = b; c[9] = cc; c[13] = d;
     let (a, b, cc, d) = fwd_odd(c[2], c[3], c[6], c[7]);
     c[2] = a; c[3] = b; c[6] = cc; c[7] = d;
+}
+
+/// Forward transform of one 16×16 macroblock of samples into the 256-entry
+/// `mb_buffer` (single component). Exact inverse of the decoder's
+/// `second_level_coefficient_combination` → `second_level_inverse_transform`
+/// → `first_level_inverse_transform` chain, so `decode(encode(x)) == x`.
+///
+/// `samples[row * 16 + col]`, `row`/`col` in `0..16`. The MB DC ends at
+/// `out[0]` (== `mb_dclp[0]`); LP at `out[16 * ICT4X4_INV_PERM[1..16]]`; HP
+/// within each block. No overlap (caller handles the no-overlap config).
+pub fn forward_transform_mb(samples: &[i32; 256]) -> [i32; 256] {
+    let mut buf = [0i32; 256];
+    // Inverse of second_level_coefficient_combination: scatter pixels into the
+    // permuted per-block layout. Block (bx,by) lives at base by*16 + bx*64.
+    for by in 0..4 {
+        for bx in 0..4 {
+            let block_base = by * 16 + bx * 64;
+            for py in 0..4 {
+                for px in 0..4 {
+                    let within = MB_PIXEL_MAP[px + py * 4];
+                    buf[block_base + within] = samples[(by * 4 + py) * 16 + (bx * 4 + px)];
+                }
+            }
+        }
+    }
+    // Inverse of second_level_inverse_transform: forward DCT on each 4×4 block.
+    for j in 0..16 {
+        let mut block = [0i32; 16];
+        block.copy_from_slice(&buf[j * 16..j * 16 + 16]);
+        fdct4x4_stage1(&mut block);
+        buf[j * 16..j * 16 + 16].copy_from_slice(&block);
+    }
+    // Inverse of first_level_inverse_transform: forward DCT on the 16 block DCs.
+    let mut dclp = [0i32; 16];
+    for j in 0..16 {
+        dclp[j] = buf[j * 16];
+    }
+    fdct4x4_stage2(&mut dclp);
+    for j in 0..16 {
+        buf[j * 16] = dclp[j];
+    }
+    buf
 }
 
 // ---- Overlap pre-filter (inverse of the decoder's overlap *post* filter) ----
