@@ -12,10 +12,11 @@ use super::bitstream::BitWriter;
 use std::collections::HashMap;
 
 /// Encode-side inverse of the decoder's `decode_abs_level` (value path only;
-/// the adaptive table *index* is chosen by the caller and the discriminator
-/// update is the caller's responsibility across MBs). Emits `level` (`>= 2`)
-/// with the abs-level Huffman `table` plus the fixed/escape suffix bits.
-pub fn encode_abs_level(bw: &mut BitWriter, table: &HashMap<u64, i32>, level: i32) {
+/// the adaptive table *index* is chosen by the caller). Emits `level` (`>= 2`)
+/// with the abs-level Huffman `table` plus the fixed/escape suffix bits, and
+/// returns the `abs_level_index` (0..=6) the caller folds into the
+/// discriminator (`ABS_LEVEL_INDEX_DELTA`).
+pub fn encode_abs_level(bw: &mut BitWriter, table: &HashMap<u64, i32>, level: i32) -> i32 {
     use super::entropy::write_huff;
     const REMAP: [i32; 6] = [2, 3, 4, 6, 10, 14];
     const FIXED: [u32; 6] = [0, 0, 1, 2, 2, 2];
@@ -33,6 +34,7 @@ pub fn encode_abs_level(bw: &mut BitWriter, table: &HashMap<u64, i32>, level: i3
         if FIXED[idx] > 0 {
             bw.write_bits((level - REMAP[idx]) as u64, FIXED[idx]);
         }
+        idx as i32
     } else {
         write_huff(bw, table, 6); // escape index
         // i_fixed = floor(log2(level - 2)); level = 2 + 2^i_fixed + extra.
@@ -53,29 +55,30 @@ pub fn encode_abs_level(bw: &mut BitWriter, table: &HashMap<u64, i32>, level: i3
         }
         let extra = level as i64 - 2 - (1i64 << i_fixed);
         bw.write_bits(extra as u64, i_fixed);
+        6
     }
 }
 
-/// Encode one DC coefficient for a single component with no spatial prediction
-/// (e.g. the first macroblock), as `mb_dc` + `decode_dc` expect: the
-/// `b_abs_level` flag, an optional abs-level VLC for the high part, the
-/// `model_bits` low-part refinement, then a sign bit iff the value is nonzero.
-/// `abs_table` is the abs-level Huffman table for the current adaptive index.
-/// Returns `b_abs_level` (the caller folds it into the model update).
+/// Encode one DC coefficient `value` (already a prediction residual) for a
+/// single component, as `mb_dc` + `decode_dc` expect: the `b_abs_level` flag,
+/// an optional abs-level VLC for the high part, the `model_bits` low-part
+/// refinement, then a sign bit iff nonzero. Returns `(b_abs_level, abs_index)`
+/// where `abs_index` is `-1` when `b_abs_level` is false.
 pub fn encode_dc_value(
     bw: &mut BitWriter,
     value: i32,
     model_bits: i32,
     abs_table: &HashMap<u64, i32>,
-) -> bool {
+) -> (bool, i32) {
     let mag = value.unsigned_abs() as i64;
     let m = model_bits as u32;
     let high = (mag >> m) as i32; // i_dc >> model_bits
     let b_abs_level = high > 0;
     bw.write_flag(b_abs_level); // mb_dc reads this before decode_dc
+    let mut abs_index = -1;
     if b_abs_level {
         // decode_dc computes i_dc_high = decode_abs_level() - 1, so level = high + 1.
-        encode_abs_level(bw, abs_table, high + 1);
+        abs_index = encode_abs_level(bw, abs_table, high + 1);
     }
     if m > 0 {
         bw.write_bits((mag & ((1i64 << m) - 1)) as u64, m);
@@ -83,7 +86,84 @@ pub fn encode_dc_value(
     if mag != 0 {
         bw.write_flag(value < 0);
     }
-    b_abs_level
+    (b_abs_level, abs_index)
+}
+
+/// One model's `m_bits`/`m_state`, mirroring `jxr_decode::state::Model`.
+#[derive(Clone, Copy)]
+pub struct ModelState {
+    pub m_bits: i32,
+    pub m_state: i32,
+}
+
+impl ModelState {
+    /// `initialize_model_mb(band)`: `m_bits = max((2-band)*4, 0)`, state 0.
+    pub fn init(band: i32) -> Self {
+        Self {
+            m_bits: ((2 - band) * 4).max(0),
+            m_state: 0,
+        }
+    }
+
+    /// Mirror of `update_model_mb` for a single-model (YONLY) plane. `lap_mean`
+    /// is the count of abs-level escapes this MB; `band` selects the weight
+    /// (0=DC, 1=LP, 2=HP).
+    pub fn update(&mut self, lap_mean: i32, band: i32) {
+        const W0: [i32; 3] = [240, 12, 1];
+        let mut lap = lap_mean * W0[band as usize];
+        if band == 2 {
+            lap >>= 4;
+        }
+        let i_model_weight = 70;
+        let i_delta = (lap - i_model_weight) >> 2;
+        if i_delta <= -8 {
+            let d = (i_delta + 4).max(-16);
+            self.m_state += d;
+            if self.m_state < -8 {
+                if self.m_bits == 0 {
+                    self.m_state = -8;
+                } else {
+                    self.m_state = 0;
+                    self.m_bits -= 1;
+                }
+            }
+        } else if i_delta >= 8 {
+            let d = (i_delta - 4).min(15);
+            self.m_state += d;
+            if self.m_state > 8 {
+                if self.m_bits >= 15 {
+                    self.m_bits = 15;
+                    self.m_state = 8;
+                } else {
+                    self.m_state = 0;
+                    self.m_bits += 1;
+                }
+            }
+        }
+    }
+}
+
+/// One adaptive-VLC table-1 selector, mirroring `jxr_decode::state::AdaptiveVLC`
+/// `init_table1` / `adapt_table1`.
+#[derive(Clone, Copy, Default)]
+pub struct AdaptiveVlc1 {
+    pub table_index: u32,
+    pub discrim: i32,
+}
+
+impl AdaptiveVlc1 {
+    pub fn adapt(&mut self) {
+        const MAX: u32 = 1;
+        if self.discrim < -8 && self.table_index != 0 {
+            self.table_index -= 1;
+            self.discrim = 0;
+        } else if self.discrim > 8 && self.table_index != MAX {
+            self.table_index += 1;
+            self.discrim = 0;
+        } else {
+            self.discrim = self.discrim.clamp(-64, 64);
+        }
+    }
 }
 
 /// Encode-side inverse of the decoder's `refine_lp`.

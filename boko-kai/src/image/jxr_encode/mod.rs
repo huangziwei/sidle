@@ -67,6 +67,7 @@ pub fn encode(
     mode: ColorMode,
     _quality: u8,
 ) -> Result<Vec<u8>, EncodeError> {
+    use crate::image::jxr_decode::tables::abs_level_index;
     if mode == ColorMode::Color {
         return Err(EncodeError::NotImplemented("color mode (Phase 6)"));
     }
@@ -77,40 +78,85 @@ pub fn encode(
         )));
     }
     let (w, h) = (input.width, input.height);
-    if (w, h) != (16, 16) {
+    if w == 0 || h == 0 || w % 16 != 0 || h % 16 != 0 {
         return Err(EncodeError::Unsupported(
-            "only a single 16×16 macroblock is supported so far".into(),
+            "dims must be positive multiples of 16 (windowing not yet implemented)".into(),
         ));
     }
+    let (wu, hu) = (w as usize, h as usize);
     let luma = &input.planes[0];
-    if luma.len() != 256 {
+    if luma.len() != wu * hu {
         return Err(EncodeError::Unsupported("plane len != width*height".into()));
     }
+    let (mbw, mbh) = (wu / 16, hu / 16);
 
-    // Pixels → samples (BD8 bias) → forward transform → DC coefficient.
-    let mut samples = [0i32; 256];
-    for (s, &px) in samples.iter_mut().zip(luma.iter()) {
-        *s = px as i32 - 128;
+    // Forward transform every macroblock → its DC coefficient (DC QP = 0 ⇒ the
+    // coded DC equals this). `dc[mbx][mby]` is the final/actual DC, which is
+    // also what the decoder's neighbour prediction reads back.
+    let mut dc = vec![vec![0i32; mbh]; mbw];
+    for mbx in 0..mbw {
+        for mby in 0..mbh {
+            let mut samples = [0i32; 256];
+            for py in 0..16 {
+                for px in 0..16 {
+                    let g = (mby * 16 + py) * wu + (mbx * 16 + px);
+                    samples[py * 16 + px] = luma[g] as i32 - 128;
+                }
+            }
+            dc[mbx][mby] = transform::forward_transform_mb(&samples)[0];
+        }
     }
-    let mb_buffer = transform::forward_transform_mb(&samples);
-    let dc = mb_buffer[0]; // mb_dclp[0]; DC QP = 0 ⇒ coded value == this
 
-    // Assemble the codestream.
     let mut bw = bitstream::BitWriter::new();
     codestream::write_image_header(&mut bw, w, h);
     codestream::write_image_plane_header_gray_dconly(&mut bw, 0); // dc_quant 0 ⇒ scaling 1
     codestream::write_vlw_esc(&mut bw, 0); // subsequent_bytes = 0 (no profile/level)
     codestream::write_common_tile_header(&mut bw);
-    // Single top-left MB: NO_PREDICTION, fresh model (m_bits = (2-DC)*4 = 8),
-    // fresh abs-level table (index 0).
-    let model_bits = 8;
-    let abs_table = crate::image::jxr_decode::tables::abs_level_index(0);
-    coeff::encode_dc_value(&mut bw, dc, model_bits, abs_table);
-    bw.align_to_byte(); // discard_remainder_bits after the tile
 
-    let codestream = bw.finish();
+    // DC band, raster order (mby outer, mbx inner), single tile. Model and
+    // abs-level table evolve exactly as the decoder's mb_dc.
+    let mut model = coeff::ModelState::init(0); // DC band ⇒ m_bits = 8
+    let mut vlc = coeff::AdaptiveVlc1::default(); // table_index 0, discrim 0
+    const ABS_DELTA: [i32; 7] = [1, 0, -1, -1, -1, -1, -1]; // ABS_LEVEL_INDEX_DELTA[0]
+    for mby in 0..mbh {
+        for mbx in 0..mbw {
+            let actual = dc[mbx][mby];
+            let (is_left, is_top) = (mbx == 0, mby == 0);
+            let predictor = if is_left && is_top {
+                0 // NO_PREDICTION
+            } else if is_left {
+                dc[mbx][mby - 1] // PREDICT_FROM_TOP
+            } else if is_top {
+                dc[mbx - 1][mby] // PREDICT_FROM_LEFT
+            } else {
+                let (left, top, tl) = (dc[mbx - 1][mby], dc[mbx][mby - 1], dc[mbx - 1][mby - 1]);
+                let (sh, sv) = ((tl - left).abs(), (tl - top).abs());
+                if sh * 4 < sv {
+                    top
+                } else if sv * 4 < sh {
+                    left
+                } else {
+                    (top + left) >> 1 // PREDICT_FROM_TOP_LEFT
+                }
+            };
+            let residual = actual - predictor;
+            let (b_abs, abs_idx) =
+                coeff::encode_dc_value(&mut bw, residual, model.m_bits, abs_level_index(vlc.table_index as usize));
+            let lap = if b_abs {
+                vlc.discrim += ABS_DELTA[abs_idx as usize];
+                1
+            } else {
+                0
+            };
+            model.update(lap, 0);
+            if mbx % 16 == 0 || mbx == mbw - 1 {
+                vlc.adapt(); // reset_context
+            }
+        }
+    }
+    bw.align_to_byte(); // discard_remainder_bits after the tile
     Ok(container::write_container(
-        &codestream,
+        &bw.finish(),
         w,
         h,
         &container::pixel_format::GRAY8,
@@ -132,20 +178,23 @@ mod tests {
 
     #[test]
     fn roundtrip_constant_grayscale_dconly() {
-        // DCONLY reconstructs a flat block exactly (LP/HP are zero): encode each
-        // constant value, decode with the real decoder, expect identical pixels.
-        for val in [128u8, 0, 255, 64, 100, 200] {
-            let plane = vec![val; 256];
-            let input = ImageInput {
-                width: 16,
-                height: 16,
-                planes: std::slice::from_ref(&plane),
-            };
-            let jxr = encode(&input, ColorMode::Grayscale, 0).expect("encode");
-            let decoded = decode_to_planes(&jxr);
-            assert_eq!((decoded.width, decoded.height), (16, 16));
-            for (i, &got) in decoded.image_plane[0].iter().enumerate() {
-                assert_eq!(got, val as i32, "val={val} pixel {i}");
+        // DCONLY reconstructs a flat block exactly (LP/HP zero). Across several
+        // sizes this also exercises multi-MB DC prediction + model/abs-table
+        // adaptation: MB(0,0) codes the full DC, every other MB predicts to 0.
+        for &(w, h) in &[(16u32, 16u32), (32, 16), (16, 32), (48, 32)] {
+            for val in [128u8, 0, 255, 64, 100, 200] {
+                let plane = vec![val; (w * h) as usize];
+                let input = ImageInput {
+                    width: w,
+                    height: h,
+                    planes: std::slice::from_ref(&plane),
+                };
+                let jxr = encode(&input, ColorMode::Grayscale, 0).expect("encode");
+                let decoded = decode_to_planes(&jxr);
+                assert_eq!((decoded.width, decoded.height), (w, h));
+                for (i, &got) in decoded.image_plane[0].iter().enumerate() {
+                    assert_eq!(got, val as i32, "w={w} h={h} val={val} pixel {i}");
+                }
             }
         }
     }
