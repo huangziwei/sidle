@@ -213,6 +213,10 @@ pub fn commit(conn: &Connection, prepared: &Prepared) -> Result<MergeOutcome> {
     // Notebooks: add-only (see module doc). An existing uuid is left entirely
     // alone — its row and files never disagree.
     for nb in &prepared.notebooks {
+        // Don't resurrect a notebook the dest library deleted.
+        if db::is_deleted(&tx, db::DELETION_NOTEBOOK, &nb.uuid).context("check notebook tombstone")? {
+            continue;
+        }
         if db::get_notebook_by_uuid(&tx, &nb.uuid).context("get notebook")?.is_none() {
             let updated_at = nb.updated_at.as_deref().unwrap_or(&nb.imported_at);
             db::upsert_notebook(
@@ -345,6 +349,13 @@ fn overwrite_metadata(conn: &Connection, source: &db::BookRow, local: &db::BookR
 /// Insert one of a book's annotations under its local id; returns whether a new
 /// row landed (`false` = a `dedup_hash` we already had → unioned away).
 fn insert_annotation_for(conn: &Connection, book_id: i64, a: &db::AnnotationRow) -> Result<bool> {
+    // Don't resurrect an annotation the dest library deleted — its tombstone wins
+    // over a merged-in copy, so a Sidle-side deletion survives the merge.
+    if db::is_deleted(conn, db::DELETION_ANNOTATION, &a.dedup_hash)
+        .context("check annotation tombstone")?
+    {
+        return Ok(false);
+    }
     db::insert_annotation(
         conn,
         &db::NewAnnotation {
@@ -395,6 +406,12 @@ fn upsert_sidle_position(conn: &Connection, book_id: i64, p: &db::ReadingPositio
 /// Upsert one ink page under its local id, keyed `(asin, container_id)`; returns
 /// whether it was new to this library.
 fn upsert_ink_for(conn: &Connection, book_id: i64, ink: &db::BookInkRow) -> Result<bool> {
+    // Don't resurrect ink the dest library deleted (its tombstone wins).
+    if db::is_deleted(conn, db::DELETION_INK, &db::ink_deletion_key(&ink.asin, &ink.container_id))
+        .context("check ink tombstone")?
+    {
+        return Ok(false);
+    }
     let existed = conn
         .query_row(
             "SELECT 1 FROM book_ink WHERE asin = ?1 AND container_id = ?2",
@@ -503,6 +520,34 @@ mod tests {
     fn merge_into(dest_conn: &Connection, dest_root: &Path, zip: &Path) -> MergeOutcome {
         let prepared = prepare(zip, dest_root, db::SCHEMA_VERSION).unwrap();
         commit(dest_conn, &prepared).unwrap()
+    }
+
+    #[test]
+    fn merge_does_not_resurrect_a_dest_deleted_annotation() {
+        let src = tempfile::tempdir().unwrap();
+        let src_root = src.path().canonicalize().unwrap();
+        let src_conn = seed(&src_root, &[("aaa", "Alpha", "2026-01-01T00:00:00+00:00")]);
+        let out = tempfile::tempdir().unwrap();
+        let zip = backup_of(&src_conn, &src_root, out.path());
+        drop(src_conn);
+
+        let dst = tempfile::tempdir().unwrap();
+        let dst_root = dst.path().canonicalize().unwrap();
+        let dst_conn = seed(&dst_root, &[("aaa", "Alpha", "2026-01-01T00:00:00+00:00")]);
+
+        // The dest deletes its copy of the annotation (writes a tombstone).
+        let book = db::find_by_sha(&dst_conn, "aaa").unwrap().unwrap().id;
+        let ann = db::list_annotations_for_book(&dst_conn, book).unwrap()[0].id;
+        assert!(db::delete_annotation(&dst_conn, ann).unwrap());
+        assert!(db::list_annotations_for_book(&dst_conn, book).unwrap().is_empty());
+
+        // Merge the source (which still has the annotation) — the deletion sticks.
+        let outcome = merge_into(&dst_conn, &dst_root, &zip);
+        assert_eq!(outcome.annotations_added, 0, "the dest tombstone blocks the merged-in copy");
+        assert!(
+            db::list_annotations_for_book(&dst_conn, book).unwrap().is_empty(),
+            "a merge must not resurrect a dest-deleted annotation",
+        );
     }
 
     #[test]
