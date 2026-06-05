@@ -22,6 +22,7 @@ let nbk = null; // notebook-mode state: { id, title, pageCount, page, cache, tok
 let paginator = null; // <foliate-paginator>
 let annotations = []; // AnnotationDto[] for the open book
 let inkEntries = []; // InkPageDto[] for the open book (PDF-mode handwriting)
+let showHidden = false; // panel: also list hidden annotations/ink (greyed)
 let overlays = []; // [{ doc, overlayer }] — one per loaded section, for repaint
 let eidToSection = null; // Map<eid, sectionIndex>, built lazily for jumps
 let keyHandler = null;
@@ -280,6 +281,7 @@ function pdfAnnotationRects(ann) {
 function paintAnnotations(doc, overlayer) {
   const vertical = (book?.writingMode || "").startsWith("vertical");
   for (const ann of annotations) {
+    if (ann.hidden) continue; // hidden in Sidle — kept in the backup, not painted
     if (ann.kind === "bookmark") {
       // PDF mode draws bookmarks as a page-corner marker (paintPdfPageBookmarks),
       // matching the Kindle's top-right corner ribbon — consistent whether the
@@ -418,7 +420,7 @@ async function createAnnotation(color, openEditor) {
 // topmost highlight/note under the point (bookmarks aren't edit targets here).
 function annotationAt(doc, x, y) {
   for (const ann of annotations) {
-    if (ann.kind === "bookmark") continue;
+    if (ann.hidden || ann.kind === "bookmark") continue;
     for (const r of annotationRects(doc, ann)) {
       if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return ann;
     }
@@ -736,7 +738,7 @@ function toggleResumeMenu() {
 
 function annotationRow(ann) {
   const li = document.createElement("li");
-  li.className = `ann-row ann-${ann.kind}`;
+  li.className = `ann-row ann-${ann.kind}${ann.hidden ? " is-hidden" : ""}`;
 
   const icon = document.createElement("span");
   icon.className = "ann-icon";
@@ -755,7 +757,12 @@ function annotationRow(ann) {
     body.appendChild(note);
   }
 
-  li.append(icon, body, rowDeleteButton(() => deleteAnnotationFromPanel(ann)));
+  li.append(
+    icon,
+    body,
+    rowHideButton(ann.hidden, () => setAnnotationHidden(ann, !ann.hidden)),
+    rowDeleteButton(() => deleteAnnotationFromPanel(ann)),
+  );
   li.addEventListener("click", () => jumpTo(ann));
   return li;
 }
@@ -781,7 +788,7 @@ function rowDeleteButton(onDelete) {
 // page, delete from the same panel as text annotations.
 function inkRow(ink) {
   const li = document.createElement("li");
-  li.className = "ann-row ann-ink";
+  li.className = `ann-row ann-ink${ink.hidden ? " is-hidden" : ""}`;
   const icon = document.createElement("span");
   icon.className = "ann-icon";
   icon.textContent = "✍︎";
@@ -792,7 +799,12 @@ function inkRow(ink) {
   quote.textContent =
     ink.host_page != null ? `Handwriting · p.${ink.host_page + 1}` : "Handwriting";
   body.appendChild(quote);
-  li.append(icon, body, rowDeleteButton(() => deleteInkFromPanel(ink)));
+  li.append(
+    icon,
+    body,
+    rowHideButton(ink.hidden, () => setInkHidden(ink, !ink.hidden)),
+    rowDeleteButton(() => deleteInkFromPanel(ink)),
+  );
   if (ink.host_page != null) li.addEventListener("click", () => pdfGoTo(ink.host_page));
   return li;
 }
@@ -816,38 +828,83 @@ async function deleteInkFromPanel(ink) {
     toast(`Couldn't delete: ${err}`, true);
     return;
   }
-  // Refresh the on-page ink overlay: drop the cached SVGs + rebuild the ink-page
-  // set, then re-render the spread so the deleted page's ink disappears.
-  if (pdf) {
-    pdf.inkCache.clear();
-    pdf.inkPages.clear();
-    try {
-      for (const p of (await window.api.invoke("reader_pdf_ink_pages", { bookId })) || [])
-        pdf.inkPages.add(p);
-    } catch {
-      /* leave empty */
-    }
-    await pdfRenderCurrent();
+  await refreshPdfInkOverlay(); // the deleted page's ink disappears
+  await reloadAnnotations(bookId);
+}
+
+// Drop the cached ink SVGs + rebuild the ink-page set from the backend (which
+// excludes hidden/deleted pages), then re-render the spread.
+async function refreshPdfInkOverlay() {
+  if (!pdf) return;
+  pdf.inkCache.clear();
+  pdf.inkPages.clear();
+  try {
+    for (const p of (await window.api.invoke("reader_pdf_ink_pages", { bookId })) || [])
+      pdf.inkPages.add(p);
+  } catch {
+    /* leave empty */
   }
+  await pdfRenderCurrent();
+}
+
+// A hide/unhide toggle for a panel row. Hiding stops the reader painting it but
+// keeps it in the backup; reversible. Stops propagation so it doesn't also jump.
+function rowHideButton(isHidden, onToggle) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "ann-hide";
+  btn.title = isHidden ? "Unhide (show in reader)" : "Hide from reader";
+  btn.setAttribute("aria-label", btn.title);
+  btn.textContent = isHidden ? "Show" : "Hide";
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    onToggle();
+  });
+  return btn;
+}
+
+async function setAnnotationHidden(ann, hidden) {
+  if (bookId == null) return;
+  try {
+    await window.api.invoke("annotation_set_hidden", { id: ann.id, hidden });
+  } catch (err) {
+    toast(`Couldn't ${hidden ? "hide" : "unhide"}: ${err}`, true);
+    return;
+  }
+  await reloadAnnotations(bookId);
+}
+
+async function setInkHidden(ink, hidden) {
+  if (bookId == null) return;
+  try {
+    await window.api.invoke("book_ink_set_hidden", { id: ink.id, hidden });
+  } catch (err) {
+    toast(`Couldn't ${hidden ? "hide" : "unhide"}: ${err}`, true);
+    return;
+  }
+  await refreshPdfInkOverlay(); // hidden ink stops painting; unhidden ink returns
   await reloadAnnotations(bookId);
 }
 
 function renderAnnotationsPanel() {
   const list = $("#reader-annotations-list");
   if (!list) return;
+  // Ink only exists for PDF books — guard so a prior book's ink can't linger in a
+  // reflowable panel.
+  const inks = readerMode === "pdf" ? inkEntries : [];
+  const hiddenCount =
+    annotations.filter((a) => a.hidden).length + inks.filter((k) => k.hidden).length;
+  // Hidden items stay in the backup but are listed only when "Show hidden" is on.
+  const annShown = showHidden ? annotations : annotations.filter((a) => !a.hidden);
+  const inkShown = showHidden ? inks : inks.filter((k) => !k.hidden);
   // Text annotations + handwritten-ink pages share one list, sorted by reading
   // position (both carry a device linear position).
   const items = [
-    ...annotations.map((a) => ({
+    ...annShown.map((a) => ({
       pos: a.loc_start ?? a.linear_pos ?? a.eid_start ?? 0,
       node: annotationRow(a),
     })),
-    // Ink only exists for PDF books — guard so a prior book's ink can't linger in
-    // a reflowable panel.
-    ...(readerMode === "pdf" ? inkEntries : []).map((k) => ({
-      pos: k.host_linear ?? 0,
-      node: inkRow(k),
-    })),
+    ...inkShown.map((k) => ({ pos: k.host_linear ?? 0, node: inkRow(k) })),
   ].sort((a, b) => a.pos - b.pos);
   list.replaceChildren(...items.map((it) => it.node));
 
@@ -857,6 +914,13 @@ function renderAnnotationsPanel() {
   if (countEl) {
     countEl.textContent = String(n);
     countEl.hidden = n === 0;
+  }
+  // "Show hidden (N)" toggle — only when something is actually hidden.
+  const toggle = $("#reader-annotations-show-hidden");
+  if (toggle) {
+    toggle.hidden = hiddenCount === 0;
+    toggle.textContent = showHidden ? `Hide hidden (${hiddenCount})` : `Show hidden (${hiddenCount})`;
+    toggle.setAttribute("aria-pressed", String(showHidden));
   }
 }
 
@@ -2344,7 +2408,7 @@ function repaintPdfOverlay() {
 // so a removed bookmark clears with the fresh overlayer.
 function paintPdfPageBookmarks(ov) {
   for (const ann of annotations) {
-    if (ann.kind !== "bookmark" || ann.eid_start == null) continue;
+    if (ann.hidden || ann.kind !== "bookmark" || ann.eid_start == null) continue;
     const wrap = pdfVisibleWrapper(pdf.eidToPage.get(ann.eid_start));
     if (!wrap) continue;
     const r = wrap.getBoundingClientRect();
@@ -3368,7 +3432,10 @@ function wire() {
     toggleResumeMenu();
   });
   $("#reader-annotations")?.addEventListener("click", () => toggleAnnotationsPanel());
-  $("#reader-annotations-close")?.addEventListener("click", () => hideAnnotationsPanel());
+  $("#reader-annotations-show-hidden")?.addEventListener("click", () => {
+    showHidden = !showHidden;
+    renderAnnotationsPanel();
+  });
   // Native annotations: page-bookmark toggle, the selection toolbar (color
   // swatches create a highlight; Note creates one + opens the editor), and the
   // editable note popover's Save/Delete.

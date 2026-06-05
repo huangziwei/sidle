@@ -498,7 +498,9 @@
         <aside id="reader-annotations-panel" class="reader-annotations-panel" hidden aria-label="Annotations">
           <header class="reader-panel-header">
             <strong>Annotations</strong>
-            <button id="reader-annotations-close" class="btn-link" type="button">Hide</button>
+            <div class="reader-panel-header-actions">
+              <button id="reader-annotations-show-hidden" class="btn-link" type="button" hidden aria-pressed="false">Show hidden</button>
+            </div>
           </header>
           <ul id="reader-annotations-list" class="reader-annotations-list"></ul>
           <div id="reader-annotations-empty" class="reader-annotations-empty">

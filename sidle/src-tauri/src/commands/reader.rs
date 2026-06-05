@@ -366,6 +366,7 @@ pub struct InkPageDto {
     pub host_page: Option<i64>,
     pub host_linear: Option<i64>,
     pub container_id: String,
+    pub hidden: bool,
 }
 
 /// List a book's handwritten-ink pages for the annotations panel (one row per
@@ -384,6 +385,7 @@ pub async fn book_ink_for_book(
             host_page: r.host_page,
             host_linear: r.host_linear,
             container_id: r.container_id,
+            hidden: r.hidden,
         })
         .collect())
 }
@@ -395,6 +397,29 @@ pub async fn book_ink_for_book(
 pub async fn book_ink_delete(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let conn = state.db.lock().await;
     crate::library::ink::delete_ink_page(&conn, &state.paths, id).map_err(|e| e.to_string())
+}
+
+/// Hide / unhide one annotation in the reader — kept in the backup, just not
+/// painted or listed by default. Reversible; never touches the device.
+#[tauri::command]
+pub async fn annotation_set_hidden(
+    state: State<'_, AppState>,
+    id: i64,
+    hidden: bool,
+) -> Result<(), String> {
+    let conn = state.db.lock().await;
+    db::set_annotation_hidden(&conn, id, hidden).map_err(|e| e.to_string())
+}
+
+/// Hide / unhide one handwritten-ink page in the reader (kept in the backup).
+#[tauri::command]
+pub async fn book_ink_set_hidden(
+    state: State<'_, AppState>,
+    id: i64,
+    hidden: bool,
+) -> Result<(), String> {
+    let conn = state.db.lock().await;
+    db::set_book_ink_hidden(&conn, id, hidden).map_err(|e| e.to_string())
 }
 
 /// One stored annotation, shaped for the reader's painter + sidebar.
@@ -416,6 +441,8 @@ pub struct AnnotationDto {
     pub color: Option<String>,
     /// `"yjr"` | `"clippings"` — provenance.
     pub source: String,
+    /// Reversible "hidden from the reader" flag (kept in the backup).
+    pub hidden: bool,
 }
 
 impl From<AnnotationRow> for AnnotationDto {
@@ -433,6 +460,7 @@ impl From<AnnotationRow> for AnnotationDto {
             note_body: a.note_body,
             color: a.color,
             source: a.source,
+            hidden: a.hidden,
         }
     }
 }

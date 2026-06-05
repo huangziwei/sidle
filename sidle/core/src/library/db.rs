@@ -101,7 +101,10 @@ pub struct BookRow {
 /// v8: added `artifact_deletions` — tombstones for Sidle-side deletes so the
 /// additive device sync won't re-add a removed annotation / ink page / notebook
 /// (Sidle is the curated backup). See .claude/plans/backup-source-of-truth.md.
-pub const SCHEMA_VERSION: i64 = 8;
+/// v9: added `annotations.hidden` / `book_ink.hidden` — a reversible "hide from
+/// the reader" flag (kept in the backup, never painted). See
+/// .claude/plans/backup-source-of-truth.md.
+pub const SCHEMA_VERSION: i64 = 9;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -516,6 +519,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )"#,
         [],
     )?;
+
+    // v9: reversible "hide from the reader" flag on annotations + ink (kept in the
+    // backup, just not painted / not listed by default). Additive columns, default
+    // 0. Both tables exist by here (created above), so the ALTERs are safe.
+    if !has_column(conn, "annotations", "hidden")? {
+        conn.execute("ALTER TABLE annotations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0", [])?;
+    }
+    if !has_column(conn, "book_ink", "hidden")? {
+        conn.execute("ALTER TABLE book_ink ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0", [])?;
+    }
 
     // Deletion records (tombstones). A Sidle-side delete of an annotation / ink
     // page / notebook records its stable identity here; the additive device sync
@@ -1478,10 +1491,12 @@ pub struct BookInkRow {
     pub host_linear: Option<i64>,
     pub nbk_sha256: Option<String>,
     pub imported_at: String,
+    /// Reversible "hidden from the reader" flag (kept in the backup).
+    pub hidden: bool,
 }
 
 const SELECT_BOOK_INK: &str = "SELECT id, book_id, asin, container_id, host_page, \
-    host_eid, host_linear, nbk_sha256, imported_at FROM book_ink";
+    host_eid, host_linear, nbk_sha256, imported_at, hidden FROM book_ink";
 
 fn row_to_book_ink(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookInkRow> {
     Ok(BookInkRow {
@@ -1494,6 +1509,7 @@ fn row_to_book_ink(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookInkRow> {
         host_linear: row.get(6)?,
         nbk_sha256: row.get(7)?,
         imported_at: row.get(8)?,
+        hidden: row.get::<_, i64>(9)? != 0,
     })
 }
 
@@ -1564,7 +1580,7 @@ pub fn list_book_ink_on_page(
     host_page: i64,
 ) -> rusqlite::Result<Vec<BookInkRow>> {
     let mut stmt = conn.prepare(&format!(
-        "{SELECT_BOOK_INK} WHERE book_id = ?1 AND host_page = ?2 ORDER BY host_linear, id"
+        "{SELECT_BOOK_INK} WHERE book_id = ?1 AND host_page = ?2 AND hidden = 0 ORDER BY host_linear, id"
     ))?;
     stmt.query_map(params![book_id, host_page], row_to_book_ink)?.collect()
 }
@@ -1574,7 +1590,7 @@ pub fn list_book_ink_on_page(
 pub fn book_ink_host_pages(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT host_page FROM book_ink \
-         WHERE book_id = ?1 AND host_page IS NOT NULL ORDER BY host_page",
+         WHERE book_id = ?1 AND host_page IS NOT NULL AND hidden = 0 ORDER BY host_page",
     )?;
     stmt.query_map(params![book_id], |r| r.get(0))?.collect()
 }
@@ -1690,6 +1706,8 @@ pub struct AnnotationRow {
     pub added_raw: Option<String>,
     pub imported_at: String,
     pub source: String,
+    /// Reversible "hidden from the reader" flag (kept in the backup).
+    pub hidden: bool,
 }
 
 /// Insert payload for one annotation; borrows so ingest can build these from
@@ -1756,7 +1774,7 @@ pub fn insert_annotation(conn: &Connection, a: &NewAnnotation<'_>) -> rusqlite::
 const SELECT_ANNOTATION: &str = r#"
     SELECT id, dedup_hash, book_id, kind, eid_start, off_start, eid_end, off_end,
            loc_start, loc_end, linear_pos, text, note_body, color,
-           clip_title, clip_author, added_at, added_raw, imported_at, source
+           clip_title, clip_author, added_at, added_raw, imported_at, source, hidden
     FROM annotations
 "#;
 
@@ -1782,6 +1800,7 @@ fn row_to_annotation(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnnotationRow>
         added_raw: row.get(17)?,
         imported_at: row.get(18)?,
         source: row.get(19)?,
+        hidden: row.get::<_, i64>(20)? != 0,
     })
 }
 
@@ -2045,6 +2064,25 @@ pub fn clear_deletion(conn: &Connection, kind: &str, key: &str) -> rusqlite::Res
 /// how many records were cleared.
 pub fn clear_all_deletions(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute("DELETE FROM artifact_deletions", [])
+}
+
+/// Set the reversible "hidden from the reader" flag on one annotation. Hidden
+/// rows stay in the backup; the reader just doesn't paint or default-list them.
+pub fn set_annotation_hidden(conn: &Connection, id: i64, hidden: bool) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE annotations SET hidden = ?1 WHERE id = ?2",
+        params![hidden as i64, id],
+    )?;
+    Ok(())
+}
+
+/// Set the reversible "hidden from the reader" flag on one ink page.
+pub fn set_book_ink_hidden(conn: &Connection, id: i64, hidden: bool) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE book_ink SET hidden = ?1 WHERE id = ?2",
+        params![hidden as i64, id],
+    )?;
+    Ok(())
 }
 
 /// Drop a device's import checkpoints (`yjr_sync` + `ink_sync`) so the next sync
@@ -3229,6 +3267,78 @@ mod tests {
             is_deleted(&conn, DELETION_INK, &ink_deletion_key("AS1", "c0")).unwrap(),
             "deleting an ink page tombstones it"
         );
+    }
+
+    #[test]
+    fn hidden_ink_is_excluded_from_painting_but_kept_in_backup() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha", "B");
+        upsert_book_ink(
+            &conn,
+            &NewBookInk {
+                book_id: Some(book),
+                asin: "AS1",
+                container_id: "c0",
+                host_page: Some(2),
+                host_eid: Some(1),
+                host_linear: Some(1),
+                nbk_sha256: Some("s"),
+                imported_at: "t0",
+            },
+        )
+        .unwrap();
+        let id = list_book_ink(&conn, book).unwrap()[0].id;
+        // Visible: the painter sees it (host_pages + on_page) and it's in the panel.
+        assert_eq!(book_ink_host_pages(&conn, book).unwrap(), vec![2]);
+        assert_eq!(list_book_ink_on_page(&conn, book, 2).unwrap().len(), 1);
+
+        set_book_ink_hidden(&conn, id, true).unwrap();
+        assert!(book_ink_host_pages(&conn, book).unwrap().is_empty(), "hidden ink not painted");
+        assert!(list_book_ink_on_page(&conn, book, 2).unwrap().is_empty());
+        let rows = list_book_ink(&conn, book).unwrap();
+        assert_eq!(rows.len(), 1, "hidden ink stays in the backup list");
+        assert!(rows[0].hidden, "flag reflects hidden state");
+
+        set_book_ink_hidden(&conn, id, false).unwrap();
+        assert_eq!(book_ink_host_pages(&conn, book).unwrap(), vec![2], "unhide repaints");
+    }
+
+    #[test]
+    fn hidden_annotation_stays_listed_with_flag() {
+        let conn = fresh_db();
+        let book = insert_minimal(&conn, "sha-h", "本");
+        insert_annotation(
+            &conn,
+            &NewAnnotation {
+                dedup_hash: "h1",
+                book_id: Some(book),
+                kind: "highlight",
+                eid_start: Some(1),
+                off_start: Some(0),
+                eid_end: Some(1),
+                off_end: Some(2),
+                loc_start: None,
+                loc_end: None,
+                linear_pos: None,
+                text: "x",
+                note_body: None,
+                color: None,
+                clip_title: None,
+                clip_author: None,
+                added_at: None,
+                added_raw: None,
+                imported_at: "t",
+                source: "yjr",
+            },
+        )
+        .unwrap();
+        let id = list_annotations_for_book(&conn, book).unwrap()[0].id;
+        assert!(!list_annotations_for_book(&conn, book).unwrap()[0].hidden);
+
+        set_annotation_hidden(&conn, id, true).unwrap();
+        let rows = list_annotations_for_book(&conn, book).unwrap();
+        assert_eq!(rows.len(), 1, "a hidden annotation stays in the backup list");
+        assert!(rows[0].hidden, "flag reflects hidden state");
     }
 
     #[test]

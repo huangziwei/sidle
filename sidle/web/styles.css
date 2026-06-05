@@ -2411,6 +2411,24 @@ kbd {
 .ann-row:hover .ann-del { opacity: 0.7; }
 .ann-del:hover { opacity: 1; color: #c0392b; }
 .ann-ink .ann-quote { color: var(--reader-muted); font-style: italic; }
+.ann-hide {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: var(--reader-muted);
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.ann-row:hover .ann-hide { opacity: 0.7; }
+.ann-hide:hover { opacity: 1; color: var(--reader-fg); }
+.ann-row.is-hidden { opacity: 0.5; }
+.ann-row.is-hidden .ann-hide { opacity: 0.7; }
+.reader-panel-header-actions { display: flex; gap: 10px; align-items: center; }
 .ann-quote {
   font-size: 13px;
   line-height: 1.5;
