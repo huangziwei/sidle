@@ -1060,7 +1060,10 @@ impl<'a> Decoder<'a> {
         scan.adapt(i);
     }
 
-    fn refine_lp(&mut self, mut i_coeff: i32, i_model_bits: i32) -> Result<i32> {
+    // `pub(crate)` so the encoder's unit tests can use it as a round-trip
+    // oracle: it depends only on the bitstream (no plane state), so a bare
+    // `Decoder::new(bytes)` can drive it.
+    pub(crate) fn refine_lp(&mut self, mut i_coeff: i32, i_model_bits: i32) -> Result<i32> {
         let coeff_ref = self.ds.unpack_bits(i_model_bits as u32)? as i32;
         if i_coeff > 0 {
             i_coeff = (i_coeff << i_model_bits) + coeff_ref;
