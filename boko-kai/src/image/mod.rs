@@ -11,3 +11,4 @@
 
 pub mod jpeg;
 pub mod jxr_decode;
+pub mod jxr_encode;
