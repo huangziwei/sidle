@@ -21,6 +21,7 @@ let pdf = null; // PDF-mode state: { pageCount, pages, labels, toc, page, img, t
 let nbk = null; // notebook-mode state: { id, title, pageCount, page, cache, token } — see openNotebook
 let paginator = null; // <foliate-paginator>
 let annotations = []; // AnnotationDto[] for the open book
+let inkEntries = []; // InkPageDto[] for the open book (PDF-mode handwriting)
 let overlays = []; // [{ doc, overlayer }] — one per loaded section, for repaint
 let eidToSection = null; // Map<eid, sectionIndex>, built lazily for jumps
 let keyHandler = null;
@@ -754,20 +755,98 @@ function annotationRow(ann) {
     body.appendChild(note);
   }
 
-  li.append(icon, body);
+  li.append(icon, body, rowDeleteButton(() => deleteAnnotationFromPanel(ann)));
   li.addEventListener("click", () => jumpTo(ann));
   return li;
+}
+
+// A small ✕ delete control for a panel row. Stops propagation so it doesn't also
+// trigger the row's jump. Deleting curates the Sidle backup — it never touches the
+// device, and a device-sourced item is recoverable via "Restore from device".
+function rowDeleteButton(onDelete) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "ann-del";
+  btn.title = "Delete from Sidle";
+  btn.setAttribute("aria-label", "Delete from Sidle");
+  btn.textContent = "✕";
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    onDelete();
+  });
+  return btn;
+}
+
+// A handwritten-ink page row (PDF mode): "Handwriting · p.N", jump to the host
+// page, delete from the same panel as text annotations.
+function inkRow(ink) {
+  const li = document.createElement("li");
+  li.className = "ann-row ann-ink";
+  const icon = document.createElement("span");
+  icon.className = "ann-icon";
+  icon.textContent = "✍︎";
+  const body = document.createElement("div");
+  body.className = "ann-row-body";
+  const quote = document.createElement("div");
+  quote.className = "ann-quote";
+  quote.textContent =
+    ink.host_page != null ? `Handwriting · p.${ink.host_page + 1}` : "Handwriting";
+  body.appendChild(quote);
+  li.append(icon, body, rowDeleteButton(() => deleteInkFromPanel(ink)));
+  if (ink.host_page != null) li.addEventListener("click", () => pdfGoTo(ink.host_page));
+  return li;
+}
+
+async function deleteAnnotationFromPanel(ann) {
+  if (bookId == null) return;
+  try {
+    await window.api.invoke("annotation_delete", { id: ann.id });
+  } catch (err) {
+    toast(`Couldn't delete: ${err}`, true);
+    return;
+  }
+  await reloadAnnotations(bookId);
+}
+
+async function deleteInkFromPanel(ink) {
+  if (bookId == null) return;
+  try {
+    await window.api.invoke("book_ink_delete", { id: ink.id });
+  } catch (err) {
+    toast(`Couldn't delete: ${err}`, true);
+    return;
+  }
+  // Refresh the on-page ink overlay: drop the cached SVGs + rebuild the ink-page
+  // set, then re-render the spread so the deleted page's ink disappears.
+  if (pdf) {
+    pdf.inkCache.clear();
+    pdf.inkPages.clear();
+    try {
+      for (const p of (await window.api.invoke("reader_pdf_ink_pages", { bookId })) || [])
+        pdf.inkPages.add(p);
+    } catch {
+      /* leave empty */
+    }
+    await pdfRenderCurrent();
+  }
+  await reloadAnnotations(bookId);
 }
 
 function renderAnnotationsPanel() {
   const list = $("#reader-annotations-list");
   if (!list) return;
-  const sorted = [...annotations].sort(
-    (a, b) => (a.loc_start ?? a.eid_start ?? 0) - (b.loc_start ?? b.eid_start ?? 0),
-  );
-  list.replaceChildren(...sorted.map(annotationRow));
+  // Text annotations + handwritten-ink pages share one list, sorted by reading
+  // position (both carry a device linear position).
+  const items = [
+    ...annotations.map((a) => ({
+      pos: a.loc_start ?? a.linear_pos ?? a.eid_start ?? 0,
+      node: annotationRow(a),
+    })),
+    ...inkEntries.map((k) => ({ pos: k.host_linear ?? 0, node: inkRow(k) })),
+  ].sort((a, b) => a.pos - b.pos);
+  list.replaceChildren(...items.map((it) => it.node));
 
-  const n = sorted.length;
+  const n = items.length;
   $("#reader-annotations-empty").hidden = n > 0;
   const countEl = $("#reader-annotations-count");
   if (countEl) {
@@ -806,7 +885,14 @@ async function reloadAnnotations(forBookId) {
     return;
   }
   annotations = next;
+  // PDF books can carry handwritten ink — list it in the same panel.
+  inkEntries = [];
   if (readerMode === "pdf") {
+    try {
+      inkEntries = (await window.api.invoke("book_ink_for_book", { bookId })) || [];
+    } catch {
+      inkEntries = [];
+    }
     // PDF repaints the whole overlay from `annotations` (incl. page-level
     // bookmark markers), so a removed annotation drops with the fresh overlayer.
     repaintPdfOverlay();

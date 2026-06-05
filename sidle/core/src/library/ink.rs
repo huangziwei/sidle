@@ -199,6 +199,26 @@ pub fn relink_ink(conn: &Connection) -> rusqlite::Result<usize> {
     Ok(linked)
 }
 
+/// Delete one ink page from the library: its `book_ink` row + device-presence +
+/// a deletion record (via [`db::delete_book_ink`]), plus the cached overlay/plain
+/// SVGs. The book sha for the cache path comes from the row's `book_id`. A no-op
+/// if the id is already gone. Used by the reader's annotations-panel delete.
+pub fn delete_ink_page(conn: &Connection, paths: &LibraryPaths, id: i64) -> Result<()> {
+    let Some(row) = db::get_book_ink(conn, id).context("read ink row")? else {
+        return Ok(());
+    };
+    db::delete_book_ink(conn, id).context("delete ink row")?;
+    if let Some(book_id) = row.book_id
+        && let Some(book) = db::get_book(conn, book_id).context("read host book")?
+    {
+        let _ =
+            std::fs::remove_file(paths.book_ink_overlay_svg(&book.sha256, &row.asin, &row.container_id));
+        let _ =
+            std::fs::remove_file(paths.book_ink_plain_svg(&book.sha256, &row.asin, &row.container_id));
+    }
+    Ok(())
+}
+
 /// eid → 0-based host page. The cached [`PageGeom::eids`] is already the union of
 /// each page's text-run eids and structural eids (image / container /
 /// page_template) — the same set the reader's `buildPdfEidIndex` registers — so

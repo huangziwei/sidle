@@ -2394,7 +2394,23 @@ kbd {
 }
 .ann-row:hover { background: var(--reader-gutter); }
 .ann-icon { flex: 0 0 auto; font-size: 13px; line-height: 1.5; }
-.ann-row-body { min-width: 0; }
+.ann-row-body { flex: 1 1 auto; min-width: 0; }
+.ann-del {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: var(--reader-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.ann-row:hover .ann-del { opacity: 0.7; }
+.ann-del:hover { opacity: 1; color: #c0392b; }
+.ann-ink .ann-quote { color: var(--reader-muted); font-style: italic; }
 .ann-quote {
   font-size: 13px;
   line-height: 1.5;

@@ -1551,6 +1551,12 @@ pub fn list_book_ink(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<Bo
     stmt.query_map(params![book_id], row_to_book_ink)?.collect()
 }
 
+/// One ink row by id (for the reader panel's delete + cache cleanup).
+pub fn get_book_ink(conn: &Connection, id: i64) -> rusqlite::Result<Option<BookInkRow>> {
+    conn.query_row(&format!("{SELECT_BOOK_INK} WHERE id = ?1"), params![id], row_to_book_ink)
+        .optional()
+}
+
 /// Ink pages overlaying one 0-based host PDF page (usually one; possibly more).
 pub fn list_book_ink_on_page(
     conn: &Connection,

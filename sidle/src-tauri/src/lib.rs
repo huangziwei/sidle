@@ -109,6 +109,8 @@ pub fn run() {
             commands::reader::annotation_create,
             commands::reader::annotation_update,
             commands::reader::annotation_delete,
+            commands::reader::book_ink_for_book,
+            commands::reader::book_ink_delete,
             commands::notebook::notebook_list,
             commands::notebook::notebook_page_svg,
             commands::notebook::notebook_thumbnail,

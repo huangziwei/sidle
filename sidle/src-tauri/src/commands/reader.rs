@@ -359,6 +359,44 @@ pub async fn reader_pdf_ink_pages(
     db::book_ink_host_pages(&conn, book_id).map_err(|e| e.to_string())
 }
 
+/// One ink page for the annotations panel — enough to list, jump to, and delete.
+#[derive(Debug, Serialize)]
+pub struct InkPageDto {
+    pub id: i64,
+    pub host_page: Option<i64>,
+    pub host_linear: Option<i64>,
+    pub container_id: String,
+}
+
+/// List a book's handwritten-ink pages for the annotations panel (one row per
+/// drawn page), ordered by reading position.
+#[tauri::command]
+pub async fn book_ink_for_book(
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<Vec<InkPageDto>, String> {
+    let conn = state.db.lock().await;
+    let rows = db::list_book_ink(&conn, book_id).map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|r| InkPageDto {
+            id: r.id,
+            host_page: r.host_page,
+            host_linear: r.host_linear,
+            container_id: r.container_id,
+        })
+        .collect())
+}
+
+/// Delete one handwritten-ink page from the library — the row, its cached SVGs,
+/// and a deletion record so a re-sync won't re-add it (Restore from device clears
+/// it). The ink analogue of [`annotation_delete`].
+#[tauri::command]
+pub async fn book_ink_delete(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let conn = state.db.lock().await;
+    crate::library::ink::delete_ink_page(&conn, &state.paths, id).map_err(|e| e.to_string())
+}
+
 /// One stored annotation, shaped for the reader's painter + sidebar.
 #[derive(Debug, Serialize)]
 pub struct AnnotationDto {
