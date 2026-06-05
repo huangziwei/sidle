@@ -9,6 +9,8 @@
 //! enabled.
 
 pub mod bitstream;
+pub mod codestream;
+pub mod container;
 pub mod coeff;
 pub mod entropy;
 pub mod transform;

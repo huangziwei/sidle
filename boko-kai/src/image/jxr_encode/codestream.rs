@@ -1,0 +1,81 @@
+//! WMPHOTO codestream framing writer (encode side) for the minimal grayscale
+//! path: spatial mode, single tile, no overlap, no windowing, **DCONLY**,
+//! `8bppGray`, uniform DC QP.
+//!
+//! Each writer mirrors the corresponding decoder reader in
+//! `jxr_decode::decoder` field-for-field, so the decoder parses exactly what we
+//! emit. The DC *value* coding (`mb_dc`) lives in [`super::coeff`]; this module
+//! is the surrounding header/tile frame.
+
+use super::bitstream::BitWriter;
+use crate::image::jxr_decode::consts::*;
+
+/// `image_header` for a `width`×`height` grayscale image. Both dims must be
+/// multiples of 16 for now (no windowing padding). Mirrors
+/// `Decoder::image_header`.
+pub fn write_image_header(bw: &mut BitWriter, width: u32, height: u32) {
+    debug_assert!(width % 16 == 0 && height % 16 == 0, "dims must be 16-aligned");
+    for &b in b"WMPHOTO\x00" {
+        bw.write_bits(b as u64, 8);
+    }
+    bw.write_bits(1, 4); // codec_version (==1)
+    bw.write_bits(0, 1); // hard_tiling_flag
+    bw.write_bits(1, 3); // codec_subversion (==1)
+    bw.write_bits(0, 1); // tiling_flag → single tile
+    bw.write_bits(0, 1); // frequency_mode → spatial
+    bw.write_bits(0, 3); // spatial_xfrm_subordinate
+    bw.write_bits(0, 1); // index_table_present_flag → none
+    bw.write_bits(NO_OVERLAP_FILTERING as u64, 2); // overlap_mode
+    bw.write_bits(1, 1); // short_header_flag → 16-bit dims
+    bw.write_bits(0, 1); // long_word_flag
+    bw.write_bits(0, 1); // windowing_flag
+    bw.write_bits(0, 1); // trim_flexbits_flag
+    bw.write_bits(0, 1); // reserved_d
+    bw.write_bits(0, 1); // red_blue_not_swapped_flag
+    bw.write_bits(0, 1); // premultiplied_alpha_flag
+    bw.write_bits(0, 1); // alpha_image_plane_flag
+    bw.write_bits(OUT_YONLY as u64, 4); // output_clr_fmt
+    bw.write_bits(BD8 as u64, 4); // output_bitdepth
+    // short header: (width-1), (height-1) as big-endian u16 (byte-aligned here).
+    write_u16_be(bw, (width - 1) as u16);
+    write_u16_be(bw, (height - 1) as u16);
+    // tiling_flag=0 → no tile dims; windowing_flag=0 → decoder derives padding.
+}
+
+/// `image_plane_header` for the single grayscale plane, DCONLY, with a uniform
+/// DC quantizer byte `dc_quant` (0 ⇒ scaling factor 1, i.e. no DC quantization).
+/// Mirrors `Decoder::image_plane_header`; ends byte-aligned
+/// (`discard_remainder_bits`).
+pub fn write_image_plane_header_gray_dconly(bw: &mut BitWriter, dc_quant: u8) {
+    bw.write_bits(INT_YONLY as u64, 3); // internal_clr_fmt
+    bw.write_bits(0, 1); // scaled_flag
+    bw.write_bits(DCONLY as u64, 4); // bands_present
+    // INT_YONLY → num_components = 1, no extra format bits.
+    // BD8 → no shift bits.
+    bw.write_flag(true); // dc_image_plane_uniform
+    // QP::read(num_components=1, num_qps=1): num_components==1 ⇒ no
+    // component_mode bits; COMP_UNIFORM ⇒ one 8-bit quant value.
+    bw.write_bits(dc_quant as u64, 8);
+    // bands_present == DCONLY ⇒ no LP/HP reserved bits or QP.
+    bw.align_to_byte();
+}
+
+/// `vlw_esc` variable-length value. We only need small values; `< 0xfb` uses
+/// the 2-byte form. Mirrors `Decoder::vlw_esc`.
+pub fn write_vlw_esc(bw: &mut BitWriter, value: u64) {
+    assert!(value < 0xfb * 256, "vlw_esc large form not implemented");
+    bw.write_bits((value >> 8) & 0xff, 8);
+    bw.write_bits(value & 0xff, 8);
+}
+
+/// `common_tile_header`: 24-bit start code (==1) + one arbitrary byte. Mirrors
+/// `Decoder::common_tile_header`.
+pub fn write_common_tile_header(bw: &mut BitWriter) {
+    bw.write_bits(1, 24); // tile_startcode
+    bw.write_bits(0, 8); // arbitrary_byte
+}
+
+fn write_u16_be(bw: &mut BitWriter, v: u16) {
+    bw.write_bits((v >> 8) as u64 & 0xff, 8);
+    bw.write_bits(v as u64 & 0xff, 8);
+}
