@@ -6,7 +6,6 @@
 
 pub mod content;
 pub mod dom;
-pub mod jxr;
 pub mod loader;
 pub mod navigation;
 pub mod output;

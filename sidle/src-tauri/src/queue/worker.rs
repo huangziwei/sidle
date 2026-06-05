@@ -404,7 +404,7 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
         .filter(|p| p.exists())
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|raw| {
-            let jpeg = boko::kfx::image_transcode::sanitize_for_kfx(&raw).unwrap_or(raw);
+            let jpeg = boko::image::jpeg::sanitize_for_kfx(&raw).unwrap_or(raw);
             is_jpeg(&jpeg).then_some(jpeg)
         });
     let cover_jpeg = match existing_cover {

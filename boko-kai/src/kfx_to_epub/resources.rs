@@ -15,7 +15,7 @@ use crate::kfx::container::get_field;
 use crate::kfx::ion::IonValue;
 use crate::kfx::symbols::KfxSymbol;
 
-use super::jxr;
+use crate::image::jxr_decode as jxr;
 use super::loader::{BookData, SymbolTable};
 use super::output::EpubOutput;
 use super::ConvertError;

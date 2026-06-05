@@ -28,7 +28,7 @@ pub mod misc;
 pub mod state;
 pub mod tables;
 
-use super::ConvertError;
+use crate::kfx_to_epub::ConvertError;
 
 /// Transcode a JPEG-XR file (with outer TIFF container) into a JPEG byte
 /// stream. Returns `(bytes, format_symbol)` where `format_symbol` is one of

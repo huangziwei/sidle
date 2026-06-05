@@ -28,7 +28,6 @@ pub mod cover;
 pub mod cover_extract;
 pub mod cover_replace;
 pub mod fragment;
-pub mod image_transcode;
 pub mod ion;
 pub mod merge;
 pub mod metadata;

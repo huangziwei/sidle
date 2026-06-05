@@ -423,7 +423,7 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
         {
             let href = asset_path.to_string_lossy().to_string();
             let bundled =
-                crate::kfx::image_transcode::sanitize_for_kfx(&data).unwrap_or(data);
+                crate::image::jpeg::sanitize_for_kfx(&data).unwrap_or(data);
             // external_resource ($164) - metadata about the resource
             fragments.push(build_external_resource_fragment(&href, &bundled, &mut ctx));
             // bcRawMedia ($417) - the actual bytes

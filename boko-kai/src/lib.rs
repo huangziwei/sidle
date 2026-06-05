@@ -37,6 +37,7 @@
 
 pub mod dom;
 pub mod export;
+pub mod image;
 pub mod import;
 pub mod io;
 pub mod model;

@@ -22,7 +22,7 @@ use crate::kfx::container::get_field;
 use crate::kfx::ion::IonValue;
 use crate::kfx::symbols::KfxSymbol;
 use crate::kfx_to_epub::ConvertError;
-use crate::kfx_to_epub::jxr;
+use crate::image::jxr_decode as jxr;
 use crate::kfx_to_epub::loader;
 
 /// Extract the declared cover's `(bytes, extension)` from an in-memory KFX.

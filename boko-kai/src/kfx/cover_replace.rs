@@ -26,7 +26,7 @@
 use crate::kfx::container::{
     self, get_field, parse_container_header, parse_index_table, symbol_id_for_name,
 };
-use crate::kfx::image_transcode::sanitize_for_kfx;
+use crate::image::jpeg::sanitize_for_kfx;
 use crate::kfx::ion::{IonParser, IonValue};
 use crate::kfx::serialization::{
     SerializedEntity, create_entity_data, create_raw_media_data, serialize_container,
