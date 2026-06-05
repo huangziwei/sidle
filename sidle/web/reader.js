@@ -842,7 +842,12 @@ function renderAnnotationsPanel() {
       pos: a.loc_start ?? a.linear_pos ?? a.eid_start ?? 0,
       node: annotationRow(a),
     })),
-    ...inkEntries.map((k) => ({ pos: k.host_linear ?? 0, node: inkRow(k) })),
+    // Ink only exists for PDF books — guard so a prior book's ink can't linger in
+    // a reflowable panel.
+    ...(readerMode === "pdf" ? inkEntries : []).map((k) => ({
+      pos: k.host_linear ?? 0,
+      node: inkRow(k),
+    })),
   ].sort((a, b) => a.pos - b.pos);
   list.replaceChildren(...items.map((it) => it.node));
 
@@ -1889,6 +1894,15 @@ async function openPdf(id, openDto, anns, positions) {
   pdfStyle.zoom = 1; // zoom is per-open: a book opens at fit, not the last zoom
   dto = openDto;
   annotations = anns || [];
+  // PDF books can carry handwritten ink — fetch it so the annotations panel lists
+  // it on open (the on-page overlay is rendered separately by pdfRenderCurrent).
+  // reloadAnnotations refetches it after a sync/edit; this is the open-time seed.
+  inkEntries = [];
+  try {
+    inkEntries = (await window.api.invoke("book_ink_for_book", { bookId: id })) || [];
+  } catch {
+    inkEntries = [];
+  }
   sidleResume = (positions || []).find((p) => p.source === "sidle") || null;
   deviceResumes = (positions || []).filter((p) => p.source === "device");
   const pages = openDto.pages || [];
