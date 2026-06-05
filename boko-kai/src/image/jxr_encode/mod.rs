@@ -13,6 +13,8 @@ pub mod codestream;
 pub mod container;
 pub mod coeff;
 pub mod entropy;
+pub mod gray;
+pub mod hp;
 pub mod transform;
 
 /// How color is handled on the way into the KFX.
@@ -67,7 +69,6 @@ pub fn encode(
     mode: ColorMode,
     _quality: u8,
 ) -> Result<Vec<u8>, EncodeError> {
-    use crate::image::jxr_decode::tables::abs_level_index;
     if mode == ColorMode::Color {
         return Err(EncodeError::NotImplemented("color mode (Phase 6)"));
     }
@@ -78,89 +79,19 @@ pub fn encode(
         )));
     }
     let (w, h) = (input.width, input.height);
-    if w == 0 || h == 0 || w % 16 != 0 || h % 16 != 0 {
-        return Err(EncodeError::Unsupported(
-            "dims must be positive multiples of 16 (windowing not yet implemented)".into(),
-        ));
+    if w == 0 || h == 0 {
+        return Err(EncodeError::Unsupported("zero-size image".into()));
+    }
+    if w > 1 << 16 || h > 1 << 16 {
+        return Err(EncodeError::Unsupported("dims exceed short-header u16 range".into()));
     }
     let (wu, hu) = (w as usize, h as usize);
     let luma = &input.planes[0];
     if luma.len() != wu * hu {
         return Err(EncodeError::Unsupported("plane len != width*height".into()));
     }
-    let (mbw, mbh) = (wu / 16, hu / 16);
-
-    // Forward transform every macroblock → its DC coefficient (DC QP = 0 ⇒ the
-    // coded DC equals this). `dc[mbx][mby]` is the final/actual DC, which is
-    // also what the decoder's neighbour prediction reads back.
-    let mut dc = vec![vec![0i32; mbh]; mbw];
-    for mbx in 0..mbw {
-        for mby in 0..mbh {
-            let mut samples = [0i32; 256];
-            for py in 0..16 {
-                for px in 0..16 {
-                    let g = (mby * 16 + py) * wu + (mbx * 16 + px);
-                    samples[py * 16 + px] = luma[g] as i32 - 128;
-                }
-            }
-            dc[mbx][mby] = transform::forward_transform_mb(&samples)[0];
-        }
-    }
-
-    let mut bw = bitstream::BitWriter::new();
-    codestream::write_image_header(&mut bw, w, h);
-    codestream::write_image_plane_header_gray_dconly(&mut bw, 0); // dc_quant 0 ⇒ scaling 1
-    codestream::write_vlw_esc(&mut bw, 0); // subsequent_bytes = 0 (no profile/level)
-    codestream::write_common_tile_header(&mut bw);
-
-    // DC band, raster order (mby outer, mbx inner), single tile. Model and
-    // abs-level table evolve exactly as the decoder's mb_dc.
-    let mut model = coeff::ModelState::init(0); // DC band ⇒ m_bits = 8
-    let mut vlc = coeff::AdaptiveVlc1::default(); // table_index 0, discrim 0
-    const ABS_DELTA: [i32; 7] = [1, 0, -1, -1, -1, -1, -1]; // ABS_LEVEL_INDEX_DELTA[0]
-    for mby in 0..mbh {
-        for mbx in 0..mbw {
-            let actual = dc[mbx][mby];
-            let (is_left, is_top) = (mbx == 0, mby == 0);
-            let predictor = if is_left && is_top {
-                0 // NO_PREDICTION
-            } else if is_left {
-                dc[mbx][mby - 1] // PREDICT_FROM_TOP
-            } else if is_top {
-                dc[mbx - 1][mby] // PREDICT_FROM_LEFT
-            } else {
-                let (left, top, tl) = (dc[mbx - 1][mby], dc[mbx][mby - 1], dc[mbx - 1][mby - 1]);
-                let (sh, sv) = ((tl - left).abs(), (tl - top).abs());
-                if sh * 4 < sv {
-                    top
-                } else if sv * 4 < sh {
-                    left
-                } else {
-                    (top + left) >> 1 // PREDICT_FROM_TOP_LEFT
-                }
-            };
-            let residual = actual - predictor;
-            let (b_abs, abs_idx) =
-                coeff::encode_dc_value(&mut bw, residual, model.m_bits, abs_level_index(vlc.table_index as usize));
-            let lap = if b_abs {
-                vlc.discrim += ABS_DELTA[abs_idx as usize];
-                1
-            } else {
-                0
-            };
-            model.update(lap, 0);
-            if mbx % 16 == 0 || mbx == mbw - 1 {
-                vlc.adapt(); // reset_context
-            }
-        }
-    }
-    bw.align_to_byte(); // discard_remainder_bits after the tile
-    Ok(container::write_container(
-        &bw.finish(),
-        w,
-        h,
-        &container::pixel_format::GRAY8,
-    ))
+    // DC + LP + HP (ALL_BANDS): lossless for any grayscale image.
+    Ok(gray::encode_grayscale(luma, w, h))
 }
 
 #[cfg(test)]
@@ -195,6 +126,149 @@ mod tests {
                 for (i, &got) in decoded.image_plane[0].iter().enumerate() {
                     assert_eq!(got, val as i32, "w={w} h={h} val={val} pixel {i}");
                 }
+            }
+        }
+    }
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0
+        }
+    }
+
+    /// Exact inverse of `transform::forward_transform_mb` (no overlap).
+    fn inverse_transform_mb(buf: &mut [i32; 256]) -> [i32; 256] {
+        use crate::image::jxr_decode::consts::MB_PIXEL_MAP;
+        use crate::image::jxr_decode::math::{str_idct4x4_stage1, str_idct4x4_stage2};
+        let mut dclp = [0i32; 16];
+        for j in 0..16 {
+            dclp[j] = buf[j * 16];
+        }
+        str_idct4x4_stage2(&mut dclp);
+        for j in 0..16 {
+            buf[j * 16] = dclp[j];
+        }
+        for j in 0..16 {
+            let mut blk = [0i32; 16];
+            blk.copy_from_slice(&buf[j * 16..j * 16 + 16]);
+            str_idct4x4_stage1(&mut blk);
+            buf[j * 16..j * 16 + 16].copy_from_slice(&blk);
+        }
+        let mut s = [0i32; 256];
+        for by in 0..4 {
+            for bx in 0..4 {
+                let bb = by * 16 + bx * 64;
+                for py in 0..4 {
+                    for px in 0..4 {
+                        s[(by * 4 + py) * 16 + bx * 4 + px] = buf[bb + MB_PIXEL_MAP[px + py * 4]];
+                    }
+                }
+            }
+        }
+        s
+    }
+
+    /// A zero-HP 16×16 block from random pixels: forward, drop HP, inverse.
+    /// `None` if any reconstructed pixel would clip (rare; caller retries).
+    fn zero_hp_block(r: &mut Lcg) -> Option<[u8; 256]> {
+        let mut samples = [0i32; 256];
+        for s in samples.iter_mut() {
+            *s = (r.next() % 41) as i32 - 20;
+        }
+        let mut buf = transform::forward_transform_mb(&samples);
+        for (p, v) in buf.iter_mut().enumerate() {
+            if p % 16 != 0 {
+                *v = 0; // drop HP, keep the per-block DC at [k*16]
+            }
+        }
+        let s = inverse_transform_mb(&mut buf);
+        let mut out = [0u8; 256];
+        for (o, &v) in out.iter_mut().zip(s.iter()) {
+            let p = v + 128;
+            if !(0..=255).contains(&p) {
+                return None;
+            }
+            *o = p as u8;
+        }
+        Some(out)
+    }
+
+    #[test]
+    fn roundtrip_zero_hp_grayscale_nohighpass() {
+        // NOHIGHPASS is lossless for zero-HP content: exercises the full LP
+        // run-level + refine + prediction path across multi-MB sizes.
+        let mut r = Lcg(0xabcd_ef01);
+        for &(mbw, mbh) in &[(1usize, 1usize), (2, 1), (1, 2), (2, 2), (3, 2)] {
+            let (w, h) = (mbw * 16, mbh * 16);
+            let mut pixels = vec![0u8; w * h];
+            for mx in 0..mbw {
+                for my in 0..mbh {
+                    let blk = loop {
+                        if let Some(b) = zero_hp_block(&mut r) {
+                            break b;
+                        }
+                    };
+                    for py in 0..16 {
+                        for px in 0..16 {
+                            pixels[(my * 16 + py) * w + (mx * 16 + px)] = blk[py * 16 + px];
+                        }
+                    }
+                }
+            }
+            let input = ImageInput {
+                width: w as u32,
+                height: h as u32,
+                planes: std::slice::from_ref(&pixels),
+            };
+            let jxr = encode(&input, ColorMode::Grayscale, 0).expect("encode");
+            let decoded = decode_to_planes(&jxr);
+            for (i, &got) in decoded.image_plane[0].iter().enumerate() {
+                assert_eq!(got, pixels[i] as i32, "mbw={mbw} mbh={mbh} pixel {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn roundtrip_arbitrary_grayscale_allbands_lossless() {
+        // The real goal: ANY grayscale image round-trips exactly (ALL_BANDS).
+        let mut r = Lcg(0x5151_2727);
+        for &(mbw, mbh) in &[(1usize, 1usize), (2, 1), (1, 2), (2, 2), (3, 3)] {
+            let (w, h) = (mbw * 16, mbh * 16);
+            let pixels: Vec<u8> = (0..w * h).map(|_| (r.next() % 256) as u8).collect();
+            let input = ImageInput {
+                width: w as u32,
+                height: h as u32,
+                planes: std::slice::from_ref(&pixels),
+            };
+            let jxr = encode(&input, ColorMode::Grayscale, 0).expect("encode");
+            let decoded = decode_to_planes(&jxr);
+            for (i, &got) in decoded.image_plane[0].iter().enumerate() {
+                assert_eq!(got, pixels[i] as i32, "mbw={mbw} mbh={mbh} pixel {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn roundtrip_non_aligned_grayscale_lossless() {
+        // Arbitrary (non-16-aligned) dimensions: edge-pad + decoder crop.
+        let mut r = Lcg(0x9090_3434);
+        for &(w, h) in &[(17u32, 31u32), (100, 50), (33, 16), (16, 33), (45, 45), (1, 1)] {
+            let pixels: Vec<u8> = (0..(w * h) as usize).map(|_| (r.next() % 256) as u8).collect();
+            let input = ImageInput {
+                width: w,
+                height: h,
+                planes: std::slice::from_ref(&pixels),
+            };
+            let jxr = encode(&input, ColorMode::Grayscale, 0).expect("encode");
+            let decoded = decode_to_planes(&jxr);
+            assert_eq!((decoded.width, decoded.height), (w, h));
+            for (i, &got) in decoded.image_plane[0].iter().enumerate() {
+                assert_eq!(got, pixels[i] as i32, "w={w} h={h} pixel {i}");
             }
         }
     }

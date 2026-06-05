@@ -14,7 +14,8 @@ use crate::image::jxr_decode::consts::*;
 /// multiples of 16 for now (no windowing padding). Mirrors
 /// `Decoder::image_header`.
 pub fn write_image_header(bw: &mut BitWriter, width: u32, height: u32) {
-    debug_assert!(width % 16 == 0 && height % 16 == 0, "dims must be 16-aligned");
+    // `width`/`height` are the true (unpadded) dims; windowing_flag = 0 makes
+    // the decoder derive the 16-aligned padding and crop back to these.
     for &b in b"WMPHOTO\x00" {
         bw.write_bits(b as u64, 8);
     }
@@ -57,6 +58,45 @@ pub fn write_image_plane_header_gray_dconly(bw: &mut BitWriter, dc_quant: u8) {
     // component_mode bits; COMP_UNIFORM ⇒ one 8-bit quant value.
     bw.write_bits(dc_quant as u64, 8);
     // bands_present == DCONLY ⇒ no LP/HP reserved bits or QP.
+    bw.align_to_byte();
+}
+
+/// `image_plane_header` for the single grayscale plane with **NOHIGHPASS**
+/// (DC + LP), uniform DC and LP quantizers. Mirrors `Decoder::image_plane_header`.
+pub fn write_image_plane_header_gray_nohighpass(bw: &mut BitWriter, dc_quant: u8, lp_quant: u8) {
+    bw.write_bits(INT_YONLY as u64, 3); // internal_clr_fmt
+    bw.write_bits(0, 1); // scaled_flag
+    bw.write_bits(NOHIGHPASS as u64, 4); // bands_present
+    bw.write_flag(true); // dc_image_plane_uniform
+    bw.write_bits(dc_quant as u64, 8); // DC QP
+    // bands_present != DCONLY:
+    bw.write_bits(0, 1); // reserved_i_bit
+    bw.write_flag(true); // lp_image_plane_uniform
+    bw.write_bits(lp_quant as u64, 8); // LP QP
+    // bands_present == NOHIGHPASS ⇒ no HP block.
+    bw.align_to_byte();
+}
+
+/// `image_plane_header` for the single grayscale plane with **ALL_BANDS**
+/// (DC + LP + HP + flexbits), uniform DC/LP/HP quantizers. Mirrors
+/// `Decoder::image_plane_header`.
+pub fn write_image_plane_header_gray_allbands(
+    bw: &mut BitWriter,
+    dc_quant: u8,
+    lp_quant: u8,
+    hp_quant: u8,
+) {
+    bw.write_bits(INT_YONLY as u64, 3);
+    bw.write_bits(0, 1); // scaled_flag
+    bw.write_bits(ALL_BANDS as u64, 4); // bands_present (0)
+    bw.write_flag(true); // dc_image_plane_uniform
+    bw.write_bits(dc_quant as u64, 8);
+    bw.write_bits(0, 1); // reserved_i_bit
+    bw.write_flag(true); // lp_image_plane_uniform
+    bw.write_bits(lp_quant as u64, 8);
+    bw.write_bits(0, 1); // reserved_j_bit
+    bw.write_flag(true); // hp_image_plane_uniform
+    bw.write_bits(hp_quant as u64, 8);
     bw.align_to_byte();
 }
 

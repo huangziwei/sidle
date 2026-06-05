@@ -9,6 +9,7 @@
 //! directly.
 
 use super::bitstream::BitWriter;
+use crate::image::jxr_decode::state::AdaptiveVLC;
 use crate::image::jxr_decode::tables;
 use std::collections::HashMap;
 
@@ -93,6 +94,96 @@ pub fn encode_abs_level(bw: &mut BitWriter, table: &HashMap<u64, i32>, level: i3
     }
 }
 
+/// Encode-side inverse of the decoder's `decode_block` (the run-level
+/// orchestration). `pairs` are `(run, level)` for the nonzero **coarse** levels
+/// in scan order (run = zeros before each). Emits the index/flag packing
+/// (first_index / index_a / index_b), runs, signs, and abs-levels, updating the
+/// adaptive discriminators exactly as the decoder does. The caller adapts the
+/// VLC tables (`adapt_table2`/`adapt_table1`) after the MB and selects them by
+/// band/chroma.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_block(
+    bw: &mut BitWriter,
+    pairs: &[(u32, i32)],
+    i_location: usize,
+    first_ind: &mut AdaptiveVLC,
+    ind0: &mut AdaptiveVLC,
+    ind1: &mut AdaptiveVLC,
+    abs0: &mut AdaptiveVLC,
+    abs1: &mut AdaptiveVLC,
+) {
+    use super::entropy::write_huff;
+    use crate::image::jxr_decode::consts::{
+        ABS_LEVEL_INDEX_DELTA, FIRST_INDEX_DELTA, INDEX1_DELTA,
+    };
+    debug_assert!(!pairs.is_empty());
+
+    let abs_one = |bw: &mut BitWriter, abs: &mut AdaptiveVLC, mag: i32| {
+        let idx = encode_abs_level(bw, tables::abs_level_index(abs.table_index as usize), mag);
+        abs.discrim_val1 += ABS_LEVEL_INDEX_DELTA[0][idx as usize];
+    };
+
+    // --- first index ---
+    let (r0, l0) = pairs[0];
+    let run_is_zero = (r0 == 0) as i32;
+    let level_is_not_1 = (l0.abs() != 1) as i32;
+    let (n_imm, n_aft) = next_flags(pairs, 0);
+    let first_index = run_is_zero + 2 * level_is_not_1 + 4 * n_imm + 8 * n_aft;
+    write_huff(bw, tables::first_index(first_ind.table_index as usize), first_index);
+    first_ind.discrim_val1 += FIRST_INDEX_DELTA[first_ind.delta_table_index as usize][first_index as usize];
+    first_ind.discrim_val2 += FIRST_INDEX_DELTA[first_ind.delta2_table_index as usize][first_index as usize];
+    let mut i_context = run_is_zero & n_imm;
+    bw.write_flag(l0 < 0);
+    if level_is_not_1 != 0 {
+        abs_one(bw, if i_context != 0 { abs1 } else { abs0 }, l0.abs());
+    }
+    if run_is_zero == 0 {
+        encode_run(bw, r0, (15 - i_location) as u32);
+    }
+    let mut i_loc = i_location + r0 as usize + 1;
+    let (mut nis, mut nar) = (n_imm, n_aft);
+
+    // --- subsequent indices ---
+    let mut j = 1usize;
+    while nis != 0 || nar != 0 {
+        let (rj, lj) = pairs[j];
+        if nis == 0 {
+            encode_run(bw, rj, (15 - i_loc) as u32);
+        }
+        i_loc += rj as usize + 1;
+        let lin1 = (lj.abs() != 1) as i32;
+        let (ni, na) = next_flags(pairs, j);
+        let i_index = lin1 + 2 * ni + 4 * na;
+        if i_loc < 15 {
+            let ind = if i_context != 0 { &mut *ind1 } else { &mut *ind0 };
+            write_huff(bw, tables::index_a(ind.table_index as usize), i_index);
+            ind.discrim_val1 += INDEX1_DELTA[ind.delta_table_index as usize][i_index as usize];
+            ind.discrim_val2 += INDEX1_DELTA[ind.delta2_table_index as usize][i_index as usize];
+        } else if i_loc == 15 {
+            write_huff(bw, tables::index_b(), i_index);
+        } else {
+            bw.write_bits(i_index as u64, 1);
+        }
+        i_context &= ni;
+        bw.write_flag(lj < 0);
+        if lin1 != 0 {
+            abs_one(bw, if i_context != 0 { abs1 } else { abs0 }, lj.abs());
+        }
+        nis = ni;
+        nar = na;
+        j += 1;
+    }
+}
+
+/// Next-coefficient flags for `pairs[j]`: `(next_is_immediate, next_after_run)`.
+fn next_flags(pairs: &[(u32, i32)], j: usize) -> (i32, i32) {
+    if j + 1 < pairs.len() {
+        if pairs[j + 1].0 == 0 { (1, 0) } else { (0, 1) }
+    } else {
+        (0, 0)
+    }
+}
+
 /// Encode one DC coefficient `value` (already a prediction residual) for a
 /// single component, as `mb_dc` + `decode_dc` expect: the `b_abs_level` flag,
 /// an optional abs-level VLC for the high part, the `model_bits` low-part
@@ -143,11 +234,11 @@ impl ModelState {
     /// is the count of abs-level escapes this MB; `band` selects the weight
     /// (0=DC, 1=LP, 2=HP).
     pub fn update(&mut self, lap_mean: i32, band: i32) {
+        // `update_model_mb` weights: i_lap_mean[0] *= i_weight0[band]. The HP
+        // `>>4` in the decoder applies only to i_lap_mean[1] (the second model),
+        // which a single-model (grayscale/YONLY) plane never uses.
         const W0: [i32; 3] = [240, 12, 1];
-        let mut lap = lap_mean * W0[band as usize];
-        if band == 2 {
-            lap >>= 4;
-        }
+        let lap = lap_mean * W0[band as usize];
         let i_model_weight = 70;
         let i_delta = (lap - i_model_weight) >> 2;
         if i_delta <= -8 {
