@@ -9,7 +9,41 @@
 //! directly.
 
 use super::bitstream::BitWriter;
+use crate::image::jxr_decode::tables;
 use std::collections::HashMap;
+
+/// Encode-side inverse of the decoder's `decode_run`: emit a run length `run`
+/// in `1..=i_max_run` (`i_max_run` in `1..=14`). Run 0 is signalled by a flag
+/// in `decode_block`, not here.
+pub fn encode_run(bw: &mut BitWriter, run: u32, i_max_run: u32) {
+    use super::entropy::write_huff;
+    const REMAP: [u32; 15] = [1, 2, 3, 5, 7, 1, 2, 3, 5, 7, 1, 2, 3, 4, 5];
+    const FIXED: [u32; 15] = [0, 0, 1, 1, 3, 0, 0, 1, 1, 2, 0, 0, 0, 0, 1];
+    const BINX: [usize; 10] = [10, 10, 5, 5, 5, 5, 0, 0, 0, 0];
+    debug_assert!((1..=14).contains(&i_max_run) && (1..=i_max_run).contains(&run));
+    if i_max_run < 5 {
+        if i_max_run != 1 {
+            // i_max_run == 1 ⇒ run is implicitly 1 (no bits).
+            write_huff(bw, tables::run_value(i_max_run as usize), run as i32);
+        }
+    } else {
+        let binx = BINX[(i_max_run - 5) as usize];
+        // The five candidate indices [binx, binx+4] partition the run range.
+        for k in 0..5usize {
+            let idx = binx + k;
+            let lo = REMAP[idx];
+            let hi = lo + (1u32 << FIXED[idx]) - 1;
+            if run >= lo && run <= hi {
+                write_huff(bw, tables::run_index(), k as i32);
+                if FIXED[idx] > 0 {
+                    bw.write_bits((run - lo) as u64, FIXED[idx]);
+                }
+                return;
+            }
+        }
+        unreachable!("run {run} not covered for i_max_run {i_max_run}");
+    }
+}
 
 /// Encode-side inverse of the decoder's `decode_abs_level` (value path only;
 /// the adaptive table *index* is chosen by the caller). Emits `level` (`>= 2`)
@@ -233,6 +267,19 @@ mod tests {
             let bytes = bw.finish();
             let back = Decoder::new(&bytes).refine_lp(i_coeff, mb).unwrap();
             assert_eq!(back, result, "i_coeff={i_coeff} mb={mb} result={result}");
+        }
+    }
+
+    #[test]
+    fn run_roundtrips_via_decoder() {
+        for i_max_run in 1..=14u32 {
+            for run in 1..=i_max_run {
+                let mut bw = BitWriter::new();
+                encode_run(&mut bw, run, i_max_run);
+                let bytes = bw.finish();
+                let got = Decoder::new(&bytes).decode_run(i_max_run).unwrap();
+                assert_eq!(got, run, "i_max_run={i_max_run} run={run}");
+            }
         }
     }
 }

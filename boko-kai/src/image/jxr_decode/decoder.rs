@@ -1668,7 +1668,8 @@ impl<'a> Decoder<'a> {
         target.discrim_val2 += v1;
     }
 
-    fn decode_run(&mut self, i_max_run: u32) -> Result<u32> {
+    // `pub(crate)` as an encoder-test oracle (bitstream-only, no plane state).
+    pub(crate) fn decode_run(&mut self, i_max_run: u32) -> Result<u32> {
         if !(1..=14).contains(&i_max_run) {
             return Err(DecodeError::Unsupported(format!("decode_run iMaxRun {i_max_run}")));
         }
