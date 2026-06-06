@@ -4,6 +4,7 @@
 //! per-macroblock sequence, reusing its `AdaptiveVLC` / `AdaptiveScan` state.
 
 use super::bitstream::BitWriter;
+use super::quant::{quantize, scaling_factor, QpSet};
 use super::{codestream, coeff, container, hp, transform};
 use crate::image::jxr_decode::consts::*;
 use crate::image::jxr_decode::state::{AdaptiveScan, AdaptiveVLC};
@@ -11,8 +12,10 @@ use crate::image::jxr_decode::tables;
 
 const ABS_DELTA: [i32; 7] = [1, 0, -1, -1, -1, -1, -1]; // ABS_LEVEL_INDEX_DELTA[0]
 
-/// Encode a grayscale image (dims multiples of 16) losslessly (ALL_BANDS).
-pub fn encode_grayscale(luma: &[u8], w: u32, h: u32) -> Vec<u8> {
+/// Encode a grayscale image (any size) as ALL_BANDS at the given per-band
+/// quantizers. `QpSet::LOSSLESS` (all 0 ⇒ scaling factor 1) is bit-exact.
+pub fn encode_grayscale(luma: &[u8], w: u32, h: u32, qp: QpSet) -> Vec<u8> {
+    let (dc_sf, lp_sf, hp_sf) = (scaling_factor(qp.dc), scaling_factor(qp.lp), scaling_factor(qp.hp));
     let (wu, hu) = (w as usize, h as usize);
     // Pad to a 16-aligned grid with edge replication; the decoder crops back to
     // (w, h) since the header carries the true dims and windowing_flag = 0.
@@ -43,10 +46,24 @@ pub fn encode_grayscale(luma: &[u8], w: u32, h: u32) -> Vec<u8> {
                     samples[py * 16 + px] = padded[g] as i32 - 128;
                 }
             }
-            let buf = transform::forward_transform_mb(&samples);
+            let mut buf = transform::forward_transform_mb(&samples);
+            // Quantize the raw coefficients in place; prediction below runs in
+            // the level domain. HP lives at within-block positions blk*16+1..16.
+            if hp_sf > 1 {
+                for blk in 0..16 {
+                    for pos in 1..16 {
+                        let idx = blk * 16 + pos;
+                        buf[idx] = quantize(buf[idx], hp_sf);
+                    }
+                }
+            }
             let mut c = [0i32; 16];
             for (j, s) in c.iter_mut().enumerate() {
-                *s = buf[16 * ICT4X4_INV_PERM[j]];
+                *s = buf[16 * ICT4X4_INV_PERM[j]]; // DC/LP at the block-DC slots
+            }
+            c[0] = quantize(c[0], dc_sf);
+            for s in c.iter_mut().skip(1) {
+                *s = quantize(*s, lp_sf);
             }
             buf_grid[mbx][mby] = buf;
             dclp[mbx][mby] = c;
@@ -55,7 +72,7 @@ pub fn encode_grayscale(luma: &[u8], w: u32, h: u32) -> Vec<u8> {
 
     let mut bw = BitWriter::new();
     codestream::write_image_header(&mut bw, w, h);
-    codestream::write_image_plane_header_gray_allbands(&mut bw, 0, 0, 0);
+    codestream::write_image_plane_header_gray_allbands(&mut bw, qp.dc, qp.lp, qp.hp);
     codestream::write_vlw_esc(&mut bw, 0);
     codestream::write_common_tile_header(&mut bw);
 

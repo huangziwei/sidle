@@ -1,12 +1,12 @@
 //! Pure-Rust JPEG-XR encoder (EPUB→KFX), dual grayscale/color.
 //!
-//! Forward mirror of [`crate::image::jxr_decode`]. Built in phases against the
-//! existing decoder as a round-trip oracle — see `.claude/plans/jxr-encoder.md`.
+//! Forward mirror of [`crate::image::jxr_decode`], built bottom-up against the
+//! decoder as a round-trip oracle — see `.claude/plans/jxr-encoder.md`.
 //!
-//! Status: scaffolding + Phase 1 forward core-transform ([`transform`]). The
-//! quantizer, entropy coder, and container writer land in later phases, after
-//! which [`encode`] becomes real and the `#[ignore]`d round-trip test below is
-//! enabled.
+//! Status: **grayscale complete** — full ALL_BANDS (DC + LP + HP + flexbits),
+//! multi-MB prediction, windowing, and per-band quantization ([`quant`]).
+//! `QpSet::LOSSLESS` round-trips bit-exact; `QP > 0` is lossy (ship mode).
+//! Color is Phase 6.
 
 pub mod bitstream;
 pub mod codestream;
@@ -15,7 +15,10 @@ pub mod coeff;
 pub mod entropy;
 pub mod gray;
 pub mod hp;
+pub mod quant;
 pub mod transform;
+
+pub use quant::QpSet;
 
 /// How color is handled on the way into the KFX.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,17 +60,14 @@ pub struct ImageInput<'a> {
     pub planes: &'a [Vec<u8>],
 }
 
-/// Encode 8-bit pixels into a JPEG-XR file (TIFF container + WMPHOTO
-/// codestream). `quality` is reserved (lossless DC for now).
-///
-/// Current support: grayscale, a single 16×16 macroblock, **DCONLY** (so it is
-/// exact only for flat blocks — the LP/HP bands and multi-MB land next). This
-/// is the first end-to-end slice: container + headers + forward transform + DC
-/// coding, decodable by `jxr_decode`.
+/// Encode 8-bit grayscale pixels into a JPEG-XR file (TIFF container + WMPHOTO
+/// codestream) at the given per-band quantizers. `QpSet::LOSSLESS` is bit-exact;
+/// higher QP trades fidelity for size (ship mode). Output is decodable by
+/// `jxr_decode` and structurally clones a real Amazon JXR.
 pub fn encode(
     input: &ImageInput<'_>,
     mode: ColorMode,
-    _quality: u8,
+    qp: QpSet,
 ) -> Result<Vec<u8>, EncodeError> {
     if mode == ColorMode::Color {
         return Err(EncodeError::NotImplemented("color mode (Phase 6)"));
@@ -90,8 +90,20 @@ pub fn encode(
     if luma.len() != wu * hu {
         return Err(EncodeError::Unsupported("plane len != width*height".into()));
     }
-    // DC + LP + HP (ALL_BANDS): lossless for any grayscale image.
-    Ok(gray::encode_grayscale(luma, w, h))
+    // DC + LP + HP (ALL_BANDS). QpSet::LOSSLESS ⇒ bit-exact; QP>0 ⇒ lossy.
+    Ok(gray::encode_grayscale(luma, w, h, qp))
+}
+
+/// Map a 0–100 quality knob to per-band quantizers. 100 ⇒ lossless; lower ⇒
+/// coarser, with HP quantized hardest (the `1:2:4` dc:lp:hp ratio Amazon-style).
+/// Tuned so the mid-80s land near Amazon's per-plate size on LN content; the
+/// default is refined against real plates in the pipeline (Phase 5).
+pub fn quality_to_qp(quality: u8) -> QpSet {
+    if quality >= 100 {
+        return QpSet::LOSSLESS;
+    }
+    let base = (((100 - quality as i32) + 2) / 3).clamp(1, 40) as u8;
+    QpSet { dc: base, lp: base.saturating_mul(2), hp: base.saturating_mul(4) }
 }
 
 #[cfg(test)]
@@ -120,7 +132,7 @@ mod tests {
                     height: h,
                     planes: std::slice::from_ref(&plane),
                 };
-                let jxr = encode(&input, ColorMode::Grayscale, 0).expect("encode");
+                let jxr = encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).expect("encode");
                 let decoded = decode_to_planes(&jxr);
                 assert_eq!((decoded.width, decoded.height), (w, h));
                 for (i, &got) in decoded.image_plane[0].iter().enumerate() {
@@ -225,7 +237,7 @@ mod tests {
                 height: h as u32,
                 planes: std::slice::from_ref(&pixels),
             };
-            let jxr = encode(&input, ColorMode::Grayscale, 0).expect("encode");
+            let jxr = encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).expect("encode");
             let decoded = decode_to_planes(&jxr);
             for (i, &got) in decoded.image_plane[0].iter().enumerate() {
                 assert_eq!(got, pixels[i] as i32, "mbw={mbw} mbh={mbh} pixel {i}");
@@ -245,7 +257,7 @@ mod tests {
                 height: h as u32,
                 planes: std::slice::from_ref(&pixels),
             };
-            let jxr = encode(&input, ColorMode::Grayscale, 0).expect("encode");
+            let jxr = encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).expect("encode");
             let decoded = decode_to_planes(&jxr);
             for (i, &got) in decoded.image_plane[0].iter().enumerate() {
                 assert_eq!(got, pixels[i] as i32, "mbw={mbw} mbh={mbh} pixel {i}");
@@ -264,12 +276,80 @@ mod tests {
                 height: h,
                 planes: std::slice::from_ref(&pixels),
             };
-            let jxr = encode(&input, ColorMode::Grayscale, 0).expect("encode");
+            let jxr = encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).expect("encode");
             let decoded = decode_to_planes(&jxr);
             assert_eq!((decoded.width, decoded.height), (w, h));
             for (i, &got) in decoded.image_plane[0].iter().enumerate() {
                 assert_eq!(got, pixels[i] as i32, "w={w} h={h} pixel {i}");
             }
         }
+    }
+
+    #[test]
+    fn lossy_roundtrip_is_a_fixpoint() {
+        // Lossy correctness without an external oracle: a decoded image already
+        // sits on the quantization grid, so re-encoding it must yield a
+        // byte-identical JXR (encode∘decode∘encode is a fixpoint). This holds
+        // iff our forward quantizer is the exact inverse of the decoder's
+        // dequant for every band. Mid-range pixels keep the reconstruction in
+        // [0,255] so no clamping perturbs the second generation. Aligned sizes
+        // only: windowing regenerates edge-padding from the (now lossy) edge, so
+        // boundary MBs of a padded image aren't a fixpoint — a property of the
+        // padding, not the quantizer.
+        let mut r = Lcg(0x1357_9bdf);
+        let qps = [
+            QpSet { dc: 4, lp: 8, hp: 16 },
+            QpSet { dc: 8, lp: 16, hp: 32 },
+            QpSet { dc: 1, lp: 4, hp: 6 },
+        ];
+        for &(w, h) in &[(32u32, 32u32), (48, 32), (64, 48)] {
+            let pixels: Vec<u8> = (0..(w * h) as usize).map(|_| 96 + (r.next() % 64) as u8).collect();
+            for &qp in &qps {
+                let input = ImageInput { width: w, height: h, planes: std::slice::from_ref(&pixels) };
+                let jxr1 = encode(&input, ColorMode::Grayscale, qp).expect("encode");
+                let dec1 = decode_to_planes(&jxr1);
+                let p1: Vec<u8> = dec1.image_plane[0].iter().map(|&v| v.clamp(0, 255) as u8).collect();
+                let input2 = ImageInput { width: w, height: h, planes: std::slice::from_ref(&p1) };
+                let jxr2 = encode(&input2, ColorMode::Grayscale, qp).expect("re-encode");
+                assert_eq!(jxr1, jxr2, "not a fixpoint at qp={qp:?} {w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn lossy_error_grows_with_qp() {
+        // Clean synthetic original with energy in every band: coarser quant ⇒
+        // strictly more error. The fixpoint test only proves self-consistency;
+        // this rules out a deadzone/rounding bug that would still round-trip but
+        // quantize badly. (Monotonic on a clean master — unlike PSNR vs Amazon's
+        // own already-quantized pixels.)
+        let (w, h) = (64usize, 64usize);
+        let pixels: Vec<u8> = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as i32, (i / w) as i32);
+                let v = 110 + (x % 17) - (y % 13) + ((x * y) % 11) * 3; // LP + HP energy
+                v.clamp(0, 255) as u8
+            })
+            .collect();
+        let mse = |qp: QpSet| -> f64 {
+            let input =
+                ImageInput { width: w as u32, height: h as u32, planes: std::slice::from_ref(&pixels) };
+            let jxr = encode(&input, ColorMode::Grayscale, qp).expect("encode");
+            let d = decode_to_planes(&jxr);
+            let se: f64 = pixels
+                .iter()
+                .zip(d.image_plane[0].iter())
+                .map(|(&r, &g)| {
+                    let e = r as f64 - g.clamp(0, 255) as f64;
+                    e * e
+                })
+                .sum();
+            se / (w * h) as f64
+        };
+        let m0 = mse(QpSet::LOSSLESS);
+        let m4 = mse(QpSet { dc: 16, lp: 16, hp: 16 }); // sf = 4
+        let m8 = mse(QpSet { dc: 32, lp: 32, hp: 32 }); // sf = 8
+        assert_eq!(m0, 0.0, "lossless must be exact");
+        assert!(m4 > 0.0 && m8 > m4, "error must grow with QP: m0={m0} m4={m4} m8={m8}");
     }
 }

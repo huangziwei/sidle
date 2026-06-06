@@ -211,7 +211,12 @@ impl QP {
     }
 }
 
-fn quant_map(i_qp: u32, i_component: usize, scaled_flag: bool, band: u8) -> Result<i32, DeserializerError> {
+pub(crate) fn quant_map(
+    i_qp: u32,
+    i_component: usize,
+    scaled_flag: bool,
+    band: u8,
+) -> Result<i32, DeserializerError> {
     let sf: i32;
     if i_qp == 0 {
         sf = 1;
