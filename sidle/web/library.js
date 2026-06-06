@@ -2344,12 +2344,18 @@ function openContextMenu(x, y, b) {
     add(menu, "Edit metadata…", () => openMetadataModal(b));
     add(menu, "Open in Finder", () => openInFinder(b.id));
     add(menu, "Re-fetch cover", () => recrawlCover(b));
-    // Nested: pick the interior-image encoding. Grayscale (device default) or
-    // full color (24bppRGB JXR — for the Sidle reader; the device renders gray).
-    addSub(menu, "Force re-convert", [
-      ["Grayscale", () => retryConvert(b.id, false)],
-      ["Full color", () => retryConvert(b.id, true)],
-    ]);
+    // The grayscale/full-color choice only changes EPUB→KFX output — the one
+    // direction that re-encodes raster images as JXR. PDF→KFX embeds the PDF
+    // verbatim and KFX→EPUB/PDF just decode the source, so for those the choice
+    // is a no-op: show a plain "Force re-convert" instead of the nested submenu.
+    if ((b.kind || "epub_to_kfx") === "epub_to_kfx") {
+      addSub(menu, "Force re-convert", [
+        ["Grayscale", () => retryConvert(b.id, false)],
+        ["Full color", () => retryConvert(b.id, true)],
+      ]);
+    } else {
+      add(menu, "Force re-convert", () => retryConvert(b.id));
+    }
     add(menu, "Remove from library", () => removeBook(b), true);
   }
 
