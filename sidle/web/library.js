@@ -39,6 +39,12 @@ const state = {
   // the browser doesn't keep serving the stale grayscale image from cache
   // after we've swapped the file on disk.
   coverCacheBust: 0,
+  // Live per-book conversion progress, keyed by book id: `{ fraction, label }`
+  // (fraction is a monotonic 0–1 estimate from the worker; label is the current
+  // step, e.g. "Encoding images"). Set on the `conversion:progress` event,
+  // seeded on `converting`, and dropped on `done`/`error`. Drives the
+  // determinate queue bar in `queueRow`.
+  convProgress: {},
   // When non-null, an autopull from /dedrm is in progress. `{ done, total }`
   // — surfaced in the status bar and used by renderQueue to know it shouldn't
   // clobber the autopull line with the queue summary.
@@ -1298,6 +1304,14 @@ function subscribeStatus() {
       return;
     }
     state.books[idx] = { ...state.books[idx], status, error: error || null };
+    // Seed the progress bar at 0 when a job starts; drop it on any terminal
+    // state (done/error) or when it falls back to pending. The per-image
+    // `conversion:progress` ticks fill it in between.
+    if (status === "converting") {
+      state.convProgress[book_id] = { fraction: 0, label: "Starting…" };
+    } else {
+      delete state.convProgress[book_id];
+    }
     // When a conversion finishes, fetch the row to pick up kfx_path. Bump
     // the cache buster too — the worker may have just overwritten the
     // grayscale cover.jpg with the color-fetch result, and without a fresh
@@ -1308,6 +1322,17 @@ function subscribeStatus() {
     } else {
       render();
     }
+  });
+
+  // Live per-book conversion progress. These fire often (once per chapter /
+  // image for EPUB→KFX), so update just the affected row in place rather than
+  // rebuilding the queue list each tick; fall back to a full render only if the
+  // row isn't mounted yet (the seeding `converting` status hasn't arrived).
+  window.api.listen("conversion:progress", (e) => {
+    const { book_id, fraction, label } = e.payload || {};
+    if (book_id == null) return;
+    state.convProgress[book_id] = { fraction: fraction ?? 0, label: label || "" };
+    if (!updateQueueRowProgress(book_id)) renderQueue();
   });
 }
 
@@ -2257,7 +2282,7 @@ function queueRow(b) {
     retry.addEventListener("click", () => retryConvert(b.id));
     status.appendChild(retry);
   } else if (b.status === "converting") {
-    status.textContent = "Converting…";
+    status.textContent = convStatusText(state.convProgress[b.id]);
   } else {
     status.textContent = "Queued";
   }
@@ -2270,9 +2295,46 @@ function queueRow(b) {
 
   const bar = document.createElement("div");
   bar.className = `queue-progress ${b.status}`;
+  // Determinate fill for an in-flight conversion (pending/error keep their CSS
+  // `::after` treatment — amber stub / full accent). Width tracks the live
+  // progress fraction; `updateQueueRowProgress` nudges it in place per tick.
+  if (b.status === "converting") {
+    const fill = document.createElement("div");
+    fill.className = "queue-progress-fill";
+    fill.style.width = `${convFillPct(state.convProgress[b.id])}%`;
+    bar.appendChild(fill);
+  }
 
+  li.dataset.bookId = b.id;
   li.append(main, meta, bar);
   return li;
+}
+
+// "Step · NN%" text for an in-flight conversion (falls back to a generic label
+// before the first progress tick lands).
+function convStatusText(prog) {
+  if (!prog || !prog.label) return "Converting…";
+  return `${prog.label} · ${convFillPct(prog)}%`;
+}
+
+// Clamp a progress fraction to an integer percent for bar width / status text.
+function convFillPct(prog) {
+  return Math.round(Math.min(1, Math.max(0, prog?.fraction ?? 0)) * 100);
+}
+
+// Patch one queue row's fill + status text in place for a progress tick, so the
+// frequent (per-image) events don't rebuild the whole list. Returns false when
+// the row isn't mounted yet (the seeding `converting` status hasn't rendered),
+// letting the caller fall back to a full `renderQueue`.
+function updateQueueRowProgress(bookId) {
+  const li = document.querySelector(`#queue-list li[data-book-id="${bookId}"]`);
+  if (!li) return false;
+  const prog = state.convProgress[bookId];
+  const fill = li.querySelector(".queue-progress-fill");
+  if (fill) fill.style.width = `${convFillPct(prog)}%`;
+  const status = li.querySelector(".queue-status.converting");
+  if (status) status.textContent = convStatusText(prog);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2322,6 +2384,7 @@ function openContextMenu(x, y, b) {
     add(menu, `Edit metadata (${sel.length})…`, () =>
       openMetadataModal(sel, { bulk: true }),
     );
+    addReconvertItem(menu, `Force re-convert (${sel.length})`, sel);
     add(menu, `Remove ${sel.length} from library`, () => bulkRemove(), true);
   } else {
     // Single-item menu.
@@ -2377,6 +2440,7 @@ function openSeriesContextMenu(x, y, entry) {
   add(menu, `Edit metadata (${members.length})…`, () =>
     openMetadataModal(members, { bulk: true }),
   );
+  addReconvertItem(menu, `Force re-convert all (${members.length})`, members);
   placeMenu(x, y);
 }
 
@@ -2434,6 +2498,22 @@ function addSub(menu, label, items) {
   }
   li.appendChild(sub);
   menu.appendChild(li);
+}
+
+// "Force re-convert" for a SET of books (multi-selection or a whole series).
+// Shows the grayscale/full-color submenu exactly when any book is EPUB→KFX —
+// the only direction the color choice affects (the others ignore it) — mirroring
+// the single-book menu; otherwise a plain item.
+function addReconvertItem(menu, label, books) {
+  const anyEpub = books.some((b) => (b.kind || "epub_to_kfx") === "epub_to_kfx");
+  if (anyEpub) {
+    addSub(menu, label, [
+      ["Grayscale", () => bulkRetryConvert(books, false)],
+      ["Full color", () => bulkRetryConvert(books, true)],
+    ]);
+  } else {
+    add(menu, label, () => bulkRetryConvert(books, false));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2809,6 +2889,26 @@ async function bulkSend() {
     return;
   }
   await sendBooks(eligible.map((b) => b.id));
+}
+
+// Queue a forced re-convert for every book in `books` (multi-select / whole
+// series). `color` is the EPUB→KFX interior-image choice; the other directions
+// ignore it (see `conversion_retry`). Invokes the command directly rather than
+// `retryConvert` so the batch shows ONE summary toast, not one per book.
+async function bulkRetryConvert(books, color = false) {
+  if (!books.length) return;
+  let failed = 0;
+  for (const b of books) {
+    try {
+      await window.api.invoke("conversion_retry", { bookId: b.id, color });
+    } catch (e) {
+      failed += 1;
+      if (failed === 1) showToast(`re-convert failed for "${b.title}": ${e}`, true);
+      console.error("re-convert failed:", b.id, e);
+    }
+  }
+  const ok = books.length - failed;
+  if (ok) showToast(`re-converting ${ok} book${ok === 1 ? "" : "s"}…`);
 }
 
 async function bulkUnsend() {

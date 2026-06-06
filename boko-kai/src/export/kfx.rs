@@ -56,6 +56,20 @@ impl KfxExporter {
     pub fn with_config(config: KfxConfig) -> Self {
         Self { config }
     }
+
+    /// Export with coarse progress reporting; see
+    /// [`crate::Book::export_with_progress`]. `on_progress` is called as
+    /// `(phase_key, current, total, human_label)` as the container is built.
+    pub fn export_with_progress<W: Write + Seek>(
+        &self,
+        book: &mut Book,
+        writer: &mut W,
+        on_progress: &dyn Fn(&str, usize, usize, &str),
+    ) -> io::Result<()> {
+        let data = build_kfx_container(book, on_progress)?;
+        writer.write_all(&data)?;
+        Ok(())
+    }
 }
 
 impl Default for KfxExporter {
@@ -66,10 +80,7 @@ impl Default for KfxExporter {
 
 impl Exporter for KfxExporter {
     fn export<W: Write + Seek>(&self, book: &mut Book, writer: &mut W) -> io::Result<()> {
-        // Build the KFX container
-        let data = build_kfx_container(book)?;
-        writer.write_all(&data)?;
-        Ok(())
+        self.export_with_progress(book, writer, &|_, _, _, _| {})
     }
 }
 
@@ -78,7 +89,10 @@ impl Exporter for KfxExporter {
 /// This follows a strict Two-Pass architecture:
 /// - Pass 1 (Survey): Walk IR, build position map, intern symbols - NO ION GENERATION
 /// - Pass 2 (Synthesis): Generate Ion using pre-computed positions
-fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
+fn build_kfx_container(
+    book: &mut Book,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> io::Result<Vec<u8>> {
     let container_id = generate_container_id();
     let mut ctx = ExportContext::new();
 
@@ -178,7 +192,9 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
     // Also build a map from source paths to chapter IDs for landmark resolution
     let mut source_to_chapter: HashMap<String, ChapterId> = HashMap::new();
 
-    for (chapter_id, section_name) in &spine_info {
+    let n_chapters = spine_info.len();
+    for (i, (chapter_id, section_name)) in spine_info.iter().enumerate() {
+        on_progress("survey", i + 1, n_chapters, "Analyzing chapters");
         // Register section name as symbol
         let _section_id = ctx.register_section(section_name);
 
@@ -350,7 +366,8 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
         }
     }
 
-    for (chapter_id, section_name) in &spine_info {
+    for (i, (chapter_id, section_name)) in spine_info.iter().enumerate() {
+        on_progress("chapters", i + 1, n_chapters, "Converting text");
         if let Ok(chapter) = book.load_chapter(*chapter_id) {
             // Set up chapter-start anchor before generating content
             ctx.begin_chapter_export(*chapter_id);
@@ -431,22 +448,26 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
     // Interior plates become JXR in the book's chosen color mode (default
     // grayscale). Captured before the loop so the `book` borrow inside is free.
     let color_mode = book.image_color_mode();
+    let n_media = asset_paths.iter().filter(|p| is_media_asset(p.as_path())).count();
+    let mut media_i = 0usize;
     for asset_path in &asset_paths {
-        if is_media_asset(asset_path)
-            && let Ok(data) = book.load_asset(asset_path)
-        {
-            let href = asset_path.to_string_lossy().to_string();
-            let is_cover =
-                cover_filename.as_deref() == asset_path.file_name().and_then(|s| s.to_str());
-            let bundled = if is_cover {
-                crate::image::jpeg::sanitize_for_kfx(&data).unwrap_or(data)
-            } else {
-                encode_asset_for_kfx(&data, color_mode)
-            };
-            // external_resource ($164) - metadata about the resource
-            fragments.push(build_external_resource_fragment(&href, &bundled, &mut ctx));
-            // bcRawMedia ($417) - the actual bytes
-            fragments.push(build_resource_fragment(&href, &bundled, &mut ctx));
+        if is_media_asset(asset_path) {
+            media_i += 1;
+            on_progress("images", media_i, n_media, "Encoding images");
+            if let Ok(data) = book.load_asset(asset_path) {
+                let href = asset_path.to_string_lossy().to_string();
+                let is_cover =
+                    cover_filename.as_deref() == asset_path.file_name().and_then(|s| s.to_str());
+                let bundled = if is_cover {
+                    crate::image::jpeg::sanitize_for_kfx(&data).unwrap_or(data)
+                } else {
+                    encode_asset_for_kfx(&data, color_mode)
+                };
+                // external_resource ($164) - metadata about the resource
+                fragments.push(build_external_resource_fragment(&href, &bundled, &mut ctx));
+                // bcRawMedia ($417) - the actual bytes
+                fragments.push(build_resource_fragment(&href, &bundled, &mut ctx));
+            }
         }
     }
 
@@ -499,6 +520,7 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
     // PASS 3: SERIALIZATION
     // ========================================================================
 
+    on_progress("finalize", 1, 1, "Finalizing");
     Ok(serialize_container(
         &container_id,
         &entities,
@@ -4912,7 +4934,7 @@ mod resource_export_tests {
     #[test]
     fn test_kfx_export_includes_images() {
         let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
-        let data = build_kfx_container(&mut book).unwrap();
+        let data = build_kfx_container(&mut book, &|_, _, _, _| {}).unwrap();
 
         // 人間失格 is a text novel with one ~32KB cover image; the full KFX is
         // ~330KB. Assert it's substantial (text + bundled image), not empty.
@@ -4924,13 +4946,45 @@ mod resource_export_tests {
     }
 
     #[test]
+    fn export_with_progress_emits_phases_in_order() {
+        use std::cell::RefCell;
+        let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
+        let phases = RefCell::new(Vec::<String>::new());
+        let mut sink = Vec::new();
+        KfxExporter::new()
+            .export_with_progress(&mut book, &mut std::io::Cursor::new(&mut sink), &|phase, cur, total, _label| {
+                // First sighting of each phase, in emission order. Counts must be sane.
+                assert!(cur >= 1 && cur <= total, "{phase}: {cur}/{total}");
+                let mut p = phases.borrow_mut();
+                if p.last().map(String::as_str) != Some(phase) {
+                    p.push(phase.to_string());
+                }
+            })
+            .unwrap();
+        let seen = phases.into_inner();
+        // The pipeline runs survey → chapters → images → finalize. (A coverless
+        // book could skip "images"; the fixture has a cover, so all four fire.)
+        let order = ["survey", "chapters", "images", "finalize"];
+        let idxs: Vec<usize> = order
+            .iter()
+            .map(|p| seen.iter().position(|s| s == p)
+                .unwrap_or_else(|| panic!("missing phase {p}; saw {seen:?}")))
+            .collect();
+        assert!(
+            idxs.windows(2).all(|w| w[0] < w[1]),
+            "phases out of order: {seen:?}"
+        );
+        assert!(!sink.is_empty(), "should have written KFX bytes");
+    }
+
+    #[test]
     fn test_kfx_cover_jpeg_interiors_jxr() {
         // Phase 5: EPUB→KFX re-encodes interior raster plates as grayscale JXR
         // but keeps the COVER as JPEG — matching Amazon's own KFX (its pristine
         // download is a grayscale-JPEG cover + JXR plates) and what the Kindle
         // library-gallery / sleep-screen thumbnailer can read.
         let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
-        let kfx = build_kfx_container(&mut book).unwrap();
+        let kfx = build_kfx_container(&mut book, &|_, _, _, _| {}).unwrap();
         let loaded = crate::kfx_to_epub::loader::load(&kfx).expect("load own kfx");
         let is_jxr = |v: &Vec<u8>| v.len() >= 3 && v[0] == 0x49 && v[1] == 0x49 && v[2] == 0xBC;
         let is_jpeg = |v: &Vec<u8>| v.len() >= 3 && v[0] == 0xFF && v[1] == 0xD8 && v[2] == 0xFF;
@@ -5001,7 +5055,7 @@ mod resource_export_tests {
     fn test_kfx_asset_roundtrip() {
         // Export EPUB to KFX
         let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
-        let kfx_data = build_kfx_container(&mut book).unwrap();
+        let kfx_data = build_kfx_container(&mut book, &|_, _, _, _| {}).unwrap();
 
         // Write to temp file and re-open
         let temp_path = std::env::temp_dir().join("test_roundtrip.kfx");
@@ -5108,7 +5162,7 @@ mod anchor_resolution_tests {
     fn test_anchor_entities_created_in_full_export() {
         // Test that anchor entities are actually created during full export
         let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
-        let kfx_data = build_kfx_container(&mut book).unwrap();
+        let kfx_data = build_kfx_container(&mut book, &|_, _, _, _| {}).unwrap();
 
         // Parse the KFX container to find anchor entities
         use crate::kfx::container::{

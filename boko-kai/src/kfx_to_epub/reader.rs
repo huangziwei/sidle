@@ -55,7 +55,7 @@ pub struct ReaderBook {
 /// Convert a KFX container to the reader's [`ReaderBook`] — the KFX→DOM front
 /// half with `data-eid` stamping, minus the EPUB zip.
 pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> {
-    let (out, book, toc) = build_output(kfx_bytes, true)?;
+    let (out, book, toc) = build_output(kfx_bytes, true, &|_, _, _, _| {})?;
     // Drop the synthetic `titlepage.xhtml` cover wrapper that `build_output`
     // prepends for the EPUB export (Apple Books et al. need an explicit cover
     // spine item; see `build_titlepage`). The reader renders the KFX's own
@@ -235,7 +235,7 @@ mod tests {
     fn epub_export_does_not_stamp_data_eid() {
         let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx")).expect("read [太宰 治] 人間失格.kfx fixture");
         // The shippable EPUB path must leave the DOM stamp-free (no bloat).
-        let (out, _book, _toc) = build_output(&bytes, false).expect("build_output");
+        let (out, _book, _toc) = build_output(&bytes, false, &|_, _, _, _| {}).expect("build_output");
         let stamped: usize = out
             .spine_documents()
             .iter()

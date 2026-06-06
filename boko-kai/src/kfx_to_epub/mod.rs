@@ -69,7 +69,18 @@ impl From<io::Error> for ConvertError {
 ///
 /// We follow the same shape; missing steps are TODOs in the relevant modules.
 pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
-    let (out, book, _toc) = build_output(kfx_bytes, false)?;
+    convert_to_epub_with_progress(kfx_bytes, &|_, _, _, _| {})
+}
+
+/// Like [`convert_to_epub`], but reports coarse phase progress to `on_progress`
+/// as `(phase_key, current, total, human_label)` — sidle's conversion queue
+/// uses this to drive a determinate progress bar.
+pub fn convert_to_epub_with_progress(
+    kfx_bytes: &[u8],
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> Result<Vec<u8>, ConvertError> {
+    let (out, book, _toc) = build_output(kfx_bytes, false, on_progress)?;
+    on_progress("finalize", 1, 1, "Packaging");
     out.finalize(&book.metadata).map_err(ConvertError::Io)
 }
 
@@ -83,17 +94,25 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
 pub(crate) fn build_output(
     kfx_bytes: &[u8],
     stamp_eids: bool,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> Result<(EpubOutput, BookData, Vec<navigation::NavPoint>), ConvertError> {
     let trace = crate::trace::Trace::new("kfx2epub", "BOKO_KFX2EPUB_TRACE");
+    // Phase emits fire BEFORE each step so the bar's label names the work in
+    // progress (not the one just finished); cur=0 lands the bar at the band's
+    // start (see sidle's `progress_fraction`). These are single opaque steps —
+    // the bar advances per phase, the label tells you which one is running.
+    on_progress("load", 0, 1, "Reading KFX");
     let book = loader::load(kfx_bytes)?;
     trace.mark("loader::load");
     let mut out = EpubOutput::new();
 
     // Resources (images, cover).
+    on_progress("resources", 0, 1, "Decoding images");
     let resources = resources::process(&book, &mut out)?;
     trace.mark("resources::process (JXR → JPEG)");
 
     // Content (storyline → XHTML).
+    on_progress("content", 0, 1, "Building chapters");
     let mut content_state = content::ContentState::new(&book, &resources);
     content_state.stamp_eids = stamp_eids;
     content_state.process_reading_order()?;
@@ -168,6 +187,7 @@ pub(crate) fn build_output(
     // Navigation. Build NCX from book_navigation, using the
     // element-id → chapter-filename map populated by `process_section` to
     // resolve `nav_unit.target_position.id` to a real chapter file.
+    on_progress("nav", 0, 1, "Writing navigation");
     let toc = navigation::extract_toc(
         &book,
         &content_state.element_id_to_filename,

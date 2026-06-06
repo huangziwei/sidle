@@ -2010,24 +2010,26 @@ kbd {
   width: 8%;
 }
 
+/* Converting now uses a determinate child fill (.queue-progress-fill) driven by
+   the live progress fraction — hide the default ::after so it doesn't sit as a
+   full muted bar behind the fill. */
 .queue-progress.converting::after {
-  background: linear-gradient(90deg, transparent, #549acb, transparent);
-  width: 35%;
-  animation: progress-slide 1.4s linear infinite;
+  display: none;
+}
+
+.queue-progress-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  background: #549acb;
+  transition: width 0.2s linear;
 }
 
 .queue-progress.error::after {
   background: var(--accent);
   width: 100%;
-}
-
-@keyframes progress-slide {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(300%);
-  }
 }
 
 .queue-empty {

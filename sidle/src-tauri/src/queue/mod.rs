@@ -158,3 +158,25 @@ pub fn emit_status(app: &AppHandle, book_id: i64, status: &str, error: Option<&s
         },
     );
 }
+
+/// Emit a per-book conversion progress tick. `fraction` is a monotonic 0.0–1.0
+/// estimate — the worker maps boko's per-phase reports through
+/// `progress_fraction` — and `label` is the human step shown beside the bar
+/// (e.g. "Encoding images"). Keyed by `book_id` so concurrent workers each
+/// drive their own row. Best-effort, like `emit_status`.
+pub fn emit_progress(app: &AppHandle, book_id: i64, fraction: f32, label: &str) {
+    #[derive(serde::Serialize, Clone)]
+    struct Evt<'a> {
+        book_id: i64,
+        fraction: f32,
+        label: &'a str,
+    }
+    let _ = app.emit(
+        "conversion:progress",
+        Evt {
+            book_id,
+            fraction,
+            label,
+        },
+    );
+}

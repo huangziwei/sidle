@@ -625,9 +625,23 @@ impl Book {
     /// # Ok::<(), std::io::Error>(())
     /// ```
     pub fn export<W: Write + Seek>(&mut self, format: Format, writer: &mut W) -> io::Result<()> {
+        self.export_with_progress(format, writer, &|_, _, _, _| {})
+    }
+
+    /// Like [`Book::export`], but reports coarse conversion progress to
+    /// `on_progress` as `(phase_key, current, total, human_label)` — sidle's
+    /// conversion queue uses this to drive a determinate progress bar. Only KFX
+    /// export (the slow direction) emits phases today; EPUB export ignores the
+    /// callback.
+    pub fn export_with_progress<W: Write + Seek>(
+        &mut self,
+        format: Format,
+        writer: &mut W,
+        on_progress: &dyn Fn(&str, usize, usize, &str),
+    ) -> io::Result<()> {
         match format {
             Format::Epub => EpubExporter::new().export(self, writer),
-            Format::Kfx => KfxExporter::new().export(self, writer),
+            Format::Kfx => KfxExporter::new().export_with_progress(self, writer, on_progress),
             Format::Azw3 | Format::Mobi => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("{:?} export is not supported", format),

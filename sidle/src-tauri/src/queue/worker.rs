@@ -22,7 +22,7 @@ use crate::library::import::{
 use crate::library::kfx_cover;
 use crate::library::pdf_geom;
 use crate::library::paths::format_basename;
-use crate::queue::emit_status;
+use crate::queue::{emit_progress, emit_status};
 use crate::state::DbHandle;
 
 /// Run a single conversion job: mark `converting`, run boko, write file,
@@ -59,9 +59,23 @@ pub async fn run_job(
     let paths_owned = paths.clone();
     let book_owned = book.clone();
     let kind_owned = kind.to_string();
+    let app_owned = app.clone();
     let started = std::time::Instant::now();
     let result = tokio::task::spawn_blocking(move || {
-        run_direction(&paths_owned, &book_owned, &kind_owned, color)
+        // Map boko's per-phase reports → a monotonic 0–1 fraction (weighted per
+        // direction) and emit a throttled `conversion:progress` event. `last`
+        // suppresses sub-1% churn so an image-heavy EPUB doesn't fire hundreds
+        // of events; the 100% tick always gets through. `Cell` gives the `Fn`
+        // closure interior mutability without needing `FnMut`.
+        let last = std::cell::Cell::new(-1.0_f32);
+        let on_progress = |phase: &str, cur: usize, total: usize, label: &str| {
+            let f = progress_fraction(&kind_owned, phase, cur, total);
+            if f >= 1.0 || f >= last.get() + 0.01 {
+                last.set(f);
+                emit_progress(&app_owned, book_id, f, label);
+            }
+        };
+        run_direction(&paths_owned, &book_owned, &kind_owned, color, &on_progress)
     })
     .await;
 
@@ -274,19 +288,63 @@ fn run_direction(
     book: &BookRow,
     kind: &str,
     color: bool,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> anyhow::Result<Produced> {
     match kind {
         // Only EPUB→KFX embeds raster plates the color mode applies to; the
         // other directions ignore it.
-        "epub_to_kfx" => convert_epub_to_kfx(paths, book, color),
-        "kfx_to_epub" => convert_kfx_to_epub(paths, book),
-        "pdf_to_kfx" => convert_pdf_to_kfx(paths, book),
-        "kfx_to_pdf" => convert_kfx_to_pdf(paths, book),
+        "epub_to_kfx" => convert_epub_to_kfx(paths, book, color, on_progress),
+        "kfx_to_epub" => convert_kfx_to_epub(paths, book, on_progress),
+        "pdf_to_kfx" => convert_pdf_to_kfx(paths, book, on_progress),
+        "kfx_to_pdf" => convert_kfx_to_pdf(paths, book, on_progress),
         other => Err(anyhow::anyhow!("unknown job kind: {other}")),
     }
 }
 
-fn convert_epub_to_kfx(paths: &LibraryPaths, book: &BookRow, color: bool) -> anyhow::Result<Produced> {
+/// Map a boko/worker phase report to a monotonic 0.0–1.0 progress-bar fraction.
+/// Bands are per-direction heuristics (the slow phase gets the widest span);
+/// within a band we interpolate by `cur/total`. Not wall-clock-exact — the live
+/// label names the precise step — but always forward-moving, so the bar never
+/// snaps backward between phases.
+fn progress_fraction(kind: &str, phase: &str, cur: usize, total: usize) -> f32 {
+    let (lo, hi): (f32, f32) = match (kind, phase) {
+        ("epub_to_kfx", "survey") => (0.00, 0.08),
+        ("epub_to_kfx", "chapters") => (0.08, 0.40),
+        ("epub_to_kfx", "images") => (0.40, 0.92),
+        ("epub_to_kfx", "finalize") => (0.92, 1.00),
+
+        ("kfx_to_epub", "load") => (0.00, 0.15),
+        ("kfx_to_epub", "resources") => (0.15, 0.45),
+        ("kfx_to_epub", "content") => (0.45, 0.80),
+        ("kfx_to_epub", "nav") => (0.80, 0.92),
+        ("kfx_to_epub", "finalize") => (0.92, 1.00),
+
+        ("pdf_to_kfx", "probe") => (0.00, 0.05),
+        ("pdf_to_kfx", "cover") => (0.05, 0.15),
+        ("pdf_to_kfx", "text") => (0.15, 0.55),
+        ("pdf_to_kfx", "build") => (0.55, 0.90),
+        ("pdf_to_kfx", "geom") => (0.90, 1.00),
+
+        ("kfx_to_pdf", _) => (0.00, 1.00),
+
+        // Unrecognized (shouldn't happen): span the whole bar so cur/total still
+        // reads as a plain fraction rather than snapping to a band edge.
+        _ => (0.00, 1.00),
+    };
+    let within = if total == 0 {
+        1.0
+    } else {
+        (cur as f32 / total as f32).clamp(0.0, 1.0)
+    };
+    (lo + (hi - lo) * within).clamp(0.0, 1.0)
+}
+
+fn convert_epub_to_kfx(
+    paths: &LibraryPaths,
+    book: &BookRow,
+    color: bool,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> anyhow::Result<Produced> {
     let source = book
         .epub_path
         .as_deref()
@@ -314,7 +372,7 @@ fn convert_epub_to_kfx(paths: &LibraryPaths, book: &BookRow, color: bool) -> any
         boko::image::jxr_encode::ColorMode::Grayscale
     });
     let mut writer = File::create(&tmp_path)?;
-    handle.export(boko::Format::Kfx, &mut writer)?;
+    handle.export_with_progress(boko::Format::Kfx, &mut writer, on_progress)?;
     writer.sync_all().ok();
     drop(writer);
     std::fs::rename(&tmp_path, &out_path)?;
@@ -333,7 +391,11 @@ fn convert_epub_to_kfx(paths: &LibraryPaths, book: &BookRow, color: bool) -> any
     })
 }
 
-fn convert_kfx_to_epub(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Produced> {
+fn convert_kfx_to_epub(
+    paths: &LibraryPaths,
+    book: &BookRow,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> anyhow::Result<Produced> {
     let source = book
         .kfx_path
         .as_deref()
@@ -350,7 +412,7 @@ fn convert_kfx_to_epub(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<P
     // back here rather than threading the bytes through the queue.
     let kfx_bytes = std::fs::read(source_path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
-    let epub_bytes = boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
+    let epub_bytes = boko::kfx_to_epub::convert_to_epub_with_progress(&kfx_bytes, on_progress)
         .map_err(|e| anyhow::anyhow!("boko kfx→epub: {e}"))?;
     write_bytes_atomic(&out_path, &epub_bytes)?;
 
@@ -372,7 +434,11 @@ fn convert_kfx_to_epub(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<P
 /// PDF → KFX: wrap the PDF verbatim into a fixed-layout PDOC KFX for the Scribe.
 /// The book's PDF side is the source; the produced KFX is what gets pushed to
 /// the device. See .claude/plans/pdf-to-kfx.md.
-fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Produced> {
+fn convert_pdf_to_kfx(
+    paths: &LibraryPaths,
+    book: &BookRow,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> anyhow::Result<Produced> {
     let source = book
         .pdf_path
         .as_deref()
@@ -384,6 +450,7 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
     let base = derived_basename(book, source_path);
     let out_path = dir.join(format!("{base}.kfx"));
 
+    on_progress("probe", 0, 1, "Reading PDF");
     let bytes = std::fs::read(source_path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
     let doc = boko::import::probe_pdf(bytes).map_err(|e| anyhow::anyhow!("probe pdf: {e}"))?;
@@ -412,6 +479,7 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
     // transcodes a PNG/WebP sidecar. Only when there's no usable sidecar (first
     // import, or an unreadable file) do we render page 1. The PDF engine
     // (PDFKit) is optional — on render failure log and proceed cover-less.
+    on_progress("cover", 0, 1, "Rendering cover");
     let existing_cover = book
         .cover_path
         .as_deref()
@@ -439,7 +507,9 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
     };
 
     // Selectable text layer (PDFKit) — optional, like the cover; on failure the
-    // book is converted visual-only.
+    // book is converted visual-only. Usually the slowest step, so it gets the
+    // widest progress band.
+    on_progress("text", 0, 1, "Extracting text");
     let text = boko::render::extract_pdf_text(&doc.bytes).ok();
     match &text {
         Some(pages) => {
@@ -453,6 +523,7 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
         None => eprintln!("[sidle/queue] book {} pdf text: skipped", book.id),
     }
 
+    on_progress("build", 0, 1, "Building KFX");
     let kfx = boko::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref(), text.as_deref());
     write_bytes_atomic(&out_path, &kfx)?;
 
@@ -462,6 +533,7 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
     // (~0.5 s release / ~1.4 s debug each) under the DB lock — what made
     // "sync annotations" slow. Computed from the in-memory bytes (no re-read of
     // the 15 MB file); best-effort — a miss just falls back to the lazy parse.
+    on_progress("geom", 0, 1, "Caching geometry");
     let kfx_sha = sha256_of_bytes(&kfx);
     let geom = pdf_geom::compute(&kfx);
     if let Err(e) = pdf_geom::write_sidecar(paths, &book.sha256, &kfx_sha, &geom) {
@@ -519,7 +591,11 @@ fn convert_pdf_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
 /// KFX → PDF: extract the verbatim embedded PDF from a PDF-backed container KFX
 /// (a synced-back PDF book, or the return side of a `.kfx` import). The PDF is
 /// byte-identical to what was embedded.
-fn convert_kfx_to_pdf(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Produced> {
+fn convert_kfx_to_pdf(
+    paths: &LibraryPaths,
+    book: &BookRow,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> anyhow::Result<Produced> {
     let source = book
         .kfx_path
         .as_deref()
@@ -533,6 +609,7 @@ fn convert_kfx_to_pdf(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Pr
 
     let kfx_bytes = std::fs::read(source_path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
+    on_progress("extract", 0, 1, "Extracting PDF");
     let pdf = boko::kfx::pdf_container::kfx_extract_pdf(&kfx_bytes)
         .map_err(|e| anyhow::anyhow!("kfx→pdf extract: {e}"))?;
     write_bytes_atomic(&out_path, &pdf)?;
