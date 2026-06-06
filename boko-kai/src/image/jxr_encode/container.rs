@@ -20,9 +20,15 @@ pub mod pixel_format {
 
 const TIFF_TYPE_BYTE: u16 = 1;
 const TIFF_TYPE_LONG: u16 = 4;
+const TIFF_TYPE_FLOAT: u16 = 11;
+
+/// 96-dpi resolution Amazon stamps on every plate (`96.0` as IEEE-754 FLOAT).
+const RESOLUTION_96DPI: u32 = 0x42c0_0000; // 96.0f32.to_bits()
 
 /// Wrap `codestream` in a JXR TIFF container for a `width`×`height` image of
-/// the given `pixel_format` GUID.
+/// the given `pixel_format` GUID. The IFD mirrors a real Amazon JXR's tag set
+/// and order exactly (clone-by-diff): pixel format, transformation, dims,
+/// resolution, image offset/byte-count.
 pub fn write_container(
     codestream: &[u8],
     width: u32,
@@ -30,8 +36,8 @@ pub fn write_container(
     pixel_format: &[u8; 16],
 ) -> Vec<u8> {
     const HEADER_LEN: u32 = 8; // II-BC-01 (4) + ifd_offset (4)
-    const NUM_ENTRIES: u16 = 5;
-    // IFD: count(2) + entries(5*12) + next_ifd(4)
+    const NUM_ENTRIES: u16 = 8;
+    // IFD: count(2) + entries(N*12) + next_ifd(4)
     const IFD_LEN: u32 = 2 + NUM_ENTRIES as u32 * 12 + 4;
 
     let ifd_offset = HEADER_LEN;
@@ -42,10 +48,14 @@ pub fn write_container(
     out.extend_from_slice(&[0x49, 0x49, 0xBC, 0x01]);
     out.extend_from_slice(&ifd_offset.to_le_bytes());
 
+    // Tags MUST be ascending (TIFF requirement); this order matches Amazon's.
     out.extend_from_slice(&NUM_ENTRIES.to_le_bytes());
     push_entry(&mut out, 0xbc01, TIFF_TYPE_BYTE, 16, uuid_offset); // pixel_format (out-of-line)
+    push_entry(&mut out, 0xbc02, TIFF_TYPE_LONG, 1, 0); // transformation (no rotate/flip)
     push_entry(&mut out, 0xbc80, TIFF_TYPE_LONG, 1, width); // image_width
     push_entry(&mut out, 0xbc81, TIFF_TYPE_LONG, 1, height); // image_height
+    push_entry(&mut out, 0xbc82, TIFF_TYPE_FLOAT, 1, RESOLUTION_96DPI); // width_res
+    push_entry(&mut out, 0xbc83, TIFF_TYPE_FLOAT, 1, RESOLUTION_96DPI); // height_res
     push_entry(&mut out, 0xbcc0, TIFF_TYPE_LONG, 1, codestream_offset); // image_offset
     push_entry(&mut out, 0xbcc1, TIFF_TYPE_LONG, 1, codestream.len() as u32); // image_byte_count
     out.extend_from_slice(&0u32.to_le_bytes()); // next IFD offset = none

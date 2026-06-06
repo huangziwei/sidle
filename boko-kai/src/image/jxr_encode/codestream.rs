@@ -28,7 +28,7 @@ pub fn write_image_header(bw: &mut BitWriter, width: u32, height: u32) {
     bw.write_bits(0, 1); // index_table_present_flag → none
     bw.write_bits(NO_OVERLAP_FILTERING as u64, 2); // overlap_mode
     bw.write_bits(1, 1); // short_header_flag → 16-bit dims
-    bw.write_bits(0, 1); // long_word_flag
+    bw.write_bits(1, 1); // long_word_flag (Amazon sets this; decoder ignores it)
     bw.write_bits(0, 1); // windowing_flag
     bw.write_bits(0, 1); // trim_flexbits_flag
     bw.write_bits(0, 1); // reserved_d
