@@ -56,9 +56,17 @@ pub struct ReaderBook {
 /// half with `data-eid` stamping, minus the EPUB zip.
 pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> {
     let (out, book, toc) = build_output(kfx_bytes, true)?;
+    // Drop the synthetic `titlepage.xhtml` cover wrapper that `build_output`
+    // prepends for the EPUB export (Apple Books et al. need an explicit cover
+    // spine item; see `build_titlepage`). The reader renders the KFX's own
+    // spine, whose first section already IS the cover image (the KFX
+    // `CoverPage`, e.g. `c0.xhtml` with the cover `<img>`) — exactly what the
+    // device shows. Keeping the titlepage too would double the cover: a leading
+    // page with no eid/Location, then the real cover section at Location 0.
     let sections: Vec<ReaderSection> = out
         .spine_documents()
         .into_iter()
+        .filter(|(href, _)| href != "titlepage.xhtml")
         .map(|(href, html)| ReaderSection { href, html })
         .collect();
     let resources = out
