@@ -1622,6 +1622,14 @@ kbd {
 .ctx-menu li.has-sub:hover > .ctx-submenu {
   display: block;
 }
+/* When the menu sits at the right edge of the window, open submenus to the LEFT
+   of the parent instead, so they don't fly off-screen (set by `placeMenu`). */
+.ctx-menu.flip-sub .ctx-submenu {
+  left: auto;
+  right: 100%;
+  margin-left: 0;
+  margin-right: 2px;
+}
 .ctx-submenu li {
   padding: 6px 12px;
   border-radius: 4px;

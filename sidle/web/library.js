@@ -2385,12 +2385,20 @@ function openSeriesContextMenu(x, y, entry) {
 function placeMenu(x, y) {
   const menu = $("#ctx-menu");
   menu.hidden = false;
+  menu.classList.remove("flip-sub"); // default: submenus open to the right
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
   requestAnimationFrame(() => {
-    const r = menu.getBoundingClientRect();
+    let r = menu.getBoundingClientRect();
     if (r.right > window.innerWidth) menu.style.left = `${window.innerWidth - r.width - 4}px`;
     if (r.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - r.height - 4}px`;
+    // A submenu opens to the right (`left: 100%`). When the menu sits at the
+    // right edge — common for the last column of cards, and after the nudge
+    // above — that flies the submenu (e.g. Force re-convert ▸) off-screen. Flip
+    // it to the left side of the parent when the right has no room.
+    r = menu.getBoundingClientRect();
+    const SUBMENU_WIDTH = 170;
+    menu.classList.toggle("flip-sub", r.right + SUBMENU_WIDTH > window.innerWidth);
   });
 }
 
