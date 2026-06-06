@@ -100,6 +100,36 @@ pub fn write_image_plane_header_gray_allbands(
     bw.align_to_byte();
 }
 
+/// `image_plane_header` for the **color** (`INT_YUV444`) plane, **DCONLY** —
+/// the staging foundation for the color path (constant-color MBs round-trip
+/// exactly). Uniform DC QP shared across components. Ends byte-aligned.
+pub fn write_image_plane_header_color_dconly(bw: &mut BitWriter, dc_quant: u8) {
+    bw.write_bits(INT_YUV444 as u64, 3); // internal_clr_fmt
+    bw.write_bits(0, 1); // scaled_flag
+    bw.write_bits(DCONLY as u64, 4); // bands_present
+    bw.write_bits(0, 8); // YUV_444 reserved_e_bit (4) + reserved_f (4)
+    bw.write_flag(true); // dc_image_plane_uniform
+    write_uniform_qp(bw, dc_quant);
+    // bands_present == DCONLY ⇒ no LP/HP block.
+    bw.align_to_byte();
+}
+
+/// `image_plane_header` for the **color** (`INT_YUV444`) plane, **NOHIGHPASS**
+/// (DC + LP) — staging step between DCONLY and ALL_BANDS. Uniform DC + LP QPs.
+pub fn write_image_plane_header_color_nohighpass(bw: &mut BitWriter, dc_quant: u8, lp_quant: u8) {
+    bw.write_bits(INT_YUV444 as u64, 3); // internal_clr_fmt
+    bw.write_bits(0, 1); // scaled_flag
+    bw.write_bits(NOHIGHPASS as u64, 4); // bands_present
+    bw.write_bits(0, 8); // YUV_444 reserved_e_bit (4) + reserved_f (4)
+    bw.write_flag(true); // dc_image_plane_uniform
+    write_uniform_qp(bw, dc_quant);
+    bw.write_bits(0, 1); // reserved_i_bit / use-DC-QP-for-LP = 0 (don't reuse)
+    bw.write_flag(true); // lp_image_plane_uniform
+    write_uniform_qp(bw, lp_quant);
+    // bands_present == NOHIGHPASS ⇒ no HP block.
+    bw.align_to_byte();
+}
+
 /// `image_plane_header` for the **color** (`INT_YUV444`, 3-component) plane with
 /// **ALL_BANDS** (DC + LP + HP + flexbits) and uniform per-band quantizers shared
 /// across components (`COMP_UNIFORM`). Mirrors `Decoder::image_plane_header` for

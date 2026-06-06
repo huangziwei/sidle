@@ -195,13 +195,32 @@ pub fn encode_dc_value(
     model_bits: i32,
     abs_table: &HashMap<u64, i32>,
 ) -> (bool, i32) {
+    let high = (value.unsigned_abs() as i64 >> model_bits as u32) as i32;
+    let b_abs_level = high > 0;
+    bw.write_flag(b_abs_level); // mb_dc reads this before decode_dc (grayscale)
+    let abs_index = encode_dc_residual(bw, value, model_bits, b_abs_level, abs_table);
+    (b_abs_level, abs_index)
+}
+
+/// Flag-less DC value body: emit the abs-level VLC (iff `b_abs_level`), the
+/// `model_bits` low part, then the sign (iff nonzero). Shared by grayscale
+/// ([`encode_dc_value`], which writes the per-component `b_abs` flag first) and
+/// **color**, where the three components' `b_abs` flags are bundled into one
+/// `val_dc_yuv` symbol written before the components (so no per-component flag).
+/// Returns the `abs_level_index` (`-1` if `!b_abs_level`).
+pub fn encode_dc_residual(
+    bw: &mut BitWriter,
+    value: i32,
+    model_bits: i32,
+    b_abs_level: bool,
+    abs_table: &HashMap<u64, i32>,
+) -> i32 {
     let mag = value.unsigned_abs() as i64;
     let m = model_bits as u32;
-    let high = (mag >> m) as i32; // i_dc >> model_bits
-    let b_abs_level = high > 0;
-    bw.write_flag(b_abs_level); // mb_dc reads this before decode_dc
     let mut abs_index = -1;
     if b_abs_level {
+        let high = (mag >> m) as i32;
+        debug_assert!(high > 0);
         // decode_dc computes i_dc_high = decode_abs_level() - 1, so level = high + 1.
         abs_index = encode_abs_level(bw, abs_table, high + 1);
     }
@@ -211,7 +230,7 @@ pub fn encode_dc_value(
     if mag != 0 {
         bw.write_flag(value < 0);
     }
-    (b_abs_level, abs_index)
+    abs_index
 }
 
 /// One model's `m_bits`/`m_state`, mirroring `jxr_decode::state::Model`.
@@ -262,6 +281,67 @@ impl ModelState {
                 } else {
                     self.m_state = 0;
                     self.m_bits += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Two-model `m_bits`/`m_state` (luma + chroma) for a **color** plane, mirroring
+/// `jxr_decode::state::Model` + `Decoder::update_model_mb` with `i_num_models =
+/// 2`. Index 0 = luma, index 1 = chroma. (Grayscale uses the single-model
+/// [`ModelState`].)
+#[derive(Clone, Copy)]
+pub struct ColorModel {
+    pub m_bits: [i32; 2],
+    pub m_state: [i32; 2],
+}
+
+impl ColorModel {
+    /// `initialize_model_mb(band)`: `m_bits = max((2-band)*4, 0)` for both models.
+    pub fn init(band: i32) -> Self {
+        let mb = ((2 - band) * 4).max(0);
+        Self { m_bits: [mb; 2], m_state: [0; 2] }
+    }
+
+    /// Mirror of `update_model_mb` for a 2-model plane. `lap` is the per-model
+    /// abs-level escape count this MB (`lap[0]` luma, `lap[1]` chroma); `band`
+    /// is 0=DC/1=LP/2=HP; `num_components` selects the chroma weight column.
+    pub fn update(&mut self, mut lap: [i32; 2], band: usize, num_components: usize) {
+        const W0: [i32; 3] = [240, 12, 1];
+        const W1: [[i32; 16]; 3] = [
+            [0, 240, 120, 80, 60, 48, 40, 34, 30, 27, 24, 22, 20, 18, 17, 16],
+            [0, 12, 6, 4, 3, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1],
+            [0, 16, 8, 5, 4, 3, 3, 2, 2, 2, 2, 1, 1, 1, 1, 1],
+        ];
+        lap[0] *= W0[band];
+        lap[1] *= W1[band][num_components - 1];
+        if band == 2 {
+            lap[1] >>= 4; // HP: the decoder's `>>4` applies only to model 1
+        }
+        let i_model_weight = 70;
+        for j in 0..2 {
+            let i_delta = (lap[j] - i_model_weight) >> 2;
+            if i_delta <= -8 {
+                self.m_state[j] += (i_delta + 4).max(-16);
+                if self.m_state[j] < -8 {
+                    if self.m_bits[j] == 0 {
+                        self.m_state[j] = -8;
+                    } else {
+                        self.m_state[j] = 0;
+                        self.m_bits[j] -= 1;
+                    }
+                }
+            } else if i_delta >= 8 {
+                self.m_state[j] += (i_delta - 4).min(15);
+                if self.m_state[j] > 8 {
+                    if self.m_bits[j] >= 15 {
+                        self.m_bits[j] = 15;
+                        self.m_state[j] = 8;
+                    } else {
+                        self.m_state[j] = 0;
+                        self.m_bits[j] += 1;
+                    }
                 }
             }
         }
