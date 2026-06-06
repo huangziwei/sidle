@@ -10,6 +10,7 @@
 
 pub mod bitstream;
 pub mod codestream;
+pub mod color;
 pub mod container;
 pub mod coeff;
 pub mod entropy;

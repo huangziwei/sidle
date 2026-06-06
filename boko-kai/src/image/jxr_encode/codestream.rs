@@ -10,12 +10,12 @@
 use super::bitstream::BitWriter;
 use crate::image::jxr_decode::consts::*;
 
-/// `image_header` for a `width`×`height` grayscale image. Both dims must be
-/// multiples of 16 for now (no windowing padding). Mirrors
-/// `Decoder::image_header`.
-pub fn write_image_header(bw: &mut BitWriter, width: u32, height: u32) {
-    // `width`/`height` are the true (unpadded) dims; windowing_flag = 0 makes
-    // the decoder derive the 16-aligned padding and crop back to these.
+/// `image_header` for a `width`×`height` image with the given `output_clr_fmt`
+/// (`OUT_YONLY` for grayscale, `OUT_RGB` for color). Mirrors
+/// `Decoder::image_header`. `width`/`height` are the true (unpadded) dims;
+/// `windowing_flag = 0` makes the decoder derive the 16-aligned padding and crop
+/// back to these.
+pub fn write_image_header(bw: &mut BitWriter, width: u32, height: u32, output_clr_fmt: u8) {
     for &b in b"WMPHOTO\x00" {
         bw.write_bits(b as u64, 8);
     }
@@ -35,7 +35,7 @@ pub fn write_image_header(bw: &mut BitWriter, width: u32, height: u32) {
     bw.write_bits(0, 1); // red_blue_not_swapped_flag
     bw.write_bits(0, 1); // premultiplied_alpha_flag
     bw.write_bits(0, 1); // alpha_image_plane_flag
-    bw.write_bits(OUT_YONLY as u64, 4); // output_clr_fmt
+    bw.write_bits(output_clr_fmt as u64, 4); // output_clr_fmt
     bw.write_bits(BD8 as u64, 4); // output_bitdepth
     // short header: (width-1), (height-1) as big-endian u16 (byte-aligned here).
     write_u16_be(bw, (width - 1) as u16);
@@ -98,6 +98,47 @@ pub fn write_image_plane_header_gray_allbands(
     bw.write_flag(true); // hp_image_plane_uniform
     bw.write_bits(hp_quant as u64, 8);
     bw.align_to_byte();
+}
+
+/// `image_plane_header` for the **color** (`INT_YUV444`, 3-component) plane with
+/// **ALL_BANDS** (DC + LP + HP + flexbits) and uniform per-band quantizers shared
+/// across components (`COMP_UNIFORM`). Mirrors `Decoder::image_plane_header` for
+/// YUV444 + `QP::read`, including the **two** 4-bit reserved fields (8 bits) the
+/// spec mandates for YUV_444 (the field whose absence-by-one-nibble was the
+/// Track-6.0 decoder bug). `scaled_flag = 0` (matches grayscale; lossy still
+/// spec-valid). Ends byte-aligned.
+pub fn write_image_plane_header_color_allbands(
+    bw: &mut BitWriter,
+    dc_quant: u8,
+    lp_quant: u8,
+    hp_quant: u8,
+) {
+    bw.write_bits(INT_YUV444 as u64, 3); // internal_clr_fmt
+    bw.write_bits(0, 1); // scaled_flag
+    bw.write_bits(ALL_BANDS as u64, 4); // bands_present (0)
+    // YUV_444: two 4-bit reserved fields (reserved_e_bit + reserved_f) = 8 bits.
+    bw.write_bits(0, 8);
+    // BD8 → no shift/mantissa bits.
+    // DC: uniform, one quant shared by all 3 components (COMP_UNIFORM).
+    bw.write_flag(true); // dc_image_plane_uniform
+    write_uniform_qp(bw, dc_quant);
+    // LP: "don't reuse DC QP" (0) → its own uniform QP.
+    bw.write_bits(0, 1); // reserved_i_bit / use-DC-QP-for-LP = 0 (don't reuse)
+    bw.write_flag(true); // lp_image_plane_uniform
+    write_uniform_qp(bw, lp_quant);
+    // HP: "don't reuse LP QP" (0) → its own uniform QP.
+    bw.write_bits(0, 1); // reserved_j_bit / use-LP-QP-for-HP = 0 (don't reuse)
+    bw.write_flag(true); // hp_image_plane_uniform
+    write_uniform_qp(bw, hp_quant);
+    bw.align_to_byte();
+}
+
+/// One band's QP for a multi-component plane in `COMP_UNIFORM` mode: a 2-bit
+/// `component_mode` (0) then a single 8-bit quant index applied to every
+/// component. Mirrors `QP::read` with `num_components > 1`.
+fn write_uniform_qp(bw: &mut BitWriter, quant: u8) {
+    bw.write_bits(COMP_UNIFORM as u64, 2);
+    bw.write_bits(quant as u64, 8);
 }
 
 /// `vlw_esc` variable-length value. We only need small values; `< 0xfb` uses

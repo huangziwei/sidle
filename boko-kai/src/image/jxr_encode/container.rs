@@ -90,4 +90,17 @@ mod tests {
         );
         assert_eq!(parsed.image_data, &codestream[..]);
     }
+
+    #[test]
+    fn container_roundtrips_rgb24_via_decoder_parse() {
+        let codestream: Vec<u8> = (0..200u32).map(|i| (i * 13 % 256) as u8).collect();
+        let bytes = write_container(&codestream, 1351, 1920, &pixel_format::RGB24);
+        let parsed = parse(&bytes).expect("decoder parses our RGB24 container");
+        assert_eq!((parsed.image_width, parsed.image_height), (1351, 1920));
+        assert_eq!(
+            parsed.pixel_format_uuid,
+            "24c3dd6f-034e-fe4b-b185-3d77768dc90d"
+        );
+        assert_eq!(parsed.image_data, &codestream[..]);
+    }
 }

@@ -354,7 +354,13 @@ impl<'a> Decoder<'a> {
             INT_YUVK => plane.num_components = 4,
             INT_YUV444 => {
                 plane.num_components = 3;
-                self.ds.unpack_bits(4)?; // reserved_f
+                // libjxr `ReadImagePlaneHeader` (strdec.c:2862-2866) reads TWO
+                // 4-bit reserved fields here (8 bits total) for YUV_444 —
+                // `reserved_e_bit` then `reserved_f`. Reading only 4 desyncs the
+                // entire codestream. Latent until now: every Amazon plate is
+                // 8bppGray/YONLY, so this YUV444 path had never run on real data;
+                // verified against libjxr-minted color JXRs (jxr-encoder.md 6.0).
+                self.ds.unpack_bits(8)?; // reserved_e_bit (4) + reserved_f (4)
             }
             INT_YUV420 | INT_YUV422 => {
                 plane.num_components = 3;
@@ -2197,13 +2203,8 @@ impl<'a> Decoder<'a> {
                 let base = row * stride;
                 for col in 0..w {
                     let idx = base + col;
-                    let y_val = y_plane[idx];
-                    let u_val = u_plane[idx];
-                    let v_val = v_plane[idx];
-                    let temp_t = -u_val;
-                    let out1 = y_val - floor_div2(temp_t);
-                    let out0 = temp_t + out1 - ceil_div2(v_val);
-                    let out2 = v_val + out0;
+                    let (out0, out1, out2) =
+                        yuv444_to_rgb(y_plane[idx], u_plane[idx], v_plane[idx]);
                     let (a, b, c) = if do_swap { (out2, out1, out0) } else { (out0, out1, out2) };
                     y_plane[idx] = a;
                     u_plane[idx] = b;
@@ -2482,15 +2483,28 @@ fn ip_4_op(ip: &mut Plane2D, x: usize, y: usize, list: &[(i32, i32)]) {
 }
 
 #[inline]
-fn floor_div2(x: i32) -> i32 {
+pub(crate) fn floor_div2(x: i32) -> i32 {
     // Python's `math.floor(x / 2)` differs from `x / 2` for negative odd x.
     // Use arithmetic right shift which is floor-toward-negative-infinity.
     x >> 1
 }
 
 #[inline]
-fn ceil_div2(x: i32) -> i32 {
+pub(crate) fn ceil_div2(x: i32) -> i32 {
     // Python's `math.ceil(x / 2)` for ints. (x + sign(x)) / 2 for trunc-div
     // doesn't equal ceil. Use: ceil(a/2) = -floor(-a/2).
     -((-x) >> 1)
+}
+
+/// Per-pixel inverse color transform for `INT_YUV444 → OUT_RGB`, the exact
+/// integer lifting the JPEG-XR spec / libjxr `strInvTransform` use. Returns the
+/// **pre-bias** centered RGB (the decoder adds the `1<<(bd-1)` bias afterwards).
+/// Single source of truth shared with the encoder's forward transform
+/// ([`crate::image::jxr_encode::color::rgb_to_yuv444`], its exact inverse).
+pub(crate) fn yuv444_to_rgb(y: i32, u: i32, v: i32) -> (i32, i32, i32) {
+    let temp_t = -u;
+    let g = y - floor_div2(temp_t); // out1
+    let r = temp_t + g - ceil_div2(v); // out0
+    let b = v + r; // out2
+    (r, g, b)
 }
