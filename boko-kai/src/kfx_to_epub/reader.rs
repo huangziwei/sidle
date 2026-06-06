@@ -69,6 +69,36 @@ pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> 
         .filter(|(href, _)| href != "titlepage.xhtml")
         .map(|(href, html)| ReaderSection { href, html })
         .collect();
+
+    // Prepend the cover (表紙 / "Cover") as the leading TOC entry. Amazon's KFX
+    // carries it, but boko's e2k KFX deliberately must NOT bake it into the
+    // `book_navigation`: a TOC target landing inside the image-only cover
+    // page-template wedges the strict Kindle firmware's front-matter pagination
+    // (the device drops the entry AND stalls e-ink refresh until the first real
+    // storyline position). So synthesize it here, reader-side only, pointing at
+    // the cover section — the spine doc that shows the cover image. Skipped when
+    // the book has no cover, that section isn't present, or the TOC already
+    // leads with it (e.g. a real Amazon KFX, whose `book_navigation` has it).
+    let mut toc = toc;
+    if let Some((cover_img, _, _)) = out.cover_image_info()
+        && let Some(cover_sec) = sections.iter().find(|s| s.html.contains(cover_img))
+        && toc.first().map(|p| p.href.as_str()) != Some(cover_sec.href.as_str())
+    {
+        let label = if book.metadata.language.to_ascii_lowercase().starts_with("ja") {
+            "表紙"
+        } else {
+            "Cover"
+        };
+        toc.insert(
+            0,
+            NavPoint {
+                label: label.to_string(),
+                href: cover_sec.href.clone(),
+                children: Vec::new(),
+            },
+        );
+    }
+
     let resources = out
         .non_spine_resources()
         .into_iter()
@@ -175,6 +205,29 @@ mod tests {
         assert!(
             book.resources.iter().any(|r| r.href == "style.css"),
             "expected style.css among reader resources"
+        );
+    }
+
+    /// The reader surfaces the cover as the leading TOC entry even when the
+    /// KFX's own `book_navigation` omits it (the fixture's toc starts at
+    /// はしがき). boko's e2k KFX must NOT bake the cover into the toc — a TOC
+    /// target inside the image-only cover page-template wedges the Kindle
+    /// firmware — so it's synthesized reader-side, pointing at the cover
+    /// section, and never doubled.
+    #[test]
+    fn reader_toc_leads_with_synthesized_cover() {
+        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx")).expect("read fixture");
+        let book = kfx_to_reader_book(&bytes).expect("kfx_to_reader_book");
+        let first = book.toc.first().expect("toc should have entries");
+        // 表紙 for this Japanese book, at the first rendered section (the cover,
+        // the synthetic titlepage having been dropped).
+        assert_eq!(first.label, "表紙");
+        assert_eq!(first.href, book.sections[0].href);
+        // Exactly once — synthesis must not double a cover a KFX already lists.
+        assert_eq!(
+            book.toc.iter().filter(|p| p.label == "表紙").count(),
+            1,
+            "cover TOC entry should appear exactly once"
         );
     }
 
