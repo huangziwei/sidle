@@ -71,7 +71,7 @@ impl HpState {
 }
 
 /// Reverse the `pred_cbphp_444` cascade (a chain of self-inverse XORs).
-fn unpredict_cascade(mut x: i32) -> i32 {
+pub(crate) fn unpredict_cascade(mut x: i32) -> i32 {
     x ^= (x & 0x3300) << 2;
     x ^= (x & 0x00CC) << 6;
     x ^= (x & 0x33) << 2;

@@ -428,6 +428,9 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
     let cover_filename = book.metadata().cover_image.as_ref().and_then(|c| {
         std::path::Path::new(c).file_name().map(|s| s.to_string_lossy().to_string())
     });
+    // Interior plates become JXR in the book's chosen color mode (default
+    // grayscale). Captured before the loop so the `book` borrow inside is free.
+    let color_mode = book.image_color_mode();
     for asset_path in &asset_paths {
         if is_media_asset(asset_path)
             && let Ok(data) = book.load_asset(asset_path)
@@ -438,7 +441,7 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
             let bundled = if is_cover {
                 crate::image::jpeg::sanitize_for_kfx(&data).unwrap_or(data)
             } else {
-                encode_asset_for_kfx(&data)
+                encode_asset_for_kfx(&data, color_mode)
             };
             // external_resource ($164) - metadata about the resource
             fragments.push(build_external_resource_fragment(&href, &bundled, &mut ctx));
@@ -1819,25 +1822,42 @@ const JXR_DEFAULT_QP: crate::image::jxr_encode::QpSet =
 /// EPUB-sourced books toward the JXR size class. Vector/undecodable assets
 /// (SVG, fonts) and any encode failure fall back to the JPEG sanitize path,
 /// which itself passes non-image bytes through unchanged.
-fn encode_asset_for_kfx(data: &[u8]) -> Vec<u8> {
-    if let Some(jxr) = encode_grayscale_jxr(data) {
+fn encode_asset_for_kfx(data: &[u8], mode: crate::image::jxr_encode::ColorMode) -> Vec<u8> {
+    if let Some(jxr) = encode_jxr_asset(data, mode) {
         return jxr;
     }
     crate::image::jpeg::sanitize_for_kfx(data).unwrap_or_else(|| data.to_vec())
 }
 
-/// Decode a raster image and re-encode its luma plane as grayscale JPEG-XR.
-/// `None` if the bytes aren't a decodable raster or exceed the encoder's range.
-fn encode_grayscale_jxr(data: &[u8]) -> Option<Vec<u8>> {
+/// Decode a raster image and re-encode it as JPEG-XR in the requested
+/// [`ColorMode`][crate::image::jxr_encode::ColorMode]: `Grayscale` (luma plane,
+/// `8bppGray`) or `Color` (RGB planes, `24bppRGB`; channels identical everywhere
+/// collapse to grayscale via the encoder's auto-detect). `None` if the bytes
+/// aren't a decodable raster or exceed the encoder's range.
+fn encode_jxr_asset(data: &[u8], mode: crate::image::jxr_encode::ColorMode) -> Option<Vec<u8>> {
     use crate::image::jxr_encode::{encode, ColorMode, ImageInput};
-    let luma = ::image::load_from_memory(data).ok()?.to_luma8();
-    let (w, h) = luma.dimensions();
+    let img = ::image::load_from_memory(data).ok()?;
+    let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 || w > (1 << 16) || h > (1 << 16) {
         return None;
     }
-    let planes = [luma.into_raw()];
+    let planes: Vec<Vec<u8>> = match mode {
+        ColorMode::Grayscale => vec![img.to_luma8().into_raw()],
+        ColorMode::Color => {
+            // De-interleave RGB8 into three planar channels (`ImageInput` layout).
+            let raw = img.to_rgb8().into_raw();
+            let n = (w * h) as usize;
+            let (mut r, mut g, mut b) = (vec![0u8; n], vec![0u8; n], vec![0u8; n]);
+            for i in 0..n {
+                r[i] = raw[i * 3];
+                g[i] = raw[i * 3 + 1];
+                b[i] = raw[i * 3 + 2];
+            }
+            vec![r, g, b]
+        }
+    };
     let input = ImageInput { width: w, height: h, planes: &planes };
-    encode(&input, ColorMode::Grayscale, JXR_DEFAULT_QP).ok()
+    encode(&input, mode, JXR_DEFAULT_QP).ok()
 }
 
 fn build_external_resource_fragment(
@@ -4651,7 +4671,8 @@ mod resource_export_tests {
         ::image::DynamicImage::ImageLuma8(img)
             .write_to(&mut png, ::image::ImageFormat::Png)
             .unwrap();
-        let jxr = encode_grayscale_jxr(png.get_ref()).expect("interior plate → JXR");
+        let jxr = encode_jxr_asset(png.get_ref(), crate::image::jxr_encode::ColorMode::Grayscale)
+            .expect("interior plate → JXR");
         assert_eq!(&jxr[0..3], &[0x49, 0x49, 0xBC], "interior plate must be JXR");
         // The plate's fixed-layout page is sized from these dims; if unreadable
         // the device letterboxes it (margins). Must round-trip through the IFD.
@@ -4660,6 +4681,39 @@ mod resource_export_tests {
             Some((32, 32)),
             "JXR plate dimensions must be readable for full-bleed page sizing"
         );
+    }
+
+    #[test]
+    fn encode_jxr_asset_honors_color_mode() {
+        use crate::image::jxr_encode::ColorMode;
+        // A genuinely-colorful plate (distinct R/G/B so it isn't auto-grayed).
+        let rgb: ::image::RgbImage = ::image::ImageBuffer::from_fn(32, 32, |x, y| {
+            ::image::Rgb([(x * 8) as u8, (y * 8) as u8, ((x + y) * 4) as u8])
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        ::image::DynamicImage::ImageRgb8(rgb)
+            .write_to(&mut png, ::image::ImageFormat::Png)
+            .unwrap();
+        let dec = |bytes: &[u8]| -> (String, usize) {
+            let c = crate::image::jxr_decode::container::parse(bytes).unwrap();
+            let n = crate::image::jxr_decode::decoder::Decoder::new(c.image_data)
+                .decode()
+                .unwrap()
+                .num_components;
+            (c.pixel_format_uuid, n)
+        };
+        // Grayscale mode → 8bppGray (1 component).
+        let g = encode_jxr_asset(png.get_ref(), ColorMode::Grayscale).unwrap();
+        assert_eq!(&g[0..3], &[0x49, 0x49, 0xBC]);
+        let (g_uuid, g_nc) = dec(&g);
+        assert_eq!(g_nc, 1, "grayscale mode → 1 component");
+        assert!(g_uuid.ends_with("dc908"), "grayscale → 8bppGray UUID, got {g_uuid}");
+        // Color mode → 24bppRGB (3 components).
+        let c = encode_jxr_asset(png.get_ref(), ColorMode::Color).unwrap();
+        assert_eq!(&c[0..3], &[0x49, 0x49, 0xBC]);
+        let (c_uuid, c_nc) = dec(&c);
+        assert_eq!(c_nc, 3, "color mode → 3 components");
+        assert!(c_uuid.ends_with("dc90d"), "color → 24bppRGB UUID, got {c_uuid}");
     }
 
     #[test]

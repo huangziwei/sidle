@@ -31,8 +31,16 @@ pub async fn conversion_status(state: State<'_, AppState>) -> Result<Vec<JobRow>
         .collect())
 }
 
+/// `color` selects the EPUB→KFX interior image encoding for a forced re-convert
+/// of a `done` book (the nested "Re-convert · full color" / "· grayscale"
+/// actions): `true` ⇒ `24bppRGB` JXR, `false` ⇒ `8bppGray` (default). Ignored
+/// when retrying a failed/pending first import (that always uses grayscale).
 #[tauri::command]
-pub async fn conversion_retry(state: State<'_, AppState>, book_id: i64) -> Result<(), String> {
+pub async fn conversion_retry(
+    state: State<'_, AppState>,
+    book_id: i64,
+    color: bool,
+) -> Result<(), String> {
     // A re-convert of an already-`done` book (the "Force re-convert" action) is
     // source→target ONLY: skip the import-time cover enrichment so the source
     // KFX (and its `kfx_sha256`) is untouched — a re-stamp would change the
@@ -51,7 +59,7 @@ pub async fn conversion_retry(state: State<'_, AppState>, book_id: i64) -> Resul
         prior.as_deref() == Some("done")
     };
     let queued = if was_done {
-        state.queue.enqueue_reconvert(book_id).await
+        state.queue.enqueue_reconvert(book_id, color).await
     } else {
         state.queue.enqueue(book_id).await
     };

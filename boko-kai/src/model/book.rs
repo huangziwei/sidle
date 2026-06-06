@@ -208,6 +208,11 @@ pub struct Book {
     /// without touching the source file. `None` = use the backend's metadata
     /// verbatim (the default).
     meta_override: Option<Metadata>,
+    /// How raster images are encoded into a KFX export: `Grayscale` (default —
+    /// the device is B&W e-ink and the source keeps the color master) or
+    /// `Color` (full `24bppRGB` JXR, for the Sidle desktop reader / a future
+    /// color device). Set via [`Book::set_image_color_mode`].
+    image_color_mode: crate::image::jxr_encode::ColorMode,
 }
 
 impl Format {
@@ -298,6 +303,7 @@ impl Book {
             backend,
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
             meta_override: None,
+            image_color_mode: crate::image::jxr_encode::ColorMode::Grayscale,
         })
     }
 
@@ -326,6 +332,7 @@ impl Book {
             backend,
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
             meta_override: None,
+            image_color_mode: crate::image::jxr_encode::ColorMode::Grayscale,
         })
     }
 
@@ -348,6 +355,21 @@ impl Book {
     /// untouched fields (identifier, ASIN, cover) survive.
     pub fn set_metadata_override(&mut self, meta: Metadata) {
         self.meta_override = Some(meta);
+    }
+
+    /// How raster images are encoded into a KFX export (default `Grayscale`).
+    pub fn image_color_mode(&self) -> crate::image::jxr_encode::ColorMode {
+        self.image_color_mode
+    }
+
+    /// Choose how raster images are encoded into a KFX export. `Grayscale`
+    /// (default) emits `8bppGray` JXR — the device is B&W and the source keeps
+    /// the color master; `Color` emits full `24bppRGB` JXR (channels that are
+    /// identical everywhere still collapse to grayscale automatically). The
+    /// cover stays JPEG regardless. Flipping this + reconverting is how a color
+    /// book gets a color KFX for the Sidle reader.
+    pub fn set_image_color_mode(&mut self, mode: crate::image::jxr_encode::ColorMode) {
+        self.image_color_mode = mode;
     }
 
     /// Table of contents.

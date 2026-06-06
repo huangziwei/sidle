@@ -2344,7 +2344,12 @@ function openContextMenu(x, y, b) {
     add(menu, "Edit metadata…", () => openMetadataModal(b));
     add(menu, "Open in Finder", () => openInFinder(b.id));
     add(menu, "Re-fetch cover", () => recrawlCover(b));
-    add(menu, "Force re-convert", () => retryConvert(b.id));
+    // Nested: pick the interior-image encoding. Grayscale (device default) or
+    // full color (24bppRGB JXR — for the Sidle reader; the device renders gray).
+    addSub(menu, "Force re-convert", [
+      ["Grayscale", () => retryConvert(b.id, false)],
+      ["Full color", () => retryConvert(b.id, true)],
+    ]);
     add(menu, "Remove from library", () => removeBook(b), true);
   }
 
@@ -2392,6 +2397,28 @@ function add(menu, label, fn, danger = false) {
     menu.hidden = true;
     fn();
   });
+  menu.appendChild(li);
+}
+
+// A parent item that reveals a nested submenu on hover. `items` is a list of
+// `[label, fn]` pairs.
+function addSub(menu, label, items) {
+  const li = document.createElement("li");
+  li.className = "has-sub";
+  li.textContent = label;
+  const sub = document.createElement("ul");
+  sub.className = "ctx-submenu";
+  for (const [subLabel, fn] of items) {
+    const sli = document.createElement("li");
+    sli.textContent = subLabel;
+    sli.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      menu.hidden = true;
+      fn();
+    });
+    sub.appendChild(sli);
+  }
+  li.appendChild(sub);
   menu.appendChild(li);
 }
 
@@ -2872,9 +2899,12 @@ async function openReader(b) {
   }
 }
 
-async function retryConvert(bookId) {
+// `color` chooses interior-image encoding on a forced re-convert (grayscale by
+// default). Failed/pending retries and auto-reconverts (page-direction change,
+// metadata edit) pass the default — they aren't a deliberate color choice.
+async function retryConvert(bookId, color = false) {
   try {
-    await window.api.invoke("conversion_retry", { bookId });
+    await window.api.invoke("conversion_retry", { bookId, color });
   } catch (e) {
     showToast(`retry failed: ${e}`, true);
   }

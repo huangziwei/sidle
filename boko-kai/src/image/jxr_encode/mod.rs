@@ -3,10 +3,11 @@
 //! Forward mirror of [`crate::image::jxr_decode`], built bottom-up against the
 //! decoder as a round-trip oracle — see `.claude/plans/jxr-encoder.md`.
 //!
-//! Status: **grayscale complete** — full ALL_BANDS (DC + LP + HP + flexbits),
-//! multi-MB prediction, windowing, and per-band quantization ([`quant`]).
-//! `QpSet::LOSSLESS` round-trips bit-exact; `QP > 0` is lossy (ship mode).
-//! Color is Phase 6.
+//! Status: **grayscale + color complete** — full ALL_BANDS (DC + LP + HP +
+//! flexbits), multi-MB prediction, windowing, and per-band quantization
+//! ([`quant`]). Grayscale ([`gray`]) is `8bppGray`; color ([`color`]) is
+//! `24bppRGB` via the YUV 4:4:4 transform. `QpSet::LOSSLESS` round-trips
+//! bit-exact (both modes); `QP > 0` is lossy (ship mode).
 
 pub mod bitstream;
 pub mod codestream;
@@ -28,8 +29,10 @@ pub enum ColorMode {
     /// e-ink, and the source EPUB retains the color master, so color is only
     /// dropped from the device copy and is recoverable by reconverting.
     Grayscale,
-    /// Full color via the internal color transform + chroma planes
-    /// (`24bppRGB`). Not yet implemented (Phase 6 — gated on a color device).
+    /// Full color via the internal YUV 4:4:4 transform + chroma planes
+    /// (`24bppRGB`). For desktop/Sidle-reader color; the device is still B&W so
+    /// grayscale stays the pipeline default. A 1-plane input encodes as
+    /// grayscale even in this mode (no chroma to synthesize).
     Color,
 }
 
@@ -70,15 +73,6 @@ pub fn encode(
     mode: ColorMode,
     qp: QpSet,
 ) -> Result<Vec<u8>, EncodeError> {
-    if mode == ColorMode::Color {
-        return Err(EncodeError::NotImplemented("color mode (Phase 6)"));
-    }
-    if input.planes.len() != 1 {
-        return Err(EncodeError::Unsupported(format!(
-            "grayscale expects 1 plane, got {}",
-            input.planes.len()
-        )));
-    }
     let (w, h) = (input.width, input.height);
     if w == 0 || h == 0 {
         return Err(EncodeError::Unsupported("zero-size image".into()));
@@ -86,13 +80,44 @@ pub fn encode(
     if w > 1 << 16 || h > 1 << 16 {
         return Err(EncodeError::Unsupported("dims exceed short-header u16 range".into()));
     }
-    let (wu, hu) = (w as usize, h as usize);
-    let luma = &input.planes[0];
-    if luma.len() != wu * hu {
-        return Err(EncodeError::Unsupported("plane len != width*height".into()));
+    let n = w as usize * h as usize;
+    let check = |p: &[u8]| {
+        if p.len() == n {
+            Ok(())
+        } else {
+            Err(EncodeError::Unsupported("plane len != width*height".into()))
+        }
+    };
+    // A 1-plane input is grayscale regardless of mode — there's no chroma to
+    // synthesize. Color auto-gray-detect (R==G==B) lives in the pipeline.
+    let want_color = mode == ColorMode::Color && input.planes.len() != 1;
+    if !want_color {
+        if input.planes.len() != 1 {
+            return Err(EncodeError::Unsupported(format!(
+                "grayscale expects 1 plane, got {}",
+                input.planes.len()
+            )));
+        }
+        check(&input.planes[0])?;
+        // DC + LP + HP (ALL_BANDS). QpSet::LOSSLESS ⇒ bit-exact; QP>0 ⇒ lossy.
+        return Ok(gray::encode_grayscale(&input.planes[0], w, h, qp));
     }
-    // DC + LP + HP (ALL_BANDS). QpSet::LOSSLESS ⇒ bit-exact; QP>0 ⇒ lossy.
-    Ok(gray::encode_grayscale(luma, w, h, qp))
+    if input.planes.len() != 3 {
+        return Err(EncodeError::Unsupported(format!(
+            "color expects 3 planes (RGB), got {}",
+            input.planes.len()
+        )));
+    }
+    check(&input.planes[0])?;
+    check(&input.planes[1])?;
+    check(&input.planes[2])?;
+    // Auto-gray: a "color" image whose channels are identical everywhere carries
+    // no chroma — emit `8bppGray` (smaller; the chroma planes would be all-zero).
+    if input.planes[0] == input.planes[1] && input.planes[1] == input.planes[2] {
+        return Ok(gray::encode_grayscale(&input.planes[0], w, h, qp));
+    }
+    // Full color: RGB → YUV444 → ALL_BANDS. Lossless 4:4:4 is bit-exact.
+    Ok(color::encode_color(&input.planes[0], &input.planes[1], &input.planes[2], w, h, qp))
 }
 
 /// Map a 0–100 quality knob to per-band quantizers. 100 ⇒ lossless; lower ⇒
@@ -352,5 +377,52 @@ mod tests {
         let m8 = mse(QpSet { dc: 32, lp: 32, hp: 32 }); // sf = 8
         assert_eq!(m0, 0.0, "lossless must be exact");
         assert!(m4 > 0.0 && m8 > m4, "error must grow with QP: m0={m0} m4={m4} m8={m8}");
+    }
+
+    #[test]
+    fn encode_color_via_public_api() {
+        // 3-plane Color round-trips exact; 1-plane Color falls back to grayscale.
+        let mut r = Lcg(0x1111_2222_3333_4444);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        // High bits: the LCG's low 8 bits alias at period 256, which would make
+        // R==G==B (zero chroma) when n is a multiple of 256.
+        let rp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let gp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let bp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let planes = [rp.clone(), gp.clone(), bp.clone()];
+        let input = ImageInput { width: w, height: h, planes: &planes };
+        let jxr = encode(&input, ColorMode::Color, QpSet::LOSSLESS).expect("color encode");
+        let d = decode_to_planes(&jxr);
+        assert_eq!(d.num_components, 3, "3-plane color must emit RGB");
+        for i in 0..n {
+            assert_eq!(
+                (d.image_plane[0][i], d.image_plane[1][i], d.image_plane[2][i]),
+                (rp[i] as i32, gp[i] as i32, bp[i] as i32),
+                "pixel {i}"
+            );
+        }
+        // 1-plane in Color mode → grayscale (1 component, no synthesized chroma).
+        let gplanes = [rp.clone()];
+        let ginput = ImageInput { width: w, height: h, planes: &gplanes };
+        let gjxr = encode(&ginput, ColorMode::Color, QpSet::LOSSLESS).expect("gray fallback");
+        assert_eq!(decode_to_planes(&gjxr).num_components, 1, "1-plane color-mode ⇒ grayscale");
+    }
+
+    #[test]
+    fn color_mode_auto_gray_detects_equal_channels() {
+        // Three identical channels carry no chroma → must emit 8bppGray.
+        let mut r = Lcg(0xaaaa_5555_cccc_3333);
+        let (w, h) = (32u32, 16u32);
+        let n = (w * h) as usize;
+        let plane: Vec<u8> = (0..n).map(|_| (r.next() % 256) as u8).collect();
+        let planes = [plane.clone(), plane.clone(), plane.clone()];
+        let input = ImageInput { width: w, height: h, planes: &planes };
+        let jxr = encode(&input, ColorMode::Color, QpSet::LOSSLESS).unwrap();
+        let d = decode_to_planes(&jxr);
+        assert_eq!(d.num_components, 1, "equal RGB channels must auto-detect to grayscale");
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], plane[i] as i32, "pixel {i}");
+        }
     }
 }

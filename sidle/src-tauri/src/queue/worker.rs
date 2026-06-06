@@ -42,6 +42,7 @@ pub async fn run_job(
     paths: &LibraryPaths,
     book_id: i64,
     reconvert: bool,
+    color: bool,
 ) {
     let Some(book) = lookup_book(db, book_id).await else {
         eprintln!("[sidle/queue] book {book_id} vanished before conversion");
@@ -60,7 +61,7 @@ pub async fn run_job(
     let kind_owned = kind.to_string();
     let started = std::time::Instant::now();
     let result = tokio::task::spawn_blocking(move || {
-        run_direction(&paths_owned, &book_owned, &kind_owned)
+        run_direction(&paths_owned, &book_owned, &kind_owned, color)
     })
     .await;
 
@@ -268,9 +269,16 @@ struct Produced {
     asin: Option<String>,
 }
 
-fn run_direction(paths: &LibraryPaths, book: &BookRow, kind: &str) -> anyhow::Result<Produced> {
+fn run_direction(
+    paths: &LibraryPaths,
+    book: &BookRow,
+    kind: &str,
+    color: bool,
+) -> anyhow::Result<Produced> {
     match kind {
-        "epub_to_kfx" => convert_epub_to_kfx(paths, book),
+        // Only EPUB→KFX embeds raster plates the color mode applies to; the
+        // other directions ignore it.
+        "epub_to_kfx" => convert_epub_to_kfx(paths, book, color),
         "kfx_to_epub" => convert_kfx_to_epub(paths, book),
         "pdf_to_kfx" => convert_pdf_to_kfx(paths, book),
         "kfx_to_pdf" => convert_kfx_to_pdf(paths, book),
@@ -278,7 +286,7 @@ fn run_direction(paths: &LibraryPaths, book: &BookRow, kind: &str) -> anyhow::Re
     }
 }
 
-fn convert_epub_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<Produced> {
+fn convert_epub_to_kfx(paths: &LibraryPaths, book: &BookRow, color: bool) -> anyhow::Result<Produced> {
     let source = book
         .epub_path
         .as_deref()
@@ -298,6 +306,13 @@ fn convert_epub_to_kfx(paths: &LibraryPaths, book: &BookRow) -> anyhow::Result<P
     // import is a no-op (DB == source); only edits diverge. See
     // `book_metadata_override`.
     handle.set_metadata_override(book_metadata_override(handle.metadata(), book));
+    // Interior plates: full-color JXR when the user picked "full color", else
+    // grayscale (default). Cover stays JPEG either way (boko handles that).
+    handle.set_image_color_mode(if color {
+        boko::image::jxr_encode::ColorMode::Color
+    } else {
+        boko::image::jxr_encode::ColorMode::Grayscale
+    });
     let mut writer = File::create(&tmp_path)?;
     handle.export(boko::Format::Kfx, &mut writer)?;
     writer.sync_all().ok();

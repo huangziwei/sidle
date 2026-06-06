@@ -1594,6 +1594,44 @@ kbd {
   color: var(--accent);
 }
 
+/* Nested submenu (e.g. Force re-convert ▸ Grayscale / Full color). */
+.ctx-menu li.has-sub {
+  position: relative;
+  padding-right: 24px;
+}
+.ctx-menu li.has-sub::after {
+  content: "▸";
+  position: absolute;
+  right: 10px;
+  opacity: 0.55;
+}
+.ctx-submenu {
+  position: absolute;
+  left: 100%;
+  top: -5px;
+  margin-left: 2px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  list-style: none;
+  padding: 4px;
+  min-width: 150px;
+  display: none;
+}
+.ctx-menu li.has-sub:hover > .ctx-submenu {
+  display: block;
+}
+.ctx-submenu li {
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.ctx-submenu li:hover {
+  background: var(--accent-soft);
+}
+
 /* Toast */
 
 .toast {
