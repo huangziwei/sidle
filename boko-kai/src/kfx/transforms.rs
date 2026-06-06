@@ -333,6 +333,7 @@ pub fn format_to_kfx_symbol(format: MediaFormat) -> u64 {
         MediaFormat::Jpeg => KfxSymbol::Jpg as u64,
         MediaFormat::Png => KfxSymbol::Png as u64,
         MediaFormat::Gif => KfxSymbol::Gif as u64,
+        MediaFormat::Jxr => KfxSymbol::Jxr as u64,
         // SVG, WebP, and fonts use Jpg as fallback (KFX limitation)
         MediaFormat::Svg => KfxSymbol::Jpg as u64,
         MediaFormat::WebP => KfxSymbol::Jpg as u64,

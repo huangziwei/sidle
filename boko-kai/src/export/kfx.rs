@@ -417,13 +417,24 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
     // bytes are a clean `FF D8 FF E0 JFIF` JPEG. See the module doc on
     // `image_transcode` for the rationale (silent gif/png invisibility
     // + KOA2 screensaver-thumbnailer rejecting EXIF-tagged covers).
+    // The cover image stays on the JPEG path: the Kindle library-gallery and
+    // sleep-screen thumbnailer don't read a JXR cover (the book opens fine, but
+    // the thumbnail/screensaver go blank). Interior plates still become JXR.
+    let cover_filename = book.metadata().cover_image.as_ref().and_then(|c| {
+        std::path::Path::new(c).file_name().map(|s| s.to_string_lossy().to_string())
+    });
     for asset_path in &asset_paths {
         if is_media_asset(asset_path)
             && let Ok(data) = book.load_asset(asset_path)
         {
             let href = asset_path.to_string_lossy().to_string();
-            let bundled =
-                crate::image::jpeg::sanitize_for_kfx(&data).unwrap_or(data);
+            let is_cover =
+                cover_filename.as_deref() == asset_path.file_name().and_then(|s| s.to_str());
+            let bundled = if is_cover {
+                crate::image::jpeg::sanitize_for_kfx(&data).unwrap_or(data)
+            } else {
+                encode_asset_for_kfx(&data)
+            };
             // external_resource ($164) - metadata about the resource
             fragments.push(build_external_resource_fragment(&href, &bundled, &mut ctx));
             // bcRawMedia ($417) - the actual bytes
@@ -1780,6 +1791,39 @@ fn build_format_capabilities_ion() -> Vec<u8> {
 }
 
 /// Build an external_resource fragment ($164) - metadata about a resource.
+/// Default per-band quantizer for grayscale-JXR plates: ~Amazon's per-image
+/// size on LN content at high fidelity (the `8/16/32` point of the QP sweep in
+/// `artifacts/jxr-extract`).
+const JXR_DEFAULT_QP: crate::image::jxr_encode::QpSet =
+    crate::image::jxr_encode::QpSet { dc: 8, lp: 16, hp: 32 };
+
+/// Prepare a media asset's bytes for KFX bundling. Raster images are re-encoded
+/// as **grayscale JPEG-XR** — the device is B&W e-ink and the source EPUB keeps
+/// the color master, so this matches Amazon's own KFX image codec and shrinks
+/// EPUB-sourced books toward the JXR size class. Vector/undecodable assets
+/// (SVG, fonts) and any encode failure fall back to the JPEG sanitize path,
+/// which itself passes non-image bytes through unchanged.
+fn encode_asset_for_kfx(data: &[u8]) -> Vec<u8> {
+    if let Some(jxr) = encode_grayscale_jxr(data) {
+        return jxr;
+    }
+    crate::image::jpeg::sanitize_for_kfx(data).unwrap_or_else(|| data.to_vec())
+}
+
+/// Decode a raster image and re-encode its luma plane as grayscale JPEG-XR.
+/// `None` if the bytes aren't a decodable raster or exceed the encoder's range.
+fn encode_grayscale_jxr(data: &[u8]) -> Option<Vec<u8>> {
+    use crate::image::jxr_encode::{encode, ColorMode, ImageInput};
+    let luma = ::image::load_from_memory(data).ok()?.to_luma8();
+    let (w, h) = luma.dimensions();
+    if w == 0 || h == 0 || w > (1 << 16) || h > (1 << 16) {
+        return None;
+    }
+    let planes = [luma.into_raw()];
+    let input = ImageInput { width: w, height: h, planes: &planes };
+    encode(&input, ColorMode::Grayscale, JXR_DEFAULT_QP).ok()
+}
+
 fn build_external_resource_fragment(
     href: &str,
     data: &[u8],
@@ -4560,6 +4604,39 @@ mod resource_export_tests {
             "KFX should include text + image data, got {} bytes",
             data.len()
         );
+    }
+
+    #[test]
+    fn test_kfx_cover_jpeg_interiors_jxr() {
+        // Phase 5: EPUB→KFX re-encodes interior raster plates as grayscale JXR
+        // but keeps the COVER as JPEG — matching Amazon's own KFX (its pristine
+        // download is a grayscale-JPEG cover + JXR plates) and what the Kindle
+        // library-gallery / sleep-screen thumbnailer can read.
+        let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
+        let kfx = build_kfx_container(&mut book).unwrap();
+        let loaded = crate::kfx_to_epub::loader::load(&kfx).expect("load own kfx");
+        let is_jxr = |v: &Vec<u8>| v.len() >= 3 && v[0] == 0x49 && v[1] == 0x49 && v[2] == 0xBC;
+        let is_jpeg = |v: &Vec<u8>| v.len() >= 3 && v[0] == 0xFF && v[1] == 0xD8 && v[2] == 0xFF;
+        // 人間失格 is a text novel — its one image is the cover, which stays JPEG.
+        assert!(
+            loaded.raw_media.values().filter(|v| is_jpeg(v)).count() >= 1,
+            "cover should stay JPEG for the thumbnailer"
+        );
+        assert_eq!(
+            loaded.raw_media.values().filter(|v| is_jxr(v)).count(),
+            0,
+            "a cover-only book has no JXR interiors"
+        );
+
+        // And the interior-plate path really emits JXR (II-BC magic).
+        let img: ::image::GrayImage =
+            ::image::ImageBuffer::from_fn(32, 32, |x, _| ::image::Luma([(x * 8) as u8]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        ::image::DynamicImage::ImageLuma8(img)
+            .write_to(&mut png, ::image::ImageFormat::Png)
+            .unwrap();
+        let jxr = encode_grayscale_jxr(png.get_ref()).expect("interior plate → JXR");
+        assert_eq!(&jxr[0..3], &[0x49, 0x49, 0xBC], "interior plate must be JXR");
     }
 
     #[test]

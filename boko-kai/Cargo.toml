@@ -80,6 +80,7 @@ image = { version = "0.25", default-features = false, features = [
     "png",
     "webp",
     "bmp",
+    "jpeg",
 ] }
 
 # Ion binary format parsing for KFX dump tool

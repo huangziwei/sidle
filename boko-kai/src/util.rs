@@ -235,6 +235,9 @@ pub enum MediaFormat {
     Svg,
     /// WebP image
     WebP,
+    /// JPEG XR image (Microsoft HD Photo) — what EPUB→KFX encodes grayscale
+    /// raster plates to, matching Amazon's own KFX image codec.
+    Jxr,
     /// TrueType font
     Ttf,
     /// OpenType font
@@ -252,6 +255,7 @@ impl MediaFormat {
             MediaFormat::Gif => "image/gif",
             MediaFormat::Svg => "image/svg+xml",
             MediaFormat::WebP => "image/webp",
+            MediaFormat::Jxr => "image/jxr",
             MediaFormat::Ttf => "font/ttf",
             MediaFormat::Otf => "font/otf",
             MediaFormat::Binary => "application/octet-stream",
@@ -267,6 +271,7 @@ impl MediaFormat {
                 | MediaFormat::Gif
                 | MediaFormat::Svg
                 | MediaFormat::WebP
+                | MediaFormat::Jxr
         )
     }
 
@@ -307,6 +312,10 @@ pub fn detect_media_format(path: &str, data: &[u8]) -> MediaFormat {
         if data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 {
             return MediaFormat::Gif;
         }
+        // JPEG XR / HD Photo: 49 49 BC (II-BC)
+        if data[0] == 0x49 && data[1] == 0x49 && data[2] == 0xBC {
+            return MediaFormat::Jxr;
+        }
         // WebP: 52 49 46 46 ... 57 45 42 50 (RIFF...WEBP)
         if data.len() >= 12
             && data[0] == 0x52
@@ -341,6 +350,9 @@ pub fn detect_media_format(path: &str, data: &[u8]) -> MediaFormat {
     }
     if path_lower.ends_with(".webp") {
         return MediaFormat::WebP;
+    }
+    if path_lower.ends_with(".jxr") {
+        return MediaFormat::Jxr;
     }
     if path_lower.ends_with(".ttf") {
         return MediaFormat::Ttf;
