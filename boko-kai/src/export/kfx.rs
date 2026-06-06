@@ -1099,15 +1099,27 @@ fn build_book_navigation_fragment_with_positions(book: &Book, ctx: &ExportContex
     // shares the `cover_page` landmark's id (which is what makes it jump
     // on-device — the firmware merges same-id TOC + landmark).
     let cover_eids = cover_section_eids(ctx);
+    let cov_label = cover_label(book);
     let src_toc: Vec<crate::model::TocEntry> = book
         .toc()
         .iter()
-        .filter(
-            |e| match resolve_toc_target(&e.target, &e.href, ctx) {
+        .filter(|e| {
+            // By title: a 表紙 / Cover entry is the source's own cover — catches a
+            // round-tripped entry whose href mis-resolves outside the cover
+            // section. (Real publisher EPUBs never list the cover in the TOC.)
+            let title = e.title.trim();
+            if title == cov_label
+                || title.eq_ignore_ascii_case("cover")
+                || title.eq_ignore_ascii_case("cover page")
+            {
+                return false;
+            }
+            // By position: an entry landing in the cover section is the cover.
+            match resolve_toc_target(&e.target, &e.href, ctx) {
                 Some((fid, _)) => !cover_eids.contains(&fid),
                 None => true,
-            },
-        )
+            }
+        })
         .cloned()
         .collect();
     let mut toc_entries = build_toc_entries_with_positions(&src_toc, ctx);
@@ -1277,7 +1289,7 @@ fn build_headings_entries(ctx: &ExportContext) -> Vec<IonValue> {
 ///
 /// Iterates over all landmarks in ctx.landmark_fragments and converts each
 /// to a KFX nav_unit using the schema for type conversion.
-fn build_landmarks_entries(_book: &Book, ctx: &ExportContext) -> Vec<IonValue> {
+fn build_landmarks_entries(book: &Book, ctx: &ExportContext) -> Vec<IonValue> {
     use crate::kfx::schema::schema;
 
     let mut entries = Vec::new();
@@ -1296,6 +1308,17 @@ fn build_landmarks_entries(_book: &Book, ctx: &ExportContext) -> Vec<IonValue> {
             continue; // Skip landmarks with no KFX equivalent
         };
 
+        // The cover TOC entry and this `cover_page` landmark share one section
+        // id; the device merges them into a single Go-To item shown with the
+        // LANDMARK's label. So give the cover the localized cover word (表紙) —
+        // matching the TOC entry and the desktop reader — instead of the source
+        // EPUB's label ("Cover").
+        let label = if *landmark_type == LandmarkType::Cover {
+            cover_label(book).to_string()
+        } else {
+            target.label.clone()
+        };
+
         let entry = IonValue::Annotated(
             vec![KfxSymbol::NavUnit as u64],
             Box::new(IonValue::Struct(vec![
@@ -1307,7 +1330,7 @@ fn build_landmarks_entries(_book: &Book, ctx: &ExportContext) -> Vec<IonValue> {
                     KfxSymbol::Representation as u64,
                     IonValue::Struct(vec![(
                         KfxSymbol::Label as u64,
-                        IonValue::String(target.label.clone()),
+                        IonValue::String(label),
                     )]),
                 ),
                 (
@@ -1344,16 +1367,22 @@ fn build_landmarks_entries(_book: &Book, ctx: &ExportContext) -> Vec<IonValue> {
 /// drops a *separate* cover entry that lands in the same section.) Returns `None`
 /// when there's no cover landmark, or when the source TOC already leads with the
 /// cover.
-fn build_cover_toc_entry(book: &Book, ctx: &ExportContext) -> Option<IonValue> {
-    let cover = ctx.landmark_fragments.get(&LandmarkType::Cover)?;
-    let target_id = cover.fragment_id;
-
-    // Localized label, matching Amazon (表紙 for Japanese books, else "Cover").
-    let label = if book.metadata().language.to_ascii_lowercase().starts_with("ja") {
+/// The cover's display word, localized like Amazon (表紙 for Japanese books,
+/// else "Cover"). Used for the cover TOC entry, the `cover_page` landmark (the
+/// device shows the landmark's label for the merged Go-To item), and to detect
+/// the source TOC's own cover entry.
+fn cover_label(book: &Book) -> &'static str {
+    if book.metadata().language.to_ascii_lowercase().starts_with("ja") {
         "表紙"
     } else {
         "Cover"
-    };
+    }
+}
+
+fn build_cover_toc_entry(book: &Book, ctx: &ExportContext) -> Option<IonValue> {
+    let cover = ctx.landmark_fragments.get(&LandmarkType::Cover)?;
+    let target_id = cover.fragment_id;
+    let label = cover_label(book);
 
     let nav_unit = IonValue::Struct(vec![
         (
