@@ -339,9 +339,14 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
         section_fragments.push(section);
         storyline_fragments.push(storyline);
 
-        // Update cover landmark to use the content ID instead of section ID
+        // Point the cover landmark at the section's page-template id (== section_id,
+        // the container position), NOT the content/storyline id. A real Amazon KFX's
+        // `cover_page` landmark targets the cover section's page_template `id` — that
+        // is what makes the device render the cover full-screen (no chrome, black
+        // letterbox) instead of as an ordinary flowed page. This overrides whatever
+        // the IR landmark resolution set. `cover_content_id` is kept for the position map.
         if let Some(target) = ctx.landmark_fragments.get_mut(&LandmarkType::Cover) {
-            target.fragment_id = cover_content_id;
+            target.fragment_id = section_id;
         }
     }
 
@@ -1417,6 +1422,17 @@ fn build_chapter_entities_grouped(
     let section_id = ctx
         .get_chapter_fragment(chapter_id)
         .unwrap_or_else(|| ctx.next_fragment_id());
+
+    // For an in-spine cover, repoint the `cover_page` landmark at this section's
+    // page-template id (the container position == section_id). The IR landmark
+    // resolver defaults it to the storyline id; a real Amazon KFX targets the
+    // page-template id, which is what makes the device render the cover
+    // full-screen (no chrome) instead of as an ordinary flowed page.
+    if is_cover {
+        if let Some(target) = ctx.landmark_fragments.get_mut(&LandmarkType::Cover) {
+            target.fragment_id = section_id;
+        }
+    }
 
     // =========================================================================
     // 2. GENERATE: Schema-driven token generation + text/structure split
@@ -4637,6 +4653,13 @@ mod resource_export_tests {
             .unwrap();
         let jxr = encode_grayscale_jxr(png.get_ref()).expect("interior plate → JXR");
         assert_eq!(&jxr[0..3], &[0x49, 0x49, 0xBC], "interior plate must be JXR");
+        // The plate's fixed-layout page is sized from these dims; if unreadable
+        // the device letterboxes it (margins). Must round-trip through the IFD.
+        assert_eq!(
+            crate::util::extract_image_dimensions(&jxr),
+            Some((32, 32)),
+            "JXR plate dimensions must be readable for full-bleed page sizing"
+        );
     }
 
     #[test]

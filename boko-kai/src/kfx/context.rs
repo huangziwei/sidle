@@ -1195,7 +1195,16 @@ impl ExportContext {
 
     /// Update landmark fragment IDs to use storyline content IDs.
     pub fn fix_landmark_content_ids(&mut self) {
-        for target in self.landmark_fragments.values_mut() {
+        for (landmark_type, target) in self.landmark_fragments.iter_mut() {
+            // The cover landmark stays at the section's page-template id (the
+            // container position), matching a real Amazon KFX, whose `cover_page`
+            // targets the page_template `id`. Remapping it to the storyline
+            // content id (like other landmarks) makes the device render the cover
+            // as an ordinary flowed page (chrome + margins) instead of the
+            // full-screen cover.
+            if *landmark_type == LandmarkType::Cover {
+                continue;
+            }
             // Try to find which chapter this fragment_id belongs to
             let mut found_chapter = None;
             for (cid, &fid) in &self.chapter_fragments {

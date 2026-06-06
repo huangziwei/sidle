@@ -168,6 +168,15 @@ pub fn extract_image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         return Some((width, height));
     }
 
+    // JPEG XR / HD Photo (II-BC): read IMAGE_WIDTH/IMAGE_HEIGHT from the TIFF IFD.
+    // Without this, JXR plates can't size their fixed-layout pages and the device
+    // letterboxes them (margins). Reuses the decoder's container parser.
+    if data[0] == 0x49 && data[1] == 0x49 && data[2] == 0xBC {
+        return crate::image::jxr_decode::container::parse(data)
+            .ok()
+            .map(|c| (c.image_width, c.image_height));
+    }
+
     None
 }
 
