@@ -243,17 +243,27 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     }
 
     // Exclude non-spine entries from the expected count — they can't survive
-    // into KFX (position-based nav requires spine content).
+    // into KFX (position-based nav requires spine content) — and discount the
+    // synthesized leading cover (表紙) entry boko prepends to match Amazon, which
+    // the source NCX never carries, so the comparison stays source-vs-source.
     let toc_count_diff = epub_side.has_ncx.then(|| {
         let expected = epub_side
             .toc_entry_count
             .saturating_sub(epub_side.non_spine_toc_entries);
-        expected as i64 - kfx.toc_targets.len() as i64
+        let cover_synth = kfx.cover_target.is_some() && kfx.toc_targets.len() > expected;
+        let kfx_count = kfx.toc_targets.len() - cover_synth as usize;
+        expected as i64 - kfx_count as i64
     });
 
+    // A nav target is dangling unless it resolves to a storyline element id — or
+    // it's the cover, a section-root / page-template position that's valid and
+    // navigable (via `section_position_id_map`) but never lives in a storyline.
+    // A real Amazon KFX is identical here: its cover TOC/landmark id is flagged
+    // by this same check without the exemption.
+    let reachable = |id: u64| Some(id) == kfx.cover_target || kfx.element_ids.contains(&id);
     let mut dangling_nav: Vec<DanglingNav> = Vec::new();
     for t in &kfx.heading_targets {
-        if !kfx.element_ids.contains(&t.element_id) {
+        if !reachable(t.element_id) {
             dangling_nav.push(DanglingNav {
                 container: "headings".into(),
                 target: t.clone(),
@@ -261,7 +271,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         }
     }
     for t in &kfx.toc_targets {
-        if !kfx.element_ids.contains(&t.element_id) {
+        if !reachable(t.element_id) {
             dangling_nav.push(DanglingNav {
                 container: "toc".into(),
                 target: t.clone(),
@@ -498,6 +508,13 @@ struct KfxNav {
     toc_targets: Vec<NavTarget>,
     /// Element IDs present in storylines (for reachability check).
     element_ids: HashSet<u64>,
+    /// The `cover_page` landmark's target id, if any — a signal that the book
+    /// has a cover, so boko's synthesized leading 表紙 TOC entry is expected and
+    /// should be discounted from the source-count comparison. (The TOC entry
+    /// itself targets the cover's first *content* id, a real reachable storyline
+    /// element, so it needs no reachability exemption — unlike the landmark's
+    /// page-template target.)
+    cover_target: Option<u64>,
 }
 
 fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
@@ -652,7 +669,42 @@ where
                 walk_toc_unit(u, resolve_sym, out);
             }
         }
-        _ => {} // landmarks etc. — out of scope here.
+        "$landmarks" | "landmarks" => {
+            // Only the cover_page target is needed (to know the book has a cover,
+            // so the synthesized 表紙 TOC entry is expected); the rest are out of
+            // scope here.
+            for u in entries {
+                record_cover_landmark(u, resolve_sym, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Record the `cover_page` landmark's target id — a signal that boko prepended a
+/// synthesized cover (表紙) TOC entry, so the TOC-count comparison can discount it.
+fn record_cover_landmark<F>(value: &IonValue, resolve_sym: &F, out: &mut KfxNav)
+where
+    F: Fn(u64) -> String,
+{
+    let inner = match value {
+        IonValue::Annotated(_, b) => b.as_ref(),
+        v => v,
+    };
+    let IonValue::Struct(fields) = inner else {
+        return;
+    };
+    let is_cover = fields.iter().any(|(k, v)| {
+        resolve_sym(*k) == "landmark_type"
+            && matches!(v, IonValue::Symbol(s) if {
+                let n = resolve_sym(*s);
+                n == "cover_page" || n == "$cover_page"
+            })
+    });
+    if is_cover
+        && let Some(target) = extract_target_position(value, resolve_sym)
+    {
+        out.cover_target = Some(target.element_id);
     }
 }
 

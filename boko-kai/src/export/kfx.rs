@@ -455,9 +455,22 @@ fn build_kfx_container(book: &mut Book) -> io::Result<Vec<u8>> {
     let font_frags = build_font_fragments(book, &mut ctx);
     fragments.extend(font_frags);
 
-    // 2k. Navigation maps for reader functionality
+    // 2k. Navigation maps. Section-keyed position architecture
+    // (`position_id_map` + one `section_position_id_map` per section), matching
+    // Amazon's reflowable KFX — this is what makes a section-level nav target
+    // (the cover) resolvable on-device. `section_names` is the per-section name
+    // string in `section_ids` order (cover first when standalone), used to key
+    // the `section_position_id_map` entities.
+    let section_names: Vec<String> = ctx
+        .cover_fragment_id
+        .map(|_| COVER_SECTION_NAME.to_string())
+        .into_iter()
+        .chain(spine_info.iter().map(|(_, n)| n.clone()))
+        .collect();
+    let sec_pos = section_positions(&ctx, &section_names);
     fragments.push(build_position_map_fragment(&ctx, &anchor_ids_by_fragment));
-    fragments.push(build_position_id_map_fragment(&ctx));
+    fragments.push(build_position_id_map_fragment(&sec_pos));
+    fragments.extend(build_section_position_id_map_fragments(&sec_pos));
     fragments.push(build_location_map_fragment(&ctx));
 
     // 2l. Container metadata entities
@@ -1073,9 +1086,35 @@ fn build_book_navigation_fragment_with_positions(book: &Book, ctx: &ExportContex
     );
     nav_containers.push(annotated);
 
-    // 2. Add TOC nav container if there are TOC entries
-    if !book.toc().is_empty() {
-        let toc_entries = build_toc_entries_with_positions(book.toc(), ctx);
+    // 2. Add TOC nav container. Amazon's KFX lists the cover (表紙 / "Cover
+    //    Page") as the FIRST toc entry even though source EPUB TOCs never do —
+    //    it's what makes the cover both appear in the device's "Go To ›
+    //    Contents" and JUMP there. Prepend a synthesized one (see
+    //    `build_cover_toc_entry`), pointing at the cover's first *content*
+    //    position (NOT the page-template section root, which isn't in the
+    //    position map and wedges the firmware).
+    // Drop any cover entry the source TOC carries itself (合本 editions / round
+    // -tripped Amazon books list 表紙 at a content eid), then prepend the
+    // canonical cover → section root, so the cover appears exactly once and
+    // shares the `cover_page` landmark's id (which is what makes it jump
+    // on-device — the firmware merges same-id TOC + landmark).
+    let cover_eids = cover_section_eids(ctx);
+    let src_toc: Vec<crate::model::TocEntry> = book
+        .toc()
+        .iter()
+        .filter(
+            |e| match resolve_toc_target(&e.target, &e.href, ctx) {
+                Some((fid, _)) => !cover_eids.contains(&fid),
+                None => true,
+            },
+        )
+        .cloned()
+        .collect();
+    let mut toc_entries = build_toc_entries_with_positions(&src_toc, ctx);
+    if let Some(cover_entry) = build_cover_toc_entry(book, ctx) {
+        toc_entries.insert(0, cover_entry);
+    }
+    if !toc_entries.is_empty() {
         let toc_container = IonValue::Struct(vec![
             (
                 KfxSymbol::NavType as u64,
@@ -1290,6 +1329,76 @@ fn build_landmarks_entries(_book: &Book, ctx: &ExportContext) -> Vec<IonValue> {
     }
 
     entries
+}
+
+/// Build the cover's leading TOC nav_unit — the entry Amazon's KFX always puts
+/// first in its `toc` nav container (表紙 / "Cover Page").
+///
+/// Targets the cover **section root** — the SAME id the `cover_page` landmark
+/// uses. With the section-keyed position architecture (one
+/// `section_position_id_map` per section; see [`section_positions`]) the section
+/// root is a navigable position, so the device resolves this target and merges
+/// it with the landmark into a single jumpable 表紙 — exactly Amazon's shape,
+/// whose cover TOC entry and `cover_page` landmark share one section id. (A
+/// content-eid target instead gets dropped: the device keeps the landmark and
+/// drops a *separate* cover entry that lands in the same section.) Returns `None`
+/// when there's no cover landmark, or when the source TOC already leads with the
+/// cover.
+fn build_cover_toc_entry(book: &Book, ctx: &ExportContext) -> Option<IonValue> {
+    let cover = ctx.landmark_fragments.get(&LandmarkType::Cover)?;
+    let target_id = cover.fragment_id;
+
+    // Localized label, matching Amazon (表紙 for Japanese books, else "Cover").
+    let label = if book.metadata().language.to_ascii_lowercase().starts_with("ja") {
+        "表紙"
+    } else {
+        "Cover"
+    };
+
+    let nav_unit = IonValue::Struct(vec![
+        (
+            KfxSymbol::Representation as u64,
+            IonValue::Struct(vec![(
+                KfxSymbol::Label as u64,
+                IonValue::String(label.to_string()),
+            )]),
+        ),
+        (
+            KfxSymbol::TargetPosition as u64,
+            IonValue::Struct(vec![
+                (KfxSymbol::Id as u64, IonValue::Int(target_id as i64)),
+                (KfxSymbol::Offset as u64, IonValue::Int(0)),
+            ]),
+        ),
+    ]);
+    Some(IonValue::Annotated(
+        vec![KfxSymbol::NavUnit as u64],
+        Box::new(nav_unit),
+    ))
+}
+
+/// EIDs of the cover section (root + content). Used to strip a cover entry the
+/// source TOC carries itself — some EPUBs (合本 editions, KFX→EPUB round-trips)
+/// list 表紙 pointing at a content eid — so the canonical cover entry (prepended
+/// at the section root, sharing the landmark's id) is the only one. Empty when
+/// the book has no cover.
+fn cover_section_eids(ctx: &ExportContext) -> Vec<u64> {
+    let Some(cover) = ctx.landmark_fragments.get(&LandmarkType::Cover) else {
+        return Vec::new();
+    };
+    let mut eids = vec![cover.fragment_id];
+    if let Some(cc) = ctx.cover_content_id {
+        eids.push(cc);
+    }
+    if let Some((cid, _)) = ctx
+        .chapter_fragments
+        .iter()
+        .find(|&(_, &fid)| fid == cover.fragment_id)
+        && let Some(content) = ctx.content_ids_by_chapter.get(cid)
+    {
+        eids.extend(content.iter().copied());
+    }
+    eids
 }
 
 /// Build TOC entries recursively with anchor entity IDs.
@@ -2154,73 +2263,135 @@ fn build_position_map_fragment(
     KfxFragment::singleton(KfxSymbol::PositionMap, ion)
 }
 
-/// Build position_id_map fragment ($265).
-///
-/// Maps cumulative character positions (PIDs) to EIDs. This enables
-/// reading progress tracking and "go to position" functionality.
-///
-/// Reference format: Sequential PIDs (0, 1, 2...) for initial entries,
-/// then character position offsets for content fragments.
-fn build_position_id_map_fragment(ctx: &ExportContext) -> KfxFragment {
-    let mut entries = Vec::new();
-    let mut pid = 0i64;
+/// One section's reading-position layout: its name (used to key the
+/// `section_position_id_map` entity) + symbol (used inside `position_id_map`),
+/// and its EIDs in reading order paired with each EID's span (advance in pids).
+/// The first EID is the section root (page-template / container, span 1); the
+/// rest are content EIDs (span = their UTF-16 text length, 1 for images).
+struct SectionPos {
+    name: String,
+    sym: u64,
+    /// `(eid, span)` in reading order, section root first.
+    eids: Vec<(u64, i64)>,
+}
 
-    // Process cover content ID first if present
-    if let Some(cover_id) = ctx.cover_content_id {
-        let content_len = ctx
-            .content_id_lengths
-            .get(&cover_id)
-            .copied()
-            .unwrap_or(1)
-            .max(1) as i64;
+/// Assemble the per-section position layout — the single source of truth for
+/// `position_id_map`, `section_position_id_map`, and the navigable section
+/// roots. Same section order as the position_map (standalone cover first if
+/// present, then spine chapters by fragment id). `section_names` is the
+/// section-name string per `section_ids` slot, needed to key the
+/// `section_position_id_map` entities (Amazon keys them by section name).
+fn section_positions(ctx: &ExportContext, section_names: &[String]) -> Vec<SectionPos> {
+    let span = |eid: u64| -> i64 {
+        // Section roots / images aren't in `content_id_lengths` ⇒ span 1; text
+        // content advances by its UTF-16 length.
+        ctx.content_id_lengths.get(&eid).copied().unwrap_or(1).max(1) as i64
+    };
 
-        // Note: eid comes first, then pid - matching Amazon's format
-        // Note: offset field is omitted when zero (Amazon's format doesn't include it)
-        let entry = IonValue::Struct(vec![
-            (KfxSymbol::Eid as u64, IonValue::Int(cover_id as i64)),
-            (KfxSymbol::Pid as u64, IonValue::Int(pid)),
-        ]);
-        entries.push(entry);
-        pid += content_len;
-    }
+    let mut out: Vec<SectionPos> = Vec::new();
 
-    // Process chapter content in order (sorted by fragment ID)
-    let mut chapter_entries: Vec<_> = ctx.chapter_fragments.iter().collect();
-    chapter_entries.sort_by_key(|(_, fid)| **fid);
-
-    for (chapter_id, _) in &chapter_entries {
-        if let Some(content_ids) = ctx.content_ids_by_chapter.get(chapter_id) {
-            for &eid in content_ids {
-                let content_len = ctx
-                    .content_id_lengths
-                    .get(&eid)
-                    .copied()
-                    .unwrap_or(1)
-                    .max(1) as i64;
-
-                // Note: eid comes first, then pid - matching Amazon's format
-                // Note: offset field is omitted when zero
-                let entry = IonValue::Struct(vec![
-                    (KfxSymbol::Eid as u64, IonValue::Int(eid as i64)),
-                    (KfxSymbol::Pid as u64, IonValue::Int(pid)),
-                ]);
-                entries.push(entry);
-                pid += content_len;
-            }
+    // Standalone cover section (c0) first, if present.
+    let section_offset = if let Some(root) = ctx.cover_fragment_id {
+        let mut eids = vec![(root, span(root))];
+        if let Some(cc) = ctx.cover_content_id {
+            eids.push((cc, span(cc)));
         }
+        out.push(SectionPos {
+            name: section_names[0].clone(),
+            sym: ctx.section_ids[0],
+            eids,
+        });
+        1
+    } else {
+        0
+    };
+
+    // Spine chapters, in fragment-id (spine) order — the cover, when it's the
+    // first spine doc rather than a synthesized standalone, falls out here.
+    let mut chapters: Vec<_> = ctx.chapter_fragments.iter().collect();
+    chapters.sort_by_key(|(_, fid)| **fid);
+    for (idx, &sym) in ctx.section_ids.iter().skip(section_offset).enumerate() {
+        let Some(&(chapter_id, &root)) = chapters.get(idx) else {
+            continue;
+        };
+        let mut eids = vec![(root, span(root))];
+        if let Some(content) = ctx.content_ids_by_chapter.get(chapter_id) {
+            eids.extend(content.iter().map(|&c| (c, span(c))));
+        }
+        out.push(SectionPos {
+            name: section_names[section_offset + idx].clone(),
+            sym,
+            eids,
+        });
     }
 
-    // Add terminator entry with eid=0 and pid=max_pid
-    // This is required by Amazon's format to indicate the end of content
-    // and provides the max position ID for location count calculation
-    let terminator = IonValue::Struct(vec![
-        (KfxSymbol::Eid as u64, IonValue::Int(0)),
-        (KfxSymbol::Pid as u64, IonValue::Int(pid)),
-    ]);
-    entries.push(terminator);
+    out
+}
 
-    let ion = IonValue::List(entries);
+/// position_id_map ($265), Amazon's **section-keyed** reflowable shape:
+/// `{contains: [{section_name, pid, length}, …]}`. `pid` is the section's
+/// cumulative start; `length` is its span (which the paired
+/// `section_position_id_map` terminator must agree with). This replaces the
+/// dense `{eid, pid}` form — section roots are absent from that, so the device
+/// can't resolve a TOC/landmark target that points at one (the cover's), which
+/// is why the cover wouldn't jump. The reader decodes either shape
+/// (`pid_map_from_book` → `fixed_layout_pid_map`).
+fn build_position_id_map_fragment(secs: &[SectionPos]) -> KfxFragment {
+    let mut entries = Vec::with_capacity(secs.len());
+    let mut pid = 0i64;
+    for s in secs {
+        let length: i64 = s.eids.iter().map(|&(_, span)| span).sum();
+        entries.push(IonValue::Struct(vec![
+            (KfxSymbol::SectionName as u64, IonValue::Symbol(s.sym)),
+            (KfxSymbol::Pid as u64, IonValue::Int(pid)),
+            (KfxSymbol::Length as u64, IonValue::Int(length)),
+        ]));
+        pid += length;
+    }
+    let ion = IonValue::Struct(vec![(KfxSymbol::Contains as u64, IonValue::List(entries))]);
     KfxFragment::singleton(KfxSymbol::PositionIdMap, ion)
+}
+
+/// section_position_id_map ($609): one entity per section, the compact
+/// position→EID walk (each element advances the running pid by the PREVIOUS
+/// EID's span and names the current EID — a bare int when it's the previous + 1,
+/// else `[advance, eid]`; an `[advance, 0]` terminator lands at the section
+/// length). This is the fine index that makes section-level targets (the cover
+/// section root) navigable on-device. Same encoding as
+/// [`build_pdf_section_position_id_map_fragments`]; like it, each entity MUST be
+/// keyed by the section-name symbol (else it serializes to id $0 and the device
+/// rejects the book).
+fn build_section_position_id_map_fragments(secs: &[SectionPos]) -> Vec<KfxFragment> {
+    secs.iter()
+        .map(|s| {
+            let mut contains: Vec<IonValue> = Vec::with_capacity(s.eids.len() + 1);
+            let mut prev: Option<(u64, i64)> = None;
+            for &(eid, span) in &s.eids {
+                let advance = prev.map_or(0, |(_, sp)| sp);
+                let consecutive = prev.is_some_and(|(p, _)| eid == p + 1);
+                if consecutive {
+                    contains.push(IonValue::Int(advance));
+                } else {
+                    contains.push(IonValue::List(vec![
+                        IonValue::Int(advance),
+                        IonValue::Int(eid as i64),
+                    ]));
+                }
+                prev = Some((eid, span));
+            }
+            let last_span = prev.map_or(0, |(_, sp)| sp);
+            contains.push(IonValue::List(vec![
+                IonValue::Int(last_span),
+                IonValue::Int(0),
+            ]));
+
+            let ion = IonValue::Struct(vec![
+                (KfxSymbol::SectionName as u64, IonValue::Symbol(s.sym)),
+                (KfxSymbol::Contains as u64, IonValue::List(contains)),
+            ]);
+            KfxFragment::new(KfxSymbol::SectionPositionIdMap, s.name.clone(), ion)
+        })
+        .collect()
 }
 
 /// Build location_map fragment ($550).
@@ -4025,6 +4196,63 @@ mod tests {
         }
     }
 
+    /// The synthesized cover TOC entry targets the cover **section root** — the
+    /// same id the `cover_page` landmark uses. With the section-keyed position
+    /// architecture the root is navigable, so the device merges TOC + landmark
+    /// into one jumpable 表紙 (Amazon's shape). Pointing at a content eid instead
+    /// gets the entry dropped on-device.
+    #[test]
+    fn cover_toc_entry_targets_section_root_matching_landmark() {
+        let book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
+        let first_chapter = book.spine()[0].id;
+        const SECTION_ROOT: u64 = 866;
+
+        let mut ctx = ExportContext::new();
+        // Cover landmark left at the section root (as the real pipeline leaves
+        // it — exempt from fix_landmark_content_ids).
+        ctx.landmark_fragments.insert(
+            LandmarkType::Cover,
+            LandmarkTarget {
+                fragment_id: SECTION_ROOT,
+                offset: 0,
+                label: "Cover".to_string(),
+            },
+        );
+        ctx.chapter_fragments.insert(first_chapter, SECTION_ROOT);
+        ctx.content_ids_by_chapter
+            .entry(first_chapter)
+            .or_default()
+            .push(881);
+
+        let entry = build_cover_toc_entry(&book, &ctx).expect("cover entry");
+        let IonValue::Annotated(_, boxed) = &entry else {
+            panic!("nav_unit should be annotated");
+        };
+        let IonValue::Struct(fields) = boxed.as_ref() else {
+            panic!("expected struct");
+        };
+        let tp = fields
+            .iter()
+            .find(|(k, _)| *k == KfxSymbol::TargetPosition as u64)
+            .map(|(_, v)| v)
+            .expect("target_position");
+        let IonValue::Struct(tp_fields) = tp else {
+            panic!("target_position should be a struct");
+        };
+        let id = tp_fields
+            .iter()
+            .find(|(k, _)| *k == KfxSymbol::Id as u64)
+            .and_then(|(_, v)| match v {
+                IonValue::Int(n) => Some(*n),
+                _ => None,
+            })
+            .expect("id");
+        assert_eq!(
+            id, SECTION_ROOT as i64,
+            "cover TOC must target the section root, matching the landmark"
+        );
+    }
+
     #[test]
     fn test_content_features_fragment() {
         let frag = build_content_features_fragment();
@@ -4358,18 +4586,15 @@ mod tests {
     }
 
     #[test]
-    fn test_position_id_map_includes_all_content_ids() {
+    fn position_maps_are_section_keyed_with_per_section_walk() {
         use crate::ChapterId;
+        use crate::kfx::fragment::FragmentData;
 
         let mut ctx = ExportContext::new();
-        ctx.register_section("c0");
-        ctx.register_section("c1");
-
-        // Simulate two chapters with multiple content IDs each
+        let c0 = ctx.register_section("c0");
+        let c1 = ctx.register_section("c1");
         let chapter1 = ChapterId(1);
         let chapter2 = ChapterId(2);
-
-        // Add content IDs for each chapter
         ctx.content_ids_by_chapter
             .entry(chapter1)
             .or_default()
@@ -4378,52 +4603,79 @@ mod tests {
             .entry(chapter2)
             .or_default()
             .extend(vec![200, 201]);
-
-        // Set up chapter_fragments for ordering
+        // chapter_fragments = the section roots; no content_id_lengths ⇒ every
+        // span defaults to 1.
         ctx.chapter_fragments.insert(chapter1, 90);
         ctx.chapter_fragments.insert(chapter2, 95);
 
-        let frag = build_position_id_map_fragment(&ctx);
+        let names = vec!["c0".to_string(), "c1".to_string()];
+        let secs = section_positions(&ctx, &names);
 
-        // Extract and verify the position_id_map entries
-        if let crate::kfx::fragment::FragmentData::Ion(IonValue::List(entries)) = &frag.data {
-            // Should have 6 entries (100, 101, 102, 200, 201) + 1 terminator (eid=0)
-            assert_eq!(
-                entries.len(),
-                6,
-                "position_id_map should have one entry per content ID plus terminator"
-            );
+        // Each section = root (chapter_fragment) first, then its content, span 1.
+        assert_eq!(secs.len(), 2);
+        assert_eq!(secs[0].sym, c0);
+        assert_eq!(secs[0].eids, vec![(90, 1), (100, 1), (101, 1), (102, 1)]);
+        assert_eq!(secs[1].sym, c1);
+        assert_eq!(secs[1].eids, vec![(95, 1), (200, 1), (201, 1)]);
 
-            // Extract all eids
-            let eids: Vec<i64> = entries
-                .iter()
-                .filter_map(|entry| {
-                    if let IonValue::Struct(fields) = entry {
-                        fields
-                            .iter()
-                            .find(|(id, _)| *id == KfxSymbol::Eid as u64)
-                            .and_then(|(_, v)| {
-                                if let IonValue::Int(eid) = v {
-                                    Some(*eid)
-                                } else {
-                                    None
-                                }
-                            })
-                    } else {
-                        None
-                    }
+        // position_id_map: section-keyed {section_name, pid, length}.
+        let pidmap = build_position_id_map_fragment(&secs);
+        let FragmentData::Ion(IonValue::Struct(top)) = &pidmap.data else {
+            panic!("position_id_map should be a struct");
+        };
+        let IonValue::List(sec_entries) = top
+            .iter()
+            .find(|(k, _)| *k == KfxSymbol::Contains as u64)
+            .map(|(_, v)| v)
+            .expect("contains")
+        else {
+            panic!("contains should be a list");
+        };
+        let field = |s: &IonValue, key: KfxSymbol| -> i64 {
+            let IonValue::Struct(f) = s else { panic!() };
+            f.iter()
+                .find(|(k, _)| *k == key as u64)
+                .and_then(|(_, v)| match v {
+                    IonValue::Int(n) => Some(*n),
+                    _ => None,
                 })
-                .collect();
+                .unwrap()
+        };
+        assert_eq!(sec_entries.len(), 2);
+        // section 0: pid 0, length 4; section 1: pid 4, length 3.
+        assert_eq!(field(&sec_entries[0], KfxSymbol::Pid), 0);
+        assert_eq!(field(&sec_entries[0], KfxSymbol::Length), 4);
+        assert_eq!(field(&sec_entries[1], KfxSymbol::Pid), 4);
+        assert_eq!(field(&sec_entries[1], KfxSymbol::Length), 3);
 
-            // Should contain all content IDs
-            assert!(eids.contains(&100), "should contain content ID 100");
-            assert!(eids.contains(&101), "should contain content ID 101");
-            assert!(eids.contains(&102), "should contain content ID 102");
-            assert!(eids.contains(&200), "should contain content ID 200");
-            assert!(eids.contains(&201), "should contain content ID 201");
-        } else {
-            panic!("expected List data");
-        }
+        // section_position_id_map: one entity per section, keyed by section name.
+        let spm = build_section_position_id_map_fragments(&secs);
+        assert_eq!(spm.len(), 2);
+        assert!(spm.iter().all(|f| f.ftype == KfxSymbol::SectionPositionIdMap as u64));
+        // Section 0 walk: [0,90] [1,100] 1 1 [1,0] — each element advances by the
+        // PREVIOUS span; a bare int names previous+1, a pair names an explicit eid.
+        let FragmentData::Ion(IonValue::Struct(s0)) = &spm[0].data else {
+            panic!("section_position_id_map should be a struct");
+        };
+        let IonValue::List(walk) = s0
+            .iter()
+            .find(|(k, _)| *k == KfxSymbol::Contains as u64)
+            .map(|(_, v)| v)
+            .expect("contains")
+        else {
+            panic!("walk should be a list");
+        };
+        let expect_pair = |v: &IonValue, a: i64, e: i64| {
+            let IonValue::List(p) = v else { panic!("expected [advance, eid]") };
+            assert_eq!(p[0].as_int(), Some(a));
+            assert_eq!(p[1].as_int(), Some(e));
+        };
+        assert_eq!(walk.len(), 5);
+        expect_pair(&walk[0], 0, 90); // root: advance 0, explicit eid
+        expect_pair(&walk[1], 1, 100); // advance 1 (root span), explicit (not 91)
+        assert_eq!(walk[2].as_int(), Some(1)); // 101 == 100+1 → bare advance
+        assert_eq!(walk[3].as_int(), Some(1)); // 102 == 101+1 → bare advance
+        expect_pair(&walk[4], 1, 0); // terminator at pid == length
     }
 }
 
