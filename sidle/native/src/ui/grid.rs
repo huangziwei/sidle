@@ -23,11 +23,12 @@ pub const ROW_GAP: u32 = 20;
 /// Bottom band of a series tile, reserved for the series name (book covers
 /// don't draw titles, but a collection must — its art is just the lead cover).
 pub const NAME_BAND_H: u32 = 64;
-/// Per-card offset for the two "stack" outlines behind the lead cover. Small —
-/// just enough to read as a stack on the 16-shade panel, not a fan.
-const STACK_OFFSET: i32 = 12;
-/// Margin between the cell edge and the front card (cover) of a series tile.
-const CARD_INSET: u32 = 28;
+/// Top strip above the lead cover, holding the two stacked book-edge bars.
+const BAR_STRIP_H: u32 = 22;
+/// Thickness of each book-edge bar.
+const BAR_H: u32 = 6;
+/// Inset of the count badge from the lead cover's bottom-left corner.
+const BADGE_MARGIN: u32 = 8;
 /// Padding inside the count badge around its number.
 const BADGE_PAD: u32 = 12;
 
@@ -46,17 +47,13 @@ pub fn blit_cell(fb: &mut Framebuffer, cell_x: i32, cell_y: i32, img: &DynamicIm
     blit_fit(fb, cell_x, cell_y, CELL_W, CELL_H, img);
 }
 
-/// Aspect-fit `img` into the box `(box_x, box_y, box_w × box_h)`, centered, and
-/// blit its luma channel. Never upscales (`scale` clamped to ≤ 1.0), so a cover
-/// already resized to ≤ a cell by [`decode_resize`] is a 1:1 centered copy —
-/// the original `blit_cell` behavior — while a series tile's smaller front-card
-/// box gets a nearest-neighbor downscale (cheap, fine on a 16-shade panel; no
-/// extra `image::resize` allocation per repaint).
-pub fn blit_fit(fb: &mut Framebuffer, box_x: i32, box_y: i32, box_w: u32, box_h: u32, img: &DynamicImage) {
-    let gray = img.to_luma8();
-    let (iw, ih) = (gray.width(), gray.height());
+/// The aspect-fit placement of an `iw × ih` image inside the box — the rect
+/// [`blit_fit`] actually paints. Never upscales (`scale` clamped to ≤ 1.0).
+/// Returns `(ox, oy, dw, dh)`; lets callers position chrome (the series tile's
+/// stack bars + count badge) against the displayed cover, not the letterbox box.
+pub fn fit_rect(box_x: i32, box_y: i32, box_w: u32, box_h: u32, iw: u32, ih: u32) -> (i32, i32, u32, u32) {
     if iw == 0 || ih == 0 || box_w == 0 || box_h == 0 {
-        return;
+        return (box_x, box_y, 0, 0);
     }
     let scale = (box_w as f32 / iw as f32)
         .min(box_h as f32 / ih as f32)
@@ -65,6 +62,24 @@ pub fn blit_fit(fb: &mut Framebuffer, box_x: i32, box_y: i32, box_w: u32, box_h:
     let dh = ((ih as f32 * scale).round() as u32).max(1);
     let ox = box_x + (box_w as i32 - dw as i32) / 2;
     let oy = box_y + (box_h as i32 - dh as i32) / 2;
+    (ox, oy, dw, dh)
+}
+
+/// Aspect-fit `img` into the box `(box_x, box_y, box_w × box_h)`, centered, and
+/// blit its luma channel (placement from [`fit_rect`]). Returns the painted
+/// rect. A cover already resized to ≤ a cell by [`decode_resize`] is a 1:1
+/// centered copy — the original `blit_cell` behavior — while a smaller box gets
+/// a nearest-neighbor downscale (cheap, fine on a 16-shade panel; no extra
+/// `image::resize` allocation per repaint).
+pub fn blit_fit(fb: &mut Framebuffer, box_x: i32, box_y: i32, box_w: u32, box_h: u32, img: &DynamicImage) -> (i32, i32, u32, u32) {
+    let gray = img.to_luma8();
+    let (iw, ih) = (gray.width(), gray.height());
+    let rect = fit_rect(box_x, box_y, box_w, box_h, iw, ih);
+    let (ox, oy, dw, dh) = rect;
+    if dw == 0 || dh == 0 {
+        return rect;
+    }
+    let scale = dw as f32 / iw as f32;
     let raw = gray.as_raw();
     for dy in 0..dh {
         let sy = ((dy as f32 / scale) as u32).min(ih - 1);
@@ -74,6 +89,7 @@ pub fn blit_fit(fb: &mut Framebuffer, box_x: i32, box_y: i32, box_w: u32, box_h:
             fb.put_pixel(ox + dx as i32, oy + dy as i32, raw[src_row + sx as usize]);
         }
     }
+    rect
 }
 
 /// Solid-color cell, used as a placeholder when a cover fails to load.
@@ -92,8 +108,8 @@ pub fn outline_cell(fb: &mut Framebuffer, cell_x: i32, cell_y: i32, selected: bo
 }
 
 /// Draw a `thickness`-px outline rectangle (the four edges of `w × h` at
-/// `(x, y)`) in `shade`. Shared by [`outline_cell`] and the series-tile stack
-/// hint. Negative origin / zero size no-ops.
+/// `(x, y)`) in `shade`. Used by [`outline_cell`] for the selection frame.
+/// Negative origin / zero size no-ops.
 pub fn outline_rect(fb: &mut Framebuffer, x: i32, y: i32, w: u32, h: u32, thickness: u32, shade: u8) {
     if x < 0 || y < 0 || w == 0 || h == 0 {
         return;
@@ -108,10 +124,12 @@ pub fn outline_rect(fb: &mut Framebuffer, x: i32, y: i32, w: u32, h: u32, thickn
 
 /// Render a series-collection tile into the cell at `(cell_x, cell_y)`:
 ///
-/// - the lead cover (or a light placeholder) as the **front card**, framed;
-/// - two offset outline rectangles **behind** it peeking bottom-right — a
-///   "stack" hint, no alpha needed (gray outlines on the 16-shade panel);
-/// - a solid dark **count badge** (light number) at the front card's top-right
+/// - the lead cover, aspect-fit **full-width** (edge-to-edge left/right, no
+///   inset or frame) exactly like a standalone book cover — only shorter, to
+///   leave room for the bars above and the name band below;
+/// - two **book-edge bars** stacked just above the cover (narrower as they
+///   recede, lighter the further back) — a "stack of volumes" hint;
+/// - a solid dark **count badge** (light number) at the cover's bottom-left
 ///   = available-to-download members;
 /// - a bottom **name band** with the series name (single line, ellipsized).
 ///
@@ -131,45 +149,60 @@ pub fn draw_series_cell(
     }
     fb.fill_rect(cell_y as u32, cell_x as u32, CELL_W, CELL_H, 0xFF);
 
-    // Cover region = the cell above the name band. The front card leaves a
-    // CARD_INSET margin and reserves 2×STACK_OFFSET at the bottom-right for the
-    // stack outlines to peek out from behind the cover.
-    let region_h = CELL_H - NAME_BAND_H;
-    let card_x = cell_x + CARD_INSET as i32;
-    let card_y = cell_y + CARD_INSET as i32;
-    let card_w = CELL_W.saturating_sub(CARD_INSET * 2 + STACK_OFFSET as u32 * 2);
-    let card_h = region_h.saturating_sub(CARD_INSET * 2 + STACK_OFFSET as u32 * 2);
+    // Cover region: the full cell width (edge-to-edge like a standalone book),
+    // between the top bar strip and the bottom name band.
+    let region_y = cell_y + BAR_STRIP_H as i32;
+    let region_h = CELL_H - NAME_BAND_H - BAR_STRIP_H;
 
-    // Stack outlines first (drawn behind: the front card paints over their
-    // top-left, leaving the bottom-right edges showing). Lighter the further back.
-    outline_rect(fb, card_x + STACK_OFFSET * 2, card_y + STACK_OFFSET * 2, card_w, card_h, 3, 0x99);
-    outline_rect(fb, card_x + STACK_OFFSET, card_y + STACK_OFFSET, card_w, card_h, 3, 0x66);
+    // Lead cover, aspect-fit into the region just like a standalone cover — no
+    // inset card, no frame. `cov_*` is the actually-painted rect, so the bars
+    // and badge track the cover rather than the letterbox margins. A missing
+    // cover falls back to a light fill spanning the region width.
+    let (cov_x, cov_y, cov_w, cov_h) = match cover {
+        Some(img) => blit_fit(fb, cell_x, region_y, CELL_W, region_h, img),
+        None => {
+            fb.fill_rect(region_y as u32, cell_x as u32, CELL_W, region_h, 0xDD);
+            (cell_x, region_y, CELL_W, region_h)
+        }
+    };
 
-    // Front card: lead cover, or a light fill when it hasn't arrived. Framed so
-    // it reads as a card even with a pale or missing cover.
-    match cover {
-        Some(img) => blit_fit(fb, card_x, card_y, card_w, card_h, img),
-        None => fb.fill_rect(card_y as u32, card_x as u32, card_w, card_h, 0xDD),
-    }
-    outline_rect(fb, card_x, card_y, card_w, card_h, 3, 0x00);
+    // Stack hint: two book-edge bars centered above the cover, the nearer (lower,
+    // wider) bar darker than the farther (higher, narrower) one.
+    let cx = cov_x + cov_w as i32 / 2;
+    let bar_lo_w = cov_w * 86 / 100;
+    let bar_hi_w = cov_w * 66 / 100;
+    fb.fill_rect(
+        (cov_y - (BAR_H as i32 + 4)).max(cell_y) as u32,
+        (cx - bar_lo_w as i32 / 2).max(cell_x) as u32,
+        bar_lo_w,
+        BAR_H,
+        0x66,
+    );
+    fb.fill_rect(
+        (cov_y - (BAR_H as i32 * 2 + 6)).max(cell_y) as u32,
+        (cx - bar_hi_w as i32 / 2).max(cell_x) as u32,
+        bar_hi_w,
+        BAR_H,
+        0x99,
+    );
 
-    // Count badge: solid black rect + white (inverted) number, top-right of the
-    // front card. Sized to the number so 1- and 2-digit counts both fit.
+    // Count badge: solid black rect + white (inverted) number, bottom-left of the
+    // cover. Sized to the number so 1- and 2-digit counts both fit.
     let badge_text = count.to_string();
     let lh = renderer.line_height().max(1);
     let tw = renderer.measure_width(&badge_text);
     let badge_w = tw + BADGE_PAD * 2;
     let badge_h = lh + BADGE_PAD;
-    let badge_x = (card_x + card_w as i32 - badge_w as i32).max(card_x);
-    let badge_y = card_y;
-    fb.fill_rect(badge_y as u32, badge_x as u32, badge_w, badge_h, 0x00);
+    let badge_x = cov_x + BADGE_MARGIN as i32;
+    let badge_y = cov_y + cov_h as i32 - badge_h as i32 - BADGE_MARGIN as i32;
+    fb.fill_rect(badge_y.max(cell_y) as u32, badge_x.max(cell_x) as u32, badge_w, badge_h, 0x00);
     let text_x = badge_x + ((badge_w as i32 - tw as i32) / 2).max(0);
     let text_baseline = badge_y + (badge_h * 70 / 100) as i32;
     renderer.draw(fb, text_x, text_baseline, &badge_text, true);
 
     // Name band: a 2px separator then the series name, centered and clamped to
     // one ellipsized line so a long name can't overrun the cell.
-    let band_top = cell_y as u32 + region_h;
+    let band_top = cell_y as u32 + (CELL_H - NAME_BAND_H);
     fb.fill_rect(band_top, cell_x as u32, CELL_W, 2, 0x00);
     const PAD: u32 = 16;
     let lines = renderer.wrap_and_clamp(name, CELL_W.saturating_sub(PAD * 2), 1);
