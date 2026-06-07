@@ -41,12 +41,6 @@ pub fn decode_resize(bytes: &[u8]) -> Result<DynamicImage> {
     Ok(img.resize(CELL_W, CELL_H, FilterType::Triangle))
 }
 
-/// Blit a cover into the full cell box, aspect-fit + centered (the common
-/// case). Thin wrapper over [`blit_fit`].
-pub fn blit_cell(fb: &mut Framebuffer, cell_x: i32, cell_y: i32, img: &DynamicImage) {
-    blit_fit(fb, cell_x, cell_y, CELL_W, CELL_H, img);
-}
-
 /// The aspect-fit placement of an `iw × ih` image inside the box — the rect
 /// [`blit_fit`] actually paints. Never upscales (`scale` clamped to ≤ 1.0).
 /// Returns `(ox, oy, dw, dh)`; lets callers position chrome (the series tile's
@@ -67,9 +61,9 @@ pub fn fit_rect(box_x: i32, box_y: i32, box_w: u32, box_h: u32, iw: u32, ih: u32
 
 /// Aspect-fit `img` into the box `(box_x, box_y, box_w × box_h)`, centered, and
 /// blit its luma channel (placement from [`fit_rect`]). Returns the painted
-/// rect. A cover already resized to ≤ a cell by [`decode_resize`] is a 1:1
-/// centered copy — the original `blit_cell` behavior — while a smaller box gets
-/// a nearest-neighbor downscale (cheap, fine on a 16-shade panel; no extra
+/// rect. A cover already resized to ≤ a cell by [`decode_resize`] is copied 1:1
+/// and centered, while a smaller box (a tile's cover region) gets a
+/// nearest-neighbor downscale (cheap, fine on a 16-shade panel; no extra
 /// `image::resize` allocation per repaint).
 pub fn blit_fit(fb: &mut Framebuffer, box_x: i32, box_y: i32, box_w: u32, box_h: u32, img: &DynamicImage) -> (i32, i32, u32, u32) {
     let gray = img.to_luma8();
@@ -90,14 +84,6 @@ pub fn blit_fit(fb: &mut Framebuffer, box_x: i32, box_y: i32, box_w: u32, box_h:
         }
     }
     rect
-}
-
-/// Solid-color cell, used as a placeholder when a cover fails to load.
-pub fn blit_placeholder(fb: &mut Framebuffer, cell_x: i32, cell_y: i32, shade: u8) {
-    if cell_x < 0 || cell_y < 0 {
-        return;
-    }
-    fb.fill_rect(cell_y as u32, cell_x as u32, CELL_W, CELL_H, shade);
 }
 
 /// Frame the selected cell with a black border so the user knows which is
@@ -122,19 +108,79 @@ pub fn outline_rect(fb: &mut Framebuffer, x: i32, y: i32, w: u32, h: u32, thickn
     fb.fill_rect(yu, xu + w - t, t, h, shade); // right
 }
 
-/// Render a series-collection tile into the cell at `(cell_x, cell_y)`:
-///
-/// - the lead cover, aspect-fit **full-width** (edge-to-edge left/right, no
-///   inset or frame) exactly like a standalone book cover — only shorter, to
-///   leave room for the bars above and the name band below;
-/// - two **book-edge bars** stacked just above the cover (narrower as they
-///   recede, lighter the further back) — a "stack of volumes" hint;
-/// - a solid dark **count badge** (light number) at the cover's bottom-left
-///   = available-to-download members;
-/// - a bottom **name band** with the series name (single line, ellipsized).
-///
-/// Self-contained (clears its own cell first) so it's reused both for the
-/// placeholder paint and the per-cover refresh in `main.rs`.
+/// Clear the cell to white, aspect-fit the cover into the region between
+/// `top_inset` and the bottom name band, then draw that band with `label`
+/// (single line, centered, ellipsized). Returns the painted cover rect so a
+/// caller can overlay chrome on it. Shared by [`draw_book_cell`] and
+/// [`draw_series_cell`]: `top_inset` is 0 for a standalone book (the cover uses
+/// the full height above the band) and `BAR_STRIP_H` for a series (leaving room
+/// for the stack bars). Off-screen cells no-op with a zero-size rect.
+fn draw_cover_tile(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    cell_x: i32,
+    cell_y: i32,
+    top_inset: u32,
+    cover: Option<&DynamicImage>,
+    label: &str,
+) -> (i32, i32, u32, u32) {
+    if cell_x < 0 || cell_y < 0 {
+        return (cell_x, cell_y, 0, 0);
+    }
+    fb.fill_rect(cell_y as u32, cell_x as u32, CELL_W, CELL_H, 0xFF);
+
+    // Cover region: full cell width (edge-to-edge, no inset card or frame),
+    // between the optional top inset and the bottom name band. The cover
+    // aspect-fits exactly like a standalone book cover.
+    let region_y = cell_y + top_inset as i32;
+    let region_h = CELL_H - NAME_BAND_H - top_inset;
+    let rect = match cover {
+        Some(img) => blit_fit(fb, cell_x, region_y, CELL_W, region_h, img),
+        None => {
+            // No cover yet: a light fill spanning the region width.
+            fb.fill_rect(region_y as u32, cell_x as u32, CELL_W, region_h, 0xDD);
+            (cell_x, region_y, CELL_W, region_h)
+        }
+    };
+
+    // Name band: a 2px separator then the label, centered and clamped to one
+    // ellipsized line so a long title can't overrun the cell.
+    let band_top = cell_y as u32 + (CELL_H - NAME_BAND_H);
+    fb.fill_rect(band_top, cell_x as u32, CELL_W, 2, 0x00);
+    const PAD: u32 = 16;
+    let lines = renderer.wrap_and_clamp(label, CELL_W.saturating_sub(PAD * 2), 1);
+    if let Some(line) = lines.first() {
+        let lw = renderer.measure_width(line);
+        let lx = cell_x + ((CELL_W as i32 - lw as i32) / 2).max(0);
+        let baseline = band_top as i32 + (NAME_BAND_H * 62 / 100) as i32;
+        renderer.draw(fb, lx, baseline, line, false);
+    }
+    rect
+}
+
+/// Render a standalone book tile: the cover (aspect-fit, full-width, no frame)
+/// above a name band carrying the book title — the same layout as a series tile
+/// minus the stack bars and count badge, so books and collections line up in
+/// the grid. A missing cover falls back to a light placeholder + the title.
+/// Self-contained (clears its own cell) for both the initial paint and the
+/// per-cover refresh in `main.rs`.
+pub fn draw_book_cell(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    cell_x: i32,
+    cell_y: i32,
+    cover: Option<&DynamicImage>,
+    title: &str,
+) {
+    draw_cover_tile(fb, renderer, cell_x, cell_y, 0, cover, title);
+}
+
+/// Render a series-collection tile: the shared cover tile (see
+/// [`draw_cover_tile`]) with the series name in the band, plus two **book-edge
+/// bars** stacked just above the cover (narrower as they recede, lighter the
+/// further back — a "stack of volumes" hint) and a solid dark **count badge**
+/// (light number = available-to-download members) at the cover's bottom-left.
+/// Self-contained for both the placeholder paint and the per-cover refresh.
 pub fn draw_series_cell(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -144,27 +190,13 @@ pub fn draw_series_cell(
     count: usize,
     name: &str,
 ) {
-    if cell_x < 0 || cell_y < 0 {
-        return;
+    // Series reserve BAR_STRIP_H above the cover for the stack bars; the cover
+    // is otherwise identical to a book's, so the two line up in the grid.
+    let (cov_x, cov_y, cov_w, cov_h) =
+        draw_cover_tile(fb, renderer, cell_x, cell_y, BAR_STRIP_H, cover, name);
+    if cov_w == 0 {
+        return; // off-screen cell
     }
-    fb.fill_rect(cell_y as u32, cell_x as u32, CELL_W, CELL_H, 0xFF);
-
-    // Cover region: the full cell width (edge-to-edge like a standalone book),
-    // between the top bar strip and the bottom name band.
-    let region_y = cell_y + BAR_STRIP_H as i32;
-    let region_h = CELL_H - NAME_BAND_H - BAR_STRIP_H;
-
-    // Lead cover, aspect-fit into the region just like a standalone cover — no
-    // inset card, no frame. `cov_*` is the actually-painted rect, so the bars
-    // and badge track the cover rather than the letterbox margins. A missing
-    // cover falls back to a light fill spanning the region width.
-    let (cov_x, cov_y, cov_w, cov_h) = match cover {
-        Some(img) => blit_fit(fb, cell_x, region_y, CELL_W, region_h, img),
-        None => {
-            fb.fill_rect(region_y as u32, cell_x as u32, CELL_W, region_h, 0xDD);
-            (cell_x, region_y, CELL_W, region_h)
-        }
-    };
 
     // Stack hint: two book-edge bars centered above the cover, the nearer (lower,
     // wider) bar darker than the farther (higher, narrower) one.
@@ -199,19 +231,6 @@ pub fn draw_series_cell(
     let text_x = badge_x + ((badge_w as i32 - tw as i32) / 2).max(0);
     let text_baseline = badge_y + (badge_h * 70 / 100) as i32;
     renderer.draw(fb, text_x, text_baseline, &badge_text, true);
-
-    // Name band: a 2px separator then the series name, centered and clamped to
-    // one ellipsized line so a long name can't overrun the cell.
-    let band_top = cell_y as u32 + (CELL_H - NAME_BAND_H);
-    fb.fill_rect(band_top, cell_x as u32, CELL_W, 2, 0x00);
-    const PAD: u32 = 16;
-    let lines = renderer.wrap_and_clamp(name, CELL_W.saturating_sub(PAD * 2), 1);
-    if let Some(line) = lines.first() {
-        let lw = renderer.measure_width(line);
-        let lx = cell_x + ((CELL_W as i32 - lw as i32) / 2).max(0);
-        let baseline = band_top as i32 + (NAME_BAND_H * 62 / 100) as i32;
-        renderer.draw(fb, lx, baseline, line, false);
-    }
 }
 
 /// Grid origin computed to center the grid on the panel.
