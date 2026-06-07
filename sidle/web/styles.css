@@ -1105,10 +1105,9 @@ kbd {
 
 /* Series collections (grouped gallery). A tile is `.series-card`, NOT
    `.book-card`, so the SelectionController's `.book-card` queries skip it —
-   collections are navigation, never selectable. Kindle-style chrome: book-edge
-   bars stacked above the cover, a dark count pill bottom-left, and a 2×3 dot
-   overflow menu bottom-right (all overlaid on the lead cover). No
-   `overflow: hidden` so the edge bars can peek above the cover. */
+   collections are navigation, never selectable. Chrome: book-edge bars stacked
+   above the lead cover (which is full-bleed left/right like a standalone book),
+   a red count pill bottom-left, and a 2×3 dot overflow menu bottom-right. */
 
 .series-card {
   background: var(--surface);
@@ -1127,8 +1126,9 @@ kbd {
 
 .series-stack {
   position: relative;
-  margin: 4px 10px 0 10px;
-  /* Room above the cover for the stacked book-edge bars to peek through. */
+  /* Full-bleed left/right like a standalone book cover (no side margin); the
+     top space holds the stacked book-edge bars. */
+  margin: 4px 0 0 0;
   padding-top: 9px;
 }
 
@@ -1159,14 +1159,12 @@ kbd {
 }
 
 .series-stack .cover {
+  /* Full-bleed left/right, no frame — matches the standalone book cover. */
   position: relative;
   z-index: 1;
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
 }
 
-/* Collection size — a solid dark pill, bottom-left, overlaid on the cover.
-   Opaque so it stays legible over any cover art in either theme. */
+/* Collection size — a red accent pill, bottom-left, overlaid on the cover. */
 .series-count {
   position: absolute;
   left: 7px;
@@ -1176,7 +1174,7 @@ kbd {
   height: 25px;
   padding: 0 7px;
   border-radius: 13px;
-  background: #161616;
+  background: var(--accent);
   color: #fff;
   font-size: 13px;
   font-weight: 700;
