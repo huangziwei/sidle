@@ -1062,6 +1062,23 @@ function seriesCard(entry) {
   badge.className = "series-count";
   badge.textContent = String(n);
   stack.appendChild(badge);
+
+  // Overflow menu (2×3 dots, bottom-right) — opens the same series context menu
+  // as a right-click. stopPropagation so the dots don't also drill into the
+  // series via the card's click handler.
+  const menuBtn = document.createElement("button");
+  menuBtn.type = "button";
+  menuBtn.className = "series-menu";
+  menuBtn.title = "Series options";
+  menuBtn.setAttribute("aria-label", "Series options");
+  for (let i = 0; i < 6; i++) menuBtn.appendChild(document.createElement("span"));
+  menuBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const r = menuBtn.getBoundingClientRect();
+    openSeriesContextMenu(r.left, r.bottom, entry);
+  });
+  stack.appendChild(menuBtn);
+
   card.appendChild(stack);
 
   const meta = document.createElement("div");
