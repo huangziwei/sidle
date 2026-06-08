@@ -74,18 +74,11 @@ pub fn rewrite_cde_content_type_pdoc(value: &mut IonNode) -> bool {
 /// supplies a stable id and no asset_id is recoverable from `$490` metadata.
 pub fn generate_container_id() -> String {
     let mut state: u128 = {
-        #[cfg(target_arch = "wasm32")]
-        {
-            (js_sys::Date::now() as u128) * 1_000_000
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        }
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
     };
     let chars: Vec<char> = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".chars().collect();
     let mut id = String::from("CR!");

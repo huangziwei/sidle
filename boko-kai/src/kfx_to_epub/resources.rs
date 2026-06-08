@@ -278,14 +278,6 @@ fn parallel_transcode(
         return Vec::new();
     }
 
-    // Browser wasm has no threads — `available_parallelism()` and
-    // `std::thread::scope` panic at runtime — so run the same per-image
-    // `transcode_one` sequentially. Slower on image-heavy KFX, but correct.
-    #[cfg(target_arch = "wasm32")]
-    let result: Vec<Result<TranscodedBytes, ConvertError>> =
-        prepared.iter().map(transcode_one).collect();
-
-    #[cfg(not(target_arch = "wasm32"))]
     let result: Vec<Result<TranscodedBytes, ConvertError>> = {
         let n_workers = std::thread::available_parallelism()
             .map(|n| n.get())

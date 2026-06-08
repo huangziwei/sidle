@@ -11,7 +11,7 @@ readme = "README.md"
 # `use boko::...` without churn.
 [lib]
 name = "boko"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [features]
 default = ["cli"]
@@ -21,14 +21,10 @@ cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:ion-rs", "aozora"]
 # raster deps) plus `regex`; gated off for wasm to shrink the binary.
 aozora = ["dep:resvg", "dep:regex"]
 # Kindle Scribe handwritten-notebook (.nbk) decode → SVG. Pulls `rusqlite`
-# (bundled C SQLite, native-only — declared in the non-wasm target table). Off
-# by default; sidle enables it. Never combine with `wasm`.
+# (bundled C SQLite). Off by default; sidle enables it.
 nbk = ["dep:rusqlite"]
-wasm = ["wasm-bindgen", "console_error_panic_hook"]
 
 [dependencies]
-wasm-bindgen = { version = "0.2", optional = true }
-console_error_panic_hook = { version = "0.1", optional = true }
 quick-xml = "0.39"
 zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 percent-encoding = "2.3"
@@ -106,30 +102,20 @@ xml5ever = "0.39.0"
 # default features are dropped; nom parser + flate2/crypto stay (hard deps).
 lopdf = { version = "0.40", default-features = false }
 
-# Native: use fast zlib-rs
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Fast pure-Rust deflate backend.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
-# KDF/KPF SQLite reader for the `nbk` feature (Scribe notebooks). `bundled`
-# compiles SQLite from source — native-only; same rusqlite 0.32 already used
-# across sidle/*. Optional: only pulled in when `nbk` is enabled.
-rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
-# WASM: use pure-Rust backend
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
-js-sys = "0.3"
-# lopdf's encrypted-PDF crypto deps pull `getrandom`, which has no default
-# backend on wasm32-unknown-unknown. lopdf's `wasm_js` feature forwards to
-# `getrandom/wasm_js` (the browser backend) so the PDF→KFX path builds for the
-# boko.html tool too. Enabled only for the wasm target.
-lopdf = { version = "0.40", default-features = false, features = ["wasm_js"] }
+# KDF/KPF SQLite reader for the `nbk` feature (Scribe notebooks). `bundled`
+# compiles SQLite from source; same rusqlite 0.32 used across sidle/*.
+# Optional: only pulled in when `nbk` is enabled.
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 # macOS PDF engine (PDF→KFX page-1 cover + the selectable text layer) = Apple
 # PDFKit / Core Graphics, the system engine Preview uses — NO bundled libpdfium.
 # PDFKit gives page rendering (`PDFPage.draw(with:to:)`) and text-with-positions
 # (`PDFPage.string` + `characterBounds(at:)`); Core Graphics provides the bitmap
-# context we render the cover into. macOS-only by design: the wasm/Kindle builds
-# don't rasterize (the Kindle never converts — conversion is always Mac-side),
+# context we render the cover into. macOS-only by design: the Kindle build
+# doesn't rasterize (the Kindle never converts — conversion is always Mac-side),
 # and a future Linux build would slot Poppler behind the same `render.rs`
 # interface. See .claude/plans/pdf-to-kfx.md (PIVOT).
 [target.'cfg(target_os = "macos")'.dependencies]

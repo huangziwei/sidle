@@ -55,9 +55,6 @@ pub mod validate;
 pub(crate) mod trace;
 pub(crate) mod util;
 
-#[cfg(feature = "wasm")]
-pub mod wasm;
-
 // Primary exports from model
 pub use model::{
     Book, Chapter, ContentBlock, Format, Metadata, Node, NodeId, Resource, Role, SectionNode,

@@ -38,7 +38,6 @@ The architecture and most of the format machinery is inherited untouched:
 - **CSS pipeline**: html5ever HTML parser, cssparser, selectors-based cascade with UA defaults (`style/`, `style/parse/`), plus the DOM optimize passes (`dom/optimize/`: prune, merge, fuse, wrap, vacuum, table).
 - **KFX format core**: Ion binary parser/writer (`kfx/ion.rs`), container parser (`kfx/container.rs`), the full KFX symbol table (`kfx/symbols.rs`), schema-driven storyline import (`kfx/storyline.rs`), and the KFX exporter and its supporting schema/registry/serialization modules (`export/kfx.rs`, `kfx/{schema,tokens,transforms,metadata,serialization,style_schema,style_registry,cover,auxiliary,context}.rs`).
 - **`kfx-dump` CLI** (`src/bin/kfx-dump.rs`) — pretty-printer for KFX containers (the only consumer of the `ion-rs` dependency). Extended by kai to dump the `ruby_content` and reading-order sections.
-- **WASM build target** (`cfg(target_arch = "wasm32")` paths).
 
 ## What kai changes
 

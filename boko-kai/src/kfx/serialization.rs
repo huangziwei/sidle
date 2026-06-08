@@ -243,14 +243,7 @@ pub fn serialize_fragment(fragment: &KfxFragment) -> Vec<u8> {
 
 /// Generate a unique container ID.
 pub fn generate_container_id() -> String {
-    // Get seed from platform-appropriate time source
-    #[cfg(target_arch = "wasm32")]
-    let seed = {
-        // In WASM, use js_sys::Date::now() which returns milliseconds
-        (js_sys::Date::now() as u128) * 1_000_000 // Convert to nanoseconds scale
-    };
-
-    #[cfg(not(target_arch = "wasm32"))]
+    // Seed from the system clock.
     let seed = {
         use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now()

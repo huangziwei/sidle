@@ -30,13 +30,3 @@ incremental = true
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-
-# Size-tuned profile for the browser-wasm `boko.html` tool. Must live here in the
-# workspace root — Cargo ignores `[profile.*]` defined in member crates.
-[profile.release-wasm]
-inherits = "release"
-opt-level = "z"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true

@@ -53,7 +53,3 @@ I want a faster, more streamlined process to manage my books:
 7. and most importantly, all format conversion should have full support for CJK text (vertical writing mode, page progression direction, etc.), which is made possible with `boko-kai`, a [fork of boko](./boko-kai/README.md).
 
 This is basically what Sidle does for now.
-
-## Bonus
-
-For format conversion only without library management, you can use this [client-side html tool](https://hzwei.dev/tools/boko.html).

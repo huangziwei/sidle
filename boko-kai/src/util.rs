@@ -4,21 +4,13 @@ use std::borrow::Cow;
 
 /// Get current time as seconds since Unix epoch.
 ///
-/// On native platforms, uses `SystemTime::now()`.
-/// On WASM, uses `js_sys::Date::now()`.
-#[cfg(not(target_arch = "wasm32"))]
+/// Uses `SystemTime::now()`.
 pub fn time_now_secs() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn time_now_secs() -> u32 {
-    // js_sys::Date::now() returns milliseconds as f64
-    (js_sys::Date::now() / 1000.0) as u32
 }
 
 /// RFC 4122 v5 UUID derived from `name` via SHA-1 over the URL namespace.
