@@ -3,12 +3,12 @@
 //!
 //! - [`jpeg`] — JPEG sanitize/strip/transcode for KFX bundling (EPUB→KFX).
 //! - [`jxr_decode`] — pure-Rust JPEG-XR decoder (KFX→EPUB).
-//!
-//! Planned (see `.claude/plans/jxr-encoder.md`):
-//! - `jxr_encode` — pure-Rust JPEG-XR encoder (EPUB→KFX), dual grayscale/color.
-//! - `jxr_common` — transform/table/state primitives shared by decode + encode,
-//!   extracted from `jxr_decode` as the encoder needs them.
+//! - [`jxr_encode`] — pure-Rust JPEG-XR encoder (EPUB→KFX), grayscale/color.
+//! - [`jxr_transcode`] — KFX→EPUB glue: `jxr_decode` → JPEG re-encode. Kept
+//!   separate from the codec (it depends on `ConvertError` / `jpeg_encoder`),
+//!   so `jxr_decode` + `jxr_encode` stay extraction-ready.
 
 pub mod jpeg;
 pub mod jxr_decode;
 pub mod jxr_encode;
+pub mod jxr_transcode;

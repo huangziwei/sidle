@@ -137,7 +137,7 @@ mod tests {
     use super::*;
 
     /// Round-trip oracle: decode JXR bytes straight to i32 planes via the
-    /// decoder, bypassing its JPEG re-encode in `jxr_decode::transcode`.
+    /// decoder, bypassing its JPEG re-encode in `jxr_transcode::transcode`.
     fn decode_to_planes(jxr: &[u8]) -> crate::image::jxr_decode::decoder::DecodedImage {
         let container = crate::image::jxr_decode::container::parse(jxr).expect("container parse");
         crate::image::jxr_decode::decoder::Decoder::new(container.image_data)
