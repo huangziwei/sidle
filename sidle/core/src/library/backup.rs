@@ -106,6 +106,30 @@ pub fn create_archive(
     db_user_version: i64,
     dest_zip: &Path,
 ) -> Result<Manifest> {
+    create_archive_with_progress(
+        snapshot,
+        books_dir,
+        source_root,
+        app_version,
+        db_user_version,
+        dest_zip,
+        &|_, _| {},
+    )
+}
+
+/// Like [`create_archive`], but ticks `on_progress(dirs_done, dirs_total)` after
+/// each book/notebook directory is zipped — drives the footer "Backing up …"
+/// counter. Zipping the book tree is the long pole; the manifest + DB write
+/// ahead of it are quick.
+pub fn create_archive_with_progress(
+    snapshot: &TempSnapshot,
+    books_dir: &Path,
+    source_root: &Path,
+    app_version: &str,
+    db_user_version: i64,
+    dest_zip: &Path,
+    on_progress: &dyn Fn(u64, u64),
+) -> Result<Manifest> {
     // (1) Counts + the dir keys read FROM THE SNAPSHOT (read-only, so we don't
     //     mutate the bytes we're about to hash), so the manifest is internally
     //     consistent with the archived DB + file set.
@@ -152,10 +176,17 @@ pub fn create_archive(
 
     add_file(&mut zw, "library.db", &snapshot.path, deflated)?;
 
+    // Progress is per archived directory (books + notebooks) — the unit that
+    // dominates wall-clock. `book_dirs`/`notebook_dirs` already counted the ones
+    // that exist on disk, so the loop bodies and the total agree.
+    let total_dirs = (book_dirs + notebook_dirs).max(0) as u64;
+    let mut done_dirs = 0u64;
     for sha in &inv.shas {
         let dir = books_dir.join(sha);
         if dir.is_dir() {
             add_dir(&mut zw, &format!("books/{sha}"), &dir, stored)?;
+            done_dirs += 1;
+            on_progress(done_dirs, total_dirs);
         }
     }
 
@@ -166,6 +197,8 @@ pub fn create_archive(
         let dir = notebooks_dir.join(uuid);
         if dir.is_dir() {
             add_dir(&mut zw, &format!("notebooks/{uuid}"), &dir, stored)?;
+            done_dirs += 1;
+            on_progress(done_dirs, total_dirs);
         }
     }
 
@@ -203,6 +236,7 @@ pub(crate) fn stage_archive(
     src_zip: &Path,
     staging: &Path,
     app_user_version: i64,
+    on_progress: &dyn Fn(u64, u64),
 ) -> Result<Manifest> {
     let file = File::open(src_zip).with_context(|| format!("open {}", src_zip.display()))?;
     let mut archive =
@@ -234,7 +268,7 @@ pub(crate) fn stage_archive(
         fs::remove_dir_all(staging)
             .with_context(|| format!("clear stale staging {}", staging.display()))?;
     }
-    extract_all(&mut archive, staging)?;
+    extract_all(&mut archive, staging, on_progress)?;
 
     // Integrity: the extracted DB's bytes must match the manifest's hash.
     let staged_db = staging.join("library.db");
@@ -259,11 +293,23 @@ pub(crate) fn stage_archive(
 /// of `dest_root`, hence same volume). `config.json` (if `dest_root` is the state
 /// dir) is left untouched. The caller relaunches afterward (H5).
 pub fn restore(src_zip: &Path, dest_root: &Path, app_user_version: i64) -> Result<RestoreOutcome> {
+    restore_with_progress(src_zip, dest_root, app_user_version, &|_, _| {})
+}
+
+/// Like [`restore`], but ticks `on_progress(entries_done, entries_total)` over
+/// the archive extraction — the slow phase (the verify + rename swap that follow
+/// are quick). Drives the footer "Restoring …" counter.
+pub fn restore_with_progress(
+    src_zip: &Path,
+    dest_root: &Path,
+    app_user_version: i64,
+    on_progress: &dyn Fn(u64, u64),
+) -> Result<RestoreOutcome> {
     // (1)+(2) Validate + gate the manifest, extract into a sibling staging dir,
     //     verify the DB checksum — the shared front-half, identical to merge
     //     (see [`stage_archive`]). Same volume → the later swap is a rename.
     let staging = sibling(dest_root, "restoring")?;
-    let manifest = stage_archive(src_zip, &staging, app_user_version)?;
+    let manifest = stage_archive(src_zip, &staging, app_user_version, on_progress)?;
 
     // (3) Restore-specific verify: the staged DB opens as a sidle library with
     //     the manifest's book count. Paths are already relative (§4a), so there
@@ -428,21 +474,33 @@ fn read_manifest(archive: &mut ZipArchive<File>) -> Result<Manifest> {
 
 /// Extract every entry into `dest`, sanitizing names against zip-slip via
 /// `enclosed_name` (anything that escapes is skipped).
-fn extract_all(archive: &mut ZipArchive<File>, dest: &Path) -> Result<()> {
+fn extract_all(
+    archive: &mut ZipArchive<File>,
+    dest: &Path,
+    on_progress: &dyn Fn(u64, u64),
+) -> Result<()> {
     fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
+    let total = archive.len() as u64;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).with_context(|| format!("zip entry {i}"))?;
-        let Some(rel) = entry.enclosed_name().map(|p| p.to_path_buf()) else { continue };
-        let out = dest.join(&rel);
-        if entry.is_dir() {
-            fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
-            continue;
+        // `enclosed_name() == None` is the zip-slip guard (rejects `../` and
+        // absolute paths); skip those entries but still count them so progress
+        // reaches `total`.
+        if let Some(rel) = entry.enclosed_name().map(|p| p.to_path_buf()) {
+            let out = dest.join(&rel);
+            if entry.is_dir() {
+                fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
+            } else {
+                if let Some(parent) = out.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("create {}", parent.display()))?;
+                }
+                let mut f =
+                    File::create(&out).with_context(|| format!("create {}", out.display()))?;
+                io::copy(&mut entry, &mut f).with_context(|| format!("extract {}", out.display()))?;
+            }
         }
-        if let Some(parent) = out.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
-        let mut f = File::create(&out).with_context(|| format!("create {}", out.display()))?;
-        io::copy(&mut entry, &mut f).with_context(|| format!("extract {}", out.display()))?;
+        on_progress(i as u64 + 1, total);
     }
     Ok(())
 }

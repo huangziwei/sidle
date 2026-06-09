@@ -20,13 +20,14 @@
 //! polish item is upload-as-`.partial` + `MoveObject`/rename when the device
 //! advertises `SetObjectPropValue` support (`MtpDevice::supports_rename()`).
 
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use futures::executor::block_on;
-use mtp_rs::mtp::{MtpDevice, NewObjectInfo, Storage};
+use mtp_rs::mtp::{MtpDevice, NewObjectInfo, Progress, Storage};
 use mtp_rs::ptp::{ObjectHandle, ObjectInfo};
 
 use crate::device::transport::{TEntry, TPath, Transport};
@@ -114,6 +115,58 @@ async fn ensure_folder(storage: &Storage, path: &TPath) -> Result<Option<ObjectH
     Ok(parent)
 }
 
+/// Upload `bytes` to `path` over MTP with byte-progress, overwriting any
+/// existing object. Shared by [`MtpTransport::write_atomic`] (no-op progress)
+/// and [`MtpTransport::copy_in_atomic_with_progress`]. The bytes are chunked so
+/// the PTP send issues bounded bulk-OUT transfers (mirror of the 64 KiB
+/// download chunking) and `on_progress` ticks repeatedly over a multi-MiB push
+/// rather than once at the end. mtp-rs drives the callback from inside the send
+/// stream, which is why it must be `Send + Sync`.
+async fn upload_streamed(
+    storage: &Storage,
+    path: &TPath,
+    bytes: &[u8],
+    on_progress: &(dyn Fn(u64, u64) + Send + Sync),
+) -> Result<()> {
+    let parent_path = path.parent().unwrap_or_default();
+    let name = path
+        .name()
+        .ok_or_else(|| anyhow!("MTP upload: empty path"))?;
+    let parent = ensure_folder(storage, &parent_path).await?;
+
+    // MTP has no atomic overwrite: delete-then-upload, accepting a tiny window
+    // where neither the old nor new object is present (Phase 3 tradeoff — see
+    // the module header). Push routes here for the real (color-cover, send)
+    // writes; the window is between an existing same-name object's delete and
+    // the new upload, which only happens on a re-push of an edited book.
+    let entries = storage.list_objects(parent).await.map_err(map_mtp_err)?;
+    if let Some(existing) = entries.into_iter().find(|o| o.filename == name) {
+        storage
+            .delete(existing.handle)
+            .await
+            .map_err(map_mtp_err)
+            .with_context(|| format!("MTP delete {name} before overwrite"))?;
+    }
+
+    let total = bytes.len() as u64;
+    let info = NewObjectInfo::file(name, total);
+    let chunks: Vec<std::result::Result<Bytes, std::io::Error>> = bytes
+        .chunks(256 * 1024)
+        .map(|c| Ok(Bytes::copy_from_slice(c)))
+        .collect();
+    let stream = futures::stream::iter(chunks);
+    on_progress(0, total);
+    storage
+        .upload_with_progress(parent, info, stream, |p: Progress| {
+            on_progress(p.bytes_transferred, p.total_bytes.unwrap_or(total));
+            ControlFlow::Continue(())
+        })
+        .await
+        .map_err(map_mtp_err)
+        .with_context(|| format!("MTP upload {name}"))?;
+    Ok(())
+}
+
 impl Transport for MtpTransport {
     fn read(&self, path: &TPath) -> Result<Vec<u8>> {
         self.read_with_progress(path, &|_, _| {})
@@ -145,53 +198,30 @@ impl Transport for MtpTransport {
 
     fn write_atomic(&self, path: &TPath, bytes: &[u8]) -> Result<()> {
         let _g = self.op_lock.lock().expect("op_lock poisoned");
-        let storage = &self.storage;
-        block_on(async {
-            let parent_path = path.parent().unwrap_or_default();
-            let name = path
-                .name()
-                .ok_or_else(|| anyhow!("MTP write_atomic: empty path"))?;
-            let parent = ensure_folder(storage, &parent_path).await?;
-
-            // MTP has no atomic overwrite. Delete-then-upload is simpler than
-            // upload-as-temp + rename and keeps the code symmetric with the
-            // pristine-write case. Tradeoff: a tiny window where neither the
-            // old nor the new object is present. Push routes through
-            // `copy_in_atomic`, not here — `write_atomic` is only used for
-            // small auxiliary writes today (currently none in the new
-            // scan-based model), so the window is academic.
-            let entries = storage.list_objects(parent).await.map_err(map_mtp_err)?;
-            if let Some(existing) = entries.into_iter().find(|o| o.filename == name) {
-                storage
-                    .delete(existing.handle)
-                    .await
-                    .map_err(map_mtp_err)
-                    .with_context(|| format!("MTP delete {name} before overwrite"))?;
-            }
-
-            let info = NewObjectInfo::file(name, bytes.len() as u64);
-            let stream = futures::stream::iter(vec![Ok::<_, std::io::Error>(
-                Bytes::copy_from_slice(bytes),
-            )]);
-            storage
-                .upload(parent, info, stream)
-                .await
-                .map_err(map_mtp_err)
-                .with_context(|| format!("MTP upload {name}"))?;
-            Ok(())
-        })
+        block_on(upload_streamed(&self.storage, path, bytes, &|_, _| {}))
     }
 
     fn copy_in_atomic(&self, src_local: &Path, dest: &TPath) -> Result<()> {
+        self.copy_in_atomic_with_progress(src_local, dest, &|_, _| {})
+    }
+
+    fn copy_in_atomic_with_progress(
+        &self,
+        src_local: &Path,
+        dest: &TPath,
+        on_progress: &(dyn Fn(u64, u64) + Send + Sync),
+    ) -> Result<()> {
         // Buffer the local file fully before uploading. Real KFX files are
         // typically <30MB, occasionally up to ~100MB for image-heavy comics —
-        // in-memory buffering keeps the upload code path identical to
-        // `write_atomic` and dodges the cross-async-boundary complexity of
-        // streaming a `std::io::Read` into a `futures::Stream`. Revisit if
+        // in-memory buffering keeps the upload path identical to `write_atomic`
+        // and dodges streaming a `std::io::Read` across the async boundary.
+        // `upload_streamed` then re-chunks the buffer so the SEND still streams
+        // bounded bulk-OUT transfers (and ticks `on_progress`). Revisit if
         // pushes start failing on RAM pressure.
         let bytes = std::fs::read(src_local)
             .with_context(|| format!("read {}", src_local.display()))?;
-        self.write_atomic(dest, &bytes)
+        let _g = self.op_lock.lock().expect("op_lock poisoned");
+        block_on(upload_streamed(&self.storage, dest, &bytes, on_progress))
     }
 
     fn delete(&self, path: &TPath) -> Result<bool> {

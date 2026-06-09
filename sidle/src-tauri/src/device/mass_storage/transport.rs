@@ -6,6 +6,7 @@
 //! `NotFound`, listing returns `[]` when the parent dir is absent.
 
 use std::ffi::CString;
+use std::io::{Read, Write};
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -63,6 +64,15 @@ impl Transport for MassStorageTransport {
     }
 
     fn copy_in_atomic(&self, src_local: &Path, dest: &TPath) -> Result<()> {
+        self.copy_in_atomic_with_progress(src_local, dest, &|_, _| {})
+    }
+
+    fn copy_in_atomic_with_progress(
+        &self,
+        src_local: &Path,
+        dest: &TPath,
+        on_progress: &(dyn Fn(u64, u64) + Send + Sync),
+    ) -> Result<()> {
         let dest_full = self.resolve(dest);
         if let Some(parent) = dest_full.parent() {
             std::fs::create_dir_all(parent)
@@ -75,16 +85,48 @@ impl Transport for MassStorageTransport {
         // those xattrs as a hidden `._<filename>` AppleDouble companion
         // next to the real file. Those companions parse as a valid `.<sha>.kfx`
         // and show up as duplicate rows in our scan. read/write copies bytes
-        // only, no metadata, no AppleDouble.
+        // only, no metadata, no AppleDouble. We loop in 256 KiB chunks (rather
+        // than `std::io::copy`) so we can tick `on_progress` as the bytes land.
         {
             let mut src = std::fs::File::open(src_local)
                 .with_context(|| format!("open {}", src_local.display()))?;
+            let total = src.metadata().map(|m| m.len()).unwrap_or(0);
             let mut dst = std::fs::File::create(&tmp)
                 .with_context(|| format!("create {}", tmp.display()))?;
-            std::io::copy(&mut src, &mut dst)
-                .with_context(|| format!("copy {} -> {}", src_local.display(), tmp.display()))?;
+            let mut buf = vec![0u8; 256 * 1024];
+            let mut done = 0u64;
+            // Force the page cache out to the device every few MiB and report
+            // progress only AFTER the flush, so `done` reflects bytes actually
+            // ON the Kindle. Without this, a plain write loop fills the OS
+            // write-back cache in milliseconds (the bar hits 100% instantly),
+            // then `sync_all` blocks for ~20s pushing a 70 MB file to a slow USB
+            // volume. `sync_data` per interval blocks for that interval's device
+            // write, pacing the loop to the real transfer. 4 MiB trades progress
+            // granularity against fsync cost.
+            const FLUSH_EVERY: u64 = 4 * 1024 * 1024;
+            let mut since_sync = 0u64;
+            on_progress(0, total);
+            loop {
+                let n = src
+                    .read(&mut buf)
+                    .with_context(|| format!("read {}", src_local.display()))?;
+                if n == 0 {
+                    break;
+                }
+                dst.write_all(&buf[..n])
+                    .with_context(|| format!("write {}", tmp.display()))?;
+                done += n as u64;
+                since_sync += n as u64;
+                if since_sync >= FLUSH_EVERY {
+                    dst.sync_data()
+                        .with_context(|| format!("sync {}", tmp.display()))?;
+                    since_sync = 0;
+                    on_progress(done, total);
+                }
+            }
             dst.sync_all()
                 .with_context(|| format!("sync {}", tmp.display()))?;
+            on_progress(done, total);
         }
         std::fs::rename(&tmp, &dest_full)
             .with_context(|| format!("rename {} -> {}", tmp.display(), dest_full.display()))?;

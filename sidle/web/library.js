@@ -53,6 +53,19 @@ const state = {
   // flight. `{ message, failed }` — shown in the status bar with priority
   // over the autopull and queue summary lines.
   importing: null,
+  // The in-flight send-to-Kindle batch: one task per book, surfaced in the
+  // queue drawer (like conversions) AND the status-bar summary. Each is
+  // `{ id, title, author, status, done, total }` with status queued → sending →
+  // sent/skipped/failed, driven by `device:send-active` (live bytes) and
+  // `device:send-progress` (terminal). Seeded by `sendBooks`, cleared when it
+  // resolves. Empty = no send in flight. A foreground action, so it outranks
+  // the autopull / queue summary lines.
+  sendQueue: [],
+  // When non-null, a long library file op (backup / restore / merge) is in
+  // flight. `{ op, done, total }` from `library:fileop-progress` — shown in the
+  // status bar (and folded into the settings modal's status line). Cleared when
+  // the triggering handler resolves; restore restarts so it never clears there.
+  fileop: null,
   // True while a Kindle annotation sync (auto-on-connect or manual) is
   // running. Surfaced in the status bar; lower priority than importing /
   // autopull so a book pull's progress isn't hidden behind it.
@@ -225,6 +238,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupKualSection();
   refreshServerStatus();
   subscribeSendProgress();
+  subscribeSendActive();
+  subscribeFileopProgress();
   subscribePullProgress();
   subscribeAnnotationSync();
   subscribeLibraryRowUpdated();
@@ -1408,10 +1423,67 @@ function wireDevice() {
   });
 }
 
+// Verb shown in the footer / settings status for each long library file op.
+const FILEOP_VERB = { backup: "Backing up", restore: "Restoring", merge: "Merging" };
+// Guards the fileop footer line against a final progress event arriving after
+// the triggering handler cleared it (same race as sendInFlight).
+let fileopInFlight = false;
+
+// Live progress for a long library file op (backup / restore / merge), shown in
+// the footer status line and folded into the settings modal's own status line —
+// these ops are triggered from there, so that's where the user is looking.
+function subscribeFileopProgress() {
+  window.api.listen("library:fileop-progress", (e) => {
+    const p = e?.payload;
+    if (!p) return;
+    if (!fileopInFlight) return; // ignore a late tick after the handler resolved
+    state.fileop = { op: p.op, done: p.done, total: p.total };
+    renderQueue();
+    const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : null;
+    const el = $("#settings-status");
+    if (pct != null && el && !el.hidden) {
+      el.textContent = `${FILEOP_VERB[p.op] || "Working"}… ${pct}%`;
+    }
+  });
+}
+
+// Live byte-progress for the file currently being sent to the Kindle, shown in
+// the footer status line (see renderQueue). Distinct from `device:send-progress`
+// below, which paints the per-file terminal result into the device popover.
+function subscribeSendActive() {
+  window.api.listen("device:send-active", (e) => {
+    const p = e?.payload;
+    if (!p) return;
+    if (!sendInFlight) return; // ignore a late tick after sendBooks resolved
+    const task = state.sendQueue.find((t) => t.id === p.book_id);
+    if (task) {
+      task.status = "sending";
+      task.done = p.done;
+      task.total = p.total;
+      if (p.title) task.title = p.title;
+    }
+    renderQueue();
+  });
+}
+
 function subscribeSendProgress() {
   window.api.listen("device:send-progress", (e) => {
     const r = e.payload;
     if (!r) return;
+    // Move the matching queue task to its terminal state (drawer + summary).
+    // find() on an already-cleared queue is a safe no-op for a late event.
+    const task = state.sendQueue.find((t) => t.id === r.book_id);
+    if (task) {
+      task.status =
+        r.kind === "pushed" || r.kind === "already_present"
+          ? "sent"
+          : r.kind === "skipped"
+            ? "skipped"
+            : "failed";
+      if (task.status === "sent" && task.total > 0) task.done = task.total;
+      task.error = r.error;
+      renderQueue();
+    }
     const prog = $("#device-send-progress");
     let line;
     if (r.kind === "pushed") line = `sent: ${r.filename}`;
@@ -1423,6 +1495,7 @@ function subscribeSendProgress() {
   });
 }
 
+let sendInFlight = false;
 async function sendBooks(bookIds) {
   if (!state.device) {
     showToast("no Kindle connected", true);
@@ -1430,6 +1503,21 @@ async function sendBooks(bookIds) {
   }
   const btn = $("#btn-send-unsent");
   btn.disabled = true;
+  sendInFlight = true;
+  // Seed one queue task per book up front so they all appear in the queue
+  // drawer immediately (like conversions), then transition as events land.
+  state.sendQueue = bookIds.map((id) => {
+    const b = state.books.find((x) => x.id === id);
+    return {
+      id,
+      title: b?.title || "Untitled",
+      author: b?.author || "",
+      status: "queued",
+      done: 0,
+      total: 0,
+    };
+  });
+  renderQueue();
   let results = [];
   try {
     results = await window.api.invoke("device_send", { bookIds });
@@ -1437,6 +1525,13 @@ async function sendBooks(bookIds) {
     showToast(`send failed: ${e}`, true);
     btn.disabled = false;
     return;
+  } finally {
+    // Clear the send queue once the batch ends. The flag guards against a final
+    // send-active/-progress event landing after this (Tauri events and the
+    // command response aren't mutually ordered) and re-populating it.
+    sendInFlight = false;
+    state.sendQueue = [];
+    renderQueue();
   }
   const counts = { pushed: 0, already_present: 0, skipped: 0, failed: 0 };
   for (const r of results) counts[r.kind] = (counts[r.kind] || 0) + 1;
@@ -2242,6 +2337,30 @@ function renderQueue() {
     summary.textContent = state.importing.message;
     if (state.importing.failed) toggle.classList.add("errors");
     else toggle.classList.add("active");
+  } else if (state.sendQueue.length) {
+    const q = state.sendQueue;
+    const sending = q.find((t) => t.status === "sending");
+    const finished = q.filter(
+      (t) => t.status !== "queued" && t.status !== "sending",
+    ).length;
+    const batch = q.length > 1 ? ` (${Math.min(finished + 1, q.length)}/${q.length})` : "";
+    if (sending) {
+      const size =
+        sending.total > 0
+          ? ` — ${formatBytes(sending.done)} / ${formatBytes(sending.total)}`
+          : "…";
+      summary.textContent = `Sending ${sending.title}${size}${batch}`;
+    } else {
+      summary.textContent = `Sending to Kindle…${batch}`;
+    }
+    toggle.classList.add("active");
+  } else if (state.fileop) {
+    const f = state.fileop;
+    const pct = f.total > 0 ? Math.round((f.done / f.total) * 100) : null;
+    const verb = FILEOP_VERB[f.op] || "Working on";
+    summary.textContent =
+      pct != null ? `${verb} library — ${pct}%` : `${verb} library…`;
+    toggle.classList.add("active");
   } else if (state.autopull) {
     summary.textContent =
       `Pulling ${state.autopull.done}/${state.autopull.total} from Kindle…`;
@@ -2273,8 +2392,9 @@ function renderQueue() {
 
   const ul = $("#queue-list");
   ul.innerHTML = "";
+  for (const t of state.sendQueue) ul.appendChild(sendQueueRow(t));
   for (const b of active) ul.appendChild(queueRow(b));
-  $("#queue-empty").hidden = active.length > 0;
+  $("#queue-empty").hidden = active.length > 0 || state.sendQueue.length > 0;
 }
 
 function queueRow(b) {
@@ -2326,6 +2446,67 @@ function queueRow(b) {
   li.dataset.bookId = b.id;
   li.append(main, meta, bar);
   return li;
+}
+
+// A queue-drawer row for a book in the send-to-Kindle batch — mirrors queueRow
+// but driven by the send task's status + byte counts. Reuses the conversion
+// row's CSS classes (pending / converting / error) so bar + status styling
+// match: queued → pending stub, sending/sent/skipped → determinate fill,
+// failed → error.
+function sendQueueRow(t) {
+  const cls =
+    t.status === "failed" ? "error" : t.status === "queued" ? "pending" : "converting";
+  const li = document.createElement("li");
+
+  const main = document.createElement("div");
+  main.className = "queue-row-main";
+  const title = document.createElement("div");
+  title.className = "queue-title";
+  title.textContent = t.title || "Untitled";
+  const status = document.createElement("div");
+  status.className = `queue-status ${cls}`;
+  status.textContent = sendStatusText(t);
+  if (t.status === "failed" && t.error) status.title = t.error;
+  main.append(title, status);
+
+  const meta = document.createElement("div");
+  meta.className = "queue-meta";
+  meta.textContent = t.author || "";
+
+  const bar = document.createElement("div");
+  bar.className = `queue-progress ${cls}`;
+  if (t.status !== "queued" && t.status !== "failed") {
+    const fill = document.createElement("div");
+    fill.className = "queue-progress-fill";
+    const pct =
+      t.status === "sending"
+        ? t.total > 0
+          ? Math.round((t.done / t.total) * 100)
+          : 0
+        : 100; // sent / skipped → full
+    fill.style.width = `${pct}%`;
+    bar.appendChild(fill);
+  }
+
+  li.append(main, meta, bar);
+  return li;
+}
+
+// Status text for a send task — live bytes while sending, a terminal word
+// otherwise.
+function sendStatusText(t) {
+  switch (t.status) {
+    case "sending":
+      return t.total > 0 ? `${formatBytes(t.done)} / ${formatBytes(t.total)}` : "Sending…";
+    case "sent":
+      return "Sent";
+    case "skipped":
+      return "Skipped";
+    case "failed":
+      return "Failed";
+    default:
+      return "Queued";
+  }
 }
 
 // "Step · NN%" text for an in-flight conversion (falls back to a generic label
@@ -3258,6 +3439,7 @@ async function confirmRelocate() {
     : mode === "restore" ? "Restoring… this can take a while for a large backup."
     : "Switching library…",
   );
+  fileopInFlight = true; // only restore emits fileop; harmless for move/use
   try {
     if (mode === "move") {
       await window.api.invoke("library_relocate_move", { dest });
@@ -3272,6 +3454,9 @@ async function confirmRelocate() {
   } catch (e) {
     $("#settings-confirm-ok").disabled = false;
     setSettingsStatus(String(e?.message ?? e), true);
+    fileopInFlight = false;
+    state.fileop = null;
+    renderQueue();
   }
 }
 
@@ -3290,6 +3475,7 @@ async function doBackup() {
   resetRelocateConfirm();
   const btn = $("#settings-backup");
   btn.disabled = true;
+  fileopInFlight = true;
   setSettingsStatus("Backing up… this can take a while for a large library.");
   try {
     const r = await window.api.invoke("library_backup", { dest });
@@ -3300,6 +3486,9 @@ async function doBackup() {
     setSettingsStatus(String(e?.message ?? e), true);
   } finally {
     btn.disabled = false;
+    fileopInFlight = false;
+    state.fileop = null;
+    renderQueue();
   }
 }
 
@@ -3324,6 +3513,7 @@ async function doMerge() {
   resetRelocateConfirm();
   const btn = $("#settings-merge");
   btn.disabled = true;
+  fileopInFlight = true;
   setSettingsStatus("Merging… this can take a while for a large backup.");
   try {
     const r = await window.api.invoke("library_merge", { src });
@@ -3338,6 +3528,9 @@ async function doMerge() {
     setSettingsStatus(String(e?.message ?? e), true);
   } finally {
     btn.disabled = false;
+    fileopInFlight = false;
+    state.fileop = null;
+    renderQueue();
   }
 }
 

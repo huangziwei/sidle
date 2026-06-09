@@ -112,9 +112,22 @@ impl Prepared {
 /// `app_user_version` is the running app's [`db::SCHEMA_VERSION`]; the manifest is
 /// gated against it (a forward-incompatible backup is refused before any copy).
 pub fn prepare(src_zip: &Path, dest_root: &Path, app_user_version: i64) -> Result<Prepared> {
+    prepare_with_progress(src_zip, dest_root, app_user_version, &|_, _| {})
+}
+
+/// Like [`prepare`], but ticks `on_progress(entries_done, entries_total)` over
+/// the archive extraction (the slow phase) — drives the footer "Merging …"
+/// counter. The subsequent new-dir copy isn't instrumented; it only touches
+/// books not already present, so it's typically a small tail.
+pub fn prepare_with_progress(
+    src_zip: &Path,
+    dest_root: &Path,
+    app_user_version: i64,
+    on_progress: &dyn Fn(u64, u64),
+) -> Result<Prepared> {
     // Shared front-half with restore: validate, version-gate, extract, checksum.
     let staging = backup::sibling(dest_root, "merging")?;
-    let _manifest = backup::stage_archive(src_zip, &staging, app_user_version)?;
+    let _manifest = backup::stage_archive(src_zip, &staging, app_user_version, on_progress)?;
 
     // Read the source inventory from the staged DB, migrated up to the current
     // schema so every column exists regardless of the backup's age (a pre-v7

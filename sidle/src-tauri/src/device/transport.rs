@@ -123,10 +123,37 @@ pub trait Transport: Send + Sync {
         Ok(bytes)
     }
 
+    /// Atomic byte-write primitive of the trait's CRUD surface. Exercised by
+    /// the mass-storage tests (round-trip, parent creation) and available for
+    /// small auxiliary writes; the book-push path streams through
+    /// [`copy_in_atomic_with_progress`](Self::copy_in_atomic_with_progress)
+    /// instead, so there's no non-test caller in the lib build today.
+    #[allow(dead_code)]
     fn write_atomic(&self, path: &TPath, bytes: &[u8]) -> Result<()>;
     /// Copy a local file into the transport at `dest`. Atomic on success;
     /// no observable `dest` if interrupted mid-copy.
     fn copy_in_atomic(&self, src_local: &Path, dest: &TPath) -> Result<()>;
+
+    /// Like [`copy_in_atomic`](Self::copy_in_atomic), but reports progress as
+    /// the write advances: `on_progress(bytes_written, total_bytes)` fires one
+    /// or more times, ending at `bytes_written == total_bytes`. The mirror of
+    /// [`read_with_progress`](Self::read_with_progress) for the send side — a
+    /// multi-MiB push over MTP takes seconds, so the UI needs a live byte
+    /// counter rather than a single "done" toast. The callback is `Send + Sync`
+    /// because MTP drives it from inside an upload stream the PTP layer requires
+    /// be `Send`. The default copies via [`copy_in_atomic`](Self::copy_in_atomic)
+    /// and reports one final tick; mass-storage and MTP override it to stream.
+    fn copy_in_atomic_with_progress(
+        &self,
+        src_local: &Path,
+        dest: &TPath,
+        on_progress: &(dyn Fn(u64, u64) + Send + Sync),
+    ) -> Result<()> {
+        self.copy_in_atomic(src_local, dest)?;
+        let n = std::fs::metadata(src_local).map(|m| m.len()).unwrap_or(0);
+        on_progress(n, n);
+        Ok(())
+    }
     /// Returns `Ok(false)` when the object was already absent.
     fn delete(&self, path: &TPath) -> Result<bool>;
     /// Recursively delete a directory and its contents. `Ok(false)` when the

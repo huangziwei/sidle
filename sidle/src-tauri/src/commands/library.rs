@@ -911,12 +911,27 @@ pub async fn library_backup_pick_dest(app: AppHandle) -> Result<Option<String>, 
     Ok(result.map(|p| p.to_string()))
 }
 
+/// Per-unit progress for a long file operation (backup / restore / merge),
+/// emitted as `library:fileop-progress` so the footer shows "Backing up library
+/// — 62%" instead of going silent for the duration. `op` is the verb the
+/// frontend renders; `done`/`total` count archived dirs (backup) or extracted
+/// zip entries (restore / merge). The frontend clears the line when the command
+/// resolves — restore relaunches, so its final tick just vanishes with the old
+/// process.
+#[derive(Clone, Serialize)]
+struct FileopProgress {
+    op: &'static str,
+    done: u64,
+    total: u64,
+}
+
 /// Write a full backup of the current library to `dest`. Holds the DB lock only
 /// for the consistent snapshot, then zips the `books/` tree lock-free so a large
 /// backup doesn't stall the app. Non-destructive — nothing here touches the live
 /// library, so no queue gate or relaunch is needed.
 #[tauri::command]
 pub async fn library_backup(
+    app: AppHandle,
     state: State<'_, AppState>,
     dest: String,
 ) -> Result<BackupSummary, String> {
@@ -938,13 +953,28 @@ pub async fn library_backup(
     // stall other commands or freeze the UI. The snapshot guard moves in and
     // cleans up there.
     let manifest = tokio::task::spawn_blocking(move || {
-        backup::create_archive(
+        // Cap IPC chatter: emit only when the integer percentage changes (plus
+        // the final tick). The book/notebook loop can run into the hundreds, and
+        // restore/merge extract thousands of zip entries.
+        let last_pct = std::cell::Cell::new(-1i32);
+        let on_progress = |done: u64, total: u64| {
+            let pct = if total > 0 { (done * 100 / total) as i32 } else { 0 };
+            if pct != last_pct.get() || done >= total {
+                last_pct.set(pct);
+                let _ = app.emit(
+                    "library:fileop-progress",
+                    FileopProgress { op: "backup", done, total },
+                );
+            }
+        };
+        backup::create_archive_with_progress(
             &snapshot,
             &books_dir,
             &source_root,
             env!("CARGO_PKG_VERSION"),
             db_user_version,
             &dest,
+            &on_progress,
         )
     })
     .await
@@ -1005,7 +1035,19 @@ pub async fn library_restore(
 
     // Extraction + verify + swap. No live connection needed; the open DB handle
     // keeps working off the old (now set-aside) inode until we relaunch.
-    let outcome = backup::restore(&src, &dest_root, db::SCHEMA_VERSION)
+    let app_progress = app.clone();
+    let last_pct = std::cell::Cell::new(-1i32);
+    let on_progress = |done: u64, total: u64| {
+        let pct = if total > 0 { (done * 100 / total) as i32 } else { 0 };
+        if pct != last_pct.get() || done >= total {
+            last_pct.set(pct);
+            let _ = app_progress.emit(
+                "library:fileop-progress",
+                FileopProgress { op: "restore", done, total },
+            );
+        }
+    };
+    let outcome = backup::restore_with_progress(&src, &dest_root, db::SCHEMA_VERSION, &on_progress)
         .map_err(|e| format!("{e:#}"))?;
     eprintln!(
         "[sidle/backup] restored {} books; previous library kept at {}",
@@ -1051,6 +1093,7 @@ pub async fn library_merge_pick_src(app: AppHandle) -> Result<Option<String>, St
 /// newer side's metadata; everything else unions by its content key.
 #[tauri::command]
 pub async fn library_merge(
+    app: AppHandle,
     state: State<'_, AppState>,
     src: String,
 ) -> Result<MergeSummary, String> {
@@ -1061,7 +1104,18 @@ pub async fn library_merge(
     // Validate → extract → copy new files, off the runtime and lock-free (mirrors
     // backup's snapshot/zip split). Yields the in-memory inventory to apply.
     let prepared = tokio::task::spawn_blocking(move || {
-        merge::prepare(&src, &dest_root, db::SCHEMA_VERSION)
+        let last_pct = std::cell::Cell::new(-1i32);
+        let on_progress = |done: u64, total: u64| {
+            let pct = if total > 0 { (done * 100 / total) as i32 } else { 0 };
+            if pct != last_pct.get() || done >= total {
+                last_pct.set(pct);
+                let _ = app.emit(
+                    "library:fileop-progress",
+                    FileopProgress { op: "merge", done, total },
+                );
+            }
+        };
+        merge::prepare_with_progress(&src, &dest_root, db::SCHEMA_VERSION, &on_progress)
     })
     .await
     .map_err(|e| e.to_string())?

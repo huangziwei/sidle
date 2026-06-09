@@ -405,6 +405,20 @@ pub async fn device_delete(
         .map_err(|e| e.to_string())
 }
 
+/// Live byte-progress for the file currently being sent, emitted as
+/// `device:send-active` so the footer / queue can show "Sending «title» —
+/// 45 MB / 72 MB" while the transfer is in flight — distinct from the per-book
+/// terminal `device:send-progress` (a `PushResult`). `total` is 0 when the size
+/// is unknown. The frontend matches `book_id` to its seeded queue task and
+/// derives batch position from that queue, so no index/count is sent.
+#[derive(Clone, serde::Serialize)]
+struct SendActive {
+    book_id: i64,
+    title: String,
+    done: u64,
+    total: u64,
+}
+
 #[tauri::command]
 pub async fn device_send(
     app: AppHandle,
@@ -425,20 +439,38 @@ pub async fn device_send(
         let mut out = Vec::with_capacity(book_ids.len());
         for book_id in book_ids {
             let result = match db::get_book(&conn, book_id)? {
-                Some(book) => match push::push_one(&device, transport.as_ref(), &conn, &book) {
-                    Ok(r) => r,
-                    Err(e) => PushResult::Failed {
-                        book_id,
-                        error: format!("{e:#}"),
-                    },
-                },
+                Some(book) => {
+                    // Stream byte-progress for THIS file into the queue. The
+                    // closure names the file (title); `push_one` ticks it as
+                    // bytes land on the device. Captured by ref, lives only for
+                    // this iteration.
+                    let title = book.title.clone();
+                    let on_progress = |done: u64, total: u64| {
+                        let _ = app.emit(
+                            "device:send-active",
+                            SendActive {
+                                book_id,
+                                title: title.clone(),
+                                done,
+                                total,
+                            },
+                        );
+                    };
+                    match push::push_one(&device, transport.as_ref(), &conn, &book, &on_progress) {
+                        Ok(r) => r,
+                        Err(e) => PushResult::Failed {
+                            book_id,
+                            error: format!("{e:#}"),
+                        },
+                    }
+                }
                 None => PushResult::Failed {
                     book_id,
                     error: "book not found".into(),
                 },
             };
-            // Best-effort: notify UI before moving to the next book so a long
-            // batch shows live progress.
+            // Best-effort: notify UI of the per-book terminal result before
+            // moving on so a long batch shows live progress.
             let _ = app.emit("device:send-progress", &result);
             out.push(result);
         }

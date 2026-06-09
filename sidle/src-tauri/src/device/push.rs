@@ -51,11 +51,17 @@ pub enum PushResult {
     Failed { book_id: i64, error: String },
 }
 
+/// Push one book's KFX to the device, streaming byte-progress for the copy via
+/// `on_progress(bytes_sent, total_bytes)` — this drives the footer "Sending …"
+/// counter from `device_send`; pass `&|_, _| {}` for a silent push. Progress
+/// covers only the file transfer; the preflight + already-present scan that
+/// precede it are fast and silent.
 pub fn push_one(
     _device: &DeviceInfo,
     transport: &dyn Transport,
     conn: &rusqlite::Connection,
     book: &BookRow,
+    on_progress: &(dyn Fn(u64, u64) + Send + Sync),
 ) -> Result<PushResult> {
     if let Some(reason) = preflight(conn, book)? {
         return Ok(PushResult::Skipped {
@@ -89,7 +95,7 @@ pub fn push_one(
     let dest = dest_dir.join(&filename);
 
     transport
-        .copy_in_atomic(Path::new(kfx_src), &dest)
+        .copy_in_atomic_with_progress(Path::new(kfx_src), &dest, on_progress)
         .with_context(|| format!("copy {} -> {}", kfx_src, transport.display_path(&dest)))?;
 
     Ok(PushResult::Pushed {
