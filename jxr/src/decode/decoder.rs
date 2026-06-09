@@ -62,6 +62,11 @@ pub struct DecodedImage {
     pub output_clr_fmt: u8,
     pub output_bitdepth: u8,
     pub red_blue_swapped: bool,
+    /// An alpha channel is present as the final plane (in-codestream planar
+    /// alpha, or a separate container codestream merged by `decode_image`).
+    pub has_alpha: bool,
+    /// The codestream's PREMULTIPLIED_ALPHA_FLAG.
+    pub premultiplied_alpha: bool,
     pub timing: DecodeTiming,
 }
 
@@ -2875,8 +2880,12 @@ impl<'a> Decoder<'a> {
 
         // RGBE shares the YUV→RGB lifting; PostScalingF2 packs E afterwards.
         if matches!(int_fmt, INT_YUV444 | INT_YUV420 | INT_YUV422) && matches!(out_fmt, OUT_RGB | OUT_RGBE) {
+            // Packed formats: the pack stage (Table 196/197/198) expects
+            // B,G,R plane order; the file's components are already swapped
+            // when RED_BLUE_NOT_SWAPPED_FLAG is 0, so swap on flag == 1
+            // (verified against JxrDecApp on a minted 565 file).
             let do_swap = matches!(self.hdr.output_bitdepth, BD5 | BD565 | BD10)
-                && self.hdr.red_blue_not_swapped_flag == 0;
+                && self.hdr.red_blue_not_swapped_flag != 0;
             // Get disjoint mutable borrows of the three component planes
             // so we can do the YUV→RGB transform in one row-major sweep.
             let stride = self.planes[p].image_plane[0].stride;
@@ -3178,6 +3187,38 @@ impl<'a> Decoder<'a> {
     fn clipping_and_packing_stage(&mut self, p: usize) -> Result<()> {
         // Tables 194/195: ints clip to range; BD16F/BD32F/BD32S pass through
         // unclipped (float bit patterns / full range) — windowing crop only.
+        let out_h = self.hdr.image_height as usize;
+        let out_w = self.hdr.image_width as usize;
+        let n = self.hdr.extra_pixels_top as usize;
+        let m = self.hdr.extra_pixels_left as usize;
+
+        if matches!(self.hdr.output_bitdepth, BD5 | BD565 | BD10) && self.hdr.output_clr_fmt == OUT_RGB {
+            // Tables 196/197/198: pack the three clipped channels into one
+            // value per pixel (single output array). Channel order in the
+            // planes at this point is the pack-ready order (the conversion
+            // stage's swap handling is oracle-verified for 565; BD5/BD10
+            // are unmintable via JxrEncApp — spec-transcribed self-loop).
+            let (hi1, hi2, max0, max1) = match self.hdr.output_bitdepth {
+                BD5 => (5u32, 10u32, 31, 31),
+                BD10 => (10, 20, 1023, 1023),
+                _ => (5, 11, 31, 63),
+            };
+            let stride = self.planes[p].image_plane[0].stride;
+            let mut packed = Plane2D::new(out_w, out_h);
+            for y in 0..out_h {
+                for x in 0..out_w {
+                    let src_idx = (y + n) * stride + m + x;
+                    let c0 = clip(self.planes[p].image_plane[0].data[src_idx], 0, max0);
+                    let c1 = clip(self.planes[p].image_plane[1].data[src_idx], 0, max1);
+                    let c2 = clip(self.planes[p].image_plane[2].data[src_idx], 0, max0);
+                    packed.data[y * out_w + x] = c0 + (c1 << hi1) + (c2 << hi2);
+                }
+            }
+            self.planes[p].image_plane = vec![packed];
+            self.planes[p].num_components = 1;
+            return Ok(());
+        }
+
         let (clip_low, clip_high) = match self.hdr.output_bitdepth {
             BD1BLACK1 | BD1WHITE1 => (0, 1),
             BD8 => (0, 255),
@@ -3191,10 +3232,6 @@ impl<'a> Decoder<'a> {
                 )));
             }
         };
-        let out_h = self.hdr.image_height as usize;
-        let out_w = self.hdr.image_width as usize;
-        let n = self.hdr.extra_pixels_top as usize;
-        let m = self.hdr.extra_pixels_left as usize;
         let nc = self.planes[p].num_components;
 
         for i in 0..nc {
@@ -3246,6 +3283,8 @@ impl<'a> Decoder<'a> {
             output_clr_fmt: self.hdr.output_clr_fmt,
             output_bitdepth: self.hdr.output_bitdepth,
             red_blue_swapped: self.hdr.red_blue_not_swapped_flag == 0,
+            has_alpha: self.hdr.alpha_image_plane_flag != 0,
+            premultiplied_alpha: self.hdr.premultiplied_alpha_flag != 0,
             timing: DecodeTiming::default(),
         }
     }

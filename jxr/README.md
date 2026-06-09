@@ -29,7 +29,9 @@ tolerates unknown tags and extra IFDs, exposes the ICC profile / XMP packet
 when present, handles separate planar-alpha codestreams (merged by
 `decode::decode_image`), and exposes the orientation tag —
 `decode::apply_orientation` implements all 8 transforms (not auto-applied,
-matching libjxr). Decoded output is raw `i32` planes plus layout fields.
+matching libjxr). Decoded output is raw `i32` planes plus layout fields, or
+use `DecodedImage::to_pixel_buffer()` for interleaved little-endian samples
+with an explicit layout (sample type, color model, alpha mode).
 
 **Encoder** — 8-bit grayscale (`8bppGray`/YONLY) and 8-bit color
 (`24bppRGB`/YUV 4:4:4): full ALL_BANDS (DC + LP + HP + flexbits) with multi-MB

@@ -22,6 +22,7 @@ pub mod container;
 pub mod decoder;
 pub mod math;
 pub mod misc;
+pub mod pixels;
 pub mod state;
 pub mod tables;
 
@@ -41,6 +42,7 @@ pub fn decode_image(c: &container::JxrContainer<'_>) -> Result<decoder::DecodedI
         }
         img.image_plane.extend(alpha.image_plane.into_iter().take(1));
         img.num_components += 1;
+        img.has_alpha = true;
     }
     Ok(img)
 }

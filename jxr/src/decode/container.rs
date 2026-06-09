@@ -58,6 +58,9 @@ pub struct JxrContainer<'a> {
     pub icc_profile: Option<&'a [u8]>,
     /// Raw XMP packet bytes (tag 0x02BC), when present.
     pub xmp: Option<&'a [u8]>,
+    /// Absolute file offset of the EXIF sub-IFD (tag 0x8769), when present
+    /// (a structure, not a blob — exposed as an offset for the caller).
+    pub exif_ifd_offset: Option<u32>,
 }
 
 /// Map of TIFF field type → bytes per value. From calibre's `FIELD_TYPE_LEN`.
@@ -227,6 +230,7 @@ pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerErro
     let mut alpha_byte_count: Option<u32> = None;
     let mut icc_span: Option<(u32, u32)> = None;
     let mut xmp_span: Option<(u32, u32)> = None;
+    let mut exif_ifd_offset: Option<u32> = None;
 
     let num_entries = read_u16_le(&mut ds)? as usize;
 
@@ -274,6 +278,7 @@ pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerErro
             0xbcc1 => image_byte_count = field_value_u64(field_type, field_data).map(|n| n as u32),
             0xbcc2 => alpha_offset = field_value_u64(field_type, field_data).map(|n| n as u32),
             0xbcc3 => alpha_byte_count = field_value_u64(field_type, field_data).map(|n| n as u32),
+            0x8769 => exif_ifd_offset = field_value_u64(field_type, field_data).map(|n| n as u32),
             _ => {} // other fields (DPI etc.) we don't need yet
         }
     }
@@ -339,6 +344,7 @@ pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerErro
         alpha_data,
         icc_profile,
         xmp,
+        exif_ifd_offset,
     })
 }
 
