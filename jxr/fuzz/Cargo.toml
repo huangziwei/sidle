@@ -1,0 +1,27 @@
+[package]
+name = "jxr-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+jxr = { path = ".." }
+
+[[bin]]
+name = "jxr_decode"
+path = "fuzz_targets/jxr_decode.rs"
+test = false
+doc = false
+bench = false
+
+# Own workspace root: keeps nightly-only fuzz deps out of the repo workspace
+# (also excluded from the root Cargo.toml) and out of the lifted-copy build.
+[workspace]
+
+[profile.release]
+debug = 1
