@@ -10,8 +10,8 @@
 //! dequantize-then-predict telescopes to exactly `level * sf` — open-loop, no
 //! drift (lossless `sf == 1` is the identity special case).
 
-use crate::image::jxr_decode::consts::DC;
-use crate::image::jxr_decode::state::quant_map;
+use crate::decode::consts::DC;
+use crate::decode::state::quant_map;
 
 /// Per-band quantizers for one grayscale plane (the QP *bytes* written into the
 /// plane header; `quant_map` turns each into a scaling factor).

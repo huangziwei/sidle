@@ -1,10 +1,10 @@
 //! TIFF-like JPEG-XR container writer — the inverse of
-//! [`crate::image::jxr_decode::container::parse`]. Wraps a WMPHOTO codestream
+//! [`crate::decode::container::parse`]. Wraps a WMPHOTO codestream
 //! in the minimal `II-BC-01` outer file with a single IFD describing one
 //! image (pixel format, dimensions, codestream pointer).
 
 /// Microsoft JXR pixel-format GUIDs (on-disk byte order). Match
-/// `jxr_decode::container::SUPPORTED_UUIDS`.
+/// `decode::container::SUPPORTED_UUIDS`.
 pub mod pixel_format {
     /// `8bppGray` — single 8-bit luma plane.
     pub const GRAY8: [u8; 16] = [
@@ -75,7 +75,7 @@ fn push_entry(out: &mut Vec<u8>, tag: u16, field_type: u16, count: u32, value_or
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image::jxr_decode::container::parse;
+    use crate::decode::container::parse;
 
     #[test]
     fn container_roundtrips_via_decoder_parse() {

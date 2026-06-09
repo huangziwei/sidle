@@ -468,6 +468,7 @@ dependencies = [
  "image",
  "ion-rs",
  "jpeg-encoder",
+ "jxr",
  "lopdf",
  "memchr",
  "objc2",
@@ -2675,6 +2676,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jxr"
+version = "0.1.0"
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4742,6 +4747,7 @@ dependencies = [
  "dirs",
  "futures",
  "hex",
+ "jxr",
  "libc",
  "mtp-rs",
  "notify",

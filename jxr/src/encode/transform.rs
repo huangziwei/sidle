@@ -1,5 +1,5 @@
 //! Forward JPEG-XR core-transform primitives — the encode-side inverses of
-//! [`crate::image::jxr_decode::math`].
+//! [`crate::decode::math`].
 //!
 //! The decoder's transform is a chain of integer *lifting steps* (each
 //! modifies one lane using the others, which are unchanged in that step), so
@@ -12,9 +12,9 @@
 //! All arithmetic is `wrapping_*`, matching the decoder, so the round trip is
 //! exact for every `i32` input.
 
-use crate::image::jxr_decode::consts::MB_PIXEL_MAP;
+use crate::decode::consts::MB_PIXEL_MAP;
 
-/// Inverse of [`crate::image::jxr_decode::math::irotate1`].
+/// Inverse of [`crate::decode::math::irotate1`].
 #[inline]
 pub fn fwd_rotate1(a: i32, b: i32) -> (i32, i32) {
     let mut a = a;
@@ -24,7 +24,7 @@ pub fn fwd_rotate1(a: i32, b: i32) -> (i32, i32) {
     (a, b)
 }
 
-/// Inverse of [`crate::image::jxr_decode::math::irotate2`].
+/// Inverse of [`crate::decode::math::irotate2`].
 #[inline]
 pub fn fwd_rotate2(a: i32, b: i32) -> (i32, i32) {
     let mut a = a;
@@ -34,7 +34,7 @@ pub fn fwd_rotate2(a: i32, b: i32) -> (i32, i32) {
     (a, b)
 }
 
-/// Inverse of [`crate::image::jxr_decode::math::str_dct2x2up`]. Given the
+/// Inverse of [`crate::decode::math::str_dct2x2up`]. Given the
 /// decoded `(a',b',c',d')` returns the original `(A,B,C,D)`.
 #[inline]
 pub fn undo_dct2x2up(ap: i32, bp: i32, cp: i32, dp: i32) -> (i32, i32, i32, i32) {
@@ -48,7 +48,7 @@ pub fn undo_dct2x2up(ap: i32, bp: i32, cp: i32, dp: i32) -> (i32, i32, i32, i32)
     (a, b, ccap, dcap)
 }
 
-/// Inverse of [`crate::image::jxr_decode::math::str_dct2x2dn`] (no `+1` round).
+/// Inverse of [`crate::decode::math::str_dct2x2dn`] (no `+1` round).
 #[inline]
 pub fn undo_dct2x2dn(ap: i32, bp: i32, cp: i32, dp: i32) -> (i32, i32, i32, i32) {
     let a2 = ap.wrapping_add(dp);
@@ -61,7 +61,7 @@ pub fn undo_dct2x2dn(ap: i32, bp: i32, cp: i32, dp: i32) -> (i32, i32, i32, i32)
     (a, b, ccap, dcap)
 }
 
-/// Inverse of [`crate::image::jxr_decode::math::inv_odd`].
+/// Inverse of [`crate::decode::math::inv_odd`].
 #[inline]
 pub fn fwd_odd(a: i32, b: i32, c: i32, d: i32) -> (i32, i32, i32, i32) {
     let mut a = a;
@@ -85,7 +85,7 @@ pub fn fwd_odd(a: i32, b: i32, c: i32, d: i32) -> (i32, i32, i32, i32) {
     (a, b, c, d)
 }
 
-/// Inverse of [`crate::image::jxr_decode::math::inv_odd_odd`]. The decoder
+/// Inverse of [`crate::decode::math::inv_odd_odd`]. The decoder
 /// negates `b` and `c` on output, so we un-negate them first, then reverse the
 /// lifting steps. The `t1`/`t2` intermediates are reconstructable because the
 /// lanes they read (`d` after the first step, `c` after the second) are
@@ -112,7 +112,7 @@ pub fn fwd_odd_odd(a: i32, b: i32, c: i32, d: i32) -> (i32, i32, i32, i32) {
     (a, b, c, d)
 }
 
-/// Undo a [`crate::image::jxr_decode::math::four_butterfly`] over the same
+/// Undo a [`crate::decode::math::four_butterfly`] over the same
 /// quadruples (each quad is disjoint, so order within the set is irrelevant).
 fn undo_four_butterfly(c: &mut [i32; 16], order: &[[usize; 4]]) {
     for o in order {
@@ -124,7 +124,7 @@ fn undo_four_butterfly(c: &mut [i32; 16], order: &[[usize; 4]]) {
     }
 }
 
-/// Forward of [`crate::image::jxr_decode::math::str_idct4x4_stage1`]: the
+/// Forward of [`crate::decode::math::str_idct4x4_stage1`]: the
 /// decoder's stage-1 ops applied in reverse, each replaced by its inverse.
 pub fn fdct4x4_stage1(c: &mut [i32; 16]) {
     undo_four_butterfly(
@@ -141,7 +141,7 @@ pub fn fdct4x4_stage1(c: &mut [i32; 16]) {
     c[0] = a; c[1] = b; c[2] = cc; c[3] = d;
 }
 
-/// Forward of [`crate::image::jxr_decode::math::str_idct4x4_stage2`].
+/// Forward of [`crate::decode::math::str_idct4x4_stage2`].
 pub fn fdct4x4_stage2(c: &mut [i32; 16]) {
     undo_four_butterfly(
         c,
@@ -201,7 +201,7 @@ pub fn forward_transform_mb(samples: &[i32; 256]) -> [i32; 256] {
 
 // ---- Overlap pre-filter (inverse of the decoder's overlap *post* filter) ----
 
-/// Inverse of [`crate::image::jxr_decode::math::t2x2h`] (same `val_round`).
+/// Inverse of [`crate::decode::math::t2x2h`] (same `val_round`).
 #[inline]
 pub fn undo_t2x2h(input: [i32; 4], val_round: i32) -> [i32; 4] {
     let (c0p, c1p, c2p, c3p) = (input[0], input[1], input[2], input[3]);
@@ -215,7 +215,7 @@ pub fn undo_t2x2h(input: [i32; 4], val_round: i32) -> [i32; 4] {
     [c0, c1, c2, c3]
 }
 
-/// Inverse of [`crate::image::jxr_decode::math::t2x2h_post`].
+/// Inverse of [`crate::decode::math::t2x2h_post`].
 #[inline]
 pub fn undo_t2x2h_post(input: [i32; 4]) -> [i32; 4] {
     let mut c0 = input[0];
@@ -232,7 +232,7 @@ pub fn undo_t2x2h_post(input: [i32; 4]) -> [i32; 4] {
     [c0, c1, c2, c3]
 }
 
-/// Inverse of [`crate::image::jxr_decode::math::inv_scale`].
+/// Inverse of [`crate::decode::math::inv_scale`].
 #[inline]
 pub fn undo_scale(c0: i32, c1: i32) -> (i32, i32) {
     let mut c0 = c0;
@@ -246,7 +246,7 @@ pub fn undo_scale(c0: i32, c1: i32) -> (i32, i32) {
     (c0, c1)
 }
 
-/// Inverse of [`crate::image::jxr_decode::math::inv_toddodd_post`]. Same
+/// Inverse of [`crate::decode::math::inv_toddodd_post`]. Same
 /// `t1`/`t2` reconstruction trick as [`fwd_odd_odd`], different constants and
 /// no output negation.
 #[inline]
@@ -271,7 +271,7 @@ pub fn undo_toddodd_post(input: [i32; 4]) -> [i32; 4] {
     [c0, c1, c2, c3]
 }
 
-/// Forward of [`crate::image::jxr_decode::math::overlap_post_filter_4x4`]:
+/// Forward of [`crate::decode::math::overlap_post_filter_4x4`]:
 /// the decoder's stages applied in reverse, each inverted.
 pub fn overlap_pre_filter_4x4(input: [i32; 16]) -> [i32; 16] {
     let mut c = input;
@@ -309,7 +309,7 @@ pub fn overlap_pre_filter_4x4(input: [i32; 16]) -> [i32; 16] {
     c
 }
 
-/// Forward of [`crate::image::jxr_decode::math::overlap_post_filter_4`].
+/// Forward of [`crate::decode::math::overlap_post_filter_4`].
 pub fn overlap_pre_filter_4(input: [i32; 4]) -> [i32; 4] {
     let mut c = input;
     c[1] = c[1].wrapping_add(c[2]);
@@ -337,7 +337,7 @@ pub fn overlap_pre_filter_4(input: [i32; 4]) -> [i32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image::jxr_decode::math as dec;
+    use crate::decode::math as dec;
 
     /// Deterministic LCG so the round-trip vectors are reproducible without a
     /// dependency. Values span roughly a coefficient range.

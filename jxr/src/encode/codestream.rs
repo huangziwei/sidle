@@ -1,14 +1,14 @@
-//! WMPHOTO codestream framing writer (encode side) for the minimal grayscale
-//! path: spatial mode, single tile, no overlap, no windowing, **DCONLY**,
-//! `8bppGray`, uniform DC QP.
+//! WMPHOTO codestream framing writer (encode side): spatial mode, single
+//! tile, no overlap, derived windowing (`windowing_flag = 0`), ALL_BANDS,
+//! `8bppGray` or `24bppRGB`, uniform per-band QP.
 //!
 //! Each writer mirrors the corresponding decoder reader in
-//! `jxr_decode::decoder` field-for-field, so the decoder parses exactly what we
+//! `decode::decoder` field-for-field, so the decoder parses exactly what we
 //! emit. The DC *value* coding (`mb_dc`) lives in [`super::coeff`]; this module
 //! is the surrounding header/tile frame.
 
 use super::bitstream::BitWriter;
-use crate::image::jxr_decode::consts::*;
+use crate::decode::consts::*;
 
 /// `image_header` for a `width`×`height` image with the given `output_clr_fmt`
 /// (`OUT_YONLY` for grayscale, `OUT_RGB` for color). Mirrors

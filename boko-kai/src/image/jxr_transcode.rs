@@ -1,13 +1,12 @@
-//! KFX → EPUB glue: decode a JPEG-XR file with the pure-Rust
-//! [`jxr_decode`](super::jxr_decode) codec, then re-encode it as JPEG for EPUB
-//! readers (which don't support JXR).
+//! KFX → EPUB glue: decode a JPEG-XR file with the pure-Rust [`jxr`] codec
+//! crate, then re-encode it as JPEG for EPUB readers (which don't support
+//! JXR).
 //!
 //! This is boko-kai pipeline glue, **not** part of the codec: it depends on
 //! `ConvertError`, `jpeg_encoder`, and the `BOKO_KFX2EPUB_TRACE` timing, none
-//! of which belong in the standalone codec. Keeping it here lets `jxr_decode`
-//! stay dependency-free for extraction into its own crate.
+//! of which belong in the standalone `jxr` crate.
 
-use super::jxr_decode::{container, decoder};
+use jxr::decode::{container, decoder};
 use crate::kfx_to_epub::ConvertError;
 
 /// Per-stage timing for one transcode call. Always collected — `Instant`'s
@@ -66,7 +65,7 @@ pub fn transcode(
 }
 
 fn encode_jpeg(img: &decoder::DecodedImage) -> Result<Vec<u8>, ConvertError> {
-    use super::jxr_decode::consts::*;
+    use jxr::decode::consts::*;
     use jpeg_encoder::Encoder;
 
     // We currently only emit JPEG for 8-bit RGB / Y outputs. Higher bit
@@ -93,7 +92,7 @@ fn encode_jpeg(img: &decoder::DecodedImage) -> Result<Vec<u8>, ConvertError> {
 fn pack_pixels(
     img: &decoder::DecodedImage,
 ) -> Result<(Vec<u8>, jpeg_encoder::ColorType), ConvertError> {
-    use super::jxr_decode::consts::*;
+    use jxr::decode::consts::*;
     use jpeg_encoder::ColorType;
 
     let w = img.width as usize;

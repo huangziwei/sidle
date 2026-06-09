@@ -43,6 +43,10 @@ pub mod io;
 pub mod model;
 pub mod style;
 
+// The JPEG-XR codec is its own top-level workspace crate (`../jxr`).
+// Re-exported because `model::Book`'s public API exposes `jxr::ColorMode`.
+pub use jxr;
+
 #[cfg(feature = "aozora")]
 pub mod aozora;
 pub mod epub;

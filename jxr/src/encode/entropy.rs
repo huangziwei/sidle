@@ -1,5 +1,5 @@
 //! Static Huffman (VLC) encoding — the inverse of the decoder's
-//! [`crate::image::jxr_decode::misc::Deserializer::huff`].
+//! [`crate::decode::misc::Deserializer::huff`].
 //!
 //! The decoder's tables map a code (the `hbin` key: the code bits prefixed
 //! with a synthetic leading `1`) to a value. To encode we find the value's
@@ -29,8 +29,8 @@ pub fn write_huff(bw: &mut BitWriter, table: &HashMap<u64, i32>, value: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image::jxr_decode::misc::Deserializer;
-    use crate::image::jxr_decode::tables as t;
+    use crate::decode::misc::Deserializer;
+    use crate::decode::tables as t;
 
     /// Every value in `table` must encode then decode back to itself.
     fn roundtrip_all(table: &HashMap<u64, i32>) {

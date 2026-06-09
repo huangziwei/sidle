@@ -5,10 +5,10 @@
 
 use super::bitstream::BitWriter;
 use super::coeff;
-use crate::image::jxr_decode::consts::*;
-use crate::image::jxr_decode::math::num_ones;
-use crate::image::jxr_decode::state::{AdaptiveScan, AdaptiveVLC, CBPHPModel};
-use crate::image::jxr_decode::tables;
+use crate::decode::consts::*;
+use crate::decode::math::num_ones;
+use crate::decode::state::{AdaptiveScan, AdaptiveVLC, CBPHPModel};
+use crate::decode::tables;
 
 // From the decoder's `mb_cbphp`.
 const I_OUT: [i32; 16] = [0, 15, 3, 12, 1, 2, 4, 8, 5, 6, 9, 10, 7, 11, 13, 14];

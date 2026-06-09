@@ -1,18 +1,19 @@
-//! Regression guard for boko's JPEG-XR **color** decode path (INT_YUV444 →
+//! Regression guard for the JPEG-XR **color** decode path (INT_YUV444 →
 //! OUT_RGB), which is load-bearing for the Sidle reader once color KFX exist.
 //!
 //! `color444_16x16_lossless.jxr` is a real **libjxr**-minted lossless 4:4:4
 //! color JXR (BSD reference encoder), produced from the deterministic image
-//! `expected_rgb()` below — a true external consumer, not a boko self-loop.
+//! `expected_rgb()` below — a true external consumer, not a self-loop.
 //! Lossless 4:4:4 ⇒ the decode must be **bit-exact**.
 //!
 //! This locks in the fix to `decoder.rs`'s YUV444 plane-header read (it must
 //! consume the *two* 4-bit reserved fields = 8 bits; reading 4 desynced the
-//! whole codestream). See `.claude/plans/jxr-encoder.md` Track 6.0. The minting
+//! whole codestream). See the repo's
+//! `.claude/plans/finished_or_stale/jxr-encoder.md` Track 6.0. The minting
 //! harness lives in `artifacts/jxr-oracle/` (gitignored); this test needs only
 //! the committed fixture.
 
-use boko::image::jxr_decode::{container, decoder::Decoder};
+use jxr::decode::{container, decoder::Decoder};
 
 /// The exact RGB image the fixture was encoded from (must match the generator
 /// in `artifacts/jxr-oracle/src/main.rs`): per-channel gradients + saturated

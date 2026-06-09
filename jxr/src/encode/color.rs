@@ -2,7 +2,7 @@
 //!
 //! JPEG-XR's color path is `RGB → internal YUV (YCoCg-like) → per-plane PCT`.
 //! [`rgb_to_yuv444`] is the **exact integer inverse** of the decoder's
-//! [`crate::image::jxr_decode::decoder::yuv444_to_rgb`] lifting (which is the
+//! `decode::decoder::yuv444_to_rgb` lifting (which is the
 //! spec / libjxr `strInvTransform`). Because every step is integer lifting, the
 //! pair is a perfect bijection — lossless 4:4:4 color round-trips bit-exactly.
 //!
@@ -20,11 +20,11 @@ use super::bitstream::BitWriter;
 use super::entropy::write_huff;
 use super::quant::{quantize, scaling_factor, QpSet};
 use super::{codestream, coeff, container, hp, transform};
-use crate::image::jxr_decode::consts::*;
-use crate::image::jxr_decode::decoder::{ceil_div2, floor_div2};
-use crate::image::jxr_decode::math::{chroma_component, num_ones};
-use crate::image::jxr_decode::state::{AdaptiveScan, AdaptiveVLC, CBPHPModel};
-use crate::image::jxr_decode::tables;
+use crate::decode::consts::*;
+use crate::decode::decoder::{ceil_div2, floor_div2};
+use crate::decode::math::{chroma_component, num_ones};
+use crate::decode::state::{AdaptiveScan, AdaptiveVLC, CBPHPModel};
+use crate::decode::tables;
 
 // From the decoder's `mb_cbphp` (i_out/i_off/i_flc), same as `hp.rs`.
 const I_OUT: [i32; 16] = [0, 15, 3, 12, 1, 2, 4, 8, 5, 6, 9, 10, 7, 11, 13, 14];
@@ -34,10 +34,8 @@ const I_FLC: [u32; 6] = [0, 2, 1, 2, 2, 0];
 const ABS_DELTA: [i32; 7] = [1, 0, -1, -1, -1, -1, -1]; // ABS_LEVEL_INDEX_DELTA[0]
 
 /// Forward color transform: centered `RGB → (Y, U, V)`, the exact inverse of the
-/// decoder's [`yuv444_to_rgb`]. Inputs are **pre-bias** (input pixel − 128 for
+/// decoder's `yuv444_to_rgb`. Inputs are **pre-bias** (input pixel − 128 for
 /// BD8); outputs are the internal coefficients the per-plane PCT consumes.
-///
-/// [`yuv444_to_rgb`]: crate::image::jxr_decode::decoder::yuv444_to_rgb
 #[inline]
 pub fn rgb_to_yuv444(r: i32, g: i32, b: i32) -> (i32, i32, i32) {
     // Invert, in reverse order, the decoder's lifting
@@ -626,7 +624,7 @@ fn encode_color_hp_mb(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image::jxr_decode::decoder::yuv444_to_rgb;
+    use crate::decode::decoder::yuv444_to_rgb;
 
     struct Lcg(u64);
     impl Lcg {
@@ -695,9 +693,9 @@ mod tests {
         }
     }
 
-    fn decode(jxr: &[u8]) -> crate::image::jxr_decode::decoder::DecodedImage {
-        let c = crate::image::jxr_decode::container::parse(jxr).expect("container parse");
-        crate::image::jxr_decode::decoder::Decoder::new(c.image_data).decode().expect("decode")
+    fn decode(jxr: &[u8]) -> crate::decode::decoder::DecodedImage {
+        let c = crate::decode::container::parse(jxr).expect("container parse");
+        crate::decode::decoder::Decoder::new(c.image_data).decode().expect("decode")
     }
 
     fn assert_rgb_exact(jxr: &[u8], w: usize, h: usize, expected: &[(u8, u8, u8)]) {
@@ -860,8 +858,8 @@ mod tests {
     /// Exact inverse of `transform::forward_transform_mb` (no overlap) — same as
     /// the grayscale test helper. Used to synthesize **zero-HP** pixel blocks.
     fn inverse_transform_mb(buf: &mut [i32; 256]) -> [i32; 256] {
-        use crate::image::jxr_decode::consts::MB_PIXEL_MAP;
-        use crate::image::jxr_decode::math::{str_idct4x4_stage1, str_idct4x4_stage2};
+        use crate::decode::consts::MB_PIXEL_MAP;
+        use crate::decode::math::{str_idct4x4_stage1, str_idct4x4_stage2};
         let mut dclp = [0i32; 16];
         for j in 0..16 {
             dclp[j] = buf[j * 16];

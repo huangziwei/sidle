@@ -6,9 +6,9 @@
 use super::bitstream::BitWriter;
 use super::quant::{quantize, scaling_factor, QpSet};
 use super::{codestream, coeff, container, hp, transform};
-use crate::image::jxr_decode::consts::*;
-use crate::image::jxr_decode::state::{AdaptiveScan, AdaptiveVLC};
-use crate::image::jxr_decode::tables;
+use crate::decode::consts::*;
+use crate::decode::state::{AdaptiveScan, AdaptiveVLC};
+use crate::decode::tables;
 
 const ABS_DELTA: [i32; 7] = [1, 0, -1, -1, -1, -1, -1]; // ABS_LEVEL_INDEX_DELTA[0]
 

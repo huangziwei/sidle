@@ -151,7 +151,7 @@ pub fn run_index() -> &'static HashMap<u64, i32> {
 
 // --- RUN_VALUE ---
 
-/// RUN_VALUE[max_run]; indices 0..=1 are unused (None in Python).
+/// `RUN_VALUE[max_run]`; indices 0..=1 are unused (None in Python).
 pub fn run_value(max_run: usize) -> &'static HashMap<u64, i32> {
     static SLOT2: OnceLock<HashMap<u64, i32>> = OnceLock::new();
     static SLOT3: OnceLock<HashMap<u64, i32>> = OnceLock::new();

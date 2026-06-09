@@ -1,5 +1,5 @@
 //! MSB-first bit writer — the encode-side mirror of the decoder's
-//! [`crate::image::jxr_decode::misc::Deserializer`] bit reader. Anything
+//! [`crate::decode::misc::Deserializer`] bit reader. Anything
 //! written here reads back identically via `Deserializer::unpack_bits` /
 //! `huff` (proven in tests).
 
@@ -66,7 +66,7 @@ impl BitWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image::jxr_decode::misc::Deserializer;
+    use crate::decode::misc::Deserializer;
 
     struct Lcg(u64);
     impl Lcg {

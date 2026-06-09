@@ -2500,7 +2500,7 @@ pub(crate) fn ceil_div2(x: i32) -> i32 {
 /// integer lifting the JPEG-XR spec / libjxr `strInvTransform` use. Returns the
 /// **pre-bias** centered RGB (the decoder adds the `1<<(bd-1)` bias afterwards).
 /// Single source of truth shared with the encoder's forward transform
-/// ([`crate::image::jxr_encode::color::rgb_to_yuv444`], its exact inverse).
+/// ([`crate::encode::color::rgb_to_yuv444`], its exact inverse).
 pub(crate) fn yuv444_to_rgb(y: i32, u: i32, v: i32) -> (i32, i32, i32) {
     let temp_t = -u;
     let g = y - floor_div2(temp_t); // out1

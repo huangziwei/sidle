@@ -1,7 +1,8 @@
-//! Pure-Rust JPEG-XR encoder (EPUB→KFX), dual grayscale/color.
+//! JPEG-XR encoder, dual grayscale/color.
 //!
-//! Forward mirror of [`crate::image::jxr_decode`], built bottom-up against the
-//! decoder as a round-trip oracle — see `.claude/plans/jxr-encoder.md`.
+//! Forward mirror of [`crate::decode`], built bottom-up against the decoder
+//! as a round-trip oracle (history: the repo's
+//! `.claude/plans/finished_or_stale/jxr-encoder.md`).
 //!
 //! Status: **grayscale + color complete** — full ALL_BANDS (DC + LP + HP +
 //! flexbits), multi-MB prediction, windowing, and per-band quantization
@@ -39,8 +40,6 @@ pub enum ColorMode {
 /// Errors from the encoder.
 #[derive(Debug)]
 pub enum EncodeError {
-    /// A stage that hasn't been built yet (scaffolding placeholder).
-    NotImplemented(&'static str),
     /// Input the encoder can't represent.
     Unsupported(String),
 }
@@ -48,7 +47,6 @@ pub enum EncodeError {
 impl std::fmt::Display for EncodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EncodeError::NotImplemented(s) => write!(f, "jxr encode not implemented: {s}"),
             EncodeError::Unsupported(s) => write!(f, "unsupported: {s}"),
         }
     }
@@ -67,7 +65,7 @@ pub struct ImageInput<'a> {
 /// Encode 8-bit grayscale pixels into a JPEG-XR file (TIFF container + WMPHOTO
 /// codestream) at the given per-band quantizers. `QpSet::LOSSLESS` is bit-exact;
 /// higher QP trades fidelity for size (ship mode). Output is decodable by
-/// `jxr_decode` and structurally clones a real Amazon JXR.
+/// `decode` and structurally clones a real Amazon JXR.
 pub fn encode(
     input: &ImageInput<'_>,
     mode: ColorMode,
@@ -138,9 +136,9 @@ mod tests {
 
     /// Round-trip oracle: decode JXR bytes straight to i32 planes via the
     /// decoder, bypassing its JPEG re-encode in `jxr_transcode::transcode`.
-    fn decode_to_planes(jxr: &[u8]) -> crate::image::jxr_decode::decoder::DecodedImage {
-        let container = crate::image::jxr_decode::container::parse(jxr).expect("container parse");
-        crate::image::jxr_decode::decoder::Decoder::new(container.image_data)
+    fn decode_to_planes(jxr: &[u8]) -> crate::decode::decoder::DecodedImage {
+        let container = crate::decode::container::parse(jxr).expect("container parse");
+        crate::decode::decoder::Decoder::new(container.image_data)
             .decode()
             .expect("decode")
     }
@@ -181,8 +179,8 @@ mod tests {
 
     /// Exact inverse of `transform::forward_transform_mb` (no overlap).
     fn inverse_transform_mb(buf: &mut [i32; 256]) -> [i32; 256] {
-        use crate::image::jxr_decode::consts::MB_PIXEL_MAP;
-        use crate::image::jxr_decode::math::{str_idct4x4_stage1, str_idct4x4_stage2};
+        use crate::decode::consts::MB_PIXEL_MAP;
+        use crate::decode::math::{str_idct4x4_stage1, str_idct4x4_stage2};
         let mut dclp = [0i32; 16];
         for j in 0..16 {
             dclp[j] = buf[j * 16];

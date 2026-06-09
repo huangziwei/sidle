@@ -9,8 +9,8 @@
 //! directly.
 
 use super::bitstream::BitWriter;
-use crate::image::jxr_decode::state::AdaptiveVLC;
-use crate::image::jxr_decode::tables;
+use crate::decode::state::AdaptiveVLC;
+use crate::decode::tables;
 use std::collections::HashMap;
 
 /// Encode-side inverse of the decoder's `decode_run`: emit a run length `run`
@@ -113,7 +113,7 @@ pub fn encode_block(
     abs1: &mut AdaptiveVLC,
 ) {
     use super::entropy::write_huff;
-    use crate::image::jxr_decode::consts::{
+    use crate::decode::consts::{
         ABS_LEVEL_INDEX_DELTA, FIRST_INDEX_DELTA, INDEX1_DELTA,
     };
     debug_assert!(!pairs.is_empty());
@@ -233,7 +233,7 @@ pub fn encode_dc_residual(
     abs_index
 }
 
-/// One model's `m_bits`/`m_state`, mirroring `jxr_decode::state::Model`.
+/// One model's `m_bits`/`m_state`, mirroring `decode::state::Model`.
 #[derive(Clone, Copy)]
 pub struct ModelState {
     pub m_bits: i32,
@@ -288,7 +288,7 @@ impl ModelState {
 }
 
 /// Two-model `m_bits`/`m_state` (luma + chroma) for a **color** plane, mirroring
-/// `jxr_decode::state::Model` + `Decoder::update_model_mb` with `i_num_models =
+/// `decode::state::Model` + `Decoder::update_model_mb` with `i_num_models =
 /// 2`. Index 0 = luma, index 1 = chroma. (Grayscale uses the single-model
 /// [`ModelState`].)
 #[derive(Clone, Copy)]
@@ -348,7 +348,7 @@ impl ColorModel {
     }
 }
 
-/// One adaptive-VLC table-1 selector, mirroring `jxr_decode::state::AdaptiveVLC`
+/// One adaptive-VLC table-1 selector, mirroring `decode::state::AdaptiveVLC`
 /// `init_table1` / `adapt_table1`.
 #[derive(Clone, Copy, Default)]
 pub struct AdaptiveVlc1 {
@@ -401,7 +401,7 @@ pub fn encode_refine_lp(bw: &mut BitWriter, i_coeff: i32, result: i32, model_bit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image::jxr_decode::decoder::Decoder;
+    use crate::decode::decoder::Decoder;
 
     struct Lcg(u64);
     impl Lcg {

@@ -45,6 +45,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 
 boko-kai = { path = "../../boko-kai", default-features = false }
+# JPEG-XR codec (top-level workspace crate) — named directly for ColorMode.
+jxr = { path = "../../jxr" }
 sidle-core = { path = "../core" }
 sidle-server = { path = "../server" }
 tracing = "0.1"

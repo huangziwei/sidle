@@ -302,7 +302,7 @@ pub struct MB {
     /// MbDCLP flat across (component, pos): index `c * MB_DCLP_PER_COMP + p`
     /// (c ∈ 0..nc, p ∈ 0..16).
     pub mb_dclp: Vec<i32>,
-    /// MBCBPHP[component]
+    /// `MBCBPHP[component]`
     pub mb_cbphp: Vec<i32>,
     /// ModelBitsMBHP[chroma 0..2]
     pub model_bits_mb_hp: [i32; 2],
@@ -444,7 +444,7 @@ pub struct Plane {
     pub mb: Vec<Vec<MB>>,
 
     /// Reconstructed pixels per component, one [`Plane2D`] per channel.
-    /// Sized to padded `width × height` until [`clipping_and_packing_stage`]
+    /// Sized to padded `width × height` until `clipping_and_packing_stage`
     /// trims to the final image size.
     pub image_plane: Vec<Plane2D>,
 }
