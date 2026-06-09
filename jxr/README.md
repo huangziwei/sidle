@@ -20,12 +20,16 @@ libjxr reference decoder across a minted matrix. *Reconstruction* covers
 YONLY, YUV 4:4:4, and YUV 4:2:0 / 4:2:2 internal color (joint-coded chroma
 entropy, the 2×2/2-pt chroma transforms and dedicated chroma overlap
 filtering, and centering-aware upsampling — all oracle-verified pixel-exact);
-the RGBE / some float output paths remain explicit gaps inherited from the
-Python source, scheduled in the roadmap. The **container** parser accepts the
-seven pixel-format GUIDs Kindle media uses (8bppGray, 16bppGray, 24bppBGR,
-24bppRGB, 32bppRGBA, 24bpp3Channels, 32bpp4Channels); decoded output is raw
-`i32` planes plus layout fields. Orientation tags are parsed but not yet
-applied.
+Output formatting covers the deep and exotic formats too — 16/32-bit integer
+and fixed point, half/full float (emitted as bit patterns), RGBE, CMYK(A) —
+each verified sample-exact against the reference decoder, including two real
+Windows HDR screen captures (3440×1440 scRGB 128bppRGBAFloat, bit-exact). The
+**container** parser knows the full pixel-format GUID table (~70 formats),
+tolerates unknown tags and extra IFDs, exposes the ICC profile / XMP packet
+when present, handles separate planar-alpha codestreams (merged by
+`decode::decode_image`), and exposes the orientation tag —
+`decode::apply_orientation` implements all 8 transforms (not auto-applied,
+matching libjxr). Decoded output is raw `i32` planes plus layout fields.
 
 **Encoder** — 8-bit grayscale (`8bppGray`/YONLY) and 8-bit color
 (`24bppRGB`/YUV 4:4:4): full ALL_BANDS (DC + LP + HP + flexbits) with multi-MB

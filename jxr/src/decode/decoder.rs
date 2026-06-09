@@ -106,6 +106,7 @@ impl<'a> Decoder<'a> {
                 windowing_flag: 0,
                 trim_flexbits_flag: 0,
                 red_blue_not_swapped_flag: 0,
+                premultiplied_alpha_flag: 0,
                 alpha_image_plane_flag: 0,
                 output_clr_fmt: OUT_YONLY,
                 output_bitdepth: BD8,
@@ -212,7 +213,9 @@ impl<'a> Decoder<'a> {
         self.hdr.trim_flexbits_flag = self.ds.unpack_bits(1)? as u32;
         self.ds.check_bit_field(1, "reserved_d", &[0])?;
         self.hdr.red_blue_not_swapped_flag = self.ds.unpack_bits(1)? as u32;
-        self.ds.check_bit_field(1, "premultiplied_alpha_flag", &[0])?;
+        // 8.3.17: premultiplied alpha is a property, not a different coding —
+        // accept and expose (consumer decides whether to un-premultiply).
+        self.hdr.premultiplied_alpha_flag = self.ds.unpack_bits(1)? as u32;
         self.hdr.alpha_image_plane_flag = self.ds.unpack_bits(1)? as u32;
 
         self.hdr.output_clr_fmt = self.ds.check_bit_field(
@@ -2863,14 +2866,15 @@ impl<'a> Decoder<'a> {
             return Ok(());
         }
 
-        if matches!(int_fmt, INT_YUV420 | INT_YUV422) && out_fmt == OUT_RGB {
+        if matches!(int_fmt, INT_YUV420 | INT_YUV422) && matches!(out_fmt, OUT_RGB | OUT_RGBE) {
             // Table 178: 420 upsamples vertically then horizontally; 422
             // horizontally only. After that the planes are 4:4:4-shaped and
             // the standard YUV444→RGB conversion below applies.
             self.upsample_chroma(p);
         }
 
-        if matches!(int_fmt, INT_YUV444 | INT_YUV420 | INT_YUV422) && out_fmt == OUT_RGB {
+        // RGBE shares the YUV→RGB lifting; PostScalingF2 packs E afterwards.
+        if matches!(int_fmt, INT_YUV444 | INT_YUV420 | INT_YUV422) && matches!(out_fmt, OUT_RGB | OUT_RGBE) {
             let do_swap = matches!(self.hdr.output_bitdepth, BD5 | BD565 | BD10)
                 && self.hdr.red_blue_not_swapped_flag == 0;
             // Get disjoint mutable borrows of the three component planes
@@ -2896,12 +2900,46 @@ impl<'a> Decoder<'a> {
             return Ok(());
         }
 
+        if int_fmt == INT_YUVK && out_fmt == OUT_CMYK {
+            // Table 186 InvColorFmtConvert3: YUVK → CMYK lifting.
+            let n = self.planes[p].image_plane[0].data.len();
+            for idx in 0..n {
+                let y = self.planes[p].image_plane[0].data[idx];
+                let u = self.planes[p].image_plane[1].data[idx];
+                let v = self.planes[p].image_plane[2].data[idx];
+                let k0 = self.planes[p].image_plane[3].data[idx];
+                let k = k0 + (y >> 1);
+                let m = k - y - (u >> 1);
+                let c = u + m + (v >> 1);
+                let yy = c - v;
+                self.planes[p].image_plane[0].data[idx] = c;
+                self.planes[p].image_plane[1].data[idx] = m;
+                self.planes[p].image_plane[2].data[idx] = yy;
+                self.planes[p].image_plane[3].data[idx] = k;
+            }
+            return Ok(());
+        }
+        if int_fmt == INT_YUVK && out_fmt == OUT_CMYKDIRECT {
+            // Table 187 InvColorFmtConvert4: pure channel shuffle.
+            let n = self.planes[p].image_plane[0].data.len();
+            for idx in 0..n {
+                let y = self.planes[p].image_plane[0].data[idx];
+                let u = self.planes[p].image_plane[1].data[idx];
+                let v = self.planes[p].image_plane[2].data[idx];
+                let k = self.planes[p].image_plane[3].data[idx];
+                self.planes[p].image_plane[0].data[idx] = u;
+                self.planes[p].image_plane[1].data[idx] = v;
+                self.planes[p].image_plane[2].data[idx] = k;
+                self.planes[p].image_plane[3].data[idx] = y;
+            }
+            return Ok(());
+        }
+
         // Same-color-format passthrough.
         let same = matches!(
             (int_fmt, out_fmt),
             (INT_YONLY, OUT_YONLY)
                 | (INT_YUV444, OUT_YUV444)
-                | (INT_YUVK, OUT_CMYK)
                 | (INT_NCOMPONENT, OUT_NCOMPONENT)
         );
         if !same {
@@ -2968,13 +3006,10 @@ impl<'a> Decoder<'a> {
     }
 
     fn add_bias(&mut self, p: usize) -> Result<()> {
-        if matches!(self.hdr.output_clr_fmt, OUT_YUV422 | OUT_YUV420 | OUT_CMYK) {
-            return Err(DecodeError::Unsupported(format!(
-                "AddBias for {}",
-                self.hdr.output_clr_fmt
-            )));
-        }
-        let bias_base = match self.hdr.output_bitdepth {
+        // Table 188. The bias for the deep integer formats is pre-shifted
+        // down by SHIFT_BITS (PostScalingInt later shifts it back up).
+        let i_scale = if self.planes[p].scaled_flag != 0 { 3 } else { 0 };
+        let mut bias_base = match self.hdr.output_bitdepth {
             BD5 => 1 << 4,
             BD565 => 1 << 5,
             BD8 => 1 << 7,
@@ -2982,18 +3017,41 @@ impl<'a> Decoder<'a> {
             BD16 => 1 << 15,
             _ => 0i32,
         };
-        let i_bias = if self.planes[p].scaled_flag != 0 {
-            bias_base << 3
-        } else {
-            bias_base
-        };
-        if i_bias != 0 {
-            let nc = self.planes[p].num_components;
-            for i in 0..nc {
-                for v in &mut self.planes[p].image_plane[i].data {
-                    *v += i_bias;
+        if matches!(self.hdr.output_bitdepth, BD16 | BD16S | BD32S) {
+            bias_base >>= self.planes[p].shift_bits;
+        }
+        let i_bias = bias_base << i_scale;
+        match self.hdr.output_clr_fmt {
+            OUT_RGB | OUT_YUV444 | OUT_YUV422 | OUT_YUV420 | OUT_YONLY | OUT_NCOMPONENT
+            | OUT_CMYKDIRECT => {
+                let nc = if matches!(
+                    self.hdr.output_clr_fmt,
+                    OUT_RGB | OUT_YUV444 | OUT_YUV422 | OUT_YUV420
+                ) {
+                    3
+                } else {
+                    self.planes[p].num_components
+                };
+                if i_bias != 0 {
+                    for i in 0..nc.min(self.planes[p].image_plane.len()) {
+                        for v in &mut self.planes[p].image_plane[i].data {
+                            *v += i_bias;
+                        }
+                    }
                 }
             }
+            OUT_CMYK => {
+                let half = (bias_base >> 1) << i_scale;
+                for i in 0..3 {
+                    for v in &mut self.planes[p].image_plane[i].data {
+                        *v += half;
+                    }
+                }
+                for v in &mut self.planes[p].image_plane[3].data {
+                    *v -= half;
+                }
+            }
+            _ => {} // RGBE: no bias
         }
         Ok(())
     }
@@ -3033,32 +3091,99 @@ impl<'a> Decoder<'a> {
     }
 
     fn postscaling_process(&mut self, p: usize) -> Result<()> {
+        // Table 190.
         if self.hdr.output_clr_fmt == OUT_RGBE {
-            return Err(DecodeError::Unsupported("RGBE".into()));
-        }
-        if matches!(self.hdr.output_clr_fmt, OUT_RGB | OUT_YUV444) {
-            if matches!(self.hdr.output_bitdepth, BD32F | BD16F) {
-                return Err(DecodeError::Unsupported("RGB BD32F/BD16F postscaling".into()));
+            // PostScalingF2 (Table 193): 3 internal values → 4-plane RGBE.
+            let n = self.planes[p].image_plane[0].data.len();
+            let stride = self.planes[p].image_plane[0].stride;
+            let height = self.planes[p].image_plane[0].height;
+            let mut e_plane = Plane2D::new(stride, height);
+            for idx in 0..n {
+                let mut out = [0i32; 4];
+                let mut exps = [0i32; 3];
+                for k in 0..3 {
+                    let v = self.planes[p].image_plane[k].data[idx];
+                    if v <= 0 {
+                        out[k] = 0;
+                        exps[k] = 0;
+                    } else if (v >> 7) > 1 {
+                        out[k] = (v & 0x7F) + 128;
+                        exps[k] = v >> 7;
+                    } else {
+                        out[k] = v;
+                        exps[k] = 1;
+                    }
+                }
+                out[3] = exps[0].max(exps[1]).max(exps[2]);
+                for k in 0..3 {
+                    if out[3] > exps[k] {
+                        let shift = out[3] - exps[k];
+                        out[k] = (2 * out[k] + 1) >> (shift + 1);
+                    }
+                }
+                for k in 0..3 {
+                    self.planes[p].image_plane[k].data[idx] = out[k];
+                }
+                e_plane.data[idx] = out[3];
             }
-            if matches!(self.hdr.output_bitdepth, BD16 | BD16S | BD32S) && self.planes[p].shift_bits != 0 {
-                let nc = self.planes[p].num_components;
+            self.planes[p].image_plane.push(e_plane);
+            self.planes[p].num_components = 4;
+            return Ok(());
+        }
+
+        let nc = if matches!(
+            self.hdr.output_clr_fmt,
+            OUT_RGB | OUT_YUV444 | OUT_YUV422 | OUT_YUV420
+        ) {
+            3
+        } else {
+            self.planes[p].num_components
+        };
+        let nc = nc.min(self.planes[p].image_plane.len());
+        match self.hdr.output_bitdepth {
+            BD16 | BD16S | BD32S => {
                 let s = self.planes[p].shift_bits;
-                for i in 0..nc {
-                    for v in &mut self.planes[p].image_plane[i].data {
-                        *v <<= s;
+                if s != 0 {
+                    for i in 0..nc {
+                        for v in &mut self.planes[p].image_plane[i].data {
+                            *v <<= s;
+                        }
                     }
                 }
             }
+            BD16F => {
+                // Table 192: sign bit ‖ min(|x|, 32767) — the half bits.
+                for i in 0..nc {
+                    for v in &mut self.planes[p].image_plane[i].data {
+                        let s = if *v < 0 { 1i32 } else { 0 };
+                        let em = v.abs().min(32767);
+                        *v = (s << 15) | em;
+                    }
+                }
+            }
+            BD32F => {
+                let len_mantissa = self.planes[p].len_mantissa as i32;
+                let exp_bias = self.planes[p].exp_bias;
+                for i in 0..nc {
+                    for v in &mut self.planes[p].image_plane[i].data {
+                        *v = postscale_f32(*v, len_mantissa, exp_bias);
+                    }
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
 
     fn clipping_and_packing_stage(&mut self, p: usize) -> Result<()> {
+        // Tables 194/195: ints clip to range; BD16F/BD32F/BD32S pass through
+        // unclipped (float bit patterns / full range) — windowing crop only.
         let (clip_low, clip_high) = match self.hdr.output_bitdepth {
             BD1BLACK1 | BD1WHITE1 => (0, 1),
             BD8 => (0, 255),
             BD16 => (0, 65535),
             BD16S => (-32768, 32767),
+            BD16F | BD32F | BD32S => (i32::MIN, i32::MAX),
             _ => {
                 return Err(DecodeError::Unsupported(format!(
                     "output bit depth {}",
@@ -3243,4 +3368,29 @@ pub(crate) fn yuv444_to_rgb(y: i32, u: i32, v: i32) -> (i32, i32, i32) {
     let r = temp_t + g - ceil_div2(v); // out0
     let b = v + r; // out2
     (r, g, b)
+}
+
+/// Table 192, BD32F arm: reassemble the custom (LEN_MANTISSA, EXP_BIAS)
+/// float as IEEE 754 single bits.
+fn postscale_f32(ix: i32, len_mantissa: i32, exp_bias: i32) -> i32 {
+    let i_s = if ix < 0 { 1i32 } else { 0 };
+    let ix = ix.abs();
+    let mut i_e = ix >> len_mantissa;
+    let mut i_m = (ix & ((1 << len_mantissa) - 1)) | (1 << len_mantissa);
+    if i_e == 0 {
+        i_m ^= 1 << len_mantissa;
+        i_e = 1;
+    }
+    i_e = i_e - exp_bias + 127;
+    while i_m < (1 << len_mantissa) && i_e > 1 && i_m > 0 {
+        i_e -= 1;
+        i_m <<= 1;
+    }
+    if i_m < (1 << len_mantissa) {
+        i_e = 0;
+    } else {
+        i_m ^= 1 << len_mantissa;
+    }
+    i_m <<= 23 - len_mantissa;
+    (i_s << 31) | (i_e << 23) | i_m
 }

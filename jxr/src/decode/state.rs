@@ -564,6 +564,7 @@ pub struct ImageHeader {
     pub trim_flexbits_flag: u32,
     #[allow(dead_code)]
     pub red_blue_not_swapped_flag: u32,
+    pub premultiplied_alpha_flag: u32,
     pub alpha_image_plane_flag: u32,
 
     pub output_clr_fmt: u8,

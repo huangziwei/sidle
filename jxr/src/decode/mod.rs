@@ -25,6 +25,26 @@ pub mod misc;
 pub mod state;
 pub mod tables;
 
+/// Decode a parsed container completely: the primary codestream, plus the
+/// separate planar-alpha codestream when the container carries one (the
+/// `-a 2` encoding — alpha as its own YONLY image appended via
+/// ALPHA_OFFSET/ALPHA_BYTE_COUNT), merged as the final component.
+pub fn decode_image(c: &container::JxrContainer<'_>) -> Result<decoder::DecodedImage, decoder::DecodeError> {
+    let mut img = decoder::Decoder::new(c.image_data).decode()?;
+    if let Some(alpha_bytes) = c.alpha_data {
+        let alpha = decoder::Decoder::new(alpha_bytes).decode()?;
+        if (alpha.width, alpha.height) != (img.width, img.height) {
+            return Err(decoder::DecodeError::Unsupported(format!(
+                "alpha image {}x{} mismatches primary {}x{}",
+                alpha.width, alpha.height, img.width, img.height
+            )));
+        }
+        img.image_plane.extend(alpha.image_plane.into_iter().take(1));
+        img.num_components += 1;
+    }
+    Ok(img)
+}
+
 /// Apply a presentation orientation (the container's SPATIAL_XFRM_PRIMARY,
 /// also `JxrDecApp -O`) to a decoded image, in place. Values 0–7:
 /// 0 none, 1 flip vertical, 2 flip horizontal, 3 both (180°),

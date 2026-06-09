@@ -46,8 +46,18 @@ pub struct JxrContainer<'a> {
     /// Presentation orientation from the SPATIAL_XFRM_PRIMARY tag (0..7;
     /// 0 = none). NOT auto-applied — see [`crate::decode::apply_orientation`].
     pub orientation: u8,
+    /// Resolved pixel-format name (`GUID_PKPixelFormat*` naming, e.g.
+    /// "64bppRGBAHalf").
+    pub format: &'static str,
     /// WMPHOTO codestream bytes.
     pub image_data: &'a [u8],
+    /// Separate planar-alpha codestream (ALPHA_OFFSET/ALPHA_BYTE_COUNT tags),
+    /// when present. Decode it as its own image — see [`super::decode_image`].
+    pub alpha_data: Option<&'a [u8]>,
+    /// Raw ICC profile bytes (tag 0x8773), when present.
+    pub icc_profile: Option<&'a [u8]>,
+    /// Raw XMP packet bytes (tag 0x02BC), when present.
+    pub xmp: Option<&'a [u8]>,
 }
 
 /// Map of TIFF field type → bytes per value. From calibre's `FIELD_TYPE_LEN`.
@@ -82,16 +92,98 @@ fn field_value_u64(field_type: u16, field_data: &[u8]) -> Option<u64> {
     }
 }
 
-const SUPPORTED_UUIDS: &[(&str, &str)] = &[
-    ("24c3dd6f-034e-fe4b-b185-3d77768dc905", "BlackWhite"),
-    ("24c3dd6f-034e-fe4b-b185-3d77768dc908", "8bppGray"),
-    ("24c3dd6f-034e-fe4b-b185-3d77768dc90b", "16bppGray"),
-    ("24c3dd6f-034e-fe4b-b185-3d77768dc90c", "24bppBGR"),
-    ("24c3dd6f-034e-fe4b-b185-3d77768dc90d", "24bppRGB"),
-    ("24c3dd6f-034e-fe4b-b185-3d77768dc90f", "32bppRGBA"),
-    ("24c3dd6f-034e-fe4b-b185-3d77768dc920", "24bpp3Channels"),
-    ("24c3dd6f-034e-fe4b-b185-3d77768dc921", "32bpp4Channels"),
+/// The Microsoft pixel-format GUID family: `24c3dd6f-034e-fe4b-b185-3d77768dc9XX`
+/// with the last byte selecting the format. Full table from libjxr
+/// `JXRGlue.h` (every non-commented `DEFINE_GUID`); names match
+/// `GUID_PKPixelFormat*`. NOTE: 0x0f is 32bppBGRA — the plain RGBA formats
+/// live OUTSIDE the family (see `ODDBALL_UUIDS`); a previous version of this
+/// table mislabeled 0x0f as "32bppRGBA".
+const FAMILY_PREFIX: &str = "24c3dd6f-034e-fe4b-b185-3d77768dc9";
+const FAMILY_FORMATS: &[(u8, &str)] = &[
+    (0x05, "BlackWhite"),
+    (0x08, "8bppGray"),
+    (0x09, "16bppRGB555"),
+    (0x0a, "16bppRGB565"),
+    (0x0b, "16bppGray"),
+    (0x0c, "24bppBGR"),
+    (0x0d, "24bppRGB"),
+    (0x0e, "32bppBGR"),
+    (0x0f, "32bppBGRA"),
+    (0x10, "32bppPBGRA"),
+    (0x11, "32bppGrayFloat"),
+    (0x12, "48bppRGBFixedPoint"),
+    (0x13, "16bppGrayFixedPoint"),
+    (0x14, "32bppRGB101010"),
+    (0x15, "48bppRGB"),
+    (0x16, "64bppRGBA"),
+    (0x17, "64bppPRGBA"),
+    (0x18, "96bppRGBFixedPoint"),
+    (0x19, "128bppRGBAFloat"),
+    (0x1a, "128bppPRGBAFloat"),
+    (0x1b, "128bppRGBFloat"),
+    (0x1c, "32bppCMYK"),
+    (0x1d, "64bppRGBAFixedPoint"),
+    (0x1e, "128bppRGBAFixedPoint"),
+    (0x1f, "64bppCMYK"),
+    (0x20, "24bpp3Channels"),
+    (0x21, "32bpp4Channels"),
+    (0x22, "40bpp5Channels"),
+    (0x23, "48bpp6Channels"),
+    (0x24, "56bpp7Channels"),
+    (0x25, "64bpp8Channels"),
+    (0x26, "48bpp3Channels"),
+    (0x27, "64bpp4Channels"),
+    (0x28, "80bpp5Channels"),
+    (0x29, "96bpp6Channels"),
+    (0x2a, "112bpp7Channels"),
+    (0x2b, "128bpp8Channels"),
+    (0x2c, "40bppCMYKAlpha"),
+    (0x2d, "80bppCMYKAlpha"),
+    (0x2e, "32bpp3ChannelsAlpha"),
+    (0x2f, "40bpp4ChannelsAlpha"),
+    (0x30, "48bpp5ChannelsAlpha"),
+    (0x31, "56bpp6ChannelsAlpha"),
+    (0x32, "64bpp7ChannelsAlpha"),
+    (0x33, "72bpp8ChannelsAlpha"),
+    (0x34, "64bpp3ChannelsAlpha"),
+    (0x35, "80bpp4ChannelsAlpha"),
+    (0x36, "96bpp5ChannelsAlpha"),
+    (0x37, "112bpp6ChannelsAlpha"),
+    (0x38, "128bpp7ChannelsAlpha"),
+    (0x39, "144bpp8ChannelsAlpha"),
+    (0x3a, "64bppRGBAHalf"),
+    (0x3b, "48bppRGBHalf"),
+    (0x3d, "32bppRGBE"),
+    (0x3e, "16bppGrayHalf"),
+    (0x3f, "32bppGrayFixedPoint"),
+    (0x40, "64bppRGBFixedPoint"),
+    (0x41, "128bppRGBFixedPoint"),
+    (0x42, "64bppRGBHalf"),
+    (0x44, "12bppYCC420"),
+    (0x45, "16bppYCC422"),
+    (0x46, "20bppYCC422"),
+    (0x47, "32bppYCC422"),
+    (0x48, "24bppYCC444"),
+    (0x49, "30bppYCC444"),
 ];
+
+/// The four formats with GUIDs outside the family (textual form = the
+/// on-disk bytes hex'd in order, matching [`format_jxr_uuid`]).
+const ODDBALL_UUIDS: &[(&str, &str)] = &[
+    ("956b8cd9-fe3e-d647-bb25-eb1748ab0cf1", "32bppRGB"),
+    ("2dadc7f5-8d6a-dd43-a7a8-a29935261ae9", "32bppRGBA"),
+    ("50a6c43c-27a5-374d-a916-3142c7ebedba", "32bppPRGBA"),
+    ("8fd7fee3-dbe8-cf4a-84c1-e97f6136b327", "96bppRGBFloat"),
+];
+
+/// Resolve a textual pixel-format UUID to its format name.
+pub fn format_name(uuid: &str) -> Option<&'static str> {
+    if let Some(suffix) = uuid.strip_prefix(FAMILY_PREFIX) {
+        let b = u8::from_str_radix(suffix, 16).ok()?;
+        return FAMILY_FORMATS.iter().find(|(s, _)| *s == b).map(|(_, n)| *n);
+    }
+    ODDBALL_UUIDS.iter().find(|(u, _)| *u == uuid).map(|(_, n)| *n)
+}
 
 /// Format the 16 bytes of a UUID in the canonical `8-4-4-4-12` form. We have
 /// to do this by hand because the Microsoft JXR pixel-format UUID is encoded
@@ -131,6 +223,10 @@ pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerErro
     let mut image_height: Option<u32> = None;
     let mut image_offset: Option<u32> = None;
     let mut image_byte_count: Option<u32> = None;
+    let mut alpha_offset: Option<u32> = None;
+    let mut alpha_byte_count: Option<u32> = None;
+    let mut icc_span: Option<(u32, u32)> = None;
+    let mut xmp_span: Option<(u32, u32)> = None;
 
     let num_entries = read_u16_le(&mut ds)? as usize;
 
@@ -153,6 +249,11 @@ pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerErro
             if off + field_data_len as usize > data.len() {
                 return Err(ContainerError::Truncated);
             }
+            match field_tag {
+                0x8773 => icc_span = Some((off as u32, field_data_len as u32)),
+                0x02bc => xmp_span = Some((off as u32, field_data_len as u32)),
+                _ => {}
+            }
             &data[off..off + field_data_len as usize]
         };
 
@@ -171,6 +272,8 @@ pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerErro
             0xbc81 => image_height = field_value_u64(field_type, field_data).map(|n| n as u32),
             0xbcc0 => image_offset = field_value_u64(field_type, field_data).map(|n| n as u32),
             0xbcc1 => image_byte_count = field_value_u64(field_type, field_data).map(|n| n as u32),
+            0xbcc2 => alpha_offset = field_value_u64(field_type, field_data).map(|n| n as u32),
+            0xbcc3 => alpha_byte_count = field_value_u64(field_type, field_data).map(|n| n as u32),
             _ => {} // other fields (DPI etc.) we don't need yet
         }
     }
@@ -181,15 +284,14 @@ pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerErro
     let image_offset = image_offset.ok_or(ContainerError::MissingField("image_offset"))?;
     let image_byte_count = image_byte_count.unwrap_or(0);
 
-    if !SUPPORTED_UUIDS.iter().any(|(u, _)| *u == pixel_format) {
-        return Err(ContainerError::UnsupportedPixelFormat(pixel_format));
-    }
+    let format = match format_name(&pixel_format) {
+        Some(n) => n,
+        None => return Err(ContainerError::UnsupportedPixelFormat(pixel_format)),
+    };
 
-    // Multi-image marker.
-    let next_ifd_offset = read_u32_le(&mut ds)?;
-    if next_ifd_offset != 0 {
-        return Err(ContainerError::MultipleImages);
-    }
+    // Subsequent IFDs (thumbnails/extra images) are tolerated: the primary
+    // image is the first IFD per Annex A; we simply don't walk the rest.
+    let _next_ifd_offset = read_u32_le(&mut ds)?;
 
     let image_data: &[u8] = if image_byte_count > 0 {
         let start = image_offset as usize;
@@ -206,12 +308,37 @@ pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerErro
         &data[start..]
     };
 
+    let alpha_data: Option<&[u8]> = match (alpha_offset, alpha_byte_count) {
+        (Some(off), count) => {
+            let start = off as usize;
+            if start > data.len() {
+                return Err(ContainerError::Truncated);
+            }
+            // Tolerate lying byte counts: jxrencapp writes ALPHA_BYTE_COUNT
+            // as the total file size; the codestream parser stops at its own
+            // end anyway, so clamp to EOF.
+            let end = match count {
+                Some(c) if c > 0 => (start + c as usize).min(data.len()),
+                _ => data.len(),
+            };
+            Some(&data[start..end])
+        }
+        _ => None,
+    };
+
+    let icc_profile = icc_span.map(|(o, l)| &data[o as usize..(o + l) as usize]);
+    let xmp = xmp_span.map(|(o, l)| &data[o as usize..(o + l) as usize]);
+
     Ok(JxrContainer {
         image_width,
         image_height,
         pixel_format_uuid: pixel_format,
         orientation,
+        format,
         image_data,
+        alpha_data,
+        icc_profile,
+        xmp,
     })
 }
 
