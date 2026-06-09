@@ -895,6 +895,15 @@ button {
   font-size: 13px;
 }
 
+.selection-progress {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.selection-progress[hidden] {
+  display: none;
+}
+
 .selection-actions {
   display: flex;
   align-items: center;

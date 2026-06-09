@@ -450,47 +450,48 @@ pub enum RecrawlResult {
     Failed { error: String },
 }
 
-/// Re-pull the color cover for one book by hitting Amazon's `/images/P/`
-/// endpoint with its ASIN. Same fetch path the kfx_to_epub worker tail uses;
-/// this command is just the manual trigger from the right-click menu.
-#[tauri::command]
-pub async fn library_recrawl_cover(
-    state: State<'_, AppState>,
-    book_id: i64,
-) -> Result<RecrawlResult, String> {
-    let book = {
-        let conn = state.db.lock().await;
-        db::get_book(&conn, book_id).map_err(|e| e.to_string())?
-    };
-    let Some(book) = book else {
-        return Err("book not found".into());
-    };
+/// Internal outcome of re-fetching one book's cover. Mirrors `RecrawlResult`
+/// but stays inside Rust: the single-book command maps it to the tagged
+/// `RecrawlResult` the frontend toasts on, the bulk command just tallies it.
+enum RecrawlOutcome {
+    Updated { cover_path: String },
+    NoAsin,
+    Failed { error: String },
+}
+
+/// Re-fetch one book's color cover from Amazon and replace it everywhere we
+/// keep a copy: the cover sidecar (what the gallery shows), the picker
+/// thumbnail, the embedded EPUB cover (for external readers), and the embedded
+/// KFX cover (the on-device home tile / sleep-screen art). The EPUB/KFX swaps
+/// are best-effort — logged and skipped on failure, since the sidecar is
+/// authoritative for the sidle UI. Shared by `library_recrawl_cover` (single)
+/// and `library_recrawl_covers` (bulk).
+async fn recrawl_one(state: &AppState, book: &BookRow) -> RecrawlOutcome {
     let Some(asin) = book.asin.as_deref() else {
-        return Ok(RecrawlResult::NoAsin);
+        return RecrawlOutcome::NoAsin;
     };
     // Treat fabricated boko ASINs the same as missing — neither can resolve
-    // to a real `/images/P/` cover, so showing the user "no ASIN" is more
-    // honest than "fetch failed".
+    // to a real `/images/P/` cover, so "no ASIN" is more honest than "failed".
     if !cover_fetch::looks_like_real_amazon_asin(asin) {
-        return Ok(RecrawlResult::NoAsin);
+        return RecrawlOutcome::NoAsin;
     }
     let Some(bytes) = cover_fetch::fetch_color_cover(asin, &book.language).await else {
-        return Ok(RecrawlResult::Failed {
+        return RecrawlOutcome::Failed {
             error: "no cover returned (404, placeholder, or network error \
                     — see [sidle/cover-fetch] log lines)"
                 .into(),
-        });
+        };
     };
     let out = state.paths.cover(&book.sha256, "jpg");
     if let Err(e) = std::fs::write(&out, &bytes) {
-        return Ok(RecrawlResult::Failed {
+        return RecrawlOutcome::Failed {
             error: format!("write failed: {e}"),
-        });
+        };
     }
     let out_str = out.to_string_lossy().to_string();
     {
         let conn = state.db.lock().await;
-        let _ = db::set_cover_path(&conn, book_id, &out_str);
+        let _ = db::set_cover_path(&conn, book.id, &out_str);
     }
     // Refresh the picker thumbnail to match the re-fetched cover. Best-effort
     // (see library::thumbnail).
@@ -509,7 +510,7 @@ pub async fn library_recrawl_cover(
     // EPUB swap doesn't invalidate the user's "Re-fetch cover" action.
     if let Some(epub) = book.epub_path.as_deref()
         && let Err(e) = epub_cover::replace_cover(std::path::Path::new(epub), &bytes, "jpg") {
-            eprintln!("[sidle/recrawl] book {book_id} epub cover swap failed: {e:#}");
+            eprintln!("[sidle/recrawl] book {} epub cover swap failed: {e:#}", book.id);
         }
     // And into the imported KFX — that's the copy we push to the Kindle, and
     // its embedded cover drives the home tile / sleep-screen art. Rewriting it
@@ -518,14 +519,99 @@ pub async fn library_recrawl_cover(
         match kfx_cover::replace_cover(std::path::Path::new(kfx), &bytes) {
             Ok(new_sha) => {
                 let conn = state.db.lock().await;
-                let _ = db::set_kfx_path_and_sha(&conn, book_id, kfx, &new_sha);
+                let _ = db::set_kfx_path_and_sha(&conn, book.id, kfx, &new_sha);
             }
-            Err(e) => eprintln!("[sidle/recrawl] book {book_id} kfx cover swap failed: {e:#}"),
+            Err(e) => eprintln!("[sidle/recrawl] book {} kfx cover swap failed: {e:#}", book.id),
         }
     }
-    Ok(RecrawlResult::Updated {
+    RecrawlOutcome::Updated {
         cover_path: out_str,
+    }
+}
+
+/// Re-pull the color cover for one book by hitting Amazon's `/images/P/`
+/// endpoint with its ASIN. Same fetch path the kfx_to_epub worker tail uses;
+/// this command is just the manual trigger from the right-click menu.
+#[tauri::command]
+pub async fn library_recrawl_cover(
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<RecrawlResult, String> {
+    let book = {
+        let conn = state.db.lock().await;
+        db::get_book(&conn, book_id).map_err(|e| e.to_string())?
+    };
+    let Some(book) = book else {
+        return Err("book not found".into());
+    };
+    Ok(match recrawl_one(state.inner(), &book).await {
+        RecrawlOutcome::Updated { cover_path } => RecrawlResult::Updated { cover_path },
+        RecrawlOutcome::NoAsin => RecrawlResult::NoAsin,
+        RecrawlOutcome::Failed { error } => RecrawlResult::Failed { error },
     })
+}
+
+/// Per-book progress for a bulk cover re-fetch, emitted as
+/// `library:recrawl-progress`. The run is one slow Amazon round-trip (plus an
+/// EPUB/KFX rewrite) per book, so without this the selection bar would look
+/// frozen for minutes on a large batch.
+#[derive(Clone, Serialize)]
+struct RecrawlProgress {
+    done: usize,
+    total: usize,
+}
+
+/// Tally returned by `library_recrawl_covers`. `updated` got a fresh cover;
+/// `failed` returned no usable cover (404 / placeholder / network); `no_asin`
+/// had no real Amazon ASIN to fetch from and was skipped.
+#[derive(Debug, Serialize)]
+pub struct RecrawlBulkSummary {
+    updated: usize,
+    failed: usize,
+    no_asin: usize,
+}
+
+/// Re-fetch covers for a set of books — the selection bar's "Re-fetch covers"
+/// action (and the multi-select / whole-series context menus). Sequential, to
+/// match `library_import` and to hold one cheap DB lock at a time; emits
+/// `library:recrawl-progress` after each book. The frontend does a single
+/// `library_list` refresh when this returns rather than re-rendering per book.
+#[tauri::command]
+pub async fn library_recrawl_covers(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    book_ids: Vec<i64>,
+) -> Result<RecrawlBulkSummary, String> {
+    let total = book_ids.len();
+    let mut summary = RecrawlBulkSummary {
+        updated: 0,
+        failed: 0,
+        no_asin: 0,
+    };
+    for (i, id) in book_ids.iter().enumerate() {
+        let book = {
+            let conn = state.db.lock().await;
+            db::get_book(&conn, *id).map_err(|e| e.to_string())?
+        };
+        match book {
+            Some(book) => match recrawl_one(state.inner(), &book).await {
+                RecrawlOutcome::Updated { .. } => summary.updated += 1,
+                RecrawlOutcome::NoAsin => summary.no_asin += 1,
+                RecrawlOutcome::Failed { error } => {
+                    summary.failed += 1;
+                    eprintln!("[sidle/recrawl] book {} failed: {error}", book.id);
+                }
+            },
+            // Row vanished mid-run (e.g. removed by a parallel action). Count
+            // it as failed and keep going rather than aborting the batch.
+            None => summary.failed += 1,
+        }
+        let _ = app.emit(
+            "library:recrawl-progress",
+            RecrawlProgress { done: i + 1, total },
+        );
+    }
+    Ok(summary)
 }
 
 /// Outcome of the user "Change cover…" action in the metadata editor.

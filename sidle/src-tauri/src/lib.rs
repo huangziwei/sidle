@@ -68,6 +68,7 @@ pub fn run() {
             commands::library::library_amazon_search,
             commands::library::library_cover_path,
             commands::library::library_recrawl_cover,
+            commands::library::library_recrawl_covers,
             commands::library::library_set_cover,
             commands::library::library_pick_files,
             commands::library::library_pick_image,

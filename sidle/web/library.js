@@ -228,6 +228,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   subscribePullProgress();
   subscribeAnnotationSync();
   subscribeLibraryRowUpdated();
+  subscribeRecrawlProgress();
   // If the user left off in the Notes tab, populate it now that boot is done.
   if (state.section === "notes" && window.Notebooks) {
     window.Notebooks.setView(state.view);
@@ -2402,6 +2403,12 @@ function openContextMenu(x, y, b) {
       openMetadataModal(sel, { bulk: true }),
     );
     addReconvertItem(menu, `Force re-convert (${sel.length})`, sel);
+    const recrawlable = sel.filter((s) => s.asin && looksLikeRealAsin(s.asin));
+    if (recrawlable.length) {
+      add(menu, `Re-fetch covers (${recrawlable.length})`, () =>
+        bulkRecrawlCovers(sel),
+      );
+    }
     add(menu, `Remove ${sel.length} from library`, () => bulkRemove(), true);
   } else {
     // Single-item menu.
@@ -2458,6 +2465,12 @@ function openSeriesContextMenu(x, y, entry) {
     openMetadataModal(members, { bulk: true }),
   );
   addReconvertItem(menu, `Force re-convert all (${members.length})`, members);
+  const recrawlable = members.filter((b) => b.asin && looksLikeRealAsin(b.asin));
+  if (recrawlable.length) {
+    add(menu, `Re-fetch covers (${recrawlable.length})`, () =>
+      bulkRecrawlCovers(members),
+    );
+  }
   placeMenu(x, y);
 }
 
@@ -2545,6 +2558,7 @@ function wireSelection() {
     if (sel.length === 1) openMetadataModal(sel[0]);
     else if (sel.length > 1) openMetadataModal(sel, { bulk: true });
   });
+  $("#sel-recrawl").addEventListener("click", () => bulkRecrawlCovers(selectedBooks()));
   $("#sel-delete").addEventListener("click", bulkRemove);
   $("#sel-clear").addEventListener("click", clearSelection);
 
@@ -2895,6 +2909,16 @@ function renderSelectionBar() {
     eligibleUnsend.length && eligibleUnsend.length !== n
       ? `Remove from Kindle (${eligibleUnsend.length})`
       : "Remove from Kindle";
+
+  // Only books with a real Amazon ASIN can be re-fetched; show the count when
+  // it's a strict subset of the selection so the user knows some are skipped.
+  const eligibleRecrawl = sel.filter((b) => b.asin && looksLikeRealAsin(b.asin));
+  const recrawl = $("#sel-recrawl");
+  recrawl.disabled = eligibleRecrawl.length === 0;
+  recrawl.textContent =
+    eligibleRecrawl.length && eligibleRecrawl.length !== n
+      ? `Re-fetch covers (${eligibleRecrawl.length})`
+      : "Re-fetch covers";
 }
 
 async function bulkSend() {
@@ -2926,6 +2950,75 @@ async function bulkRetryConvert(books, color = false) {
   }
   const ok = books.length - failed;
   if (ok) showToast(`re-converting ${ok} book${ok === 1 ? "" : "s"}…`);
+}
+
+// Re-fetch color covers for every book in `books` that has a real Amazon ASIN
+// (selection bar, multi-select menu, or a whole series). The backend runs them
+// sequentially — one Amazon round-trip + EPUB/KFX cover rewrite per book — and
+// streams `library:recrawl-progress`; we refresh the gallery once at the end.
+// Overwrites each book's current cover (including a manually-set one), so we
+// confirm first. Guarded against re-entry while a run is in flight.
+let recrawlInFlight = false;
+async function bulkRecrawlCovers(books) {
+  if (recrawlInFlight) return;
+  const eligible = books.filter((b) => b.asin && looksLikeRealAsin(b.asin));
+  if (eligible.length === 0) {
+    showToast("no selected book has an Amazon ASIN to re-fetch", true);
+    return;
+  }
+  const n = eligible.length;
+  if (
+    !confirm(
+      `Re-fetch ${n === 1 ? "this cover" : `${n} covers`} from Amazon?\n\n` +
+        "Replaces the current cover with the latest high-resolution art.",
+    )
+  ) {
+    return;
+  }
+
+  recrawlInFlight = true;
+  const btn = $("#sel-recrawl");
+  const prog = $("#sel-recrawl-progress");
+  if (btn) btn.disabled = true;
+  if (prog) {
+    prog.hidden = false;
+    prog.textContent = `Fetching covers 0/${n}…`;
+  }
+  let summary;
+  try {
+    summary = await window.api.invoke("library_recrawl_covers", {
+      bookIds: eligible.map((b) => b.id),
+    });
+  } catch (e) {
+    showToast(`cover fetch error: ${e}`, true);
+    return;
+  } finally {
+    recrawlInFlight = false;
+    if (prog) prog.hidden = true;
+    if (btn) btn.disabled = false;
+  }
+
+  // Covers landed at the same sidecar paths, so each <img> src is unchanged —
+  // bump the cache-bust token to force reloads, then re-pull rows + render.
+  state.coverCacheBust += 1;
+  await refresh();
+  const parts = [`${summary.updated} updated`];
+  if (summary.failed) parts.push(`${summary.failed} no cover`);
+  if (summary.no_asin) parts.push(`${summary.no_asin} skipped`);
+  showToast(parts.join(" · "), summary.updated === 0);
+}
+
+// Progress for a bulk cover re-fetch, shown inline in the selection bar so a
+// multi-minute run doesn't look frozen.
+function subscribeRecrawlProgress() {
+  window.api.listen("library:recrawl-progress", (e) => {
+    const r = e?.payload;
+    if (!r) return;
+    const prog = $("#sel-recrawl-progress");
+    if (!prog) return;
+    prog.hidden = false;
+    prog.textContent = `Fetching covers ${r.done}/${r.total}…`;
+  });
 }
 
 async function bulkUnsend() {
