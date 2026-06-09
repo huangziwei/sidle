@@ -12,12 +12,14 @@ gives you a working codec. If you find it useful, take it (license below).
 
 ## What it supports today
 
-**Decoder** — the full T.832 codestream: all internal color formats (YONLY,
-YUV 4:2:0 / 4:2:2 / 4:4:4, YUVK, N-component), all output formats (incl. CMYK,
-CMYKDIRECT, RGBE), all bit depths (BD1 white/black, 8, 16, 16S, 16F, 32S, 32F,
-5, 565, 10 — incl. half/full float), all band modes (DCONLY → ALL_BANDS),
-planar alpha, overlap modes 0/1/2, tiling, frequency order, windowing,
-short/long headers. The **container** parser currently accepts the seven
+**Decoder** — the full T.832 codestream *syntax* (header, entropy coding,
+transforms): all band modes (DCONLY → ALL_BANDS), planar alpha, overlap modes
+0/1/2, tiling (uniform + non-uniform), frequency and spatial order, trimmed
+flexbits, windowing, short/long headers — verified bit-exact against the
+libjxr reference decoder across a minted matrix. *Reconstruction* currently
+covers YONLY / YUV 4:4:4 internal color (YUV 4:2:0 / 4:2:2 upsampling and the
+RGBE/some float output paths are explicit gaps, inherited from the Python
+source, scheduled in the roadmap). The **container** parser accepts the seven
 pixel-format GUIDs Kindle media uses (8bppGray, 16bppGray, 24bppBGR, 24bppRGB,
 32bppRGBA, 24bpp3Channels, 32bpp4Channels); decoded output is raw `i32` planes
 plus layout fields. Orientation tags are parsed but not yet applied.
