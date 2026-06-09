@@ -7,8 +7,14 @@
 //! we have to refetch from the product page.
 //!
 //! The cover Amazon shows on the product page is the original color art.
-//! We grab it from the public `/images/P/<ASIN>.<locale>...` pattern (same
-//! approach calibre uses for its Amazon metadata source).
+//! We grab it from the public `/images/P/<ASIN>.<locale>.<size>.jpg` pattern
+//! (same approach calibre uses for its Amazon metadata source).
+//!
+//! For `<size>` we prefer `_SCRM_`, which returns the full-resolution source
+//! render — typically 1400–2560px on the long edge. The legacy `LZZZZZZZ`
+//! ("large") code is capped at 500px, which bakes a soft, low-res cover into
+//! the library tiles and reader. We fall back to `LZZZZZZZ` only when `_SCRM_`
+//! has no art for that ASIN (see the placeholder note below).
 //!
 //! Locale code is picked from the book's `language` field — there's no
 //! marketplace marker inside KFX itself (verified against kfxlib's
@@ -18,8 +24,11 @@
 //! (which may be color if the KFX was produced from a color EPUB, or
 //! grayscale if it came from Amazon's monochrome-device build).
 //!
-//! The endpoint sometimes 200s with Amazon's "no image" placeholder
-//! (~hundreds of bytes); we reject anything under `PLACEHOLDER_THRESHOLD`.
+//! The endpoint sometimes 200s with a placeholder instead of art: Amazon's
+//! "no image" JPEG (~hundreds of bytes) for a missing cover, or — specific to
+//! `_SCRM_` — a 1×1 GIF sentinel (~43 bytes) for ASINs whose source render
+//! isn't published. Both fall under `PLACEHOLDER_THRESHOLD`, so the same size
+//! gate rejects them and lets the caller fall through to the next variant.
 
 use std::time::Duration;
 
@@ -48,10 +57,7 @@ pub async fn fetch_color_cover(asin: &str, language: &str) -> Option<Vec<u8>> {
         return None;
     }
     let locale = locale_for_language(language);
-    let url = format!(
-        "https://images-na.ssl-images-amazon.com/images/P/{asin}.{locale}.LZZZZZZZ.jpg"
-    );
-    eprintln!("[sidle/cover-fetch] GET {url} (language={language:?})");
+    eprintln!("[sidle/cover-fetch] asin={asin} language={language:?} locale={locale}");
 
     let client = match reqwest::Client::builder()
         .user_agent("sidle/0.1")
@@ -64,7 +70,25 @@ pub async fn fetch_color_cover(asin: &str, language: &str) -> Option<Vec<u8>> {
             return None;
         }
     };
-    let resp = match client.get(&url).send().await {
+
+    // Full-res source render first, capped legacy size as fallback. See the
+    // module docs for why `_SCRM_` wins and when it has to fall through.
+    let base = format!("https://images-na.ssl-images-amazon.com/images/P/{asin}.{locale}");
+    for suffix in ["_SCRM_", "LZZZZZZZ"] {
+        if let Some(bytes) = fetch_variant(&client, &format!("{base}.{suffix}.jpg")).await {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+/// Fetch one cover-URL variant. Returns the bytes only when the response is a
+/// 2xx whose body clears `PLACEHOLDER_THRESHOLD`; any network error, non-2xx,
+/// or sub-threshold body (Amazon's "no image" / 1×1 sentinel) yields `None` so
+/// the caller can try the next variant.
+async fn fetch_variant(client: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
+    eprintln!("[sidle/cover-fetch] GET {url}");
+    let resp = match client.get(url).send().await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[sidle/cover-fetch] request failed: {e}");
@@ -90,10 +114,7 @@ pub async fn fetch_color_cover(asin: &str, language: &str) -> Option<Vec<u8>> {
         );
         return None;
     }
-    eprintln!(
-        "[sidle/cover-fetch] OK: {} bytes from locale={locale}",
-        bytes.len()
-    );
+    eprintln!("[sidle/cover-fetch] OK: {} bytes", bytes.len());
     Some(bytes.to_vec())
 }
 
