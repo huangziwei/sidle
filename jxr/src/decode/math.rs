@@ -468,3 +468,36 @@ pub fn inv_toddodd_post(input: [i32; 4]) -> [i32; 4] {
     c[3] = c[3].wrapping_sub(c[0]);
     c
 }
+
+/// Table 170 — `OverlapPostFilter2x2`: the chroma 2×2 cross-junction filter
+/// (first-level overlap for YUV 4:2:0/4:2:2 block DCs).
+pub fn overlap_post_filter_2x2(input: [i32; 4]) -> [i32; 4] {
+    let mut c = input;
+    c[0] += c[3];
+    c[1] += c[2];
+    c[3] -= (c[0] + 1) >> 1;
+    c[2] -= (c[1] + 1) >> 1;
+    c[1] += (c[0] + 2) >> 2;
+    c[0] += (c[1] + 1) >> 1;
+    c[0] += c[1] >> 5;
+    c[0] += c[1] >> 9;
+    c[0] += c[1] >> 13;
+    c[1] += (c[0] + 2) >> 2;
+    c[3] += (c[0] + 1) >> 1;
+    c[2] += (c[1] + 1) >> 1;
+    c[0] -= c[3];
+    c[1] -= c[2];
+    c
+}
+
+/// Table 171 — `OverlapPostFilter2`: the chroma 2-point edge filter.
+pub fn overlap_post_filter_2(input: [i32; 2]) -> [i32; 2] {
+    let mut c = input;
+    c[1] += (c[0] + 2) >> 2;
+    c[0] += (c[1] + 1) >> 1;
+    c[0] += c[1] >> 5;
+    c[0] += c[1] >> 9;
+    c[0] += c[1] >> 13;
+    c[1] += (c[0] + 2) >> 2;
+    c
+}

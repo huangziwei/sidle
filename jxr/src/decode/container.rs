@@ -43,6 +43,9 @@ pub struct JxrContainer<'a> {
     pub image_width: u32,
     pub image_height: u32,
     pub pixel_format_uuid: String,
+    /// Presentation orientation from the SPATIAL_XFRM_PRIMARY tag (0..7;
+    /// 0 = none). NOT auto-applied — see [`crate::decode::apply_orientation`].
+    pub orientation: u8,
     /// WMPHOTO codestream bytes.
     pub image_data: &'a [u8],
 }
@@ -123,6 +126,7 @@ pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerErro
     let _ = ds.extract(skip, true)?;
 
     let mut pixel_format: Option<String> = None;
+    let mut orientation: u8 = 0;
     let mut image_width: Option<u32> = None;
     let mut image_height: Option<u32> = None;
     let mut image_offset: Option<u32> = None;
@@ -159,11 +163,15 @@ pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerErro
                 }
                 pixel_format = Some(format_jxr_uuid(&field_data[..16]));
             }
+            // A.7.19 SPATIAL_XFRM_PRIMARY: presentation orientation 0..7.
+            0xbc02 => {
+                orientation = field_value_u64(field_type, field_data).unwrap_or(0).min(7) as u8;
+            }
             0xbc80 => image_width = field_value_u64(field_type, field_data).map(|n| n as u32),
             0xbc81 => image_height = field_value_u64(field_type, field_data).map(|n| n as u32),
             0xbcc0 => image_offset = field_value_u64(field_type, field_data).map(|n| n as u32),
             0xbcc1 => image_byte_count = field_value_u64(field_type, field_data).map(|n| n as u32),
-            _ => {} // other fields (DPI, transformation, etc.) we don't need
+            _ => {} // other fields (DPI etc.) we don't need yet
         }
     }
 
@@ -202,6 +210,7 @@ pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerErro
         image_width,
         image_height,
         pixel_format_uuid: pixel_format,
+        orientation,
         image_data,
     })
 }

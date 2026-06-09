@@ -16,13 +16,16 @@ gives you a working codec. If you find it useful, take it (license below).
 transforms): all band modes (DCONLY → ALL_BANDS), planar alpha, overlap modes
 0/1/2, tiling (uniform + non-uniform), frequency and spatial order, trimmed
 flexbits, windowing, short/long headers — verified bit-exact against the
-libjxr reference decoder across a minted matrix. *Reconstruction* currently
-covers YONLY / YUV 4:4:4 internal color (YUV 4:2:0 / 4:2:2 upsampling and the
-RGBE/some float output paths are explicit gaps, inherited from the Python
-source, scheduled in the roadmap). The **container** parser accepts the seven
-pixel-format GUIDs Kindle media uses (8bppGray, 16bppGray, 24bppBGR, 24bppRGB,
-32bppRGBA, 24bpp3Channels, 32bpp4Channels); decoded output is raw `i32` planes
-plus layout fields. Orientation tags are parsed but not yet applied.
+libjxr reference decoder across a minted matrix. *Reconstruction* covers
+YONLY, YUV 4:4:4, and YUV 4:2:0 / 4:2:2 internal color (joint-coded chroma
+entropy, the 2×2/2-pt chroma transforms and dedicated chroma overlap
+filtering, and centering-aware upsampling — all oracle-verified pixel-exact);
+the RGBE / some float output paths remain explicit gaps inherited from the
+Python source, scheduled in the roadmap. The **container** parser accepts the
+seven pixel-format GUIDs Kindle media uses (8bppGray, 16bppGray, 24bppBGR,
+24bppRGB, 32bppRGBA, 24bpp3Channels, 32bpp4Channels); decoded output is raw
+`i32` planes plus layout fields. Orientation tags are parsed but not yet
+applied.
 
 **Encoder** — 8-bit grayscale (`8bppGray`/YONLY) and 8-bit color
 (`24bppRGB`/YUV 4:4:4): full ALL_BANDS (DC + LP + HP + flexbits) with multi-MB

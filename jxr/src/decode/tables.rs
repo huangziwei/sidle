@@ -224,7 +224,6 @@ pub fn cbplp_yuv1_444() -> &'static HashMap<u64, i32> {
     ]))
 }
 
-#[allow(dead_code)]
 pub fn cbplp_yuv1_42x() -> &'static HashMap<u64, i32> {
     static SLOT: OnceLock<HashMap<u64, i32>> = OnceLock::new();
     cached(&SLOT, || hbin(&[

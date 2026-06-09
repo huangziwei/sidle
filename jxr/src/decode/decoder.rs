@@ -51,6 +51,7 @@ impl From<DeserializerError> for DecodeError {
 type Result<T> = std::result::Result<T, DecodeError>;
 
 /// Decoded raster samples per component, sized to the original image area.
+#[derive(Clone)]
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
@@ -477,13 +478,6 @@ impl<'a> Decoder<'a> {
 
         self.ds.discard_remainder_bits();
 
-        if matches!(plane.internal_clr_fmt, INT_YUV420 | INT_YUV422) {
-            return Err(DecodeError::Unsupported(format!(
-                "internal color {} not supported",
-                plane.internal_clr_fmt
-            )));
-        }
-
         Ok(())
     }
 
@@ -845,7 +839,12 @@ impl<'a> Decoder<'a> {
                 let i_left_v = self.planes[p].mb[left.0][left.1].mb_dclp[2 * MB_DCLP_PER_COMP];
                 let i_top_v = self.planes[p].mb[top.0][top.1].mb_dclp[2 * MB_DCLP_PER_COMP];
                 let i_topleft_v = self.planes[p].mb[topleft.0][topleft.1].mb_dclp[2 * MB_DCLP_PER_COMP];
-                let i_scale = 2;
+                // Table 128: chroma weighting scale by subsampling.
+                let i_scale = match int_fmt {
+                    INT_YUV420 => 8,
+                    INT_YUV422 => 4,
+                    _ => 2,
+                };
                 i_str_hor = (i_topleft - i_left).abs() * i_scale
                     + (i_topleft_u - i_left_u).abs()
                     + (i_topleft_v - i_left_v).abs();
@@ -882,7 +881,9 @@ impl<'a> Decoder<'a> {
                     let top = self.planes[p].mb[mbx][mby].top_mb.unwrap();
                     let v_l = self.planes[p].mb[left.0][left.1].mb_dclp[dst];
                     let v_t = self.planes[p].mb[top.0][top.1].mb_dclp[dst];
-                    self.planes[p].mb[mbx][mby].mb_dclp[dst] += (v_t + v_l) >> 1;
+                    // Table 129: chroma of subsampled formats rounds up.
+                    let round = if i_comp > 0 && matches!(int_fmt, INT_YUV420 | INT_YUV422) { 1 } else { 0 };
+                    self.planes[p].mb[mbx][mby].mb_dclp[dst] += (v_t + v_l + round) >> 1;
                 }
                 _ => {}
             }
@@ -939,14 +940,17 @@ impl<'a> Decoder<'a> {
 
         let mut i_lap_mean = [0i32; 2];
         let plane_nc = self.planes[p].num_components;
-        let i_full_planes = plane_nc;
         let int_fmt = self.planes[p].internal_clr_fmt;
+        let is_42x = matches!(int_fmt, INT_YUV420 | INT_YUV422);
+        // Table 53: 420/422 code U and V jointly as one chroma "plane".
+        let i_full_planes = if is_42x { 2 } else { plane_nc };
 
         let i_cbplp: u32;
-        if int_fmt == INT_YUV444 {
+        if matches!(int_fmt, INT_YUV444 | INT_YUV420 | INT_YUV422) {
             let i_max = (i_full_planes as i32 * 4) - 5;
             if self.planes[p].count_zero_cbplp <= 0 || self.planes[p].count_max_cbplp < 0 {
-                let cbplp_yuv1 = self.ds.huff(tables::cbplp_yuv1_444())?;
+                let table = if is_42x { tables::cbplp_yuv1_42x() } else { tables::cbplp_yuv1_444() };
+                let cbplp_yuv1 = self.ds.huff(table)?;
                 i_cbplp = if self.planes[p].count_max_cbplp < self.planes[p].count_zero_cbplp {
                     (i_max - cbplp_yuv1) as u32
                 } else {
@@ -974,23 +978,57 @@ impl<'a> Decoder<'a> {
         for n in 0..i_full_planes {
             let i_index = chroma_component(n);
             if (i_cbplp >> n) & 1 == 1 {
-                let i_location = 1;
-                let block = self.decode_block(p, i_index != 0, i_location, ModelBand::LP)?;
-                i_lap_mean[i_index] += block.len() as i32;
+                if is_42x && n > 0 {
+                    // Joint U/V chroma block: one DECODE_BLOCK, coefficients
+                    // interleaved U,V with a FIXED inverse scan (Table 53).
+                    // Our LP storage is transpose-composed, so the spec's
+                    // `LPInput[c][iTransposeNNN[iRemap]]` is `lp_input[c][iRemap]`.
+                    let i_location = if int_fmt == INT_YUV420 { 10 } else { 2 };
+                    let block = self.decode_block(p, true, i_location, ModelBand::LP)?;
+                    i_lap_mean[1] += block.len() as i32;
+                    let mut temp = [0i32; 14];
+                    let mut i = 0usize;
+                    for (run, level) in &block {
+                        i += *run as usize;
+                        temp[i] = *level;
+                        i += 1;
+                    }
+                    const REMAP_ARR: [usize; 7] = [4, 1, 2, 3, 5, 6, 7];
+                    let (offset, count) = if int_fmt == INT_YUV420 { (1usize, 6usize) } else { (0, 14) };
+                    for (k, &t) in temp.iter().enumerate().take(count) {
+                        lp_input[(k & 1) + 1][REMAP_ARR[(k >> 1) + offset]] = t;
+                    }
+                } else {
+                    let i_location = 1;
+                    let block = self.decode_block(p, i_index != 0, i_location, ModelBand::LP)?;
+                    i_lap_mean[i_index] += block.len() as i32;
 
-                let mut i = 1usize;
-                for (run, level) in &block {
-                    i += *run as usize;
-                    self.adaptive_lp_scan(p, n, i, *level, &mut lp_input);
-                    i += 1;
+                    let mut i = 1usize;
+                    for (run, level) in &block {
+                        i += *run as usize;
+                        self.adaptive_lp_scan(p, n, i, *level, &mut lp_input);
+                        i += 1;
+                    }
                 }
             }
 
             let i_model_bits = self.planes[p].model_lp.m_bits[i_index];
             if i_model_bits > 0 {
-                for k in 1..16 {
-                    let cur = lp_input[n][k];
-                    lp_input[n][k] = self.refine_lp(cur, i_model_bits)?;
+                if is_42x && n > 0 {
+                    // Chroma refinement interleaves U,V per coefficient
+                    // (Table 53); linear order in our transposed storage.
+                    let jmax = if int_fmt == INT_YUV420 { 4 } else { 8 };
+                    for k in 1..jmax {
+                        let cur = lp_input[1][k];
+                        lp_input[1][k] = self.refine_lp(cur, i_model_bits)?;
+                        let cur = lp_input[2][k];
+                        lp_input[2][k] = self.refine_lp(cur, i_model_bits)?;
+                    }
+                } else {
+                    for k in 1..16 {
+                        let cur = lp_input[n][k];
+                        lp_input[n][k] = self.refine_lp(cur, i_model_bits)?;
+                    }
                 }
             }
         }
@@ -1003,7 +1041,15 @@ impl<'a> Decoder<'a> {
 
         for i in 0..plane_nc {
             let cbase = i * MB_DCLP_PER_COMP;
-            for j in 1..16 {
+            // Table 124: chroma of 420/422 carries only 3/7 LP coefficients.
+            let jmax = if i > 0 && int_fmt == INT_YUV420 {
+                4
+            } else if i > 0 && int_fmt == INT_YUV422 {
+                8
+            } else {
+                16
+            };
+            for j in 1..jmax {
                 self.planes[p].mb[mbx][mby].mb_dclp[cbase + j] = lp_input[i][j];
             }
         }
@@ -1032,7 +1078,42 @@ impl<'a> Decoder<'a> {
 
         for i in 0..plane_nc {
             let cbase = i * MB_DCLP_PER_COMP;
-            if mb_lp_mode == PREDICT_FROM_LEFT {
+            if i > 0 && int_fmt == INT_YUV420 {
+                // Table 133 (420 chroma), indices in our transposed storage:
+                // spec j=2 ↔ ours j=1 (left), spec j=1 ↔ ours j=2 (top).
+                if mb_lp_mode == PREDICT_FROM_LEFT {
+                    let lm = self.planes[p].mb[mbx][mby].left_mb.unwrap();
+                    let v = self.planes[p].mb[lm.0][lm.1].mb_dclp[cbase + 1];
+                    self.planes[p].mb[mbx][mby].mb_dclp[cbase + 1] += v;
+                } else if mb_lp_mode == PREDICT_FROM_TOP {
+                    let tm = self.planes[p].mb[mbx][mby].top_mb.unwrap();
+                    let v = self.planes[p].mb[tm.0][tm.1].mb_dclp[cbase + 2];
+                    self.planes[p].mb[mbx][mby].mb_dclp[cbase + 2] += v;
+                }
+            } else if i > 0 && int_fmt == INT_YUV422 {
+                // Table 133 (422 chroma) translated: spec {4,2,6} ↔ ours
+                // {4,1,5} (left); top: spec j4←top4, j1←top5, j5←own j1 ↔
+                // ours j4←top4, j2←top6, j6←own j2; and the MBDCMode==top
+                // special prediction applies even with LP prediction off.
+                if mb_lp_mode == PREDICT_FROM_LEFT {
+                    let lm = self.planes[p].mb[mbx][mby].left_mb.unwrap();
+                    for j in [4usize, 1, 5] {
+                        let v = self.planes[p].mb[lm.0][lm.1].mb_dclp[cbase + j];
+                        self.planes[p].mb[mbx][mby].mb_dclp[cbase + j] += v;
+                    }
+                } else if mb_lp_mode == PREDICT_FROM_TOP {
+                    let tm = self.planes[p].mb[mbx][mby].top_mb.unwrap();
+                    let v4 = self.planes[p].mb[tm.0][tm.1].mb_dclp[cbase + 4];
+                    self.planes[p].mb[mbx][mby].mb_dclp[cbase + 4] += v4;
+                    let v6 = self.planes[p].mb[tm.0][tm.1].mb_dclp[cbase + 6];
+                    self.planes[p].mb[mbx][mby].mb_dclp[cbase + 2] += v6;
+                    let v2 = self.planes[p].mb[mbx][mby].mb_dclp[cbase + 2];
+                    self.planes[p].mb[mbx][mby].mb_dclp[cbase + 6] += v2;
+                } else if mb_dc_mode == PREDICT_FROM_TOP {
+                    let v2 = self.planes[p].mb[mbx][mby].mb_dclp[cbase + 2];
+                    self.planes[p].mb[mbx][mby].mb_dclp[cbase + 6] += v2;
+                }
+            } else if mb_lp_mode == PREDICT_FROM_LEFT {
                 let lm = self.planes[p].mb[mbx][mby].left_mb.unwrap();
                 for j in [1, 2, 3].iter().copied() {
                     let v = self.planes[p].mb[lm.0][lm.1].mb_dclp[cbase + j];
@@ -1050,10 +1131,26 @@ impl<'a> Decoder<'a> {
         for i in 0..plane_nc {
             let scaling = self.planes[p].lp_qp.as_ref().unwrap().scaling_factor(i);
             let cbase = i * MB_DCLP_PER_COMP;
-            for j in 1..16 {
-                let v = self.planes[p].mb[mbx][mby].mb_dclp[cbase + j] * scaling;
-                let pos = 16 * ICT4X4_INV_PERM[j];
-                self.planes[p].mb[mbx][mby].mb_buffer[i * MB_BUF_PER_COMP + pos] = v;
+            if i > 0 && int_fmt == INT_YUV420 {
+                // Chroma DC-LP into SPEC-RASTER block DC slots: our mb_dclp
+                // is transpose-domain, so slot T420[j] gets dclp[j].
+                const T420: [usize; 4] = [0, 2, 1, 3];
+                for j in 1..4 {
+                    let v = self.planes[p].mb[mbx][mby].mb_dclp[cbase + j] * scaling;
+                    self.planes[p].mb[mbx][mby].mb_buffer[i * MB_BUF_PER_COMP + 16 * T420[j]] = v;
+                }
+            } else if i > 0 && int_fmt == INT_YUV422 {
+                const T422: [usize; 8] = [0, 2, 1, 3, 4, 6, 5, 7];
+                for j in 1..8 {
+                    let v = self.planes[p].mb[mbx][mby].mb_dclp[cbase + j] * scaling;
+                    self.planes[p].mb[mbx][mby].mb_buffer[i * MB_BUF_PER_COMP + 16 * T422[j]] = v;
+                }
+            } else {
+                for j in 1..16 {
+                    let v = self.planes[p].mb[mbx][mby].mb_dclp[cbase + j] * scaling;
+                    let pos = 16 * ICT4X4_INV_PERM[j];
+                    self.planes[p].mb[mbx][mby].mb_buffer[i * MB_BUF_PER_COMP + pos] = v;
+                }
             }
         }
 
@@ -1187,6 +1284,22 @@ impl<'a> Decoder<'a> {
                             i_diff_cbphp[k + 1] |= i_cbphp_chr << (i_block * 4);
                         }
                     }
+                } else if int_fmt == INT_YUV422 {
+                    // Table 57: chroma CBP is an 8-bit pattern (2×4 blocks);
+                    // CBPHP_CH_BLK shares the CHR_CBPHP code table.
+                    const I_SHIFT: [i32; 4] = [0, 1, 4, 5];
+                    i_diff_cbphp[0] |= (i_blk_cbphp & 0x0F) << (i_block * 4);
+                    for k in 0..2 {
+                        if (i_blk_cbphp >> (k + 4)) & 0x01 != 0 {
+                            let v = self.ds.huff(tables::chr_cbphp())?;
+                            let i_cbphp_chr = I_SHIFT[(v + 1) as usize];
+                            i_diff_cbphp[k + 1] |= i_cbphp_chr << I_SHIFT[i_block as usize];
+                        }
+                    }
+                } else if int_fmt == INT_YUV420 {
+                    i_diff_cbphp[0] |= (i_blk_cbphp & 0x0F) << (i_block * 4);
+                    i_diff_cbphp[1] |= ((i_blk_cbphp >> 4) & 0x01) << i_block;
+                    i_diff_cbphp[2] |= ((i_blk_cbphp >> 5) & 0x01) << i_block;
                 } else {
                     i_diff_cbphp[i_comp] |= i_blk_cbphp << (i_block * 4);
                 }
@@ -1199,12 +1312,118 @@ impl<'a> Decoder<'a> {
             self.planes[p].cbphp_model_hp.count_zeroes = [4, 4];
         }
 
-        for i_comp in 0..plane_nc {
+        // Table 65: 420/422 run the 444 predictor on luma only, then their
+        // own chroma predictors.
+        let pred_444_comps = if matches!(int_fmt, INT_YUV420 | INT_YUV422) { 1 } else { plane_nc };
+        for i_comp in 0..pred_444_comps {
             let v = self.pred_cbphp_444(p, i_comp, &i_diff_cbphp, mbx, mby);
             self.planes[p].mb[mbx][mby].mb_cbphp[i_comp] = v;
         }
+        if int_fmt == INT_YUV422 {
+            for i_comp in 1..3 {
+                let v = self.pred_cbphp_422(p, i_comp, &i_diff_cbphp, mbx, mby);
+                self.planes[p].mb[mbx][mby].mb_cbphp[i_comp] = v;
+            }
+        } else if int_fmt == INT_YUV420 {
+            for i_comp in 1..3 {
+                let v = self.pred_cbphp_420(p, i_comp, &i_diff_cbphp, mbx, mby);
+                self.planes[p].mb[mbx][mby].mb_cbphp[i_comp] = v;
+            }
+        }
 
         Ok(())
+    }
+
+    /// Table 67. Chroma CBPHP prediction for 4:2:2 (8-bit pattern, 2×4 blocks
+    /// in raster order). `iNOrig` counts double so the shared model update
+    /// stays on the 16-block scale.
+    fn pred_cbphp_422(
+        &mut self,
+        p: usize,
+        i_component: usize,
+        i_diff_cbphp: &[i32],
+        mbx: usize,
+        mby: usize,
+    ) -> i32 {
+        let mut i_cbphp = i_diff_cbphp[i_component];
+        let state = self.planes[p].cbphp_model_hp.cbphp_state[1];
+        if state == 0 {
+            if self.planes[p].mb[mbx][mby].is_left_edge {
+                if self.planes[p].mb[mbx][mby].is_top_edge {
+                    i_cbphp ^= 1;
+                } else {
+                    let tm = self.planes[p].mb[mbx][mby].top_mb.unwrap();
+                    i_cbphp ^= (self.planes[p].mb[tm.0][tm.1].mb_cbphp[i_component] >> 6) & 1;
+                }
+            } else {
+                let lm = self.planes[p].mb[mbx][mby].left_mb.unwrap();
+                i_cbphp ^= (self.planes[p].mb[lm.0][lm.1].mb_cbphp[i_component] >> 1) & 1;
+            }
+            i_cbphp ^= (i_cbphp & 0x01) << 1;
+            i_cbphp ^= (i_cbphp & 0x03) << 2;
+            i_cbphp ^= (i_cbphp & 0x0C) << 2;
+            i_cbphp ^= (i_cbphp & 0x30) << 2;
+        } else if state == 2 {
+            i_cbphp ^= 0x00FF;
+        }
+        let n_orig = num_ones(i_cbphp as u32) as i32 * 2;
+        self.update_cbphp_model(p, 1, n_orig);
+        i_cbphp
+    }
+
+    /// Table 68. Chroma CBPHP prediction for 4:2:0 (4-bit pattern, 2×2 blocks
+    /// in raster order). `iNOrig` counts ×4 for the shared model update.
+    fn pred_cbphp_420(
+        &mut self,
+        p: usize,
+        i_component: usize,
+        i_diff_cbphp: &[i32],
+        mbx: usize,
+        mby: usize,
+    ) -> i32 {
+        let mut i_cbphp = i_diff_cbphp[i_component];
+        let state = self.planes[p].cbphp_model_hp.cbphp_state[1];
+        if state == 0 {
+            if self.planes[p].mb[mbx][mby].is_left_edge {
+                if self.planes[p].mb[mbx][mby].is_top_edge {
+                    i_cbphp ^= 1;
+                } else {
+                    let tm = self.planes[p].mb[mbx][mby].top_mb.unwrap();
+                    i_cbphp ^= (self.planes[p].mb[tm.0][tm.1].mb_cbphp[i_component] >> 2) & 1;
+                }
+            } else {
+                let lm = self.planes[p].mb[mbx][mby].left_mb.unwrap();
+                i_cbphp ^= (self.planes[p].mb[lm.0][lm.1].mb_cbphp[i_component] >> 1) & 1;
+            }
+            i_cbphp ^= 0x02 & (i_cbphp << 1);
+            i_cbphp ^= (i_cbphp & 0x3) << 2;
+        } else if state == 2 {
+            i_cbphp ^= 0x0F;
+        }
+        let n_orig = num_ones(i_cbphp as u32) as i32 * 4;
+        self.update_cbphp_model(p, 1, n_orig);
+        i_cbphp
+    }
+
+    /// Table 106 UpdateCBPHPModel — shared by all three predictors.
+    fn update_cbphp_model(&mut self, p: usize, chroma_flag: usize, n_orig: i32) {
+        let m = &mut self.planes[p].cbphp_model_hp;
+        let i_n_diff = 3;
+        m.count_ones[chroma_flag] += n_orig - i_n_diff;
+        m.count_ones[chroma_flag] = clip(m.count_ones[chroma_flag], -16, 15);
+        m.count_zeroes[chroma_flag] += (16 - n_orig) - i_n_diff;
+        m.count_zeroes[chroma_flag] = clip(m.count_zeroes[chroma_flag], -16, 15);
+        m.cbphp_state[chroma_flag] = if m.count_ones[chroma_flag] < 0 {
+            if m.count_ones[chroma_flag] < m.count_zeroes[chroma_flag] {
+                1
+            } else {
+                2
+            }
+        } else if m.count_zeroes[chroma_flag] < 0 {
+            2
+        } else {
+            0
+        };
     }
 
     fn refine_cbphp(&mut self, i_num: i32) -> Result<i32> {
@@ -1252,25 +1471,7 @@ impl<'a> Decoder<'a> {
             i_cbphp ^= 0x0000FFFF;
         }
         let n_orig = num_ones(i_cbphp as u32) as i32;
-        // UpdateCBPHPModel
-        let m = &mut self.planes[p].cbphp_model_hp;
-        let i_n_diff = 3;
-        m.count_ones[chroma_flag] += n_orig - i_n_diff;
-        m.count_ones[chroma_flag] = clip(m.count_ones[chroma_flag], -16, 15);
-        m.count_zeroes[chroma_flag] += (16 - n_orig) - i_n_diff;
-        m.count_zeroes[chroma_flag] = clip(m.count_zeroes[chroma_flag], -16, 15);
-        m.cbphp_state[chroma_flag] = if m.count_ones[chroma_flag] < 0 {
-            if m.count_ones[chroma_flag] < m.count_zeroes[chroma_flag] {
-                1
-            } else {
-                2
-            }
-        } else if m.count_zeroes[chroma_flag] < 0 {
-            2
-        } else {
-            0
-        };
-
+        self.update_cbphp_model(p, chroma_flag, n_orig);
         i_cbphp
     }
 
@@ -1307,11 +1508,26 @@ impl<'a> Decoder<'a> {
             let strength_ver =
                 mb.mb_dclp[4].abs() + mb.mb_dclp[8].abs() + mb.mb_dclp[12].abs();
             let (mut s_hor, mut s_ver) = (strength_hor, strength_ver);
-            if !matches!(self.planes[p].internal_clr_fmt, INT_YONLY | INT_NCOMPONENT) {
+            let int_fmt = self.planes[p].internal_clr_fmt;
+            if !matches!(int_fmt, INT_YONLY | INT_NCOMPONENT) {
+                // Table 135 chroma terms, translated into our transposed
+                // mb_dclp storage (s_hor here ≙ spec iStrVer and vice versa).
                 for i in 1..3 {
                     let cbase = i * MB_DCLP_PER_COMP;
-                    s_hor += mb.mb_dclp[cbase + 1].abs();
-                    s_ver += mb.mb_dclp[cbase + 4].abs();
+                    match int_fmt {
+                        INT_YUV420 => {
+                            s_hor += mb.mb_dclp[cbase + 1].abs();
+                            s_ver += mb.mb_dclp[cbase + 2].abs();
+                        }
+                        INT_YUV422 => {
+                            s_hor += mb.mb_dclp[cbase + 1].abs() + mb.mb_dclp[cbase + 5].abs();
+                            s_ver += mb.mb_dclp[cbase + 2].abs() + mb.mb_dclp[cbase + 6].abs();
+                        }
+                        _ => {
+                            s_hor += mb.mb_dclp[cbase + 1].abs();
+                            s_ver += mb.mb_dclp[cbase + 4].abs();
+                        }
+                    }
                 }
             }
             let i_or_wt = 4;
@@ -1343,7 +1559,18 @@ impl<'a> Decoder<'a> {
             let i_cbphp_init = if do_hp { self.planes[p].mb[mbx][mby].mb_cbphp[i_comp] } else { 0 };
             let mut i_cbphp = i_cbphp_init;
 
-            for &i_block in &I_HIER_SCAN_ORDER {
+            // Tables 69/70/83: chroma of 420/422 has 4/8 blocks per MB and
+            // uses the IDENTITY block map (hier scan only for 16 blocks).
+            let int_fmt = self.planes[p].internal_clr_fmt;
+            let n_blocks = if i_comp > 0 && int_fmt == INT_YUV420 {
+                4
+            } else if i_comp > 0 && int_fmt == INT_YUV422 {
+                8
+            } else {
+                16
+            };
+            for raw_block in 0..n_blocks {
+                let i_block = if n_blocks == 16 { I_HIER_SCAN_ORDER[raw_block] } else { raw_block };
                 if do_hp {
                     let mode = self.planes[p].mb[mbx][mby].mb_hp_mode;
                     let i_num_non_zero = self.decode_block_adaptive(
@@ -1448,6 +1675,16 @@ impl<'a> Decoder<'a> {
 
     fn hp_transform_coefficient_decoding(&mut self, p: usize, mbx: usize, mby: usize) {
         let plane_nc = self.planes[p].num_components;
+        let int_fmt = self.planes[p].internal_clr_fmt;
+        let chroma_blocks = |i_comp: usize| -> usize {
+            if i_comp > 0 && int_fmt == INT_YUV420 {
+                4
+            } else if i_comp > 0 && int_fmt == INT_YUV422 {
+                8
+            } else {
+                16
+            }
+        };
         for i_comp in 0..plane_nc {
             let i_index = if i_comp == 0 { 0 } else { 1 };
             let scaling = self.planes[p].hp_qp.as_ref().unwrap().scaling_factor(i_comp);
@@ -1455,7 +1692,7 @@ impl<'a> Decoder<'a> {
 
             let hp_cbase = i_comp * HP_INPUT_PER_COMP;
             let mb_cbase = i_comp * MB_BUF_PER_COMP;
-            for blk in 0..16 {
+            for blk in 0..chroma_blocks(i_comp) {
                 let blk_off = blk * 16;
                 for j in 1..16 {
                     let vlc = self.planes[p].mb[mbx][mby].hp_input_vlc[hp_cbase + blk_off + j];
@@ -1466,12 +1703,19 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        for i_comp in 0..plane_nc {
-            let mode = self.planes[p].mb[mbx][mby].mb_hp_mode;
+        // HP prediction (Table 136). In-block coefficient indices are in our
+        // storage domain ({2,10,9} ≙ spec {1,2,3}; {1,5,6} ≙ spec {4,8,12});
+        // chroma 420/422 differ only in block-ID lists/strides (our chroma
+        // blocks are raster-indexed, matching the spec's lists directly).
+        let mode = self.planes[p].mb[mbx][mby].mb_hp_mode;
+        const K_TOP: [usize; 3] = [2, 10, 9];
+        const K_LEFT: [usize; 3] = [1, 5, 6];
+        let pred_comps = if matches!(int_fmt, INT_YUV420 | INT_YUV422) { 1 } else { plane_nc };
+        for i_comp in 0..pred_comps {
             let cbase = i_comp * MB_BUF_PER_COMP;
             if mode == PREDICT_FROM_TOP {
                 for &blk_id in &[1usize, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15] {
-                    for &k in &[2usize, 10, 9] {
+                    for &k in &K_TOP {
                         let v_prev = self.planes[p].mb[mbx][mby].mb_buffer
                             [cbase + 16 * (blk_id - 1) + k];
                         self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * blk_id + k] += v_prev;
@@ -1479,10 +1723,41 @@ impl<'a> Decoder<'a> {
                 }
             } else if mode == PREDICT_FROM_LEFT {
                 for blk_id in 4..16 {
-                    for &k in &[1usize, 5, 6] {
+                    for &k in &K_LEFT {
                         let v_prev = self.planes[p].mb[mbx][mby].mb_buffer
                             [cbase + 16 * (blk_id - 4) + k];
                         self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * blk_id + k] += v_prev;
+                    }
+                }
+            }
+        }
+        if matches!(int_fmt, INT_YUV420 | INT_YUV422) {
+            for i_comp in 1..3 {
+                let cbase = i_comp * MB_BUF_PER_COMP;
+                // Chroma blocks are SPEC-RASTER indexed (2 columns): our TOP
+                // ≙ spec mode 1 (stride −2 = row above), our LEFT ≙ spec
+                // mode 0 (stride −1 = column left).
+                let (top_blks, top_stride, left_blks, left_stride): (&[usize], usize, &[usize], usize) =
+                    if int_fmt == INT_YUV420 {
+                        (&[2, 3], 2, &[1, 3], 1)
+                    } else {
+                        (&[2, 4, 6, 3, 5, 7], 2, &[1, 3, 5, 7], 1)
+                    };
+                if mode == PREDICT_FROM_TOP {
+                    for &blk_id in top_blks {
+                        for &k in &K_TOP {
+                            let v_prev = self.planes[p].mb[mbx][mby].mb_buffer
+                                [cbase + 16 * (blk_id - top_stride) + k];
+                            self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * blk_id + k] += v_prev;
+                        }
+                    }
+                } else if mode == PREDICT_FROM_LEFT {
+                    for &blk_id in left_blks {
+                        for &k in &K_LEFT {
+                            let v_prev = self.planes[p].mb[mbx][mby].mb_buffer
+                                [cbase + 16 * (blk_id - left_stride) + k];
+                            self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * blk_id + k] += v_prev;
+                        }
                     }
                 }
             }
@@ -1771,9 +2046,18 @@ impl<'a> Decoder<'a> {
         ];
         let band_idx = band.as_index();
         i_lap_mean[0] *= i_weight0[band_idx];
-        i_lap_mean[1] *= i_weight1[band_idx][self.planes[p].num_components - 1];
-        if matches!(band, ModelBand::HP) {
-            i_lap_mean[1] >>= 4;
+        // Table 116: 420/422 chroma uses iWeight2 (joint-coded chroma scale),
+        // everything else iWeight1 by component count (+>>4 for HP).
+        const I_WEIGHT2: [i32; 6] = [120, 37, 2, 120, 18, 1];
+        match self.planes[p].internal_clr_fmt {
+            INT_YUV420 => i_lap_mean[1] *= I_WEIGHT2[band_idx],
+            INT_YUV422 => i_lap_mean[1] *= I_WEIGHT2[3 + band_idx],
+            _ => {
+                i_lap_mean[1] *= i_weight1[band_idx][self.planes[p].num_components - 1];
+                if matches!(band, ModelBand::HP) {
+                    i_lap_mean[1] >>= 4;
+                }
+            }
         }
 
         let i_num_models = if self.planes[p].internal_clr_fmt == INT_YONLY { 1 } else { 2 };
@@ -1842,23 +2126,349 @@ impl<'a> Decoder<'a> {
     fn first_level_inverse_transform(&mut self, p: usize) {
         let nc = self.planes[p].num_components;
         let scaled = self.planes[p].scaled_flag != 0;
+        let int_fmt = self.planes[p].internal_clr_fmt;
         for i in 0..nc {
             let cbase = i * MB_BUF_PER_COMP;
+            let chroma_42x = i > 0 && matches!(int_fmt, INT_YUV420 | INT_YUV422);
             for mby in 0..self.hdr.mb_height {
                 for mbx in 0..self.hdr.mb_width {
                     let mb = &mut self.planes[p].mb[mbx][mby];
-                    let mut dclp0 = [0i32; 16];
-                    for j in 0..16 {
-                        dclp0[j] = mb.mb_buffer[cbase + j * 16];
-                    }
-                    str_idct4x4_stage2(&mut dclp0);
-                    if i > 0 && scaled {
-                        for v in dclp0.iter_mut() {
-                            *v = v.wrapping_mul(2);
+                    if chroma_42x && int_fmt == INT_YUV420 {
+                        // Table 151, 420 chroma: 2×2 Hadamard + swap(1,2).
+                        // Block-DC slots hold spec-domain dequantized DC-LP.
+                        let mut d = [0i32; 4];
+                        for (j, dj) in d.iter_mut().enumerate() {
+                            *dj = mb.mb_buffer[cbase + j * 16];
+                        }
+                        d = t2x2h(d, 0);
+                        d.swap(1, 2);
+                        if scaled {
+                            for v in d.iter_mut() {
+                                *v = v.wrapping_mul(2);
+                            }
+                        }
+                        for (j, dj) in d.iter().enumerate() {
+                            mb.mb_buffer[cbase + j * 16] = *dj;
+                        }
+                    } else if chroma_42x {
+                        // Table 151, 422 chroma: T2pt{0,4}, T2x2h{0..3},
+                        // swap(1,2), T2x2h{4,6,5,7}, swap(5,6).
+                        let mut d = [0i32; 8];
+                        for (j, dj) in d.iter_mut().enumerate() {
+                            *dj = mb.mb_buffer[cbase + j * 16];
+                        }
+                        d[0] -= (d[4] + 1) >> 1;
+                        d[4] += d[0];
+                        let a = t2x2h([d[0], d[1], d[2], d[3]], 0);
+                        d[0] = a[0];
+                        d[1] = a[1];
+                        d[2] = a[2];
+                        d[3] = a[3];
+                        d.swap(1, 2);
+                        let b = t2x2h([d[4], d[6], d[5], d[7]], 0);
+                        d[4] = b[0];
+                        d[6] = b[1];
+                        d[5] = b[2];
+                        d[7] = b[3];
+                        d.swap(5, 6);
+                        if scaled {
+                            for v in d.iter_mut() {
+                                *v = v.wrapping_mul(2);
+                            }
+                        }
+                        for (j, dj) in d.iter().enumerate() {
+                            mb.mb_buffer[cbase + j * 16] = *dj;
+                        }
+                    } else {
+                        let mut dclp0 = [0i32; 16];
+                        for j in 0..16 {
+                            dclp0[j] = mb.mb_buffer[cbase + j * 16];
+                        }
+                        str_idct4x4_stage2(&mut dclp0);
+                        if i > 0 && scaled {
+                            for v in dclp0.iter_mut() {
+                                *v = v.wrapping_mul(2);
+                            }
+                        }
+                        for j in 0..16 {
+                            mb.mb_buffer[cbase + j * 16] = dclp0[j];
                         }
                     }
-                    for j in 0..16 {
-                        mb.mb_buffer[cbase + j * 16] = dclp0[j];
+                }
+            }
+        }
+    }
+
+    /// Read/write one chroma block DC (block `b`, spec-raster) of MB (x,y).
+    #[inline]
+    fn chroma_dc(&self, p: usize, cbase: usize, x: usize, y: usize, b: usize) -> i32 {
+        self.planes[p].mb[x][y].mb_buffer[cbase + 16 * b]
+    }
+
+    #[inline]
+    fn set_chroma_dc(&mut self, p: usize, cbase: usize, x: usize, y: usize, b: usize, v: i32) {
+        self.planes[p].mb[x][y].mb_buffer[cbase + 16 * b] = v;
+    }
+
+    /// Apply `OverlapPostFilter2x2` across the four (x, y, block) cells.
+    fn chroma_f2x2(&mut self, p: usize, cbase: usize, cells: [(usize, usize, usize); 4]) {
+        let v = overlap_post_filter_2x2([
+            self.chroma_dc(p, cbase, cells[0].0, cells[0].1, cells[0].2),
+            self.chroma_dc(p, cbase, cells[1].0, cells[1].1, cells[1].2),
+            self.chroma_dc(p, cbase, cells[2].0, cells[2].1, cells[2].2),
+            self.chroma_dc(p, cbase, cells[3].0, cells[3].1, cells[3].2),
+        ]);
+        for (k, &(x, y, b)) in cells.iter().enumerate() {
+            self.set_chroma_dc(p, cbase, x, y, b, v[k]);
+        }
+    }
+
+    /// Apply `OverlapPostFilter2` across two (x, y, block) cells.
+    fn chroma_f2(&mut self, p: usize, cbase: usize, cells: [(usize, usize, usize); 2]) {
+        let v = overlap_post_filter_2([
+            self.chroma_dc(p, cbase, cells[0].0, cells[0].1, cells[0].2),
+            self.chroma_dc(p, cbase, cells[1].0, cells[1].1, cells[1].2),
+        ]);
+        for (k, &(x, y, b)) in cells.iter().enumerate() {
+            self.set_chroma_dc(p, cbase, x, y, b, v[k]);
+        }
+    }
+
+    /// Tables 154/155 — first-level overlap filtering for 420/422 chroma
+    /// block DCs (overlap mode 2 only). Operates across MB boundaries on the
+    /// spec-raster block-DC slots; structure transcribed table-for-table
+    /// (corner difference → junction/edge filters → corner addition).
+    fn first_level_overlap_chroma(&mut self, p: usize, i: usize) {
+        let is420 = self.planes[p].internal_clr_fmt == INT_YUV420;
+        let cbase = i * MB_BUF_PER_COMP;
+        let hard = self.hdr.hard_tiling_flag != 0;
+        let cols = self.hdr.num_tile_cols;
+        let rows = self.hdr.num_tile_rows;
+        let left = self.hdr.left_mb_index_of_tile.clone();
+        let top = self.hdr.top_mb_index_of_tile.clone();
+        // Bottom-corner block indices differ: 420 row1 = {2,3}; 422 row3 = {6,7}.
+        let (bl, br) = if is420 { (2usize, 3usize) } else { (6usize, 7usize) };
+
+        for ty in 0..rows {
+            // Corner differences ("OverlapPostFilter1", −=).
+            if ty == 0 || hard {
+                let y = top[ty];
+                let d = self.chroma_dc(p, cbase, left[0], y, 1);
+                let v = self.chroma_dc(p, cbase, left[0], y, 0) - d;
+                self.set_chroma_dc(p, cbase, left[0], y, 0, v);
+                let xr = left[cols] - 1;
+                let d = self.chroma_dc(p, cbase, xr, y, 0);
+                let v = self.chroma_dc(p, cbase, xr, y, 1) - d;
+                self.set_chroma_dc(p, cbase, xr, y, 1, v);
+                if hard {
+                    for tx in 1..cols.saturating_sub(1) {
+                        let d = self.chroma_dc(p, cbase, left[tx], y, 1);
+                        let v = self.chroma_dc(p, cbase, left[tx], y, 0) - d;
+                        self.set_chroma_dc(p, cbase, left[tx], y, 0, v);
+                        let d = self.chroma_dc(p, cbase, left[tx] - 1, y, 0);
+                        let v = self.chroma_dc(p, cbase, left[tx] - 1, y, 1) - d;
+                        self.set_chroma_dc(p, cbase, left[tx] - 1, y, 1, v);
+                    }
+                }
+            }
+            if ty == rows - 1 || hard {
+                let y = top[ty + 1] - 1;
+                let d = self.chroma_dc(p, cbase, left[0], y, br);
+                let v = self.chroma_dc(p, cbase, left[0], y, bl) - d;
+                self.set_chroma_dc(p, cbase, left[0], y, bl, v);
+                let xr = left[cols] - 1;
+                let d = self.chroma_dc(p, cbase, xr, y, bl);
+                let v = self.chroma_dc(p, cbase, xr, y, br) - d;
+                self.set_chroma_dc(p, cbase, xr, y, br, v);
+                if hard {
+                    for tx in 1..cols.saturating_sub(1) {
+                        let d = self.chroma_dc(p, cbase, left[tx], y, br);
+                        let v = self.chroma_dc(p, cbase, left[tx], y, bl) - d;
+                        self.set_chroma_dc(p, cbase, left[tx], y, bl, v);
+                        let d = self.chroma_dc(p, cbase, left[tx] - 1, y, bl);
+                        let v = self.chroma_dc(p, cbase, left[tx] - 1, y, br) - d;
+                        self.set_chroma_dc(p, cbase, left[tx] - 1, y, br, v);
+                    }
+                }
+            }
+
+            for tx in 0..cols {
+                let (x0, x1) = (left[tx], left[tx + 1]);
+                let (y0, y1) = (top[ty], top[ty + 1]);
+                if is420 {
+                    // Interior 2×2 junctions (across both MB axes).
+                    for y in y0..y1.saturating_sub(1) {
+                        for x in x0..x1.saturating_sub(1) {
+                            self.chroma_f2x2(p, cbase,
+                                [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                        }
+                    }
+                } else {
+                    // 422: within-MB row1↔row2 junction for every MB pair;
+                    // across-MB row3↔row0 guarded to non-last rows.
+                    for y in y0..y1 {
+                        for x in x0..x1.saturating_sub(1) {
+                            self.chroma_f2x2(p, cbase,
+                                [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)]);
+                            if y != y1 - 1 {
+                                self.chroma_f2x2(p, cbase,
+                                    [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                            }
+                        }
+                    }
+                }
+                if tx == 0 || hard {
+                    let x = x0;
+                    if is420 {
+                        for y in y0..y1.saturating_sub(1) {
+                            self.chroma_f2(p, cbase, [(x, y, 2), (x, y + 1, 0)]);
+                        }
+                    } else {
+                        for y in y0..y1 {
+                            self.chroma_f2(p, cbase, [(x, y, 2), (x, y, 4)]);
+                            if y != y1 - 1 {
+                                self.chroma_f2(p, cbase, [(x, y, 6), (x, y + 1, 0)]);
+                            }
+                        }
+                    }
+                }
+                if tx == cols - 1 || hard {
+                    let x = x1 - 1;
+                    if is420 {
+                        for y in y0..y1.saturating_sub(1) {
+                            self.chroma_f2(p, cbase, [(x, y, 3), (x, y + 1, 1)]);
+                        }
+                    } else {
+                        for y in y0..y1 {
+                            self.chroma_f2(p, cbase, [(x, y, 3), (x, y, 5)]);
+                            if y != y1 - 1 {
+                                self.chroma_f2(p, cbase, [(x, y, 7), (x, y + 1, 1)]);
+                            }
+                        }
+                    }
+                }
+                if ty == 0 || hard {
+                    let y = y0;
+                    for x in x0..x1.saturating_sub(1) {
+                        self.chroma_f2(p, cbase, [(x, y, 1), (x + 1, y, 0)]);
+                    }
+                }
+                if ty == rows - 1 || hard {
+                    let y = y1 - 1;
+                    for x in x0..x1.saturating_sub(1) {
+                        self.chroma_f2(p, cbase, [(x, y, br), (x + 1, y, bl)]);
+                    }
+                }
+                if !hard && tx != cols - 1 {
+                    // Right across (soft tile boundary).
+                    let x = x1 - 1;
+                    for y in y0..y1.saturating_sub(1) {
+                        if is420 {
+                            self.chroma_f2x2(p, cbase,
+                                [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                        } else {
+                            self.chroma_f2x2(p, cbase,
+                                [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)]);
+                            self.chroma_f2x2(p, cbase,
+                                [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                        }
+                    }
+                }
+                if !hard && ty != rows - 1 {
+                    // Bottom across.
+                    let y = y1 - 1;
+                    for x in x0..x1.saturating_sub(1) {
+                        if is420 {
+                            self.chroma_f2x2(p, cbase,
+                                [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                        } else {
+                            self.chroma_f2x2(p, cbase,
+                                [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)]);
+                            self.chroma_f2x2(p, cbase,
+                                [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                        }
+                    }
+                }
+                if !hard && tx != cols - 1 && ty != rows - 1 {
+                    // Diagonal.
+                    let (x, y) = (x1 - 1, y1 - 1);
+                    if is420 {
+                        self.chroma_f2x2(p, cbase,
+                            [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                    } else {
+                        self.chroma_f2x2(p, cbase,
+                            [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)]);
+                        self.chroma_f2x2(p, cbase,
+                            [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                    }
+                }
+                if !hard && tx == 0 && ty != rows - 1 {
+                    // Left-edge continuation across the soft tile boundary.
+                    let (x, y) = (x0, y1 - 1);
+                    if is420 {
+                        self.chroma_f2(p, cbase, [(x, y, 2), (x, y + 1, 0)]);
+                    } else {
+                        self.chroma_f2(p, cbase, [(x, y, 2), (x, y, 4)]);
+                        self.chroma_f2(p, cbase, [(x, y, 6), (x, y + 1, 0)]);
+                    }
+                }
+                if !hard && tx == cols - 1 && ty != rows - 1 {
+                    let (x, y) = (x1 - 1, y1 - 1);
+                    if is420 {
+                        self.chroma_f2(p, cbase, [(x, y, 3), (x, y + 1, 1)]);
+                    } else {
+                        self.chroma_f2(p, cbase, [(x, y, 3), (x, y, 5)]);
+                        self.chroma_f2(p, cbase, [(x, y, 7), (x, y + 1, 1)]);
+                    }
+                }
+                if !hard && tx != cols - 1 && ty == 0 {
+                    let (x, y) = (x1 - 1, y0);
+                    self.chroma_f2(p, cbase, [(x, y, 1), (x + 1, y, 0)]);
+                }
+                if !hard && tx != cols - 1 && ty == rows - 1 {
+                    let (x, y) = (x1 - 1, y1 - 1);
+                    self.chroma_f2(p, cbase, [(x, y, br), (x + 1, y, bl)]);
+                }
+            }
+
+            // Corner additions (+=), undoing the pre-differences.
+            if ty == 0 || hard {
+                let y = top[ty];
+                let d = self.chroma_dc(p, cbase, left[0], y, 1);
+                let v = self.chroma_dc(p, cbase, left[0], y, 0) + d;
+                self.set_chroma_dc(p, cbase, left[0], y, 0, v);
+                let xr = left[cols] - 1;
+                let d = self.chroma_dc(p, cbase, xr, y, 0);
+                let v = self.chroma_dc(p, cbase, xr, y, 1) + d;
+                self.set_chroma_dc(p, cbase, xr, y, 1, v);
+                if hard {
+                    for tx in 1..cols.saturating_sub(1) {
+                        let d = self.chroma_dc(p, cbase, left[tx], y, 1);
+                        let v = self.chroma_dc(p, cbase, left[tx], y, 0) + d;
+                        self.set_chroma_dc(p, cbase, left[tx], y, 0, v);
+                        let d = self.chroma_dc(p, cbase, left[tx] - 1, y, 0);
+                        let v = self.chroma_dc(p, cbase, left[tx] - 1, y, 1) + d;
+                        self.set_chroma_dc(p, cbase, left[tx] - 1, y, 1, v);
+                    }
+                }
+            }
+            if ty == rows - 1 || hard {
+                let y = top[ty + 1] - 1;
+                let d = self.chroma_dc(p, cbase, left[0], y, br);
+                let v = self.chroma_dc(p, cbase, left[0], y, bl) + d;
+                self.set_chroma_dc(p, cbase, left[0], y, bl, v);
+                let xr = left[cols] - 1;
+                let d = self.chroma_dc(p, cbase, xr, y, bl);
+                let v = self.chroma_dc(p, cbase, xr, y, br) + d;
+                self.set_chroma_dc(p, cbase, xr, y, br, v);
+                if hard {
+                    for tx in 1..cols.saturating_sub(1) {
+                        let d = self.chroma_dc(p, cbase, left[tx], y, br);
+                        let v = self.chroma_dc(p, cbase, left[tx], y, bl) + d;
+                        self.set_chroma_dc(p, cbase, left[tx], y, bl, v);
+                        let d = self.chroma_dc(p, cbase, left[tx] - 1, y, bl);
+                        let v = self.chroma_dc(p, cbase, left[tx] - 1, y, br) + d;
+                        self.set_chroma_dc(p, cbase, left[tx] - 1, y, br, v);
                     }
                 }
             }
@@ -1891,6 +2501,11 @@ impl<'a> Decoder<'a> {
         let zzz_lookup = |z: usize| -> usize { XY_TRANSPOSE[z] * 16 };
 
         for i in 0..nc {
+            if i > 0 && matches!(self.planes[p].internal_clr_fmt, INT_YUV420 | INT_YUV422) {
+                // Tables 154/155: dedicated chroma geometry.
+                self.first_level_overlap_chroma(p, i);
+                continue;
+            }
             for tx in 0..self.hdr.num_tile_cols {
                 for ty in 0..self.hdr.num_tile_rows {
                     let first_mbx = self.hdr.left_mb_index_of_tile[tx];
@@ -1977,14 +2592,26 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// Blocks per MB for component `i`: 4/8 for 420/422 chroma, else 16.
+    fn blocks_per_mb(&self, p: usize, i: usize) -> usize {
+        if i > 0 && self.planes[p].internal_clr_fmt == INT_YUV420 {
+            4
+        } else if i > 0 && self.planes[p].internal_clr_fmt == INT_YUV422 {
+            8
+        } else {
+            16
+        }
+    }
+
     fn second_level_inverse_transform(&mut self, p: usize) {
         let nc = self.planes[p].num_components;
         for i in 0..nc {
+            let nblk = self.blocks_per_mb(p, i);
             let cbase = i * MB_BUF_PER_COMP;
             for mby in 0..self.hdr.mb_height {
                 for mbx in 0..self.hdr.mb_width {
                     let mb = &mut self.planes[p].mb[mbx][mby];
-                    for j in 0..16 {
+                    for j in 0..nblk {
                         let block = &mut mb.mb_buffer[cbase + j * 16..cbase + j * 16 + 16];
                         let mut coeff = [0i32; 16];
                         coeff.copy_from_slice(block);
@@ -2000,28 +2627,60 @@ impl<'a> Decoder<'a> {
         let nc = self.planes[p].num_components;
         let w = self.hdr.width as usize;
         let h = self.hdr.height as usize;
-        let mut ip: Vec<Plane2D> = (0..nc).map(|_| Plane2D::new(w, h)).collect();
+        let int_fmt = self.planes[p].internal_clr_fmt;
+        let mut ip: Vec<Plane2D> = (0..nc)
+            .map(|i| {
+                let (cw, ch) = self.component_extended_dims(int_fmt, i, w, h);
+                Plane2D::new(cw, ch)
+            })
+            .collect();
         for i in 0..nc {
             let plane2d = &mut ip[i];
             let stride = plane2d.stride;
             let cbase = i * MB_BUF_PER_COMP;
-            for mby in 0..self.hdr.mb_height {
-                let mbyy = mby << 4;
-                for mbx in 0..self.hdr.mb_width {
-                    let mbxx = mbx << 4;
-                    let mb = &self.planes[p].mb[mbx][mby];
-                    for by in 0..4 {
-                        let by_x4 = mbyy + (by << 2);
-                        let by_x16 = by << 4;
-                        for bx in 0..4 {
-                            let bx_x4 = mbxx + (bx << 2);
-                            let bx_x64 = bx << 6;
+            if i > 0 && matches!(int_fmt, INT_YUV420 | INT_YUV422) {
+                // Table 157 chroma arms: blocks are raster-indexed, 2 per
+                // row; MB footprint is 8 px wide (and 8 px tall for 420).
+                let nblk = if int_fmt == INT_YUV420 { 4 } else { 8 };
+                let mb_h = if int_fmt == INT_YUV420 { 8 } else { 16 };
+                for mby in 0..self.hdr.mb_height {
+                    let mbyy = mby * mb_h;
+                    for mbx in 0..self.hdr.mb_width {
+                        let mbxx = mbx * 8;
+                        let mb = &self.planes[p].mb[mbx][mby];
+                        for j in 0..nblk {
+                            let bx4 = mbxx + 4 * (j % 2);
+                            let by4 = mbyy + 4 * (j / 2);
+                            let blk_off = cbase + 16 * j;
                             for py in 0..4 {
-                                let py_x4 = py << 2;
-                                let row = by_x4 + py;
+                                let row = by4 + py;
                                 for px in 0..4 {
-                                    plane2d.data[row * stride + bx_x4 + px] =
-                                        mb.mb_buffer[cbase + by_x16 + bx_x64 + MB_PIXEL_MAP[px + py_x4]];
+                                    plane2d.data[row * stride + bx4 + px] =
+                                        mb.mb_buffer[blk_off + MB_PIXEL_MAP[px + 4 * py]];
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                for mby in 0..self.hdr.mb_height {
+                    let mbyy = mby << 4;
+                    for mbx in 0..self.hdr.mb_width {
+                        let mbxx = mbx << 4;
+                        let mb = &self.planes[p].mb[mbx][mby];
+                        for by in 0..4 {
+                            let by_x4 = mbyy + (by << 2);
+                            let by_x16 = by << 4;
+                            for bx in 0..4 {
+                                let bx_x4 = mbxx + (bx << 2);
+                                let bx_x64 = bx << 6;
+                                for py in 0..4 {
+                                    let py_x4 = py << 2;
+                                    let row = by_x4 + py;
+                                    for px in 0..4 {
+                                        plane2d.data[row * stride + bx_x4 + px] =
+                                            mb.mb_buffer[cbase + by_x16 + bx_x64 + MB_PIXEL_MAP[px + py_x4]];
+                                    }
                                 }
                             }
                         }
@@ -2032,15 +2691,31 @@ impl<'a> Decoder<'a> {
         self.planes[p].image_plane = ip;
     }
 
+    /// Extended (MB-padded) dimensions of component `i`'s plane.
+    fn component_extended_dims(&self, int_fmt: u8, i: usize, w: usize, h: usize) -> (usize, usize) {
+        if i > 0 && int_fmt == INT_YUV420 {
+            (w / 2, h / 2)
+        } else if i > 0 && int_fmt == INT_YUV422 {
+            (w / 2, h)
+        } else {
+            (w, h)
+        }
+    }
+
     fn second_level_overlap_filtering(&mut self, p: usize) {
         let nc = self.planes[p].num_components;
+        let int_fmt = self.planes[p].internal_clr_fmt;
         for i in 0..nc {
+            // Table 159: identical structure for chroma, with coordinates
+            // divided by the subsampling factors.
+            let dx = if i > 0 && matches!(int_fmt, INT_YUV420 | INT_YUV422) { 2 } else { 1 };
+            let dy = if i > 0 && int_fmt == INT_YUV420 { 2 } else { 1 };
             for tx in 0..self.hdr.num_tile_cols {
                 for ty in 0..self.hdr.num_tile_rows {
-                    let first_mbx = self.hdr.left_mb_index_of_tile[tx] * 16;
-                    let next_mbx = self.hdr.left_mb_index_of_tile[tx + 1] * 16;
-                    let first_mby = self.hdr.top_mb_index_of_tile[ty] * 16;
-                    let next_mby = self.hdr.top_mb_index_of_tile[ty + 1] * 16;
+                    let first_mbx = self.hdr.left_mb_index_of_tile[tx] * 16 / dx;
+                    let next_mbx = self.hdr.left_mb_index_of_tile[tx + 1] * 16 / dx;
+                    let first_mby = self.hdr.top_mb_index_of_tile[ty] * 16 / dy;
+                    let next_mby = self.hdr.top_mb_index_of_tile[ty + 1] * 16 / dy;
 
                     let ip = &mut self.planes[p].image_plane[i];
 
@@ -2188,7 +2863,14 @@ impl<'a> Decoder<'a> {
             return Ok(());
         }
 
-        if int_fmt == INT_YUV444 && out_fmt == OUT_RGB {
+        if matches!(int_fmt, INT_YUV420 | INT_YUV422) && out_fmt == OUT_RGB {
+            // Table 178: 420 upsamples vertically then horizontally; 422
+            // horizontally only. After that the planes are 4:4:4-shaped and
+            // the standard YUV444→RGB conversion below applies.
+            self.upsample_chroma(p);
+        }
+
+        if matches!(int_fmt, INT_YUV444 | INT_YUV420 | INT_YUV422) && out_fmt == OUT_RGB {
             let do_swap = matches!(self.hdr.output_bitdepth, BD5 | BD565 | BD10)
                 && self.hdr.red_blue_not_swapped_flag == 0;
             // Get disjoint mutable borrows of the three component planes
@@ -2229,6 +2911,60 @@ impl<'a> Decoder<'a> {
             )));
         }
         Ok(())
+    }
+
+    /// Table 180 chroma upsampling (separable; taps by chroma centering).
+    /// Replaces chroma planes with full-extended-size planes.
+    fn upsample_chroma(&mut self, p: usize) {
+        let int_fmt = self.planes[p].internal_clr_fmt;
+        let cx = self.planes[p].chroma_centering_x as usize;
+        let cy = self.planes[p].chroma_centering_y as usize;
+        const TAPS: [[i32; 4]; 5] = [
+            [4, 4, 0, 8],
+            [5, 3, 1, 7],
+            [6, 2, 2, 6],
+            [7, 1, 3, 5],
+            [8, 0, 4, 4],
+        ];
+        let up_1d = |ori: &[i32], out: &mut [i32], h: &[i32; 4]| {
+            let n = ori.len();
+            for k in 0..n {
+                let prev = ori[k.saturating_sub(1)];
+                let next = ori[(k + 1).min(n - 1)];
+                out[2 * k] = (h[2] * prev + h[3] * ori[k] + 4) >> 3;
+                out[2 * k + 1] = (h[0] * ori[k] + h[1] * next + 4) >> 3;
+            }
+        };
+        for i in 1..3 {
+            let mut plane = std::mem::replace(&mut self.planes[p].image_plane[i], Plane2D::new(0, 0));
+            if int_fmt == INT_YUV420 {
+                // Vertical first (Table 178).
+                let (w, h) = (plane.stride, plane.height);
+                let mut vert = Plane2D::new(w, h * 2);
+                let mut col_in = vec![0i32; h];
+                let mut col_out = vec![0i32; h * 2];
+                for x in 0..w {
+                    for y in 0..h {
+                        col_in[y] = plane.data[y * w + x];
+                    }
+                    up_1d(&col_in, &mut col_out, &TAPS[cy.min(4)]);
+                    for y in 0..h * 2 {
+                        vert.data[y * w + x] = col_out[y];
+                    }
+                }
+                plane = vert;
+            }
+            // Horizontal (both 420 and 422).
+            let (w, h) = (plane.stride, plane.height);
+            let mut horiz = Plane2D::new(w * 2, h);
+            let mut row_out = vec![0i32; w * 2];
+            for y in 0..h {
+                let row_in = &plane.data[y * w..(y + 1) * w];
+                up_1d(row_in, &mut row_out, &TAPS[cx.min(4)]);
+                horiz.data[y * w * 2..(y + 1) * w * 2].copy_from_slice(&row_out);
+            }
+            self.planes[p].image_plane[i] = horiz;
+        }
     }
 
     fn add_bias(&mut self, p: usize) -> Result<()> {
