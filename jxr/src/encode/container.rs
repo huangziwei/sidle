@@ -38,6 +38,10 @@ pub mod pixel_format {
     pub const GRAY32_FIXED: [u8; 16] = guid(0x3f);
     /// `96bppRGBFixed` — three signed 32-bit fixed-point channels (BD32S).
     pub const RGB96_FIXED: [u8; 16] = guid(0x18);
+    /// `16bppGrayHalf` — single IEEE-754 half plane (BD16F).
+    pub const GRAY16_HALF: [u8; 16] = guid(0x3e);
+    /// `48bppRGBHalf` — three IEEE-754 half channels (BD16F).
+    pub const RGB48_HALF: [u8; 16] = guid(0x3b);
 }
 
 const TIFF_TYPE_BYTE: u16 = 1;

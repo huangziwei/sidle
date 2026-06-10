@@ -2404,6 +2404,80 @@ mod tests {
     }
 
     #[test]
+    fn deep_f16_q1_bit_pattern_exact() {
+        use crate::decode::consts::BD16F;
+        let mut r = Lcg(0xf16_0001);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        // Arbitrary bit patterns — NaN payloads, infinities, denormals all
+        // included. The single non-survivor: -0.0 (0x8000) canonicalizes to
+        // +0.0, exactly as the reference encoder does (probed).
+        let canon = |v: u16| -> i32 { if v == 0x8000 { 0 } else { v as i32 } };
+        let gray: Vec<u16> = (0..n).map(|_| (r.next() >> 32) as u16).collect();
+        let planes = [gray.clone()];
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::F16(&planes),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc93e", "16bppGrayHalf GUID");
+        let hd = headers_of(&jxr);
+        assert_eq!(hd.hdr.output_bitdepth, BD16F);
+        let d = decode_to_planes(&jxr);
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], canon(gray[i]), "gray px{i} bits {:#06x}", gray[i]);
+        }
+        // Specials, explicitly: ±0, ±Inf, quiet/neg NaN, ±denormal, ±1.0.
+        let mut specials =
+            vec![0x0000u16, 0x8000, 0x7c00, 0xfc00, 0x7e00, 0xfe00, 0x0001, 0x8001, 0x3c00, 0xbc00];
+        specials.resize(256, 0x4248); // pad to 16x16 with 3.14-ish
+        let planes = [specials.clone()];
+        let input = TypedInput {
+            width: 16,
+            height: 16,
+            samples: SamplePlanes::F16(&planes),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
+        let d = decode_to_planes(&jxr);
+        for (i, &s) in specials.iter().enumerate() {
+            assert_eq!(d.image_plane[0][i], canon(s), "special {s:#06x}");
+        }
+        // RGB halfs + scaled gray: both stay bit-pattern-exact at q1.
+        let rgb: [Vec<u16>; 3] =
+            std::array::from_fn(|_| (0..n).map(|_| (r.next() >> 32) as u16).collect());
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::F16(&rgb),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc93b", "48bppRGBHalf GUID");
+        let d = decode_to_planes(&jxr);
+        for c in 0..3 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i], canon(rgb[c][i]), "ch{c} px{i}");
+            }
+        }
+        let planes = [gray.clone()];
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::F16(&planes),
+            premultiplied_alpha: false,
+        };
+        let opts = EncodeOptions { scaled: true, ..Default::default() };
+        let jxr = encode_typed(&input, ColorMode::Grayscale, opts).unwrap();
+        let d = decode_to_planes(&jxr);
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], canon(gray[i]), "scaled px{i}");
+        }
+    }
+
+    #[test]
     fn deep_scaled_u16_gray_q1_exact() {
         // Scaled arithmetic stays exactly invertible for 16-bit gray, as for
         // 8-bit: the conversion's `<< 3` is floored back by the decoder's
