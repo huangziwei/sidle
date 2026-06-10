@@ -15,7 +15,7 @@
 //! forces unscaled arithmetic for 32-bit depths (`strenc.c:961`); we reject
 //! `scaled` there instead of silently clearing it.
 
-use crate::decode::consts::{BD16, BD16F, BD16S, BD32S, BD8};
+use crate::decode::consts::{BD16, BD16F, BD16S, BD32F, BD32S, BD8};
 
 /// Typed sample planes for [`crate::encode_typed`] — one `Vec` per component
 /// (R,G,B\[,A\] order, or a single gray plane), each row-major with
@@ -45,6 +45,16 @@ pub enum SamplePlanes<'a> {
     /// (`0x8000`), which normalizes to `+0.0` (the fold has a single zero;
     /// the reference encoder does the same — probed).
     F16(&'a [Vec<u16>]),
+    /// IEEE-754 **single** bit patterns (BD32F): `32bppGrayFloat` /
+    /// `128bppRGBFloat`. The codestream codes a custom float
+    /// (`len_mantissa = 13`, `exp_bias = 4` — the reference defaults, cloned)
+    /// through the same sign-magnitude fold, keeping the top 13 mantissa
+    /// bits **rounded** (half-up) — the float analog of BD32S's shift_bits.
+    /// Values already on that grid (e.g. anything our decoder produced from
+    /// a BD32F file, incl. wild scRGB captures) round-trip bit-exactly at
+    /// q1; ±0 normalize to +0, and scaled arithmetic is rejected (i32
+    /// headroom, as the reference forces).
+    F32(&'a [Vec<u32>]),
 }
 
 /// The BD16F sign-magnitude fold: half bits → the pseudo-integer the
@@ -60,6 +70,45 @@ fn fold_f16(h: u16) -> i32 {
     }
 }
 
+/// The BD32F fold: IEEE single bits → the custom-float pseudo-integer
+/// (`(E << len_mantissa) | M`, sign-magnitude) — a line-for-line clone of
+/// libjxr's `Forward_Float` (strenc.c), the forward inverse of the decoder's
+/// `postscale_f32`. Round-half-up on the 23−lm dropped mantissa bits (the
+/// carry rolls into the exponent field, which is exactly correct); ±0 → 0.
+/// One divergence: libjxr's `m >>= (1 - e1)` is C UB for magnitudes below
+/// ~2⁻³⁶ (shift ≥ 32); we do the honest math (flush to zero, which the
+/// decoder maps back to ±0).
+fn fold_f32(bits: u32, lm: i32, eb: i32) -> i32 {
+    if bits & 0x7fff_ffff == 0 {
+        return 0;
+    }
+    let e = ((bits >> 23) & 0xff) as i32;
+    let mut m = ((bits & 0x007f_ffff) | 0x0080_0000) as i32;
+    let mut e_act = e;
+    if e == 0 {
+        m ^= 0x0080_0000; // IEEE subnormal: no implicit bit, exponent 1
+        e_act = 1;
+    }
+    let mut e1 = e_act - 127 + eb;
+    if e1 <= 1 {
+        if e1 < 1 {
+            let sh = 1 - e1;
+            m = if sh >= 24 { 0 } else { m >> sh };
+        }
+        e1 = 1;
+        if m & 0x0080_0000 == 0 {
+            e1 = 0; // custom-subnormal
+        }
+    }
+    m &= 0x007f_ffff;
+    let h = (e1 << lm) + ((m + (1 << (23 - lm - 1))) >> (23 - lm));
+    if bits >> 31 != 0 {
+        -h
+    } else {
+        h
+    }
+}
+
 impl SamplePlanes<'_> {
     /// Number of component planes supplied.
     pub fn num_planes(&self) -> usize {
@@ -69,6 +118,7 @@ impl SamplePlanes<'_> {
             SamplePlanes::I16(p) => p.len(),
             SamplePlanes::I32(p) => p.len(),
             SamplePlanes::F16(p) => p.len(),
+            SamplePlanes::F32(p) => p.len(),
         }
     }
 
@@ -80,6 +130,7 @@ impl SamplePlanes<'_> {
             SamplePlanes::I16(p) => p[i].len(),
             SamplePlanes::I32(p) => p[i].len(),
             SamplePlanes::F16(p) => p[i].len(),
+            SamplePlanes::F32(p) => p[i].len(),
         }
     }
 
@@ -91,6 +142,7 @@ impl SamplePlanes<'_> {
             SamplePlanes::I16(_) => Depth::BD16S,
             SamplePlanes::I32(_) => Depth::BD32S,
             SamplePlanes::F16(_) => Depth::BD16F,
+            SamplePlanes::F32(_) => Depth::BD32F,
         }
     }
 
@@ -103,6 +155,7 @@ impl SamplePlanes<'_> {
             SamplePlanes::I16(_) => &pf::GRAY16_FIXED,
             SamplePlanes::I32(_) => &pf::GRAY32_FIXED,
             SamplePlanes::F16(_) => &pf::GRAY16_HALF,
+            SamplePlanes::F32(_) => &pf::GRAY32_FLOAT,
         }
     }
 
@@ -115,6 +168,7 @@ impl SamplePlanes<'_> {
             SamplePlanes::I16(_) => &pf::RGB48_FIXED,
             SamplePlanes::I32(_) => &pf::RGB96_FIXED,
             SamplePlanes::F16(_) => &pf::RGB48_HALF,
+            SamplePlanes::F32(_) => &pf::RGB128_FLOAT,
         }
     }
 
@@ -127,6 +181,11 @@ impl SamplePlanes<'_> {
             SamplePlanes::I16(p) => prebias(p[i].iter().map(|&v| v as i32), &d, scaled),
             SamplePlanes::I32(p) => prebias(p[i].iter().copied(), &d, scaled),
             SamplePlanes::F16(p) => prebias(p[i].iter().map(|&v| fold_f16(v)), &d, scaled),
+            SamplePlanes::F32(p) => prebias(
+                p[i].iter().map(|&v| fold_f32(v, d.len_mantissa as i32, d.exp_bias)),
+                &d,
+                scaled,
+            ),
         }
     }
 }
@@ -160,6 +219,10 @@ impl Depth {
         Depth { bitdepth: BD32S, shift_bits: 10, len_mantissa: 0, exp_bias: 0 };
     pub const BD16F: Depth =
         Depth { bitdepth: BD16F, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
+    /// The reference defaults: `len_mantissa = 13` (strenc.c:790),
+    /// `exp_bias = 4` (header-dumped from every jxrencapp BD32F mint).
+    pub const BD32F: Depth =
+        Depth { bitdepth: BD32F, shift_bits: 0, len_mantissa: 13, exp_bias: 4 };
 
     /// The bias the decoder's `add_bias` adds back for this depth (Table 188
     /// `bias_base`, before its `>> shift_bits` pre-shift): `1 << 7` for BD8,

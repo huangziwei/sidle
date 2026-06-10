@@ -595,7 +595,7 @@ pub fn encode_typed(
             opts,
         );
     }
-    if matches!(samples, SamplePlanes::I32(_)) && opts.scaled {
+    if matches!(samples, SamplePlanes::I32(_) | SamplePlanes::F32(_)) && opts.scaled {
         return Err(EncodeError::Unsupported(
             "scaled arithmetic with 32-bit input would overflow the i32 transform \
              (the reference encoder forces unscaled here too); set scaled = false"
@@ -2475,6 +2475,121 @@ mod tests {
         for i in 0..n {
             assert_eq!(d.image_plane[0][i], canon(gray[i]), "scaled px{i}");
         }
+    }
+
+    #[test]
+    fn deep_f32_q1_grid_exact_rounding_and_specials() {
+        use crate::decode::consts::BD32F;
+        let mut r = Lcg(0xf32_0001);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        // Values ON the custom-float grid (13 mantissa bits, exponent within
+        // the custom-normal range) round-trip bit-exactly at q1.
+        let grid = |r: &mut Lcg| -> u32 {
+            let sign = (((r.next() >> 13) & 1) as u32) << 31;
+            let e = 124 + ((r.next() >> 17) % 77) as u32; // custom-normal range
+            let m13 = ((r.next() >> 23) & 0x1fff) as u32;
+            sign | (e << 23) | (m13 << 10)
+        };
+        let gray: Vec<u32> = (0..n).map(|_| grid(&mut r)).collect();
+        let planes = [gray.clone()];
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::F32(&planes),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc911", "32bppGrayFloat GUID");
+        let hd = headers_of(&jxr);
+        assert_eq!(hd.hdr.output_bitdepth, BD32F);
+        assert_eq!((hd.planes[0].len_mantissa, hd.planes[0].exp_bias), (13, 4), "reference defaults");
+        let d = decode_to_planes(&jxr);
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i] as u32, gray[i], "grid px{i} bits {:#010x}", gray[i]);
+        }
+        // RGB grid values, 128bppRGBFloat.
+        let rgb: [Vec<u32>; 3] = std::array::from_fn(|_| (0..n).map(|_| grid(&mut r)).collect());
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::F32(&rgb),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc91b", "128bppRGBFloat GUID");
+        let d = decode_to_planes(&jxr);
+        for c in 0..3 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i] as u32, rgb[c][i], "ch{c} px{i}");
+            }
+        }
+        // Rounding semantics (round-half-up on the dropped 10 bits, carry
+        // into the exponent) + specials, via a 16x16 single-MB plane.
+        let cases: &[(u32, u32)] = &[
+            (0x0000_0000, 0x0000_0000), // +0
+            (0x8000_0000, 0x0000_0000), // -0 → +0 (single zero)
+            (0x7f80_0000, 0x7f80_0000), // +Inf
+            (0xff80_0000, 0xff80_0000), // −Inf
+            (0x7fc0_0000, 0x7fc0_0000), // quiet NaN (payload top bit on the grid)
+            (0x3f80_03ff, 0x3f80_0400), // 1.0+ε rounds UP to the next grid step
+            (0x3f80_01ff, 0x3f80_0000), // below half-step rounds DOWN
+            (0x3fff_ffff, 0x4000_0000), // mantissa carry: ~1.9999999 → 2.0
+            (0xbf80_03ff, 0xbf80_0400), // negative mirror of the round-up
+            (0x4248_f5c3, 0x4248_f400), // π·16-ish truncates+rounds on grid
+        ];
+        let mut vals: Vec<u32> = cases.iter().map(|&(i, _)| i).collect();
+        vals.resize(256, 0x3f80_0000);
+        let planes = [vals];
+        let input = TypedInput {
+            width: 16,
+            height: 16,
+            samples: SamplePlanes::F32(&planes),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
+        let d = decode_to_planes(&jxr);
+        for (i, &(input_bits, want)) in cases.iter().enumerate() {
+            assert_eq!(
+                d.image_plane[0][i] as u32, want,
+                "case {input_bits:#010x} → got {:#010x}, want {want:#010x}",
+                d.image_plane[0][i] as u32
+            );
+        }
+        // Idempotence: arbitrary finite floats → q1 → decoded values are
+        // canonical (re-encoding them is bit-exact, encode∘decode a fixpoint).
+        let arb: Vec<u32> = (0..n)
+            .map(|_| {
+                let bits = (r.next() >> 32) as u32;
+                let e = (bits >> 23) & 0xff;
+                if e == 0 || e == 0xff { bits & 0x7fff_ffff | 0x3f80_0000 } else { bits }
+            })
+            .collect();
+        let planes = [arb];
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::F32(&planes),
+            premultiplied_alpha: false,
+        };
+        let jxr1 = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
+        let d1 = decode_to_planes(&jxr1);
+        let canon: Vec<u32> = d1.image_plane[0].iter().map(|&v| v as u32).collect();
+        let planes2 = [canon.clone()];
+        let input2 = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::F32(&planes2),
+            premultiplied_alpha: false,
+        };
+        let jxr2 = encode_typed(&input2, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
+        let d2 = decode_to_planes(&jxr2);
+        for i in 0..n {
+            assert_eq!(d2.image_plane[0][i] as u32, canon[i], "fixpoint px{i}");
+        }
+        // Scaled arithmetic rejected for 32-bit floats too.
+        let opts = EncodeOptions { scaled: true, ..Default::default() };
+        assert!(encode_typed(&input2, ColorMode::Grayscale, opts).is_err());
     }
 
     #[test]

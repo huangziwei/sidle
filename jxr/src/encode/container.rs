@@ -42,6 +42,12 @@ pub mod pixel_format {
     pub const GRAY16_HALF: [u8; 16] = guid(0x3e);
     /// `48bppRGBHalf` — three IEEE-754 half channels (BD16F).
     pub const RGB48_HALF: [u8; 16] = guid(0x3b);
+    /// `32bppGrayFloat` — single IEEE-754 single plane (BD32F).
+    pub const GRAY32_FLOAT: [u8; 16] = guid(0x11);
+    /// `128bppRGBFloat` — three IEEE-754 single channels, container stride
+    /// padded to 4 (the format the reference encoder mints for RGB float;
+    /// the codestream itself carries 3 components).
+    pub const RGB128_FLOAT: [u8; 16] = guid(0x1b);
 }
 
 const TIFF_TYPE_BYTE: u16 = 1;
