@@ -330,7 +330,6 @@ impl MB {
         mbxt: usize,
         mbyt: usize,
         tile_width_mb: usize,
-        num_components: usize,
         left_mb: Option<(usize, usize)>,
         top_mb: Option<(usize, usize)>,
         top_left_mb: Option<(usize, usize)>,
@@ -357,13 +356,37 @@ impl MB {
             mb_dc_mode: NO_PREDICTION,
             mb_lp_mode: NO_PREDICTION,
             mb_hp_mode: NO_PREDICTION,
-            hp_input_vlc: vec![0; num_components * HP_INPUT_PER_COMP],
-            hp_input_flex: vec![0; num_components * HP_INPUT_PER_COMP],
-            mb_dclp: vec![0; num_components * MB_DCLP_PER_COMP],
-            mb_cbphp: vec![0; num_components],
+            // Coefficient/sample buffers are allocated lazily by
+            // `alloc_buffers` when `coded_tiles` first decodes this MB. The
+            // grid is materialised up front (so it can be indexed by
+            // [MBx][MBy]) but holds only cheap skeletons until then — a
+            // large-but-bogus geometry rejected before decoding (e.g. a bad
+            // index table) never allocates the whole grid's per-MB buffers,
+            // which for a near-cap geometry would be ~1 GB of pure waste.
+            hp_input_vlc: Vec::new(),
+            hp_input_flex: Vec::new(),
+            mb_dclp: Vec::new(),
+            mb_cbphp: Vec::new(),
             model_bits_mb_hp: [0, 0],
             mb_qp_index_lp: 0,
-            mb_buffer: vec![0; num_components * MB_BUF_PER_COMP],
+            mb_buffer: Vec::new(),
+        }
+    }
+
+    /// Allocate this MB's coefficient/sample buffers (idempotent). Called by
+    /// `coded_tiles` the first time it decodes the MB, so the cost is paid only
+    /// for macroblocks actually reached — never for a geometry rejected before
+    /// decoding. Re-entrant across the DC/LP/HP/FLEX passes of frequency mode
+    /// (the first pass allocates; later passes see non-empty buffers and skip).
+    /// Produces exactly the zero-filled buffers `new` used to, so decode output
+    /// is unchanged.
+    pub fn alloc_buffers(&mut self, num_components: usize) {
+        if self.mb_buffer.is_empty() {
+            self.hp_input_vlc = vec![0; num_components * HP_INPUT_PER_COMP];
+            self.hp_input_flex = vec![0; num_components * HP_INPUT_PER_COMP];
+            self.mb_dclp = vec![0; num_components * MB_DCLP_PER_COMP];
+            self.mb_cbphp = vec![0; num_components];
+            self.mb_buffer = vec![0; num_components * MB_BUF_PER_COMP];
         }
     }
 }

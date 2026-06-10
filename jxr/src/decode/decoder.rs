@@ -531,7 +531,7 @@ impl<'a> Decoder<'a> {
         // Fill placeholder so we can index by [MBx][MBy].
         for col in &mut plane.mb {
             for _ in 0..mb_height {
-                col.push(MB::new(0, 0, 0, 0, 1, plane.num_components, None, None, None));
+                col.push(MB::new(0, 0, 0, 0, 1, None, None, None));
             }
         }
 
@@ -551,7 +551,7 @@ impl<'a> Decoder<'a> {
                         let tl_mb = if mbx > 0 && mby > 0 { Some((mbx - 1, mby - 1)) } else { None };
                         plane.mb[mbx][mby] = MB::new(
                             mbx, mby, mbxt, mbyt, tile_mb_width,
-                            plane.num_components, left_mb, top_mb, tl_mb,
+                            left_mb, top_mb, tl_mb,
                         );
                     }
                 }
@@ -755,6 +755,12 @@ impl<'a> Decoder<'a> {
     }
 
     fn tile_mb(&mut self, tile_type: u8, p: usize, mbx: usize, mby: usize) -> Result<()> {
+        // Lazily materialise this MB's coefficient buffers on first decode
+        // (idempotent across the band passes of frequency mode). The grid was
+        // built as cheap skeletons, so a stream rejected before reaching here
+        // never paid for the per-MB buffers — see `MB::alloc_buffers`.
+        let nc = self.planes[p].num_components;
+        self.planes[p].mb[mbx][mby].alloc_buffers(nc);
         match tile_type {
             DC => self.mb_dc(p, mbx, mby)?,
             LP => {
