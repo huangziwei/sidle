@@ -13,8 +13,9 @@
 //! into the same per-plane forward transform grayscale uses (no further −128).
 //! See `.claude/plans/jxr-encoder.md` Track 6.1.
 //!
-//! 4:4:4 only — boko's decoder rejects subsampled chroma (`decoder.rs:474`), so
-//! there is no down-sampling here; each chroma plane is full resolution.
+//! The emission path is 4:4:4 (full-resolution chroma). 4:2:0/4:2:2 (4b, in
+//! progress) downsample the centered U/V planes AFTER the color transform —
+//! the libjxr pipeline order — via [`downsample_h`]/[`downsample_v`].
 
 use super::bitstream::BitWriter;
 use super::entropy::write_huff;
@@ -57,6 +58,74 @@ fn pad_plane(src: &[u8], wu: usize, hu: usize, pw: usize, ph: usize) -> Vec<u8> 
         }
     }
     p
+}
+
+/// libjxr's `DF_ODD` 5-tap chroma decimation filter: `[1,4,6,4,1]/16` with
+/// round-half-up, centered on the EVEN sample (`d2`) — so the surviving chroma
+/// samples are co-sited with even luma positions, matching the
+/// `chroma_centering_x/y = 0` the plane header declares (the only values
+/// libjxr ever writes, `strenc.c:1299`).
+#[inline]
+fn df_odd(d0: i32, d1: i32, d2: i32, d3: i32, d4: i32) -> i32 {
+    (((d1 + d2 + d3) << 2) + (d2 << 1) + d0 + d4 + 8) >> 4
+}
+
+/// Reflect an out-of-range index back into `0..=m` (only ever ±2 over, the
+/// filter's reach). Mirrors `downsampleUV`'s boundary handling: on the left,
+/// `src[-k] → src[k]`; on the right (padded extent), `src[m+k] → src[m-k]`.
+#[inline]
+fn reflect(i: isize, m: isize) -> usize {
+    (if i < 0 {
+        -i
+    } else if i > m {
+        2 * m - i
+    } else {
+        i
+    }) as usize
+}
+
+/// Horizontal 2:1 chroma decimation of a `w×h` centered plane → `w/2 × h`
+/// (444→422). Whole-plane port of libjxr `downsampleUV`'s horizontal pass
+/// (`strenc.c:1603`); `w` is the padded (16-aligned, hence even) width.
+pub fn downsample_h(src: &[i32], w: usize, h: usize) -> Vec<i32> {
+    let ow = w / 2;
+    let m = (w - 1) as isize;
+    let mut out = vec![0i32; ow * h];
+    for y in 0..h {
+        let row = &src[y * w..y * w + w];
+        for (x, o) in out[y * ow..y * ow + ow].iter_mut().enumerate() {
+            let c = 2 * x as isize;
+            *o = df_odd(
+                row[reflect(c - 2, m)],
+                row[reflect(c - 1, m)],
+                row[c as usize],
+                row[reflect(c + 1, m)],
+                row[reflect(c + 2, m)],
+            );
+        }
+    }
+    out
+}
+
+/// Vertical 2:1 chroma decimation of a `w×h` centered plane → `w × h/2`
+/// (422→420). Whole-plane port of `downsampleUV`'s vertical pass; `h` is the
+/// padded (even) height.
+pub fn downsample_v(src: &[i32], w: usize, h: usize) -> Vec<i32> {
+    let oh = h / 2;
+    let m = (h - 1) as isize;
+    let mut out = vec![0i32; w * oh];
+    for y in 0..oh {
+        let c = 2 * y as isize;
+        let r0 = reflect(c - 2, m) * w;
+        let r1 = reflect(c - 1, m) * w;
+        let r2 = c as usize * w;
+        let r3 = reflect(c + 1, m) * w;
+        let r4 = reflect(c + 2, m) * w;
+        for x in 0..w {
+            out[y * w + x] = df_odd(src[r0 + x], src[r1 + x], src[r2 + x], src[r3 + x], src[r4 + x]);
+        }
+    }
+    out
 }
 
 /// One 3-component (`INT_YUV444`) image plane: per-component quantized
@@ -750,6 +819,46 @@ mod tests {
         fn byte(&mut self) -> u8 {
             (self.next() >> 32) as u8
         }
+    }
+
+    /// `DF_ODD` filter arithmetic + boundary reflection, pinned against
+    /// hand-computed values (filter = [1,4,6,4,1]/16 round-half-up on the
+    /// even-centered window; left edge reflects src[-k]→src[k], right edge
+    /// src[m+k]→src[m-k] — `strenc.c` `downsampleUV` boundary behavior).
+    #[test]
+    fn downsample_filter_and_boundaries() {
+        // Constant plane → constant (taps sum to 16).
+        let c = vec![7i32; 16 * 4];
+        assert!(downsample_h(&c, 16, 4).iter().all(|&v| v == 7));
+        assert!(downsample_v(&c, 16, 4).iter().all(|&v| v == 7));
+        // A 16-impulse at even column 4 lands in the windows centered at
+        // 2x = 2, 4, 6 with weights 1, 6, 1 (out[0]'s window 0±2 misses it).
+        let mut imp = vec![0i32; 16];
+        imp[4] = 16;
+        let out = downsample_h(&imp, 16, 1);
+        assert_eq!(out, vec![0, 1, 6, 1, 0, 0, 0, 0]);
+        // Left-boundary reflection: src = [10, 20, 30, ...]: out[0] window is
+        // d0=src[2], d1=src[1], d2=src[0], d3=src[1], d4=src[2] →
+        // (30 + 80 + 60 + 80 + 30 + 8) >> 4 = 288>>4 = 18.
+        let mut edge = vec![0i32; 16];
+        edge[0] = 10;
+        edge[1] = 20;
+        edge[2] = 30;
+        let out = downsample_h(&edge, 16, 1);
+        assert_eq!(out[0], (30 + 4 * 20 + 6 * 10 + 4 * 20 + 30 + 8) >> 4);
+        // Right-boundary reflection: impulse at the last column (15): only
+        // out[7] (center 14) sees it via d3 (real) — and d4 reflects 16→14
+        // (value 0). Last-column impulse contributes 4/16 ⇒ (4*16+8)>>4 = 4.
+        let mut tail = vec![0i32; 16];
+        tail[15] = 16;
+        let out = downsample_h(&tail, 16, 1);
+        assert_eq!(out[7], 4);
+        // Vertical pass mirrors horizontal on a transposed layout.
+        let mut vimp = vec![0i32; 2 * 16];
+        vimp[4 * 2] = 16; // column 0, row 4
+        let out = downsample_v(&vimp, 2, 16);
+        let col: Vec<i32> = (0..8).map(|y| out[y * 2]).collect();
+        assert_eq!(col, vec![0, 1, 6, 1, 0, 0, 0, 0]);
     }
 
     /// The gate: the decoder's real `yuv444_to_rgb` must invert our forward

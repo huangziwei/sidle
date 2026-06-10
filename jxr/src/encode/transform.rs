@@ -199,6 +199,83 @@ pub fn forward_transform_mb(samples: &[i32; 256]) -> [i32; 256] {
     buf
 }
 
+/// Forward transform of one 8×8 **420 chroma** macroblock into its 64-entry
+/// `mb_buffer` slice (4 blocks, raster-indexed 2 per row, block `j` at
+/// `buf[16j..16j+16]` — the decoder's chroma layout, Table 157). Exact inverse
+/// of the decoder chain: per-block `str_idct4x4_stage1` + the across-block-DC
+/// 420 stage (`t2x2h(d,0)` then `swap(1,2)`, `decoder.rs`
+/// `first_level_inverse_transform`). `samples[row * 8 + col]`, row/col in
+/// `0..8`, holding the downsampled centered chroma.
+pub fn forward_transform_chroma_mb_420(samples: &[i32; 64]) -> [i32; 64] {
+    let mut buf = [0i32; 64];
+    for j in 0..4 {
+        let (bx4, by4) = (4 * (j % 2), 4 * (j / 2));
+        let mut block = [0i32; 16];
+        for py in 0..4 {
+            for px in 0..4 {
+                block[MB_PIXEL_MAP[px + 4 * py]] = samples[(by4 + py) * 8 + bx4 + px];
+            }
+        }
+        fdct4x4_stage1(&mut block);
+        buf[16 * j..16 * j + 16].copy_from_slice(&block);
+    }
+    // Across-block stage, decoder ops undone in reverse: unswap(1,2), then the
+    // exact t2x2h inverse.
+    let mut d = [buf[0], buf[16], buf[32], buf[48]];
+    d.swap(1, 2);
+    let v = undo_t2x2h(d, 0);
+    for (j, vj) in v.iter().enumerate() {
+        buf[16 * j] = *vj;
+    }
+    buf
+}
+
+/// Forward transform of one 8×16 **422 chroma** macroblock into its 128-entry
+/// `mb_buffer` slice (8 blocks, raster-indexed 2 per row). Exact inverse of
+/// the decoder's 422 across-block sequence (2-pt lifting on (0,4), `t2x2h` on
+/// (0..3) + `swap(1,2)`, `t2x2h` gathered as (4,6,5,7) + `swap(5,6)` — Table
+/// 151) on top of the per-block stage-1. `samples[row * 8 + col]`, row in
+/// `0..16`, col in `0..8`.
+pub fn forward_transform_chroma_mb_422(samples: &[i32; 128]) -> [i32; 128] {
+    let mut buf = [0i32; 128];
+    for j in 0..8 {
+        let (bx4, by4) = (4 * (j % 2), 4 * (j / 2));
+        let mut block = [0i32; 16];
+        for py in 0..4 {
+            for px in 0..4 {
+                block[MB_PIXEL_MAP[px + 4 * py]] = samples[(by4 + py) * 8 + bx4 + px];
+            }
+        }
+        fdct4x4_stage1(&mut block);
+        buf[16 * j..16 * j + 16].copy_from_slice(&block);
+    }
+    let mut d = [0i32; 8];
+    for (j, dj) in d.iter_mut().enumerate() {
+        *dj = buf[16 * j];
+    }
+    // Decoder order: 2pt(0,4); t2x2h(0,1,2,3)+swap(1,2); t2x2h(4,6,5,7)+swap(5,6).
+    // Undo in reverse:
+    d.swap(5, 6);
+    let v = undo_t2x2h([d[4], d[6], d[5], d[7]], 0);
+    d[4] = v[0];
+    d[6] = v[1];
+    d[5] = v[2];
+    d[7] = v[3];
+    d.swap(1, 2);
+    let v = undo_t2x2h([d[0], d[1], d[2], d[3]], 0);
+    d[0] = v[0];
+    d[1] = v[1];
+    d[2] = v[2];
+    d[3] = v[3];
+    // Undo the 2-pt lifting (decoder: d0 -= (d4+1)>>1; d4 += d0).
+    d[4] = d[4].wrapping_sub(d[0]);
+    d[0] = d[0].wrapping_add(d[4].wrapping_add(1) >> 1);
+    for (j, dj) in d.iter().enumerate() {
+        buf[16 * j] = *dj;
+    }
+    buf
+}
+
 // ---- Overlap pre-filter (inverse of the decoder's overlap *post* filter) ----
 
 /// Inverse of [`crate::decode::math::t2x2h`] (same `val_round`).
@@ -495,6 +572,96 @@ mod tests {
         for _ in 0..5000 {
             let x = [r.next(), r.next(), r.next(), r.next()];
             assert_eq!(dec::overlap_post_filter_4(overlap_pre_filter_4(x)), x);
+        }
+    }
+
+    /// The decoder's 420-chroma reconstruction (the `first_level_inverse_transform`
+    /// chroma arm + per-block stage-1 + Table-157 scatter), composed by hand
+    /// exactly as `decoder.rs` runs it.
+    fn decode_chroma_mb_420(buf: &[i32; 64]) -> [i32; 64] {
+        let mut buf = *buf;
+        let mut d = [buf[0], buf[16], buf[32], buf[48]];
+        d = dec::t2x2h(d, 0);
+        d.swap(1, 2);
+        for (j, dj) in d.iter().enumerate() {
+            buf[16 * j] = *dj;
+        }
+        let mut out = [0i32; 64];
+        for j in 0..4 {
+            let mut block = [0i32; 16];
+            block.copy_from_slice(&buf[16 * j..16 * j + 16]);
+            dec::str_idct4x4_stage1(&mut block);
+            let (bx4, by4) = (4 * (j % 2), 4 * (j / 2));
+            for py in 0..4 {
+                for px in 0..4 {
+                    out[(by4 + py) * 8 + bx4 + px] = block[MB_PIXEL_MAP[px + 4 * py]];
+                }
+            }
+        }
+        out
+    }
+
+    /// The decoder's 422-chroma reconstruction (Table-151 across-block sequence
+    /// from `decoder.rs:2256-2284` + stage-1 + scatter), composed by hand.
+    fn decode_chroma_mb_422(buf: &[i32; 128]) -> [i32; 128] {
+        let mut buf = *buf;
+        let mut d = [0i32; 8];
+        for (j, dj) in d.iter_mut().enumerate() {
+            *dj = buf[16 * j];
+        }
+        d[0] = d[0].wrapping_sub(d[4].wrapping_add(1) >> 1);
+        d[4] = d[4].wrapping_add(d[0]);
+        let a = dec::t2x2h([d[0], d[1], d[2], d[3]], 0);
+        d[0] = a[0];
+        d[1] = a[1];
+        d[2] = a[2];
+        d[3] = a[3];
+        d.swap(1, 2);
+        let b = dec::t2x2h([d[4], d[6], d[5], d[7]], 0);
+        d[4] = b[0];
+        d[6] = b[1];
+        d[5] = b[2];
+        d[7] = b[3];
+        d.swap(5, 6);
+        for (j, dj) in d.iter().enumerate() {
+            buf[16 * j] = *dj;
+        }
+        let mut out = [0i32; 128];
+        for j in 0..8 {
+            let mut block = [0i32; 16];
+            block.copy_from_slice(&buf[16 * j..16 * j + 16]);
+            dec::str_idct4x4_stage1(&mut block);
+            let (bx4, by4) = (4 * (j % 2), 4 * (j / 2));
+            for py in 0..4 {
+                for px in 0..4 {
+                    out[(by4 + py) * 8 + bx4 + px] = block[MB_PIXEL_MAP[px + 4 * py]];
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn chroma_mb_420_inverts_decoder() {
+        let mut r = Lcg(0x420420);
+        for _ in 0..2000 {
+            let mut x = [0i32; 64];
+            for v in x.iter_mut() {
+                *v = r.next();
+            }
+            assert_eq!(decode_chroma_mb_420(&forward_transform_chroma_mb_420(&x)), x);
+        }
+    }
+
+    #[test]
+    fn chroma_mb_422_inverts_decoder() {
+        let mut r = Lcg(0x422422);
+        for _ in 0..2000 {
+            let mut x = [0i32; 128];
+            for v in x.iter_mut() {
+                *v = r.next();
+            }
+            assert_eq!(decode_chroma_mb_422(&forward_transform_chroma_mb_422(&x)), x);
         }
     }
 }
