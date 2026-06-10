@@ -477,7 +477,7 @@ pub fn encode_grayscale_options(
         |head| {
             codestream::write_image_plane_header_gray_bands(head, bands, qp.dc, qp.lp, qp.hp, scaled)
         },
-        trim_v,
+        &codestream::classic_tile_headers(trim_v),
         codestream::band_count(bands),
         mbw,
         mbh,

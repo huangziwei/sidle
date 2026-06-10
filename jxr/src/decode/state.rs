@@ -209,6 +209,11 @@ impl QP {
     pub fn scaling_factor(&self, i_component: usize) -> i32 {
         self.quant_scaling_factor[i_component][self.index_qps]
     }
+
+    /// Scaling factor at an explicit QP-set index (per-MB DQUANT lookups).
+    pub fn scaling_factor_at(&self, i_component: usize, index: usize) -> i32 {
+        self.quant_scaling_factor[i_component][index]
+    }
 }
 
 pub(crate) fn quant_map(
@@ -307,6 +312,13 @@ pub struct MB {
     /// ModelBitsMBHP[chroma 0..2]
     pub model_bits_mb_hp: [i32; 2],
     pub mb_qp_index_lp: usize,
+    /// This MB's HP QP-set index (DQUANT). Stored per MB because in
+    /// frequency mode the HP dequantization runs in the FLEX pass, after the
+    /// HP pass has already advanced the plane-level `index_qps` past this MB
+    /// — using the global value there dequantizes every MB with the last
+    /// MB's index. (Latent until the encoder could mint DQUANT × frequency
+    /// files; JxrDecApp arbitrates the per-MB semantics.)
+    pub mb_qp_index_hp: usize,
 
     /// MBBuffer flat across components: `mb_buffer[c * MB_BUF_PER_COMP + pos]`
     /// where `pos` ∈ 0..256. Original Python layout was per-component
@@ -369,6 +381,7 @@ impl MB {
             mb_cbphp: Vec::new(),
             model_bits_mb_hp: [0, 0],
             mb_qp_index_lp: 0,
+            mb_qp_index_hp: 0,
             mb_buffer: Vec::new(),
         }
     }

@@ -51,6 +51,71 @@ pub fn scaling_factors_for(qp: QpSet, chroma: bool, scaled: bool) -> (i32, i32, 
     )
 }
 
+/// One band's per-component QP bytes `(Y, U, V)`. The component mode is
+/// DERIVED on emission: all equal ⇒ `COMP_UNIFORM` (one byte), `U == V` ⇒
+/// `COMP_SEPARATE` (luma + chroma bytes), else `COMP_INDEPENDENT` (three).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BandQp(pub [u8; 3]);
+
+impl BandQp {
+    /// All components at one QP byte.
+    pub fn uniform(q: u8) -> Self {
+        BandQp([q, q, q])
+    }
+    /// Luma + shared chroma.
+    pub fn separate(luma: u8, chroma: u8) -> Self {
+        BandQp([luma, chroma, chroma])
+    }
+}
+
+/// One tile's QP sets: a single DC set, and 1–16 LP/HP sets — more than one
+/// makes the band per-MB DQUANT (each MB picks its set by index).
+#[derive(Clone, Debug)]
+pub struct TileQps {
+    pub dc: BandQp,
+    pub lp: Vec<BandQp>,
+    pub hp: Vec<BandQp>,
+}
+
+/// The 4e quantization plan for the primary plane: per-tile QP sets (one
+/// entry = image-uniform layout where possible) plus per-MB LP/HP set-index
+/// maps (row-major `mby * mbw + mbx`; empty = all zero). Every tile must
+/// declare the same LP/HP list lengths (the per-band `num_qps` shape).
+#[derive(Clone, Debug)]
+pub struct QpPlan {
+    pub tiles: Vec<TileQps>,
+    pub lp_index: Vec<u8>,
+    pub hp_index: Vec<u8>,
+}
+
+impl QpPlan {
+    /// The classic single-set plan (optionally with separate chroma bytes).
+    pub fn uniform(qp: QpSet, chroma_qp: Option<QpSet>) -> Self {
+        let c = chroma_qp.unwrap_or(qp);
+        QpPlan {
+            tiles: vec![TileQps {
+                dc: BandQp::separate(qp.dc, c.dc),
+                lp: vec![BandQp::separate(qp.lp, c.lp)],
+                hp: vec![BandQp::separate(qp.hp, c.hp)],
+            }],
+            lp_index: Vec::new(),
+            hp_index: Vec::new(),
+        }
+    }
+    pub fn num_lp_qps(&self) -> usize {
+        self.tiles[0].lp.len()
+    }
+    pub fn num_hp_qps(&self) -> usize {
+        self.tiles[0].hp.len()
+    }
+}
+
+/// Scaling factor for one component at one QP byte (the decoder's
+/// `quant_map`, mode- and component-aware).
+pub fn component_scaling_factor(q: u8, component: usize, scaled: bool, band: u8) -> i32 {
+    quant_map(q as u32, component, scaled, band).unwrap_or(1)
+}
+
 /// Quantize one coefficient to a level: `sign(c) * ((|c| + offset) / sf)` with
 /// libjxr's deadzone `offset = (sf*3 + 1) >> 3`. `sf <= 1` ⇒ identity.
 #[inline]

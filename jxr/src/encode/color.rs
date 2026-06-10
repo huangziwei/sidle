@@ -166,6 +166,13 @@ pub(super) struct ColorPlane {
     /// Current tile width in MBs (`reset_context` fires on the tile's last
     /// column). Single tile = `mbw`.
     tile_w: usize,
+    /// LP/HP QP sets per tile (DQUANT when > 1): the per-MB set index is
+    /// emitted before each MB's band payload and gates LP prediction.
+    num_lp_qps: usize,
+    num_hp_qps: usize,
+    /// Per-MB LP/HP set indices, row-major `mby * mbw + mbx`; empty = all 0.
+    lp_idx_map: Vec<u8>,
+    hp_idx_map: Vec<u8>,
     /// Chroma dclp slots per MB (1 DC + LP): 16 / 8 / 4.
     jmax_ch: usize,
     buf_grid: Vec<Vec<[[i32; 256]; 3]>>,
@@ -191,7 +198,10 @@ impl ColorPlane {
     /// YUV 4:4:4, forward-transform + quantize every MB per component, and
     /// initialize the YUV adaptive entropy state.
     pub(super) fn new(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> Self {
-        Self::new_fmt(r, g, b, w, h, qp, INT_YUV444, ALL_BANDS, false, (0, 0), NO_OVERLAP_FILTERING, &[], &[])
+        Self::new_fmt(
+            r, g, b, w, h, qp, INT_YUV444, ALL_BANDS, false, (0, 0), NO_OVERLAP_FILTERING, &[], &[],
+            None,
+        )
     }
 
     /// [`Self::new`] generalized over chroma sampling and `bands_present`:
@@ -216,13 +226,41 @@ impl ColorPlane {
         overlap: u8,
         tile_cols_mb: &[usize],
         tile_rows_mb: &[usize],
+        plan: Option<&super::quant::QpPlan>,
     ) -> Self {
-        // Per-component-class, MODE-dependent scaling factors: the decoder's
-        // `quant_map` derives different factors for scaled arithmetic, and in
-        // scaled mode chroma DC/LP sit one binary order below luma. Unscaled:
-        // both triples are identical (no component dependence).
-        let (dc_sf_l, lp_sf_l, hp_sf_l) = super::quant::scaling_factors_for(qp, false, scaled);
-        let (dc_sf_c, lp_sf_c, hp_sf_c) = super::quant::scaling_factors_for(qp, true, scaled);
+        // The quantization plan: per-tile QP sets + per-MB LP/HP set indices.
+        // `None` = the classic single uniform set from `qp`. Factors come
+        // from the decoder's `quant_map` per (component, scaled, band) — the
+        // MODE- and COMPONENT-dependent map.
+        let owned_plan;
+        let plan = match plan {
+            Some(p) => p,
+            None => {
+                owned_plan = super::quant::QpPlan::uniform(qp, None);
+                &owned_plan
+            }
+        };
+        struct TileFactors {
+            dc: [i32; 3],
+            lp: Vec<[i32; 3]>,
+            hp: Vec<[i32; 3]>,
+        }
+        let csf = super::quant::component_scaling_factor;
+        let tile_factors: Vec<TileFactors> = plan
+            .tiles
+            .iter()
+            .map(|t| TileFactors {
+                dc: std::array::from_fn(|c| csf(t.dc.0[c], c, scaled, DC)),
+                lp: t.lp.iter().map(|q| std::array::from_fn(|c| csf(q.0[c], c, scaled, LP))).collect(),
+                hp: t.hp.iter().map(|q| std::array::from_fn(|c| csf(q.0[c], c, scaled, HP))).collect(),
+            })
+            .collect();
+        let (num_lp_qps, num_hp_qps) = (plan.num_lp_qps(), plan.num_hp_qps());
+        debug_assert!(
+            plan.tiles.iter().all(|t| t.lp.len() == num_lp_qps && t.hp.len() == num_hp_qps),
+            "every tile must declare the same LP/HP set counts"
+        );
+        debug_assert!(num_lp_qps >= 1 && num_lp_qps <= 16 && num_hp_qps >= 1 && num_hp_qps <= 16);
         let (wu, hu) = (w as usize, h as usize);
         let (top, left) = (window.0 as usize, window.1 as usize);
         let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
@@ -381,15 +419,31 @@ impl ColorPlane {
         }
 
         // Stage 2 (across-block transform) + quantization + dclp extraction.
+        // Per-MB factors: the MB's tile entry (row-major) + its LP/HP set
+        // indices from the plan maps.
+        let ncols = left_mb.len() - 1;
+        let tile_of = |mbx: usize, mby: usize| -> usize {
+            if plan.tiles.len() == 1 {
+                return 0;
+            }
+            let tx = left_mb[1..].iter().position(|&b| mbx < b).unwrap_or(ncols - 1);
+            let ty =
+                top_mb[1..].iter().position(|&b| mby < b).unwrap_or(top_mb.len() - 2);
+            ty * ncols + tx
+        };
+        debug_assert!(
+            plan.lp_index.is_empty() || plan.lp_index.len() == mbw * mbh,
+            "LP index map must cover the MB grid"
+        );
+        debug_assert!(plan.hp_index.is_empty() || plan.hp_index.len() == mbw * mbh);
         for mbx in 0..mbw {
             for mby in 0..mbh {
+                let tf = &tile_factors[tile_of(mbx, mby)];
+                let li = plan.lp_index.get(mby * mbw + mbx).copied().unwrap_or(0) as usize;
+                let hi = plan.hp_index.get(mby * mbw + mbx).copied().unwrap_or(0) as usize;
                 for comp in 0..3 {
                     let chroma_42x = comp > 0 && fmt != INT_YUV444;
-                    let (dc_sf, lp_sf, hp_sf) = if comp > 0 {
-                        (dc_sf_c, lp_sf_c, hp_sf_c)
-                    } else {
-                        (dc_sf_l, lp_sf_l, hp_sf_l)
-                    };
+                    let (dc_sf, lp_sf, hp_sf) = (tf.dc[comp], tf.lp[li][comp], tf.hp[hi][comp]);
                     if !chroma_42x {
                         // Scaled chroma (444) floor-halves the block-DCs
                         // between the transform stages; luma never does.
@@ -479,6 +533,10 @@ impl ColorPlane {
             trim: 0,
             tile_origin: (0, 0),
             tile_w: mbw,
+            num_lp_qps,
+            num_hp_qps,
+            lp_idx_map: plan.lp_index.clone(),
+            hp_idx_map: plan.hp_index.clone(),
             nblk_ch,
             jmax_ch,
             buf_grid,
@@ -535,11 +593,31 @@ impl ColorPlane {
     /// Emit one macroblock's DC + LP + HP(+flex) bits for all 3 components,
     /// updating this plane's adaptive state exactly as the decoder's per-MB
     /// YUV444 readers do.
+    /// This MB's LP QP-set index (0 when no DQUANT map).
+    fn lp_idx_at(&self, mbx: usize, mby: usize) -> usize {
+        self.lp_idx_map.get(mby * self.mbw + mbx).copied().unwrap_or(0) as usize
+    }
+
+    fn hp_idx_at(&self, mbx: usize, mby: usize) -> usize {
+        self.hp_idx_map.get(mby * self.mbw + mbx).copied().unwrap_or(0) as usize
+    }
+
     pub(super) fn encode_mb(&mut self, sink: &mut codestream::Sink, mbx: usize, mby: usize) {
         // Tile-relative position: edge tests, the 16-MB adapt cadence, and the
         // last-column reset are all within-tile (decoder `MB::new` flags).
         let (mbxt, mbyt) = (mbx - self.tile_origin.0, mby - self.tile_origin.1);
         let (is_left, is_top) = (mbxt == 0, mbyt == 0);
+
+        // Per-MB QP-set indices (DQUANT) — the decoder reads them before any
+        // band payload (`lp_tile_mb_qp`/`hp_tile_mb_qp`): in spatial order
+        // they land right here before DC; in frequency order each lands in
+        // its band's packet just before this MB's payload.
+        if self.bands != DCONLY && self.num_lp_qps > 1 {
+            codestream::write_qp_index(sink.lp(), self.lp_idx_at(mbx, mby), self.num_lp_qps);
+        }
+        if self.bands != DCONLY && self.bands != NOHIGHPASS && self.num_hp_qps > 1 {
+            codestream::write_qp_index(sink.hp(), self.hp_idx_at(mbx, mby), self.num_hp_qps);
+        }
         let dc_of = |mx: usize, my: usize| {
             [self.dclp[mx][my][0][0], self.dclp[mx][my][1][0], self.dclp[mx][my][2][0]]
         };
@@ -620,9 +698,16 @@ impl ColorPlane {
         if mbxt % 16 == 0 {
             self.scan.reset_totals();
         }
+        // LP prediction additionally requires the neighbour to share this
+        // MB's LP QP-set index (decoder `mb_lp_mode`) — always true without
+        // DQUANT.
         let lp_mode = match dmode {
-            PREDICT_FROM_LEFT => PREDICT_FROM_LEFT,
-            PREDICT_FROM_TOP => PREDICT_FROM_TOP,
+            PREDICT_FROM_LEFT if self.lp_idx_at(mbx - 1, mby) == self.lp_idx_at(mbx, mby) => {
+                PREDICT_FROM_LEFT
+            }
+            PREDICT_FROM_TOP if self.lp_idx_at(mbx, mby - 1) == self.lp_idx_at(mbx, mby) => {
+                PREDICT_FROM_TOP
+            }
             _ => NO_PREDICTION,
         };
         let is_42x = self.fmt != INT_YUV444;
@@ -975,7 +1060,7 @@ pub fn encode_color_scaled(
     bands: u8,
     scaled: bool,
 ) -> Vec<u8> {
-    encode_color_options(r, g, b, w, h, qp, fmt, bands, scaled, 0, (0, 0), (&[], &[]), 0, false)
+    encode_color_options(r, g, b, w, h, qp, fmt, bands, scaled, 0, (0, 0), (&[], &[]), 0, false, None)
 }
 
 /// Window-margins tuple (top, left, bottom, right) for an image placed at
@@ -1008,10 +1093,12 @@ pub fn encode_color_options(
     tiles: (&[usize], &[usize]),
     overlap: u8,
     frequency: bool,
+    plan: Option<&super::quant::QpPlan>,
 ) -> Vec<u8> {
     let trim = if bands == ALL_BANDS { trim } else { 0 };
-    let mut plane =
-        ColorPlane::new_fmt(r, g, b, w, h, qp, fmt, bands, scaled, window, overlap, tiles.0, tiles.1);
+    let mut plane = ColorPlane::new_fmt(
+        r, g, b, w, h, qp, fmt, bands, scaled, window, overlap, tiles.0, tiles.1, plan,
+    );
     plane.trim = trim as u32;
     let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
     spec.frequency_mode = frequency;
@@ -1021,14 +1108,52 @@ pub fn encode_color_options(
     spec.tile_cols_mb = tiles.0.to_vec();
     spec.tile_rows_mb = tiles.1.to_vec();
     let (mbw, mbh) = (plane.mbw, plane.mbh);
+    let tile_headers: Box<dyn Fn(&mut BitWriter, usize, usize)> = match plan {
+        None => Box::new(codestream::classic_tile_headers(trim)),
+        Some(p) => {
+            let ntiles = tiles.0.len().max(1) * tiles.1.len().max(1);
+            assert!(
+                p.tiles.len() == 1 || p.tiles.len() == ntiles,
+                "QpPlan must carry 1 or ntiles tile entries"
+            );
+            let p = p.clone();
+            let dc_uniform = p.tiles.len() == 1;
+            let lp_uniform = dc_uniform && p.num_lp_qps() == 1;
+            let hp_uniform = dc_uniform && p.num_hp_qps() == 1;
+            Box::new(move |w: &mut BitWriter, tile: usize, band: usize| {
+                // Spatial tile-header field order is the decoder's:
+                // flex (trim), DC, LP, HP. Frequency packets carry only
+                // their band's fields.
+                let sp = band == codestream::SPATIAL_BAND;
+                if (sp || band == 3) && trim != 0 {
+                    codestream::write_trim_flexbits(w, trim);
+                }
+                let t = &p.tiles[if dc_uniform { 0 } else { tile }];
+                if (sp || band == 0) && !dc_uniform {
+                    codestream::write_band_qp(w, &[t.dc], 3);
+                }
+                if (sp || band == 1) && !lp_uniform && bands != DCONLY {
+                    w.write_bits(0, 1); // use_dc_qp = 0
+                    w.write_bits(t.lp.len() as u64 - 1, 4); // num_lp_qps − 1
+                    codestream::write_band_qp(w, &t.lp, 3);
+                }
+                if (sp || band == 2) && !hp_uniform && bands != DCONLY && bands != NOHIGHPASS {
+                    w.write_bits(0, 1); // use_lp_qp = 0
+                    w.write_bits(t.hp.len() as u64 - 1, 4); // num_hp_qps − 1
+                    codestream::write_band_qp(w, &t.hp, 3);
+                }
+            })
+        }
+    };
     let body = codestream::emit_codestream(
         &spec,
-        |head| {
-            codestream::write_image_plane_header_yuv_scaled(
+        |head| match plan {
+            Some(p) => codestream::write_image_plane_header_yuv_plan(head, fmt, bands, p, scaled),
+            None => codestream::write_image_plane_header_yuv_scaled(
                 head, fmt, bands, qp.dc, qp.lp, qp.hp, scaled,
-            )
+            ),
         },
-        trim,
+        &*tile_headers,
         codestream::band_count(bands),
         mbw,
         mbh,
@@ -1069,8 +1194,9 @@ pub fn encode_color_alpha(
     overlap: u8,
     frequency: bool,
 ) -> Vec<u8> {
-    let mut primary =
-        ColorPlane::new_fmt(r, g, b, w, h, qp, fmt, ALL_BANDS, scaled, window, overlap, tiles.0, tiles.1);
+    let mut primary = ColorPlane::new_fmt(
+        r, g, b, w, h, qp, fmt, ALL_BANDS, scaled, window, overlap, tiles.0, tiles.1, None,
+    );
     // The alpha plane stays unscaled — scaled_flag is per plane header, and
     // alpha is exactness-sensitive (jxrencapp likewise never scales alpha
     // independently of its lossy decision; ours keeps the lossless path).
@@ -1102,7 +1228,7 @@ pub fn encode_color_alpha(
                 alpha_qp.hp,
             );
         },
-        0,
+        &codestream::classic_tile_headers(0),
         4,
         mbw,
         mbh,
@@ -1173,7 +1299,7 @@ pub fn encode_yonly_from_color(
     let body = codestream::emit_codestream(
         &spec,
         |head| codestream::write_image_plane_header_gray_scaled(head, qp.dc, qp.lp, qp.hp, scaled),
-        0,
+        &codestream::classic_tile_headers(0),
         4,
         mbw,
         mbh,

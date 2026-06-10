@@ -817,8 +817,6 @@ impl<'a> Decoder<'a> {
     }
 
     fn hp_tile_mb_qp(&mut self, p: usize, mbx: usize, mby: usize) -> Result<()> {
-        let _ = mby;
-        let _ = mbx;
         let plane = &self.planes[p];
         if plane.hp_present
             && plane.hp_qp.as_ref().is_some_and(|q| q.num_qps > 1)
@@ -826,7 +824,9 @@ impl<'a> Decoder<'a> {
         {
             let num_qps = plane.hp_qp.as_ref().unwrap().num_qps;
             let idx = self.decode_qp_index(num_qps)?;
-            if let Some(qp) = self.planes[p].hp_qp.as_mut() {
+            let plane = &mut self.planes[p];
+            plane.mb[mbx][mby].mb_qp_index_hp = idx;
+            if let Some(qp) = plane.hp_qp.as_mut() {
                 qp.index_qps = idx;
             }
         }
@@ -1788,9 +1788,14 @@ impl<'a> Decoder<'a> {
                 16
             }
         };
+        // Dequantize with THIS MB's HP QP-set index: in frequency mode this
+        // function runs during the FLEX pass, when the plane-level
+        // `index_qps` already holds the HP pass's LAST index.
+        let hp_idx = self.planes[p].mb[mbx][mby].mb_qp_index_hp;
         for i_comp in 0..plane_nc {
             let i_index = if i_comp == 0 { 0 } else { 1 };
-            let scaling = self.planes[p].hp_qp.as_ref().unwrap().scaling_factor(i_comp);
+            let scaling =
+                self.planes[p].hp_qp.as_ref().unwrap().scaling_factor_at(i_comp, hp_idx);
             let bits = self.planes[p].mb[mbx][mby].model_bits_mb_hp[i_index];
 
             let hp_cbase = i_comp * HP_INPUT_PER_COMP;

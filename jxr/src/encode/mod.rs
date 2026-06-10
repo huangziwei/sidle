@@ -173,6 +173,11 @@ pub struct EncodeOptions {
     /// packets (DC/LP/HP/flexbits) addressed by the index table, enabling
     /// progressive/partial decode. Same coefficients, re-segmented stream.
     pub frequency: bool,
+    /// Chroma per-band quantizers distinct from the luma `qp` (T.832
+    /// `COMP_SEPARATE` component mode — the classic quantize-chroma-harder
+    /// rate trick). Color inputs only; ignored for grayscale. `None` = same
+    /// as `qp` (`COMP_UNIFORM`, byte-stable).
+    pub chroma_qp: Option<QpSet>,
 }
 
 impl Default for EncodeOptions {
@@ -190,6 +195,7 @@ impl Default for EncodeOptions {
             tile_rows: 0,
             overlap: Overlap::None,
             frequency: false,
+            chroma_qp: None,
         }
     }
 }
@@ -360,6 +366,10 @@ pub fn encode_with_options(
     let tiles: (&[usize], &[usize]) = (&tile_cols_mb, &tile_rows_mb);
     let overlap = opts.overlap.code();
     let frequency = opts.frequency;
+    // chroma_qp folds into a single-set QpPlan with separate chroma bytes
+    // (COMP_SEPARATE emission); None keeps the classic plan-free path.
+    let chroma_plan = opts.chroma_qp.map(|c| quant::QpPlan::uniform(qp, Some(c)));
+    let plan = chroma_plan.as_ref();
     let (w, h) = (input.width, input.height);
     if w == 0 || h == 0 {
         return Err(EncodeError::Unsupported("zero-size image".into()));
@@ -506,22 +516,23 @@ pub fn encode_with_options(
                 && window == (0, 0)
                 && tiles.0.is_empty()
                 && opts.overlap == Overlap::None
-                && !frequency =>
+                && !frequency
+                && plan.is_none() =>
         {
             // The classic byte-stable path (clone of the original encoder).
             Ok(color::encode_color(r, g, b, w, h, qp))
         }
         ChromaSampling::Yuv444 => Ok(color::encode_color_options(
             r, g, b, w, h, qp, INT_YUV444, bands, opts.scaled, trim, window, tiles, overlap,
-            frequency,
+            frequency, plan,
         )),
         ChromaSampling::Yuv422 => Ok(color::encode_color_options(
             r, g, b, w, h, qp, INT_YUV422, bands, opts.scaled, trim, window, tiles, overlap,
-            frequency,
+            frequency, plan,
         )),
         ChromaSampling::Yuv420 => Ok(color::encode_color_options(
             r, g, b, w, h, qp, INT_YUV420, bands, opts.scaled, trim, window, tiles, overlap,
-            frequency,
+            frequency, plan,
         )),
     }
 }
@@ -1276,6 +1287,7 @@ mod tests {
                     (&[], &[]),
                     0,
                     false,
+                    None,
                 );
                 let d = dec(&f);
                 for i in 0..n {
@@ -1545,6 +1557,7 @@ mod tests {
                         (&[], &[]),
                         overlap.code(),
                         false,
+                        None,
                     );
                     let d = dec(&f);
                     for i in 0..n {
@@ -1795,6 +1808,217 @@ mod tests {
                     "lossy frequency must equal spatial ({chroma:?} ch{c})"
                 );
             }
+        }
+    }
+
+    /// 4e: QP generality. (a) `chroma_qp` (COMP_SEPARATE at the uniform
+    /// level): equal bytes stay byte-identical to the plain path; zero-chroma
+    /// content is exact under any chroma QP; (b) COMP_INDEPENDENT (U ≠ V);
+    /// (c) per-tile QP sets — an all-lossless-tiles plan is exact, and in a
+    /// mixed plan the lossless tiles' pixels stay EXACT while lossy tiles
+    /// deviate; (d) per-MB DQUANT (LP+HP set lists + index maps): lossless-
+    /// set MBs stay exact, lossy-set MBs deviate, and the same plan in
+    /// frequency mode reconstructs identically (index bits route per band).
+    /// Any emission/prediction mismatch would desync the entropy decode
+    /// entirely, so exactness is a sharp gate.
+    #[test]
+    fn qp_generality_separate_pertile_dquant() {
+        use crate::decode::container::parse;
+        use quant::{BandQp, QpPlan, TileQps};
+        let mut r = Lcg(0x9e9e_0042_9e9e_0042);
+        let dec = |jxr: &[u8]| {
+            let c = parse(jxr).unwrap();
+            crate::decode::decode_image(&c).unwrap()
+        };
+        let (w, h) = (64u32, 64u32);
+        let n = (w * h) as usize;
+        let planes: [Vec<u8>; 3] = noise_planes(&mut r, n);
+        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let gray: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+
+        // (a) chroma_qp == qp ⇒ byte-identical (derived COMP_UNIFORM).
+        let qp = QpSet { dc: 8, lp: 16, hp: 32 };
+        let a = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions { qp, ..Default::default() },
+        )
+        .unwrap();
+        let b = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions { qp, chroma_qp: Some(qp), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(a, b, "equal chroma_qp must emit COMP_UNIFORM bytes");
+        // Zero-chroma content + harsh chroma QP ⇒ still exact.
+        let gcolor = [gray.clone(), gray.clone(), gray.clone()];
+        let f = color::encode_color_options(
+            &gcolor[0], &gcolor[1], &gcolor[2], w, h,
+            QpSet::LOSSLESS,
+            crate::decode::consts::INT_YUV444,
+            crate::decode::consts::ALL_BANDS,
+            false, 0, (0, 0), (&[], &[]), 0, false,
+            Some(&QpPlan::uniform(QpSet::LOSSLESS, Some(QpSet { dc: 64, lp: 64, hp: 64 }))),
+        );
+        let d = dec(&f);
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], gray[i] as i32, "zero-chroma separate px{i}");
+        }
+        // Colored content + harsh chroma: decodes, smaller than all-lossless.
+        let lossless = encode(&input, ColorMode::Color, QpSet::LOSSLESS).unwrap();
+        let f = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions { chroma_qp: Some(QpSet { dc: 64, lp: 64, hp: 64 }), ..Default::default() },
+        )
+        .unwrap();
+        assert!(f.len() < lossless.len(), "harsh chroma must shrink the file");
+        let d = dec(&f);
+        assert_eq!((d.width, d.height, d.num_components), (w, h, 3));
+
+        // (b) COMP_INDEPENDENT (Y, U, V all different) — lossless Y, lossy U/V.
+        let plan_indep = QpPlan {
+            tiles: vec![TileQps {
+                dc: BandQp([0, 16, 32]),
+                lp: vec![BandQp([0, 16, 32])],
+                hp: vec![BandQp([0, 16, 32])],
+            }],
+            lp_index: Vec::new(),
+            hp_index: Vec::new(),
+        };
+        let f = color::encode_color_options(
+            &gcolor[0], &gcolor[1], &gcolor[2], w, h,
+            QpSet::LOSSLESS,
+            crate::decode::consts::INT_YUV444,
+            crate::decode::consts::ALL_BANDS,
+            false, 0, (0, 0), (&[], &[]), 0, false,
+            Some(&plan_indep),
+        );
+        let d = dec(&f);
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], gray[i] as i32, "independent zero-chroma px{i}");
+        }
+
+        // (c) per-tile QP sets over a 2x2 grid: all-lossless = exact; mixed =
+        // the lossless tiles' pixel regions stay exact.
+        let mbw = (w as usize) / 16;
+        let cols: Vec<usize> = vec![2, 2];
+        let rows: Vec<usize> = vec![2, 2];
+        let tile_l = TileQps {
+            dc: BandQp::uniform(0),
+            lp: vec![BandQp::uniform(0)],
+            hp: vec![BandQp::uniform(0)],
+        };
+        let tile_q = TileQps {
+            dc: BandQp::uniform(32),
+            lp: vec![BandQp::uniform(64)],
+            hp: vec![BandQp::uniform(96)],
+        };
+        let all_lossless = QpPlan {
+            tiles: vec![tile_l.clone(), tile_l.clone(), tile_l.clone(), tile_l.clone()],
+            lp_index: Vec::new(),
+            hp_index: Vec::new(),
+        };
+        let f = color::encode_color_options(
+            &planes[0], &planes[1], &planes[2], w, h,
+            QpSet::LOSSLESS,
+            crate::decode::consts::INT_YUV444,
+            crate::decode::consts::ALL_BANDS,
+            false, 0, (0, 0), (&cols, &rows), 0, false,
+            Some(&all_lossless),
+        );
+        let d = dec(&f);
+        for c in 0..3 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i], planes[c][i] as i32, "per-tile lossless ch{c} px{i}");
+            }
+        }
+        // Mixed: tile 0 (top-left 32x32) lossless, others lossy.
+        let mixed = QpPlan {
+            tiles: vec![tile_l.clone(), tile_q.clone(), tile_q.clone(), tile_q.clone()],
+            lp_index: Vec::new(),
+            hp_index: Vec::new(),
+        };
+        let f = color::encode_color_options(
+            &planes[0], &planes[1], &planes[2], w, h,
+            QpSet::LOSSLESS,
+            crate::decode::consts::INT_YUV444,
+            crate::decode::consts::ALL_BANDS,
+            false, 0, (0, 0), (&cols, &rows), 0, false,
+            Some(&mixed),
+        );
+        let d = dec(&f);
+        let mut lossy_diffs = 0usize;
+        for c in 0..3 {
+            for y in 0..h as usize {
+                for x in 0..w as usize {
+                    let i = y * w as usize + x;
+                    if x < 32 && y < 32 {
+                        assert_eq!(
+                            d.image_plane[c][i], planes[c][i] as i32,
+                            "lossless tile must stay exact ch{c} ({x},{y})"
+                        );
+                    } else if d.image_plane[c][i] != planes[c][i] as i32 {
+                        lossy_diffs += 1;
+                    }
+                }
+            }
+        }
+        assert!(lossy_diffs > 0, "lossy tiles must actually quantize");
+
+        // (d) per-MB DQUANT: LP sets [lossless, harsh] + HP sets [lossless,
+        // harsh] on a checkerboard; set-0 MBs exact, set-1 MBs deviate;
+        // frequency mode reconstructs identically.
+        let mbh = (h as usize) / 16;
+        let map: Vec<u8> =
+            (0..mbw * mbh).map(|i| (((i % mbw) + (i / mbw)) % 2) as u8).collect();
+        let dq = QpPlan {
+            tiles: vec![TileQps {
+                dc: BandQp::uniform(0),
+                lp: vec![BandQp::uniform(0), BandQp::uniform(64)],
+                hp: vec![BandQp::uniform(0), BandQp::uniform(96)],
+            }],
+            lp_index: map.clone(),
+            hp_index: map.clone(),
+        };
+        let enc = |frequency: bool| {
+            color::encode_color_options(
+                &planes[0], &planes[1], &planes[2], w, h,
+                QpSet::LOSSLESS,
+                crate::decode::consts::INT_YUV444,
+                crate::decode::consts::ALL_BANDS,
+                false, 0, (0, 0), (&[], &[]), 0, frequency,
+                Some(&dq),
+            )
+        };
+        let fs = enc(false);
+        let ds = dec(&fs);
+        let mut lossy_mb_diffs = 0usize;
+        for c in 0..3 {
+            for y in 0..h as usize {
+                for x in 0..w as usize {
+                    let i = y * w as usize + x;
+                    let mb = (y / 16) * mbw + (x / 16);
+                    if map[mb] == 0 {
+                        assert_eq!(
+                            ds.image_plane[c][i], planes[c][i] as i32,
+                            "set-0 (lossless) MB must stay exact ch{c} ({x},{y})"
+                        );
+                    } else if ds.image_plane[c][i] != planes[c][i] as i32 {
+                        lossy_mb_diffs += 1;
+                    }
+                }
+            }
+        }
+        assert!(lossy_mb_diffs > 0, "set-1 MBs must actually quantize");
+        let ff = enc(true);
+        let df = dec(&ff);
+        for c in 0..3 {
+            assert_eq!(
+                ds.image_plane[c], df.image_plane[c],
+                "DQUANT frequency must equal spatial (ch{c})"
+            );
         }
     }
 

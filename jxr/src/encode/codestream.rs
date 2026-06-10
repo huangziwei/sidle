@@ -370,23 +370,51 @@ pub fn write_image_plane_header_yuv_scaled(
     hp_quant: u8,
     scaled: bool,
 ) {
+    let plan = super::quant::QpPlan::uniform(
+        super::quant::QpSet { dc: dc_quant, lp: lp_quant, hp: hp_quant },
+        None,
+    );
+    write_image_plane_header_yuv_plan(bw, int_fmt, bands, &plan, scaled);
+}
+
+/// [`write_image_plane_header_yuv_scaled`] over a full [`super::quant::QpPlan`]:
+/// each band's `image_plane_uniform` flag is set iff the plan keeps that band
+/// at one image-wide QP set (single tile entry, single set) — otherwise the
+/// flag is 0 and every tile's `*_tile_plane_header` carries the band's sets
+/// ([`emit_codestream`]'s `tile_headers` hook).
+pub fn write_image_plane_header_yuv_plan(
+    bw: &mut BitWriter,
+    int_fmt: u8,
+    bands: u8,
+    plan: &super::quant::QpPlan,
+    scaled: bool,
+) {
     debug_assert!(matches!(int_fmt, INT_YUV444 | INT_YUV422 | INT_YUV420));
+    let dc_uniform = plan.tiles.len() == 1;
+    let lp_uniform = dc_uniform && plan.num_lp_qps() == 1;
+    let hp_uniform = dc_uniform && plan.num_hp_qps() == 1;
     bw.write_bits(int_fmt as u64, 3); // internal_clr_fmt
     bw.write_flag(scaled); // scaled_flag
     bw.write_bits(bands as u64, 4); // bands_present
     // Format-specific reserved/centering block — 8 zero bits for all three.
     bw.write_bits(0, 8);
     // BD8 → no shift/mantissa bits.
-    bw.write_flag(true); // dc_image_plane_uniform
-    write_uniform_qp(bw, dc_quant);
+    bw.write_flag(dc_uniform); // dc_image_plane_uniform
+    if dc_uniform {
+        write_band_qp(bw, &[plan.tiles[0].dc], 3);
+    }
     if bands != DCONLY {
-        bw.write_bits(0, 1); // reserved_i_bit / use-DC-QP-for-LP = 0
-        bw.write_flag(true); // lp_image_plane_uniform
-        write_uniform_qp(bw, lp_quant);
+        bw.write_bits(0, 1); // reserved_i_bit
+        bw.write_flag(lp_uniform); // lp_image_plane_uniform
+        if lp_uniform {
+            write_band_qp(bw, &plan.tiles[0].lp, 3);
+        }
         if bands != NOHIGHPASS {
-            bw.write_bits(0, 1); // reserved_j_bit / use-LP-QP-for-HP = 0
-            bw.write_flag(true); // hp_image_plane_uniform
-            write_uniform_qp(bw, hp_quant);
+            bw.write_bits(0, 1); // reserved_j_bit
+            bw.write_flag(hp_uniform); // hp_image_plane_uniform
+            if hp_uniform {
+                write_band_qp(bw, &plan.tiles[0].hp, 3);
+            }
         }
     }
     bw.align_to_byte();
@@ -398,6 +426,47 @@ pub fn write_image_plane_header_yuv_scaled(
 fn write_uniform_qp(bw: &mut BitWriter, quant: u8) {
     bw.write_bits(COMP_UNIFORM as u64, 2);
     bw.write_bits(quant as u64, 8);
+}
+
+/// One band's QP sets, general form — mirrors `QP::read(nc, num_qps, …)`:
+/// per set, a 2-bit `component_mode` (when `nc > 1`) derived from the byte
+/// pattern, then the mode's QP bytes. Single-component planes carry bare
+/// bytes (no mode bits).
+pub fn write_band_qp(bw: &mut BitWriter, sets: &[super::quant::BandQp], nc: usize) {
+    for q in sets {
+        let [y, u, v] = q.0;
+        if nc == 1 {
+            bw.write_bits(y as u64, 8);
+            continue;
+        }
+        if y == u && u == v {
+            bw.write_bits(COMP_UNIFORM as u64, 2);
+            bw.write_bits(y as u64, 8);
+        } else if u == v {
+            bw.write_bits(COMP_SEPARATE as u64, 2);
+            bw.write_bits(y as u64, 8);
+            bw.write_bits(u as u64, 8);
+        } else {
+            bw.write_bits(COMP_INDEPENDENT as u64, 2);
+            for b in [y, u, v] {
+                bw.write_bits(b as u64, 8);
+            }
+        }
+    }
+}
+
+/// Per-MB QP-set index (mirrors `Decoder::decode_qp_index`): index 0 is a
+/// single 0 bit; index `v > 0` is a 1 bit + `v − 1` in the table's width
+/// for `num_qp`.
+pub fn write_qp_index(bw: &mut BitWriter, idx: usize, num_qp: usize) {
+    const BITS: [u32; 17] = [0, 0, 1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4];
+    debug_assert!(idx < num_qp);
+    if idx == 0 {
+        bw.write_bits(0, 1);
+    } else {
+        bw.write_bits(1, 1);
+        bw.write_bits((idx - 1) as u64, BITS[num_qp.min(16)]);
+    }
 }
 
 /// `vlw_esc` variable-length value: 2-byte form below `0xfb00`, the `0xfb`
@@ -488,7 +557,7 @@ pub trait TileEncode {
 pub fn emit_codestream(
     spec: &ImageHeaderSpec,
     write_plane_headers: impl FnOnce(&mut BitWriter),
-    trim: u8,
+    tile_headers: &dyn Fn(&mut BitWriter, usize, usize),
     num_bands: usize,
     mbw: usize,
     mbh: usize,
@@ -509,6 +578,7 @@ pub fn emit_codestream(
     // byte offset is known for the index table without back-patching.
     let mut packets: Vec<Vec<u8>> = Vec::with_capacity(cols.len() * rows.len());
     let mut top = 0usize;
+    let mut tile_idx = 0usize;
     for &th in &rows {
         let mut left = 0usize;
         for &tw_mb in &cols {
@@ -516,9 +586,7 @@ pub fn emit_codestream(
             if !spec.frequency_mode {
                 let mut tw = BitWriter::new();
                 write_common_tile_header(&mut tw);
-                if trim != 0 {
-                    write_trim_flexbits(&mut tw, trim);
-                }
+                tile_headers(&mut tw, tile_idx, SPATIAL_BAND);
                 let mut sink = Sink::Spatial(&mut tw);
                 for mby in top..top + th {
                     for mbx in left..left + tw_mb {
@@ -539,9 +607,7 @@ pub fn emit_codestream(
                 for (b, w) in [&mut dcw, &mut lpw, &mut hpw, &mut fxw].into_iter().enumerate() {
                     if b < num_bands {
                         write_common_tile_header(w);
-                        if b == 3 && trim != 0 {
-                            write_trim_flexbits(w, trim);
-                        }
+                        tile_headers(w, tile_idx, b);
                     }
                 }
                 {
@@ -567,6 +633,7 @@ pub fn emit_codestream(
                 }
             }
             left += tw_mb;
+            tile_idx += 1;
         }
         top += th;
     }
@@ -586,6 +653,21 @@ pub fn emit_codestream(
         out.extend_from_slice(&p);
     }
     out
+}
+
+/// The `band` value [`emit_codestream`]'s `tile_headers` hook receives for a
+/// SPATIAL tile packet (all bands' tile-header fields in flex→DC→LP→HP
+/// order); frequency packets receive their band index 0–3.
+pub const SPATIAL_BAND: usize = 4;
+
+/// The classic `tile_headers` hook: uniform QPs (no per-tile fields), just
+/// the 4-bit `trim_flexbits` value in the flex header when set.
+pub fn classic_tile_headers(trim: u8) -> impl Fn(&mut BitWriter, usize, usize) {
+    move |w, _tile, band| {
+        if (band == SPATIAL_BAND || band == 3) && trim != 0 {
+            write_trim_flexbits(w, trim);
+        }
+    }
 }
 
 /// Bands carried by a `bands_present` code (= frequency packets per tile).

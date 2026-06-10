@@ -40,12 +40,22 @@ libjxr 5-tap even-centered filter, centering declared 0/0), and 8-bit
 color + alpha (`32bppBGRA`/`32bppPBGRA`: a T.832 alpha image plane, per-MB
 interleaved, its own per-band QPs, premultiplied property bit; the primary
 may be subsampled): full ALL_BANDS (DC + LP + HP + flexbits) with multi-MB
-prediction and adaptive VLC/scan state, spatial order, single tile, per-band
-quantization (`QpSet::LOSSLESS` at 4:4:4 round-trips bit-exact; subsampled
-chroma is lossy by construction; higher QP = lossy), **scaled or unscaled
-arithmetic** (`scaled_flag` both ways; scaled is libjxr's lossy mode — its
-chroma half-step floors, so it is not bit-lossless for color), arbitrary
-non-16-aligned dimensions up to 65 536 px. Interleaved source buffers in the
+prediction and adaptive VLC/scan state — plus the full 8-bit structural
+envelope: **band truncation** (`BandsPresent`) and trimmed flexbits,
+**tiling** (uniform grids via `tile_cols`/`tile_rows`; index table;
+non-uniform grids internally), **explicit window margins**
+(`window_top`/`window_left`), **overlap pre-filtering** modes 1 and 2
+(`Overlap`; exact inverses of the decoder's post-filters, so lossless stays
+bit-exact), **frequency order** (`frequency`: per-band tile packets, libjxr's
+default order), the short *and* long header (auto-selected past 2¹⁶ px, up
+to 2²⁸), **scaled or unscaled arithmetic** (`scaled_flag` both ways; scaled
+is libjxr's lossy mode — its chroma half-step floors, so it is not
+bit-lossless for color), and the complete T.832 quantization syntax:
+per-band QPs (`QpSet::LOSSLESS` at 4:4:4 round-trips bit-exact; higher QP =
+lossy; subsampled chroma is lossy by construction), separate chroma
+quantizers (`chroma_qp` → `COMP_SEPARATE`), and — as crate-internal
+capability — `COMP_INDEPENDENT`, per-tile QP sets, and per-MB DQUANT index
+maps. Arbitrary non-16-aligned dimensions. Interleaved source buffers in the
 common memory orders (gray, RGB, BGR, RGBA, BGRA — premultiplied = BGRA/RGBA
 plus the `premultiplied_alpha` flag) normalize to the planar input via
 `deinterleave`; output always uses the canonical GUID for its channel count.
@@ -53,10 +63,14 @@ Gray+alpha input is rejected: JPEG XR defines no grayscale-with-alpha
 container pixel format — expand to RGBA. Separate-codestream alpha (the
 container-level arrangement libjxr calls *planar*, `-a 2`) is decoded but
 deliberately never emitted — the in-codestream alpha image plane covers the
-capability in one codestream.
+capability in one codestream. Every feature is verified two ways: in-crate
+round-trip/equivalence invariants against this crate's decoder, and
+JxrDecApp-exact readback (with jxrencapp PSNR/size parity wherever the
+reference encoder can mint a counterpart).
 
-Both halves are being pushed toward full-spec general-purpose coverage; the
-roadmap lives in the repo at `.claude/plans/jxr-general-codec.md`.
+The encoder's 8-bit envelope is complete; deep/HDR input formats remain
+encoder-side future work. The roadmap lives in the repo at
+`.claude/plans/jxr-general-codec.md`.
 
 ## Usage
 
