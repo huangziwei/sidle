@@ -68,3 +68,8 @@ malformed_fixture!(tile_columns_exceed_grid, "tile_columns_exceed_grid.jxr", "ma
 // Stream truncated within the container/header — the bit reader reports
 // insufficient data instead of reading past the buffer.
 malformed_fixture!(truncated_header, "truncated_header.jxr", "container-err");
+
+// Per-MB QP-set selector decoded out of range (index ≥ num_qps) — would index
+// past the quant-scaling table at `scaling_factor`. Found by the Phase-3
+// certification fuzz run (1 h × 8 workers); `decode_qp_index` now bounds it.
+malformed_fixture!(qp_index_out_of_range, "qp_index_out_of_range.jxr", "malformed");

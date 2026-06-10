@@ -839,6 +839,15 @@ impl<'a> Decoder<'a> {
         if self.ds.unpack_bits(1)? != 0 {
             let bits = bits_qp_index[num_qp.min(16)];
             let v = self.ds.unpack_bits(bits)? as usize + 1;
+            // The selected QP set must exist: `bits` spans a power-of-two range
+            // that can exceed num_qp, so a valid stream only ever emits v <
+            // num_qp; a larger value would index past the QP table (used as
+            // `quant_scaling_factor[..][index_qps]`). Reject rather than panic.
+            if v >= num_qp {
+                return Err(DecodeError::Malformed(format!(
+                    "QP-set index {v} out of range (num_qps {num_qp})"
+                )));
+            }
             Ok(v)
         } else {
             Ok(0)
