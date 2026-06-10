@@ -59,270 +59,326 @@ fn pad_plane(src: &[u8], wu: usize, hu: usize, pw: usize, ph: usize) -> Vec<u8> 
     p
 }
 
-/// Encode an RGB image (3 planes, each `w*h` row-major) as a **color** JPEG-XR
-/// (`24bppRGB` / `INT_YUV444 → OUT_RGB`). **NOHIGHPASS stage** (Track 6.3): DC +
-/// LP — exact for content with zero HP (per-MB-affine); HP band still TODO.
-///
-/// Mirrors the decoder's `mb_dc` + `mb_lp` YUV paths: a `val_dc_yuv` symbol for
-/// the DC abs-flags, per-component DC residuals with chroma models/tables and
-/// 3-component-weighted prediction; then `cbplp_yuv1_444` (with the
-/// count-escape state) + per-component LP run-level via `encode_block` over a
-/// **shared** adaptive scan with luma/chroma index tables, + LP refinement.
-pub fn encode_color(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> Vec<u8> {
-    let (dc_sf, lp_sf, hp_sf) =
-        (scaling_factor(qp.dc), scaling_factor(qp.lp), scaling_factor(qp.hp));
-    let (wu, hu) = (w as usize, h as usize);
-    let (pw, ph) = (wu.next_multiple_of(16), hu.next_multiple_of(16));
-    let (mbw, mbh) = (pw / 16, ph / 16);
+/// One 3-component (`INT_YUV444`) image plane: per-component quantized
+/// coefficients plus the YUV adaptive entropy state, encodable one macroblock
+/// at a time. Mirror of [`super::gray::YOnlyPlane`] for the color path; a
+/// color+alpha image (4a) is a `ColorPlane` and a `YOnlyPlane` per-MB
+/// interleaved on one `BitWriter`.
+pub(super) struct ColorPlane {
+    pub(super) mbw: usize,
+    pub(super) mbh: usize,
+    buf_grid: Vec<Vec<[[i32; 256]; 3]>>,
+    dclp: Vec<Vec<[[i32; 16]; 3]>>,
+    cbphp_grid: Vec<Vec<[i32; 3]>>,
+    model_dc: coeff::ColorModel,
+    abs_dc_lum: coeff::AdaptiveVlc1,
+    abs_dc_chr: coeff::AdaptiveVlc1,
+    model_lp: coeff::ColorModel,
+    lp_first: [AdaptiveVLC; 2], // [lum, chr]
+    lp_ind0: [AdaptiveVLC; 2],
+    lp_ind1: [AdaptiveVLC; 2],
+    lp_abs0: AdaptiveVLC,
+    lp_abs1: AdaptiveVLC,
+    scan: AdaptiveScan,
+    count_zero_cbplp: i32,
+    count_max_cbplp: i32,
+    hp_state: ColorHpState,
+}
 
-    // Pad RGB, then forward color transform per pixel → 3 centered YUV planes.
-    let (rp, gp, bp) = (
-        pad_plane(r, wu, hu, pw, ph),
-        pad_plane(g, wu, hu, pw, ph),
-        pad_plane(b, wu, hu, pw, ph),
-    );
-    let mut yuv = [vec![0i32; pw * ph], vec![0i32; pw * ph], vec![0i32; pw * ph]];
-    for i in 0..pw * ph {
-        let (y, u, v) = rgb_to_yuv444(rp[i] as i32 - 128, gp[i] as i32 - 128, bp[i] as i32 - 128);
-        yuv[0][i] = y;
-        yuv[1][i] = u;
-        yuv[2][i] = v;
-    }
+impl ColorPlane {
+    /// Pad RGB to the 16-aligned MB grid, forward-color-transform to centered
+    /// YUV 4:4:4, forward-transform + quantize every MB per component, and
+    /// initialize the YUV adaptive entropy state.
+    pub(super) fn new(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> Self {
+        let (dc_sf, lp_sf, hp_sf) =
+            (scaling_factor(qp.dc), scaling_factor(qp.lp), scaling_factor(qp.hp));
+        let (wu, hu) = (w as usize, h as usize);
+        let (pw, ph) = (wu.next_multiple_of(16), hu.next_multiple_of(16));
+        let (mbw, mbh) = (pw / 16, ph / 16);
 
-    // Per-MB, per-component quantized DC+LP levels (`dclp`) and the full forward
-    // buffers (`buf_grid`, HP quantized) for the HP band.
-    let mut dclp = vec![vec![[[0i32; 16]; 3]; mbh]; mbw];
-    let mut buf_grid = vec![vec![[[0i32; 256]; 3]; mbh]; mbw];
-    for mbx in 0..mbw {
-        for mby in 0..mbh {
-            for (comp, plane) in yuv.iter().enumerate() {
-                let mut samples = [0i32; 256];
-                for py in 0..16 {
-                    for px in 0..16 {
-                        samples[py * 16 + px] = plane[(mby * 16 + py) * pw + (mbx * 16 + px)];
-                    }
-                }
-                let mut buf = transform::forward_transform_mb(&samples);
-                if hp_sf > 1 {
-                    for blk in 0..16 {
-                        for pos in 1..16 {
-                            let i = blk * 16 + pos;
-                            buf[i] = quantize(buf[i], hp_sf);
+        // Pad RGB, then forward color transform per pixel → 3 centered YUV planes.
+        let (rp, gp, bp) = (
+            pad_plane(r, wu, hu, pw, ph),
+            pad_plane(g, wu, hu, pw, ph),
+            pad_plane(b, wu, hu, pw, ph),
+        );
+        let mut yuv = [vec![0i32; pw * ph], vec![0i32; pw * ph], vec![0i32; pw * ph]];
+        for i in 0..pw * ph {
+            let (y, u, v) =
+                rgb_to_yuv444(rp[i] as i32 - 128, gp[i] as i32 - 128, bp[i] as i32 - 128);
+            yuv[0][i] = y;
+            yuv[1][i] = u;
+            yuv[2][i] = v;
+        }
+
+        // Per-MB, per-component quantized DC+LP levels (`dclp`) and the full forward
+        // buffers (`buf_grid`, HP quantized) for the HP band.
+        let mut dclp = vec![vec![[[0i32; 16]; 3]; mbh]; mbw];
+        let mut buf_grid = vec![vec![[[0i32; 256]; 3]; mbh]; mbw];
+        for mbx in 0..mbw {
+            for mby in 0..mbh {
+                for (comp, plane) in yuv.iter().enumerate() {
+                    let mut samples = [0i32; 256];
+                    for py in 0..16 {
+                        for px in 0..16 {
+                            samples[py * 16 + px] =
+                                plane[(mby * 16 + py) * pw + (mbx * 16 + px)];
                         }
                     }
+                    let mut buf = transform::forward_transform_mb(&samples);
+                    if hp_sf > 1 {
+                        for blk in 0..16 {
+                            for pos in 1..16 {
+                                let i = blk * 16 + pos;
+                                buf[i] = quantize(buf[i], hp_sf);
+                            }
+                        }
+                    }
+                    let c = &mut dclp[mbx][mby][comp];
+                    for (j, slot) in c.iter_mut().enumerate() {
+                        *slot = buf[16 * ICT4X4_INV_PERM[j]];
+                    }
+                    c[0] = quantize(c[0], dc_sf);
+                    for s in c.iter_mut().skip(1) {
+                        *s = quantize(*s, lp_sf);
+                    }
+                    buf_grid[mbx][mby][comp] = buf;
                 }
-                let c = &mut dclp[mbx][mby][comp];
-                for (j, slot) in c.iter_mut().enumerate() {
-                    *slot = buf[16 * ICT4X4_INV_PERM[j]];
-                }
-                c[0] = quantize(c[0], dc_sf);
-                for s in c.iter_mut().skip(1) {
-                    *s = quantize(*s, lp_sf);
-                }
-                buf_grid[mbx][mby][comp] = buf;
             }
+        }
+
+        // LP band state: luma + chroma index tables, shared abs tables + scan,
+        // and the cbplp count-escape counters (DC/HP state in the literal below).
+        let mut lp_first = [AdaptiveVLC::default(), AdaptiveVLC::default()]; // [lum, chr]
+        let mut lp_ind0 = [AdaptiveVLC::default(), AdaptiveVLC::default()];
+        let mut lp_ind1 = [AdaptiveVLC::default(), AdaptiveVLC::default()];
+        let mut lp_abs0 = AdaptiveVLC::default();
+        let mut lp_abs1 = AdaptiveVLC::default();
+        for t in lp_first.iter_mut().chain(lp_ind0.iter_mut()).chain(lp_ind1.iter_mut()) {
+            t.init_table2();
+        }
+        lp_abs0.init_table1();
+        lp_abs1.init_table1();
+
+        ColorPlane {
+            mbw,
+            mbh,
+            buf_grid,
+            dclp,
+            cbphp_grid: vec![vec![[0i32; 3]; mbh]; mbw],
+            model_dc: coeff::ColorModel::init(0),
+            abs_dc_lum: coeff::AdaptiveVlc1::default(),
+            abs_dc_chr: coeff::AdaptiveVlc1::default(),
+            model_lp: coeff::ColorModel::init(1),
+            lp_first,
+            lp_ind0,
+            lp_ind1,
+            lp_abs0,
+            lp_abs1,
+            scan: AdaptiveScan::new(&GRGI_ZIGZAG_INV_4X4_H),
+            count_zero_cbplp: 1,
+            count_max_cbplp: 1,
+            hp_state: ColorHpState::new(),
         }
     }
 
+    /// Emit one macroblock's DC + LP + HP(+flex) bits for all 3 components,
+    /// updating this plane's adaptive state exactly as the decoder's per-MB
+    /// YUV444 readers do.
+    pub(super) fn encode_mb(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize) {
+        let (is_left, is_top) = (mbx == 0, mby == 0);
+        let dc_of = |mx: usize, my: usize| {
+            [self.dclp[mx][my][0][0], self.dclp[mx][my][1][0], self.dclp[mx][my][2][0]]
+        };
+
+        // ---------- DC ----------
+        let (dmode, dc_preds): (u8, [i32; 3]) = if is_left && is_top {
+            (NO_PREDICTION, [0; 3])
+        } else if is_left {
+            (PREDICT_FROM_TOP, dc_of(mbx, mby - 1))
+        } else if is_top {
+            (PREDICT_FROM_LEFT, dc_of(mbx - 1, mby))
+        } else {
+            let (l, t, tl) = (dc_of(mbx - 1, mby), dc_of(mbx, mby - 1), dc_of(mbx - 1, mby - 1));
+            let sh = (tl[0] - l[0]).abs() * 2 + (tl[1] - l[1]).abs() + (tl[2] - l[2]).abs();
+            let sv = (tl[0] - t[0]).abs() * 2 + (tl[1] - t[1]).abs() + (tl[2] - t[2]).abs();
+            if sh * 4 < sv {
+                (PREDICT_FROM_TOP, t)
+            } else if sv * 4 < sh {
+                (PREDICT_FROM_LEFT, l)
+            } else {
+                (PREDICT_FROM_TOP_LEFT, [(t[0] + l[0]) >> 1, (t[1] + l[1]) >> 1, (t[2] + l[2]) >> 1])
+            }
+        };
+        let mut dc_res = [0i32; 3];
+        let mut babs = [false; 3];
+        for comp in 0..3 {
+            let mb = self.model_dc.m_bits[chroma_component(comp)];
+            dc_res[comp] = self.dclp[mbx][mby][comp][0] - dc_preds[comp];
+            babs[comp] = (dc_res[comp].unsigned_abs() >> mb as u32) > 0;
+        }
+        let val = ((babs[0] as i32) << 2) | ((babs[1] as i32) << 1) | (babs[2] as i32);
+        write_huff(bw, tables::val_dc_yuv(), val);
+        let mut lap_dc = [0i32; 2];
+        for comp in 0..3 {
+            let chroma = chroma_component(comp);
+            let mb = self.model_dc.m_bits[chroma];
+            let abs_vlc = if chroma == 0 { &mut self.abs_dc_lum } else { &mut self.abs_dc_chr };
+            let abs_table = tables::abs_level_index(abs_vlc.table_index as usize);
+            let idx = coeff::encode_dc_residual(bw, dc_res[comp], mb, babs[comp], abs_table);
+            if babs[comp] {
+                abs_vlc.discrim += ABS_DELTA[idx as usize];
+                lap_dc[chroma] += 1;
+            }
+        }
+        self.model_dc.update(lap_dc, 0, 3);
+        if mbx % 16 == 0 || mbx == self.mbw - 1 {
+            self.abs_dc_lum.adapt();
+            self.abs_dc_chr.adapt();
+        }
+
+        // ---------- LP ----------
+        if mbx % 16 == 0 {
+            self.scan.reset_totals();
+        }
+        let lp_mode = match dmode {
+            PREDICT_FROM_LEFT => PREDICT_FROM_LEFT,
+            PREDICT_FROM_TOP => PREDICT_FROM_TOP,
+            _ => NO_PREDICTION,
+        };
+        let mut lp_res = [[0i32; 16]; 3];
+        let mut coarse = [[0i32; 16]; 3];
+        for comp in 0..3 {
+            let mb = self.model_lp.m_bits[chroma_component(comp)] as u32;
+            for j in 1..16 {
+                let pred = if lp_mode == PREDICT_FROM_LEFT && matches!(j, 1 | 2 | 3) {
+                    self.dclp[mbx - 1][mby][comp][j]
+                } else if lp_mode == PREDICT_FROM_TOP && matches!(j, 4 | 8 | 12) {
+                    self.dclp[mbx][mby - 1][comp][j]
+                } else {
+                    0
+                };
+                lp_res[comp][j] = self.dclp[mbx][mby][comp][j] - pred;
+                let m = (lp_res[comp][j].unsigned_abs() >> mb) as i32;
+                coarse[comp][j] = if lp_res[comp][j] < 0 { -m } else { m };
+            }
+        }
+        let cbp = [
+            (1..16).any(|j| coarse[0][j] != 0),
+            (1..16).any(|j| coarse[1][j] != 0),
+            (1..16).any(|j| coarse[2][j] != 0),
+        ];
+        let i_cbplp = (cbp[0] as i32) | ((cbp[1] as i32) << 1) | ((cbp[2] as i32) << 2);
+        // cbplp coding: Huffman (with optional inversion) when the count
+        // state says so, else 3 raw bits — mirrors `mb_lp` (decoder.rs:940).
+        let i_max = 3 * 4 - 5; // = 7 (all bits set)
+        if self.count_zero_cbplp <= 0 || self.count_max_cbplp < 0 {
+            let cbplp_yuv1 = if self.count_max_cbplp < self.count_zero_cbplp {
+                i_max - i_cbplp
+            } else {
+                i_cbplp
+            };
+            write_huff(bw, tables::cbplp_yuv1_444(), cbplp_yuv1);
+        } else {
+            bw.write_bits(i_cbplp as u64, 3);
+        }
+        self.count_zero_cbplp =
+            (self.count_zero_cbplp + 1 - if i_cbplp == 0 { 4 } else { 0 }).clamp(-8, 7);
+        self.count_max_cbplp =
+            (self.count_max_cbplp + 1 - if i_cbplp == i_max { 4 } else { 0 }).clamp(-8, 7);
+
+        let mut lap_lp = [0i32; 2];
+        for comp in 0..3 {
+            let chroma = chroma_component(comp);
+            if cbp[comp] {
+                // Build (run, level) pairs in shared-scan order, adapting the
+                // one scan across all components exactly as the decoder does.
+                let mut pairs: Vec<(u32, i32)> = Vec::new();
+                let mut run = 0u32;
+                for i in 1..16usize {
+                    let pos = self.scan.translate(i);
+                    if coarse[comp][pos] != 0 {
+                        pairs.push((run, coarse[comp][pos]));
+                        run = 0;
+                        self.scan.adapt(i);
+                    } else {
+                        run += 1;
+                    }
+                }
+                lap_lp[chroma] += pairs.len() as i32;
+                coeff::encode_block(
+                    bw,
+                    &pairs,
+                    1,
+                    &mut self.lp_first[chroma],
+                    &mut self.lp_ind0[chroma],
+                    &mut self.lp_ind1[chroma],
+                    &mut self.lp_abs0,
+                    &mut self.lp_abs1,
+                );
+            }
+            let mb = self.model_lp.m_bits[chroma];
+            if mb > 0 {
+                for j in 1..16 {
+                    coeff::encode_refine_lp(bw, coarse[comp][j], lp_res[comp][j], mb);
+                }
+            }
+        }
+        self.model_lp.update(lap_lp, 1, 3);
+        if mbx % 16 == 0 || mbx == self.mbw - 1 {
+            for t in self.lp_first.iter_mut() {
+                t.adapt_table2(4);
+            }
+            for t in self.lp_ind0.iter_mut().chain(self.lp_ind1.iter_mut()) {
+                t.adapt_table2(3);
+            }
+            self.lp_abs0.adapt_table1();
+            self.lp_abs1.adapt_table1();
+        }
+
+        // ---------- HP ----------
+        if mbx % 16 == 0 {
+            self.hp_state.hor_scan.reset_totals();
+            self.hp_state.ver_scan.reset_totals();
+        }
+        let cbphp_left = if is_left { [0; 3] } else { self.cbphp_grid[mbx - 1][mby] };
+        let cbphp_top = if is_top { [0; 3] } else { self.cbphp_grid[mbx][mby - 1] };
+        self.cbphp_grid[mbx][mby] = encode_color_hp_mb(
+            bw,
+            &mut self.hp_state,
+            &self.buf_grid[mbx][mby],
+            &self.dclp[mbx][mby],
+            cbphp_left,
+            cbphp_top,
+            is_left,
+            is_top,
+        );
+        if mbx % 16 == 0 || mbx == self.mbw - 1 {
+            self.hp_state.adapt();
+        }
+    }
+}
+
+/// Encode an RGB image (3 planes, each `w*h` row-major) as a **color** JPEG-XR
+/// (`24bppRGB` / `INT_YUV444 → OUT_RGB`), ALL_BANDS (DC + LP + HP + flexbits).
+/// Lossless 4:4:4 round-trips bit-exactly; `QP > 0` is lossy.
+///
+/// Mirrors the decoder's YUV444 paths per macroblock: a `val_dc_yuv` symbol for
+/// the DC abs-flags, per-component DC residuals with chroma models/tables and
+/// 3-component-weighted prediction; `cbplp_yuv1_444` (with the count-escape
+/// state) + per-component LP run-level via `encode_block` over a **shared**
+/// adaptive scan with luma/chroma index tables, + LP refinement; YUV
+/// `mb_cbphp` + per-component HP run-level + flex.
+pub fn encode_color(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> Vec<u8> {
+    let mut plane = ColorPlane::new(r, g, b, w, h, qp);
     let mut bw = BitWriter::new();
     codestream::write_image_header(&mut bw, w, h, OUT_RGB);
     codestream::write_image_plane_header_color_allbands(&mut bw, qp.dc, qp.lp, qp.hp);
     codestream::write_vlw_esc(&mut bw, 0);
     codestream::write_common_tile_header(&mut bw);
-
-    // DC band state.
-    let mut model_dc = coeff::ColorModel::init(0);
-    let mut abs_dc_lum = coeff::AdaptiveVlc1::default();
-    let mut abs_dc_chr = coeff::AdaptiveVlc1::default();
-    // LP band state: luma + chroma index tables, shared abs tables + scan, and
-    // the cbplp count-escape counters.
-    let mut model_lp = coeff::ColorModel::init(1);
-    let mut lp_first = [AdaptiveVLC::default(), AdaptiveVLC::default()]; // [lum, chr]
-    let mut lp_ind0 = [AdaptiveVLC::default(), AdaptiveVLC::default()];
-    let mut lp_ind1 = [AdaptiveVLC::default(), AdaptiveVLC::default()];
-    let mut lp_abs0 = AdaptiveVLC::default();
-    let mut lp_abs1 = AdaptiveVLC::default();
-    for t in lp_first.iter_mut().chain(lp_ind0.iter_mut()).chain(lp_ind1.iter_mut()) {
-        t.init_table2();
-    }
-    lp_abs0.init_table1();
-    lp_abs1.init_table1();
-    let mut scan = AdaptiveScan::new(&GRGI_ZIGZAG_INV_4X4_H);
-    let (mut count_zero_cbplp, mut count_max_cbplp) = (1i32, 1i32);
-    // HP band state.
-    let mut hp_state = ColorHpState::new();
-    let mut cbphp_grid = vec![vec![[0i32; 3]; mbh]; mbw];
-
-    for mby in 0..mbh {
-        for mbx in 0..mbw {
-            let (is_left, is_top) = (mbx == 0, mby == 0);
-            let dc_of = |mx: usize, my: usize| {
-                [dclp[mx][my][0][0], dclp[mx][my][1][0], dclp[mx][my][2][0]]
-            };
-
-            // ---------- DC ----------
-            let (dmode, dc_preds): (u8, [i32; 3]) = if is_left && is_top {
-                (NO_PREDICTION, [0; 3])
-            } else if is_left {
-                (PREDICT_FROM_TOP, dc_of(mbx, mby - 1))
-            } else if is_top {
-                (PREDICT_FROM_LEFT, dc_of(mbx - 1, mby))
-            } else {
-                let (l, t, tl) = (dc_of(mbx - 1, mby), dc_of(mbx, mby - 1), dc_of(mbx - 1, mby - 1));
-                let sh = (tl[0] - l[0]).abs() * 2 + (tl[1] - l[1]).abs() + (tl[2] - l[2]).abs();
-                let sv = (tl[0] - t[0]).abs() * 2 + (tl[1] - t[1]).abs() + (tl[2] - t[2]).abs();
-                if sh * 4 < sv {
-                    (PREDICT_FROM_TOP, t)
-                } else if sv * 4 < sh {
-                    (PREDICT_FROM_LEFT, l)
-                } else {
-                    (PREDICT_FROM_TOP_LEFT, [(t[0] + l[0]) >> 1, (t[1] + l[1]) >> 1, (t[2] + l[2]) >> 1])
-                }
-            };
-            let mut dc_res = [0i32; 3];
-            let mut babs = [false; 3];
-            for comp in 0..3 {
-                let mb = model_dc.m_bits[chroma_component(comp)];
-                dc_res[comp] = dclp[mbx][mby][comp][0] - dc_preds[comp];
-                babs[comp] = (dc_res[comp].unsigned_abs() >> mb as u32) > 0;
-            }
-            let val = ((babs[0] as i32) << 2) | ((babs[1] as i32) << 1) | (babs[2] as i32);
-            write_huff(&mut bw, tables::val_dc_yuv(), val);
-            let mut lap_dc = [0i32; 2];
-            for comp in 0..3 {
-                let chroma = chroma_component(comp);
-                let mb = model_dc.m_bits[chroma];
-                let abs_vlc = if chroma == 0 { &mut abs_dc_lum } else { &mut abs_dc_chr };
-                let abs_table = tables::abs_level_index(abs_vlc.table_index as usize);
-                let idx = coeff::encode_dc_residual(&mut bw, dc_res[comp], mb, babs[comp], abs_table);
-                if babs[comp] {
-                    abs_vlc.discrim += ABS_DELTA[idx as usize];
-                    lap_dc[chroma] += 1;
-                }
-            }
-            model_dc.update(lap_dc, 0, 3);
-            if mbx % 16 == 0 || mbx == mbw - 1 {
-                abs_dc_lum.adapt();
-                abs_dc_chr.adapt();
-            }
-
-            // ---------- LP ----------
-            if mbx % 16 == 0 {
-                scan.reset_totals();
-            }
-            let lp_mode = match dmode {
-                PREDICT_FROM_LEFT => PREDICT_FROM_LEFT,
-                PREDICT_FROM_TOP => PREDICT_FROM_TOP,
-                _ => NO_PREDICTION,
-            };
-            let mut lp_res = [[0i32; 16]; 3];
-            let mut coarse = [[0i32; 16]; 3];
-            for comp in 0..3 {
-                let mb = model_lp.m_bits[chroma_component(comp)] as u32;
-                for j in 1..16 {
-                    let pred = if lp_mode == PREDICT_FROM_LEFT && matches!(j, 1 | 2 | 3) {
-                        dclp[mbx - 1][mby][comp][j]
-                    } else if lp_mode == PREDICT_FROM_TOP && matches!(j, 4 | 8 | 12) {
-                        dclp[mbx][mby - 1][comp][j]
-                    } else {
-                        0
-                    };
-                    lp_res[comp][j] = dclp[mbx][mby][comp][j] - pred;
-                    let m = (lp_res[comp][j].unsigned_abs() >> mb) as i32;
-                    coarse[comp][j] = if lp_res[comp][j] < 0 { -m } else { m };
-                }
-            }
-            let cbp = [
-                (1..16).any(|j| coarse[0][j] != 0),
-                (1..16).any(|j| coarse[1][j] != 0),
-                (1..16).any(|j| coarse[2][j] != 0),
-            ];
-            let i_cbplp = (cbp[0] as i32) | ((cbp[1] as i32) << 1) | ((cbp[2] as i32) << 2);
-            // cbplp coding: Huffman (with optional inversion) when the count
-            // state says so, else 3 raw bits — mirrors `mb_lp` (decoder.rs:940).
-            let i_max = 3 * 4 - 5; // = 7 (all bits set)
-            if count_zero_cbplp <= 0 || count_max_cbplp < 0 {
-                let cbplp_yuv1 = if count_max_cbplp < count_zero_cbplp {
-                    i_max - i_cbplp
-                } else {
-                    i_cbplp
-                };
-                write_huff(&mut bw, tables::cbplp_yuv1_444(), cbplp_yuv1);
-            } else {
-                bw.write_bits(i_cbplp as u64, 3);
-            }
-            count_zero_cbplp = (count_zero_cbplp + 1 - if i_cbplp == 0 { 4 } else { 0 }).clamp(-8, 7);
-            count_max_cbplp = (count_max_cbplp + 1 - if i_cbplp == i_max { 4 } else { 0 }).clamp(-8, 7);
-
-            let mut lap_lp = [0i32; 2];
-            for comp in 0..3 {
-                let chroma = chroma_component(comp);
-                if cbp[comp] {
-                    // Build (run, level) pairs in shared-scan order, adapting the
-                    // one scan across all components exactly as the decoder does.
-                    let mut pairs: Vec<(u32, i32)> = Vec::new();
-                    let mut run = 0u32;
-                    for i in 1..16usize {
-                        let pos = scan.translate(i);
-                        if coarse[comp][pos] != 0 {
-                            pairs.push((run, coarse[comp][pos]));
-                            run = 0;
-                            scan.adapt(i);
-                        } else {
-                            run += 1;
-                        }
-                    }
-                    lap_lp[chroma] += pairs.len() as i32;
-                    coeff::encode_block(
-                        &mut bw,
-                        &pairs,
-                        1,
-                        &mut lp_first[chroma],
-                        &mut lp_ind0[chroma],
-                        &mut lp_ind1[chroma],
-                        &mut lp_abs0,
-                        &mut lp_abs1,
-                    );
-                }
-                let mb = model_lp.m_bits[chroma];
-                if mb > 0 {
-                    for j in 1..16 {
-                        coeff::encode_refine_lp(&mut bw, coarse[comp][j], lp_res[comp][j], mb);
-                    }
-                }
-            }
-            model_lp.update(lap_lp, 1, 3);
-            if mbx % 16 == 0 || mbx == mbw - 1 {
-                for t in lp_first.iter_mut() {
-                    t.adapt_table2(4);
-                }
-                for t in lp_ind0.iter_mut().chain(lp_ind1.iter_mut()) {
-                    t.adapt_table2(3);
-                }
-                lp_abs0.adapt_table1();
-                lp_abs1.adapt_table1();
-            }
-
-            // ---------- HP ----------
-            if mbx % 16 == 0 {
-                hp_state.hor_scan.reset_totals();
-                hp_state.ver_scan.reset_totals();
-            }
-            let cbphp_left = if is_left { [0; 3] } else { cbphp_grid[mbx - 1][mby] };
-            let cbphp_top = if is_top { [0; 3] } else { cbphp_grid[mbx][mby - 1] };
-            cbphp_grid[mbx][mby] = encode_color_hp_mb(
-                &mut bw,
-                &mut hp_state,
-                &buf_grid[mbx][mby],
-                &dclp[mbx][mby],
-                cbphp_left,
-                cbphp_top,
-                is_left,
-                is_top,
-            );
-            if mbx % 16 == 0 || mbx == mbw - 1 {
-                hp_state.adapt();
-            }
+    for mby in 0..plane.mbh {
+        for mbx in 0..plane.mbw {
+            plane.encode_mb(&mut bw, mbx, mby);
         }
     }
     bw.align_to_byte();
