@@ -15,6 +15,7 @@ pub mod codestream;
 pub mod color;
 pub mod container;
 pub mod coeff;
+pub mod convert;
 pub mod entropy;
 pub mod gray;
 pub mod hp;
@@ -22,6 +23,7 @@ mod overlap;
 pub mod quant;
 pub mod transform;
 
+pub use convert::SamplePlanes;
 pub use quant::QpSet;
 
 /// How color is handled on the way into the KFX.
@@ -328,14 +330,15 @@ pub fn encode_with_alpha_qp(
 /// [`encode`] over the full option surface ([`EncodeOptions`]): chroma
 /// sampling (4:4:4 / 4:2:2 / 4:2:0 / luma-only), independent alpha QPs, and
 /// scaled arithmetic.
-pub fn encode_with_options(
-    input: &ImageInput<'_>,
-    mode: ColorMode,
-    opts: EncodeOptions,
-) -> Result<Vec<u8>, EncodeError> {
-    use crate::decode::consts::{INT_YUV420, INT_YUV422, INT_YUV444};
-    let (qp, alpha_qp) = (opts.qp, opts.alpha_qp.unwrap_or(opts.qp));
-    let bands = opts.bands.code();
+/// The geometry every encode path validates the same way: window margins,
+/// padded MB grid, uniform tile split, size caps.
+struct Geometry {
+    window: (u32, u32),
+    tile_cols_mb: Vec<usize>,
+    tile_rows_mb: Vec<usize>,
+}
+
+fn validate_geometry(w: u32, h: u32, opts: &EncodeOptions) -> Result<Geometry, EncodeError> {
     if opts.trim_flexbits > 15 {
         return Err(EncodeError::Unsupported("trim_flexbits must be 0–15".into()));
     }
@@ -344,11 +347,20 @@ pub fn encode_with_options(
             "window margins are 6-bit fields (0–63)".into(),
         ));
     }
+    if w == 0 || h == 0 {
+        return Err(EncodeError::Unsupported("zero-size image".into()));
+    }
+    if w > 1 << 28 || h > 1 << 28 {
+        // The long header carries 32-bit dims, but cap at the sane end of the
+        // spec range (the decoder's own decompression budget would reject the
+        // grid anyway).
+        return Err(EncodeError::Unsupported("dims exceed 2^28".into()));
+    }
     let window = (opts.window_top as u32, opts.window_left as u32);
     // Tile grid: uniform split of the padded MB grid (which includes the
     // window margins). Each tile must be ≥ 1 MB; counts are 12-bit fields.
-    let mb_cols = ((input.width + window.1).div_ceil(16)) as usize;
-    let mb_rows = ((input.height + window.0).div_ceil(16)) as usize;
+    let mb_cols = ((w + window.1).div_ceil(16)) as usize;
+    let mb_rows = ((h + window.0).div_ceil(16)) as usize;
     let (tc, tr) = (opts.tile_cols.max(1) as usize, opts.tile_rows.max(1) as usize);
     if tc > 4096 || tr > 4096 {
         return Err(EncodeError::Unsupported("tile counts are 12-bit fields (≤ 4096)".into()));
@@ -363,23 +375,27 @@ pub fn encode_with_options(
     } else {
         (Vec::new(), Vec::new())
     };
-    let tiles: (&[usize], &[usize]) = (&tile_cols_mb, &tile_rows_mb);
+    Ok(Geometry { window, tile_cols_mb, tile_rows_mb })
+}
+
+pub fn encode_with_options(
+    input: &ImageInput<'_>,
+    mode: ColorMode,
+    opts: EncodeOptions,
+) -> Result<Vec<u8>, EncodeError> {
+    use crate::decode::consts::{INT_YUV420, INT_YUV422, INT_YUV444};
+    let (qp, alpha_qp) = (opts.qp, opts.alpha_qp.unwrap_or(opts.qp));
+    let bands = opts.bands.code();
+    let (w, h) = (input.width, input.height);
+    let geom = validate_geometry(w, h, &opts)?;
+    let window = geom.window;
+    let tiles: (&[usize], &[usize]) = (&geom.tile_cols_mb, &geom.tile_rows_mb);
     let overlap = opts.overlap.code();
     let frequency = opts.frequency;
     // chroma_qp folds into a single-set QpPlan with separate chroma bytes
     // (COMP_SEPARATE emission); None keeps the classic plan-free path.
     let chroma_plan = opts.chroma_qp.map(|c| quant::QpPlan::uniform(qp, Some(c)));
     let plan = chroma_plan.as_ref();
-    let (w, h) = (input.width, input.height);
-    if w == 0 || h == 0 {
-        return Err(EncodeError::Unsupported("zero-size image".into()));
-    }
-    if w > 1 << 28 || h > 1 << 28 {
-        // The long header carries 32-bit dims, but cap at the sane end of the
-        // spec range (the decoder's own decompression budget would reject the
-        // grid anyway).
-        return Err(EncodeError::Unsupported("dims exceed 2^28".into()));
-    }
     let n = w as usize * h as usize;
     let check = |p: &[u8]| {
         if p.len() == n {
@@ -534,6 +550,193 @@ pub fn encode_with_options(
             r, g, b, w, h, qp, INT_YUV420, bands, opts.scaled, trim, window, tiles, overlap,
             frequency, plan,
         )),
+    }
+}
+
+/// Typed (any-depth) pixel input for [`encode_typed`]: the deep-format
+/// counterpart of [`ImageInput`]. Plane count carries the color shape exactly
+/// as in the 8-bit API (**1** = grayscale, **3** = RGB; **4** = RGB + alpha,
+/// 8-bit only so far); the [`SamplePlanes`] variant carries the depth.
+pub struct TypedInput<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub samples: SamplePlanes<'a>,
+    /// See [`ImageInput::premultiplied_alpha`] (4-plane inputs only).
+    pub premultiplied_alpha: bool,
+}
+
+/// [`encode_with_options`] over typed planes ([`TypedInput`]): encode 8-bit
+/// **or deep** pixels. `U8` routes through the classic 8-bit path
+/// byte-for-byte; `U16`/`I16` (BD16/BD16S) add `16bppGray` / `48bppRGB` /
+/// `…Fixed` and are bit-exact at `QpSet::LOSSLESS`; `I32` (BD32S,
+/// `32bppGrayFixed` / `96bppRGBFixed`) sheds its 10 low bits on input
+/// (`shift_bits` — reference-encoder behavior; q1 round-trips
+/// `(x >> 10) << 10`) and rejects scaled arithmetic (`i32` transform
+/// headroom; libjxr forces unscaled there too). Everything structural in
+/// [`EncodeOptions`] — chroma sampling, bands/trim, windowing, tiles,
+/// overlap, frequency order, `chroma_qp` — applies at any depth.
+pub fn encode_typed(
+    input: &TypedInput<'_>,
+    mode: ColorMode,
+    opts: EncodeOptions,
+) -> Result<Vec<u8>, EncodeError> {
+    use crate::decode::consts::{INT_YUV420, INT_YUV422, INT_YUV444};
+    let samples = &input.samples;
+    let (w, h) = (input.width, input.height);
+    if let SamplePlanes::U8(planes) = samples {
+        return encode_with_options(
+            &ImageInput {
+                width: w,
+                height: h,
+                planes,
+                premultiplied_alpha: input.premultiplied_alpha,
+            },
+            mode,
+            opts,
+        );
+    }
+    if matches!(samples, SamplePlanes::I32(_)) && opts.scaled {
+        return Err(EncodeError::Unsupported(
+            "scaled arithmetic with 32-bit input would overflow the i32 transform \
+             (the reference encoder forces unscaled here too); set scaled = false"
+                .into(),
+        ));
+    }
+    let geom = validate_geometry(w, h, &opts)?;
+    let window = geom.window;
+    let tiles: (&[usize], &[usize]) = (&geom.tile_cols_mb, &geom.tile_rows_mb);
+    let (overlap, frequency) = (opts.overlap.code(), opts.frequency);
+    let (qp, bands, trim) = (opts.qp, opts.bands.code(), opts.trim_flexbits);
+    let depth = samples.depth();
+    let n = w as usize * h as usize;
+    let np = samples.num_planes();
+    for i in 0..np {
+        if samples.plane_len(i) != n {
+            return Err(EncodeError::Unsupported("plane len != width*height".into()));
+        }
+    }
+    match np {
+        2 => {
+            return Err(EncodeError::Unsupported(
+                "gray+alpha: JPEG XR has no grayscale-with-alpha container pixel format; \
+                 supply RGBA (4 planes)"
+                    .into(),
+            ))
+        }
+        4 => {
+            return Err(EncodeError::Unsupported(
+                "alpha with deep (>8-bit) input is not implemented".into(),
+            ))
+        }
+        1 | 3 => {}
+        other => {
+            return Err(EncodeError::Unsupported(format!(
+                "expected 1 (gray) or 3 (RGB) planes, got {other}"
+            )))
+        }
+    }
+    if input.premultiplied_alpha {
+        return Err(EncodeError::Unsupported(
+            "premultiplied_alpha set but no alpha plane (4 planes)".into(),
+        ));
+    }
+    let want_color = mode == ColorMode::Color && np != 1;
+    if !want_color {
+        if np != 1 {
+            return Err(EncodeError::Unsupported(format!(
+                "grayscale expects 1 plane, got {np}"
+            )));
+        }
+        let pre = samples.prebias_plane(0, opts.scaled);
+        return Ok(gray::encode_gray_prebias(
+            &pre,
+            w,
+            h,
+            qp,
+            opts.scaled,
+            bands,
+            trim,
+            window,
+            tiles,
+            overlap,
+            frequency,
+            &depth,
+            samples.gray_guid(),
+        ));
+    }
+    let rp = samples.prebias_plane(0, opts.scaled);
+    let gp = samples.prebias_plane(1, opts.scaled);
+    let bp = samples.prebias_plane(2, opts.scaled);
+    // Auto-gray, in the pre-bias domain: channels the emitted codestream
+    // could not distinguish (identical after conversion — for BD32S that is
+    // equality of the surviving high bits) carry no chroma → emit the
+    // family's gray format, mirroring the 8-bit auto-gray.
+    if rp == gp && gp == bp {
+        return Ok(gray::encode_gray_prebias(
+            &rp,
+            w,
+            h,
+            qp,
+            opts.scaled,
+            bands,
+            trim,
+            window,
+            tiles,
+            overlap,
+            frequency,
+            &depth,
+            samples.gray_guid(),
+        ));
+    }
+    let chroma_plan = opts.chroma_qp.map(|c| quant::QpPlan::uniform(qp, Some(c)));
+    let plan = chroma_plan.as_ref();
+    match opts.chroma {
+        ChromaSampling::YOnly if opts.bands == BandsPresent::All && trim == 0 => {
+            Ok(color::encode_yonly_prebias(
+                &rp,
+                &gp,
+                &bp,
+                w,
+                h,
+                qp,
+                opts.scaled,
+                window,
+                tiles,
+                overlap,
+                frequency,
+                &depth,
+                samples.rgb_guid(),
+            ))
+        }
+        ChromaSampling::YOnly => Err(EncodeError::Unsupported(
+            "band truncation / trim with YOnly chroma is not implemented".into(),
+        )),
+        chroma => {
+            let fmt = match chroma {
+                ChromaSampling::Yuv422 => INT_YUV422,
+                ChromaSampling::Yuv420 => INT_YUV420,
+                _ => INT_YUV444,
+            };
+            Ok(color::encode_color_prebias(
+                &rp,
+                &gp,
+                &bp,
+                w,
+                h,
+                qp,
+                fmt,
+                bands,
+                opts.scaled,
+                trim,
+                window,
+                tiles,
+                overlap,
+                frequency,
+                plan,
+                &depth,
+                samples.rgb_guid(),
+            ))
+        }
     }
 }
 
@@ -2044,5 +2247,362 @@ mod tests {
         let bad = [p.clone(), p.clone(), p.clone(), vec![0u8; n - 1]];
         let input = ImageInput { width: w, height: h, planes: &bad, premultiplied_alpha: false };
         assert!(encode(&input, ColorMode::Color, QpSet::LOSSLESS).is_err());
+    }
+
+    // ------------------------------------------------------------- 5a: deep
+
+    /// Parse just the headers of an encoded file (image + plane), for
+    /// asserting the emitted depth fields.
+    fn headers_of(jxr: &[u8]) -> crate::decode::decoder::Decoder<'_> {
+        let c = crate::decode::container::parse(jxr).expect("container");
+        let mut d = crate::decode::decoder::Decoder::new(c.image_data);
+        d.parse_headers().expect("headers");
+        d
+    }
+
+    fn guid_of(jxr: &[u8]) -> String {
+        crate::decode::container::parse(jxr).unwrap().pixel_format_uuid
+    }
+
+    #[test]
+    fn deep_u16_q1_roundtrip_bit_exact() {
+        use crate::decode::consts::BD16;
+        let mut r = Lcg(0xd16_0001);
+        for &(w, h) in &[(48u32, 32u32), (17, 31), (16, 16)] {
+            let n = (w * h) as usize;
+            // Full 16-bit range noise (extremes included via the gradient mix).
+            let gray: Vec<u16> = (0..n).map(|i| ((r.next() >> 32) as u16).wrapping_add(i as u16)).collect();
+            let planes = [gray.clone()];
+            let input = TypedInput {
+                width: w,
+                height: h,
+                samples: SamplePlanes::U16(&planes),
+                premultiplied_alpha: false,
+            };
+            let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
+            assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc90b", "16bppGray GUID");
+            let hd = headers_of(&jxr);
+            assert_eq!(hd.hdr.output_bitdepth, BD16);
+            assert_eq!(hd.planes[0].shift_bits, 0);
+            let d = decode_to_planes(&jxr);
+            for i in 0..n {
+                assert_eq!(d.image_plane[0][i], gray[i] as i32, "{w}x{h} gray px{i}");
+            }
+            // 3-plane RGB, same discipline.
+            let rgb: [Vec<u16>; 3] =
+                std::array::from_fn(|_| (0..n).map(|_| (r.next() >> 32) as u16).collect());
+            let input = TypedInput {
+                width: w,
+                height: h,
+                samples: SamplePlanes::U16(&rgb),
+                premultiplied_alpha: false,
+            };
+            let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+            assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc915", "48bppRGB GUID");
+            let d = decode_to_planes(&jxr);
+            for c in 0..3 {
+                for i in 0..n {
+                    assert_eq!(d.image_plane[c][i], rgb[c][i] as i32, "{w}x{h} ch{c} px{i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deep_i16_q1_roundtrip_bit_exact() {
+        use crate::decode::consts::BD16S;
+        let mut r = Lcg(0xd16_5);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        // Signed noise across the whole i16 range.
+        let gray: Vec<i16> = (0..n).map(|_| (r.next() >> 32) as u16 as i16).collect();
+        let planes = [gray.clone()];
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::I16(&planes),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc913", "16bppGrayFixed GUID");
+        let hd = headers_of(&jxr);
+        assert_eq!(hd.hdr.output_bitdepth, BD16S);
+        assert_eq!(hd.planes[0].shift_bits, 0);
+        let d = decode_to_planes(&jxr);
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], gray[i] as i32, "px{i}");
+        }
+        let rgb: [Vec<i16>; 3] =
+            std::array::from_fn(|_| (0..n).map(|_| (r.next() >> 32) as u16 as i16).collect());
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::I16(&rgb),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc912", "48bppRGBFixed GUID");
+        let d = decode_to_planes(&jxr);
+        for c in 0..3 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i], rgb[c][i] as i32, "ch{c} px{i}");
+            }
+        }
+    }
+
+    #[test]
+    fn deep_i32_sheds_shift_bits_and_rejects_scaled() {
+        use crate::decode::consts::BD32S;
+        let mut r = Lcg(0xd32_5);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        // Wide signed values: q1 round-trips the high 22 bits exactly —
+        // `(x >> 10) << 10`, the same answer jxrencapp's shift_bits=10 gives.
+        let gray: Vec<i32> = (0..n).map(|_| r.next() as i32 >> 4).collect();
+        let planes = [gray.clone()];
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::I32(&planes),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc93f", "32bppGrayFixed GUID");
+        let hd = headers_of(&jxr);
+        assert_eq!(hd.hdr.output_bitdepth, BD32S);
+        assert_eq!(hd.planes[0].shift_bits, 10, "libjxr's default pre-shift");
+        let d = decode_to_planes(&jxr);
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], (gray[i] >> 10) << 10, "px{i}");
+        }
+        // RGB variant.
+        let rgb: [Vec<i32>; 3] =
+            std::array::from_fn(|_| (0..n).map(|_| r.next() as i32 >> 4).collect());
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::I32(&rgb),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc918", "96bppRGBFixed GUID");
+        let d = decode_to_planes(&jxr);
+        for c in 0..3 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i], (rgb[c][i] >> 10) << 10, "ch{c} px{i}");
+            }
+        }
+        // Scaled arithmetic would overflow the i32 transform — explicit error.
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::I32(&planes),
+            premultiplied_alpha: false,
+        };
+        let opts = EncodeOptions { scaled: true, ..Default::default() };
+        assert!(encode_typed(&input, ColorMode::Grayscale, opts).is_err());
+    }
+
+    #[test]
+    fn deep_scaled_u16_gray_q1_exact() {
+        // Scaled arithmetic stays exactly invertible for 16-bit gray, as for
+        // 8-bit: the conversion's `<< 3` is floored back by the decoder's
+        // `(v + 4) >> 3`.
+        let mut r = Lcg(0xd16_3ca1ed);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        let gray: Vec<u16> = (0..n).map(|_| (r.next() >> 32) as u16).collect();
+        let planes = [gray.clone()];
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::U16(&planes),
+            premultiplied_alpha: false,
+        };
+        let opts = EncodeOptions { scaled: true, ..Default::default() };
+        let jxr = encode_typed(&input, ColorMode::Grayscale, opts).unwrap();
+        let d = decode_to_planes(&jxr);
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], gray[i] as i32, "px{i}");
+        }
+    }
+
+    #[test]
+    fn deep_structural_options_compose() {
+        // The Phase-4 structural machinery is depth-agnostic: tiles + overlap
+        // + frequency order + explicit window margins on BD16 RGB stays
+        // bit-exact at q1.
+        let mut r = Lcg(0xd16_57ac);
+        let (w, h) = (70u32, 38u32);
+        let n = (w * h) as usize;
+        let rgb: [Vec<u16>; 3] =
+            std::array::from_fn(|_| (0..n).map(|_| (r.next() >> 32) as u16).collect());
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::U16(&rgb),
+            premultiplied_alpha: false,
+        };
+        let opts = EncodeOptions {
+            tile_cols: 2,
+            tile_rows: 2,
+            overlap: Overlap::Two,
+            frequency: true,
+            window_top: 5,
+            window_left: 9,
+            ..Default::default()
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, opts).unwrap();
+        let d = decode_to_planes(&jxr);
+        assert_eq!((d.width, d.height), (w, h));
+        for c in 0..3 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i], rgb[c][i] as i32, "ch{c} px{i}");
+            }
+        }
+        // Lossy + 4:2:0 + band truncation on deep input: decodes to shape,
+        // error bounded by the subsample/quant loss (sanity, not parity —
+        // parity is the harness's job).
+        let opts = EncodeOptions {
+            qp: QpSet { dc: 16, lp: 32, hp: 64 },
+            chroma: ChromaSampling::Yuv420,
+            bands: BandsPresent::NoFlexbits,
+            scaled: true,
+            ..Default::default()
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, opts).unwrap();
+        let d = decode_to_planes(&jxr);
+        assert_eq!((d.width, d.height, d.num_components), (w, h, 3));
+        // chroma_qp (COMP_SEPARATE) smoke on deep color.
+        let opts = EncodeOptions {
+            qp: QpSet { dc: 4, lp: 8, hp: 16 },
+            chroma_qp: Some(QpSet { dc: 16, lp: 32, hp: 64 }),
+            ..Default::default()
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, opts).unwrap();
+        let d = decode_to_planes(&jxr);
+        assert_eq!((d.width, d.height, d.num_components), (w, h, 3));
+    }
+
+    #[test]
+    fn deep_auto_gray_collapses_to_family_gray() {
+        let mut r = Lcg(0xd16_96a7);
+        let (w, h) = (32u32, 16u32);
+        let n = (w * h) as usize;
+        let g: Vec<u16> = (0..n).map(|_| (r.next() >> 32) as u16).collect();
+        let rgb = [g.clone(), g.clone(), g.clone()];
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::U16(&rgb),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc90b", "collapses to 16bppGray");
+        let d = decode_to_planes(&jxr);
+        assert_eq!(d.num_components, 1);
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], g[i] as i32, "px{i}");
+        }
+    }
+
+    #[test]
+    fn deep_yonly_from_color_replicates_luma() {
+        let mut r = Lcg(0xd16_404c);
+        let (w, h) = (32u32, 16u32);
+        let n = (w * h) as usize;
+        let rgb: [Vec<u16>; 3] =
+            std::array::from_fn(|_| (0..n).map(|_| (r.next() >> 32) as u16).collect());
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::U16(&rgb),
+            premultiplied_alpha: false,
+        };
+        let opts = EncodeOptions { chroma: ChromaSampling::YOnly, ..Default::default() };
+        let jxr = encode_typed(&input, ColorMode::Color, opts).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc915", "stays 48bppRGB");
+        let d = decode_to_planes(&jxr);
+        assert_eq!(d.num_components, 3);
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], d.image_plane[1][i], "R==G px{i}");
+            assert_eq!(d.image_plane[1][i], d.image_plane[2][i], "G==B px{i}");
+        }
+    }
+
+    #[test]
+    fn encode_typed_u8_is_byte_stable() {
+        // The U8 variant routes through the classic path byte-for-byte.
+        let mut r = Lcg(0x08_b17e);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        let planes: [Vec<u8>; 3] = noise_planes(&mut r, n);
+        let opts = EncodeOptions {
+            qp: QpSet { dc: 4, lp: 8, hp: 16 },
+            chroma: ChromaSampling::Yuv420,
+            scaled: true,
+            ..Default::default()
+        };
+        let via_typed = encode_typed(
+            &TypedInput {
+                width: w,
+                height: h,
+                samples: SamplePlanes::U8(&planes),
+                premultiplied_alpha: false,
+            },
+            ColorMode::Color,
+            opts,
+        )
+        .unwrap();
+        let via_classic = encode_with_options(
+            &ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false },
+            ColorMode::Color,
+            opts,
+        )
+        .unwrap();
+        assert_eq!(via_typed, via_classic);
+    }
+
+    #[test]
+    fn deep_input_validation() {
+        let (w, h) = (16u32, 16u32);
+        let n = (w * h) as usize;
+        let p16 = vec![1234u16; n];
+        // 2 planes: no gray+alpha pixel format at any depth.
+        let two = [p16.clone(), p16.clone()];
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::U16(&two),
+            premultiplied_alpha: false,
+        };
+        assert!(encode_typed(&input, ColorMode::Color, EncodeOptions::default()).is_err());
+        // 4 deep planes: deep alpha not implemented.
+        let four = [p16.clone(), p16.clone(), p16.clone(), p16.clone()];
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::U16(&four),
+            premultiplied_alpha: false,
+        };
+        assert!(encode_typed(&input, ColorMode::Color, EncodeOptions::default()).is_err());
+        // Wrong plane length.
+        let bad = [vec![0u16; n - 1]];
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::U16(&bad),
+            premultiplied_alpha: false,
+        };
+        assert!(encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).is_err());
+        // 3 planes in Grayscale mode.
+        let three = [p16.clone(), p16.clone(), p16.clone()];
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::U16(&three),
+            premultiplied_alpha: false,
+        };
+        assert!(encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).is_err());
     }
 }

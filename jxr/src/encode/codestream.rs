@@ -62,6 +62,8 @@ pub struct ImageHeaderSpec {
     pub width: u32,
     pub height: u32,
     pub output_clr_fmt: u8,
+    /// T.832 `OUTPUT_BITDEPTH` code (BD8 unless a deep input set it).
+    pub output_bitdepth: u8,
     pub premultiplied_alpha: bool,
     pub alpha_image_plane: bool,
     pub trim_flexbits: u8,
@@ -88,6 +90,7 @@ impl ImageHeaderSpec {
             width,
             height,
             output_clr_fmt,
+            output_bitdepth: BD8,
             premultiplied_alpha: false,
             alpha_image_plane: false,
             trim_flexbits: 0,
@@ -157,7 +160,7 @@ pub fn write_image_header_spec(bw: &mut BitWriter, s: &ImageHeaderSpec) {
     bw.write_flag(s.premultiplied_alpha); // premultiplied_alpha_flag
     bw.write_flag(s.alpha_image_plane); // alpha_image_plane_flag
     bw.write_bits(s.output_clr_fmt as u64, 4); // output_clr_fmt
-    bw.write_bits(BD8 as u64, 4); // output_bitdepth
+    bw.write_bits(s.output_bitdepth as u64, 4); // output_bitdepth
     // (width-1), (height-1): u16 BE short / u32 BE long (byte-aligned here).
     if short {
         write_u16_be(bw, (s.width - 1) as u16);
@@ -257,12 +260,35 @@ pub fn write_image_plane_header_gray_scaled(
     hp_quant: u8,
     scaled: bool,
 ) {
-    write_image_plane_header_gray_bands(bw, ALL_BANDS, dc_quant, lp_quant, hp_quant, scaled)
+    write_image_plane_header_gray_bands(
+        bw,
+        ALL_BANDS,
+        dc_quant,
+        lp_quant,
+        hp_quant,
+        scaled,
+        &super::convert::Depth::BD8,
+    )
+}
+
+/// The depth-conditional plane-header fields after the format-specific
+/// block (`Decoder::image_plane_header` order): `shift_bits` for the deep
+/// integer depths, `len_mantissa` + `exp_bias` for BD32F, nothing else.
+pub fn write_depth_plane_fields(bw: &mut BitWriter, d: &super::convert::Depth) {
+    match d.bitdepth {
+        BD16 | BD16S | BD32S => bw.write_bits(d.shift_bits as u64, 8),
+        BD32F => {
+            bw.write_bits(d.len_mantissa as u64, 8);
+            bw.write_bits((d.exp_bias as u8) as u64, 8); // two's-complement byte
+        }
+        _ => {}
+    }
 }
 
 /// The general single-component (`INT_YONLY`) plane header: any
-/// `bands_present` × `scaled_flag`, uniform QPs. The LP/HP QP blocks shrink
-/// with the band set exactly as `Decoder::image_plane_header` reads them.
+/// `bands_present` × `scaled_flag`, uniform QPs, any output depth. The LP/HP
+/// QP blocks shrink with the band set exactly as
+/// `Decoder::image_plane_header` reads them.
 pub fn write_image_plane_header_gray_bands(
     bw: &mut BitWriter,
     bands: u8,
@@ -270,10 +296,13 @@ pub fn write_image_plane_header_gray_bands(
     lp_quant: u8,
     hp_quant: u8,
     scaled: bool,
+    depth: &super::convert::Depth,
 ) {
     bw.write_bits(INT_YONLY as u64, 3);
     bw.write_flag(scaled); // scaled_flag
     bw.write_bits(bands as u64, 4); // bands_present
+    // INT_YONLY → no format-specific block.
+    write_depth_plane_fields(bw, depth);
     bw.write_flag(true); // dc_image_plane_uniform
     bw.write_bits(dc_quant as u64, 8);
     if bands != DCONLY {
@@ -374,7 +403,7 @@ pub fn write_image_plane_header_yuv_scaled(
         super::quant::QpSet { dc: dc_quant, lp: lp_quant, hp: hp_quant },
         None,
     );
-    write_image_plane_header_yuv_plan(bw, int_fmt, bands, &plan, scaled);
+    write_image_plane_header_yuv_plan(bw, int_fmt, bands, &plan, scaled, &super::convert::Depth::BD8);
 }
 
 /// [`write_image_plane_header_yuv_scaled`] over a full [`super::quant::QpPlan`]:
@@ -388,6 +417,7 @@ pub fn write_image_plane_header_yuv_plan(
     bands: u8,
     plan: &super::quant::QpPlan,
     scaled: bool,
+    depth: &super::convert::Depth,
 ) {
     debug_assert!(matches!(int_fmt, INT_YUV444 | INT_YUV422 | INT_YUV420));
     let dc_uniform = plan.tiles.len() == 1;
@@ -398,7 +428,7 @@ pub fn write_image_plane_header_yuv_plan(
     bw.write_bits(bands as u64, 4); // bands_present
     // Format-specific reserved/centering block — 8 zero bits for all three.
     bw.write_bits(0, 8);
-    // BD8 → no shift/mantissa bits.
+    write_depth_plane_fields(bw, depth);
     bw.write_flag(dc_uniform); // dc_image_plane_uniform
     if dc_uniform {
         write_band_qp(bw, &[plan.tiles[0].dc], 3);

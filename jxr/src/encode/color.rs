@@ -53,15 +53,15 @@ pub fn rgb_to_yuv444(r: i32, g: i32, b: i32) -> (i32, i32, i32) {
 /// nearest edge (corners replicate the corner sample). `(0, 0)` is the classic
 /// derived-windowing placement.
 fn pad_plane(
-    src: &[u8],
+    src: &[i32],
     wu: usize,
     hu: usize,
     pw: usize,
     ph: usize,
     top: usize,
     left: usize,
-) -> Vec<u8> {
-    let mut p = vec![0u8; pw * ph];
+) -> Vec<i32> {
+    let mut p = vec![0i32; pw * ph];
     for y in 0..ph {
         let sy = y.saturating_sub(top).min(hu - 1);
         for x in 0..pw {
@@ -197,7 +197,7 @@ impl ColorPlane {
     /// Pad RGB to the 16-aligned MB grid, forward-color-transform to centered
     /// YUV 4:4:4, forward-transform + quantize every MB per component, and
     /// initialize the YUV adaptive entropy state.
-    pub(super) fn new(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> Self {
+    pub(super) fn new(r: &[i32], g: &[i32], b: &[i32], w: u32, h: u32, qp: QpSet) -> Self {
         Self::new_fmt(
             r, g, b, w, h, qp, INT_YUV444, ALL_BANDS, false, (0, 0), NO_OVERLAP_FILTERING, &[], &[],
             None,
@@ -213,9 +213,9 @@ impl ColorPlane {
     /// grid for explicit windowing (`(0, 0)` = classic derived padding).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_fmt(
-        r: &[u8],
-        g: &[u8],
-        b: &[u8],
+        r: &[i32],
+        g: &[i32],
+        b: &[i32],
         w: u32,
         h: u32,
         qp: QpSet,
@@ -266,22 +266,19 @@ impl ColorPlane {
         let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
         let (mbw, mbh) = (pw / 16, ph / 16);
 
-        // Pad RGB, then forward color transform per pixel → 3 centered YUV planes.
+        // Pad the pre-bias RGB ([`super::convert`] already centered/shifted
+        // it — for scaled planes the 3 extra fraction bits enter BEFORE the
+        // color lifting, mirroring the decoder's unscale-after-inverse-
+        // lifting order), then forward color transform per pixel → 3
+        // centered YUV planes.
         let (rp, gp, bp) = (
             pad_plane(r, wu, hu, pw, ph, top, left),
             pad_plane(g, wu, hu, pw, ph, top, left),
             pad_plane(b, wu, hu, pw, ph, top, left),
         );
-        // Scaled arithmetic: 3 extra fraction bits enter BEFORE the color
-        // lifting (the decoder unscales after its inverse lifting).
-        let sh = if scaled { 3 } else { 0 };
         let mut yuv = [vec![0i32; pw * ph], vec![0i32; pw * ph], vec![0i32; pw * ph]];
         for i in 0..pw * ph {
-            let (y, u, v) = rgb_to_yuv444(
-                (rp[i] as i32 - 128) << sh,
-                (gp[i] as i32 - 128) << sh,
-                (bp[i] as i32 - 128) << sh,
-            );
+            let (y, u, v) = rgb_to_yuv444(rp[i], gp[i], bp[i]);
             yuv[0][i] = y;
             yuv[1][i] = u;
             yuv[2][i] = v;
@@ -1007,7 +1004,9 @@ impl codestream::TileEncode for AlphaPair<'_> {
 /// adaptive scan with luma/chroma index tables, + LP refinement; YUV
 /// `mb_cbphp` + per-component HP run-level + flex.
 pub fn encode_color(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> Vec<u8> {
-    let mut plane = ColorPlane::new(r, g, b, w, h, qp);
+    let conv = super::convert::u8_prebias;
+    let (rp, gp, bp) = (conv(r, false), conv(g, false), conv(b, false));
+    let mut plane = ColorPlane::new(&rp, &gp, &bp, w, h, qp);
     let mut bw = BitWriter::new();
     codestream::write_image_header(&mut bw, w, h, OUT_RGB, false, false);
     codestream::write_image_plane_header_color_allbands(&mut bw, qp.dc, qp.lp, qp.hp);
@@ -1095,12 +1094,59 @@ pub fn encode_color_options(
     frequency: bool,
     plan: Option<&super::quant::QpPlan>,
 ) -> Vec<u8> {
+    let conv = super::convert::u8_prebias;
+    let (rp, gp, bp) = (conv(r, scaled), conv(g, scaled), conv(b, scaled));
+    encode_color_prebias(
+        &rp,
+        &gp,
+        &bp,
+        w,
+        h,
+        qp,
+        fmt,
+        bands,
+        scaled,
+        trim,
+        window,
+        tiles,
+        overlap,
+        frequency,
+        plan,
+        &super::convert::Depth::BD8,
+        &container::pixel_format::RGB24,
+    )
+}
+
+/// Depth-general 3-plane color driver: `r`/`g`/`b` already forward-converted
+/// to the pre-bias domain ([`super::convert`]), `depth` carried into the
+/// image + plane headers, `guid` into the container.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn encode_color_prebias(
+    r: &[i32],
+    g: &[i32],
+    b: &[i32],
+    w: u32,
+    h: u32,
+    qp: QpSet,
+    fmt: u8,
+    bands: u8,
+    scaled: bool,
+    trim: u8,
+    window: (u32, u32),
+    tiles: (&[usize], &[usize]),
+    overlap: u8,
+    frequency: bool,
+    plan: Option<&super::quant::QpPlan>,
+    depth: &super::convert::Depth,
+    guid: &[u8; 16],
+) -> Vec<u8> {
     let trim = if bands == ALL_BANDS { trim } else { 0 };
     let mut plane = ColorPlane::new_fmt(
         r, g, b, w, h, qp, fmt, bands, scaled, window, overlap, tiles.0, tiles.1, plan,
     );
     plane.trim = trim as u32;
     let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
+    spec.output_bitdepth = depth.bitdepth;
     spec.frequency_mode = frequency;
     spec.overlap_mode = overlap;
     spec.trim_flexbits = trim;
@@ -1148,10 +1194,13 @@ pub fn encode_color_options(
     let body = codestream::emit_codestream(
         &spec,
         |head| match plan {
-            Some(p) => codestream::write_image_plane_header_yuv_plan(head, fmt, bands, p, scaled),
-            None => codestream::write_image_plane_header_yuv_scaled(
-                head, fmt, bands, qp.dc, qp.lp, qp.hp, scaled,
-            ),
+            Some(p) => {
+                codestream::write_image_plane_header_yuv_plan(head, fmt, bands, p, scaled, depth)
+            }
+            None => {
+                let p = super::quant::QpPlan::uniform(qp, None);
+                codestream::write_image_plane_header_yuv_plan(head, fmt, bands, &p, scaled, depth)
+            }
         },
         &*tile_headers,
         codestream::band_count(bands),
@@ -1159,7 +1208,7 @@ pub fn encode_color_options(
         mbh,
         &mut plane,
     );
-    container::write_container(&body, w, h, &container::pixel_format::RGB24)
+    container::write_container(&body, w, h, guid)
 }
 
 /// Encode RGB + alpha (4 planes, each `w*h` row-major) as a color JPEG-XR with
@@ -1194,15 +1243,18 @@ pub fn encode_color_alpha(
     overlap: u8,
     frequency: bool,
 ) -> Vec<u8> {
+    let conv = super::convert::u8_prebias;
+    let (rp, gp, bp) = (conv(r, scaled), conv(g, scaled), conv(b, scaled));
     let mut primary = ColorPlane::new_fmt(
-        r, g, b, w, h, qp, fmt, ALL_BANDS, scaled, window, overlap, tiles.0, tiles.1, None,
+        &rp, &gp, &bp, w, h, qp, fmt, ALL_BANDS, scaled, window, overlap, tiles.0, tiles.1, None,
     );
     // The alpha plane stays unscaled — scaled_flag is per plane header, and
     // alpha is exactness-sensitive (jxrencapp likewise never scales alpha
     // independently of its lossy decision; ours keeps the lossless path).
     // overlap_mode is an image-header field, so it applies to the alpha
     // plane's reconstruction too — filter it identically.
-    let mut alpha = super::gray::YOnlyPlane::new(a, w, h, alpha_qp, window, overlap, tiles);
+    let ap = conv(a, false);
+    let mut alpha = super::gray::YOnlyPlane::new(&ap, w, h, alpha_qp, window, overlap, tiles);
     let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
     spec.frequency_mode = frequency;
     spec.overlap_mode = overlap;
@@ -1261,10 +1313,46 @@ pub fn encode_yonly_from_color(
     overlap: u8,
     frequency: bool,
 ) -> Vec<u8> {
+    let conv = super::convert::u8_prebias;
+    let (rp, gp, bp) = (conv(r, scaled), conv(g, scaled), conv(b, scaled));
+    encode_yonly_prebias(
+        &rp,
+        &gp,
+        &bp,
+        w,
+        h,
+        qp,
+        scaled,
+        window,
+        tiles,
+        overlap,
+        frequency,
+        &super::convert::Depth::BD8,
+        &container::pixel_format::RGB24,
+    )
+}
+
+/// Depth-general YONLY-from-color driver ([`encode_yonly_from_color`] over
+/// pre-bias planes).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn encode_yonly_prebias(
+    r: &[i32],
+    g: &[i32],
+    b: &[i32],
+    w: u32,
+    h: u32,
+    qp: QpSet,
+    scaled: bool,
+    window: (u32, u32),
+    tiles: (&[usize], &[usize]),
+    overlap: u8,
+    frequency: bool,
+    depth: &super::convert::Depth,
+    guid: &[u8; 16],
+) -> Vec<u8> {
     let (wu, hu) = (w as usize, h as usize);
     let (top, left) = (window.0 as usize, window.1 as usize);
     let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
-    let sh = if scaled { 3 } else { 0 };
     let (rp, gp, bp) = (
         pad_plane(r, wu, hu, pw, ph, top, left),
         pad_plane(g, wu, hu, pw, ph, top, left),
@@ -1272,11 +1360,7 @@ pub fn encode_yonly_from_color(
     );
     let mut y_plane = vec![0i32; pw * ph];
     for i in 0..pw * ph {
-        let (y, _, _) = rgb_to_yuv444(
-            (rp[i] as i32 - 128) << sh,
-            (gp[i] as i32 - 128) << sh,
-            (bp[i] as i32 - 128) << sh,
-        );
+        let (y, _, _) = rgb_to_yuv444(rp[i], gp[i], bp[i]);
         y_plane[i] = y;
     }
     let mut plane = super::gray::YOnlyPlane::from_centered_padded_ovl(
@@ -1290,6 +1374,7 @@ pub fn encode_yonly_from_color(
         &super::overlap::bounds(tiles.1, ph / 16),
     );
     let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
+    spec.output_bitdepth = depth.bitdepth;
     spec.frequency_mode = frequency;
     spec.overlap_mode = overlap;
     spec.margins = window_margins(w, h, window);
@@ -1298,14 +1383,24 @@ pub fn encode_yonly_from_color(
     let (mbw, mbh) = (plane.mbw, plane.mbh);
     let body = codestream::emit_codestream(
         &spec,
-        |head| codestream::write_image_plane_header_gray_scaled(head, qp.dc, qp.lp, qp.hp, scaled),
+        |head| {
+            codestream::write_image_plane_header_gray_bands(
+                head,
+                ALL_BANDS,
+                qp.dc,
+                qp.lp,
+                qp.hp,
+                scaled,
+                depth,
+            )
+        },
         &codestream::classic_tile_headers(0),
         4,
         mbw,
         mbh,
         &mut plane,
     );
-    container::write_container(&body, w, h, &container::pixel_format::RGB24)
+    container::write_container(&body, w, h, guid)
 }
 
 /// HP-band adaptive state for the color path — multi-component analogue of

@@ -164,18 +164,8 @@ impl<'a> Decoder<'a> {
         let mut timing = DecodeTiming::default();
 
         let t_hdr = Instant::now();
-        self.image_header()?;
-
-        // Primary plane.
-        self.planes.push(Plane::new(false));
-        self.image_plane_header(0)?;
+        self.parse_headers()?;
         let num_bands_primary = self.planes[0].num_bands;
-
-        // Alpha plane (optional).
-        if self.hdr.alpha_image_plane_flag != 0 {
-            self.planes.push(Plane::new(true));
-            self.image_plane_header(1)?;
-        }
 
         if self.hdr.index_table_present_flag != 0 {
             self.index_table_tiles(num_bands_primary)?;
@@ -219,6 +209,23 @@ impl<'a> Decoder<'a> {
         timing.output_fmt += t_out.elapsed();
         img.timing = timing;
         Ok(img)
+    }
+
+    /// Parse only the image header and image-plane header(s) — no entropy
+    /// decode, no pixel work. After it returns, [`Self::hdr`] and
+    /// [`Self::planes`] carry the structural fields (dimensions, color/bit
+    /// depth, `scaled_flag`, `shift_bits`, `len_mantissa`/`exp_bias`, QPs…).
+    /// Cheap format sniffing; also how the encoder's external parity gates
+    /// diff header fields against reference-encoder output.
+    pub fn parse_headers(&mut self) -> Result<()> {
+        self.image_header()?;
+        self.planes.push(Plane::new(false));
+        self.image_plane_header(0)?;
+        if self.hdr.alpha_image_plane_flag != 0 {
+            self.planes.push(Plane::new(true));
+            self.image_plane_header(1)?;
+        }
+        Ok(())
     }
 
     fn image_header(&mut self) -> Result<()> {

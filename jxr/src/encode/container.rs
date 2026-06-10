@@ -4,31 +4,40 @@
 //! image (pixel format, dimensions, codestream pointer).
 
 /// Microsoft JXR pixel-format GUIDs (on-disk byte order). Match
-/// `decode::container::SUPPORTED_UUIDS`.
+/// `decode::container::SUPPORTED_UUIDS`. The whole family shares the
+/// `24c3dd6f-034e-fe4b-b185-3d77768dc9xx` prefix — only the last byte
+/// varies (values verified against jxrencapp-minted files).
 pub mod pixel_format {
+    const fn guid(last: u8) -> [u8; 16] {
+        [
+            0x24, 0xc3, 0xdd, 0x6f, 0x03, 0x4e, 0xfe, 0x4b, 0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d,
+            0xc9, last,
+        ]
+    }
+
     /// `8bppGray` — single 8-bit luma plane.
-    pub const GRAY8: [u8; 16] = [
-        0x24, 0xc3, 0xdd, 0x6f, 0x03, 0x4e, 0xfe, 0x4b, 0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9,
-        0x08,
-    ];
-    /// `24bppRGB` — three 8-bit channels (for the future color path).
-    pub const RGB24: [u8; 16] = [
-        0x24, 0xc3, 0xdd, 0x6f, 0x03, 0x4e, 0xfe, 0x4b, 0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9,
-        0x0d,
-    ];
+    pub const GRAY8: [u8; 16] = guid(0x08);
+    /// `24bppRGB` — three 8-bit channels.
+    pub const RGB24: [u8; 16] = guid(0x0d);
     /// `32bppBGRA` — RGB + straight alpha. The GUID JxrEncApp mints for 8-bit
     /// RGB-with-alpha (`-c 9`); there is no in-family plain-RGBA32. Pairs with
     /// `red_blue_not_swapped_flag = 0` exactly like [`RGB24`].
-    pub const BGRA32: [u8; 16] = [
-        0x24, 0xc3, 0xdd, 0x6f, 0x03, 0x4e, 0xfe, 0x4b, 0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9,
-        0x0f,
-    ];
+    pub const BGRA32: [u8; 16] = guid(0x0f);
     /// `32bppPBGRA` — RGB + **premultiplied** alpha (pairs with
     /// `premultiplied_alpha_flag = 1`).
-    pub const PBGRA32: [u8; 16] = [
-        0x24, 0xc3, 0xdd, 0x6f, 0x03, 0x4e, 0xfe, 0x4b, 0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9,
-        0x10,
-    ];
+    pub const PBGRA32: [u8; 16] = guid(0x10);
+    /// `16bppGray` — single 16-bit unsigned luma plane (BD16).
+    pub const GRAY16: [u8; 16] = guid(0x0b);
+    /// `48bppRGB` — three 16-bit unsigned channels (BD16).
+    pub const RGB48: [u8; 16] = guid(0x15);
+    /// `16bppGrayFixed` — single signed 16-bit fixed-point plane (BD16S).
+    pub const GRAY16_FIXED: [u8; 16] = guid(0x13);
+    /// `48bppRGBFixed` — three signed 16-bit fixed-point channels (BD16S).
+    pub const RGB48_FIXED: [u8; 16] = guid(0x12);
+    /// `32bppGrayFixed` — single signed 32-bit fixed-point plane (BD32S).
+    pub const GRAY32_FIXED: [u8; 16] = guid(0x3f);
+    /// `96bppRGBFixed` — three signed 32-bit fixed-point channels (BD32S).
+    pub const RGB96_FIXED: [u8; 16] = guid(0x18);
 }
 
 const TIFF_TYPE_BYTE: u16 = 1;

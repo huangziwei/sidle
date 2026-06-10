@@ -63,14 +63,29 @@ Gray+alpha input is rejected: JPEG XR defines no grayscale-with-alpha
 container pixel format — expand to RGBA. Separate-codestream alpha (the
 container-level arrangement libjxr calls *planar*, `-a 2`) is decoded but
 deliberately never emitted — the in-codestream alpha image plane covers the
-capability in one codestream. Every feature is verified two ways: in-crate
-round-trip/equivalence invariants against this crate's decoder, and
-JxrDecApp-exact readback (with jxrencapp PSNR/size parity wherever the
-reference encoder can mint a counterpart).
+capability in one codestream.
 
-The encoder's 8-bit envelope is complete; deep/HDR input formats remain
-encoder-side future work. The roadmap lives in the repo at
-`.claude/plans/jxr-general-codec.md`.
+Beyond 8-bit, `encode_typed` takes **typed planes** (`TypedInput` +
+`SamplePlanes`, mirroring the decoder's sample types; plane count carries
+gray/RGB exactly like the 8-bit API, and `U8` routes through the classic
+path byte-for-byte): 16-bit unsigned (`16bppGray`/`48bppRGB`, bit-exact at
+lossless QP), 16-bit signed fixed (`…Fixed`, bit-exact), and 32-bit signed
+fixed (`32bppGrayFixed`/`96bppRGBFixed` — **never bit-lossless**: the
+reference encoder's `shift_bits = 10` pre-shift is cloned, so q1 round-trips
+`(x >> 10) << 10`, and scaled arithmetic is rejected for `i32`-headroom
+reasons, as libjxr forces too). The forward sample conversion is the exact
+stage-by-stage inverse of the decoder's output formatting; everything
+structural (chroma sampling, bands/trim, windowing, tiles, overlap,
+frequency order, QP syntax) composes with any depth. Deep alpha planes,
+half/full-float, and RGBE input are not implemented yet.
+
+Every feature is verified two ways: in-crate round-trip/equivalence
+invariants against this crate's decoder, and JxrDecApp-exact readback (with
+jxrencapp PSNR/size parity wherever the reference encoder can mint a
+counterpart; the deep formats additionally diff header fields and container
+GUIDs against reference-minted twins).
+
+The roadmap lives in the repo at `.claude/plans/jxr-general-codec.md`.
 
 ## Usage
 

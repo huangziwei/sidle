@@ -50,13 +50,16 @@ pub(super) struct YOnlyPlane {
 }
 
 impl YOnlyPlane {
-    /// Pad `luma` to the 16-aligned MB grid (edge replication; the decoder
-    /// crops back to the true dims, which the header carries), placing the
-    /// image at `(top, left) = window` — `(0, 0)` is the classic
-    /// `windowing_flag = 0` derived padding. Forward-transform every MB,
-    /// quantize per band, and initialize the adaptive entropy state.
+    /// Pad pre-bias `luma` ([`super::convert`] already centered it) to the
+    /// 16-aligned MB grid (edge replication; the decoder crops back to the
+    /// true dims, which the header carries), placing the image at
+    /// `(top, left) = window` — `(0, 0)` is the classic `windowing_flag = 0`
+    /// derived padding. Forward-transform every MB, quantize per band, and
+    /// initialize the adaptive entropy state. (`scaled` planes arrive
+    /// pre-shifted by the conversion; this constructor is the unscaled-flag
+    /// entry the alpha plane uses.)
     pub(super) fn new(
-        luma: &[u8],
+        luma: &[i32],
         w: u32,
         h: u32,
         qp: QpSet,
@@ -71,8 +74,7 @@ impl YOnlyPlane {
         for y in 0..ph {
             let sy = y.saturating_sub(top).min(hu - 1);
             for x in 0..pw {
-                centered[y * pw + x] =
-                    luma[sy * wu + x.saturating_sub(left).min(wu - 1)] as i32 - 128;
+                centered[y * pw + x] = luma[sy * wu + x.saturating_sub(left).min(wu - 1)];
             }
         }
         Self::from_centered_padded_ovl(
@@ -439,16 +441,52 @@ pub fn encode_grayscale_options(
     overlap: u8,
     frequency: bool,
 ) -> Vec<u8> {
+    let pre = super::convert::u8_prebias(luma, scaled);
+    encode_gray_prebias(
+        &pre,
+        w,
+        h,
+        qp,
+        scaled,
+        bands,
+        trim,
+        window,
+        tiles,
+        overlap,
+        frequency,
+        &super::convert::Depth::BD8,
+        &container::pixel_format::GRAY8,
+    )
+}
+
+/// Depth-general grayscale driver: `luma` is already forward-converted to
+/// the pre-bias domain ([`super::convert`] — bias subtracted, scaled shift
+/// applied, deep shift_bits shed), `depth` rides into the image + plane
+/// headers, `guid` into the container.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn encode_gray_prebias(
+    luma: &[i32],
+    w: u32,
+    h: u32,
+    qp: QpSet,
+    scaled: bool,
+    bands: u8,
+    trim: u8,
+    window: (u32, u32),
+    tiles: (&[usize], &[usize]),
+    overlap: u8,
+    frequency: bool,
+    depth: &super::convert::Depth,
+    guid: &[u8; 16],
+) -> Vec<u8> {
     let (wu, hu) = (w as usize, h as usize);
     let (top, left) = (window.0 as usize, window.1 as usize);
     let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
-    let sh = if scaled { 3 } else { 0 };
     let mut centered = vec![0i32; pw * ph];
     for y in 0..ph {
         let sy = y.saturating_sub(top).min(hu - 1);
         for x in 0..pw {
-            centered[y * pw + x] =
-                (luma[sy * wu + x.saturating_sub(left).min(wu - 1)] as i32 - 128) << sh;
+            centered[y * pw + x] = luma[sy * wu + x.saturating_sub(left).min(wu - 1)];
         }
     }
     let mut plane = YOnlyPlane::from_centered_padded_ovl(
@@ -464,6 +502,7 @@ pub fn encode_grayscale_options(
     plane.bands = bands;
     plane.trim = if bands == ALL_BANDS { trim as u32 } else { 0 };
     let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_YONLY);
+    spec.output_bitdepth = depth.bitdepth;
     spec.frequency_mode = frequency;
     spec.overlap_mode = overlap;
     spec.trim_flexbits = if bands == ALL_BANDS { trim } else { 0 };
@@ -475,7 +514,9 @@ pub fn encode_grayscale_options(
     let body = codestream::emit_codestream(
         &spec,
         |head| {
-            codestream::write_image_plane_header_gray_bands(head, bands, qp.dc, qp.lp, qp.hp, scaled)
+            codestream::write_image_plane_header_gray_bands(
+                head, bands, qp.dc, qp.lp, qp.hp, scaled, depth,
+            )
         },
         &codestream::classic_tile_headers(trim_v),
         codestream::band_count(bands),
@@ -483,5 +524,5 @@ pub fn encode_grayscale_options(
         mbh,
         &mut plane,
     );
-    container::write_container(&body, w, h, &container::pixel_format::GRAY8)
+    container::write_container(&body, w, h, guid)
 }
