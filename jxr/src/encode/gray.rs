@@ -50,14 +50,13 @@ pub(super) struct YOnlyPlane {
 }
 
 impl YOnlyPlane {
-    /// Pad pre-bias `luma` ([`super::convert`] already centered it) to the
-    /// 16-aligned MB grid (edge replication; the decoder crops back to the
-    /// true dims, which the header carries), placing the image at
-    /// `(top, left) = window` — `(0, 0)` is the classic `windowing_flag = 0`
-    /// derived padding. Forward-transform every MB, quantize per band, and
-    /// initialize the adaptive entropy state. (`scaled` planes arrive
-    /// pre-shifted by the conversion; this constructor is the unscaled-flag
-    /// entry the alpha plane uses.)
+    /// Pad pre-bias `luma` ([`super::convert`] already centered it — and,
+    /// when `scaled`, pre-shifted it) to the 16-aligned MB grid (edge
+    /// replication; the decoder crops back to the true dims, which the
+    /// header carries), placing the image at `(top, left) = window` —
+    /// `(0, 0)` is the classic `windowing_flag = 0` derived padding.
+    /// Forward-transform every MB, quantize per band, and initialize the
+    /// adaptive entropy state. This is the alpha image plane's constructor.
     pub(super) fn new(
         luma: &[i32],
         w: u32,
@@ -66,6 +65,7 @@ impl YOnlyPlane {
         window: (u32, u32),
         overlap: u8,
         tiles: (&[usize], &[usize]),
+        scaled: bool,
     ) -> Self {
         let (wu, hu) = (w as usize, h as usize);
         let (top, left) = (window.0 as usize, window.1 as usize);
@@ -82,7 +82,7 @@ impl YOnlyPlane {
             pw,
             ph,
             qp,
-            false,
+            scaled,
             overlap,
             &super::overlap::bounds(tiles.0, pw / 16),
             &super::overlap::bounds(tiles.1, ph / 16),

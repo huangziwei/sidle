@@ -1248,18 +1248,66 @@ pub fn encode_color_alpha(
     frequency: bool,
 ) -> Vec<u8> {
     let conv = super::convert::u8_prebias;
-    let (rp, gp, bp) = (conv(r, scaled), conv(g, scaled), conv(b, scaled));
+    let (rp, gp, bp, ap) = (conv(r, scaled), conv(g, scaled), conv(b, scaled), conv(a, scaled));
+    let guid = if premultiplied {
+        &container::pixel_format::PBGRA32
+    } else {
+        &container::pixel_format::BGRA32
+    };
+    encode_color_alpha_prebias(
+        &rp,
+        &gp,
+        &bp,
+        &ap,
+        w,
+        h,
+        qp,
+        alpha_qp,
+        premultiplied,
+        fmt,
+        scaled,
+        window,
+        tiles,
+        overlap,
+        frequency,
+        &super::convert::Depth::BD8,
+        guid,
+    )
+}
+
+/// Depth-general RGB+alpha driver ([`encode_color_alpha`] over pre-bias
+/// planes): `depth` rides into the image header and BOTH plane headers (the
+/// alpha plane carries its own `shift_bits`/float fields). The alpha plane's
+/// `scaled_flag` follows the image's (the reference encoder couples them;
+/// scaled lossless YONLY stays bit-exact) while its QPs stay independent
+/// (`alpha_qp`). `overlap_mode` is an image-header field, so it applies to
+/// the alpha plane's reconstruction too — filter it identically.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn encode_color_alpha_prebias(
+    r: &[i32],
+    g: &[i32],
+    b: &[i32],
+    a: &[i32],
+    w: u32,
+    h: u32,
+    qp: QpSet,
+    alpha_qp: QpSet,
+    premultiplied: bool,
+    fmt: u8,
+    scaled: bool,
+    window: (u32, u32),
+    tiles: (&[usize], &[usize]),
+    overlap: u8,
+    frequency: bool,
+    depth: &super::convert::Depth,
+    guid: &[u8; 16],
+) -> Vec<u8> {
     let mut primary = ColorPlane::new_fmt(
-        &rp, &gp, &bp, w, h, qp, fmt, ALL_BANDS, scaled, window, overlap, tiles.0, tiles.1, None,
+        r, g, b, w, h, qp, fmt, ALL_BANDS, scaled, window, overlap, tiles.0, tiles.1, None,
     );
-    // The alpha plane stays unscaled — scaled_flag is per plane header, and
-    // alpha is exactness-sensitive (jxrencapp likewise never scales alpha
-    // independently of its lossy decision; ours keeps the lossless path).
-    // overlap_mode is an image-header field, so it applies to the alpha
-    // plane's reconstruction too — filter it identically.
-    let ap = conv(a, false);
-    let mut alpha = super::gray::YOnlyPlane::new(&ap, w, h, alpha_qp, window, overlap, tiles);
+    let mut alpha = super::gray::YOnlyPlane::new(a, w, h, alpha_qp, window, overlap, tiles, scaled);
     let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
+    spec.output_bitdepth = depth.bitdepth;
     spec.frequency_mode = frequency;
     spec.overlap_mode = overlap;
     spec.premultiplied_alpha = premultiplied;
@@ -1272,16 +1320,18 @@ pub fn encode_color_alpha(
     let body = codestream::emit_codestream(
         &spec,
         |head| {
-            codestream::write_image_plane_header_yuv_scaled(
-                head, fmt, ALL_BANDS, qp.dc, qp.lp, qp.hp, scaled,
-            );
+            let plan = super::quant::QpPlan::uniform(qp, None);
+            codestream::write_image_plane_header_yuv_plan(head, fmt, ALL_BANDS, &plan, scaled, depth);
             // Alpha image plane header: YONLY, own bands + QPs (JxrEncApp
-            // analog `-Q`).
-            codestream::write_image_plane_header_gray_allbands(
+            // analog `-Q`), same depth fields.
+            codestream::write_image_plane_header_gray_bands(
                 head,
+                ALL_BANDS,
                 alpha_qp.dc,
                 alpha_qp.lp,
                 alpha_qp.hp,
+                scaled,
+                depth,
             );
         },
         &codestream::classic_tile_headers(0),
@@ -1290,11 +1340,6 @@ pub fn encode_color_alpha(
         mbh,
         &mut pair,
     );
-    let guid = if premultiplied {
-        &container::pixel_format::PBGRA32
-    } else {
-        &container::pixel_format::BGRA32
-    };
     container::write_container(&body, w, h, guid)
 }
 

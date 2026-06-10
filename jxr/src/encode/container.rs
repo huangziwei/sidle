@@ -44,6 +44,20 @@ pub mod pixel_format {
     pub const RGB48_HALF: [u8; 16] = guid(0x3b);
     /// `32bppRGBE` — Radiance shared-exponent HDR (BD8 + `OUT_RGBE`).
     pub const RGBE32: [u8; 16] = guid(0x3d);
+    /// `64bppRGBA` — four 16-bit unsigned channels (BD16 + alpha plane).
+    pub const RGBA64: [u8; 16] = guid(0x16);
+    /// `64bppPRGBA` — premultiplied [`RGBA64`].
+    pub const PRGBA64: [u8; 16] = guid(0x17);
+    /// `64bppRGBAFixedPoint` — four signed 16-bit channels (BD16S + alpha).
+    pub const RGBA64_FIXED: [u8; 16] = guid(0x1d);
+    /// `128bppRGBAFixedPoint` — four signed 32-bit channels (BD32S + alpha).
+    pub const RGBA128_FIXED: [u8; 16] = guid(0x1e);
+    /// `64bppRGBAHalf` — four IEEE-754 half channels (BD16F + alpha).
+    pub const RGBA64_HALF: [u8; 16] = guid(0x3a);
+    /// `128bppRGBAFloat` — four IEEE-754 single channels (BD32F + alpha).
+    pub const RGBA128_FLOAT: [u8; 16] = guid(0x19);
+    /// `128bppPRGBAFloat` — premultiplied [`RGBA128_FLOAT`].
+    pub const PRGBA128_FLOAT: [u8; 16] = guid(0x1a);
     /// `32bppGrayFloat` — single IEEE-754 single plane (BD32F).
     pub const GRAY32_FLOAT: [u8; 16] = guid(0x11);
     /// `128bppRGBFloat` — three IEEE-754 single channels, container stride

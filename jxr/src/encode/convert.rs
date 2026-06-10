@@ -228,6 +228,25 @@ impl SamplePlanes<'_> {
         }
     }
 
+    /// Container GUID for this family's 4-plane (RGB + alpha) shape;
+    /// `None` when the GUID family has no such format (no premultiplied
+    /// variant exists for the fixed/half families, and RGBE has no alpha).
+    pub(super) fn rgba_guid(&self, premultiplied: bool) -> Option<&'static [u8; 16]> {
+        use super::container::pixel_format as pf;
+        match (self, premultiplied) {
+            (SamplePlanes::U8(_), false) => Some(&pf::BGRA32),
+            (SamplePlanes::U8(_), true) => Some(&pf::PBGRA32),
+            (SamplePlanes::U16(_), false) => Some(&pf::RGBA64),
+            (SamplePlanes::U16(_), true) => Some(&pf::PRGBA64),
+            (SamplePlanes::I16(_), false) => Some(&pf::RGBA64_FIXED),
+            (SamplePlanes::I32(_), false) => Some(&pf::RGBA128_FIXED),
+            (SamplePlanes::F16(_), false) => Some(&pf::RGBA64_HALF),
+            (SamplePlanes::F32(_), false) => Some(&pf::RGBA128_FLOAT),
+            (SamplePlanes::F32(_), true) => Some(&pf::PRGBA128_FLOAT),
+            _ => None,
+        }
+    }
+
     /// Forward-convert plane `i` to the pre-bias domain ([`prebias`]).
     pub(super) fn prebias_plane(&self, i: usize, scaled: bool) -> Vec<i32> {
         let d = self.depth();

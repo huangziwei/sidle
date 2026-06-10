@@ -67,23 +67,47 @@ capability in one codestream.
 
 Beyond 8-bit, `encode_typed` takes **typed planes** (`TypedInput` +
 `SamplePlanes`, mirroring the decoder's sample types; plane count carries
-gray/RGB exactly like the 8-bit API, and `U8` routes through the classic
-path byte-for-byte): 16-bit unsigned (`16bppGray`/`48bppRGB`, bit-exact at
-lossless QP), 16-bit signed fixed (`…Fixed`, bit-exact), and 32-bit signed
-fixed (`32bppGrayFixed`/`96bppRGBFixed` — **never bit-lossless**: the
-reference encoder's `shift_bits = 10` pre-shift is cloned, so q1 round-trips
-`(x >> 10) << 10`, and scaled arithmetic is rejected for `i32`-headroom
-reasons, as libjxr forces too). The forward sample conversion is the exact
-stage-by-stage inverse of the decoder's output formatting; everything
-structural (chroma sampling, bands/trim, windowing, tiles, overlap,
-frequency order, QP syntax) composes with any depth. Deep alpha planes,
-half/full-float, and RGBE input are not implemented yet.
+gray/RGB/RGBA exactly like the 8-bit API, and `U8` routes through the
+classic path byte-for-byte):
+
+- **16-bit unsigned** (`U16` → `16bppGray`/`48bppRGB`/`64bppRGBA`) and
+  **16-bit signed fixed** (`I16` → the `…Fixed` family): bit-exact at
+  lossless QP.
+- **32-bit signed fixed** (`I32` → `32bppGrayFixed`/`96bppRGBFixed`/
+  `128bppRGBAFixedPoint`): **never bit-lossless** — the reference encoder's
+  `shift_bits = 10` pre-shift is cloned, so q1 round-trips
+  `(x >> 10) << 10`; scaled arithmetic is rejected (`i32` transform
+  headroom, as libjxr forces too).
+- **Half floats** (`F16`, *bit patterns* → the `…Half` family): lossless QP
+  is bit-pattern-exact for every pattern — NaN payloads, infinities,
+  denormals — except `-0.0`, which normalizes to `+0.0` (the codestream's
+  sign-magnitude fold has a single zero; the reference does the same).
+- **Full floats** (`F32`, *bit patterns* → `32bppGrayFloat`/
+  `128bppRGBFloat`/`128bppRGBAFloat`): coded through the reference's custom
+  float (`len_mantissa 13`, `exp_bias 4`) — the top 13 mantissa bits
+  survive, rounded half-up; anything this crate's decoder produced (e.g. a
+  decoded scRGB capture) is already on that grid and re-encodes
+  bit-exactly. Scaled arithmetic rejected, like `I32`.
+- **RGBE** (`Rgbe`, exactly 4 byte planes R,G,B + shared exponent →
+  `32bppRGBE`): normalized Radiance data round-trips all four planes
+  byte-exact at lossless QP; unnormalized pixels renormalize
+  value-preservingly.
+
+A 4th plane at any depth is a T.832 alpha image plane (premultiplied
+variants exist for the `U16` and `F32` families only — the GUID family has
+no others). Float and RGBE inputs keep YUV 4:4:4 (folded samples don't
+survive chroma decimation; the reference encoder enforces the same). The
+forward sample conversion is the exact stage-by-stage inverse of the
+decoder's output formatting; everything structural (chroma sampling for
+integer inputs, bands/trim, windowing, tiles, overlap, frequency order, QP
+syntax) composes with any depth.
 
 Every feature is verified two ways: in-crate round-trip/equivalence
 invariants against this crate's decoder, and JxrDecApp-exact readback (with
 jxrencapp PSNR/size parity wherever the reference encoder can mint a
 counterpart; the deep formats additionally diff header fields and container
-GUIDs against reference-minted twins).
+GUIDs against reference-minted twins, and two real 3440×1440 scRGB HDR
+captures re-encode 4-channel bit-exact).
 
 The roadmap lives in the repo at `.claude/plans/jxr-general-codec.md`.
 

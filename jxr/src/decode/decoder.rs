@@ -3183,11 +3183,15 @@ impl<'a> Decoder<'a> {
                 _ => 0,
             };
         }
-        let output_components = if matches!(self.planes[p].internal_clr_fmt, INT_NCOMPONENT) {
-            self.planes[p].num_components
-        } else if matches!(self.hdr.output_clr_fmt, OUT_RGB | OUT_RGBE | OUT_YUV444)
-            || self.planes[p].internal_clr_fmt == INT_YUV444
-        {
+        // Per PLANE, not per image (jxr_image.py:991 tests the plane's own
+        // `internal_clr_fmt`; its `[RGB, RGBE, YUV444]` list is effectively
+        // `== YUV444` — RGB/RGBE are OUTPUT-format codes 7/8, which the
+        // 3-bit internal field can never hold). The alpha image plane is
+        // YONLY (1 component): scaling it with the image-level color format
+        // indexed past its single plane. Found by 5e's scaled-alpha encodes
+        // — the first files either encoder ever emitted that scale a
+        // 1-component plane in a multi-component image.
+        let output_components = if self.planes[p].internal_clr_fmt == INT_YUV444 {
             3
         } else {
             self.planes[p].num_components

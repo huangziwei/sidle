@@ -686,14 +686,63 @@ pub fn encode_typed(
             ))
         }
         4 => {
-            return Err(EncodeError::Unsupported(
-                "alpha with deep (>8-bit) input is not implemented".into(),
-            ))
+            use crate::decode::consts::{INT_YUV420, INT_YUV422, INT_YUV444};
+            if mode != ColorMode::Color {
+                return Err(EncodeError::Unsupported(
+                    "alpha requires ColorMode::Color (no gray+alpha pixel format exists)".into(),
+                ));
+            }
+            if opts.chroma == ChromaSampling::YOnly {
+                return Err(EncodeError::Unsupported(
+                    "YOnly chroma with an alpha plane is not implemented".into(),
+                ));
+            }
+            if opts.bands != BandsPresent::All || trim != 0 {
+                return Err(EncodeError::Unsupported(
+                    "band truncation / trim_flexbits with an alpha plane is not implemented"
+                        .into(),
+                ));
+            }
+            let Some(guid) = samples.rgba_guid(input.premultiplied_alpha) else {
+                return Err(EncodeError::Unsupported(
+                    "no premultiplied container pixel format exists for this sample \
+                     family (only the unsigned-16 and float-32 families have one)"
+                        .into(),
+                ));
+            };
+            let fmt = match opts.chroma {
+                ChromaSampling::Yuv422 => INT_YUV422,
+                ChromaSampling::Yuv420 => INT_YUV420,
+                _ => INT_YUV444,
+            };
+            let rp = samples.prebias_plane(0, opts.scaled);
+            let gp = samples.prebias_plane(1, opts.scaled);
+            let bp = samples.prebias_plane(2, opts.scaled);
+            let ap = samples.prebias_plane(3, opts.scaled);
+            return Ok(color::encode_color_alpha_prebias(
+                &rp,
+                &gp,
+                &bp,
+                &ap,
+                w,
+                h,
+                qp,
+                opts.alpha_qp.unwrap_or(qp),
+                input.premultiplied_alpha,
+                fmt,
+                opts.scaled,
+                window,
+                tiles,
+                overlap,
+                frequency,
+                &depth,
+                guid,
+            ));
         }
         1 | 3 => {}
         other => {
             return Err(EncodeError::Unsupported(format!(
-                "expected 1 (gray) or 3 (RGB) planes, got {other}"
+                "expected 1 (gray), 3 (RGB) or 4 (RGBA) planes, got {other}"
             )))
         }
     }
@@ -2913,6 +2962,156 @@ mod tests {
     }
 
     #[test]
+    fn deep_rgba_q1_all_families_exact() {
+        // 4-plane (RGB + alpha image plane) at every deep family: all four
+        // channels bit-exact at q1 (BD32S masked by its shift; F16
+        // canonicalizes -0).
+        let mut r = Lcg(0xa1fa_d33b);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        // U16 → 64bppRGBA.
+        let p16: [Vec<u16>; 4] =
+            std::array::from_fn(|_| (0..n).map(|_| (r.next() >> 32) as u16).collect());
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::U16(&p16),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc916", "64bppRGBA GUID");
+        let d = decode_to_planes(&jxr);
+        assert_eq!(d.num_components, 4);
+        assert!(d.has_alpha && !d.premultiplied_alpha);
+        for c in 0..4 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i], p16[c][i] as i32, "U16 ch{c} px{i}");
+            }
+        }
+        // Premultiplied U16 → 64bppPRGBA + flag.
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::U16(&p16),
+            premultiplied_alpha: true,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc917", "64bppPRGBA GUID");
+        assert!(decode_to_planes(&jxr).premultiplied_alpha);
+        // I16 → 64bppRGBAFixedPoint.
+        let pi16: [Vec<i16>; 4] =
+            std::array::from_fn(|_| (0..n).map(|_| (r.next() >> 32) as u16 as i16).collect());
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::I16(&pi16),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc91d", "64bppRGBAFixed GUID");
+        let d = decode_to_planes(&jxr);
+        for c in 0..4 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i], pi16[c][i] as i32, "I16 ch{c} px{i}");
+            }
+        }
+        // I32 → 128bppRGBAFixedPoint (shift-masked).
+        let pi32: [Vec<i32>; 4] =
+            std::array::from_fn(|_| (0..n).map(|_| r.next() as i32 >> 4).collect());
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::I32(&pi32),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc91e", "128bppRGBAFixed GUID");
+        let d = decode_to_planes(&jxr);
+        for c in 0..4 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i], (pi32[c][i] >> 10) << 10, "I32 ch{c} px{i}");
+            }
+        }
+        // F16 → 64bppRGBAHalf (bit patterns; -0 canonicalizes).
+        let pf16: [Vec<u16>; 4] =
+            std::array::from_fn(|_| (0..n).map(|_| (r.next() >> 32) as u16).collect());
+        let canon = |v: u16| -> i32 { if v == 0x8000 { 0 } else { v as i32 } };
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::F16(&pf16),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc93a", "64bppRGBAHalf GUID");
+        let d = decode_to_planes(&jxr);
+        for c in 0..4 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i], canon(pf16[c][i]), "F16 ch{c} px{i}");
+            }
+        }
+        // F32 → 128bppRGBAFloat (grid values), + premultiplied variant.
+        let grid = |r: &mut Lcg| -> u32 {
+            let sign = (((r.next() >> 13) & 1) as u32) << 31;
+            let e = 124 + ((r.next() >> 17) % 77) as u32;
+            let m13 = ((r.next() >> 23) & 0x1fff) as u32;
+            sign | (e << 23) | (m13 << 10)
+        };
+        let pf32: [Vec<u32>; 4] = std::array::from_fn(|_| (0..n).map(|_| grid(&mut r)).collect());
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::F32(&pf32),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc919", "128bppRGBAFloat GUID");
+        let d = decode_to_planes(&jxr);
+        for c in 0..4 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i] as u32, pf32[c][i], "F32 ch{c} px{i}");
+            }
+        }
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::F32(&pf32),
+            premultiplied_alpha: true,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc91a", "128bppPRGBAFloat GUID");
+        // Premultiplied has no GUID for the fixed/half families.
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::I16(&pi16),
+            premultiplied_alpha: true,
+        };
+        assert!(encode_typed(&input, ColorMode::Color, EncodeOptions::default()).is_err());
+        // Deep alpha QP independence: lossy alpha leaves lossless RGB exact.
+        let input = TypedInput {
+            width: w,
+            height: h,
+            samples: SamplePlanes::U16(&p16),
+            premultiplied_alpha: false,
+        };
+        let opts = EncodeOptions {
+            alpha_qp: Some(QpSet { dc: 32, lp: 64, hp: 128 }),
+            ..Default::default()
+        };
+        let d = decode_to_planes(&encode_typed(&input, ColorMode::Color, opts).unwrap());
+        for c in 0..3 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i], p16[c][i] as i32, "RGB must stay exact");
+            }
+        }
+        assert!(
+            (0..n).any(|i| d.image_plane[3][i] != p16[3][i] as i32),
+            "lossy alpha must show quantization error"
+        );
+    }
+
+    #[test]
     fn deep_input_validation() {
         let (w, h) = (16u32, 16u32);
         let n = (w * h) as usize;
@@ -2926,7 +3125,7 @@ mod tests {
             premultiplied_alpha: false,
         };
         assert!(encode_typed(&input, ColorMode::Color, EncodeOptions::default()).is_err());
-        // 4 deep planes: deep alpha not implemented.
+        // 4 deep planes in Grayscale mode: alpha cannot ride grayscale.
         let four = [p16.clone(), p16.clone(), p16.clone(), p16.clone()];
         let input = TypedInput {
             width: w,
@@ -2934,7 +3133,7 @@ mod tests {
             samples: SamplePlanes::U16(&four),
             premultiplied_alpha: false,
         };
-        assert!(encode_typed(&input, ColorMode::Color, EncodeOptions::default()).is_err());
+        assert!(encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).is_err());
         // Wrong plane length.
         let bad = [vec![0u16; n - 1]];
         let input = TypedInput {
