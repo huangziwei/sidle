@@ -3,7 +3,6 @@
 //! image**. Mirrors the decoder's `mb_dc` + `mb_lp` + `mb_cbphp` + `mb_hp_flex`
 //! per-macroblock sequence, reusing its `AdaptiveVLC` / `AdaptiveScan` state.
 
-use super::bitstream::BitWriter;
 use super::quant::{quantize, QpSet};
 use super::{codestream, coeff, container, hp, transform};
 use crate::decode::consts::*;

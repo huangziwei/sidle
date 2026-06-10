@@ -1663,6 +1663,141 @@ mod tests {
         );
     }
 
+    /// 4d: frequency mode. Same per-MB band sections routed into per-band
+    /// tile packets (index table addressing) — so LOSSLESS stays exact across
+    /// the whole envelope, and a frequency-mode lossy decode must be
+    /// PIXEL-IDENTICAL to the spatial one (same coefficients, re-segmented
+    /// stream).
+    #[test]
+    fn frequency_mode_roundtrip_and_equivalence() {
+        use crate::decode::container::parse;
+        let mut r = Lcg(0xf4e0_0042_f4e0_0042);
+        let dec = |jxr: &[u8]| {
+            let c = parse(jxr).unwrap();
+            crate::decode::decode_image(&c).unwrap()
+        };
+        for &(w, h) in &[(48u32, 32u32), (17, 31), (96, 64)] {
+            let n = (w * h) as usize;
+            let planes4: [Vec<u8>; 4] = noise_planes(&mut r, n);
+            let freq = EncodeOptions { frequency: true, ..Default::default() };
+            // Gray / RGB / RGBA exact at lossless.
+            let gplanes = [planes4[0].clone()];
+            let gi =
+                ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
+            let f = encode_with_options(&gi, ColorMode::Grayscale, freq).unwrap();
+            let d = dec(&f);
+            for i in 0..n {
+                assert_eq!(d.image_plane[0][i], gplanes[0][i] as i32, "gray freq {w}x{h} px{i}");
+            }
+            let ci = ImageInput {
+                width: w,
+                height: h,
+                planes: &planes4[..3],
+                premultiplied_alpha: false,
+            };
+            let f = encode_with_options(&ci, ColorMode::Color, freq).unwrap();
+            let d = dec(&f);
+            for c in 0..3 {
+                for i in 0..n {
+                    assert_eq!(
+                        d.image_plane[c][i], planes4[c][i] as i32,
+                        "rgb freq {w}x{h} ch{c} px{i}"
+                    );
+                }
+            }
+            let ai =
+                ImageInput { width: w, height: h, planes: &planes4, premultiplied_alpha: false };
+            let f = encode_with_options(&ai, ColorMode::Color, freq).unwrap();
+            let d = dec(&f);
+            assert_eq!(d.num_components, 4);
+            for c in 0..4 {
+                for i in 0..n {
+                    assert_eq!(
+                        d.image_plane[c][i], planes4[c][i] as i32,
+                        "rgba freq {w}x{h} ch{c} px{i}"
+                    );
+                }
+            }
+            // Frequency × tiles × window × overlap, exact.
+            if w >= 48 {
+                let f = encode_with_options(
+                    &ci,
+                    ColorMode::Color,
+                    EncodeOptions {
+                        frequency: true,
+                        tile_cols: 2,
+                        tile_rows: 2,
+                        window_top: 3,
+                        window_left: 5,
+                        overlap: Overlap::Two,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let d = dec(&f);
+                assert_eq!((d.width, d.height), (w, h));
+                for c in 0..3 {
+                    for i in 0..n {
+                        assert_eq!(
+                            d.image_plane[c][i], planes4[c][i] as i32,
+                            "freq×tiles×window×ovl {w}x{h} ch{c} px{i}"
+                        );
+                    }
+                }
+            }
+            // Frequency × band truncation: fewer packets per tile, decodes
+            // to the same pixels as the spatial encode at the same bands.
+            for bands in [BandsPresent::NoFlexbits, BandsPresent::NoHighpass, BandsPresent::DcOnly]
+            {
+                let fs = encode_with_options(
+                    &gi,
+                    ColorMode::Grayscale,
+                    EncodeOptions { bands, ..Default::default() },
+                )
+                .unwrap();
+                let ff = encode_with_options(
+                    &gi,
+                    ColorMode::Grayscale,
+                    EncodeOptions { bands, frequency: true, ..Default::default() },
+                )
+                .unwrap();
+                assert_eq!(
+                    dec(&fs).image_plane[0],
+                    dec(&ff).image_plane[0],
+                    "{bands:?} spatial vs frequency must reconstruct identically"
+                );
+            }
+        }
+        // Lossy: frequency == spatial pixel-for-pixel (444 + 420, with trim).
+        let (w, h) = (96u32, 64u32);
+        let n = (w * h) as usize;
+        let planes: [Vec<u8>; 3] = noise_planes(&mut r, n);
+        let ci = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        for chroma in [ChromaSampling::Yuv444, ChromaSampling::Yuv420] {
+            let base = EncodeOptions {
+                qp: QpSet { dc: 16, lp: 32, hp: 64 },
+                scaled: true,
+                chroma,
+                trim_flexbits: 4,
+                ..Default::default()
+            };
+            let fs = encode_with_options(&ci, ColorMode::Color, base).unwrap();
+            let ff = encode_with_options(
+                &ci,
+                ColorMode::Color,
+                EncodeOptions { frequency: true, ..base },
+            )
+            .unwrap();
+            let (ds, df) = (dec(&fs), dec(&ff));
+            for c in 0..3 {
+                assert_eq!(
+                    ds.image_plane[c], df.image_plane[c],
+                    "lossy frequency must equal spatial ({chroma:?} ch{c})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn alpha_input_validation() {
         let (w, h) = (16u32, 16u32);
