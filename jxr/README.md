@@ -33,11 +33,16 @@ matching libjxr). Decoded output is raw `i32` planes plus layout fields, or
 use `DecodedImage::to_pixel_buffer()` for interleaved little-endian samples
 with an explicit layout (sample type, color model, alpha mode).
 
-**Encoder** — 8-bit grayscale (`8bppGray`/YONLY) and 8-bit color
-(`24bppRGB`/YUV 4:4:4): full ALL_BANDS (DC + LP + HP + flexbits) with multi-MB
-prediction and adaptive VLC/scan state, spatial order, single tile, per-band
-quantization (`QpSet::LOSSLESS` round-trips bit-exact; higher QP = lossy),
-arbitrary non-16-aligned dimensions up to 65 536 px.
+**Encoder** — 8-bit grayscale (`8bppGray`/YONLY), 8-bit color
+(`24bppRGB`/YUV 4:4:4), and 8-bit color + alpha (`32bppBGRA`/`32bppPBGRA`:
+a T.832 alpha image plane, per-MB interleaved, with its own per-band QPs via
+`encode_with_alpha_qp`; the premultiplied property bit passes through): full
+ALL_BANDS (DC + LP + HP + flexbits) with multi-MB prediction and adaptive
+VLC/scan state, spatial order, single tile, per-band quantization
+(`QpSet::LOSSLESS` round-trips bit-exact; higher QP = lossy), arbitrary
+non-16-aligned dimensions up to 65 536 px. Gray+alpha input is rejected:
+JPEG XR defines no grayscale-with-alpha container pixel format — expand to
+RGBA.
 
 Both halves are being pushed toward full-spec general-purpose coverage; the
 roadmap lives in the repo at `.claude/plans/jxr-general-codec.md`.
@@ -50,7 +55,7 @@ use jxr::{encode, ColorMode, ImageInput, QpSet};
 // Encode a 4×4 grayscale gradient losslessly…
 let pixels: Vec<u8> = (0..16).map(|i| (i * 16) as u8).collect();
 let planes = vec![pixels.clone()];
-let input = ImageInput { width: 4, height: 4, planes: &planes };
+let input = ImageInput { width: 4, height: 4, planes: &planes, premultiplied_alpha: false };
 let file = encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).unwrap();
 
 // …and decode it back: TIFF-like container, then WMPHOTO codestream.

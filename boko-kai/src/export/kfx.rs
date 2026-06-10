@@ -2016,7 +2016,7 @@ fn encode_jxr_asset(data: &[u8], mode: jxr::ColorMode) -> Option<Vec<u8>> {
             vec![r, g, b]
         }
     };
-    let input = ImageInput { width: w, height: h, planes: &planes };
+    let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
     encode(&input, mode, JXR_DEFAULT_QP).ok()
 }
 

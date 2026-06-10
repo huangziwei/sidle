@@ -273,7 +273,7 @@ impl YOnlyPlane {
 pub fn encode_grayscale(luma: &[u8], w: u32, h: u32, qp: QpSet) -> Vec<u8> {
     let mut plane = YOnlyPlane::new(luma, w, h, qp);
     let mut bw = BitWriter::new();
-    codestream::write_image_header(&mut bw, w, h, OUT_YONLY);
+    codestream::write_image_header(&mut bw, w, h, OUT_YONLY, false, false);
     codestream::write_image_plane_header_gray_allbands(&mut bw, qp.dc, qp.lp, qp.hp);
     codestream::write_vlw_esc(&mut bw, 0);
     codestream::write_common_tile_header(&mut bw);

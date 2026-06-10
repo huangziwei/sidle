@@ -54,22 +54,44 @@ impl std::fmt::Display for EncodeError {
 
 impl std::error::Error for EncodeError {}
 
-/// 8-bit pixel input. One plane per component (1 for grayscale, 3 for color),
-/// each row-major with `len == width * height`.
+/// 8-bit pixel input. One plane per component, each row-major with
+/// `len == width * height`: **1** plane = grayscale, **3** = RGB, **4** =
+/// RGB + alpha (encoded as a T.832 alpha image plane). **2** planes
+/// (gray+alpha) is rejected: JPEG XR has no grayscale-with-alpha container
+/// pixel format (the channels+alpha GUID family starts at 3 channels), so
+/// such a file would be unrepresentable — expand to RGBA.
 pub struct ImageInput<'a> {
     pub width: u32,
     pub height: u32,
     pub planes: &'a [Vec<u8>],
+    /// The alpha plane (4-plane input) holds premultiplied values. Sets the
+    /// codestream `premultiplied_alpha_flag` (a property bit, not a different
+    /// coding — T.832 8.3.17) and selects the `32bppPBGRA` container GUID.
+    pub premultiplied_alpha: bool,
 }
 
-/// Encode 8-bit grayscale pixels into a JPEG-XR file (TIFF container + WMPHOTO
-/// codestream) at the given per-band quantizers. `QpSet::LOSSLESS` is bit-exact;
-/// higher QP trades fidelity for size (ship mode). Output is decodable by
-/// `decode` and structurally clones a real Amazon JXR.
+/// Encode 8-bit grayscale/RGB(A) pixels into a JPEG-XR file (TIFF container +
+/// WMPHOTO codestream) at the given per-band quantizers. `QpSet::LOSSLESS` is
+/// bit-exact; higher QP trades fidelity for size (ship mode). An alpha plane
+/// (4-plane input) is quantized with the same `qp` — use
+/// [`encode_with_alpha_qp`] to quantize it independently. Output is decodable
+/// by `decode` and structurally clones a real Amazon JXR.
 pub fn encode(
     input: &ImageInput<'_>,
     mode: ColorMode,
     qp: QpSet,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_with_alpha_qp(input, mode, qp, qp)
+}
+
+/// [`encode`] with the alpha image plane quantized by its **own** per-band
+/// `alpha_qp` (the JxrEncApp `-Q` analog; the plane carries its own QPs in its
+/// plane header). Ignored unless the input has a 4th (alpha) plane.
+pub fn encode_with_alpha_qp(
+    input: &ImageInput<'_>,
+    mode: ColorMode,
+    qp: QpSet,
+    alpha_qp: QpSet,
 ) -> Result<Vec<u8>, EncodeError> {
     let (w, h) = (input.width, input.height);
     if w == 0 || h == 0 {
@@ -86,6 +108,42 @@ pub fn encode(
             Err(EncodeError::Unsupported("plane len != width*height".into()))
         }
     };
+    if input.planes.len() == 2 {
+        return Err(EncodeError::Unsupported(
+            "gray+alpha: JPEG XR has no grayscale-with-alpha container pixel format; \
+             supply RGBA (4 planes)"
+                .into(),
+        ));
+    }
+    if input.premultiplied_alpha && input.planes.len() != 4 {
+        return Err(EncodeError::Unsupported(
+            "premultiplied_alpha set but no alpha plane (4 planes)".into(),
+        ));
+    }
+    if input.planes.len() == 4 {
+        if mode != ColorMode::Color {
+            return Err(EncodeError::Unsupported(
+                "alpha requires ColorMode::Color (no gray+alpha pixel format exists)".into(),
+            ));
+        }
+        for p in input.planes {
+            check(p)?;
+        }
+        // No auto-gray collapse here even when R==G==B: gray+alpha has no
+        // container pixel format, so collapsing would change the declared
+        // format — and all-zero chroma planes cost next to nothing.
+        return Ok(color::encode_color_alpha(
+            &input.planes[0],
+            &input.planes[1],
+            &input.planes[2],
+            &input.planes[3],
+            w,
+            h,
+            qp,
+            alpha_qp,
+            input.premultiplied_alpha,
+        ));
+    }
     // A 1-plane input is grayscale regardless of mode — there's no chroma to
     // synthesize. Color auto-gray-detect (R==G==B) lives in the pipeline.
     let want_color = mode == ColorMode::Color && input.planes.len() != 1;
@@ -155,6 +213,7 @@ mod tests {
                     width: w,
                     height: h,
                     planes: std::slice::from_ref(&plane),
+                    premultiplied_alpha: false,
                 };
                 let jxr = encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).expect("encode");
                 let decoded = decode_to_planes(&jxr);
@@ -260,6 +319,7 @@ mod tests {
                 width: w as u32,
                 height: h as u32,
                 planes: std::slice::from_ref(&pixels),
+                premultiplied_alpha: false,
             };
             let jxr = encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).expect("encode");
             let decoded = decode_to_planes(&jxr);
@@ -280,6 +340,7 @@ mod tests {
                 width: w as u32,
                 height: h as u32,
                 planes: std::slice::from_ref(&pixels),
+                premultiplied_alpha: false,
             };
             let jxr = encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).expect("encode");
             let decoded = decode_to_planes(&jxr);
@@ -299,6 +360,7 @@ mod tests {
                 width: w,
                 height: h,
                 planes: std::slice::from_ref(&pixels),
+                premultiplied_alpha: false,
             };
             let jxr = encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).expect("encode");
             let decoded = decode_to_planes(&jxr);
@@ -329,11 +391,21 @@ mod tests {
         for &(w, h) in &[(32u32, 32u32), (48, 32), (64, 48)] {
             let pixels: Vec<u8> = (0..(w * h) as usize).map(|_| 96 + (r.next() % 64) as u8).collect();
             for &qp in &qps {
-                let input = ImageInput { width: w, height: h, planes: std::slice::from_ref(&pixels) };
+                let input = ImageInput {
+                    width: w,
+                    height: h,
+                    planes: std::slice::from_ref(&pixels),
+                    premultiplied_alpha: false,
+                };
                 let jxr1 = encode(&input, ColorMode::Grayscale, qp).expect("encode");
                 let dec1 = decode_to_planes(&jxr1);
                 let p1: Vec<u8> = dec1.image_plane[0].iter().map(|&v| v.clamp(0, 255) as u8).collect();
-                let input2 = ImageInput { width: w, height: h, planes: std::slice::from_ref(&p1) };
+                let input2 = ImageInput {
+                    width: w,
+                    height: h,
+                    planes: std::slice::from_ref(&p1),
+                    premultiplied_alpha: false,
+                };
                 let jxr2 = encode(&input2, ColorMode::Grayscale, qp).expect("re-encode");
                 assert_eq!(jxr1, jxr2, "not a fixpoint at qp={qp:?} {w}x{h}");
             }
@@ -357,7 +429,12 @@ mod tests {
             .collect();
         let mse = |qp: QpSet| -> f64 {
             let input =
-                ImageInput { width: w as u32, height: h as u32, planes: std::slice::from_ref(&pixels) };
+                ImageInput {
+                    width: w as u32,
+                    height: h as u32,
+                    planes: std::slice::from_ref(&pixels),
+                    premultiplied_alpha: false,
+                };
             let jxr = encode(&input, ColorMode::Grayscale, qp).expect("encode");
             let d = decode_to_planes(&jxr);
             let se: f64 = pixels
@@ -389,7 +466,7 @@ mod tests {
         let gp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
         let bp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
         let planes = [rp.clone(), gp.clone(), bp.clone()];
-        let input = ImageInput { width: w, height: h, planes: &planes };
+        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
         let jxr = encode(&input, ColorMode::Color, QpSet::LOSSLESS).expect("color encode");
         let d = decode_to_planes(&jxr);
         assert_eq!(d.num_components, 3, "3-plane color must emit RGB");
@@ -402,7 +479,7 @@ mod tests {
         }
         // 1-plane in Color mode → grayscale (1 component, no synthesized chroma).
         let gplanes = [rp.clone()];
-        let ginput = ImageInput { width: w, height: h, planes: &gplanes };
+        let ginput = ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
         let gjxr = encode(&ginput, ColorMode::Color, QpSet::LOSSLESS).expect("gray fallback");
         assert_eq!(decode_to_planes(&gjxr).num_components, 1, "1-plane color-mode ⇒ grayscale");
     }
@@ -415,12 +492,174 @@ mod tests {
         let n = (w * h) as usize;
         let plane: Vec<u8> = (0..n).map(|_| (r.next() % 256) as u8).collect();
         let planes = [plane.clone(), plane.clone(), plane.clone()];
-        let input = ImageInput { width: w, height: h, planes: &planes };
+        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
         let jxr = encode(&input, ColorMode::Color, QpSet::LOSSLESS).unwrap();
         let d = decode_to_planes(&jxr);
         assert_eq!(d.num_components, 1, "equal RGB channels must auto-detect to grayscale");
         for i in 0..n {
             assert_eq!(d.image_plane[0][i], plane[i] as i32, "pixel {i}");
         }
+    }
+
+    fn noise_planes<const N: usize>(r: &mut Lcg, n: usize) -> [Vec<u8>; N] {
+        std::array::from_fn(|_| (0..n).map(|_| (r.next() >> 32) as u8).collect())
+    }
+
+    #[test]
+    fn roundtrip_rgba_alpha_plane_lossless() {
+        // 4-plane RGBA → YUV444 primary plane + YONLY alpha image plane,
+        // per-MB interleaved; all four channels bit-exact at LOSSLESS,
+        // including non-16-aligned dims (both planes pad + crop identically).
+        let mut r = Lcg(0xfeed_f00d_1234_5678);
+        for &(w, h) in &[(48u32, 32u32), (17, 31), (16, 16), (100, 50)] {
+            let n = (w * h) as usize;
+            let planes: [Vec<u8>; 4] = noise_planes(&mut r, n);
+            let input =
+                ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+            let jxr = encode(&input, ColorMode::Color, QpSet::LOSSLESS).expect("rgba encode");
+            let d = decode_to_planes(&jxr);
+            assert_eq!(d.num_components, 4, "{w}x{h}: 3 primary + alpha");
+            assert!(d.has_alpha && !d.premultiplied_alpha, "{w}x{h}: alpha flags");
+            for c in 0..4 {
+                for i in 0..n {
+                    assert_eq!(d.image_plane[c][i], planes[c][i] as i32, "{w}x{h} ch{c} px{i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rgba_alpha_own_qp_is_independent() {
+        // The alpha plane carries its own QPs in its plane header: a lossy
+        // alpha leaves the lossless RGB bit-exact, and conversely.
+        let mut r = Lcg(0xa1fa_0000_dead_beef);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        let planes: [Vec<u8>; 4] = noise_planes(&mut r, n);
+        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let lossy = QpSet { dc: 32, lp: 64, hp: 128 };
+
+        let jxr = encode_with_alpha_qp(&input, ColorMode::Color, QpSet::LOSSLESS, lossy).unwrap();
+        let d = decode_to_planes(&jxr);
+        for c in 0..3 {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i], planes[c][i] as i32, "RGB must stay exact ch{c}");
+            }
+        }
+        assert!(
+            (0..n).any(|i| d.image_plane[3][i] != planes[3][i] as i32),
+            "noise alpha at dc32/lp64/hp128 must show quantization error"
+        );
+
+        let jxr2 = encode_with_alpha_qp(&input, ColorMode::Color, lossy, QpSet::LOSSLESS).unwrap();
+        let d2 = decode_to_planes(&jxr2);
+        for i in 0..n {
+            assert_eq!(d2.image_plane[3][i], planes[3][i] as i32, "alpha must stay exact px{i}");
+        }
+        assert!(
+            (0..3).any(|c| (0..n).any(|i| d2.image_plane[c][i] != planes[c][i] as i32)),
+            "noise RGB at dc32/lp64/hp128 must show quantization error"
+        );
+    }
+
+    #[test]
+    fn rgba_premultiplied_flag_passthrough() {
+        // premultiplied_alpha → `32bppPBGRA` GUID + the codestream property
+        // bit (T.832 8.3.17), exposed by the decoder and the PixelBuffer.
+        use crate::decode::pixels::AlphaMode;
+        let mut r = Lcg(0x9e37_79b9_7f4a_7c15);
+        let (w, h) = (32u32, 16u32);
+        let n = (w * h) as usize;
+        let planes: [Vec<u8>; 4] = noise_planes(&mut r, n);
+        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: true };
+        let jxr = encode(&input, ColorMode::Color, QpSet::LOSSLESS).unwrap();
+        let c = crate::decode::container::parse(&jxr).expect("container");
+        assert_eq!(c.pixel_format_uuid, "24c3dd6f-034e-fe4b-b185-3d77768dc910", "32bppPBGRA");
+        let d = crate::decode::decode_image(&c).expect("decode");
+        assert!(d.has_alpha && d.premultiplied_alpha);
+        let pb = d.to_pixel_buffer().expect("pixel buffer");
+        assert_eq!(pb.alpha, AlphaMode::Premultiplied);
+        assert_eq!(pb.channels, 4);
+
+        let input2 =
+            ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let jxr2 = encode(&input2, ColorMode::Color, QpSet::LOSSLESS).unwrap();
+        let c2 = crate::decode::container::parse(&jxr2).expect("container");
+        assert_eq!(c2.pixel_format_uuid, "24c3dd6f-034e-fe4b-b185-3d77768dc90f", "32bppBGRA");
+        let d2 = crate::decode::decode_image(&c2).expect("decode");
+        assert!(d2.has_alpha && !d2.premultiplied_alpha);
+        assert_eq!(d2.to_pixel_buffer().unwrap().alpha, AlphaMode::Straight);
+    }
+
+    #[test]
+    fn rgba_equal_channels_stays_color() {
+        // R==G==B with an alpha plane must NOT auto-gray (gray+alpha has no
+        // container pixel format): stays a 4-component 32bppBGRA file.
+        let mut r = Lcg(0x5555_aaaa_5555_aaaa);
+        let (w, h) = (32u32, 16u32);
+        let n = (w * h) as usize;
+        let g: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let a: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let planes = [g.clone(), g.clone(), g.clone(), a.clone()];
+        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let jxr = encode(&input, ColorMode::Color, QpSet::LOSSLESS).unwrap();
+        let c = crate::decode::container::parse(&jxr).expect("container");
+        assert_eq!(c.pixel_format_uuid, "24c3dd6f-034e-fe4b-b185-3d77768dc90f");
+        let d = decode_to_planes(&jxr);
+        assert_eq!(d.num_components, 4, "no auto-gray with alpha");
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], g[i] as i32);
+            assert_eq!(d.image_plane[3][i], a[i] as i32);
+        }
+    }
+
+    #[test]
+    fn rgba_lossy_fixpoint_with_alpha() {
+        // encode∘decode∘encode is byte-identical with lossy QPs on both planes
+        // (alpha QP ≠ primary QP) — the quantizer-inversion discipline extended
+        // to the alpha plane. Mid-range pixels + aligned dims, as in the
+        // gray/color fixpoint tests.
+        let mut r = Lcg(0x0ddc_0ffe_e123_4567);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        let mk = |r: &mut Lcg| -> Vec<u8> {
+            (0..n).map(|_| 96 + ((r.next() >> 32) as u8 % 64)).collect()
+        };
+        let planes = [mk(&mut r), mk(&mut r), mk(&mut r), mk(&mut r)];
+        let (qp, aqp) = (QpSet { dc: 4, lp: 8, hp: 16 }, QpSet { dc: 8, lp: 16, hp: 32 });
+        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let jxr1 = encode_with_alpha_qp(&input, ColorMode::Color, qp, aqp).unwrap();
+        let d = decode_to_planes(&jxr1);
+        let ch = |c: usize| -> Vec<u8> {
+            d.image_plane[c].iter().map(|&v| v.clamp(0, 255) as u8).collect()
+        };
+        let p2 = [ch(0), ch(1), ch(2), ch(3)];
+        let input2 = ImageInput { width: w, height: h, planes: &p2, premultiplied_alpha: false };
+        let jxr2 = encode_with_alpha_qp(&input2, ColorMode::Color, qp, aqp).unwrap();
+        assert_eq!(jxr1, jxr2, "rgba lossy must be a fixpoint");
+    }
+
+    #[test]
+    fn alpha_input_validation() {
+        let (w, h) = (16u32, 16u32);
+        let n = (w * h) as usize;
+        let p = vec![128u8; n];
+        // 2 planes: no gray+alpha container pixel format exists.
+        let two = [p.clone(), p.clone()];
+        let input = ImageInput { width: w, height: h, planes: &two, premultiplied_alpha: false };
+        assert!(encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).is_err());
+        assert!(encode(&input, ColorMode::Color, QpSet::LOSSLESS).is_err());
+        // 4 planes in Grayscale mode: alpha cannot ride a grayscale image.
+        let four = [p.clone(), p.clone(), p.clone(), p.clone()];
+        let input = ImageInput { width: w, height: h, planes: &four, premultiplied_alpha: false };
+        assert!(encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).is_err());
+        // premultiplied flag without an alpha plane.
+        let three = [p.clone(), p.clone(), p.clone()];
+        let input = ImageInput { width: w, height: h, planes: &three, premultiplied_alpha: true };
+        assert!(encode(&input, ColorMode::Color, QpSet::LOSSLESS).is_err());
+        // wrong plane length among the 4.
+        let bad = [p.clone(), p.clone(), p.clone(), vec![0u8; n - 1]];
+        let input = ImageInput { width: w, height: h, planes: &bad, premultiplied_alpha: false };
+        assert!(encode(&input, ColorMode::Color, QpSet::LOSSLESS).is_err());
     }
 }

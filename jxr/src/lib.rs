@@ -4,4 +4,6 @@
 pub mod decode;
 pub mod encode;
 
-pub use encode::{ColorMode, EncodeError, ImageInput, QpSet, encode, quality_to_qp};
+pub use encode::{
+    ColorMode, EncodeError, ImageInput, QpSet, encode, encode_with_alpha_qp, quality_to_qp,
+};

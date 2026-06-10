@@ -372,7 +372,7 @@ impl ColorPlane {
 pub fn encode_color(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> Vec<u8> {
     let mut plane = ColorPlane::new(r, g, b, w, h, qp);
     let mut bw = BitWriter::new();
-    codestream::write_image_header(&mut bw, w, h, OUT_RGB);
+    codestream::write_image_header(&mut bw, w, h, OUT_RGB, false, false);
     codestream::write_image_plane_header_color_allbands(&mut bw, qp.dc, qp.lp, qp.hp);
     codestream::write_vlw_esc(&mut bw, 0);
     codestream::write_common_tile_header(&mut bw);
@@ -383,6 +383,57 @@ pub fn encode_color(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> 
     }
     bw.align_to_byte();
     container::write_container(&bw.finish(), w, h, &container::pixel_format::RGB24)
+}
+
+/// Encode RGB + alpha (4 planes, each `w*h` row-major) as a color JPEG-XR with
+/// a T.832 **alpha image plane**: `32bppBGRA` (or `32bppPBGRA` when
+/// `premultiplied`) container, `INT_YUV444` primary plane + `INT_YONLY` alpha
+/// plane with its **own** uniform per-band QPs (`alpha_qp`), per-MB
+/// interleaved exactly as the decoder reads them (`tile_mb(plane0)` then
+/// `tile_mb(plane1)` per MB). Lossless QPs on both planes round-trip all four
+/// channels bit-exactly.
+///
+/// This is what JxrEncApp calls *interleaved* alpha (`-a 3`, in-codestream
+/// plane; its `-a 2` "planar" is the separate-container-codestream variant,
+/// which is a different, container-level feature).
+pub fn encode_color_alpha(
+    r: &[u8],
+    g: &[u8],
+    b: &[u8],
+    a: &[u8],
+    w: u32,
+    h: u32,
+    qp: QpSet,
+    alpha_qp: QpSet,
+    premultiplied: bool,
+) -> Vec<u8> {
+    let mut primary = ColorPlane::new(r, g, b, w, h, qp);
+    let mut alpha = super::gray::YOnlyPlane::new(a, w, h, alpha_qp);
+    let mut bw = BitWriter::new();
+    codestream::write_image_header(&mut bw, w, h, OUT_RGB, premultiplied, true);
+    codestream::write_image_plane_header_color_allbands(&mut bw, qp.dc, qp.lp, qp.hp);
+    // Alpha image plane header: YONLY, own bands + QPs (JxrEncApp analog `-Q`).
+    codestream::write_image_plane_header_gray_allbands(
+        &mut bw,
+        alpha_qp.dc,
+        alpha_qp.lp,
+        alpha_qp.hp,
+    );
+    codestream::write_vlw_esc(&mut bw, 0);
+    codestream::write_common_tile_header(&mut bw);
+    for mby in 0..primary.mbh {
+        for mbx in 0..primary.mbw {
+            primary.encode_mb(&mut bw, mbx, mby);
+            alpha.encode_mb(&mut bw, mbx, mby);
+        }
+    }
+    bw.align_to_byte();
+    let guid = if premultiplied {
+        &container::pixel_format::PBGRA32
+    } else {
+        &container::pixel_format::BGRA32
+    };
+    container::write_container(&bw.finish(), w, h, guid)
 }
 
 /// HP-band adaptive state for the color path — multi-component analogue of

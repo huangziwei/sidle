@@ -14,8 +14,18 @@ use crate::decode::consts::*;
 /// (`OUT_YONLY` for grayscale, `OUT_RGB` for color). Mirrors
 /// `Decoder::image_header`. `width`/`height` are the true (unpadded) dims;
 /// `windowing_flag = 0` makes the decoder derive the 16-aligned padding and crop
-/// back to these.
-pub fn write_image_header(bw: &mut BitWriter, width: u32, height: u32, output_clr_fmt: u8) {
+/// back to these. `alpha_image_plane` declares the in-codestream alpha plane
+/// (T.832 "alpha image plane"; per-MB interleaved — what JxrEncApp calls
+/// *interleaved* alpha, `-a 3`); `premultiplied_alpha` is the matching
+/// property bit (8.3.17: a property, not a different coding).
+pub fn write_image_header(
+    bw: &mut BitWriter,
+    width: u32,
+    height: u32,
+    output_clr_fmt: u8,
+    premultiplied_alpha: bool,
+    alpha_image_plane: bool,
+) {
     for &b in b"WMPHOTO\x00" {
         bw.write_bits(b as u64, 8);
     }
@@ -33,8 +43,8 @@ pub fn write_image_header(bw: &mut BitWriter, width: u32, height: u32, output_cl
     bw.write_bits(0, 1); // trim_flexbits_flag
     bw.write_bits(0, 1); // reserved_d
     bw.write_bits(0, 1); // red_blue_not_swapped_flag
-    bw.write_bits(0, 1); // premultiplied_alpha_flag
-    bw.write_bits(0, 1); // alpha_image_plane_flag
+    bw.write_flag(premultiplied_alpha); // premultiplied_alpha_flag
+    bw.write_flag(alpha_image_plane); // alpha_image_plane_flag
     bw.write_bits(output_clr_fmt as u64, 4); // output_clr_fmt
     bw.write_bits(BD8 as u64, 4); // output_bitdepth
     // short header: (width-1), (height-1) as big-endian u16 (byte-aligned here).
@@ -77,9 +87,12 @@ pub fn write_image_plane_header_gray_nohighpass(bw: &mut BitWriter, dc_quant: u8
     bw.align_to_byte();
 }
 
-/// `image_plane_header` for the single grayscale plane with **ALL_BANDS**
-/// (DC + LP + HP + flexbits), uniform DC/LP/HP quantizers. Mirrors
-/// `Decoder::image_plane_header`.
+/// `image_plane_header` for a single-component (`INT_YONLY`) plane with
+/// **ALL_BANDS** (DC + LP + HP + flexbits), uniform DC/LP/HP quantizers.
+/// Mirrors `Decoder::image_plane_header`. Serves both the grayscale primary
+/// plane and the **alpha image plane** — the spec's plane-header syntax is
+/// plane-role-agnostic, and an alpha plane must be YONLY (the decoder rejects
+/// anything else), so the alpha header is this writer with the alpha QPs.
 pub fn write_image_plane_header_gray_allbands(
     bw: &mut BitWriter,
     dc_quant: u8,
