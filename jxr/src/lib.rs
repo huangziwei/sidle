@@ -5,5 +5,6 @@ pub mod decode;
 pub mod encode;
 
 pub use encode::{
-    ColorMode, EncodeError, ImageInput, QpSet, encode, encode_with_alpha_qp, quality_to_qp,
+    ChannelOrder, ColorMode, EncodeError, ImageInput, QpSet, deinterleave, encode,
+    encode_with_alpha_qp, quality_to_qp,
 };

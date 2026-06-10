@@ -54,12 +54,83 @@ impl std::fmt::Display for EncodeError {
 
 impl std::error::Error for EncodeError {}
 
+/// Interleaved 8-bit channel orders accepted by [`deinterleave`] — the common
+/// memory layouts (`24bppBGR`, `32bppBGRA`, …) normalized to the planar
+/// R,G,B(,A) layout [`ImageInput`] takes. Premultiplied variants
+/// (PRGBA/PBGRA) are an [`Rgba`](ChannelOrder::Rgba)/[`Bgra`](ChannelOrder::Bgra)
+/// byte order plus `ImageInput::premultiplied_alpha = true` — premultiplication
+/// is a property flag, not a different layout. The emitted file always uses
+/// the canonical GUID for its channel count (`24bppRGB`, `32bppBGRA`/
+/// `32bppPBGRA`): byte-order-only GUID variants would change nothing but the
+/// order a conformant decoder interleaves its output in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelOrder {
+    /// One byte per pixel (`8bppGray`).
+    Gray,
+    /// R,G,B triplets (`24bppRGB` memory order).
+    Rgb,
+    /// B,G,R triplets (`24bppBGR` memory order).
+    Bgr,
+    /// R,G,B,A quads (`32bppRGBA` memory order).
+    Rgba,
+    /// B,G,R,A quads (`32bppBGRA` memory order).
+    Bgra,
+}
+
+impl ChannelOrder {
+    fn channels(self) -> usize {
+        match self {
+            ChannelOrder::Gray => 1,
+            ChannelOrder::Rgb | ChannelOrder::Bgr => 3,
+            ChannelOrder::Rgba | ChannelOrder::Bgra => 4,
+        }
+    }
+    /// Normalized plane index (R,G,B,A order) of interleaved position `i`.
+    fn plane_of(self, i: usize) -> usize {
+        match self {
+            ChannelOrder::Gray | ChannelOrder::Rgb | ChannelOrder::Rgba => i,
+            ChannelOrder::Bgr | ChannelOrder::Bgra => match i {
+                0 => 2,
+                2 => 0,
+                other => other,
+            },
+        }
+    }
+}
+
+/// De-interleave an 8-bit pixel buffer in the given channel `order` into the
+/// normalized planar layout [`ImageInput`] takes (R,G,B\[,A\] planes, or a
+/// single gray plane). `bytes.len()` must equal `width × height × channels`.
+pub fn deinterleave(
+    order: ChannelOrder,
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<Vec<u8>>, EncodeError> {
+    let n = width as usize * height as usize;
+    let ch = order.channels();
+    if bytes.len() != n * ch {
+        return Err(EncodeError::Unsupported(format!(
+            "interleaved buffer len {} != {width}x{height}x{ch}",
+            bytes.len()
+        )));
+    }
+    let mut planes = vec![vec![0u8; n]; ch];
+    for (px, chunk) in bytes.chunks_exact(ch).enumerate() {
+        for (i, &v) in chunk.iter().enumerate() {
+            planes[order.plane_of(i)][px] = v;
+        }
+    }
+    Ok(planes)
+}
+
 /// 8-bit pixel input. One plane per component, each row-major with
 /// `len == width * height`: **1** plane = grayscale, **3** = RGB, **4** =
 /// RGB + alpha (encoded as a T.832 alpha image plane). **2** planes
 /// (gray+alpha) is rejected: JPEG XR has no grayscale-with-alpha container
 /// pixel format (the channels+alpha GUID family starts at 3 channels), so
-/// such a file would be unrepresentable — expand to RGBA.
+/// such a file would be unrepresentable — expand to RGBA. Interleaved
+/// buffers in common memory orders normalize via [`deinterleave`].
 pub struct ImageInput<'a> {
     pub width: u32,
     pub height: u32,
@@ -637,6 +708,57 @@ mod tests {
         let input2 = ImageInput { width: w, height: h, planes: &p2, premultiplied_alpha: false };
         let jxr2 = encode_with_alpha_qp(&input2, ColorMode::Color, qp, aqp).unwrap();
         assert_eq!(jxr1, jxr2, "rgba lossy must be a fixpoint");
+    }
+
+    #[test]
+    fn deinterleave_orders_normalize_to_rgb_planes() {
+        // Two pixels in each memory order; planes come out R,G,B(,A) always.
+        let bgra = [1u8, 2, 3, 4, 5, 6, 7, 8]; // px0 = B1 G2 R3 A4
+        let p = deinterleave(ChannelOrder::Bgra, &bgra, 2, 1).unwrap();
+        assert_eq!(p, vec![vec![3, 7], vec![2, 6], vec![1, 5], vec![4, 8]]);
+        let rgba = [3u8, 2, 1, 4, 7, 6, 5, 8]; // same pixels, R,G,B,A order
+        assert_eq!(deinterleave(ChannelOrder::Rgba, &rgba, 2, 1).unwrap(), p);
+        let bgr = [1u8, 2, 3, 5, 6, 7];
+        let rgb = [3u8, 2, 1, 7, 6, 5];
+        let p3 = deinterleave(ChannelOrder::Bgr, &bgr, 2, 1).unwrap();
+        assert_eq!(p3, vec![vec![3, 7], vec![2, 6], vec![1, 5]]);
+        assert_eq!(deinterleave(ChannelOrder::Rgb, &rgb, 2, 1).unwrap(), p3);
+        // Gray = single-plane passthrough.
+        assert_eq!(
+            deinterleave(ChannelOrder::Gray, &[9u8, 10], 2, 1).unwrap(),
+            vec![vec![9, 10]]
+        );
+        // Wrong buffer length is rejected.
+        assert!(deinterleave(ChannelOrder::Rgb, &[0u8; 5], 2, 1).is_err());
+    }
+
+    #[test]
+    fn bgra_and_rgba_inputs_encode_byte_identical() {
+        // The same pixels handed over in BGRA vs RGBA memory order must yield
+        // the SAME file (orderings are input sugar; the codestream and the
+        // canonical 32bppBGRA container don't depend on the source order).
+        let mut r = Lcg(0xc0de_ba5e_c0de_ba5e);
+        let (w, h) = (32u32, 16u32);
+        let n = (w * h) as usize;
+        let rgba: Vec<u8> = (0..n * 4).map(|_| (r.next() >> 32) as u8).collect();
+        let bgra: Vec<u8> = rgba
+            .chunks_exact(4)
+            .flat_map(|px| [px[2], px[1], px[0], px[3]])
+            .collect();
+        let pa = deinterleave(ChannelOrder::Rgba, &rgba, w, h).unwrap();
+        let pb = deinterleave(ChannelOrder::Bgra, &bgra, w, h).unwrap();
+        assert_eq!(pa, pb, "normalized planes must be identical");
+        let ia = ImageInput { width: w, height: h, planes: &pa, premultiplied_alpha: false };
+        let ib = ImageInput { width: w, height: h, planes: &pb, premultiplied_alpha: false };
+        let fa = encode(&ia, ColorMode::Color, QpSet::LOSSLESS).unwrap();
+        let fb = encode(&ib, ColorMode::Color, QpSet::LOSSLESS).unwrap();
+        assert_eq!(fa, fb, "same pixels, different input order ⇒ same file");
+        // And the file really carries those pixels (spot the first pixel).
+        let d = decode_to_planes(&fa);
+        assert_eq!(
+            (d.image_plane[0][0], d.image_plane[1][0], d.image_plane[2][0], d.image_plane[3][0]),
+            (rgba[0] as i32, rgba[1] as i32, rgba[2] as i32, rgba[3] as i32)
+        );
     }
 
     #[test]

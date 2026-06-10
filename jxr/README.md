@@ -40,9 +40,15 @@ a T.832 alpha image plane, per-MB interleaved, with its own per-band QPs via
 ALL_BANDS (DC + LP + HP + flexbits) with multi-MB prediction and adaptive
 VLC/scan state, spatial order, single tile, per-band quantization
 (`QpSet::LOSSLESS` round-trips bit-exact; higher QP = lossy), arbitrary
-non-16-aligned dimensions up to 65 536 px. Gray+alpha input is rejected:
-JPEG XR defines no grayscale-with-alpha container pixel format — expand to
-RGBA.
+non-16-aligned dimensions up to 65 536 px. Interleaved source buffers in the
+common memory orders (gray, RGB, BGR, RGBA, BGRA — premultiplied = BGRA/RGBA
+plus the `premultiplied_alpha` flag) normalize to the planar input via
+`deinterleave`; output always uses the canonical GUID for its channel count.
+Gray+alpha input is rejected: JPEG XR defines no grayscale-with-alpha
+container pixel format — expand to RGBA. Separate-codestream alpha (the
+container-level arrangement libjxr calls *planar*, `-a 2`) is decoded but
+deliberately never emitted — the in-codestream alpha image plane covers the
+capability in one codestream.
 
 Both halves are being pushed toward full-spec general-purpose coverage; the
 roadmap lives in the repo at `.claude/plans/jxr-general-codec.md`.
