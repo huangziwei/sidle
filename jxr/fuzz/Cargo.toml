@@ -25,3 +25,13 @@ bench = false
 
 [profile.release]
 debug = 1
+# Intent: fuzz the decoder with the SAME integer-overflow semantics it ships
+# with (release wraps garbage-from-garbage; never panics). NOTE this profile
+# line is NOT sufficient on its own — cargo-fuzz force-enables overflow checks
+# ("--release but with debug assertions AND overflow checks enabled", see
+# `cargo fuzz build --help`) and overrides it. The EFFECTIVE control is
+# `RUSTFLAGS=-Coverflow-checks=off`, set by scripts/jxr-fuzz-overnight.sh; run
+# the fuzzer through that script (or export it yourself). `cargo test -p jxr`
+# keeps overflow-checks ON (dev profile), so overflow on VALID input still
+# fails the test suite.
+overflow-checks = false

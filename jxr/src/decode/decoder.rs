@@ -28,6 +28,12 @@ pub enum DecodeError {
     Bits(DeserializerError),
     Unsupported(String),
     BadSignature(String),
+    /// The codestream is internally inconsistent or describes an impossible
+    /// geometry (e.g. tile widths exceeding the image, or dimensions that
+    /// would allocate far more memory than the input could encode). Distinct
+    /// from `Unsupported`, which is reserved for spec-legal input we don't yet
+    /// reconstruct. Raised by the hardening guards on untrusted input.
+    Malformed(String),
 }
 
 impl std::fmt::Display for DecodeError {
@@ -36,6 +42,7 @@ impl std::fmt::Display for DecodeError {
             DecodeError::Bits(e) => write!(f, "{e}"),
             DecodeError::Unsupported(s) => write!(f, "unsupported: {s}"),
             DecodeError::BadSignature(s) => write!(f, "bad signature: {s}"),
+            DecodeError::Malformed(s) => write!(f, "malformed: {s}"),
         }
     }
 }
@@ -49,6 +56,18 @@ impl From<DeserializerError> for DecodeError {
 }
 
 type Result<T> = std::result::Result<T, DecodeError>;
+
+// Hardening ceilings for untrusted input (NOT T.832 limits). The decoder
+// materialises the entire macroblock grid and sample planes up front, so a
+// lying header could otherwise demand gigabytes from a handful of bytes.
+// `MAX_MB_COMPONENTS` caps resident memory regardless of input — roughly a
+// 4700² RGB or 8192² grayscale image, comfortably under the fuzz RSS limit —
+// while the per-byte budget rejects geometries far too large for the
+// codestream to actually encode. The floor keeps every small valid file
+// admissible (the smallest coded macroblock still costs real bits).
+const MAX_MB_COMPONENTS: u64 = 1 << 18;
+const MB_BUDGET_PER_BYTE: u64 = 64;
+const MB_BUDGET_FLOOR: u64 = 4096;
 
 /// Decoded raster samples per component, sized to the original image area.
 #[derive(Clone)]
@@ -166,7 +185,14 @@ impl<'a> Decoder<'a> {
         if subsequent_bytes > 0 {
             let i_bytes = self.profile_level_info()?;
             if subsequent_bytes != i_bytes {
-                let extra = subsequent_bytes - i_bytes;
+                // profile_level_info must not claim to have consumed more than
+                // the declared subsequent-byte count (else the skip below wraps
+                // to a huge length on a u64 underflow).
+                let extra = subsequent_bytes.checked_sub(i_bytes).ok_or_else(|| {
+                    DecodeError::Malformed(format!(
+                        "profile/level info ({i_bytes} B) overruns declared {subsequent_bytes} B"
+                    ))
+                })?;
                 let _ = self.ds.extract(extra as usize, true)?;
             }
         }
@@ -314,9 +340,27 @@ impl<'a> Decoder<'a> {
         self.hdr.mb_width = (self.hdr.width / 16) as usize;
         self.hdr.mb_height = (self.hdr.height / 16) as usize;
 
-        // Append the last "rest" tile entry.
-        tile_w_mb.push(self.hdr.mb_width - left_mb.last().unwrap());
-        tile_h_mb.push(self.hdr.mb_height - top_mb.last().unwrap());
+        // Append the last "rest" tile entry. The explicit tile widths/heights
+        // must fit within the macroblock grid; a lying header that overshoots
+        // would otherwise wrap to a huge usize tile size — in release the
+        // subtraction wraps silently (no debug panic), feeding runaway loops
+        // and allocations downstream — so reject it as malformed here.
+        let prev_left = *left_mb.last().unwrap();
+        let prev_top = *top_mb.last().unwrap();
+        let rest_w = self.hdr.mb_width.checked_sub(prev_left).ok_or_else(|| {
+            DecodeError::Malformed(format!(
+                "tile columns ({prev_left}) exceed {} macroblock columns",
+                self.hdr.mb_width
+            ))
+        })?;
+        let rest_h = self.hdr.mb_height.checked_sub(prev_top).ok_or_else(|| {
+            DecodeError::Malformed(format!(
+                "tile rows ({prev_top}) exceed {} macroblock rows",
+                self.hdr.mb_height
+            ))
+        })?;
+        tile_w_mb.push(rest_w);
+        tile_h_mb.push(rest_h);
         left_mb.push(left_mb.last().unwrap() + tile_w_mb.last().unwrap());
         top_mb.push(top_mb.last().unwrap() + tile_h_mb.last().unwrap());
 
@@ -399,6 +443,18 @@ impl<'a> Decoder<'a> {
             }
         }
 
+        // UpdateModelMB (Table 116) indexes a 16-entry per-component weight
+        // table by `num_components - 1`. The N-component syntax admits up to
+        // 4111 components, which would index out of bounds on the very first
+        // macroblock — the reference (jxr_image.py:1362) raises IndexError
+        // there too, i.e. such a stream is undecodable — so reject it up front.
+        if plane.num_components > 16 {
+            return Err(DecodeError::Unsupported(format!(
+                "{}-component image (max 16 supported)",
+                plane.num_components
+            )));
+        }
+
         plane.chroma_per_blk = if plane.internal_clr_fmt == INT_YUV420 {
             1
         } else if plane.internal_clr_fmt == INT_YUV422 {
@@ -448,11 +504,29 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        // Build MB grid for this plane.
+        // Build MB grid for this plane. Reject impossible geometry before
+        // allocating: bound mb_width × mb_height × num_components by both the
+        // absolute ceiling (resident memory) and the codestream length (a
+        // decompression bomb can't claim more macroblocks than the bytes could
+        // encode). See MAX_MB_COMPONENTS et al.
+        let stream_len = self.ds.buffer.len() as u64;
         let hdr = &self.hdr;
         let plane = &mut self.planes[p];
         let mb_width = hdr.mb_width;
         let mb_height = hdr.mb_height;
+        let mb_total = (mb_width as u64).saturating_mul(mb_height as u64);
+        let mb_components = mb_total.saturating_mul(plane.num_components as u64);
+        let stream_budget = stream_len
+            .saturating_mul(MB_BUDGET_PER_BYTE)
+            .saturating_add(MB_BUDGET_FLOOR);
+        if mb_components > MAX_MB_COMPONENTS || mb_total > stream_budget {
+            return Err(DecodeError::Malformed(format!(
+                "image geometry {mb_width}×{mb_height} mb × {} comp \
+                 (={mb_components} mb-components) exceeds the decode budget \
+                 for a {stream_len}-byte stream",
+                plane.num_components
+            )));
+        }
         plane.mb = (0..mb_width).map(|_| Vec::with_capacity(mb_height)).collect();
         // Fill placeholder so we can index by [MBx][MBy].
         for col in &mut plane.mb {
@@ -495,7 +569,13 @@ impl<'a> Decoder<'a> {
             n_entries *= num_bands_primary;
         }
         self.ds.check_bit_field(16, "index_table_startcode", &[1])?;
-        self.index_offset_tile = Vec::with_capacity(n_entries);
+        // Each entry costs ≥2 bytes (vlw_esc), so the table cannot hold more
+        // entries than the stream has bytes; cap the pre-allocation so a lying
+        // tile count (up to ~16M from the 12-bit tile fields) can't reserve
+        // hundreds of MB from a short stream. The loop still errors cleanly via
+        // `?` once the bits run out.
+        let cap = n_entries.min(self.ds.len());
+        self.index_offset_tile = Vec::with_capacity(cap);
         for _ in 0..n_entries {
             let v = self.vlw_esc()?;
             self.index_offset_tile.push(v);
