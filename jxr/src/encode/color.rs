@@ -1114,12 +1114,15 @@ pub fn encode_color_options(
         plan,
         &super::convert::Depth::BD8,
         &container::pixel_format::RGB24,
+        OUT_RGB,
     )
 }
 
 /// Depth-general 3-plane color driver: `r`/`g`/`b` already forward-converted
 /// to the pre-bias domain ([`super::convert`]), `depth` carried into the
-/// image + plane headers, `guid` into the container.
+/// image + plane headers, `guid` into the container. `out_clr_fmt` is
+/// `OUT_RGB` for everything except the RGBE path (`OUT_RGBE` — same
+/// 3-component YUV444 internal coding, different output formatting).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_color_prebias(
     r: &[i32],
@@ -1139,13 +1142,14 @@ pub(super) fn encode_color_prebias(
     plan: Option<&super::quant::QpPlan>,
     depth: &super::convert::Depth,
     guid: &[u8; 16],
+    out_clr_fmt: u8,
 ) -> Vec<u8> {
     let trim = if bands == ALL_BANDS { trim } else { 0 };
     let mut plane = ColorPlane::new_fmt(
         r, g, b, w, h, qp, fmt, bands, scaled, window, overlap, tiles.0, tiles.1, plan,
     );
     plane.trim = trim as u32;
-    let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
+    let mut spec = codestream::ImageHeaderSpec::new(w, h, out_clr_fmt);
     spec.output_bitdepth = depth.bitdepth;
     spec.frequency_mode = frequency;
     spec.overlap_mode = overlap;

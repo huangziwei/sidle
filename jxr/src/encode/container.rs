@@ -42,6 +42,8 @@ pub mod pixel_format {
     pub const GRAY16_HALF: [u8; 16] = guid(0x3e);
     /// `48bppRGBHalf` — three IEEE-754 half channels (BD16F).
     pub const RGB48_HALF: [u8; 16] = guid(0x3b);
+    /// `32bppRGBE` — Radiance shared-exponent HDR (BD8 + `OUT_RGBE`).
+    pub const RGBE32: [u8; 16] = guid(0x3d);
     /// `32bppGrayFloat` — single IEEE-754 single plane (BD32F).
     pub const GRAY32_FLOAT: [u8; 16] = guid(0x11);
     /// `128bppRGBFloat` — three IEEE-754 single channels, container stride

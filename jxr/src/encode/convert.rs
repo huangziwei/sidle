@@ -55,6 +55,15 @@ pub enum SamplePlanes<'a> {
     /// q1; ±0 normalize to +0, and scaled arithmetic is rejected (i32
     /// headroom, as the reference forces).
     F32(&'a [Vec<u32>]),
+    /// Radiance shared-exponent **RGBE** (`32bppRGBE`, BD8 + `OUT_RGBE`):
+    /// exactly 4 byte planes — R, G, B mantissas and the shared exponent E.
+    /// Each channel renormalizes against E on the way in (the reference's
+    /// `forwardRGBE`, half-bit imputation included), so **normalized** RGBE
+    /// (max mantissa ≥ 128, the .hdr convention) round-trips all four planes
+    /// byte-exact at lossless QP; unnormalized pixels keep their VALUE but
+    /// re-emerge renormalized. Chroma subsampling is rejected (the shared
+    /// exponent couples the channels per pixel; the reference refuses too).
+    Rgbe(&'a [Vec<u8>]),
 }
 
 /// The BD16F sign-magnitude fold: half bits → the pseudo-integer the
@@ -109,6 +118,48 @@ fn fold_f32(bits: u32, lm: i32, eb: i32) -> i32 {
     }
 }
 
+/// The RGBE per-channel fold (libjxr `forwardRGBE`, strenc.c:315): mantissa
+/// byte + shared exponent → the `(e << 7) | m` pseudo-log value the
+/// codestream codes. A sub-128 mantissa is left-normalized against E with a
+/// **half-bit imputed on the first shift** — the decoder's
+/// `(2x + 1) >> (diff + 1)` recovery then reproduces the source byte
+/// exactly.
+fn fold_rgbe(mut m: i32, e: i32) -> i32 {
+    if e == 0 {
+        return 0;
+    }
+    let mut e = e - 1;
+    let mut append = 1;
+    while m & 0x80 == 0 && e > 0 {
+        m = (m << 1) + append;
+        append = 0;
+        e -= 1;
+    }
+    if e == 0 {
+        m
+    } else {
+        (m & 0x7f) + ((e + 1) << 7)
+    }
+}
+
+/// Forward-convert the four RGBE planes to the three pre-bias channel
+/// planes (the shared E plane folds into each channel; the decoder's
+/// PostScalingF2 re-derives it as the per-pixel max exponent).
+pub(super) fn rgbe_prebias(
+    planes: &[Vec<u8>],
+    scaled: bool,
+) -> (Vec<i32>, Vec<i32>, Vec<i32>) {
+    let sh = if scaled { 3 } else { 0 };
+    let conv = |k: usize| -> Vec<i32> {
+        planes[k]
+            .iter()
+            .zip(planes[3].iter())
+            .map(|(&m, &e)| fold_rgbe(m as i32, e as i32) << sh)
+            .collect()
+    };
+    (conv(0), conv(1), conv(2))
+}
+
 impl SamplePlanes<'_> {
     /// Number of component planes supplied.
     pub fn num_planes(&self) -> usize {
@@ -119,6 +170,7 @@ impl SamplePlanes<'_> {
             SamplePlanes::I32(p) => p.len(),
             SamplePlanes::F16(p) => p.len(),
             SamplePlanes::F32(p) => p.len(),
+            SamplePlanes::Rgbe(p) => p.len(),
         }
     }
 
@@ -131,6 +183,7 @@ impl SamplePlanes<'_> {
             SamplePlanes::I32(p) => p[i].len(),
             SamplePlanes::F16(p) => p[i].len(),
             SamplePlanes::F32(p) => p[i].len(),
+            SamplePlanes::Rgbe(p) => p[i].len(),
         }
     }
 
@@ -143,6 +196,7 @@ impl SamplePlanes<'_> {
             SamplePlanes::I32(_) => Depth::BD32S,
             SamplePlanes::F16(_) => Depth::BD16F,
             SamplePlanes::F32(_) => Depth::BD32F,
+            SamplePlanes::Rgbe(_) => Depth::BD8,
         }
     }
 
@@ -156,6 +210,7 @@ impl SamplePlanes<'_> {
             SamplePlanes::I32(_) => &pf::GRAY32_FIXED,
             SamplePlanes::F16(_) => &pf::GRAY16_HALF,
             SamplePlanes::F32(_) => &pf::GRAY32_FLOAT,
+            SamplePlanes::Rgbe(_) => &pf::RGBE32, // unreachable: RGBE is 4-plane only
         }
     }
 
@@ -169,6 +224,7 @@ impl SamplePlanes<'_> {
             SamplePlanes::I32(_) => &pf::RGB96_FIXED,
             SamplePlanes::F16(_) => &pf::RGB48_HALF,
             SamplePlanes::F32(_) => &pf::RGB128_FLOAT,
+            SamplePlanes::Rgbe(_) => &pf::RGBE32,
         }
     }
 
@@ -186,6 +242,9 @@ impl SamplePlanes<'_> {
                 &d,
                 scaled,
             ),
+            // RGBE folds channels against the shared E plane — use
+            // [`rgbe_prebias`], not the per-plane path.
+            SamplePlanes::Rgbe(_) => unreachable!("RGBE converts via rgbe_prebias"),
         }
     }
 }

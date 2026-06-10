@@ -602,6 +602,22 @@ pub fn encode_typed(
                 .into(),
         ));
     }
+    // Float and RGBE inputs code through the pseudo-integer folds, where
+    // chroma decimation has no sensible semantics (and RGBE's shared
+    // exponent couples the channels per pixel) — the reference encoder
+    // refuses the combination too (strenc.c: "Float or RGBE images must be
+    // encoded with YUV 444!").
+    if matches!(
+        samples,
+        SamplePlanes::F16(_) | SamplePlanes::F32(_) | SamplePlanes::Rgbe(_)
+    ) && matches!(opts.chroma, ChromaSampling::Yuv420 | ChromaSampling::Yuv422)
+    {
+        return Err(EncodeError::Unsupported(
+            "float/RGBE input must keep YUV 4:4:4 chroma (folded samples don't \
+             survive decimation; the reference encoder enforces the same)"
+                .into(),
+        ));
+    }
     let geom = validate_geometry(w, h, &opts)?;
     let window = geom.window;
     let tiles: (&[usize], &[usize]) = (&geom.tile_cols_mb, &geom.tile_rows_mb);
@@ -614,6 +630,52 @@ pub fn encode_typed(
         if samples.plane_len(i) != n {
             return Err(EncodeError::Unsupported("plane len != width*height".into()));
         }
+    }
+    if let SamplePlanes::Rgbe(planes) = samples {
+        use crate::decode::consts::{INT_YUV444, OUT_RGBE};
+        if np != 4 {
+            return Err(EncodeError::Unsupported(format!(
+                "RGBE expects exactly 4 planes (R, G, B, shared exponent), got {np}"
+            )));
+        }
+        if mode != ColorMode::Color {
+            return Err(EncodeError::Unsupported("RGBE is inherently color".into()));
+        }
+        if input.premultiplied_alpha {
+            return Err(EncodeError::Unsupported("RGBE has no alpha plane".into()));
+        }
+        if opts.chroma == ChromaSampling::YOnly {
+            return Err(EncodeError::Unsupported(
+                "YOnly chroma with RGBE is not implemented".into(),
+            ));
+        }
+        if opts.bands != BandsPresent::All || trim != 0 {
+            return Err(EncodeError::Unsupported(
+                "band truncation / trim_flexbits with RGBE is not implemented".into(),
+            ));
+        }
+        let (rp, gp, bp) = convert::rgbe_prebias(planes, opts.scaled);
+        let chroma_plan = opts.chroma_qp.map(|c| quant::QpPlan::uniform(qp, Some(c)));
+        return Ok(color::encode_color_prebias(
+            &rp,
+            &gp,
+            &bp,
+            w,
+            h,
+            qp,
+            INT_YUV444,
+            bands,
+            opts.scaled,
+            0,
+            window,
+            tiles,
+            overlap,
+            frequency,
+            chroma_plan.as_ref(),
+            &depth,
+            samples.rgb_guid(),
+            OUT_RGBE,
+        ));
     }
     match np {
         2 => {
@@ -735,6 +797,7 @@ pub fn encode_typed(
                 plan,
                 &depth,
                 samples.rgb_guid(),
+                crate::decode::consts::OUT_RGB,
             ))
         }
     }
@@ -2590,6 +2653,103 @@ mod tests {
         // Scaled arithmetic rejected for 32-bit floats too.
         let opts = EncodeOptions { scaled: true, ..Default::default() };
         assert!(encode_typed(&input2, ColorMode::Grayscale, opts).is_err());
+    }
+
+    #[test]
+    fn rgbe_q1_normalized_roundtrip_exact() {
+        use crate::decode::consts::{BD8, OUT_RGBE};
+        let mut r = Lcg(0x46be_0001);
+        for &(w, h) in &[(48u32, 32u32), (17, 31)] {
+            let n = (w * h) as usize;
+            // Normalized RGBE (the .hdr convention: max mantissa ≥ 128),
+            // varied exponents; a few zero pixels (E = 0).
+            let mut planes: [Vec<u8>; 4] = std::array::from_fn(|_| vec![0u8; n]);
+            for i in 0..n {
+                if i % 37 == 0 {
+                    continue; // zero pixel
+                }
+                let m: [u8; 3] = std::array::from_fn(|_| (r.next() >> 32) as u8);
+                let hi = (0..3).max_by_key(|&k| m[k]).unwrap();
+                for k in 0..3 {
+                    planes[k][i] = if k == hi { m[k] | 0x80 } else { m[k] };
+                }
+                planes[3][i] = 120 + ((r.next() >> 32) % 31) as u8;
+            }
+            let input = TypedInput {
+                width: w,
+                height: h,
+                samples: SamplePlanes::Rgbe(&planes),
+                premultiplied_alpha: false,
+            };
+            let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+            assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc93d", "32bppRGBE GUID");
+            let hd = headers_of(&jxr);
+            assert_eq!(hd.hdr.output_clr_fmt, OUT_RGBE);
+            assert_eq!(hd.hdr.output_bitdepth, BD8);
+            let d = decode_to_planes(&jxr);
+            assert_eq!(d.num_components, 4, "R, G, B + derived E");
+            for c in 0..4 {
+                for i in 0..n {
+                    assert_eq!(
+                        d.image_plane[c][i], planes[c][i] as i32,
+                        "{w}x{h} ch{c} px{i} (E={})",
+                        planes[3][i]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rgbe_unnormalized_preserves_value_and_validation() {
+        // Unnormalized pixels (all mantissas < 128) renormalize: bytes
+        // change, the represented value (m · 2^E) is preserved exactly —
+        // the half-bit imputation is below the byte's precision.
+        let n = 256usize;
+        let planes: [Vec<u8>; 4] = [
+            vec![5u8; n],
+            vec![64u8; n],
+            vec![17u8; n],
+            vec![136u8; n],
+        ];
+        let input = TypedInput {
+            width: 16,
+            height: 16,
+            samples: SamplePlanes::Rgbe(&planes),
+            premultiplied_alpha: false,
+        };
+        let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        let d = decode_to_planes(&jxr);
+        let value = |m: i32, e: i32| -> f64 {
+            if e == 0 { 0.0 } else { m as f64 * ((e - 136) as f64).exp2() }
+        };
+        for i in 0..n {
+            for c in 0..3 {
+                let got = value(d.image_plane[c][i], d.image_plane[3][i]);
+                let want = value(planes[c][i] as i32, planes[3][i] as i32);
+                // forwardRGBE imputes a half bit on the first shift: the
+                // value moves by exactly half an input ulp at that exponent.
+                let ulp = ((planes[3][i] as i32 - 136) as f64).exp2();
+                assert!(
+                    (got - want).abs() <= ulp / 2.0 + 1e-12,
+                    "px{i} ch{c}: {got} vs {want} (ulp {ulp})"
+                );
+            }
+        }
+        // Subsampled chroma is rejected for RGBE (and floats).
+        for chroma in [ChromaSampling::Yuv420, ChromaSampling::Yuv422] {
+            let opts = EncodeOptions { chroma, ..Default::default() };
+            assert!(encode_typed(&input, ColorMode::Color, opts).is_err());
+        }
+        // 3-plane RGBE is malformed.
+        let three = [planes[0].clone(), planes[1].clone(), planes[2].clone()];
+        let input3 = TypedInput {
+            width: 16,
+            height: 16,
+            samples: SamplePlanes::Rgbe(&three),
+            premultiplied_alpha: false,
+        };
+        assert!(encode_typed(&input3, ColorMode::Color, EncodeOptions::default()).is_err());
     }
 
     #[test]
