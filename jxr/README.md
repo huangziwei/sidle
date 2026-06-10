@@ -34,12 +34,17 @@ use `DecodedImage::to_pixel_buffer()` for interleaved little-endian samples
 with an explicit layout (sample type, color model, alpha mode).
 
 **Encoder** — 8-bit grayscale (`8bppGray`/YONLY), 8-bit color
-(`24bppRGB`/YUV 4:4:4), and 8-bit color + alpha (`32bppBGRA`/`32bppPBGRA`:
-a T.832 alpha image plane, per-MB interleaved, with its own per-band QPs via
-`encode_with_alpha_qp`; the premultiplied property bit passes through): full
-ALL_BANDS (DC + LP + HP + flexbits) with multi-MB prediction and adaptive
-VLC/scan state, spatial order, single tile, per-band quantization
-(`QpSet::LOSSLESS` round-trips bit-exact; higher QP = lossy), arbitrary
+(`24bppRGB`) at **4:4:4, 4:2:2, 4:2:0 or luma-only** chroma sampling
+(`ChromaSampling` via `encode_with_options`; the 42x downsampler is the
+libjxr 5-tap even-centered filter, centering declared 0/0), and 8-bit
+color + alpha (`32bppBGRA`/`32bppPBGRA`: a T.832 alpha image plane, per-MB
+interleaved, its own per-band QPs, premultiplied property bit; the primary
+may be subsampled): full ALL_BANDS (DC + LP + HP + flexbits) with multi-MB
+prediction and adaptive VLC/scan state, spatial order, single tile, per-band
+quantization (`QpSet::LOSSLESS` at 4:4:4 round-trips bit-exact; subsampled
+chroma is lossy by construction; higher QP = lossy), **scaled or unscaled
+arithmetic** (`scaled_flag` both ways; scaled is libjxr's lossy mode — its
+chroma half-step floors, so it is not bit-lossless for color), arbitrary
 non-16-aligned dimensions up to 65 536 px. Interleaved source buffers in the
 common memory orders (gray, RGB, BGR, RGBA, BGRA — premultiplied = BGRA/RGBA
 plus the `premultiplied_alpha` flag) normalize to the planar input via

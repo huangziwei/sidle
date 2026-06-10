@@ -307,6 +307,8 @@ impl ColorModel {
     /// Mirror of `update_model_mb` for a 2-model plane. `lap` is the per-model
     /// abs-level escape count this MB (`lap[0]` luma, `lap[1]` chroma); `band`
     /// is 0=DC/1=LP/2=HP; `num_components` selects the chroma weight column.
+    /// This is the Table-116 "else" arm (444/YUVK/NCOMPONENT); subsampled
+    /// chroma uses [`Self::update_42x`].
     pub fn update(&mut self, mut lap: [i32; 2], band: usize, num_components: usize) {
         const W0: [i32; 3] = [240, 12, 1];
         const W1: [[i32; 16]; 3] = [
@@ -319,6 +321,22 @@ impl ColorModel {
         if band == 2 {
             lap[1] >>= 4; // HP: the decoder's `>>4` applies only to model 1
         }
+        self.adapt_models(lap);
+    }
+
+    /// Table-116 chroma weights for the JOINTLY-coded 420/422 chroma "plane"
+    /// (`iWeight2`, no `>>4` on HP) — mirrors `decoder.rs update_model_mb`'s
+    /// `INT_YUV420`/`INT_YUV422` arms. This was the Phase-2 hunted bug in the
+    /// decode direction; the encoder must diverge identically.
+    pub fn update_42x(&mut self, mut lap: [i32; 2], band: usize, is_420: bool) {
+        const W0: [i32; 3] = [240, 12, 1];
+        const I_WEIGHT2: [i32; 6] = [120, 37, 2, 120, 18, 1];
+        lap[0] *= W0[band];
+        lap[1] *= I_WEIGHT2[if is_420 { 0 } else { 3 } + band];
+        self.adapt_models(lap);
+    }
+
+    fn adapt_models(&mut self, lap: [i32; 2]) {
         let i_model_weight = 70;
         for j in 0..2 {
             let i_delta = (lap[j] - i_model_weight) >> 2;
@@ -380,6 +398,24 @@ impl AdaptiveVlc1 {
 /// - `i_coeff == 0`: `coeff_ref` is the magnitude; an optional sign bit follows
 ///   iff it's non-zero.
 ///
+/// Encode one HP **flexbits** refinement under `trim_flexbits`: emit the top
+/// `model_bits - trim` bits of the `model_bits`-wide refinement (the decoder
+/// reconstructs `flex << trim`), with the sign carried only when the coarse
+/// coefficient is zero AND the trimmed refinement is nonzero. `trim = 0`
+/// matches the plain refinement bit-for-bit.
+pub fn encode_flexbits(bw: &mut BitWriter, i_coeff: i32, result: i32, model_bits: i32, trim: u32) {
+    let left = model_bits - trim as i32;
+    if left <= 0 {
+        return;
+    }
+    let low = result.unsigned_abs() & ((1u32 << model_bits) - 1);
+    let flex_ref = (low >> trim) as i32;
+    bw.write_bits(flex_ref as u64, left as u32);
+    if i_coeff == 0 && flex_ref != 0 {
+        bw.write_flag(result < 0);
+    }
+}
+
 /// Given the coarse `i_coeff` (known from the quantized levels) and the final
 /// `result`, we recover and emit `coeff_ref` (+ sign).
 pub fn encode_refine_lp(bw: &mut BitWriter, i_coeff: i32, result: i32, model_bits: i32) {

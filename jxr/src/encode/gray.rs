@@ -23,6 +23,11 @@ const ABS_DELTA: [i32; 7] = [1, 0, -1, -1, -1, -1, -1]; // ABS_LEVEL_INDEX_DELTA
 pub(super) struct YOnlyPlane {
     pub(super) mbw: usize,
     pub(super) mbh: usize,
+    /// `bands_present` this plane emits (DC always; LP unless DCONLY; HP at
+    /// ALL_BANDS/NOFLEXBITS; flexbits only at ALL_BANDS).
+    pub(super) bands: u8,
+    /// `trim_flexbits` (0–15).
+    pub(super) trim: u32,
     buf_grid: Vec<Vec<[i32; 256]>>,
     dclp: Vec<Vec<[i32; 16]>>,
     cbphp_grid: Vec<Vec<i32>>,
@@ -44,23 +49,26 @@ impl YOnlyPlane {
     /// `windowing_flag = 0`), forward-transform every MB, quantize per band,
     /// and initialize the adaptive entropy state.
     pub(super) fn new(luma: &[u8], w: u32, h: u32, qp: QpSet) -> Self {
-        let (dc_sf, lp_sf, hp_sf) =
-            (scaling_factor(qp.dc), scaling_factor(qp.lp), scaling_factor(qp.hp));
         let (wu, hu) = (w as usize, h as usize);
         let (pw, ph) = (wu.next_multiple_of(16), hu.next_multiple_of(16));
-        let (mbw, mbh) = (pw / 16, ph / 16);
-        let padded: std::borrow::Cow<[u8]> = if pw == wu && ph == hu {
-            std::borrow::Cow::Borrowed(luma)
-        } else {
-            let mut p = vec![0u8; pw * ph];
-            for y in 0..ph {
-                let sy = y.min(hu - 1);
-                for x in 0..pw {
-                    p[y * pw + x] = luma[sy * wu + x.min(wu - 1)];
-                }
+        let mut centered = vec![0i32; pw * ph];
+        for y in 0..ph {
+            let sy = y.min(hu - 1);
+            for x in 0..pw {
+                centered[y * pw + x] = luma[sy * wu + x.min(wu - 1)] as i32 - 128;
             }
-            std::borrow::Cow::Owned(p)
-        };
+        }
+        Self::from_centered_padded(&centered, pw, ph, qp)
+    }
+
+    /// [`Self::new`] over an already-centered, already-padded `i32` plane
+    /// (`pw × ph`, both 16-aligned). This is the entry the YONLY-from-color
+    /// path uses: the Y plane of `rgb_to_yuv444` is centered but can exceed
+    /// the u8 range for saturated colors (the decoder clips on output).
+    pub(super) fn from_centered_padded(plane: &[i32], pw: usize, ph: usize, qp: QpSet) -> Self {
+        let (dc_sf, lp_sf, hp_sf) =
+            (scaling_factor(qp.dc), scaling_factor(qp.lp), scaling_factor(qp.hp));
+        let (mbw, mbh) = (pw / 16, ph / 16);
 
         // Forward transform every MB → full mb_buffer (HP within blocks) + dclp.
         let mut buf_grid = vec![vec![[0i32; 256]; mbh]; mbw];
@@ -71,7 +79,7 @@ impl YOnlyPlane {
                 for py in 0..16 {
                     for px in 0..16 {
                         let g = (mby * 16 + py) * pw + (mbx * 16 + px);
-                        samples[py * 16 + px] = padded[g] as i32 - 128;
+                        samples[py * 16 + px] = plane[g];
                     }
                 }
                 let mut buf = transform::forward_transform_mb(&samples);
@@ -113,6 +121,8 @@ impl YOnlyPlane {
         YOnlyPlane {
             mbw,
             mbh,
+            bands: ALL_BANDS,
+            trim: 0,
             buf_grid,
             dclp,
             cbphp_grid: vec![vec![0i32; mbh]; mbw],
@@ -172,6 +182,9 @@ impl YOnlyPlane {
         self.model_dc.update(dc_lap, 0);
         if mbx % 16 == 0 || mbx == self.mbw - 1 {
             self.abs_dc.adapt();
+        }
+        if self.bands == DCONLY {
+            return;
         }
 
         // ---------- LP ----------
@@ -244,6 +257,9 @@ impl YOnlyPlane {
             self.lp_abs1.adapt_table1();
         }
 
+        if self.bands == NOHIGHPASS {
+            return;
+        }
         // ---------- HP ----------
         if mbx % 16 == 0 {
             self.hp_state.hor_scan.reset_totals();
@@ -260,6 +276,8 @@ impl YOnlyPlane {
             cbphp_top,
             is_left,
             is_top,
+            self.bands == ALL_BANDS,
+            self.trim,
         );
         self.cbphp_grid[mbx][mby] = mbcbp;
         if mbx % 16 == 0 || mbx == self.mbw - 1 {
@@ -271,12 +289,55 @@ impl YOnlyPlane {
 /// Encode a grayscale image (any size) as ALL_BANDS at the given per-band
 /// quantizers. `QpSet::LOSSLESS` (all 0 ⇒ scaling factor 1) is bit-exact.
 pub fn encode_grayscale(luma: &[u8], w: u32, h: u32, qp: QpSet) -> Vec<u8> {
-    let mut plane = YOnlyPlane::new(luma, w, h, qp);
+    encode_grayscale_scaled(luma, w, h, qp, false)
+}
+
+/// [`encode_grayscale`] with **scaled arithmetic** exposed: the luma samples
+/// carry 3 extra fraction bits (`<<3`; no chroma, so no half-step) and the
+/// plane header sets `scaled_flag`. Exactly invertible at q1 — the decoder's
+/// `(v + bias<<3 + 3) >> 3` output stage recovers every pixel — but kept
+/// non-default to match libjxr (scaled is its lossy mode).
+pub fn encode_grayscale_scaled(luma: &[u8], w: u32, h: u32, qp: QpSet, scaled: bool) -> Vec<u8> {
+    encode_grayscale_options(luma, w, h, qp, scaled, ALL_BANDS, 0)
+}
+
+/// [`encode_grayscale_scaled`] over the band-truncation envelope: any
+/// `bands_present` (the plane header and per-MB sections shrink together)
+/// and `trim_flexbits` (image-header flag + the 4-bit tile value; the flex
+/// emission drops the low `trim` bits).
+pub fn encode_grayscale_options(
+    luma: &[u8],
+    w: u32,
+    h: u32,
+    qp: QpSet,
+    scaled: bool,
+    bands: u8,
+    trim: u8,
+) -> Vec<u8> {
+    let (wu, hu) = (w as usize, h as usize);
+    let (pw, ph) = (wu.next_multiple_of(16), hu.next_multiple_of(16));
+    let sh = if scaled { 3 } else { 0 };
+    let mut centered = vec![0i32; pw * ph];
+    for y in 0..ph {
+        let sy = y.min(hu - 1);
+        for x in 0..pw {
+            centered[y * pw + x] = (luma[sy * wu + x.min(wu - 1)] as i32 - 128) << sh;
+        }
+    }
+    let mut plane = YOnlyPlane::from_centered_padded(&centered, pw, ph, qp);
+    plane.bands = bands;
+    plane.trim = if bands == ALL_BANDS { trim as u32 } else { 0 };
     let mut bw = BitWriter::new();
-    codestream::write_image_header(&mut bw, w, h, OUT_YONLY, false, false);
-    codestream::write_image_plane_header_gray_allbands(&mut bw, qp.dc, qp.lp, qp.hp);
+    codestream::write_image_header_ext(
+        &mut bw, w, h, OUT_YONLY, false, false,
+        if bands == ALL_BANDS { trim } else { 0 },
+    );
+    codestream::write_image_plane_header_gray_bands(&mut bw, bands, qp.dc, qp.lp, qp.hp, scaled);
     codestream::write_vlw_esc(&mut bw, 0);
     codestream::write_common_tile_header(&mut bw);
+    if bands == ALL_BANDS && trim != 0 {
+        codestream::write_trim_flexbits(&mut bw, trim);
+    }
     for mby in 0..plane.mbh {
         for mbx in 0..plane.mbw {
             plane.encode_mb(&mut bw, mbx, mby);

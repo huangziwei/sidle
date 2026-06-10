@@ -54,6 +54,86 @@ impl std::fmt::Display for EncodeError {
 
 impl std::error::Error for EncodeError {}
 
+/// Chroma sampling of the encoded codestream for color (3-/4-plane) inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChromaSampling {
+    /// Full-resolution chroma (4:4:4) — the only lossless-capable choice.
+    #[default]
+    Yuv444,
+    /// Horizontally halved chroma (4:2:2). Lossy by construction.
+    Yuv422,
+    /// Chroma halved both ways (4:2:0). Lossy by construction.
+    Yuv420,
+    /// Luma only (`-d 0` analog): chroma dropped; decoders reconstruct
+    /// gray R=G=B from the transform's luma.
+    YOnly,
+}
+
+/// Which subbands the codestream carries (T.832 `bands_present`): trailing
+/// bands are DROPPED at encode time — a precision/size trade entirely
+/// decided by the encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BandsPresent {
+    /// DC + LP + HP + flexbits (everything).
+    #[default]
+    All,
+    /// DC + LP + HP without the flexbits refinement.
+    NoFlexbits,
+    /// DC + LP only.
+    NoHighpass,
+    /// DC only.
+    DcOnly,
+}
+
+impl BandsPresent {
+    fn code(self) -> u8 {
+        use crate::decode::consts::{ALL_BANDS, DCONLY, NOFLEXBITS, NOHIGHPASS};
+        match self {
+            BandsPresent::All => ALL_BANDS,
+            BandsPresent::NoFlexbits => NOFLEXBITS,
+            BandsPresent::NoHighpass => NOHIGHPASS,
+            BandsPresent::DcOnly => DCONLY,
+        }
+    }
+}
+
+/// Encoder options beyond the plain [`encode`] surface. Started as the 4b
+/// close-out shape and extended as Phase 4 lands more of the envelope (this
+/// is the Phase-7 consolidation point, begun early). `Default` reproduces
+/// classic `encode(…, QpSet::LOSSLESS)` behavior.
+#[derive(Debug, Clone, Copy)]
+pub struct EncodeOptions {
+    /// Primary-plane per-band quantizers.
+    pub qp: QpSet,
+    /// Alpha-plane quantizers (4-plane input); `None` = same as `qp`.
+    pub alpha_qp: Option<QpSet>,
+    /// Chroma sampling for color inputs (ignored for 1-plane grayscale).
+    pub chroma: ChromaSampling,
+    /// Subband truncation (`bands_present`).
+    pub bands: BandsPresent,
+    /// `trim_flexbits` (0–15): drop the low flexbits on emission. Only
+    /// meaningful with `bands == All`; ignored otherwise.
+    pub trim_flexbits: u8,
+    /// Scaled arithmetic (`scaled_flag = 1`): 3 extra fraction bits through
+    /// the transforms; chroma DC-LP coded at half amplitude (floor — lossy);
+    /// the mode libjxr uses for everything lossy. Exactly invertible for
+    /// gray/zero-chroma content; NOT bit-lossless for color at q1.
+    pub scaled: bool,
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        Self {
+            qp: QpSet::LOSSLESS,
+            alpha_qp: None,
+            chroma: ChromaSampling::Yuv444,
+            bands: BandsPresent::All,
+            trim_flexbits: 0,
+            scaled: false,
+        }
+    }
+}
+
 /// Interleaved 8-bit channel orders accepted by [`deinterleave`] — the common
 /// memory layouts (`24bppBGR`, `32bppBGRA`, …) normalized to the planar
 /// R,G,B(,A) layout [`ImageInput`] takes. Premultiplied variants
@@ -164,12 +244,36 @@ pub fn encode_with_alpha_qp(
     qp: QpSet,
     alpha_qp: QpSet,
 ) -> Result<Vec<u8>, EncodeError> {
+    encode_with_options(
+        input,
+        mode,
+        EncodeOptions { qp, alpha_qp: Some(alpha_qp), ..Default::default() },
+    )
+}
+
+/// [`encode`] over the full option surface ([`EncodeOptions`]): chroma
+/// sampling (4:4:4 / 4:2:2 / 4:2:0 / luma-only), independent alpha QPs, and
+/// scaled arithmetic.
+pub fn encode_with_options(
+    input: &ImageInput<'_>,
+    mode: ColorMode,
+    opts: EncodeOptions,
+) -> Result<Vec<u8>, EncodeError> {
+    use crate::decode::consts::{INT_YUV420, INT_YUV422, INT_YUV444};
+    let (qp, alpha_qp) = (opts.qp, opts.alpha_qp.unwrap_or(opts.qp));
+    let bands = opts.bands.code();
+    if opts.trim_flexbits > 15 {
+        return Err(EncodeError::Unsupported("trim_flexbits must be 0–15".into()));
+    }
     let (w, h) = (input.width, input.height);
     if w == 0 || h == 0 {
         return Err(EncodeError::Unsupported("zero-size image".into()));
     }
-    if w > 1 << 16 || h > 1 << 16 {
-        return Err(EncodeError::Unsupported("dims exceed short-header u16 range".into()));
+    if w > 1 << 28 || h > 1 << 28 {
+        // The long header carries 32-bit dims, but cap at the sane end of the
+        // spec range (the decoder's own decompression budget would reject the
+        // grid anyway).
+        return Err(EncodeError::Unsupported("dims exceed 2^28".into()));
     }
     let n = w as usize * h as usize;
     let check = |p: &[u8]| {
@@ -200,6 +304,21 @@ pub fn encode_with_alpha_qp(
         for p in input.planes {
             check(p)?;
         }
+        if opts.chroma == ChromaSampling::YOnly {
+            return Err(EncodeError::Unsupported(
+                "YOnly chroma with an alpha plane is not implemented".into(),
+            ));
+        }
+        if opts.bands != BandsPresent::All || opts.trim_flexbits != 0 {
+            return Err(EncodeError::Unsupported(
+                "band truncation / trim_flexbits with an alpha plane is not implemented".into(),
+            ));
+        }
+        let fmt = match opts.chroma {
+            ChromaSampling::Yuv422 => INT_YUV422,
+            ChromaSampling::Yuv420 => INT_YUV420,
+            _ => INT_YUV444,
+        };
         // No auto-gray collapse here even when R==G==B: gray+alpha has no
         // container pixel format, so collapsing would change the declared
         // format — and all-zero chroma planes cost next to nothing.
@@ -213,6 +332,8 @@ pub fn encode_with_alpha_qp(
             qp,
             alpha_qp,
             input.premultiplied_alpha,
+            fmt,
+            opts.scaled,
         ));
     }
     // A 1-plane input is grayscale regardless of mode — there's no chroma to
@@ -226,8 +347,16 @@ pub fn encode_with_alpha_qp(
             )));
         }
         check(&input.planes[0])?;
-        // DC + LP + HP (ALL_BANDS). QpSet::LOSSLESS ⇒ bit-exact; QP>0 ⇒ lossy.
-        return Ok(gray::encode_grayscale(&input.planes[0], w, h, qp));
+        // QpSet::LOSSLESS at All bands ⇒ bit-exact; truncation/trim ⇒ lossy.
+        return Ok(gray::encode_grayscale_options(
+            &input.planes[0],
+            w,
+            h,
+            qp,
+            opts.scaled,
+            bands,
+            opts.trim_flexbits,
+        ));
     }
     if input.planes.len() != 3 {
         return Err(EncodeError::Unsupported(format!(
@@ -239,12 +368,44 @@ pub fn encode_with_alpha_qp(
     check(&input.planes[1])?;
     check(&input.planes[2])?;
     // Auto-gray: a "color" image whose channels are identical everywhere carries
-    // no chroma — emit `8bppGray` (smaller; the chroma planes would be all-zero).
+    // no chroma — emit `8bppGray` (smaller; the chroma planes would be all-zero;
+    // the chroma-sampling choice is moot on a gray image).
     if input.planes[0] == input.planes[1] && input.planes[1] == input.planes[2] {
-        return Ok(gray::encode_grayscale(&input.planes[0], w, h, qp));
+        return Ok(gray::encode_grayscale_options(
+            &input.planes[0],
+            w,
+            h,
+            qp,
+            opts.scaled,
+            bands,
+            opts.trim_flexbits,
+        ));
     }
-    // Full color: RGB → YUV444 → ALL_BANDS. Lossless 4:4:4 is bit-exact.
-    Ok(color::encode_color(&input.planes[0], &input.planes[1], &input.planes[2], w, h, qp))
+    let (r, g, b) = (&input.planes[0], &input.planes[1], &input.planes[2]);
+    let trim = opts.trim_flexbits;
+    match opts.chroma {
+        ChromaSampling::YOnly if opts.bands == BandsPresent::All && trim == 0 => {
+            Ok(color::encode_yonly_from_color(r, g, b, w, h, qp, opts.scaled))
+        }
+        ChromaSampling::YOnly => Err(EncodeError::Unsupported(
+            "band truncation / trim with YOnly chroma is not implemented".into(),
+        )),
+        ChromaSampling::Yuv444
+            if !opts.scaled && opts.bands == BandsPresent::All && trim == 0 =>
+        {
+            // The classic byte-stable path (clone of the original encoder).
+            Ok(color::encode_color(r, g, b, w, h, qp))
+        }
+        ChromaSampling::Yuv444 => Ok(color::encode_color_options(
+            r, g, b, w, h, qp, INT_YUV444, bands, opts.scaled, trim,
+        )),
+        ChromaSampling::Yuv422 => Ok(color::encode_color_options(
+            r, g, b, w, h, qp, INT_YUV422, bands, opts.scaled, trim,
+        )),
+        ChromaSampling::Yuv420 => Ok(color::encode_color_options(
+            r, g, b, w, h, qp, INT_YUV420, bands, opts.scaled, trim,
+        )),
+    }
 }
 
 /// Map a 0–100 quality knob to per-band quantizers. 100 ⇒ lossless; lower ⇒
@@ -759,6 +920,162 @@ mod tests {
             (d.image_plane[0][0], d.image_plane[1][0], d.image_plane[2][0], d.image_plane[3][0]),
             (rgba[0] as i32, rgba[1] as i32, rgba[2] as i32, rgba[3] as i32)
         );
+    }
+
+    #[test]
+    fn encode_with_options_dispatch() {
+        use crate::decode::container::parse;
+        let mut r = Lcg(0x0715_0042_0715_0042);
+        let (w, h) = (32u32, 16u32);
+        let n = (w * h) as usize;
+        let rp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let gp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let bp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let planes = [rp.clone(), gp.clone(), bp.clone()];
+        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let dec = |jxr: &[u8]| {
+            let c = parse(jxr).unwrap();
+            crate::decode::decode_image(&c).unwrap()
+        };
+        // Default == classic encode, byte-for-byte.
+        let a = encode_with_options(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
+        let b = encode(&input, ColorMode::Color, QpSet::LOSSLESS).unwrap();
+        assert_eq!(a, b, "Default options must reproduce classic encode bytes");
+        // 4:2:0 via options: decodes to shape.
+        let f = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions { chroma: ChromaSampling::Yuv420, ..Default::default() },
+        )
+        .unwrap();
+        let d = dec(&f);
+        assert_eq!((d.width, d.height, d.num_components), (w, h, 3));
+        // YOnly: gray replication.
+        let f = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions { chroma: ChromaSampling::YOnly, ..Default::default() },
+        )
+        .unwrap();
+        let d = dec(&f);
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], d.image_plane[1][i]);
+        }
+        // Scaled 444 lossless: bounded error (chroma half-step only).
+        let f = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions { scaled: true, ..Default::default() },
+        )
+        .unwrap();
+        let d = dec(&f);
+        for i in 0..n {
+            assert!((d.image_plane[0][i] - rp[i] as i32).abs() <= 2);
+        }
+        // YOnly + alpha rejected.
+        let four = [rp.clone(), gp.clone(), bp.clone(), rp.clone()];
+        let input4 = ImageInput { width: w, height: h, planes: &four, premultiplied_alpha: false };
+        assert!(encode_with_options(
+            &input4,
+            ColorMode::Color,
+            EncodeOptions { chroma: ChromaSampling::YOnly, ..Default::default() },
+        )
+        .is_err());
+        // 420 + alpha works.
+        let f = encode_with_options(
+            &input4,
+            ColorMode::Color,
+            EncodeOptions { chroma: ChromaSampling::Yuv420, ..Default::default() },
+        )
+        .unwrap();
+        let d = dec(&f);
+        assert_eq!(d.num_components, 4);
+        assert!(d.has_alpha);
+    }
+
+    /// 4c: band truncation + trim_flexbits + long header via EncodeOptions.
+    #[test]
+    fn bands_trim_and_long_header() {
+        use crate::decode::container::parse;
+        let mut r = Lcg(0x0042_4c00_0042_4c00);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        let gray: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let planes = [gray.clone()];
+        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let dec = |jxr: &[u8]| {
+            let c = parse(jxr).unwrap();
+            crate::decode::decode_image(&c).unwrap()
+        };
+        let mse = |jxr: &[u8]| -> f64 {
+            let d = dec(jxr);
+            gray.iter()
+                .zip(d.image_plane[0].iter())
+                .map(|(&a, &b)| {
+                    let e = a as f64 - b.clamp(0, 255) as f64;
+                    e * e
+                })
+                .sum::<f64>()
+                / n as f64
+        };
+        // Bands truncate monotonically: every level decodes, error grows,
+        // size shrinks.
+        let opts = |bands: BandsPresent, trim: u8| EncodeOptions {
+            bands,
+            trim_flexbits: trim,
+            ..Default::default()
+        };
+        let all = encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::All, 0)).unwrap();
+        let noflex =
+            encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::NoFlexbits, 0)).unwrap();
+        let nohp =
+            encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::NoHighpass, 0)).unwrap();
+        let dconly =
+            encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::DcOnly, 0)).unwrap();
+        assert_eq!(mse(&all), 0.0, "All bands lossless must be exact");
+        let (m_nf, m_nh, m_dc) = (mse(&noflex), mse(&nohp), mse(&dconly));
+        assert!(m_nf > 0.0 && m_nh > m_nf && m_dc > m_nh, "{m_nf} {m_nh} {m_dc}");
+        assert!(noflex.len() < all.len() && nohp.len() < noflex.len() && dconly.len() < nohp.len());
+        // Trim: error grows with trim at All bands; trim=15 ≈ NoFlexbits-ish.
+        let t4 = encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::All, 4)).unwrap();
+        let t15 = encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::All, 15)).unwrap();
+        let (m_t4, m_t15) = (mse(&t4), mse(&t15));
+        assert!(m_t4 > 0.0 && m_t15 >= m_t4, "{m_t4} {m_t15}");
+        assert!(t4.len() < all.len() && t15.len() < t4.len());
+        // Same for the color path (420 + trim decodes fine).
+        let rp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let gp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let bp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let cplanes = [rp, gp, bp];
+        let cinput =
+            ImageInput { width: w, height: h, planes: &cplanes, premultiplied_alpha: false };
+        for (chroma, bands, trim) in [
+            (ChromaSampling::Yuv444, BandsPresent::NoFlexbits, 0u8),
+            (ChromaSampling::Yuv444, BandsPresent::All, 6),
+            (ChromaSampling::Yuv420, BandsPresent::All, 6),
+            (ChromaSampling::Yuv420, BandsPresent::NoHighpass, 0),
+        ] {
+            let f = encode_with_options(
+                &cinput,
+                ColorMode::Color,
+                EncodeOptions { chroma, bands, trim_flexbits: trim, ..Default::default() },
+            )
+            .unwrap();
+            let d = dec(&f);
+            assert_eq!((d.width, d.height, d.num_components), (w, h, 3));
+        }
+        // Long header: dims beyond 2^16 encode + decode exactly.
+        let (lw, lh) = (70_000u32, 16u32);
+        let big: Vec<u8> = (0..(lw as usize * 16)).map(|i| (i % 251) as u8).collect();
+        let bplanes = [big.clone()];
+        let binput =
+            ImageInput { width: lw, height: lh, planes: &bplanes, premultiplied_alpha: false };
+        let f = encode(&binput, ColorMode::Grayscale, QpSet::LOSSLESS).unwrap();
+        let d = dec(&f);
+        assert_eq!((d.width, d.height), (lw, lh));
+        for (i, &v) in d.image_plane[0].iter().enumerate() {
+            assert_eq!(v, big[i] as i32, "long-header px{i}");
+        }
     }
 
     #[test]

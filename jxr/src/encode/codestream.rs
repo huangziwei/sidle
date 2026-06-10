@@ -26,6 +26,24 @@ pub fn write_image_header(
     premultiplied_alpha: bool,
     alpha_image_plane: bool,
 ) {
+    write_image_header_ext(bw, width, height, output_clr_fmt, premultiplied_alpha, alpha_image_plane, 0)
+}
+
+/// [`write_image_header`] with `trim_flexbits` (1–15 sets the flag; the 4-bit
+/// trim value itself is emitted in the spatial tile's flex plane header) and
+/// AUTOMATIC long-header selection: dims beyond the 16-bit short-header range
+/// switch `short_header_flag` off and emit 32-bit dims.
+#[allow(clippy::too_many_arguments)]
+pub fn write_image_header_ext(
+    bw: &mut BitWriter,
+    width: u32,
+    height: u32,
+    output_clr_fmt: u8,
+    premultiplied_alpha: bool,
+    alpha_image_plane: bool,
+    trim_flexbits: u8,
+) {
+    let short = width <= 1 << 16 && height <= 1 << 16;
     for &b in b"WMPHOTO\x00" {
         bw.write_bits(b as u64, 8);
     }
@@ -37,20 +55,35 @@ pub fn write_image_header(
     bw.write_bits(0, 3); // spatial_xfrm_subordinate
     bw.write_bits(0, 1); // index_table_present_flag → none
     bw.write_bits(NO_OVERLAP_FILTERING as u64, 2); // overlap_mode
-    bw.write_bits(1, 1); // short_header_flag → 16-bit dims
+    bw.write_flag(short); // short_header_flag (16- vs 32-bit dims)
     bw.write_bits(1, 1); // long_word_flag (Amazon sets this; decoder ignores it)
     bw.write_bits(0, 1); // windowing_flag
-    bw.write_bits(0, 1); // trim_flexbits_flag
+    bw.write_flag(trim_flexbits != 0); // trim_flexbits_flag
     bw.write_bits(0, 1); // reserved_d
     bw.write_bits(0, 1); // red_blue_not_swapped_flag
     bw.write_flag(premultiplied_alpha); // premultiplied_alpha_flag
     bw.write_flag(alpha_image_plane); // alpha_image_plane_flag
     bw.write_bits(output_clr_fmt as u64, 4); // output_clr_fmt
     bw.write_bits(BD8 as u64, 4); // output_bitdepth
-    // short header: (width-1), (height-1) as big-endian u16 (byte-aligned here).
-    write_u16_be(bw, (width - 1) as u16);
-    write_u16_be(bw, (height - 1) as u16);
+    // (width-1), (height-1): u16 BE short / u32 BE long (byte-aligned here).
+    if short {
+        write_u16_be(bw, (width - 1) as u16);
+        write_u16_be(bw, (height - 1) as u16);
+    } else {
+        for v in [width - 1, height - 1] {
+            for sh in [24u32, 16, 8, 0] {
+                bw.write_bits(((v >> sh) & 0xFF) as u64, 8);
+            }
+        }
+    }
     // tiling_flag=0 → no tile dims; windowing_flag=0 → decoder derives padding.
+}
+
+/// The 4-bit `trim_flexbits` value of the spatial tile's flex plane header
+/// (read by `flex_tile_plane_header` when the image-header flag is set;
+/// primary plane only — the alpha plane's flex header is skipped).
+pub fn write_trim_flexbits(bw: &mut BitWriter, trim: u8) {
+    bw.write_bits(trim as u64 & 0xF, 4);
 }
 
 /// `image_plane_header` for the single grayscale plane, DCONLY, with a uniform
@@ -99,17 +132,46 @@ pub fn write_image_plane_header_gray_allbands(
     lp_quant: u8,
     hp_quant: u8,
 ) {
+    write_image_plane_header_gray_scaled(bw, dc_quant, lp_quant, hp_quant, false)
+}
+
+/// [`write_image_plane_header_gray_allbands`] with the `scaled_flag` exposed.
+pub fn write_image_plane_header_gray_scaled(
+    bw: &mut BitWriter,
+    dc_quant: u8,
+    lp_quant: u8,
+    hp_quant: u8,
+    scaled: bool,
+) {
+    write_image_plane_header_gray_bands(bw, ALL_BANDS, dc_quant, lp_quant, hp_quant, scaled)
+}
+
+/// The general single-component (`INT_YONLY`) plane header: any
+/// `bands_present` × `scaled_flag`, uniform QPs. The LP/HP QP blocks shrink
+/// with the band set exactly as `Decoder::image_plane_header` reads them.
+pub fn write_image_plane_header_gray_bands(
+    bw: &mut BitWriter,
+    bands: u8,
+    dc_quant: u8,
+    lp_quant: u8,
+    hp_quant: u8,
+    scaled: bool,
+) {
     bw.write_bits(INT_YONLY as u64, 3);
-    bw.write_bits(0, 1); // scaled_flag
-    bw.write_bits(ALL_BANDS as u64, 4); // bands_present (0)
+    bw.write_flag(scaled); // scaled_flag
+    bw.write_bits(bands as u64, 4); // bands_present
     bw.write_flag(true); // dc_image_plane_uniform
     bw.write_bits(dc_quant as u64, 8);
-    bw.write_bits(0, 1); // reserved_i_bit
-    bw.write_flag(true); // lp_image_plane_uniform
-    bw.write_bits(lp_quant as u64, 8);
-    bw.write_bits(0, 1); // reserved_j_bit
-    bw.write_flag(true); // hp_image_plane_uniform
-    bw.write_bits(hp_quant as u64, 8);
+    if bands != DCONLY {
+        bw.write_bits(0, 1); // reserved_i_bit
+        bw.write_flag(true); // lp_image_plane_uniform
+        bw.write_bits(lp_quant as u64, 8);
+        if bands != NOHIGHPASS {
+            bw.write_bits(0, 1); // reserved_j_bit
+            bw.write_flag(true); // hp_image_plane_uniform
+            bw.write_bits(hp_quant as u64, 8);
+        }
+    }
     bw.align_to_byte();
 }
 
@@ -156,23 +218,63 @@ pub fn write_image_plane_header_color_allbands(
     lp_quant: u8,
     hp_quant: u8,
 ) {
-    bw.write_bits(INT_YUV444 as u64, 3); // internal_clr_fmt
-    bw.write_bits(0, 1); // scaled_flag
-    bw.write_bits(ALL_BANDS as u64, 4); // bands_present (0)
-    // YUV_444: two 4-bit reserved fields (reserved_e_bit + reserved_f) = 8 bits.
+    write_image_plane_header_yuv(bw, INT_YUV444, ALL_BANDS, dc_quant, lp_quant, hp_quant);
+}
+
+/// `image_plane_header` for a 3-component YUV plane of any sampling
+/// (`INT_YUV444`/`INT_YUV422`/`INT_YUV420`) and any `bands_present`, with
+/// uniform per-band `COMP_UNIFORM` quantizers. Mirrors
+/// `Decoder::image_plane_header` field-for-field. The format-specific block
+/// after `bands_present` is 8 zero bits in every case: YUV444 = two 4-bit
+/// reserved fields; YUV420 = reserved_e(1) + chroma_centering_x(3) +
+/// reserved_g(1) + chroma_centering_y(3); YUV422 = reserved_e(1) +
+/// centering_x(3) + reserved_h(4) — and we always declare centering 0/0
+/// (co-sited with even luma, the only values libjxr writes and exactly what
+/// the even-centered downsample filter produces). `scaled_flag = 0`. Ends
+/// byte-aligned.
+pub fn write_image_plane_header_yuv(
+    bw: &mut BitWriter,
+    int_fmt: u8,
+    bands: u8,
+    dc_quant: u8,
+    lp_quant: u8,
+    hp_quant: u8,
+) {
+    write_image_plane_header_yuv_scaled(bw, int_fmt, bands, dc_quant, lp_quant, hp_quant, false)
+}
+
+/// [`write_image_plane_header_yuv`] with the `scaled_flag` exposed (scaled
+/// arithmetic: samples carry 3 extra fraction bits; chroma DC-LP is coded at
+/// half amplitude; the decoder's output stage shifts back down).
+#[allow(clippy::too_many_arguments)]
+pub fn write_image_plane_header_yuv_scaled(
+    bw: &mut BitWriter,
+    int_fmt: u8,
+    bands: u8,
+    dc_quant: u8,
+    lp_quant: u8,
+    hp_quant: u8,
+    scaled: bool,
+) {
+    debug_assert!(matches!(int_fmt, INT_YUV444 | INT_YUV422 | INT_YUV420));
+    bw.write_bits(int_fmt as u64, 3); // internal_clr_fmt
+    bw.write_flag(scaled); // scaled_flag
+    bw.write_bits(bands as u64, 4); // bands_present
+    // Format-specific reserved/centering block — 8 zero bits for all three.
     bw.write_bits(0, 8);
     // BD8 → no shift/mantissa bits.
-    // DC: uniform, one quant shared by all 3 components (COMP_UNIFORM).
     bw.write_flag(true); // dc_image_plane_uniform
     write_uniform_qp(bw, dc_quant);
-    // LP: "don't reuse DC QP" (0) → its own uniform QP.
-    bw.write_bits(0, 1); // reserved_i_bit / use-DC-QP-for-LP = 0 (don't reuse)
-    bw.write_flag(true); // lp_image_plane_uniform
-    write_uniform_qp(bw, lp_quant);
-    // HP: "don't reuse LP QP" (0) → its own uniform QP.
-    bw.write_bits(0, 1); // reserved_j_bit / use-LP-QP-for-HP = 0 (don't reuse)
-    bw.write_flag(true); // hp_image_plane_uniform
-    write_uniform_qp(bw, hp_quant);
+    if bands != DCONLY {
+        bw.write_bits(0, 1); // reserved_i_bit / use-DC-QP-for-LP = 0
+        bw.write_flag(true); // lp_image_plane_uniform
+        write_uniform_qp(bw, lp_quant);
+        if bands != NOHIGHPASS {
+            bw.write_bits(0, 1); // reserved_j_bit / use-LP-QP-for-HP = 0
+            bw.write_flag(true); // hp_image_plane_uniform
+            write_uniform_qp(bw, hp_quant);
+        }
+    }
     bw.align_to_byte();
 }
 

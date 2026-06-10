@@ -128,14 +128,28 @@ pub fn downsample_v(src: &[i32], w: usize, h: usize) -> Vec<i32> {
     out
 }
 
-/// One 3-component (`INT_YUV444`) image plane: per-component quantized
-/// coefficients plus the YUV adaptive entropy state, encodable one macroblock
-/// at a time. Mirror of [`super::gray::YOnlyPlane`] for the color path; a
-/// color+alpha image (4a) is a `ColorPlane` and a `YOnlyPlane` per-MB
-/// interleaved on one `BitWriter`.
+/// One 3-component YUV image plane (`INT_YUV444`, or subsampled
+/// `INT_YUV422`/`INT_YUV420`): per-component quantized coefficients plus the
+/// YUV adaptive entropy state, encodable one macroblock at a time. Mirror of
+/// [`super::gray::YOnlyPlane`] for the color path; a color+alpha image (4a)
+/// is a `ColorPlane` and a `YOnlyPlane` per-MB interleaved on one
+/// `BitWriter`. For subsampled chroma the per-component buffers use a PREFIX
+/// of the 444-sized arrays (chroma MB = 4 blocks / 4 dclp slots for 420,
+/// 8/8 for 422 — the decoder's fixed-stride `MB_BUF_PER_COMP` layout).
 pub(super) struct ColorPlane {
     pub(super) mbw: usize,
     pub(super) mbh: usize,
+    /// `INT_YUV444` / `INT_YUV422` / `INT_YUV420`.
+    fmt: u8,
+    /// `bands_present` this plane emits (DC always; LP unless DCONLY; HP+flex
+    /// only at ALL_BANDS — NOFLEXBITS emission is 4c work).
+    bands: u8,
+    /// Chroma blocks per MB: 16 (444) / 8 (422) / 4 (420).
+    nblk_ch: usize,
+    /// `trim_flexbits` (0–15): low flexbits dropped on emission.
+    trim: u32,
+    /// Chroma dclp slots per MB (1 DC + LP): 16 / 8 / 4.
+    jmax_ch: usize,
     buf_grid: Vec<Vec<[[i32; 256]; 3]>>,
     dclp: Vec<Vec<[[i32; 16]; 3]>>,
     cbphp_grid: Vec<Vec<[i32; 3]>>,
@@ -159,6 +173,28 @@ impl ColorPlane {
     /// YUV 4:4:4, forward-transform + quantize every MB per component, and
     /// initialize the YUV adaptive entropy state.
     pub(super) fn new(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> Self {
+        Self::new_fmt(r, g, b, w, h, qp, INT_YUV444, ALL_BANDS, false)
+    }
+
+    /// [`Self::new`] generalized over chroma sampling and `bands_present`:
+    /// for `INT_YUV422`/`INT_YUV420` the centered U/V planes are decimated
+    /// AFTER the color transform (libjxr pipeline order) and chroma MBs run
+    /// through the 4-/8-block forward transforms with the transposed-domain
+    /// dclp extraction (T420/T422 — the decoder's write-back tables, read
+    /// backwards).
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_fmt(
+        r: &[u8],
+        g: &[u8],
+        b: &[u8],
+        w: u32,
+        h: u32,
+        qp: QpSet,
+        fmt: u8,
+        bands: u8,
+        scaled: bool,
+    ) -> Self {
         let (dc_sf, lp_sf, hp_sf) =
             (scaling_factor(qp.dc), scaling_factor(qp.lp), scaling_factor(qp.hp));
         let (wu, hu) = (w as usize, h as usize);
@@ -171,47 +207,136 @@ impl ColorPlane {
             pad_plane(g, wu, hu, pw, ph),
             pad_plane(b, wu, hu, pw, ph),
         );
+        // Scaled arithmetic: 3 extra fraction bits enter BEFORE the color
+        // lifting (the decoder unscales after its inverse lifting).
+        let sh = if scaled { 3 } else { 0 };
         let mut yuv = [vec![0i32; pw * ph], vec![0i32; pw * ph], vec![0i32; pw * ph]];
         for i in 0..pw * ph {
-            let (y, u, v) =
-                rgb_to_yuv444(rp[i] as i32 - 128, gp[i] as i32 - 128, bp[i] as i32 - 128);
+            let (y, u, v) = rgb_to_yuv444(
+                (rp[i] as i32 - 128) << sh,
+                (gp[i] as i32 - 128) << sh,
+                (bp[i] as i32 - 128) << sh,
+            );
             yuv[0][i] = y;
             yuv[1][i] = u;
             yuv[2][i] = v;
         }
 
+        // Decimate chroma per format (444 → 422 horizontally, → 420 vertically
+        // on top). Chroma plane dims: (pw/2, ph) for 422, (pw/2, ph/2) for 420.
+        let cw = if fmt == INT_YUV444 { pw } else { pw / 2 };
+        if fmt != INT_YUV444 {
+            for plane in yuv.iter_mut().skip(1) {
+                let mut p = downsample_h(plane, pw, ph);
+                if fmt == INT_YUV420 {
+                    p = downsample_v(&p, pw / 2, ph);
+                }
+                *plane = p;
+            }
+        }
+        let (nblk_ch, jmax_ch) = match fmt {
+            INT_YUV420 => (4usize, 4usize),
+            INT_YUV422 => (8, 8),
+            _ => (16, 16),
+        };
+
         // Per-MB, per-component quantized DC+LP levels (`dclp`) and the full forward
         // buffers (`buf_grid`, HP quantized) for the HP band.
+        const T420: [usize; 4] = [0, 2, 1, 3];
+        const T422: [usize; 8] = [0, 2, 1, 3, 4, 6, 5, 7];
         let mut dclp = vec![vec![[[0i32; 16]; 3]; mbh]; mbw];
         let mut buf_grid = vec![vec![[[0i32; 256]; 3]; mbh]; mbw];
         for mbx in 0..mbw {
             for mby in 0..mbh {
                 for (comp, plane) in yuv.iter().enumerate() {
-                    let mut samples = [0i32; 256];
-                    for py in 0..16 {
-                        for px in 0..16 {
-                            samples[py * 16 + px] =
-                                plane[(mby * 16 + py) * pw + (mbx * 16 + px)];
-                        }
-                    }
-                    let mut buf = transform::forward_transform_mb(&samples);
-                    if hp_sf > 1 {
-                        for blk in 0..16 {
-                            for pos in 1..16 {
-                                let i = blk * 16 + pos;
-                                buf[i] = quantize(buf[i], hp_sf);
+                    let chroma_42x = comp > 0 && fmt != INT_YUV444;
+                    if !chroma_42x {
+                        let mut samples = [0i32; 256];
+                        for py in 0..16 {
+                            for px in 0..16 {
+                                samples[py * 16 + px] =
+                                    plane[(mby * 16 + py) * pw + (mbx * 16 + px)];
                             }
                         }
+                        // Scaled chroma (444) floor-halves the block-DCs
+                        // between the transform stages; luma never does.
+                        let mut buf = transform::forward_transform_mb_with(
+                            &samples,
+                            scaled && comp > 0,
+                        );
+                        if hp_sf > 1 {
+                            for blk in 0..16 {
+                                for pos in 1..16 {
+                                    let i = blk * 16 + pos;
+                                    buf[i] = quantize(buf[i], hp_sf);
+                                }
+                            }
+                        }
+                        let c = &mut dclp[mbx][mby][comp];
+                        for (j, slot) in c.iter_mut().enumerate() {
+                            *slot = buf[16 * ICT4X4_INV_PERM[j]];
+                        }
+                        c[0] = quantize(c[0], dc_sf);
+                        for s in c.iter_mut().skip(1) {
+                            *s = quantize(*s, lp_sf);
+                        }
+                        buf_grid[mbx][mby][comp] = buf;
+                    } else if fmt == INT_YUV420 {
+                        // Chroma MB footprint 8×8 at (mbx*8, mby*8) in the
+                        // decimated plane.
+                        let mut samples = [0i32; 64];
+                        for py in 0..8 {
+                            for px in 0..8 {
+                                samples[py * 8 + px] =
+                                    plane[(mby * 8 + py) * cw + (mbx * 8 + px)];
+                            }
+                        }
+                        let mut buf = transform::forward_transform_chroma_mb_420(&samples, scaled);
+                        if hp_sf > 1 {
+                            for blk in 0..4 {
+                                for pos in 1..16 {
+                                    let i = blk * 16 + pos;
+                                    buf[i] = quantize(buf[i], hp_sf);
+                                }
+                            }
+                        }
+                        let c = &mut dclp[mbx][mby][comp];
+                        for j in 0..4 {
+                            c[j] = buf[16 * T420[j]];
+                        }
+                        c[0] = quantize(c[0], dc_sf);
+                        for s in c.iter_mut().take(4).skip(1) {
+                            *s = quantize(*s, lp_sf);
+                        }
+                        buf_grid[mbx][mby][comp][..64].copy_from_slice(&buf);
+                    } else {
+                        // 422: chroma MB footprint 8×16 at (mbx*8, mby*16).
+                        let mut samples = [0i32; 128];
+                        for py in 0..16 {
+                            for px in 0..8 {
+                                samples[py * 8 + px] =
+                                    plane[(mby * 16 + py) * cw + (mbx * 8 + px)];
+                            }
+                        }
+                        let mut buf = transform::forward_transform_chroma_mb_422(&samples, scaled);
+                        if hp_sf > 1 {
+                            for blk in 0..8 {
+                                for pos in 1..16 {
+                                    let i = blk * 16 + pos;
+                                    buf[i] = quantize(buf[i], hp_sf);
+                                }
+                            }
+                        }
+                        let c = &mut dclp[mbx][mby][comp];
+                        for j in 0..8 {
+                            c[j] = buf[16 * T422[j]];
+                        }
+                        c[0] = quantize(c[0], dc_sf);
+                        for s in c.iter_mut().take(8).skip(1) {
+                            *s = quantize(*s, lp_sf);
+                        }
+                        buf_grid[mbx][mby][comp][..128].copy_from_slice(&buf);
                     }
-                    let c = &mut dclp[mbx][mby][comp];
-                    for (j, slot) in c.iter_mut().enumerate() {
-                        *slot = buf[16 * ICT4X4_INV_PERM[j]];
-                    }
-                    c[0] = quantize(c[0], dc_sf);
-                    for s in c.iter_mut().skip(1) {
-                        *s = quantize(*s, lp_sf);
-                    }
-                    buf_grid[mbx][mby][comp] = buf;
                 }
             }
         }
@@ -232,6 +357,11 @@ impl ColorPlane {
         ColorPlane {
             mbw,
             mbh,
+            fmt,
+            bands,
+            trim: 0,
+            nblk_ch,
+            jmax_ch,
             buf_grid,
             dclp,
             cbphp_grid: vec![vec![[0i32; 3]; mbh]; mbw],
@@ -261,6 +391,14 @@ impl ColorPlane {
         };
 
         // ---------- DC ----------
+        // Table 128: chroma strength weighting scales with subsampling;
+        // Table 129: TOP_LEFT prediction of SUBSAMPLED chroma rounds up.
+        let i_scale = match self.fmt {
+            INT_YUV420 => 8,
+            INT_YUV422 => 4,
+            _ => 2,
+        };
+        let chroma_round = if self.fmt == INT_YUV444 { 0 } else { 1 };
         let (dmode, dc_preds): (u8, [i32; 3]) = if is_left && is_top {
             (NO_PREDICTION, [0; 3])
         } else if is_left {
@@ -269,14 +407,23 @@ impl ColorPlane {
             (PREDICT_FROM_LEFT, dc_of(mbx - 1, mby))
         } else {
             let (l, t, tl) = (dc_of(mbx - 1, mby), dc_of(mbx, mby - 1), dc_of(mbx - 1, mby - 1));
-            let sh = (tl[0] - l[0]).abs() * 2 + (tl[1] - l[1]).abs() + (tl[2] - l[2]).abs();
-            let sv = (tl[0] - t[0]).abs() * 2 + (tl[1] - t[1]).abs() + (tl[2] - t[2]).abs();
+            let sh =
+                (tl[0] - l[0]).abs() * i_scale + (tl[1] - l[1]).abs() + (tl[2] - l[2]).abs();
+            let sv =
+                (tl[0] - t[0]).abs() * i_scale + (tl[1] - t[1]).abs() + (tl[2] - t[2]).abs();
             if sh * 4 < sv {
                 (PREDICT_FROM_TOP, t)
             } else if sv * 4 < sh {
                 (PREDICT_FROM_LEFT, l)
             } else {
-                (PREDICT_FROM_TOP_LEFT, [(t[0] + l[0]) >> 1, (t[1] + l[1]) >> 1, (t[2] + l[2]) >> 1])
+                (
+                    PREDICT_FROM_TOP_LEFT,
+                    [
+                        (t[0] + l[0]) >> 1,
+                        (t[1] + l[1] + chroma_round) >> 1,
+                        (t[2] + l[2] + chroma_round) >> 1,
+                    ],
+                )
             }
         };
         let mut dc_res = [0i32; 3];
@@ -300,10 +447,17 @@ impl ColorPlane {
                 lap_dc[chroma] += 1;
             }
         }
-        self.model_dc.update(lap_dc, 0, 3);
+        match self.fmt {
+            INT_YUV420 => self.model_dc.update_42x(lap_dc, 0, true),
+            INT_YUV422 => self.model_dc.update_42x(lap_dc, 0, false),
+            _ => self.model_dc.update(lap_dc, 0, 3),
+        }
         if mbx % 16 == 0 || mbx == self.mbw - 1 {
             self.abs_dc_lum.adapt();
             self.abs_dc_chr.adapt();
+        }
+        if self.bands == DCONLY {
+            return;
         }
 
         // ---------- LP ----------
@@ -315,85 +469,223 @@ impl ColorPlane {
             PREDICT_FROM_TOP => PREDICT_FROM_TOP,
             _ => NO_PREDICTION,
         };
+        let is_42x = self.fmt != INT_YUV444;
         let mut lp_res = [[0i32; 16]; 3];
         let mut coarse = [[0i32; 16]; 3];
         for comp in 0..3 {
+            let chroma_42x = is_42x && comp > 0;
             let mb = self.model_lp.m_bits[chroma_component(comp)] as u32;
-            for j in 1..16 {
-                let pred = if lp_mode == PREDICT_FROM_LEFT && matches!(j, 1 | 2 | 3) {
-                    self.dclp[mbx - 1][mby][comp][j]
-                } else if lp_mode == PREDICT_FROM_TOP && matches!(j, 4 | 8 | 12) {
-                    self.dclp[mbx][mby - 1][comp][j]
+            let jm = if chroma_42x { self.jmax_ch } else { 16 };
+            for j in 1..jm {
+                let pred = if !chroma_42x {
+                    // Luma and 444 chroma: spec translations {1,2,3} / {4,8,12}.
+                    if lp_mode == PREDICT_FROM_LEFT && matches!(j, 1 | 2 | 3) {
+                        self.dclp[mbx - 1][mby][comp][j]
+                    } else if lp_mode == PREDICT_FROM_TOP && matches!(j, 4 | 8 | 12) {
+                        self.dclp[mbx][mby - 1][comp][j]
+                    } else {
+                        0
+                    }
+                } else if self.fmt == INT_YUV420 {
+                    // Table 133, 420 chroma in our transposed storage
+                    // (decoder.rs:1184-1195): ours j=1 from left, j=2 from top.
+                    if lp_mode == PREDICT_FROM_LEFT && j == 1 {
+                        self.dclp[mbx - 1][mby][comp][1]
+                    } else if lp_mode == PREDICT_FROM_TOP && j == 2 {
+                        self.dclp[mbx][mby - 1][comp][2]
+                    } else {
+                        0
+                    }
                 } else {
-                    0
+                    // Table 133, 422 chroma (decoder.rs:1196-1218): LEFT predicts
+                    // ours {4,1,5}; TOP: j4←top[4], j2←top[6], j6←own FINAL j2
+                    // (the decoder adds top[6] to j2 BEFORE chaining j2 into j6,
+                    // so the j6 residual is against the final j2 value); the
+                    // MBDCMode==TOP special chains j6←j2 even with LP
+                    // prediction off.
+                    if lp_mode == PREDICT_FROM_LEFT && matches!(j, 4 | 1 | 5) {
+                        self.dclp[mbx - 1][mby][comp][j]
+                    } else if lp_mode == PREDICT_FROM_TOP {
+                        match j {
+                            4 => self.dclp[mbx][mby - 1][comp][4],
+                            2 => self.dclp[mbx][mby - 1][comp][6],
+                            6 => self.dclp[mbx][mby][comp][2],
+                            _ => 0,
+                        }
+                    } else if lp_mode == NO_PREDICTION && dmode == PREDICT_FROM_TOP && j == 6 {
+                        self.dclp[mbx][mby][comp][2]
+                    } else {
+                        0
+                    }
                 };
                 lp_res[comp][j] = self.dclp[mbx][mby][comp][j] - pred;
                 let m = (lp_res[comp][j].unsigned_abs() >> mb) as i32;
                 coarse[comp][j] = if lp_res[comp][j] < 0 { -m } else { m };
             }
         }
-        let cbp = [
-            (1..16).any(|j| coarse[0][j] != 0),
-            (1..16).any(|j| coarse[1][j] != 0),
-            (1..16).any(|j| coarse[2][j] != 0),
-        ];
-        let i_cbplp = (cbp[0] as i32) | ((cbp[1] as i32) << 1) | ((cbp[2] as i32) << 2);
-        // cbplp coding: Huffman (with optional inversion) when the count
-        // state says so, else 3 raw bits — mirrors `mb_lp` (decoder.rs:940).
-        let i_max = 3 * 4 - 5; // = 7 (all bits set)
-        if self.count_zero_cbplp <= 0 || self.count_max_cbplp < 0 {
-            let cbplp_yuv1 = if self.count_max_cbplp < self.count_zero_cbplp {
-                i_max - i_cbplp
-            } else {
-                i_cbplp
-            };
-            write_huff(bw, tables::cbplp_yuv1_444(), cbplp_yuv1);
-        } else {
-            bw.write_bits(i_cbplp as u64, 3);
-        }
-        self.count_zero_cbplp =
-            (self.count_zero_cbplp + 1 - if i_cbplp == 0 { 4 } else { 0 }).clamp(-8, 7);
-        self.count_max_cbplp =
-            (self.count_max_cbplp + 1 - if i_cbplp == i_max { 4 } else { 0 }).clamp(-8, 7);
 
+        // CBPLP + coded blocks + refinement. 444 codes three per-component
+        // flags/blocks; 420/422 code luma + ONE joint chroma "plane"
+        // (i_full_planes = 2, Table 53).
         let mut lap_lp = [0i32; 2];
-        for comp in 0..3 {
-            let chroma = chroma_component(comp);
-            if cbp[comp] {
-                // Build (run, level) pairs in shared-scan order, adapting the
-                // one scan across all components exactly as the decoder does.
+        if !is_42x {
+            let cbp = [
+                (1..16).any(|j| coarse[0][j] != 0),
+                (1..16).any(|j| coarse[1][j] != 0),
+                (1..16).any(|j| coarse[2][j] != 0),
+            ];
+            let i_cbplp = (cbp[0] as i32) | ((cbp[1] as i32) << 1) | ((cbp[2] as i32) << 2);
+            // cbplp coding: Huffman (with optional inversion) when the count
+            // state says so, else 3 raw bits — mirrors `mb_lp` (decoder.rs:940).
+            let i_max = 3 * 4 - 5; // = 7 (all bits set)
+            if self.count_zero_cbplp <= 0 || self.count_max_cbplp < 0 {
+                let cbplp_yuv1 = if self.count_max_cbplp < self.count_zero_cbplp {
+                    i_max - i_cbplp
+                } else {
+                    i_cbplp
+                };
+                write_huff(bw, tables::cbplp_yuv1_444(), cbplp_yuv1);
+            } else {
+                bw.write_bits(i_cbplp as u64, 3);
+            }
+            self.count_zero_cbplp =
+                (self.count_zero_cbplp + 1 - if i_cbplp == 0 { 4 } else { 0 }).clamp(-8, 7);
+            self.count_max_cbplp =
+                (self.count_max_cbplp + 1 - if i_cbplp == i_max { 4 } else { 0 }).clamp(-8, 7);
+
+            for comp in 0..3 {
+                let chroma = chroma_component(comp);
+                if cbp[comp] {
+                    // Build (run, level) pairs in shared-scan order, adapting the
+                    // one scan across all components exactly as the decoder does.
+                    let mut pairs: Vec<(u32, i32)> = Vec::new();
+                    let mut run = 0u32;
+                    for i in 1..16usize {
+                        let pos = self.scan.translate(i);
+                        if coarse[comp][pos] != 0 {
+                            pairs.push((run, coarse[comp][pos]));
+                            run = 0;
+                            self.scan.adapt(i);
+                        } else {
+                            run += 1;
+                        }
+                    }
+                    lap_lp[chroma] += pairs.len() as i32;
+                    coeff::encode_block(
+                        bw,
+                        &pairs,
+                        1,
+                        &mut self.lp_first[chroma],
+                        &mut self.lp_ind0[chroma],
+                        &mut self.lp_ind1[chroma],
+                        &mut self.lp_abs0,
+                        &mut self.lp_abs1,
+                    );
+                }
+                let mb = self.model_lp.m_bits[chroma];
+                if mb > 0 {
+                    for j in 1..16 {
+                        coeff::encode_refine_lp(bw, coarse[comp][j], lp_res[comp][j], mb);
+                    }
+                }
+            }
+            self.model_lp.update(lap_lp, 1, 3);
+        } else {
+            let jmax = self.jmax_ch;
+            let cbp_luma = (1..16).any(|j| coarse[0][j] != 0);
+            let cbp_chroma =
+                (1..jmax).any(|j| coarse[1][j] != 0 || coarse[2][j] != 0);
+            let i_cbplp = (cbp_luma as i32) | ((cbp_chroma as i32) << 1);
+            let i_max = 2 * 4 - 5; // = 3 (iFullPlanes = 2, Table 53)
+            if self.count_zero_cbplp <= 0 || self.count_max_cbplp < 0 {
+                let cbplp_yuv1 = if self.count_max_cbplp < self.count_zero_cbplp {
+                    i_max - i_cbplp
+                } else {
+                    i_cbplp
+                };
+                write_huff(bw, tables::cbplp_yuv1_42x(), cbplp_yuv1);
+            } else {
+                bw.write_bits(i_cbplp as u64, 2);
+            }
+            self.count_zero_cbplp =
+                (self.count_zero_cbplp + 1 - if i_cbplp == 0 { 4 } else { 0 }).clamp(-8, 7);
+            self.count_max_cbplp =
+                (self.count_max_cbplp + 1 - if i_cbplp == i_max { 4 } else { 0 }).clamp(-8, 7);
+
+            // n = 0: luma block (adaptive shared scan) + refinement.
+            if cbp_luma {
                 let mut pairs: Vec<(u32, i32)> = Vec::new();
                 let mut run = 0u32;
                 for i in 1..16usize {
                     let pos = self.scan.translate(i);
-                    if coarse[comp][pos] != 0 {
-                        pairs.push((run, coarse[comp][pos]));
+                    if coarse[0][pos] != 0 {
+                        pairs.push((run, coarse[0][pos]));
                         run = 0;
                         self.scan.adapt(i);
                     } else {
                         run += 1;
                     }
                 }
-                lap_lp[chroma] += pairs.len() as i32;
+                lap_lp[0] += pairs.len() as i32;
                 coeff::encode_block(
                     bw,
                     &pairs,
                     1,
-                    &mut self.lp_first[chroma],
-                    &mut self.lp_ind0[chroma],
-                    &mut self.lp_ind1[chroma],
+                    &mut self.lp_first[0],
+                    &mut self.lp_ind0[0],
+                    &mut self.lp_ind1[0],
                     &mut self.lp_abs0,
                     &mut self.lp_abs1,
                 );
             }
-            let mb = self.model_lp.m_bits[chroma];
-            if mb > 0 {
+            let mb_lum = self.model_lp.m_bits[0];
+            if mb_lum > 0 {
                 for j in 1..16 {
-                    coeff::encode_refine_lp(bw, coarse[comp][j], lp_res[comp][j], mb);
+                    coeff::encode_refine_lp(bw, coarse[0][j], lp_res[0][j], mb_lum);
                 }
             }
+            // n = 1: ONE joint U/V block with the FIXED interleaved order
+            // (Table 53; decoder.rs:1084-1103): coded position k carries
+            // component (k&1)+1, coefficient REMAP_ARR[(k>>1)+offset] in our
+            // transposed storage. No adaptive-scan participation.
+            const REMAP_ARR: [usize; 7] = [4, 1, 2, 3, 5, 6, 7];
+            let (offset, count, i_location) =
+                if self.fmt == INT_YUV420 { (1usize, 6usize, 10usize) } else { (0, 14, 2) };
+            if cbp_chroma {
+                let mut pairs: Vec<(u32, i32)> = Vec::new();
+                let mut run = 0u32;
+                for k in 0..count {
+                    let v = coarse[(k & 1) + 1][REMAP_ARR[(k >> 1) + offset]];
+                    if v != 0 {
+                        pairs.push((run, v));
+                        run = 0;
+                    } else {
+                        run += 1;
+                    }
+                }
+                lap_lp[1] += pairs.len() as i32;
+                coeff::encode_block(
+                    bw,
+                    &pairs,
+                    i_location,
+                    &mut self.lp_first[1],
+                    &mut self.lp_ind0[1],
+                    &mut self.lp_ind1[1],
+                    &mut self.lp_abs0,
+                    &mut self.lp_abs1,
+                );
+            }
+            // Chroma refinement interleaves U,V per coefficient (linear order
+            // in our transposed storage; decoder.rs:1120-1129).
+            let mb_chr = self.model_lp.m_bits[1];
+            if mb_chr > 0 {
+                for k in 1..jmax {
+                    coeff::encode_refine_lp(bw, coarse[1][k], lp_res[1][k], mb_chr);
+                    coeff::encode_refine_lp(bw, coarse[2][k], lp_res[2][k], mb_chr);
+                }
+            }
+            self.model_lp.update_42x(lap_lp, 1, self.fmt == INT_YUV420);
         }
-        self.model_lp.update(lap_lp, 1, 3);
         if mbx % 16 == 0 || mbx == self.mbw - 1 {
             for t in self.lp_first.iter_mut() {
                 t.adapt_table2(4);
@@ -405,6 +697,9 @@ impl ColorPlane {
             self.lp_abs1.adapt_table1();
         }
 
+        if self.bands == NOHIGHPASS {
+            return;
+        }
         // ---------- HP ----------
         if mbx % 16 == 0 {
             self.hp_state.hor_scan.reset_totals();
@@ -415,6 +710,10 @@ impl ColorPlane {
         self.cbphp_grid[mbx][mby] = encode_color_hp_mb(
             bw,
             &mut self.hp_state,
+            self.fmt,
+            self.nblk_ch,
+            self.bands == ALL_BANDS,
+            self.trim,
             &self.buf_grid[mbx][mby],
             &self.dclp[mbx][mby],
             cbphp_left,
@@ -454,6 +753,82 @@ pub fn encode_color(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> 
     container::write_container(&bw.finish(), w, h, &container::pixel_format::RGB24)
 }
 
+/// Staged 4b driver (public for the oracle harness; the final API shape
+/// lands at the 4b close-out): encode RGB with the given internal chroma sampling
+/// (`INT_YUV444`/`INT_YUV422`/`INT_YUV420`) and `bands_present`. Internal
+/// until the 4b API close-out; the public `encode_color` remains the
+/// 444 ALL_BANDS path.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_color_subsampled(
+    r: &[u8],
+    g: &[u8],
+    b: &[u8],
+    w: u32,
+    h: u32,
+    qp: QpSet,
+    fmt: u8,
+    bands: u8,
+) -> Vec<u8> {
+    encode_color_scaled(r, g, b, w, h, qp, fmt, bands, false)
+}
+
+/// [`encode_color_subsampled`] with **scaled arithmetic** (`scaled_flag = 1`)
+/// exposed: 3 extra fraction bits through the transforms, chroma DC-LP coded
+/// at half amplitude, the decoder's output stage shifting back down. This is
+/// the mode jxrencapp uses for everything lossy (and all 42x).
+#[allow(clippy::too_many_arguments)]
+pub fn encode_color_scaled(
+    r: &[u8],
+    g: &[u8],
+    b: &[u8],
+    w: u32,
+    h: u32,
+    qp: QpSet,
+    fmt: u8,
+    bands: u8,
+    scaled: bool,
+) -> Vec<u8> {
+    encode_color_options(r, g, b, w, h, qp, fmt, bands, scaled, 0)
+}
+
+/// [`encode_color_scaled`] plus `trim_flexbits` (image-header flag + the
+/// 4-bit spatial-tile value + truncated flex emission). The full internal
+/// option surface for the 3-plane color path.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_color_options(
+    r: &[u8],
+    g: &[u8],
+    b: &[u8],
+    w: u32,
+    h: u32,
+    qp: QpSet,
+    fmt: u8,
+    bands: u8,
+    scaled: bool,
+    trim: u8,
+) -> Vec<u8> {
+    let trim = if bands == ALL_BANDS { trim } else { 0 };
+    let mut plane = ColorPlane::new_fmt(r, g, b, w, h, qp, fmt, bands, scaled);
+    plane.trim = trim as u32;
+    let mut bw = BitWriter::new();
+    codestream::write_image_header_ext(&mut bw, w, h, OUT_RGB, false, false, trim);
+    codestream::write_image_plane_header_yuv_scaled(
+        &mut bw, fmt, bands, qp.dc, qp.lp, qp.hp, scaled,
+    );
+    codestream::write_vlw_esc(&mut bw, 0);
+    codestream::write_common_tile_header(&mut bw);
+    if trim != 0 {
+        codestream::write_trim_flexbits(&mut bw, trim);
+    }
+    for mby in 0..plane.mbh {
+        for mbx in 0..plane.mbw {
+            plane.encode_mb(&mut bw, mbx, mby);
+        }
+    }
+    bw.align_to_byte();
+    container::write_container(&bw.finish(), w, h, &container::pixel_format::RGB24)
+}
+
 /// Encode RGB + alpha (4 planes, each `w*h` row-major) as a color JPEG-XR with
 /// a T.832 **alpha image plane**: `32bppBGRA` (or `32bppPBGRA` when
 /// `premultiplied`) container, `INT_YUV444` primary plane + `INT_YONLY` alpha
@@ -465,6 +840,10 @@ pub fn encode_color(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> 
 /// This is what JxrEncApp calls *interleaved* alpha (`-a 3`, in-codestream
 /// plane; its `-a 2` "planar" is the separate-container-codestream variant,
 /// which is a different, container-level feature).
+/// The primary plane may be 444 or subsampled (`fmt`); the alpha plane is
+/// always YONLY. Subsampled chroma is lossy by construction; 444 lossless
+/// round-trips all four channels bit-exactly.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_color_alpha(
     r: &[u8],
     g: &[u8],
@@ -475,12 +854,19 @@ pub fn encode_color_alpha(
     qp: QpSet,
     alpha_qp: QpSet,
     premultiplied: bool,
+    fmt: u8,
+    scaled: bool,
 ) -> Vec<u8> {
-    let mut primary = ColorPlane::new(r, g, b, w, h, qp);
+    let mut primary = ColorPlane::new_fmt(r, g, b, w, h, qp, fmt, ALL_BANDS, scaled);
+    // The alpha plane stays unscaled — scaled_flag is per plane header, and
+    // alpha is exactness-sensitive (jxrencapp likewise never scales alpha
+    // independently of its lossy decision; ours keeps the lossless path).
     let mut alpha = super::gray::YOnlyPlane::new(a, w, h, alpha_qp);
     let mut bw = BitWriter::new();
     codestream::write_image_header(&mut bw, w, h, OUT_RGB, premultiplied, true);
-    codestream::write_image_plane_header_color_allbands(&mut bw, qp.dc, qp.lp, qp.hp);
+    codestream::write_image_plane_header_yuv_scaled(
+        &mut bw, fmt, ALL_BANDS, qp.dc, qp.lp, qp.hp, scaled,
+    );
     // Alpha image plane header: YONLY, own bands + QPs (JxrEncApp analog `-Q`).
     codestream::write_image_plane_header_gray_allbands(
         &mut bw,
@@ -503,6 +889,52 @@ pub fn encode_color_alpha(
         &container::pixel_format::BGRA32
     };
     container::write_container(&bw.finish(), w, h, guid)
+}
+
+/// Encode an RGB image as **internal YONLY** with `OUT_RGB` output (the
+/// JxrEncApp `-d 0` analog): the forward color transform's luma is coded as a
+/// single plane and the decoder replicates it into R=G=B on output. The
+/// container stays `24bppRGB`. Gray sources (R=G=B) round-trip exactly —
+/// their luma IS the gray value; color sources reconstruct as luma.
+pub fn encode_yonly_from_color(
+    r: &[u8],
+    g: &[u8],
+    b: &[u8],
+    w: u32,
+    h: u32,
+    qp: QpSet,
+    scaled: bool,
+) -> Vec<u8> {
+    let (wu, hu) = (w as usize, h as usize);
+    let (pw, ph) = (wu.next_multiple_of(16), hu.next_multiple_of(16));
+    let sh = if scaled { 3 } else { 0 };
+    let (rp, gp, bp) = (
+        pad_plane(r, wu, hu, pw, ph),
+        pad_plane(g, wu, hu, pw, ph),
+        pad_plane(b, wu, hu, pw, ph),
+    );
+    let mut y_plane = vec![0i32; pw * ph];
+    for i in 0..pw * ph {
+        let (y, _, _) = rgb_to_yuv444(
+            (rp[i] as i32 - 128) << sh,
+            (gp[i] as i32 - 128) << sh,
+            (bp[i] as i32 - 128) << sh,
+        );
+        y_plane[i] = y;
+    }
+    let mut plane = super::gray::YOnlyPlane::from_centered_padded(&y_plane, pw, ph, qp);
+    let mut bw = BitWriter::new();
+    codestream::write_image_header(&mut bw, w, h, OUT_RGB, false, false);
+    codestream::write_image_plane_header_gray_scaled(&mut bw, qp.dc, qp.lp, qp.hp, scaled);
+    codestream::write_vlw_esc(&mut bw, 0);
+    codestream::write_common_tile_header(&mut bw);
+    for mby in 0..plane.mbh {
+        for mbx in 0..plane.mbw {
+            plane.encode_mb(&mut bw, mbx, mby);
+        }
+    }
+    bw.align_to_byte();
+    container::write_container(&bw.finish(), w, h, &container::pixel_format::RGB24)
 }
 
 /// HP-band adaptive state for the color path — multi-component analogue of
@@ -577,37 +1009,88 @@ fn write_cbphp_refine(bw: &mut BitWriter, nibble: i32, num: i32) {
     }
 }
 
-/// Encode the three components' `mb_cbphp` (16-bit per-block HP coded-block
-/// patterns) — inverse of the YUV444 `mb_cbphp` reader + `pred_cbphp_444`. First
-/// unpredict each component (cascade + neighbour bit, per `chroma_flag` state)
-/// and update the CBPHP model, then emit the single interleaved structure: a
-/// luma `i_cbphp`/`num_cbphp`, and per present block-group a `num_blk_cbphp`
-/// carrying the luma nibble plus (via the `i_val≥6` escape) `chr_cbphp` /
-/// `val_inc` and the chroma nibbles (`num_ch_blk` + refine).
+/// Inverse of the decoder's 420 chroma prediction cascade (Table 68): the
+/// decode steps applied in reverse order (each step XORs higher bits with a
+/// function of untouched lower bits, so each is its own inverse).
+fn unpredict_cascade_420(mut c: i32) -> i32 {
+    c ^= (c & 0x3) << 2;
+    c ^= 0x02 & (c << 1);
+    c
+}
+
+/// Inverse of the decoder's 422 chroma prediction cascade (Table 67).
+fn unpredict_cascade_422(mut c: i32) -> i32 {
+    c ^= (c & 0x30) << 2;
+    c ^= (c & 0x0C) << 2;
+    c ^= (c & 0x03) << 2;
+    c ^= (c & 0x01) << 1;
+    c
+}
+
+/// Encode the three components' `mb_cbphp` (per-block HP coded-block
+/// patterns: 16-bit luma/444, 8-bit 422 chroma, 4-bit 420 chroma) — inverse
+/// of the YUV `mb_cbphp` reader + `pred_cbphp_444/422/420`. First unpredict
+/// each component (cascade + neighbour bit per `chroma_flag` state; chroma
+/// model counts scale ×2 (422) / ×4 (420) to the 16-block frame) and update
+/// the CBPHP model, then emit the interleaved structure: `num_cbphp` over the
+/// four block-groups, and per present group a `num_blk_cbphp` carrying the
+/// luma nibble plus (via the `i_val≥6` escape) `chr_cbphp`/`val_inc` and the
+/// chroma parts — nibbles via `num_ch_blk`+refine for 444, a `chr_cbphp`
+/// pair-pattern symbol for 422, and nothing further for 420 (the 0x10/0x20
+/// flags ARE the per-group single-block chroma bits).
+#[allow(clippy::too_many_arguments)]
 fn encode_color_cbphp(
     bw: &mut BitWriter,
     st: &mut ColorHpState,
+    fmt: u8,
     mb_cbphp: [i32; 3],
     cbphp_left: [i32; 3],
     cbphp_top: [i32; 3],
     is_left: bool,
     is_top: bool,
 ) {
+    let is_42x = fmt != INT_YUV444;
     // --- unpredict per component + update CBPHP model ---
     let mut i_diff = [0i32; 3];
     for comp in 0..3 {
         let cf = (comp > 0) as usize;
-        let neighbor = if is_left {
-            if is_top { 1 } else { (cbphp_top[comp] >> 10) & 1 }
+        let chroma_42x = is_42x && comp > 0;
+        // Neighbour-bit positions + full-pattern mask per predictor
+        // (Tables 65/67/68).
+        let (top_shift, left_shift, full_mask) = if !chroma_42x {
+            (10u32, 5u32, 0xFFFF)
+        } else if fmt == INT_YUV420 {
+            (2, 1, 0xF)
         } else {
-            (cbphp_left[comp] >> 5) & 1
+            (6, 1, 0xFF)
+        };
+        let neighbor = if is_left {
+            if is_top { 1 } else { (cbphp_top[comp] >> top_shift) & 1 }
+        } else {
+            (cbphp_left[comp] >> left_shift) & 1
         };
         i_diff[comp] = match st.cbphp_model.cbphp_state[cf] {
-            0 => hp::unpredict_cascade(mb_cbphp[comp]) ^ neighbor,
-            2 => mb_cbphp[comp] ^ 0xFFFF,
+            0 => {
+                let un = if !chroma_42x {
+                    hp::unpredict_cascade(mb_cbphp[comp])
+                } else if fmt == INT_YUV420 {
+                    unpredict_cascade_420(mb_cbphp[comp])
+                } else {
+                    unpredict_cascade_422(mb_cbphp[comp])
+                };
+                un ^ neighbor
+            }
+            2 => mb_cbphp[comp] ^ full_mask,
             _ => mb_cbphp[comp],
         };
-        let n_orig = num_ones(mb_cbphp[comp] as u32) as i32;
+        let mult = if !chroma_42x {
+            1
+        } else if fmt == INT_YUV420 {
+            4
+        } else {
+            2
+        };
+        let n_orig = num_ones(mb_cbphp[comp] as u32) as i32 * mult;
         let m = &mut st.cbphp_model;
         m.count_ones[cf] = (m.count_ones[cf] + n_orig - 3).clamp(-16, 15);
         m.count_zeroes[cf] = (m.count_zeroes[cf] + (16 - n_orig) - 3).clamp(-16, 15);
@@ -622,9 +1105,25 @@ fn encode_color_cbphp(
 
     // --- code the interleaved structure ---
     let nib = |d: i32, b: usize| (d >> (b * 4)) & 0xF;
+    // The chroma "part" a block-group carries: full nibble (444), the single
+    // per-group bit (420), or the column-pair pattern at bits {0,2} of the
+    // group-shifted byte (422, mask 0b101 — decoder I_SHIFT mapping).
+    const I_SHIFT_422: [i32; 4] = [0, 1, 4, 5];
+    let chroma_part = |d: i32, b: usize| -> i32 {
+        if !is_42x {
+            nib(d, b)
+        } else if fmt == INT_YUV420 {
+            (d >> b) & 1
+        } else {
+            (d >> I_SHIFT_422[b]) & 5
+        }
+    };
     let mut i_cbphp = 0i32;
     for b in 0..4 {
-        if nib(i_diff[0], b) != 0 || nib(i_diff[1], b) != 0 || nib(i_diff[2], b) != 0 {
+        if nib(i_diff[0], b) != 0
+            || chroma_part(i_diff[1], b) != 0
+            || chroma_part(i_diff[2], b) != 0
+        {
             i_cbphp |= 1 << b;
         }
     }
@@ -638,10 +1137,10 @@ fn encode_color_cbphp(
             continue;
         }
         let luma_nib = nib(i_diff[0], b);
-        let u_nib = nib(i_diff[1], b);
-        let v_nib = nib(i_diff[2], b);
+        let u_part = chroma_part(i_diff[1], b);
+        let v_part = chroma_part(i_diff[2], b);
         let chroma_bits =
-            (if u_nib != 0 { 0x10 } else { 0 }) | (if v_nib != 0 { 0x20 } else { 0 });
+            (if u_part != 0 { 0x10 } else { 0 }) | (if v_part != 0 { 0x20 } else { 0 });
         let i_code = I_OUT.iter().position(|&x| x == luma_nib).unwrap() as i32;
         let base = (0..=5usize)
             .find(|&v| i_code >= I_OFF[v] && i_code < I_OFF[v] + (1 << I_FLC[v]))
@@ -666,14 +1165,29 @@ fn encode_color_cbphp(
             bw.write_bits((i_code - I_OFF[base]) as u64, I_FLC[base]);
         }
         if chroma_bits != 0 {
-            for k in 0..2 {
-                if (chroma_bits >> (k + 4)) & 1 != 0 {
-                    let cnib = if k == 0 { u_nib } else { v_nib };
-                    let num = num_ones(cnib as u32) as i32;
-                    write_huff(bw, tables::num_ch_blk(), num - 1);
-                    write_cbphp_refine(bw, cnib, num);
+            if !is_42x {
+                for &part in &[u_part, v_part] {
+                    if part != 0 {
+                        let num = num_ones(part as u32) as i32;
+                        write_huff(bw, tables::num_ch_blk(), num - 1);
+                        write_cbphp_refine(bw, part, num);
+                    }
+                }
+            } else if fmt == INT_YUV422 {
+                // CBPHP_CH_BLK: pair pattern {1,4,5} → chr_cbphp symbol 0/1/2
+                // (decoder reconstructs via I_SHIFT[(v+1)]).
+                for &part in &[u_part, v_part] {
+                    if part != 0 {
+                        let v = match part {
+                            1 => 0,
+                            4 => 1,
+                            _ => 2, // 5 = both blocks of the pair
+                        };
+                        write_huff(bw, tables::chr_cbphp(), v);
+                    }
                 }
             }
+            // 420: nothing further — the 0x10/0x20 flags carried it all.
         }
     }
 }
@@ -683,9 +1197,14 @@ fn encode_color_cbphp(
 /// the per-component forward `mb_buffer`s (HP quantized at within-block
 /// positions); `lp` the per-component DC+LP levels (for the shared HP pred
 /// mode). Returns each component's `mb_cbphp` for neighbour prediction.
+#[allow(clippy::too_many_arguments)]
 fn encode_color_hp_mb(
     bw: &mut BitWriter,
     st: &mut ColorHpState,
+    fmt: u8,
+    nblk_ch: usize,
+    emit_flex: bool,
+    trim: u32,
     bufs: &[[i32; 256]; 3],
     lp: &[[i32; 16]; 3],
     cbphp_left: [i32; 3],
@@ -693,12 +1212,27 @@ fn encode_color_hp_mb(
     is_left: bool,
     is_top: bool,
 ) -> [i32; 3] {
-    // Shared HP prediction mode: luma LP + chroma LP (1st h/v) strength.
+    let is_42x = fmt != INT_YUV444;
+    // Shared HP prediction mode: luma LP + chroma LP strength, with the
+    // format-specific chroma terms (Table 135 in our transposed mb_dclp
+    // storage — mirrors `decoder.rs` CalcHPPredMode).
     let mut s_hor = lp[0][1].abs() + lp[0][2].abs() + lp[0][3].abs();
     let mut s_ver = lp[0][4].abs() + lp[0][8].abs() + lp[0][12].abs();
     for c in 1..3 {
-        s_hor += lp[c][1].abs();
-        s_ver += lp[c][4].abs();
+        match fmt {
+            INT_YUV420 => {
+                s_hor += lp[c][1].abs();
+                s_ver += lp[c][2].abs();
+            }
+            INT_YUV422 => {
+                s_hor += lp[c][1].abs() + lp[c][5].abs();
+                s_ver += lp[c][2].abs() + lp[c][6].abs();
+            }
+            _ => {
+                s_hor += lp[c][1].abs();
+                s_ver += lp[c][4].abs();
+            }
+        }
     }
     let mode = if s_hor * 4 < s_ver {
         PREDICT_FROM_TOP
@@ -712,37 +1246,65 @@ fn encode_color_hp_mb(
     let mut coarse = [[[0i32; 16]; 16]; 3];
     let mut mb_cbphp = [0i32; 3];
     for comp in 0..3 {
+        let chroma_42x = is_42x && comp > 0;
+        let nblk = if chroma_42x { nblk_ch } else { 16 };
         let buf = &bufs[comp];
         let r = &mut res[comp];
-        for blk in 0..16 {
+        for blk in 0..nblk {
             for pos in 1..16 {
                 r[blk][pos] = buf[blk * 16 + pos];
             }
         }
+        // Within-MB HP prediction (Table 136). Luma/444 blocks use the
+        // permuted 16-block layout (TOP: blk−1 within columns; LEFT: blk−4);
+        // 42x chroma blocks are raster-indexed 2-wide, so TOP predicts from
+        // blk−2 and LEFT from blk−1 (the decoder's blkId lists/strides).
         if mode == PREDICT_FROM_TOP {
-            for &blk in &[1usize, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15] {
-                for &k in &[2usize, 10, 9] {
-                    r[blk][k] = buf[blk * 16 + k] - buf[(blk - 1) * 16 + k];
+            if !chroma_42x {
+                for &blk in &[1usize, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15] {
+                    for &k in &[2usize, 10, 9] {
+                        r[blk][k] = buf[blk * 16 + k] - buf[(blk - 1) * 16 + k];
+                    }
+                }
+            } else {
+                let top_blks: &[usize] =
+                    if fmt == INT_YUV420 { &[2, 3] } else { &[2, 4, 6, 3, 5, 7] };
+                for &blk in top_blks {
+                    for &k in &[2usize, 10, 9] {
+                        r[blk][k] = buf[blk * 16 + k] - buf[(blk - 2) * 16 + k];
+                    }
                 }
             }
         } else if mode == PREDICT_FROM_LEFT {
-            for blk in 4..16 {
-                for &k in &[1usize, 5, 6] {
-                    r[blk][k] = buf[blk * 16 + k] - buf[(blk - 4) * 16 + k];
+            if !chroma_42x {
+                for blk in 4..16 {
+                    for &k in &[1usize, 5, 6] {
+                        r[blk][k] = buf[blk * 16 + k] - buf[(blk - 4) * 16 + k];
+                    }
+                }
+            } else {
+                let left_blks: &[usize] =
+                    if fmt == INT_YUV420 { &[1, 3] } else { &[1, 3, 5, 7] };
+                for &blk in left_blks {
+                    for &k in &[1usize, 5, 6] {
+                        r[blk][k] = buf[blk * 16 + k] - buf[(blk - 1) * 16 + k];
+                    }
                 }
             }
         }
         let mbits = st.model.m_bits[chroma_component(comp)] as u32;
-        for blk in 0..16 {
+        for blk in 0..nblk {
             for pos in 1..16 {
                 let v = r[blk][pos];
                 let c = (v.unsigned_abs() >> mbits) as i32;
                 coarse[comp][blk][pos] = if v < 0 { -c } else { c };
             }
         }
+        // CBP bit order: hierarchical scan for 16-block planes, raster
+        // (identity) for 4/8-block 42x chroma (Tables 69/83).
         let mut cbp = 0i32;
-        for k in 0..16 {
-            let blk = I_HIER_SCAN_ORDER[k];
+        for k in 0..nblk {
+            let blk = if nblk == 16 { I_HIER_SCAN_ORDER[k] } else { k };
             if (1..16).any(|pos| coarse[comp][blk][pos] != 0) {
                 cbp |= 1 << k;
             }
@@ -750,15 +1312,17 @@ fn encode_color_hp_mb(
         mb_cbphp[comp] = cbp;
     }
 
-    encode_color_cbphp(bw, st, mb_cbphp, cbphp_left, cbphp_top, is_left, is_top);
+    encode_color_cbphp(bw, st, fmt, mb_cbphp, cbphp_left, cbphp_top, is_left, is_top);
 
     let mut lap = [0i32; 2];
     for comp in 0..3 {
         let chroma = chroma_component(comp);
+        let chroma_42x = is_42x && comp > 0;
+        let nblk = if chroma_42x { nblk_ch } else { 16 };
         let mbits = st.model.m_bits[chroma];
         let mut cbp = mb_cbphp[comp];
-        for k in 0..16 {
-            let blk = I_HIER_SCAN_ORDER[k];
+        for k in 0..nblk {
+            let blk = if nblk == 16 { I_HIER_SCAN_ORDER[k] } else { k };
             if cbp & 1 != 0 {
                 let scan = if mode == PREDICT_FROM_TOP { &mut st.ver_scan } else { &mut st.hor_scan };
                 let mut pairs: Vec<(u32, i32)> = Vec::new();
@@ -786,14 +1350,20 @@ fn encode_color_hp_mb(
                 );
             }
             cbp >>= 1;
-            if mbits > 0 {
+            // Flexbits: skipped entirely at NOFLEXBITS; truncated by `trim`
+            // when the image header sets trim_flexbits_flag.
+            if emit_flex && mbits > 0 {
                 for &n in &I_TRANSPOSE_FLEX[1..] {
-                    coeff::encode_refine_lp(bw, coarse[comp][blk][n], res[comp][blk][n], mbits);
+                    coeff::encode_flexbits(bw, coarse[comp][blk][n], res[comp][blk][n], mbits, trim);
                 }
             }
         }
     }
-    st.model.update(lap, 2, 3);
+    match fmt {
+        INT_YUV420 => st.model.update_42x(lap, 2, true),
+        INT_YUV422 => st.model.update_42x(lap, 2, false),
+        _ => st.model.update(lap, 2, 3),
+    }
     mb_cbphp
 }
 
@@ -923,6 +1493,248 @@ mod tests {
             let got = (d.image_plane[0][i], d.image_plane[1][i], d.image_plane[2][i]);
             let (r, g, b) = expected[i];
             assert_eq!(got, (r as i32, g as i32, b as i32), "pixel {i}");
+        }
+    }
+
+    /// 4b Stage A gate: whole-image constant color at 420/422 **DCONLY**
+    /// round-trips END-TO-END exactly (constant chroma survives decimation;
+    /// the decoder's centering upsample of a constant is that constant),
+    /// across 1-MB, multi-MB, and non-aligned sizes — exercising the 42x
+    /// plane header, chroma MB transforms, chroma DC prediction (iScale +
+    /// rounding) and the Table-116 model dispatch on real grids.
+    #[test]
+    fn roundtrip_constant_color_42x_dconly() {
+        for &fmt in &[INT_YUV420, INT_YUV422] {
+            for &(w, h) in &[(16usize, 16usize), (48, 32), (17, 31), (64, 64)] {
+                for &(r, g, b) in
+                    &[(200u8, 50u8, 100u8), (0, 0, 0), (255, 255, 255), (128, 128, 128), (10, 200, 250)]
+                {
+                    let (rp, gp, bp) = (vec![r; w * h], vec![g; w * h], vec![b; w * h]);
+                    let jxr = encode_color_subsampled(
+                        &rp, &gp, &bp, w as u32, h as u32, QpSet::LOSSLESS, fmt, DCONLY,
+                    );
+                    let expected = vec![(r, g, b); w * h];
+                    assert_rgb_exact(&jxr, w, h, &expected);
+                }
+            }
+        }
+    }
+
+    /// 4b Stage B gate (in-crate half): zero-HP **luma** detail over CONSTANT
+    /// chroma at 420/422 **NOHIGHPASS** is end-to-end exact — the luma LP path
+    /// runs fully inside the 42x MB structure (cbplp_yuv1_42x, the
+    /// iFullPlanes=2 raw width, refinement order), while constant chroma
+    /// survives decimation/upsampling exactly. Chroma LP *values* are gated
+    /// externally via JxrDecApp (decimation is lossy end-to-end).
+    #[test]
+    fn roundtrip_zero_hp_luma_42x_nohighpass() {
+        let mut r = Lcg2(0x42b5_7a6e_0042_b57a);
+        for &fmt in &[INT_YUV420, INT_YUV422] {
+            for &(mbw, mbh) in &[(1usize, 1usize), (2, 2), (3, 2)] {
+                let (w, h) = (mbw * 16, mbh * 16);
+                let mut gray = vec![0u8; w * h];
+                for mx in 0..mbw {
+                    for my in 0..mbh {
+                        let blk = loop {
+                            let yb = zero_hp_centered(&mut r, 14);
+                            let mut ok = true;
+                            let mut out = [0u8; 256];
+                            for p in 0..256 {
+                                let v = yb[p] + 128;
+                                if !(0..=255).contains(&v) {
+                                    ok = false;
+                                    break;
+                                }
+                                out[p] = v as u8;
+                            }
+                            if ok {
+                                break out;
+                            }
+                        };
+                        for py in 0..16 {
+                            for px in 0..16 {
+                                gray[(my * 16 + py) * w + (mx * 16 + px)] = blk[py * 16 + px];
+                            }
+                        }
+                    }
+                }
+                // R=G=B ⇒ U=V=0 everywhere (constant chroma), Y = gray − 128.
+                let jxr = encode_color_subsampled(
+                    &gray, &gray, &gray, w as u32, h as u32, QpSet::LOSSLESS, fmt, NOHIGHPASS,
+                );
+                let expected: Vec<(u8, u8, u8)> =
+                    gray.iter().map(|&v| (v, v, v)).collect();
+                assert_rgb_exact(&jxr, w, h, &expected);
+            }
+        }
+    }
+
+    /// 4b Stage C gate (in-crate half): arbitrary **luma** detail over
+    /// CONSTANT chroma at 420/422 **ALL_BANDS** lossless is end-to-end exact —
+    /// the full luma DC+LP+HP+flex path runs inside the 42x MB structure
+    /// (CBPHP chroma arms see all-zero patterns but the group/escape coding
+    /// still runs), and constant chroma survives decimation exactly.
+    #[test]
+    fn roundtrip_gray_content_42x_allbands() {
+        let mut r = Lcg(0xc0a1_e5ce_0042_c0a1);
+        for &fmt in &[INT_YUV420, INT_YUV422] {
+            for &(w, h) in &[(48usize, 32usize), (17, 31)] {
+                let n = w * h;
+                let gray: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+                let jxr = encode_color_subsampled(
+                    &gray, &gray, &gray, w as u32, h as u32, QpSet::LOSSLESS, fmt, ALL_BANDS,
+                );
+                let expected: Vec<(u8, u8, u8)> = gray.iter().map(|&v| (v, v, v)).collect();
+                assert_rgb_exact(&jxr, w, h, &expected);
+            }
+        }
+    }
+
+    /// 4b Stage C structural check: arbitrary content at 420/422 ALL_BANDS
+    /// decodes to the right shape across QPs (joint LP + chroma CBPHP/HP all
+    /// emitting); pixel exactness is the harness's JxrDecApp gate.
+    #[test]
+    fn subsampled_allbands_streams_decode() {
+        let mut r = Lcg(0xa11b_a4d5_0042_a11b);
+        for &fmt in &[INT_YUV420, INT_YUV422] {
+            for &(w, h) in &[(48usize, 32usize), (33, 17)] {
+                let n = w * h;
+                let rp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+                let gp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+                let bp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+                for &qp in &[QpSet::LOSSLESS, QpSet { dc: 16, lp: 32, hp: 64 }] {
+                    let jxr = encode_color_subsampled(
+                        &rp, &gp, &bp, w as u32, h as u32, qp, fmt, ALL_BANDS,
+                    );
+                    let d = decode(&jxr);
+                    assert_eq!(
+                        (d.width as usize, d.height as usize, d.num_components),
+                        (w, h, 3),
+                        "fmt={fmt} {w}x{h}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 4b Stage D: YONLY-from-color (`-d 0` analog). Gray content (R=G=B)
+    /// round-trips exactly — its luma IS the gray value and the decoder
+    /// replicates YONLY into R=G=B; color content decodes to the right shape.
+    #[test]
+    fn yonly_from_color_roundtrip() {
+        let mut r = Lcg(0xd0d0_0042_d0d0_0042);
+        for &(w, h) in &[(48usize, 32usize), (17, 31)] {
+            let n = w * h;
+            let gray: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+            let jxr = encode_yonly_from_color(&gray, &gray, &gray, w as u32, h as u32, QpSet::LOSSLESS, false);
+            let expected: Vec<(u8, u8, u8)> = gray.iter().map(|&v| (v, v, v)).collect();
+            assert_rgb_exact(&jxr, w, h, &expected);
+            // Color content: structural (decoder replicates luma; not source-exact).
+            let rp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+            let gp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+            let bp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+            let jxr = encode_yonly_from_color(&rp, &gp, &bp, w as u32, h as u32, QpSet::LOSSLESS, false);
+            let d = decode(&jxr);
+            assert_eq!((d.width as usize, d.height as usize, d.num_components), (w, h, 3));
+            // Replication property: all three output channels identical.
+            for i in 0..n {
+                assert_eq!(d.image_plane[0][i], d.image_plane[1][i]);
+                assert_eq!(d.image_plane[1][i], d.image_plane[2][i]);
+            }
+        }
+    }
+
+    /// 4b Stage D: alpha image plane over a SUBSAMPLED (420) primary. Gray
+    /// content (constant zero chroma) + noise alpha at lossless is exact on
+    /// all four channels — luma and the alpha plane are full-resolution paths.
+    #[test]
+    fn alpha_over_subsampled_primary_roundtrip() {
+        let mut r = Lcg(0xa1fa_0420_a1fa_0420);
+        for &fmt in &[INT_YUV420, INT_YUV422] {
+            let (w, h) = (48usize, 32usize);
+            let n = w * h;
+            let gray: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+            let alpha: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+            let jxr = encode_color_alpha(
+                &gray, &gray, &gray, &alpha, w as u32, h as u32,
+                QpSet::LOSSLESS, QpSet::LOSSLESS, false, fmt, false,
+            );
+            let d = decode(&jxr);
+            assert_eq!(d.num_components, 4, "fmt={fmt}");
+            assert!(d.has_alpha);
+            for i in 0..n {
+                assert_eq!(d.image_plane[0][i], gray[i] as i32, "luma px{i}");
+                assert_eq!(d.image_plane[1][i], gray[i] as i32);
+                assert_eq!(d.image_plane[2][i], gray[i] as i32);
+                assert_eq!(d.image_plane[3][i], alpha[i] as i32, "alpha px{i}");
+            }
+        }
+    }
+
+    /// 4b Stage D: scaled arithmetic. Gray content (zero chroma — halving of
+    /// zero is exact) at scaled q1 is end-to-end exact for every sampling:
+    /// the luma path is `<<3` in, `(v+bias<<3+3)>>3` out, exactly invertible.
+    /// Arbitrary content decodes to shape (chroma half-step is lossy by
+    /// design; JxrDecApp readback exactness is the harness gate).
+    #[test]
+    fn scaled_arithmetic_roundtrips() {
+        let mut r = Lcg(0x5ca1_ed00_5ca1_ed00);
+        for &fmt in &[INT_YUV444, INT_YUV420, INT_YUV422] {
+            let (w, h) = (48usize, 32usize);
+            let n = w * h;
+            let gray: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+            let jxr = encode_color_scaled(
+                &gray, &gray, &gray, w as u32, h as u32, QpSet::LOSSLESS, fmt, ALL_BANDS, true,
+            );
+            let expected: Vec<(u8, u8, u8)> = gray.iter().map(|&v| (v, v, v)).collect();
+            assert_rgb_exact(&jxr, w, h, &expected);
+            // Arbitrary color content: structural + bounded chroma error at q1.
+            let rp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+            let gp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+            let bp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+            let jxr = encode_color_scaled(
+                &rp, &gp, &bp, w as u32, h as u32, QpSet::LOSSLESS, fmt, ALL_BANDS, true,
+            );
+            let d = decode(&jxr);
+            assert_eq!((d.width as usize, d.height as usize, d.num_components), (w, h, 3));
+            if fmt == INT_YUV444 {
+                // 444 scaled q1: only the chroma half-step loses — pixel error
+                // is tightly bounded (libjxr accepts this; "lossless" mode in
+                // libjxr simply never uses scaled).
+                for i in 0..n {
+                    assert!((d.image_plane[0][i] - rp[i] as i32).abs() <= 2, "px{i}");
+                    assert!((d.image_plane[1][i] - gp[i] as i32).abs() <= 2);
+                    assert!((d.image_plane[2][i] - bp[i] as i32).abs() <= 2);
+                }
+            }
+        }
+    }
+
+    /// 4b Stage B structural check: arbitrary content at 420/422 NOHIGHPASS
+    /// (lossless + lossy QPs) yields streams our decoder parses to the right
+    /// shape — a desync in the joint-chroma LP coding shows up here as a
+    /// decode error. Pixel exactness is the harness's JxrDecApp gate.
+    #[test]
+    fn subsampled_nohighpass_streams_decode() {
+        let mut r = Lcg(0x4242_0042_4242_0042);
+        for &fmt in &[INT_YUV420, INT_YUV422] {
+            for &(w, h) in &[(48usize, 32usize), (33, 17)] {
+                let n = w * h;
+                let rp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+                let gp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+                let bp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
+                for &qp in &[QpSet::LOSSLESS, QpSet { dc: 16, lp: 32, hp: 0 }] {
+                    let jxr = encode_color_subsampled(
+                        &rp, &gp, &bp, w as u32, h as u32, qp, fmt, NOHIGHPASS,
+                    );
+                    let d = decode(&jxr);
+                    assert_eq!(
+                        (d.width as usize, d.height as usize, d.num_components),
+                        (w, h, 3),
+                        "fmt={fmt} {w}x{h}"
+                    );
+                }
+            }
         }
     }
 

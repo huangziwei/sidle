@@ -166,6 +166,14 @@ pub fn fdct4x4_stage2(c: &mut [i32; 16]) {
 /// `out[0]` (== `mb_dclp[0]`); LP at `out[16 * ICT4X4_INV_PERM[1..16]]`; HP
 /// within each block. No overlap (caller handles the no-overlap config).
 pub fn forward_transform_mb(samples: &[i32; 256]) -> [i32; 256] {
+    forward_transform_mb_with(samples, false)
+}
+
+/// [`forward_transform_mb`] with the SCALED-mode chroma half-step: when
+/// `halve_dclp`, the 16 block-DCs are floor-halved (`>>1`) between stage 1
+/// and stage 2 — the exact inverse of the decoder's post-stage-2 chroma `×2`
+/// in scaled arithmetic, and libjxr's `strNormalizeEnc` placement.
+pub fn forward_transform_mb_with(samples: &[i32; 256], halve_dclp: bool) -> [i32; 256] {
     let mut buf = [0i32; 256];
     // Inverse of second_level_coefficient_combination: scatter pixels into the
     // permuted per-block layout. Block (bx,by) lives at base by*16 + bx*64.
@@ -191,6 +199,9 @@ pub fn forward_transform_mb(samples: &[i32; 256]) -> [i32; 256] {
     let mut dclp = [0i32; 16];
     for j in 0..16 {
         dclp[j] = buf[j * 16];
+        if halve_dclp {
+            dclp[j] >>= 1;
+        }
     }
     fdct4x4_stage2(&mut dclp);
     for j in 0..16 {
@@ -206,7 +217,7 @@ pub fn forward_transform_mb(samples: &[i32; 256]) -> [i32; 256] {
 /// 420 stage (`t2x2h(d,0)` then `swap(1,2)`, `decoder.rs`
 /// `first_level_inverse_transform`). `samples[row * 8 + col]`, row/col in
 /// `0..8`, holding the downsampled centered chroma.
-pub fn forward_transform_chroma_mb_420(samples: &[i32; 64]) -> [i32; 64] {
+pub fn forward_transform_chroma_mb_420(samples: &[i32; 64], halve_dclp: bool) -> [i32; 64] {
     let mut buf = [0i32; 64];
     for j in 0..4 {
         let (bx4, by4) = (4 * (j % 2), 4 * (j / 2));
@@ -220,8 +231,14 @@ pub fn forward_transform_chroma_mb_420(samples: &[i32; 64]) -> [i32; 64] {
         buf[16 * j..16 * j + 16].copy_from_slice(&block);
     }
     // Across-block stage, decoder ops undone in reverse: unswap(1,2), then the
-    // exact t2x2h inverse.
+    // exact t2x2h inverse. Scaled mode floor-halves the block-DCs first
+    // (inverse of the decoder's post-inverse ×2; libjxr `strDCT2x2dnEnc`).
     let mut d = [buf[0], buf[16], buf[32], buf[48]];
+    if halve_dclp {
+        for v in d.iter_mut() {
+            *v >>= 1;
+        }
+    }
     d.swap(1, 2);
     let v = undo_t2x2h(d, 0);
     for (j, vj) in v.iter().enumerate() {
@@ -236,7 +253,7 @@ pub fn forward_transform_chroma_mb_420(samples: &[i32; 64]) -> [i32; 64] {
 /// (0..3) + `swap(1,2)`, `t2x2h` gathered as (4,6,5,7) + `swap(5,6)` — Table
 /// 151) on top of the per-block stage-1. `samples[row * 8 + col]`, row in
 /// `0..16`, col in `0..8`.
-pub fn forward_transform_chroma_mb_422(samples: &[i32; 128]) -> [i32; 128] {
+pub fn forward_transform_chroma_mb_422(samples: &[i32; 128], halve_dclp: bool) -> [i32; 128] {
     let mut buf = [0i32; 128];
     for j in 0..8 {
         let (bx4, by4) = (4 * (j % 2), 4 * (j / 2));
@@ -252,6 +269,9 @@ pub fn forward_transform_chroma_mb_422(samples: &[i32; 128]) -> [i32; 128] {
     let mut d = [0i32; 8];
     for (j, dj) in d.iter_mut().enumerate() {
         *dj = buf[16 * j];
+        if halve_dclp {
+            *dj >>= 1;
+        }
     }
     // Decoder order: 2pt(0,4); t2x2h(0,1,2,3)+swap(1,2); t2x2h(4,6,5,7)+swap(5,6).
     // Undo in reverse:
@@ -649,7 +669,7 @@ mod tests {
             for v in x.iter_mut() {
                 *v = r.next();
             }
-            assert_eq!(decode_chroma_mb_420(&forward_transform_chroma_mb_420(&x)), x);
+            assert_eq!(decode_chroma_mb_420(&forward_transform_chroma_mb_420(&x, false)), x);
         }
     }
 
@@ -661,7 +681,7 @@ mod tests {
             for v in x.iter_mut() {
                 *v = r.next();
             }
-            assert_eq!(decode_chroma_mb_422(&forward_transform_chroma_mb_422(&x)), x);
+            assert_eq!(decode_chroma_mb_422(&forward_transform_chroma_mb_422(&x, false)), x);
         }
     }
 }

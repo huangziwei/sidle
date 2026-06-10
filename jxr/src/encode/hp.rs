@@ -157,6 +157,7 @@ pub fn encode_cbphp(bw: &mut BitWriter, st: &mut HpState, mb_cbphp: i32, neighbo
 /// values (for the HP prediction mode); `cbphp_left`/`cbphp_top` the neighbours'
 /// stored `mb_cbphp`. Returns this MB's `mb_cbphp` for neighbour prediction.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn encode_hp_mb(
     bw: &mut BitWriter,
     st: &mut HpState,
@@ -166,6 +167,8 @@ pub fn encode_hp_mb(
     cbphp_top: i32,
     is_left: bool,
     is_top: bool,
+    emit_flex: bool,
+    trim: u32,
 ) -> i32 {
     // HP prediction mode from the LP coefficients.
     let s_hor = mb_dclp[1].abs() + mb_dclp[2].abs() + mb_dclp[3].abs();
@@ -259,7 +262,10 @@ pub fn encode_hp_mb(
         cbp >>= 1;
         if mb > 0 {
             for &n in &I_TRANSPOSE_FLEX[1..] {
-                coeff::encode_refine_lp(bw, coarse[blk][n], res[blk][n], mb as i32);
+                if !emit_flex {
+                    break;
+                }
+                coeff::encode_flexbits(bw, coarse[blk][n], res[blk][n], mb as i32, trim);
             }
         }
     }
