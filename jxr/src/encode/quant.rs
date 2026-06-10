@@ -10,7 +10,7 @@
 //! dequantize-then-predict telescopes to exactly `level * sf` — open-loop, no
 //! drift (lossless `sf == 1` is the identity special case).
 
-use crate::decode::consts::DC;
+use crate::decode::consts::{DC, HP, LP};
 use crate::decode::state::quant_map;
 
 /// Per-band quantizers for one grayscale plane (the QP *bytes* written into the
@@ -33,6 +33,22 @@ impl QpSet {
 /// irrelevant for component 0 with `scaled_flag = false`.)
 pub fn scaling_factor(qp: u8) -> i32 {
     quant_map(qp as u32, 0, false, DC).unwrap_or(1)
+}
+
+/// Per-band, per-component-class scaling factors at quantizer set `qp` — the
+/// general form of [`scaling_factor`]. The decoder's `quant_map` derivation
+/// is MODE- and COMPONENT-dependent: `scaled_flag` selects a different
+/// mantissa/exponent split (the scaled-domain coefficients carry 3 extra
+/// fraction bits), and in scaled mode the chroma DC/LP factors sit one
+/// binary order below luma's (`i_scaled_shift` 0 vs 1). `chroma` selects the
+/// component class (any component > 0 maps the same way).
+pub fn scaling_factors_for(qp: QpSet, chroma: bool, scaled: bool) -> (i32, i32, i32) {
+    let comp = usize::from(chroma);
+    (
+        quant_map(qp.dc as u32, comp, scaled, DC).unwrap_or(1),
+        quant_map(qp.lp as u32, comp, scaled, LP).unwrap_or(1),
+        quant_map(qp.hp as u32, comp, scaled, HP).unwrap_or(1),
+    )
 }
 
 /// Quantize one coefficient to a level: `sign(c) * ((|c| + offset) / sf)` with

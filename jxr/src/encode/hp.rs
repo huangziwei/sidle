@@ -159,7 +159,7 @@ pub fn encode_cbphp(bw: &mut BitWriter, st: &mut HpState, mb_cbphp: i32, neighbo
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub fn encode_hp_mb(
-    bw: &mut BitWriter,
+    sink: &mut super::codestream::Sink,
     st: &mut HpState,
     buf: &[i32; 256],
     mb_dclp: &[i32; 16],
@@ -225,7 +225,7 @@ pub fn encode_hp_mb(
     } else {
         (cbphp_left >> 5) & 1
     };
-    encode_cbphp(bw, st, mb_cbphp, neighbor_bit);
+    encode_cbphp(sink.hp(), st, mb_cbphp, neighbor_bit);
 
     // Per-block: run-level coarse (if not skipped) then flexbits (every block).
     let mut lap = 0i32;
@@ -255,8 +255,8 @@ pub fn encode_hp_mb(
             };
             lap += pairs.len() as i32;
             coeff::encode_block(
-                bw, &pairs, 1, &mut st.first_ind, &mut st.ind0, &mut st.ind1, &mut st.abs0,
-                &mut st.abs1,
+                sink.hp(), &pairs, 1, &mut st.first_ind, &mut st.ind0, &mut st.ind1,
+                &mut st.abs0, &mut st.abs1,
             );
         }
         cbp >>= 1;
@@ -265,7 +265,7 @@ pub fn encode_hp_mb(
                 if !emit_flex {
                     break;
                 }
-                coeff::encode_flexbits(bw, coarse[blk][n], res[blk][n], mb as i32, trim);
+                coeff::encode_flexbits(sink.flex(), coarse[blk][n], res[blk][n], mb as i32, trim);
             }
         }
     }

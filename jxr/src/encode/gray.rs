@@ -4,7 +4,7 @@
 //! per-macroblock sequence, reusing its `AdaptiveVLC` / `AdaptiveScan` state.
 
 use super::bitstream::BitWriter;
-use super::quant::{quantize, scaling_factor, QpSet};
+use super::quant::{quantize, QpSet};
 use super::{codestream, coeff, container, hp, transform};
 use crate::decode::consts::*;
 use crate::decode::state::{AdaptiveScan, AdaptiveVLC};
@@ -56,7 +56,15 @@ impl YOnlyPlane {
     /// image at `(top, left) = window` — `(0, 0)` is the classic
     /// `windowing_flag = 0` derived padding. Forward-transform every MB,
     /// quantize per band, and initialize the adaptive entropy state.
-    pub(super) fn new(luma: &[u8], w: u32, h: u32, qp: QpSet, window: (u32, u32)) -> Self {
+    pub(super) fn new(
+        luma: &[u8],
+        w: u32,
+        h: u32,
+        qp: QpSet,
+        window: (u32, u32),
+        overlap: u8,
+        tiles: (&[usize], &[usize]),
+    ) -> Self {
         let (wu, hu) = (w as usize, h as usize);
         let (top, left) = (window.0 as usize, window.1 as usize);
         let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
@@ -68,21 +76,58 @@ impl YOnlyPlane {
                     luma[sy * wu + x.saturating_sub(left).min(wu - 1)] as i32 - 128;
             }
         }
-        Self::from_centered_padded(&centered, pw, ph, qp)
+        Self::from_centered_padded_ovl(
+            &centered,
+            pw,
+            ph,
+            qp,
+            false,
+            overlap,
+            &super::overlap::bounds(tiles.0, pw / 16),
+            &super::overlap::bounds(tiles.1, ph / 16),
+        )
     }
 
     /// [`Self::new`] over an already-centered, already-padded `i32` plane
-    /// (`pw × ph`, both 16-aligned). This is the entry the YONLY-from-color
-    /// path uses: the Y plane of `rgb_to_yuv444` is centered but can exceed
-    /// the u8 range for saturated colors (the decoder clips on output).
-    pub(super) fn from_centered_padded(plane: &[i32], pw: usize, ph: usize, qp: QpSet) -> Self {
-        let (dc_sf, lp_sf, hp_sf) =
-            (scaling_factor(qp.dc), scaling_factor(qp.lp), scaling_factor(qp.hp));
+    /// (`pw × ph`, both 16-aligned) — the entry the YONLY-from-color path
+    /// uses: the Y plane of `rgb_to_yuv444` is centered but can exceed the
+    /// u8 range for saturated colors (the decoder clips on output) — with
+    /// overlap filtering: the staged
+    /// forward pipeline — sample-domain PRE-filter (overlap ≥ 1) → per-block
+    /// stage-1 DCT → block-DC-domain PRE-filter (overlap == 2) → stage-2 DCT
+    /// → quantization — the exact reverse of the decoder's
+    /// `sample_reconstruction`. `left_mb`/`top_mb` are tile boundaries in MB
+    /// units (`len == ntiles + 1`); overlap filters cross soft-tile edges.
+    pub(super) fn from_centered_padded_ovl(
+        plane: &[i32],
+        pw: usize,
+        ph: usize,
+        qp: QpSet,
+        scaled: bool,
+        overlap: u8,
+        left_mb: &[usize],
+        top_mb: &[usize],
+    ) -> Self {
+        // The QP→scaling-factor map is MODE-dependent (the decoder's
+        // `quant_map` scaled branch): a scaled plane must quantize with the
+        // scaled factors or the decoder dequantizes with different ones.
+        let (dc_sf, lp_sf, hp_sf) = super::quant::scaling_factors_for(qp, false, scaled);
         let (mbw, mbh) = (pw / 16, ph / 16);
 
-        // Forward transform every MB → full mb_buffer (HP within blocks) + dclp.
+        let filtered;
+        let plane = if overlap != NO_OVERLAP_FILTERING {
+            let mut p = plane.to_vec();
+            let tile_x: Vec<usize> = left_mb.iter().map(|&m| m * 16).collect();
+            let tile_y: Vec<usize> = top_mb.iter().map(|&m| m * 16).collect();
+            super::overlap::sample_pre_filter(&mut p, pw, &tile_x, &tile_y);
+            filtered = p;
+            &filtered[..]
+        } else {
+            plane
+        };
+
+        // Stage 1: per-MB per-block forward DCT (raw block DCs at the slots).
         let mut buf_grid = vec![vec![[0i32; 256]; mbh]; mbw];
-        let mut dclp = vec![vec![[0i32; 16]; mbh]; mbw];
         for mbx in 0..mbw {
             for mby in 0..mbh {
                 let mut samples = [0i32; 256];
@@ -92,7 +137,29 @@ impl YOnlyPlane {
                         samples[py * 16 + px] = plane[g];
                     }
                 }
-                let mut buf = transform::forward_transform_mb(&samples);
+                buf_grid[mbx][mby] = transform::forward_stage1_mb(&samples);
+            }
+        }
+
+        if overlap == FIRST_AND_SECOND_LEVEL_OVERLAP_FILTERING {
+            struct GrayDc<'a>(&'a mut Vec<Vec<[i32; 256]>>);
+            impl super::overlap::DcGrid for GrayDc<'_> {
+                fn dc(&self, mbx: usize, mby: usize, off: usize) -> i32 {
+                    self.0[mbx][mby][off]
+                }
+                fn set_dc(&mut self, mbx: usize, mby: usize, off: usize, v: i32) {
+                    self.0[mbx][mby][off] = v;
+                }
+            }
+            super::overlap::dc_pre_filter_luma(&mut GrayDc(&mut buf_grid), left_mb, top_mb);
+        }
+
+        // Stage 2 (block-DC DCT) + quantization + dclp extraction.
+        let mut dclp = vec![vec![[0i32; 16]; mbh]; mbw];
+        for mbx in 0..mbw {
+            for mby in 0..mbh {
+                let buf = &mut buf_grid[mbx][mby];
+                transform::forward_stage2_mb(buf, false);
                 // Quantize the raw coefficients in place; prediction below runs in
                 // the level domain. HP lives at within-block positions blk*16+1..16.
                 if hp_sf > 1 {
@@ -111,7 +178,6 @@ impl YOnlyPlane {
                 for s in c.iter_mut().skip(1) {
                     *s = quantize(*s, lp_sf);
                 }
-                buf_grid[mbx][mby] = buf;
                 dclp[mbx][mby] = c;
             }
         }
@@ -176,8 +242,10 @@ impl YOnlyPlane {
     }
 
     /// Emit one macroblock's DC + LP + HP(+flex) bits, updating this plane's
-    /// adaptive state exactly as the decoder's per-MB readers do.
-    pub(super) fn encode_mb(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize) {
+    /// adaptive state exactly as the decoder's per-MB readers do. Band
+    /// sections route through the [`codestream::Sink`] (one writer in
+    /// spatial order; per-band writers in frequency order).
+    pub(super) fn encode_mb(&mut self, sink: &mut codestream::Sink, mbx: usize, mby: usize) {
         let c = self.dclp[mbx][mby];
         // Tile-relative position: edge tests, the 16-MB adapt cadence, and the
         // last-column reset are all within-tile (decoder `MB::new` flags).
@@ -185,6 +253,7 @@ impl YOnlyPlane {
         let (is_left, is_top) = (mbxt == 0, mbyt == 0);
 
         // ---------- DC ----------
+        let bw = sink.dc();
         let (dmode, dc_pred) = if is_left && is_top {
             (NO_PREDICTION, 0)
         } else if is_left {
@@ -227,6 +296,7 @@ impl YOnlyPlane {
         }
 
         // ---------- LP ----------
+        let bw = sink.lp();
         if mbxt % 16 == 0 {
             self.scan.reset_totals();
         }
@@ -307,7 +377,7 @@ impl YOnlyPlane {
         let cbphp_left = if is_left { 0 } else { self.cbphp_grid[mbx - 1][mby] };
         let cbphp_top = if is_top { 0 } else { self.cbphp_grid[mbx][mby - 1] };
         let mbcbp = hp::encode_hp_mb(
-            bw,
+            sink,
             &mut self.hp_state,
             &self.buf_grid[mbx][mby],
             &c,
@@ -329,8 +399,8 @@ impl codestream::TileEncode for YOnlyPlane {
     fn begin_tile(&mut self, first_mbx: usize, first_mby: usize, tile_w: usize) {
         YOnlyPlane::begin_tile(self, first_mbx, first_mby, tile_w);
     }
-    fn encode_mb_at(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize) {
-        self.encode_mb(bw, mbx, mby);
+    fn encode_mb_at(&mut self, sink: &mut codestream::Sink, mbx: usize, mby: usize) {
+        self.encode_mb(sink, mbx, mby);
     }
 }
 
@@ -346,7 +416,7 @@ pub fn encode_grayscale(luma: &[u8], w: u32, h: u32, qp: QpSet) -> Vec<u8> {
 /// `(v + bias<<3 + 3) >> 3` output stage recovers every pixel — but kept
 /// non-default to match libjxr (scaled is its lossy mode).
 pub fn encode_grayscale_scaled(luma: &[u8], w: u32, h: u32, qp: QpSet, scaled: bool) -> Vec<u8> {
-    encode_grayscale_options(luma, w, h, qp, scaled, ALL_BANDS, 0, (0, 0), (&[], &[]))
+    encode_grayscale_options(luma, w, h, qp, scaled, ALL_BANDS, 0, (0, 0), (&[], &[]), 0, false)
 }
 
 /// [`encode_grayscale_scaled`] over the band-truncation envelope: any
@@ -367,6 +437,8 @@ pub fn encode_grayscale_options(
     trim: u8,
     window: (u32, u32),
     tiles: (&[usize], &[usize]),
+    overlap: u8,
+    frequency: bool,
 ) -> Vec<u8> {
     let (wu, hu) = (w as usize, h as usize);
     let (top, left) = (window.0 as usize, window.1 as usize);
@@ -380,10 +452,21 @@ pub fn encode_grayscale_options(
                 (luma[sy * wu + x.saturating_sub(left).min(wu - 1)] as i32 - 128) << sh;
         }
     }
-    let mut plane = YOnlyPlane::from_centered_padded(&centered, pw, ph, qp);
+    let mut plane = YOnlyPlane::from_centered_padded_ovl(
+        &centered,
+        pw,
+        ph,
+        qp,
+        scaled,
+        overlap,
+        &super::overlap::bounds(tiles.0, pw / 16),
+        &super::overlap::bounds(tiles.1, ph / 16),
+    );
     plane.bands = bands;
     plane.trim = if bands == ALL_BANDS { trim as u32 } else { 0 };
     let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_YONLY);
+    spec.frequency_mode = frequency;
+    spec.overlap_mode = overlap;
     spec.trim_flexbits = if bands == ALL_BANDS { trim } else { 0 };
     spec.margins = super::color::window_margins(w, h, window);
     spec.tile_cols_mb = tiles.0.to_vec();
@@ -396,6 +479,7 @@ pub fn encode_grayscale_options(
             codestream::write_image_plane_header_gray_bands(head, bands, qp.dc, qp.lp, qp.hp, scaled)
         },
         trim_v,
+        codestream::band_count(bands),
         mbw,
         mbh,
         &mut plane,

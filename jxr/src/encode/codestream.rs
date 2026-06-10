@@ -416,6 +416,48 @@ pub fn write_vlw_esc(bw: &mut BitWriter, value: u64) {
     }
 }
 
+/// Where one macroblock's band sections are written: a single writer
+/// (SPATIAL order — bands interleaved per MB inside one tile packet) or one
+/// writer per band (FREQUENCY order — the same sections routed into per-band
+/// tile packets; T.832 coded_tiles reads each band packet with the identical
+/// per-MB section sequence, so routing is the only difference).
+pub enum Sink<'a> {
+    Spatial(&'a mut BitWriter),
+    Frequency {
+        dc: &'a mut BitWriter,
+        lp: &'a mut BitWriter,
+        hp: &'a mut BitWriter,
+        flex: &'a mut BitWriter,
+    },
+}
+
+impl Sink<'_> {
+    pub fn dc(&mut self) -> &mut BitWriter {
+        match self {
+            Sink::Spatial(w) => w,
+            Sink::Frequency { dc, .. } => dc,
+        }
+    }
+    pub fn lp(&mut self) -> &mut BitWriter {
+        match self {
+            Sink::Spatial(w) => w,
+            Sink::Frequency { lp, .. } => lp,
+        }
+    }
+    pub fn hp(&mut self) -> &mut BitWriter {
+        match self {
+            Sink::Spatial(w) => w,
+            Sink::Frequency { hp, .. } => hp,
+        }
+    }
+    pub fn flex(&mut self) -> &mut BitWriter {
+        match self {
+            Sink::Spatial(w) => w,
+            Sink::Frequency { flex, .. } => flex,
+        }
+    }
+}
+
 /// One encodable image plane from the tile driver's point of view: reset the
 /// per-tile entropy/prediction state ([`Self::begin_tile`] — the decoder's
 /// `initialize_context`), then emit MBs at GLOBAL grid coordinates. The
@@ -426,22 +468,28 @@ pub trait TileEncode {
     /// `tile_w` MBs wide: fresh entropy models / VLC tables / scans, and
     /// tile-relative edge & adapt cadence from here on.
     fn begin_tile(&mut self, first_mbx: usize, first_mby: usize, tile_w: usize);
-    /// Emit one MB (all planes' sections, interleaved) at global `(mbx, mby)`.
-    fn encode_mb_at(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize);
+    /// Emit one MB (all planes' sections, interleaved) at global `(mbx, mby)`,
+    /// each band section routed through the [`Sink`].
+    fn encode_mb_at(&mut self, sink: &mut Sink, mbx: usize, mby: usize);
 }
 
 /// Assemble a complete WMPHOTO codestream: image header (`spec`), plane
 /// headers (`write_plane_headers`), index table when required, the
-/// `subsequent_bytes` field (0), then one byte-aligned tile packet per tile
-/// in the decoder's row-major tile order (`common_tile_header` + the 4-bit
-/// `trim_flexbits` flex header value when set + the tile's MBs).
+/// `subsequent_bytes` field (0), then the byte-aligned tile packets in the
+/// decoder's row-major tile order. SPATIAL = one packet per tile
+/// (`common_tile_header` + the 4-bit `trim_flexbits` flex header value when
+/// set + the tile's MBs, bands interleaved per MB). FREQUENCY
+/// (`spec.frequency_mode`) = `num_bands` packets per tile in DC/LP/HP/FLEX
+/// order, each with its own `common_tile_header` (the trim value sits in the
+/// FLEX packet — its flex tile plane header), the same MB raster per packet.
 ///
-/// Single tile reproduces the classic byte layout exactly (no index table,
-/// same alignment points).
+/// Single tile spatial reproduces the classic byte layout exactly (no index
+/// table, same alignment points).
 pub fn emit_codestream(
     spec: &ImageHeaderSpec,
     write_plane_headers: impl FnOnce(&mut BitWriter),
     trim: u8,
+    num_bands: usize,
     mbw: usize,
     mbh: usize,
     plane: &mut dyn TileEncode,
@@ -464,19 +512,60 @@ pub fn emit_codestream(
     for &th in &rows {
         let mut left = 0usize;
         for &tw_mb in &cols {
-            let mut tw = BitWriter::new();
-            write_common_tile_header(&mut tw);
-            if trim != 0 {
-                write_trim_flexbits(&mut tw, trim);
-            }
             plane.begin_tile(left, top, tw_mb);
-            for mby in top..top + th {
-                for mbx in left..left + tw_mb {
-                    plane.encode_mb_at(&mut tw, mbx, mby);
+            if !spec.frequency_mode {
+                let mut tw = BitWriter::new();
+                write_common_tile_header(&mut tw);
+                if trim != 0 {
+                    write_trim_flexbits(&mut tw, trim);
+                }
+                let mut sink = Sink::Spatial(&mut tw);
+                for mby in top..top + th {
+                    for mbx in left..left + tw_mb {
+                        plane.encode_mb_at(&mut sink, mbx, mby);
+                    }
+                }
+                tw.align_to_byte();
+                packets.push(tw.finish());
+            } else {
+                // One writer per band; each PRESENT packet opens with its own
+                // common_tile_header. Absent trailing bands receive no bits
+                // (the per-MB sections are gated by `bands_present`) and
+                // their writers are simply not pushed. The decoder reads this
+                // tile's packets consecutively in DC/LP/HP/FLEX order (its
+                // `coded_tiles` band loop), so they concatenate in that order.
+                let [mut dcw, mut lpw, mut hpw, mut fxw] =
+                    [BitWriter::new(), BitWriter::new(), BitWriter::new(), BitWriter::new()];
+                for (b, w) in [&mut dcw, &mut lpw, &mut hpw, &mut fxw].into_iter().enumerate() {
+                    if b < num_bands {
+                        write_common_tile_header(w);
+                        if b == 3 && trim != 0 {
+                            write_trim_flexbits(w, trim);
+                        }
+                    }
+                }
+                {
+                    let mut sink = Sink::Frequency {
+                        dc: &mut dcw,
+                        lp: &mut lpw,
+                        hp: &mut hpw,
+                        flex: &mut fxw,
+                    };
+                    for mby in top..top + th {
+                        for mbx in left..left + tw_mb {
+                            plane.encode_mb_at(&mut sink, mbx, mby);
+                        }
+                    }
+                }
+                for (b, mut w) in [dcw, lpw, hpw, fxw].into_iter().enumerate() {
+                    if b < num_bands {
+                        w.align_to_byte();
+                        packets.push(w.finish());
+                    } else {
+                        debug_assert!(w.finish().is_empty(), "absent band must stay silent");
+                    }
                 }
             }
-            tw.align_to_byte();
-            packets.push(tw.finish());
             left += tw_mb;
         }
         top += th;
@@ -497,6 +586,16 @@ pub fn emit_codestream(
         out.extend_from_slice(&p);
     }
     out
+}
+
+/// Bands carried by a `bands_present` code (= frequency packets per tile).
+pub fn band_count(bands: u8) -> usize {
+    match bands {
+        ALL_BANDS => 4,
+        NOFLEXBITS => 3,
+        NOHIGHPASS => 2,
+        _ => 1,
+    }
 }
 
 /// `common_tile_header`: 24-bit start code (==1) + one arbitrary byte. Mirrors

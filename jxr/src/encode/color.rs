@@ -19,7 +19,7 @@
 
 use super::bitstream::BitWriter;
 use super::entropy::write_huff;
-use super::quant::{quantize, scaling_factor, QpSet};
+use super::quant::{quantize, QpSet};
 use super::{codestream, coeff, container, hp, transform};
 use crate::decode::consts::*;
 use crate::decode::decoder::{ceil_div2, floor_div2};
@@ -191,7 +191,7 @@ impl ColorPlane {
     /// YUV 4:4:4, forward-transform + quantize every MB per component, and
     /// initialize the YUV adaptive entropy state.
     pub(super) fn new(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> Self {
-        Self::new_fmt(r, g, b, w, h, qp, INT_YUV444, ALL_BANDS, false, (0, 0))
+        Self::new_fmt(r, g, b, w, h, qp, INT_YUV444, ALL_BANDS, false, (0, 0), NO_OVERLAP_FILTERING, &[], &[])
     }
 
     /// [`Self::new`] generalized over chroma sampling and `bands_present`:
@@ -213,9 +213,16 @@ impl ColorPlane {
         bands: u8,
         scaled: bool,
         window: (u32, u32),
+        overlap: u8,
+        tile_cols_mb: &[usize],
+        tile_rows_mb: &[usize],
     ) -> Self {
-        let (dc_sf, lp_sf, hp_sf) =
-            (scaling_factor(qp.dc), scaling_factor(qp.lp), scaling_factor(qp.hp));
+        // Per-component-class, MODE-dependent scaling factors: the decoder's
+        // `quant_map` derives different factors for scaled arithmetic, and in
+        // scaled mode chroma DC/LP sit one binary order below luma. Unscaled:
+        // both triples are identical (no component dependence).
+        let (dc_sf_l, lp_sf_l, hp_sf_l) = super::quant::scaling_factors_for(qp, false, scaled);
+        let (dc_sf_c, lp_sf_c, hp_sf_c) = super::quant::scaling_factors_for(qp, true, scaled);
         let (wu, hu) = (w as usize, h as usize);
         let (top, left) = (window.0 as usize, window.1 as usize);
         let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
@@ -260,12 +267,48 @@ impl ColorPlane {
             _ => (16, 16),
         };
 
+        // Tile boundaries in MB units (single tile when the lists are empty);
+        // the overlap pre-filters cross soft-tile edges per these bounds.
+        let mut left_mb = vec![0usize];
+        if tile_cols_mb.is_empty() {
+            left_mb.push(mbw);
+        } else {
+            for &wmb in tile_cols_mb {
+                left_mb.push(left_mb.last().unwrap() + wmb);
+            }
+        }
+        let mut top_mb = vec![0usize];
+        if tile_rows_mb.is_empty() {
+            top_mb.push(mbh);
+        } else {
+            for &hmb in tile_rows_mb {
+                top_mb.push(top_mb.last().unwrap() + hmb);
+            }
+        }
+
+        // (overlap ≥ 1) sample-domain PRE-filter per component on its padded
+        // (and for 42x decimated) plane — tile bounds in component pixels.
+        if overlap != NO_OVERLAP_FILTERING {
+            for (comp, plane) in yuv.iter_mut().enumerate() {
+                let chroma_42x = comp > 0 && fmt != INT_YUV444;
+                let dx = if chroma_42x { 2 } else { 1 };
+                let dy = if chroma_42x && fmt == INT_YUV420 { 2 } else { 1 };
+                let tile_x: Vec<usize> = left_mb.iter().map(|&m| m * 16 / dx).collect();
+                let tile_y: Vec<usize> = top_mb.iter().map(|&m| m * 16 / dy).collect();
+                let stride = if chroma_42x { cw } else { pw };
+                super::overlap::sample_pre_filter(plane, stride, &tile_x, &tile_y);
+            }
+        }
+
         // Per-MB, per-component quantized DC+LP levels (`dclp`) and the full forward
-        // buffers (`buf_grid`, HP quantized) for the HP band.
+        // buffers (`buf_grid`, HP quantized) for the HP band — staged so the
+        // block-DC-domain overlap pre-filter can run between the DCT stages.
         const T420: [usize; 4] = [0, 2, 1, 3];
         const T422: [usize; 8] = [0, 2, 1, 3, 4, 6, 5, 7];
         let mut dclp = vec![vec![[[0i32; 16]; 3]; mbh]; mbw];
         let mut buf_grid = vec![vec![[[0i32; 256]; 3]; mbh]; mbw];
+
+        // Stage 1: per-block forward DCT (raw block DCs at the block slots).
         for mbx in 0..mbw {
             for mby in 0..mbh {
                 for (comp, plane) in yuv.iter().enumerate() {
@@ -278,12 +321,80 @@ impl ColorPlane {
                                     plane[(mby * 16 + py) * pw + (mbx * 16 + px)];
                             }
                         }
+                        buf_grid[mbx][mby][comp] = transform::forward_stage1_mb(&samples);
+                    } else if fmt == INT_YUV420 {
+                        // Chroma MB footprint 8×8 at (mbx*8, mby*8) in the
+                        // decimated plane.
+                        let mut samples = [0i32; 64];
+                        for py in 0..8 {
+                            for px in 0..8 {
+                                samples[py * 8 + px] =
+                                    plane[(mby * 8 + py) * cw + (mbx * 8 + px)];
+                            }
+                        }
+                        buf_grid[mbx][mby][comp][..64]
+                            .copy_from_slice(&transform::forward_stage1_chroma_420(&samples));
+                    } else {
+                        // 422: chroma MB footprint 8×16 at (mbx*8, mby*16).
+                        let mut samples = [0i32; 128];
+                        for py in 0..16 {
+                            for px in 0..8 {
+                                samples[py * 8 + px] =
+                                    plane[(mby * 16 + py) * cw + (mbx * 8 + px)];
+                            }
+                        }
+                        buf_grid[mbx][mby][comp][..128]
+                            .copy_from_slice(&transform::forward_stage1_chroma_422(&samples));
+                    }
+                }
+            }
+        }
+
+        // (overlap == 2) block-DC-domain PRE-filter, between the stages.
+        if overlap == FIRST_AND_SECOND_LEVEL_OVERLAP_FILTERING {
+            struct CompDc<'a> {
+                grid: &'a mut Vec<Vec<[[i32; 256]; 3]>>,
+                comp: usize,
+            }
+            impl super::overlap::DcGrid for CompDc<'_> {
+                fn dc(&self, mbx: usize, mby: usize, off: usize) -> i32 {
+                    self.grid[mbx][mby][self.comp][off]
+                }
+                fn set_dc(&mut self, mbx: usize, mby: usize, off: usize, v: i32) {
+                    self.grid[mbx][mby][self.comp][off] = v;
+                }
+            }
+            for comp in 0..3 {
+                let chroma_42x = comp > 0 && fmt != INT_YUV444;
+                let mut g = CompDc { grid: &mut buf_grid, comp };
+                if chroma_42x {
+                    super::overlap::dc_pre_filter_chroma(
+                        &mut g,
+                        fmt == INT_YUV420,
+                        &left_mb,
+                        &top_mb,
+                    );
+                } else {
+                    super::overlap::dc_pre_filter_luma(&mut g, &left_mb, &top_mb);
+                }
+            }
+        }
+
+        // Stage 2 (across-block transform) + quantization + dclp extraction.
+        for mbx in 0..mbw {
+            for mby in 0..mbh {
+                for comp in 0..3 {
+                    let chroma_42x = comp > 0 && fmt != INT_YUV444;
+                    let (dc_sf, lp_sf, hp_sf) = if comp > 0 {
+                        (dc_sf_c, lp_sf_c, hp_sf_c)
+                    } else {
+                        (dc_sf_l, lp_sf_l, hp_sf_l)
+                    };
+                    if !chroma_42x {
                         // Scaled chroma (444) floor-halves the block-DCs
                         // between the transform stages; luma never does.
-                        let mut buf = transform::forward_transform_mb_with(
-                            &samples,
-                            scaled && comp > 0,
-                        );
+                        let buf = &mut buf_grid[mbx][mby][comp];
+                        transform::forward_stage2_mb(buf, scaled && comp > 0);
                         if hp_sf > 1 {
                             for blk in 0..16 {
                                 for pos in 1..16 {
@@ -300,18 +411,10 @@ impl ColorPlane {
                         for s in c.iter_mut().skip(1) {
                             *s = quantize(*s, lp_sf);
                         }
-                        buf_grid[mbx][mby][comp] = buf;
                     } else if fmt == INT_YUV420 {
-                        // Chroma MB footprint 8×8 at (mbx*8, mby*8) in the
-                        // decimated plane.
-                        let mut samples = [0i32; 64];
-                        for py in 0..8 {
-                            for px in 0..8 {
-                                samples[py * 8 + px] =
-                                    plane[(mby * 8 + py) * cw + (mbx * 8 + px)];
-                            }
-                        }
-                        let mut buf = transform::forward_transform_chroma_mb_420(&samples, scaled);
+                        let mut buf = [0i32; 64];
+                        buf.copy_from_slice(&buf_grid[mbx][mby][comp][..64]);
+                        transform::forward_stage2_chroma_420(&mut buf, scaled);
                         if hp_sf > 1 {
                             for blk in 0..4 {
                                 for pos in 1..16 {
@@ -330,15 +433,9 @@ impl ColorPlane {
                         }
                         buf_grid[mbx][mby][comp][..64].copy_from_slice(&buf);
                     } else {
-                        // 422: chroma MB footprint 8×16 at (mbx*8, mby*16).
-                        let mut samples = [0i32; 128];
-                        for py in 0..16 {
-                            for px in 0..8 {
-                                samples[py * 8 + px] =
-                                    plane[(mby * 16 + py) * cw + (mbx * 8 + px)];
-                            }
-                        }
-                        let mut buf = transform::forward_transform_chroma_mb_422(&samples, scaled);
+                        let mut buf = [0i32; 128];
+                        buf.copy_from_slice(&buf_grid[mbx][mby][comp][..128]);
+                        transform::forward_stage2_chroma_422(&mut buf, scaled);
                         if hp_sf > 1 {
                             for blk in 0..8 {
                                 for pos in 1..16 {
@@ -438,7 +535,7 @@ impl ColorPlane {
     /// Emit one macroblock's DC + LP + HP(+flex) bits for all 3 components,
     /// updating this plane's adaptive state exactly as the decoder's per-MB
     /// YUV444 readers do.
-    pub(super) fn encode_mb(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize) {
+    pub(super) fn encode_mb(&mut self, sink: &mut codestream::Sink, mbx: usize, mby: usize) {
         // Tile-relative position: edge tests, the 16-MB adapt cadence, and the
         // last-column reset are all within-tile (decoder `MB::new` flags).
         let (mbxt, mbyt) = (mbx - self.tile_origin.0, mby - self.tile_origin.1);
@@ -448,6 +545,7 @@ impl ColorPlane {
         };
 
         // ---------- DC ----------
+        let bw = sink.dc();
         // Table 128: chroma strength weighting scales with subsampling;
         // Table 129: TOP_LEFT prediction of SUBSAMPLED chroma rounds up.
         let i_scale = match self.fmt {
@@ -518,6 +616,7 @@ impl ColorPlane {
         }
 
         // ---------- LP ----------
+        let bw = sink.lp();
         if mbxt % 16 == 0 {
             self.scan.reset_totals();
         }
@@ -765,7 +864,7 @@ impl ColorPlane {
         let cbphp_left = if is_left { [0; 3] } else { self.cbphp_grid[mbx - 1][mby] };
         let cbphp_top = if is_top { [0; 3] } else { self.cbphp_grid[mbx][mby - 1] };
         self.cbphp_grid[mbx][mby] = encode_color_hp_mb(
-            bw,
+            sink,
             &mut self.hp_state,
             self.fmt,
             self.nblk_ch,
@@ -788,8 +887,8 @@ impl codestream::TileEncode for ColorPlane {
     fn begin_tile(&mut self, first_mbx: usize, first_mby: usize, tile_w: usize) {
         ColorPlane::begin_tile(self, first_mbx, first_mby, tile_w);
     }
-    fn encode_mb_at(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize) {
-        self.encode_mb(bw, mbx, mby);
+    fn encode_mb_at(&mut self, sink: &mut codestream::Sink, mbx: usize, mby: usize) {
+        self.encode_mb(sink, mbx, mby);
     }
 }
 
@@ -806,9 +905,9 @@ impl codestream::TileEncode for AlphaPair<'_> {
         self.primary.begin_tile(first_mbx, first_mby, tile_w);
         self.alpha.begin_tile(first_mbx, first_mby, tile_w);
     }
-    fn encode_mb_at(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize) {
-        self.primary.encode_mb(bw, mbx, mby);
-        self.alpha.encode_mb(bw, mbx, mby);
+    fn encode_mb_at(&mut self, sink: &mut codestream::Sink, mbx: usize, mby: usize) {
+        self.primary.encode_mb(sink, mbx, mby);
+        self.alpha.encode_mb(sink, mbx, mby);
     }
 }
 
@@ -829,9 +928,12 @@ pub fn encode_color(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> 
     codestream::write_image_plane_header_color_allbands(&mut bw, qp.dc, qp.lp, qp.hp);
     codestream::write_vlw_esc(&mut bw, 0);
     codestream::write_common_tile_header(&mut bw);
-    for mby in 0..plane.mbh {
-        for mbx in 0..plane.mbw {
-            plane.encode_mb(&mut bw, mbx, mby);
+    {
+        let mut sink = codestream::Sink::Spatial(&mut bw);
+        for mby in 0..plane.mbh {
+            for mbx in 0..plane.mbw {
+                plane.encode_mb(&mut sink, mbx, mby);
+            }
         }
     }
     bw.align_to_byte();
@@ -873,7 +975,7 @@ pub fn encode_color_scaled(
     bands: u8,
     scaled: bool,
 ) -> Vec<u8> {
-    encode_color_options(r, g, b, w, h, qp, fmt, bands, scaled, 0, (0, 0), (&[], &[]))
+    encode_color_options(r, g, b, w, h, qp, fmt, bands, scaled, 0, (0, 0), (&[], &[]), 0, false)
 }
 
 /// Window-margins tuple (top, left, bottom, right) for an image placed at
@@ -904,11 +1006,16 @@ pub fn encode_color_options(
     trim: u8,
     window: (u32, u32),
     tiles: (&[usize], &[usize]),
+    overlap: u8,
+    frequency: bool,
 ) -> Vec<u8> {
     let trim = if bands == ALL_BANDS { trim } else { 0 };
-    let mut plane = ColorPlane::new_fmt(r, g, b, w, h, qp, fmt, bands, scaled, window);
+    let mut plane =
+        ColorPlane::new_fmt(r, g, b, w, h, qp, fmt, bands, scaled, window, overlap, tiles.0, tiles.1);
     plane.trim = trim as u32;
     let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
+    spec.frequency_mode = frequency;
+    spec.overlap_mode = overlap;
     spec.trim_flexbits = trim;
     spec.margins = window_margins(w, h, window);
     spec.tile_cols_mb = tiles.0.to_vec();
@@ -922,6 +1029,7 @@ pub fn encode_color_options(
             )
         },
         trim,
+        codestream::band_count(bands),
         mbw,
         mbh,
         &mut plane,
@@ -958,13 +1066,20 @@ pub fn encode_color_alpha(
     scaled: bool,
     window: (u32, u32),
     tiles: (&[usize], &[usize]),
+    overlap: u8,
+    frequency: bool,
 ) -> Vec<u8> {
-    let mut primary = ColorPlane::new_fmt(r, g, b, w, h, qp, fmt, ALL_BANDS, scaled, window);
+    let mut primary =
+        ColorPlane::new_fmt(r, g, b, w, h, qp, fmt, ALL_BANDS, scaled, window, overlap, tiles.0, tiles.1);
     // The alpha plane stays unscaled — scaled_flag is per plane header, and
     // alpha is exactness-sensitive (jxrencapp likewise never scales alpha
     // independently of its lossy decision; ours keeps the lossless path).
-    let mut alpha = super::gray::YOnlyPlane::new(a, w, h, alpha_qp, window);
+    // overlap_mode is an image-header field, so it applies to the alpha
+    // plane's reconstruction too — filter it identically.
+    let mut alpha = super::gray::YOnlyPlane::new(a, w, h, alpha_qp, window, overlap, tiles);
     let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
+    spec.frequency_mode = frequency;
+    spec.overlap_mode = overlap;
     spec.premultiplied_alpha = premultiplied;
     spec.alpha_image_plane = true;
     spec.margins = window_margins(w, h, window);
@@ -988,6 +1103,7 @@ pub fn encode_color_alpha(
             );
         },
         0,
+        4,
         mbw,
         mbh,
         &mut pair,
@@ -1016,6 +1132,8 @@ pub fn encode_yonly_from_color(
     scaled: bool,
     window: (u32, u32),
     tiles: (&[usize], &[usize]),
+    overlap: u8,
+    frequency: bool,
 ) -> Vec<u8> {
     let (wu, hu) = (w as usize, h as usize);
     let (top, left) = (window.0 as usize, window.1 as usize);
@@ -1035,8 +1153,19 @@ pub fn encode_yonly_from_color(
         );
         y_plane[i] = y;
     }
-    let mut plane = super::gray::YOnlyPlane::from_centered_padded(&y_plane, pw, ph, qp);
+    let mut plane = super::gray::YOnlyPlane::from_centered_padded_ovl(
+        &y_plane,
+        pw,
+        ph,
+        qp,
+        scaled,
+        overlap,
+        &super::overlap::bounds(tiles.0, pw / 16),
+        &super::overlap::bounds(tiles.1, ph / 16),
+    );
     let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
+    spec.frequency_mode = frequency;
+    spec.overlap_mode = overlap;
     spec.margins = window_margins(w, h, window);
     spec.tile_cols_mb = tiles.0.to_vec();
     spec.tile_rows_mb = tiles.1.to_vec();
@@ -1045,6 +1174,7 @@ pub fn encode_yonly_from_color(
         &spec,
         |head| codestream::write_image_plane_header_gray_scaled(head, qp.dc, qp.lp, qp.hp, scaled),
         0,
+        4,
         mbw,
         mbh,
         &mut plane,
@@ -1314,7 +1444,7 @@ fn encode_color_cbphp(
 /// mode). Returns each component's `mb_cbphp` for neighbour prediction.
 #[allow(clippy::too_many_arguments)]
 fn encode_color_hp_mb(
-    bw: &mut BitWriter,
+    sink: &mut codestream::Sink,
     st: &mut ColorHpState,
     fmt: u8,
     nblk_ch: usize,
@@ -1427,7 +1557,7 @@ fn encode_color_hp_mb(
         mb_cbphp[comp] = cbp;
     }
 
-    encode_color_cbphp(bw, st, fmt, mb_cbphp, cbphp_left, cbphp_top, is_left, is_top);
+    encode_color_cbphp(sink.hp(), st, fmt, mb_cbphp, cbphp_left, cbphp_top, is_left, is_top);
 
     let mut lap = [0i32; 2];
     for comp in 0..3 {
@@ -1454,7 +1584,7 @@ fn encode_color_hp_mb(
                 }
                 lap[chroma] += pairs.len() as i32;
                 coeff::encode_block(
-                    bw,
+                    sink.hp(),
                     &pairs,
                     1,
                     &mut st.first[chroma],
@@ -1469,7 +1599,13 @@ fn encode_color_hp_mb(
             // when the image header sets trim_flexbits_flag.
             if emit_flex && mbits > 0 {
                 for &n in &I_TRANSPOSE_FLEX[1..] {
-                    coeff::encode_flexbits(bw, coarse[comp][blk][n], res[comp][blk][n], mbits, trim);
+                    coeff::encode_flexbits(
+                        sink.flex(),
+                        coarse[comp][blk][n],
+                        res[comp][blk][n],
+                        mbits,
+                        trim,
+                    );
                 }
             }
         }
@@ -1741,14 +1877,14 @@ mod tests {
         for &(w, h) in &[(48usize, 32usize), (17, 31)] {
             let n = w * h;
             let gray: Vec<u8> = (0..n).map(|_| r.byte()).collect();
-            let jxr = encode_yonly_from_color(&gray, &gray, &gray, w as u32, h as u32, QpSet::LOSSLESS, false, (0, 0), (&[], &[]));
+            let jxr = encode_yonly_from_color(&gray, &gray, &gray, w as u32, h as u32, QpSet::LOSSLESS, false, (0, 0), (&[], &[]), 0, false);
             let expected: Vec<(u8, u8, u8)> = gray.iter().map(|&v| (v, v, v)).collect();
             assert_rgb_exact(&jxr, w, h, &expected);
             // Color content: structural (decoder replicates luma; not source-exact).
             let rp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let gp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let bp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
-            let jxr = encode_yonly_from_color(&rp, &gp, &bp, w as u32, h as u32, QpSet::LOSSLESS, false, (0, 0), (&[], &[]));
+            let jxr = encode_yonly_from_color(&rp, &gp, &bp, w as u32, h as u32, QpSet::LOSSLESS, false, (0, 0), (&[], &[]), 0, false);
             let d = decode(&jxr);
             assert_eq!((d.width as usize, d.height as usize, d.num_components), (w, h, 3));
             // Replication property: all three output channels identical.
@@ -1772,7 +1908,7 @@ mod tests {
             let alpha: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let jxr = encode_color_alpha(
                 &gray, &gray, &gray, &alpha, w as u32, h as u32,
-                QpSet::LOSSLESS, QpSet::LOSSLESS, false, fmt, false, (0, 0), (&[], &[]),
+                QpSet::LOSSLESS, QpSet::LOSSLESS, false, fmt, false, (0, 0), (&[], &[]), 0, false,
             );
             let d = decode(&jxr);
             assert_eq!(d.num_components, 4, "fmt={fmt}");

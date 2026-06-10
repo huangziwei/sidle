@@ -174,6 +174,16 @@ pub fn forward_transform_mb(samples: &[i32; 256]) -> [i32; 256] {
 /// and stage 2 — the exact inverse of the decoder's post-stage-2 chroma `×2`
 /// in scaled arithmetic, and libjxr's `strNormalizeEnc` placement.
 pub fn forward_transform_mb_with(samples: &[i32; 256], halve_dclp: bool) -> [i32; 256] {
+    let mut buf = forward_stage1_mb(samples);
+    forward_stage2_mb(&mut buf, halve_dclp);
+    buf
+}
+
+/// Stage 1 only of [`forward_transform_mb_with`]: scatter into the permuted
+/// per-block layout + per-block forward DCT. Block DCs sit raw at
+/// `buf[j * 16]` — exactly where the first-level (block-DC domain) overlap
+/// PRE-filter operates between the stages when `overlap_mode == 2`.
+pub fn forward_stage1_mb(samples: &[i32; 256]) -> [i32; 256] {
     let mut buf = [0i32; 256];
     // Inverse of second_level_coefficient_combination: scatter pixels into the
     // permuted per-block layout. Block (bx,by) lives at base by*16 + bx*64.
@@ -195,6 +205,12 @@ pub fn forward_transform_mb_with(samples: &[i32; 256], halve_dclp: bool) -> [i32
         fdct4x4_stage1(&mut block);
         buf[j * 16..j * 16 + 16].copy_from_slice(&block);
     }
+    buf
+}
+
+/// Stage 2 only of [`forward_transform_mb_with`]: forward DCT on the 16
+/// block DCs (optionally floor-halved first — scaled-mode chroma).
+pub fn forward_stage2_mb(buf: &mut [i32; 256], halve_dclp: bool) {
     // Inverse of first_level_inverse_transform: forward DCT on the 16 block DCs.
     let mut dclp = [0i32; 16];
     for j in 0..16 {
@@ -207,7 +223,6 @@ pub fn forward_transform_mb_with(samples: &[i32; 256], halve_dclp: bool) -> [i32
     for j in 0..16 {
         buf[j * 16] = dclp[j];
     }
-    buf
 }
 
 /// Forward transform of one 8×8 **420 chroma** macroblock into its 64-entry
@@ -218,6 +233,14 @@ pub fn forward_transform_mb_with(samples: &[i32; 256], halve_dclp: bool) -> [i32
 /// `first_level_inverse_transform`). `samples[row * 8 + col]`, row/col in
 /// `0..8`, holding the downsampled centered chroma.
 pub fn forward_transform_chroma_mb_420(samples: &[i32; 64], halve_dclp: bool) -> [i32; 64] {
+    let mut buf = forward_stage1_chroma_420(samples);
+    forward_stage2_chroma_420(&mut buf, halve_dclp);
+    buf
+}
+
+/// Stage 1 only of [`forward_transform_chroma_mb_420`] (per-block forward
+/// DCT; raw block DCs at `buf[16j]` for the DC-domain overlap pre-filter).
+pub fn forward_stage1_chroma_420(samples: &[i32; 64]) -> [i32; 64] {
     let mut buf = [0i32; 64];
     for j in 0..4 {
         let (bx4, by4) = (4 * (j % 2), 4 * (j / 2));
@@ -230,6 +253,11 @@ pub fn forward_transform_chroma_mb_420(samples: &[i32; 64], halve_dclp: bool) ->
         fdct4x4_stage1(&mut block);
         buf[16 * j..16 * j + 16].copy_from_slice(&block);
     }
+    buf
+}
+
+/// Stage 2 only of [`forward_transform_chroma_mb_420`].
+pub fn forward_stage2_chroma_420(buf: &mut [i32; 64], halve_dclp: bool) {
     // Across-block stage, decoder ops undone in reverse: unswap(1,2), then the
     // exact t2x2h inverse. Scaled mode floor-halves the block-DCs first
     // (inverse of the decoder's post-inverse ×2; libjxr `strDCT2x2dnEnc`).
@@ -244,7 +272,6 @@ pub fn forward_transform_chroma_mb_420(samples: &[i32; 64], halve_dclp: bool) ->
     for (j, vj) in v.iter().enumerate() {
         buf[16 * j] = *vj;
     }
-    buf
 }
 
 /// Forward transform of one 8×16 **422 chroma** macroblock into its 128-entry
@@ -254,6 +281,13 @@ pub fn forward_transform_chroma_mb_420(samples: &[i32; 64], halve_dclp: bool) ->
 /// 151) on top of the per-block stage-1. `samples[row * 8 + col]`, row in
 /// `0..16`, col in `0..8`.
 pub fn forward_transform_chroma_mb_422(samples: &[i32; 128], halve_dclp: bool) -> [i32; 128] {
+    let mut buf = forward_stage1_chroma_422(samples);
+    forward_stage2_chroma_422(&mut buf, halve_dclp);
+    buf
+}
+
+/// Stage 1 only of [`forward_transform_chroma_mb_422`].
+pub fn forward_stage1_chroma_422(samples: &[i32; 128]) -> [i32; 128] {
     let mut buf = [0i32; 128];
     for j in 0..8 {
         let (bx4, by4) = (4 * (j % 2), 4 * (j / 2));
@@ -266,6 +300,11 @@ pub fn forward_transform_chroma_mb_422(samples: &[i32; 128], halve_dclp: bool) -
         fdct4x4_stage1(&mut block);
         buf[16 * j..16 * j + 16].copy_from_slice(&block);
     }
+    buf
+}
+
+/// Stage 2 only of [`forward_transform_chroma_mb_422`].
+pub fn forward_stage2_chroma_422(buf: &mut [i32; 128], halve_dclp: bool) {
     let mut d = [0i32; 8];
     for (j, dj) in d.iter_mut().enumerate() {
         *dj = buf[16 * j];
@@ -293,7 +332,6 @@ pub fn forward_transform_chroma_mb_422(samples: &[i32; 128], halve_dclp: bool) -
     for (j, dj) in d.iter().enumerate() {
         buf[16 * j] = *dj;
     }
-    buf
 }
 
 // ---- Overlap pre-filter (inverse of the decoder's overlap *post* filter) ----
@@ -403,6 +441,147 @@ pub fn overlap_pre_filter_4x4(input: [i32; 16]) -> [i32; 16] {
     c[4] = r[0]; c[7] = r[1]; c[8] = r[2]; c[11] = r[3];
     let r = undo_t2x2h([c[5], c[6], c[9], c[10]], 0);
     c[5] = r[0]; c[6] = r[1]; c[9] = r[2]; c[10] = r[3];
+    c
+}
+
+/// Inverse of [`crate::decode::math::str_dct2x2dn`]: recover `(a, b, C, d)`
+/// from the forward's output tuple. `t` is recomputable from the restored
+/// pre-output values, so the inversion is exact.
+#[inline]
+fn undo_str_dct2x2dn(ap: i32, bp: i32, cp: i32, dp: i32) -> (i32, i32, i32, i32) {
+    let a1 = ap.wrapping_add(dp);
+    let b1 = bp.wrapping_sub(cp);
+    let t = a1.wrapping_sub(b1) >> 1;
+    let d = t.wrapping_sub(cp);
+    let big_c = t.wrapping_sub(dp);
+    (a1.wrapping_sub(d), b1.wrapping_add(big_c), big_c, d)
+}
+
+/// Inverse of [`crate::decode::math::inv_odd_odd_post`] (mechanical lifting
+/// reversal; `t1`/`t2` are re-taken once `d`/`c` are restored to the states
+/// they were sampled from).
+#[inline]
+fn undo_inv_odd_odd_post(a: i32, b: i32, c: i32, d: i32) -> (i32, i32, i32, i32) {
+    let (mut a, mut b, mut c, mut d) = (a, b, c, d);
+    d = d.wrapping_add(a);
+    c = c.wrapping_sub(b);
+    let t1 = d >> 1;
+    let t2 = c >> 1;
+    a = a.wrapping_sub(t1);
+    b = b.wrapping_add(t2);
+    a = a.wrapping_add((b.wrapping_mul(3).wrapping_add(4)) >> 3);
+    b = b.wrapping_sub((a.wrapping_mul(3).wrapping_add(2)) >> 2);
+    a = a.wrapping_add((b.wrapping_mul(3).wrapping_add(6)) >> 3);
+    b = b.wrapping_sub(t2);
+    a = a.wrapping_add(t1);
+    c = c.wrapping_add(b);
+    d = d.wrapping_sub(a);
+    (a, b, c, d)
+}
+
+/// Inverse of [`crate::decode::math::str_hst_dec1_alternate`].
+#[inline]
+fn undo_str_hst_dec1_alternate(a: i32, d: i32) -> (i32, i32) {
+    let (mut a, mut d) = (a, d);
+    d = d.wrapping_add(a >> 10);
+    d = d.wrapping_sub(a >> 7);
+    d = d.wrapping_sub(a.wrapping_mul(3) >> 4);
+    a = a.wrapping_sub(d.wrapping_mul(3) >> 3);
+    d = (a >> 1).wrapping_sub(d);
+    a = a.wrapping_sub(d);
+    (a, d)
+}
+
+/// Inverse of [`crate::decode::math::str_hst_dec`]: the forward returns
+/// `(a1 − c_out, b1 + d1, d1, c_out)`; every intermediate is recoverable in
+/// closed form.
+#[inline]
+fn undo_str_hst_dec(w: i32, x: i32, y: i32, z: i32) -> (i32, i32, i32, i32) {
+    let d1 = y;
+    let c_out = z;
+    let a1 = w.wrapping_add(c_out);
+    let b1 = x.wrapping_sub(d1);
+    let c = (a1.wrapping_sub(b1) >> 1).wrapping_sub(c_out);
+    let d = d1.wrapping_add(b1 >> 1);
+    let a = a1.wrapping_sub((d.wrapping_mul(3).wrapping_add(4)) >> 3);
+    let b = b1.wrapping_add(c);
+    (a, b, c, d)
+}
+
+/// Forward of [`crate::decode::math::str_post_4x4_stage2_split_alternate`]
+/// (libjxr `strPre4x4Stage2Split`): the first-level (block-DC domain)
+/// overlap PRE-filter for luma/444 — the decoder's stages in reverse, each
+/// inverted. Index slots match the decoder's input layout.
+pub fn str_pre_4x4_stage2_split_alternate(input: &[i32; 16]) -> [i32; 16] {
+    let mut c = *input;
+    // E⁻¹: undo the four str_hst_dec quads.
+    for &[i0, i1, i2, i3] in &[[0usize, 12, 3, 15], [1, 13, 2, 14], [4, 8, 7, 11], [5, 9, 6, 10]] {
+        let (a, b, cc, d) = undo_str_hst_dec(c[i0], c[i1], c[i2], c[i3]);
+        c[i0] = a;
+        c[i1] = b;
+        c[i2] = cc;
+        c[i3] = d;
+    }
+    // D⁻¹: undo the four str_hst_dec1_alternate pairs.
+    for &[i0, i1] in &[[0usize, 15], [1, 14], [4, 11], [5, 10]] {
+        let (a, d) = undo_str_hst_dec1_alternate(c[i0], c[i1]);
+        c[i0] = a;
+        c[i1] = d;
+    }
+    // C⁻¹: irotate1 undone by fwd_rotate1, same pairs.
+    for &[i0, i1] in &[[6usize, 2], [7, 3], [9, 8], [13, 12]] {
+        let (a, b) = fwd_rotate1(c[i0], c[i1]);
+        c[i0] = a;
+        c[i1] = b;
+    }
+    // B⁻¹: undo inv_odd_odd_post on (10, 11, 14, 15).
+    let (a, b, cc, d) = undo_inv_odd_odd_post(c[10], c[11], c[14], c[15]);
+    c[10] = a;
+    c[11] = b;
+    c[14] = cc;
+    c[15] = d;
+    // A⁻¹: undo the four str_dct2x2dn quads.
+    for &[i0, i1, i2, i3] in &[[0usize, 3, 12, 15], [1, 2, 13, 14], [4, 7, 8, 11], [5, 6, 9, 10]] {
+        let (a, b, cc, d) = undo_str_dct2x2dn(c[i0], c[i1], c[i2], c[i3]);
+        c[i0] = a;
+        c[i1] = b;
+        c[i2] = cc;
+        c[i3] = d;
+    }
+    c
+}
+
+/// Forward of [`crate::decode::math::overlap_post_filter_2x2`] (Table 170's
+/// inverse — libjxr's chroma 2×2 junction PRE-filter).
+pub fn overlap_pre_filter_2x2(input: [i32; 4]) -> [i32; 4] {
+    let mut c = input;
+    c[1] = c[1].wrapping_add(c[2]);
+    c[0] = c[0].wrapping_add(c[3]);
+    c[2] = c[2].wrapping_sub((c[1].wrapping_add(1)) >> 1);
+    c[3] = c[3].wrapping_sub((c[0].wrapping_add(1)) >> 1);
+    c[1] = c[1].wrapping_sub((c[0].wrapping_add(2)) >> 2);
+    c[0] = c[0].wrapping_sub(c[1] >> 13);
+    c[0] = c[0].wrapping_sub(c[1] >> 9);
+    c[0] = c[0].wrapping_sub(c[1] >> 5);
+    c[0] = c[0].wrapping_sub((c[1].wrapping_add(1)) >> 1);
+    c[1] = c[1].wrapping_sub((c[0].wrapping_add(2)) >> 2);
+    c[2] = c[2].wrapping_add((c[1].wrapping_add(1)) >> 1);
+    c[3] = c[3].wrapping_add((c[0].wrapping_add(1)) >> 1);
+    c[1] = c[1].wrapping_sub(c[2]);
+    c[0] = c[0].wrapping_sub(c[3]);
+    c
+}
+
+/// Forward of [`crate::decode::math::overlap_post_filter_2`] (Table 171's
+/// inverse — the chroma 2-point edge PRE-filter).
+pub fn overlap_pre_filter_2(input: [i32; 2]) -> [i32; 2] {
+    let mut c = input;
+    c[1] = c[1].wrapping_sub((c[0].wrapping_add(2)) >> 2);
+    c[0] = c[0].wrapping_sub(c[1] >> 13);
+    c[0] = c[0].wrapping_sub(c[1] >> 9);
+    c[0] = c[0].wrapping_sub(c[1] >> 5);
+    c[0] = c[0].wrapping_sub((c[1].wrapping_add(1)) >> 1);
+    c[1] = c[1].wrapping_sub((c[0].wrapping_add(2)) >> 2);
     c
 }
 
@@ -592,6 +771,21 @@ mod tests {
         for _ in 0..5000 {
             let x = [r.next(), r.next(), r.next(), r.next()];
             assert_eq!(dec::overlap_post_filter_4(overlap_pre_filter_4(x)), x);
+        }
+    }
+
+    /// First-level (block-DC domain) pre-filter and the chroma junction/edge
+    /// pre-filters invert the decoder's post filters exactly.
+    #[test]
+    fn first_level_pre_filters_invert_decoder() {
+        let mut r = Lcg(0x4242_1717);
+        for _ in 0..5000 {
+            let x = r.block();
+            assert_eq!(dec::str_post_4x4_stage2_split_alternate(&str_pre_4x4_stage2_split_alternate(&x)), x);
+            let q = [x[0], x[1], x[2], x[3]];
+            assert_eq!(dec::overlap_post_filter_2x2(overlap_pre_filter_2x2(q)), q);
+            let p = [x[4], x[5]];
+            assert_eq!(dec::overlap_post_filter_2(overlap_pre_filter_2(p)), p);
         }
     }
 

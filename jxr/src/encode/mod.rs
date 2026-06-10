@@ -18,6 +18,7 @@ pub mod coeff;
 pub mod entropy;
 pub mod gray;
 pub mod hp;
+mod overlap;
 pub mod quant;
 pub mod transform;
 
@@ -67,6 +68,35 @@ pub enum ChromaSampling {
     /// Luma only (`-d 0` analog): chroma dropped; decoders reconstruct
     /// gray R=G=B from the transform's luma.
     YOnly,
+}
+
+/// Overlap pre-filtering (T.832 `overlap_mode`, the JxrEncApp `-l` knob):
+/// smooths block boundaries before the forward transform; decoders undo it
+/// exactly, so lossless stays lossless. Reduces blocking at low bitrates at
+/// some high-frequency cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Overlap {
+    /// No overlap filtering (`overlap_mode = 0`) — the byte-stable default.
+    #[default]
+    None,
+    /// One-level (`overlap_mode = 1`): sample-domain filtering only.
+    One,
+    /// Two-level (`overlap_mode = 2`): sample-domain + block-DC-domain.
+    Two,
+}
+
+impl Overlap {
+    fn code(self) -> u8 {
+        use crate::decode::consts::{
+            FIRST_AND_SECOND_LEVEL_OVERLAP_FILTERING, NO_OVERLAP_FILTERING,
+            SECOND_LEVEL_OVERLAP_FILTERING,
+        };
+        match self {
+            Overlap::None => NO_OVERLAP_FILTERING,
+            Overlap::One => SECOND_LEVEL_OVERLAP_FILTERING,
+            Overlap::Two => FIRST_AND_SECOND_LEVEL_OVERLAP_FILTERING,
+        }
+    }
 }
 
 /// Which subbands the codestream carries (T.832 `bands_present`): trailing
@@ -136,6 +166,13 @@ pub struct EncodeOptions {
     pub tile_cols: u16,
     /// Uniform tile rows. See [`Self::tile_cols`].
     pub tile_rows: u16,
+    /// Overlap pre-filtering level ([`Overlap`]; the JxrEncApp `-l` knob).
+    pub overlap: Overlap,
+    /// Frequency order (T.832 `frequency_mode`, libjxr's DEFAULT order — its
+    /// `-f` turns it off): each tile's bands go into separate byte-aligned
+    /// packets (DC/LP/HP/flexbits) addressed by the index table, enabling
+    /// progressive/partial decode. Same coefficients, re-segmented stream.
+    pub frequency: bool,
 }
 
 impl Default for EncodeOptions {
@@ -151,6 +188,8 @@ impl Default for EncodeOptions {
             window_left: 0,
             tile_cols: 0,
             tile_rows: 0,
+            overlap: Overlap::None,
+            frequency: false,
         }
     }
 }
@@ -319,6 +358,8 @@ pub fn encode_with_options(
         (Vec::new(), Vec::new())
     };
     let tiles: (&[usize], &[usize]) = (&tile_cols_mb, &tile_rows_mb);
+    let overlap = opts.overlap.code();
+    let frequency = opts.frequency;
     let (w, h) = (input.width, input.height);
     if w == 0 || h == 0 {
         return Err(EncodeError::Unsupported("zero-size image".into()));
@@ -390,6 +431,8 @@ pub fn encode_with_options(
             opts.scaled,
             window,
             tiles,
+            overlap,
+            frequency,
         ));
     }
     // A 1-plane input is grayscale regardless of mode — there's no chroma to
@@ -414,6 +457,8 @@ pub fn encode_with_options(
             opts.trim_flexbits,
             window,
             tiles,
+            overlap,
+            frequency,
         ));
     }
     if input.planes.len() != 3 {
@@ -439,13 +484,17 @@ pub fn encode_with_options(
             opts.trim_flexbits,
             window,
             tiles,
+            overlap,
+            frequency,
         ));
     }
     let (r, g, b) = (&input.planes[0], &input.planes[1], &input.planes[2]);
     let trim = opts.trim_flexbits;
     match opts.chroma {
         ChromaSampling::YOnly if opts.bands == BandsPresent::All && trim == 0 => {
-            Ok(color::encode_yonly_from_color(r, g, b, w, h, qp, opts.scaled, window, tiles))
+            Ok(color::encode_yonly_from_color(
+                r, g, b, w, h, qp, opts.scaled, window, tiles, overlap, frequency,
+            ))
         }
         ChromaSampling::YOnly => Err(EncodeError::Unsupported(
             "band truncation / trim with YOnly chroma is not implemented".into(),
@@ -455,19 +504,24 @@ pub fn encode_with_options(
                 && opts.bands == BandsPresent::All
                 && trim == 0
                 && window == (0, 0)
-                && tiles.0.is_empty() =>
+                && tiles.0.is_empty()
+                && opts.overlap == Overlap::None
+                && !frequency =>
         {
             // The classic byte-stable path (clone of the original encoder).
             Ok(color::encode_color(r, g, b, w, h, qp))
         }
         ChromaSampling::Yuv444 => Ok(color::encode_color_options(
-            r, g, b, w, h, qp, INT_YUV444, bands, opts.scaled, trim, window, tiles,
+            r, g, b, w, h, qp, INT_YUV444, bands, opts.scaled, trim, window, tiles, overlap,
+            frequency,
         )),
         ChromaSampling::Yuv422 => Ok(color::encode_color_options(
-            r, g, b, w, h, qp, INT_YUV422, bands, opts.scaled, trim, window, tiles,
+            r, g, b, w, h, qp, INT_YUV422, bands, opts.scaled, trim, window, tiles, overlap,
+            frequency,
         )),
         ChromaSampling::Yuv420 => Ok(color::encode_color_options(
-            r, g, b, w, h, qp, INT_YUV420, bands, opts.scaled, trim, window, tiles,
+            r, g, b, w, h, qp, INT_YUV420, bands, opts.scaled, trim, window, tiles, overlap,
+            frequency,
         )),
     }
 }
@@ -1220,6 +1274,8 @@ mod tests {
                     0,
                     (top as u32, left as u32),
                     (&[], &[]),
+                    0,
+                    false,
                 );
                 let d = dec(&f);
                 for i in 0..n {
@@ -1382,6 +1438,229 @@ mod tests {
             EncodeOptions { tile_cols: 2, ..Default::default() },
         )
         .is_err());
+    }
+
+    /// 4c: overlap modes 1/2. The pre-filters are exact inverses of the
+    /// decoder's post-filters over the same (disjoint) windows, so LOSSLESS
+    /// stays bit-exact through overlap — across content kinds, subsampling,
+    /// tiles (soft-tile continuations), window margins, and the alpha plane.
+    /// Lossy overlap must still decode to the right shape, and overlapped
+    /// lossy bytes must differ from non-overlapped (the filter is real).
+    #[test]
+    fn overlap_roundtrip_lossless() {
+        use crate::decode::container::parse;
+        let mut r = Lcg(0x0a1a_4242_0a1a_4242);
+        let dec = |jxr: &[u8]| {
+            let c = parse(jxr).unwrap();
+            crate::decode::decode_image(&c).unwrap()
+        };
+        for &(w, h) in &[(48u32, 32u32), (17, 31), (64, 64)] {
+            let n = (w * h) as usize;
+            let planes4: [Vec<u8>; 4] = noise_planes(&mut r, n);
+            for overlap in [Overlap::One, Overlap::Two] {
+                // Grayscale exact.
+                let gplanes = [planes4[0].clone()];
+                let gi = ImageInput {
+                    width: w,
+                    height: h,
+                    planes: &gplanes,
+                    premultiplied_alpha: false,
+                };
+                let f = encode_with_options(
+                    &gi,
+                    ColorMode::Grayscale,
+                    EncodeOptions { overlap, ..Default::default() },
+                )
+                .unwrap();
+                let d = dec(&f);
+                for i in 0..n {
+                    assert_eq!(
+                        d.image_plane[0][i], gplanes[0][i] as i32,
+                        "gray {overlap:?} {w}x{h} px{i}"
+                    );
+                }
+                // RGB 4:4:4 exact.
+                let ci = ImageInput {
+                    width: w,
+                    height: h,
+                    planes: &planes4[..3],
+                    premultiplied_alpha: false,
+                };
+                let f = encode_with_options(
+                    &ci,
+                    ColorMode::Color,
+                    EncodeOptions { overlap, ..Default::default() },
+                )
+                .unwrap();
+                let d = dec(&f);
+                for c in 0..3 {
+                    for i in 0..n {
+                        assert_eq!(
+                            d.image_plane[c][i], planes4[c][i] as i32,
+                            "rgb {overlap:?} {w}x{h} ch{c} px{i}"
+                        );
+                    }
+                }
+                // RGBA exact (alpha plane filtered identically).
+                let ai = ImageInput {
+                    width: w,
+                    height: h,
+                    planes: &planes4,
+                    premultiplied_alpha: false,
+                };
+                let f = encode_with_options(
+                    &ai,
+                    ColorMode::Color,
+                    EncodeOptions { overlap, ..Default::default() },
+                )
+                .unwrap();
+                let d = dec(&f);
+                assert_eq!(d.num_components, 4);
+                for c in 0..4 {
+                    for i in 0..n {
+                        assert_eq!(
+                            d.image_plane[c][i], planes4[c][i] as i32,
+                            "rgba {overlap:?} {w}x{h} ch{c} px{i}"
+                        );
+                    }
+                }
+                // Gray content through 420/422 (zero chroma) exact — incl.
+                // the chroma DC-domain pre-filter at overlap Two.
+                for fmt in
+                    [crate::decode::consts::INT_YUV420, crate::decode::consts::INT_YUV422]
+                {
+                    let g = &planes4[0];
+                    let f = color::encode_color_options(
+                        g,
+                        g,
+                        g,
+                        w,
+                        h,
+                        QpSet::LOSSLESS,
+                        fmt,
+                        crate::decode::consts::ALL_BANDS,
+                        false,
+                        0,
+                        (0, 0),
+                        (&[], &[]),
+                        overlap.code(),
+                        false,
+                    );
+                    let d = dec(&f);
+                    for i in 0..n {
+                        assert_eq!(
+                            d.image_plane[0][i], g[i] as i32,
+                            "{fmt} {overlap:?} {w}x{h} px{i}"
+                        );
+                    }
+                }
+            }
+        }
+        // Overlap × tiles (soft-tile continuations) × window margins, exact.
+        let (w, h) = (96u32, 64u32);
+        let n = (w * h) as usize;
+        let planes4: [Vec<u8>; 4] = noise_planes(&mut r, n);
+        for overlap in [Overlap::One, Overlap::Two] {
+            let ai =
+                ImageInput { width: w, height: h, planes: &planes4, premultiplied_alpha: false };
+            let f = encode_with_options(
+                &ai,
+                ColorMode::Color,
+                EncodeOptions {
+                    overlap,
+                    tile_cols: 3,
+                    tile_rows: 2,
+                    window_top: 5,
+                    window_left: 9,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let d = dec(&f);
+            assert_eq!((d.width, d.height), (w, h));
+            for c in 0..4 {
+                for i in 0..n {
+                    assert_eq!(
+                        d.image_plane[c][i], planes4[c][i] as i32,
+                        "tiles×window {overlap:?} ch{c} px{i}"
+                    );
+                }
+            }
+        }
+        // Lossy with overlap: decodes, and differs from no-overlap bytes.
+        let ci =
+            ImageInput { width: w, height: h, planes: &planes4[..3], premultiplied_alpha: false };
+        let qp = QpSet { dc: 16, lp: 32, hp: 64 };
+        let base = EncodeOptions { qp, scaled: true, ..Default::default() };
+        let f0 = encode_with_options(&ci, ColorMode::Color, base).unwrap();
+        for overlap in [Overlap::One, Overlap::Two] {
+            let f = encode_with_options(
+                &ci,
+                ColorMode::Color,
+                EncodeOptions { overlap, ..base },
+            )
+            .unwrap();
+            assert_ne!(f, f0, "{overlap:?} must change the coded bytes");
+            let d = dec(&f);
+            assert_eq!((d.width, d.height, d.num_components), (w, h, 3));
+        }
+    }
+
+    /// Scaled-mode LOSSY quantization regression: the QP→scaling-factor map
+    /// is mode-dependent (decoder `quant_map` scaled branch; chroma DC/LP one
+    /// order below luma), so a scaled lossy encode must land in the same
+    /// quality regime as the unscaled one at the same QP — not garbage.
+    /// (The 4b scaled gates were all lossless-exactness or decoder-agreement;
+    /// this pins the lossy fidelity that those could not see.)
+    #[test]
+    fn scaled_lossy_quantizes_with_scaled_factors() {
+        use crate::decode::container::parse;
+        let mut r = Lcg(0x5ca1_ed42_5ca1_ed42);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        let planes: [Vec<u8>; 3] = noise_planes(&mut r, n);
+        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let psnr = |jxr: &[u8]| -> f64 {
+            let c = parse(jxr).unwrap();
+            let d = crate::decode::decode_image(&c).unwrap();
+            let mut se = 0f64;
+            for ch in 0..3 {
+                for i in 0..n {
+                    let e = (d.image_plane[ch][i].clamp(0, 255) - planes[ch][i] as i32) as f64;
+                    se += e * e;
+                }
+            }
+            10.0 * (255.0f64 * 255.0 * (3 * n) as f64 / se).log10()
+        };
+        let qp = QpSet { dc: 16, lp: 16, hp: 16 };
+        let unscaled =
+            encode_with_options(&input, ColorMode::Color, EncodeOptions { qp, ..Default::default() })
+                .unwrap();
+        let scaled = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions { qp, scaled: true, ..Default::default() },
+        )
+        .unwrap();
+        let (pu, ps) = (psnr(&unscaled), psnr(&scaled));
+        assert!(ps > pu - 2.0, "scaled q16 must match unscaled quality: {ps:.2} vs {pu:.2} dB");
+        // And the same holds with overlap + 420 in the mix. (On independent
+        // RGB noise, 4:2:0 PSNR vs source is dominated by the subsampling
+        // loss itself — so the baseline is the UNSCALED 4:2:0 encode, not an
+        // absolute figure.)
+        let opts420 = EncodeOptions { qp, chroma: ChromaSampling::Yuv420, ..Default::default() };
+        let u420 = encode_with_options(&input, ColorMode::Color, opts420).unwrap();
+        let f = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions { scaled: true, overlap: Overlap::Two, ..opts420 },
+        )
+        .unwrap();
+        let (pu420, ps420) = (psnr(&u420), psnr(&f));
+        assert!(
+            ps420 > pu420 - 2.0,
+            "scaled+overlap 420 q16 must match unscaled 420: {ps420:.2} vs {pu420:.2} dB"
+        );
     }
 
     #[test]
