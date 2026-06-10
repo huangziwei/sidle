@@ -43,40 +43,154 @@ pub fn write_image_header_ext(
     alpha_image_plane: bool,
     trim_flexbits: u8,
 ) {
-    let short = width <= 1 << 16 && height <= 1 << 16;
+    let mut spec = ImageHeaderSpec::new(width, height, output_clr_fmt);
+    spec.premultiplied_alpha = premultiplied_alpha;
+    spec.alpha_image_plane = alpha_image_plane;
+    spec.trim_flexbits = trim_flexbits;
+    write_image_header_spec(bw, &spec);
+}
+
+/// Every `image_header` degree of freedom the encoder supports, in one spec
+/// so the emission lives in a single writer that mirrors
+/// `Decoder::image_header` field-for-field. [`ImageHeaderSpec::new`] is the
+/// classic frame (single tile, spatial order, no overlap, derived windowing);
+/// drivers override fields from there.
+#[derive(Clone, Debug)]
+pub struct ImageHeaderSpec {
+    /// Window (output) dims — what the decoder crops to and the container
+    /// declares.
+    pub width: u32,
+    pub height: u32,
+    pub output_clr_fmt: u8,
+    pub premultiplied_alpha: bool,
+    pub alpha_image_plane: bool,
+    pub trim_flexbits: u8,
+    /// `overlap_mode` (0/1/2 — none / first-level / both levels).
+    pub overlap_mode: u8,
+    /// Explicit window margins (top, left, bottom, right), each < 64, with
+    /// `top + height + bottom` and `left + width + right` 16-aligned.
+    /// Non-zero top/left ⇒ `windowing_flag = 1` and all four are emitted;
+    /// otherwise the flag stays 0 and bottom/right must equal the
+    /// decoder-derived 16-alignment pads (asserted).
+    pub margins: (u32, u32, u32, u32),
+    /// Tile column widths / row heights in MB units — EVERY tile including
+    /// the last (the writer drops the last entry; the decoder re-derives it).
+    /// Empty = 1 tile in that dimension.
+    pub tile_cols_mb: Vec<usize>,
+    pub tile_rows_mb: Vec<usize>,
+    /// Frequency order (band-major tile packets) instead of spatial.
+    pub frequency_mode: bool,
+}
+
+impl ImageHeaderSpec {
+    pub fn new(width: u32, height: u32, output_clr_fmt: u8) -> Self {
+        Self {
+            width,
+            height,
+            output_clr_fmt,
+            premultiplied_alpha: false,
+            alpha_image_plane: false,
+            trim_flexbits: 0,
+            overlap_mode: NO_OVERLAP_FILTERING,
+            margins: (0, 0, 0, 0),
+            tile_cols_mb: Vec::new(),
+            tile_rows_mb: Vec::new(),
+            frequency_mode: false,
+        }
+    }
+
+    /// Number of tiles (≥ 1 per dimension).
+    pub fn num_tiles(&self) -> (usize, usize) {
+        (self.tile_cols_mb.len().max(1), self.tile_rows_mb.len().max(1))
+    }
+
+    /// Whether the codestream carries an index table (frequency mode or
+    /// more than one tile — T.832 requires it for both).
+    pub fn index_table_present(&self) -> bool {
+        let (c, r) = self.num_tiles();
+        self.frequency_mode || c * r > 1
+    }
+
+    /// Whether the short header form can carry this spec: dims fit 16 bits
+    /// AND every emitted tile-size list entry fits 8 bits.
+    fn short_header(&self) -> bool {
+        let lists_fit = self
+            .tile_cols_mb
+            .iter()
+            .chain(self.tile_rows_mb.iter())
+            .all(|&mb| mb <= 0xFF);
+        self.width <= 1 << 16 && self.height <= 1 << 16 && lists_fit
+    }
+}
+
+/// The general `image_header` writer ([`ImageHeaderSpec`]). Field order is
+/// the decoder's: fixed flags, dims, tile counts + size lists, window
+/// margins.
+pub fn write_image_header_spec(bw: &mut BitWriter, s: &ImageHeaderSpec) {
+    let short = s.short_header();
+    let (num_cols, num_rows) = s.num_tiles();
+    let tiling = num_cols * num_rows > 1;
+    let windowing = s.margins.0 != 0 || s.margins.1 != 0;
+    debug_assert!(
+        windowing
+            || ((s.margins.2 == 0 || s.margins.2 == (16 - s.height % 16) % 16)
+                && (s.margins.3 == 0 || s.margins.3 == (16 - s.width % 16) % 16)),
+        "windowing_flag=0 requires decoder-derivable bottom/right margins"
+    );
     for &b in b"WMPHOTO\x00" {
         bw.write_bits(b as u64, 8);
     }
     bw.write_bits(1, 4); // codec_version (==1)
-    bw.write_bits(0, 1); // hard_tiling_flag
+    bw.write_bits(0, 1); // hard_tiling_flag (soft tiles: overlap crosses tiles)
     bw.write_bits(1, 3); // codec_subversion (==1)
-    bw.write_bits(0, 1); // tiling_flag → single tile
-    bw.write_bits(0, 1); // frequency_mode → spatial
+    bw.write_flag(tiling); // tiling_flag
+    bw.write_flag(s.frequency_mode); // frequency_mode
     bw.write_bits(0, 3); // spatial_xfrm_subordinate
-    bw.write_bits(0, 1); // index_table_present_flag → none
-    bw.write_bits(NO_OVERLAP_FILTERING as u64, 2); // overlap_mode
+    bw.write_flag(s.index_table_present()); // index_table_present_flag
+    bw.write_bits(s.overlap_mode as u64, 2); // overlap_mode
     bw.write_flag(short); // short_header_flag (16- vs 32-bit dims)
     bw.write_bits(1, 1); // long_word_flag (Amazon sets this; decoder ignores it)
-    bw.write_bits(0, 1); // windowing_flag
-    bw.write_flag(trim_flexbits != 0); // trim_flexbits_flag
+    bw.write_flag(windowing); // windowing_flag
+    bw.write_flag(s.trim_flexbits != 0); // trim_flexbits_flag
     bw.write_bits(0, 1); // reserved_d
     bw.write_bits(0, 1); // red_blue_not_swapped_flag
-    bw.write_flag(premultiplied_alpha); // premultiplied_alpha_flag
-    bw.write_flag(alpha_image_plane); // alpha_image_plane_flag
-    bw.write_bits(output_clr_fmt as u64, 4); // output_clr_fmt
+    bw.write_flag(s.premultiplied_alpha); // premultiplied_alpha_flag
+    bw.write_flag(s.alpha_image_plane); // alpha_image_plane_flag
+    bw.write_bits(s.output_clr_fmt as u64, 4); // output_clr_fmt
     bw.write_bits(BD8 as u64, 4); // output_bitdepth
     // (width-1), (height-1): u16 BE short / u32 BE long (byte-aligned here).
     if short {
-        write_u16_be(bw, (width - 1) as u16);
-        write_u16_be(bw, (height - 1) as u16);
+        write_u16_be(bw, (s.width - 1) as u16);
+        write_u16_be(bw, (s.height - 1) as u16);
     } else {
-        for v in [width - 1, height - 1] {
+        for v in [s.width - 1, s.height - 1] {
             for sh in [24u32, 16, 8, 0] {
                 bw.write_bits(((v >> sh) & 0xFF) as u64, 8);
             }
         }
     }
-    // tiling_flag=0 → no tile dims; windowing_flag=0 → decoder derives padding.
+    if tiling {
+        bw.write_bits(num_cols as u64 - 1, 12); // num_ver_tiles_minus1
+        bw.write_bits(num_rows as u64 - 1, 12); // num_hor_tiles_minus1
+    }
+    // Tile size lists: all but the last entry, 8-bit short / 16-bit long.
+    let size_bits = if short { 8 } else { 16 };
+    if num_cols > 1 {
+        for &wmb in &s.tile_cols_mb[..num_cols - 1] {
+            bw.write_bits(wmb as u64, size_bits);
+        }
+    }
+    if num_rows > 1 {
+        for &hmb in &s.tile_rows_mb[..num_rows - 1] {
+            bw.write_bits(hmb as u64, size_bits);
+        }
+    }
+    if windowing {
+        for m in [s.margins.0, s.margins.1, s.margins.2, s.margins.3] {
+            debug_assert!(m < 64, "window margins are 6-bit fields");
+            bw.write_bits(m as u64, 6);
+        }
+    }
 }
 
 /// The 4-bit `trim_flexbits` value of the spatial tile's flex plane header
@@ -286,12 +400,103 @@ fn write_uniform_qp(bw: &mut BitWriter, quant: u8) {
     bw.write_bits(quant as u64, 8);
 }
 
-/// `vlw_esc` variable-length value. We only need small values; `< 0xfb` uses
-/// the 2-byte form. Mirrors `Decoder::vlw_esc`.
+/// `vlw_esc` variable-length value: 2-byte form below `0xfb00`, the `0xfb`
+/// 32-bit escape up to `u32::MAX`, the `0xfc` 64-bit escape beyond. Mirrors
+/// `Decoder::vlw_esc`.
 pub fn write_vlw_esc(bw: &mut BitWriter, value: u64) {
-    assert!(value < 0xfb * 256, "vlw_esc large form not implemented");
-    bw.write_bits((value >> 8) & 0xff, 8);
-    bw.write_bits(value & 0xff, 8);
+    if value < 0xfb * 256 {
+        bw.write_bits((value >> 8) & 0xff, 8);
+        bw.write_bits(value & 0xff, 8);
+    } else if value <= u32::MAX as u64 {
+        bw.write_bits(0xfb, 8);
+        bw.write_bits(value, 32);
+    } else {
+        bw.write_bits(0xfc, 8);
+        bw.write_bits(value, 64);
+    }
+}
+
+/// One encodable image plane from the tile driver's point of view: reset the
+/// per-tile entropy/prediction state ([`Self::begin_tile`] — the decoder's
+/// `initialize_context`), then emit MBs at GLOBAL grid coordinates. The
+/// composite (primary + alpha) implementation interleaves both planes per MB,
+/// exactly as `Decoder::coded_tiles` reads them.
+pub trait TileEncode {
+    /// Start a tile whose first MB is `(first_mbx, first_mby)` and which is
+    /// `tile_w` MBs wide: fresh entropy models / VLC tables / scans, and
+    /// tile-relative edge & adapt cadence from here on.
+    fn begin_tile(&mut self, first_mbx: usize, first_mby: usize, tile_w: usize);
+    /// Emit one MB (all planes' sections, interleaved) at global `(mbx, mby)`.
+    fn encode_mb_at(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize);
+}
+
+/// Assemble a complete WMPHOTO codestream: image header (`spec`), plane
+/// headers (`write_plane_headers`), index table when required, the
+/// `subsequent_bytes` field (0), then one byte-aligned tile packet per tile
+/// in the decoder's row-major tile order (`common_tile_header` + the 4-bit
+/// `trim_flexbits` flex header value when set + the tile's MBs).
+///
+/// Single tile reproduces the classic byte layout exactly (no index table,
+/// same alignment points).
+pub fn emit_codestream(
+    spec: &ImageHeaderSpec,
+    write_plane_headers: impl FnOnce(&mut BitWriter),
+    trim: u8,
+    mbw: usize,
+    mbh: usize,
+    plane: &mut dyn TileEncode,
+) -> Vec<u8> {
+    let mut head = BitWriter::new();
+    write_image_header_spec(&mut head, spec);
+    write_plane_headers(&mut head);
+
+    let cols: Vec<usize> =
+        if spec.tile_cols_mb.is_empty() { vec![mbw] } else { spec.tile_cols_mb.clone() };
+    let rows: Vec<usize> =
+        if spec.tile_rows_mb.is_empty() { vec![mbh] } else { spec.tile_rows_mb.clone() };
+    debug_assert_eq!(cols.iter().sum::<usize>(), mbw, "tile columns must cover the MB grid");
+    debug_assert_eq!(rows.iter().sum::<usize>(), mbh, "tile rows must cover the MB grid");
+
+    // Tile packets, each in its own writer so it starts byte-aligned and its
+    // byte offset is known for the index table without back-patching.
+    let mut packets: Vec<Vec<u8>> = Vec::with_capacity(cols.len() * rows.len());
+    let mut top = 0usize;
+    for &th in &rows {
+        let mut left = 0usize;
+        for &tw_mb in &cols {
+            let mut tw = BitWriter::new();
+            write_common_tile_header(&mut tw);
+            if trim != 0 {
+                write_trim_flexbits(&mut tw, trim);
+            }
+            plane.begin_tile(left, top, tw_mb);
+            for mby in top..top + th {
+                for mbx in left..left + tw_mb {
+                    plane.encode_mb_at(&mut tw, mbx, mby);
+                }
+            }
+            tw.align_to_byte();
+            packets.push(tw.finish());
+            left += tw_mb;
+        }
+        top += th;
+    }
+
+    if spec.index_table_present() {
+        head.write_bits(1, 16); // index_table_startcode
+        let mut off = 0u64;
+        for p in &packets {
+            write_vlw_esc(&mut head, off); // offset from the first tile's start
+            off += p.len() as u64;
+        }
+    }
+    write_vlw_esc(&mut head, 0); // subsequent_bytes (no profile/level info)
+
+    let mut out = head.finish();
+    for p in packets {
+        out.extend_from_slice(&p);
+    }
+    out
 }
 
 /// `common_tile_header`: 24-bit start code (==1) + one arbitrary byte. Mirrors

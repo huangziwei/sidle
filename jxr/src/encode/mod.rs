@@ -119,6 +119,23 @@ pub struct EncodeOptions {
     /// the mode libjxr uses for everything lossy. Exactly invertible for
     /// gray/zero-chroma content; NOT bit-lossless for color at q1.
     pub scaled: bool,
+    /// Explicit top window margin (0–63): the coded image gets `window_top`
+    /// extra rows above the content (edge-replicated) and the header carries
+    /// explicit T.832 window margins (`windowing_flag = 1`) so decoders crop
+    /// them. With both 0 (default) the classic derived windowing is used.
+    /// Margins are a coded-domain placement knob (e.g. aligning content to
+    /// the MB grid); pixels are unaffected.
+    pub window_top: u8,
+    /// Explicit left window margin (0–63). See [`Self::window_top`].
+    pub window_left: u8,
+    /// Uniform tile columns (the JxrEncApp `-U` analog): the MB grid splits
+    /// into this many near-equal tile columns, each independently entropy-
+    /// coded (random access / error resilience; mildly worse compression).
+    /// 0 or 1 = single column. More than one tile in either dimension adds
+    /// the T.832 index table.
+    pub tile_cols: u16,
+    /// Uniform tile rows. See [`Self::tile_cols`].
+    pub tile_rows: u16,
 }
 
 impl Default for EncodeOptions {
@@ -130,8 +147,20 @@ impl Default for EncodeOptions {
             bands: BandsPresent::All,
             trim_flexbits: 0,
             scaled: false,
+            window_top: 0,
+            window_left: 0,
+            tile_cols: 0,
+            tile_rows: 0,
         }
     }
+}
+
+/// Split `mb` macroblocks into `n` near-equal tile spans (remainder spread
+/// over the leading tiles), the uniform-tiling distribution.
+fn uniform_tiles(mb: usize, n: usize) -> Vec<usize> {
+    let n = n.max(1);
+    let (base, rem) = (mb / n, mb % n);
+    (0..n).map(|i| base + usize::from(i < rem)).collect()
 }
 
 /// Interleaved 8-bit channel orders accepted by [`deinterleave`] — the common
@@ -265,6 +294,31 @@ pub fn encode_with_options(
     if opts.trim_flexbits > 15 {
         return Err(EncodeError::Unsupported("trim_flexbits must be 0–15".into()));
     }
+    if opts.window_top > 63 || opts.window_left > 63 {
+        return Err(EncodeError::Unsupported(
+            "window margins are 6-bit fields (0–63)".into(),
+        ));
+    }
+    let window = (opts.window_top as u32, opts.window_left as u32);
+    // Tile grid: uniform split of the padded MB grid (which includes the
+    // window margins). Each tile must be ≥ 1 MB; counts are 12-bit fields.
+    let mb_cols = ((input.width + window.1).div_ceil(16)) as usize;
+    let mb_rows = ((input.height + window.0).div_ceil(16)) as usize;
+    let (tc, tr) = (opts.tile_cols.max(1) as usize, opts.tile_rows.max(1) as usize);
+    if tc > 4096 || tr > 4096 {
+        return Err(EncodeError::Unsupported("tile counts are 12-bit fields (≤ 4096)".into()));
+    }
+    if tc > mb_cols || tr > mb_rows {
+        return Err(EncodeError::Unsupported(format!(
+            "{tc}x{tr} tiles over a {mb_cols}x{mb_rows} MB grid (every tile needs ≥ 1 MB)"
+        )));
+    }
+    let (tile_cols_mb, tile_rows_mb) = if tc > 1 || tr > 1 {
+        (uniform_tiles(mb_cols, tc), uniform_tiles(mb_rows, tr))
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let tiles: (&[usize], &[usize]) = (&tile_cols_mb, &tile_rows_mb);
     let (w, h) = (input.width, input.height);
     if w == 0 || h == 0 {
         return Err(EncodeError::Unsupported("zero-size image".into()));
@@ -334,6 +388,8 @@ pub fn encode_with_options(
             input.premultiplied_alpha,
             fmt,
             opts.scaled,
+            window,
+            tiles,
         ));
     }
     // A 1-plane input is grayscale regardless of mode — there's no chroma to
@@ -356,6 +412,8 @@ pub fn encode_with_options(
             opts.scaled,
             bands,
             opts.trim_flexbits,
+            window,
+            tiles,
         ));
     }
     if input.planes.len() != 3 {
@@ -379,31 +437,37 @@ pub fn encode_with_options(
             opts.scaled,
             bands,
             opts.trim_flexbits,
+            window,
+            tiles,
         ));
     }
     let (r, g, b) = (&input.planes[0], &input.planes[1], &input.planes[2]);
     let trim = opts.trim_flexbits;
     match opts.chroma {
         ChromaSampling::YOnly if opts.bands == BandsPresent::All && trim == 0 => {
-            Ok(color::encode_yonly_from_color(r, g, b, w, h, qp, opts.scaled))
+            Ok(color::encode_yonly_from_color(r, g, b, w, h, qp, opts.scaled, window, tiles))
         }
         ChromaSampling::YOnly => Err(EncodeError::Unsupported(
             "band truncation / trim with YOnly chroma is not implemented".into(),
         )),
         ChromaSampling::Yuv444
-            if !opts.scaled && opts.bands == BandsPresent::All && trim == 0 =>
+            if !opts.scaled
+                && opts.bands == BandsPresent::All
+                && trim == 0
+                && window == (0, 0)
+                && tiles.0.is_empty() =>
         {
             // The classic byte-stable path (clone of the original encoder).
             Ok(color::encode_color(r, g, b, w, h, qp))
         }
         ChromaSampling::Yuv444 => Ok(color::encode_color_options(
-            r, g, b, w, h, qp, INT_YUV444, bands, opts.scaled, trim,
+            r, g, b, w, h, qp, INT_YUV444, bands, opts.scaled, trim, window, tiles,
         )),
         ChromaSampling::Yuv422 => Ok(color::encode_color_options(
-            r, g, b, w, h, qp, INT_YUV422, bands, opts.scaled, trim,
+            r, g, b, w, h, qp, INT_YUV422, bands, opts.scaled, trim, window, tiles,
         )),
         ChromaSampling::Yuv420 => Ok(color::encode_color_options(
-            r, g, b, w, h, qp, INT_YUV420, bands, opts.scaled, trim,
+            r, g, b, w, h, qp, INT_YUV420, bands, opts.scaled, trim, window, tiles,
         )),
     }
 }
@@ -1076,6 +1140,248 @@ mod tests {
         for (i, &v) in d.image_plane[0].iter().enumerate() {
             assert_eq!(v, big[i] as i32, "long-header px{i}");
         }
+    }
+
+    /// 4c: explicit window margins (`windowing_flag = 1`). The image sits at
+    /// `(top, left)` inside the coded grid; decoders crop the margins away, so
+    /// every lossless-exact path must stay exact — including odd margins over
+    /// subsampled chroma (gray content) and the alpha plane (which shares the
+    /// placement).
+    #[test]
+    fn explicit_window_margins_roundtrip() {
+        use crate::decode::container::parse;
+        let mut r = Lcg(0x717d_0042_717d_0042);
+        let dec = |jxr: &[u8]| {
+            let c = parse(jxr).unwrap();
+            crate::decode::decode_image(&c).unwrap()
+        };
+        let windows = [(1u8, 1u8), (5, 9), (63, 63), (0, 7), (16, 0)];
+        for &(w, h) in &[(30u32, 20u32), (48, 32), (16, 16)] {
+            let n = (w * h) as usize;
+            let gray: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+            let gplanes = [gray.clone()];
+            let ginput =
+                ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
+            let cplanes: [Vec<u8>; 3] = noise_planes(&mut r, n);
+            let cinput =
+                ImageInput { width: w, height: h, planes: &cplanes, premultiplied_alpha: false };
+            let aplanes: [Vec<u8>; 4] = noise_planes(&mut r, n);
+            let ainput =
+                ImageInput { width: w, height: h, planes: &aplanes, premultiplied_alpha: false };
+            for &(top, left) in &windows {
+                let opts = EncodeOptions {
+                    window_top: top,
+                    window_left: left,
+                    ..Default::default()
+                };
+                // Grayscale: exact.
+                let f = encode_with_options(&ginput, ColorMode::Grayscale, opts).unwrap();
+                let d = dec(&f);
+                assert_eq!((d.width, d.height), (w, h), "({top},{left}) {w}x{h}");
+                for i in 0..n {
+                    assert_eq!(d.image_plane[0][i], gray[i] as i32, "gray ({top},{left}) px{i}");
+                }
+                // Color 4:4:4: exact.
+                let f = encode_with_options(&cinput, ColorMode::Color, opts).unwrap();
+                let d = dec(&f);
+                for c in 0..3 {
+                    for i in 0..n {
+                        assert_eq!(
+                            d.image_plane[c][i], cplanes[c][i] as i32,
+                            "rgb ({top},{left}) ch{c} px{i}"
+                        );
+                    }
+                }
+                // RGBA: exact on all four channels.
+                let f = encode_with_options(&ainput, ColorMode::Color, opts).unwrap();
+                let d = dec(&f);
+                assert_eq!(d.num_components, 4);
+                for c in 0..4 {
+                    for i in 0..n {
+                        assert_eq!(
+                            d.image_plane[c][i], aplanes[c][i] as i32,
+                            "rgba ({top},{left}) ch{c} px{i}"
+                        );
+                    }
+                }
+                // 4:2:0 with gray content (zero chroma): exact even at odd margins.
+                let gcolor = [gray.clone(), gray.clone(), gray.clone()];
+                // (auto-gray would collapse this; go through the color driver.)
+                let f = color::encode_color_options(
+                    &gcolor[0],
+                    &gcolor[1],
+                    &gcolor[2],
+                    w,
+                    h,
+                    QpSet::LOSSLESS,
+                    crate::decode::consts::INT_YUV420,
+                    crate::decode::consts::ALL_BANDS,
+                    false,
+                    0,
+                    (top as u32, left as u32),
+                    (&[], &[]),
+                );
+                let d = dec(&f);
+                for i in 0..n {
+                    assert_eq!(d.image_plane[0][i], gray[i] as i32, "420 ({top},{left}) px{i}");
+                }
+            }
+        }
+        // Margins are 6-bit fields: 64 is rejected.
+        let p = vec![0u8; 256];
+        let planes = [p.clone()];
+        let input = ImageInput { width: 16, height: 16, planes: &planes, premultiplied_alpha: false };
+        assert!(encode_with_options(
+            &input,
+            ColorMode::Grayscale,
+            EncodeOptions { window_top: 64, ..Default::default() },
+        )
+        .is_err());
+    }
+
+    /// 4c: tiling. Multi-tile files (index table, per-tile packets, per-tile
+    /// entropy resets, tile-relative prediction edges) round-trip exactly at
+    /// lossless across grids, content kinds, and tiles×window combos; and
+    /// because tiling only re-segments the entropy stream — coefficients are
+    /// untouched — a tiled lossy decode must equal the untiled one
+    /// pixel-for-pixel.
+    #[test]
+    fn tiled_roundtrip_and_equivalence() {
+        use crate::decode::container::parse;
+        let mut r = Lcg(0x7113_d042_7113_d042);
+        let dec = |jxr: &[u8]| {
+            let c = parse(jxr).unwrap();
+            crate::decode::decode_image(&c).unwrap()
+        };
+        // 600px = 38 MB columns: 2 columns ⇒ 19-MB tiles, so the within-tile
+        // 16-MB adapt cadence fires mid-tile too.
+        for &(w, h, tc, tr) in &[
+            (600u32, 32u32, 2u16, 2u16),
+            (96, 96, 3, 2),
+            (64, 64, 4, 1),
+            (64, 64, 1, 4),
+            (48, 32, 3, 2), // uneven split: 3 MBs / 3 cols, 2 MBs / 2 rows
+            (17, 31, 2, 2), // non-aligned dims
+        ] {
+            let n = (w * h) as usize;
+            let gray: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+            let gplanes = [gray.clone()];
+            let ginput =
+                ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
+            let opts = EncodeOptions { tile_cols: tc, tile_rows: tr, ..Default::default() };
+            let f = encode_with_options(&ginput, ColorMode::Grayscale, opts).unwrap();
+            let d = dec(&f);
+            assert_eq!((d.width, d.height), (w, h));
+            for i in 0..n {
+                assert_eq!(d.image_plane[0][i], gray[i] as i32, "gray {tc}x{tr} {w}x{h} px{i}");
+            }
+            // Color + RGBA, exact at lossless.
+            let cplanes: [Vec<u8>; 4] = noise_planes(&mut r, n);
+            let cinput = ImageInput {
+                width: w,
+                height: h,
+                planes: &cplanes[..3],
+                premultiplied_alpha: false,
+            };
+            let f = encode_with_options(&cinput, ColorMode::Color, opts).unwrap();
+            let d = dec(&f);
+            for c in 0..3 {
+                for i in 0..n {
+                    assert_eq!(
+                        d.image_plane[c][i], cplanes[c][i] as i32,
+                        "rgb {tc}x{tr} {w}x{h} ch{c} px{i}"
+                    );
+                }
+            }
+            let ainput =
+                ImageInput { width: w, height: h, planes: &cplanes, premultiplied_alpha: false };
+            let f = encode_with_options(&ainput, ColorMode::Color, opts).unwrap();
+            let d = dec(&f);
+            assert_eq!(d.num_components, 4);
+            for c in 0..4 {
+                for i in 0..n {
+                    assert_eq!(
+                        d.image_plane[c][i], cplanes[c][i] as i32,
+                        "rgba {tc}x{tr} {w}x{h} ch{c} px{i}"
+                    );
+                }
+            }
+        }
+        // Tiled lossy == untiled lossy, pixel-for-pixel (and likewise at 420).
+        let (w, h) = (96u32, 64u32);
+        let n = (w * h) as usize;
+        let cplanes: [Vec<u8>; 3] = noise_planes(&mut r, n);
+        let cinput =
+            ImageInput { width: w, height: h, planes: &cplanes, premultiplied_alpha: false };
+        for chroma in [ChromaSampling::Yuv444, ChromaSampling::Yuv420] {
+            let qp = QpSet { dc: 16, lp: 32, hp: 64 };
+            let base = EncodeOptions { qp, chroma, scaled: true, ..Default::default() };
+            let untiled = encode_with_options(&cinput, ColorMode::Color, base).unwrap();
+            let tiled = encode_with_options(
+                &cinput,
+                ColorMode::Color,
+                EncodeOptions { tile_cols: 3, tile_rows: 2, ..base },
+            )
+            .unwrap();
+            let (du, dt) = (dec(&untiled), dec(&tiled));
+            for c in 0..3 {
+                assert_eq!(
+                    du.image_plane[c], dt.image_plane[c],
+                    "tiling must not change reconstruction ({chroma:?} ch{c})"
+                );
+            }
+        }
+        // Tiles × explicit window margins.
+        let gplanes = [cplanes[0].clone()];
+        let ginput =
+            ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
+        let f = encode_with_options(
+            &ginput,
+            ColorMode::Grayscale,
+            EncodeOptions {
+                tile_cols: 2,
+                tile_rows: 2,
+                window_top: 5,
+                window_left: 9,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let d = dec(&f);
+        assert_eq!((d.width, d.height), (w, h));
+        for i in 0..n {
+            assert_eq!(d.image_plane[0][i], gplanes[0][i] as i32, "tiles×window px{i}");
+        }
+        // Large noise tiles: packet offsets beyond 0xfaff exercise the 0xfb
+        // 32-bit vlw_esc escape in the index table.
+        let (bw, bh) = (768u32, 768u32);
+        let bn = (bw * bh) as usize;
+        let big: Vec<u8> = (0..bn).map(|_| (r.next() >> 32) as u8).collect();
+        let bplanes = [big.clone()];
+        let binput =
+            ImageInput { width: bw, height: bh, planes: &bplanes, premultiplied_alpha: false };
+        let f = encode_with_options(
+            &binput,
+            ColorMode::Grayscale,
+            EncodeOptions { tile_cols: 2, tile_rows: 2, ..Default::default() },
+        )
+        .unwrap();
+        assert!(f.len() > 4 * 0xfb00, "noise file must be big enough to need the escape");
+        let d = dec(&f);
+        for i in 0..bn {
+            assert_eq!(d.image_plane[0][i], big[i] as i32, "vlw-escape px{i}");
+        }
+        // Validation: every tile needs ≥ 1 MB.
+        let small = vec![0u8; 256];
+        let splanes = [small];
+        let sinput =
+            ImageInput { width: 16, height: 16, planes: &splanes, premultiplied_alpha: false };
+        assert!(encode_with_options(
+            &sinput,
+            ColorMode::Grayscale,
+            EncodeOptions { tile_cols: 2, ..Default::default() },
+        )
+        .is_err());
     }
 
     #[test]

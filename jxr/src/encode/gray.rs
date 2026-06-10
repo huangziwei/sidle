@@ -28,6 +28,13 @@ pub(super) struct YOnlyPlane {
     pub(super) bands: u8,
     /// `trim_flexbits` (0–15).
     pub(super) trim: u32,
+    /// First MB of the current tile — edge tests and the VLC-adapt cadence
+    /// are tile-relative (the decoder's `mbxt`/`mbyt`). Single tile keeps the
+    /// constructor's `(0, 0)`.
+    tile_origin: (usize, usize),
+    /// Current tile width in MBs (`reset_context` fires on the tile's last
+    /// column). Single tile = `mbw`.
+    tile_w: usize,
     buf_grid: Vec<Vec<[i32; 256]>>,
     dclp: Vec<Vec<[i32; 16]>>,
     cbphp_grid: Vec<Vec<i32>>,
@@ -45,17 +52,20 @@ pub(super) struct YOnlyPlane {
 
 impl YOnlyPlane {
     /// Pad `luma` to the 16-aligned MB grid (edge replication; the decoder
-    /// crops back to the true dims since the header carries them and
-    /// `windowing_flag = 0`), forward-transform every MB, quantize per band,
-    /// and initialize the adaptive entropy state.
-    pub(super) fn new(luma: &[u8], w: u32, h: u32, qp: QpSet) -> Self {
+    /// crops back to the true dims, which the header carries), placing the
+    /// image at `(top, left) = window` — `(0, 0)` is the classic
+    /// `windowing_flag = 0` derived padding. Forward-transform every MB,
+    /// quantize per band, and initialize the adaptive entropy state.
+    pub(super) fn new(luma: &[u8], w: u32, h: u32, qp: QpSet, window: (u32, u32)) -> Self {
         let (wu, hu) = (w as usize, h as usize);
-        let (pw, ph) = (wu.next_multiple_of(16), hu.next_multiple_of(16));
+        let (top, left) = (window.0 as usize, window.1 as usize);
+        let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
         let mut centered = vec![0i32; pw * ph];
         for y in 0..ph {
-            let sy = y.min(hu - 1);
+            let sy = y.saturating_sub(top).min(hu - 1);
             for x in 0..pw {
-                centered[y * pw + x] = luma[sy * wu + x.min(wu - 1)] as i32 - 128;
+                centered[y * pw + x] =
+                    luma[sy * wu + x.saturating_sub(left).min(wu - 1)] as i32 - 128;
             }
         }
         Self::from_centered_padded(&centered, pw, ph, qp)
@@ -123,6 +133,8 @@ impl YOnlyPlane {
             mbh,
             bands: ALL_BANDS,
             trim: 0,
+            tile_origin: (0, 0),
+            tile_w: mbw,
             buf_grid,
             dclp,
             cbphp_grid: vec![vec![0i32; mbh]; mbw],
@@ -139,11 +151,38 @@ impl YOnlyPlane {
         }
     }
 
+    /// Start a tile at `(first_mbx, first_mby)`, `tile_w` MBs wide: fresh
+    /// entropy state, exactly the constructor's init — the encoder mirror of
+    /// the decoder's `initialize_context` (which re-inits every band's
+    /// models/VLC tables/scans at each tile's first MB).
+    pub(super) fn begin_tile(&mut self, first_mbx: usize, first_mby: usize, tile_w: usize) {
+        self.tile_origin = (first_mbx, first_mby);
+        self.tile_w = tile_w;
+        self.model_dc = coeff::ModelState::init(0);
+        self.abs_dc = coeff::AdaptiveVlc1::default();
+        self.model_lp = coeff::ModelState::init(1);
+        self.first_ind = AdaptiveVLC::default();
+        self.lp_ind0 = AdaptiveVLC::default();
+        self.lp_ind1 = AdaptiveVLC::default();
+        self.lp_abs0 = AdaptiveVLC::default();
+        self.lp_abs1 = AdaptiveVLC::default();
+        self.first_ind.init_table2();
+        self.lp_ind0.init_table2();
+        self.lp_ind1.init_table2();
+        self.lp_abs0.init_table1();
+        self.lp_abs1.init_table1();
+        self.scan = AdaptiveScan::new(&GRGI_ZIGZAG_INV_4X4_H);
+        self.hp_state = hp::HpState::new();
+    }
+
     /// Emit one macroblock's DC + LP + HP(+flex) bits, updating this plane's
     /// adaptive state exactly as the decoder's per-MB readers do.
     pub(super) fn encode_mb(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize) {
         let c = self.dclp[mbx][mby];
-        let (is_left, is_top) = (mbx == 0, mby == 0);
+        // Tile-relative position: edge tests, the 16-MB adapt cadence, and the
+        // last-column reset are all within-tile (decoder `MB::new` flags).
+        let (mbxt, mbyt) = (mbx - self.tile_origin.0, mby - self.tile_origin.1);
+        let (is_left, is_top) = (mbxt == 0, mbyt == 0);
 
         // ---------- DC ----------
         let (dmode, dc_pred) = if is_left && is_top {
@@ -180,7 +219,7 @@ impl YOnlyPlane {
             0
         };
         self.model_dc.update(dc_lap, 0);
-        if mbx % 16 == 0 || mbx == self.mbw - 1 {
+        if mbxt % 16 == 0 || mbxt == self.tile_w - 1 {
             self.abs_dc.adapt();
         }
         if self.bands == DCONLY {
@@ -188,7 +227,7 @@ impl YOnlyPlane {
         }
 
         // ---------- LP ----------
-        if mbx % 16 == 0 {
+        if mbxt % 16 == 0 {
             self.scan.reset_totals();
         }
         let lp_mode = if dmode == PREDICT_FROM_LEFT {
@@ -249,7 +288,7 @@ impl YOnlyPlane {
             }
         }
         self.model_lp.update(lp_lap, 1);
-        if mbx % 16 == 0 || mbx == self.mbw - 1 {
+        if mbxt % 16 == 0 || mbxt == self.tile_w - 1 {
             self.first_ind.adapt_table2(4);
             self.lp_ind0.adapt_table2(3);
             self.lp_ind1.adapt_table2(3);
@@ -261,7 +300,7 @@ impl YOnlyPlane {
             return;
         }
         // ---------- HP ----------
-        if mbx % 16 == 0 {
+        if mbxt % 16 == 0 {
             self.hp_state.hor_scan.reset_totals();
             self.hp_state.ver_scan.reset_totals();
         }
@@ -280,9 +319,18 @@ impl YOnlyPlane {
             self.trim,
         );
         self.cbphp_grid[mbx][mby] = mbcbp;
-        if mbx % 16 == 0 || mbx == self.mbw - 1 {
+        if mbxt % 16 == 0 || mbxt == self.tile_w - 1 {
             self.hp_state.adapt();
         }
+    }
+}
+
+impl codestream::TileEncode for YOnlyPlane {
+    fn begin_tile(&mut self, first_mbx: usize, first_mby: usize, tile_w: usize) {
+        YOnlyPlane::begin_tile(self, first_mbx, first_mby, tile_w);
+    }
+    fn encode_mb_at(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize) {
+        self.encode_mb(bw, mbx, mby);
     }
 }
 
@@ -298,13 +346,17 @@ pub fn encode_grayscale(luma: &[u8], w: u32, h: u32, qp: QpSet) -> Vec<u8> {
 /// `(v + bias<<3 + 3) >> 3` output stage recovers every pixel — but kept
 /// non-default to match libjxr (scaled is its lossy mode).
 pub fn encode_grayscale_scaled(luma: &[u8], w: u32, h: u32, qp: QpSet, scaled: bool) -> Vec<u8> {
-    encode_grayscale_options(luma, w, h, qp, scaled, ALL_BANDS, 0)
+    encode_grayscale_options(luma, w, h, qp, scaled, ALL_BANDS, 0, (0, 0), (&[], &[]))
 }
 
 /// [`encode_grayscale_scaled`] over the band-truncation envelope: any
-/// `bands_present` (the plane header and per-MB sections shrink together)
-/// and `trim_flexbits` (image-header flag + the 4-bit tile value; the flex
-/// emission drops the low `trim` bits).
+/// `bands_present` (the plane header and per-MB sections shrink together),
+/// `trim_flexbits` (image-header flag + the 4-bit tile value; the flex
+/// emission drops the low `trim` bits), explicit window margins
+/// (`window = (top, left)`; `(0, 0)` = classic derived windowing), and a
+/// tile grid (`tiles = (column widths, row heights)` in MB units covering
+/// the padded grid; empty = single tile).
+#[allow(clippy::too_many_arguments)]
 pub fn encode_grayscale_options(
     luma: &[u8],
     w: u32,
@@ -313,36 +365,40 @@ pub fn encode_grayscale_options(
     scaled: bool,
     bands: u8,
     trim: u8,
+    window: (u32, u32),
+    tiles: (&[usize], &[usize]),
 ) -> Vec<u8> {
     let (wu, hu) = (w as usize, h as usize);
-    let (pw, ph) = (wu.next_multiple_of(16), hu.next_multiple_of(16));
+    let (top, left) = (window.0 as usize, window.1 as usize);
+    let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
     let sh = if scaled { 3 } else { 0 };
     let mut centered = vec![0i32; pw * ph];
     for y in 0..ph {
-        let sy = y.min(hu - 1);
+        let sy = y.saturating_sub(top).min(hu - 1);
         for x in 0..pw {
-            centered[y * pw + x] = (luma[sy * wu + x.min(wu - 1)] as i32 - 128) << sh;
+            centered[y * pw + x] =
+                (luma[sy * wu + x.saturating_sub(left).min(wu - 1)] as i32 - 128) << sh;
         }
     }
     let mut plane = YOnlyPlane::from_centered_padded(&centered, pw, ph, qp);
     plane.bands = bands;
     plane.trim = if bands == ALL_BANDS { trim as u32 } else { 0 };
-    let mut bw = BitWriter::new();
-    codestream::write_image_header_ext(
-        &mut bw, w, h, OUT_YONLY, false, false,
-        if bands == ALL_BANDS { trim } else { 0 },
+    let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_YONLY);
+    spec.trim_flexbits = if bands == ALL_BANDS { trim } else { 0 };
+    spec.margins = super::color::window_margins(w, h, window);
+    spec.tile_cols_mb = tiles.0.to_vec();
+    spec.tile_rows_mb = tiles.1.to_vec();
+    let trim_v = spec.trim_flexbits;
+    let (mbw, mbh) = (plane.mbw, plane.mbh);
+    let body = codestream::emit_codestream(
+        &spec,
+        |head| {
+            codestream::write_image_plane_header_gray_bands(head, bands, qp.dc, qp.lp, qp.hp, scaled)
+        },
+        trim_v,
+        mbw,
+        mbh,
+        &mut plane,
     );
-    codestream::write_image_plane_header_gray_bands(&mut bw, bands, qp.dc, qp.lp, qp.hp, scaled);
-    codestream::write_vlw_esc(&mut bw, 0);
-    codestream::write_common_tile_header(&mut bw);
-    if bands == ALL_BANDS && trim != 0 {
-        codestream::write_trim_flexbits(&mut bw, trim);
-    }
-    for mby in 0..plane.mbh {
-        for mbx in 0..plane.mbw {
-            plane.encode_mb(&mut bw, mbx, mby);
-        }
-    }
-    bw.align_to_byte();
-    container::write_container(&bw.finish(), w, h, &container::pixel_format::GRAY8)
+    container::write_container(&body, w, h, &container::pixel_format::GRAY8)
 }

@@ -48,13 +48,24 @@ pub fn rgb_to_yuv444(r: i32, g: i32, b: i32) -> (i32, i32, i32) {
     (y, u, v)
 }
 
-/// Pad one u8 plane to a 16-aligned grid with edge replication (as `gray.rs`).
-fn pad_plane(src: &[u8], wu: usize, hu: usize, pw: usize, ph: usize) -> Vec<u8> {
+/// Pad one u8 plane to a 16-aligned grid with edge replication (as `gray.rs`),
+/// the image content placed at `(top, left)` — all four margins replicate the
+/// nearest edge (corners replicate the corner sample). `(0, 0)` is the classic
+/// derived-windowing placement.
+fn pad_plane(
+    src: &[u8],
+    wu: usize,
+    hu: usize,
+    pw: usize,
+    ph: usize,
+    top: usize,
+    left: usize,
+) -> Vec<u8> {
     let mut p = vec![0u8; pw * ph];
     for y in 0..ph {
-        let sy = y.min(hu - 1);
+        let sy = y.saturating_sub(top).min(hu - 1);
         for x in 0..pw {
-            p[y * pw + x] = src[sy * wu + x.min(wu - 1)];
+            p[y * pw + x] = src[sy * wu + x.saturating_sub(left).min(wu - 1)];
         }
     }
     p
@@ -148,6 +159,13 @@ pub(super) struct ColorPlane {
     nblk_ch: usize,
     /// `trim_flexbits` (0–15): low flexbits dropped on emission.
     trim: u32,
+    /// First MB of the current tile — edge tests and the VLC-adapt cadence
+    /// are tile-relative (the decoder's `mbxt`/`mbyt`). Single tile keeps the
+    /// constructor's `(0, 0)`.
+    tile_origin: (usize, usize),
+    /// Current tile width in MBs (`reset_context` fires on the tile's last
+    /// column). Single tile = `mbw`.
+    tile_w: usize,
     /// Chroma dclp slots per MB (1 DC + LP): 16 / 8 / 4.
     jmax_ch: usize,
     buf_grid: Vec<Vec<[[i32; 256]; 3]>>,
@@ -173,7 +191,7 @@ impl ColorPlane {
     /// YUV 4:4:4, forward-transform + quantize every MB per component, and
     /// initialize the YUV adaptive entropy state.
     pub(super) fn new(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> Self {
-        Self::new_fmt(r, g, b, w, h, qp, INT_YUV444, ALL_BANDS, false)
+        Self::new_fmt(r, g, b, w, h, qp, INT_YUV444, ALL_BANDS, false, (0, 0))
     }
 
     /// [`Self::new`] generalized over chroma sampling and `bands_present`:
@@ -181,8 +199,8 @@ impl ColorPlane {
     /// AFTER the color transform (libjxr pipeline order) and chroma MBs run
     /// through the 4-/8-block forward transforms with the transposed-domain
     /// dclp extraction (T420/T422 — the decoder's write-back tables, read
-    /// backwards).
-    #[allow(clippy::too_many_arguments)]
+    /// backwards). `window = (top, left)` places the image inside the padded
+    /// grid for explicit windowing (`(0, 0)` = classic derived padding).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_fmt(
         r: &[u8],
@@ -194,18 +212,20 @@ impl ColorPlane {
         fmt: u8,
         bands: u8,
         scaled: bool,
+        window: (u32, u32),
     ) -> Self {
         let (dc_sf, lp_sf, hp_sf) =
             (scaling_factor(qp.dc), scaling_factor(qp.lp), scaling_factor(qp.hp));
         let (wu, hu) = (w as usize, h as usize);
-        let (pw, ph) = (wu.next_multiple_of(16), hu.next_multiple_of(16));
+        let (top, left) = (window.0 as usize, window.1 as usize);
+        let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
         let (mbw, mbh) = (pw / 16, ph / 16);
 
         // Pad RGB, then forward color transform per pixel → 3 centered YUV planes.
         let (rp, gp, bp) = (
-            pad_plane(r, wu, hu, pw, ph),
-            pad_plane(g, wu, hu, pw, ph),
-            pad_plane(b, wu, hu, pw, ph),
+            pad_plane(r, wu, hu, pw, ph, top, left),
+            pad_plane(g, wu, hu, pw, ph, top, left),
+            pad_plane(b, wu, hu, pw, ph, top, left),
         );
         // Scaled arithmetic: 3 extra fraction bits enter BEFORE the color
         // lifting (the decoder unscales after its inverse lifting).
@@ -360,6 +380,8 @@ impl ColorPlane {
             fmt,
             bands,
             trim: 0,
+            tile_origin: (0, 0),
+            tile_w: mbw,
             nblk_ch,
             jmax_ch,
             buf_grid,
@@ -381,11 +403,46 @@ impl ColorPlane {
         }
     }
 
+    /// Start a tile at `(first_mbx, first_mby)`, `tile_w` MBs wide: fresh
+    /// entropy state, exactly the constructor's init — the encoder mirror of
+    /// the decoder's `initialize_context` (which re-inits every band's
+    /// models/VLC tables/scans/CBP counters at each tile's first MB).
+    pub(super) fn begin_tile(&mut self, first_mbx: usize, first_mby: usize, tile_w: usize) {
+        self.tile_origin = (first_mbx, first_mby);
+        self.tile_w = tile_w;
+        self.model_dc = coeff::ColorModel::init(0);
+        self.abs_dc_lum = coeff::AdaptiveVlc1::default();
+        self.abs_dc_chr = coeff::AdaptiveVlc1::default();
+        self.model_lp = coeff::ColorModel::init(1);
+        self.lp_first = [AdaptiveVLC::default(), AdaptiveVLC::default()];
+        self.lp_ind0 = [AdaptiveVLC::default(), AdaptiveVLC::default()];
+        self.lp_ind1 = [AdaptiveVLC::default(), AdaptiveVLC::default()];
+        self.lp_abs0 = AdaptiveVLC::default();
+        self.lp_abs1 = AdaptiveVLC::default();
+        for t in self
+            .lp_first
+            .iter_mut()
+            .chain(self.lp_ind0.iter_mut())
+            .chain(self.lp_ind1.iter_mut())
+        {
+            t.init_table2();
+        }
+        self.lp_abs0.init_table1();
+        self.lp_abs1.init_table1();
+        self.scan = AdaptiveScan::new(&GRGI_ZIGZAG_INV_4X4_H);
+        self.count_zero_cbplp = 1;
+        self.count_max_cbplp = 1;
+        self.hp_state = ColorHpState::new();
+    }
+
     /// Emit one macroblock's DC + LP + HP(+flex) bits for all 3 components,
     /// updating this plane's adaptive state exactly as the decoder's per-MB
     /// YUV444 readers do.
     pub(super) fn encode_mb(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize) {
-        let (is_left, is_top) = (mbx == 0, mby == 0);
+        // Tile-relative position: edge tests, the 16-MB adapt cadence, and the
+        // last-column reset are all within-tile (decoder `MB::new` flags).
+        let (mbxt, mbyt) = (mbx - self.tile_origin.0, mby - self.tile_origin.1);
+        let (is_left, is_top) = (mbxt == 0, mbyt == 0);
         let dc_of = |mx: usize, my: usize| {
             [self.dclp[mx][my][0][0], self.dclp[mx][my][1][0], self.dclp[mx][my][2][0]]
         };
@@ -452,7 +509,7 @@ impl ColorPlane {
             INT_YUV422 => self.model_dc.update_42x(lap_dc, 0, false),
             _ => self.model_dc.update(lap_dc, 0, 3),
         }
-        if mbx % 16 == 0 || mbx == self.mbw - 1 {
+        if mbxt % 16 == 0 || mbxt == self.tile_w - 1 {
             self.abs_dc_lum.adapt();
             self.abs_dc_chr.adapt();
         }
@@ -461,7 +518,7 @@ impl ColorPlane {
         }
 
         // ---------- LP ----------
-        if mbx % 16 == 0 {
+        if mbxt % 16 == 0 {
             self.scan.reset_totals();
         }
         let lp_mode = match dmode {
@@ -686,7 +743,7 @@ impl ColorPlane {
             }
             self.model_lp.update_42x(lap_lp, 1, self.fmt == INT_YUV420);
         }
-        if mbx % 16 == 0 || mbx == self.mbw - 1 {
+        if mbxt % 16 == 0 || mbxt == self.tile_w - 1 {
             for t in self.lp_first.iter_mut() {
                 t.adapt_table2(4);
             }
@@ -701,7 +758,7 @@ impl ColorPlane {
             return;
         }
         // ---------- HP ----------
-        if mbx % 16 == 0 {
+        if mbxt % 16 == 0 {
             self.hp_state.hor_scan.reset_totals();
             self.hp_state.ver_scan.reset_totals();
         }
@@ -721,9 +778,37 @@ impl ColorPlane {
             is_left,
             is_top,
         );
-        if mbx % 16 == 0 || mbx == self.mbw - 1 {
+        if mbxt % 16 == 0 || mbxt == self.tile_w - 1 {
             self.hp_state.adapt();
         }
+    }
+}
+
+impl codestream::TileEncode for ColorPlane {
+    fn begin_tile(&mut self, first_mbx: usize, first_mby: usize, tile_w: usize) {
+        ColorPlane::begin_tile(self, first_mbx, first_mby, tile_w);
+    }
+    fn encode_mb_at(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize) {
+        self.encode_mb(bw, mbx, mby);
+    }
+}
+
+/// Primary + alpha pair: per-MB plane interleave with per-plane state, the
+/// composite the decoder reads as `tile_mb(plane 0)` then `tile_mb(plane 1)`
+/// inside each MB slot. Tile resets apply to BOTH planes' state.
+pub(super) struct AlphaPair<'a> {
+    pub primary: &'a mut ColorPlane,
+    pub alpha: &'a mut super::gray::YOnlyPlane,
+}
+
+impl codestream::TileEncode for AlphaPair<'_> {
+    fn begin_tile(&mut self, first_mbx: usize, first_mby: usize, tile_w: usize) {
+        self.primary.begin_tile(first_mbx, first_mby, tile_w);
+        self.alpha.begin_tile(first_mbx, first_mby, tile_w);
+    }
+    fn encode_mb_at(&mut self, bw: &mut BitWriter, mbx: usize, mby: usize) {
+        self.primary.encode_mb(bw, mbx, mby);
+        self.alpha.encode_mb(bw, mbx, mby);
     }
 }
 
@@ -788,12 +873,23 @@ pub fn encode_color_scaled(
     bands: u8,
     scaled: bool,
 ) -> Vec<u8> {
-    encode_color_options(r, g, b, w, h, qp, fmt, bands, scaled, 0)
+    encode_color_options(r, g, b, w, h, qp, fmt, bands, scaled, 0, (0, 0), (&[], &[]))
+}
+
+/// Window-margins tuple (top, left, bottom, right) for an image placed at
+/// `(top, left)` inside its minimal 16-aligned grid: bottom/right are the
+/// remaining alignment pads (each ≤ 15).
+pub(super) fn window_margins(w: u32, h: u32, window: (u32, u32)) -> (u32, u32, u32, u32) {
+    let (top, left) = window;
+    let pw = (w + left).next_multiple_of(16);
+    let ph = (h + top).next_multiple_of(16);
+    (top, left, ph - h - top, pw - w - left)
 }
 
 /// [`encode_color_scaled`] plus `trim_flexbits` (image-header flag + the
-/// 4-bit spatial-tile value + truncated flex emission). The full internal
-/// option surface for the 3-plane color path.
+/// 4-bit spatial-tile value + truncated flex emission) and explicit window
+/// margins (`window = (top, left)`; `(0, 0)` = classic derived windowing).
+/// The full internal option surface for the 3-plane color path.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_color_options(
     r: &[u8],
@@ -806,27 +902,31 @@ pub fn encode_color_options(
     bands: u8,
     scaled: bool,
     trim: u8,
+    window: (u32, u32),
+    tiles: (&[usize], &[usize]),
 ) -> Vec<u8> {
     let trim = if bands == ALL_BANDS { trim } else { 0 };
-    let mut plane = ColorPlane::new_fmt(r, g, b, w, h, qp, fmt, bands, scaled);
+    let mut plane = ColorPlane::new_fmt(r, g, b, w, h, qp, fmt, bands, scaled, window);
     plane.trim = trim as u32;
-    let mut bw = BitWriter::new();
-    codestream::write_image_header_ext(&mut bw, w, h, OUT_RGB, false, false, trim);
-    codestream::write_image_plane_header_yuv_scaled(
-        &mut bw, fmt, bands, qp.dc, qp.lp, qp.hp, scaled,
+    let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
+    spec.trim_flexbits = trim;
+    spec.margins = window_margins(w, h, window);
+    spec.tile_cols_mb = tiles.0.to_vec();
+    spec.tile_rows_mb = tiles.1.to_vec();
+    let (mbw, mbh) = (plane.mbw, plane.mbh);
+    let body = codestream::emit_codestream(
+        &spec,
+        |head| {
+            codestream::write_image_plane_header_yuv_scaled(
+                head, fmt, bands, qp.dc, qp.lp, qp.hp, scaled,
+            )
+        },
+        trim,
+        mbw,
+        mbh,
+        &mut plane,
     );
-    codestream::write_vlw_esc(&mut bw, 0);
-    codestream::write_common_tile_header(&mut bw);
-    if trim != 0 {
-        codestream::write_trim_flexbits(&mut bw, trim);
-    }
-    for mby in 0..plane.mbh {
-        for mbx in 0..plane.mbw {
-            plane.encode_mb(&mut bw, mbx, mby);
-        }
-    }
-    bw.align_to_byte();
-    container::write_container(&bw.finish(), w, h, &container::pixel_format::RGB24)
+    container::write_container(&body, w, h, &container::pixel_format::RGB24)
 }
 
 /// Encode RGB + alpha (4 planes, each `w*h` row-major) as a color JPEG-XR with
@@ -856,39 +956,48 @@ pub fn encode_color_alpha(
     premultiplied: bool,
     fmt: u8,
     scaled: bool,
+    window: (u32, u32),
+    tiles: (&[usize], &[usize]),
 ) -> Vec<u8> {
-    let mut primary = ColorPlane::new_fmt(r, g, b, w, h, qp, fmt, ALL_BANDS, scaled);
+    let mut primary = ColorPlane::new_fmt(r, g, b, w, h, qp, fmt, ALL_BANDS, scaled, window);
     // The alpha plane stays unscaled — scaled_flag is per plane header, and
     // alpha is exactness-sensitive (jxrencapp likewise never scales alpha
     // independently of its lossy decision; ours keeps the lossless path).
-    let mut alpha = super::gray::YOnlyPlane::new(a, w, h, alpha_qp);
-    let mut bw = BitWriter::new();
-    codestream::write_image_header(&mut bw, w, h, OUT_RGB, premultiplied, true);
-    codestream::write_image_plane_header_yuv_scaled(
-        &mut bw, fmt, ALL_BANDS, qp.dc, qp.lp, qp.hp, scaled,
+    let mut alpha = super::gray::YOnlyPlane::new(a, w, h, alpha_qp, window);
+    let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
+    spec.premultiplied_alpha = premultiplied;
+    spec.alpha_image_plane = true;
+    spec.margins = window_margins(w, h, window);
+    spec.tile_cols_mb = tiles.0.to_vec();
+    spec.tile_rows_mb = tiles.1.to_vec();
+    let (mbw, mbh) = (primary.mbw, primary.mbh);
+    let mut pair = AlphaPair { primary: &mut primary, alpha: &mut alpha };
+    let body = codestream::emit_codestream(
+        &spec,
+        |head| {
+            codestream::write_image_plane_header_yuv_scaled(
+                head, fmt, ALL_BANDS, qp.dc, qp.lp, qp.hp, scaled,
+            );
+            // Alpha image plane header: YONLY, own bands + QPs (JxrEncApp
+            // analog `-Q`).
+            codestream::write_image_plane_header_gray_allbands(
+                head,
+                alpha_qp.dc,
+                alpha_qp.lp,
+                alpha_qp.hp,
+            );
+        },
+        0,
+        mbw,
+        mbh,
+        &mut pair,
     );
-    // Alpha image plane header: YONLY, own bands + QPs (JxrEncApp analog `-Q`).
-    codestream::write_image_plane_header_gray_allbands(
-        &mut bw,
-        alpha_qp.dc,
-        alpha_qp.lp,
-        alpha_qp.hp,
-    );
-    codestream::write_vlw_esc(&mut bw, 0);
-    codestream::write_common_tile_header(&mut bw);
-    for mby in 0..primary.mbh {
-        for mbx in 0..primary.mbw {
-            primary.encode_mb(&mut bw, mbx, mby);
-            alpha.encode_mb(&mut bw, mbx, mby);
-        }
-    }
-    bw.align_to_byte();
     let guid = if premultiplied {
         &container::pixel_format::PBGRA32
     } else {
         &container::pixel_format::BGRA32
     };
-    container::write_container(&bw.finish(), w, h, guid)
+    container::write_container(&body, w, h, guid)
 }
 
 /// Encode an RGB image as **internal YONLY** with `OUT_RGB` output (the
@@ -896,6 +1005,7 @@ pub fn encode_color_alpha(
 /// single plane and the decoder replicates it into R=G=B on output. The
 /// container stays `24bppRGB`. Gray sources (R=G=B) round-trip exactly —
 /// their luma IS the gray value; color sources reconstruct as luma.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_yonly_from_color(
     r: &[u8],
     g: &[u8],
@@ -904,14 +1014,17 @@ pub fn encode_yonly_from_color(
     h: u32,
     qp: QpSet,
     scaled: bool,
+    window: (u32, u32),
+    tiles: (&[usize], &[usize]),
 ) -> Vec<u8> {
     let (wu, hu) = (w as usize, h as usize);
-    let (pw, ph) = (wu.next_multiple_of(16), hu.next_multiple_of(16));
+    let (top, left) = (window.0 as usize, window.1 as usize);
+    let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
     let sh = if scaled { 3 } else { 0 };
     let (rp, gp, bp) = (
-        pad_plane(r, wu, hu, pw, ph),
-        pad_plane(g, wu, hu, pw, ph),
-        pad_plane(b, wu, hu, pw, ph),
+        pad_plane(r, wu, hu, pw, ph, top, left),
+        pad_plane(g, wu, hu, pw, ph, top, left),
+        pad_plane(b, wu, hu, pw, ph, top, left),
     );
     let mut y_plane = vec![0i32; pw * ph];
     for i in 0..pw * ph {
@@ -923,18 +1036,20 @@ pub fn encode_yonly_from_color(
         y_plane[i] = y;
     }
     let mut plane = super::gray::YOnlyPlane::from_centered_padded(&y_plane, pw, ph, qp);
-    let mut bw = BitWriter::new();
-    codestream::write_image_header(&mut bw, w, h, OUT_RGB, false, false);
-    codestream::write_image_plane_header_gray_scaled(&mut bw, qp.dc, qp.lp, qp.hp, scaled);
-    codestream::write_vlw_esc(&mut bw, 0);
-    codestream::write_common_tile_header(&mut bw);
-    for mby in 0..plane.mbh {
-        for mbx in 0..plane.mbw {
-            plane.encode_mb(&mut bw, mbx, mby);
-        }
-    }
-    bw.align_to_byte();
-    container::write_container(&bw.finish(), w, h, &container::pixel_format::RGB24)
+    let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
+    spec.margins = window_margins(w, h, window);
+    spec.tile_cols_mb = tiles.0.to_vec();
+    spec.tile_rows_mb = tiles.1.to_vec();
+    let (mbw, mbh) = (plane.mbw, plane.mbh);
+    let body = codestream::emit_codestream(
+        &spec,
+        |head| codestream::write_image_plane_header_gray_scaled(head, qp.dc, qp.lp, qp.hp, scaled),
+        0,
+        mbw,
+        mbh,
+        &mut plane,
+    );
+    container::write_container(&body, w, h, &container::pixel_format::RGB24)
 }
 
 /// HP-band adaptive state for the color path — multi-component analogue of
@@ -1626,14 +1741,14 @@ mod tests {
         for &(w, h) in &[(48usize, 32usize), (17, 31)] {
             let n = w * h;
             let gray: Vec<u8> = (0..n).map(|_| r.byte()).collect();
-            let jxr = encode_yonly_from_color(&gray, &gray, &gray, w as u32, h as u32, QpSet::LOSSLESS, false);
+            let jxr = encode_yonly_from_color(&gray, &gray, &gray, w as u32, h as u32, QpSet::LOSSLESS, false, (0, 0), (&[], &[]));
             let expected: Vec<(u8, u8, u8)> = gray.iter().map(|&v| (v, v, v)).collect();
             assert_rgb_exact(&jxr, w, h, &expected);
             // Color content: structural (decoder replicates luma; not source-exact).
             let rp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let gp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let bp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
-            let jxr = encode_yonly_from_color(&rp, &gp, &bp, w as u32, h as u32, QpSet::LOSSLESS, false);
+            let jxr = encode_yonly_from_color(&rp, &gp, &bp, w as u32, h as u32, QpSet::LOSSLESS, false, (0, 0), (&[], &[]));
             let d = decode(&jxr);
             assert_eq!((d.width as usize, d.height as usize, d.num_components), (w, h, 3));
             // Replication property: all three output channels identical.
@@ -1657,7 +1772,7 @@ mod tests {
             let alpha: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let jxr = encode_color_alpha(
                 &gray, &gray, &gray, &alpha, w as u32, h as u32,
-                QpSet::LOSSLESS, QpSet::LOSSLESS, false, fmt, false,
+                QpSet::LOSSLESS, QpSet::LOSSLESS, false, fmt, false, (0, 0), (&[], &[]),
             );
             let d = decode(&jxr);
             assert_eq!(d.num_components, 4, "fmt={fmt}");
