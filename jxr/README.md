@@ -174,6 +174,12 @@ assert_eq!(round_trip, pixels);
 Lossy encoding takes a `QpSet { dc, lp, hp }` directly, or use the
 `quality_to_qp(0..=100)` knob.
 
+To just *look* at a `.jxr`, the bundled viewer example writes a 24-bit BMP —
+`cargo run --release --example jxr2bmp -- in.jxr [out.bmp] [--tonemap]`
+(`--tonemap` Reinhard-compresses HDR float images; the example's header
+documents its display-mapping policy — deliberately an example, not API:
+tone mapping and transfer choice are display policy, not codec contract).
+
 ## Provenance & license
 
 **GPL-3.0** — see `LICENSE` in this directory; it travels with any copy.
