@@ -73,3 +73,11 @@ malformed_fixture!(truncated_header, "truncated_header.jxr", "container-err");
 // past the quant-scaling table at `scaling_factor`. Found by the Phase-3
 // certification fuzz run (1 h × 8 workers); `decode_qp_index` now bounds it.
 malformed_fixture!(qp_index_out_of_range, "qp_index_out_of_range.jxr", "malformed");
+
+// Degenerate windowing: 679123969×1 px with margins that don't pad to the MB
+// grid → mb_height truncates to 0, zeroing the decode-budget product while the
+// MB-grid build still allocated one column Vec per mb_width (~1 GB of empty
+// Vec headers from a 702-byte stream) before the first tile startcode check.
+// Found by the Phase-7 certification fuzz run (slow-unit report); the
+// extended-size whole-macroblock guard now rejects it at the image header.
+malformed_fixture!(zero_mb_rows_column_bomb, "zero_mb_rows_column_bomb.jxr", "malformed");

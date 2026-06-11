@@ -401,8 +401,11 @@ impl<'a> Decoder<'a> {
             }
         };
 
-        self.hdr.image_width = read_hl(&mut self.ds)? + 1;
-        self.hdr.image_height = read_hl(&mut self.ds)? + 1;
+        // wrapping_add: WIDTH_MINUS1 = u32::MAX must wrap to 0 (and be caught
+        // by the macroblock-grid check below) in every build configuration,
+        // not panic under overflow checks.
+        self.hdr.image_width = read_hl(&mut self.ds)?.wrapping_add(1);
+        self.hdr.image_height = read_hl(&mut self.ds)?.wrapping_add(1);
         self.hdr.width = self.hdr.image_width;
         self.hdr.height = self.hdr.image_height;
 
@@ -461,11 +464,36 @@ impl<'a> Decoder<'a> {
             };
         }
 
-        self.hdr.width += self.hdr.extra_pixels_left + self.hdr.extra_pixels_right;
-        self.hdr.height += self.hdr.extra_pixels_top + self.hdr.extra_pixels_bottom;
+        // saturating_add: keeps a near-u32::MAX width from panicking under
+        // overflow checks; a saturated value then fails the grid check below.
+        self.hdr.width = self.hdr.width.saturating_add(self.hdr.extra_pixels_left + self.hdr.extra_pixels_right);
+        self.hdr.height = self.hdr.height.saturating_add(self.hdr.extra_pixels_top + self.hdr.extra_pixels_bottom);
 
         self.hdr.mb_width = (self.hdr.width / 16) as usize;
         self.hdr.mb_height = (self.hdr.height / 16) as usize;
+
+        // The margin-extended size must be a whole, positive number of
+        // macroblocks (T.832 windowing semantics — the margins exist to pad
+        // the image to the MB grid; libjxr fails violations with
+        // WMP_errInvalidParameter, strdec.c:3056 — its legacy salvage there,
+        // reinterpreting right/bottom margins on already-aligned dims as an
+        // output crop, is deliberately not ported). Load-bearing for the
+        // decode-budget guard in `image_plane_header`: height 1 + margins 0
+        // truncates mb_height to 0, zeroing the budgeted mb_width × mb_height
+        // product while the grid build still allocates one column Vec per
+        // mb_width — a 702-byte header claiming 679 Mpx × 1 allocated ~1 GB
+        // of empty column headers before the first tile startcode check
+        // (Phase-7 certification slow-unit finding).
+        if self.hdr.width & 0xF != 0
+            || self.hdr.height & 0xF != 0
+            || self.hdr.mb_width == 0
+            || self.hdr.mb_height == 0
+        {
+            return Err(DecodeError::Malformed(format!(
+                "extended image size {}×{} is not a whole positive number of 16-pixel macroblocks",
+                self.hdr.width, self.hdr.height
+            )));
+        }
 
         // Append the last "rest" tile entry. The explicit tile widths/heights
         // must fit within the macroblock grid; a lying header that overshoots
