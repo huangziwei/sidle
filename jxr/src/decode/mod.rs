@@ -8,23 +8,22 @@
 //!
 //! ## Layout
 //!
-//! - `misc` — bit/byte stream reader used by both the container and
-//!   codestream parsers.
-//! - `container` — TIFF-like outer file parser (extracts the WMPHOTO
-//!   codestream bytes + image dimensions / pixel format UUID).
-//! - `consts` / `tables` — constants and Huffman tables from the spec.
-//! - `math` — IDCT / butterfly / overlap-filter primitives.
-//! - `state` — plane / MB / adaptive-VLC structs.
-//! - `decoder` — the codestream decoder pipeline.
+//! Public modules are the decoded-artifact vocabulary: [`container`] (outer
+//! file), [`decoder`] (codestream pipeline, [`decoder::DecodedImage`], and
+//! the [`decoder::Decoder::parse_headers`] sniffing view), [`pixels`]
+//! (interleaved pixel-buffer view) and [`consts`] (the T.832 constants the
+//! raw `u8` fields are expressed in). The machinery — `misc` (bit reader),
+//! `math` (transform primitives), `state` (plane/MB/VLC state), `tables`
+//! (spec Huffman tables) — is crate-internal.
 
 pub mod consts;
 pub mod container;
 pub mod decoder;
-pub mod math;
-pub mod misc;
+pub(crate) mod math;
+pub(crate) mod misc;
 pub mod pixels;
-pub mod state;
-pub mod tables;
+pub(crate) mod state;
+pub(crate) mod tables;
 
 /// Decode a parsed container completely: the primary codestream, plus the
 /// separate planar-alpha codestream when the container carries one (the

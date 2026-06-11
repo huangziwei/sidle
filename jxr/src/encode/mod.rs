@@ -1,31 +1,33 @@
-//! JPEG-XR encoder, dual grayscale/color.
+//! JPEG-XR encoder: the decoder's forward mirror, covering every format
+//! the decoder reads (the full T.832 envelope — see the crate README).
 //!
-//! Forward mirror of [`crate::decode`], built bottom-up against the decoder
-//! as a round-trip oracle (history: the repo's
-//! `.claude/plans/finished_or_stale/jxr-encoder.md`).
-//!
-//! Status: **grayscale + color complete** — full ALL_BANDS (DC + LP + HP +
-//! flexbits), multi-MB prediction, windowing, and per-band quantization
-//! ([`quant`]). Grayscale ([`gray`]) is `8bppGray`; color ([`color`]) is
-//! `24bppRGB` via the YUV 4:4:4 transform. `QpSet::LOSSLESS` round-trips
-//! bit-exact (both modes); `QP > 0` is lossy (ship mode).
+//! Built bottom-up against [`crate::decode`] as a round-trip oracle
+//! (history: the repo's `.claude/plans/` jxr plans). Entry points:
+//! [`encode`] / [`encode_with_alpha_qp`] (classic 8-bit),
+//! [`encode_with_options`] (the full 8-bit option surface), and
+//! [`encode_typed`] (deep/HDR/exotic [`SamplePlanes`]).
+//! `QpSet::LOSSLESS` round-trips bit-exact wherever the format family is
+//! exact (see the per-family notes on [`encode_typed`]); `QP > 0` is lossy.
 
-pub mod bitstream;
-pub mod codestream;
-pub mod color;
-pub mod container;
-pub mod coeff;
-pub mod convert;
-pub mod entropy;
-pub mod gray;
-pub mod hp;
+// Encoder machinery: crate-visible only. The public encode surface is the
+// re-exports below plus the `encode*` functions — narrowed deliberately
+// (Phase 7a) so the API rustdoc shows the contract, not the internals.
+pub(crate) mod bitstream;
+pub(crate) mod codestream;
+pub(crate) mod coeff;
+pub(crate) mod color;
+pub(crate) mod container;
+pub(crate) mod convert;
+pub(crate) mod entropy;
+pub(crate) mod gray;
+pub(crate) mod hp;
 mod multi;
 mod overlap;
-pub mod quant;
-pub mod transform;
+pub(crate) mod quant;
+pub(crate) mod transform;
 
 pub use convert::SamplePlanes;
-pub use quant::QpSet;
+pub use quant::{BandQp, QpPlan, QpSet, TileQps};
 
 /// How the input planes are interpreted as color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,16 +57,32 @@ pub enum ColorMode {
     NComponent,
 }
 
-/// Errors from the encoder.
+/// Errors from the encoder. The split is by WHO can fix the call:
+///
+/// - [`Invalid`](EncodeError::Invalid) — the input is internally inconsistent
+///   or outside what the JPEG XR format can express at all. No encoder could
+///   satisfy it; fix the call site.
+/// - [`Unsupported`](EncodeError::Unsupported) — a format-expressible request
+///   this encoder deliberately does not implement (a capability stance,
+///   usually mirroring the reference encoder's own refusal). The message says
+///   which.
 #[derive(Debug)]
 pub enum EncodeError {
-    /// Input the encoder can't represent.
+    /// Caller-contract violation: plane count/length mismatches, out-of-range
+    /// knobs, a malformed [`QpPlan`], or a request the format itself cannot
+    /// express (e.g. grayscale-with-alpha — no such container pixel format
+    /// exists).
+    Invalid(String),
+    /// A format-expressible request this encoder takes a stance against
+    /// implementing (e.g. chroma-subsampled float input, which the reference
+    /// encoder also refuses).
     Unsupported(String),
 }
 
 impl std::fmt::Display for EncodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            EncodeError::Invalid(s) => write!(f, "invalid input: {s}"),
             EncodeError::Unsupported(s) => write!(f, "unsupported: {s}"),
         }
     }
@@ -148,7 +166,7 @@ impl BandsPresent {
 /// close-out shape and extended as Phase 4 lands more of the envelope (this
 /// is the Phase-7 consolidation point, begun early). `Default` reproduces
 /// classic `encode(…, QpSet::LOSSLESS)` behavior.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct EncodeOptions {
     /// Primary-plane per-band quantizers.
     pub qp: QpSet,
@@ -193,8 +211,30 @@ pub struct EncodeOptions {
     /// Chroma per-band quantizers distinct from the luma `qp` (T.832
     /// `COMP_SEPARATE` component mode — the classic quantize-chroma-harder
     /// rate trick). Color inputs only; ignored for grayscale. `None` = same
-    /// as `qp` (`COMP_UNIFORM`, byte-stable).
+    /// as `qp` (`COMP_UNIFORM`, byte-stable). Mutually exclusive with
+    /// [`qp_plan`](Self::qp_plan).
     pub chroma_qp: Option<QpSet>,
+    /// The full T.832 quantization syntax for the primary plane: per-tile
+    /// [QP sets](TileQps) and per-MB LP/HP DQUANT index maps ([`QpPlan`]).
+    /// `None` (the default) derives the classic single-set plan from
+    /// `qp`/`chroma_qp`. `Some` becomes THE quantizer source — `qp` is
+    /// unused and `chroma_qp` must stay `None`
+    /// ([`Invalid`](EncodeError::Invalid) otherwise).
+    ///
+    /// Honored on the color-coded paths: 3-plane RGB at any sample depth,
+    /// packed RGB, and RGBE, at 4:4:4/4:2:2/4:2:0 chroma. Grayscale,
+    /// `YOnly`, alpha-plane, CMYK/N-component and bi-level paths reject it
+    /// ([`Unsupported`](EncodeError::Unsupported)) — their QP generality is
+    /// the uniform `qp`/`chroma_qp`/`alpha_qp` surface. A plan also
+    /// suppresses the auto-gray collapse (identical R==G==B channels encode
+    /// as the declared color format rather than silently dropping the
+    /// plan's chroma bytes and tile structure).
+    ///
+    /// Component mode (`COMP_UNIFORM`/`SEPARATE`/`INDEPENDENT`) is derived
+    /// per band from each [`BandQp`]'s bytes on emission. More than one
+    /// LP/HP set makes that band per-MB DQUANT: each macroblock picks its
+    /// set by the index map (empty map = all set 0).
+    pub qp_plan: Option<QpPlan>,
 }
 
 impl Default for EncodeOptions {
@@ -213,6 +253,7 @@ impl Default for EncodeOptions {
             overlap: Overlap::None,
             frequency: false,
             chroma_qp: None,
+            qp_plan: None,
         }
     }
 }
@@ -281,7 +322,7 @@ pub fn deinterleave(
     let n = width as usize * height as usize;
     let ch = order.channels();
     if bytes.len() != n * ch {
-        return Err(EncodeError::Unsupported(format!(
+        return Err(EncodeError::Invalid(format!(
             "interleaved buffer len {} != {width}x{height}x{ch}",
             bytes.len()
         )));
@@ -303,8 +344,12 @@ pub fn deinterleave(
 /// such a file would be unrepresentable — expand to RGBA. Interleaved
 /// buffers in common memory orders normalize via [`deinterleave`].
 pub struct ImageInput<'a> {
+    /// Width in pixels.
     pub width: u32,
+    /// Height in pixels.
     pub height: u32,
+    /// 1 (gray), 3 (R,G,B) or 4 (R,G,B,A) planes, each `width × height`
+    /// row-major.
     pub planes: &'a [Vec<u8>],
     /// The alpha plane (4-plane input) holds premultiplied values. Sets the
     /// codestream `premultiplied_alpha_flag` (a property bit, not a different
@@ -351,25 +396,28 @@ struct Geometry {
     window: (u32, u32),
     tile_cols_mb: Vec<usize>,
     tile_rows_mb: Vec<usize>,
+    /// Window-padded MB grid (the shape DQUANT index maps address).
+    mb_cols: usize,
+    mb_rows: usize,
 }
 
 fn validate_geometry(w: u32, h: u32, opts: &EncodeOptions) -> Result<Geometry, EncodeError> {
     if opts.trim_flexbits > 15 {
-        return Err(EncodeError::Unsupported("trim_flexbits must be 0–15".into()));
+        return Err(EncodeError::Invalid("trim_flexbits must be 0–15".into()));
     }
     if opts.window_top > 63 || opts.window_left > 63 {
-        return Err(EncodeError::Unsupported(
+        return Err(EncodeError::Invalid(
             "window margins are 6-bit fields (0–63)".into(),
         ));
     }
     if w == 0 || h == 0 {
-        return Err(EncodeError::Unsupported("zero-size image".into()));
+        return Err(EncodeError::Invalid("zero-size image".into()));
     }
     if w > 1 << 28 || h > 1 << 28 {
         // The long header carries 32-bit dims, but cap at the sane end of the
         // spec range (the decoder's own decompression budget would reject the
         // grid anyway).
-        return Err(EncodeError::Unsupported("dims exceed 2^28".into()));
+        return Err(EncodeError::Invalid("dims exceed 2^28".into()));
     }
     let window = (opts.window_top as u32, opts.window_left as u32);
     // Tile grid: uniform split of the padded MB grid (which includes the
@@ -378,10 +426,10 @@ fn validate_geometry(w: u32, h: u32, opts: &EncodeOptions) -> Result<Geometry, E
     let mb_rows = ((h + window.0).div_ceil(16)) as usize;
     let (tc, tr) = (opts.tile_cols.max(1) as usize, opts.tile_rows.max(1) as usize);
     if tc > 4096 || tr > 4096 {
-        return Err(EncodeError::Unsupported("tile counts are 12-bit fields (≤ 4096)".into()));
+        return Err(EncodeError::Invalid("tile counts are 12-bit fields (≤ 4096)".into()));
     }
     if tc > mb_cols || tr > mb_rows {
-        return Err(EncodeError::Unsupported(format!(
+        return Err(EncodeError::Invalid(format!(
             "{tc}x{tr} tiles over a {mb_cols}x{mb_rows} MB grid (every tile needs ≥ 1 MB)"
         )));
     }
@@ -390,9 +438,100 @@ fn validate_geometry(w: u32, h: u32, opts: &EncodeOptions) -> Result<Geometry, E
     } else {
         (Vec::new(), Vec::new())
     };
-    Ok(Geometry { window, tile_cols_mb, tile_rows_mb })
+    Ok(Geometry { window, tile_cols_mb, tile_rows_mb, mb_cols, mb_rows })
 }
 
+/// Shape-check a caller-supplied [`QpPlan`] against the tile grid — the
+/// public-surface counterpart of the emission-side debug assertions.
+fn validate_qp_plan(p: &QpPlan, geom: &Geometry) -> Result<(), EncodeError> {
+    let ntiles = geom.tile_cols_mb.len().max(1) * geom.tile_rows_mb.len().max(1);
+    if p.tiles.len() != 1 && p.tiles.len() != ntiles {
+        return Err(EncodeError::Invalid(format!(
+            "QpPlan carries {} tile entries; expected 1 (image-uniform) or {ntiles} (one per tile)",
+            p.tiles.len()
+        )));
+    }
+    let (nlp, nhp) = (p.num_lp_qps(), p.num_hp_qps());
+    for t in &p.tiles {
+        if !(1..=16).contains(&t.lp.len()) || !(1..=16).contains(&t.hp.len()) {
+            return Err(EncodeError::Invalid(
+                "each tile needs 1–16 LP and 1–16 HP QP sets (num_qps is a 4-bit field)".into(),
+            ));
+        }
+        if t.lp.len() != nlp || t.hp.len() != nhp {
+            return Err(EncodeError::Invalid(
+                "every tile must declare the same LP/HP set counts (the per-band num_qps \
+                 shape is image-level)"
+                    .into(),
+            ));
+        }
+    }
+    let nmb = geom.mb_cols * geom.mb_rows;
+    let check_index = |idx: &[u8], sets: usize, band: &str| -> Result<(), EncodeError> {
+        if idx.is_empty() {
+            return Ok(());
+        }
+        if sets == 1 {
+            return Err(EncodeError::Invalid(format!(
+                "{band}_index map with a single {band} set would never be read — \
+                 drop the map or declare more sets"
+            )));
+        }
+        if idx.len() != nmb {
+            return Err(EncodeError::Invalid(format!(
+                "{band}_index map has {} entries; the (window-padded) MB grid is {}x{} = {nmb}",
+                idx.len(),
+                geom.mb_cols,
+                geom.mb_rows
+            )));
+        }
+        if let Some(&bad) = idx.iter().find(|&&i| i as usize >= sets) {
+            return Err(EncodeError::Invalid(format!(
+                "{band}_index entry {bad} out of range (this plan declares {sets} {band} sets)"
+            )));
+        }
+        Ok(())
+    };
+    check_index(&p.lp_index, nlp, "lp")?;
+    check_index(&p.hp_index, nhp, "hp")
+}
+
+/// The documented `qp_plan` contract: paths that don't route through the
+/// color plane machinery reject an explicit plan instead of silently
+/// dropping its tile structure and index maps.
+fn reject_qp_plan(opts: &EncodeOptions, path: &str) -> Result<(), EncodeError> {
+    if opts.qp_plan.is_some() {
+        return Err(EncodeError::Unsupported(format!(
+            "qp_plan (per-tile QP sets / DQUANT index maps) is implemented for the \
+             color-coded paths only; the {path} path takes the uniform qp"
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve the primary-plane QP source for the color-coded paths: an explicit
+/// `qp_plan` (validated against the geometry), the `chroma_qp` fold, or `None`
+/// (the classic single-set path, byte-stable).
+fn resolve_qp_plan(opts: &EncodeOptions, geom: &Geometry) -> Result<Option<QpPlan>, EncodeError> {
+    match (&opts.qp_plan, opts.chroma_qp) {
+        (Some(_), Some(_)) => Err(EncodeError::Invalid(
+            "qp_plan and chroma_qp are mutually exclusive QP sources".into(),
+        )),
+        (Some(p), None) => {
+            validate_qp_plan(p, geom)?;
+            Ok(Some(p.clone()))
+        }
+        (None, Some(c)) => Ok(Some(quant::QpPlan::uniform(opts.qp, Some(c)))),
+        (None, None) => Ok(None),
+    }
+}
+
+/// The full-surface 8-bit encode: [`encode`] plus everything in
+/// [`EncodeOptions`] (chroma sampling, band truncation, windowing, tiling,
+/// overlap pre-filtering, frequency order, scaled arithmetic, the complete
+/// QP syntax). `Default::default()` options reproduce `encode(…)`
+/// byte-for-byte. CMYK/N-component [`ColorMode`]s route the planes through
+/// the per-component path ([`encode_typed`] accepts them at 16-bit too).
 pub fn encode_with_options(
     input: &ImageInput<'_>,
     mode: ColorMode,
@@ -417,33 +556,34 @@ pub fn encode_with_options(
     let tiles: (&[usize], &[usize]) = (&geom.tile_cols_mb, &geom.tile_rows_mb);
     let overlap = opts.overlap.code();
     let frequency = opts.frequency;
-    // chroma_qp folds into a single-set QpPlan with separate chroma bytes
-    // (COMP_SEPARATE emission); None keeps the classic plan-free path.
-    let chroma_plan = opts.chroma_qp.map(|c| quant::QpPlan::uniform(qp, Some(c)));
-    let plan = chroma_plan.as_ref();
+    // Explicit qp_plan, or chroma_qp folded into a single-set QpPlan with
+    // separate chroma bytes (COMP_SEPARATE emission); None keeps the classic
+    // plan-free path.
+    let owned_plan = resolve_qp_plan(&opts, &geom)?;
+    let plan = owned_plan.as_ref();
     let n = w as usize * h as usize;
     let check = |p: &[u8]| {
         if p.len() == n {
             Ok(())
         } else {
-            Err(EncodeError::Unsupported("plane len != width*height".into()))
+            Err(EncodeError::Invalid("plane len != width*height".into()))
         }
     };
     if input.planes.len() == 2 {
-        return Err(EncodeError::Unsupported(
+        return Err(EncodeError::Invalid(
             "gray+alpha: JPEG XR has no grayscale-with-alpha container pixel format; \
              supply RGBA (4 planes)"
                 .into(),
         ));
     }
     if input.premultiplied_alpha && input.planes.len() != 4 {
-        return Err(EncodeError::Unsupported(
+        return Err(EncodeError::Invalid(
             "premultiplied_alpha set but no alpha plane (4 planes)".into(),
         ));
     }
     if input.planes.len() == 4 {
         if mode != ColorMode::Color {
-            return Err(EncodeError::Unsupported(
+            return Err(EncodeError::Invalid(
                 "alpha requires ColorMode::Color (no gray+alpha pixel format exists)".into(),
             ));
         }
@@ -460,6 +600,7 @@ pub fn encode_with_options(
                 "band truncation / trim_flexbits with an alpha plane is not implemented".into(),
             ));
         }
+        reject_qp_plan(&opts, "alpha-plane")?;
         let fmt = match opts.chroma {
             ChromaSampling::Yuv422 => INT_YUV422,
             ChromaSampling::Yuv420 => INT_YUV420,
@@ -491,12 +632,13 @@ pub fn encode_with_options(
     let want_color = mode == ColorMode::Color && input.planes.len() != 1;
     if !want_color {
         if input.planes.len() != 1 {
-            return Err(EncodeError::Unsupported(format!(
+            return Err(EncodeError::Invalid(format!(
                 "grayscale expects 1 plane, got {}",
                 input.planes.len()
             )));
         }
         check(&input.planes[0])?;
+        reject_qp_plan(&opts, "grayscale")?;
         // QpSet::LOSSLESS at All bands ⇒ bit-exact; truncation/trim ⇒ lossy.
         return Ok(gray::encode_grayscale_options(
             &input.planes[0],
@@ -513,7 +655,7 @@ pub fn encode_with_options(
         ));
     }
     if input.planes.len() != 3 {
-        return Err(EncodeError::Unsupported(format!(
+        return Err(EncodeError::Invalid(format!(
             "color expects 3 planes (RGB), got {}",
             input.planes.len()
         )));
@@ -523,8 +665,13 @@ pub fn encode_with_options(
     check(&input.planes[2])?;
     // Auto-gray: a "color" image whose channels are identical everywhere carries
     // no chroma — emit `8bppGray` (smaller; the chroma planes would be all-zero;
-    // the chroma-sampling choice is moot on a gray image).
-    if input.planes[0] == input.planes[1] && input.planes[1] == input.planes[2] {
+    // the chroma-sampling choice is moot on a gray image). An explicit qp_plan
+    // suppresses the collapse: the gray path can't honor a plan, and silently
+    // dropping it would be worse than the few bytes of zero chroma.
+    if opts.qp_plan.is_none()
+        && input.planes[0] == input.planes[1]
+        && input.planes[1] == input.planes[2]
+    {
         return Ok(gray::encode_grayscale_options(
             &input.planes[0],
             w,
@@ -543,6 +690,7 @@ pub fn encode_with_options(
     let trim = opts.trim_flexbits;
     match opts.chroma {
         ChromaSampling::YOnly if opts.bands == BandsPresent::All && trim == 0 => {
+            reject_qp_plan(&opts, "YOnly")?;
             Ok(color::encode_yonly_from_color(
                 r, g, b, w, h, qp, opts.scaled, window, tiles, overlap, frequency,
             ))
@@ -592,13 +740,13 @@ fn encode_packed(
 ) -> Result<Vec<u8>, EncodeError> {
     use crate::decode::consts::{INT_YUV420, INT_YUV422, INT_YUV444, OUT_RGB};
     if mode != ColorMode::Color {
-        return Err(EncodeError::Unsupported("packed RGB input is inherently color".into()));
+        return Err(EncodeError::Invalid("packed RGB input is inherently color".into()));
     }
     if premultiplied_alpha {
-        return Err(EncodeError::Unsupported("packed RGB has no alpha plane".into()));
+        return Err(EncodeError::Invalid("packed RGB has no alpha plane".into()));
     }
     if samples.num_planes() != 1 {
-        return Err(EncodeError::Unsupported(format!(
+        return Err(EncodeError::Invalid(format!(
             "packed input is ONE plane of packed words, got {} planes",
             samples.num_planes()
         )));
@@ -609,14 +757,15 @@ fn encode_packed(
     let (overlap, frequency) = (opts.overlap.code(), opts.frequency);
     let (qp, bands, trim) = (opts.qp, opts.bands.code(), opts.trim_flexbits);
     if samples.plane_len(0) != w as usize * h as usize {
-        return Err(EncodeError::Unsupported("plane len != width*height".into()));
+        return Err(EncodeError::Invalid("plane len != width*height".into()));
     }
     let depth = samples.depth();
     let guid = samples.rgb_guid();
     let (rp, gp, bp) = convert::packed_prebias(samples, opts.scaled);
-    let chroma_plan = opts.chroma_qp.map(|c| quant::QpPlan::uniform(qp, Some(c)));
+    let owned_plan = resolve_qp_plan(&opts, &geom)?;
     match opts.chroma {
         ChromaSampling::YOnly if opts.bands == BandsPresent::All && trim == 0 => {
+            reject_qp_plan(&opts, "YOnly")?;
             Ok(color::encode_yonly_prebias(
                 &rp, &gp, &bp, w, h, qp, opts.scaled, window, tiles, overlap, frequency, &depth,
                 guid,
@@ -646,7 +795,7 @@ fn encode_packed(
                 tiles,
                 overlap,
                 frequency,
-                chroma_plan.as_ref(),
+                owned_plan.as_ref(),
                 &depth,
                 guid,
                 OUT_RGB,
@@ -667,32 +816,33 @@ fn encode_bw(
     opts: EncodeOptions,
 ) -> Result<Vec<u8>, EncodeError> {
     if mode != ColorMode::Grayscale {
-        return Err(EncodeError::Unsupported("bi-level input is inherently grayscale".into()));
+        return Err(EncodeError::Invalid("bi-level input is inherently grayscale".into()));
     }
     if premultiplied_alpha {
-        return Err(EncodeError::Unsupported("bi-level has no alpha plane".into()));
+        return Err(EncodeError::Invalid("bi-level has no alpha plane".into()));
     }
     if samples.num_planes() != 1 {
-        return Err(EncodeError::Unsupported(format!(
+        return Err(EncodeError::Invalid(format!(
             "bi-level input is ONE plane, got {}",
             samples.num_planes()
         )));
     }
     if samples.plane_len(0) != w as usize * h as usize {
-        return Err(EncodeError::Unsupported("plane len != width*height".into()));
+        return Err(EncodeError::Invalid("plane len != width*height".into()));
     }
     let bad = match samples {
         SamplePlanes::Bw(p) | SamplePlanes::BwBlackIsOne(p) => p[0].iter().any(|&v| v > 1),
         _ => unreachable!(),
     };
     if bad {
-        return Err(EncodeError::Unsupported("bi-level values must be 0 or 1".into()));
+        return Err(EncodeError::Invalid("bi-level values must be 0 or 1".into()));
     }
     let geom = validate_geometry(w, h, &opts)?;
     let window = geom.window;
     let tiles: (&[usize], &[usize]) = (&geom.tile_cols_mb, &geom.tile_rows_mb);
     let (overlap, frequency) = (opts.overlap.code(), opts.frequency);
     let (qp, bands, trim) = (opts.qp, opts.bands.code(), opts.trim_flexbits);
+    reject_qp_plan(&opts, "bi-level (grayscale)")?;
     let pre = samples.prebias_plane(0, opts.scaled);
     Ok(gray::encode_gray_prebias(
         &pre,
@@ -729,7 +879,7 @@ fn encode_multi_typed(
         SamplePlanes::U8(_) => false,
         SamplePlanes::U16(_) => true,
         _ => {
-            return Err(EncodeError::Unsupported(
+            return Err(EncodeError::Invalid(
                 "CMYK/N-component container formats exist for the 8- and 16-bit \
                  unsigned families only"
                     .into(),
@@ -737,14 +887,14 @@ fn encode_multi_typed(
         }
     };
     if !matches!(opts.chroma, ChromaSampling::Yuv444) {
-        return Err(EncodeError::Unsupported(
+        return Err(EncodeError::Invalid(
             "CMYK/N-component input keeps YUV 4:4:4 (no subsampled YUVK/NCOMPONENT \
              exists in T.832)"
                 .into(),
         ));
     }
     if premultiplied_alpha {
-        return Err(EncodeError::Unsupported(
+        return Err(EncodeError::Invalid(
             "no premultiplied container pixel format exists for CMYK/N-component".into(),
         ));
     }
@@ -753,12 +903,13 @@ fn encode_multi_typed(
     let tiles: (&[usize], &[usize]) = (&geom.tile_cols_mb, &geom.tile_rows_mb);
     let (overlap, frequency) = (opts.overlap.code(), opts.frequency);
     let (qp, bands, trim) = (opts.qp, opts.bands.code(), opts.trim_flexbits);
+    reject_qp_plan(&opts, "CMYK/N-component (per-component)")?;
     let chroma_qp = opts.chroma_qp.unwrap_or(qp);
     let n = w as usize * h as usize;
     let np = samples.num_planes();
     for i in 0..np {
         if samples.plane_len(i) != n {
-            return Err(EncodeError::Unsupported("plane len != width*height".into()));
+            return Err(EncodeError::Invalid("plane len != width*height".into()));
         }
     }
     let cmyk = matches!(mode, ColorMode::Cmyk | ColorMode::CmykDirect);
@@ -767,7 +918,7 @@ fn encode_multi_typed(
             4 => (4, false),
             5 => (4, true),
             other => {
-                return Err(EncodeError::Unsupported(format!(
+                return Err(EncodeError::Invalid(format!(
                     "CMYK expects 4 planes (C,M,Y,K) or 5 (+alpha), got {other}"
                 )))
             }
@@ -779,7 +930,7 @@ fn encode_multi_typed(
         match np {
             3..=8 => (np, false),
             other => {
-                return Err(EncodeError::Unsupported(format!(
+                return Err(EncodeError::Invalid(format!(
                     "N-component expects 3–8 channel planes (the container GUID \
                      family stops at 8 channels; alpha is not offered), got {other}"
                 )))
@@ -841,8 +992,11 @@ fn encode_multi_typed(
 /// as in the 8-bit API (**1** = grayscale, **3** = RGB; **4** = RGB + alpha,
 /// 8-bit only so far); the [`SamplePlanes`] variant carries the depth.
 pub struct TypedInput<'a> {
+    /// Width in pixels.
     pub width: u32,
+    /// Height in pixels.
     pub height: u32,
+    /// The typed planes; the variant carries the sample depth.
     pub samples: SamplePlanes<'a>,
     /// See [`ImageInput::premultiplied_alpha`] (4-plane inputs only).
     pub premultiplied_alpha: bool,
@@ -923,21 +1077,21 @@ pub fn encode_typed(
     let np = samples.num_planes();
     for i in 0..np {
         if samples.plane_len(i) != n {
-            return Err(EncodeError::Unsupported("plane len != width*height".into()));
+            return Err(EncodeError::Invalid("plane len != width*height".into()));
         }
     }
     if let SamplePlanes::Rgbe(planes) = samples {
         use crate::decode::consts::{INT_YUV444, OUT_RGBE};
         if np != 4 {
-            return Err(EncodeError::Unsupported(format!(
+            return Err(EncodeError::Invalid(format!(
                 "RGBE expects exactly 4 planes (R, G, B, shared exponent), got {np}"
             )));
         }
         if mode != ColorMode::Color {
-            return Err(EncodeError::Unsupported("RGBE is inherently color".into()));
+            return Err(EncodeError::Invalid("RGBE is inherently color".into()));
         }
         if input.premultiplied_alpha {
-            return Err(EncodeError::Unsupported("RGBE has no alpha plane".into()));
+            return Err(EncodeError::Invalid("RGBE has no alpha plane".into()));
         }
         if opts.chroma == ChromaSampling::YOnly {
             return Err(EncodeError::Unsupported(
@@ -950,7 +1104,7 @@ pub fn encode_typed(
             ));
         }
         let (rp, gp, bp) = convert::rgbe_prebias(planes, opts.scaled);
-        let chroma_plan = opts.chroma_qp.map(|c| quant::QpPlan::uniform(qp, Some(c)));
+        let owned_plan = resolve_qp_plan(&opts, &geom)?;
         return Ok(color::encode_color_prebias(
             &rp,
             &gp,
@@ -966,7 +1120,7 @@ pub fn encode_typed(
             tiles,
             overlap,
             frequency,
-            chroma_plan.as_ref(),
+            owned_plan.as_ref(),
             &depth,
             samples.rgb_guid(),
             OUT_RGBE,
@@ -974,7 +1128,7 @@ pub fn encode_typed(
     }
     match np {
         2 => {
-            return Err(EncodeError::Unsupported(
+            return Err(EncodeError::Invalid(
                 "gray+alpha: JPEG XR has no grayscale-with-alpha container pixel format; \
                  supply RGBA (4 planes)"
                     .into(),
@@ -983,7 +1137,7 @@ pub fn encode_typed(
         4 => {
             use crate::decode::consts::{INT_YUV420, INT_YUV422, INT_YUV444};
             if mode != ColorMode::Color {
-                return Err(EncodeError::Unsupported(
+                return Err(EncodeError::Invalid(
                     "alpha requires ColorMode::Color (no gray+alpha pixel format exists)".into(),
                 ));
             }
@@ -999,12 +1153,13 @@ pub fn encode_typed(
                 ));
             }
             let Some(guid) = samples.rgba_guid(input.premultiplied_alpha) else {
-                return Err(EncodeError::Unsupported(
+                return Err(EncodeError::Invalid(
                     "no premultiplied container pixel format exists for this sample \
                      family (only the unsigned-16 and float-32 families have one)"
                         .into(),
                 ));
             };
+            reject_qp_plan(&opts, "alpha-plane")?;
             let fmt = match opts.chroma {
                 ChromaSampling::Yuv422 => INT_YUV422,
                 ChromaSampling::Yuv420 => INT_YUV420,
@@ -1036,23 +1191,24 @@ pub fn encode_typed(
         }
         1 | 3 => {}
         other => {
-            return Err(EncodeError::Unsupported(format!(
+            return Err(EncodeError::Invalid(format!(
                 "expected 1 (gray), 3 (RGB) or 4 (RGBA) planes, got {other}"
             )))
         }
     }
     if input.premultiplied_alpha {
-        return Err(EncodeError::Unsupported(
+        return Err(EncodeError::Invalid(
             "premultiplied_alpha set but no alpha plane (4 planes)".into(),
         ));
     }
     let want_color = mode == ColorMode::Color && np != 1;
     if !want_color {
         if np != 1 {
-            return Err(EncodeError::Unsupported(format!(
+            return Err(EncodeError::Invalid(format!(
                 "grayscale expects 1 plane, got {np}"
             )));
         }
+        reject_qp_plan(&opts, "grayscale")?;
         let pre = samples.prebias_plane(0, opts.scaled);
         return Ok(gray::encode_gray_prebias(
             &pre,
@@ -1076,8 +1232,9 @@ pub fn encode_typed(
     // Auto-gray, in the pre-bias domain: channels the emitted codestream
     // could not distinguish (identical after conversion — for BD32S that is
     // equality of the surviving high bits) carry no chroma → emit the
-    // family's gray format, mirroring the 8-bit auto-gray.
-    if rp == gp && gp == bp {
+    // family's gray format, mirroring the 8-bit auto-gray (and like it,
+    // suppressed by an explicit qp_plan).
+    if opts.qp_plan.is_none() && rp == gp && gp == bp {
         return Ok(gray::encode_gray_prebias(
             &rp,
             w,
@@ -1094,10 +1251,11 @@ pub fn encode_typed(
             samples.gray_guid(),
         ));
     }
-    let chroma_plan = opts.chroma_qp.map(|c| quant::QpPlan::uniform(qp, Some(c)));
-    let plan = chroma_plan.as_ref();
+    let owned_plan = resolve_qp_plan(&opts, &geom)?;
+    let plan = owned_plan.as_ref();
     match opts.chroma {
         ChromaSampling::YOnly if opts.bands == BandsPresent::All && trim == 0 => {
+            reject_qp_plan(&opts, "YOnly")?;
             Ok(color::encode_yonly_prebias(
                 &rp,
                 &gp,
@@ -1850,14 +2008,14 @@ mod tests {
                     ..Default::default()
                 };
                 // Grayscale: exact.
-                let f = encode_with_options(&ginput, ColorMode::Grayscale, opts).unwrap();
+                let f = encode_with_options(&ginput, ColorMode::Grayscale, opts.clone()).unwrap();
                 let d = dec(&f);
                 assert_eq!((d.width, d.height), (w, h), "({top},{left}) {w}x{h}");
                 for i in 0..n {
                     assert_eq!(d.image_plane[0][i], gray[i] as i32, "gray ({top},{left}) px{i}");
                 }
                 // Color 4:4:4: exact.
-                let f = encode_with_options(&cinput, ColorMode::Color, opts).unwrap();
+                let f = encode_with_options(&cinput, ColorMode::Color, opts.clone()).unwrap();
                 let d = dec(&f);
                 for c in 0..3 {
                     for i in 0..n {
@@ -1868,7 +2026,7 @@ mod tests {
                     }
                 }
                 // RGBA: exact on all four channels.
-                let f = encode_with_options(&ainput, ColorMode::Color, opts).unwrap();
+                let f = encode_with_options(&ainput, ColorMode::Color, opts.clone()).unwrap();
                 let d = dec(&f);
                 assert_eq!(d.num_components, 4);
                 for c in 0..4 {
@@ -1947,7 +2105,7 @@ mod tests {
             let ginput =
                 ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
             let opts = EncodeOptions { tile_cols: tc, tile_rows: tr, ..Default::default() };
-            let f = encode_with_options(&ginput, ColorMode::Grayscale, opts).unwrap();
+            let f = encode_with_options(&ginput, ColorMode::Grayscale, opts.clone()).unwrap();
             let d = dec(&f);
             assert_eq!((d.width, d.height), (w, h));
             for i in 0..n {
@@ -1961,7 +2119,7 @@ mod tests {
                 planes: &cplanes[..3],
                 premultiplied_alpha: false,
             };
-            let f = encode_with_options(&cinput, ColorMode::Color, opts).unwrap();
+            let f = encode_with_options(&cinput, ColorMode::Color, opts.clone()).unwrap();
             let d = dec(&f);
             for c in 0..3 {
                 for i in 0..n {
@@ -1973,7 +2131,7 @@ mod tests {
             }
             let ainput =
                 ImageInput { width: w, height: h, planes: &cplanes, premultiplied_alpha: false };
-            let f = encode_with_options(&ainput, ColorMode::Color, opts).unwrap();
+            let f = encode_with_options(&ainput, ColorMode::Color, opts.clone()).unwrap();
             let d = dec(&f);
             assert_eq!(d.num_components, 4);
             for c in 0..4 {
@@ -1994,11 +2152,11 @@ mod tests {
         for chroma in [ChromaSampling::Yuv444, ChromaSampling::Yuv420] {
             let qp = QpSet { dc: 16, lp: 32, hp: 64 };
             let base = EncodeOptions { qp, chroma, scaled: true, ..Default::default() };
-            let untiled = encode_with_options(&cinput, ColorMode::Color, base).unwrap();
+            let untiled = encode_with_options(&cinput, ColorMode::Color, base.clone()).unwrap();
             let tiled = encode_with_options(
                 &cinput,
                 ColorMode::Color,
-                EncodeOptions { tile_cols: 3, tile_rows: 2, ..base },
+                EncodeOptions { tile_cols: 3, tile_rows: 2, ..base.clone() },
             )
             .unwrap();
             let (du, dt) = (dec(&untiled), dec(&tiled));
@@ -2215,12 +2373,12 @@ mod tests {
             ImageInput { width: w, height: h, planes: &planes4[..3], premultiplied_alpha: false };
         let qp = QpSet { dc: 16, lp: 32, hp: 64 };
         let base = EncodeOptions { qp, scaled: true, ..Default::default() };
-        let f0 = encode_with_options(&ci, ColorMode::Color, base).unwrap();
+        let f0 = encode_with_options(&ci, ColorMode::Color, base.clone()).unwrap();
         for overlap in [Overlap::One, Overlap::Two] {
             let f = encode_with_options(
                 &ci,
                 ColorMode::Color,
-                EncodeOptions { overlap, ..base },
+                EncodeOptions { overlap, ..base.clone() },
             )
             .unwrap();
             assert_ne!(f, f0, "{overlap:?} must change the coded bytes");
@@ -2272,11 +2430,11 @@ mod tests {
         // loss itself — so the baseline is the UNSCALED 4:2:0 encode, not an
         // absolute figure.)
         let opts420 = EncodeOptions { qp, chroma: ChromaSampling::Yuv420, ..Default::default() };
-        let u420 = encode_with_options(&input, ColorMode::Color, opts420).unwrap();
+        let u420 = encode_with_options(&input, ColorMode::Color, opts420.clone()).unwrap();
         let f = encode_with_options(
             &input,
             ColorMode::Color,
-            EncodeOptions { scaled: true, overlap: Overlap::Two, ..opts420 },
+            EncodeOptions { scaled: true, overlap: Overlap::Two, ..opts420.clone() },
         )
         .unwrap();
         let (pu420, ps420) = (psnr(&u420), psnr(&f));
@@ -2307,7 +2465,7 @@ mod tests {
             let gplanes = [planes4[0].clone()];
             let gi =
                 ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
-            let f = encode_with_options(&gi, ColorMode::Grayscale, freq).unwrap();
+            let f = encode_with_options(&gi, ColorMode::Grayscale, freq.clone()).unwrap();
             let d = dec(&f);
             for i in 0..n {
                 assert_eq!(d.image_plane[0][i], gplanes[0][i] as i32, "gray freq {w}x{h} px{i}");
@@ -2318,7 +2476,7 @@ mod tests {
                 planes: &planes4[..3],
                 premultiplied_alpha: false,
             };
-            let f = encode_with_options(&ci, ColorMode::Color, freq).unwrap();
+            let f = encode_with_options(&ci, ColorMode::Color, freq.clone()).unwrap();
             let d = dec(&f);
             for c in 0..3 {
                 for i in 0..n {
@@ -2330,7 +2488,7 @@ mod tests {
             }
             let ai =
                 ImageInput { width: w, height: h, planes: &planes4, premultiplied_alpha: false };
-            let f = encode_with_options(&ai, ColorMode::Color, freq).unwrap();
+            let f = encode_with_options(&ai, ColorMode::Color, freq.clone()).unwrap();
             let d = dec(&f);
             assert_eq!(d.num_components, 4);
             for c in 0..4 {
@@ -2404,11 +2562,11 @@ mod tests {
                 trim_flexbits: 4,
                 ..Default::default()
             };
-            let fs = encode_with_options(&ci, ColorMode::Color, base).unwrap();
+            let fs = encode_with_options(&ci, ColorMode::Color, base.clone()).unwrap();
             let ff = encode_with_options(
                 &ci,
                 ColorMode::Color,
-                EncodeOptions { frequency: true, ..base },
+                EncodeOptions { frequency: true, ..base.clone() },
             )
             .unwrap();
             let (ds, df) = (dec(&fs), dec(&ff));
@@ -2461,20 +2619,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(a, b, "equal chroma_qp must emit COMP_UNIFORM bytes");
-        // Zero-chroma content + harsh chroma QP ⇒ still exact.
+        // Zero-chroma content + harsh chroma QP ⇒ still exact. Routed through
+        // the PUBLIC qp_plan surface: the explicit plan also suppresses the
+        // auto-gray collapse, so this really emits the color codestream.
         let gcolor = [gray.clone(), gray.clone(), gray.clone()];
-        let f = color::encode_color_options(
-            &gcolor[0], &gcolor[1], &gcolor[2], w, h,
-            QpSet::LOSSLESS,
-            crate::decode::consts::INT_YUV444,
-            crate::decode::consts::ALL_BANDS,
-            false, 0, (0, 0), (&[], &[]), 0, false,
-            Some(&QpPlan::uniform(QpSet::LOSSLESS, Some(QpSet { dc: 64, lp: 64, hp: 64 }))),
-        );
+        let ginput =
+            ImageInput { width: w, height: h, planes: &gcolor, premultiplied_alpha: false };
+        let harsh_chroma = QpPlan::uniform(QpSet::LOSSLESS, Some(QpSet { dc: 64, lp: 64, hp: 64 }));
+        let f = encode_with_options(
+            &ginput,
+            ColorMode::Color,
+            EncodeOptions { qp_plan: Some(harsh_chroma.clone()), ..Default::default() },
+        )
+        .unwrap();
         let d = dec(&f);
+        assert_eq!(d.num_components, 3, "qp_plan must suppress the auto-gray collapse");
         for i in 0..n {
             assert_eq!(d.image_plane[0][i], gray[i] as i32, "zero-chroma separate px{i}");
         }
+        // The same single-set plan and the chroma_qp fold are one emission.
+        let via_chroma_qp = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions {
+                chroma_qp: Some(QpSet { dc: 64, lp: 64, hp: 64 }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let via_plan = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions { qp_plan: Some(harsh_chroma), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(via_chroma_qp, via_plan, "qp_plan(uniform) must equal the chroma_qp bytes");
         // Colored content + harsh chroma: decodes, smaller than all-lossless.
         let lossless = encode(&input, ColorMode::Color, QpSet::LOSSLESS).unwrap();
         let f = encode_with_options(
@@ -2497,14 +2676,12 @@ mod tests {
             lp_index: Vec::new(),
             hp_index: Vec::new(),
         };
-        let f = color::encode_color_options(
-            &gcolor[0], &gcolor[1], &gcolor[2], w, h,
-            QpSet::LOSSLESS,
-            crate::decode::consts::INT_YUV444,
-            crate::decode::consts::ALL_BANDS,
-            false, 0, (0, 0), (&[], &[]), 0, false,
-            Some(&plan_indep),
-        );
+        let f = encode_with_options(
+            &ginput,
+            ColorMode::Color,
+            EncodeOptions { qp_plan: Some(plan_indep), ..Default::default() },
+        )
+        .unwrap();
         let d = dec(&f);
         for i in 0..n {
             assert_eq!(d.image_plane[0][i], gray[i] as i32, "independent zero-chroma px{i}");
@@ -2513,8 +2690,6 @@ mod tests {
         // (c) per-tile QP sets over a 2x2 grid: all-lossless = exact; mixed =
         // the lossless tiles' pixel regions stay exact.
         let mbw = (w as usize) / 16;
-        let cols: Vec<usize> = vec![2, 2];
-        let rows: Vec<usize> = vec![2, 2];
         let tile_l = TileQps {
             dc: BandQp::uniform(0),
             lp: vec![BandQp::uniform(0)],
@@ -2530,14 +2705,17 @@ mod tests {
             lp_index: Vec::new(),
             hp_index: Vec::new(),
         };
-        let f = color::encode_color_options(
-            &planes[0], &planes[1], &planes[2], w, h,
-            QpSet::LOSSLESS,
-            crate::decode::consts::INT_YUV444,
-            crate::decode::consts::ALL_BANDS,
-            false, 0, (0, 0), (&cols, &rows), 0, false,
-            Some(&all_lossless),
-        );
+        let f = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions {
+                tile_cols: 2,
+                tile_rows: 2,
+                qp_plan: Some(all_lossless),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let d = dec(&f);
         for c in 0..3 {
             for i in 0..n {
@@ -2550,14 +2728,17 @@ mod tests {
             lp_index: Vec::new(),
             hp_index: Vec::new(),
         };
-        let f = color::encode_color_options(
-            &planes[0], &planes[1], &planes[2], w, h,
-            QpSet::LOSSLESS,
-            crate::decode::consts::INT_YUV444,
-            crate::decode::consts::ALL_BANDS,
-            false, 0, (0, 0), (&cols, &rows), 0, false,
-            Some(&mixed),
-        );
+        let f = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions {
+                tile_cols: 2,
+                tile_rows: 2,
+                qp_plan: Some(mixed),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let d = dec(&f);
         let mut lossy_diffs = 0usize;
         for c in 0..3 {
@@ -2593,14 +2774,12 @@ mod tests {
             hp_index: map.clone(),
         };
         let enc = |frequency: bool| {
-            color::encode_color_options(
-                &planes[0], &planes[1], &planes[2], w, h,
-                QpSet::LOSSLESS,
-                crate::decode::consts::INT_YUV444,
-                crate::decode::consts::ALL_BANDS,
-                false, 0, (0, 0), (&[], &[]), 0, frequency,
-                Some(&dq),
+            encode_with_options(
+                &input,
+                ColorMode::Color,
+                EncodeOptions { frequency, qp_plan: Some(dq.clone()), ..Default::default() },
             )
+            .unwrap()
         };
         let fs = enc(false);
         let ds = dec(&fs);
@@ -2628,6 +2807,239 @@ mod tests {
             assert_eq!(
                 ds.image_plane[c], df.image_plane[c],
                 "DQUANT frequency must equal spatial (ch{c})"
+            );
+        }
+    }
+
+    /// The public `qp_plan` contract: shape validation (every malformed plan
+    /// is `Invalid` BEFORE any coding state is built), the path rejections
+    /// (`Unsupported` on gray/YOnly/alpha/multi/bi-level), the
+    /// `chroma_qp` mutual exclusion, auto-gray suppression at both entry
+    /// points, and plan support on the typed (deep + packed) color paths.
+    #[test]
+    fn qp_plan_public_surface() {
+        use crate::decode::container::parse;
+        let mut r = Lcg(0x7a7a_0011_7a7a_0011);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        let planes: [Vec<u8>; 3] = noise_planes(&mut r, n);
+        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let lossless_tile = || TileQps {
+            dc: BandQp::uniform(0),
+            lp: vec![BandQp::uniform(0)],
+            hp: vec![BandQp::uniform(0)],
+        };
+        let uniform_plan = || QpPlan {
+            tiles: vec![lossless_tile()],
+            lp_index: Vec::new(),
+            hp_index: Vec::new(),
+        };
+        let opts_with = |p: QpPlan| EncodeOptions { qp_plan: Some(p), ..Default::default() };
+        let invalid = |r: Result<Vec<u8>, EncodeError>, what: &str| {
+            assert!(
+                matches!(r, Err(EncodeError::Invalid(_))),
+                "{what} must be EncodeError::Invalid, got {r:?}"
+            );
+        };
+        let unsupported = |r: Result<Vec<u8>, EncodeError>, what: &str| {
+            assert!(
+                matches!(r, Err(EncodeError::Unsupported(_))),
+                "{what} must be EncodeError::Unsupported, got {r:?}"
+            );
+        };
+
+        // -- Shape validation (all Invalid) --
+        let mut p = uniform_plan();
+        p.tiles = vec![lossless_tile(), lossless_tile(), lossless_tile()];
+        invalid(
+            encode_with_options(
+                &input,
+                ColorMode::Color,
+                EncodeOptions { tile_cols: 2, tile_rows: 2, ..opts_with(p) },
+            ),
+            "3 tile entries on a 2x2 grid",
+        );
+        let mut p = uniform_plan();
+        p.tiles[0].hp = vec![BandQp::uniform(0); 17];
+        invalid(
+            encode_with_options(&input, ColorMode::Color, opts_with(p)),
+            "17 HP sets",
+        );
+        let mut p = QpPlan {
+            tiles: vec![lossless_tile(), lossless_tile(), lossless_tile(), lossless_tile()],
+            lp_index: Vec::new(),
+            hp_index: Vec::new(),
+        };
+        p.tiles[2].lp = vec![BandQp::uniform(0), BandQp::uniform(8)];
+        invalid(
+            encode_with_options(
+                &input,
+                ColorMode::Color,
+                EncodeOptions { tile_cols: 2, tile_rows: 2, ..opts_with(p) },
+            ),
+            "ragged per-tile LP set counts",
+        );
+        let (mbw, mbh) = (w.div_ceil(16) as usize, h.div_ceil(16) as usize);
+        let two_sets = || QpPlan {
+            tiles: vec![TileQps {
+                dc: BandQp::uniform(0),
+                lp: vec![BandQp::uniform(0), BandQp::uniform(64)],
+                hp: vec![BandQp::uniform(0), BandQp::uniform(64)],
+            }],
+            lp_index: Vec::new(),
+            hp_index: Vec::new(),
+        };
+        let mut p = two_sets();
+        p.lp_index = vec![0; mbw * mbh - 1];
+        invalid(
+            encode_with_options(&input, ColorMode::Color, opts_with(p)),
+            "short lp_index map",
+        );
+        let mut p = two_sets();
+        p.hp_index = vec![2; mbw * mbh];
+        invalid(
+            encode_with_options(&input, ColorMode::Color, opts_with(p)),
+            "hp_index entry out of range",
+        );
+        let mut p = uniform_plan();
+        p.lp_index = vec![0; mbw * mbh];
+        invalid(
+            encode_with_options(&input, ColorMode::Color, opts_with(p)),
+            "index map with a single set",
+        );
+        invalid(
+            encode_with_options(
+                &input,
+                ColorMode::Color,
+                EncodeOptions {
+                    chroma_qp: Some(QpSet { dc: 8, lp: 8, hp: 8 }),
+                    ..opts_with(uniform_plan())
+                },
+            ),
+            "qp_plan + chroma_qp",
+        );
+
+        // -- Path rejections (all Unsupported) --
+        let gray = vec![planes[0].clone()];
+        let ginput = ImageInput { width: w, height: h, planes: &gray, premultiplied_alpha: false };
+        unsupported(
+            encode_with_options(&ginput, ColorMode::Grayscale, opts_with(uniform_plan())),
+            "qp_plan x grayscale",
+        );
+        unsupported(
+            encode_with_options(
+                &input,
+                ColorMode::Color,
+                EncodeOptions { chroma: ChromaSampling::YOnly, ..opts_with(uniform_plan()) },
+            ),
+            "qp_plan x YOnly",
+        );
+        let four: Vec<Vec<u8>> = planes.iter().cloned().chain([planes[0].clone()]).collect();
+        let ainput = ImageInput { width: w, height: h, planes: &four, premultiplied_alpha: false };
+        unsupported(
+            encode_with_options(&ainput, ColorMode::Color, opts_with(uniform_plan())),
+            "qp_plan x alpha plane",
+        );
+        let cmyk: Vec<Vec<u8>> = (0..4).map(|c| planes[c % 3].clone()).collect();
+        let cinput = ImageInput { width: w, height: h, planes: &cmyk, premultiplied_alpha: false };
+        unsupported(
+            encode_with_options(&cinput, ColorMode::Cmyk, opts_with(uniform_plan())),
+            "qp_plan x CMYK",
+        );
+        let bw: Vec<Vec<u8>> = vec![planes[0].iter().map(|&v| v & 1).collect()];
+        unsupported(
+            encode_typed(
+                &TypedInput {
+                    width: w,
+                    height: h,
+                    samples: SamplePlanes::Bw(&bw),
+                    premultiplied_alpha: false,
+                },
+                ColorMode::Grayscale,
+                opts_with(uniform_plan()),
+            ),
+            "qp_plan x bi-level",
+        );
+
+        // -- Auto-gray suppression: R==G==B + qp_plan emits the color GUID --
+        let gcolor = [planes[0].clone(), planes[0].clone(), planes[0].clone()];
+        let gc_input =
+            ImageInput { width: w, height: h, planes: &gcolor, premultiplied_alpha: false };
+        let without = encode_with_options(&gc_input, ColorMode::Color, Default::default()).unwrap();
+        assert!(
+            parse(&without).unwrap().pixel_format_uuid.ends_with("08"),
+            "gray content without a plan still collapses to 8bppGray"
+        );
+        let with = encode_with_options(&gc_input, ColorMode::Color, opts_with(uniform_plan()))
+            .unwrap();
+        assert!(
+            parse(&with).unwrap().pixel_format_uuid.ends_with("0d"),
+            "qp_plan must suppress auto-gray (24bppRGB GUID)"
+        );
+
+        // -- Typed paths: U16 RGB with per-MB DQUANT (lossless set-0 exact), --
+        // -- packed 565 with an all-lossless per-tile plan (words exact).    --
+        let deep: Vec<Vec<u16>> =
+            (0..3).map(|_| (0..n).map(|_| (r.next() >> 24) as u16).collect()).collect();
+        let map: Vec<u8> = (0..mbw * mbh).map(|i| (i % 2) as u8).collect();
+        let mut dq = two_sets();
+        dq.lp_index = map.clone();
+        dq.hp_index = map.clone();
+        let f = encode_typed(
+            &TypedInput {
+                width: w,
+                height: h,
+                samples: SamplePlanes::U16(&deep),
+                premultiplied_alpha: false,
+            },
+            ColorMode::Color,
+            opts_with(dq),
+        )
+        .unwrap();
+        let c = parse(&f).unwrap();
+        let d = crate::decode::decode_image(&c).unwrap();
+        let mut deviations = 0usize;
+        for ch in 0..3 {
+            for y in 0..h as usize {
+                for x in 0..w as usize {
+                    let i = y * w as usize + x;
+                    if map[(y / 16) * mbw + (x / 16)] == 0 {
+                        assert_eq!(
+                            d.image_plane[ch][i], deep[ch][i] as i32,
+                            "U16 DQUANT set-0 MB must stay exact ch{ch} ({x},{y})"
+                        );
+                    } else if d.image_plane[ch][i] != deep[ch][i] as i32 {
+                        deviations += 1;
+                    }
+                }
+            }
+        }
+        assert!(deviations > 0, "U16 DQUANT set-1 MBs must actually quantize");
+        let packed: Vec<Vec<u16>> = vec![(0..n).map(|_| (r.next() >> 40) as u16).collect()];
+        let f = encode_typed(
+            &TypedInput {
+                width: w,
+                height: h,
+                samples: SamplePlanes::Packed565(&packed),
+                premultiplied_alpha: false,
+            },
+            ColorMode::Color,
+            EncodeOptions { tile_cols: 2, ..opts_with(QpPlan {
+                tiles: vec![lossless_tile(), lossless_tile()],
+                lp_index: Vec::new(),
+                hp_index: Vec::new(),
+            }) },
+        )
+        .unwrap();
+        let c = parse(&f).unwrap();
+        // Packed output formatting re-packs into ONE word plane (the in-crate
+        // packed tests assert the same shape).
+        let d = crate::decode::decode_image(&c).unwrap();
+        assert_eq!(d.num_components, 1);
+        for (i, px) in packed[0].iter().enumerate() {
+            assert_eq!(
+                d.image_plane[0][i], *px as i32,
+                "packed 565 per-tile lossless plan word px{i}"
             );
         }
     }
@@ -2807,7 +3219,7 @@ mod tests {
             premultiplied_alpha: false,
         };
         let opts = EncodeOptions { scaled: true, ..Default::default() };
-        assert!(encode_typed(&input, ColorMode::Grayscale, opts).is_err());
+        assert!(encode_typed(&input, ColorMode::Grayscale, opts.clone()).is_err());
     }
 
     #[test]
@@ -2877,7 +3289,7 @@ mod tests {
             premultiplied_alpha: false,
         };
         let opts = EncodeOptions { scaled: true, ..Default::default() };
-        let jxr = encode_typed(&input, ColorMode::Grayscale, opts).unwrap();
+        let jxr = encode_typed(&input, ColorMode::Grayscale, opts.clone()).unwrap();
         let d = decode_to_planes(&jxr);
         for i in 0..n {
             assert_eq!(d.image_plane[0][i], canon(gray[i]), "scaled px{i}");
@@ -2996,7 +3408,7 @@ mod tests {
         }
         // Scaled arithmetic rejected for 32-bit floats too.
         let opts = EncodeOptions { scaled: true, ..Default::default() };
-        assert!(encode_typed(&input2, ColorMode::Grayscale, opts).is_err());
+        assert!(encode_typed(&input2, ColorMode::Grayscale, opts.clone()).is_err());
     }
 
     #[test]
@@ -3083,7 +3495,7 @@ mod tests {
         // Subsampled chroma is rejected for RGBE (and floats).
         for chroma in [ChromaSampling::Yuv420, ChromaSampling::Yuv422] {
             let opts = EncodeOptions { chroma, ..Default::default() };
-            assert!(encode_typed(&input, ColorMode::Color, opts).is_err());
+            assert!(encode_typed(&input, ColorMode::Color, opts.clone()).is_err());
         }
         // 3-plane RGBE is malformed.
         let three = [planes[0].clone(), planes[1].clone(), planes[2].clone()];
@@ -3113,7 +3525,7 @@ mod tests {
             premultiplied_alpha: false,
         };
         let opts = EncodeOptions { scaled: true, ..Default::default() };
-        let jxr = encode_typed(&input, ColorMode::Grayscale, opts).unwrap();
+        let jxr = encode_typed(&input, ColorMode::Grayscale, opts.clone()).unwrap();
         let d = decode_to_planes(&jxr);
         for i in 0..n {
             assert_eq!(d.image_plane[0][i], gray[i] as i32, "px{i}");
@@ -3145,7 +3557,7 @@ mod tests {
             window_left: 9,
             ..Default::default()
         };
-        let jxr = encode_typed(&input, ColorMode::Color, opts).unwrap();
+        let jxr = encode_typed(&input, ColorMode::Color, opts.clone()).unwrap();
         let d = decode_to_planes(&jxr);
         assert_eq!((d.width, d.height), (w, h));
         for c in 0..3 {
@@ -3163,7 +3575,7 @@ mod tests {
             scaled: true,
             ..Default::default()
         };
-        let jxr = encode_typed(&input, ColorMode::Color, opts).unwrap();
+        let jxr = encode_typed(&input, ColorMode::Color, opts.clone()).unwrap();
         let d = decode_to_planes(&jxr);
         assert_eq!((d.width, d.height, d.num_components), (w, h, 3));
         // chroma_qp (COMP_SEPARATE) smoke on deep color.
@@ -3172,7 +3584,7 @@ mod tests {
             chroma_qp: Some(QpSet { dc: 16, lp: 32, hp: 64 }),
             ..Default::default()
         };
-        let jxr = encode_typed(&input, ColorMode::Color, opts).unwrap();
+        let jxr = encode_typed(&input, ColorMode::Color, opts.clone()).unwrap();
         let d = decode_to_planes(&jxr);
         assert_eq!((d.width, d.height, d.num_components), (w, h, 3));
     }
@@ -3213,7 +3625,7 @@ mod tests {
             premultiplied_alpha: false,
         };
         let opts = EncodeOptions { chroma: ChromaSampling::YOnly, ..Default::default() };
-        let jxr = encode_typed(&input, ColorMode::Color, opts).unwrap();
+        let jxr = encode_typed(&input, ColorMode::Color, opts.clone()).unwrap();
         assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc915", "stays 48bppRGB");
         let d = decode_to_planes(&jxr);
         assert_eq!(d.num_components, 3);
@@ -3244,13 +3656,13 @@ mod tests {
                 premultiplied_alpha: false,
             },
             ColorMode::Color,
-            opts,
+            opts.clone(),
         )
         .unwrap();
         let via_classic = encode_with_options(
             &ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false },
             ColorMode::Color,
-            opts,
+            opts.clone(),
         )
         .unwrap();
         assert_eq!(via_typed, via_classic);
@@ -3394,7 +3806,7 @@ mod tests {
             alpha_qp: Some(QpSet { dc: 32, lp: 64, hp: 128 }),
             ..Default::default()
         };
-        let d = decode_to_planes(&encode_typed(&input, ColorMode::Color, opts).unwrap());
+        let d = decode_to_planes(&encode_typed(&input, ColorMode::Color, opts.clone()).unwrap());
         for c in 0..3 {
             for i in 0..n {
                 assert_eq!(d.image_plane[c][i], p16[c][i] as i32, "RGB must stay exact");
@@ -3499,7 +3911,7 @@ mod tests {
             ),
         ];
         for (name, opts) in variants {
-            let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts).unwrap());
+            let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts.clone()).unwrap());
             for c in 0..4 {
                 for i in 0..n {
                     assert_eq!(d.image_plane[c][i], p8[c][i] as i32, "[{name}] ch{c} px{i}");
@@ -3509,7 +3921,7 @@ mod tests {
         // Scaled q1: bounded by the half-step floor propagated through the
         // ink lifting (a few code values), never unbounded.
         let opts = EncodeOptions { scaled: true, ..Default::default() };
-        let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts).unwrap());
+        let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts.clone()).unwrap());
         for c in 0..4 {
             for i in 0..n {
                 let e = (d.image_plane[c][i] - p8[c][i] as i32).abs();
@@ -3518,14 +3930,14 @@ mod tests {
         }
         let opts =
             EncodeOptions { qp: QpSet { dc: 8, lp: 16, hp: 32 }, scaled: true, ..Default::default() };
-        let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts).unwrap());
+        let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts.clone()).unwrap());
         assert_eq!((d.width, d.height, d.num_components), (w, h, 4));
         let opts = EncodeOptions {
             qp: QpSet { dc: 4, lp: 8, hp: 16 },
             chroma_qp: Some(QpSet { dc: 16, lp: 32, hp: 64 }),
             ..Default::default()
         };
-        let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts).unwrap());
+        let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts.clone()).unwrap());
         assert_eq!(d.num_components, 4);
     }
 
@@ -3572,7 +3984,7 @@ mod tests {
             alpha_qp: Some(QpSet { dc: 32, lp: 64, hp: 128 }),
             ..Default::default()
         };
-        let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts).unwrap());
+        let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts.clone()).unwrap());
         for c in 0..4 {
             for i in 0..n {
                 assert_eq!(d.image_plane[c][i], p8[c][i] as i32, "inks must stay exact");
@@ -3676,7 +4088,7 @@ mod tests {
                 samples: SamplePlanes::U8(&four),
                 premultiplied_alpha: false,
             };
-            assert!(encode_typed(&input, ColorMode::Cmyk, opts).is_err(), "{chroma:?}");
+            assert!(encode_typed(&input, ColorMode::Cmyk, opts.clone()).is_err(), "{chroma:?}");
         }
         // Wrong plane counts.
         let three = [p.clone(), p.clone(), p.clone()];
@@ -3789,7 +4201,7 @@ mod tests {
             premultiplied_alpha: false,
         };
         let opts = EncodeOptions { scaled: true, ..Default::default() };
-        let d = decode_to_planes(&encode_typed(&input, ColorMode::Color, opts).unwrap());
+        let d = decode_to_planes(&encode_typed(&input, ColorMode::Color, opts.clone()).unwrap());
         for i in 0..n {
             let (gw, ww) = (d.image_plane[0][i] as u16, words[i]);
             let un = |v: u16| [(v & 31) as i32, ((v >> 5) & 63) as i32, ((v >> 11) & 31) as i32];

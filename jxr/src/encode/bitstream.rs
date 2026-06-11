@@ -51,10 +51,6 @@ impl BitWriter {
         }
     }
 
-    /// Total bits written so far (including pending fractional bits).
-    pub fn bit_len(&self) -> usize {
-        self.out.len() * 8 + self.nbits as usize
-    }
 
     /// Finish, padding the final partial byte with zeros, and return the bytes.
     pub fn finish(mut self) -> Vec<u8> {

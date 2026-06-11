@@ -405,20 +405,7 @@ impl codestream::TileEncode for YOnlyPlane {
     }
 }
 
-/// Encode a grayscale image (any size) as ALL_BANDS at the given per-band
-/// quantizers. `QpSet::LOSSLESS` (all 0 ⇒ scaling factor 1) is bit-exact.
-pub fn encode_grayscale(luma: &[u8], w: u32, h: u32, qp: QpSet) -> Vec<u8> {
-    encode_grayscale_scaled(luma, w, h, qp, false)
-}
 
-/// [`encode_grayscale`] with **scaled arithmetic** exposed: the luma samples
-/// carry 3 extra fraction bits (`<<3`; no chroma, so no half-step) and the
-/// plane header sets `scaled_flag`. Exactly invertible at q1 — the decoder's
-/// `(v + bias<<3 + 3) >> 3` output stage recovers every pixel — but kept
-/// non-default to match libjxr (scaled is its lossy mode).
-pub fn encode_grayscale_scaled(luma: &[u8], w: u32, h: u32, qp: QpSet, scaled: bool) -> Vec<u8> {
-    encode_grayscale_options(luma, w, h, qp, scaled, ALL_BANDS, 0, (0, 0), (&[], &[]), 0, false)
-}
 
 /// [`encode_grayscale_scaled`] over the band-truncation envelope: any
 /// `bands_present` (the plane header and per-MB sections shrink together),

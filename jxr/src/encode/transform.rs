@@ -157,27 +157,7 @@ pub fn fdct4x4_stage2(c: &mut [i32; 16]) {
     c[2] = a; c[3] = b; c[6] = cc; c[7] = d;
 }
 
-/// Forward transform of one 16×16 macroblock of samples into the 256-entry
-/// `mb_buffer` (single component). Exact inverse of the decoder's
-/// `second_level_coefficient_combination` → `second_level_inverse_transform`
-/// → `first_level_inverse_transform` chain, so `decode(encode(x)) == x`.
-///
-/// `samples[row * 16 + col]`, `row`/`col` in `0..16`. The MB DC ends at
-/// `out[0]` (== `mb_dclp[0]`); LP at `out[16 * ICT4X4_INV_PERM[1..16]]`; HP
-/// within each block. No overlap (caller handles the no-overlap config).
-pub fn forward_transform_mb(samples: &[i32; 256]) -> [i32; 256] {
-    forward_transform_mb_with(samples, false)
-}
 
-/// [`forward_transform_mb`] with the SCALED-mode chroma half-step: when
-/// `halve_dclp`, the 16 block-DCs are floor-halved (`>>1`) between stage 1
-/// and stage 2 — the exact inverse of the decoder's post-stage-2 chroma `×2`
-/// in scaled arithmetic, and libjxr's `strNormalizeEnc` placement.
-pub fn forward_transform_mb_with(samples: &[i32; 256], halve_dclp: bool) -> [i32; 256] {
-    let mut buf = forward_stage1_mb(samples);
-    forward_stage2_mb(&mut buf, halve_dclp);
-    buf
-}
 
 /// Stage 1 only of [`forward_transform_mb_with`]: scatter into the permuted
 /// per-block layout + per-block forward DCT. Block DCs sit raw at
@@ -225,18 +205,6 @@ pub fn forward_stage2_mb(buf: &mut [i32; 256], halve_dclp: bool) {
     }
 }
 
-/// Forward transform of one 8×8 **420 chroma** macroblock into its 64-entry
-/// `mb_buffer` slice (4 blocks, raster-indexed 2 per row, block `j` at
-/// `buf[16j..16j+16]` — the decoder's chroma layout, Table 157). Exact inverse
-/// of the decoder chain: per-block `str_idct4x4_stage1` + the across-block-DC
-/// 420 stage (`t2x2h(d,0)` then `swap(1,2)`, `decoder.rs`
-/// `first_level_inverse_transform`). `samples[row * 8 + col]`, row/col in
-/// `0..8`, holding the downsampled centered chroma.
-pub fn forward_transform_chroma_mb_420(samples: &[i32; 64], halve_dclp: bool) -> [i32; 64] {
-    let mut buf = forward_stage1_chroma_420(samples);
-    forward_stage2_chroma_420(&mut buf, halve_dclp);
-    buf
-}
 
 /// Stage 1 only of [`forward_transform_chroma_mb_420`] (per-block forward
 /// DCT; raw block DCs at `buf[16j]` for the DC-domain overlap pre-filter).
@@ -274,17 +242,6 @@ pub fn forward_stage2_chroma_420(buf: &mut [i32; 64], halve_dclp: bool) {
     }
 }
 
-/// Forward transform of one 8×16 **422 chroma** macroblock into its 128-entry
-/// `mb_buffer` slice (8 blocks, raster-indexed 2 per row). Exact inverse of
-/// the decoder's 422 across-block sequence (2-pt lifting on (0,4), `t2x2h` on
-/// (0..3) + `swap(1,2)`, `t2x2h` gathered as (4,6,5,7) + `swap(5,6)` — Table
-/// 151) on top of the per-block stage-1. `samples[row * 8 + col]`, row in
-/// `0..16`, col in `0..8`.
-pub fn forward_transform_chroma_mb_422(samples: &[i32; 128], halve_dclp: bool) -> [i32; 128] {
-    let mut buf = forward_stage1_chroma_422(samples);
-    forward_stage2_chroma_422(&mut buf, halve_dclp);
-    buf
-}
 
 /// Stage 1 only of [`forward_transform_chroma_mb_422`].
 pub fn forward_stage1_chroma_422(samples: &[i32; 128]) -> [i32; 128] {
@@ -608,6 +565,30 @@ pub fn overlap_pre_filter_4(input: [i32; 4]) -> [i32; 4] {
     c[1] = c[1].wrapping_sub(c[2]);
     c[0] = c[0].wrapping_sub(c[3]);
     c
+}
+
+/// Test-only stage-1+2 compositions over one MB — the shape the inversion
+/// tests exercise (production paths run the stages separately, interleaved
+/// with the DC pre-filter and quantization).
+#[cfg(test)]
+pub(crate) fn forward_transform_mb(samples: &[i32; 256]) -> [i32; 256] {
+    let mut buf = forward_stage1_mb(samples);
+    forward_stage2_mb(&mut buf, false);
+    buf
+}
+
+#[cfg(test)]
+fn forward_transform_chroma_mb_420(samples: &[i32; 64], halve_dclp: bool) -> [i32; 64] {
+    let mut buf = forward_stage1_chroma_420(samples);
+    forward_stage2_chroma_420(&mut buf, halve_dclp);
+    buf
+}
+
+#[cfg(test)]
+fn forward_transform_chroma_mb_422(samples: &[i32; 128], halve_dclp: bool) -> [i32; 128] {
+    let mut buf = forward_stage1_chroma_422(samples);
+    forward_stage2_chroma_422(&mut buf, halve_dclp);
+    buf
 }
 
 #[cfg(test)]

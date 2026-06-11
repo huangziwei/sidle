@@ -27,6 +27,7 @@ pub enum SampleType {
 }
 
 impl SampleType {
+    /// Bytes per sample (1, 2 or 4).
     pub fn bytes(self) -> usize {
         match self {
             SampleType::U8 => 1,
@@ -39,8 +40,11 @@ impl SampleType {
 /// Color interpretation of the channels (alpha, when present, follows them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorModel {
+    /// Single luma channel.
     Gray,
+    /// Red, green, blue.
     Rgb,
+    /// Cyan, magenta, yellow, black ink.
     Cmyk,
     /// Shared-exponent RGBE: 4 channels of U8 (R, G, B, E).
     Rgbe,
@@ -51,25 +55,34 @@ pub enum ColorModel {
 /// How to interpret the trailing alpha channel, if any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlphaMode {
+    /// No alpha channel.
     None,
+    /// Straight (non-premultiplied) alpha.
     Straight,
+    /// Color channels are premultiplied by alpha.
     Premultiplied,
 }
 
 /// Interleaved little-endian pixels + layout description.
 pub struct PixelBuffer {
+    /// Width in pixels.
     pub width: u32,
+    /// Height in pixels.
     pub height: u32,
     /// Total channels per pixel, including alpha (1 for `Packed565`).
     pub channels: u8,
+    /// Color interpretation of the leading channels.
     pub color: ColorModel,
+    /// Whether (and how) the trailing channel is alpha.
     pub alpha: AlphaMode,
+    /// Per-sample storage type.
     pub sample: SampleType,
     /// `width × height × channels` samples, row-major, channels interleaved,
     /// each sample `sample.bytes()` long, little-endian.
     pub data: Vec<u8>,
 }
 
+/// Error from [`DecodedImage::to_pixel_buffer`].
 #[derive(Debug)]
 pub enum PixelError {
     /// A (color format, bit depth) combination this packer doesn't cover.

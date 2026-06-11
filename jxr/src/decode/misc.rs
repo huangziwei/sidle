@@ -51,6 +51,7 @@ impl<'a> Deserializer<'a> {
         self.buffer.len().saturating_sub(self.offset)
     }
 
+    #[allow(dead_code)] // `len`'s conventional companion
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

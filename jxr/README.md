@@ -53,9 +53,11 @@ is libjxr's lossy mode — its chroma half-step floors, so it is not
 bit-lossless for color), and the complete T.832 quantization syntax:
 per-band QPs (`QpSet::LOSSLESS` at 4:4:4 round-trips bit-exact; higher QP =
 lossy; subsampled chroma is lossy by construction), separate chroma
-quantizers (`chroma_qp` → `COMP_SEPARATE`), and — as crate-internal
-capability — `COMP_INDEPENDENT`, per-tile QP sets, and per-MB DQUANT index
-maps. Arbitrary non-16-aligned dimensions. Interleaved source buffers in the
+quantizers (`chroma_qp` → `COMP_SEPARATE`), and the full quantization plan
+(`EncodeOptions::qp_plan` → `QpPlan`): per-component bytes
+(`COMP_INDEPENDENT`), per-tile QP sets, and per-MB LP/HP DQUANT index maps,
+on the color-coded paths (RGB at any depth, packed, RGBE). Arbitrary
+non-16-aligned dimensions. Interleaved source buffers in the
 common memory orders (gray, RGB, BGR, RGBA, BGRA — premultiplied = BGRA/RGBA
 plus the `premultiplied_alpha` flag) normalize to the planar input via
 `deinterleave`; output always uses the canonical GUID for its channel count.

@@ -1024,43 +1024,7 @@ pub fn encode_color(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> 
     container::write_container(&bw.finish(), w, h, &container::pixel_format::RGB24)
 }
 
-/// Staged 4b driver (public for the oracle harness; the final API shape
-/// lands at the 4b close-out): encode RGB with the given internal chroma sampling
-/// (`INT_YUV444`/`INT_YUV422`/`INT_YUV420`) and `bands_present`. Internal
-/// until the 4b API close-out; the public `encode_color` remains the
-/// 444 ALL_BANDS path.
-#[allow(clippy::too_many_arguments)]
-pub fn encode_color_subsampled(
-    r: &[u8],
-    g: &[u8],
-    b: &[u8],
-    w: u32,
-    h: u32,
-    qp: QpSet,
-    fmt: u8,
-    bands: u8,
-) -> Vec<u8> {
-    encode_color_scaled(r, g, b, w, h, qp, fmt, bands, false)
-}
 
-/// [`encode_color_subsampled`] with **scaled arithmetic** (`scaled_flag = 1`)
-/// exposed: 3 extra fraction bits through the transforms, chroma DC-LP coded
-/// at half amplitude, the decoder's output stage shifting back down. This is
-/// the mode jxrencapp uses for everything lossy (and all 42x).
-#[allow(clippy::too_many_arguments)]
-pub fn encode_color_scaled(
-    r: &[u8],
-    g: &[u8],
-    b: &[u8],
-    w: u32,
-    h: u32,
-    qp: QpSet,
-    fmt: u8,
-    bands: u8,
-    scaled: bool,
-) -> Vec<u8> {
-    encode_color_options(r, g, b, w, h, qp, fmt, bands, scaled, 0, (0, 0), (&[], &[]), 0, false, None)
-}
 
 /// Window-margins tuple (top, left, bottom, right) for an image placed at
 /// `(top, left)` inside its minimal 16-aligned grid: bottom/right are the
@@ -1162,7 +1126,9 @@ pub(super) fn encode_color_prebias(
         None => Box::new(codestream::classic_tile_headers(trim)),
         Some(p) => {
             let ntiles = tiles.0.len().max(1) * tiles.1.len().max(1);
-            assert!(
+            // Public callers are validated upstream (`validate_qp_plan`);
+            // this backstops the crate-internal entry points.
+            debug_assert!(
                 p.tiles.len() == 1 || p.tiles.len() == ntiles,
                 "QpPlan must carry 1 or ntiles tile entries"
             );
@@ -1886,6 +1852,36 @@ fn encode_color_hp_mb(
         _ => st.model.update(lap, 2, 3),
     }
     mb_cbphp
+}
+
+/// Test-only shorthands the color matrix tests are written in.
+#[cfg(test)]
+fn encode_color_subsampled(
+    r: &[u8],
+    g: &[u8],
+    b: &[u8],
+    w: u32,
+    h: u32,
+    qp: QpSet,
+    fmt: u8,
+    bands: u8,
+) -> Vec<u8> {
+    encode_color_scaled(r, g, b, w, h, qp, fmt, bands, false)
+}
+
+#[cfg(test)]
+fn encode_color_scaled(
+    r: &[u8],
+    g: &[u8],
+    b: &[u8],
+    w: u32,
+    h: u32,
+    qp: QpSet,
+    fmt: u8,
+    bands: u8,
+    scaled: bool,
+) -> Vec<u8> {
+    encode_color_options(r, g, b, w, h, qp, fmt, bands, scaled, 0, (0, 0), (&[], &[]), 0, false, None)
 }
 
 #[cfg(test)]

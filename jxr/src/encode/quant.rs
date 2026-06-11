@@ -17,8 +17,11 @@ use crate::decode::state::quant_map;
 /// plane header; `quant_map` turns each into a scaling factor).
 #[derive(Debug, Clone, Copy)]
 pub struct QpSet {
+    /// DC-band quantizer byte (0 = lossless).
     pub dc: u8,
+    /// LP-band quantizer byte.
     pub lp: u8,
+    /// HP-band (+flexbits) quantizer byte.
     pub hp: u8,
 }
 
@@ -27,16 +30,9 @@ impl QpSet {
     pub const LOSSLESS: QpSet = QpSet { dc: 0, lp: 0, hp: 0 };
 }
 
-/// Scaling factor for a grayscale (luma / component 0) plane at quantizer `qp`,
-/// non-scaled arithmetic. `qp == 0` ⇒ 1. Identical to what the decoder derives,
-/// so `level * scaling_factor(qp)` is the exact dequantization. (`band` is
-/// irrelevant for component 0 with `scaled_flag = false`.)
-pub fn scaling_factor(qp: u8) -> i32 {
-    quant_map(qp as u32, 0, false, DC).unwrap_or(1)
-}
 
 /// Per-band, per-component-class scaling factors at quantizer set `qp` — the
-/// general form of [`scaling_factor`]. The decoder's `quant_map` derivation
+/// general per-band form. The decoder's `quant_map` derivation
 /// is MODE- and COMPONENT-dependent: `scaled_flag` selects a different
 /// mantissa/exponent split (the scaled-domain coefficients carry 3 extra
 /// fraction bits), and in scaled mode the chroma DC/LP factors sit one
@@ -72,8 +68,11 @@ impl BandQp {
 /// makes the band per-MB DQUANT (each MB picks its set by index).
 #[derive(Clone, Debug)]
 pub struct TileQps {
+    /// The tile's single DC set.
     pub dc: BandQp,
+    /// 1–16 LP sets (more than one ⇒ per-MB DQUANT on the LP band).
     pub lp: Vec<BandQp>,
+    /// 1–16 HP sets (more than one ⇒ per-MB DQUANT on the HP band).
     pub hp: Vec<BandQp>,
 }
 
@@ -83,8 +82,12 @@ pub struct TileQps {
 /// declare the same LP/HP list lengths (the per-band `num_qps` shape).
 #[derive(Clone, Debug)]
 pub struct QpPlan {
+    /// One entry (image-uniform) or one per tile, raster order.
     pub tiles: Vec<TileQps>,
+    /// Per-MB LP set indices over the window-padded MB grid
+    /// (`mby * mb_cols + mbx`); empty = every MB uses set 0.
     pub lp_index: Vec<u8>,
+    /// Per-MB HP set indices, as [`Self::lp_index`].
     pub hp_index: Vec<u8>,
 }
 
@@ -102,9 +105,11 @@ impl QpPlan {
             hp_index: Vec::new(),
         }
     }
+    /// LP sets per tile (the image-level `num_lp_qps` shape).
     pub fn num_lp_qps(&self) -> usize {
         self.tiles[0].lp.len()
     }
+    /// HP sets per tile (the image-level `num_hp_qps` shape).
     pub fn num_hp_qps(&self) -> usize {
         self.tiles[0].hp.len()
     }
@@ -128,6 +133,12 @@ pub fn quantize(coeff: i32, sf: i32) -> i32 {
     let abs = (coeff ^ m) - m;
     let level = (abs + offset) / sf;
     (level ^ m) - m
+}
+
+/// Test-only single-band shorthand for the unit tests.
+#[cfg(test)]
+fn scaling_factor(qp: u8) -> i32 {
+    quant_map(qp as u32, 0, false, DC).unwrap_or(1)
 }
 
 #[cfg(test)]

@@ -280,9 +280,15 @@ fn shift_left_signed(man: i32, exp: i32) -> i32 {
 /// `num_components` is captured at construction time so the per-component
 /// buffers can be sized correctly.
 pub struct MB {
+    // Port-parity position fields (jxr_image.py stores them on each MB;
+    // the Rust pipeline threads positions as arguments instead).
+    #[allow(dead_code)]
     pub mbx: usize,
+    #[allow(dead_code)]
     pub mby: usize,
+    #[allow(dead_code)]
     pub mbxt: usize,
+    #[allow(dead_code)]
     pub mbyt: usize,
 
     pub left_mb: Option<(usize, usize)>,
@@ -507,16 +513,19 @@ impl Plane2D {
     }
 
     #[inline]
+    #[allow(dead_code)] // port-parity accessor (callers index `data` directly)
     pub fn width(&self) -> usize {
         self.stride
     }
 
     #[inline]
+    #[allow(dead_code)] // port-parity accessor
     pub fn get(&self, x: usize, y: usize) -> i32 {
         self.data[y * self.stride + x]
     }
 
     #[inline]
+    #[allow(dead_code)] // port-parity accessor
     pub fn set(&mut self, x: usize, y: usize, v: i32) {
         self.data[y * self.stride + x] = v;
     }

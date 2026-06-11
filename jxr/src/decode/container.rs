@@ -7,13 +7,22 @@
 
 use super::misc::{Deserializer, DeserializerError};
 
+/// Errors from [`parse`] — the outer TIFF-like file is malformed,
+/// truncated, or describes something this crate doesn't read.
 #[derive(Debug)]
 pub enum ContainerError {
+    /// The leading `II BC 01` magic is absent.
     BadSignature(String),
+    /// A required IFD tag (dimensions, pixel format, codestream pointer)
+    /// is missing.
     MissingField(&'static str),
+    /// The pixel-format GUID is not in the known table.
     UnsupportedPixelFormat(String),
+    /// The file chains more than one IFD (multi-image files not supported).
     MultipleImages,
+    /// A declared (offset, length) range runs past the end of the file.
     Truncated,
+    /// Raw read error from the byte cursor.
     Bits(DeserializerError),
 }
 
@@ -40,8 +49,11 @@ impl From<DeserializerError> for ContainerError {
 
 /// What we extract from a JXR container before handing off to the decoder.
 pub struct JxrContainer<'a> {
+    /// Image width from the `IMAGE_WIDTH` tag.
     pub image_width: u32,
+    /// Image height from the `IMAGE_HEIGHT` tag.
     pub image_height: u32,
+    /// Pixel-format GUID, lowercase-hex `8-4-4-4-12` form.
     pub pixel_format_uuid: String,
     /// Presentation orientation from the SPATIAL_XFRM_PRIMARY tag (0..7;
     /// 0 = none). NOT auto-applied — see [`crate::decode::apply_orientation`].
@@ -205,6 +217,11 @@ fn format_jxr_uuid(b: &[u8]) -> String {
     )
 }
 
+/// Parse the TIFF-like JXR container: locate the primary (and, when
+/// present, separate-alpha) WMPHOTO codestream, the pixel-format GUID, the
+/// dimensions, and the optional metadata ranges (ICC, XMP, EXIF). Unknown
+/// tags and trailing IFD entries are tolerated; the codestream itself is
+/// not touched (hand `image_data` to [`decoder::Decoder`](super::decoder::Decoder)).
 pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerError> {
     let mut ds = Deserializer::new(data);
     let sig = ds.extract(4, true)?;

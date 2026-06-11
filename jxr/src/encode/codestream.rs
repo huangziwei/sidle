@@ -203,73 +203,9 @@ pub fn write_trim_flexbits(bw: &mut BitWriter, trim: u8) {
     bw.write_bits(trim as u64 & 0xF, 4);
 }
 
-/// `image_plane_header` for the single grayscale plane, DCONLY, with a uniform
-/// DC quantizer byte `dc_quant` (0 ⇒ scaling factor 1, i.e. no DC quantization).
-/// Mirrors `Decoder::image_plane_header`; ends byte-aligned
-/// (`discard_remainder_bits`).
-pub fn write_image_plane_header_gray_dconly(bw: &mut BitWriter, dc_quant: u8) {
-    bw.write_bits(INT_YONLY as u64, 3); // internal_clr_fmt
-    bw.write_bits(0, 1); // scaled_flag
-    bw.write_bits(DCONLY as u64, 4); // bands_present
-    // INT_YONLY → num_components = 1, no extra format bits.
-    // BD8 → no shift bits.
-    bw.write_flag(true); // dc_image_plane_uniform
-    // QP::read(num_components=1, num_qps=1): num_components==1 ⇒ no
-    // component_mode bits; COMP_UNIFORM ⇒ one 8-bit quant value.
-    bw.write_bits(dc_quant as u64, 8);
-    // bands_present == DCONLY ⇒ no LP/HP reserved bits or QP.
-    bw.align_to_byte();
-}
 
-/// `image_plane_header` for the single grayscale plane with **NOHIGHPASS**
-/// (DC + LP), uniform DC and LP quantizers. Mirrors `Decoder::image_plane_header`.
-pub fn write_image_plane_header_gray_nohighpass(bw: &mut BitWriter, dc_quant: u8, lp_quant: u8) {
-    bw.write_bits(INT_YONLY as u64, 3); // internal_clr_fmt
-    bw.write_bits(0, 1); // scaled_flag
-    bw.write_bits(NOHIGHPASS as u64, 4); // bands_present
-    bw.write_flag(true); // dc_image_plane_uniform
-    bw.write_bits(dc_quant as u64, 8); // DC QP
-    // bands_present != DCONLY:
-    bw.write_bits(0, 1); // reserved_i_bit
-    bw.write_flag(true); // lp_image_plane_uniform
-    bw.write_bits(lp_quant as u64, 8); // LP QP
-    // bands_present == NOHIGHPASS ⇒ no HP block.
-    bw.align_to_byte();
-}
 
-/// `image_plane_header` for a single-component (`INT_YONLY`) plane with
-/// **ALL_BANDS** (DC + LP + HP + flexbits), uniform DC/LP/HP quantizers.
-/// Mirrors `Decoder::image_plane_header`. Serves both the grayscale primary
-/// plane and the **alpha image plane** — the spec's plane-header syntax is
-/// plane-role-agnostic, and an alpha plane must be YONLY (the decoder rejects
-/// anything else), so the alpha header is this writer with the alpha QPs.
-pub fn write_image_plane_header_gray_allbands(
-    bw: &mut BitWriter,
-    dc_quant: u8,
-    lp_quant: u8,
-    hp_quant: u8,
-) {
-    write_image_plane_header_gray_scaled(bw, dc_quant, lp_quant, hp_quant, false)
-}
 
-/// [`write_image_plane_header_gray_allbands`] with the `scaled_flag` exposed.
-pub fn write_image_plane_header_gray_scaled(
-    bw: &mut BitWriter,
-    dc_quant: u8,
-    lp_quant: u8,
-    hp_quant: u8,
-    scaled: bool,
-) {
-    write_image_plane_header_gray_bands(
-        bw,
-        ALL_BANDS,
-        dc_quant,
-        lp_quant,
-        hp_quant,
-        scaled,
-        &super::convert::Depth::BD8,
-    )
-}
 
 /// The depth-conditional plane-header fields after the format-specific
 /// block (`Decoder::image_plane_header` order): `shift_bits` for the deep
@@ -318,35 +254,7 @@ pub fn write_image_plane_header_gray_bands(
     bw.align_to_byte();
 }
 
-/// `image_plane_header` for the **color** (`INT_YUV444`) plane, **DCONLY** —
-/// the staging foundation for the color path (constant-color MBs round-trip
-/// exactly). Uniform DC QP shared across components. Ends byte-aligned.
-pub fn write_image_plane_header_color_dconly(bw: &mut BitWriter, dc_quant: u8) {
-    bw.write_bits(INT_YUV444 as u64, 3); // internal_clr_fmt
-    bw.write_bits(0, 1); // scaled_flag
-    bw.write_bits(DCONLY as u64, 4); // bands_present
-    bw.write_bits(0, 8); // YUV_444 reserved_e_bit (4) + reserved_f (4)
-    bw.write_flag(true); // dc_image_plane_uniform
-    write_uniform_qp(bw, dc_quant);
-    // bands_present == DCONLY ⇒ no LP/HP block.
-    bw.align_to_byte();
-}
 
-/// `image_plane_header` for the **color** (`INT_YUV444`) plane, **NOHIGHPASS**
-/// (DC + LP) — staging step between DCONLY and ALL_BANDS. Uniform DC + LP QPs.
-pub fn write_image_plane_header_color_nohighpass(bw: &mut BitWriter, dc_quant: u8, lp_quant: u8) {
-    bw.write_bits(INT_YUV444 as u64, 3); // internal_clr_fmt
-    bw.write_bits(0, 1); // scaled_flag
-    bw.write_bits(NOHIGHPASS as u64, 4); // bands_present
-    bw.write_bits(0, 8); // YUV_444 reserved_e_bit (4) + reserved_f (4)
-    bw.write_flag(true); // dc_image_plane_uniform
-    write_uniform_qp(bw, dc_quant);
-    bw.write_bits(0, 1); // reserved_i_bit / use-DC-QP-for-LP = 0 (don't reuse)
-    bw.write_flag(true); // lp_image_plane_uniform
-    write_uniform_qp(bw, lp_quant);
-    // bands_present == NOHIGHPASS ⇒ no HP block.
-    bw.align_to_byte();
-}
 
 /// `image_plane_header` for the **color** (`INT_YUV444`, 3-component) plane with
 /// **ALL_BANDS** (DC + LP + HP + flexbits) and uniform per-band quantizers shared
@@ -501,13 +409,6 @@ pub fn write_image_plane_header_multi(
     bw.align_to_byte();
 }
 
-/// One band's QP for a multi-component plane in `COMP_UNIFORM` mode: a 2-bit
-/// `component_mode` (0) then a single 8-bit quant index applied to every
-/// component. Mirrors `QP::read` with `num_components > 1`.
-fn write_uniform_qp(bw: &mut BitWriter, quant: u8) {
-    bw.write_bits(COMP_UNIFORM as u64, 2);
-    bw.write_bits(quant as u64, 8);
-}
 
 /// One band's QP sets, general form — mirrors `QP::read(nc, num_qps, …)`:
 /// per set, a 2-bit `component_mode` (when `nc > 1`) derived from the byte

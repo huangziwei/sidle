@@ -23,10 +23,17 @@ use super::misc::{Deserializer, DeserializerError};
 use super::state::*;
 use super::tables;
 
+/// Errors from codestream decoding. `Unsupported` is reserved for
+/// spec-legal input this crate doesn't reconstruct; `Malformed` for input
+/// that is internally inconsistent (the hardening guards' verdict on
+/// untrusted bytes).
 #[derive(Debug)]
 pub enum DecodeError {
+    /// Bitstream read error (ran out of bits / malformed escape).
     Bits(DeserializerError),
+    /// Spec-legal input this decoder does not reconstruct.
     Unsupported(String),
+    /// The `WMPHOTO` codestream magic is absent.
     BadSignature(String),
     /// The codestream is internally inconsistent or describes an impossible
     /// geometry (e.g. tile widths exceeding the image, or dimensions that
@@ -72,20 +79,29 @@ const MB_BUDGET_FLOOR: u64 = 4096;
 /// Decoded raster samples per component, sized to the original image area.
 #[derive(Clone)]
 pub struct DecodedImage {
+    /// Original (pre-padding) width in pixels.
     pub width: u32,
+    /// Original (pre-padding) height in pixels.
     pub height: u32,
     /// `image_plane[component]` is a flat `Vec<i32>` with row-major layout
     /// `pixel[y][x] = image_plane[c][y * width + x]`.
     pub image_plane: Vec<Vec<i32>>,
+    /// Plane count, including alpha when present.
     pub num_components: usize,
+    /// `OUTPUT_CLR_FMT` (`consts::OUT_*`) — the value convention the planes
+    /// are in after output formatting.
     pub output_clr_fmt: u8,
+    /// `OUTPUT_BITDEPTH` (`consts::BD*`).
     pub output_bitdepth: u8,
+    /// RGB planes are stored B,G,R (the container GUID decides; packed
+    /// formats re-pack accordingly).
     pub red_blue_swapped: bool,
     /// An alpha channel is present as the final plane (in-codestream planar
     /// alpha, or a separate container codestream merged by `decode_image`).
     pub has_alpha: bool,
     /// The codestream's PREMULTIPLIED_ALPHA_FLAG.
     pub premultiplied_alpha: bool,
+    /// Wall-clock sub-stage timing of the decode that produced this image.
     pub timing: DecodeTiming,
 }
 
@@ -103,18 +119,84 @@ pub struct DecodeTiming {
     pub output_fmt: std::time::Duration,
 }
 
+/// Headers-only view of a codestream, returned by
+/// [`Decoder::parse_headers`]: the file's coding shape — dimensions,
+/// color/depth, structure, per-plane coding parameters — without any
+/// entropy or pixel work. The raw `u8` codes are expressed in the
+/// [`consts`](crate::decode::consts) vocabulary.
+#[derive(Debug, Clone)]
+pub struct HeaderSummary {
+    /// Original (pre-padding) image width in pixels.
+    pub width: u32,
+    /// Original (pre-padding) image height in pixels.
+    pub height: u32,
+    /// `OUTPUT_CLR_FMT` (`consts::OUT_*`).
+    pub output_clr_fmt: u8,
+    /// `OUTPUT_BITDEPTH` (`consts::BD*`).
+    pub output_bitdepth: u8,
+    /// `OVERLAP_MODE` (0 = none, 1 = first-level, 2 = both).
+    pub overlap_mode: u8,
+    /// Frequency order: per-band tile packets instead of spatial order.
+    pub frequency_mode: bool,
+    /// Tile grid columns (1 = untiled).
+    pub tile_cols: usize,
+    /// Tile grid rows (1 = untiled).
+    pub tile_rows: usize,
+    /// Window margins (top, left, bottom, right): coded-grid pixels a
+    /// conformant decoder crops away.
+    pub margins: (u32, u32, u32, u32),
+    /// The codestream carries a T.832 alpha image plane (per-MB interleaved).
+    pub alpha_image_plane: bool,
+    /// `PREMULTIPLIED_ALPHA_FLAG`.
+    pub premultiplied_alpha: bool,
+    /// Per-plane coding parameters: `[primary]` or `[primary, alpha]`.
+    pub planes: Vec<PlaneSummary>,
+}
+
+/// One image plane's header fields (see [`HeaderSummary::planes`]).
+#[derive(Debug, Clone)]
+pub struct PlaneSummary {
+    /// This is the alpha image plane.
+    pub is_alpha: bool,
+    /// `INTERNAL_CLR_FMT` (`consts::INT_*`).
+    pub internal_clr_fmt: u8,
+    /// Coded components in this plane.
+    pub num_components: usize,
+    /// `BANDS_PRESENT` (`consts::{ALL_BANDS, NOFLEXBITS, NOHIGHPASS, DCONLY}`).
+    pub bands_present: u8,
+    /// `SCALED_FLAG` — scaled (3 extra fraction bits) arithmetic.
+    pub scaled: bool,
+    /// `SHIFT_BITS` (the 32-bit integer formats' pre-shift).
+    pub shift_bits: u32,
+    /// Custom-float `LEN_MANTISSA` (float outputs).
+    pub len_mantissa: u32,
+    /// Custom-float `EXP_BIAS` (float outputs).
+    pub exp_bias: i32,
+    /// Image-plane-uniform DC quantizer scaling factors,
+    /// `[component][qp_set]`; `None` when DC QPs vary per tile.
+    pub dc_scaling: Option<Vec<Vec<i32>>>,
+    /// LP scaling factors, as [`Self::dc_scaling`] (`None` = per-tile/MB).
+    pub lp_scaling: Option<Vec<Vec<i32>>>,
+    /// HP scaling factors, as [`Self::dc_scaling`] (`None` = per-tile/MB).
+    pub hp_scaling: Option<Vec<Vec<i32>>>,
+}
+
 /// Top-level decoder. Owns the bitstream cursor and all plane state.
 pub struct Decoder<'a> {
-    pub ds: Deserializer<'a>,
-    pub hdr: ImageHeader,
-    pub planes: Vec<Plane>,
+    pub(crate) ds: Deserializer<'a>,
+    pub(crate) hdr: ImageHeader,
+    pub(crate) planes: Vec<Plane>,
 
     // Tile-level transient state.
-    pub trim_flexbits: u32,
-    pub index_offset_tile: Vec<u64>,
+    pub(crate) trim_flexbits: u32,
+    pub(crate) index_offset_tile: Vec<u64>,
 }
 
 impl<'a> Decoder<'a> {
+    /// A decoder over one WMPHOTO codestream (the `image_data` /
+    /// `alpha_data` slice a parsed container exposes). No work happens
+    /// until [`decode`](Self::decode) or
+    /// [`parse_headers`](Self::parse_headers).
     pub fn new(data: &'a [u8]) -> Self {
         Self {
             ds: Deserializer::new(data),
@@ -159,6 +241,10 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// Decode the codestream completely: headers, entropy decode, inverse
+    /// transforms, overlap post-filters, output formatting. Returns the
+    /// reconstructed planes; errors (never panics) on malformed or
+    /// unsupported input.
     pub fn decode(mut self) -> Result<DecodedImage> {
         use std::time::Instant;
         let mut timing = DecodeTiming::default();
@@ -212,12 +298,11 @@ impl<'a> Decoder<'a> {
     }
 
     /// Parse only the image header and image-plane header(s) — no entropy
-    /// decode, no pixel work. After it returns, [`Self::hdr`] and
-    /// [`Self::planes`] carry the structural fields (dimensions, color/bit
-    /// depth, `scaled_flag`, `shift_bits`, `len_mantissa`/`exp_bias`, QPs…).
-    /// Cheap format sniffing; also how the encoder's external parity gates
-    /// diff header fields against reference-encoder output.
-    pub fn parse_headers(&mut self) -> Result<()> {
+    /// decode, no pixel work. Cheap format sniffing (dimensions, color/bit
+    /// depth, `scaled_flag`, `shift_bits`, `len_mantissa`/`exp_bias`, QPs…);
+    /// also how the encoder's external parity gates diff header fields
+    /// against reference-encoder output.
+    pub fn parse_headers(&mut self) -> Result<HeaderSummary> {
         self.image_header()?;
         self.planes.push(Plane::new(false));
         self.image_plane_header(0)?;
@@ -225,7 +310,42 @@ impl<'a> Decoder<'a> {
             self.planes.push(Plane::new(true));
             self.image_plane_header(1)?;
         }
-        Ok(())
+        let h = &self.hdr;
+        Ok(HeaderSummary {
+            width: h.image_width,
+            height: h.image_height,
+            output_clr_fmt: h.output_clr_fmt,
+            output_bitdepth: h.output_bitdepth,
+            overlap_mode: h.overlap_mode,
+            frequency_mode: h.frequency_mode != 0,
+            tile_cols: h.num_tile_cols,
+            tile_rows: h.num_tile_rows,
+            margins: (
+                h.extra_pixels_top,
+                h.extra_pixels_left,
+                h.extra_pixels_bottom,
+                h.extra_pixels_right,
+            ),
+            alpha_image_plane: h.alpha_image_plane_flag != 0,
+            premultiplied_alpha: h.premultiplied_alpha_flag != 0,
+            planes: self
+                .planes
+                .iter()
+                .map(|p| PlaneSummary {
+                    is_alpha: p.is_alpha,
+                    internal_clr_fmt: p.internal_clr_fmt,
+                    num_components: p.num_components,
+                    bands_present: p.bands_present,
+                    scaled: p.scaled_flag != 0,
+                    shift_bits: p.shift_bits,
+                    len_mantissa: p.len_mantissa,
+                    exp_bias: p.exp_bias,
+                    dc_scaling: p.dc_qp.as_ref().map(|q| q.quant_scaling_factor.clone()),
+                    lp_scaling: p.lp_qp.as_ref().map(|q| q.quant_scaling_factor.clone()),
+                    hp_scaling: p.hp_qp.as_ref().map(|q| q.quant_scaling_factor.clone()),
+                })
+                .collect(),
+        })
     }
 
     fn image_header(&mut self) -> Result<()> {
@@ -3415,7 +3535,7 @@ impl<'a> Decoder<'a> {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub enum ModelBand {
+pub(crate) enum ModelBand {
     DC,
     LP,
     HP,
