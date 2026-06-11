@@ -1,0 +1,14 @@
+[package]
+name = "jxr"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-Rust JPEG XR (ITU-T T.832) codec — decoder + encoder, zero dependencies"
+license = "GPL-3.0-or-later"
+publish = false
+readme = "README.md"
+
+# Intentionally self-contained: no `workspace = true` inheritance anywhere in
+# this manifest, so copying the `jxr/` directory out of the repo builds as-is.
+
+[dependencies]
+# Intentionally empty — the codec is std-only. Keep it that way.

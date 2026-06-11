@@ -22,7 +22,7 @@ use crate::kfx::container::get_field;
 use crate::kfx::ion::IonValue;
 use crate::kfx::symbols::KfxSymbol;
 use crate::kfx_to_epub::ConvertError;
-use crate::image::jxr_transcode as jxr;
+use crate::image::jxr_transcode as transcode;
 use crate::kfx_to_epub::loader;
 
 /// Extract the declared cover's `(bytes, extension)` from an in-memory KFX.
@@ -74,7 +74,7 @@ pub fn kfx_extract_cover(kfx_bytes: &[u8]) -> Result<Option<(Vec<u8>, &'static s
     // formats pass through. Detect JXR by the declared format or the II-BC magic.
     let is_jxr = format.as_deref() == Some("jxr") || raw.starts_with(&[0x49, 0x49, 0xBC]);
     if is_jxr {
-        let (bytes, final_format, _timing) = jxr::transcode(raw, &cover_name)?;
+        let (bytes, final_format, _timing) = transcode::transcode(raw, &cover_name)?;
         // `transcode` passes the original bytes through with format "jxr" on a
         // decode failure; an undisplayable JXR sidecar is no better than none.
         if final_format == "jxr" {

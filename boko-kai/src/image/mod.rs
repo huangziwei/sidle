@@ -1,14 +1,13 @@
-//! All raster-image transforms in one place, shared across conversion
-//! directions (EPUB→KFX and KFX→EPUB).
+//! Raster-image transforms shared across conversion directions (EPUB→KFX and
+//! KFX→EPUB).
 //!
 //! - [`jpeg`] — JPEG sanitize/strip/transcode for KFX bundling (EPUB→KFX).
-//! - [`jxr_decode`] — pure-Rust JPEG-XR decoder (KFX→EPUB).
-//! - [`jxr_encode`] — pure-Rust JPEG-XR encoder (EPUB→KFX), grayscale/color.
-//! - [`jxr_transcode`] — KFX→EPUB glue: `jxr_decode` → JPEG re-encode. Kept
-//!   separate from the codec (it depends on `ConvertError` / `jpeg_encoder`),
-//!   so `jxr_decode` + `jxr_encode` stay extraction-ready.
+//! - [`jxr_transcode`] — KFX→EPUB glue: JXR decode → JPEG re-encode. This is
+//!   pipeline glue (it depends on `ConvertError` / `jpeg_encoder`), not part
+//!   of the codec.
+//!
+//! The JPEG-XR codec itself lives in the standalone, zero-dependency
+//! top-level [`jxr`] crate (re-exported as `boko::jxr`).
 
 pub mod jpeg;
-pub mod jxr_decode;
-pub mod jxr_encode;
 pub mod jxr_transcode;

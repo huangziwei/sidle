@@ -1,13 +1,12 @@
-//! KFX → EPUB glue: decode a JPEG-XR file with the pure-Rust
-//! [`jxr_decode`](super::jxr_decode) codec, then re-encode it as JPEG for EPUB
-//! readers (which don't support JXR).
+//! KFX → EPUB glue: decode a JPEG-XR file with the pure-Rust [`jxr`] codec
+//! crate, then re-encode it as JPEG for EPUB readers (which don't support
+//! JXR).
 //!
 //! This is boko-kai pipeline glue, **not** part of the codec: it depends on
 //! `ConvertError`, `jpeg_encoder`, and the `BOKO_KFX2EPUB_TRACE` timing, none
-//! of which belong in the standalone codec. Keeping it here lets `jxr_decode`
-//! stay dependency-free for extraction into its own crate.
+//! of which belong in the standalone `jxr` crate.
 
-use super::jxr_decode::{container, decoder};
+use jxr::decode::{container, decoder};
 use crate::kfx_to_epub::ConvertError;
 
 /// Per-stage timing for one transcode call. Always collected — `Instant`'s
@@ -66,75 +65,49 @@ pub fn transcode(
 }
 
 fn encode_jpeg(img: &decoder::DecodedImage) -> Result<Vec<u8>, ConvertError> {
-    use super::jxr_decode::consts::*;
-    use jpeg_encoder::Encoder;
+    use jpeg_encoder::{ColorType, Encoder};
+    use jxr::decode::pixels::{ColorModel, SampleType};
 
-    // We currently only emit JPEG for 8-bit RGB / Y outputs. Higher bit
-    // depths and RGBA either need PNG or precision reduction.
-    if img.output_bitdepth != BD8 {
+    let buf = img
+        .to_pixel_buffer()
+        .map_err(|e| ConvertError::JpegEncode(e.to_string()))?;
+
+    // We only emit JPEG for 8-bit gray / RGB-shaped layouts. Higher bit
+    // depths, packed, CMYK, RGBE etc. pass through (caller bundles as-is).
+    if buf.sample != SampleType::U8 {
         return Err(ConvertError::JpegEncode(format!(
-            "unsupported bitdepth {} for JPEG re-encode",
-            img.output_bitdepth
+            "unsupported sample type {:?} for JPEG re-encode",
+            buf.sample
         )));
     }
-
-    let (rgb_bytes, color) = pack_pixels(img)?;
+    let n_color: usize = match buf.color {
+        ColorModel::Gray => 1,
+        ColorModel::Rgb => 3,
+        // N-channel: treat 3+ as RGB, 1 as gray (legacy behavior).
+        ColorModel::NChannel(k) if k >= 3 => 3,
+        ColorModel::NChannel(1) => 1,
+        other => {
+            return Err(ConvertError::JpegEncode(format!(
+                "unsupported color layout {other:?} for JPEG re-encode"
+            )));
+        }
+    };
+    // Strip alpha / extra channels: JPEG can't carry them.
+    let ch = buf.channels as usize;
+    let bytes: Vec<u8> = if ch == n_color {
+        buf.data
+    } else {
+        buf.data
+            .chunks_exact(ch)
+            .flat_map(|px| px[..n_color].iter().copied())
+            .collect()
+    };
+    let color = if n_color == 1 { ColorType::Luma } else { ColorType::Rgb };
 
     let mut out: Vec<u8> = Vec::new();
     let encoder = Encoder::new(&mut out, 95);
     encoder
-        .encode(&rgb_bytes, img.width as u16, img.height as u16, color)
+        .encode(&bytes, img.width as u16, img.height as u16, color)
         .map_err(|e| ConvertError::JpegEncode(format!("{:?}", e)))?;
     Ok(out)
-}
-
-/// Pack the decoded i32 planes into the contiguous byte buffer that
-/// jpeg-encoder expects, picking the right ColorType for the layout.
-fn pack_pixels(
-    img: &decoder::DecodedImage,
-) -> Result<(Vec<u8>, jpeg_encoder::ColorType), ConvertError> {
-    use super::jxr_decode::consts::*;
-    use jpeg_encoder::ColorType;
-
-    let w = img.width as usize;
-    let h = img.height as usize;
-
-    // YONLY -> Luma. RGB / NCOMPONENT(3) -> Rgb. RGBA-shaped images cannot
-    // round-trip through JPEG; we drop alpha to keep things simple — no
-    // JXR+alpha image has shown up in a real fixture yet. Revisit when
-    // one appears.
-    let is_rgb_like = matches!(img.output_clr_fmt, OUT_RGB)
-        || (matches!(img.output_clr_fmt, OUT_NCOMPONENT) && img.num_components >= 3);
-    let is_y_like = matches!(img.output_clr_fmt, OUT_YONLY)
-        || (matches!(img.output_clr_fmt, OUT_NCOMPONENT) && img.num_components == 1);
-
-    if is_y_like {
-        let mut buf = vec![0u8; w * h];
-        let plane = &img.image_plane[0];
-        for i in 0..w * h {
-            buf[i] = clamp_u8(plane[i]);
-        }
-        Ok((buf, ColorType::Luma))
-    } else if is_rgb_like {
-        let mut buf = vec![0u8; w * h * 3];
-        let r = &img.image_plane[0];
-        let g = &img.image_plane[1];
-        let b = &img.image_plane[2];
-        for i in 0..w * h {
-            buf[i * 3] = clamp_u8(r[i]);
-            buf[i * 3 + 1] = clamp_u8(g[i]);
-            buf[i * 3 + 2] = clamp_u8(b[i]);
-        }
-        Ok((buf, ColorType::Rgb))
-    } else {
-        Err(ConvertError::JpegEncode(format!(
-            "unsupported color layout: clr_fmt={} num_components={}",
-            img.output_clr_fmt, img.num_components
-        )))
-    }
-}
-
-#[inline]
-fn clamp_u8(v: i32) -> u8 {
-    v.clamp(0, 255) as u8
 }

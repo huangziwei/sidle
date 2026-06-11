@@ -15,7 +15,7 @@ use crate::kfx::container::get_field;
 use crate::kfx::ion::IonValue;
 use crate::kfx::symbols::KfxSymbol;
 
-use crate::image::jxr_transcode as jxr;
+use crate::image::jxr_transcode as transcode;
 use super::loader::{BookData, SymbolTable};
 use super::output::EpubOutput;
 use super::ConvertError;
@@ -80,7 +80,7 @@ pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, C
         .filter_map(|key| prepare_resource(key, &resources[key], book))
         .collect();
 
-    // ---- Parallel pass: run jxr::transcode on each prepared item that needs
+    // ---- Parallel pass: run transcode::transcode on each prepared item that needs
     //      it. Items that don't need transcoding (already JPEG/PNG/etc.) carry
     //      their bytes through. Each worker thread owns its slice; we
     //      reassemble in `prepared` order to preserve determinism.
@@ -88,7 +88,7 @@ pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, C
         parallel_transcode(&prepared);
 
     // ---- Serial post-pass: filenames, manifest insertion, index.
-    let mut totals = jxr::TranscodeTiming::default();
+    let mut totals = transcode::TranscodeTiming::default();
     let mut jxr_count = 0usize;
     for (prep, t_result) in prepared.iter().zip(transcoded) {
         let TranscodedBytes { bytes, final_format, timing } = t_result?;
@@ -202,7 +202,7 @@ struct TranscodedBytes {
     bytes: Vec<u8>,
     final_format: String,
     /// `Some` only when the JXR pipeline ran; `None` for pass-through formats.
-    timing: Option<jxr::TranscodeTiming>,
+    timing: Option<transcode::TranscodeTiming>,
 }
 
 fn prepare_resource<'a>(
@@ -316,7 +316,7 @@ fn parallel_transcode(
 
 fn transcode_one(p: &PreparedResource<'_>) -> Result<TranscodedBytes, ConvertError> {
     if p.is_jxr {
-        let (bytes, final_format, t) = jxr::transcode(p.raw_bytes, &p.resource_name)?;
+        let (bytes, final_format, t) = transcode::transcode(p.raw_bytes, &p.resource_name)?;
         Ok(TranscodedBytes {
             bytes,
             final_format,

@@ -367,9 +367,9 @@ fn convert_epub_to_kfx(
     // Interior plates: full-color JXR when the user picked "full color", else
     // grayscale (default). Cover stays JPEG either way (boko handles that).
     handle.set_image_color_mode(if color {
-        boko::image::jxr_encode::ColorMode::Color
+        jxr::ColorMode::Color
     } else {
-        boko::image::jxr_encode::ColorMode::Grayscale
+        jxr::ColorMode::Grayscale
     });
     let mut writer = File::create(&tmp_path)?;
     handle.export_with_progress(boko::Format::Kfx, &mut writer, on_progress)?;

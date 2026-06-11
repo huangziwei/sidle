@@ -1973,8 +1973,8 @@ fn build_format_capabilities_ion() -> Vec<u8> {
 /// Default per-band quantizer for grayscale-JXR plates: ~Amazon's per-image
 /// size on LN content at high fidelity (the `8/16/32` point of the QP sweep in
 /// `artifacts/jxr-extract`).
-const JXR_DEFAULT_QP: crate::image::jxr_encode::QpSet =
-    crate::image::jxr_encode::QpSet { dc: 8, lp: 16, hp: 32 };
+const JXR_DEFAULT_QP: jxr::QpSet =
+    jxr::QpSet { dc: 8, lp: 16, hp: 32 };
 
 /// Prepare a media asset's bytes for KFX bundling. Raster images are re-encoded
 /// as **grayscale JPEG-XR** — the device is B&W e-ink and the source EPUB keeps
@@ -1982,7 +1982,7 @@ const JXR_DEFAULT_QP: crate::image::jxr_encode::QpSet =
 /// EPUB-sourced books toward the JXR size class. Vector/undecodable assets
 /// (SVG, fonts) and any encode failure fall back to the JPEG sanitize path,
 /// which itself passes non-image bytes through unchanged.
-fn encode_asset_for_kfx(data: &[u8], mode: crate::image::jxr_encode::ColorMode) -> Vec<u8> {
+fn encode_asset_for_kfx(data: &[u8], mode: jxr::ColorMode) -> Vec<u8> {
     if let Some(jxr) = encode_jxr_asset(data, mode) {
         return jxr;
     }
@@ -1990,12 +1990,12 @@ fn encode_asset_for_kfx(data: &[u8], mode: crate::image::jxr_encode::ColorMode) 
 }
 
 /// Decode a raster image and re-encode it as JPEG-XR in the requested
-/// [`ColorMode`][crate::image::jxr_encode::ColorMode]: `Grayscale` (luma plane,
+/// [`ColorMode`][jxr::ColorMode]: `Grayscale` (luma plane,
 /// `8bppGray`) or `Color` (RGB planes, `24bppRGB`; channels identical everywhere
 /// collapse to grayscale via the encoder's auto-detect). `None` if the bytes
 /// aren't a decodable raster or exceed the encoder's range.
-fn encode_jxr_asset(data: &[u8], mode: crate::image::jxr_encode::ColorMode) -> Option<Vec<u8>> {
-    use crate::image::jxr_encode::{encode, ColorMode, ImageInput};
+fn encode_jxr_asset(data: &[u8], mode: jxr::ColorMode) -> Option<Vec<u8>> {
+    use jxr::{encode, ColorMode, ImageInput};
     let img = ::image::load_from_memory(data).ok()?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 || w > (1 << 16) || h > (1 << 16) {
@@ -2015,8 +2015,17 @@ fn encode_jxr_asset(data: &[u8], mode: crate::image::jxr_encode::ColorMode) -> O
             }
             vec![r, g, b]
         }
+        // Only the gray/RGB raster modes are wired here (all the KFX
+        // pipeline produces TODAY — gray default, Color when color KFX
+        // lands). If a new ColorMode ever reaches this site, extend the
+        // match; the debug_assert makes that loud instead of silently
+        // dropping the asset.
+        _ => {
+            debug_assert!(false, "encode_jxr_asset: unhandled ColorMode {mode:?}");
+            return None;
+        }
     };
-    let input = ImageInput { width: w, height: h, planes: &planes };
+    let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
     encode(&input, mode, JXR_DEFAULT_QP).ok()
 }
 
@@ -5006,7 +5015,7 @@ mod resource_export_tests {
         ::image::DynamicImage::ImageLuma8(img)
             .write_to(&mut png, ::image::ImageFormat::Png)
             .unwrap();
-        let jxr = encode_jxr_asset(png.get_ref(), crate::image::jxr_encode::ColorMode::Grayscale)
+        let jxr = encode_jxr_asset(png.get_ref(), jxr::ColorMode::Grayscale)
             .expect("interior plate → JXR");
         assert_eq!(&jxr[0..3], &[0x49, 0x49, 0xBC], "interior plate must be JXR");
         // The plate's fixed-layout page is sized from these dims; if unreadable
@@ -5020,7 +5029,7 @@ mod resource_export_tests {
 
     #[test]
     fn encode_jxr_asset_honors_color_mode() {
-        use crate::image::jxr_encode::ColorMode;
+        use jxr::ColorMode;
         // A genuinely-colorful plate (distinct R/G/B so it isn't auto-grayed).
         let rgb: ::image::RgbImage = ::image::ImageBuffer::from_fn(32, 32, |x, y| {
             ::image::Rgb([(x * 8) as u8, (y * 8) as u8, ((x + y) * 4) as u8])
@@ -5030,8 +5039,8 @@ mod resource_export_tests {
             .write_to(&mut png, ::image::ImageFormat::Png)
             .unwrap();
         let dec = |bytes: &[u8]| -> (String, usize) {
-            let c = crate::image::jxr_decode::container::parse(bytes).unwrap();
-            let n = crate::image::jxr_decode::decoder::Decoder::new(c.image_data)
+            let c = jxr::decode::container::parse(bytes).unwrap();
+            let n = jxr::decode::decoder::Decoder::new(c.image_data)
                 .decode()
                 .unwrap()
                 .num_components;

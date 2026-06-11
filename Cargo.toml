@@ -2,11 +2,15 @@
 resolver = "3"
 members = [
     "boko-kai",
+    "jxr",
     "sidle/core",
     "sidle/native",
     "sidle/server",
     "sidle/src-tauri",
 ]
+# The fuzz harness is nightly-only and must never enter normal builds; it is
+# its own workspace (cargo-fuzz convention).
+exclude = ["jxr/fuzz"]
 
 # Single source of truth for the sidle-* crates' version. Each opts in with
 # `version.workspace = true`, so bumping this one line versions the whole

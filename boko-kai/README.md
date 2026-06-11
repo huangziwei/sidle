@@ -86,7 +86,7 @@ A parallel pipeline rather than the generic IR path, because KFX's data model (p
 - `navigation.rs` — NCX + OPF guide from `book_navigation`; anchor registration from `$266 anchors`.
 - `properties.rs` — KFX style struct → CSS Declaration (writing-mode, font, text-align, box model, ruby, text-emphasis, text-combine-upright, …).
 - `resources.rs` — raw-media extraction; JXR → JPEG transcode runs in parallel via `std::thread::scope`.
-- `jxr/` — a **pure-Rust JPEG-XR decoder**, line-by-line port of calibre's `jxr_*.py`, so the Tauri bundle stays free of C / libjxr / ImageMagick deps.
+- JPEG-XR decode lives in the **standalone top-level `jxr` crate** (`../jxr`, re-exported as `boko::jxr`): pure Rust, zero deps, so the Tauri bundle stays free of C / libjxr / ImageMagick. `image/jxr_transcode.rs` is the JXR→JPEG glue.
 - `output.rs` — EPUB zip assembly (OPF 2.0, NCX, manifest, spine, titlepage SVG wrapper for the cover).
 - CLI: `boko convert in.kfx out.epub`. API: `boko::kfx_to_epub::convert_to_epub(&kfx_bytes)`.
 

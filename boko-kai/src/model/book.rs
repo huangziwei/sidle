@@ -212,7 +212,7 @@ pub struct Book {
     /// the device is B&W e-ink and the source keeps the color master) or
     /// `Color` (full `24bppRGB` JXR, for the Sidle desktop reader / a future
     /// color device). Set via [`Book::set_image_color_mode`].
-    image_color_mode: crate::image::jxr_encode::ColorMode,
+    image_color_mode: jxr::ColorMode,
 }
 
 impl Format {
@@ -303,7 +303,7 @@ impl Book {
             backend,
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
             meta_override: None,
-            image_color_mode: crate::image::jxr_encode::ColorMode::Grayscale,
+            image_color_mode: jxr::ColorMode::Grayscale,
         })
     }
 
@@ -332,7 +332,7 @@ impl Book {
             backend,
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
             meta_override: None,
-            image_color_mode: crate::image::jxr_encode::ColorMode::Grayscale,
+            image_color_mode: jxr::ColorMode::Grayscale,
         })
     }
 
@@ -358,7 +358,7 @@ impl Book {
     }
 
     /// How raster images are encoded into a KFX export (default `Grayscale`).
-    pub fn image_color_mode(&self) -> crate::image::jxr_encode::ColorMode {
+    pub fn image_color_mode(&self) -> jxr::ColorMode {
         self.image_color_mode
     }
 
@@ -368,7 +368,7 @@ impl Book {
     /// identical everywhere still collapse to grayscale automatically). The
     /// cover stays JPEG regardless. Flipping this + reconverting is how a color
     /// book gets a color KFX for the Sidle reader.
-    pub fn set_image_color_mode(&mut self, mode: crate::image::jxr_encode::ColorMode) {
+    pub fn set_image_color_mode(&mut self, mode: jxr::ColorMode) {
         self.image_color_mode = mode;
     }
 

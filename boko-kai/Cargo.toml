@@ -62,6 +62,11 @@ base64 = "0.22"
 # can render. Small, focused, no C deps.
 jpeg-encoder = { version = "0.6", default-features = false }
 
+# Pure-Rust JPEG-XR codec (top-level workspace crate; zero deps). Decodes KFX
+# raw media (KFX→EPUB + reader) and encodes EPUB→KFX interior plates.
+# Re-exported as `boko::jxr` since `model::Book`'s API exposes its types.
+jxr = { path = "../jxr" }
+
 # Pure-Rust multi-format image decoder. Used by the EPUB→KFX path to
 # transcode every non-JPEG image (GIF, PNG, WebP, BMP) to JPEG before
 # bundling. KDP's "Image Guidelines — Reflowable" warns that Kindle
