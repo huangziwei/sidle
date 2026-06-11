@@ -1205,6 +1205,7 @@ pub fn encode_color_alpha(
     h: u32,
     qp: QpSet,
     alpha_qp: QpSet,
+    chroma_qp: Option<QpSet>,
     premultiplied: bool,
     fmt: u8,
     scaled: bool,
@@ -1229,6 +1230,7 @@ pub fn encode_color_alpha(
         h,
         qp,
         alpha_qp,
+        chroma_qp,
         premultiplied,
         fmt,
         scaled,
@@ -1246,8 +1248,10 @@ pub fn encode_color_alpha(
 /// alpha plane carries its own `shift_bits`/float fields). The alpha plane's
 /// `scaled_flag` follows the image's (the reference encoder couples them;
 /// scaled lossless YONLY stays bit-exact) while its QPs stay independent
-/// (`alpha_qp`). `overlap_mode` is an image-header field, so it applies to
-/// the alpha plane's reconstruction too — filter it identically.
+/// (`alpha_qp`). `chroma_qp` quantizes the PRIMARY plane's chroma separately
+/// (`COMP_SEPARATE`), exactly as on the 3-plane path; the alpha plane is
+/// YONLY and unaffected. `overlap_mode` is an image-header field, so it
+/// applies to the alpha plane's reconstruction too — filter it identically.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_color_alpha_prebias(
     r: &[i32],
@@ -1258,6 +1262,7 @@ pub(super) fn encode_color_alpha_prebias(
     h: u32,
     qp: QpSet,
     alpha_qp: QpSet,
+    chroma_qp: Option<QpSet>,
     premultiplied: bool,
     fmt: u8,
     scaled: bool,
@@ -1268,8 +1273,9 @@ pub(super) fn encode_color_alpha_prebias(
     depth: &super::convert::Depth,
     guid: &[u8; 16],
 ) -> Vec<u8> {
+    let plan = super::quant::QpPlan::uniform(qp, chroma_qp);
     let mut primary = ColorPlane::new_fmt(
-        r, g, b, w, h, qp, fmt, ALL_BANDS, scaled, window, overlap, tiles.0, tiles.1, None,
+        r, g, b, w, h, qp, fmt, ALL_BANDS, scaled, window, overlap, tiles.0, tiles.1, Some(&plan),
     );
     let mut alpha = super::gray::YOnlyPlane::new(a, w, h, alpha_qp, window, overlap, tiles, scaled);
     let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
@@ -1286,7 +1292,6 @@ pub(super) fn encode_color_alpha_prebias(
     let body = codestream::emit_codestream(
         &spec,
         |head| {
-            let plan = super::quant::QpPlan::uniform(qp, None);
             codestream::write_image_plane_header_yuv_plan(head, fmt, ALL_BANDS, &plan, scaled, depth);
             // Alpha image plane header: YONLY, own bands + QPs (JxrEncApp
             // analog `-Q`), same depth fields.
@@ -2174,7 +2179,8 @@ mod tests {
             let alpha: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let jxr = encode_color_alpha(
                 &gray, &gray, &gray, &alpha, w as u32, h as u32,
-                QpSet::LOSSLESS, QpSet::LOSSLESS, false, fmt, false, (0, 0), (&[], &[]), 0, false,
+                QpSet::LOSSLESS, QpSet::LOSSLESS, None, false, fmt, false, (0, 0), (&[], &[]), 0,
+                false,
             );
             let d = decode(&jxr);
             assert_eq!(d.num_components, 4, "fmt={fmt}");

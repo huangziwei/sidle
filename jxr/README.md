@@ -31,7 +31,10 @@ when present, handles separate planar-alpha codestreams (merged by
 `decode::apply_orientation` implements all 8 transforms (not auto-applied,
 matching libjxr). Decoded output is raw `i32` planes plus layout fields, or
 use `DecodedImage::to_pixel_buffer()` for interleaved little-endian samples
-with an explicit layout (sample type, color model, alpha mode).
+with an explicit layout (sample type, color model, alpha mode). For cheap
+format sniffing, `Decoder::parse_headers()` returns a `HeaderSummary`
+(dimensions, color/depth codes, tiling/overlap/frequency structure, and
+per-plane coding parameters) without doing any pixel work.
 
 **Encoder** — 8-bit grayscale (`8bppGray`/YONLY), 8-bit color
 (`24bppRGB`) at **4:4:4, 4:2:2, 4:2:0 or luma-only** chroma sampling
@@ -132,6 +135,14 @@ cannot mint a counterpart (plain CMYK, CMYKA-80, CMYKDIRECT, N-channel,
 JxrDecApp readback of our files where its writers cooperate (everything
 except CMYKDIRECT and N-channel), self-loop otherwise — flagged in the
 harness output every run.
+
+Both directions are fuzzed (`fuzz/`): the decoder against arbitrary bytes
+(panics, OOM, hangs are findings; run with release overflow semantics —
+see `scripts/jxr-fuzz-overnight.sh`), and the encoder as a **round-trip
+oracle** — random valid inputs over the whole envelope above are encoded,
+decoded, and checked against each combination's documented exactness
+contract, plus a no-panic target for arbitrary invalid options
+(`scripts/jxr-fuzz-encode.sh`; overflow checks deliberately ON there).
 
 The roadmap lives in the repo at `.claude/plans/jxr-general-codec.md`.
 

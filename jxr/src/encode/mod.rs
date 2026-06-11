@@ -210,9 +210,10 @@ pub struct EncodeOptions {
     pub frequency: bool,
     /// Chroma per-band quantizers distinct from the luma `qp` (T.832
     /// `COMP_SEPARATE` component mode — the classic quantize-chroma-harder
-    /// rate trick). Color inputs only; ignored for grayscale. `None` = same
-    /// as `qp` (`COMP_UNIFORM`, byte-stable). Mutually exclusive with
-    /// [`qp_plan`](Self::qp_plan).
+    /// rate trick). Applies to the chroma-carrying plane: 3-plane color and
+    /// the 4-plane (alpha) path's primary; ignored for grayscale (no chroma
+    /// to quantize). `None` = same as `qp` (`COMP_UNIFORM`, byte-stable).
+    /// Mutually exclusive with [`qp_plan`](Self::qp_plan).
     pub chroma_qp: Option<QpSet>,
     /// The full T.832 quantization syntax for the primary plane: per-tile
     /// [QP sets](TileQps) and per-MB LP/HP DQUANT index maps ([`QpPlan`]).
@@ -618,6 +619,7 @@ pub fn encode_with_options(
             h,
             qp,
             alpha_qp,
+            opts.chroma_qp,
             input.premultiplied_alpha,
             fmt,
             opts.scaled,
@@ -1059,11 +1061,14 @@ pub fn encode_typed(
     if matches!(
         samples,
         SamplePlanes::F16(_) | SamplePlanes::F32(_) | SamplePlanes::Rgbe(_)
-    ) && matches!(opts.chroma, ChromaSampling::Yuv420 | ChromaSampling::Yuv422)
-    {
+    ) && matches!(
+        opts.chroma,
+        ChromaSampling::Yuv420 | ChromaSampling::Yuv422 | ChromaSampling::YOnly
+    ) {
         return Err(EncodeError::Unsupported(
-            "float/RGBE input must keep YUV 4:4:4 chroma (folded samples don't \
-             survive decimation; the reference encoder enforces the same)"
+            "float/RGBE input must keep YUV 4:4:4 chroma (folded samples survive \
+             neither decimation nor a YUV-style luma projection; the reference \
+             encoder enforces the same)"
                 .into(),
         ));
     }
@@ -1092,11 +1097,6 @@ pub fn encode_typed(
         }
         if input.premultiplied_alpha {
             return Err(EncodeError::Invalid("RGBE has no alpha plane".into()));
-        }
-        if opts.chroma == ChromaSampling::YOnly {
-            return Err(EncodeError::Unsupported(
-                "YOnly chroma with RGBE is not implemented".into(),
-            ));
         }
         if opts.bands != BandsPresent::All || trim != 0 {
             return Err(EncodeError::Unsupported(
@@ -1178,6 +1178,7 @@ pub fn encode_typed(
                 h,
                 qp,
                 opts.alpha_qp.unwrap_or(qp),
+                opts.chroma_qp,
                 input.premultiplied_alpha,
                 fmt,
                 opts.scaled,
@@ -3042,6 +3043,65 @@ mod tests {
                 "packed 565 per-tile lossless plan word px{i}"
             );
         }
+    }
+
+    /// 7a coherence fix: `chroma_qp` applies to the 4-plane (alpha) path's
+    /// PRIMARY plane — previously the alpha drivers silently ignored it.
+    /// Zero-chroma content stays exact under a harsh chroma quantizer;
+    /// colored content shrinks; equal bytes derive `COMP_UNIFORM`
+    /// byte-stably.
+    #[test]
+    fn alpha_chroma_qp_applies() {
+        use crate::decode::container::parse;
+        let mut r = Lcg(0xa1fa_0077);
+        let (w, h) = (48u32, 32u32);
+        let n = (w * h) as usize;
+        let gray: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
+        let alpha: Vec<u8> = (0..n).map(|_| (r.next() >> 24) as u8).collect();
+        let dec = |jxr: &[u8]| {
+            let c = parse(jxr).unwrap();
+            crate::decode::decode_image(&c).unwrap()
+        };
+        let harsh = QpSet { dc: 64, lp: 64, hp: 64 };
+        // Zero-chroma RGBA + harsh chroma_qp at q1: exact on all 4 channels.
+        let gplanes = vec![gray.clone(), gray.clone(), gray.clone(), alpha.clone()];
+        let ginput =
+            ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
+        let f = encode_with_options(
+            &ginput,
+            ColorMode::Color,
+            EncodeOptions { chroma_qp: Some(harsh), ..Default::default() },
+        )
+        .unwrap();
+        let d = dec(&f);
+        assert_eq!(d.num_components, 4);
+        for (c, plane) in [&gray, &gray, &gray, &alpha].iter().enumerate() {
+            for i in 0..n {
+                assert_eq!(d.image_plane[c][i], plane[i] as i32, "alpha chroma_qp ch{c} px{i}");
+            }
+        }
+        // Colored RGBA: harsh chroma shrinks the file; still 4-channel.
+        let cplanes: [Vec<u8>; 3] = noise_planes(&mut r, n);
+        let four = vec![cplanes[0].clone(), cplanes[1].clone(), cplanes[2].clone(), alpha];
+        let cinput = ImageInput { width: w, height: h, planes: &four, premultiplied_alpha: false };
+        let lossless =
+            encode_with_options(&cinput, ColorMode::Color, Default::default()).unwrap();
+        let f = encode_with_options(
+            &cinput,
+            ColorMode::Color,
+            EncodeOptions { chroma_qp: Some(harsh), ..Default::default() },
+        )
+        .unwrap();
+        assert!(f.len() < lossless.len(), "harsh chroma must shrink the alpha file");
+        assert_eq!(dec(&f).num_components, 4);
+        // chroma_qp == qp derives COMP_UNIFORM: byte-identical to None.
+        let same = encode_with_options(
+            &cinput,
+            ColorMode::Color,
+            EncodeOptions { chroma_qp: Some(QpSet::LOSSLESS), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(same, lossless, "equal chroma_qp must stay byte-stable on the alpha path");
     }
 
     #[test]

@@ -10,11 +10,31 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+arbitrary = "1"
 jxr = { path = ".." }
 
 [[bin]]
 name = "jxr_decode"
 path = "fuzz_targets/jxr_decode.rs"
+test = false
+doc = false
+bench = false
+
+# Encoder targets (7b). NOTE: unlike jxr_decode, run these WITHOUT
+# RUSTFLAGS=-Coverflow-checks=off — they feed VALID data end-to-end, where
+# an integer overflow is a real wrong-output bug, so cargo-fuzz's default
+# (checks on) is the correct semantics. scripts/jxr-fuzz-encode.sh does
+# this; the decode script's override stays decode-only.
+[[bin]]
+name = "jxr_encode_roundtrip"
+path = "fuzz_targets/jxr_encode_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jxr_encode_nopanic"
+path = "fuzz_targets/jxr_encode_nopanic.rs"
 test = false
 doc = false
 bench = false
