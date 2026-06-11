@@ -111,12 +111,22 @@ fuzz_target!(|data: &[u8]| {
             .expect("re-encode of decoded F32 must be accepted");
             let c2 = jxr::decode::container::parse(&again).unwrap();
             let img2 = jxr::decode::decode_image(&c2).expect("re-encoded F32 must decode");
+            // The decoder can emit -0.0 (a flushed tiny negative keeps its
+            // sign — JxrDecApp-faithful); the encoder's fold has a single
+            // zero, so idempotence holds up to zero-sign, exactly the
+            // documented -0.0 → +0.0 exception.
+            let zfold = |v: i32| if v & 0x7fff_ffff == 0 { 0 } else { v };
             for (ch, plane2) in img2.image_plane.iter().enumerate() {
-                assert_eq!(
-                    plane2, &img.image_plane[ch],
-                    "F32 idempotence broke on ch{ch} (mode {:?}, opts {:?})",
-                    case.mode, case.opts
-                );
+                for (i, (&a, &b)) in plane2.iter().zip(&img.image_plane[ch]).enumerate() {
+                    assert_eq!(
+                        zfold(a),
+                        zfold(b),
+                        "F32 idempotence broke at px{i} ch{ch}: {a:#x} vs {b:#x} \
+                         (mode {:?}, opts {:?})",
+                        case.mode,
+                        case.opts
+                    );
+                }
             }
         }
         Expect::Exact | Expect::Bounded(_) => {
