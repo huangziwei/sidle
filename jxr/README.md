@@ -10,7 +10,7 @@ is deliberately kept liftable: the crate is fully self-contained (no workspace
 inheritance, no dependencies), so copying this directory into your own tree
 gives you a working codec. If you find it useful, take it (license below).
 
-## What it supports today
+## What it supports
 
 **Decoder** — the full T.832 codestream *syntax* (header, entropy coding,
 transforms): all band modes (DCONLY → ALL_BANDS), planar alpha, overlap modes
@@ -136,15 +136,19 @@ JxrDecApp readback of our files where its writers cooperate (everything
 except CMYKDIRECT and N-channel), self-loop otherwise — flagged in the
 harness output every run.
 
-Both directions are fuzzed (`fuzz/`): the decoder against arbitrary bytes
-(panics, OOM, hangs are findings; run with release overflow semantics —
-see `scripts/jxr-fuzz-overnight.sh`), and the encoder as a **round-trip
-oracle** — random valid inputs over the whole envelope above are encoded,
-decoded, and checked against each combination's documented exactness
-contract, plus a no-panic target for arbitrary invalid options
-(`scripts/jxr-fuzz-encode.sh`; overflow checks deliberately ON there).
-
-The roadmap lives in the repo at `.claude/plans/jxr-general-codec.md`.
+Both directions are fuzzed (`fuzz/`, cargo-fuzz). The decoder runs against
+arbitrary bytes (`jxr_decode` — panics, OOM, and hangs are findings, errors
+are the expected outcome for garbage); run it with
+`RUSTFLAGS=-Coverflow-checks=off` so reconstruction arithmetic keeps the
+shipping release semantics (wrapping, garbage-from-garbage) instead of
+cargo-fuzz's checks-on default turning unreachable-in-production wraps into
+spurious panics. The encoder is fuzzed as a **round-trip oracle**
+(`jxr_encode_roundtrip` — random valid inputs over the whole envelope above
+are encoded, decoded, and checked against each combination's documented
+exactness contract) plus a no-panic target for arbitrary invalid options
+(`jxr_encode_nopanic`). The encoder targets deliberately keep overflow
+checks ON — the inverse of the decode flag: they feed valid data
+end-to-end, where an integer overflow is a real wrong-output bug.
 
 ## Usage
 
