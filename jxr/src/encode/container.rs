@@ -64,6 +64,34 @@ pub mod pixel_format {
     /// padded to 4 (the format the reference encoder mints for RGB float;
     /// the codestream itself carries 3 components).
     pub const RGB128_FLOAT: [u8; 16] = guid(0x1b);
+    /// `32bppCMYK` — four 8-bit ink channels (BD8 + `OUT_CMYK`).
+    pub const CMYK32: [u8; 16] = guid(0x1c);
+    /// `64bppCMYK` — four 16-bit ink channels (BD16 + `OUT_CMYK`).
+    pub const CMYK64: [u8; 16] = guid(0x1f);
+    /// `40bppCMYKAlpha` — [`CMYK32`] + an 8-bit alpha image plane.
+    pub const CMYKA40: [u8; 16] = guid(0x2c);
+    /// `80bppCMYKAlpha` — [`CMYK64`] + a 16-bit alpha image plane.
+    pub const CMYKA80: [u8; 16] = guid(0x2d);
+    /// `BlackWhite` — bi-level (BD1WHITE1 or BD1BLACK1 in the codestream).
+    pub const BLACKWHITE: [u8; 16] = guid(0x05);
+    /// `16bppRGB555` — packed 5-5-5 (BD5).
+    pub const RGB555: [u8; 16] = guid(0x09);
+    /// `16bppRGB565` — packed 5-6-5 (BD565).
+    pub const RGB565: [u8; 16] = guid(0x0a);
+    /// `32bppRGB101010` — packed 10-10-10 (BD10).
+    pub const RGB101010: [u8; 16] = guid(0x14);
+    /// `xxbpp[3–8]Channels[Alpha]` — `OUT_NCOMPONENT` with `n` channels at
+    /// 8 bits (base `0x20`; `0x2e` with an alpha plane) or 16 bits (`0x26`;
+    /// `0x34` with alpha). The GUID family stops at 8 channels.
+    pub const fn nchannel(n: usize, deep: bool, alpha: bool) -> [u8; 16] {
+        let base = match (deep, alpha) {
+            (false, false) => 0x20u8,
+            (true, false) => 0x26,
+            (false, true) => 0x2e,
+            (true, true) => 0x34,
+        };
+        guid(base + (n as u8 - 3))
+    }
 }
 
 const TIFF_TYPE_BYTE: u16 = 1;

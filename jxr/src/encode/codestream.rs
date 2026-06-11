@@ -450,6 +450,57 @@ pub fn write_image_plane_header_yuv_plan(
     bw.align_to_byte();
 }
 
+/// `image_plane_header` for a multi-component per-channel plane
+/// (`INT_YUVK`, 4 components; `INT_NCOMPONENT`, 3–16): any `bands_present` ×
+/// `scaled_flag` × depth, uniform QPs with `COMP_UNIFORM`/`COMP_SEPARATE`
+/// emission (component 0 = `qp`, all others = `chroma_qp` — the only
+/// component shapes this writer emits; `COMP_INDEPENDENT` for > 3
+/// components would need per-component bytes the public surface doesn't
+/// carry). Field order mirrors `Decoder::image_plane_header`: the
+/// NCOMPONENT format-specific block is 4-bit `nc − 1` + 4 reserved bits
+/// (or the 15 ⊕ 12-bit extension at exactly 16); YUVK has none.
+#[allow(clippy::too_many_arguments)]
+pub fn write_image_plane_header_multi(
+    bw: &mut BitWriter,
+    int_fmt: u8,
+    nc: usize,
+    bands: u8,
+    qp: super::quant::QpSet,
+    chroma_qp: super::quant::QpSet,
+    scaled: bool,
+    depth: &super::convert::Depth,
+) {
+    debug_assert!(matches!(int_fmt, INT_YUVK | INT_NCOMPONENT));
+    debug_assert!(if int_fmt == INT_YUVK { nc == 4 } else { (3..=16).contains(&nc) });
+    bw.write_bits(int_fmt as u64, 3); // internal_clr_fmt
+    bw.write_flag(scaled); // scaled_flag
+    bw.write_bits(bands as u64, 4); // bands_present
+    if int_fmt == INT_NCOMPONENT {
+        if nc < 16 {
+            bw.write_bits(nc as u64 - 1, 4);
+            bw.write_bits(0, 4); // reserved_h
+        } else {
+            bw.write_bits(15, 4);
+            bw.write_bits(0, 12); // num_components − 16
+        }
+    }
+    write_depth_plane_fields(bw, depth);
+    let set = |lum: u8, chr: u8| super::quant::BandQp::separate(lum, chr);
+    bw.write_flag(true); // dc_image_plane_uniform
+    write_band_qp(bw, &[set(qp.dc, chroma_qp.dc)], nc);
+    if bands != DCONLY {
+        bw.write_bits(0, 1); // reserved_i_bit
+        bw.write_flag(true); // lp_image_plane_uniform
+        write_band_qp(bw, &[set(qp.lp, chroma_qp.lp)], nc);
+        if bands != NOHIGHPASS {
+            bw.write_bits(0, 1); // reserved_j_bit
+            bw.write_flag(true); // hp_image_plane_uniform
+            write_band_qp(bw, &[set(qp.hp, chroma_qp.hp)], nc);
+        }
+    }
+    bw.align_to_byte();
+}
+
 /// One band's QP for a multi-component plane in `COMP_UNIFORM` mode: a 2-bit
 /// `component_mode` (0) then a single 8-bit quant index applied to every
 /// component. Mirrors `QP::read` with `num_components > 1`.

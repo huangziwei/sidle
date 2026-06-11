@@ -2015,6 +2015,15 @@ fn encode_jxr_asset(data: &[u8], mode: jxr::ColorMode) -> Option<Vec<u8>> {
             }
             vec![r, g, b]
         }
+        // Only the gray/RGB raster modes are wired here (all the KFX
+        // pipeline produces TODAY — gray default, Color when color KFX
+        // lands). If a new ColorMode ever reaches this site, extend the
+        // match; the debug_assert makes that loud instead of silently
+        // dropping the asset.
+        _ => {
+            debug_assert!(false, "encode_jxr_asset: unhandled ColorMode {mode:?}");
+            return None;
+        }
     };
     let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
     encode(&input, mode, JXR_DEFAULT_QP).ok()

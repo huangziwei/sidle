@@ -102,12 +102,34 @@ decoder's output formatting; everything structural (chroma sampling for
 integer inputs, bands/trim, windowing, tiles, overlap, frequency order, QP
 syntax) composes with any depth.
 
+And the exotica, closing the encoder/decoder capability gap:
+
+- **CMYK** (`ColorMode::Cmyk`, 4 ink planes at `U8`/`U16` →
+  `32/64bppCMYK`; a 5th plane → `40/80bppCMYKAlpha`): coded through the
+  internal YUVK transform per component — bit-exact at lossless QP, scaled
+  near-exact (the component half-step floor, as for color).
+  `ColorMode::CmykDirect` skips the ink transform (`OUT_CMYKDIRECT`).
+- **N-component** (`ColorMode::NComponent`, 3–8 channel planes at
+  `U8`/`U16` → the `xxbppNChannels` GUIDs): independent channels,
+  bit-exact at lossless QP.
+- **Packed RGB** (`Packed555`/`Packed565`/`Packed101010` — one plane of
+  packed words): lossless QP round-trips the packed words exactly,
+  including 565's asymmetric 5-bit-channel scaling.
+- **Bi-level** (`Bw` / `BwBlackIsOne` — one 0/1 plane, the polarity in
+  `OUTPUT_BITDEPTH` under the single `BlackWhite` GUID): exact at lossless
+  QP.
+
 Every feature is verified two ways: in-crate round-trip/equivalence
 invariants against this crate's decoder, and JxrDecApp-exact readback (with
 jxrencapp PSNR/size parity wherever the reference encoder can mint a
 counterpart; the deep formats additionally diff header fields and container
 GUIDs against reference-minted twins, and two real 3440×1440 scRGB HDR
-captures re-encode 4-channel bit-exact).
+captures re-encode 4-channel bit-exact). Where the reference toolchain
+cannot mint a counterpart (plain CMYK, CMYKA-80, CMYKDIRECT, N-channel,
+555, bi-level — its input readers, not its format support), the gate is
+JxrDecApp readback of our files where its writers cooperate (everything
+except CMYKDIRECT and N-channel), self-loop otherwise — flagged in the
+harness output every run.
 
 The roadmap lives in the repo at `.claude/plans/jxr-general-codec.md`.
 

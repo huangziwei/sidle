@@ -3137,6 +3137,19 @@ impl<'a> Decoder<'a> {
             bias_base >>= self.planes[p].shift_bits;
         }
         let i_bias = bias_base << i_scale;
+        // The alpha image plane is its own YONLY channel: it takes the plain
+        // bias regardless of the image's color format (the OUT_CMYK half/−K
+        // arm below is primary-plane semantics — indexing it against the
+        // 1-component alpha plane walked out of bounds; found by the first
+        // `-a 3` CMYKA decode, 6a).
+        if self.planes[p].is_alpha {
+            if i_bias != 0 {
+                for v in &mut self.planes[p].image_plane[0].data {
+                    *v += i_bias;
+                }
+            }
+            return Ok(());
+        }
         match self.hdr.output_clr_fmt {
             OUT_RGB | OUT_YUV444 | OUT_YUV422 | OUT_YUV420 | OUT_YONLY | OUT_NCOMPONENT
             | OUT_CMYKDIRECT => {

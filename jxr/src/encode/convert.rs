@@ -15,7 +15,7 @@
 //! forces unscaled arithmetic for 32-bit depths (`strenc.c:961`); we reject
 //! `scaled` there instead of silently clearing it.
 
-use crate::decode::consts::{BD16, BD16F, BD16S, BD32F, BD32S, BD8};
+use crate::decode::consts::{BD10, BD16, BD16F, BD16S, BD1BLACK1, BD1WHITE1, BD32F, BD32S, BD5, BD565, BD8};
 
 /// Typed sample planes for [`crate::encode_typed`] — one `Vec` per component
 /// (R,G,B\[,A\] order, or a single gray plane), each row-major with
@@ -64,6 +64,25 @@ pub enum SamplePlanes<'a> {
     /// re-emerge renormalized. Chroma subsampling is rejected (the shared
     /// exponent couples the channels per pixel; the reference refuses too).
     Rgbe(&'a [Vec<u8>]),
+    /// Packed 5-5-5 RGB words (`16bppRGB555`, BD5): ONE plane of u16 words,
+    /// channel 0 in the low 5 bits (the decode side's layout). Lossless QP
+    /// round-trips the packed words exactly.
+    Packed555(&'a [Vec<u16>]),
+    /// Packed 5-6-5 RGB words (`16bppRGB565`, BD565): ONE plane of u16
+    /// words, channel 0 low, the 6-bit channel in the middle. The 5-bit
+    /// channels code at doubled amplitude (the decoder's extra `>>1` on
+    /// non-green channels — mirrored exactly).
+    Packed565(&'a [Vec<u16>]),
+    /// Packed 10-10-10 RGB words (`32bppRGB101010`, BD10): ONE plane of u32
+    /// words, channel 0 in the low 10 bits.
+    Packed101010(&'a [Vec<u32>]),
+    /// Bi-level (`BlackWhite` GUID, BD1WHITE1 — stored 1 = white): ONE plane
+    /// of 0/1 bytes. Values above 1 are rejected. For the BLACK-is-1
+    /// convention use [`SamplePlanes::BwBlackIsOne`].
+    Bw(&'a [Vec<u8>]),
+    /// [`SamplePlanes::Bw`] with the BD1BLACK1 polarity (stored 1 = black);
+    /// same single GUID, the polarity lives in `OUTPUT_BITDEPTH`.
+    BwBlackIsOne(&'a [Vec<u8>]),
 }
 
 /// The BD16F sign-magnitude fold: half bits → the pseudo-integer the
@@ -171,6 +190,11 @@ impl SamplePlanes<'_> {
             SamplePlanes::F16(p) => p.len(),
             SamplePlanes::F32(p) => p.len(),
             SamplePlanes::Rgbe(p) => p.len(),
+            SamplePlanes::Packed555(p) => p.len(),
+            SamplePlanes::Packed565(p) => p.len(),
+            SamplePlanes::Packed101010(p) => p.len(),
+            SamplePlanes::Bw(p) => p.len(),
+            SamplePlanes::BwBlackIsOne(p) => p.len(),
         }
     }
 
@@ -184,6 +208,11 @@ impl SamplePlanes<'_> {
             SamplePlanes::F16(p) => p[i].len(),
             SamplePlanes::F32(p) => p[i].len(),
             SamplePlanes::Rgbe(p) => p[i].len(),
+            SamplePlanes::Packed555(p) => p[i].len(),
+            SamplePlanes::Packed565(p) => p[i].len(),
+            SamplePlanes::Packed101010(p) => p[i].len(),
+            SamplePlanes::Bw(p) => p[i].len(),
+            SamplePlanes::BwBlackIsOne(p) => p[i].len(),
         }
     }
 
@@ -197,6 +226,11 @@ impl SamplePlanes<'_> {
             SamplePlanes::F16(_) => Depth::BD16F,
             SamplePlanes::F32(_) => Depth::BD32F,
             SamplePlanes::Rgbe(_) => Depth::BD8,
+            SamplePlanes::Packed555(_) => Depth::BD5,
+            SamplePlanes::Packed565(_) => Depth::BD565,
+            SamplePlanes::Packed101010(_) => Depth::BD10,
+            SamplePlanes::Bw(_) => Depth::BD1_WHITE1,
+            SamplePlanes::BwBlackIsOne(_) => Depth::BD1_BLACK1,
         }
     }
 
@@ -211,6 +245,10 @@ impl SamplePlanes<'_> {
             SamplePlanes::F16(_) => &pf::GRAY16_HALF,
             SamplePlanes::F32(_) => &pf::GRAY32_FLOAT,
             SamplePlanes::Rgbe(_) => &pf::RGBE32, // unreachable: RGBE is 4-plane only
+            SamplePlanes::Bw(_) | SamplePlanes::BwBlackIsOne(_) => &pf::BLACKWHITE,
+            SamplePlanes::Packed555(_) => &pf::RGB555, // unreachable: packed is color
+            SamplePlanes::Packed565(_) => &pf::RGB565,
+            SamplePlanes::Packed101010(_) => &pf::RGB101010,
         }
     }
 
@@ -225,6 +263,10 @@ impl SamplePlanes<'_> {
             SamplePlanes::F16(_) => &pf::RGB48_HALF,
             SamplePlanes::F32(_) => &pf::RGB128_FLOAT,
             SamplePlanes::Rgbe(_) => &pf::RGBE32,
+            SamplePlanes::Packed555(_) => &pf::RGB555,
+            SamplePlanes::Packed565(_) => &pf::RGB565,
+            SamplePlanes::Packed101010(_) => &pf::RGB101010,
+            SamplePlanes::Bw(_) | SamplePlanes::BwBlackIsOne(_) => &pf::BLACKWHITE,
         }
     }
 
@@ -264,6 +306,15 @@ impl SamplePlanes<'_> {
             // RGBE folds channels against the shared E plane — use
             // [`rgbe_prebias`], not the per-plane path.
             SamplePlanes::Rgbe(_) => unreachable!("RGBE converts via rgbe_prebias"),
+            // Packed words split into three channels — [`packed_prebias`].
+            SamplePlanes::Packed555(_) | SamplePlanes::Packed565(_) | SamplePlanes::Packed101010(_) => {
+                unreachable!("packed formats convert via packed_prebias")
+            }
+            // Bi-level: 0/1 values, no bias (Table 188 lists no BD1 bias).
+            SamplePlanes::Bw(p) | SamplePlanes::BwBlackIsOne(p) => {
+                let sh = if scaled { 3 } else { 0 };
+                p[i].iter().map(|&v| (v as i32) << sh).collect()
+            }
         }
     }
 }
@@ -297,6 +348,14 @@ impl Depth {
         Depth { bitdepth: BD32S, shift_bits: 10, len_mantissa: 0, exp_bias: 0 };
     pub const BD16F: Depth =
         Depth { bitdepth: BD16F, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
+    pub const BD5: Depth = Depth { bitdepth: BD5, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
+    pub const BD565: Depth =
+        Depth { bitdepth: BD565, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
+    pub const BD10: Depth = Depth { bitdepth: BD10, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
+    pub const BD1_WHITE1: Depth =
+        Depth { bitdepth: BD1WHITE1, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
+    pub const BD1_BLACK1: Depth =
+        Depth { bitdepth: BD1BLACK1, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
     /// The reference defaults: `len_mantissa = 13` (strenc.c:790),
     /// `exp_bias = 4` (header-dumped from every jxrencapp BD32F mint).
     pub const BD32F: Depth =
@@ -335,6 +394,110 @@ fn prebias(samples: impl Iterator<Item = i32>, d: &Depth, scaled: bool) -> Vec<i
     let s = d.shift_bits;
     let bias = d.bias_base() >> s;
     samples.map(|x| ((x >> s) - bias) << sh).collect()
+}
+
+/// Raw integer samples of plane `i`, no bias/shift applied — the CMYK
+/// conversions own their bias geometry. U8/U16 only (the CMYK container
+/// formats); other families are rejected upstream.
+fn raw_plane(samples: &SamplePlanes<'_>, i: usize) -> Vec<i32> {
+    match samples {
+        SamplePlanes::U8(p) => p[i].iter().map(|&v| v as i32).collect(),
+        SamplePlanes::U16(p) => p[i].iter().map(|&v| v as i32).collect(),
+        _ => unreachable!("CMYK is U8/U16 only (validated upstream)"),
+    }
+}
+
+/// CMYK → internal YUVK forward — a clone of libjxr's `_CC_CMYK` lifting +
+/// its asymmetric bias placement (strenc.c:415/1970: `U = c, V = −y,
+/// K = k, Y = iOffset − m` with `iOffset` the FULL bias): the exact
+/// inverse of the decoder's Table-186 lifting + its half-bias CMYK
+/// `add_bias` arm (numerically proven over the full byte range, both
+/// arithmetic modes). Returns the 4 internal planes in Y,U,V,K order.
+pub(super) fn cmyk_prebias(samples: &SamplePlanes<'_>, scaled: bool) -> Vec<Vec<i32>> {
+    let d = samples.depth();
+    let sh = if scaled { 3 } else { 0 };
+    let bias = d.bias_base() << sh;
+    let n = samples.plane_len(0);
+    let (cp, mp, yp, kp) = (
+        raw_plane(samples, 0),
+        raw_plane(samples, 1),
+        raw_plane(samples, 2),
+        raw_plane(samples, 3),
+    );
+    let mut out = vec![vec![0i32; n]; 4];
+    for i in 0..n {
+        let (mut c, mut m, mut y, mut k) = (cp[i] << sh, mp[i] << sh, yp[i] << sh, kp[i] << sh);
+        y -= c;
+        c += ((y + 1) >> 1) - m;
+        m += (c >> 1) - k;
+        k += (m + 1) >> 1;
+        out[0][i] = bias - m; // Y
+        out[1][i] = c; // U
+        out[2][i] = -y; // V
+        out[3][i] = k; // K
+    }
+    out
+}
+
+/// CMYKDIRECT → internal YUVK forward: the inverse of the decoder's
+/// Table-187 channel shuffle (`out = (U, V, K, Y)`) + the plain full-bias
+/// arm — internal `(Y,U,V,K) = (d3, d0, d1, d2)`, each `(x − bias) << sh`.
+pub(super) fn cmykdirect_prebias(samples: &SamplePlanes<'_>, scaled: bool) -> Vec<Vec<i32>> {
+    let d = samples.depth();
+    let sh = if scaled { 3 } else { 0 };
+    let bias = d.bias_base();
+    const MAP: [usize; 4] = [3, 0, 1, 2]; // internal Y,U,V,K ← direct channel
+    MAP.iter()
+        .map(|&src| raw_plane(samples, src).iter().map(|&v| (v - bias) << sh).collect())
+        .collect()
+}
+
+/// Unpack packed RGB words into the three pre-bias channel planes — the
+/// inverse of the decoder's pack (Tables 196/197/198: `c0 + (c1 << hi1) +
+/// (c2 << hi2)` over clipped channels) + its per-channel bias/scaling:
+/// BD5/BD10 take the plain bias (16/512); BD565's 5-bit channels (0 and 2)
+/// carry an extra `<< 1` (the decoder's `j_scale + 1` on non-green channels
+/// — `compute_scaling`, even unscaled). Positional channels: the YUV
+/// lifting inverts positionally, so no R/B naming is needed (we emit
+/// `red_blue_not_swapped_flag = 0`, the no-swap decode path).
+pub(super) fn packed_prebias(
+    samples: &SamplePlanes<'_>,
+    scaled: bool,
+) -> (Vec<i32>, Vec<i32>, Vec<i32>) {
+    let sh = if scaled { 3 } else { 0 };
+    let unpack = |w: i32, hi1: i32, hi2: i32, max0: i32, max1: i32| -> (i32, i32, i32) {
+        (w & max0, (w >> hi1) & max1, (w >> hi2) & max0)
+    };
+    let n = samples.plane_len(0);
+    let (mut r, mut g, mut b) = (vec![0i32; n], vec![0i32; n], vec![0i32; n]);
+    match samples {
+        SamplePlanes::Packed555(p) => {
+            for (i, &w) in p[0].iter().enumerate() {
+                let (c0, c1, c2) = unpack(w as i32, 5, 10, 31, 31);
+                r[i] = (c0 - 16) << sh;
+                g[i] = (c1 - 16) << sh;
+                b[i] = (c2 - 16) << sh;
+            }
+        }
+        SamplePlanes::Packed565(p) => {
+            for (i, &w) in p[0].iter().enumerate() {
+                let (c0, c1, c2) = unpack(w as i32, 5, 11, 31, 63);
+                r[i] = (c0 << (sh + 1)) - (32 << sh);
+                g[i] = (c1 - 32) << sh;
+                b[i] = (c2 << (sh + 1)) - (32 << sh);
+            }
+        }
+        SamplePlanes::Packed101010(p) => {
+            for (i, &w) in p[0].iter().enumerate() {
+                let (c0, c1, c2) = unpack(w as i32, 10, 20, 1023, 1023);
+                r[i] = (c0 - 512) << sh;
+                g[i] = (c1 - 512) << sh;
+                b[i] = (c2 - 512) << sh;
+            }
+        }
+        _ => unreachable!("packed_prebias is for the packed variants"),
+    }
+    (r, g, b)
 }
 
 #[cfg(test)]
