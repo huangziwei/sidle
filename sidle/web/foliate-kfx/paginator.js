@@ -344,29 +344,35 @@ class View {
         this.expand()
     }
     setImageSize() {
-        const { width, height, margin } = this.#layout
+        const { width, height, columnWidth } = this.#layout
         const doc = this.document
-        // Page content box in physical px. Before the first layout these can be
+        // Layout geometry in physical px. Before the first layout these can be
         // 0/NaN — skip then (a later render() re-runs with real values).
-        if (!(width > 0) || !(height > 0)) return
-        const maxW = `${Math.max(0, width - margin * 2)}px`
-        const maxH = `${Math.max(0, height - margin * 2)}px`
+        // Scrolled flow carries no width/height and bails here too (sidle only
+        // uses flow=paginated).
+        if (!(width > 0) || !(height > 0) || !(columnWidth > 0)) return
+        // An image must fit ONE column box, not the page: on a two-column
+        // spread the page is twice the column's inline size, so a page-box cap
+        // lets a wide figure bleed across the gap under the neighbouring
+        // column's text. Cap the inline axis at the column width (trunc()
+        // matches the `column-width` columnize() sets; the realized column is
+        // never narrower) and the block axis at the page extent, which a
+        // column spans fully (columnize() pads the inline axis only, and the
+        // header/footer margins live outside #container).
+        const inlineMax = `${Math.trunc(columnWidth)}px`
+        const maxW = this.#vertical ? `${width}px` : inlineMax
+        const maxH = this.#vertical ? inlineMax : `${height}px`
         for (const el of doc.body.querySelectorAll('img, svg, video')) {
             setStylesImportant(el, {
-                // Bound the image to the page content box on BOTH axes, in
-                // definite px. The old code capped only one axis in px and left
-                // the cross axis at `100%` — which silently fails to resolve
-                // whenever the image's containing block has no definite size.
-                // Full-page illustrations are exactly that case: the <img> sits
-                // in `writing-mode: horizontal-tb` wrapper <div>s nested inside a
-                // vertical-rl body, with no definite height anywhere in the
-                // chain. The unresolved cap left the portrait image to grow to
-                // the full page width and overflow the page height — cropped
-                // top/bottom in a landscape window. Two physical px caps +
-                // `object-fit: contain` make it fit to height instead (centered,
-                // with left/right margins). `width/height: auto` neutralises any
+                // Both caps in definite px: a percentage cap resolves against
+                // the multicol container (the whole page, not the column box),
+                // and silently fails to resolve at all where the containing
+                // block has no definite size — e.g. full-page illustrations in
+                // `writing-mode: horizontal-tb` wrapper <div>s nested inside a
+                // vertical-rl body. `width/height: auto` neutralises any
                 // intrinsic-attribute or inherited sizing so only the caps and
-                // the aspect ratio decide the box.
+                // the aspect ratio decide the box; `object-fit: contain` keeps
+                // the drawing inside it.
                 'width': 'auto',
                 'height': 'auto',
                 'max-width': maxW,
