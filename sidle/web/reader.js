@@ -1934,6 +1934,15 @@ function pdfStep() {
 function pdfSpreadStart(p) {
   if (p <= 0) return 0;
   if (pdfSpreadMode() !== "double") return p;
+  // Fixed-layout KFX: pair from the explicit `page-spread-left/right` properties,
+  // not page parity — a section that emits a single page (cover, standalone
+  // illustration) must not drift every later spread by one. The trailing side
+  // ends a pair, so its boundary is the previous page; a leading or single page
+  // starts its own.
+  if (pdf.kfxImages) {
+    const trailing = pdf.ppd === "rtl" ? "page-spread-left" : "page-spread-right";
+    return pdf.pages[p]?.spread === trailing ? p - 1 : p;
+  }
   // Cover-alone shifts the pairing by one: odd-aligned starts vs even-aligned.
   const wantParity = pdfStyle.cover === false ? 0 : 1;
   return p % 2 === wantParity ? p : p - 1;
@@ -1942,6 +1951,18 @@ function pdfSpreadStart(p) {
 // in single mode, nor on a standalone cover (page 0 with "Cover page" on).
 function pdfSpreadHasRight(s) {
   if (pdfSpreadMode() !== "double") return false;
+  // Fixed-layout KFX: a pair is a leading page immediately followed by its
+  // trailing complement; a single page (null spread, e.g. the cover) stands
+  // alone.
+  if (pdf.kfxImages) {
+    const leading = pdf.ppd === "rtl" ? "page-spread-right" : "page-spread-left";
+    const trailing = pdf.ppd === "rtl" ? "page-spread-left" : "page-spread-right";
+    return (
+      s + 1 < pdf.pageCount &&
+      pdf.pages[s]?.spread === leading &&
+      pdf.pages[s + 1]?.spread === trailing
+    );
+  }
   if (pdfStyle.cover !== false && s === 0) return false; // standalone cover
   return s + 1 < pdf.pageCount;
 }
@@ -2094,6 +2115,177 @@ async function openPdf(id, openDto, anns, positions) {
   document.addEventListener("keydown", keyHandler, true);
 }
 
+// Open an image-based fixed-layout KFX (manga / comic) in the spread reader.
+// Reuses the ENTIRE PDF spread machinery — RTL facing-page pairing, responsive
+// single/double, navigation, progress, bookmarks, TOC, resize, zoom, night mode
+// — so `readerMode` is "pdf". The only difference from a real PDF: each page
+// image is a static blob URL extracted from the KFX section's `<img>` (carried in
+// `pdf.kfxImages`), which `pdfFetchPage` returns directly instead of rendering on
+// demand. Spread pairing uses the section `page-spread-left/right` properties.
+async function openFxl(id, openDto, anns, positions) {
+  readerMode = "pdf";
+  bookId = id;
+  dto = openDto;
+  annotations = anns || [];
+  inkEntries = []; // FXL spread doesn't render Scribe ink yet — keep the panel clean
+  pdfStyle = loadPdfStyle();
+  pdfStyle.zoom = 1; // zoom is per-open (start at fit)
+
+  // Every non-spine resource → a blob URL (the pages reference images by href).
+  const b64ToBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const resUrls = new Map();
+  for (const r of openDto.resources || []) {
+    resUrls.set(
+      r.href,
+      URL.createObjectURL(
+        new Blob([b64ToBytes(r.data_base64)], { type: r.mime || "application/octet-stream" }),
+      ),
+    );
+  }
+
+  // Per page (= per spine section): image blob URL, viewport size, spread side,
+  // and the structural eids (so a bookmark / last-read resolves to its page).
+  const firstImgSrc = (html) => {
+    const m = html.match(/<img[^>]*\bsrc="([^"]+)"/i);
+    return m ? m[1] : null;
+  };
+  const eidsOf = (html) => {
+    const out = [];
+    const re = /data-eid="(\d+)"/g;
+    let m;
+    while ((m = re.exec(html))) out.push(Number(m[1]));
+    return out;
+  };
+  const kfxImages = [];
+  const pages = [];
+  const hrefToPage = new Map();
+  openDto.sections.forEach((s, i) => {
+    const src = firstImgSrc(s.html);
+    kfxImages.push(src ? resUrls.get(src) || null : null);
+    const vp = Array.isArray(s.viewport) ? s.viewport : null;
+    pages.push({
+      width: vp?.[0] || 0,
+      height: vp?.[1] || 0,
+      words: [],
+      eids: eidsOf(s.html),
+      spread: s.spread || null,
+    });
+    hrefToPage.set(s.href, i);
+  });
+
+  // KFX TOC (href-based) → PDF TOC (page-index based); an href may carry a
+  // `#fragment`, so match on the file part.
+  const mapToc = (entries) =>
+    (entries || []).map((e) => ({
+      label: e.label,
+      page_index: hrefToPage.get((e.href || "").split("#")[0]) ?? 0,
+      children: mapToc(e.children),
+    }));
+  const toc = mapToc(openDto.toc);
+
+  const pageCount = pages.length;
+  const eidToPage = buildPdfEidIndex(pages);
+  const ppd = openDto.page_progression_direction === "rtl" ? "rtl" : "ltr";
+
+  sidleResume = (positions || []).find((p) => p.source === "sidle") || null;
+  deviceResumes = (positions || []).filter((p) => p.source === "device");
+  const resumeEid = sidleResume?.eid;
+  const start = clampPage(
+    (resumeEid != null ? eidToPage.get(resumeEid) : undefined) ?? sidleResume?.linear_pos ?? 0,
+    pageCount,
+  );
+
+  // Spread host — identical DOM/CSS to the PDF spread (flex pair; `.rtl`
+  // row-reverse for manga). Two persistent page wrappers, content swapped per
+  // turn.
+  const host = document.createElement("div");
+  host.className = "reader-pdf-spread";
+  if (ppd === "rtl") host.classList.add("rtl");
+  const mkPage = () => {
+    const wrap = document.createElement("div");
+    wrap.className = "reader-pdf-page";
+    const img = document.createElement("img");
+    img.className = "reader-pdf-img";
+    img.alt = "";
+    img.draggable = false;
+    const ink = document.createElement("div");
+    ink.className = "reader-pdf-ink";
+    const text = document.createElement("div");
+    text.className = "reader-pdf-text";
+    wrap.append(img, ink, text);
+    return { wrap, img, ink, text };
+  };
+  const L = mkPage();
+  const R = mkPage();
+  host.append(L.wrap, R.wrap);
+
+  pdf = {
+    pageCount,
+    pages,
+    ppd,
+    labels: [],
+    toc,
+    page: start,
+    host,
+    pageL: L.wrap,
+    pageR: R.wrap,
+    imgL: L.img,
+    imgR: R.img,
+    textL: L.text,
+    textR: R.text,
+    inkL: L.ink,
+    inkR: R.ink,
+    overlayer: null,
+    eidToPage,
+    hasText: false,
+    token: 0,
+    renderTimer: null,
+    cache: new Map(),
+    inflight: new Map(),
+    inkPages: new Set(),
+    inkCache: new Map(),
+    kfxImages, // FXL marker + page-index → blob URL (see pdfFetchPage)
+    resUrls, // revoked in closePdf
+  };
+
+  // Image-only pages have no reflowable Location map and no selectable text.
+  locByEid = null;
+  eidToSection = null;
+
+  $("#reader-title").textContent = openDto.title || "Untitled";
+  $("#reader-loc").textContent = "";
+  $("#reader-percent").textContent = "";
+  for (const sel of ["#reader-bookmark", "#reader-search", "#reader-annotations"]) {
+    const el = $(sel);
+    if (el) el.hidden = false;
+  }
+  for (const sel of PDF_NO_TEXT_HIDDEN) {
+    const el = $(sel);
+    if (el) el.hidden = true; // no selectable text → no search
+  }
+  view().hidden = false;
+  view().classList.add("open");
+  revealTopbar();
+  renderPdfTocPanel();
+  renderAnnotationsPanel();
+  renderResumeControl();
+  syncPdfStylePanel();
+  applyPdfStyle();
+
+  $("#reader-paginator-host").replaceChildren(host);
+  clearPdfOverlay();
+  host.addEventListener("mouseup", () => onSelection(document));
+  host.addEventListener("click", (e) => onDocClick(e, document));
+  host.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  await pdfRenderCurrent();
+  pdfUpdateProgress();
+  markPdfTocActive();
+
+  keyHandler = onKey; // forwards to pdfOnKey while readerMode === "pdf"
+  document.addEventListener("keydown", keyHandler, true);
+}
+
 // eid → page index for a PDF book: every word's eid and every page's structural
 // eids (image/container/page_template) map to that page. First page wins, so an
 // eid shared structurally resolves to its earliest page. Backs annotation /
@@ -2172,6 +2364,10 @@ async function closePdf() {
   deviceResumes = [];
   searchResults = [];
   searchQuery = "";
+  // Free fixed-layout KFX page-image blobs (plain PDF books have none).
+  if (pdf?.resUrls) {
+    for (const u of pdf.resUrls.values()) URL.revokeObjectURL(u);
+  }
   pdf = null;
   pdfTocRows = [];
   dto = null;
@@ -2205,6 +2401,11 @@ function pdfGoTo(i) {
 // so renders don't pile onto the PDFKit render backend.
 function pdfScheduleRender() {
   clearTimeout(pdf.renderTimer);
+  // Fixed-layout KFX images are already in memory — render now, no debounce.
+  if (pdf.kfxImages) {
+    pdfRenderCurrent();
+    return;
+  }
   const half = pdfSpreadMode() === "double";
   if (pdf.cache.has(`${pdf.page}@${pdfRenderWidth(pdf.page, half)}`)) {
     pdfRenderCurrent();
@@ -2245,6 +2446,10 @@ function pdfTrimCache() {
 // Coalesces with an in-flight request for the same key — so navigating onto a
 // page whose prefetch is still running awaits that prefetch instead of erroring.
 function pdfFetchPage(page, width) {
+  // Fixed-layout KFX: the page image is a static blob URL extracted from the
+  // section, not an on-demand render — return it directly (no backend call, no
+  // resolution cache; `width` is irrelevant).
+  if (pdf?.kfxImages) return Promise.resolve(pdf.kfxImages[page] || null);
   const key = `${page}@${width}`;
   const hit = pdf.cache.get(key);
   if (hit) return Promise.resolve(hit);
@@ -3183,6 +3388,13 @@ async function open(id) {
     await openPdf(id, openDto, anns || [], positions || []);
     return;
   }
+  // Image-based fixed-layout KFX (manga / comic) reads as facing-page spreads,
+  // reusing the PDF spread renderer with the section images. Reflowable text
+  // books fall through to the paginator below.
+  if (openDto.mode === "reflowable" && openDto.fixed_layout) {
+    await openFxl(id, openDto, anns || [], positions || []);
+    return;
+  }
   readerMode = "reflowable";
   bookId = id;
   dto = openDto;
@@ -3202,11 +3414,7 @@ async function open(id) {
   totalChars = cumChars;
   imageSections = new Set();
   dto.sections.forEach((sec, i) => {
-    // A fixed-layout (manga / comic) book is pre-paginated: every spine document
-    // is one full-page image sized by its own `<meta name="viewport">`, so treat
-    // them all as image pages (full-bleed, zero-margin, one column) regardless of
-    // the per-section text heuristic. Reflowable books fall back to that heuristic.
-    if (dto.fixed_layout || isImageOnlySection(sec.html)) imageSections.add(i);
+    if (isImageOnlySection(sec.html)) imageSections.add(i);
   });
   layoutMode = null;
   const pace = loadPace();

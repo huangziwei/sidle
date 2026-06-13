@@ -415,14 +415,21 @@ pub async fn library_open_in_finder(
         db::get_book(&conn, book_id)
             .map_err(|e| e.to_string())?
             .and_then(|b| {
-                // Prefer the EPUB if it exists; fall back to KFX so books
-                // imported as `.kfx` with a still-converting EPUB can still
-                // be revealed by their `.kfx` file.
-                b.epub_path.or(b.kfx_path)
+                // Sidle is a KFX reader: the `.kfx` is the canonical book file;
+                // the `.epub` is a derived artifact the user may have deleted.
+                // Reveal the first candidate that actually EXISTS on disk (KFX
+                // first), so a stale DB path — e.g. an EPUB removed from the
+                // folder, or a KFX import whose EPUB hasn't converted yet —
+                // falls through to the file that's really there instead of
+                // failing to reveal anything.
+                [b.kfx_path, b.epub_path]
+                    .into_iter()
+                    .flatten()
+                    .find(|p| std::path::Path::new(p).exists())
             })
     };
     let Some(path) = path else {
-        return Err("no file on disk for this book yet".into());
+        return Err("no file on disk for this book".into());
     };
     app.opener()
         .reveal_item_in_dir(path)

@@ -2097,17 +2097,26 @@ pub fn emit_stylesheet(state: &ContentState) -> String {
 
     // Fixed-layout reset (calibre's RESET_CSS, linked on every FXL page): the
     // `<meta name="viewport">` sizes the page to the image's pixel box and the
-    // reader scales that box to the screen, so the page itself must have no
-    // margin/padding and the image must fill its box. Only emitted for
-    // image-based fixed-layout books; reflowable books keep author margins.
+    // reader scales that box to the screen. Two things must hold for the image
+    // to fill the page:
+    //   1. The image must size to the *viewport*, not to its wrapper divs. The
+    //      KFX page wrapper (`.g0`/`.sJ`) establishes no definite height, so a
+    //      percentage `height: 100%` collapses and the page white-boxes. `vw`/
+    //      `vh` resolve against the viewport directly, bypassing the chain.
+    //   2. The body must be `horizontal-tb`. An image-based FXL book often
+    //      carries `vertical-rl` text metadata (the pages are scanned vertical
+    //      text); a vertical-rl body flips the block axis so `width: 100%`
+    //      resolves against the wrong dimension and the image shrinks. The
+    //      page-turn direction is carried by `page-progression-direction`, not
+    //      the writing mode, so forcing horizontal-tb here is safe.
+    // Only emitted for image-based fixed-layout books; reflowable books below
+    // keep their author writing mode + margins.
     if state.is_fixed_layout {
-        s.push_str("html, body { margin: 0; padding: 0; }\n");
+        s.push_str("html, body { margin: 0; padding: 0; writing-mode: horizontal-tb; }\n");
         s.push_str("body { text-align: center; }\n");
-        s.push_str("img { display: block; width: 100%; height: 100%; object-fit: contain; }\n");
-    }
-
-    // Body defaults — writing-mode comes from document_data.
-    if state.writing_mode != "horizontal-tb" {
+        s.push_str("img { display: block; width: 100vw; height: 100vh; object-fit: contain; }\n");
+    } else if state.writing_mode != "horizontal-tb" {
+        // Body defaults — writing-mode comes from document_data.
         s.push_str(&format!(
             "body {{ writing-mode: {wm}; -webkit-writing-mode: {wm}; -epub-writing-mode: {wm}; }}\n",
             wm = state.writing_mode
