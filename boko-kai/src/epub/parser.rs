@@ -1157,7 +1157,7 @@ fn local_name(name: &[u8]) -> &[u8] {
 }
 
 /// Resolve XML entity references.
-fn resolve_entity(entity: &str) -> Option<String> {
+pub(crate) fn resolve_entity(entity: &str) -> Option<String> {
     match entity {
         "apos" => return Some("'".to_string()),
         "quot" => return Some("\"".to_string()),

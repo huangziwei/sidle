@@ -139,18 +139,27 @@ pub struct Report {
 
 impl Report {
     pub fn is_clean(&self) -> bool {
+        // Direction-agnostic core. `dangling_anchors` (a KFX anchor pointing at a
+        // missing KFX element) is deliberately NOT here — it's side-specific and
+        // gated by `is_clean_for`: it's a defect only when boko produced the KFX.
         self.external_only_in_epub.is_empty()
             && self.external_only_in_kfx.is_empty()
-            && self.dangling_anchors.is_empty()
             && self.orphan_link_tos.is_empty()
     }
 
-    /// Direction-aware gate. In KFX→EPUB, an EPUB-internal dangling ref
-    /// (`<a href="#x">` with no `id="x"`) is boko's defect and must fail; in
-    /// EPUB→KFX it's source data quality (not boko's fault), so it's excluded.
+    /// Direction-aware gate. The two dangling classes are each boko's fault only
+    /// in the direction where boko produced the side that carries them:
+    /// - **EPUB-side dangling ref** (`<a href="#x">` with no `id="x"`) — boko's
+    ///   defect in KFX→EPUB; in EPUB→KFX it's source EPUB data quality.
+    /// - **KFX-side dangling anchor** (anchor → missing KFX element) — boko's
+    ///   defect in EPUB→KFX; in KFX→EPUB it's source KFX data quality (calibre's
+    ///   `report_missing_positions` flags the very same positions, and boko's
+    ///   EPUB carries no dangling href for it).
     /// `validate_all` and the standalone links check both gate on this.
     pub fn is_clean_for(&self, dir: super::Direction) -> bool {
-        self.is_clean() && (dir.epub_is_source() || self.epub_dangling_refs.is_empty())
+        self.is_clean()
+            && (dir.epub_is_source() || self.epub_dangling_refs.is_empty())
+            && (!dir.epub_is_source() || self.dangling_anchors.is_empty())
     }
 
     pub fn print_summary(&self, dir: super::Direction) {
@@ -536,7 +545,15 @@ pub fn classify_href(raw: &str) -> HrefKind {
     // contains only [A-Za-z0-9+.-]. This catches http, https, mailto, tel,
     // ftp, data, javascript, etc. — all "external" from KFX's perspective.
     if has_scheme(trimmed) {
-        return HrefKind::External(trimmed.to_string());
+        // EPUB hrefs are XML-escaped (`&amp;`), KFX uris are stored raw (`&`).
+        // Unescape so the external-URL round-trip compares logical URLs, not
+        // escaping (142 showed 9 "dropped" + 12 "fabricated" that were the same
+        // amazon.com URLs differing only by `&` vs `&amp;`). Idempotent on a URL
+        // with no entities.
+        let url = quick_xml::escape::unescape(trimmed)
+            .map(|c| c.into_owned())
+            .unwrap_or_else(|_| trimmed.to_string());
+        return HrefKind::External(url);
     }
 
     // Relative ref with optional fragment.

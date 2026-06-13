@@ -500,10 +500,22 @@ fn count_headings(xhtml: &str, out: &mut HashMap<u8, usize>) {
 
 #[derive(Debug, Default)]
 struct KfxNav {
-    /// Count of leaf nav_units per heading level.
+    /// Count of leaf nav_units per heading level. Computed at the end of
+    /// `extract_kfx_nav` from `heading_targets`/`heading_target_levels`,
+    /// EXCLUDING targets that point at an image element (`type: image`): calibre
+    /// and boko both promote only `<div>`→`<hN>`, never `<img>`, so an
+    /// image-typed heading nav entry is a valid Kindle heading-jump target but
+    /// is never an `<hN>` in the EPUB. Counting it would over-state the expected
+    /// heading count and false-fail every book that decorates chapter titles
+    /// with a heading-level image.
     headings_by_level: HashMap<u8, usize>,
     /// Every nav_unit target_position inside the headings container.
     heading_targets: Vec<NavTarget>,
+    /// Heading level (2..=6) parallel to `heading_targets`, in the same order.
+    heading_target_levels: Vec<u8>,
+    /// Element IDs of `type: image` content structs — excluded from the heading
+    /// count (see `headings_by_level`).
+    image_element_ids: HashSet<u64>,
     /// Every nav_unit target_position inside the toc container.
     toc_targets: Vec<NavTarget>,
     /// Element IDs present in storylines (for reachability check).
@@ -569,9 +581,25 @@ fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
             }
         } else if ent.type_id == storyline_type
             && let Some(value) = parse_entity(kfx_bytes, ent) {
-                collect_element_ids(&value, &resolve_sym, &mut nav.element_ids);
+                collect_element_ids(
+                    &value,
+                    &resolve_sym,
+                    &mut nav.element_ids,
+                    &mut nav.image_element_ids,
+                );
             }
     }
+
+    // Heading count per level, now that both the nav targets and the image
+    // element ids are known: count each heading target EXCEPT those pointing at
+    // an image element (never an `<hN>` in the EPUB; see `headings_by_level`).
+    let mut headings_by_level: HashMap<u8, usize> = HashMap::new();
+    for (target, level) in nav.heading_targets.iter().zip(&nav.heading_target_levels) {
+        if !nav.image_element_ids.contains(&target.element_id) {
+            *headings_by_level.entry(*level).or_insert(0) += 1;
+        }
+    }
+    nav.headings_by_level = headings_by_level;
 
     Ok(nav)
 }
@@ -752,7 +780,7 @@ where
     for unit in nested {
         if let Some(target) = extract_target_position(unit, resolve_sym) {
             out.heading_targets.push(target);
-            *out.headings_by_level.entry(level).or_insert(0) += 1;
+            out.heading_target_levels.push(level);
         }
     }
 }
@@ -824,29 +852,55 @@ where
     None
 }
 
-fn collect_element_ids<F>(value: &IonValue, resolve_sym: &F, out: &mut HashSet<u64>)
-where
+fn collect_element_ids<F>(
+    value: &IonValue,
+    resolve_sym: &F,
+    out: &mut HashSet<u64>,
+    image_ids: &mut HashSet<u64>,
+) where
     F: Fn(u64) -> String,
 {
     match value {
         IonValue::Struct(fields) => {
+            // Capture this struct's own id + whether it is an image content
+            // element (`type: image`), so an image-typed heading nav target can
+            // be excluded from the heading count.
+            let mut this_id: Option<u64> = None;
+            let mut is_image = false;
             for (k, v) in fields {
-                if resolve_sym(*k) == "id"
-                    && let IonValue::Int(n) = v
-                    && *n >= 0
-                {
-                    out.insert(*n as u64);
+                match resolve_sym(*k).as_str() {
+                    "id" => {
+                        if let IonValue::Int(n) = v
+                            && *n >= 0
+                        {
+                            this_id = Some(*n as u64);
+                            out.insert(*n as u64);
+                        }
+                    }
+                    "type" => {
+                        if let IonValue::Symbol(s) = v
+                            && resolve_sym(*s) == "image"
+                        {
+                            is_image = true;
+                        }
+                    }
+                    _ => {}
                 }
-                collect_element_ids(v, resolve_sym, out);
+                collect_element_ids(v, resolve_sym, out, image_ids);
+            }
+            if is_image
+                && let Some(id) = this_id
+            {
+                image_ids.insert(id);
             }
         }
         IonValue::List(items) => {
             for item in items {
-                collect_element_ids(item, resolve_sym, out);
+                collect_element_ids(item, resolve_sym, out, image_ids);
             }
         }
         IonValue::Annotated(_, inner) => {
-            collect_element_ids(inner, resolve_sym, out);
+            collect_element_ids(inner, resolve_sym, out, image_ids);
         }
         _ => {}
     }

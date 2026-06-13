@@ -282,6 +282,17 @@ pub fn extract_text_from_xhtml(xhtml: &str, out: &mut String) {
             Ok(Event::Text(e)) if suppress_depth == 0 => {
                 out.push_str(&String::from_utf8_lossy(e.as_ref()));
             }
+            // quick-xml 0.39 emits entity references (`&amp;`, `&#160;`, …) as
+            // their own `GeneralRef` events, NOT inside Text — so without this
+            // arm every escaped `&`/`<`/`>` in the EPUB is silently dropped from
+            // the extracted text, showing up as false "dropped" chars vs the KFX
+            // (e.g. 142 had 7 `&`). Decode and append.
+            Ok(Event::GeneralRef(e)) if suppress_depth == 0 => {
+                let entity = String::from_utf8_lossy(e.as_ref());
+                if let Some(resolved) = crate::epub::parser::resolve_entity(&entity) {
+                    out.push_str(&resolved);
+                }
+            }
             Ok(Event::CData(e)) if suppress_depth == 0 => {
                 out.push_str(&String::from_utf8_lossy(&e));
             }

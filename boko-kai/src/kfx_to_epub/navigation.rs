@@ -31,14 +31,27 @@ pub struct AnchorTable {
     /// id derived from the first anchor name.
     pub position_anchors: HashMap<i64, HashMap<i64, Vec<String>>>,
 
-    /// Reverse index `anchor_name → location_id`, built alongside
+    /// Reverse index `anchor_name → (location_id, offset)`, built alongside
     /// `position_anchors`. `resolve_uri` used to scan the whole
     /// `position_anchors` map for every `<a href="anchor:…">` — an
     /// O(hrefs × anchors) quadratic that cost ~300 ms on a link-dense book.
-    /// This makes resolution O(1). Only the eid is needed (resolve_uri
-    /// discards the offset). First registration wins, matching the prior
-    /// scan's "first match" semantics.
-    pub name_to_eid: HashMap<String, i64>,
+    /// This makes resolution O(1). The OFFSET is retained (not just the eid)
+    /// so `resolve_uri` can resolve a link to ANY anchor at a position to the
+    /// SAME element id the *first* anchor there stamped (calibre's
+    /// `get_anchor_uri` semantics — `id_at` returns the first anchor's id, so a
+    /// link naming a non-first co-located anchor must still point at that id or
+    /// it dangles). First registration wins, matching the prior "first match".
+    pub name_to_position: HashMap<String, (i64, i64)>,
+
+    /// Heading level (1..=6) registered at a `(location_id, offset)` by the
+    /// `$798 headings` nav container. boko's eager equivalent of calibre's
+    /// `anchor_heading_level` (name-keyed) + `position_anchors` lookup: since
+    /// these synthesized heading anchors are never link targets (only the
+    /// element's TAG matters), we key the level directly by position.
+    /// `process_position` reads this and stamps `-kfx-heading-level` (here: the
+    /// element's `layout_hints` level), which `consolidate_html` promotes to
+    /// `<hN>` when the element also carries the `"heading"` layout hint.
+    pub heading_level: HashMap<(i64, i64), u8>,
 }
 
 impl AnchorTable {
@@ -60,6 +73,12 @@ impl AnchorTable {
         Some(self.anchor_id(name))
     }
 
+    /// Heading level (1..=6) registered at `(eid, offset)` by the `$798`
+    /// headings nav, or `None`. Read by `process_position`.
+    pub fn heading_level_at(&self, eid: i64, offset: i64) -> Option<u8> {
+        self.heading_level.get(&(eid, offset)).copied()
+    }
+
     /// Resolve an `anchor_name` to its final EPUB URI for `<a href>`
     /// emission. Calibre's `get_anchor_uri` — looks at three sources
     /// in order: external `anchor_uri` (a real http URI), then the
@@ -76,12 +95,16 @@ impl AnchorTable {
         if let Some(uri) = self.anchor_uri.get(anchor_name) {
             return Some(uri.clone());
         }
-        // Internal position anchor — O(1) via the reverse index (the offset
-        // is unused: calibre drops the `(eid, 0)` fragment, but we keep the
-        // `#id` for simplicity and the validator doesn't penalize it).
-        if let Some(&eid) = self.name_to_eid.get(anchor_name) {
+        // Internal position anchor — O(1) via the reverse index. The fragment
+        // is the FIRST anchor's id at this position (`id_at`), NOT
+        // `fix_html_id(anchor_name)`: when several anchors share a position
+        // only the first one's id is stamped on the element, so a link naming a
+        // co-located later anchor must resolve to that same id (faithful to
+        // calibre's `get_anchor_uri`, which reads `anchor_uri[name]` =
+        // `filename#elem.id` for the single stamped element).
+        if let Some(&(eid, offset)) = self.name_to_position.get(anchor_name) {
             let file = element_id_to_filename.get(&eid)?;
-            let frag = self.anchor_id(anchor_name);
+            let frag = self.id_at(eid, offset)?;
             return Some(format!("{}#{}", file, frag));
         }
         None
@@ -140,10 +163,121 @@ pub fn extract_anchors(book: &BookData) -> AnchorTable {
                 .or_default()
                 .push(name.clone());
             // Reverse index for O(1) resolve_uri; first registration wins.
-            table.name_to_eid.entry(name.clone()).or_insert(eid);
+            table
+                .name_to_position
+                .entry(name.clone())
+                .or_insert((eid, offset));
         }
     }
     table
+}
+
+/// Register heading levels from the `$798 headings` nav container into the
+/// anchor table, BEFORE content emission. Mirrors the subset of calibre's
+/// `process_nav_unit` (`yj_to_epub_navigation.py:199-258`) that derives
+/// `heading_level` from a `$798` container: each top-level unit's
+/// `landmark_type` (`$h2`..`$h6`) sets the level for its nested entries, and
+/// every nested unit's `target_position` `(eid, offset)` is recorded at that
+/// level. `content::process_position` later stamps the level onto the matching
+/// element so `consolidate_html` promotes it to `<hN>` (the element supplies
+/// the `"heading"` layout hint via its `$style`).
+///
+/// TOC / landmark / page_list anchor registration is intentionally NOT ported
+/// here: boko resolves those eagerly via `id_at` + the chapter-file map, and
+/// registering synthesized TOC anchors would risk new dangling fragments for no
+/// validator benefit. Headings are the one nav class whose level boko cannot
+/// derive any other way (it lives only in the nav, not on the element's style).
+pub fn register_heading_anchors(book: &BookData, table: &mut AnchorTable) {
+    let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
+        return;
+    };
+    for value in nav.values() {
+        let unwrapped = value.unwrap_annotated();
+        let candidates: Vec<IonValue> = match unwrapped {
+            IonValue::List(items) => items.clone(),
+            IonValue::Struct(_) => vec![unwrapped.clone()],
+            _ => Vec::new(),
+        };
+        for reading_order in candidates {
+            let Some(ro_fields) = reading_order.as_struct() else {
+                continue;
+            };
+            let Some(containers) =
+                get_field(ro_fields, KfxSymbol::NavContainers as u64).and_then(|v| v.as_list())
+            else {
+                continue;
+            };
+            for container in containers {
+                let inner = container.unwrap_annotated();
+                let Some(cfields) = inner.as_struct() else {
+                    continue;
+                };
+                let nav_type = get_field(cfields, KfxSymbol::NavType as u64)
+                    .and_then(|v| book.symbols.text_of(v))
+                    .unwrap_or("");
+                if nav_type != "headings" {
+                    continue;
+                }
+                let Some(level_units) =
+                    get_field(cfields, KfxSymbol::Entries as u64).and_then(|v| v.as_list())
+                else {
+                    continue;
+                };
+                for level_unit in level_units {
+                    register_heading_level_unit(level_unit, book, table);
+                }
+            }
+        }
+    }
+}
+
+fn register_heading_level_unit(value: &IonValue, book: &BookData, table: &mut AnchorTable) {
+    let inner = value.unwrap_annotated();
+    let Some(fields) = inner.as_struct() else {
+        return;
+    };
+    let Some(level) = get_field(fields, KfxSymbol::LandmarkType as u64)
+        .and_then(|v| book.symbols.text_of(v))
+        .and_then(level_of_landmark)
+    else {
+        return;
+    };
+    let Some(nested) = get_field(fields, KfxSymbol::Entries as u64).and_then(|v| v.as_list())
+    else {
+        return;
+    };
+    for unit in nested {
+        if let Some((eid, offset)) = heading_target_position(unit) {
+            table.heading_level.entry((eid, offset)).or_insert(level);
+        }
+    }
+}
+
+/// Kindle headings `landmark_type` symbol → heading level. h1 is included for
+/// completeness even though Kindle omits it from the headings nav.
+fn level_of_landmark(name: &str) -> Option<u8> {
+    match name {
+        "h1" | "$h1" => Some(1),
+        "h2" | "$h2" => Some(2),
+        "h3" | "$h3" => Some(3),
+        "h4" | "$h4" => Some(4),
+        "h5" | "$h5" => Some(5),
+        "h6" | "$h6" => Some(6),
+        _ => None,
+    }
+}
+
+fn heading_target_position(unit: &IonValue) -> Option<(i64, i64)> {
+    let fields = unit.unwrap_annotated().as_struct()?;
+    get_field(fields, KfxSymbol::TargetPosition as u64)
+        .and_then(|v| v.as_struct())
+        .and_then(|pos| {
+            let id = get_field(pos, KfxSymbol::Id as u64)?.as_int()?;
+            let offset = get_field(pos, KfxSymbol::Offset as u64)
+                .and_then(|v| v.as_int())
+                .unwrap_or(0);
+            Some((id, offset))
+        })
 }
 
 /// Sanitise an anchor name into a valid HTML id (alphanumerics + `_` /

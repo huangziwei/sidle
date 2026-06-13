@@ -109,6 +109,13 @@ pub struct AnchorTarget {
     pub element_id: String,
 }
 
+/// Result of calibre's `locate_offset_in`: either the located node, or the
+/// remaining (still-unconsumed) offset to carry up to the next sibling.
+enum LocateResult {
+    Found(NodeId),
+    Remaining(i64),
+}
+
 pub struct BookPart {
     pub filename: String,
     pub dom: Dom,
@@ -138,7 +145,11 @@ pub struct BookPart {
 impl<'a> ContentState<'a> {
     pub fn new(book: &'a BookData, resources: &'a ResourceIndex) -> Self {
         let (writing_mode, page_progression_direction) = extract_doc_data(book);
-        let anchors = super::navigation::extract_anchors(book);
+        let mut anchors = super::navigation::extract_anchors(book);
+        // Register `$798` heading levels into the anchor table before content
+        // emission so `process_position` can stamp them (calibre runs
+        // `process_navigation` before `process_reading_order`).
+        super::navigation::register_heading_anchors(book, &mut anchors);
         let fxl = detect_fxl(book);
         Self {
             book,
@@ -538,6 +549,32 @@ impl<'a> ContentState<'a> {
             }
         };
 
+        // `$601 render == $283 inline` — calibre `yj_to_epub_content.py:1278`.
+        // A KFX element can request inline rendering; calibre demotes such a
+        // `<div>` to `<span>` when every child is itself inline (`is_inline_only`),
+        // else keeps the `<div>` (+ fit_width). boko previously ignored this,
+        // rendering all `render:inline` elements (119 in one CJK novel) as block
+        // `<div>`s — a fidelity loss that, among other things, gave heading
+        // containers spurious block children and blocked their `<hN>` promotion.
+        if get_field(fields, KfxSymbol::Render as u64)
+            .map(|v| v.unwrap_annotated())
+            .and_then(|v| if let IonValue::Symbol(s) = v { Some(*s) } else { None })
+            == Some(KfxSymbol::Inline as u64)
+        {
+            let should_span = {
+                let dom_ref = &self.book_parts[part_index].dom;
+                dom_ref.get(elem_id).tag == "div"
+                    && dom_ref
+                        .get(elem_id)
+                        .children
+                        .iter()
+                        .all(|&c| is_inline_only(dom_ref, c))
+            };
+            if should_span {
+                self.book_parts[part_index].dom.get_mut(elem_id).tag = "span".to_string();
+            }
+        }
+
         // `$615 yj.classification` — calibre `yj_to_epub_content.py:1058`.
         // EPUB-2.0 active branches (we emit EPUB 2.0):
         //   - `$453 caption` → rename to `<caption>` when the parent is
@@ -564,24 +601,15 @@ impl<'a> ContentState<'a> {
             let _ = class_name;
         }
 
-        // `process_position` — calibre `yj_to_epub_navigation.py:375`.
-        // Every content struct with `$155 id` registers itself at
-        // `(id, offset=0)`; if the anchor table has a position match
-        // there, the element gets `id="anchor-id"`. This is what wires
-        // NCX `<content src="chapter.xhtml#X">` to the right paragraph
-        // and what lets internal `<a href>` resolve to fragments.
-        // Partial-offset positions (offset > 0 from `locate_offset`)
-        // are deferred to task #11 (split_span for partial-text ruby
-        // covers the same machinery).
-        let loc_id = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int());
-
         // `data-eid` stamping (reader render mode only). Every content struct
         // with a `$155 id` carries its eid into the DOM so the reader can map
         // an annotation's `(eid, offset)` to a `Range`. These are exactly the
         // addressable elements: annotation eids and `position_id_map` keys are
-        // the same `$155 id`s. Off for the shippable EPUB export.
+        // the same `$155 id`s. Off for the shippable EPUB export. (Kept on
+        // `$155` only — the reader's annotation keys are `$155` ids — while the
+        // anchor path below uses calibre's `$155`-or-`$598` location id.)
         if self.stamp_eids
-            && let Some(eid) = loc_id
+            && let Some(eid) = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int())
         {
             self.book_parts[part_index]
                 .dom
@@ -589,14 +617,28 @@ impl<'a> ContentState<'a> {
                 .set("data-eid", eid.to_string());
         }
 
-        if let Some(loc_id) = loc_id
-            && let Some(anchor_id) = self.anchors.id_at(loc_id, 0)
-        {
-            let dom_ref = &mut self.book_parts[part_index].dom;
-            // Don't overwrite an id that was already set (e.g. an
-            // earlier walk through the same node).
-            if !dom_ref.get(elem_id).attrs.iter().any(|(k, _)| k == "id") {
-                dom_ref.get_mut(elem_id).set("id", anchor_id);
+        // `process_position` — calibre `yj_to_epub_content.py:1080-1087`. Stamp
+        // the offset-0 anchor on the content element, then walk every
+        // registered offset>0 at this location: `locate_offset` finds (and
+        // splits) the span at that text offset and `process_position` stamps a
+        // zero-length `<span>` there. This is what wires NCX
+        // `<content src="chapter.xhtml#X">` and internal `<a href>` to the right
+        // paragraph — including mid-paragraph footnote/cross-ref targets, which
+        // the previous offset-0-only stamp left dangling.
+        if let Some(loc_id) = get_location_id(fields) {
+            self.process_position(loc_id, 0, part_index, elem_id);
+
+            let mut offsets: Vec<i64> = self
+                .anchors
+                .position_anchors
+                .get(&loc_id)
+                .map(|m| m.keys().copied().filter(|&o| o > 0).collect())
+                .unwrap_or_default();
+            offsets.sort_unstable();
+            for off in offsets {
+                if let Some(located) = self.locate_offset(part_index, elem_id, off, false, true) {
+                    self.process_position(loc_id, off, part_index, located);
+                }
             }
         }
 
@@ -625,6 +667,181 @@ impl<'a> ContentState<'a> {
         }
         let _ = is_top_level;
         Ok(())
+    }
+
+    /// Port of calibre's `process_position` (`yj_to_epub_navigation.py:375`).
+    /// When `(eid, offset)` is a registered anchor position, stamp the
+    /// element's `id` (the first-anchor-at-position id) if it has none.
+    ///
+    /// boko resolves anchor URIs eagerly through `id_at`/`resolve_uri` rather
+    /// than calibre's deferred `anchor_elem` table, so we deliberately do NOT
+    /// pop the position — `id_at` must stay readable for nav/link resolution
+    /// after content emission. The "don't overwrite id" guard keeps stamping
+    /// idempotent; each `(eid, offset)` maps to exactly one element (the
+    /// offset-0 content element, or the single zero-length span `locate_offset`
+    /// splits out for an offset>0).
+    fn process_position(&mut self, eid: i64, offset: i64, part_index: usize, elem_id: NodeId) {
+        // Stamp the element id from the first anchor at this position, if any.
+        if let Some(anchor_id) = self.anchors.id_at(eid, offset) {
+            let dom = &mut self.book_parts[part_index].dom;
+            if !dom.get(elem_id).has_attr("id") {
+                dom.get_mut(elem_id).set("id", anchor_id);
+            }
+        }
+        // Carry any heading level registered here onto the element (calibre's
+        // `add_style(elem, {"-kfx-heading-level": N}, replace=False)`). boko
+        // records it on `element_layout_hints`, which `consolidate_html`
+        // consumes: a `<div>` with the `"heading"` layout hint (from its
+        // `$style`) plus this level becomes `<hN>`. Independent of the id stamp
+        // above — a heading position need not carry a named anchor.
+        if let Some(level) = self.anchors.heading_level_at(eid, offset) {
+            let entry = self.book_parts[part_index]
+                .element_layout_hints
+                .entry(elem_id)
+                .or_default();
+            if entry.1.is_none() {
+                entry.1 = Some(level.to_string());
+            }
+        }
+    }
+
+    /// Port of calibre `locate_offset` (`yj_to_epub_content.py:1540`). Walks the
+    /// text under `root` counting code points until `offset_query`, splitting
+    /// the containing `<span>` so the returned node begins exactly at the
+    /// offset. Returns `None` when the offset is past the text (calibre logs the
+    /// failure and returns `None`). `split_after`/`zero_len` mirror calibre; the
+    /// `process_position` call site passes `split_after=false, zero_len=true`,
+    /// so the located node is a fresh empty `<span>` precisely at the offset.
+    fn locate_offset(
+        &mut self,
+        part_index: usize,
+        root: NodeId,
+        offset_query: i64,
+        split_after: bool,
+        zero_len: bool,
+    ) -> Option<NodeId> {
+        match self.locate_offset_in(part_index, root, offset_query, split_after, zero_len) {
+            LocateResult::Found(n) => Some(n),
+            // calibre: `if result == 0 and not split_after: return SubElement(root, "span")`
+            LocateResult::Remaining(0) if !split_after => {
+                Some(self.book_parts[part_index].dom.sub_element(root, "span"))
+            }
+            LocateResult::Remaining(_) => None,
+        }
+    }
+
+    /// Port of calibre `locate_offset_in` (`yj_to_epub_content.py:1557`). Returns
+    /// either the located node or the still-unconsumed remaining offset.
+    fn locate_offset_in(
+        &mut self,
+        part_index: usize,
+        elem: NodeId,
+        mut offset_query: i64,
+        split_after: bool,
+        zero_len: bool,
+    ) -> LocateResult {
+        if offset_query < 0 {
+            return LocateResult::Remaining(offset_query);
+        }
+        let tag = self.book_parts[part_index].dom.get(elem).tag.clone();
+        let scan_children;
+        if tag == "span" {
+            // KFX offsets count Unicode code points; Rust `char` is a scalar
+            // value, so `chars().count()` == calibre's `unicode_len_`.
+            let text_len = self.book_parts[part_index]
+                .dom
+                .get(elem)
+                .text
+                .as_deref()
+                .map(|t| t.chars().count() as i64)
+                .unwrap_or(0);
+            if text_len > 0 {
+                if !split_after {
+                    if offset_query == 0 {
+                        return LocateResult::Found(elem);
+                    } else if offset_query < text_len {
+                        let new_span = self.split_span(part_index, elem, offset_query);
+                        if zero_len {
+                            self.split_span(part_index, new_span, 0);
+                        }
+                        return LocateResult::Found(new_span);
+                    }
+                } else if offset_query == text_len - 1 {
+                    return LocateResult::Found(elem);
+                } else if offset_query < text_len {
+                    self.split_span(part_index, elem, offset_query + 1);
+                    return LocateResult::Found(elem);
+                }
+                offset_query -= text_len;
+            }
+            scan_children = true;
+        } else if matches!(tag.as_str(), "img" | "svg" | "math") {
+            // Inline replaced elements count as a single position.
+            if offset_query == 0 {
+                return LocateResult::Found(elem);
+            }
+            offset_query -= 1;
+            scan_children = false;
+        } else if matches!(
+            tag.as_str(),
+            "a" | "aside" | "div" | "figure" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li"
+                | "ruby" | "rb"
+        ) {
+            scan_children = true;
+        } else {
+            // calibre: "rt" → don't scan; any other tag logs an error and
+            // likewise stops descending (offset is carried up unchanged).
+            scan_children = false;
+        }
+        if scan_children {
+            let children = self.book_parts[part_index].dom.get(elem).children.clone();
+            for child in children {
+                match self.locate_offset_in(part_index, child, offset_query, split_after, zero_len) {
+                    LocateResult::Found(n) => return LocateResult::Found(n),
+                    LocateResult::Remaining(r) => offset_query = r,
+                }
+            }
+        }
+        LocateResult::Remaining(offset_query)
+    }
+
+    /// Port of calibre `split_span` (`yj_to_epub_content.py:1635`). Splits
+    /// `old_span`'s text at `first_text_len` code points; the tail becomes a
+    /// new sibling `<span>` inserted right after, inheriting the same class /
+    /// inline style (calibre copies `get_style(old)` → new). Returns the new
+    /// span.
+    fn split_span(&mut self, part_index: usize, old_span: NodeId, first_text_len: i64) -> NodeId {
+        let part = &mut self.book_parts[part_index];
+        let text: Vec<char> = part
+            .dom
+            .get(old_span)
+            .text
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .collect();
+        let n = (first_text_len.max(0) as usize).min(text.len());
+        let head: String = text[..n].iter().collect();
+        let tail: String = text[n..].iter().collect();
+        part.dom.get_mut(old_span).text = if head.is_empty() { None } else { Some(head) };
+        let new_span = part.dom.create_element("span");
+        part.dom.get_mut(new_span).text = if tail.is_empty() { None } else { Some(tail) };
+        // Inherit class + inline style so the split halves render identically.
+        if let Some(cls) = part.element_classes.get(&old_span).cloned() {
+            part.element_classes.insert(new_span, cls);
+        }
+        if let Some(sty) = part.element_styles.get(&old_span).cloned() {
+            part.element_styles.insert(new_span, sty);
+        }
+        // Insert right after `old_span` in its parent (calibre's
+        // `parent.insert(parent.index(old_span) + 1, new_span)`).
+        if let Some(parent) = part.dom.get(old_span).parent {
+            match part.dom.child_index(parent, old_span) {
+                Some(pos) => part.dom.insert(parent, pos + 1, new_span),
+                None => part.dom.append(parent, new_span),
+            }
+        }
+        new_span
     }
 
     // -----------------------------------------------------------------
@@ -1094,6 +1311,15 @@ impl<'a> ContentState<'a> {
         let Some(fields) = inner.as_struct() else {
             return Ok(());
         };
+        // Storyline-root anchor (calibre `process_story`,
+        // `yj_to_epub_content.py:346`): stamp the story's location id at offset
+        // 0 on the parent element the story renders into, BEFORE its content is
+        // added. This is what fixes links whose target anchor sits on a
+        // storyline root rather than a leaf content struct — boko's content
+        // walk only stamps content structs, so those previously dangled.
+        if let Some(loc_id) = get_location_id(fields) {
+            self.process_position(loc_id, 0, part_index, parent_id);
+        }
         if let Some(list) = get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list()) {
             let list_clone = list.to_vec();
             for child in &list_clone {
@@ -1498,6 +1724,16 @@ pub(super) fn extract_reading_orders(book: &BookData) -> Vec<Vec<String>> {
     out
 }
 
+/// Calibre's `get_location_id` (`yj_to_epub_navigation.py:372`): a structure's
+/// location id is `$155 id`, falling back to `$598 kfx_id`. Used by every
+/// `process_position` call site so an anchor that targets a structure keyed by
+/// the alternate `$598` id still resolves.
+fn get_location_id(fields: &[(u64, IonValue)]) -> Option<i64> {
+    get_field(fields, KfxSymbol::Id as u64)
+        .and_then(|v| v.as_int())
+        .or_else(|| get_field(fields, KfxSymbol::KfxId as u64).and_then(|v| v.as_int()))
+}
+
 /// Look up a fragment of the given KFX type by name.
 pub(super) fn lookup_fragment(book: &BookData, ftype: KfxSymbol, fid: &str) -> Option<IonValue> {
     book.by_type
@@ -1630,6 +1866,28 @@ fn is_block_tag(tag: &str) -> bool {
     BLOCK_TAGS.contains(&tag)
 }
 
+/// Calibre's `is_inline_only` (`yj_to_epub_content.py:1900`): an element is
+/// inline-only if it's an `<svg>`, or it's one of the inline tags
+/// (a/audio/img/rb/rt/ruby/span/video) with every descendant inline-only. Used
+/// by the `render:inline` demotion to decide whether a `<div>` can become a
+/// `<span>` without swallowing a block child.
+fn is_inline_only(dom: &super::dom::Dom, id: NodeId) -> bool {
+    let tag = dom.get(id).tag.as_str();
+    if tag == "svg" {
+        return true;
+    }
+    if !matches!(
+        tag,
+        "a" | "audio" | "img" | "rb" | "rt" | "ruby" | "span" | "video"
+    ) {
+        return false;
+    }
+    dom.get(id)
+        .children
+        .iter()
+        .all(|&c| is_inline_only(dom, c))
+}
+
 /// Strip every `<span>` whose attribute list is empty (or carries only an
 /// empty `class=""`), inlining its text and children into the parent.
 /// Mirrors calibre's `consolidate_html` span pass (epub_output.py:783).
@@ -1754,9 +2012,104 @@ fn strip_empty_spans(dom: &mut super::dom::Dom) {
 /// Does NOT yet do `kfx-layout-hints: heading → h<N>` or `figure → figure`
 /// promotions — those need YJ_PROPERTY_INFO entries for $761 / $790, owned
 /// by step 6.
+/// True when a `<div>` carries no attributes of any kind — directly on the DOM
+/// node (e.g. an `id` stamped by `process_position`) OR pending in the part's
+/// class / inline-style / layout-hint maps (not yet flushed to attrs at
+/// consolidate time). Calibre's div-collapse only unwraps genuinely-empty
+/// wrapper divs (`len(e.attrib) == 0`), and `-kfx-layout-hints` /
+/// `-kfx-heading-level` count as attributes there.
+fn div_is_bare(part: &BookPart, id: NodeId) -> bool {
+    part.dom.get(id).attrs.is_empty()
+        && part.element_classes.get(&id).is_none_or(|c| c.is_empty())
+        && part.element_styles.get(&id).is_none_or(|s| s.is_empty())
+        && !part.element_layout_hints.contains_key(&id)
+}
+
+/// Unwrap `e` (an attribute-less div that is the SOLE child of `parent`, whose
+/// `text` is empty) into `parent`: `e`'s leading text becomes the parent's
+/// text, `e`'s children take `e`'s place, and `e`'s tail trails the last child
+/// (lxml `strip_tags` semantics, specialised to the sole-child case).
+fn unwrap_into_parent(dom: &mut super::dom::Dom, e: NodeId, parent: NodeId) {
+    let e_text = dom.get(e).text.clone();
+    let e_children = dom.get(e).children.clone();
+    let e_tail = dom.get(e).tail.clone();
+    dom.get_mut(parent).text = e_text;
+    dom.get_mut(parent).children = e_children.clone();
+    for &c in &e_children {
+        dom.get_mut(c).parent = Some(parent);
+    }
+    if let Some(tail) = e_tail.filter(|t| !t.is_empty()) {
+        if let Some(&last) = e_children.last() {
+            let cur = dom.get(last).tail.clone().unwrap_or_default();
+            dom.get_mut(last).tail = Some(cur + &tail);
+        } else {
+            let cur = dom.get(parent).text.clone().unwrap_or_default();
+            dom.get_mut(parent).text = Some(cur + &tail);
+        }
+    }
+    dom.get_mut(e).parent = None;
+    dom.get_mut(e).children.clear();
+}
+
+/// Port of calibre's `consolidate_html` div-collapse (`epub_output.py:792-814`).
+/// Strips an attribute-less `<div>` that is the sole child of a block-level
+/// parent (with no leading parent text), splicing its contents up into the
+/// parent. KFX wraps content in redundant nested `<div>`s; without this, a
+/// heading container holding a single bare wrapper `<div>` keeps a spurious
+/// block child and never promotes to `<hN>`. Re-scans after each collapse
+/// (one removal can expose another), matching calibre's `while True`.
+fn collapse_redundant_divs(part: &mut BookPart) {
+    const BODY_CHILD_BLOCKS: &[&str] = &[
+        "aside", "div", "figure", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "iframe", "ol", "p",
+        "table", "ul",
+    ];
+    loop {
+        let mut target: Option<(NodeId, NodeId)> = None;
+        for id in 0..part.dom.len() {
+            if part.dom.get(id).tag != "div" || !div_is_bare(part, id) {
+                continue;
+            }
+            let Some(parent) = part.dom.get(id).parent else {
+                continue;
+            };
+            if part.dom.get(parent).children.len() != 1
+                || part.dom.get(parent).text.as_deref().is_some_and(|t| !t.is_empty())
+            {
+                continue;
+            }
+            let ptag = part.dom.get(parent).tag.as_str();
+            let ok = match ptag {
+                "aside" | "caption" | "div" | "figure" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                | "li" | "p" | "td" => true,
+                "body" => {
+                    let e = part.dom.get(id);
+                    let e_text_empty = e.text.as_deref().is_none_or(|t| t.is_empty());
+                    e_text_empty
+                        && e.children.iter().all(|&c| {
+                            BODY_CHILD_BLOCKS.contains(&part.dom.get(c).tag.as_str())
+                                && part.dom.get(c).tail.as_deref().is_none_or(|t| t.is_empty())
+                        })
+                }
+                _ => false,
+            };
+            if ok {
+                target = Some((id, parent));
+                break;
+            }
+        }
+        let Some((e, parent)) = target else { break };
+        unwrap_into_parent(&mut part.dom, e, parent);
+    }
+}
+
 pub fn consolidate_html(state: &mut ContentState) {
     for part in &mut state.book_parts {
         strip_empty_spans(&mut part.dom);
+        // Collapse redundant single-child wrapper `<div>`s BEFORE computing
+        // block/text descendants, so a heading container holding only a bare
+        // wrapper div is seen as having no block child and can promote to
+        // `<hN>` (calibre's `consolidate_html` div-collapse, epub_output.py:792).
+        collapse_redundant_divs(part);
 
         // First pass: compute (has_block_desc, has_text_desc) per node.
         let n = part.dom.len();

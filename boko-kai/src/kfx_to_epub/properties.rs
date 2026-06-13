@@ -120,6 +120,15 @@ pub fn convert_yj_properties(
 /// Translate a single KFX property value to a CSS string. Handles the four
 /// cases calibre supports: enum (Prop.values), length (struct with unit/value),
 /// color, plain int/float, string/symbol.
+/// calibre's `DEFAULT_FONT_NAMES` (yj_to_epub_properties.py:715): font-family
+/// values meaning "the document default font". calibre replaces these with the
+/// real default family in its font pass (`font_name_replacements`,
+/// yj_to_epub_metadata.py:114); boko defers that pass, so we emit no font-family
+/// (inherit the default) rather than the literal sentinel, which is invalid CSS.
+fn is_default_font_name(s: &str) -> bool {
+    s == "default" || s == "$amzn_fixup_default_font$"
+}
+
 fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Option<String> {
     let inner = value.unwrap_annotated();
 
@@ -154,8 +163,19 @@ fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Optio
             IonValue::Int(n) => Some(format_int_value(prop.name, *n)),
             IonValue::Float(f) => Some(format!("{}", f)),
             IonValue::Decimal(d) => Some(d.clone()),
+            // `font-family: $amzn_fixup_default_font$` / `default` mean "the
+            // document default font"; calibre substitutes the real family in its
+            // font pass (deferred here), so emit nothing rather than invalid CSS.
+            IonValue::String(s) if prop.name == "font-family" && is_default_font_name(s) => None,
             IonValue::String(s) => Some(s.clone()),
-            IonValue::Symbol(id) => Some(symbols.resolve(*id).to_string()),
+            IonValue::Symbol(id) => {
+                let s = symbols.resolve(*id).to_string();
+                if prop.name == "font-family" && is_default_font_name(&s) {
+                    None
+                } else {
+                    Some(s)
+                }
+            }
             IonValue::Struct(struct_fields) => {
                 // KFX length structs: { value: N, unit: "px" }
                 format_length_struct(struct_fields, symbols)
@@ -326,20 +346,22 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
     ("font_style", Prop { name: "font-style", values: Some(&[
         ("italic", Some("italic")), ("normal", Some("normal")), ("oblique", Some("oblique")),
     ])}),
+    // Direct port of calibre's `Prop("font-weight", {...})`
+    // (yj_to_epub_properties.py:238), keyed by symbol: $350 normal, $355 thin→100,
+    // $356 ultra_light→200, $357 light→300, $359 medium→500, $360 semi_bold→600,
+    // $361 bold, $362 ultra_bold→800, $363 heavy→900. ($358 "book" is unmapped, as
+    // in calibre.) boko's prior `font_weight_100…` keys never matched a real symbol
+    // name, so the whole family silently dropped.
     ("font_weight", Prop { name: "font-weight", values: Some(&[
-        ("bold", Some("bold")), ("normal", Some("normal")),
-        ("font_weight_100", Some("100")), ("font_weight_200", Some("200")),
-        ("font_weight_300", Some("300")), ("font_weight_500", Some("500")),
-        ("font_weight_600", Some("600")), ("font_weight_800", Some("800")),
-        ("font_weight_900", Some("900")),
-        // Named weights (KFX emits these alongside the numeric forms). Standard
-        // CSS keyword→number mapping; `ultra_bold` is the only one the corpus
-        // actually dropped, the rest of the family added to pre-empt the tail.
-        ("thin", Some("100")), ("extra_light", Some("200")), ("ultra_light", Some("200")),
-        ("light", Some("300")), ("medium", Some("500")),
-        ("semi_bold", Some("600")), ("demi_bold", Some("600")),
-        ("extra_bold", Some("800")), ("ultra_bold", Some("800")),
-        ("black", Some("900")), ("heavy", Some("900")),
+        ("normal", Some("normal")),
+        ("thin", Some("100")),
+        ("ultra_light", Some("200")),
+        ("light", Some("300")),
+        ("medium", Some("500")),
+        ("semi_bold", Some("600")),
+        ("bold", Some("bold")),
+        ("ultra_bold", Some("800")),
+        ("heavy", Some("900")),
     ])}),
     ("font_variant", Prop { name: "font-variant", values: Some(&[
         ("normal", Some("normal")), ("small-caps", Some("small-caps")),
@@ -524,16 +546,21 @@ pub fn style_layout_hints_for(
         let key = book.symbols.resolve(*k);
         match key {
             "layout_hints" => {
-                // List of symbols. Map each to its element-name equivalent
-                // (caption / figure / heading).
+                // List of symbols. Key by symbol ID — calibre's
+                // `LAYOUT_HINT_ELEMENT_NAMES` maps `$760`/`$282`/`$453`, and
+                // boko's symbol table names `$760` "treat_as_title" (calibre
+                // leaves it nameless). The previous code matched the resolved
+                // NAME "heading", which no real symbol carries, so every
+                // named-style heading was silently dropped — the root cause of
+                // 0 `<hN>` on Amazon KFX whose heading-ness lives on a `$style`
+                // entity rather than inline. Mirror `layout_hints_from_element_fields`.
                 if let IonValue::List(items) = v.unwrap_annotated() {
                     for item in items {
                         if let IonValue::Symbol(id) = item.unwrap_annotated() {
-                            let sym = book.symbols.resolve(*id);
-                            let name = match sym {
-                                "caption" => "caption",
-                                "figure" => "figure",
-                                "heading" => "heading",
+                            let name = match *id {
+                                x if x == KfxSymbol::TreatAsTitle as u64 => "heading",
+                                x if x == KfxSymbol::Figure as u64 => "figure",
+                                x if x == KfxSymbol::Caption as u64 => "caption",
                                 _ => continue,
                             };
                             hints.push(name.to_string());
