@@ -442,6 +442,15 @@ function onDocClick(e, doc) {
       goToToc(href);
       return;
     }
+    // External link (http/https/mailto) → hand to the OS default browser/mail
+    // client instead of letting the iframe navigate to it, which would render
+    // the page inside the reader. Same-page (#frag) and relative resource hrefs
+    // fall through to the iframe's native handling.
+    if (isExternalHref(href)) {
+      e.preventDefault();
+      openExternalHref(href);
+      return;
+    }
   }
 
   const ann = annotationAt(doc, e.clientX, e.clientY);
@@ -457,6 +466,29 @@ function onDocClick(e, doc) {
   if (ann.source === "sidle") openAnnotationEditor(ann, px, py);
   else if (ann.note_body) showReadOnlyNote(ann, px, py);
   else hideNotePopover();
+}
+
+// Classify an in-content href as external (handed to the OS browser) vs internal
+// (resolved within the book). A scheme-ful absolute URL (http/https/mailto) is
+// external; a same-page "#frag" or a relative resource href is not — `new URL`
+// with no base throws on a relative href, which we treat as internal.
+function isExternalHref(href) {
+  if (!href || href.startsWith("#")) return false;
+  let url;
+  try {
+    url = new URL(href);
+  } catch {
+    return false;
+  }
+  return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:";
+}
+
+// Open an external link in the OS default browser / mail client via the opener
+// plugin (Rust `open_external_url`), rather than navigating the content iframe.
+function openExternalHref(href) {
+  window.api.invoke("open_external_url", { url: href }).catch((err) => {
+    console.error("open_external_url failed", err);
+  });
 }
 
 // Place the popover near a parent-document point, flipping above if it would

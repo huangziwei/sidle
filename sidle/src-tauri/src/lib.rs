@@ -114,6 +114,7 @@ pub fn run() {
             commands::reader::book_ink_delete,
             commands::reader::annotation_set_hidden,
             commands::reader::book_ink_set_hidden,
+            commands::reader::open_external_url,
             commands::notebook::notebook_list,
             commands::notebook::notebook_page_svg,
             commands::notebook::notebook_thumbnail,

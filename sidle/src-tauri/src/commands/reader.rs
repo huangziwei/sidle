@@ -9,7 +9,8 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::library::db::{self, AnnotationRow};
 use crate::library::ingest;
@@ -772,4 +773,25 @@ pub async fn annotation_delete(state: State<'_, AppState>, id: i64) -> Result<()
     let conn = state.db.lock().await;
     db::delete_annotation(&conn, id).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Hand an external book link off to the OS default handler (browser / mail
+/// client) instead of letting the reader's content iframe navigate to it — which
+/// would render the page inside the reader. The reader's click handler calls this
+/// for absolute `http`/`https`/`mailto` hrefs in book content. The scheme guard
+/// is defense-in-depth: a backstop against a content href with a surprising
+/// scheme (`file:`, `javascript:`, …) reaching the opener even if the JS-side
+/// classifier is ever loosened.
+#[tauri::command]
+pub async fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
+    let lower = url.trim_start().to_ascii_lowercase();
+    let scheme_ok = lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:");
+    if !scheme_ok {
+        return Err(format!("refusing to open non-web URL: {url}"));
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
 }
