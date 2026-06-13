@@ -14,7 +14,7 @@ const state = {
   // When grouped, the series whose contents are being browsed, or null at the
   // top level. Ephemeral navigation — never persisted.
   seriesView: null, // string | null
-  section: "books", // 'books' | 'notes' — top-level Books/Notes tab
+  section: "books", // 'books' | 'notes' | 'device' — top-level tab (device = Kindle page)
   sort: { key: "imported_at", asc: false },
   // Facet filters: AND across facets, OR within. Each Set holds the
   // currently-selected values for that facet. See extractFacetValues for
@@ -121,6 +121,9 @@ const booksSelection = new window.SelectionController({
 // keyboard handlers in wireSelection() are written against this, so they're
 // section-agnostic.
 function activeController() {
+  // The Kindle page has no selectable items — return no controller so the lasso
+  // and the Esc/Cmd-A handlers (which bail on a null controller) stay inert there.
+  if (state.section === "device") return null;
   if (state.section === "notes") {
     return window.Notebooks ? window.Notebooks.selection() : null;
   }
@@ -352,18 +355,19 @@ function setView(v) {
 }
 
 function applyView() {
-  const notes = state.section === "notes";
+  const books = state.section === "books";
   const mode = displayMode(); // 'flat' | 'grouped' | 'series' (books-only)
   // Content visibility is driven by `.view.active { display: block }`, an author
   // rule that OVERRIDES the `hidden` attribute (`[hidden]` is only a UA rule), so
   // the `active` class — not `hidden` — is what actually shows/hides a section.
-  // It must be cleared on the book views in Notes mode or the gallery shows
-  // through; `hidden` is kept in sync for a11y.
-  const galleryActive = !notes && state.view === "gallery";
+  // The book views activate ONLY in the Books section; gate positively on `books`
+  // so neither Notes nor the device page lets the gallery show through. `hidden`
+  // is kept in sync for a11y.
+  const galleryActive = books && state.view === "gallery";
   // In List view the grouped TOP level shows the lightweight series index
   // (#series-list); flat and drilled-into-a-series both use the book table.
-  const seriesIndexActive = !notes && state.view === "list" && mode === "grouped";
-  const listActive = !notes && state.view === "list" && mode !== "grouped";
+  const seriesIndexActive = books && state.view === "list" && mode === "grouped";
+  const listActive = books && state.view === "list" && mode !== "grouped";
   // Toolbar toggle buttons reflect the chosen view regardless of section.
   $("#view-gallery").classList.toggle("active", state.view === "gallery");
   $("#view-list").classList.toggle("active", state.view === "list");
@@ -401,46 +405,79 @@ function setGroup(g) {
   render();
 }
 
-// Top-level Books / Notes split. Both share the Gallery/List view toggle;
-// switching swaps the action button (Add → Import) and hides the Books-only
-// filter chrome. Notes shows the Scribe notebook grid/list (owned by
-// notebooks.js).
+// The library section to fall back to when leaving the Kindle page (the pill
+// toggles device ⇄ here). Only ever 'books' or 'notes'.
+let lastLibrarySection = "books";
+
+// Top-level Books / Notes / Kindle split. Books and Notes share the Gallery/List
+// view toggle; switching swaps the action button (Add → Import) and hides the
+// Books-only filter chrome. Notes shows the Scribe notebook grid/list (owned by
+// notebooks.js). 'device' is the full-screen Kindle page (entered via the
+// upper-right pill or `\`) — transient: never persisted, never the boot home.
 function setSection(s) {
   state.section = s;
   // Drill-in is a Books-only navigation; don't carry it across the tab switch.
   state.seriesView = null;
+  if (s !== "device") {
+    lastLibrarySection = s;
+    localStorage.setItem("section", s);
+  }
+  // Leaving Books (for Notes or the Kindle page) drops the book selection so the
+  // Books selection bar doesn't linger over the other surface.
+  if (s !== "books") clearSelection();
   applySection();
-  localStorage.setItem("section", s);
   if (window.Notebooks) {
-    if (s === "notes") {
-      // Drop any book selection so the Books selection bar doesn't linger over
-      // the Notes view; notebooks.js owns its own selection + bar.
-      clearSelection();
-      window.Notebooks.show();
-    } else {
-      window.Notebooks.hide();
-    }
+    if (s === "notes") window.Notebooks.show();
+    else window.Notebooks.hide();
+  }
+  if (s === "device") {
+    // Entering the Kindle page: re-pull device / KUAL / LAN state. Lives here
+    // (not the pill handler) so the `\` shortcut refreshes too.
+    refreshDevicePage();
+  } else if (s === "books") {
+    // Re-render the book views on return. A device refresh (a Kindle connect, or
+    // refreshDeviceList while the Kindle page is open) calls render() with
+    // section≠"books", and displayMode() is section-gated, so it rebuilds the
+    // gallery/list FLAT into the hidden DOM. Rebuild now that section==="books"
+    // so the grouping matches the flat|series toggle again.
+    render();
   }
 }
 
 function applySection() {
   const notes = state.section === "notes";
-  $("#section-books").classList.toggle("active", !notes);
+  const device = state.section === "device";
+  const books = state.section === "books";
+  // Section tabs light up for their own section. Neither Books nor Notes is
+  // active on the Kindle page — the upper-right pill carries that state instead.
+  $("#section-books").classList.toggle("active", books);
   $("#section-notes").classList.toggle("active", notes);
-  $("#section-books").setAttribute("aria-selected", String(!notes));
+  $("#section-books").setAttribute("aria-selected", String(books));
   $("#section-notes").setAttribute("aria-selected", String(notes));
-  // Add… (Books) and Import (Notes) swap; the Gallery/List toggle now drives
-  // both sections, so it stays visible across the split.
-  $("#btn-add").hidden = notes;
+  // The pill doubles as the Kindle-page tab — mark it active there.
+  $("#device-pill").classList.toggle("active", device);
+  // Add… (Books only) and Import (Notes only); both gone on the device page.
+  $("#btn-add").hidden = !books;
   $("#btn-notes-import").hidden = !notes;
-  $("#filter-bar").hidden = notes;
+  // The Kindle page is device-management, not a library — strip ALL library
+  // chrome. Notes keeps the Gallery/List toggle + separators; only the device
+  // page also hides the view toggle and both toolbar separators (the section↔view
+  // one and #view-sep), so the toolbar-group collapses to just Books/Notes.
+  $("#filter-bar").hidden = notes || device;
   const search = document.querySelector(".filter-search");
-  if (search) search.hidden = notes;
-  // `#notes` uses the same `.view`/`.view.active` system: the `active` class
-  // (not `hidden`) is what `display: block`s it — without it the base
-  // `.view { display: none }` keeps it hidden. applyView() owns gallery/list.
+  if (search) search.hidden = notes || device;
+  $("#view-seg").hidden = device;
+  $("#view-sep").hidden = device;
+  // First .toolbar-sep in DOM order is the section↔view divider (no id of its own).
+  const sectionSep = document.querySelector(".toolbar-sep");
+  if (sectionSep) sectionSep.hidden = device;
+  // `#notes` / `#device-page` use the same `.view`/`.view.active` system: the
+  // `active` class (not `hidden`) is what `display: block`s them. applyView()
+  // owns the book views, which stay inactive whenever the section isn't Books.
   $("#notes").classList.toggle("active", notes);
   $("#notes").hidden = !notes;
+  $("#device-page").classList.toggle("active", device);
+  $("#device-page").hidden = !device;
   applyView();
 }
 
@@ -1381,46 +1418,38 @@ function coverUrlFor(b) {
 }
 
 // ---------------------------------------------------------------------------
-// Device pill + popover
+// Device pill + Kindle page
 // ---------------------------------------------------------------------------
 
+// Re-pull everything the Kindle page shows. Fired on entering the device section
+// (pill click or `\`). KUAL staleness + LAN-server state change out-of-band
+// (server token rotates, native rebuilt, sakabar/CLI start-stop), so this always
+// re-probes rather than trusting cached state.
+function refreshDevicePage() {
+  refreshDeviceList();
+  refreshKualStatus();
+  // Re-stage the LAN self-update bundle so an untethered "Update over Wi-Fi"
+  // serves the latest cross-built picker: the dev loop is "rebuild armv7 → open
+  // the Kindle page → device pulls", no cable, no app restart. Fire-and-forget +
+  // mtime-gated (a no-op once warm); non-fatal on error.
+  window.api
+    .invoke("kual_stage_dist")
+    .catch((err) => console.warn("kual_stage_dist failed:", err));
+  refreshServerStatus();
+}
+
 function wireDevice() {
-  $("#device-pill").addEventListener("click", (e) => {
-    e.stopPropagation();
-    const pop = $("#device-popover");
-    pop.hidden = !pop.hidden;
-    if (!pop.hidden) {
-      refreshDeviceList();
-      // KUAL section staleness can change between opens (server token
-      // rotates, native rebuilt, etc.) so always re-pull on show.
-      refreshKualStatus();
-      // Re-stage the LAN self-update bundle so an untethered "Update over Wi-Fi"
-      // serves the latest cross-built picker: the dev loop is "rebuild armv7 →
-      // open this popover → device pulls", no cable, no app restart.
-      // Fire-and-forget + mtime-gated (a no-op once warm); non-fatal on error.
-      window.api
-        .invoke("kual_stage_dist")
-        .catch((err) => console.warn("kual_stage_dist failed:", err));
-      // The LAN server can start/stop out-of-band (sakabar, CLI, or it outlived a
-      // previous app session), so re-probe on every open — the toggle is
-      // observation-based, not pinned to this app's own start/stop actions.
-      refreshServerStatus();
-    }
+  // The pill toggles the full-screen Kindle page: into it, or back to the last
+  // library section if we're already there (preserves the click-to-dismiss feel
+  // the popover had). setSection's "device" branch fires the on-enter refreshes.
+  $("#device-pill").addEventListener("click", () => {
+    setSection(state.section === "device" ? lastLibrarySection : "device");
   });
   $("#btn-send-unsent").addEventListener("click", () => sendUnsent());
   $("#btn-sync-annotations").addEventListener("click", () => syncAnnotations());
   $("#btn-restore-annotations")?.addEventListener("click", () => restoreFromDevice());
   $("#btn-import-all-orphans").addEventListener("click", () => importAllOrphans());
   $("#btn-device-eject").addEventListener("click", () => ejectDevice());
-  // Clicks INSIDE the popover shouldn't close it.
-  $("#device-popover").addEventListener("click", (e) => e.stopPropagation());
-  document.addEventListener("click", (e) => {
-    const root = $("#device");
-    if (root && !root.contains(e.target)) $("#device-popover").hidden = true;
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") $("#device-popover").hidden = true;
-  });
 }
 
 // Verb shown in the footer / settings status for each long library file op.
@@ -1794,7 +1823,7 @@ function updateDeviceUI(info) {
       tip.textContent = "";
     }
     // Always load sent state when device connects so the list-view "On Kindle"
-    // column reflects reality without the user having to open the popover.
+    // column reflects reality without the user having to open the Kindle page.
     refreshDeviceList();
     refreshKualStatus();
   } else {
@@ -2081,15 +2110,14 @@ async function importOrphan(filename) {
 //
 // The backend pulls and converts every new /dedrm file on Kindle connect —
 // no user interaction needed. We just listen for the per-file progress (to
-// keep the popover's status line current) and a final summary toast.
+// keep the Kindle page's status line current) and a final summary toast.
 // ---------------------------------------------------------------------------
 
 function subscribePullProgress() {
-  // Per-file event from the autopull worker. Updates the device-popover
-  // status line for users who have the popover open, and — for actually-
-  // imported files — triggers a library refresh so the new row appears in
-  // the gallery the moment it lands on disk, instead of waiting for the
-  // whole batch to finish.
+  // Per-file event from the autopull worker. Updates the Kindle-page status
+  // line for users who have it open, and — for actually-imported files —
+  // triggers a library refresh so the new row appears in the gallery the
+  // moment it lands on disk, instead of waiting for the whole batch to finish.
   window.api.listen("device:pull-progress", async (e) => {
     const r = e.payload;
     if (!r) return;
@@ -3037,6 +3065,9 @@ function onLibraryKeydown(e) {
       return;
     case "]":
       setSection("notes");
+      return;
+    case "\\":
+      setSection("device");
       return;
     case "?":
       e.preventDefault();

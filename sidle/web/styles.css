@@ -496,41 +496,90 @@ button {
   background: #6fb361;
 }
 
-.device-popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  width: 380px;
-  max-height: 80vh;
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  box-shadow: var(--shadow);
-  z-index: 150;
-  display: flex;
-  flex-direction: column;
-  /* Scroll the popover body once the KUAL + LAN-server + sent-list
-     sections together exceed max-height — used to be `hidden` which
-     clipped everything below the device fields. */
-  overflow-y: auto;
+/* ---------------------------------------------------------------------------
+   Kindle page (#device-page)
+   Promoted from the old upper-right device popover, which had outgrown a 380px
+   panel. The pill in the header is the entry point; this is a full-width `.view`
+   inside #main (same show/hide system as #gallery / #notes). The inner blocks
+   below — .device-fields, .device-actions, .device-sent-list, .kual-section,
+   .server-section — are reused verbatim from the popover; a few popover-era
+   dividers are neutralised once each block is boxed inside a card.
+   --------------------------------------------------------------------------- */
+
+.device-page {
+  max-width: 920px;
+  margin: 0 auto;
 }
 
-.device-popover[hidden] {
-  display: none;
-}
-
-.device-popover-header {
+.device-page-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
+  padding-bottom: 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.device-page-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.device-page-title h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+/* The pill doubles as this page's tab — a soft accent tint marks it active
+   without disturbing the status dot or label (the pill is otherwise unchanged). */
+.device-pill.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* Identity grid sits full-width under the header, above the cards. */
+.device-page > .device-fields {
+  max-width: 540px;
+}
+
+/* Responsive card grid — new Kindle features land as new .device-card. */
+.device-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  margin-top: 8px;
+  align-items: start;
+}
+
+.device-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.device-card-header {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
 }
 
-.device-popover-header-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.device-card-header strong {
+  font-size: 13px;
+}
+
+/* Neutralise popover-era dividers now that each block is boxed by its card: the
+   card draws the edge, so drop the actions/sent-list bottom rules and the
+   KUAL/LAN-server top rules (which existed to separate stacked popover blocks). */
+.device-card .device-actions,
+.device-card .device-sent-list {
+  border-bottom: 0;
+}
+
+.device-card.kual-section,
+.device-card.server-section {
+  border-top: 0;
 }
 
 .device-eject-btn {
