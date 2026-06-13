@@ -29,6 +29,7 @@
 //! See feedback memory: ground-truth-by-direction.
 
 pub mod epub3;
+pub mod fxl;
 pub mod images;
 pub mod links;
 pub mod metadata;

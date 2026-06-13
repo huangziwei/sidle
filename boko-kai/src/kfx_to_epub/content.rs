@@ -84,6 +84,23 @@ pub struct ContentState<'a> {
     /// shippable EPUB export leaves this `false` (no attribute bloat). Set by
     /// `kfx_to_reader_book` via `build_output(.., stamp_eids = true)`.
     pub stamp_eids: bool,
+
+    /// Image-based fixed-layout book (manga / comic / picture book): detected
+    /// from `content_features` (`yj_*fixed_layout`). When set, `process_section`
+    /// routes through `process_spread_template` — splitting each
+    /// `double_page_spread` section into one XHTML page per `scale_fit`
+    /// container with a `<meta name="viewport">` — instead of stacking both
+    /// halves into a single reflowable document. Mirrors calibre's
+    /// `is_comic`/`fixed_layout` branch in `process_reading_order`.
+    pub is_fixed_layout: bool,
+    /// Double-page-spread comic (`yj_double_page_spread`): drives the
+    /// `book-type: comic` OPF hint and the per-page `page-spread-left/right`
+    /// itemref properties.
+    pub is_comic: bool,
+    /// Page pixel size of the first fixed-layout page emitted — surfaced as the
+    /// OPF `original-resolution` / `rendition:orientation` (calibre
+    /// `epub_output.py:932`).
+    pub original_resolution: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,12 +125,21 @@ pub struct BookPart {
     /// element's named style. Read in `consolidate_html` to promote
     /// `<div>` → `<h<N>>` / `<figure>` (calibre `yj_to_epub_properties.py:1921`).
     pub element_layout_hints: HashMap<NodeId, (Vec<String>, Option<String>)>,
+    /// Fixed-layout page pixel size — emitted as `<meta name="viewport">` and
+    /// drives the book's `original-resolution`. Set by `process_spread_template`
+    /// for each `scale_fit` page; `None` for reflowable documents.
+    pub viewport: Option<(u32, u32)>,
+    /// EPUB spine itemref property for this fixed-layout page
+    /// (`"page-spread-left"` / `"page-spread-right"`), or `None` for a single
+    /// (non-spread) page or a reflowable document.
+    pub spread_property: Option<String>,
 }
 
 impl<'a> ContentState<'a> {
     pub fn new(book: &'a BookData, resources: &'a ResourceIndex) -> Self {
         let (writing_mode, page_progression_direction) = extract_doc_data(book);
         let anchors = super::navigation::extract_anchors(book);
+        let fxl = detect_fxl(book);
         Self {
             book,
             resources,
@@ -128,6 +154,9 @@ impl<'a> ContentState<'a> {
             used_kfx_styles: Vec::new(),
             element_id_to_filename: HashMap::new(),
             stamp_eids: false,
+            is_fixed_layout: fxl.fixed_layout,
+            is_comic: fxl.double_page_spread,
+            original_resolution: None,
         }
     }
 
@@ -167,32 +196,20 @@ impl<'a> ContentState<'a> {
             return Ok(());
         }
 
-        // Calibre's "main page_template": the last one in the list.
-        let filename = format!("{section_name}.xhtml");
-        let part_index = self.book_parts.len();
-        let (mut dom, html_id, head_id, body_id) = super::dom::new_book_part(section_name);
-        // `xml:lang` on `<html>` — calibre adds it on every spine doc using
-        // the book-level `dc:language` (epub_output.py: `set_doc_lang`).
-        // Reading systems use this for font selection and word-break.
-        let lang = self.book.metadata.language.trim();
-        if !lang.is_empty() {
-            dom.get_mut(html_id).set("xml:lang", lang);
-            dom.get_mut(html_id).set("lang", lang);
+        // Image-based fixed-layout (manga / comic): each section's page_template
+        // is a `page_spread`/`facing_page` container whose story is a list of
+        // `scale_fit` page containers. Split it into one spine document per
+        // page (calibre's `is_comic` branch → `process_page_spread_page_template`)
+        // instead of stacking both halves into a single reflowable document.
+        if self.is_fixed_layout {
+            let first = page_templates[0].clone();
+            return self.process_spread_template(&first, section_name, "", true);
         }
-        self.book_parts.push(BookPart {
-            filename: filename.clone(),
-            dom,
-            html_id,
-            head_id,
-            body_id,
-            element_classes: HashMap::new(),
-            element_styles: HashMap::new(),
-            element_ids: HashMap::new(),
-            element_layout_hints: HashMap::new(),
-        });
 
-        // Link stylesheet.
-        self.link_stylesheet(part_index);
+        // Reflowable: calibre's "main page_template" is the last one in the list.
+        let filename = format!("{section_name}.xhtml");
+        let part_index = self.push_book_part(&filename, section_name);
+        let body_id = self.book_parts[part_index].body_id;
 
         // Record every element id reachable from this section (page_templates +
         // their storylines, recursively). This lets `navigation::extract_toc`
@@ -219,6 +236,188 @@ impl<'a> ContentState<'a> {
             &writing_mode,
             true,
         )?;
+        Ok(())
+    }
+
+    /// Create a new empty book_part (`<html><head><body>`), set its `xml:lang`
+    /// from the book language, link the stylesheet, and return its index.
+    /// Filenames are made unique by suffixing a counter on collision. Shared by
+    /// the reflowable section path and the fixed-layout per-page splitter.
+    fn push_book_part(&mut self, filename: &str, title: &str) -> usize {
+        let mut filename = filename.to_string();
+        if self.book_parts.iter().any(|p| p.filename == filename) {
+            let stem = filename.trim_end_matches(".xhtml").to_string();
+            let mut n = 1;
+            loop {
+                let cand = format!("{stem}-{n}.xhtml");
+                if !self.book_parts.iter().any(|p| p.filename == cand) {
+                    filename = cand;
+                    break;
+                }
+                n += 1;
+            }
+        }
+        let part_index = self.book_parts.len();
+        let (mut dom, html_id, head_id, body_id) = super::dom::new_book_part(title);
+        // `xml:lang` on `<html>` — calibre adds it on every spine doc using the
+        // book-level `dc:language` (epub_output.py: `set_doc_lang`). Reading
+        // systems use this for font selection and word-break.
+        let lang = self.book.metadata.language.trim();
+        if !lang.is_empty() {
+            dom.get_mut(html_id).set("xml:lang", lang);
+            dom.get_mut(html_id).set("lang", lang);
+        }
+        self.book_parts.push(BookPart {
+            filename,
+            dom,
+            html_id,
+            head_id,
+            body_id,
+            element_classes: HashMap::new(),
+            element_styles: HashMap::new(),
+            element_ids: HashMap::new(),
+            element_layout_hints: HashMap::new(),
+            viewport: None,
+            spread_property: None,
+        });
+        self.link_stylesheet(part_index);
+        part_index
+    }
+
+    /// Port of calibre's `process_page_spread_page_template`
+    /// (`yj_to_epub_content.py:210`). A `page_spread`/`facing_page` container's
+    /// `$176 story_name` resolves to a storyline whose `content_list` is the
+    /// per-page `scale_fit` containers; each recurses to a leaf that becomes its
+    /// own spine document with an alternating `page-spread-left`/`-right` itemref
+    /// property (RTL reads the right page first). A bare `scale_fit` page (e.g.
+    /// the cover) is a single page with no spread property.
+    fn process_spread_template(
+        &mut self,
+        template: &IonValue,
+        section_name: &str,
+        spread_property: &str,
+        is_section: bool,
+    ) -> Result<(), ConvertError> {
+        // Resolve a `$608 structure` symbol reference to the real struct.
+        let resolved;
+        let template = match template.unwrap_annotated() {
+            IonValue::Symbol(id) => {
+                let name = self.book.symbols.resolve(*id).to_string();
+                match lookup_fragment(self.book, KfxSymbol::Structure, &name) {
+                    Some(f) => {
+                        resolved = f;
+                        &resolved
+                    }
+                    None => return Ok(()),
+                }
+            }
+            _ => template,
+        };
+        let inner = template.unwrap_annotated();
+        let Some(fields) = inner.as_struct() else {
+            return Ok(());
+        };
+        let layout = get_field(fields, KfxSymbol::Layout as u64)
+            .and_then(|v| self.book.symbols.text_of(v))
+            .unwrap_or("")
+            .to_string();
+
+        if layout == "page_spread" || layout == "facing_page" {
+            // The story holds the per-page `scale_fit` containers.
+            let Some(story_name) = get_field(fields, KfxSymbol::StoryName as u64)
+                .and_then(|v| self.book.symbols.text_of(v))
+                .map(|s| s.to_string())
+            else {
+                return Ok(());
+            };
+            let pages: Vec<IonValue> = lookup_fragment(self.book, KfxSymbol::Storyline, &story_name)
+                .and_then(|story| {
+                    story
+                        .unwrap_annotated()
+                        .as_struct()
+                        .and_then(|fs| get_field(fs, KfxSymbol::ContentList as u64))
+                        .and_then(|v| v.as_list())
+                        .map(|v| v.to_vec())
+                })
+                .unwrap_or_default();
+            // RTL spreads read the right-hand page first.
+            let mut prop = if self.page_progression_direction == "ltr" {
+                "page-spread-left"
+            } else {
+                "page-spread-right"
+            };
+            for page in &pages {
+                self.process_spread_template(page, section_name, prop, false)?;
+                prop = if prop == "page-spread-left" {
+                    "page-spread-right"
+                } else {
+                    "page-spread-left"
+                };
+            }
+            return Ok(());
+        }
+
+        // Leaf page: a `scale_fit` (or other) container → one spine document.
+        self.emit_fxl_page(template, fields, section_name, spread_property)?;
+        let _ = is_section;
+        Ok(())
+    }
+
+    /// Emit one fixed-layout page: a fresh spine document carrying a
+    /// `<meta name="viewport">` sized to the page's `fixed_width`/`fixed_height`
+    /// and (when part of a spread) a `page-spread-left`/`-right` property.
+    fn emit_fxl_page(
+        &mut self,
+        container: &IonValue,
+        fields: &[(u64, IonValue)],
+        section_name: &str,
+        spread_property: &str,
+    ) -> Result<(), ConvertError> {
+        let spread_type = spread_property.rsplit('-').next().unwrap_or("");
+        let base = if spread_type.is_empty() {
+            format!("{section_name}.xhtml")
+        } else {
+            format!("{section_name}-{spread_type}.xhtml")
+        };
+        let part_index = self.push_book_part(&base, section_name);
+        let filename = self.book_parts[part_index].filename.clone();
+        let body_id = self.book_parts[part_index].body_id;
+        let head_id = self.book_parts[part_index].head_id;
+
+        if !spread_property.is_empty() {
+            self.book_parts[part_index].spread_property = Some(spread_property.to_string());
+        }
+
+        // Viewport `<meta>` from the page's fixed pixel size (calibre
+        // `yj_to_epub_content.py:565`). Also seeds the book's
+        // `original-resolution`.
+        if let (Some(w), Some(h)) = (
+            read_px(fields, KfxSymbol::FixedWidth),
+            read_px(fields, KfxSymbol::FixedHeight),
+        ) {
+            self.book_parts[part_index].viewport = Some((w, h));
+            let dom = &mut self.book_parts[part_index].dom;
+            let meta = dom.sub_element(head_id, "meta");
+            let m = dom.get_mut(meta);
+            m.set("name", "viewport");
+            m.set("content", format!("width={w}, height={h}"));
+            if self.original_resolution.is_none() {
+                self.original_resolution = Some((w, h));
+            }
+        }
+
+        // Record element ids reachable from this page → filename, for nav.
+        let mut ids: Vec<i64> = Vec::new();
+        collect_element_ids(container, self.book, &mut ids);
+        for eid in ids {
+            self.element_id_to_filename
+                .entry(eid)
+                .or_insert_with(|| filename.clone());
+        }
+
+        // Emit the page content (the container's div + image) into the body.
+        let wm = self.writing_mode.clone();
+        self.process_content(container, part_index, body_id, &wm, true)?;
         Ok(())
     }
 
@@ -1185,6 +1384,76 @@ fn reading_order_ppd(book: &BookData) -> Option<String> {
     None
 }
 
+/// Book-level fixed-layout signals read from the `content_features` ($585)
+/// entity. `yj_*fixed_layout` ⇒ image-based fixed layout (manga / comic /
+/// picture book); `yj_double_page_spread` ⇒ a spread comic (drives
+/// `book-type: comic` + `page-spread-*`).
+struct FxlInfo {
+    fixed_layout: bool,
+    double_page_spread: bool,
+}
+
+fn detect_fxl(book: &BookData) -> FxlInfo {
+    let mut fixed_layout = false;
+    let mut double_page_spread = false;
+    if let Some(map) = book.by_type.get(&(KfxSymbol::ContentFeatures as u64)) {
+        for v in map.values() {
+            let inner = v.unwrap_annotated();
+            let Some(fields) = inner.as_struct() else {
+                continue;
+            };
+            let Some(features) =
+                get_field(fields, KfxSymbol::Features as u64).and_then(|x| x.as_list())
+            else {
+                continue;
+            };
+            for feat in features {
+                let Some(ff) = feat.unwrap_annotated().as_struct() else {
+                    continue;
+                };
+                // `key` is an IonString in Amazon KFX, but tolerate a symbol too.
+                let key = match get_field(ff, KfxSymbol::Key as u64) {
+                    Some(v) => match v.unwrap_annotated() {
+                        IonValue::String(s) => s.clone(),
+                        other => book
+                            .symbols
+                            .text_of(other)
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                    },
+                    None => continue,
+                };
+                if key.contains("fixed_layout") {
+                    fixed_layout = true;
+                }
+                if key == "yj_double_page_spread" {
+                    double_page_spread = true;
+                }
+            }
+        }
+    }
+    FxlInfo {
+        fixed_layout,
+        double_page_spread,
+    }
+}
+
+/// Read a pixel dimension field that may be a bare int (`fixed_width: 900`) or a
+/// `{value, unit}` length struct. Returns `None` when absent or non-positive.
+fn read_px(fields: &[(u64, IonValue)], sym: KfxSymbol) -> Option<u32> {
+    let v = get_field(fields, sym as u64)?;
+    let inner = v.unwrap_annotated();
+    if let Some(n) = inner.as_int() {
+        return if n > 0 { Some(n as u32) } else { None };
+    }
+    if let Some(fs) = inner.as_struct()
+        && let Some(n) = get_field(fs, KfxSymbol::Value as u64).and_then(|x| x.as_int())
+    {
+        return if n > 0 { Some(n as u32) } else { None };
+    }
+    None
+}
+
 pub(super) fn extract_reading_orders(book: &BookData) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = Vec::new();
     // Try $538 document_data.reading_orders first, then $258 metadata.reading_orders.
@@ -1825,6 +2094,17 @@ pub fn finalize_chapter_attrs(state: &mut ContentState) {
 pub fn emit_stylesheet(state: &ContentState) -> String {
     let mut s = String::new();
     s.push_str("@charset \"utf-8\";\n");
+
+    // Fixed-layout reset (calibre's RESET_CSS, linked on every FXL page): the
+    // `<meta name="viewport">` sizes the page to the image's pixel box and the
+    // reader scales that box to the screen, so the page itself must have no
+    // margin/padding and the image must fill its box. Only emitted for
+    // image-based fixed-layout books; reflowable books keep author margins.
+    if state.is_fixed_layout {
+        s.push_str("html, body { margin: 0; padding: 0; }\n");
+        s.push_str("body { text-align: center; }\n");
+        s.push_str("img { display: block; width: 100%; height: 100%; object-fit: contain; }\n");
+    }
 
     // Body defaults — writing-mode comes from document_data.
     if state.writing_mode != "horizontal-tb" {

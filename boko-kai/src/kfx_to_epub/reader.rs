@@ -19,6 +19,13 @@ use super::{ConvertError, build_output};
 pub struct ReaderSection {
     pub href: String,
     pub html: String,
+    /// Fixed-layout page pixel size, parsed from the document's
+    /// `<meta name="viewport">`; `None` for reflowable documents. The reader
+    /// uses it to size the page box before scaling to the screen.
+    pub viewport: Option<(u32, u32)>,
+    /// `"page-spread-left"` / `"page-spread-right"` for a paired fixed-layout
+    /// page, else `None`. Drives two-up spread placement in the reader.
+    pub spread: Option<String>,
 }
 
 /// A non-spine asset the chapters reference by relative href (images,
@@ -50,6 +57,10 @@ pub struct ReaderBook {
     pub locations: Vec<(i64, i64)>,
     /// Largest linear position — the denominator for whole-book %.
     pub max_location: i64,
+    /// Image-based fixed-layout book (manga / comic): the reader switches to
+    /// pre-paginated rendering (one page per section, viewport-sized, two-up
+    /// spreads) instead of reflowing text.
+    pub fixed_layout: bool,
 }
 
 /// Convert a KFX container to the reader's [`ReaderBook`] — the KFX→DOM front
@@ -63,11 +74,20 @@ pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> 
     // `CoverPage`, e.g. `c0.xhtml` with the cover `<img>`) — exactly what the
     // device shows. Keeping the titlepage too would double the cover: a leading
     // page with no eid/Location, then the real cover section at Location 0.
+    let fixed_layout = out.is_fixed_layout();
     let sections: Vec<ReaderSection> = out
-        .spine_documents()
+        .spine_documents_with_props()
         .into_iter()
-        .filter(|(href, _)| href != "titlepage.xhtml")
-        .map(|(href, html)| ReaderSection { href, html })
+        .filter(|(href, _, _)| href != "titlepage.xhtml")
+        .map(|(href, html, spread)| {
+            let viewport = parse_viewport(&html);
+            ReaderSection {
+                href,
+                html,
+                viewport,
+                spread,
+            }
+        })
         .collect();
 
     // Prepend the cover (表紙 / "Cover") as the leading TOC entry. Amazon's KFX
@@ -122,7 +142,32 @@ pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> 
         page_progression_direction,
         locations,
         max_location,
+        fixed_layout,
     })
+}
+
+/// Parse `width`/`height` from a `<meta name="viewport" content="width=W,
+/// height=H">` tag (the only viewport form `content.rs` emits for fixed-layout
+/// pages). Returns `None` when absent — i.e. a reflowable document.
+fn parse_viewport(html: &str) -> Option<(u32, u32)> {
+    let i = html.find("name=\"viewport\"")?;
+    let content_start = html[i..].find("content=\"")? + i + "content=\"".len();
+    let content_end = html[content_start..].find('"')? + content_start;
+    let content = &html[content_start..content_end];
+    let mut w = None;
+    let mut h = None;
+    for part in content.split(',') {
+        let part = part.trim();
+        if let Some(v) = part.strip_prefix("width=") {
+            w = v.trim().parse::<u32>().ok();
+        } else if let Some(v) = part.strip_prefix("height=") {
+            h = v.trim().parse::<u32>().ok();
+        }
+    }
+    match (w, h) {
+        (Some(w), Some(h)) => Some((w, h)),
+        _ => None,
+    }
 }
 
 /// Per-element linear positions for the reader's Location/% readout.
@@ -229,6 +274,15 @@ mod tests {
             1,
             "cover TOC entry should appear exactly once"
         );
+    }
+
+    #[test]
+    fn parse_viewport_reads_fixed_layout_meta() {
+        let html = r#"<html><head><meta name="viewport" content="width=900, height=1280"/></head><body><img src="p.jpg"/></body></html>"#;
+        assert_eq!(parse_viewport(html), Some((900, 1280)));
+        // Reflowable page (no viewport) → None.
+        let reflow = r#"<html><head><title>c0</title></head><body><p>text</p></body></html>"#;
+        assert_eq!(parse_viewport(reflow), None);
     }
 
     #[test]

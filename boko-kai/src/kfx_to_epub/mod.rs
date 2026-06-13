@@ -161,14 +161,49 @@ pub(crate) fn build_output(
         );
     }
     trace.mark("content::emit_stylesheet");
+    // Collect every `<img src>` the emitted pages reference, so fixed-layout
+    // books can prune the unreferenced page-thumbnail set below.
+    let mut referenced_images: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for part in &content_state.book_parts {
+        for id in 0..part.dom.len() {
+            let el = part.dom.get(id);
+            if el.tag == "img"
+                && let Some(src) = el.get("src")
+            {
+                referenced_images.insert(src.to_string());
+            }
+        }
         let xhtml = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE html>\n{}",
             part.dom.serialize(part.dom.root)
         );
-        out.add_spine_chapter(&part.filename, xhtml);
+        out.add_spine_chapter_with_props(&part.filename, xhtml, part.spread_property.clone());
     }
     trace.mark("dom serialize + add spine chapters");
+
+    // Propagate fixed-layout (manga / comic) metadata to the OPF generator.
+    out.fixed_layout = content_state.is_fixed_layout;
+    // `original-resolution` = the most common page size. The cover is often a
+    // different size from the content pages, so the modal page geometry is the
+    // representative one (falls back to the first page if no pages are sized).
+    out.original_resolution = {
+        let mut counts: std::collections::HashMap<(u32, u32), usize> =
+            std::collections::HashMap::new();
+        for p in &content_state.book_parts {
+            if let Some(vp) = p.viewport {
+                *counts.entry(vp).or_insert(0) += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .max_by_key(|&(_, n)| n)
+            .map(|(vp, _)| vp)
+            .or(content_state.original_resolution)
+    };
+    if content_state.is_comic {
+        out.book_type = Some("comic".to_string());
+    }
 
     // If content emission produced nothing, fall back to image scaffolding
     // so the EPUB still has something in the spine.
@@ -176,11 +211,26 @@ pub(crate) fn build_output(
         resources::emit_image_scaffold_chapters(&mut out);
     }
 
+    // Fixed-layout manga bundles a full set of page thumbnails the reading
+    // order never references (`yj_thumbnails_present`); drop them so the EPUB
+    // ships only the pages it shows (calibre manifests only referenced
+    // resources). Reflowable books reference all their images, so this is
+    // gated on fixed layout to avoid pruning a CSS-only or cover-only image.
+    if content_state.is_fixed_layout {
+        let pruned = out.retain_referenced_images(&referenced_images);
+        trace.mark("resources::prune unreferenced thumbnails");
+        let _ = pruned;
+    }
+
     // Cover titlepage wrapper: matches calibre's `titlepage.xhtml` — an SVG
     // viewBox sized to the cover image so readers (Apple Books, Kindle, etc.)
     // render the cover at the right aspect ratio. Inserted at the FRONT of
-    // the spine so it's what opens when a reader picks up the book.
-    if let Some(titlepage) = build_titlepage(&out) {
+    // the spine so it's what opens when a reader picks up the book. Skipped for
+    // fixed-layout books, whose first spine page already IS the cover (adding a
+    // titlepage would duplicate it and break the spread pairing parity).
+    if !content_state.is_fixed_layout
+        && let Some(titlepage) = build_titlepage(&out)
+    {
         out.prepend_spine_chapter("titlepage.xhtml", titlepage);
     }
 

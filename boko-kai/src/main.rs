@@ -215,6 +215,16 @@ enum ValidateCheck {
         details: usize,
     },
 
+    /// Verify a fixed-layout (manga / comic) KFX produced a conformant
+    /// pre-paginated EPUB: rendition:layout, per-page viewport, page-spread
+    /// properties, and no orphan page thumbnails
+    Fxl {
+        epub: String,
+        kfx: String,
+        #[arg(long, default_value_t = 20)]
+        details: usize,
+    },
+
     /// Run all available validations against the conversion
     All {
         epub: String,
@@ -298,6 +308,9 @@ fn main() -> ExitCode {
                 }
                 ValidateCheck::PageProgression { epub, kfx, details } => {
                     validate_page_progression(&epub, &kfx, details, dir)
+                }
+                ValidateCheck::Fxl { epub, kfx, details } => {
+                    validate_fxl(&epub, &kfx, details, dir)
                 }
                 ValidateCheck::All { epub, kfx, details } => {
                     validate_all(&epub, &kfx, details, dir)
@@ -663,6 +676,24 @@ fn validate_page_progression(
     }
 }
 
+fn validate_fxl(
+    epub_path: &str,
+    kfx_path: &str,
+    _details: usize,
+    dir: boko::validate::Direction,
+) -> Result<(), String> {
+    let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
+    let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
+
+    let report = boko::validate::fxl::validate(&epub_bytes, &kfx_bytes)?;
+    report.print_summary(dir);
+    if report.is_clean() {
+        Ok(())
+    } else {
+        Err("fixed-layout structure not conformant (see report above)".to_string())
+    }
+}
+
 fn validate_all(
     epub_path: &str,
     kfx_path: &str,
@@ -766,6 +797,13 @@ fn validate_all(
     let ppd = boko::validate::page_progression::validate(&epub_bytes, &kfx_bytes)?;
     ppd.print_summary(dir);
     if !ppd.is_clean() {
+        all_clean = false;
+    }
+
+    println!("\n=== Fixed layout ===");
+    let fxl = boko::validate::fxl::validate(&epub_bytes, &kfx_bytes)?;
+    fxl.print_summary(dir);
+    if !fxl.is_clean() {
         all_clean = false;
     }
 

@@ -28,6 +28,14 @@ pub struct OebpsFile {
     pub height: Option<u32>,
 }
 
+/// One spine entry: a manifest item id plus an optional EPUB `properties`
+/// value. Fixed-layout pages carry `page-spread-left`/`page-spread-right` so
+/// readers pair facing pages in a two-up view.
+pub struct SpineItem {
+    pub id: String,
+    pub properties: Option<String>,
+}
+
 /// OPF manifest entry. `id` must be unique across the manifest; `href` is
 /// relative to the OPF (i.e. the file path under `OEBPS/`).
 pub struct ManifestEntry {
@@ -55,8 +63,19 @@ pub struct EpubOutput {
     /// `id` → index in `manifest` for fast lookup / linking.
     manifest_by_id: HashMap<String, usize>,
 
-    /// Spine: ordered list of manifest item ids.
-    spine: Vec<String>,
+    /// Spine: ordered list of manifest item ids (+ optional FXL properties).
+    spine: Vec<SpineItem>,
+
+    /// Image-based fixed-layout book (manga / comic). Drives the
+    /// `rendition:layout pre-paginated` + `fixed-layout` OPF metadata and the
+    /// `rendition:` property declaration on `<package>`.
+    pub fixed_layout: bool,
+    /// Page pixel size for `original-resolution` / `rendition:orientation`
+    /// (calibre `epub_output.py:932`). Only meaningful when `fixed_layout`.
+    pub original_resolution: Option<(u32, u32)>,
+    /// `book-type` OPF hint — `"comic"` for double-page-spread manga
+    /// (calibre `epub_output.py:941`).
+    pub book_type: Option<String>,
 
     /// NCX navMap content (the inner <navPoint>…</navPoint> sequence).
     /// When set, `generate_ncx` uses this instead of the spine-derived
@@ -95,6 +114,9 @@ impl EpubOutput {
             manifest: Vec::new(),
             manifest_by_id: HashMap::new(),
             spine: Vec::new(),
+            fixed_layout: false,
+            original_resolution: None,
+            book_type: None,
             ncx_navmap: None,
             nav_ol_html: None,
             page_progression_direction: None,
@@ -214,8 +236,8 @@ impl EpubOutput {
         self.manifest_by_id.insert(new_id_str.clone(), idx);
         // Spine entries are by id — update any reference to the old id.
         for slot in &mut self.spine {
-            if slot == &old_id {
-                *slot = new_id_str.clone();
+            if slot.id == old_id {
+                slot.id = new_id_str.clone();
             }
         }
         Some(new_id_str)
@@ -232,7 +254,13 @@ impl EpubOutput {
             None,
             None,
         );
-        self.spine.insert(0, id);
+        self.spine.insert(
+            0,
+            SpineItem {
+                id,
+                properties: None,
+            },
+        );
     }
 
     /// Public read-only accessor used by `mod.rs` when generating the
@@ -257,6 +285,17 @@ impl EpubOutput {
 
     /// Append a chapter `xhtml` to the spine, bundled at `OEBPS/<filename>`.
     pub fn add_spine_chapter(&mut self, filename: &str, xhtml: String) {
+        self.add_spine_chapter_with_props(filename, xhtml, None);
+    }
+
+    /// Like [`add_spine_chapter`] but attaches an EPUB itemref `properties`
+    /// value (e.g. `page-spread-left`) for fixed-layout pages.
+    pub fn add_spine_chapter_with_props(
+        &mut self,
+        filename: &str,
+        xhtml: String,
+        properties: Option<String>,
+    ) {
         let id = self.add_resource(
             filename,
             xhtml.into_bytes(),
@@ -264,7 +303,43 @@ impl EpubOutput {
             None,
             None,
         );
-        self.spine.push(id);
+        self.spine.push(SpineItem { id, properties });
+    }
+
+    /// Drop manifest image resources not referenced by any spine document.
+    /// Fixed-layout manga ships a full set of page thumbnails the reading order
+    /// never uses (`yj_thumbnails_present`); calibre manifests only referenced
+    /// resources. `referenced` is the set of `<img src>` hrefs collected from
+    /// the emitted pages; the cover image is always kept. Returns the number of
+    /// resources pruned.
+    pub fn retain_referenced_images(&mut self, referenced: &std::collections::HashSet<String>) -> usize {
+        let drop: Vec<String> = self
+            .manifest
+            .iter()
+            .filter(|m| {
+                m.media_type.starts_with("image/")
+                    && !m.is_cover_image
+                    && !referenced.contains(&m.href)
+            })
+            .map(|m| m.href.clone())
+            .collect();
+        for href in &drop {
+            self.oebps_files.remove(href);
+            self.oebps_order.retain(|f| f != href);
+            if let Some(pos) = self.manifest.iter().position(|m| &m.href == href) {
+                let id = self.manifest[pos].id.clone();
+                self.manifest.remove(pos);
+                self.manifest_by_id.remove(&id);
+            }
+        }
+        // `manifest_by_id` indices shifted by the removals above — rebuild.
+        if !drop.is_empty() {
+            self.manifest_by_id.clear();
+            for (i, m) in self.manifest.iter().enumerate() {
+                self.manifest_by_id.insert(m.id.clone(), i);
+            }
+        }
+        drop.len()
     }
 
     /// Reader-mode extraction: the spine chapters in reading order as
@@ -274,13 +349,38 @@ impl EpubOutput {
     pub fn spine_documents(&self) -> Vec<(String, String)> {
         self.spine
             .iter()
-            .filter_map(|id| {
-                let idx = *self.manifest_by_id.get(id)?;
+            .filter_map(|item| {
+                let idx = *self.manifest_by_id.get(&item.id)?;
                 let href = self.manifest[idx].href.clone();
                 let file = self.oebps_files.get(&href)?;
                 Some((href, String::from_utf8_lossy(&file.data).into_owned()))
             })
             .collect()
+    }
+
+    /// Reader-mode extraction with fixed-layout metadata: `(href, html,
+    /// spread_property)` per spine document in reading order. `spread_property`
+    /// is `page-spread-left`/`-right` for paired FXL pages, else `None`. The
+    /// per-page viewport lives in the document's own `<meta name="viewport">`.
+    pub fn spine_documents_with_props(&self) -> Vec<(String, String, Option<String>)> {
+        self.spine
+            .iter()
+            .filter_map(|item| {
+                let idx = *self.manifest_by_id.get(&item.id)?;
+                let href = self.manifest[idx].href.clone();
+                let file = self.oebps_files.get(&href)?;
+                Some((
+                    href,
+                    String::from_utf8_lossy(&file.data).into_owned(),
+                    item.properties.clone(),
+                ))
+            })
+            .collect()
+    }
+
+    /// Whether this is an image-based fixed-layout book (manga / comic).
+    pub fn is_fixed_layout(&self) -> bool {
+        self.fixed_layout
     }
 
     /// Reader-mode extraction: every non-spine file (images, `style.css`) as
@@ -290,7 +390,11 @@ impl EpubOutput {
         let spine_hrefs: std::collections::HashSet<&str> = self
             .spine
             .iter()
-            .filter_map(|id| self.manifest_by_id.get(id).map(|&i| self.manifest[i].href.as_str()))
+            .filter_map(|item| {
+                self.manifest_by_id
+                    .get(&item.id)
+                    .map(|&i| self.manifest[i].href.as_str())
+            })
             .collect();
         self.oebps_order
             .iter()
@@ -375,10 +479,16 @@ impl EpubOutput {
         // manifest items and `<meta property="dcterms:modified">` in
         // metadata. NCX still emitted for legacy EPUB 2 readers.
         let mut s = String::new();
-        s.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
-"#);
+        // Declare the `rendition:` property vocabulary on `<package>` for
+        // fixed-layout books (EPUB 3 Multiple-Rendition / FXL metadata).
+        let prefix_attr = if self.fixed_layout {
+            " prefix=\"rendition: http://www.idpf.org/vocab/rendition/#\""
+        } else {
+            ""
+        };
+        s.push_str(&format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"BookId\"{prefix_attr}>\n  <metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:opf=\"http://www.idpf.org/2007/opf\">\n"
+        ));
 
         // Title — when KFX carries `title_pronunciation` (Japanese yomigana
         // sort key), surface it as `opf:file-as`; otherwise omit the attr.
@@ -490,19 +600,46 @@ impl EpubOutput {
             ));
         }
 
-        // Primary writing mode hint — calibre emits this for any
-        // non-`horizontal-tb` book (epub_output.py:955). The Kindle reader
-        // uses it as a layout signal even though EPUB-3 readers also read
-        // the CSS writing-mode declaration in the stylesheet.
-        if let Some(wm) = self
-            .writing_mode
-            .as_deref()
-            .filter(|v| !v.is_empty() && *v != "horizontal-tb")
-        {
+        // Primary writing mode hint (calibre epub_output.py:954). For a
+        // horizontal book the primary mode encodes the page-turn direction
+        // (`horizontal-rl` for RTL manga); for a vertical book it's the
+        // writing mode itself. `horizontal-lr` is the default and omitted.
+        let wm = self.writing_mode.as_deref().unwrap_or("horizontal-tb");
+        let ppd = self.page_progression_direction.as_deref().unwrap_or("ltr");
+        let primary_writing_mode = if wm == "horizontal-tb" || wm.is_empty() {
+            if ppd == "rtl" { "horizontal-rl" } else { "horizontal-lr" }
+        } else {
+            wm
+        };
+        if primary_writing_mode != "horizontal-lr" {
             s.push_str(&format!(
                 "    <meta name=\"primary-writing-mode\" content=\"{}\"/>\n",
-                xml_escape(wm)
+                xml_escape(primary_writing_mode)
             ));
+        }
+
+        // Fixed-layout (manga / comic) metadata — calibre epub_output.py:926.
+        if self.fixed_layout {
+            s.push_str("    <meta property=\"rendition:layout\">pre-paginated</meta>\n");
+            s.push_str("    <meta name=\"fixed-layout\" content=\"true\"/>\n");
+            if let Some((w, h)) = self.original_resolution {
+                s.push_str(&format!(
+                    "    <meta name=\"original-resolution\" content=\"{w}x{h}\"/>\n"
+                ));
+                let orientation = if w > h { "landscape" } else { "portrait" };
+                s.push_str(&format!(
+                    "    <meta property=\"rendition:orientation\">{orientation}</meta>\n"
+                ));
+                s.push_str(&format!(
+                    "    <meta name=\"orientation-lock\" content=\"{orientation}\"/>\n"
+                ));
+            }
+            if let Some(bt) = self.book_type.as_deref() {
+                s.push_str(&format!(
+                    "    <meta name=\"book-type\" content=\"{}\"/>\n",
+                    xml_escape(bt)
+                ));
+            }
         }
 
         s.push_str("  </metadata>\n");
@@ -545,10 +682,16 @@ impl EpubOutput {
             .map(|v| format!(" page-progression-direction=\"{}\"", xml_escape(v)))
             .unwrap_or_default();
         s.push_str(&format!("  <spine toc=\"ncx\"{}>\n", ppd_attr));
-        for id in &self.spine {
+        for item in &self.spine {
+            let props = item
+                .properties
+                .as_deref()
+                .map(|p| format!(" properties=\"{}\"", xml_escape(p)))
+                .unwrap_or_default();
             s.push_str(&format!(
-                "    <itemref idref=\"{}\"/>\n",
-                xml_escape(id)
+                "    <itemref idref=\"{}\"{}/>\n",
+                xml_escape(&item.id),
+                props,
             ));
         }
         s.push_str("  </spine>\n");
@@ -611,12 +754,12 @@ impl EpubOutput {
         s.push_str("    <h1>Table of Contents</h1>\n");
         if let Some(ol) = &self.nav_ol_html {
             s.push_str(ol);
-        } else if let Some(first_chapter_id) = self.spine.first() {
+        } else if let Some(first) = self.spine.first() {
             // Fallback: single entry pointing at the first spine chapter
             // (mirrors what `generate_ncx` does when `ncx_navmap` is unset).
             let href = self
                 .manifest_by_id
-                .get(first_chapter_id)
+                .get(&first.id)
                 .map(|&idx| self.manifest[idx].href.clone())
                 .unwrap_or_default();
             s.push_str(&format!(
@@ -680,10 +823,10 @@ impl EpubOutput {
         // single-entry fallback pointing at the first spine chapter.
         if let Some(navmap) = &self.ncx_navmap {
             s.push_str(navmap);
-        } else if let Some(first_chapter_id) = self.spine.first() {
+        } else if let Some(first) = self.spine.first() {
             let href = self
                 .manifest_by_id
-                .get(first_chapter_id)
+                .get(&first.id)
                 .map(|&idx| self.manifest[idx].href.clone())
                 .unwrap_or_default();
             s.push_str(&format!(

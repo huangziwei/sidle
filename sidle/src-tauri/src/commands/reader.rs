@@ -20,6 +20,11 @@ use crate::state::AppState;
 pub struct ReaderSectionDto {
     pub href: String,
     pub html: String,
+    /// Fixed-layout page pixel size `[width, height]`, or `null` for reflowable.
+    pub viewport: Option<[u32; 2]>,
+    /// `"page-spread-left"` / `"page-spread-right"` for a paired fixed-layout
+    /// page, else `null`.
+    pub spread: Option<String>,
 }
 
 /// A non-spine asset the chapters reference by relative href.
@@ -134,6 +139,9 @@ pub struct ReaderBookDto {
     pub locations: Vec<(i64, i64)>,
     /// Largest linear position — the denominator for whole-book %.
     pub max_location: i64,
+    /// Image-based fixed-layout book (manga / comic): the reader renders
+    /// pre-paginated pages (viewport-sized, two-up spreads) instead of reflowing.
+    pub fixed_layout: bool,
 }
 
 fn map_toc(points: Vec<boko::kfx_to_epub::navigation::NavPoint>) -> Vec<ReaderTocDto> {
@@ -156,6 +164,8 @@ impl From<boko::kfx_to_epub::ReaderBook> for ReaderBookDto {
                 .map(|s| ReaderSectionDto {
                     href: s.href,
                     html: s.html,
+                    viewport: s.viewport.map(|(w, h)| [w, h]),
+                    spread: s.spread,
                 })
                 .collect(),
             resources: b
@@ -175,6 +185,7 @@ impl From<boko::kfx_to_epub::ReaderBook> for ReaderBookDto {
             page_progression_direction: b.page_progression_direction,
             locations: b.locations,
             max_location: b.max_location,
+            fixed_layout: b.fixed_layout,
         }
     }
 }

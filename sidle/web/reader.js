@@ -3202,7 +3202,11 @@ async function open(id) {
   totalChars = cumChars;
   imageSections = new Set();
   dto.sections.forEach((sec, i) => {
-    if (isImageOnlySection(sec.html)) imageSections.add(i);
+    // A fixed-layout (manga / comic) book is pre-paginated: every spine document
+    // is one full-page image sized by its own `<meta name="viewport">`, so treat
+    // them all as image pages (full-bleed, zero-margin, one column) regardless of
+    // the per-section text heuristic. Reflowable books fall back to that heuristic.
+    if (dto.fixed_layout || isImageOnlySection(sec.html)) imageSections.add(i);
   });
   layoutMode = null;
   const pace = loadPace();
