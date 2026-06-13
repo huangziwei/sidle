@@ -145,6 +145,14 @@ impl Report {
             && self.orphan_link_tos.is_empty()
     }
 
+    /// Direction-aware gate. In KFX→EPUB, an EPUB-internal dangling ref
+    /// (`<a href="#x">` with no `id="x"`) is boko's defect and must fail; in
+    /// EPUB→KFX it's source data quality (not boko's fault), so it's excluded.
+    /// `validate_all` and the standalone links check both gate on this.
+    pub fn is_clean_for(&self, dir: super::Direction) -> bool {
+        self.is_clean() && (dir.epub_is_source() || self.epub_dangling_refs.is_empty())
+    }
+
     pub fn print_summary(&self, dir: super::Direction) {
         let epub_is_src = dir.epub_is_source();
         println!("EPUB <a href>:");

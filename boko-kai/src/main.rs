@@ -535,7 +535,7 @@ fn validate_links(
     if details > 0 {
         report.print_details(details, dir);
     }
-    if report.is_clean() {
+    if report.is_clean_for(dir) {
         Ok(())
     } else {
         let dropped = if dir.epub_is_source() {
@@ -706,13 +706,28 @@ fn validate_all(
     println!("=== Direction: {} → {} ===", dir.source_label(), dir.target_label());
     let mut all_clean = true;
 
+    // Fixed-layout (manga / image) books are image pages: the reflow-text gates
+    // — ruby, text, CSS coverage, semantic tags, writing-mode — don't apply and
+    // would score a correct FXL book as broken (e.g. the deliberate FXL
+    // horizontal-tb forcing trips the writing-mode gate). Detect up front; for an
+    // FXL book those checks still run and print, but as INFORMATION only. The
+    // FXL-shape gate plus images / nav / metadata / links / PPD still gate.
+    let fxl = boko::validate::fxl::validate(&epub_bytes, &kfx_bytes)?;
+    let reflow_gated = !fxl.kfx_fixed_layout;
+    if fxl.kfx_fixed_layout {
+        println!(
+            "(fixed-layout book — ruby/text/style/tags/writing-mode are \
+             informational; gating on FXL shape + images/nav/metadata/links/PPD)"
+        );
+    }
+
     println!("=== Ruby ===");
     let ruby = boko::validate::ruby::validate(&epub_bytes, &kfx_bytes)?;
     ruby.print_summary(dir);
     if details > 0 {
         ruby.print_details(details, dir);
     }
-    if !ruby.is_clean() {
+    if reflow_gated && !ruby.is_clean() {
         all_clean = false;
     }
 
@@ -722,7 +737,7 @@ fn validate_all(
     if details > 0 {
         text.print_details(details, dir);
     }
-    if !text.is_clean_for(dir) {
+    if reflow_gated && !text.is_clean_for(dir) {
         all_clean = false;
     }
 
@@ -732,7 +747,7 @@ fn validate_all(
     if details > 0 {
         style.print_details(details);
     }
-    if !style.is_clean() {
+    if reflow_gated && !style.is_clean() {
         all_clean = false;
     }
 
@@ -742,7 +757,7 @@ fn validate_all(
     if details > 0 {
         tags.print_details(details);
     }
-    if !tags.is_clean() {
+    if reflow_gated && !tags.is_clean() {
         all_clean = false;
     }
 
@@ -752,7 +767,7 @@ fn validate_all(
     if details > 0 {
         links.print_details(details, dir);
     }
-    if !links.is_clean() {
+    if !links.is_clean_for(dir) {
         all_clean = false;
     }
 
@@ -789,7 +804,7 @@ fn validate_all(
     println!("\n=== Writing mode ===");
     let wm = boko::validate::writing_mode::validate(&epub_bytes, &kfx_bytes)?;
     wm.print_summary(dir);
-    if !wm.is_clean() {
+    if reflow_gated && !wm.is_clean() {
         all_clean = false;
     }
 
@@ -801,7 +816,6 @@ fn validate_all(
     }
 
     println!("\n=== Fixed layout ===");
-    let fxl = boko::validate::fxl::validate(&epub_bytes, &kfx_bytes)?;
     fxl.print_summary(dir);
     if !fxl.is_clean() {
         all_clean = false;

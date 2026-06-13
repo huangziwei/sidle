@@ -332,6 +332,14 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         ("font_weight_300", Some("300")), ("font_weight_500", Some("500")),
         ("font_weight_600", Some("600")), ("font_weight_800", Some("800")),
         ("font_weight_900", Some("900")),
+        // Named weights (KFX emits these alongside the numeric forms). Standard
+        // CSS keyword→number mapping; `ultra_bold` is the only one the corpus
+        // actually dropped, the rest of the family added to pre-empt the tail.
+        ("thin", Some("100")), ("extra_light", Some("200")), ("ultra_light", Some("200")),
+        ("light", Some("300")), ("medium", Some("500")),
+        ("semi_bold", Some("600")), ("demi_bold", Some("600")),
+        ("extra_bold", Some("800")), ("ultra_bold", Some("800")),
+        ("black", Some("900")), ("heavy", Some("900")),
     ])}),
     ("font_variant", Prop { name: "font-variant", values: Some(&[
         ("normal", Some("normal")), ("small-caps", Some("small-caps")),

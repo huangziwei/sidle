@@ -200,7 +200,13 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
             kfx: kfx.title.clone(),
         });
     }
-    if !epub.language.is_empty() && epub.language != kfx.language {
+    // Flag only when the KFX *has* a language that boko didn't carry faithfully
+    // (dropped, or changed). When the KFX language is empty, boko supplying a
+    // default `dc:language` is required by EPUB and isn't a fidelity defect —
+    // there's nothing in the source to be unfaithful to. (boko's hard-coded "en"
+    // fallback is a poor default for a CJK-heavy library, but no corpus book hits
+    // it wrongly; revisit if a non-English empty-language book appears.)
+    if !kfx.language.is_empty() && epub.language != kfx.language {
         diffs.push(FieldDiff {
             field: "language",
             epub: epub.language.clone(),

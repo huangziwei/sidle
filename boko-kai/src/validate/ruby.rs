@@ -612,6 +612,12 @@ fn collect_pairs_from_ion<F>(
                     let mut length: i64 = -1;
                     let mut ruby_name = String::new();
                     let mut ruby_id: i64 = 0;
+                    // Sub-ranges from `ruby_id_list`: one style_event can annotate
+                    // several base spans, each with its own ruby_id. boko's emitter
+                    // (content.rs try_emit_ruby_text) expands these into multiple
+                    // pairs, so the KFX side must too — otherwise every list-event
+                    // pair shows up as "fabricated".
+                    let mut id_list: Vec<(i64, i64, i64)> = Vec::new();
                     for (k, v) in efields {
                         match resolve_sym(*k).as_str() {
                             "offset" => {
@@ -634,17 +640,63 @@ fn collect_pairs_from_ion<F>(
                                     ruby_id = *n;
                                 }
                             }
+                            "ruby_id_list" => {
+                                if let Some(entries) = v.as_list() {
+                                    for entry in entries {
+                                        let Some(ef) = entry.unwrap_annotated().as_struct() else {
+                                            continue;
+                                        };
+                                        let (mut o, mut l, mut rid) = (0i64, 0i64, 0i64);
+                                        for (ek, ev2) in ef {
+                                            match resolve_sym(*ek).as_str() {
+                                                "offset" => {
+                                                    if let IonValue::Int(n) = ev2 {
+                                                        o = *n;
+                                                    }
+                                                }
+                                                "length" => {
+                                                    if let IonValue::Int(n) = ev2 {
+                                                        l = *n;
+                                                    }
+                                                }
+                                                "ruby_id" => {
+                                                    if let IonValue::Int(n) = ev2 {
+                                                        rid = *n;
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        if l > 0 && rid > 0 {
+                                            id_list.push((o, l, rid));
+                                        }
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
-                    if offset >= 0 && length > 0 && !ruby_name.is_empty() && ruby_id > 0 {
-                        let start = offset as usize;
-                        let end = (start + length as usize).min(chars.len());
+                    if offset < 0 || ruby_name.is_empty() {
+                        continue;
+                    }
+                    // A single `ruby_id` covers the whole [0, length) span; otherwise
+                    // use the `ruby_id_list` sub-ranges. Mirrors boko's emitter.
+                    let ranges: Vec<(i64, i64, i64)> = if ruby_id > 0 {
+                        vec![(0, length, ruby_id)]
+                    } else {
+                        id_list
+                    };
+                    for (sub_off, sub_len, rid) in ranges {
+                        if sub_len <= 0 || rid <= 0 {
+                            continue;
+                        }
+                        let start = (offset + sub_off).max(0) as usize;
+                        let end = (start + sub_len as usize).min(chars.len());
                         if start < end {
                             let base: String = chars[start..end].iter().collect();
                             let annotation = ruby_lookup
                                 .get(&ruby_name)
-                                .and_then(|v| v.get((ruby_id - 1) as usize))
+                                .and_then(|v| v.get((rid - 1) as usize))
                                 .cloned()
                                 .unwrap_or_default();
                             pairs.push(RubyPair::from_trimmed(&base, &annotation));

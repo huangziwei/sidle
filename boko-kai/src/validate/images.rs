@@ -158,15 +158,22 @@ pub struct Report {
 }
 
 impl Report {
-    /// Whether the conversion in the given direction looks clean: no internal
-    /// defects on either side, image counts match, every internal `<img>` in
-    /// the EPUB has bundled bytes AND those bytes parse as a real image.
+    /// Whether the conversion looks clean **for the reader**: every internal
+    /// `<img>` in the EPUB resolves to bundled bytes that parse as a real image.
+    ///
+    /// Gated ONLY on EPUB-side, boko-controlled facts. Deliberately NOT gated on:
+    /// - `dangling_external_resources` / `orphan_image_refs` / `orphan_raw_media`
+    ///   — intrinsic to the *source KFX* (calibre's EPUB trips them with the same
+    ///   numbers), not something boko introduces or can fix.
+    /// - `epub_image_count == kfx_image_element_count` — boko adds a cover `<img>`
+    ///   with no KFX storyline element, so a book with a cover legitimately has
+    ///   one more EPUB image than KFX elements; this equality false-fails on every
+    ///   such book.
+    /// All of the above stay printed-but-informational in the report (a real
+    /// dropped image still shows as `epub_missing_image_count`). See
+    /// `.claude/plans/finished_or_stale/kfx-to-epub-port.md` "Insights".
     pub fn is_clean(&self) -> bool {
-        self.dangling_external_resources.is_empty()
-            && self.orphan_image_refs.is_empty()
-            && self.epub_image_count == self.kfx_image_element_count
-            && self.epub_missing_image_count == 0
-            && self.epub_unreadable_image_count == 0
+        self.epub_missing_image_count == 0 && self.epub_unreadable_image_count == 0
     }
 
     /// Count of images dropped by boko's converter, given the conversion
