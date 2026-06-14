@@ -66,6 +66,11 @@ pub struct ElementStart {
     /// `罫囲み` `<div>` wrapping `<p>` lines) becomes a `type: container` whose
     /// children form the content list directly.
     pub has_block_children: bool,
+    /// `box_align` value symbol to emit on a bordered container, aligning its
+    /// content to the writing-mode start (right for vertical-rl). Without it
+    /// the Kindle device end-aligns a full-width box's content, leaving a gap
+    /// before the first column. `None` = don't emit. Set during export.
+    pub container_box_align: Option<u64>,
 }
 
 impl ElementStart {
@@ -83,6 +88,7 @@ impl ElementStart {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_box_align: None,
         }
     }
 
@@ -201,6 +207,7 @@ impl TokenStream {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_box_align: None,
         }));
     }
 

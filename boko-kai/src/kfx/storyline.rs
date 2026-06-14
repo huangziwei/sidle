@@ -196,6 +196,7 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         style_name,                     // Style name (for import lookup)
         needs_container_wrapper: false, // Only used during export
         has_block_children: false,      // Only used during export
+        container_box_align: None,      // Only used during export
     }));
 
     // Recurse into children
@@ -879,6 +880,24 @@ fn walk_node_for_export(
         .children(node_id)
         .any(|c| chapter.node(c).is_some_and(|n| !is_inline_like_role(n.role)));
 
+    // A bordered container is full-width on Kindle; without an explicit
+    // `box_align` the device end-aligns its content, leaving a gap before the
+    // first column. Align content to the writing-mode start (right for
+    // vertical-rl, left otherwise) so the box reads from its start edge.
+    if elem.needs_container_wrapper {
+        use crate::style::WritingMode;
+        let wm = chapter
+            .styles
+            .get(node.style)
+            .map(|s| s.writing_mode)
+            .unwrap_or_default();
+        let align = match wm {
+            WritingMode::VerticalRl => KfxSymbol::Right,
+            _ => KfxSymbol::Left,
+        };
+        elem.container_box_align = Some(align as u64);
+    }
+
     // SCHEMA-DRIVEN attribute export
     // Create a closure to get semantic values by target
     let export_ctx = crate::kfx::transforms::ExportContext {
@@ -1491,6 +1510,12 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     // Layout: vertical (required for container)
                     outer_fields.push((sym!(Layout), IonValue::Symbol(KfxSymbol::Vertical as u64)));
 
+                    // box_align: start-align the box content (else the device
+                    // end-aligns it, leaving a gap before the first column).
+                    if let Some(ba) = elem.container_box_align {
+                        outer_fields.push((KfxSymbol::BoxAlign as u64, IonValue::Symbol(ba)));
+                    }
+
                     // Add semantic type annotation if the strategy specifies one
                     if let Some(strategy) = schema().export_strategy(elem.role)
                         && let Some(semantic_type) = strategy.semantic_type()
@@ -1659,6 +1684,9 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     if elem.needs_container_wrapper {
                         fields.push((sym!(Type), IonValue::Symbol(KfxSymbol::Container as u64)));
                         fields.push((sym!(Layout), IonValue::Symbol(KfxSymbol::Vertical as u64)));
+                        if let Some(ba) = elem.container_box_align {
+                            fields.push((KfxSymbol::BoxAlign as u64, IonValue::Symbol(ba)));
+                        }
                     } else if let Some(kfx_type) = schema().kfx_type_for_role(elem.role) {
                         fields.push((sym!(Type), IonValue::Symbol(kfx_type as u64)));
                     }
@@ -2079,6 +2107,7 @@ mod tests {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_box_align: None,
         }));
         stream.end_element();
 
@@ -2110,6 +2139,7 @@ mod tests {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_box_align: None,
         }));
         stream.end_element();
 
@@ -2146,6 +2176,7 @@ mod tests {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_box_align: None,
         }));
         stream.end_element();
 
@@ -2187,6 +2218,7 @@ mod tests {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_box_align: None,
         }));
         stream.end_element();
 
@@ -2825,6 +2857,7 @@ mod tests {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_box_align: None,
         }));
         stream.end_element();
 

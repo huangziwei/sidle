@@ -518,9 +518,11 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
     ])}),
 
     // ---- alignment / decoration / variant / yj breaks ----
-    // `box_align: center` ↔ auto inline margins; `margin-inline: auto` centers
-    // a definite-width block in one declaration (the exporter's inverse).
-    ("box_align", Prop { name: "margin-inline", values: Some(&[("center", Some("auto"))]) }),
+    // `box_align` is the container's content alignment (calibre maps $580 →
+    // text-align). Values left/center/right.
+    ("box_align", Prop { name: "text-align", values: Some(&[
+        ("center", Some("center")), ("left", Some("left")), ("right", Some("right")),
+    ])}),
     ("float", Prop { name: "float", values: Some(&[
         ("none", Some("none")), ("left", Some("left")), ("right", Some("right")),
     ])}),
