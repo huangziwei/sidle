@@ -471,17 +471,84 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         ("all", Some("all")), ("none", Some("none")),
     ])}),
 
-    // ---- ruby ----
-    // NOTE: `ruby_align`/`ruby_position` are NOT canonical YJ symbol names
-    // (real KFX uses `ruby_text_align`/`ruby_base_align` and
-    // `ruby_position_horizontal`/`_vertical`), so these never match. boko does
-    // not export ruby styling, so they are inert; left as-is pending a verified
-    // sample for the correct value set.
-    ("ruby_align", Prop { name: "ruby-align", values: Some(&[
-        ("center", Some("center")), ("space-around", Some("space-around")),
-        ("space-between", Some("space-between")), ("start", Some("start")),
+    // ---- fragmentation (page/column breaks) ----
+    // `break-inside: avoid` keeps a 罫囲み box from splitting across pages.
+    ("break_inside", Prop { name: "break-inside", values: Some(&[
+        ("auto", Some("auto")), ("avoid", Some("avoid")),
     ])}),
-    ("ruby_position", Prop { name: "ruby-position", values: Some(&[
+    ("break_before", Prop { name: "break-before", values: Some(&[
+        ("auto", Some("auto")), ("avoid", Some("avoid")), ("always", Some("page")),
+    ])}),
+    ("break_after", Prop { name: "break-after", values: Some(&[
+        ("auto", Some("auto")), ("avoid", Some("avoid")), ("always", Some("page")),
+    ])}),
+    ("keep_lines_together", Prop { name: "orphans", values: None }),
+
+    // ---- lists ----
+    ("list_style", Prop { name: "list-style-type", values: Some(&[
+        ("none", Some("none")), ("disc", Some("disc")), ("circle", Some("circle")),
+        ("square", Some("square")), ("numeric", Some("decimal")),
+        ("roman_lower", Some("lower-roman")), ("roman_upper", Some("upper-roman")),
+        ("alpha_lower", Some("lower-alpha")), ("alpha_upper", Some("upper-alpha")),
+    ])}),
+    ("list_style_position", Prop { name: "list-style-position", values: Some(&[
+        ("outside", Some("outside")), ("inside", Some("inside")),
+    ])}),
+
+    // ---- text wrapping ----
+    ("word_break", Prop { name: "word-break", values: Some(&[
+        ("normal", Some("normal")), ("break_all", Some("break-all")),
+    ])}),
+    ("hyphens", Prop { name: "hyphens", values: Some(&[
+        ("auto", Some("auto")), ("manual", Some("manual")), ("none", Some("none")),
+    ])}),
+
+    // ---- box sizing / radius / table borders ----
+    ("sizing_bounds", Prop { name: "box-sizing", values: Some(&[
+        ("content_bounds", Some("content-box")), ("border_bounds", Some("border-box")),
+    ])}),
+    ("border_radius_top_left", Prop { name: "border-top-left-radius", values: None }),
+    ("border_radius_top_right", Prop { name: "border-top-right-radius", values: None }),
+    ("border_radius_bottom_left", Prop { name: "border-bottom-left-radius", values: None }),
+    ("border_radius_bottom_right", Prop { name: "border-bottom-right-radius", values: None }),
+    ("border_spacing_horizontal", Prop { name: "-webkit-border-horizontal-spacing", values: None }),
+    ("border_spacing_vertical", Prop { name: "-webkit-border-vertical-spacing", values: None }),
+    ("table_border_collapse", Prop { name: "border-collapse", values: Some(&[
+        ("true", Some("collapse")), ("false", Some("separate")),
+    ])}),
+
+    // ---- alignment / decoration / variant / yj breaks ----
+    // `box_align: center` ↔ auto inline margins; `margin-inline: auto` centers
+    // a definite-width block in one declaration (the exporter's inverse).
+    ("box_align", Prop { name: "margin-inline", values: Some(&[("center", Some("auto"))]) }),
+    ("float", Prop { name: "float", values: Some(&[
+        ("none", Some("none")), ("left", Some("left")), ("right", Some("right")),
+    ])}),
+    ("overline", Prop { name: "text-decoration-line", values: Some(&[
+        ("solid", Some("overline")), ("none", None),
+    ])}),
+    ("glyph_transform", Prop { name: "font-variant", values: Some(&[
+        ("small_caps", Some("small-caps")),
+    ])}),
+    // yj-internal break props (Amazon emits these alongside the CSS break-*).
+    ("yj_break_before", Prop { name: "break-before", values: Some(&[
+        ("auto", Some("auto")), ("always", Some("page")), ("avoid", Some("avoid")),
+    ])}),
+    ("yj_break_after", Prop { name: "break-after", values: Some(&[
+        ("auto", Some("auto")), ("always", Some("page")), ("avoid", Some("avoid")),
+    ])}),
+
+    // ---- ruby ----
+    // Canonical YJ symbol names (`symbols.rs`): the previous `ruby_align`/
+    // `ruby_position` keys were not real symbols and never matched.
+    ("ruby_text_align", Prop { name: "ruby-align", values: Some(&[
+        ("center", Some("center")), ("space_around", Some("space-around")),
+        ("space_between", Some("space-between")), ("start", Some("start")),
+    ])}),
+    ("ruby_position_vertical", Prop { name: "ruby-position", values: Some(&[
+        ("under", Some("under")), ("over", Some("over")),
+    ])}),
+    ("ruby_position_horizontal", Prop { name: "ruby-position", values: Some(&[
         ("under", Some("under")), ("over", Some("over")),
     ])}),
 

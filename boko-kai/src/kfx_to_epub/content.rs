@@ -1091,6 +1091,12 @@ impl<'a> ContentState<'a> {
             // (offset, length, anchor_name) — the link target name; resolved
             // to a `chapter.xhtml#id` URI by `resolve_link_placeholders`.
             Link(i64, i64, String),
+            // (offset, length, style_name) — an inline run carrying a `$style`
+            // with no ruby/link, e.g. 圏点 (text-emphasis), gothic, italics.
+            // Emitted as `<span class="<style>">`. Without this the run renders
+            // as plain text (the emphasis/etc. is lost in the reader, though the
+            // device honours it from the KFX directly).
+            Styled(i64, i64, String),
         }
 
         let mut collected: Vec<Ev> = Vec::new();
@@ -1140,6 +1146,14 @@ impl<'a> ContentState<'a> {
                 && let Some(name) = self.book.symbols.text_of(link_sym)
             {
                 collected.push(Ev::Link(offset, length, name.to_string()));
+            } else if let Some(style_sym) = get_field(ef, KfxSymbol::Style as u64)
+                && let Some(name) = self.book.symbols.text_of(style_sym)
+                && !properties::style_decl_for(name, self.book).is_empty()
+            {
+                // A `$style`-only event (no ruby/link) carrying renderable CSS
+                // (e.g. text-emphasis). Skip styles that produce no declaration
+                // (the default `s0`) — they'd just be redundant plain spans.
+                collected.push(Ev::Styled(offset, length, name.to_string()));
             }
         }
 
@@ -1147,7 +1161,7 @@ impl<'a> ContentState<'a> {
             return Ok(false);
         }
         collected.sort_by_key(|e| match e {
-            Ev::Ruby(off, ..) | Ev::Link(off, ..) => *off,
+            Ev::Ruby(off, ..) | Ev::Link(off, ..) | Ev::Styled(off, ..) => *off,
         });
 
         let chars: Vec<char> = text.chars().collect();
@@ -1161,6 +1175,8 @@ impl<'a> ContentState<'a> {
         // (base_start, base_end, base_text, [(rt_start, rt_end, rt_text)])
         type RubySpan = (usize, usize, String, Vec<(i64, i64, String)>);
         let mut rubies: Vec<RubySpan> = Vec::new();
+        // (start, end, style_name) — narrow styled runs, emitted alongside ruby.
+        let mut styled: Vec<(usize, usize, String)> = Vec::new();
         for ev in collected {
             match ev {
                 Ev::Link(off, len, name) => {
@@ -1179,17 +1195,42 @@ impl<'a> ContentState<'a> {
                     }
                     rubies.push((off, len, name, id_list));
                 }
+                Ev::Styled(off, len, name) => {
+                    let off = off as usize;
+                    let len = len as usize;
+                    if len == 0 || off + len > chars.len() {
+                        continue;
+                    }
+                    styled.push((off, len, name));
+                }
             }
         }
 
-        // Helper: emit ruby/text pieces into `parent` for range [from, to).
-        // Picks up any ruby event whose `[off, off+len)` falls inside the
-        // range; leaves the rest as a `<span>`.
+        // Merge ruby + styled runs into one offset-sorted list of inline marks.
+        enum Mark {
+            Ruby(usize, usize, String, Vec<(i64, i64, String)>),
+            Styled(usize, usize, String),
+        }
+        let mut marks: Vec<Mark> = Vec::new();
+        for (off, len, name, ids) in rubies {
+            marks.push(Mark::Ruby(off, len, name, ids));
+        }
+        for (off, len, name) in styled {
+            marks.push(Mark::Styled(off, len, name));
+        }
+        marks.sort_by_key(|m| match m {
+            Mark::Ruby(off, ..) | Mark::Styled(off, ..) => *off,
+        });
+
+        // Helper: emit ruby/styled/text pieces into `parent` for range
+        // [from, to). Picks up any mark whose `[off, off+len)` falls inside the
+        // range; leaves the rest as a plain `<span>`.
         let emit_range = |this: &mut Self, parent: NodeId, from: usize, to: usize| {
             let mut cursor = from;
-            for (off, len, ruby_name, id_list) in &rubies {
-                let off = *off;
-                let len = *len;
+            for mark in &marks {
+                let (off, len) = match mark {
+                    Mark::Ruby(off, len, ..) | Mark::Styled(off, len, ..) => (*off, *len),
+                };
                 if off + len <= from || off >= to {
                     continue;
                 }
@@ -1199,22 +1240,33 @@ impl<'a> ContentState<'a> {
                 if off > cursor {
                     this.emit_span(part_index, parent, &chars[cursor..off]);
                 }
-                let ruby_el = this.book_parts[part_index].dom.sub_element(parent, "ruby");
-                for (sub_off, sub_len, ruby_id_str) in id_list {
-                    let sub_off = *sub_off as usize;
-                    let sub_len = *sub_len as usize;
-                    let slice_start = off + sub_off;
-                    let slice_end = slice_start + sub_len;
-                    if slice_end > chars.len() {
-                        break;
-                    }
-                    let rb_text: String = chars[slice_start..slice_end].iter().collect();
-                    let rb = this.book_parts[part_index].dom.sub_element(ruby_el, "rb");
-                    this.book_parts[part_index].dom.get_mut(rb).text = Some(rb_text);
+                match mark {
+                    Mark::Ruby(off, _len, ruby_name, id_list) => {
+                        let off = *off;
+                        let ruby_el = this.book_parts[part_index].dom.sub_element(parent, "ruby");
+                        for (sub_off, sub_len, ruby_id_str) in id_list {
+                            let sub_off = *sub_off as usize;
+                            let sub_len = *sub_len as usize;
+                            let slice_start = off + sub_off;
+                            let slice_end = slice_start + sub_len;
+                            if slice_end > chars.len() {
+                                break;
+                            }
+                            let rb_text: String = chars[slice_start..slice_end].iter().collect();
+                            let rb = this.book_parts[part_index].dom.sub_element(ruby_el, "rb");
+                            this.book_parts[part_index].dom.get_mut(rb).text = Some(rb_text);
 
-                    let rt_text = this.lookup_ruby_annotation(ruby_name, ruby_id_str);
-                    let rt = this.book_parts[part_index].dom.sub_element(ruby_el, "rt");
-                    this.book_parts[part_index].dom.get_mut(rt).text = Some(rt_text);
+                            let rt_text = this.lookup_ruby_annotation(ruby_name, ruby_id_str);
+                            let rt = this.book_parts[part_index].dom.sub_element(ruby_el, "rt");
+                            this.book_parts[part_index].dom.get_mut(rt).text = Some(rt_text);
+                        }
+                    }
+                    Mark::Styled(off, len, style_name) => {
+                        let span = this.book_parts[part_index].dom.sub_element(parent, "span");
+                        this.attach_inline_style(part_index, span, style_name);
+                        let text: String = chars[*off..*off + *len].iter().collect();
+                        this.book_parts[part_index].dom.set_inline_text(span, &text);
+                    }
                 }
                 cursor = off + len;
             }
@@ -1403,6 +1455,29 @@ impl<'a> ContentState<'a> {
                 .element_styles
                 .insert(elem_id, inline);
         }
+    }
+
+    /// Register a `$style` for an inline run (a style_event) and attach its
+    /// class to `span`. The style-name half of [`attach_style`], without the
+    /// element-field layout-hint handling that only block elements need. Used
+    /// by [`try_emit_ruby_text`] for 圏点 / gothic / italic inline runs.
+    ///
+    /// The class is written as a real attribute (not via `element_classes`,
+    /// which is applied only after `consolidate_html`): `strip_empty_spans`
+    /// runs first and would unwrap an attribute-less span, dropping the run.
+    fn attach_inline_style(&mut self, part_index: usize, span: NodeId, style_name: &str) {
+        let decl = properties::style_decl_for(style_name, self.book);
+        if decl.is_empty() {
+            return;
+        }
+        if !self.used_kfx_styles.iter().any(|s| s == style_name) {
+            self.used_kfx_styles.push(style_name.to_string());
+        }
+        self.stylesheet.entry(style_name.to_string()).or_insert(decl);
+        self.book_parts[part_index]
+            .dom
+            .get_mut(span)
+            .set("class", safe_class_name(style_name));
     }
 
     /// Walk `$142 style_events`: each event names a chunk of text + a style.

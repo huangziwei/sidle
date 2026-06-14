@@ -663,6 +663,24 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
             LazyLock::new(|| Regex::new(r"［＃「.*」は[大中小]見出し］").unwrap());
         s = re_replace_str_cow(&HEADING_REF_RE, s, "");
 
+        // 地付き / 地からN字上げ — a signature (e.g. 坂口安吾) set to the bottom
+        // (inline-end) of its column. Wrap the rest of the line in `.chitsuki`
+        // (end-aligned) on its own line so it reads as a signature rather than
+        // running on inline. The N of 地からN字上げ (gap from the bottom) is a
+        // print-precise offset with no reflowable equivalent — recording the
+        // class is the meaningful part. Previously the catch-all just dropped
+        // the marker.
+        static JIAGE_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"［＃地から[０-９0-9]+字上げ］(.*)$").unwrap());
+        s = re_replace_cow(&JIAGE_RE, s, |caps| {
+            format!(r#"<br/><span class="chitsuki">{}</span>"#, &caps[1])
+        });
+        static CHITSUKI_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"［＃地付き］(.*)$").unwrap());
+        s = re_replace_cow(&CHITSUKI_RE, s, |caps| {
+            format!(r#"<br/><span class="chitsuki">{}</span>"#, &caps[1])
+        });
+
         // Final catch-all: drop any remaining ［＃...］.
         static REMAINING_ANN_RE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"［＃[^］]*］").unwrap());

@@ -517,6 +517,7 @@ fn build_opf(
 {publisher}{date}    <dc:source>https://www.aozora.gr.jp/</dc:source>
     <meta property="dcterms:modified">{modified}</meta>
     <meta property="rendition:layout">reflowable</meta>
+    <meta name="primary-writing-mode" content="vertical-rl"/>
   </metadata>
   <manifest>
     <item id="cover" href="text/cover.xhtml" media-type="application/xhtml+xml"/>
@@ -690,9 +691,10 @@ em.batsu { font-style: normal; -webkit-text-emphasis: "×"; text-emphasis: "×";
 .gothic { font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Noto Sans JP", sans-serif; }
 .italic { font-style: italic; }
 .yokogumi { writing-mode: horizontal-tb; -webkit-writing-mode: horizontal-tb; -epub-writing-mode: horizontal-tb; }
-.keigakomi { border: 1px solid currentColor; padding: 0.2em; }
-.keigakomi-dashed { border: 1px dashed currentColor; padding: 0.2em; }
-.keigakomi-double { border: 3px double currentColor; padding: 0.2em; }
+.chitsuki { display: block; text-align: end; }
+.keigakomi { border: 1px solid currentColor; padding: 0.2em; break-inside: avoid; }
+.keigakomi-dashed { border: 1px dashed currentColor; padding: 0.2em; break-inside: avoid; }
+.keigakomi-double { border: 3px double currentColor; padding: 0.2em; break-inside: avoid; }
 .colophon { margin-top: 3em; font-size: 0.85em; }
 .colophon p { text-indent: 0; margin: 0.2em 0; }
 "#;
