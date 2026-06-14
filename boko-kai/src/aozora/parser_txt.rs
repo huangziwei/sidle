@@ -146,11 +146,12 @@ pub fn parse_txt(text: &str) -> Document {
 struct BodyState {
     indent_level: u32,
     block_styles: Vec<&'static str>,
-    /// Open `罫囲み` (ruled-box) wrapper `<div>`s, innermost last. Each entry
-    /// is the box's CSS class. Unlike [`block_styles`] (per-paragraph classes),
-    /// a box must enclose *all* its lines in ONE bordered container — see
+    /// State of the currently-open `罫囲み` (ruled box). `None` when not inside
+    /// a box; `Some(first)` while a box `<p>` is open, where `first` is true
+    /// until the first line is written (so lines after it get a `<br/>`
+    /// separator). A box is ONE `<p>` whose lines are joined by `<br/>` — see
     /// [`is_box_class`].
-    open_boxes: Vec<&'static str>,
+    box_first: Option<bool>,
     heading_id: u32,
     toc: Vec<TocEntry>,
     html: String,
@@ -169,23 +170,25 @@ fn block_style_class(name: &str) -> Option<&'static str> {
     }
 }
 
-/// A `罫囲み`/`枠囲み` (ruled box) class. These need ONE wrapping `<div>`
-/// around the whole block, not a per-paragraph border: the box is a single
-/// visual frame around every enclosed line. Applying the border per-paragraph
-/// produced N separate one-line boxes, which KFX promotes to N full-page
-/// `type: container` blocks on Kindle (each on its own page). The other block
-/// styles (gothic/italic/yokogumi) compose fine per-paragraph and stay that
-/// way.
+/// A `罫囲み`/`枠囲み` (ruled box) class. The box is emitted as ONE `<p>` whose
+/// lines are joined by `<br/>`, NOT a per-paragraph border nor a `<div>` of
+/// separate `<p>`s. Both alternatives broke Kindle: a per-paragraph border made
+/// N one-line boxes (each its own page), and a `<div>` of N `<p>` block children
+/// made the device paginate *between* the children (still one line per page).
+/// Kindle paginates between a container's block children but flows `<br/>`/`\n`
+/// line breaks *within* a single text block — so one `<p>` with `<br/>`s keeps
+/// every line together in one box. The other block styles (gothic/italic/
+/// yokogumi) compose fine per-paragraph and stay that way.
 fn is_box_class(cls: &str) -> bool {
     cls.starts_with("keigakomi")
 }
 
-/// Emit closing `</div>` for every open box and clear the stack. Page breaks
-/// and headings reset block state; an unterminated box must not leak across
-/// such a reset (or past the end of the body).
+/// Close the open box `<p>`, if any. Page breaks and headings reset block
+/// state; an unterminated box must not leak across such a reset (or past the
+/// end of the body).
 fn close_open_boxes(state: &mut BodyState) {
-    while state.open_boxes.pop().is_some() {
-        state.html.push_str("</div>\n");
+    if state.box_first.take().is_some() {
+        state.html.push_str("</p>\n");
     }
 }
 
@@ -273,15 +276,19 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
         }
     }
 
-    // Block-level style start. The `罫囲み`/`枠囲み` family opens a single
-    // wrapping `<div>` (one box around all enclosed lines); the other styles
-    // push a per-paragraph class.
+    // Block-level style start. The `罫囲み`/`枠囲み` family opens a single box
+    // `<p>` (its lines joined by `<br/>`); the other styles push a per-paragraph
+    // class. The box `<p>` carries `indent` when inside a `字下げ` block.
     if let Some(caps) = BLOCK_START_RE.captures(&raw) {
         let name = caps.get(1).unwrap().as_str();
         if let Some(cls) = block_style_class(name) {
             if is_box_class(cls) {
-                state.html.push_str(&format!("<div class=\"{}\">\n", cls));
-                state.open_boxes.push(cls);
+                close_open_boxes(state); // no nesting; flush any prior box
+                let indent = if state.indent_level > 0 { "indent " } else { "" };
+                state
+                    .html
+                    .push_str(&format!("<p class=\"{}{}\">", indent, cls));
+                state.box_first = Some(true);
             } else {
                 state.block_styles.push(cls);
             }
@@ -291,14 +298,12 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
             return;
         }
     }
-    // Block-level style end. A box name (`…囲み`) closes the wrapping `<div>`;
-    // anything else pops a per-paragraph block style.
+    // Block-level style end. A box name (`…囲み`) closes the box `<p>`; anything
+    // else pops a per-paragraph block style.
     if let Some(caps) = BLOCK_END_RE.captures(&raw) {
         let name = caps.get(1).unwrap().as_str();
         if name.contains("囲み") {
-            if state.open_boxes.pop().is_some() {
-                state.html.push_str("</div>\n");
-            }
+            close_open_boxes(state);
         } else {
             state.block_styles.pop();
         }
@@ -422,6 +427,23 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
         // the inline-strip in `convert_aozora_line` will drop the marker so
         // the heading still renders as a paragraph (matches HTML-tool
         // behavior for this edge).
+    }
+
+    // Inside a `罫囲み` box: append this line to the open box `<p>`, joining
+    // successive lines with `<br/>` (the box is a single text block so Kindle
+    // keeps every line on one page).
+    if let Some(first) = state.box_first {
+        let inner = if raw.trim().is_empty() {
+            String::new()
+        } else {
+            convert_aozora_line(&raw, &mut state.referenced_images)
+        };
+        if !first {
+            state.html.push_str("<br/>");
+        }
+        state.html.push_str(&inner);
+        state.box_first = Some(false);
+        return;
     }
 
     if raw.trim().is_empty() {
@@ -920,24 +942,22 @@ mod tests {
     }
 
     #[test]
-    fn keigakomi_block_is_one_wrapping_div() {
-        // A 罫囲み (ruled box) block must enclose ALL its lines in ONE bordered
-        // <div>, not stamp the border class on each <p>. Per-paragraph borders
-        // became N separate full-page boxes on Kindle. Mirrors 坂口安吾『不連続
-        // 殺人事件』ch.1, where three letter lines share one box.
+    fn keigakomi_block_is_one_paragraph_with_breaks() {
+        // A 罫囲み (ruled box) block is ONE `<p>` whose lines are joined by
+        // `<br/>` — a single bordered text block. Per-paragraph borders made N
+        // full-page boxes on Kindle; a `<div>` of N `<p>`s made the device
+        // paginate between the children (one line per page). One `<p>` keeps
+        // every line in one box. Mirrors 坂口安吾『不連続殺人事件』ch.1.
         let src = "T\nA\n\n-------\n前\n［＃ここから罫囲み］\n一行目\n二行目\n三行目\n［＃ここで罫囲み終わり］\n後\n";
         let doc = parse_txt(src);
         let body = &doc.body_xhtml;
-        // Exactly one wrapping div, opened and closed once.
-        assert_eq!(body.matches(r#"<div class="keigakomi">"#).count(), 1, "body:\n{body}");
-        assert_eq!(body.matches("</div>").count(), 1, "body:\n{body}");
-        // The three lines are plain <p> inside it — no per-paragraph border.
-        assert!(body.contains(r#"<div class="keigakomi">
-<p>一行目</p>
-<p>二行目</p>
-<p>三行目</p>
-</div>"#), "body:\n{body}");
-        assert!(!body.contains(r#"<p class="keigakomi""#), "no per-paragraph box; body:\n{body}");
+        // Exactly one box <p>; lines joined by <br/>; no per-line boxes, no div.
+        assert!(
+            body.contains(r#"<p class="keigakomi">一行目<br/>二行目<br/>三行目</p>"#),
+            "body:\n{body}"
+        );
+        assert_eq!(body.matches(r#"class="keigakomi""#).count(), 1, "body:\n{body}");
+        assert!(!body.contains("<div"), "box must not be a div; body:\n{body}");
     }
 
     #[test]
@@ -956,19 +976,16 @@ mod tests {
     #[test]
     fn keigakomi_box_closes_at_chapter_heading() {
         // An unterminated box must not leak across a heading reset (which clears
-        // block state) — the <div> is force-closed so the XHTML stays balanced.
+        // block state) — the box `<p>` is force-closed so the XHTML stays
+        // balanced and the heading is emitted outside the box.
         let src = "T\nA\n\n-------\n［＃ここから罫囲み］\n箱の中\n［＃中見出し］次章［＃中見出し終わり］\n本文\n";
         let doc = parse_txt(src);
         let body = &doc.body_xhtml;
-        assert_eq!(
-            body.matches(r#"<div class="keigakomi">"#).count(),
-            body.matches("</div>").count(),
-            "balanced div tags; body:\n{body}"
-        );
-        // Heading is emitted outside the box.
-        let div_end = body.find("</div>").expect("box closed");
+        let box_open = body.find(r#"<p class="keigakomi">"#).expect("box opened");
+        let box_close = body[box_open..].find("</p>").map(|i| box_open + i).expect("box closed");
         let h_start = body.find("<h3").expect("heading present");
-        assert!(div_end < h_start, "heading after box close; body:\n{body}");
+        assert!(box_close < h_start, "heading after box close; body:\n{body}");
+        assert!(!body[box_open..box_close].contains("<h3"), "heading not inside box; body:\n{body}");
     }
 
     #[test]

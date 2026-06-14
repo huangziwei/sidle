@@ -450,7 +450,33 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
     ("border_style_left", Prop { name: "border-left-style", values: Some(BORDER_STYLES) }),
     ("border_style_right", Prop { name: "border-right-style", values: Some(BORDER_STYLES) }),
 
+    // ---- text emphasis (圏点) ----
+    // Reverse of the export `ValueTransform::Map` in style_schema.rs. Common in
+    // Japanese; previously absent here, so 圏点 was dropped on the reader path
+    // (the matching export shorthand-parse gap is fixed in declaration.rs).
+    ("text_emphasis_style", Prop { name: "text-emphasis-style", values: Some(&[
+        ("filled_dot", Some("filled dot")), ("open_dot", Some("open dot")),
+        ("filled_circle", Some("filled circle")), ("open_circle", Some("open circle")),
+        ("filled_double_circle", Some("filled double-circle")),
+        ("open_double_circle", Some("open double-circle")),
+        ("filled_triangle", Some("filled triangle")), ("open_triangle", Some("open triangle")),
+        ("filled_sesame", Some("filled sesame")), ("open_sesame", Some("open sesame")),
+        ("none", None),
+    ])}),
+    // Packed-int colour (handled by `is_color_prop`).
+    ("text_emphasis_color", Prop { name: "text-emphasis-color", values: None }),
+
+    // ---- text-combine-upright (縦中横) ----
+    ("text_combine", Prop { name: "text-combine-upright", values: Some(&[
+        ("all", Some("all")), ("none", Some("none")),
+    ])}),
+
     // ---- ruby ----
+    // NOTE: `ruby_align`/`ruby_position` are NOT canonical YJ symbol names
+    // (real KFX uses `ruby_text_align`/`ruby_base_align` and
+    // `ruby_position_horizontal`/`_vertical`), so these never match. boko does
+    // not export ruby styling, so they are inert; left as-is pending a verified
+    // sample for the correct value set.
     ("ruby_align", Prop { name: "ruby-align", values: Some(&[
         ("center", Some("center")), ("space-around", Some("space-around")),
         ("space-between", Some("space-between")), ("start", Some("start")),

@@ -110,6 +110,23 @@ impl Dom {
         n
     }
 
+    /// Set `el`'s inline text, expanding `'\n'` into `<br/>` children. KFX
+    /// stores a hard line break (`<br>`) as a newline inside the text content
+    /// (see the exporter's Break→`"\n"`); plain HTML would collapse it to a
+    /// space, so a `罫囲み` box of `l1\nl2\nl3` would otherwise run together on
+    /// one line. Segments are joined by `<br/>` (first → `text`, the rest →
+    /// each `<br/>`'s `tail`). The common no-newline case just sets `text`.
+    pub fn set_inline_text(&mut self, el: NodeId, text: &str) {
+        let mut parts = text.split('\n');
+        if let Some(first) = parts.next() {
+            self.nodes[el].text = Some(first.to_string());
+        }
+        for part in parts {
+            let br = self.sub_element(el, "br");
+            self.nodes[br].tail = Some(part.to_string());
+        }
+    }
+
     /// Find `child`'s index in `parent.children`.
     pub fn child_index(&self, parent: NodeId, child: NodeId) -> Option<usize> {
         self.nodes[parent].children.iter().position(|&c| c == child)

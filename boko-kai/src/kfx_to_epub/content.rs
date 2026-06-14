@@ -1036,7 +1036,7 @@ impl<'a> ContentState<'a> {
             }
             let dom = &mut self.book_parts[part_index].dom;
             let span = dom.sub_element(parent_id, "span");
-            dom.get_mut(span).text = Some(text);
+            dom.set_inline_text(span, &text);
             return Ok(());
         }
         // $146 = content_list
@@ -1253,7 +1253,8 @@ impl<'a> ContentState<'a> {
         }
         let dom = &mut self.book_parts[part_index].dom;
         let span = dom.sub_element(parent, "span");
-        dom.get_mut(span).text = Some(chars.iter().collect());
+        let text: String = chars.iter().collect();
+        dom.set_inline_text(span, &text);
     }
 
     /// Look up the rt annotation text for a given ruby_name + ruby_id.
