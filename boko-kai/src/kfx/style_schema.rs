@@ -2172,11 +2172,25 @@ pub fn extract_ir_field(
                 None
             }
         }
-        // BoxAlign: derived from margin-left: auto + margin-right: auto
+        // BoxAlign: margin-left:auto + margin-right:auto centers a block — but
+        // only when it has a definite width. With width:auto (the default), CSS
+        // resolves the auto margins to 0 and the block is NOT centered; it
+        // shrinks to its content (this is how Apple Books renders an Aozora
+        // 罫囲み box — a content-width box, not a page-wide one). Without the
+        // width guard, every block that merely never set a horizontal margin got
+        // `box_align: center`, because `Length::default()` is `Auto` — which on
+        // Kindle forced bordered boxes to span the full page width (each line of
+        // a 罫囲み box landed on its own page).
         IrField::BoxAlign => {
-            if ir_style.margin_left == ir_style::Length::Auto
-                && ir_style.margin_right == ir_style::Length::Auto
-            {
+            let both_margins_auto = ir_style.margin_left == ir_style::Length::Auto
+                && ir_style.margin_right == ir_style::Length::Auto;
+            // A definite width OR a max-width gives the block a resolvable size
+            // for auto margins to center against. `max-width` covers centered
+            // images/covers (`img { max-width: …; margin: auto }`); a bare text
+            // block (the 罫囲み box, headings) has neither and so is not centered.
+            let has_definite_width = ir_style.width != ir_style::Length::Auto
+                || ir_style.max_width != ir_style::Length::Auto;
+            if both_margins_auto && has_definite_width {
                 Some("center".to_string())
             } else {
                 None
@@ -3979,10 +3993,43 @@ mod tests {
     fn test_box_align_from_margin_auto() {
         use crate::style::{ComputedStyle, Length};
 
-        // margin-left: auto + margin-right: auto → box_align: center
+        // margin-left/right: auto + a definite width → box_align: center (CSS
+        // centers a block only when its width is definite).
         let mut style = ComputedStyle::default();
         style.margin_left = Length::Auto;
         style.margin_right = Length::Auto;
+        style.width = Length::Percent(50.0);
+
+        let result = extract_ir_field(&style, IrField::BoxAlign, ir_style::WritingMode::default());
+        assert_eq!(result, Some("center".to_string()));
+    }
+
+    #[test]
+    fn test_box_align_not_emitted_without_width() {
+        use crate::style::{ComputedStyle, Length};
+
+        // Auto margins with width:auto do NOT center (auto margins resolve to 0).
+        // This is the 罫囲み box case: a bordered <div> that never sets a width
+        // must hug its content, not span the page.
+        let mut style = ComputedStyle::default();
+        style.margin_left = Length::Auto;
+        style.margin_right = Length::Auto;
+        // width left at its default (Auto).
+
+        let result = extract_ir_field(&style, IrField::BoxAlign, ir_style::WritingMode::default());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_box_align_from_margin_auto_with_max_width() {
+        use crate::style::{ComputedStyle, Length};
+
+        // A centered image — `img { max-width: 50%; margin: auto }` — has no
+        // `width` but a `max-width`, which is enough to center it.
+        let mut style = ComputedStyle::default();
+        style.margin_left = Length::Auto;
+        style.margin_right = Length::Auto;
+        style.max_width = Length::Percent(50.0);
 
         let result = extract_ir_field(&style, IrField::BoxAlign, ir_style::WritingMode::default());
         assert_eq!(result, Some("center".to_string()));
@@ -3992,10 +4039,11 @@ mod tests {
     fn test_box_align_not_emitted_without_both_auto() {
         use crate::style::{ComputedStyle, Length};
 
-        // Only margin-left: auto is not enough
+        // Only margin-left: auto is not enough (even with a width).
         let mut style = ComputedStyle::default();
         style.margin_left = Length::Auto;
         style.margin_right = Length::Px(0.0);
+        style.width = Length::Percent(50.0);
 
         let result = extract_ir_field(&style, IrField::BoxAlign, ir_style::WritingMode::default());
         assert_eq!(result, None);

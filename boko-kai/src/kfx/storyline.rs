@@ -195,6 +195,7 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         style_symbol: None,             // Symbol ID (for export)
         style_name,                     // Style name (for import lookup)
         needs_container_wrapper: false, // Only used during export
+        has_block_children: false,      // Only used during export
     }));
 
     // Recurse into children
@@ -735,6 +736,18 @@ fn needs_container_wrapper(style: &ComputedStyle) -> bool {
     has_top || has_bottom || has_left || has_right
 }
 
+/// Roles that flatten into their parent's inline text run (Text/Break become
+/// characters; Link/Inline/Ruby become style_events) rather than emitting their
+/// own KFX structure. Used to distinguish a bordered *leaf* element (inline
+/// content only → inner-text wrapper) from a bordered element with *block*
+/// children (e.g. a `罫囲み` `<div>` of `<p>` lines → one `type: container`).
+fn is_inline_like_role(role: Role) -> bool {
+    matches!(
+        role,
+        Role::Text | Role::Inline | Role::Link | Role::Ruby | Role::RubyText | Role::Break
+    )
+}
+
 /// Convert an IR chapter to a TokenStream.
 ///
 /// This is the first stage of export: walking the IR tree and emitting tokens.
@@ -858,6 +871,13 @@ fn walk_node_for_export(
         .get(node.style)
         .map(needs_container_wrapper)
         .unwrap_or(false);
+
+    // Does this element have block-level children (vs. only inline/text)? A
+    // bordered `<div>` of `<p>` lines (Aozora 罫囲み) becomes one bordered
+    // `type: container`; a bordered leaf `<p>` keeps the inner-text wrapper.
+    elem.has_block_children = chapter
+        .children(node_id)
+        .any(|c| chapter.node(c).is_some_and(|n| !is_inline_like_role(n.role)));
 
     // SCHEMA-DRIVEN attribute export
     // Create a closure to get semantic values by target
@@ -1430,8 +1450,12 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
         match token {
             KfxToken::StartElement(elem) => {
                 // Check if this element needs container wrapping for borders to render
-                // KFX requires type: container with nested type: text for borders
-                if elem.needs_container_wrapper {
+                // KFX requires type: container with nested type: text for borders.
+                // Only bordered *leaf* elements (inline content) take this path; a
+                // bordered element with block children goes through the normal path
+                // below, where its type is forced to `container` and its children
+                // form the content list directly (no inner-text wrapper).
+                if elem.needs_container_wrapper && !elem.has_block_children {
                     // === CONTAINER WRAPPER PATH ===
                     // Create outer container with type: container, layout: vertical
                     // and all the semantic/style fields, then create inner text element
@@ -1626,8 +1650,16 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     let style_sym = elem.style_symbol.unwrap_or(ctx.default_style_symbol);
                     fields.push((sym!(Style), IonValue::Symbol(style_sym)));
 
-                    // Type field (as symbol ID)
-                    if let Some(kfx_type) = schema().kfx_type_for_role(elem.role) {
+                    // Type field (as symbol ID). A bordered element with block
+                    // children (e.g. a 罫囲み `<div>` of `<p>` lines) must be
+                    // `type: container` for the border to render on Kindle — the
+                    // role's default `type: text` would drop it — and a container
+                    // requires an explicit `layout`. Its `<p>` children become the
+                    // content list directly.
+                    if elem.needs_container_wrapper {
+                        fields.push((sym!(Type), IonValue::Symbol(KfxSymbol::Container as u64)));
+                        fields.push((sym!(Layout), IonValue::Symbol(KfxSymbol::Vertical as u64)));
+                    } else if let Some(kfx_type) = schema().kfx_type_for_role(elem.role) {
                         fields.push((sym!(Type), IonValue::Symbol(kfx_type as u64)));
                     }
 
@@ -2046,6 +2078,7 @@ mod tests {
             style_symbol: None,
             style_name: None,
             needs_container_wrapper: false,
+            has_block_children: false,
         }));
         stream.end_element();
 
@@ -2076,6 +2109,7 @@ mod tests {
             style_symbol: None,
             style_name: None,
             needs_container_wrapper: false,
+            has_block_children: false,
         }));
         stream.end_element();
 
@@ -2111,6 +2145,7 @@ mod tests {
             style_symbol: None,
             style_name: None,
             needs_container_wrapper: false,
+            has_block_children: false,
         }));
         stream.end_element();
 
@@ -2151,6 +2186,7 @@ mod tests {
             style_symbol: None,
             style_name: None,
             needs_container_wrapper: false,
+            has_block_children: false,
         }));
         stream.end_element();
 
@@ -2788,6 +2824,7 @@ mod tests {
             style_symbol: None,
             style_name: None,
             needs_container_wrapper: false,
+            has_block_children: false,
         }));
         stream.end_element();
 

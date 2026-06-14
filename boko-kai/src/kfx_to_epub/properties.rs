@@ -429,21 +429,26 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
     ("bottom", Prop { name: "bottom", values: None }),
 
     // ---- borders ----
+    // Keys are the canonical YJ symbol names (per `symbols.rs`): `border_color_top`,
+    // `border_style_top`, `border_weight_top` — NOT the CSS-style `border_top_color`
+    // ordering. The old keys never matched any KFX field, so every per-side border was
+    // silently dropped on import (no box rendered in the reader). The CSS property name
+    // (`name:`) is the correct CSS spelling.
     ("border_color", Prop { name: "border-color", values: None }),
-    ("border_top_color", Prop { name: "border-top-color", values: None }),
-    ("border_bottom_color", Prop { name: "border-bottom-color", values: None }),
-    ("border_left_color", Prop { name: "border-left-color", values: None }),
-    ("border_right_color", Prop { name: "border-right-color", values: None }),
-    ("border_width", Prop { name: "border-width", values: None }),
-    ("border_top_width", Prop { name: "border-top-width", values: None }),
-    ("border_bottom_width", Prop { name: "border-bottom-width", values: None }),
-    ("border_left_width", Prop { name: "border-left-width", values: None }),
-    ("border_right_width", Prop { name: "border-right-width", values: None }),
+    ("border_color_top", Prop { name: "border-top-color", values: None }),
+    ("border_color_bottom", Prop { name: "border-bottom-color", values: None }),
+    ("border_color_left", Prop { name: "border-left-color", values: None }),
+    ("border_color_right", Prop { name: "border-right-color", values: None }),
+    ("border_weight", Prop { name: "border-width", values: None }),
+    ("border_weight_top", Prop { name: "border-top-width", values: None }),
+    ("border_weight_bottom", Prop { name: "border-bottom-width", values: None }),
+    ("border_weight_left", Prop { name: "border-left-width", values: None }),
+    ("border_weight_right", Prop { name: "border-right-width", values: None }),
     ("border_style", Prop { name: "border-style", values: Some(BORDER_STYLES) }),
-    ("border_top_style", Prop { name: "border-top-style", values: Some(BORDER_STYLES) }),
-    ("border_bottom_style", Prop { name: "border-bottom-style", values: Some(BORDER_STYLES) }),
-    ("border_left_style", Prop { name: "border-left-style", values: Some(BORDER_STYLES) }),
-    ("border_right_style", Prop { name: "border-right-style", values: Some(BORDER_STYLES) }),
+    ("border_style_top", Prop { name: "border-top-style", values: Some(BORDER_STYLES) }),
+    ("border_style_bottom", Prop { name: "border-bottom-style", values: Some(BORDER_STYLES) }),
+    ("border_style_left", Prop { name: "border-left-style", values: Some(BORDER_STYLES) }),
+    ("border_style_right", Prop { name: "border-right-style", values: Some(BORDER_STYLES) }),
 
     // ---- ruby ----
     ("ruby_align", Prop { name: "ruby-align", values: Some(&[

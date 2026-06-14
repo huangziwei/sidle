@@ -124,6 +124,9 @@ pub fn parse_txt(text: &str) -> Document {
     for raw in body_lines {
         process_line(raw, &mut state);
     }
+    // Close any box left open by malformed/missing `終わり` markers so the
+    // body XHTML is always well-formed.
+    close_open_boxes(&mut state);
 
     Document {
         title,
@@ -143,6 +146,11 @@ pub fn parse_txt(text: &str) -> Document {
 struct BodyState {
     indent_level: u32,
     block_styles: Vec<&'static str>,
+    /// Open `罫囲み` (ruled-box) wrapper `<div>`s, innermost last. Each entry
+    /// is the box's CSS class. Unlike [`block_styles`] (per-paragraph classes),
+    /// a box must enclose *all* its lines in ONE bordered container — see
+    /// [`is_box_class`].
+    open_boxes: Vec<&'static str>,
     heading_id: u32,
     toc: Vec<TocEntry>,
     html: String,
@@ -161,6 +169,26 @@ fn block_style_class(name: &str) -> Option<&'static str> {
     }
 }
 
+/// A `罫囲み`/`枠囲み` (ruled box) class. These need ONE wrapping `<div>`
+/// around the whole block, not a per-paragraph border: the box is a single
+/// visual frame around every enclosed line. Applying the border per-paragraph
+/// produced N separate one-line boxes, which KFX promotes to N full-page
+/// `type: container` blocks on Kindle (each on its own page). The other block
+/// styles (gothic/italic/yokogumi) compose fine per-paragraph and stay that
+/// way.
+fn is_box_class(cls: &str) -> bool {
+    cls.starts_with("keigakomi")
+}
+
+/// Emit closing `</div>` for every open box and clear the stack. Page breaks
+/// and headings reset block state; an unterminated box must not leak across
+/// such a reset (or past the end of the body).
+fn close_open_boxes(state: &mut BodyState) {
+    while state.open_boxes.pop().is_some() {
+        state.html.push_str("</div>\n");
+    }
+}
+
 static INDENT_START_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃ここから[０-９0-9]+字下げ[^］]*］").unwrap());
 static INDENT_END_RE: LazyLock<Regex> =
@@ -171,6 +199,13 @@ static BLOCK_START_RE: LazyLock<Regex> = LazyLock::new(|| {
 static BLOCK_END_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"［＃ここで(横組み|ゴシック体|斜体|[^］]*囲み)終わり］").unwrap()
 });
+/// `字詰め` (characters-per-line) block markers, e.g. `［＃ここから３５字詰め］`
+/// / `［＃ここで字詰め終わり］`. A fixed line length is a print-layout concept
+/// with no equivalent in reflowable text, so these carry no style — but they
+/// must be *consumed* as no-ops. Left to fall through, the stripped-empty line
+/// emitted a stray empty `<p>`.
+static JIZUME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"［＃ここから[０-９0-9]+字詰め］|［＃ここで字詰め終わり］").unwrap());
 static PAGE_BREAK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃(改ページ|改丁|ページの左右中央)］").unwrap());
 static PAGE_BREAK_LINE_ONLY_RE: LazyLock<Regex> =
@@ -229,20 +264,44 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
         return;
     }
 
-    // Block-level style start.
+    // `字詰め` (chars-per-line) block markers: consume as no-ops so they don't
+    // fall through to the paragraph fallback and emit an empty `<p>`.
+    if JIZUME_RE.is_match(&raw) {
+        raw = JIZUME_RE.replace_all(&raw, "").to_string();
+        if raw.trim().is_empty() {
+            return;
+        }
+    }
+
+    // Block-level style start. The `罫囲み`/`枠囲み` family opens a single
+    // wrapping `<div>` (one box around all enclosed lines); the other styles
+    // push a per-paragraph class.
     if let Some(caps) = BLOCK_START_RE.captures(&raw) {
         let name = caps.get(1).unwrap().as_str();
         if let Some(cls) = block_style_class(name) {
-            state.block_styles.push(cls);
+            if is_box_class(cls) {
+                state.html.push_str(&format!("<div class=\"{}\">\n", cls));
+                state.open_boxes.push(cls);
+            } else {
+                state.block_styles.push(cls);
+            }
         }
         raw = BLOCK_START_RE.replace(&raw, "").to_string();
         if raw.trim().is_empty() {
             return;
         }
     }
-    // Block-level style end.
-    if BLOCK_END_RE.is_match(&raw) {
-        state.block_styles.pop();
+    // Block-level style end. A box name (`…囲み`) closes the wrapping `<div>`;
+    // anything else pops a per-paragraph block style.
+    if let Some(caps) = BLOCK_END_RE.captures(&raw) {
+        let name = caps.get(1).unwrap().as_str();
+        if name.contains("囲み") {
+            if state.open_boxes.pop().is_some() {
+                state.html.push_str("</div>\n");
+            }
+        } else {
+            state.block_styles.pop();
+        }
         // Note: JS uses a looser end-strip regex than start. Match its
         // behavior — strip anything `［＃ここで...終わり］`.
         let end_strip = Regex::new(r"［＃ここで[^］]*終わり］").unwrap();
@@ -256,6 +315,7 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
     // page-break marker, skip it; otherwise strip and continue.
     if PAGE_BREAK_RE.is_match(&raw) {
         state.indent_level = 0;
+        close_open_boxes(state);
         state.block_styles.clear();
         if PAGE_BREAK_LINE_ONLY_RE.is_match(raw.trim()) {
             return;
@@ -266,6 +326,7 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
     // Heading lines reset block state.
     if HEADING_PRECEDES_RE.is_match(&raw) {
         state.indent_level = 0;
+        close_open_boxes(state);
         state.block_styles.clear();
     }
 
@@ -856,6 +917,58 @@ mod tests {
         let doc = parse_txt(src);
         assert!(doc.body_xhtml.contains(r#"<p class="indent">字下げ中</p>"#));
         assert!(doc.body_xhtml.contains("<p>通常2</p>"));
+    }
+
+    #[test]
+    fn keigakomi_block_is_one_wrapping_div() {
+        // A 罫囲み (ruled box) block must enclose ALL its lines in ONE bordered
+        // <div>, not stamp the border class on each <p>. Per-paragraph borders
+        // became N separate full-page boxes on Kindle. Mirrors 坂口安吾『不連続
+        // 殺人事件』ch.1, where three letter lines share one box.
+        let src = "T\nA\n\n-------\n前\n［＃ここから罫囲み］\n一行目\n二行目\n三行目\n［＃ここで罫囲み終わり］\n後\n";
+        let doc = parse_txt(src);
+        let body = &doc.body_xhtml;
+        // Exactly one wrapping div, opened and closed once.
+        assert_eq!(body.matches(r#"<div class="keigakomi">"#).count(), 1, "body:\n{body}");
+        assert_eq!(body.matches("</div>").count(), 1, "body:\n{body}");
+        // The three lines are plain <p> inside it — no per-paragraph border.
+        assert!(body.contains(r#"<div class="keigakomi">
+<p>一行目</p>
+<p>二行目</p>
+<p>三行目</p>
+</div>"#), "body:\n{body}");
+        assert!(!body.contains(r#"<p class="keigakomi""#), "no per-paragraph box; body:\n{body}");
+    }
+
+    #[test]
+    fn jizume_markers_leave_no_empty_paragraph() {
+        // `字詰め` (chars-per-line) has no reflowable equivalent; the markers
+        // must be consumed, not left to emit a stray empty <p>.
+        let src = "T\nA\n\n-------\n前\n［＃ここから３５字詰め］\n本文\n［＃ここで字詰め終わり］\n後\n";
+        let doc = parse_txt(src);
+        let body = &doc.body_xhtml;
+        assert!(!body.contains("<p></p>"), "no empty <p>; body:\n{body}");
+        assert!(!body.contains(r#"<p class="indent"></p>"#), "no empty indent <p>; body:\n{body}");
+        assert!(!body.contains("字詰"), "marker text stripped; body:\n{body}");
+        assert!(body.contains("<p>本文</p>"), "body:\n{body}");
+    }
+
+    #[test]
+    fn keigakomi_box_closes_at_chapter_heading() {
+        // An unterminated box must not leak across a heading reset (which clears
+        // block state) — the <div> is force-closed so the XHTML stays balanced.
+        let src = "T\nA\n\n-------\n［＃ここから罫囲み］\n箱の中\n［＃中見出し］次章［＃中見出し終わり］\n本文\n";
+        let doc = parse_txt(src);
+        let body = &doc.body_xhtml;
+        assert_eq!(
+            body.matches(r#"<div class="keigakomi">"#).count(),
+            body.matches("</div>").count(),
+            "balanced div tags; body:\n{body}"
+        );
+        // Heading is emitted outside the box.
+        let div_end = body.find("</div>").expect("box closed");
+        let h_start = body.find("<h3").expect("heading present");
+        assert!(div_end < h_start, "heading after box close; body:\n{body}");
     }
 
     #[test]

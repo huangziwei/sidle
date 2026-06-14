@@ -59,6 +59,13 @@ pub struct ElementStart {
     /// KFX requires block elements with borders to be `type: container` with
     /// nested `type: text` for content. Set during export by checking IR style.
     pub needs_container_wrapper: bool,
+    /// Whether this element has block-level children (vs. only inline/text).
+    /// Together with [`needs_container_wrapper`] this decides how a bordered
+    /// element is emitted: a bordered *leaf* (inline content only) gets the
+    /// inner-text wrapper; a bordered element *with block children* (e.g. a
+    /// `罫囲み` `<div>` wrapping `<p>` lines) becomes a `type: container` whose
+    /// children form the content list directly.
+    pub has_block_children: bool,
 }
 
 impl ElementStart {
@@ -75,6 +82,7 @@ impl ElementStart {
             style_symbol: None,
             style_name: None,
             needs_container_wrapper: false,
+            has_block_children: false,
         }
     }
 
@@ -192,6 +200,7 @@ impl TokenStream {
             style_symbol: None,
             style_name: None,
             needs_container_wrapper: false,
+            has_block_children: false,
         }));
     }
 
