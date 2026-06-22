@@ -426,7 +426,11 @@ pub fn format_basename(authors: &[String], title: &str, date: Option<&str>) -> S
     truncate_chars(&out, 180)
 }
 
-fn sanitize_segment(s: &str) -> String {
+/// Make `s` safe to use as a single filesystem path segment: replace the
+/// characters Finder/macOS reject (and NUL) with `_`, turn control chars into
+/// spaces, and collapse runs of whitespace. Shared by [`format_basename`] and
+/// the library export (per-author subfolder names).
+pub fn sanitize_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

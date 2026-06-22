@@ -114,7 +114,10 @@ const booksSelection = new window.SelectionController({
   lassoEl: () => $("#lasso"),
   skipSelector:
     ".book-card, .book-table tbody tr, .series-table tbody tr, .series-card, .book-table thead, .resizer",
-  onChange: () => renderSelectionBar(),
+  onChange: () => {
+    renderSelectionBar();
+    paintSeriesSelection(); // collections reflect "all members selected"
+  },
 });
 
 // The selection controller for the currently active section. The lasso +
@@ -756,6 +759,7 @@ function render() {
   applyView(); // sync which container is visible to the current mode
   renderQueue();
   renderSelectionBar();
+  paintSeriesSelection(); // re-mark selected collections on the rebuilt tiles
   updateSendUnsentButton();
   // The empty-state messages are wired to whether the *visible* set is
   // empty. If the underlying library is non-empty but filters hide
@@ -1145,7 +1149,7 @@ function seriesCard(entry) {
   meta.append(t, a, seriesMetaBadges(entry));
   card.appendChild(meta);
 
-  card.addEventListener("click", () => enterSeries(entry.name));
+  card.addEventListener("click", (e) => onSeriesClick(e, entry.name));
   card.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     openSeriesContextMenu(e.clientX, e.clientY, entry);
@@ -1175,7 +1179,7 @@ function renderSeriesList(entries) {
       author.textContent = seriesSubtitle(e);
       count.textContent = String(e.books.length);
       tr.append(name, author, count);
-      tr.addEventListener("click", () => enterSeries(e.name));
+      tr.addEventListener("click", (ev) => onSeriesClick(ev, e.name));
       tr.addEventListener("contextmenu", (ev) => {
         ev.preventDefault();
         openSeriesContextMenu(ev.clientX, ev.clientY, e);
@@ -2618,6 +2622,7 @@ function openContextMenu(x, y, b) {
         bulkRecrawlCovers(sel),
       );
     }
+    addExportItem(menu, sel);
     add(menu, `Remove ${sel.length} from library`, () => bulkRemove(), true);
   } else {
     // Single-item menu.
@@ -2652,6 +2657,7 @@ function openContextMenu(x, y, b) {
     } else {
       add(menu, "Force re-convert", () => retryConvert(b.id));
     }
+    addExportItem(menu, [b]);
     add(menu, "Remove from library", () => removeBook(b), true);
   }
 
@@ -2680,6 +2686,7 @@ function openSeriesContextMenu(x, y, entry) {
       bulkRecrawlCovers(members),
     );
   }
+  addExportItem(menu, members);
   placeMenu(x, y);
 }
 
@@ -2756,6 +2763,164 @@ function addReconvertItem(menu, label, books) {
 }
 
 // ---------------------------------------------------------------------------
+// Export (copy a chosen format out to an external folder)
+// ---------------------------------------------------------------------------
+
+// The export formats, in menu order. KFX is universal (every book has it); EPUB
+// and PDF are the two possible companion sides — a book pairs KFX with exactly
+// one of them.
+const EXPORT_FORMATS = [
+  ["epub", "EPUB"],
+  ["pdf", "PDF"],
+  ["kfx", "KFX"],
+];
+
+// Whether `b`'s `fmt` file is present and finished converting, so it can be
+// copied out. KFX is always the canonical side; EPUB/PDF exist only for the
+// matching companion, and only once the queue marks that side done. (The file
+// could still be missing on disk — the backend is authoritative and reports a
+// skip; this just drives the menu's enabled formats + counts.)
+function hasFormatReady(b, fmt) {
+  if (fmt === "kfx") return formatStatusFor("kfx", b) === "done";
+  if (nonKfxFormat(b) !== fmt) return false;
+  return formatStatusFor(fmt, b) === "done";
+}
+
+// How many books in `books` can export each format (drives the menu labels).
+function exportFormatCounts(books) {
+  const counts = { epub: 0, pdf: 0, kfx: 0 };
+  for (const b of books) {
+    for (const fmt of ["epub", "pdf", "kfx"]) {
+      if (hasFormatReady(b, fmt)) counts[fmt] += 1;
+    }
+  }
+  return counts;
+}
+
+// `[label, fn]` pairs for the formats at least one book in `books` can export —
+// e.g. `["EPUB (12)", …]`. Empty when nothing in the selection is ready.
+function exportMenuItems(books) {
+  const counts = exportFormatCounts(books);
+  return EXPORT_FORMATS.filter(([fmt]) => counts[fmt] > 0).map(([fmt, label]) => [
+    `${label} (${counts[fmt]})`,
+    () => doExport(books, fmt),
+  ]);
+}
+
+// Append an "Export to folder ▸ <format>" submenu to a context menu, or a plain
+// hint when nothing in `books` is ready to export yet.
+function addExportItem(menu, books) {
+  const items = exportMenuItems(books);
+  if (items.length) {
+    addSub(menu, "Export to folder", items);
+  } else {
+    add(menu, "Export to folder (nothing ready)", () =>
+      showToast("no exportable file is ready yet", true),
+    );
+  }
+}
+
+// Pick a destination folder, then copy each eligible book's `fmt` file into it
+// (the backend groups them into per-author subfolders). Reports a one-line
+// summary; per-book skips are logged to the console.
+async function doExport(books, fmt) {
+  const eligible = books.filter((b) => hasFormatReady(b, fmt));
+  if (eligible.length === 0) {
+    showToast(`no ${fmt.toUpperCase()} file ready to export`, true);
+    return;
+  }
+  let dir;
+  try {
+    dir = await window.api.invoke("library_pick_folder");
+  } catch (e) {
+    showToast(`export failed: ${e}`, true);
+    return;
+  }
+  if (!dir) return; // user cancelled the folder picker
+
+  let summary;
+  try {
+    summary = await window.api.invoke("library_export_books", {
+      bookIds: eligible.map((b) => b.id),
+      format: fmt,
+      destDir: dir,
+    });
+  } catch (e) {
+    showToast(`export failed: ${e}`, true);
+    return;
+  }
+
+  if (summary.errors?.length) console.warn("export skips:", summary.errors);
+  const parts = [`exported ${summary.exported} ${fmt.toUpperCase()}`];
+  if (summary.skipped) parts.push(`${summary.skipped} skipped`);
+  showToast(`${parts.join(" · ")} → ${dir}`, summary.exported === 0);
+}
+
+// Open the export format menu at (x, y). Used by the selection-bar button, which
+// has no context-menu host of its own; the format items are top-level here
+// rather than a submenu.
+function openExportMenuAt(x, y, books) {
+  const menu = $("#ctx-menu");
+  menu.innerHTML = "";
+  const items = exportMenuItems(books);
+  if (items.length) {
+    for (const [label, fn] of items) add(menu, label, fn);
+  } else {
+    add(menu, "Nothing ready to export", () =>
+      showToast("no exportable file is ready yet", true),
+    );
+  }
+  placeMenu(x, y);
+}
+
+// ---------------------------------------------------------------------------
+// Series-as-selection (cmd/shift-click a collection to select its books)
+// ---------------------------------------------------------------------------
+
+// Click on a collection tile/row: a modifier (cmd/ctrl/shift) selects its
+// member books; a plain click drills into the series.
+function onSeriesClick(e, name) {
+  if (e.metaKey || e.ctrlKey || e.shiftKey) {
+    e.stopPropagation();
+    toggleSeriesSelection(name);
+  } else {
+    enterSeries(name);
+  }
+}
+
+// Add a collection's currently-visible members to the book selection, or remove
+// them if they're all already selected. Lets one Export (or any bulk action)
+// span whole series + standalone books at once.
+function toggleSeriesSelection(name) {
+  const visible = sortedBooks(visibleBooks(state.books));
+  const members = membersOfSeries(visible, name);
+  if (!members.length) return;
+  const allSel = members.every((b) => booksSelection.has(b.id));
+  for (const b of members) {
+    if (allSel) booksSelection.selected.delete(b.id);
+    else booksSelection.selected.add(b.id);
+  }
+  booksSelection.lastClicked = null;
+  // Repaints book containers + fires onChange → renderSelectionBar +
+  // paintSeriesSelection (which marks this collection selected).
+  booksSelection.applyVisuals();
+}
+
+// Mark a collection tile / index-row `.selected` when every one of its visible
+// members is in the selection — so a cmd-selected series reads as a unit, like a
+// book card. Called on every selection change and after each render.
+function paintSeriesSelection() {
+  const els = $$("#gallery-grid .series-card, #series-list tbody tr[data-series]");
+  if (!els.length) return;
+  const visible = sortedBooks(visibleBooks(state.books));
+  for (const el of els) {
+    const members = membersOfSeries(visible, el.dataset.series);
+    const all = members.length > 0 && members.every((b) => booksSelection.has(b.id));
+    el.classList.toggle("selected", all);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Selection (multi-select + bulk actions)
 // ---------------------------------------------------------------------------
 
@@ -2768,6 +2933,16 @@ function wireSelection() {
     else if (sel.length > 1) openMetadataModal(sel, { bulk: true });
   });
   $("#sel-recrawl").addEventListener("click", () => bulkRecrawlCovers(selectedBooks()));
+  // Export opens a format menu anchored to the button. stopPropagation so the
+  // document-level "click closes #ctx-menu" handler doesn't fire on this click
+  // and immediately re-hide the menu we just opened.
+  $("#sel-export").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const sel = selectedBooks();
+    if (!sel.length) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    openExportMenuAt(r.left, r.bottom, sel);
+  });
   $("#sel-delete").addEventListener("click", bulkRemove);
   $("#sel-clear").addEventListener("click", clearSelection);
 

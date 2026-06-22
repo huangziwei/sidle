@@ -436,6 +436,138 @@ pub async fn library_open_in_finder(
         .map_err(|e| e.to_string())
 }
 
+/// Summary of a multi-book export to an external folder, shown in a toast.
+#[derive(Debug, Serialize)]
+pub struct ExportSummary {
+    /// Files actually copied.
+    pub exported: usize,
+    /// Books with no file of the requested format on disk (or a copy error).
+    pub skipped: usize,
+    /// The destination folder (echoed back for the toast).
+    pub dest: String,
+    /// First few human-readable skip reasons (capped), for the toast/console.
+    pub errors: Vec<String>,
+}
+
+/// Copy the chosen `format` (`"epub"` | `"pdf"` | `"kfx"`) file of every book in
+/// `book_ids` into `dest_dir`, grouped into a per-author subfolder
+/// (`<dest>/<Author>/<filename>`). Each file keeps its stored basename (already
+/// `[Author] Title (Year)`); a name collision inside an author folder is
+/// disambiguated with a ` (n)` suffix so two same-named files never clobber each
+/// other. A book that has no file of that format on disk — the companion side
+/// hasn't converted yet, or the file was deleted — is skipped and counted; the
+/// export never aborts on a single failure.
+#[tauri::command]
+pub async fn library_export_books(
+    state: State<'_, AppState>,
+    book_ids: Vec<i64>,
+    format: String,
+    dest_dir: String,
+) -> Result<ExportSummary, String> {
+    if !matches!(format.as_str(), "epub" | "pdf" | "kfx") {
+        return Err(format!("unknown export format: {format}"));
+    }
+    let dest_root = Path::new(&dest_dir);
+    if !dest_root.is_dir() {
+        return Err(format!("{} is not a folder", dest_root.display()));
+    }
+
+    let books = {
+        let conn = state.db.lock().await;
+        let mut v = Vec::with_capacity(book_ids.len());
+        for &id in &book_ids {
+            if let Some(b) = db::get_book(&conn, id).map_err(|e| e.to_string())? {
+                v.push(b);
+            }
+        }
+        v
+    };
+
+    let mut exported = 0usize;
+    let mut skipped = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+    let note = |errors: &mut Vec<String>, msg: String| {
+        if errors.len() < 8 {
+            errors.push(msg);
+        }
+    };
+
+    for book in books {
+        let src = match format.as_str() {
+            "kfx" => book.kfx_path.as_deref(),
+            "epub" => book.epub_path.as_deref(),
+            "pdf" => book.pdf_path.as_deref(),
+            _ => unreachable!("format validated above"),
+        };
+        let Some(src) = src.map(Path::new).filter(|p| p.exists()) else {
+            skipped += 1;
+            note(
+                &mut errors,
+                format!("{}: no {} file on disk", book.title, format.to_uppercase()),
+            );
+            continue;
+        };
+        let Some(file_name) = src.file_name() else {
+            skipped += 1;
+            continue;
+        };
+
+        let author_seg = crate::library::paths::sanitize_segment(&book.author);
+        let author = if author_seg.is_empty() {
+            "Unknown Author"
+        } else {
+            author_seg.as_str()
+        };
+        let author_dir = dest_root.join(author);
+        if let Err(e) = std::fs::create_dir_all(&author_dir) {
+            skipped += 1;
+            note(&mut errors, format!("{}: {e}", book.title));
+            continue;
+        }
+
+        let target = dedup_path(author_dir.join(file_name));
+        match std::fs::copy(src, &target) {
+            Ok(_) => exported += 1,
+            Err(e) => {
+                skipped += 1;
+                note(&mut errors, format!("{}: {e}", book.title));
+            }
+        }
+    }
+
+    Ok(ExportSummary {
+        exported,
+        skipped,
+        dest: dest_dir,
+        errors,
+    })
+}
+
+/// If `path` is free, return it unchanged; otherwise insert ` (2)`, ` (3)`, …
+/// before the extension until a free name is found (giving up after a sane cap).
+fn dedup_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path.extension().map(|e| e.to_string_lossy().into_owned());
+    for n in 2..10_000 {
+        let name = match &ext {
+            Some(e) => format!("{stem} ({n}).{e}"),
+            None => format!("{stem} ({n})"),
+        };
+        let cand = dir.join(name);
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    path
+}
+
 #[tauri::command]
 pub async fn library_cover_path(
     state: State<'_, AppState>,

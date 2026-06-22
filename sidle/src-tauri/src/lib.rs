@@ -65,6 +65,7 @@ pub fn run() {
             commands::library::library_remove,
             commands::library::library_compact,
             commands::library::library_open_in_finder,
+            commands::library::library_export_books,
             commands::library::library_amazon_search,
             commands::library::library_cover_path,
             commands::library::library_recrawl_cover,
