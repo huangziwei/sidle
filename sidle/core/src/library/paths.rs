@@ -442,6 +442,34 @@ pub fn sanitize_segment(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// If `path` is free, return it unchanged; otherwise insert ` (2)`, ` (3)`, …
+/// before the extension until a free name is found (giving up after a sane cap,
+/// returning the original). Shared by the library export (per-author folders)
+/// and the notebook PDF export (flat folder) so neither clobbers an existing
+/// file in the destination.
+pub fn dedup_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path.extension().map(|e| e.to_string_lossy().into_owned());
+    for n in 2..10_000 {
+        let name = match &ext {
+            Some(e) => format!("{stem} ({n}).{e}"),
+            None => format!("{stem} ({n})"),
+        };
+        let cand = dir.join(name);
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    path
+}
+
 fn extract_year(date: &str) -> Option<String> {
     let bytes = date.as_bytes();
     let mut i = 0;

@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 
+use crate::commands::library::ExportSummary;
 use crate::device::monitor::{ensure_transport, evict_transport};
 use crate::library::LibraryPaths;
 use crate::library::db::{self, NotebookRow};
@@ -272,4 +273,74 @@ pub async fn notebook_import_device(
         summary.failed.len()
     );
     Ok(summary)
+}
+
+/// Export each notebook in `notebook_ids` to a multi-page PDF in `dest_dir` —
+/// one `<title>.pdf` per notebook (notebooks have no author, so the folder is
+/// flat). Filenames come from the (sanitized) title; a collision gets a ` (n)`
+/// suffix. A notebook with no pages, or whose render fails, is skipped and
+/// counted; the export never aborts on a single failure. Reuses the library
+/// export's [`ExportSummary`] shape.
+#[tauri::command]
+pub async fn notebook_export_pdf(
+    state: State<'_, AppState>,
+    notebook_ids: Vec<i64>,
+    dest_dir: String,
+) -> Result<ExportSummary, String> {
+    let dest_root = Path::new(&dest_dir).to_path_buf();
+    if !dest_root.is_dir() {
+        return Err(format!("{} is not a folder", dest_root.display()));
+    }
+
+    // Resolve the rows under the lock; render + write outside it (resvg
+    // rasterization is CPU-heavy and synchronous — keep it off the async runtime).
+    let rows = {
+        let conn = state.db.lock().await;
+        let mut v = Vec::with_capacity(notebook_ids.len());
+        for &id in &notebook_ids {
+            if let Some(n) = db::get_notebook(&conn, id).map_err(|e| e.to_string())? {
+                v.push(n);
+            }
+        }
+        v
+    };
+
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut exported = 0usize;
+        let mut skipped = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        for n in rows {
+            let title = crate::library::paths::sanitize_segment(&n.title);
+            let title = if title.is_empty() { "Notebook" } else { &title };
+            let pdf = match notebook::export_notebook_pdf(&paths, &n.uuid, n.page_count as usize) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    skipped += 1;
+                    if errors.len() < 8 {
+                        errors.push(format!("{title}: {e:#}"));
+                    }
+                    continue;
+                }
+            };
+            let target = crate::library::paths::dedup_path(dest_root.join(format!("{title}.pdf")));
+            match std::fs::write(&target, &pdf) {
+                Ok(()) => exported += 1,
+                Err(e) => {
+                    skipped += 1;
+                    if errors.len() < 8 {
+                        errors.push(format!("{title}: {e}"));
+                    }
+                }
+            }
+        }
+        ExportSummary {
+            exported,
+            skipped,
+            dest: dest_dir,
+            errors,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
 }

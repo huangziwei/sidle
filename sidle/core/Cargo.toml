@@ -27,5 +27,16 @@ boko-kai = { path = "../../boko-kai", default-features = false, features = ["aoz
 # cover formats we actually decode (jpg/png).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
+# Notebook → PDF export (library::pdf_render): rasterize each cached page SVG
+# with resvg (re-exports usvg + tiny_skia) and assemble a multi-page PDF with
+# lopdf, FlateDecode-compressing each page image via flate2. All three are
+# already in the workspace lockfile (resvg via boko's `aozora`, lopdf as a boko
+# dep), so these edges reuse the exact compiled versions — no new fetch, no
+# duplicate SVG stack (which `svg2pdf` would have forced; it pins usvg 0.45 vs.
+# our 0.47). `raster-images` so embedded pencil-stroke PNGs render.
+resvg = { version = "0.47", default-features = false, features = ["raster-images"] }
+lopdf = { version = "0.40", default-features = false }
+flate2 = "1"
+
 [dev-dependencies]
 tempfile = "3"

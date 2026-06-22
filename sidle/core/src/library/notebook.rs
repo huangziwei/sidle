@@ -96,6 +96,24 @@ pub fn import_notebook(
     Ok(NotebookOutcome::Imported(row))
 }
 
+/// Render a stored notebook to a single multi-page PDF — one page per cached
+/// page SVG, read from the import-time render cache so we never re-parse the
+/// `nbk`. `page_count` is the notebook row's count. See
+/// [`crate::library::pdf_render`] for the SVG→PDF rasterization.
+pub fn export_notebook_pdf(paths: &LibraryPaths, uuid: &str, page_count: usize) -> Result<Vec<u8>> {
+    if page_count == 0 {
+        anyhow::bail!("notebook has no pages");
+    }
+    let mut svgs = Vec::with_capacity(page_count);
+    for i in 0..page_count {
+        let p = paths.notebook_page_svg(uuid, i);
+        let svg = std::fs::read_to_string(&p)
+            .with_context(|| format!("read page {} svg: {}", i + 1, p.display()))?;
+        svgs.push(svg);
+    }
+    crate::library::pdf_render::svgs_to_pdf(&svgs)
+}
+
 /// SHA-256 hex of a byte buffer (same digest shape as `import::sha256_of_file`).
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};

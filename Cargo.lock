@@ -4219,12 +4219,15 @@ version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9be183ad6a216aa96f33e4c8033b0988b8b3ea6fd2359d19af5bac4643fd8e81"
 dependencies = [
+ "gif",
+ "image-webp",
  "log",
  "pico-args",
  "rgb",
  "svgtypes",
  "tiny-skia",
  "usvg",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -4781,7 +4784,10 @@ dependencies = [
  "boko-kai",
  "chrono",
  "dirs",
+ "flate2",
  "image",
+ "lopdf",
+ "resvg",
  "rusqlite",
  "serde",
  "serde_json",

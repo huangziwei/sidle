@@ -306,6 +306,41 @@
     await refresh();
   }
 
+  // Export each notebook in `notebooks` to a multi-page PDF in a chosen folder
+  // (one <title>.pdf per notebook — notebooks have no author, so it's flat).
+  // Pages render from the import-time SVG cache; the library doesn't change, so
+  // no refresh. Notebooks with no pages are skipped.
+  async function exportPdf(notebooks) {
+    const items = notebooks.filter((n) => n.page_count > 0);
+    if (items.length === 0) {
+      toast("nothing to export — no pages", true);
+      return;
+    }
+    let dir;
+    try {
+      dir = await api.invoke("library_pick_folder");
+    } catch (e) {
+      toast(`export failed: ${e}`, true);
+      return;
+    }
+    if (!dir) return; // user cancelled the folder picker
+
+    let summary;
+    try {
+      summary = await api.invoke("notebook_export_pdf", {
+        notebookIds: items.map((n) => n.id),
+        destDir: dir,
+      });
+    } catch (e) {
+      toast(`export failed: ${e}`, true);
+      return;
+    }
+    if (summary.errors?.length) console.warn("notebook export skips:", summary.errors);
+    const parts = [`exported ${summary.exported} PDF`];
+    if (summary.skipped) parts.push(`${summary.skipped} skipped`);
+    toast(`${parts.join(" · ")} → ${dir}`, summary.exported === 0);
+  }
+
   // Tile thumbnail: prefer the device cover PNG; fall back to page 0's SVG; then
   // a text placeholder. Async — fills `coverEl` in place.
   async function loadThumb(n, coverEl) {
@@ -374,7 +409,15 @@
         closeMenu();
         bulkRemove();
       });
-      menu.append(remove);
+
+      const exportItem = document.createElement("li");
+      exportItem.textContent = `Export ${sel.count()} as PDF…`;
+      exportItem.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeMenu();
+        exportPdf(selectedNotebooks());
+      });
+      menu.append(exportItem, remove);
     } else {
       const rename = document.createElement("li");
       rename.textContent = "Rename…";
@@ -401,7 +444,15 @@
         doRemove(n);
       });
 
-      menu.append(rename, remove);
+      const exportItem = document.createElement("li");
+      exportItem.textContent = "Export as PDF…";
+      exportItem.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeMenu();
+        exportPdf([n]);
+      });
+
+      menu.append(rename, exportItem, remove);
     }
     menu.hidden = false;
     menu.style.left = `${x}px`;
@@ -605,6 +656,13 @@
         }
         removeArmed = false;
         bulkRemove();
+      });
+    }
+    const selExport = q("#nb-sel-export");
+    if (selExport) {
+      selExport.addEventListener("click", () => {
+        const picked = selectedNotebooks();
+        if (picked.length) exportPdf(picked);
       });
     }
     const selClear = q("#nb-sel-clear");
