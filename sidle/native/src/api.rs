@@ -107,7 +107,7 @@ pub(crate) fn get_with_token(
 /// the user gives up before any error renders. LAN-only, so 3s is
 /// plenty for a healthy round-trip on a JSON-only endpoint.
 const LIST_TIMEOUT: Duration = Duration::from_secs(3);
-/// Timeout for cover fetches. Covers are now ~20KB grayscale thumbnails
+/// Timeout for cover fetches. Covers are now ~30–50KB color thumbnails
 /// (`?thumb=1`), so the common case is fast — but the server falls back to
 /// the full-res cover (up to ~1MB) for any book whose thumbnail hasn't been
 /// generated yet (boot backfill still running), and covers fetch serially, so
@@ -242,10 +242,10 @@ fn is_ignorable(c: char) -> bool {
 }
 
 pub fn fetch_cover(agent: &ureq::Agent, cfg: &ServerConfig, id: i64) -> Result<Vec<u8>> {
-    // `?thumb=1` → the server returns the small grayscale thumbnail produced
-    // at import (see sidle_core::library::thumbnail) — ~20KB instead of the
-    // full-res color cover. The server falls back to full-res if the thumbnail
-    // isn't on disk yet, so this is always safe to request.
+    // `?thumb=1` → the server returns the small color thumbnail produced at
+    // import (see sidle_core::library::thumbnail) — ~30–50KB instead of the
+    // full-res cover. The server falls back to full-res if the thumbnail isn't
+    // on disk yet, so this is always safe to request.
     let url = format!("http://{}:{}/cover/{}?thumb=1", cfg.host, cfg.port, id);
     let res = get_with_token(agent, &url, &cfg.token, COVER_TIMEOUT)?;
     let mut bytes = Vec::new();

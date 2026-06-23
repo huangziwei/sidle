@@ -177,13 +177,21 @@ impl LibraryPaths {
         self.book_dir(sha).join("pdf_geom.json")
     }
 
-    /// Thumbnail sidecar: the small grayscale JPEG derived from the cover at
+    /// Thumbnail sidecar: the small color JPEG derived from the cover at
     /// import time and served to the Kindle picker (`/cover/{id}?thumb=1`).
     /// Always `.jpg` regardless of the source cover's extension — the
     /// thumbnail is re-encoded, so its format is fixed. See
     /// [`crate::library::thumbnail`].
     pub fn cover_thumb(&self, sha: &str) -> PathBuf {
         self.book_dir(sha).join("cover.thumb.jpg")
+    }
+
+    /// Library-wide marker recording the thumbnail format version the boot
+    /// backfill last produced. Lets a format change (e.g. grayscale → color)
+    /// force a one-time rebuild of every `cover.thumb.jpg`. See
+    /// [`crate::library::thumbnail::THUMB_FORMAT_VERSION`].
+    pub fn cover_thumb_format(&self) -> PathBuf {
+        self.root.join("cover-thumb.fmt")
     }
 
     /// Directory the desktop app stages the KUAL self-update bundle into, and

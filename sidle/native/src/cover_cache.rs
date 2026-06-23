@@ -1,6 +1,6 @@
 //! On-device cover thumbnail cache.
 //!
-//! The picker fetches a ~20KB grayscale thumbnail per book over the LAN. That's
+//! The picker fetches a ~30–50KB color thumbnail per book over the LAN. That's
 //! fast, but a relaunch would re-fetch every visible cover — and since the
 //! picker hides already-downloaded books, it mostly shows books the in-memory
 //! cache never warmed. This disk cache bridges across launches: a cover fetched

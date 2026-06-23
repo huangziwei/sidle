@@ -210,7 +210,7 @@ async fn health() -> Response {
         "Endpoints (require token via X-Sidle-Token header or ?token= query):\n",
         "  GET /list.json     — library as JSON\n",
         "  GET /get/{id}      — book .kfx bytes\n",
-        "  GET /cover/{id}    — cover image (?thumb=1 for a small grayscale thumbnail)\n",
+        "  GET /cover/{id}    — cover image (?thumb=1 for a small color thumbnail)\n",
     );
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -251,10 +251,11 @@ struct BookListEntry {
     row: db::BookRow,
     device_filename: Option<String>,
     /// Millisecond mtime of whatever `get_cover` would serve for this book (the
-    /// grayscale thumb if present, else the full-res cover), or 0 if it has no
+    /// color thumb if present, else the full-res cover), or 0 if it has no
     /// cover. The Kindle picker folds this into its on-device cover-cache
-    /// filename so a desktop cover-recrawl bumps the rev and self-invalidates
-    /// the stale thumbnail (`sidle/native/src/cover_cache.rs`).
+    /// filename so a desktop cover-recrawl — or a thumbnail format rebuild —
+    /// bumps the rev and self-invalidates the stale thumbnail
+    /// (`sidle/native/src/cover_cache.rs`).
     cover_rev: i64,
 }
 
@@ -288,7 +289,7 @@ async fn list_json(
 }
 
 /// Revision token for a book's cover: the millisecond mtime of whatever
-/// [`get_cover`] would serve (the grayscale thumb if present, else the full-res
+/// [`get_cover`] would serve (the color thumb if present, else the full-res
 /// cover). Returns 0 when the book has no cover or the file can't be stat'd.
 ///
 /// Shipped in `/list.json` so the Kindle picker can key its cover cache on
@@ -366,11 +367,11 @@ async fn get_cover(
         .ok_or(StatusCode::NOT_FOUND)?;
     let cover_path = book.cover_path.ok_or(StatusCode::NOT_FOUND)?;
 
-    // The Kindle picker asks for `?thumb=1` — serve the small grayscale
-    // thumbnail produced at import (see sidle_core::library::thumbnail). If it
-    // isn't on disk yet (the boot backfill hasn't reached this book, or it
-    // failed), fall through to the full-res cover so the picker still gets
-    // something — just slower for that one book until the thumbnail lands.
+    // The Kindle picker asks for `?thumb=1` — serve the small color thumbnail
+    // produced at import (see sidle_core::library::thumbnail). If it isn't on
+    // disk yet (the boot backfill hasn't reached this book, or it failed), fall
+    // through to the full-res cover so the picker still gets something — just
+    // slower for that one book until the thumbnail lands.
     let want_thumb = query.get("thumb").is_some_and(|v| v == "1" || v == "true");
     if want_thumb {
         let thumb = state.paths.cover_thumb(&book.sha256);

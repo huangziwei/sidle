@@ -33,7 +33,8 @@ const BADGE_MARGIN: u32 = 8;
 const BADGE_PAD: u32 = 12;
 
 /// Decode a JPEG/PNG byte buffer and resize to fit inside `CELL_W × CELL_H`,
-/// preserving aspect. Returns the resized grayscale image.
+/// preserving aspect. Returns the resized image in its source color (the cover
+/// thumbnail is a color JPEG; [`blit_fit`] samples its RGB).
 pub fn decode_resize(bytes: &[u8]) -> Result<DynamicImage> {
     let img = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()?
@@ -60,27 +61,29 @@ pub fn fit_rect(box_x: i32, box_y: i32, box_w: u32, box_h: u32, iw: u32, ih: u32
 }
 
 /// Aspect-fit `img` into the box `(box_x, box_y, box_w × box_h)`, centered, and
-/// blit its luma channel (placement from [`fit_rect`]). Returns the painted
-/// rect. A cover already resized to ≤ a cell by [`decode_resize`] is copied 1:1
-/// and centered, while a smaller box (a tile's cover region) gets a
-/// nearest-neighbor downscale (cheap, fine on a 16-shade panel; no extra
-/// `image::resize` allocation per repaint).
+/// blit its RGB (placement from [`fit_rect`]). Returns the painted rect. A cover
+/// already resized to ≤ a cell by [`decode_resize`] is copied 1:1 and centered,
+/// while a smaller box (a tile's cover region) gets a nearest-neighbor downscale
+/// (cheap, fine on the panel; no extra `image::resize` allocation per repaint).
+/// Color reaches the Colorsoft; the grayscale KOA2 collapses it to luma in
+/// `send_update`.
 pub fn blit_fit(fb: &mut Framebuffer, box_x: i32, box_y: i32, box_w: u32, box_h: u32, img: &DynamicImage) -> (i32, i32, u32, u32) {
-    let gray = img.to_luma8();
-    let (iw, ih) = (gray.width(), gray.height());
+    let rgb = img.to_rgb8();
+    let (iw, ih) = (rgb.width(), rgb.height());
     let rect = fit_rect(box_x, box_y, box_w, box_h, iw, ih);
     let (ox, oy, dw, dh) = rect;
     if dw == 0 || dh == 0 {
         return rect;
     }
     let scale = dw as f32 / iw as f32;
-    let raw = gray.as_raw();
+    let raw = rgb.as_raw();
     for dy in 0..dh {
         let sy = ((dy as f32 / scale) as u32).min(ih - 1);
         let src_row = (sy * iw) as usize;
         for dx in 0..dw {
             let sx = ((dx as f32 / scale) as u32).min(iw - 1);
-            fb.put_pixel(ox + dx as i32, oy + dy as i32, raw[src_row + sx as usize]);
+            let p = (src_row + sx as usize) * 3;
+            fb.put_pixel_rgb(ox + dx as i32, oy + dy as i32, [raw[p], raw[p + 1], raw[p + 2]]);
         }
     }
     rect
