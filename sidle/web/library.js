@@ -1807,6 +1807,9 @@ function updateDeviceUI(info) {
     const restoreBtn = $("#btn-restore-annotations");
     if (restoreBtn) restoreBtn.disabled = false;
     $("#device-model").textContent = info.model || "Kindle";
+    // MTP fills firmware in via the on-connect session refresh, so it shows
+    // "—" for the first beat then updates — same as free space.
+    $("#device-firmware").textContent = info.firmware || "—";
     $("#device-serial").textContent = info.serial || "—";
     $("#device-transport").textContent = transportLabel(info.transport);
     $("#device-free").textContent =
@@ -1836,6 +1839,7 @@ function updateDeviceUI(info) {
     status.className = "device-popover-status disconnected";
     status.textContent = "Disconnected";
     $("#device-model").textContent = "—";
+    $("#device-firmware").textContent = "—";
     $("#device-serial").textContent = "—";
     $("#device-transport").textContent = "—";
     $("#device-free").textContent = "—";

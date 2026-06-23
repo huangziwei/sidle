@@ -45,6 +45,9 @@ pub struct MtpTransport {
     /// expose a refresh hook if the UI needs live numbers.
     free_at_open: u64,
     total_capacity: u64,
+    /// Firmware/OS version parsed from `system/version.txt`, read off the
+    /// object tree at session open. `None` if the file wasn't reachable.
+    firmware: Option<String>,
 }
 
 impl MtpTransport {
@@ -52,7 +55,7 @@ impl MtpTransport {
     /// bound `Storage` holds the PTP session (and the claimed USB interface)
     /// open for the transport's lifetime.
     pub fn open(location_id: u64) -> Result<Self> {
-        let (storage, free, total) = block_on(async {
+        let (storage, free, total, firmware) = block_on(async {
             let device = MtpDevice::open_by_location(location_id)
                 .await
                 .map_err(map_mtp_err)
@@ -67,15 +70,33 @@ impl MtpTransport {
                 .ok_or_else(|| anyhow!("Kindle reports no MTP storage — try reconnecting"))?;
             let free = storage.info().free_space_bytes;
             let total = storage.info().max_capacity;
-            Ok::<_, anyhow::Error>((storage, free, total))
+            // Firmware: the Kindle exposes its real filesystem over MTP, so read
+            // `system/version.txt` — the same file mass-storage parses. The MTP
+            // `GetDeviceInfo.device_version` field comes back empty on Kindle,
+            // and none of its device properties carry the OS version. One extra
+            // round-trip at session open, alongside the storage-info read.
+            let firmware = read_firmware(&storage).await;
+            Ok::<_, anyhow::Error>((storage, free, total, firmware))
         })?;
         Ok(Self {
             storage,
             op_lock: Mutex::new(()),
             free_at_open: free,
             total_capacity: total,
+            firmware,
         })
     }
+}
+
+/// Read and parse `system/version.txt` off the device for the firmware string.
+/// Best-effort: any failure (file absent, download error, no version token in
+/// the line) yields `None` — firmware is informational and must never block or
+/// fail the session open.
+async fn read_firmware(storage: &Storage) -> Option<String> {
+    let path = TPath::parse(crate::device::VERSION_TXT_REL);
+    let handle = resolve(storage, &path).await.ok().flatten()?;
+    let bytes = storage.download(handle).await.ok()?;
+    crate::device::parse_firmware(&String::from_utf8_lossy(&bytes))
 }
 
 /// Walk `path` segment-by-segment from storage root, returning the final
@@ -360,6 +381,10 @@ impl Transport for MtpTransport {
         // `GetStorageInfo` round-trip — Phase 4 can wire that to a refresh
         // button if the static value drifts noticeably in practice.
         Some((self.free_at_open, self.total_capacity))
+    }
+
+    fn firmware(&self) -> Option<String> {
+        self.firmware.clone()
     }
 
     fn display_path(&self, path: &TPath) -> String {

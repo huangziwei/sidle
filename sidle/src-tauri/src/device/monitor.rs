@@ -58,17 +58,23 @@ pub fn spawn(
                 // Mass-storage refreshes `free_bytes` cheaply on every poll
                 // via `statvfs`. MTP can't: each refresh would claim the USB
                 // interface, which can race with a user-initiated push. So
-                // `mtp::detect()` returns `None` for free/total, and we
-                // preserve the last known values across polls when the
-                // serial matches. Initial population comes from the
-                // on-connect refresh task spawned below.
+                // `mtp::detect()` returns `None` for free/total/firmware, and
+                // we preserve the last known values across polls when the
+                // serial matches. Initial population comes from the on-connect
+                // refresh task spawned below; without this carry-over the
+                // session-derived fields would flicker back to "—" every tick.
                 if let (Some(new_info), Some(prev_info)) = (next.as_mut(), prev.as_ref())
                 {
                     let same_device = new_info.serial == prev_info.serial;
                     let is_mtp = matches!(new_info.transport, TransportKind::Mtp { .. });
-                    if same_device && is_mtp && new_info.free_bytes.is_none() {
-                        new_info.free_bytes = prev_info.free_bytes;
-                        new_info.total_bytes = prev_info.total_bytes;
+                    if same_device && is_mtp {
+                        if new_info.free_bytes.is_none() {
+                            new_info.free_bytes = prev_info.free_bytes;
+                            new_info.total_bytes = prev_info.total_bytes;
+                        }
+                        if new_info.firmware.is_none() {
+                            new_info.firmware = prev_info.firmware.clone();
+                        }
                     }
                 }
 
@@ -206,8 +212,9 @@ async fn on_mass_storage_connect(
 
 /// Everything that should happen when an MTP Kindle (Scribe, 2024+) connects.
 /// Sequential, not concurrent: MTP exposes a single USB session, so the
-/// free-space `GetStorageInfo` and the annotation pull must not overlap.
-///   1. One-shot `GetStorageInfo` so the popover stops showing "—" for space.
+/// device-info read and the annotation pull must not overlap.
+///   1. One-shot session read (free space + firmware) so the popover stops
+///      showing "—" for those fields.
 ///   2. Sync highlights / notes / bookmarks off the device.
 ///
 /// Whether step 2 finds anything depends on the device exposing its `.sdr/.yjr`
@@ -448,11 +455,13 @@ struct AutoPullSummary {
     failed: u32,
 }
 
-/// One-shot MTP `GetStorageInfo` after the user plugs in. The 2s detect
-/// poll deliberately doesn't open MTP sessions — each open claims the USB
-/// interface and would race with a user-initiated push. Instead we do it
-/// once on connect, write the result back into `state.device`, and emit
-/// a follow-up `device:status` so the popover swaps "—" for real numbers.
+/// One-shot MTP session read after the user plugs in: `GetStorageInfo` for
+/// free/total bytes plus the firmware (`device_version`, captured when the
+/// transport opened). The 2s detect poll deliberately doesn't open MTP
+/// sessions — each open claims the USB interface and would race with a
+/// user-initiated push. Instead we do it once on connect, write the result
+/// back into `state.device`, and emit a follow-up `device:status` so the
+/// popover swaps "—" for real numbers.
 ///
 /// Staleness after a push/delete is the trade-off: the cached free/total
 /// won't drop until the next reconnect. Acceptable for sidle's usage
@@ -469,19 +478,19 @@ async fn refresh_mtp_storage_info(
     let shared = match ensure_transport(&transport, &device).await {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("[sidle/mtp] free-space refresh: open failed for {serial}: {e:#}");
+            eprintln!("[sidle/mtp] device refresh: open failed for {serial}: {e:#}");
             return;
         }
     };
-    let snapshot = tokio::task::spawn_blocking(move || shared.free_space())
-        .await
-        .ok()
-        .flatten();
+    let (snapshot, firmware) =
+        tokio::task::spawn_blocking(move || (shared.free_space(), shared.firmware()))
+            .await
+            .unwrap_or((None, None));
 
-    let Some((free, total)) = snapshot else {
-        eprintln!("[sidle/mtp] free-space refresh: no storage info for {serial}");
+    if snapshot.is_none() && firmware.is_none() {
+        eprintln!("[sidle/mtp] device refresh: no storage info or firmware for {serial}");
         return;
-    };
+    }
 
     let updated = {
         let mut guard = state.lock().await;
@@ -490,8 +499,13 @@ async fn refresh_mtp_storage_info(
             // user unplugged before the refresh finished, drop the result
             // rather than resurrecting stale state.
             Some(current) if current.serial == serial => {
-                current.free_bytes = Some(free);
-                current.total_bytes = Some(total);
+                if let Some((free, total)) = snapshot {
+                    current.free_bytes = Some(free);
+                    current.total_bytes = Some(total);
+                }
+                if firmware.is_some() {
+                    current.firmware = firmware;
+                }
                 Some(current.clone())
             }
             _ => None,

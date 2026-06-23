@@ -213,6 +213,14 @@ pub trait Transport: Send + Sync {
     #[allow(dead_code)] // Phase 4 wiring (free-space refresh from transport).
     fn free_space(&self) -> Option<(u64, u64)>;
 
+    /// Firmware/OS version string when the transport learns it at session open
+    /// (MTP reads `system/version.txt` off the object tree). Mass-storage gets
+    /// firmware from the same file at detect time, so it keeps the default
+    /// `None` here.
+    fn firmware(&self) -> Option<String> {
+        None
+    }
+
     /// Human-readable rendering of `path` for audit logs. Mass-storage
     /// renders the full filesystem path so existing `device_history.device_path`
     /// rows stay byte-identical; MTP can pick whatever's useful.

@@ -42,6 +42,11 @@ pub use transport::{TEntry, TPath, Transport};
 pub struct DeviceInfo {
     pub serial: String,
     pub model: Option<String>,
+    /// Firmware/OS version, e.g. `5.16.2.1.1`. Mass-storage parses it out of
+    /// `system/version.txt` at detect time; MTP reads it from `GetDeviceInfo`
+    /// (`device_version`) at session open, so it's `None` until the on-connect
+    /// refresh lands — same lifecycle as `free_bytes` on MTP.
+    pub firmware: Option<String>,
     pub free_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
     #[serde(flatten)]
@@ -94,5 +99,44 @@ impl DeviceInfo {
             TransportKind::MassStorage { mount } => Some(PathBuf::from(mount)),
             TransportKind::Mtp { .. } => None,
         }
+    }
+}
+
+/// On-device path to the firmware marker, relative to the volume/storage root.
+/// Mass-storage reads it off the mount; MTP downloads it from the object tree
+/// (the Kindle exposes its real filesystem over MTP, so it's the same file).
+pub const VERSION_TXT_REL: &str = "system/version.txt";
+
+/// Pull the firmware version out of `system/version.txt`'s first line. The line
+/// is `Kindle <firmware> [(build)]` — e.g. `Kindle 5.19.4.0.1 (476724 003)` —
+/// so the firmware is the first whitespace token that's a dotted version number
+/// (leading digit, at least one `.`). `None` if the line carries none.
+pub(crate) fn parse_firmware(raw: &str) -> Option<String> {
+    let first = raw.lines().next()?;
+    first
+        .split_whitespace()
+        .find(|tok| {
+            tok.starts_with(|c: char| c.is_ascii_digit())
+                && tok.contains('.')
+                && tok.chars().all(|c| c.is_ascii_digit() || c == '.')
+        })
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_firmware;
+
+    #[test]
+    fn parses_firmware_with_and_without_build() {
+        // No parenthesised build suffix.
+        assert_eq!(parse_firmware("Kindle 5.16.10.4.0\n").as_deref(), Some("5.16.10.4.0"));
+        // With a build suffix — only the dotted version token is taken.
+        assert_eq!(
+            parse_firmware("Kindle 5.19.4.0.1 (476724 003)\n").as_deref(),
+            Some("5.19.4.0.1")
+        );
+        // Nothing version-shaped on the line.
+        assert_eq!(parse_firmware("Kindle\n"), None);
     }
 }

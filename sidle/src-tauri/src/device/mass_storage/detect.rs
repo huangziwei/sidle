@@ -73,10 +73,12 @@ fn inspect(mount: &Path) -> Option<DeviceInfo> {
         .or_else(|| ensure_device_id(mount))
         .unwrap_or_else(|| anon_serial(mount));
     let model = parse_model(&raw);
+    let firmware = crate::device::parse_firmware(&raw);
     let (free, total) = fs_usage(mount).unwrap_or((None, None));
     Some(DeviceInfo {
         serial,
         model,
+        firmware,
         free_bytes: free,
         total_bytes: total,
         transport: TransportKind::MassStorage {
@@ -217,6 +219,7 @@ mod tests {
         // never from version.txt. Either way it must be non-empty.
         assert!(!info.serial.is_empty());
         assert_eq!(info.model.as_deref(), Some("Kindle 5.16.2.1.1 (409745 002)"));
+        assert_eq!(info.firmware.as_deref(), Some("5.16.2.1.1"));
         match info.transport {
             TransportKind::MassStorage { mount } => {
                 assert_eq!(mount, tmp.path().to_string_lossy());

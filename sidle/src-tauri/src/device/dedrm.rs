@@ -158,6 +158,7 @@ mod tests {
     fn fake_device(mount: &Path) -> DeviceInfo {
         DeviceInfo {
             model: None,
+            firmware: None,
             serial: "test".into(),
             free_bytes: None,
             total_bytes: None,

@@ -50,8 +50,10 @@ pub fn detect() -> Option<DeviceInfo> {
     Some(DeviceInfo {
         serial,
         model,
-        // Free/total bytes come from MTP `GetStorageInfo` and require an open
-        // session. Wired up in Phase 4 alongside the transport impl.
+        // Firmware (`device_version`) and free/total bytes both come from an
+        // open MTP session (`GetDeviceInfo` / `GetStorageInfo`), which the 2s
+        // detect poll deliberately avoids. The on-connect refresh fills them in.
+        firmware: None,
         free_bytes: None,
         total_bytes: None,
         transport: TransportKind::Mtp {
