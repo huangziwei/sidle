@@ -603,25 +603,23 @@ async fn render_conf(state: &AppState, serial: String) -> Option<ServerConfRende
 #[tauri::command]
 pub async fn kual_status(state: State<'_, AppState>) -> Result<KualStatus, String> {
     let device = state.device.lock().await.clone();
-    let mount = match device.as_ref().and_then(|d| d.mass_storage_mount()) {
-        Some(m) => m,
-        // No mass-storage Kindle connected (or MTP-only Scribe). The
-        // section is hidden by the UI when overall == DeviceDisconnected.
-        None => {
-            return Ok(KualStatus {
-                overall: KualOverall::DeviceDisconnected,
-                files: Vec::new(),
-                binary_mtime_ms: None,
-                native_source_mtime_ms: None,
-            });
-        }
+    // No Kindle connected at all → the UI hides the section on DeviceDisconnected.
+    // A connected device — mass-storage OR MTP — gets a real status; the deploy
+    // runs over either transport.
+    let Some(device) = device else {
+        return Ok(KualStatus {
+            overall: KualOverall::DeviceDisconnected,
+            files: Vec::new(),
+            binary_mtime_ms: None,
+            native_source_mtime_ms: None,
+        });
     };
 
     // If we can't render a conf (no server token, no LAN IP), fall back
     // to a placeholder so the binary/bundle slots still get checked.
     // The status will read "server.conf stale" but at least the user
     // sees which other files need pushing.
-    let serial = device.as_ref().map(|d| d.serial.clone()).unwrap_or_default();
+    let serial = device.serial.clone();
     let conf = render_conf(&state, serial).await.unwrap_or(ServerConfRender {
         host: String::new(),
         port: 0,
@@ -630,10 +628,23 @@ pub async fn kual_status(state: State<'_, AppState>) -> Result<KualStatus, Strin
     });
 
     let source = state.kual_source.clone();
-    tokio::task::spawn_blocking(move || kual::compute_status(&source, &conf, &mount))
+    let transport = ensure_transport(&state.transport, &device)
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| format!("open device transport: {e:#}"))?;
+    let cell = state.transport.clone();
+    let result =
+        tokio::task::spawn_blocking(move || kual::compute_status(&source, &conf, transport.as_ref()))
+            .await
+            .map_err(|e| e.to_string())?;
+    match result {
+        Ok(status) => Ok(status),
+        Err(e) => {
+            // On-wire failure (mainly MTP): drop the cached session so the next
+            // call reopens fresh rather than reusing a wedged endpoint.
+            evict_transport(&cell).await;
+            Err(format!("{e:#}"))
+        }
+    }
 }
 
 #[tauri::command]
@@ -642,14 +653,11 @@ pub async fn kual_install(
     state: State<'_, AppState>,
 ) -> Result<KualInstallReport, String> {
     let device = state.device.lock().await.clone();
-    let mount = device
-        .as_ref()
-        .and_then(|d| d.mass_storage_mount())
-        .ok_or_else(|| "no mass-storage Kindle connected".to_string())?;
+    let device = device.ok_or_else(|| "no Kindle connected".to_string())?;
 
     // Hard-fail if any input the conf needs is missing — better than
     // writing a broken server.conf that'd silently 403 the picker.
-    let serial = device.as_ref().map(|d| d.serial.clone()).unwrap_or_default();
+    let serial = device.serial.clone();
     let conf = render_conf(&state, serial).await.ok_or_else(|| {
         "couldn't resolve server.conf inputs (need a running server with token + a LAN IP)"
             .to_string()
@@ -658,13 +666,17 @@ pub async fn kual_install(
     let source = state.kual_source.clone();
     let app_handle = app.clone();
     let dist_dir = state.paths.kual_dist();
-    tokio::task::spawn_blocking(move || -> Result<KualInstallReport, String> {
-        let report = kual::install_all(&source, &conf, &mount, |progress| {
+    let transport = ensure_transport(&state.transport, &device)
+        .await
+        .map_err(|e| format!("open device transport: {e:#}"))?;
+    let cell = state.transport.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<KualInstallReport, String> {
+        let report = kual::install_all(&source, &conf, transport.as_ref(), |progress| {
             let _ = app_handle.emit("kual:install-progress", progress);
         })
         .map_err(|e| format!("{e:#}"))?;
         // Refresh the LAN dist so an untethered "Update over Wi-Fi" pulls the
-        // exact binary this USB push just wrote. Non-fatal — a staging miss
+        // exact binary this push just wrote. Non-fatal — a staging miss
         // doesn't undo a successful device install.
         if let Err(e) = kual::stage_dist(&source, &dist_dir) {
             eprintln!("[sidle/kual_install] kual-dist staging failed: {e:#}");
@@ -672,7 +684,12 @@ pub async fn kual_install(
         Ok(report)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    // On-wire failure (mainly MTP): drop the cached session so a retry reopens.
+    if result.is_err() {
+        evict_transport(&cell).await;
+    }
+    result
 }
 
 /// Re-stage the LAN self-update bundle (`<data-dir>/kual-dist/`) when the

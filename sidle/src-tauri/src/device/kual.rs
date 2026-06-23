@@ -25,6 +25,8 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::{TPath, Transport};
+
 /// Where on the device the KUAL bundle lives, relative to the mount.
 const DEVICE_BUNDLE_REL: &str = "extensions/sidle";
 
@@ -161,9 +163,9 @@ pub struct KualFileStatus {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum KualOverall {
-    /// No mass-storage device connected. Section hidden.
-    /// Constructed at the command layer (no Kindle plugged in or MTP-
-    /// only), not by `compute_status` — which requires a mount path.
+    /// No Kindle connected at all. Section hidden. Constructed at the command
+    /// layer (the device cell is empty), not by `compute_status` — which now
+    /// runs against any connected device's transport, mass-storage or MTP.
     #[allow(dead_code)]
     DeviceDisconnected,
     /// Source binary doesn't exist — the user hasn't run `cargo
@@ -286,24 +288,40 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Device-side path for a slot's `device_rel` (`bin/sidle` →
+/// `extensions/sidle/bin/sidle`) as a transport [`TPath`].
+fn device_tpath(device_rel: &str) -> TPath {
+    TPath::parse(&format!("{DEVICE_BUNDLE_REL}/{device_rel}"))
+}
+
+/// Hex sha256 of the on-device bytes at `path`, or `None` when the object is
+/// absent — the transport analog of [`sha256_file_opt`]. Drives the same
+/// staleness/idempotency logic over either transport (mass-storage `std::fs` or
+/// MTP USB), so the deploy behaves identically on both.
+fn device_sha_opt(transport: &dyn Transport, path: &TPath) -> Result<Option<String>> {
+    if transport.exists(path)? {
+        Ok(Some(sha256_bytes(&transport.read(path)?)))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Compute the per-file staleness given a source layout, a rendered
-/// server.conf, and the mount path of the connected mass-storage
-/// device (e.g. `/Volumes/Kindle`).
+/// server.conf, and the connected device's [`Transport`] (mass-storage volume
+/// or MTP — the deploy is identical over either).
 ///
-/// Pure function — does no writes, no network. Uses the host
-/// filesystem to read both sides.
+/// Does no writes, no network. Reads the source side off the host filesystem
+/// and the device side through `transport`.
 pub fn compute_status(
     source: &KualSource,
     conf: &ServerConfRender,
-    device_mount: &Path,
+    transport: &dyn Transport,
 ) -> Result<KualStatus> {
-    let device_root = device_mount.join(DEVICE_BUNDLE_REL);
     let mut files = Vec::with_capacity(6);
     let mut binary_missing = false;
 
     for slot in slots(source, conf) {
-        let device_path = device_root.join(slot.device_rel);
-        let device_hash = sha256_file_opt(&device_path)?;
+        let device_hash = device_sha_opt(transport, &device_tpath(slot.device_rel))?;
 
         let state = match slot.source {
             Source::Rendered(text) => {
@@ -440,35 +458,30 @@ fn walk_newest_mtime(dir: &Path) -> Option<u64> {
 pub fn install_all(
     source: &KualSource,
     conf: &ServerConfRender,
-    device_mount: &Path,
+    transport: &dyn Transport,
     mut on_progress: impl FnMut(&KualFileInstallResult),
 ) -> Result<KualInstallReport> {
-    let device_root = device_mount.join(DEVICE_BUNDLE_REL);
-    // The bin/ and etc/ subdirs may not exist on a fresh install.
-    std::fs::create_dir_all(device_root.join("bin"))
-        .with_context(|| format!("mkdir {}", device_root.join("bin").display()))?;
-    std::fs::create_dir_all(device_root.join("etc"))
-        .with_context(|| format!("mkdir {}", device_root.join("etc").display()))?;
-
+    // No explicit mkdir: `Transport::write_atomic` creates the bin/ and etc/
+    // parents on both transports (mass-storage `create_dir_all`, MTP
+    // `ensure_folder`), so a fresh install needs no pre-step.
     let mut results = Vec::with_capacity(6);
     for slot in slots(source, conf) {
-        let dest = device_root.join(slot.device_rel);
-        let result = install_one(&slot, &dest);
+        let result = install_one(transport, &slot);
         on_progress(&result);
         results.push(result);
     }
 
-    // A USB push is authoritative: the `bin/sidle` we just wrote supersedes any
+    // A direct push is authoritative: the `bin/sidle` we just wrote supersedes any
     // pending LAN self-update staged as `bin/sidle.new` by an earlier "Update
     // over Wi-Fi". Leaving the stale `.new` would let the launcher's
     // unconditional swap (`sidle.sh`) clobber this freshly-pushed binary on the
-    // next launch — a silent regression. Best-effort; NotFound is the norm.
-    let _ = std::fs::remove_file(device_root.join("bin/sidle.new"));
+    // next launch — a silent regression. Best-effort; absent is the norm.
+    let _ = transport.delete(&device_tpath("bin/sidle.new"));
 
     Ok(KualInstallReport { results })
 }
 
-fn install_one(slot: &Slot<'_>, dest: &Path) -> KualFileInstallResult {
+fn install_one(transport: &dyn Transport, slot: &Slot<'_>) -> KualFileInstallResult {
     let bytes_result: Result<Vec<u8>> = match &slot.source {
         Source::Rendered(text) => Ok(text.as_bytes().to_vec()),
         Source::File(path) => std::fs::read(path)
@@ -487,15 +500,16 @@ fn install_one(slot: &Slot<'_>, dest: &Path) -> KualFileInstallResult {
         }
     };
 
+    let tpath = device_tpath(slot.device_rel);
     let source_hash = sha256_bytes(&bytes);
-    if let Ok(Some(device_hash)) = sha256_file_opt(dest)
+    if let Ok(Some(device_hash)) = device_sha_opt(transport, &tpath)
         && device_hash == source_hash {
             return KualFileInstallResult::Skipped {
                 device_path: slot.device_rel.to_string(),
             };
         }
 
-    if let Err(e) = atomic_write(dest, &bytes) {
+    if let Err(e) = transport.write_atomic(&tpath, &bytes) {
         return KualFileInstallResult::Failed {
             device_path: slot.device_rel.to_string(),
             error: format!("{e:#}"),
@@ -683,6 +697,13 @@ mod tests {
         }
     }
 
+    /// Wrap a temp dir as a mass-storage [`Transport`], so the deploy tests
+    /// drive the same trait the command layer uses — byte-for-byte the prior
+    /// `std::fs`-against-a-mount behavior, now also shared with the MTP path.
+    fn ms(dir: &Path) -> crate::device::mass_storage::transport::MassStorageTransport {
+        crate::device::mass_storage::transport::MassStorageTransport::new(dir.to_path_buf())
+    }
+
     #[test]
     fn render_has_trailing_newline_and_all_fields() {
         let conf = make_conf();
@@ -737,7 +758,7 @@ mod tests {
         let source = make_source(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
 
-        let status = compute_status(&source, &make_conf(), device.path()).unwrap();
+        let status = compute_status(&source, &make_conf(), &ms(device.path())).unwrap();
         assert_eq!(status.overall, KualOverall::NotInstalled);
         assert!(status.files.iter().all(|f| matches!(f.state, KualFileState::Missing { .. })));
     }
@@ -749,8 +770,8 @@ mod tests {
         let device = tempfile::tempdir().unwrap();
         let conf = make_conf();
 
-        install_all(&source, &conf, device.path(), |_| {}).unwrap();
-        let status = compute_status(&source, &conf, device.path()).unwrap();
+        install_all(&source, &conf, &ms(device.path()), |_| {}).unwrap();
+        let status = compute_status(&source, &conf, &ms(device.path())).unwrap();
         assert_eq!(status.overall, KualOverall::InSync);
     }
 
@@ -762,12 +783,12 @@ mod tests {
 
         // First install with one token.
         let conf1 = make_conf();
-        install_all(&source, &conf1, device.path(), |_| {}).unwrap();
+        install_all(&source, &conf1, &ms(device.path()), |_| {}).unwrap();
 
         // Token rotates; everything else identical.
         let mut conf2 = conf1.clone();
         conf2.token = "rotated".into();
-        let status = compute_status(&source, &conf2, device.path()).unwrap();
+        let status = compute_status(&source, &conf2, &ms(device.path())).unwrap();
 
         match status.overall {
             KualOverall::Stale { stale_count, missing_count } => {
@@ -791,7 +812,7 @@ mod tests {
         let source = make_source(tmp.path(), false); // no binary
         let device = tempfile::tempdir().unwrap();
 
-        let status = compute_status(&source, &make_conf(), device.path()).unwrap();
+        let status = compute_status(&source, &make_conf(), &ms(device.path())).unwrap();
         assert_eq!(status.overall, KualOverall::BinaryNotBuilt);
         let bin = status.files.iter().find(|f| f.device_path == "bin/sidle").unwrap();
         assert_eq!(bin.state, KualFileState::SourceMissing);
@@ -804,8 +825,8 @@ mod tests {
         let device = tempfile::tempdir().unwrap();
         let conf = make_conf();
 
-        install_all(&source, &conf, device.path(), |_| {}).unwrap();
-        let report = install_all(&source, &conf, device.path(), |_| {}).unwrap();
+        install_all(&source, &conf, &ms(device.path()), |_| {}).unwrap();
+        let report = install_all(&source, &conf, &ms(device.path()), |_| {}).unwrap();
 
         assert!(report.results.iter().all(|r| matches!(r, KualFileInstallResult::Skipped { .. })),
                 "second install on identical inputs should skip everything");
@@ -818,11 +839,11 @@ mod tests {
         let device = tempfile::tempdir().unwrap();
 
         let conf1 = make_conf();
-        install_all(&source, &conf1, device.path(), |_| {}).unwrap();
+        install_all(&source, &conf1, &ms(device.path()), |_| {}).unwrap();
 
         let mut conf2 = conf1.clone();
         conf2.token = "rotated".into();
-        let report = install_all(&source, &conf2, device.path(), |_| {}).unwrap();
+        let report = install_all(&source, &conf2, &ms(device.path()), |_| {}).unwrap();
 
         let written: Vec<&str> = report
             .results
@@ -841,7 +862,7 @@ mod tests {
         let source = make_source(tmp.path(), true);
         let device = tempfile::tempdir().unwrap();
 
-        install_all(&source, &make_conf(), device.path(), |_| {}).unwrap();
+        install_all(&source, &make_conf(), &ms(device.path()), |_| {}).unwrap();
         assert!(device.path().join("extensions/sidle/bin/sidle").exists());
         assert!(device.path().join("extensions/sidle/bin/sidle.sh").exists());
         assert!(device.path().join("extensions/sidle/bin/update.sh").exists());
@@ -857,7 +878,7 @@ mod tests {
         let device = tempfile::tempdir().unwrap();
 
         let mut events = 0;
-        install_all(&source, &make_conf(), device.path(), |_| events += 1).unwrap();
+        install_all(&source, &make_conf(), &ms(device.path()), |_| events += 1).unwrap();
         // bin/sidle, bin/sidle.sh, bin/update.sh, config.xml, menu.json, etc/server.conf
         assert_eq!(events, 6);
     }
@@ -890,7 +911,7 @@ mod tests {
         let stale = bin_dir.join("sidle.new");
         std::fs::write(&stale, b"stale-lan-stage").unwrap();
 
-        install_all(&source, &make_conf(), device.path(), |_| {}).unwrap();
+        install_all(&source, &make_conf(), &ms(device.path()), |_| {}).unwrap();
 
         assert!(!stale.exists(), "USB install must clear a pending bin/sidle.new");
         assert!(bin_dir.join("sidle").exists(), "the authoritative bin/sidle is written");
