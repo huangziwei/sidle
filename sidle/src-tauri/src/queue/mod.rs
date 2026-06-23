@@ -20,8 +20,9 @@ use crate::state::DbHandle;
 enum QueueMsg {
     /// `(book_id, reconvert, color)` — `reconvert` = forced re-run (source→target
     /// only, skip the import-time cover enrichment that mutates the source KFX).
-    /// `color` = encode EPUB→KFX interior plates as full-color JXR (else
-    /// grayscale, the default); ignored by the other conversion directions.
+    /// `color` = encode EPUB→KFX interior plates as full-color JXR (the default;
+    /// grayscale sources auto-collapse to `8bppGray`, so this only changes
+    /// genuinely-color images); ignored by the other conversion directions.
     Enqueue(i64, bool, bool),
     SetWorkers(usize),
     Shutdown,
@@ -37,8 +38,10 @@ impl QueueHandle {
     /// Enqueue a first-time conversion (import / autopull): runs the format
     /// conversion **and** the import-time cover enrichment.
     pub async fn enqueue(&self, book_id: i64) -> Result<()> {
-        // First-time conversion ⇒ grayscale (the pipeline default).
-        self.tx.send(QueueMsg::Enqueue(book_id, false, false)).await?;
+        // First-time conversion ⇒ full color (the pipeline default). The JXR
+        // encoder's auto-gray collapse keeps grayscale pages at `8bppGray`, so
+        // only genuinely-color images (e.g. cover plates / color inserts) grow.
+        self.tx.send(QueueMsg::Enqueue(book_id, false, true)).await?;
         Ok(())
     }
 

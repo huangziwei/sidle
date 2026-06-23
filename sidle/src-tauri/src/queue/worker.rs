@@ -364,8 +364,9 @@ fn convert_epub_to_kfx(
     // import is a no-op (DB == source); only edits diverge. See
     // `book_metadata_override`.
     handle.set_metadata_override(book_metadata_override(handle.metadata(), book));
-    // Interior plates: full-color JXR when the user picked "full color", else
-    // grayscale (default). Cover stays JPEG either way (boko handles that).
+    // Interior plates: full-color JXR (the default) unless the user explicitly
+    // picked grayscale on a re-convert. Grayscale source pages auto-collapse to
+    // `8bppGray` regardless. Cover stays JPEG either way (boko handles that).
     handle.set_image_color_mode(if color {
         jxr::ColorMode::Color
     } else {

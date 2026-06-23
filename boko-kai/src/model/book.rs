@@ -208,10 +208,12 @@ pub struct Book {
     /// without touching the source file. `None` = use the backend's metadata
     /// verbatim (the default).
     meta_override: Option<Metadata>,
-    /// How raster images are encoded into a KFX export: `Grayscale` (default —
-    /// the device is B&W e-ink and the source keeps the color master) or
-    /// `Color` (full `24bppRGB` JXR, for the Sidle desktop reader / a future
-    /// color device). Set via [`Book::set_image_color_mode`].
+    /// How raster images are encoded into a KFX export: `Color` (default —
+    /// full `24bppRGB` JXR, for color devices like the Colorsoft and the Sidle
+    /// desktop reader) or `Grayscale` (luma-only `8bppGray`). `Color` is safe as
+    /// the default because the JXR encoder auto-collapses any image whose
+    /// channels are identical (a grayscale source) to `8bppGray`, so only
+    /// genuinely-color images carry chroma. Set via [`Book::set_image_color_mode`].
     image_color_mode: jxr::ColorMode,
 }
 
@@ -303,7 +305,7 @@ impl Book {
             backend,
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
             meta_override: None,
-            image_color_mode: jxr::ColorMode::Grayscale,
+            image_color_mode: jxr::ColorMode::Color,
         })
     }
 
@@ -332,7 +334,7 @@ impl Book {
             backend,
             ir_cache: Arc::new(RwLock::new(HashMap::new())),
             meta_override: None,
-            image_color_mode: jxr::ColorMode::Grayscale,
+            image_color_mode: jxr::ColorMode::Color,
         })
     }
 
