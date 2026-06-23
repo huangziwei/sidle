@@ -129,7 +129,7 @@ Separately, `validate/epub3/` is a standalone EPUB-3 spec checker (mimetype, con
 | Change | Reason |
 |---|---|
 | `name = "boko-kai"`, lib `name = "boko"` | Crate renamed for clarity; lib import name unchanged so dependents still write `use boko::…` |
-| `version = "0.3.0+kai.2"` | Kai version tag |
+| `version = "0.3.0+kai.3"` | Kai version tag |
 | `publish = false` | Private fork, not on crates.io |
 | `LICENSE` GPL-3.0-or-later | Inherited from upstream, unchanged |
 

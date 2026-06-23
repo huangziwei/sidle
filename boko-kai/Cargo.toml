@@ -1,6 +1,6 @@
 [package]
 name = "boko-kai"
-version = "0.3.0+kai.2"
+version = "0.3.0+kai.3"
 edition = "2024"
 description = "Private modified (kai 改) fork of boko with extra CJK typography support; consumed only by sidle"
 license = "GPL-3.0-or-later"
