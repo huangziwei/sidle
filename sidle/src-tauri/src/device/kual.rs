@@ -75,6 +75,21 @@ impl KualSource {
             binary_path: kual.join("native").join("sidle"),
         }
     }
+
+    /// Build time (unix seconds) of `binary_path`, read from the
+    /// `<binary_path>.build-ts` sidecar `build.sh` writes beside the cross-built
+    /// picker. Feeds the manifest's `built_at` so the device can refuse a
+    /// downgrade. `0` when the sidecar is absent (e.g. a bare `cargo build` that
+    /// skipped `build.sh`), which disables the guard — the device then falls back
+    /// to the sha-only check.
+    pub fn build_ts(&self) -> u64 {
+        let mut sidecar = self.binary_path.clone().into_os_string();
+        sidecar.push(".build-ts");
+        std::fs::read_to_string(PathBuf::from(sidecar))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
 }
 
 /// Fields rendered into `etc/server.conf` on the device. Held as a
@@ -566,6 +581,13 @@ pub struct KualManifestEntry {
     pub name: String,
     pub sha256: String,
     pub size: u64,
+    /// Unix seconds the staged file was built — read from the `sidle.build-ts`
+    /// sidecar `build.sh` writes beside the binary (and baked into the binary
+    /// itself). The device refuses to self-update to an entry whose `built_at`
+    /// isn't strictly newer than its own, so a stale `kual-dist` can't downgrade
+    /// it over Wi-Fi. `0` when the sidecar is absent (a bare `cargo build`).
+    #[serde(default)]
+    pub built_at: u64,
 }
 
 /// The `kual-dist/manifest.json` contract. `sidle-server` mirrors a minimal
@@ -635,6 +657,7 @@ pub fn stage_dist(source: &KualSource, dist_dir: &Path) -> Result<StageOutcome> 
             name: "bin/sidle".to_string(),
             sha256,
             size,
+            built_at: source.build_ts(),
         }],
     };
     let json = serde_json::to_vec_pretty(&manifest).context("serialize kual manifest")?;

@@ -43,8 +43,17 @@ VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\
 echo "==> Stamping KUAL config.xml version ($VERSION)"
 sed -i '' -E "s#<version>[^<]*</version>#<version>${VERSION}</version>#" kual/sidle/config.xml
 
-echo "==> Cross-compiling sidle-native for Kindle ($KUAL_TARGET)"
-cargo build --release --target "$KUAL_TARGET" -p sidle-native
+# Single build timestamp (unix seconds) for this run: baked into the picker
+# binary (build.rs reads SIDLE_BUILD_TS) AND written to the sidle.build-ts
+# sidecar the server folds into the LAN-update manifest as `built_at`. One clock
+# on both sides lets the device refuse a self-update that isn't strictly newer —
+# a stale kual-dist can't downgrade it over Wi-Fi.
+BUILD_TS="$(date +%s)"
+echo "==> Cross-compiling sidle-native for Kindle ($KUAL_TARGET)  [build_ts=$BUILD_TS]"
+SIDLE_BUILD_TS="$BUILD_TS" cargo build --release --target "$KUAL_TARGET" -p sidle-native
+# Stamp the build time next to the binary KualSource points at (dev path);
+# build.rs baked the same value into the binary itself.
+printf '%s' "$BUILD_TS" > "target/$KUAL_TARGET/release/sidle.build-ts"
 
 echo "==> Building sidle-server (LAN daemon: app spawns it; sakabar + Kindle reach it)"
 cargo build --release -p sidle-server
@@ -74,6 +83,7 @@ cp kual/sidle/menu.json     "$RES_KUAL/sidle/menu.json"
 cp kual/sidle/bin/sidle.sh  "$RES_KUAL/sidle/bin/sidle.sh"
 cp kual/sidle/bin/update.sh "$RES_KUAL/sidle/bin/update.sh"
 cp "target/$KUAL_TARGET/release/sidle" "$RES_KUAL/native/sidle"
+cp "target/$KUAL_TARGET/release/sidle.build-ts" "$RES_KUAL/native/sidle.build-ts"
 
 echo "==> Building sidle desktop app"
 cargo tauri build

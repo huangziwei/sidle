@@ -157,10 +157,20 @@ fn run_update() -> anyhow::Result<()> {
     draw_panel(&mut fb, &mut renderer, "Checking for update…")?;
 
     // Step-level breadcrumbs go to the dedicated update log via the closure.
-    let message = match selfupdate::run_pull(&agent, &cfg, Path::new(BUNDLE_DIR), |m| update_log(m)) {
+    let message = match selfupdate::run_pull(
+        &agent,
+        &cfg,
+        Path::new(BUNDLE_DIR),
+        selfupdate::self_build_ts(),
+        |m| update_log(m),
+    ) {
         Ok(selfupdate::UpdateOutcome::UpToDate) => "Already up to date".to_string(),
         Ok(selfupdate::UpdateOutcome::Staged(_)) => {
             "Update staged — relaunch to apply".to_string()
+        }
+        // The server's binary is older/equal — kept the newer one on the device.
+        Ok(selfupdate::UpdateOutcome::RefusedOlder(_)) => {
+            "Server build not newer — kept current".to_string()
         }
         // Reuse the gallery's token-mismatch breadcrumb verbatim (see `diag`).
         Err(api::SidleError::TokenMismatch) => {

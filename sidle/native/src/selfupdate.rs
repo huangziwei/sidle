@@ -34,6 +34,13 @@ pub struct KualManifestEntry {
     pub name: String,
     pub sha256: String,
     pub size: u64,
+    /// Unix seconds the served file was built (`build.sh`'s `BUILD_TS`, also
+    /// baked into the picker binary). `0` when the manifest predates build
+    /// stamping. The device stages this only if `built_at` is strictly newer
+    /// than its own build time — the guard that stops a stale `kual-dist` from
+    /// downgrading the picker over Wi-Fi (see [`should_stage`]).
+    #[serde(default)]
+    pub built_at: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,6 +55,20 @@ pub enum UpdateOutcome {
     UpToDate,
     /// Staged one or more `<name>.new` files (the names), pending a relaunch.
     Staged(Vec<String>),
+    /// The manifest offered differing bytes, but none were strictly newer than
+    /// what's installed — refused so a stale `kual-dist` can't downgrade us. The
+    /// device keeps its current (newer-or-equal) binary. Carries the file names.
+    RefusedOlder(Vec<String>),
+}
+
+/// This binary's build time (unix seconds), baked by `build.rs` from
+/// `build.sh`'s `SIDLE_BUILD_TS`. `0` when built without the stamp (a bare
+/// `cargo build`), which disables the downgrade guard for this binary — it then
+/// updates on any sha difference, the pre-guard behavior.
+pub fn self_build_ts() -> u64 {
+    option_env!("SIDLE_BUILD_TS")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// Tiny JSON — keep it snappy like the boot list fetch.
@@ -110,6 +131,45 @@ pub fn needs_update(on_device: Option<&[u8]>, entry: &KualManifestEntry) -> bool
     }
 }
 
+/// What [`run_pull`] should do with one manifest entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageDecision {
+    /// On-device bytes already match the manifest — skip.
+    UpToDate,
+    /// Download, verify, and stage as `<name>.new`.
+    Stage,
+    /// Bytes differ, but the manifest's build is not strictly newer than ours —
+    /// refuse, so a stale `kual-dist` can't downgrade the device.
+    RefuseOlder,
+}
+
+/// Decide whether to replace the on-device copy, given this binary's build time.
+/// Identical bytes → never. When **both** the entry and this binary carry a
+/// build stamp (`built_at`/`self_build_ts` non-zero), stage only if the entry is
+/// **strictly newer**; an older-or-equal stamp is refused — the downgrade guard.
+/// If either side is unstamped (`0` — a pre-guard manifest or a bare `cargo
+/// build`), fall back to the sha-only rule so updates still flow.
+pub fn should_stage(
+    on_device: Option<&[u8]>,
+    entry: &KualManifestEntry,
+    self_build_ts: u64,
+) -> StageDecision {
+    if !needs_update(on_device, entry) {
+        return StageDecision::UpToDate;
+    }
+    // The guard only protects an *existing* on-device copy from being replaced by
+    // an older-or-equal build. A missing file has nothing to downgrade, so it's
+    // always installed (matches `needs_update`'s "missing → yes").
+    if on_device.is_some()
+        && entry.built_at != 0
+        && self_build_ts != 0
+        && entry.built_at <= self_build_ts
+    {
+        return StageDecision::RefuseOlder;
+    }
+    StageDecision::Stage
+}
+
 /// Whether a freshly downloaded blob matches the manifest entry — **both** size
 /// and sha256. The gate before staging: the launcher swaps `.new` in
 /// unconditionally, so a truncated or corrupt download must never become the
@@ -161,25 +221,40 @@ pub fn run_pull(
     agent: &ureq::Agent,
     cfg: &ServerConfig,
     bundle: &Path,
+    self_build_ts: u64,
     log: impl Fn(&str),
 ) -> Result<UpdateOutcome> {
     let manifest = fetch_manifest(agent, cfg)?;
     log(&format!("manifest: {} file(s)", manifest.files.len()));
     let mut staged = Vec::new();
+    let mut refused = Vec::new();
     for entry in &manifest.files {
         let dest = bundle.join(&entry.name);
         let on_device = std::fs::read(&dest).ok();
         let have = on_device.as_deref().map(sha256_hex);
         log(&format!(
-            "{}: device={} manifest={} ({} bytes)",
+            "{}: device={} manifest={} ({} bytes, built_at={} vs self={})",
             entry.name,
             have.as_deref().map(short).unwrap_or("absent"),
             short(&entry.sha256),
             entry.size,
+            entry.built_at,
+            self_build_ts,
         ));
-        if !needs_update(on_device.as_deref(), entry) {
-            log(&format!("{}: already current — skip", entry.name));
-            continue;
+        match should_stage(on_device.as_deref(), entry, self_build_ts) {
+            StageDecision::UpToDate => {
+                log(&format!("{}: already current — skip", entry.name));
+                continue;
+            }
+            StageDecision::RefuseOlder => {
+                log(&format!(
+                    "{}: manifest build {} not newer than installed {} — refusing downgrade",
+                    entry.name, entry.built_at, self_build_ts,
+                ));
+                refused.push(entry.name.clone());
+                continue;
+            }
+            StageDecision::Stage => {}
         }
         log(&format!("{}: downloading…", entry.name));
         let bytes = download_file(agent, cfg, &entry.name)?;
@@ -203,10 +278,12 @@ pub fn run_pull(
         log(&format!("{}: verified + staged {}", entry.name, staged_path.display()));
         staged.push(entry.name.clone());
     }
-    Ok(if staged.is_empty() {
-        UpdateOutcome::UpToDate
-    } else {
+    Ok(if !staged.is_empty() {
         UpdateOutcome::Staged(staged)
+    } else if !refused.is_empty() {
+        UpdateOutcome::RefusedOlder(refused)
+    } else {
+        UpdateOutcome::UpToDate
     })
 }
 
@@ -215,10 +292,15 @@ mod tests {
     use super::*;
 
     fn entry_for(bytes: &[u8]) -> KualManifestEntry {
+        entry_for_ts(bytes, 0)
+    }
+
+    fn entry_for_ts(bytes: &[u8], built_at: u64) -> KualManifestEntry {
         KualManifestEntry {
             name: "bin/sidle".into(),
             sha256: sha256_hex(bytes),
             size: bytes.len() as u64,
+            built_at,
         }
     }
 
@@ -247,6 +329,55 @@ mod tests {
         assert!(needs_update(None, &e), "missing on device → needs update");
         assert!(needs_update(Some(b"old-binary-v1"), &e), "differs → needs update");
         assert!(!needs_update(Some(v2), &e), "identical → up to date");
+    }
+
+    #[test]
+    fn should_stage_refuses_older_or_equal_build() {
+        let installed = b"running-v2";
+        let newer = b"newer-v3";
+        let older = b"older-v1";
+
+        // Strictly newer build with different bytes → stage.
+        assert_eq!(
+            should_stage(Some(installed), &entry_for_ts(newer, 200), 100),
+            StageDecision::Stage,
+        );
+        // Older build → refuse (the bug we're guarding: stale kual-dist).
+        assert_eq!(
+            should_stage(Some(installed), &entry_for_ts(older, 50), 100),
+            StageDecision::RefuseOlder,
+        );
+        // Equal build but different bytes → refuse (no forward progress).
+        assert_eq!(
+            should_stage(Some(installed), &entry_for_ts(older, 100), 100),
+            StageDecision::RefuseOlder,
+        );
+        // Identical bytes always win, even if the stamp looks newer.
+        assert_eq!(
+            should_stage(Some(installed), &entry_for_ts(installed, 999), 100),
+            StageDecision::UpToDate,
+        );
+    }
+
+    #[test]
+    fn should_stage_falls_back_to_sha_when_unstamped() {
+        let installed = b"running-v2";
+        let other = b"other-v9";
+        // Manifest predates stamping (built_at=0) → sha-only: differing bytes stage.
+        assert_eq!(
+            should_stage(Some(installed), &entry_for_ts(other, 0), 100),
+            StageDecision::Stage,
+        );
+        // This binary is unstamped (self=0) → sha-only even against a stamped entry.
+        assert_eq!(
+            should_stage(Some(installed), &entry_for_ts(other, 50), 0),
+            StageDecision::Stage,
+        );
+        // Missing on device → always stage regardless of stamps.
+        assert_eq!(
+            should_stage(None, &entry_for_ts(other, 10), 100),
+            StageDecision::Stage,
+        );
     }
 
     #[test]
