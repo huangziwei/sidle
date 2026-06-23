@@ -159,13 +159,11 @@ pub fn run(
     loop {
         match input.next()? {
             InputEvent::Touch(TouchEvent::Up { y, .. }) => match layout.hit(y) {
-                Some(Tap::Key(k)) => {
-                    if state.key != k {
-                        state.key = k;
-                        render(fb, renderer, state, &layout);
-                        let rect = layout.rows_rect(fb.var.xres);
-                        fb.send_update(rect, WAVEFORM_MODE_DU)?;
-                    }
+                Some(Tap::Key(k)) if state.key != k => {
+                    state.key = k;
+                    render(fb, renderer, state, &layout);
+                    let rect = layout.rows_rect(fb.var.xres);
+                    fb.send_update(rect, WAVEFORM_MODE_DU)?;
                 }
                 Some(Tap::Direction) => {
                     state.dir = state.dir.toggled();
@@ -174,7 +172,8 @@ pub fn run(
                     fb.send_update(rect, WAVEFORM_MODE_DU)?;
                 }
                 Some(Tap::Done) => return Ok(state),
-                None => {}
+                // Tapping the already-selected key / no hit — nothing to do.
+                Some(Tap::Key(_)) | None => {}
             },
             InputEvent::Touch(TouchEvent::Down { .. }) => {}
             InputEvent::Touch(TouchEvent::Screenshot) => {

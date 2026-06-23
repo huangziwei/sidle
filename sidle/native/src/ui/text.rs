@@ -127,8 +127,8 @@ fn blit_threshold(
     // are small (≤32x32 typically), so per-pixel call overhead is fine.
     for row in 0..h {
         let cov_row = &coverage[row * w..row * w + w];
-        for col in 0..w {
-            if cov_row[col] >= COVERAGE_THRESHOLD {
+        for (col, &cov) in cov_row.iter().enumerate() {
+            if cov >= COVERAGE_THRESHOLD {
                 fb.put_pixel(x + col as i32, y + row as i32, fg);
             }
         }

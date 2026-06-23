@@ -236,6 +236,9 @@ fn n_pages(n_options: usize, per_page: usize) -> usize {
     n_options.div_ceil(per_page).max(1)
 }
 
+// Hit-test over geometry + paging state — the args are irreducible positional
+// values; a struct would just relocate the list to the call site.
+#[allow(clippy::too_many_arguments)]
 fn pick_hit(
     tx: u32,
     ty: u32,
@@ -281,6 +284,7 @@ fn row_text(filters: &Filters, facet: Facet, value: &str, count: usize) -> Strin
     format!("{mark}{value}  ({count})")
 }
 
+#[allow(clippy::too_many_arguments)] // draw fn: positional geometry + paging args
 fn render_pick_page(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -337,6 +341,7 @@ fn render_pick_page(
 
 /// Re-draw a single option row in place + DU refresh — a toggle shouldn't flash
 /// the whole screen.
+#[allow(clippy::too_many_arguments)] // draw fn: positional geometry + paging args
 fn redraw_pick_row(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -394,22 +399,19 @@ fn value_picker(
                         render_pick_page(fb, renderer, filters, facet, &options, page, pp, pages, lh);
                         fb.send_update(full_rect(fb), WAVEFORM_MODE_GC16)?;
                     }
-                    Some(PickTap::Prev) => {
-                        if page > 0 {
-                            page -= 1;
-                            render_pick_page(fb, renderer, filters, facet, &options, page, pp, pages, lh);
-                            fb.send_update(full_rect(fb), WAVEFORM_MODE_GC16)?;
-                        }
+                    Some(PickTap::Prev) if page > 0 => {
+                        page -= 1;
+                        render_pick_page(fb, renderer, filters, facet, &options, page, pp, pages, lh);
+                        fb.send_update(full_rect(fb), WAVEFORM_MODE_GC16)?;
                     }
-                    Some(PickTap::Next) => {
-                        if page + 1 < pages {
-                            page += 1;
-                            render_pick_page(fb, renderer, filters, facet, &options, page, pp, pages, lh);
-                            fb.send_update(full_rect(fb), WAVEFORM_MODE_GC16)?;
-                        }
+                    Some(PickTap::Next) if page + 1 < pages => {
+                        page += 1;
+                        render_pick_page(fb, renderer, filters, facet, &options, page, pp, pages, lh);
+                        fb.send_update(full_rect(fb), WAVEFORM_MODE_GC16)?;
                     }
                     Some(PickTap::Back) => return Ok(()),
-                    None => {}
+                    // Prev at first page / Next at last page / no hit — nothing to do.
+                    Some(PickTap::Prev | PickTap::Next) | None => {}
                 }
             }
             InputEvent::Touch(TouchEvent::Down { .. }) => {}

@@ -143,10 +143,11 @@ fn find_button_device() -> Result<Option<PathBuf>> {
             continue;
         }
         for line in block.lines() {
-            if let Some(rest) = line.strip_prefix("H: Handlers=") {
-                if let Some(ev) = rest.split_whitespace().find(|w| w.starts_with("event")) {
-                    return Ok(Some(PathBuf::from(format!("/dev/input/{ev}"))));
-                }
+            let Some(rest) = line.strip_prefix("H: Handlers=") else {
+                continue;
+            };
+            if let Some(ev) = rest.split_whitespace().find(|w| w.starts_with("event")) {
+                return Ok(Some(PathBuf::from(format!("/dev/input/{ev}"))));
             }
         }
     }

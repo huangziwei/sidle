@@ -87,13 +87,13 @@ impl Input {
             // Buttons first. `read_one` returns None for releases / autorepeat
             // / SYN / unmapped keys, in which case we loop and poll again
             // rather than block on a second read.
-            if self.buttons.is_some() && fds[1].revents & libc::POLLIN != 0 {
-                if let Some(buttons) = self.buttons.as_mut() {
-                    if let Some(page) = buttons.read_one()? {
-                        return Ok(InputEvent::Page(page));
-                    }
-                    continue;
+            if let Some(buttons) = self.buttons.as_mut()
+                && fds[1].revents & libc::POLLIN != 0
+            {
+                if let Some(page) = buttons.read_one()? {
+                    return Ok(InputEvent::Page(page));
                 }
+                continue;
             }
 
             if fds[0].revents & libc::POLLIN != 0 {

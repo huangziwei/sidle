@@ -98,7 +98,7 @@ fn main() {
     // Sidle-created window is WM-managed + recomposited on teardown before we
     // port the renderer off raw /dev/fb0. Bypasses all fb/config setup.
     if std::env::args().any(|a| a == "--x11-poc") {
-        let r = eink::x11poc::run(|m| log(m));
+        let r = eink::x11poc::run(log);
         log(format!("x11poc done: {r:?}"));
         return;
     }
