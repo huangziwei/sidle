@@ -11,10 +11,14 @@
 //! orientation (page-bezel side), so we render identity here and never rotate
 //! pixels ourselves — doing so would double-rotate. Touch/buttons are read raw
 //! from evdev (panel-fixed), so the main loop re-orients *those* on rotation;
-//! see [`crate::eink::input`]. The panel is 8bpp grayscale (depth 8, white=255 /
-//! black=0) — exactly our backing format — so presenting is a 1:1 `PutImage` of
-//! the dirty rows, chunked under the server's max request length. Type/method
-//! names (`Framebuffer`, `MxcfbRect`, `send_update`) are kept so the renderer is
+//! see [`crate::eink::input`]. The renderer always draws into an 8bpp grayscale
+//! backing (white=255 / black=0). How those bytes reach the server depends on
+//! the window depth: a grayscale panel (KOA2, depth 8) takes them 1:1; a color
+//! panel (Colorsoft — `/dev/fb0` is 32bpp, X runs depth 24/32) wants 4 bytes per
+//! pixel, so `send_update` expands gray → `(g,g,g,pad)` on the fly. Gray is
+//! R=G=B, so the visual's channel order is irrelevant. The dirty rows are
+//! chunked under the server's max request length. Type/method names
+//! (`Framebuffer`, `MxcfbRect`, `send_update`) are kept so the renderer is
 //! unchanged; the X server drives the eink refresh, so the waveform is ignored.
 
 use std::path::Path;
@@ -61,6 +65,10 @@ pub struct Framebuffer {
     win: Window,
     gc: Gcontext,
     depth: u8,
+    /// Server wire bytes per pixel for `depth` (from `pixmap_formats`): 1 on a
+    /// depth-8 panel, 4 on depth-24/32. `send_update` expands the 8bpp backing
+    /// to this width.
+    bytes_per_pixel: usize,
     pub var: Var,
     /// 8bpp grayscale, stride == `xres`. All drawing writes here; `send_update`
     /// `PutImage`s the dirty rows to the window.
@@ -77,6 +85,22 @@ impl Framebuffer {
         let xres = screen.width_in_pixels as u32;
         let yres = screen.height_in_pixels as u32;
         let depth = screen.root_depth;
+        // Wire bytes per pixel the server expects for this depth. Depth 8 → 1;
+        // depth 24/32 → 4 (X pads 24-bit pixels to 32). Looked up rather than
+        // assumed so `send_update` adapts to whatever the panel's X exposes.
+        let bytes_per_pixel = conn
+            .setup()
+            .pixmap_formats
+            .iter()
+            .find(|f| f.depth == depth)
+            .map(|f| (f.bits_per_pixel as usize / 8).max(1))
+            .unwrap_or(1);
+        // stderr → sidle.sh's log: confirms geometry + the format we picked.
+        eprintln!(
+            "fb: xres={xres} yres={yres} depth={depth} bytes_per_pixel={bytes_per_pixel} \
+             root_visual=0x{:x}",
+            screen.root_visual,
+        );
 
         let win = conn.generate_id().context("generate_id window")?;
         conn.create_window(
@@ -120,6 +144,7 @@ impl Framebuffer {
             win,
             gc,
             depth,
+            bytes_per_pixel,
             var: Var { xres, yres },
             backing,
             max_req_bytes,
@@ -162,17 +187,42 @@ impl Framebuffer {
     /// no per-scanline padding. Chunked under the server's max request length.
     /// Identity (the X server rotates the window); waveform ignored.
     pub fn send_update(&mut self, rect: MxcfbRect, _waveform: u32) -> Result<u32> {
-        let stride = self.var.xres as usize;
+        let bpp = self.bytes_per_pixel;
+        let stride = self.var.xres as usize; // backing stride (1 byte/px)
+        let row_bytes = stride * bpp; // wire bytes per scanline
         let width = self.var.xres as u16;
         let top = rect.top.min(self.var.yres);
         let bottom = rect.top.saturating_add(rect.height).min(self.var.yres);
-        let max_rows = (self.max_req_bytes.saturating_sub(64) / stride.max(1)).max(1);
+        let max_rows = (self.max_req_bytes.saturating_sub(64) / row_bytes.max(1)).max(1);
+
+        // Scratch reused across bands when expanding to a wider pixel format.
+        let mut wide: Vec<u8> = Vec::new();
 
         let mut y = top;
         while y < bottom {
             let h = ((bottom - y) as usize).min(max_rows);
             let s = y as usize * stride;
             let e = s + h * stride;
+            let band = &self.backing[s..e];
+
+            // bpp == 1: the backing bytes are already the wire format. Otherwise
+            // expand each gray byte to `bpp` bytes — `(g,g,g)` in the colour
+            // channels, trailing pad left 0xFF (opaque for ARGB visuals, ignored
+            // for depth-24). R=G=B, so channel order is irrelevant.
+            let data: &[u8] = if bpp == 1 {
+                band
+            } else {
+                wide.clear();
+                wide.resize(band.len() * bpp, 0xFF);
+                for (i, &g) in band.iter().enumerate() {
+                    let p = i * bpp;
+                    for c in 0..bpp.min(3) {
+                        wide[p + c] = g;
+                    }
+                }
+                &wide
+            };
+
             self.conn
                 .put_image(
                     ImageFormat::Z_PIXMAP,
@@ -184,7 +234,7 @@ impl Framebuffer {
                     y as i16,
                     0,
                     self.depth,
-                    &self.backing[s..e],
+                    data,
                 )
                 .context("put_image")?;
             y += h as u32;

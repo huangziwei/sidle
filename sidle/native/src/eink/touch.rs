@@ -21,10 +21,13 @@
 //! in and emit the boundary at `SYN_REPORT` so the position fields are
 //! correctly populated for the matching event.
 //!
-//! Device discovery: `/proc/bus/input/devices` is text; we match the
-//! device whose Name field contains "touch", "cyttsp" (KOA2's driver),
-//! or "zforce" (older Kindles) and extract its `eventN` handler. No
-//! EVIOCGNAME ioctl needed.
+//! Device discovery: `/proc/bus/input/devices` is text. Name-matching alone is
+//! brittle across panels — KOA2 reports "cyttsp", the Colorsoft reports
+//! "fts_ts" (FocalTech) — so we primarily match on *capability*: a touchscreen
+//! advertises absolute axes (`EV_ABS`) and is a direct device
+//! (`INPUT_PROP_DIRECT`), which the power-key / accelerometer nodes are not.
+//! A name allowlist is kept as a fast path. We then extract its `eventN`
+//! handler; no `EVIOCGNAME` ioctl needed.
 //!
 //! Wire format: on the KOA2's kernel (4.1.15, 32-bit ARM), each event is
 //! 16 bytes — `struct timeval` is 8 bytes, then u16 type, u16 code,
@@ -51,6 +54,11 @@ const ABS_MT_TRACKING_ID: u16 = 0x39;
 // Protocol-B contact selector: subsequent ABS_MT_* events address this slot.
 // Sticky — the kernel only emits it when the active contact changes.
 const ABS_MT_SLOT: u16 = 0x2f;
+// Capability bits used to identify the touchscreen in /proc/bus/input/devices.
+// EV_ABS in the `B: EV=` bitmap → reports absolute axes; INPUT_PROP_DIRECT in
+// `B: PROP=` → finger maps 1:1 to a screen point (touchscreen, not touchpad).
+const EV_ABS_BIT: u32 = 3;
+const INPUT_PROP_DIRECT: u32 = 1;
 
 const EVENT_BYTES: usize = 16;
 
@@ -332,21 +340,46 @@ fn find_touch_device() -> Result<PathBuf> {
         .context("read /proc/bus/input/devices")?;
 
     for block in raw.split("\n\n") {
-        let name_line = block.lines().find(|l| l.starts_with("N: Name="));
-        let lowered = name_line.unwrap_or("").to_lowercase();
-        let is_touch = ["touch", "cyttsp", "zforce", "atmel"]
+        let name = block
+            .lines()
+            .find_map(|l| l.strip_prefix("N: Name="))
+            .unwrap_or("")
+            .to_lowercase();
+        // Fast path: a known controller name. Fallback: capabilities — the
+        // device reports absolute axes and is a direct touch surface. The
+        // power key (EV=3, no EV_ABS) and accelerometers (no INPUT_PROP_DIRECT)
+        // are rejected by the capability test.
+        let name_match = ["touch", "cyttsp", "zforce", "atmel", "fts", "focaltech", "goodix", "elan"]
             .iter()
-            .any(|needle| lowered.contains(needle));
-        if !is_touch {
+            .any(|needle| name.contains(needle));
+        let has_abs = first_hex_word(block, "B: EV=") & (1 << EV_ABS_BIT) != 0;
+        let is_direct = first_hex_word(block, "B: PROP=") & (1 << INPUT_PROP_DIRECT) != 0;
+        if !(name_match || (has_abs && is_direct)) {
             continue;
         }
         for line in block.lines() {
-            if let Some(rest) = line.strip_prefix("H: Handlers=") {
-                if let Some(ev) = rest.split_whitespace().find(|w| w.starts_with("event")) {
-                    return Ok(PathBuf::from(format!("/dev/input/{ev}")));
-                }
+            let Some(rest) = line.strip_prefix("H: Handlers=") else {
+                continue;
+            };
+            if let Some(ev) = rest.split_whitespace().find(|w| w.starts_with("event")) {
+                // stderr → sidle.sh's log; confirms which node we grabbed.
+                eprintln!("touch: using /dev/input/{ev} (name={name:?})");
+                return Ok(PathBuf::from(format!("/dev/input/{ev}")));
             }
         }
     }
     bail!("no touchscreen entry in /proc/bus/input/devices");
+}
+
+/// First whitespace-separated hex word of the `prefix` line in a
+/// `/proc/bus/input/devices` block (e.g. `B: EV=b` → `0xb`). `0` when the line
+/// is absent or unparseable. EV/PROP fit one word, so the most-significant-word-
+/// first ordering of multi-word bitmaps doesn't matter here.
+fn first_hex_word(block: &str, prefix: &str) -> u64 {
+    block
+        .lines()
+        .find_map(|l| l.strip_prefix(prefix))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|w| u64::from_str_radix(w, 16).ok())
+        .unwrap_or(0)
 }
