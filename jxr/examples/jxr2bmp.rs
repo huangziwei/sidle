@@ -22,6 +22,11 @@
 //!   layouts are rejected: each needs an interpretation choice this viewer
 //!   refuses to make silently.
 
+// Index-driven pixel loops (a sample index also strides the source buffer) match
+// the codec's style; iterators would obscure the packing math. See the same
+// allow in the library crate root.
+#![allow(clippy::needless_range_loop)]
+
 use jxr::decode::pixels::{AlphaMode, ColorModel, PixelBuffer, SampleType};
 use jxr::decode::{container, decode_image};
 

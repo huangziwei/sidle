@@ -155,6 +155,7 @@ impl Report {
     ///   defect in EPUB→KFX; in KFX→EPUB it's source KFX data quality (calibre's
     ///   `report_missing_positions` flags the very same positions, and boko's
     ///   EPUB carries no dangling href for it).
+    ///
     /// `validate_all` and the standalone links check both gate on this.
     pub fn is_clean_for(&self, dir: super::Direction) -> bool {
         self.is_clean()

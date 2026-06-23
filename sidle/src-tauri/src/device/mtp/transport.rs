@@ -30,7 +30,7 @@ use futures::executor::block_on;
 use mtp_rs::mtp::{MtpDevice, NewObjectInfo, Progress, Storage};
 use mtp_rs::ptp::{ObjectHandle, ObjectInfo};
 
-use crate::device::transport::{TEntry, TPath, Transport};
+use crate::device::transport::{ChildFiles, TEntry, TPath, Transport};
 
 pub struct MtpTransport {
     storage: Storage,
@@ -299,7 +299,7 @@ impl Transport for MtpTransport {
         dir: &TPath,
         pick_dir: &dyn Fn(&str) -> bool,
         pick_file: &dyn Fn(&str) -> bool,
-    ) -> Result<Vec<(String, Vec<(String, Vec<u8>)>)>> {
+    ) -> Result<Vec<ChildFiles>> {
         // Resolve `dir` ONCE, then list each matching child + read its matching
         // files BY HANDLE — no per-file re-walk of `dir` from the storage root (the
         // O(N²) that made sync scale badly with library size). `.yjr`/`.yjf`/`nbk`
@@ -312,7 +312,7 @@ impl Transport for MtpTransport {
                 return Ok(Vec::new());
             };
             let children = storage.list_objects(Some(parent)).await.map_err(map_mtp_err)?;
-            let mut out: Vec<(String, Vec<(String, Vec<u8>)>)> = Vec::new();
+            let mut out: Vec<ChildFiles> = Vec::new();
             for child in children {
                 if !child.is_folder() || !pick_dir(&child.filename) {
                     continue;

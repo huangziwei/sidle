@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn and_across_or_within() {
-        let books = vec![
+        let books = [
             Book { language: "jp".into(), author: "A".into(), ..book(1) },
             Book { language: "jp".into(), author: "B".into(), ..book(2) },
             Book { language: "en".into(), author: "A".into(), ..book(3) },

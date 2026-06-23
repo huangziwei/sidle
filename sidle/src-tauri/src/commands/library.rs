@@ -1072,7 +1072,7 @@ pub async fn library_backup(
         // restore/merge extract thousands of zip entries.
         let last_pct = std::cell::Cell::new(-1i32);
         let on_progress = |done: u64, total: u64| {
-            let pct = if total > 0 { (done * 100 / total) as i32 } else { 0 };
+            let pct = (done * 100).checked_div(total).unwrap_or(0) as i32;
             if pct != last_pct.get() || done >= total {
                 last_pct.set(pct);
                 let _ = app.emit(
@@ -1152,7 +1152,7 @@ pub async fn library_restore(
     let app_progress = app.clone();
     let last_pct = std::cell::Cell::new(-1i32);
     let on_progress = |done: u64, total: u64| {
-        let pct = if total > 0 { (done * 100 / total) as i32 } else { 0 };
+        let pct = (done * 100).checked_div(total).unwrap_or(0) as i32;
         if pct != last_pct.get() || done >= total {
             last_pct.set(pct);
             let _ = app_progress.emit(
@@ -1220,7 +1220,7 @@ pub async fn library_merge(
     let prepared = tokio::task::spawn_blocking(move || {
         let last_pct = std::cell::Cell::new(-1i32);
         let on_progress = |done: u64, total: u64| {
-            let pct = if total > 0 { (done * 100 / total) as i32 } else { 0 };
+            let pct = (done * 100).checked_div(total).unwrap_or(0) as i32;
             if pct != last_pct.get() || done >= total {
                 last_pct.set(pct);
                 let _ = app.emit(

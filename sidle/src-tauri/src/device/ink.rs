@@ -93,6 +93,10 @@ pub fn handwritten_notes(collected: &[CollectedYjr]) -> Vec<Annotation> {
 /// library — it'll sync next connect once it's added). An unchanged `nbk` (same
 /// content sha) skips the decode + raster re-render via the `ink_sync`
 /// checkpoint, exactly like the `.yjr` fast path.
+// Eight distinct inputs (db handle, paths, device id, timestamp, the two pulled
+// collections, the report sink, and the progress callback) with one call site —
+// a parameter struct would add indirection without removing any real coupling.
+#[allow(clippy::too_many_arguments)]
 pub fn import_collected_ink(
     conn: &Connection,
     paths: &LibraryPaths,

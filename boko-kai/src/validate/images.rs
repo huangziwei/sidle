@@ -169,9 +169,9 @@ impl Report {
     ///   with no KFX storyline element, so a book with a cover legitimately has
     ///   one more EPUB image than KFX elements; this equality false-fails on every
     ///   such book.
+    ///
     /// All of the above stay printed-but-informational in the report (a real
-    /// dropped image still shows as `epub_missing_image_count`). See
-    /// `.claude/plans/finished_or_stale/kfx-to-epub-port.md` "Insights".
+    /// dropped image still shows as `epub_missing_image_count`).
     pub fn is_clean(&self) -> bool {
         self.epub_missing_image_count == 0 && self.epub_unreadable_image_count == 0
     }

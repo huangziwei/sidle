@@ -1591,10 +1591,10 @@ fn build_chapter_entities_grouped(
     // resolver defaults it to the storyline id; a real Amazon KFX targets the
     // page-template id, which is what makes the device render the cover
     // full-screen (no chrome) instead of as an ordinary flowed page.
-    if is_cover {
-        if let Some(target) = ctx.landmark_fragments.get_mut(&LandmarkType::Cover) {
-            target.fragment_id = section_id;
-        }
+    if is_cover
+        && let Some(target) = ctx.landmark_fragments.get_mut(&LandmarkType::Cover)
+    {
+        target.fragment_id = section_id;
     }
 
     // =========================================================================

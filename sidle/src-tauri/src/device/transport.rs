@@ -96,6 +96,10 @@ pub struct TEntry {
     pub modified: Option<String>,
 }
 
+/// One matched child directory's haul from [`Transport::read_files_in_children`]:
+/// the child's name paired with its picked `(filename, bytes)` entries.
+pub type ChildFiles = (String, Vec<(String, Vec<u8>)>);
+
 /// On-device IO surface. Each method is logically atomic from the caller's
 /// view: a partial `write_atomic` either lands fully or leaves the prior
 /// object untouched, a `delete` is a no-op when the object is already gone,
@@ -178,7 +182,7 @@ pub trait Transport: Send + Sync {
         dir: &TPath,
         pick_dir: &dyn Fn(&str) -> bool,
         pick_file: &dyn Fn(&str) -> bool,
-    ) -> Result<Vec<(String, Vec<(String, Vec<u8>)>)>> {
+    ) -> Result<Vec<ChildFiles>> {
         let mut out = Vec::new();
         for entry in self.list(dir)? {
             if !entry.is_dir || !pick_dir(&entry.name) {

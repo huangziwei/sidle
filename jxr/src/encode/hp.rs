@@ -156,8 +156,6 @@ pub fn encode_cbphp(bw: &mut BitWriter, st: &mut HpState, mb_cbphp: i32, neighbo
 /// (HP at within-block positions `blk*16 + 1..16`); `mb_dclp` the LP final
 /// values (for the HP prediction mode); `cbphp_left`/`cbphp_top` the neighbours'
 /// stored `mb_cbphp`. Returns this MB's `mb_cbphp` for neighbour prediction.
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn encode_hp_mb(
     sink: &mut super::codestream::Sink,
     st: &mut HpState,
