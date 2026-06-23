@@ -34,7 +34,7 @@ Book data and library database will be stored in `~/Library/Application Support/
 
 To install the KUAL app, plug in the Kindle via USB, then in the Kindle tab, enter `KUAL extension`, then click `push KUAL`. 
 
-Currently only tested on macOS 26 and Kindle Oasis 2 (9th Gen) with 15.16.2.1.1.
+Tested on macOS 26 with Kindle Oasis 2 (9th Gen; 15.16.2.1.1) and Kindle Colorsoft (1th Gen; 15.8.0.2) 
 
 ## But Why?
 
