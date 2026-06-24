@@ -1491,6 +1491,39 @@ kbd {
   text-overflow: ellipsis;
 }
 
+/* Drag a book onto a series tile to file it there. Mouse-based for the same
+   reason as the column drag above (the webview blocks the native drag API), so
+   the ghost and highlights are ours. See library.js wireBookDragSource. */
+.book-drag-ghost {
+  position: fixed;
+  pointer-events: none;
+  z-index: 500;
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent);
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+}
+
+/* The book tile/row in motion dims so the ghost reads as the thing being moved. */
+.book-card.drag-source,
+#series-list tbody tr.drag-source {
+  opacity: 0.45;
+}
+
+/* The series tile/row under the cursor — "drop here to file into this series". */
+.series-card.series-drop-target,
+#series-list tbody tr[data-series].series-drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
 /* Formats column */
 
 .formats {

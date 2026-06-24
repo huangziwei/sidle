@@ -580,6 +580,131 @@ function wireDragDrop() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Drag a book onto a series tile to file it there
+// ---------------------------------------------------------------------------
+//
+// Grab a book tile/row (or, if it's part of the current selection, the whole
+// selection) and drop it on a series tile to set those books' series_name —
+// the quick path that skips opening the metadata editor.
+//
+// Mouse-based, NOT the HTML5 drag API: the webview runs with dragDropEnabled
+// (for file-drop import), so WebKit hands native drags to Tauri at the OS level
+// and dragstart/drop never reach our DOM — the same reason the column reorder
+// in table.js is mouse-driven. We mirror that pattern: a small movement
+// threshold separates a drag from a click, a floating ghost trails the cursor,
+// the series tile under it lights up, and mouseup files the books via the
+// existing bulk-metadata command. Series tiles need no per-tile wiring — they're
+// found by hit-testing `[data-series]` under the cursor.
+
+const BOOK_DRAG_THRESHOLD = 4; // px a mousedown must travel before it's a drag
+
+// The series tile currently lit as the drop target, so we can clear it as the
+// cursor moves off. Reset to null when no drag is in flight.
+let seriesDropTargetEl = null;
+
+// Wire a book tile/row as a drag source. `book` is its library row.
+function wireBookDragSource(el, book) {
+  el.addEventListener("mousedown", (e) => onBookDragDown(e, el, book));
+}
+
+function onBookDragDown(e, el, book) {
+  if (e.button !== 0) return; // primary button only
+  // Modifier = select/toggle/range; let the click handler own it, no drag.
+  if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+  e.preventDefault(); // suppress text selection; the click still fires for select
+
+  const startX = e.clientX;
+  const startY = e.clientY;
+  // Grab the whole selection when the book is part of it; otherwise just this
+  // one, without disturbing an unrelated selection.
+  const ids = booksSelection.has(book.id) ? booksSelection.ids() : [book.id];
+
+  let dragging = false;
+  let ghost = null;
+
+  const onMove = (ev) => {
+    if (!dragging) {
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < BOOK_DRAG_THRESHOLD) return;
+      dragging = true;
+      el.classList.add("drag-source");
+      ghost = document.createElement("div");
+      ghost.className = "book-drag-ghost";
+      ghost.textContent = `${ids.length} book${ids.length === 1 ? "" : "s"}`;
+      document.body.appendChild(ghost);
+      document.body.style.cursor = "grabbing";
+    }
+    ghost.style.left = `${ev.clientX + 10}px`;
+    ghost.style.top = `${ev.clientY + 10}px`;
+    paintSeriesDropTarget(seriesTileAt(ev.clientX, ev.clientY));
+  };
+
+  const onUp = (ev) => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    document.body.style.cursor = "";
+    if (ghost) ghost.remove();
+    el.classList.remove("drag-source");
+    paintSeriesDropTarget(null);
+    if (!dragging) return; // never crossed the threshold — a plain click
+
+    el.classList.add("just-dragged"); // swallow the trailing synthetic click
+    // Drop it again after that click would have fired, so an aborted drag
+    // (released over nothing → no re-render) can't swallow the next real click.
+    setTimeout(() => el.classList.remove("just-dragged"), 0);
+    const target = seriesTileAt(ev.clientX, ev.clientY);
+    if (target) assignBooksToSeries(ids, target.dataset.series);
+  };
+
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
+// The series drop target under a point: a gallery `.series-card` or a grouped
+// list series row (`#series-list tr[data-series]`). null when over neither.
+function seriesTileAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  return el ? el.closest(".series-card[data-series], #series-list tbody tr[data-series]") : null;
+}
+
+// Light exactly one series tile as the live drop target, clearing the previous.
+function paintSeriesDropTarget(el) {
+  if (seriesDropTargetEl === el) return;
+  if (seriesDropTargetEl) seriesDropTargetEl.classList.remove("series-drop-target");
+  seriesDropTargetEl = el;
+  if (el) el.classList.add("series-drop-target");
+}
+
+// Set `series_name` on the dropped books via the bulk-metadata command (same
+// path as the editor), then merge the returned rows and re-render once. Books
+// already in the series are skipped so the toast count is truthful.
+async function assignBooksToSeries(bookIds, seriesName) {
+  const name = (seriesName || "").trim();
+  if (!name || !bookIds || bookIds.length === 0) return;
+  const targets = bookIds.filter((id) => {
+    const b = state.books.find((x) => x.id === id);
+    return b && seriesNameOf(b) !== name;
+  });
+  if (targets.length === 0) {
+    showToast(`Already in "${name}".`);
+    return;
+  }
+  try {
+    const rows = await window.api.invoke("library_bulk_update_metadata", {
+      bookIds: targets,
+      patch: { series_name: name },
+    });
+    for (const r of rows) mergeBookRow(r);
+    // The books collapsed into the series tile and are no longer individually
+    // shown, so drop them from the selection if they were in it.
+    if (targets.some((id) => booksSelection.has(id))) booksSelection.clear();
+    render();
+    showToast(`Added ${rows.length} book${rows.length === 1 ? "" : "s"} to "${name}".`);
+  } catch (e) {
+    showToast(`Couldn't add to series: ${e}`, true);
+  }
+}
+
 async function importPaths(paths) {
   startImportStatus(paths);
 
@@ -1107,6 +1232,7 @@ function seriesCard(entry) {
     img.src = coverUrl;
     img.alt = "";
     img.loading = "lazy";
+    img.draggable = false; // don't let the lead cover drag out as a bare image
     cover.appendChild(img);
   } else {
     const ph = document.createElement("div");
@@ -1200,6 +1326,7 @@ function renderSeriesList(entries) {
         onItemContext(ev, b);
         openContextMenu(ev.clientX, ev.clientY, b);
       });
+      wireBookDragSource(tr, b); // drag onto a series row to file it there
     }
     tbody.appendChild(tr);
   }
@@ -1221,6 +1348,7 @@ function galleryCard(b) {
     img.src = coverUrl;
     img.alt = "";
     img.loading = "lazy";
+    img.draggable = false; // the card owns the drag (file into a series), not the cover image
     cover.appendChild(img);
   } else {
     const ph = document.createElement("div");
@@ -1248,6 +1376,7 @@ function galleryCard(b) {
     onItemContext(e, b);
     openContextMenu(e.clientX, e.clientY, b);
   });
+  wireBookDragSource(card, b); // drag onto a series tile to file it there
   return card;
 }
 
@@ -2991,6 +3120,13 @@ function onMainMouseDown(e) {
 // Thin wrappers so the book card/row handlers read naturally; the logic is the
 // shared controller's. Notes wires its cards straight to its own controller.
 function onItemClick(e, b) {
+  // A drag that releases back on its origin tile fires a trailing click; swallow
+  // it once so the drag doesn't also re-select (see wireBookDragSource).
+  const el = e.currentTarget;
+  if (el && el.classList.contains("just-dragged")) {
+    el.classList.remove("just-dragged");
+    return;
+  }
   booksSelection.click(e, b.id);
   setFocusKey(`book:${b.id}`); // keyboard cursor follows the clicked book
 }
