@@ -125,6 +125,25 @@ pub fn run() {
             commands::notebook::notebook_import_device,
             commands::notebook::notebook_export_pdf,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .on_window_event(|window, event| {
+            // macOS convention: the red close button (and Cmd+W) closes the
+            // *window*, not the app. Tauri's default exits once the last window
+            // closes, so intercept the request and hide the window instead. The
+            // app stays alive in the Dock; Cmd+Q (default menu) still quits.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // Clicking the Dock icon after the window was hidden re-shows it.
+            if let tauri::RunEvent::Reopen { .. } = event {
+                for (_, window) in app.webview_windows() {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        });
 }
