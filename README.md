@@ -6,12 +6,14 @@ Sideload/dump books in and out of a (jailbroken) Kindle.
 
 ## TL;DR
 
-Sidle contains two parts:
+Sidle contains two main parts:
 
 1. a Rust/Tauri app for managing books, converting various formats to EPUB and KFX, and reading them on macOS;
 2. a KUAL app to pull books from the library and sync annotations back to the library via WIFI.
 
 The Tauri app doesn't require the Kindle to be jailbroken, but the KUAL app does (to begin with, you need to jailbreak to install KUAL itself). 
+
+There's also a bonus: a [pure rust JPEG XR encoder/decoder](./jxr/README.md) as a standalone crate.
 
 ## Screenshots
 
