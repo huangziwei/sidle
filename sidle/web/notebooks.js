@@ -11,6 +11,9 @@
 (function () {
   const api = window.api;
   const q = (sel) => document.querySelector(sel);
+  // Natural-order collation: digit runs compare as numbers, so "Note 2" sorts
+  // before "Note 10". Mirrors library.js's title/name sort.
+  const naturalCollator = new Intl.Collator(undefined, { numeric: true });
 
   // Module state. `viewer` is null unless the paged SVG viewer is open.
   const nb = {
@@ -136,7 +139,7 @@
       const av = val(a);
       const bv = val(b);
       if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
-      return String(av).localeCompare(String(bv)) * dir;
+      return naturalCollator.compare(String(av), String(bv)) * dir;
     });
   }
 

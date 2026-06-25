@@ -955,6 +955,17 @@ function render() {
   }
 }
 
+// Natural-order string collation: digit runs compare as numbers, so "Vol 2"
+// sorts before "Vol 10" instead of lexicographically after it. Used for every
+// title/name/facet ordering, so a series' volumes line up by their in-title
+// number even before a numeric series index is set. `numeric: true` is the only
+// override — case/accent handling stays the locale default, matching the bare
+// `localeCompare` it replaces.
+const naturalCollator = new Intl.Collator(undefined, { numeric: true });
+function naturalCompare(a, b) {
+  return naturalCollator.compare(a, b);
+}
+
 function sortedBooks(books) {
   const list = books || state.books;
   const { key, asc } = state.sort;
@@ -966,7 +977,7 @@ function sortedBooks(books) {
     if (av == null) return 1;
     if (bv == null) return -1;
     if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
-    return String(av).localeCompare(String(bv)) * dir;
+    return naturalCompare(String(av), String(bv)) * dir;
   });
 }
 
@@ -979,7 +990,7 @@ function sortValue(b, key) {
 // Composite sort key for the Series column: primary by series_name,
 // secondary by series_index. We pack both into a single string with a
 // control-char separator ( sorts before every printable char) and
-// a zero-padded index, so the existing localeCompare path in
+// a zero-padded index, so the existing naturalCompare path in
 // sortedBooks() handles the two-level ordering without any tuple
 // machinery. Books without a series return null and sink to the bottom
 // via the existing null-handling.
@@ -1033,7 +1044,9 @@ function bySeriesIndex(a, b) {
   const bn = bi != null && Number.isFinite(bi);
   if (an && bn && ai !== bi) return ai - bi;
   if (an !== bn) return an ? -1 : 1;
-  return (a.title || "").localeCompare(b.title || "");
+  // No (or equal) series index: fall back to the title in natural order, so
+  // "Vol 1 … Vol 9, Vol 10, Vol 11" lines up without a hand-entered index.
+  return naturalCompare(a.title || "", b.title || "");
 }
 
 function membersOfSeries(books, name) {
@@ -1210,7 +1223,7 @@ function facetOptions(facet) {
   return [...counts.entries()].sort((a, b) => {
     if (a[0] === "—") return 1;
     if (b[0] === "—") return -1;
-    return a[0].localeCompare(b[0]);
+    return naturalCompare(a[0], b[0]);
   });
 }
 
