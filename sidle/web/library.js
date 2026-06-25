@@ -149,6 +149,59 @@ const SORT_KEYS = [
 
 const FACETS = ["language", "author", "on_kindle", "publisher", "series", "tags", "formats"];
 
+// Display names for the canonical language codes the backend harmonizes to
+// (see sidle-core `library::lang`). Codes the backend can't simplify fall back
+// to the raw code, so an unmapped language still shows *something*. Chinese is
+// split by script because Simplified vs Traditional is a real reading choice.
+const LANGUAGE_NAMES = {
+  en: "English",
+  ja: "日本語",
+  "zh-Hans": "简体中文",
+  "zh-Hant": "繁體中文",
+  zh: "中文",
+  ko: "한국어",
+  fr: "Français",
+  de: "Deutsch",
+  es: "Español",
+  it: "Italiano",
+  pt: "Português",
+  ru: "Русский",
+  nl: "Nederlands",
+  ar: "العربية",
+  he: "עברית",
+  hi: "हिन्दी",
+  th: "ไทย",
+  vi: "Tiếng Việt",
+  id: "Bahasa Indonesia",
+  ms: "Bahasa Melayu",
+  pl: "Polski",
+  sv: "Svenska",
+  da: "Dansk",
+  no: "Norsk",
+  fi: "Suomi",
+  el: "Ελληνικά",
+  cs: "Čeština",
+  tr: "Türkçe",
+  uk: "Українська",
+  ro: "Română",
+  hu: "Magyar",
+};
+
+// Human-readable name for a language code; "—"/blank stays the em-dash
+// placeholder, unknown codes fall back to themselves.
+function languageName(code) {
+  const c = (code || "").trim();
+  if (!c || c === "—") return "—";
+  return LANGUAGE_NAMES[c] || c;
+}
+
+// The label shown for a facet *value* in the filter dropdown and pill. The
+// stored value stays the canonical code (so filtering/matching is unchanged);
+// only the language facet maps its codes to display names.
+function facetOptionLabel(facet, value) {
+  return facet === "language" ? languageName(value) : value;
+}
+
 // The Books list-view column schema. The shared TableView (table.js) renders
 // these with sortable headers, drag-to-reorder, resizable widths, and a
 // right-click visibility menu — the SAME component the Notes tab uses, so the
@@ -161,7 +214,7 @@ const BOOK_COLUMNS = [
   { key: "series",       label: "Series",     sortable: true,  render: (b) => seriesText(b) },
   { key: "publisher",    label: "Publisher",  sortable: true,  render: (b) => b.publisher || "" },
   { key: "published_at", label: "Published",  sortable: true,  render: (b) => b.published_at || "" },
-  { key: "language",     label: "Lang",       sortable: true,  render: (b) => b.language || "" },
+  { key: "language",     label: "Lang",       sortable: true,  render: (b) => languageName(b.language) },
   { key: "tags",         label: "Tags",       sortable: false, render: (b) => (b.tags || []).join(", ") },
   { key: "imported_at",  label: "Date added", sortable: true,  render: (b) => formatDate(b.imported_at) },
   { key: "file_size",    label: "Size",       sortable: true,  render: (b) => formatBytes(b.file_size) },
@@ -4012,7 +4065,7 @@ function renderFilterBar() {
       pill.classList.remove("active");
     } else if (sel.size === 1) {
       const [value] = sel;
-      label.textContent = `${baseLabel}: ${value}`;
+      label.textContent = `${baseLabel}: ${facetOptionLabel(facet, value)}`;
       pill.classList.add("active");
     } else {
       label.textContent = `${baseLabel}: ${sel.size}`;
@@ -4074,8 +4127,14 @@ function renderDropdownOptions(facet) {
 
   const needle = dropdownSearch.trim().toLowerCase();
   const all = facetOptions(facet);
+  // Match against both the code and its display label, so typing "english"
+  // finds the "en" option (whose visible label is "English").
   const filtered = needle
-    ? all.filter(([v]) => v.toLowerCase().includes(needle))
+    ? all.filter(
+        ([v]) =>
+          v.toLowerCase().includes(needle) ||
+          facetOptionLabel(facet, v).toLowerCase().includes(needle),
+      )
     : all;
 
   if (filtered.length === 0) {
@@ -4095,10 +4154,11 @@ function renderDropdownOptions(facet) {
     cb.addEventListener("click", (e) => e.stopPropagation());
     cb.addEventListener("change", () => toggleFilterValue(facet, value));
 
+    const optLabel = facetOptionLabel(facet, value);
     const lbl = document.createElement("span");
     lbl.className = "opt-label";
-    lbl.textContent = value;
-    lbl.title = value;
+    lbl.textContent = optLabel;
+    lbl.title = optLabel;
 
     const cnt = document.createElement("span");
     cnt.className = "opt-count";

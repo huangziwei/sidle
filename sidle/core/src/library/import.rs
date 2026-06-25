@@ -414,7 +414,9 @@ fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
         // 「、」-packed creators, so the stored list (and the filename derived
         // from it) is the natural-order display form. See [`authors`].
         authors: authors::from_metadata(&m.authors),
-        language: m.language.clone(),
+        // Harmonize the source's language tag (en-US, eng, zh_cn, …) to one
+        // canonical code so the library facet doesn't fan out into variants.
+        language: super::lang::normalize(&m.language),
         ppd: m.page_progression_direction.clone(),
         date: m.date.clone(),
         asin: m.asin.clone().filter(|s| !s.is_empty()),

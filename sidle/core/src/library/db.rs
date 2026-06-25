@@ -104,7 +104,9 @@ pub struct BookRow {
 /// v9: added `annotations.hidden` / `book_ink.hidden` — a reversible "hide from
 /// the reader" flag (kept in the backup, never painted). See
 /// .claude/plans/backup-source-of-truth.md.
-pub const SCHEMA_VERSION: i64 = 9;
+/// v10: harmonized `books.language` to canonical codes (en-US/eng → en, zh-TW →
+/// zh-Hant). Data-only backfill via [`super::lang`]; no schema change.
+pub const SCHEMA_VERSION: i64 = 10;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -559,6 +561,29 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // import now routes them to the ink path. Unconditional + idempotent, like
     // the clippings scrub above.
     conn.execute("DELETE FROM annotations WHERE kind = 'handwritten_note'", [])?;
+
+    // v10: harmonize language tags (en-US, eng, ZH_cn, … → en / zh-Hans /
+    // zh-Hant). Rewritten in Rust over the *distinct* values so the BCP-47 logic
+    // lives in one place ([`super::lang`]) and only a handful of UPDATEs run.
+    // Idempotent: canonical values map to themselves, so a re-open finds nothing
+    // to change. A bare UPDATE (not the curation mutators), so `updated_at` is
+    // left untouched — this is housekeeping, not a user edit.
+    {
+        let raws: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT DISTINCT language FROM books")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for raw in raws {
+            let canon = super::lang::normalize(&raw);
+            if canon != raw {
+                conn.execute(
+                    "UPDATE books SET language = ?1 WHERE language = ?2",
+                    params![canon, raw],
+                )?;
+            }
+        }
+    }
 
     // §4c: stamp the schema version. migrate() always brings the DB up to the
     // latest schema, so set the current marker; backups gate restores on it.
@@ -2196,6 +2221,54 @@ mod tests {
             },
         )
         .expect("insert")
+    }
+
+    fn insert_with_language(conn: &Connection, sha: &str, language: &str) -> i64 {
+        insert_book(
+            conn,
+            &NewBook {
+                sha256: sha,
+                title: "T",
+                author: "",
+                language,
+                ppd: None,
+                epub_path: None,
+                cover_path: None,
+                kfx_path: None,
+                kfx_sha256: None,
+                pdf_path: None,
+                file_size: 0,
+                imported_at: "2026-05-19T00:00:00Z",
+                asin: None,
+                publisher: None,
+                published_at: None,
+                series_name: None,
+                series_index: None,
+                tags: &[],
+            },
+        )
+        .expect("insert")
+    }
+
+    #[test]
+    fn migrate_harmonizes_existing_language_tags() {
+        let conn = fresh_db();
+        // Stand-ins for pre-v10 rows: `insert_book` writes the language verbatim
+        // (harmonization lived only in the import layer), so these mimic old data
+        // stored before the canonicalization existed.
+        let en = insert_with_language(&conn, "sha-en", "en-US");
+        let zh = insert_with_language(&conn, "sha-zh", "zh-hant");
+        let ja = insert_with_language(&conn, "sha-ja", "jpn");
+        let blank = insert_with_language(&conn, "sha-blank", "");
+
+        // Re-open the library: migrate() is idempotent and runs the backfill.
+        migrate(&conn).expect("re-migrate");
+
+        let lang = |id| get_book(&conn, id).unwrap().unwrap().language;
+        assert_eq!(lang(en), "en");
+        assert_eq!(lang(zh), "zh-Hant");
+        assert_eq!(lang(ja), "ja");
+        assert_eq!(lang(blank), "", "blank language stays blank");
     }
 
     #[test]

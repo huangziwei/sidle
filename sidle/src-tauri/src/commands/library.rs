@@ -112,7 +112,9 @@ pub async fn library_update_metadata(
     // natural order, and re-join with the unambiguous display separator.
     patch.author =
         crate::library::authors::join_display(&crate::library::authors::parse_input(&patch.author));
-    patch.language = patch.language.trim().to_string();
+    // Harmonize to a canonical code (en-US → en, eng → en, zh-TW → zh-Hant) so a
+    // hand-edit stays consistent with what import stores.
+    patch.language = crate::library::lang::normalize(&patch.language);
     // Page progression direction: only "rtl"/"ltr" are meaningful; blank or
     // anything else clears it to None (Auto = device/source default).
     patch.ppd = match patch.ppd.take().map(|s| s.trim().to_ascii_lowercase()) {
@@ -329,6 +331,11 @@ pub async fn library_bulk_update_metadata(
         patch.author = (!canon.is_empty()).then_some(canon);
     }
     normalize_opt(&mut patch.language);
+    // Harmonize to a canonical code, same as a single edit / import.
+    if let Some(l) = patch.language.take() {
+        let canon = crate::library::lang::normalize(&l);
+        patch.language = (!canon.is_empty()).then_some(canon);
+    }
     // Page direction: lowercase + validate. Bulk can only set rtl/ltr (the
     // sparse "leave unchanged" semantics can't express "clear to Auto").
     if let Some(p) = patch.ppd.take() {

@@ -7,6 +7,7 @@ pub mod import;
 pub mod ingest;
 pub mod ink;
 pub mod kfx_cover;
+pub mod lang;
 pub mod merge;
 pub mod notebook;
 pub mod paths;
