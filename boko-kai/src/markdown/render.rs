@@ -145,24 +145,6 @@ impl<'a> RenderContext<'a> {
         true
     }
 
-    /// Write an HTML anchor if this node is targeted by internal links.
-    fn write_anchor_if_targeted(&mut self, node_id: NodeId) {
-        let global_id = GlobalNodeId::new(self.chapter_id, node_id);
-        if self.resolved.is_internal_target(global_id) {
-            // Skip headings - they get automatic slug-based IDs
-            if let Some(node) = self.chapter.node(node_id)
-                && matches!(node.role, Role::Heading(_))
-            {
-                return;
-            }
-            self.ensure_line_started();
-            self.output.push_str(&format!(
-                "<a id=\"c{}n{}\"></a>",
-                self.chapter_id.0, node_id.0
-            ));
-        }
-    }
-
     /// Ensure we're ready to write content (write prefix if at line start).
     fn ensure_line_started(&mut self) {
         if self.at_line_start {
@@ -227,9 +209,6 @@ impl<'a> RenderContext<'a> {
         let Some(node) = self.chapter.node(id) else {
             return;
         };
-
-        // Output anchor if this node is a link target
-        self.write_anchor_if_targeted(id);
 
         let role = node.role;
 
@@ -360,30 +339,31 @@ impl<'a> RenderContext<'a> {
             Role::Link => {
                 self.ensure_line_started();
 
-                // Look up resolved target
+                // Resolve the link's destination. Internal references to
+                // non-heading nodes render as plain text: a flat txt/Markdown
+                // file carries no `<a id>` targets, so a `#cNnM` link would just
+                // dangle. External URLs and links to headings (which Markdown
+                // anchors by slug automatically) stay as real links.
                 let global_id = GlobalNodeId::new(self.chapter_id, id);
                 let anchor = match self.resolved.get(global_id) {
-                    Some(AnchorTarget::External(url)) => url.clone(),
+                    Some(AnchorTarget::External(url)) => Some(url.clone()),
                     Some(AnchorTarget::Internal(target)) => {
-                        if let Some(slug) = self.heading_slugs.get(target) {
-                            format!("#{}", slug)
-                        } else {
-                            format!("#c{}n{}", target.chapter.0, target.node.0)
-                        }
+                        self.heading_slugs.get(target).map(|slug| format!("#{}", slug))
                     }
-                    Some(AnchorTarget::Chapter(chapter_id)) => {
-                        format!("#c{}", chapter_id.0)
+                    Some(AnchorTarget::Chapter(_)) => None,
+                    None => {
+                        let href = self.chapter.semantics.href(id).unwrap_or("");
+                        (!href.is_empty()).then(|| href.to_string())
                     }
-                    None => self.chapter.semantics.href(id).unwrap_or("").to_string(),
                 };
 
-                // Skip link formatting if anchor is empty
-                if anchor.is_empty() {
-                    self.walk_children(id);
-                } else {
-                    self.output.push('[');
-                    self.walk_children(id);
-                    self.output.push_str(&format!("]({})", anchor));
+                match anchor {
+                    Some(anchor) => {
+                        self.output.push('[');
+                        self.walk_children(id);
+                        self.output.push_str(&format!("]({})", anchor));
+                    }
+                    None => self.walk_children(id),
                 }
             }
 
@@ -580,7 +560,20 @@ impl<'a> RenderContext<'a> {
                 self.output.push('）');
             }
 
-            Role::Container | Role::Root | Role::TableHead | Role::TableBody => {
+            // A `<div>`/`<section>` is block-level. Separate it from its
+            // siblings with a blank line, like a paragraph. Pure wrapper
+            // containers (a div that only holds other blocks) collapse to a
+            // single separation via the `pending_newline` logic, so nesting
+            // doesn't pile up blank lines. Without this, EPUBs that wrap every
+            // paragraph and heading in a styled `<div>` (common in Calibre /
+            // Kindle-sourced books) run all their text together on one line.
+            Role::Container => {
+                self.start_block();
+                self.walk_children(id);
+                self.end_block(role);
+            }
+
+            Role::Root | Role::TableHead | Role::TableBody => {
                 self.walk_children(id);
             }
         }
