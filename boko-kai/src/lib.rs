@@ -40,6 +40,7 @@ pub mod export;
 pub mod image;
 pub mod import;
 pub mod io;
+pub mod markdown;
 pub mod model;
 pub mod style;
 
@@ -72,6 +73,6 @@ pub use style::{ComputedStyle, ListStyleType, Origin, StyleId, StylePool, Styles
 pub use dom::compile_html;
 
 // Primary exports from other modules
-pub use export::{EpubExporter, Exporter};
+pub use export::{EpubExporter, Exporter, MarkdownConfig, MarkdownExporter};
 pub use import::{ChapterId, Importer, SpineEntry};
 pub use io::{ByteSource, FileSource};

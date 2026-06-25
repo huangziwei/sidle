@@ -9,7 +9,7 @@ use std::io::{self, Seek, Write};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use crate::export::{EpubExporter, Exporter, KfxExporter};
+use crate::export::{EpubExporter, Exporter, KfxExporter, MarkdownExporter};
 use crate::import::{
     Azw3Importer, ChapterId, EpubImporter, Importer, KfxImporter, MobiImporter, SpineEntry,
 };
@@ -32,6 +32,8 @@ pub enum Format {
     Mobi,
     /// KFX format (Kindle Format 10)
     Kfx,
+    /// Markdown (export only)
+    Markdown,
 }
 
 /// A resource (image, font, CSS, etc.) with its data and media type.
@@ -230,6 +232,7 @@ impl Format {
                 // `.kfx-zip` is Amazon's multi-container KFX bundle; the KFX
                 // importer auto-detects and dispatches it via its `open()`.
                 "kfx" | "kfx-zip" => Some(Format::Kfx),
+                "md" | "txt" => Some(Format::Markdown),
                 _ => None,
             })
     }
@@ -244,7 +247,7 @@ impl Format {
 
     /// Whether this format can be used for output/export.
     pub fn can_export(&self) -> bool {
-        matches!(self, Format::Epub | Format::Kfx)
+        matches!(self, Format::Epub | Format::Kfx | Format::Markdown)
     }
 }
 
@@ -300,6 +303,12 @@ impl Book {
                     Box::new(KfxImporter::open(path)?)
                 }
             }
+            Format::Markdown => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "Markdown format is export-only",
+                ));
+            }
         };
         Ok(Self {
             backend,
@@ -329,6 +338,12 @@ impl Book {
                 }
             }
             Format::Kfx => Box::new(KfxImporter::from_source(source)?),
+            Format::Markdown => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "Markdown format is export-only",
+                ));
+            }
         };
         Ok(Self {
             backend,
@@ -612,6 +627,7 @@ impl Book {
     /// |----------|---------|
     /// | EPUB     | ✓       |
     /// | KFX      | ✓       |
+    /// | Markdown | ✓       |
     /// | AZW3     | ✗       |
     /// | MOBI     | ✗       |
     ///
@@ -644,6 +660,7 @@ impl Book {
         match format {
             Format::Epub => EpubExporter::new().export(self, writer),
             Format::Kfx => KfxExporter::new().export_with_progress(self, writer, on_progress),
+            Format::Markdown => MarkdownExporter::new().export(self, writer),
             Format::Azw3 | Format::Mobi => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("{:?} export is not supported", format),

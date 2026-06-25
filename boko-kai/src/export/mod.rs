@@ -36,6 +36,7 @@ mod epub;
 mod html_synth;
 mod kfx;
 mod normalize;
+mod text;
 
 pub use css_gen::{CssArtifact, generate_css, generate_css_all};
 pub use epub::{EpubConfig, EpubExporter};
@@ -45,6 +46,7 @@ pub use html_synth::{
 };
 pub use kfx::{KfxConfig, KfxExporter, PdfKfxMeta, pdf_to_kfx};
 pub use normalize::{ChapterContent, GlobalStylePool, NormalizedContent, normalize_book};
+pub use text::{MarkdownConfig, MarkdownExporter};
 
 /// Trait for exporting books to specific formats.
 ///

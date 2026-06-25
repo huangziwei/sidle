@@ -1114,12 +1114,13 @@ fn print_toc_human(entries: &[TocEntry], depth: usize) {
 
 fn parse_format(fmt: &str) -> Result<Format, String> {
     match fmt.to_lowercase().as_str() {
+        "md" | "markdown" | "txt" | "text" => Ok(Format::Markdown),
         "epub" => Ok(Format::Epub),
         "azw3" => Ok(Format::Azw3),
         "mobi" => Ok(Format::Mobi),
         "kfx" => Ok(Format::Kfx),
         _ => Err(format!(
-            "Unknown format: {}. Supported: epub, azw3, mobi, kfx",
+            "Unknown format: {}. Supported: md, txt, epub, azw3, mobi, kfx",
             fmt
         )),
     }
@@ -1173,8 +1174,9 @@ fn convert(
         return Err(format!("{:?} cannot be used as input format", fmt));
     }
 
-    // Determine output format. Both EPUB and KFX need a real output path —
-    // no stdout default, no implicit fallback.
+    // Determine output format. A non-stdout target needs a real output path; a
+    // recognized extension (.epub/.kfx/.txt/.md) selects the exporter. Use `-t`
+    // to force the format (e.g. when writing Markdown to stdout via `-`).
     let output_format = if let Some(fmt) = to_format {
         parse_format(fmt)?
     } else if let Some(out) = output
@@ -1182,20 +1184,20 @@ fn convert(
     {
         Format::from_path(out).ok_or_else(|| {
             format!(
-                "Unknown output format: {}. Supported: .epub, .kfx",
+                "Unknown output format: {}. Supported: .epub, .kfx, .txt, .md",
                 out
             )
         })?
     } else {
         return Err(
-            "Output path required. Supported targets: .epub, .kfx (use -t to override)"
+            "Output path required. Supported targets: .epub, .kfx, .txt, .md (use -t to override)"
                 .to_string(),
         );
     };
 
     if !output_format.can_export() {
         return Err(format!(
-            "{:?} cannot be used as output format. Supported: epub, kfx",
+            "{:?} cannot be used as output format. Supported: epub, kfx, md/txt",
             output_format
         ));
     }

@@ -449,14 +449,20 @@ pub struct ExportSummary {
     pub errors: Vec<String>,
 }
 
-/// Copy the chosen `format` (`"epub"` | `"pdf"` | `"kfx"`) file of every book in
-/// `book_ids` into `dest_dir`, grouped into a per-author subfolder
-/// (`<dest>/<Author>/<filename>`). Each file keeps its stored basename (already
-/// `[Author] Title (Year)`); a name collision inside an author folder is
-/// disambiguated with a ` (n)` suffix so two same-named files never clobber each
-/// other. A book that has no file of that format on disk — the companion side
-/// hasn't converted yet, or the file was deleted — is skipped and counted; the
-/// export never aborts on a single failure.
+/// Write the chosen `format` of every book in `book_ids` directly into
+/// `dest_dir` as a flat folder of files (`<dest>/<filename>`, no per-author
+/// subfolders).
+///
+/// `"epub"` | `"pdf"` | `"kfx"` copy the stored file verbatim — each keeps its
+/// basename (already `[Author] Title (Year)`). `"txt"` has no stored file: it is
+/// generated on demand by converting the book's content to Markdown (the EPUB
+/// when present — closest to the source text — else the universal KFX side),
+/// written as `<basename>.txt`.
+///
+/// A name collision in the destination is disambiguated with a ` (n)` suffix so
+/// two same-named files never clobber each other. A book with no usable source
+/// on disk — the companion side hasn't converted yet, or the file was deleted —
+/// is skipped and counted; the export never aborts on a single failure.
 #[tauri::command]
 pub async fn library_export_books(
     state: State<'_, AppState>,
@@ -464,7 +470,7 @@ pub async fn library_export_books(
     format: String,
     dest_dir: String,
 ) -> Result<ExportSummary, String> {
-    if !matches!(format.as_str(), "epub" | "pdf" | "kfx") {
+    if !matches!(format.as_str(), "epub" | "pdf" | "kfx" | "txt") {
         return Err(format!("unknown export format: {format}"));
     }
     let dest_root = Path::new(&dest_dir);
@@ -493,41 +499,70 @@ pub async fn library_export_books(
     };
 
     for book in books {
-        let src = match format.as_str() {
-            "kfx" => book.kfx_path.as_deref(),
-            "epub" => book.epub_path.as_deref(),
-            "pdf" => book.pdf_path.as_deref(),
+        // The source file to read. The copy formats name that exact file; `txt`
+        // is generated from the best available content source — the EPUB if it's
+        // on disk, else the universal KFX side.
+        let src: Option<&Path> = match format.as_str() {
+            "kfx" => book.kfx_path.as_deref().map(Path::new).filter(|p| p.exists()),
+            "epub" => book.epub_path.as_deref().map(Path::new).filter(|p| p.exists()),
+            "pdf" => book.pdf_path.as_deref().map(Path::new).filter(|p| p.exists()),
+            "txt" => [book.epub_path.as_deref(), book.kfx_path.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(Path::new)
+                .find(|p| p.exists()),
             _ => unreachable!("format validated above"),
         };
-        let Some(src) = src.map(Path::new).filter(|p| p.exists()) else {
+        let Some(src) = src else {
             skipped += 1;
-            note(
-                &mut errors,
-                format!("{}: no {} file on disk", book.title, format.to_uppercase()),
-            );
-            continue;
-        };
-        let Some(file_name) = src.file_name() else {
-            skipped += 1;
+            let what = if format == "txt" {
+                "no EPUB or KFX source on disk".to_string()
+            } else {
+                format!("no {} file on disk", format.to_uppercase())
+            };
+            note(&mut errors, format!("{}: {what}", book.title));
             continue;
         };
 
-        let author_seg = crate::library::paths::sanitize_segment(&book.author);
-        let author = if author_seg.is_empty() {
-            "Unknown Author"
+        // Target filename. Copy formats keep the source's name verbatim; `txt`
+        // swaps the source's extension for `.txt` (both companion sides share
+        // the same `[Author] Title (Year)` stem, so the source choice doesn't
+        // change the output name).
+        let target_name = if format == "txt" {
+            match src.file_stem() {
+                Some(stem) => {
+                    let mut n = stem.to_os_string();
+                    n.push(".txt");
+                    n
+                }
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            }
         } else {
-            author_seg.as_str()
+            match src.file_name() {
+                Some(name) => name.to_os_string(),
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            }
         };
-        let author_dir = dest_root.join(author);
-        if let Err(e) = std::fs::create_dir_all(&author_dir) {
-            skipped += 1;
-            note(&mut errors, format!("{}: {e}", book.title));
-            continue;
-        }
 
-        let target = crate::library::paths::dedup_path(author_dir.join(file_name));
-        match std::fs::copy(src, &target) {
-            Ok(_) => exported += 1,
+        let target = crate::library::paths::dedup_path(dest_root.join(target_name));
+        let outcome = if format == "txt" {
+            // KFX decode + IR walk is CPU-heavy; keep it off the async runtime.
+            let src = src.to_path_buf();
+            let target = target.clone();
+            tokio::task::spawn_blocking(move || export_book_as_txt(&src, &target))
+                .await
+                .unwrap_or_else(|e| Err(format!("task panicked: {e}")))
+        } else {
+            std::fs::copy(src, &target).map(|_| ()).map_err(|e| e.to_string())
+        };
+        match outcome {
+            Ok(()) => exported += 1,
             Err(e) => {
                 skipped += 1;
                 note(&mut errors, format!("{}: {e}", book.title));
@@ -541,6 +576,18 @@ pub async fn library_export_books(
         dest: dest_dir,
         errors,
     })
+}
+
+/// Convert a book file (EPUB or KFX, auto-detected by extension) to Markdown and
+/// write it to `target`. Backs the `txt` export, which — unlike the copy formats
+/// — has no stored file. Call on a blocking thread: boko's KFX decode and IR
+/// walk are CPU-bound.
+fn export_book_as_txt(src: &Path, target: &Path) -> Result<(), String> {
+    let mut book = boko::Book::open(src).map_err(|e| format!("open: {e}"))?;
+    let mut file = std::fs::File::create(target).map_err(|e| format!("create: {e}"))?;
+    book.export(boko::Format::Markdown, &mut file)
+        .map_err(|e| format!("convert: {e}"))?;
+    Ok(())
 }
 
 #[tauri::command]

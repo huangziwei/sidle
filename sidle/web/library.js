@@ -2901,11 +2901,13 @@ function addReconvertItem(menu, label, books) {
 
 // The export formats, in menu order. KFX is universal (every book has it); EPUB
 // and PDF are the two possible companion sides — a book pairs KFX with exactly
-// one of them.
+// one of them. TXT is special: it has no stored file and is generated on demand
+// (book content → Markdown), so it's offered for every book.
 const EXPORT_FORMATS = [
   ["epub", "EPUB"],
   ["pdf", "PDF"],
   ["kfx", "KFX"],
+  ["txt", "TXT"],
 ];
 
 // Whether `b`'s `fmt` file is present and finished converting, so it can be
@@ -2915,15 +2917,24 @@ const EXPORT_FORMATS = [
 // skip; this just drives the menu's enabled formats + counts.)
 function hasFormatReady(b, fmt) {
   if (fmt === "kfx") return formatStatusFor("kfx", b) === "done";
+  // TXT is generated from whatever content side is ready — KFX (universal) or
+  // EPUB (preferred when present). It's never a stored companion file, so it
+  // becomes available as soon as the imported side exists.
+  if (fmt === "txt") {
+    return (
+      formatStatusFor("kfx", b) === "done" ||
+      formatStatusFor("epub", b) === "done"
+    );
+  }
   if (nonKfxFormat(b) !== fmt) return false;
   return formatStatusFor(fmt, b) === "done";
 }
 
 // How many books in `books` can export each format (drives the menu labels).
 function exportFormatCounts(books) {
-  const counts = { epub: 0, pdf: 0, kfx: 0 };
+  const counts = Object.fromEntries(EXPORT_FORMATS.map(([fmt]) => [fmt, 0]));
   for (const b of books) {
-    for (const fmt of ["epub", "pdf", "kfx"]) {
+    for (const [fmt] of EXPORT_FORMATS) {
       if (hasFormatReady(b, fmt)) counts[fmt] += 1;
     }
   }
