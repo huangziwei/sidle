@@ -2980,9 +2980,27 @@ kbd {
   max-width: 460px;
 }
 /* The base `.modal-body` is a 2-column grid (the metadata editor's cover +
-   fields); the settings body is a single column. */
+   fields); the settings body is a single column. It also flexes/shrinks so the
+   pinned confirm+status region below it keeps its room. */
 .settings-panel .modal-body {
   display: block;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* Confirm + status sit here, outside the scroll area and just above the footer,
+   so a pending confirmation is never lost below the fold. Collapses to nothing
+   when both children are hidden; grows a separated, padded bar when either shows. */
+.settings-pinned {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 20px;
+}
+.settings-pinned:has(> *:not([hidden])) {
+  padding-top: 14px;
+  padding-bottom: 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
 }
 .settings-loc-row {
   display: flex;
@@ -3019,11 +3037,29 @@ kbd {
   line-height: 1.5;
 }
 .settings-confirm {
-  margin-top: 12px;
-  padding: 12px;
-  border: 1px solid var(--border-strong);
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--accent);
+  border-left: 4px solid var(--accent);
   border-radius: var(--radius);
-  background: var(--bg);
+  background: var(--accent-soft);
+  /* A brief pop so the prompt catches the eye the moment it appears. */
+  animation: settings-confirm-pop 220ms ease-out;
+}
+@keyframes settings-confirm-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-confirm {
+    animation: none;
+  }
 }
 .settings-confirm-text {
   margin: 0 0 10px;
@@ -3043,7 +3079,7 @@ kbd {
   gap: 8px;
 }
 .settings-status {
-  margin: 12px 0 0;
+  margin: 0;
   font-size: 13px;
   color: var(--muted);
   white-space: pre-line;

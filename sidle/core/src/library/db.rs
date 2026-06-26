@@ -5,7 +5,8 @@
 //! request). WAL + `busy_timeout` (see [`open`]) let those two processes share
 //! the file safely. rusqlite calls block, but the library workload is tiny.
 
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -159,36 +160,67 @@ fn resolve_opt(root: Option<&Path>, stored: Option<String>) -> Option<String> {
     stored.map(|s| resolve_one(root, &s))
 }
 
-/// Relativize an absolute managed path to root-relative for storage. A path
-/// outside `root` (or a `None` root) is stored unchanged — defensive; library-
-/// managed files always live under root. Idempotent: an already-relative input
-/// isn't under `root`, so `strip_prefix` fails and it's left as-is.
+/// Relativize a managed path to root-relative for storage.
+///
+/// Fast path: strip the current `root` prefix. Fallback: a managed file ALWAYS
+/// lives at `<some-root>/books/<sha>/…` (or `<some-root>/notebooks/<uuid>/…`), so
+/// when the value was written under a *different* root — a library relocated to a
+/// new folder, or the legacy lowercase `…/sidle/…` root that `strip_prefix` can't
+/// match against today's case-corrected `…/Sidle` — slice from the last
+/// `books`/`notebooks` component instead. Without this, such a path stays
+/// absolute and dangles the moment the library moves (§4a portability defeated).
+///
+/// A path with no managed component (a foreign cover, say) and a `None` root
+/// (in-memory test conn) are stored unchanged. Idempotent: an already-relative
+/// input keeps its `books/<sha>/…` tail.
 fn relativize_for_store(root: Option<&Path>, abs: &str) -> String {
-    match root {
-        Some(r) => match Path::new(abs).strip_prefix(r) {
-            Ok(rel) => rel.to_string_lossy().into_owned(),
-            Err(_) => abs.to_string(),
-        },
-        None => abs.to_string(),
+    let Some(r) = root else {
+        return abs.to_string();
+    };
+    let p = Path::new(abs);
+    if let Ok(rel) = p.strip_prefix(r) {
+        return rel.to_string_lossy().into_owned();
     }
+    managed_relative_tail(p).unwrap_or_else(|| abs.to_string())
 }
 
-/// `(id, epub_path, cover_path, kfx_path)` for the §4a path-relativization
-/// migration sweep.
-type PathColumns = (i64, Option<String>, Option<String>, Option<String>);
+/// The `books/<sha>/…` (or `notebooks/<uuid>/…`) tail of a managed path, taken
+/// from its LAST `books`/`notebooks` component so a root that itself contains
+/// such a component resolves to the deepest (managed) one. `None` when the path
+/// has neither — i.e. it isn't a library-managed file.
+fn managed_relative_tail(p: &Path) -> Option<String> {
+    let comps: Vec<Component<'_>> = p.components().collect();
+    let idx = comps.iter().rposition(|c| {
+        matches!(c, Component::Normal(s) if *s == OsStr::new("books") || *s == OsStr::new("notebooks"))
+    })?;
+    let tail: PathBuf = comps[idx..].iter().collect();
+    Some(tail.to_string_lossy().into_owned())
+}
+
+/// `(id, epub_path, cover_path, kfx_path, pdf_path)` for the §4a path-
+/// relativization migration sweep.
+type PathColumns = (
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 /// One-time migration: rewrite absolute `*_path` columns (pre-§4a rows stored
-/// `<root>/books/<sha>/...`) to root-relative. Gated on actually finding an
-/// absolute value, so steady-state opens short-circuit after the first. No-op
-/// for an in-memory DB (the path has no parent). Lives in `open()` — which has
-/// the db path, hence the root — not `migrate()`, which only gets the `Connection`.
+/// `<root>/books/<sha>/...`, including legacy rows whose `<root>` no longer
+/// matches today's — a relocated library, or the old lowercase `sidle` dir) to
+/// root-relative. Gated on actually finding an absolute value, so steady-state
+/// opens short-circuit after the first. No-op for an in-memory DB (the path has
+/// no parent). Lives in `open()` — which has the db path, hence the root — not
+/// `migrate()`, which only gets the `Connection`.
 fn relativize_existing_paths(conn: &Connection, db_path: &Path) -> rusqlite::Result<()> {
     let Some(root) = db_path.parent() else {
         return Ok(());
     };
     let any_absolute: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM books \
-         WHERE epub_path LIKE '/%' OR cover_path LIKE '/%' OR kfx_path LIKE '/%')",
+        "SELECT EXISTS(SELECT 1 FROM books WHERE epub_path LIKE '/%' \
+         OR cover_path LIKE '/%' OR kfx_path LIKE '/%' OR pdf_path LIKE '/%')",
         [],
         |r| r.get(0),
     )?;
@@ -196,17 +228,22 @@ fn relativize_existing_paths(conn: &Connection, db_path: &Path) -> rusqlite::Res
         return Ok(());
     }
     let rows: Vec<PathColumns> = {
-        let mut stmt = conn.prepare("SELECT id, epub_path, cover_path, kfx_path FROM books")?;
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-            .collect::<rusqlite::Result<_>>()?
+        let mut stmt =
+            conn.prepare("SELECT id, epub_path, cover_path, kfx_path, pdf_path FROM books")?;
+        stmt.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?
     };
-    for (id, epub, cover, kfx) in rows {
+    for (id, epub, cover, kfx, pdf) in rows {
         let e = epub.map(|s| relativize_for_store(Some(root), &s));
         let c = cover.map(|s| relativize_for_store(Some(root), &s));
         let k = kfx.map(|s| relativize_for_store(Some(root), &s));
+        let p = pdf.map(|s| relativize_for_store(Some(root), &s));
         conn.execute(
-            "UPDATE books SET epub_path = ?1, cover_path = ?2, kfx_path = ?3 WHERE id = ?4",
-            params![e, c, k, id],
+            "UPDATE books SET epub_path = ?1, cover_path = ?2, kfx_path = ?3, pdf_path = ?4 \
+             WHERE id = ?5",
+            params![e, c, k, p, id],
         )?;
     }
     Ok(())
@@ -3171,6 +3208,103 @@ mod tests {
         assert_eq!(stored(&conn, "epub_path").as_deref(), Some(rel_epub));
         let row = get_book(&conn, book_id).expect("get").expect("present");
         assert_eq!(row.epub_path.as_deref(), Some(epub_abs.to_string_lossy().as_ref()));
+    }
+
+    /// `relativize_for_store` must relativize a managed path even when it was
+    /// written under a DIFFERENT root than today's — the bug behind books going
+    /// missing after a relocate. `strip_prefix` alone can't: the stored paths
+    /// sat under the legacy lowercase `…/sidle/…` (case-mismatched against the
+    /// live `…/Sidle`) or under the pre-move folder entirely.
+    #[test]
+    fn relativize_handles_foreign_and_legacy_roots() {
+        let live = Path::new("/Users/x/Documents/Sidle");
+
+        // Legacy lowercase root, case-mismatched against the live root.
+        assert_eq!(
+            relativize_for_store(
+                Some(live),
+                "/Users/x/Library/Application Support/sidle/books/abc/[A] T.epub",
+            ),
+            "books/abc/[A] T.epub",
+        );
+        // A wholly different pre-move folder.
+        assert_eq!(
+            relativize_for_store(Some(live), "/Volumes/Ext/OldLib/books/def/cover.jpg"),
+            "books/def/cover.jpg",
+        );
+        // Notebooks are managed the same way.
+        assert_eq!(
+            relativize_for_store(Some(live), "/old/root/notebooks/uuid-1/pages/p0.svg"),
+            "notebooks/uuid-1/pages/p0.svg",
+        );
+        // The fast path (already under the live root) still works…
+        assert_eq!(
+            relativize_for_store(Some(live), "/Users/x/Documents/Sidle/books/ghi/x.kfx"),
+            "books/ghi/x.kfx",
+        );
+        // …and is idempotent on an already-relative value.
+        assert_eq!(relativize_for_store(Some(live), "books/abc/x.epub"), "books/abc/x.epub");
+        // A root that itself contains a `books` component resolves to the deepest
+        // (managed) one, not the root's.
+        assert_eq!(
+            relativize_for_store(Some(Path::new("/srv/books/lib")), "/elsewhere/books/jkl/x.epub"),
+            "books/jkl/x.epub",
+        );
+        // A foreign path with no managed component is left untouched.
+        assert_eq!(
+            relativize_for_store(Some(live), "/Users/x/Pictures/my-cover.png"),
+            "/Users/x/Pictures/my-cover.png",
+        );
+    }
+
+    /// End-to-end: a row whose paths are absolute under an old, case-mismatched
+    /// root (exactly the on-disk state after a relocate that predates this fix)
+    /// is healed on the next `open` so it resolves under the new live root.
+    #[test]
+    fn legacy_absolute_paths_migrate_under_relocated_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonicalize");
+        let db_path = root.join("library.db");
+        let sha = "b600ad79";
+
+        let stored = |conn: &Connection, col: &str| -> Option<String> {
+            conn.query_row(
+                &format!("SELECT {col} FROM books WHERE sha256 = ?1"),
+                rusqlite::params![sha],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .expect("query")
+        };
+
+        let id = {
+            let conn = open(&db_path).expect("open");
+            let id = insert_minimal(&conn, sha, "01 文学少女");
+            // Stamp in the legacy on-disk state: absolute paths under the OLD
+            // lowercase app-support root, which no longer holds the files.
+            let legacy = "/Users/x/Library/Application Support/sidle/books/b600ad79";
+            conn.execute(
+                "UPDATE books SET epub_path = ?1, cover_path = ?2, kfx_path = ?3 WHERE id = ?4",
+                rusqlite::params![
+                    format!("{legacy}/[N] book.epub"),
+                    format!("{legacy}/cover.jpg"),
+                    format!("{legacy}/[N] book.kfx"),
+                    id,
+                ],
+            )
+            .expect("stamp legacy");
+            id
+        };
+
+        // Reopen at the live root → migration relativizes, so reads now resolve
+        // under THIS root (where the relocate actually put the files).
+        let conn = open(&db_path).expect("reopen");
+        assert_eq!(stored(&conn, "epub_path").as_deref(), Some("books/b600ad79/[N] book.epub"));
+        assert_eq!(stored(&conn, "cover_path").as_deref(), Some("books/b600ad79/cover.jpg"));
+        let row = get_book(&conn, id).expect("get").expect("present");
+        assert_eq!(
+            row.cover_path.as_deref(),
+            Some(root.join("books/b600ad79/cover.jpg").to_string_lossy().as_ref()),
+        );
     }
 
     #[test]

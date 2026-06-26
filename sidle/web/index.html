@@ -421,7 +421,12 @@
               <button type="button" id="settings-merge" class="btn">Merge from backup&hellip;</button>
             </div>
           </section>
+        </div>
 
+        <!-- Pinned below the scrollable body so a pending confirmation / status
+             is always visible — it used to sit at the end of the scrolling list
+             and fall below the fold. -->
+        <div class="settings-pinned">
           <div id="settings-confirm" class="settings-confirm" hidden>
             <p id="settings-confirm-text" class="settings-confirm-text"></p>
             <div class="settings-confirm-actions">
@@ -429,9 +434,9 @@
               <button type="button" id="settings-confirm-ok" class="btn">Confirm &amp; restart</button>
             </div>
           </div>
-
           <p id="settings-status" class="settings-status" hidden></p>
         </div>
+
         <footer class="modal-footer">
           <button type="button" class="btn-link" id="settings-close">Close</button>
         </footer>
