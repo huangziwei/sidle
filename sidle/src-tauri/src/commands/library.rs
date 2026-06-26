@@ -992,7 +992,8 @@ pub async fn library_pick_folder(app: AppHandle) -> Result<Option<String>, Strin
 /// remnants, and relaunch — nothing is left behind except the tiny `config.json`
 /// pointer in the app state dir. Refuses when a conversion is in flight (its
 /// output would be stranded), when `dest` is already the current root, or when
-/// `dest` is non-empty.
+/// `dest` is non-empty — except the default location, which always holds
+/// `config.json` and is refused only if it already contains a library.
 #[tauri::command]
 pub async fn library_relocate_move(
     app: AppHandle,
@@ -1003,13 +1004,24 @@ pub async fn library_relocate_move(
     if dest == state.paths.root {
         return Err("That's already the current library location.".into());
     }
-    if dir_has_entries(&dest) {
+    // The default location *is* the app state dir, which always holds
+    // `config.json` (the root pointer) and so can never be literally empty.
+    // Moving back to it must therefore be allowed; we only refuse when it
+    // already holds a library we'd clobber. Any other destination must be empty.
+    let state_dir = LibraryPaths::state_dir().map_err(|e| e.to_string())?;
+    if dest == state_dir {
+        if dest.join("library.db").exists() || dest.join("books").is_dir() {
+            return Err(format!(
+                "{} already contains a library — pick a new or empty folder.",
+                dest.display()
+            ));
+        }
+    } else if dir_has_entries(&dest) {
         return Err(format!(
             "{} is not empty — pick a new or empty folder.",
             dest.display()
         ));
     }
-    let state_dir = LibraryPaths::state_dir().map_err(|e| e.to_string())?;
     let src_root = state.paths.root.clone();
     let books_renamed = {
         let conn = state.db.lock().await;
