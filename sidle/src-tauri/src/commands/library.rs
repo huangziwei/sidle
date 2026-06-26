@@ -987,10 +987,11 @@ pub async fn library_pick_folder(app: AppHandle) -> Result<Option<String>, Strin
     Ok(result.map(|p| p.to_string()))
 }
 
-/// Move the library to `dest`: snapshot + verify the DB there, relocate the
-/// `books/` tree (rename when same-volume, else copy), repoint, delete the old
-/// remnants, and relaunch — nothing is left behind except the tiny `config.json`
-/// pointer in the app state dir. Refuses when a conversion is in flight (its
+/// Move the library to `dest`: snapshot + verify the DB there, relocate every
+/// other root entry — `books/`, `notebooks/`, `kual-dist/`, `.server-token` —
+/// (rename when same-volume, else copy), repoint, delete the old remnants, and
+/// relaunch — nothing is left behind except the tiny `config.json` pointer in the
+/// app state dir. Refuses when a conversion is in flight (its
 /// output would be stranded), when `dest` is already the current root, or when
 /// `dest` is non-empty — except the default location, which always holds
 /// `config.json` and is refused only if it already contains a library.
@@ -1023,7 +1024,7 @@ pub async fn library_relocate_move(
         ));
     }
     let src_root = state.paths.root.clone();
-    let books_renamed = {
+    let copied = {
         let conn = state.db.lock().await;
         // Gate on an idle queue: a conversion finishing mid-move would write its
         // output into the old root and be stranded. (Relaunch is why no queue
@@ -1043,7 +1044,7 @@ pub async fn library_relocate_move(
     // runs only once the new root is the live one; `finish_move` preserves the
     // state dir's `config.json` when the old root was the default location.
     LibraryPaths::set_root(&dest).map_err(|e| format!("{e:#}"))?;
-    relocate::finish_move(&src_root, &state_dir, books_renamed);
+    relocate::finish_move(&src_root, &state_dir, &copied);
     // Relaunch onto the new root; `restart` diverges, so nothing runs after it.
     app.restart()
 }

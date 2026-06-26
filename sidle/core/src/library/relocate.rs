@@ -8,7 +8,8 @@
 //! repoints via [`LibraryPaths::set_root`](crate::library::LibraryPaths::set_root)
 //! and relaunches. See `.claude/plans/library-backup-and-portability.md` §6.
 
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
@@ -41,15 +42,24 @@ pub fn copy_library(src_conn: &Connection, src_books: &Path, dest_root: &Path) -
 }
 
 /// Move the library to `dest_root` (must be empty/new): snapshot + verify the DB
-/// there, then relocate the `books/` tree by `rename` (instant, same volume) or
-/// copy (cross-volume). Returns `true` if the books were renamed (the source
-/// tree is already gone), `false` if copied (the caller still removes it).
+/// there, then relocate EVERY other root entry — `books/`, `notebooks/`, the
+/// staged `kual-dist/`, `.server-token`, derived markers like `cover-thumb.fmt`,
+/// and anything added later — by `rename` (instant, same volume) or copy
+/// (cross-volume). Moving only `books/` used to strand notebooks (data loss) and
+/// leave `kual-dist/`/`.server-token` behind as cruft that also blocked a clean
+/// re-move. Returns the source paths that were COPIED (cross-volume), for the
+/// caller to delete via [`finish_move`]; renamed entries are already gone.
 ///
-/// The OLD `library.db*` — and, on the copy path, the old `books/` — are left
-/// for the caller to delete via [`finish_move`] AFTER it repoints, so the
-/// destructive cleanup runs only once the new root is live; any failure before
-/// that leaves the original library untouched.
-pub fn move_library(src_conn: &Connection, src_root: &Path, dest_root: &Path) -> Result<bool> {
+/// The live `library.db*` is snapshotted (it's open — can't be renamed out from
+/// under the connection), not moved, and the old files are cleared by
+/// [`finish_move`]; `config.json` (the root pointer) is left in the state dir.
+/// Deferring the destructive cleanup to after the repoint means any failure here
+/// leaves the original library untouched.
+pub fn move_library(
+    src_conn: &Connection,
+    src_root: &Path,
+    dest_root: &Path,
+) -> Result<Vec<PathBuf>> {
     std::fs::create_dir_all(dest_root)
         .with_context(|| format!("create {}", dest_root.display()))?;
 
@@ -65,34 +75,55 @@ pub fn move_library(src_conn: &Connection, src_root: &Path, dest_root: &Path) ->
         }
     }
 
-    let src_books = src_root.join("books");
-    if !src_books.is_dir() {
-        return Ok(false);
-    }
-    let dest_books = dest_root.join("books");
-    match std::fs::rename(&src_books, &dest_books) {
-        Ok(()) => Ok(true),
-        // Cross-volume rename fails (EXDEV); fall back to a copy and let the
-        // caller remove the source in finish_move.
-        Err(_) => {
-            copy_dir(&src_books, &dest_books)?;
-            Ok(false)
+    let mut copied = Vec::new();
+    for entry in
+        std::fs::read_dir(src_root).with_context(|| format!("read {}", src_root.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name();
+        if is_db_or_pointer(&name) {
+            continue;
+        }
+        let from = entry.path();
+        let to = dest_root.join(&name);
+        match std::fs::rename(&from, &to) {
+            Ok(()) => {}
+            // Cross-volume rename fails (EXDEV); copy and let finish_move remove
+            // the source after the repoint.
+            Err(_) => {
+                copy_path(&from, &to)?;
+                copied.push(from);
+            }
         }
     }
+    Ok(copied)
+}
+
+/// Root entries the move handles specially instead of relocating: the live DB
+/// (snapshotted) and its WAL/SHM sidecars, plus `config.json` — the root pointer,
+/// which must stay in the state dir.
+fn is_db_or_pointer(name: &OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some("library.db" | "library.db-wal" | "library.db-shm" | "config.json")
+    )
 }
 
 /// Delete the moved-from library's remnants, AFTER the caller has repointed: the
-/// old `library.db*`, the source `books/` if it was copied (not renamed), and
-/// the old root dir itself when it's now empty and isn't `state_dir` (which must
-/// keep `config.json`, the root pointer). Best-effort — the move has already
-/// committed, so a stubborn file logs rather than fails.
-pub fn finish_move(src_root: &Path, state_dir: &Path, books_renamed: bool) {
-    let src_books = src_root.join("books");
-    if !books_renamed
-        && src_books.is_dir()
-        && let Err(e) = std::fs::remove_dir_all(&src_books)
-    {
-        eprintln!("[sidle/relocate] left old {}: {e}", src_books.display());
+/// COPIED sources (the cross-volume path — renamed entries are already gone), the
+/// old `library.db*`, and the old root dir itself when it's now empty and isn't
+/// `state_dir` (which must keep `config.json`, the root pointer). Best-effort —
+/// the move has already committed, so a stubborn file logs rather than fails.
+pub fn finish_move(src_root: &Path, state_dir: &Path, copied: &[PathBuf]) {
+    for from in copied {
+        let removed = if from.is_dir() {
+            std::fs::remove_dir_all(from)
+        } else {
+            std::fs::remove_file(from)
+        };
+        if let Err(e) = removed {
+            eprintln!("[sidle/relocate] left old {}: {e}", from.display());
+        }
     }
     for name in ["library.db", "library.db-wal", "library.db-shm"] {
         let f = src_root.join(name);
@@ -153,6 +184,22 @@ pub(crate) fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Copy a single root entry — a file or a whole directory tree — for the
+/// cross-volume move path, where `rename` can't cross the device boundary.
+fn copy_path(from: &Path, to: &Path) -> Result<()> {
+    if from.is_dir() {
+        copy_dir(from, to)
+    } else {
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        std::fs::copy(from, to)
+            .with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
+        Ok(())
+    }
 }
 
 /// True if `dir` exists and contains no entries.
@@ -259,36 +306,74 @@ mod tests {
             .unwrap();
         }
 
-        // Same volume (same tempdir) → rename path.
-        let renamed = move_library(&conn, &src_root, &dest_root).unwrap();
-        assert!(renamed, "same-volume move should rename");
+        // Other root contents must move too: notebooks (real data!), the staged
+        // kual-dist bundle, and the server token. Only library.db* stays behind
+        // for finish_move.
+        std::fs::create_dir_all(src_root.join("notebooks/nb-1/pages")).unwrap();
+        std::fs::write(src_root.join("notebooks/nb-1/pages/page-0.svg"), "<svg/>").unwrap();
+        std::fs::create_dir_all(src_root.join("kual-dist")).unwrap();
+        std::fs::write(src_root.join("kual-dist/manifest.json"), "{}").unwrap();
+        std::fs::write(src_root.join(".server-token"), "tok").unwrap();
+
+        // Same volume (same tempdir) → rename path; nothing is copied.
+        let copied = move_library(&conn, &src_root, &dest_root).unwrap();
+        assert!(copied.is_empty(), "same-volume move renames, nothing copied");
         assert!(dest_root.join("library.db").is_file());
         assert_eq!(std::fs::read_to_string(dest_root.join("books/aaa/book.epub")).unwrap(), "e-aaa");
+        // notebooks / kual-dist / token relocated, not stranded.
+        assert_eq!(
+            std::fs::read_to_string(dest_root.join("notebooks/nb-1/pages/page-0.svg")).unwrap(),
+            "<svg/>",
+        );
+        assert!(dest_root.join("kual-dist/manifest.json").is_file());
+        assert!(dest_root.join(".server-token").is_file());
         assert!(!src_root.join("books").exists(), "books renamed out of source");
+        assert!(!src_root.join("notebooks").exists(), "notebooks renamed out of source");
+        assert!(!src_root.join("kual-dist").exists(), "kual-dist renamed out of source");
+        assert!(!src_root.join(".server-token").exists(), "token renamed out of source");
         assert!(src_root.join("library.db").is_file(), "old db kept until finish_move");
         assert_eq!(validate_existing(&dest_root).unwrap(), 2);
 
         // finish_move clears the old db; src_root isn't the state dir and is now
         // empty, so it's removed entirely.
         let state_dir = parent.path().join("state");
-        finish_move(&src_root, &state_dir, renamed);
+        finish_move(&src_root, &state_dir, &copied);
         assert!(!src_root.exists(), "empty old root removed");
     }
 
     #[test]
     fn finish_move_keeps_state_dir_and_its_config() {
-        // When the moved-from root IS the state dir, finish_move drops the
-        // library bulk but never the dir or its config.json pointer.
+        // When the moved-from root IS the state dir, finish_move drops the old
+        // library.db but never the dir or its config.json pointer. (books/ and
+        // the other contents were already renamed out by move_library.)
         let state_dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(state_dir.path().join("books/aaa")).unwrap();
         std::fs::write(state_dir.path().join("library.db"), b"x").unwrap();
         std::fs::write(state_dir.path().join("config.json"), b"{}").unwrap();
 
-        finish_move(state_dir.path(), state_dir.path(), false);
+        finish_move(state_dir.path(), state_dir.path(), &[]);
 
-        assert!(!state_dir.path().join("books").exists());
-        assert!(!state_dir.path().join("library.db").exists());
+        assert!(!state_dir.path().join("library.db").exists(), "old db dropped");
         assert!(state_dir.path().join("config.json").is_file(), "pointer kept");
         assert!(state_dir.path().exists(), "state dir kept");
+    }
+
+    #[test]
+    fn finish_move_deletes_copied_sources_then_removes_empty_root() {
+        // Cross-volume path: move_library copied these out and handed the source
+        // paths back for deletion after the repoint.
+        let parent = tempfile::tempdir().unwrap();
+        let src_root = parent.path().join("old");
+        std::fs::create_dir_all(src_root.join("books/aaa")).unwrap();
+        std::fs::write(src_root.join("books/aaa/x.epub"), "e").unwrap();
+        std::fs::write(src_root.join(".server-token"), "t").unwrap();
+        std::fs::write(src_root.join("library.db"), "db").unwrap();
+
+        let copied = vec![src_root.join("books"), src_root.join(".server-token")];
+        let state_dir = parent.path().join("state");
+        finish_move(&src_root, &state_dir, &copied);
+
+        assert!(!src_root.join("books").exists(), "copied dir source removed");
+        assert!(!src_root.join(".server-token").exists(), "copied file source removed");
+        assert!(!src_root.exists(), "now-empty old root removed");
     }
 }
