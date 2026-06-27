@@ -205,6 +205,19 @@ fn import_one(
         SourceKind::Unknown => unreachable!("filtered above"),
     };
 
+    // 2b. Repair EPUBs whose producer (e.g. ScribdMpubToEpubConverter) wrote
+    //     spurious ZIP64 extra fields the `zip` crate rejects. Doing it here —
+    //     before metadata, cover, persist, and the downstream `epub_to_kfx`
+    //     job — means the file we store is a clean archive, valid in external
+    //     readers too, rather than relying on boko's read-time repair each
+    //     time. A no-op (returns the bytes unchanged) for well-formed EPUBs and
+    //     for the freshly-built EPUBs the azw3/mobi/aozora paths produce.
+    let canonical_bytes = if canonical == Canonical::Epub {
+        boko::epub::neutralize_spurious_zip64(&canonical_bytes).unwrap_or(canonical_bytes)
+    } else {
+        canonical_bytes
+    };
+
     // 3. Metadata from the canonical bytes (no file re-open). PDF metadata
     //    comes from `/Info` via `probe_pdf`; everything else from boko.
     let meta = match canonical {

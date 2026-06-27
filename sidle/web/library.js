@@ -380,6 +380,7 @@ function wireToolbar() {
   $("#btn-notes-import").addEventListener("click", () => {
     if (window.Notebooks) window.Notebooks.importDevice();
   });
+  $("#import-error-close").addEventListener("click", hideImportErrorReport);
 
   $("#btn-settings").addEventListener("click", openSettings);
   $("#settings-close").addEventListener("click", closeSettings);
@@ -763,14 +764,14 @@ async function importPaths(paths) {
 
   let imported = 0;
   let dupes = 0;
-  let failed = 0;
+  const failures = [];
   try {
     const results = await window.api.invoke("library_import", { paths });
     for (const r of results) {
       if (r.kind === "imported") imported++;
       else if (r.kind === "duplicate") dupes++;
       else if (r.kind === "failed") {
-        failed++;
+        failures.push({ path: r.path, error: r.error });
         console.error("import failed:", r.path, r.error);
       }
     }
@@ -780,8 +781,9 @@ async function importPaths(paths) {
     return;
   }
 
+  const failed = failures.length;
   // Status-bar failure mode is the all-failed case (status bar is the
-  // single-line summary; per-file detail still goes in the toast below).
+  // single-line summary; the detail panel below carries the per-file reason).
   if (failed > 0 && imported === 0 && dupes === 0) {
     showImportFailure();
   } else {
@@ -790,11 +792,53 @@ async function importPaths(paths) {
 
   await refresh();
 
+  // The toast is only a count; show a persistent, dismissable report with the
+  // actual reason each file failed (anything imported successfully clears any
+  // stale report). Failures from a previous run shouldn't linger over a clean one.
+  if (failed > 0) {
+    showImportErrorReport(failures);
+  } else {
+    hideImportErrorReport();
+  }
+
   const parts = [];
   if (imported) parts.push(`${imported} imported`);
   if (dupes) parts.push(`${dupes} already in library`);
   if (failed) parts.push(`${failed} failed`);
   if (parts.length) showToast(parts.join(" · "), failed > 0);
+}
+
+// Per-file import failure report. The detailed `error` from Rust (the full
+// anyhow context chain, e.g. "read metadata from …: invalid Zip archive: …")
+// is captured per file and rendered here so a failed drop is diagnosable
+// instead of just "import failed". Persists until dismissed — an error is
+// worth reading, unlike the 4-second toast.
+function showImportErrorReport(failures) {
+  const panel = $("#import-error-report");
+  const list = $("#import-error-list");
+  const title = $("#import-error-title");
+  if (!panel || !list) return;
+
+  title.textContent =
+    failures.length === 1 ? "Import failed" : `${failures.length} imports failed`;
+  list.innerHTML = "";
+  for (const f of failures) {
+    const li = document.createElement("li");
+    const name = document.createElement("div");
+    name.className = "import-error-file";
+    name.textContent = (f.path || "").split(/[\\/]/).pop() || f.path || "(unknown file)";
+    const reason = document.createElement("pre");
+    reason.className = "import-error-reason";
+    reason.textContent = f.error || "Unknown error";
+    li.append(name, reason);
+    list.appendChild(li);
+  }
+  panel.hidden = false;
+}
+
+function hideImportErrorReport() {
+  const panel = $("#import-error-report");
+  if (panel) panel.hidden = true;
 }
 
 // Two-phase reveal for the aozora pipeline: the slow step is the

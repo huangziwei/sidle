@@ -69,6 +69,22 @@ struct Refinement {
     value: String,
 }
 
+/// Last-resort cover detection for OPFs that declare neither the EPUB 3
+/// `properties="cover-image"` nor the EPUB 2 `<meta name="cover">`: many
+/// converters (e.g. ScribdMpubToEpubConverter) instead just give the cover
+/// image a manifest item whose id is literally `cover`. Match that — and the
+/// `cover-image` / `coverimage` spellings — but only when the item is an image,
+/// so the cover *page* (typically `id="coverpage"`, an XHTML document) is never
+/// mistaken for the picture itself.
+fn fallback_cover_by_id(manifest: &HashMap<String, ManifestItem>) -> Option<&ManifestItem> {
+    manifest.iter().find_map(|(id, item)| {
+        let id = id.to_ascii_lowercase();
+        (matches!(id.as_str(), "cover" | "cover-image" | "coverimage")
+            && item.media_type.starts_with("image/"))
+        .then_some(item)
+    })
+}
+
 /// Parse OPF package document.
 pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     let mut reader = Reader::from_str(content);
@@ -479,6 +495,12 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     } else if let Some(cover_id) = epub2_cover_id
         && let Some(item) = manifest.get(&cover_id)
     {
+        metadata.cover_image = Some(item.href.clone());
+    } else if let Some(item) = fallback_cover_by_id(&manifest) {
+        // Neither the EPUB 3 `cover-image` property nor the EPUB 2
+        // `<meta name="cover">` was present — fall back to the near-universal
+        // convention of a manifest item whose id is literally `cover`. See
+        // [`fallback_cover_by_id`].
         metadata.cover_image = Some(item.href.clone());
     }
 
@@ -1348,6 +1370,30 @@ mod tests {
 
         let result = parse_opf(opf).unwrap();
         assert_eq!(result.metadata.cover_image, Some("cover.png".to_string()));
+    }
+
+    #[test]
+    fn test_parse_opf_cover_fallback_by_manifest_id() {
+        // ScribdMpubToEpubConverter shape: no `properties="cover-image"` and no
+        // `<meta name="cover">`, just a manifest item whose id is `cover`. The
+        // XHTML cover *page* (`id="coverpage"`) must not be picked instead.
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Book</dc:title></metadata>
+  <manifest>
+    <item id="coverpage" href="Text/coverpage.xhtml" media-type="application/xhtml+xml"/>
+    <item id="cover" href="Images/cover.jpg" media-type="image/jpeg"/>
+    <item id="ch1" href="Text/ch1.html" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="coverpage"/><itemref idref="ch1"/></spine>
+</package>"#;
+
+        let result = parse_opf(opf).unwrap();
+        assert_eq!(
+            result.metadata.cover_image,
+            Some("Images/cover.jpg".to_string()),
+            "should fall back to the image manifest item id=cover, not the cover page"
+        );
     }
 
     #[test]

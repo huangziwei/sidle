@@ -13,7 +13,7 @@ use crate::epub::{
     parse_opf_guide,
 };
 use crate::import::{ChapterId, Importer, SpineEntry, normalize_components, resolve_path_based_href};
-use crate::io::{ByteSource, ByteSourceCursor, FileSource};
+use crate::io::{ByteSource, ByteSourceCursor, FileSource, MemorySource};
 use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
 
 /// EPUB format importer with random-access ZIP reading.
@@ -155,9 +155,12 @@ impl Importer for EpubImporter {
 }
 
 impl EpubImporter {
-    /// Create an importer from a ByteSource.
-    pub fn from_source(source: Arc<dyn ByteSource>) -> io::Result<Self> {
-        // 1. Scan ZIP central directory and cache entry locations
+    /// Scan the ZIP central directory and cache each entry's byte location.
+    /// Factored out of [`from_source`] so it can be retried against a repaired
+    /// in-memory copy when the raw bytes trip the `zip` crate.
+    fn scan_zip(
+        source: &Arc<dyn ByteSource>,
+    ) -> io::Result<(HashMap<String, ZipEntryLoc>, Vec<PathBuf>)> {
         let cursor = ByteSourceCursor::new(source.clone());
         let mut archive = ZipArchive::new(cursor)?;
 
@@ -179,6 +182,32 @@ impl EpubImporter {
             );
             assets.push(PathBuf::from(name));
         }
+
+        Ok((zip_index, assets))
+    }
+
+    /// Create an importer from a ByteSource.
+    pub fn from_source(source: Arc<dyn ByteSource>) -> io::Result<Self> {
+        // 1. Scan ZIP central directory and cache entry locations. A handful of
+        //    EPUB producers (e.g. ScribdMpubToEpubConverter) emit spurious
+        //    ZIP64 extra fields that the `zip` crate misreads as
+        //    "Invalid local file header"; if the first scan fails, retry once
+        //    on a repaired in-memory copy. See `epub::neutralize_spurious_zip64`.
+        let (zip_index, assets, source) = match Self::scan_zip(&source) {
+            Ok((zip_index, assets)) => (zip_index, assets, source),
+            Err(first_err) => {
+                let raw = source.read_at(0, source.len() as usize)?;
+                match crate::epub::neutralize_spurious_zip64(&raw) {
+                    Some(repaired) => {
+                        let repaired: Arc<dyn ByteSource> =
+                            Arc::new(MemorySource::new(repaired));
+                        let (zip_index, assets) = Self::scan_zip(&repaired)?;
+                        (zip_index, assets, repaired)
+                    }
+                    None => return Err(first_err),
+                }
+            }
+        };
 
         // 2. Find OPF path from container.xml
         let container_bytes = read_entry(&source, &zip_index, "META-INF/container.xml")?;
