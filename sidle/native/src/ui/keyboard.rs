@@ -19,7 +19,8 @@ use crate::eink::touch::TouchEvent;
 use crate::orientation::Orientation;
 use crate::search;
 use crate::ui::filter::{self, Filters};
-use crate::ui::grid::{self, outline_rect};
+use crate::ui::grid::outline_rect;
+use crate::ui::searchbar;
 use crate::ui::text::TextRenderer;
 
 /// Letter/digit rows. The action row (space / Del / Clear / Done) is laid out
@@ -49,23 +50,10 @@ struct KeyButton {
 }
 
 /// Top of the key grid — the band above it holds the title, query, and count.
-fn field_h(lh: u32) -> u32 {
-    lh * 2
-}
-
-/// Vertical layout of the top band: `(field_top, count_baseline, band_bottom)`.
-/// The (search field + match count) group is **centered** in the space above the
-/// bottom-anchored keyboard, so the panel reads as a balanced search overlay
-/// rather than a field pinned to the top above a void. A keystroke refreshes only
-/// `[0, band_bottom]`, leaving the keyboard untouched.
-fn band_layout(xres: u32, yres: u32, lh: u32) -> (u32, u32, u32) {
-    let keys_top = metrics(xres, yres).3 as u32;
-    let fh = field_h(lh);
-    let group_h = fh + lh + lh; // field, gap, count
-    let field_top = (keys_top.saturating_sub(group_h) / 2).max(MARGIN as u32);
-    let count_baseline = field_top + fh + lh + lh * 70 / 100;
-    let band_bottom = field_top + group_h + 16;
-    (field_top, count_baseline, band_bottom)
+/// Bottom of the top band (the shared search bar + the match count below it). A
+/// keystroke refreshes only `[0, band_bottom]`, leaving the keyboard untouched.
+fn band_bottom(lh: u32) -> u32 {
+    searchbar::TOP + searchbar::HEIGHT + lh + 24
 }
 
 /// Keyboard metrics for the panel: `(unit, key_w, key_h, keys_top)`. Keys are a
@@ -134,8 +122,7 @@ fn full_rect(fb: &Framebuffer) -> MxcfbRect {
 /// The query+count band at the top — its own rect so a keystroke refreshes only
 /// this with a fast DU instead of the whole panel.
 fn band_rect(fb: &Framebuffer, lh: u32) -> MxcfbRect {
-    let bb = band_layout(fb.var.xres, fb.var.yres, lh).2;
-    MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: bb }
+    MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: band_bottom(lh) }
 }
 
 /// Books passing the active facets **and** the typed query — the same predicate
@@ -148,9 +135,9 @@ fn count_matches(all_books: &[Book], filters: &Filters, query: &str) -> usize {
         .count()
 }
 
-/// Draw the rounded search field (magnifier + typed text or placeholder, the
-/// tail shown when it overflows) and the live match count below it. Matches the
-/// grid's search bar. Caller white-fills the band first.
+/// Draw the **shared** search bar (identical to the grid view — same position,
+/// size, style) and the live match count directly below it. Caller white-fills
+/// the band first.
 fn draw_band(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -160,28 +147,9 @@ fn draw_band(
     lh: u32,
 ) {
     let xres = fb.var.xres;
-    let (field_top, count_baseline, _) = band_layout(xres, fb.var.yres, lh);
-    let fw = (xres as i32 - 2 * MARGIN).max(1) as u32;
-    let fh = field_h(lh);
-    let cy = (field_top + fh / 2) as i32;
-    let baseline = (field_top + fh * 60 / 100) as i32;
+    searchbar::draw(fb, renderer, query);
 
-    // Rounded pill + magnifier just inside the left rounded end.
-    grid::stroke_round_rect(fb, MARGIN, field_top as i32, fw, fh, fh / 2, 3, 0x00);
-    let mr = (fh / 2).saturating_sub(12).max(12);
-    let mcx = MARGIN + (fh / 2) as i32 + 6;
-    grid::draw_magnifier(fb, mcx, cy, mr, 0x00);
-    let text_x = mcx + mr as i32 + 22;
-
-    let avail = (MARGIN + fw as i32 - 28 - text_x).max(0) as u32;
-    let shown = clamp_tail(renderer, query, avail);
-    if shown.is_empty() {
-        renderer.draw(fb, text_x, baseline, "Search by romaji", false);
-    } else {
-        renderer.draw(fb, text_x, baseline, &shown, false);
-    }
-
-    // Match count, centered, below the field.
+    // Match count, centered, directly below the bar.
     let n = count_matches(all_books, filters, query);
     let count = if query.trim().is_empty() {
         format!("{n} books")
@@ -193,25 +161,8 @@ fn draw_band(
         format!("{n} matches")
     };
     let cw = renderer.measure_width(&count);
-    renderer.draw(fb, ((xres as i32 - cw as i32) / 2).max(0), count_baseline as i32, &count, false);
-}
-
-/// Trailing substring of `s` that fits `max_width` (so a long query scrolls to
-/// show the most recently typed characters).
-fn clamp_tail(renderer: &mut TextRenderer, s: &str, max_width: u32) -> String {
-    if renderer.measure_width(s) <= max_width {
-        return s.to_string();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    let mut start = 0;
-    while start < chars.len() {
-        let tail: String = chars[start..].iter().collect();
-        if renderer.measure_width(&tail) <= max_width {
-            return tail;
-        }
-        start += 1;
-    }
-    String::new()
+    let cy = (searchbar::TOP + searchbar::HEIGHT + lh) as i32;
+    renderer.draw(fb, ((xres as i32 - cw as i32) / 2).max(0), cy, &count, false);
 }
 
 fn draw_key(fb: &mut Framebuffer, renderer: &mut TextRenderer, kb: &KeyButton) {
@@ -267,8 +218,7 @@ pub fn run(
     // Refresh just the query+count band after a keystroke (fast DU, no flash).
     macro_rules! refresh_band {
         () => {{
-            let bb = band_layout(fb.var.xres, fb.var.yres, lh).2;
-            fb.fill_rect(0, 0, fb.var.xres, bb, 0xFF);
+            fb.fill_rect(0, 0, fb.var.xres, band_bottom(lh), 0xFF);
             draw_band(fb, renderer, all_books, filters, &query, lh);
             fb.send_update(band_rect(fb, lh), WAVEFORM_MODE_DU)?;
         }};
@@ -276,28 +226,40 @@ pub fn run(
 
     loop {
         match input.next()? {
-            InputEvent::Touch(TouchEvent::Up { x, y }) => match hit(&keys, x, y) {
-                Some(Key::Char(c)) => {
-                    query.push(c);
-                    refresh_band!();
+            InputEvent::Touch(TouchEvent::Up { x, y }) => {
+                // The search bar stays live in the overlay — its `✕` clears,
+                // consistent with the grid view; a field tap is a no-op (already
+                // open). Otherwise resolve a key.
+                if let Some(tap) = searchbar::hit(x, y, fb.var.xres, !query.is_empty()) {
+                    if matches!(tap, searchbar::Tap::Clear) {
+                        query.clear();
+                        refresh_band!();
+                    }
+                } else {
+                    match hit(&keys, x, y) {
+                        Some(Key::Char(c)) => {
+                            query.push(c);
+                            refresh_band!();
+                        }
+                        Some(Key::Space) => {
+                            // Harmless to matching (`canon` drops it) but lets the
+                            // user separate words visually.
+                            query.push(' ');
+                            refresh_band!();
+                        }
+                        Some(Key::Backspace) => {
+                            query.pop();
+                            refresh_band!();
+                        }
+                        Some(Key::Clear) => {
+                            query.clear();
+                            refresh_band!();
+                        }
+                        Some(Key::Done) => return Ok(query),
+                        None => {}
+                    }
                 }
-                Some(Key::Space) => {
-                    // A space is harmless to matching (`canon` drops it) but lets
-                    // the user separate words visually.
-                    query.push(' ');
-                    refresh_band!();
-                }
-                Some(Key::Backspace) => {
-                    query.pop();
-                    refresh_band!();
-                }
-                Some(Key::Clear) => {
-                    query.clear();
-                    refresh_band!();
-                }
-                Some(Key::Done) => return Ok(query),
-                None => {}
-            },
+            }
             InputEvent::Touch(TouchEvent::Down { .. }) => {}
             InputEvent::Touch(TouchEvent::Screenshot) => {
                 let _ = crate::eink::screenshot::capture(fb);

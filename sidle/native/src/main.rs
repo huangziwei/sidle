@@ -35,6 +35,7 @@ use ui::filter::{self, Filters};
 use ui::filtermenu;
 use ui::grid;
 use ui::pager::{self, PAGE_SIZE, PagerHit};
+use ui::searchbar;
 use ui::sort::SortState;
 use ui::text::TextRenderer;
 use ui::toast;
@@ -56,13 +57,6 @@ const FONT_PX: f32 = 28.0;
 /// grid origin derives from it (`grid::grid_origin`). On the KOA2 (1264×1680)
 /// `190 + 3·440 + 2·20 + 80(strip) = 1630 < 1680` — the 3×3 grid still fits.
 const TOP_MARGIN: u32 = 190;
-/// Search bar geometry within the top margin (top level only).
-const SEARCH_BAR_TOP: u32 = 16;
-const SEARCH_BAR_H: u32 = 88;
-const SEARCH_BAR_MARGIN_X: u32 = 40;
-/// Right-hand zone of the search bar that clears the query (shown only when a
-/// query is active).
-const SEARCH_CLEAR_W: u32 = 150;
 /// Stock Kindle indexer watches `documents/` subfolders too (verified via
 /// the existing `documents/Downloads/Items01/` indexed tree). Land here so
 /// our books are grouped and easy to find in the library.
@@ -515,18 +509,19 @@ fn run() -> anyhow::Result<()> {
                 // the query. Either way re-filter (only if the query changed) and
                 // repaint, since the keyboard overwrote the screen.
                 if series_view.is_none()
-                    && let Some(tap) = search_bar_hit(x, y, fb.var.xres, !query.is_empty())
+                    && let Some(tap) =
+                        ui::searchbar::hit(x, y, fb.var.xres, !query.is_empty())
                 {
                     let before = query.clone();
                     match tap {
-                        SearchTap::Open => {
+                        ui::searchbar::Tap::Open => {
                             log("search-bar tap → keyboard");
                             query = ui::keyboard::run(
                                 &mut fb, &mut input, &mut renderer, &all_books, &filters,
                                 &query, &mut current_orient,
                             )?;
                         }
-                        SearchTap::Clear => {
+                        ui::searchbar::Tap::Clear => {
                             log("search cleared");
                             query.clear();
                         }
@@ -760,63 +755,6 @@ fn rebuild_view(
     view
 }
 
-/// A tap on the top search bar: open the keyboard, or clear the active query.
-enum SearchTap {
-    Open,
-    Clear,
-}
-
-/// Hit-test the top search bar. `query_active` enables the right-hand `clear`
-/// zone (only drawn when a query is set). Returns `None` outside the bar — the
-/// caller only checks this at the top level (the bar isn't drawn when drilled).
-fn search_bar_hit(tx: u32, ty: u32, xres: u32, query_active: bool) -> Option<SearchTap> {
-    let x = SEARCH_BAR_MARGIN_X;
-    let w = xres.saturating_sub(SEARCH_BAR_MARGIN_X * 2);
-    let in_y = (SEARCH_BAR_TOP..SEARCH_BAR_TOP + SEARCH_BAR_H).contains(&ty);
-    let in_x = (x..x + w).contains(&tx);
-    if !in_x || !in_y {
-        return None;
-    }
-    if query_active && tx >= x + w - SEARCH_CLEAR_W {
-        return Some(SearchTap::Clear);
-    }
-    Some(SearchTap::Open)
-}
-
-/// Draw the top search field as a rounded **pill** with a magnifier glyph and
-/// the placeholder/query, plus an `✕` clear button when a query is set —
-/// mirroring the stock Kindle library's search bar. Top-level chrome only.
-fn draw_search_bar(fb: &mut Framebuffer, renderer: &mut TextRenderer, query: &str) {
-    let xres = fb.var.xres;
-    let x = SEARCH_BAR_MARGIN_X;
-    let w = xres.saturating_sub(SEARCH_BAR_MARGIN_X * 2);
-    let cy = (SEARCH_BAR_TOP + SEARCH_BAR_H / 2) as i32;
-    let baseline = (SEARCH_BAR_TOP + SEARCH_BAR_H * 62 / 100) as i32;
-
-    // Pill frame + magnifier just inside the left rounded end.
-    grid::stroke_round_rect(
-        fb, x as i32, SEARCH_BAR_TOP as i32, w, SEARCH_BAR_H, SEARCH_BAR_H / 2, 3, 0x00,
-    );
-    let mr = 18u32;
-    let mcx = (x + SEARCH_BAR_H / 2 + 6) as i32;
-    grid::draw_magnifier(fb, mcx, cy, mr, 0x00);
-    let text_x = mcx + mr as i32 + 24;
-
-    if query.trim().is_empty() {
-        renderer.draw(fb, text_x, baseline, "Search by romaji", false);
-        return;
-    }
-    // Active: query text (clamped to leave room for the ✕) + the clear button.
-    let right_limit = (x + w).saturating_sub(SEARCH_CLEAR_W) as i32;
-    let text_w = (right_limit - text_x).max(0) as u32;
-    let shown = renderer.wrap_and_clamp(query, text_w, 1);
-    if let Some(s) = shown.first() {
-        renderer.draw(fb, text_x, baseline, s, false);
-    }
-    let clear_cx = (x + w).saturating_sub(SEARCH_CLEAR_W / 2) as i32;
-    grid::draw_x(fb, clear_cx, cy, 15, 0x00);
-}
-
 /// Draw one page of `cells` with placeholders, the header, and the bottom
 /// strip, then one full GC16 refresh. Series cells get the collection art
 /// (`grid::draw_series_cell`); book cells the cover-or-title-placeholder.
@@ -839,14 +777,14 @@ fn draw_gallery_page(
 ) -> anyhow::Result<()> {
     fb.fill_rect(0, 0, fb.var.xres, fb.var.yres, 0xFF);
 
-    // Top chrome. At the top level: the Amazon-style search bar, then the sort
-    // header just below it. Drilled into a series: no bar (search is a top-level
-    // action), just the series-name header centered in the margin.
+    // Top chrome. At the top level: the search bar (the shared widget — same in
+    // the keyboard overlay), then the sort header just below it. Drilled into a
+    // series: no bar (search is a top-level action), just the series-name header.
     let hbaseline = if drilled {
         grid_top * 60 / 100
     } else {
-        draw_search_bar(fb, renderer, query);
-        (SEARCH_BAR_TOP + SEARCH_BAR_H) as i32 + renderer.line_height() as i32
+        searchbar::draw(fb, renderer, query);
+        (searchbar::TOP + searchbar::HEIGHT) as i32 + renderer.line_height() as i32
     };
     // Header line, clamped to one line so a long series name can't overrun.
     let hlines = renderer.wrap_and_clamp(header, fb.var.xres.saturating_sub(80), 1);

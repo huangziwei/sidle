@@ -6,6 +6,7 @@ pub mod filtermenu;
 pub mod grid;
 pub mod keyboard;
 pub mod pager;
+pub mod searchbar;
 pub mod sort;
 pub mod sortmenu;
 pub mod text;
