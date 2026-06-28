@@ -121,6 +121,14 @@ pub async fn library_update_metadata(
         Some(s) if s == "rtl" || s == "ltr" => Some(s),
         _ => None,
     };
+    // Romaji: trim + lowercase the editable search fields. A blank field
+    // self-heals by re-rendering from the (now-canonicalized) title/author via
+    // the engine — so clearing it regenerates a sensible value instead of wiping
+    // the book out of search. `title`/`author`/`language` are finalized above.
+    // The yomi isn't available here (no source file), so a regenerate is
+    // engine-only — the user then hand-corrects an ambiguous name.
+    patch.title_romaji = normalize_romaji(&patch.title_romaji, &patch.title, &patch.language);
+    patch.author_romaji = normalize_romaji(&patch.author_romaji, &patch.author, &patch.language);
     if let Some(s) = &mut patch.publisher {
         let trimmed = s.trim().to_string();
         if trimmed.is_empty() {
@@ -195,6 +203,26 @@ fn canonicalize_tags(tags: Vec<String>) -> Vec<String> {
         }
     }
     out
+}
+
+/// Normalize an edited romaji field: trim + lowercase, and self-heal a blank one
+/// by re-rendering from its source (title/author) via the engine — so clearing
+/// the field regenerates rather than blanking the book out of search.
+fn normalize_romaji(value: &str, source: &str, language: &str) -> String {
+    let trimmed = value.trim().to_lowercase();
+    if trimmed.is_empty() {
+        crate::library::romaji::romanize_field(source, None, language)
+    } else {
+        trimmed
+    }
+}
+
+/// Render romaji for a piece of text — backs the metadata editor's "regenerate"
+/// (`↻`) buttons. Engine-only (no yomi available client-side); the user reviews
+/// and corrects the result before saving.
+#[tauri::command]
+pub fn library_romanize(text: String, language: String) -> String {
+    crate::library::romaji::romanize_field(&text, None, &language)
 }
 
 /// Set a book's ASIN to a real 10-character Amazon catalogue id.

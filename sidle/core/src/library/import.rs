@@ -411,6 +411,13 @@ struct BookMeta {
     /// EPUB `<dc:publisher>` or KFX `publisher` field (symbol 232). Optional;
     /// many self-pub and indie books leave it blank.
     publisher: Option<String>,
+    /// Yomigana for the title — boko's `Metadata.title_sort`, from EPUB
+    /// `opf:file-as` or KFX `title_pronunciation`. Romanized into
+    /// `books.title_romaji` at [`insert_row`] when it's phonetic kana.
+    title_reading: Option<String>,
+    /// Yomigana for the first author — boko's `Metadata.author_sort`. Only used
+    /// when the book has a single creator (it covers just the first).
+    author_reading: Option<String>,
 }
 
 fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
@@ -434,6 +441,10 @@ fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
         date: m.date.clone(),
         asin: m.asin.clone().filter(|s| !s.is_empty()),
         publisher: m.publisher.clone().filter(|s| !s.is_empty()),
+        // Yomigana boko already pulled from EPUB `opf:file-as` / KFX
+        // `*_pronunciation` — romanized at `insert_row` (yomigana-aware when kana).
+        title_reading: m.title_sort.clone(),
+        author_reading: m.author_sort.clone(),
     }
 }
 
@@ -460,6 +471,9 @@ fn extract_meta_from_pdf(doc: &boko::import::PdfDoc, fallback_stem: Option<&str>
         date: None,
         asin: None,
         publisher: None,
+        // PDF `/Info` carries no yomi — romaji renders from the raw fields.
+        title_reading: None,
+        author_reading: None,
     }
 }
 
@@ -511,6 +525,16 @@ fn insert_row(
     // `extract_meta`; join with the unambiguous display separator so readers
     // split on `[&、]`, never a comma. See [`authors`].
     let authors_joined = authors::join_display(&meta.authors);
+    // Render the editable, searchable romaji yomigana-aware. The author reading
+    // (boko's `author_sort`) covers only the first creator, so it's used only
+    // when there's a single author; otherwise the engine romanizes the join.
+    let title_romaji =
+        super::romaji::romanize_field(&meta.title, meta.title_reading.as_deref(), &meta.language);
+    let author_reading = (meta.authors.len() == 1)
+        .then_some(meta.author_reading.as_deref())
+        .flatten();
+    let author_romaji =
+        super::romaji::romanize_field(&authors_joined, author_reading, &meta.language);
     let now = db::now_iso();
     let id = db::insert_book(
         conn,
@@ -519,6 +543,8 @@ fn insert_row(
             title: &meta.title,
             author: &authors_joined,
             language: &meta.language,
+            title_romaji: &title_romaji,
+            author_romaji: &author_romaji,
             ppd: meta.ppd.as_deref(),
             epub_path: epub_path_str.as_deref(),
             cover_path: cover_path_str.as_deref(),

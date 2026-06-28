@@ -199,6 +199,7 @@ mod tests {
             imported_at: String::new(),
             tags: Vec::new(),
             cover_rev: 0,
+            search_key: String::new(),
         }
     }
 

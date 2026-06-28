@@ -320,9 +320,23 @@
               <span>Title</span>
               <input name="title" required autocomplete="off" />
             </label>
+            <label class="field" id="field-title-romaji">
+              <span>Title romaji
+                <button type="button" class="btn-link romaji-regen" data-romaji-for="title"
+                        title="Regenerate from title">↻</button>
+              </span>
+              <input name="title_romaji" placeholder="searchable romaji — editable" autocomplete="off" />
+            </label>
             <label class="field">
               <span>Authors</span>
               <input name="author" placeholder="Jane Smith & John Doe" autocomplete="off" />
+            </label>
+            <label class="field" id="field-author-romaji">
+              <span>Author romaji
+                <button type="button" class="btn-link romaji-regen" data-romaji-for="author"
+                        title="Regenerate from author">↻</button>
+              </span>
+              <input name="author_romaji" placeholder="searchable romaji — editable" autocomplete="off" />
             </label>
             <label class="field">
               <span>Language</span>

@@ -19,6 +19,7 @@ mod cover_cache;
 mod device_state;
 mod eink;
 mod orientation;
+mod search;
 mod selfupdate;
 mod series;
 mod ui;
@@ -50,11 +51,18 @@ const CONFIG_PATH: &str = "/mnt/us/extensions/sidle/etc/server.conf";
 /// swaps it in. Parent of [`CONFIG_PATH`]'s `etc/`.
 const BUNDLE_DIR: &str = "/mnt/us/extensions/sidle";
 const FONT_PX: f32 = 28.0;
-/// Quit moved off the implicit top-left corner (too easy to trigger
-/// accidentally with stray touch events near the panel edge) — exit is
-/// now an explicit `✕ Exit` tap zone in the bottom strip. Top margin can
-/// drop back to a small visual gap.
-const TOP_MARGIN: u32 = 80;
+/// Top margin above the grid. Holds the Amazon-style **search bar** (top level
+/// only) plus the sort/results header line below it. Sized to seat both; the
+/// grid origin derives from it (`grid::grid_origin`). On the KOA2 (1264×1680)
+/// `190 + 3·440 + 2·20 + 80(strip) = 1630 < 1680` — the 3×3 grid still fits.
+const TOP_MARGIN: u32 = 190;
+/// Search bar geometry within the top margin (top level only).
+const SEARCH_BAR_TOP: u32 = 16;
+const SEARCH_BAR_H: u32 = 88;
+const SEARCH_BAR_MARGIN_X: u32 = 40;
+/// Right-hand zone of the search bar that clears the query (shown only when a
+/// query is active).
+const SEARCH_CLEAR_W: u32 = 150;
 /// Stock Kindle indexer watches `documents/` subfolders too (verified via
 /// the existing `documents/Downloads/Items01/` indexed tree). Land here so
 /// our books are grouped and easy to find in the library.
@@ -313,7 +321,10 @@ fn run() -> anyhow::Result<()> {
     // (`ORDER BY imported_at DESC`), now labelled in the grid header.
     let mut sort = SortState::default();
     let mut filters = Filters::default();
-    let mut entries = series::group_by_series(rebuild_view(&all_books, &filters, sort));
+    // Romaji search query (top-level only). Typed on the on-screen keyboard
+    // (`ui::keyboard`), folded into `rebuild_view` alongside the facets.
+    let mut query = String::new();
+    let mut entries = series::group_by_series(rebuild_view(&all_books, &filters, sort, &query));
     let mut series_view: Option<String> = None;
     let mut cells = series::cells_for_top(&entries);
 
@@ -341,7 +352,7 @@ fn run() -> anyhow::Result<()> {
     log("initial render (placeholders)");
     repaint_page(
         &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells, &mut covers, page,
-        total_pages, grid_left, grid_top, sort, filters.active_facets(), series_view.as_deref(),
+        total_pages, grid_left, grid_top, sort, filters.active_facets(), series_view.as_deref(), &query,
     )?;
 
     let mut armed: Option<Armed> = None;
@@ -415,7 +426,7 @@ fn run() -> anyhow::Result<()> {
                             repaint_page(
                                 &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
                                 &mut covers, page, total_pages, grid_left, grid_top, sort,
-                                filters.active_facets(), series_view.as_deref(),
+                                filters.active_facets(), series_view.as_deref(), &query,
                             )?;
                         }
                         continue;
@@ -474,7 +485,7 @@ fn run() -> anyhow::Result<()> {
                         repaint_page(
                             &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
                             &mut covers, page, total_pages, grid_left, grid_top, sort,
-                            filters.active_facets(), series_view.as_deref(),
+                            filters.active_facets(), series_view.as_deref(), &query,
                         )?;
                     } else {
                         // Short tap on a cover — discovery hint. Without
@@ -493,9 +504,48 @@ fn run() -> anyhow::Result<()> {
                         repaint_page(
                             &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
                             &mut covers, page, total_pages, grid_left, grid_top, sort,
-                            filters.active_facets(), series_view.as_deref(),
+                            filters.active_facets(), series_view.as_deref(), &query,
                         )?;
                     }
+                    continue;
+                }
+
+                // Search bar (top level only — the bar isn't drawn when drilled).
+                // Tap the field → on-screen keyboard; tap the `clear` zone → drop
+                // the query. Either way re-filter (only if the query changed) and
+                // repaint, since the keyboard overwrote the screen.
+                if series_view.is_none()
+                    && let Some(tap) = search_bar_hit(x, y, fb.var.xres, !query.is_empty())
+                {
+                    let before = query.clone();
+                    match tap {
+                        SearchTap::Open => {
+                            log("search-bar tap → keyboard");
+                            query = ui::keyboard::run(
+                                &mut fb, &mut input, &mut renderer, &all_books, &filters,
+                                &query, &mut current_orient,
+                            )?;
+                        }
+                        SearchTap::Clear => {
+                            log("search cleared");
+                            query.clear();
+                        }
+                    }
+                    if query != before {
+                        entries = series::group_by_series(rebuild_view(
+                            &all_books, &filters, sort, &query,
+                        ));
+                        cells = series::cells_for_top(&entries);
+                        total_pages = pager::n_pages(cells.len());
+                        covers = vec![None; cells.len()];
+                        page = 0;
+                        log(format!("search {:?}: {} tiles", query, cells.len()));
+                    }
+                    repaint_page(
+                        &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells, &mut covers,
+                        page, total_pages, grid_left, grid_top, sort, filters.active_facets(),
+                        series_view.as_deref(), &query,
+                    )?;
                     continue;
                 }
 
@@ -530,7 +580,7 @@ fn run() -> anyhow::Result<()> {
                                 // cover vec — it re-fills from the id-keyed disk
                                 // cache on the paint below (no re-fetch).
                                 entries = series::group_by_series(
-                                    rebuild_view(&all_books, &filters, sort),
+                                    rebuild_view(&all_books, &filters, sort, &query),
                                 );
                                 cells = series::cells_for_top(&entries);
                                 total_pages = pager::n_pages(cells.len());
@@ -547,7 +597,7 @@ fn run() -> anyhow::Result<()> {
                             repaint_page(
                                 &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
                                 &mut covers, page, total_pages, grid_left, grid_top, sort,
-                                filters.active_facets(), series_view.as_deref(),
+                                filters.active_facets(), series_view.as_deref(), &query,
                             )?;
                         }
                         PagerHit::Back => {
@@ -562,7 +612,7 @@ fn run() -> anyhow::Result<()> {
                             repaint_page(
                                 &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
                                 &mut covers, page, total_pages, grid_left, grid_top, sort,
-                                filters.active_facets(), series_view.as_deref(),
+                                filters.active_facets(), series_view.as_deref(), &query,
                             )?;
                         }
                         PagerHit::Prev => {
@@ -572,7 +622,7 @@ fn run() -> anyhow::Result<()> {
                                 repaint_page(
                                     &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
                                     &mut covers, page, total_pages, grid_left, grid_top, sort,
-                                    filters.active_facets(), series_view.as_deref(),
+                                    filters.active_facets(), series_view.as_deref(), &query,
                                 )?;
                             }
                         }
@@ -583,7 +633,7 @@ fn run() -> anyhow::Result<()> {
                                 repaint_page(
                                     &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
                                     &mut covers, page, total_pages, grid_left, grid_top, sort,
-                                    filters.active_facets(), series_view.as_deref(),
+                                    filters.active_facets(), series_view.as_deref(), &query,
                                 )?;
                             }
                         }
@@ -627,7 +677,7 @@ fn run() -> anyhow::Result<()> {
                             repaint_page(
                                 &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
                                 &mut covers, page, total_pages, grid_left, grid_top, sort,
-                                filters.active_facets(), series_view.as_deref(),
+                                filters.active_facets(), series_view.as_deref(), &query,
                             )?;
                         }
                     }
@@ -658,7 +708,7 @@ fn run() -> anyhow::Result<()> {
                     repaint_page(
                         &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
                         &mut covers, page, total_pages, grid_left, grid_top, sort,
-                        filters.active_facets(), series_view.as_deref(),
+                        filters.active_facets(), series_view.as_deref(), &query,
                     )?;
                 }
             }
@@ -678,7 +728,7 @@ fn run() -> anyhow::Result<()> {
                         repaint_page(
                             &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
                             &mut covers, page, total_pages, grid_left, grid_top, sort,
-                            filters.active_facets(), series_view.as_deref(),
+                            filters.active_facets(), series_view.as_deref(), &query,
                         )?;
                     }
                 }
@@ -691,14 +741,74 @@ fn run() -> anyhow::Result<()> {
 /// The filtered+sorted master view, ready to fold into series collections
 /// (`series::group_by_series`): `all_books` filtered by the active facets, then
 /// sorted. Cloning a few hundred small `Book` structs per rebuild is trivial.
-fn rebuild_view(all_books: &[api::Book], filters: &Filters, sort: SortState) -> Vec<api::Book> {
+fn rebuild_view(
+    all_books: &[api::Book],
+    filters: &Filters,
+    sort: SortState,
+    query: &str,
+) -> Vec<api::Book> {
+    // Search and facets are ANDed; survivors regroup into series tiles (a tile
+    // shows iff ≥1 member matches — members carry the series romaji in their
+    // search_key, so searching a series name surfaces the collection).
+    let cq = search::canon(query);
     let mut view: Vec<api::Book> = all_books
         .iter()
-        .filter(|b| filter::matches(b, filters, None))
+        .filter(|b| filter::matches(b, filters, None) && search::matches(b, &cq))
         .cloned()
         .collect();
     sort.apply(&mut view);
     view
+}
+
+/// A tap on the top search bar: open the keyboard, or clear the active query.
+enum SearchTap {
+    Open,
+    Clear,
+}
+
+/// Hit-test the top search bar. `query_active` enables the right-hand `clear`
+/// zone (only drawn when a query is set). Returns `None` outside the bar — the
+/// caller only checks this at the top level (the bar isn't drawn when drilled).
+fn search_bar_hit(tx: u32, ty: u32, xres: u32, query_active: bool) -> Option<SearchTap> {
+    let x = SEARCH_BAR_MARGIN_X;
+    let w = xres.saturating_sub(SEARCH_BAR_MARGIN_X * 2);
+    let in_y = (SEARCH_BAR_TOP..SEARCH_BAR_TOP + SEARCH_BAR_H).contains(&ty);
+    let in_x = (x..x + w).contains(&tx);
+    if !in_x || !in_y {
+        return None;
+    }
+    if query_active && tx >= x + w - SEARCH_CLEAR_W {
+        return Some(SearchTap::Clear);
+    }
+    Some(SearchTap::Open)
+}
+
+/// Draw the top search field: a framed box showing the active query (or a
+/// placeholder), with a right-hand `clear` zone when a query is set. Top-level
+/// chrome only, mirroring the stock Kindle library's search field.
+fn draw_search_bar(fb: &mut Framebuffer, renderer: &mut TextRenderer, query: &str) {
+    const PAD: u32 = 28;
+    let xres = fb.var.xres;
+    let x = SEARCH_BAR_MARGIN_X;
+    let w = xres.saturating_sub(SEARCH_BAR_MARGIN_X * 2);
+    let baseline = (SEARCH_BAR_TOP + SEARCH_BAR_H * 60 / 100) as i32;
+    grid::outline_rect(fb, x as i32, SEARCH_BAR_TOP as i32, w, SEARCH_BAR_H, 3, 0x00);
+
+    if query.trim().is_empty() {
+        renderer.draw(fb, (x + PAD) as i32, baseline, "Search by romaji…", false);
+        return;
+    }
+    // Active: query text (clamped to one line) + a `clear` zone on the right.
+    let text_w = w.saturating_sub(SEARCH_CLEAR_W + PAD * 2);
+    let shown = renderer.wrap_and_clamp(query, text_w, 1);
+    if let Some(s) = shown.first() {
+        renderer.draw(fb, (x + PAD) as i32, baseline, s, false);
+    }
+    let clear_x = x + w - SEARCH_CLEAR_W;
+    fb.fill_rect(SEARCH_BAR_TOP + 14, clear_x, 2, SEARCH_BAR_H - 28, 0x00);
+    let cw = renderer.measure_width("clear");
+    let cx = clear_x as i32 + ((SEARCH_CLEAR_W as i32 - cw as i32) / 2).max(0);
+    renderer.draw(fb, cx, baseline, "clear", false);
 }
 
 /// Draw one page of `cells` with placeholders, the header, and the bottom
@@ -719,16 +829,24 @@ fn draw_gallery_page(
     header: &str,
     filter_count: usize,
     drilled: bool,
+    query: &str,
 ) -> anyhow::Result<()> {
     fb.fill_rect(0, 0, fb.var.xres, fb.var.yres, 0xFF);
 
-    // Header line in the top margin: the sort order (top level) or the drilled-in
-    // series name. Clamp to one line so a long series name can't overrun the panel.
+    // Top chrome. At the top level: the Amazon-style search bar, then the sort
+    // header just below it. Drilled into a series: no bar (search is a top-level
+    // action), just the series-name header centered in the margin.
+    let hbaseline = if drilled {
+        grid_top * 60 / 100
+    } else {
+        draw_search_bar(fb, renderer, query);
+        (SEARCH_BAR_TOP + SEARCH_BAR_H) as i32 + renderer.line_height() as i32
+    };
+    // Header line, clamped to one line so a long series name can't overrun.
     let hlines = renderer.wrap_and_clamp(header, fb.var.xres.saturating_sub(80), 1);
     if let Some(h) = hlines.first() {
         let hw = renderer.measure_width(h);
         let hx = ((fb.var.xres as i32 - hw as i32) / 2).max(0);
-        let hbaseline = grid_top * 60 / 100;
         renderer.draw(fb, hx, hbaseline, h, false);
     }
 
@@ -785,6 +903,7 @@ fn repaint_page(
     sort: SortState,
     filter_count: usize,
     series_view: Option<&str>,
+    query: &str,
 ) -> anyhow::Result<()> {
     let drilled = series_view.is_some();
     let header = match series_view {
@@ -793,7 +912,7 @@ fn repaint_page(
     };
     draw_gallery_page(
         fb, renderer, cells, covers, page, total_pages, grid_left, grid_top, &header,
-        filter_count, drilled,
+        filter_count, drilled, query,
     )?;
     fetch_and_paint_page(fb, renderer, agent, cfg, cache_dir, cells, covers, page, grid_left, grid_top)?;
     Ok(())

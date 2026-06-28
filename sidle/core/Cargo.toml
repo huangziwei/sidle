@@ -19,6 +19,17 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 dirs = "6"
 
+# Romanization for the searchable `title_romaji`/`author_romaji` metadata + the
+# picker's derived search key (library::romaji). Host-only (desktop/server), so
+# binary size is a non-issue. `kakasi` (kanji + kana → rōmaji) bundles its own
+# dictionary via `phf` — no external dict download like `lindera` would need;
+# GPL-3.0, link-compatible with the AGPL-3.0-or-later workspace (same lineage as
+# boko-kai). `pinyin` (Han → tone-less pīnyīn) is a zero-dep bundled table.
+# `unicode-normalization` ASCII-folds romaji/accents (ō→o) in `canon`.
+kakasi = "0.1"
+pinyin = "0.11"
+unicode-normalization = "0.1"
+
 boko-kai = { path = "../../boko-kai", default-features = false, features = ["aozora", "nbk"] }
 
 # image: cover thumbnail decode + grayscale + downscale, produced at import

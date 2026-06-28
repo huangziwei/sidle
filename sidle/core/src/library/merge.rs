@@ -318,6 +318,8 @@ fn insert_source_book(conn: &Connection, dest_root: &Path, row: &db::BookRow) ->
             series_name: row.series_name.as_deref(),
             series_index: row.series_index,
             tags: &row.tags,
+            title_romaji: &row.title_romaji,
+            author_romaji: &row.author_romaji,
         },
     )
     .context("insert merged book")
@@ -339,8 +341,8 @@ fn overwrite_metadata(conn: &Connection, source: &db::BookRow, local: &db::BookR
         r#"UPDATE books SET
                title = ?1, author = ?2, language = ?3, ppd = ?4, publisher = ?5,
                published_at = ?6, series_name = ?7, series_index = ?8, tags = ?9,
-               asin = ?10, updated_at = ?11
-           WHERE id = ?12"#,
+               asin = ?10, title_romaji = ?11, author_romaji = ?12, updated_at = ?13
+           WHERE id = ?14"#,
         params![
             source.title,
             source.author,
@@ -352,6 +354,8 @@ fn overwrite_metadata(conn: &Connection, source: &db::BookRow, local: &db::BookR
             source.series_index,
             tags_json,
             asin,
+            source.title_romaji,
+            source.author_romaji,
             source.updated_at,
             local.id,
         ],
@@ -488,6 +492,8 @@ mod tests {
                     series_name: None,
                     series_index: None,
                     tags: &[],
+                    title_romaji: "",
+                    author_romaji: "",
                 },
             )
             .unwrap();

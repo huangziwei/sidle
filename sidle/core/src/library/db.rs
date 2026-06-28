@@ -76,6 +76,21 @@ pub struct BookRow {
     /// sides. Read as `COALESCE(updated_at, imported_at)` so a pre-v7 row that
     /// somehow escaped the backfill never reads NULL.
     pub updated_at: String,
+    /// Human-readable romaji of the title — the searchable, **editable**
+    /// rendering shown in the metadata modal. Rendered at import (yomigana-aware)
+    /// and correctable by hand; the picker's [`search_key`] folds it in.
+    /// `COALESCE(…, '')` so a pre-v11 row reads `""` rather than NULL.
+    pub title_romaji: String,
+    /// Human-readable romaji of the author line. See [`Self::title_romaji`].
+    pub author_romaji: String,
+    /// **Derived, not a column.** The canonical (space/punctuation-free,
+    /// ASCII-folded) match key the Kindle picker substring-searches — assembled
+    /// in [`row_to_book`] from the romaji columns + auto-romanized
+    /// series/publisher/tags + the raw fields ([`super::romaji::search_key`]).
+    /// Flows to the device via `/list.json` (`#[serde(flatten)]` on the server's
+    /// list entry); recomputed fresh on every read so a metadata edit can't
+    /// leave it stale.
+    pub search_key: String,
 }
 
 /// Schema version stamped into `PRAGMA user_version` by [`migrate`]. Bump on
@@ -107,7 +122,11 @@ pub struct BookRow {
 /// .claude/plans/backup-source-of-truth.md.
 /// v10: harmonized `books.language` to canonical codes (en-US/eng → en, zh-TW →
 /// zh-Hant). Data-only backfill via [`super::lang`]; no schema change.
-pub const SCHEMA_VERSION: i64 = 10;
+/// v11: added `books.title_romaji` / `author_romaji` — the editable, searchable
+/// romanization of title/author (see [`super::romaji`]). Backfilled from the raw
+/// fields via kakasi/pinyin; new imports render them yomigana-aware. Drives the
+/// picker's search.
+pub const SCHEMA_VERSION: i64 = 11;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -622,6 +641,39 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
 
+    // v11: searchable romaji metadata. Two editable columns rendered from the
+    // title/author and shown in the editor (see [`super::romaji`]). New imports
+    // render them yomigana-aware (`import::extract_meta` from boko's
+    // `title_sort`/`author_sort`); here we backfill existing rows from the raw
+    // fields via the same engine. Pure CPU (no file I/O) and NULL-guarded, so
+    // it's safe to re-run on every `open()` — including sidle-server's
+    // per-request open: the first fill does ~1k tiny romanizations, every later
+    // open finds zero NULL rows and the loop is a no-op. A bare backfill, not a
+    // user edit, so `updated_at` is deliberately left untouched.
+    if !has_column(conn, "books", "title_romaji")? {
+        conn.execute("ALTER TABLE books ADD COLUMN title_romaji TEXT", [])?;
+    }
+    if !has_column(conn, "books", "author_romaji")? {
+        conn.execute("ALTER TABLE books ADD COLUMN author_romaji TEXT", [])?;
+    }
+    {
+        let rows: Vec<(i64, String, String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, title, author, language FROM books WHERE title_romaji IS NULL")?;
+            let mapped =
+                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            mapped.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, title, author, language) in rows {
+            let title_romaji = super::romaji::romanize_field(&title, None, &language);
+            let author_romaji = super::romaji::romanize_field(&author, None, &language);
+            conn.execute(
+                "UPDATE books SET title_romaji = ?1, author_romaji = ?2 WHERE id = ?3",
+                params![title_romaji, author_romaji, id],
+            )?;
+        }
+    }
+
     // §4c: stamp the schema version. migrate() always brings the DB up to the
     // latest schema, so set the current marker; backups gate restores on it.
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -747,8 +799,9 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
         r#"INSERT INTO books
             (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path,
              file_size, imported_at, asin, publisher, published_at,
-             series_name, series_index, tags, kfx_sha256, pdf_path, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"#,
+             series_name, series_index, tags, kfx_sha256, pdf_path, updated_at,
+             title_romaji, author_romaji)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"#,
         params![
             book.sha256,
             book.title,
@@ -771,6 +824,8 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
             // A fresh book's last-edit time is its import time; the curation
             // mutators move it forward later.
             book.imported_at,
+            book.title_romaji,
+            book.author_romaji,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -998,6 +1053,15 @@ pub struct MetadataPatch {
     pub series_name: Option<String>,
     pub series_index: Option<f64>,
     pub tags: Vec<String>,
+    /// Editable romaji of the title/author (see [`super::romaji`]). The command
+    /// layer trims + lowercases them, and self-heals a blank field by
+    /// re-rendering it from the (canonicalized) title/author. `#[serde(default)]`
+    /// so a caller that doesn't send them (older frontend) leaves them blank →
+    /// self-healed, not wiped to a stale value.
+    #[serde(default)]
+    pub title_romaji: String,
+    #[serde(default)]
+    pub author_romaji: String,
 }
 
 pub fn update_metadata(
@@ -1018,8 +1082,10 @@ pub fn update_metadata(
                   series_name   = ?7,
                   series_index  = ?8,
                   tags          = ?9,
-                  updated_at    = ?10
-              WHERE id = ?11"#,
+                  title_romaji  = ?10,
+                  author_romaji = ?11,
+                  updated_at    = ?12
+              WHERE id = ?13"#,
         params![
             patch.title,
             patch.author,
@@ -1030,6 +1096,8 @@ pub fn update_metadata(
             patch.series_name,
             patch.series_index,
             tags_json,
+            patch.title_romaji,
+            patch.author_romaji,
             now_iso(),
             book_id,
         ],
@@ -1239,6 +1307,10 @@ pub struct NewBook<'a> {
     /// Caller passes the canonical tag list (already trimmed / lowercased
     /// / deduped). `insert_book` serializes it to a JSON array TEXT.
     pub tags: &'a [String],
+    /// Editable romaji of the title/author, rendered yomigana-aware at import
+    /// (see [`super::romaji`] and `import::extract_meta`). The picker searches it.
+    pub title_romaji: &'a str,
+    pub author_romaji: &'a str,
 }
 
 pub fn now_iso() -> String {
@@ -1252,7 +1324,8 @@ const SELECT_BOOKS_WITH_JOBS: &str = r#"
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
            b.kfx_sha256, b.pdf_path,
-           COALESCE(b.updated_at, b.imported_at)
+           COALESCE(b.updated_at, b.imported_at),
+           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, '')
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     ORDER BY b.imported_at DESC
@@ -1265,7 +1338,8 @@ const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
            b.kfx_sha256, b.pdf_path,
-           COALESCE(b.updated_at, b.imported_at)
+           COALESCE(b.updated_at, b.imported_at),
+           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, '')
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.sha256 = ?1
@@ -1278,7 +1352,8 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
            b.kfx_sha256, b.pdf_path,
-           COALESCE(b.updated_at, b.imported_at)
+           COALESCE(b.updated_at, b.imported_at),
+           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, '')
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
@@ -1291,7 +1366,8 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX: &str = r#"
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
            b.kfx_sha256, b.pdf_path,
-           COALESCE(b.updated_at, b.imported_at)
+           COALESCE(b.updated_at, b.imported_at),
+           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, '')
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_sha256 LIKE ?1
@@ -1309,7 +1385,8 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
            COALESCE(j.status, 'pending') AS status, j.error, j.kind,
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
            b.kfx_sha256, b.pdf_path,
-           COALESCE(b.updated_at, b.imported_at)
+           COALESCE(b.updated_at, b.imported_at),
+           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, '')
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_path LIKE ?1
@@ -1321,12 +1398,34 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
     // Defensive parse: we control writes and only emit canonical JSON
     // arrays, but a corrupt column shouldn't take down the whole list.
     let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+    // Bind the fields the derived `search_key` reads up front, so it can borrow
+    // them before they're moved into the struct.
+    let title: String = row.get(2)?;
+    let author: String = row.get(3)?;
+    let language: String = row.get(4)?;
+    let publisher: Option<String> = row.get(15)?;
+    let series_name: Option<String> = row.get(17)?;
+    let title_romaji: String = row.get(23)?;
+    let author_romaji: String = row.get(24)?;
+    // Derived (not a column): the device match key — curated romaji (or a live
+    // fallback when a column is empty) + auto-romanized series/publisher/tags +
+    // the raw fields. Recomputed fresh on every read.
+    let search_key = super::romaji::search_key(
+        &title,
+        &author,
+        publisher.as_deref(),
+        series_name.as_deref(),
+        &tags,
+        &language,
+        &title_romaji,
+        &author_romaji,
+    );
     Ok(BookRow {
         id: row.get(0)?,
         sha256: row.get(1)?,
-        title: row.get(2)?,
-        author: row.get(3)?,
-        language: row.get(4)?,
+        title,
+        author,
+        language,
         ppd: row.get(5)?,
         // Stored root-relative (§4a); resolve to absolute against the live root.
         epub_path: resolve_opt(root, row.get(6)?),
@@ -1338,14 +1437,17 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         status: row.get(12)?,
         error: row.get(13)?,
         kind: row.get(14)?,
-        publisher: row.get(15)?,
+        publisher,
         published_at: row.get(16)?,
-        series_name: row.get(17)?,
+        series_name,
         series_index: row.get(18)?,
         tags,
         kfx_sha256: row.get(20)?,
         pdf_path: resolve_opt(root, row.get(21)?),
         updated_at: row.get(22)?,
+        title_romaji,
+        author_romaji,
+        search_key,
     })
 }
 
@@ -2255,6 +2357,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags: &[],
+                title_romaji: "",
+                author_romaji: "",
             },
         )
         .expect("insert")
@@ -2282,6 +2386,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags: &[],
+                title_romaji: "",
+                author_romaji: "",
             },
         )
         .expect("insert")
@@ -2306,6 +2412,32 @@ mod tests {
         assert_eq!(lang(zh), "zh-Hant");
         assert_eq!(lang(ja), "ja");
         assert_eq!(lang(blank), "", "blank language stays blank");
+    }
+
+    #[test]
+    fn migrate_backfills_null_romaji() {
+        let conn = fresh_db();
+        // Mimic a pre-v11 row: insert_book now always writes the romaji columns,
+        // so NULL them out + set a JP language to recreate the upgrade scenario.
+        let id = insert_minimal(&conn, "sha-jp", "世界");
+        conn.execute(
+            "UPDATE books SET title_romaji = NULL, author_romaji = NULL, language = 'ja' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+
+        // Re-open: migrate() is idempotent and backfills NULL romaji from the raw
+        // title/author via the engine.
+        migrate(&conn).expect("re-migrate");
+
+        let book = get_book(&conn, id).unwrap().unwrap();
+        assert_eq!(book.title_romaji, "sekai", "kakasi backfilled the title romaji");
+        // The derived search key folds the backfilled romaji in.
+        assert!(book.search_key.contains("sekai"), "search_key: {}", book.search_key);
+
+        // Idempotent: a second migrate finds no NULL rows and changes nothing.
+        migrate(&conn).expect("re-migrate idempotent");
+        assert_eq!(get_book(&conn, id).unwrap().unwrap().title_romaji, "sekai");
     }
 
     #[test]
@@ -2438,6 +2570,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags: &[],
+                title_romaji: "",
+                author_romaji: "",
             },
         )
         .expect("insert");
@@ -2867,6 +3001,8 @@ mod tests {
             series_name: Some("ハルキ三部作".into()),
             series_index: Some(2.5),
             tags: vec!["小説".into(), "ライトノベル".into()],
+            title_romaji: String::new(),
+            author_romaji: String::new(),
         };
         update_metadata(&conn, id, &patch).expect("update");
 
@@ -2900,6 +3036,8 @@ mod tests {
                 series_name: Some("Foundation".into()),
                 series_index: Some(1.0),
                 tags: vec![],
+                title_romaji: String::new(),
+                author_romaji: String::new(),
             },
         )
         .expect("seed");
@@ -2918,6 +3056,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags: vec![],
+                title_romaji: String::new(),
+                author_romaji: String::new(),
             },
         )
         .expect("clear");
@@ -2946,6 +3086,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags: vec![],
+                title_romaji: String::new(),
+                author_romaji: String::new(),
             },
         )
         .expect("set");
@@ -2966,6 +3108,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags: vec![],
+                title_romaji: String::new(),
+                author_romaji: String::new(),
             },
         )
         .expect("clear");
@@ -2997,6 +3141,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags: tags.clone(),
+                title_romaji: String::new(),
+                author_romaji: String::new(),
             },
         )
         .expect("update");
@@ -3050,6 +3196,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags,
+                title_romaji: String::new(),
+                author_romaji: String::new(),
             },
         )
         .expect("seed");
@@ -3172,6 +3320,8 @@ mod tests {
                     series_name: None,
                     series_index: None,
                     tags: &[],
+                    title_romaji: "",
+                    author_romaji: "",
                 },
             )
             .expect("insert");
@@ -3337,6 +3487,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags: &[],
+                title_romaji: "",
+                author_romaji: "",
             },
         )
         .expect("insert")

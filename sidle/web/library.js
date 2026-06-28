@@ -4336,6 +4336,11 @@ function wireMetadataModal() {
   $("#metadata-cover-refetch").addEventListener("click", onCoverRefetchClick);
   $("#asin-search").addEventListener("click", onAsinSearchClick);
   $("#metadata-form").asin.addEventListener("input", renderAsinHint);
+  // "↻" regenerate buttons: re-render a romaji field from its source (title /
+  // author) via the engine. The user reviews/corrects before saving.
+  for (const btn of $("#metadata-form").querySelectorAll(".romaji-regen")) {
+    btn.addEventListener("click", onRomajiRegen);
+  }
 
   // Snapshot each input's placeholder so bulk mode can swap to "Leave
   // unchanged" and single mode can restore the original hint.
@@ -4393,10 +4398,12 @@ function openMetadataModal(arg, opts = {}) {
     // Every editable field starts empty → "leave unchanged".
     for (const name of BULK_FIELDS) form[name].value = "";
     setBulkPlaceholders(true);
-    // Title + ASIN are hidden in bulk; disable them so they're exempt from
-    // native required-validation and aren't read on submit.
+    // Title + ASIN + romaji are per-book-unique → hidden in bulk; disable them
+    // so they're exempt from native required-validation and aren't read on submit.
     form.title.disabled = true;
     form.asin.disabled = true;
+    form.title_romaji.disabled = true;
+    form.author_romaji.disabled = true;
 
     $("#metadata-modal").hidden = false;
     setTimeout(() => form.author.focus(), 0);
@@ -4413,10 +4420,14 @@ function openMetadataModal(arg, opts = {}) {
   $("#field-tags-label").textContent = "Tags";
   form.title.disabled = false;
   form.asin.disabled = false;
+  form.title_romaji.disabled = false;
+  form.author_romaji.disabled = false;
   setBulkPlaceholders(false);
 
   form.title.value = book.title || "";
   form.author.value = book.author || "";
+  form.title_romaji.value = book.title_romaji || "";
+  form.author_romaji.value = book.author_romaji || "";
   form.language.value = book.language || "";
   form.ppd.value = book.ppd || ""; // "" = Auto
   form.publisher.value = book.publisher || "";
@@ -4494,6 +4505,25 @@ function renderCoverPreview(book) {
   }
 }
 
+// Regenerate a romaji field from its source field (title / author) via the
+// `library_romanize` command. Engine-only — the user reviews and corrects the
+// result before saving. Bound to the "↻" buttons in the metadata modal.
+async function onRomajiRegen(e) {
+  const form = $("#metadata-form");
+  const which = e.currentTarget.dataset.romajiFor; // "title" | "author"
+  const target = form[`${which}_romaji`];
+  if (!target) return;
+  const source = (form[which]?.value || "").trim();
+  try {
+    target.value = await window.api.invoke("library_romanize", {
+      text: source,
+      language: form.language.value.trim(),
+    });
+  } catch (err) {
+    showToast(`Romanize failed: ${err}`, true);
+  }
+}
+
 async function submitMetadataForm() {
   if (metadataBulk) return submitBulkMetadataForm();
   if (!metadataBook) return;
@@ -4520,6 +4550,10 @@ async function submitMetadataForm() {
       tagsRaw === ""
         ? []
         : tagsRaw.split(/[,、]/).map((s) => s.trim()).filter(Boolean),
+    // Editable search romaji. A blank field self-heals on the backend
+    // (re-rendered from title/author), so clearing it regenerates.
+    title_romaji: form.title_romaji.value.trim(),
+    author_romaji: form.author_romaji.value.trim(),
   };
 
   if (!patch.title) {

@@ -181,6 +181,15 @@ pub struct Book {
     /// (the prior behavior).
     #[serde(default)]
     pub cover_rev: i64,
+    /// Canonical (space/punctuation-free, ASCII-folded, lowercase) search key the
+    /// server derives from the book's editable romaji + auto-romanized
+    /// series/publisher/tags + raw fields (`sidle_core::library::romaji::search_key`).
+    /// The picker substring-matches the typed (also-`canon`'d) query against this —
+    /// the on-screen Latin keyboard's whole reason for being. `#[serde(default)]`
+    /// → `""` against an older server that doesn't ship it; [`crate::search`] then
+    /// falls back to canon'ing the raw title/author on-device (Latin-only match).
+    #[serde(default)]
+    pub search_key: String,
 }
 
 pub fn list_books(agent: &ureq::Agent, cfg: &ServerConfig) -> Result<Vec<Book>> {
@@ -550,6 +559,7 @@ mod tests {
             imported_at: String::new(),
             tags: Vec::new(),
             cover_rev: 0,
+            search_key: String::new(),
         }
     }
 

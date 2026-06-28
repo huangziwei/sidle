@@ -15,6 +15,7 @@ pub mod pdf_geom;
 pub mod pdf_render;
 pub mod relocate;
 pub mod rename;
+pub mod romaji;
 pub mod thumbnail;
 pub mod yjr;
 

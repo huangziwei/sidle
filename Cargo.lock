@@ -2680,6 +2680,18 @@ name = "jxr"
 version = "0.1.0"
 
 [[package]]
+name = "kakasi"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9303d1b656a06c4cea50948f5b519a748ced7b216a10e800f3640df57337ee9"
+dependencies = [
+ "byteorder",
+ "phf 0.11.3",
+ "phf_shared 0.11.3",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3637,6 +3649,12 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pinyin"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e225f595052d9c46045755be4b8d7950b6d9f3c33e0c0b74ba58f11bbfa8c64b"
 
 [[package]]
 name = "piper"
@@ -4786,13 +4804,16 @@ dependencies = [
  "dirs",
  "flate2",
  "image",
+ "kakasi",
  "lopdf",
+ "pinyin",
  "resvg",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "unicode-normalization",
  "zip",
 ]
 

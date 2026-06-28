@@ -632,6 +632,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags: &[],
+                title_romaji: "",
+                author_romaji: "",
             },
         )
         .unwrap()
@@ -927,6 +929,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags: &[],
+                title_romaji: "",
+                author_romaji: "",
             },
         )
         .unwrap();
@@ -995,6 +999,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags: &[],
+                title_romaji: "",
+                author_romaji: "",
             },
         )
         .unwrap();

@@ -2057,9 +2057,19 @@ kbd {
 
 .modal-panel.bulk .metadata-cover,
 .modal-panel.bulk #field-title,
+.modal-panel.bulk #field-title-romaji,
+.modal-panel.bulk #field-author-romaji,
 .modal-panel.bulk #field-asin,
 .modal-panel.bulk #asin-aside {
   display: none;
+}
+
+/* The "↻" regenerate button sits inline in the romaji field's label. */
+.romaji-regen {
+  margin-inline-start: 0.4em;
+  font-size: 1.1em;
+  line-height: 1;
+  padding: 0 0.2em;
 }
 
 /* Status bar + queue drawer */

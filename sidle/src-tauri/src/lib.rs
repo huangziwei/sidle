@@ -60,6 +60,7 @@ pub fn run() {
             commands::library::library_list,
             commands::library::library_import,
             commands::library::library_update_metadata,
+            commands::library::library_romanize,
             commands::library::library_set_asin,
             commands::library::library_bulk_update_metadata,
             commands::library::library_remove,
