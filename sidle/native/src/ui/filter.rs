@@ -11,13 +11,15 @@
 //! X are computed against the books matching all *other* active facets, so
 //! picking language=jp narrows the Author options but not the Language options.
 //!
-//! Collation is stdlib `str::cmp` (matches `ui::sort`); the "—" sentinel (a
-//! book with no value for a facet) sorts last and is itself selectable.
+//! Collation is [`crate::collate::natural_compare`] (matches `ui::sort`); the
+//! "—" sentinel (a book with no value for a facet) sorts last and is itself
+//! selectable.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::api::Book;
+use crate::collate::natural_compare;
 
 /// Sentinel value for "this book has no value for this facet" — itself a
 /// selectable option (so "books with no author" is a filter you can pick).
@@ -197,7 +199,7 @@ pub fn facet_options(books: &[Book], filters: &Filters, facet: Facet) -> Vec<(St
         (NONE, NONE) => Ordering::Equal,
         (NONE, _) => Ordering::Greater,
         (_, NONE) => Ordering::Less,
-        _ => a.0.cmp(&b.0),
+        _ => natural_compare(&a.0, &b.0),
     });
     out
 }

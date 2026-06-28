@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod api;
+mod collate;
 mod config;
 mod cover_cache;
 mod device_state;

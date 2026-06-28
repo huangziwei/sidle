@@ -14,20 +14,27 @@
 //! is `main.rs`.
 //!
 //! Port of the desktop's `groupBySeries` / `bySeriesIndex` / `seriesNameOf`
-//! (`web/library.js`), with two deliberate divergences noted at each site:
-//! members are sorted **eagerly** here (the desktop sorts lazily at render),
-//! and collation is stdlib `str::cmp` (code-point order, matching [`crate::ui::sort`])
-//! rather than `localeCompare`.
+//! (`web/library.js`). One deliberate divergence: members are sorted **eagerly**
+//! here (the desktop sorts lazily at render). Collation matches the desktop —
+//! [`crate::collate::natural_compare`], the port of `naturalCompare`, shared
+//! with [`crate::ui::sort`].
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::api::Book;
+use crate::collate::natural_compare;
 
 /// A top-level tile: either a standalone book or a series collection. Folded
 /// from the filtered+sorted view by [`group_by_series`]; a collection appears
 /// at the position of its **first-seen** member so the active sort drives tile
 /// order for free.
+// `Standalone(Book)` dwarfs the `Series` variant, tripping `large_enum_variant`
+// on a 64-bit host build. The picker ships on 32-bit armv7, where the variants
+// stay under the lint's threshold (clean on-target); boxing the common
+// standalone variant would add a heap allocation per book to this transient,
+// bounded view model for no on-device gain.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Entry {
     /// A book with no series — rendered and downloaded as itself.
@@ -72,8 +79,8 @@ pub fn series_name_of(b: &Book) -> Option<&str> {
 
 /// Canonical within-series order: by `series_index` ascending (half-numbers
 /// like 1.5 sort correctly), books with no index after those with one, then by
-/// title. Port of `bySeriesIndex` — `localeCompare` becomes `str::cmp`
-/// (code-point order) to match [`crate::ui::sort`]'s collation.
+/// title in natural order ([`natural_compare`], so "Vol 9" precedes "Vol 10"
+/// without a hand-entered index). Port of `bySeriesIndex`.
 pub fn by_series_index(a: &Book, b: &Book) -> Ordering {
     let an = a.series_index.filter(|x| x.is_finite());
     let bn = b.series_index.filter(|x| x.is_finite());
@@ -81,10 +88,10 @@ pub fn by_series_index(a: &Book, b: &Book) -> Ordering {
         (Some(x), Some(y)) => x
             .partial_cmp(&y)
             .unwrap_or(Ordering::Equal)
-            .then_with(|| a.title.cmp(&b.title)),
+            .then_with(|| natural_compare(&a.title, &b.title)),
         (Some(_), None) => Ordering::Less, // indexed before un-indexed
         (None, Some(_)) => Ordering::Greater,
-        (None, None) => a.title.cmp(&b.title),
+        (None, None) => natural_compare(&a.title, &b.title),
     }
 }
 

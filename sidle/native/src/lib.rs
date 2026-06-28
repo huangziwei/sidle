@@ -7,6 +7,7 @@
 //! the test runner can build it without dragging in the device modules.
 
 pub mod api;
+pub mod collate;
 pub mod config;
 pub mod cover_cache;
 pub mod device_state;

@@ -10,14 +10,17 @@
 //! (`core/src/library/db.rs:493`) — only now it's labelled in the UI instead of
 //! reading as a random order.
 //!
-//! Collation is stdlib `str::cmp` (UTF-8 byte order = Unicode code-point order),
-//! not a locale collator: correct for ASCII, code-point order for CJK. Good
-//! enough to ship; revisit only if kana/kanji ordering looks wrong on device.
+//! Collation is [`crate::collate::natural_compare`] (port of the desktop's
+//! `naturalCompare`): digit runs compare numerically — "Vol 2" before "Vol 10" —
+//! while the non-digit segments stay code-point order (correct for ASCII,
+//! code-point order for CJK). Revisit only if kana/kanji ordering looks wrong on
+//! device.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use crate::api::Book;
+use crate::collate::natural_compare;
 
 /// The seven sort keys, in the order shown in the Sort overlay (matches the
 /// desktop popover order). `on_kindle` is intentionally absent (see module doc).
@@ -189,7 +192,7 @@ fn compare(a: &Book, b: &Book, state: SortState) -> Ordering {
 /// cross-variant arms can't occur in practice but resolve deterministically.
 fn cmp_present(a: &SortVal<'_>, b: &SortVal<'_>) -> Ordering {
     match (a, b) {
-        (SortVal::Text(x), SortVal::Text(y)) => x.cmp(y),
+        (SortVal::Text(x), SortVal::Text(y)) => natural_compare(x, y),
         (SortVal::Num(x), SortVal::Num(y)) => x.cmp(y),
         _ => Ordering::Equal,
     }
