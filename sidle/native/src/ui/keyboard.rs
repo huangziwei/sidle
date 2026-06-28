@@ -19,7 +19,7 @@ use crate::eink::touch::TouchEvent;
 use crate::orientation::Orientation;
 use crate::search;
 use crate::ui::filter::{self, Filters};
-use crate::ui::grid::outline_rect;
+use crate::ui::grid::{self, outline_rect};
 use crate::ui::text::TextRenderer;
 
 /// Letter/digit rows. The action row (space / Del / Clear / Done) is laid out
@@ -49,32 +49,55 @@ struct KeyButton {
 }
 
 /// Top of the key grid — the band above it holds the title, query, and count.
-fn keys_top(yres: u32) -> i32 {
-    (yres as f32 * 0.30) as i32
+fn field_h(lh: u32) -> u32 {
+    lh * 2
 }
 
-/// Lay out every key for the current panel size. Letter/digit rows use a fixed
-/// column `unit` (10 units wide) and are centered; the action row fills the same
-/// width with weighted keys (space ×4, the rest ×2 → 10 units).
-fn layout(xres: u32, yres: u32) -> Vec<KeyButton> {
-    let top = keys_top(yres);
-    let area_h = yres as i32 - top - MARGIN;
-    let row_h = (area_h / 5).max(1);
-    let key_h = (row_h - GAP).max(1) as u32;
-    let unit = ((xres as i32 - 2 * MARGIN) / 10).max(1);
-    let key_w = (unit - GAP).max(1) as u32;
+/// Vertical layout of the top band: `(field_top, count_baseline, band_bottom)`.
+/// The (search field + match count) group is **centered** in the space above the
+/// bottom-anchored keyboard, so the panel reads as a balanced search overlay
+/// rather than a field pinned to the top above a void. A keystroke refreshes only
+/// `[0, band_bottom]`, leaving the keyboard untouched.
+fn band_layout(xres: u32, yres: u32, lh: u32) -> (u32, u32, u32) {
+    let keys_top = metrics(xres, yres).3 as u32;
+    let fh = field_h(lh);
+    let group_h = fh + lh + lh; // field, gap, count
+    let field_top = (keys_top.saturating_sub(group_h) / 2).max(MARGIN as u32);
+    let count_baseline = field_top + fh + lh + lh * 70 / 100;
+    let band_bottom = field_top + group_h + 16;
+    (field_top, count_baseline, band_bottom)
+}
 
+/// Keyboard metrics for the panel: `(unit, key_w, key_h, keys_top)`. Keys are a
+/// touch taller than wide (comfortable tap targets — not the old domino
+/// proportions), and the 5-row block is **bottom-anchored** like a real soft
+/// keyboard, so the search field sits up top and the keys rest at the bottom.
+fn metrics(xres: u32, yres: u32) -> (i32, i32, i32, i32) {
+    let unit = ((xres as i32 - 2 * MARGIN) / 10).max(1);
+    let key_w = (unit - GAP).max(1);
+    let key_h = (key_w * 13 / 10).max(1);
+    let block_h = 5 * key_h + 4 * GAP;
+    let keys_top = (yres as i32 - MARGIN - block_h).max(MARGIN);
+    (unit, key_w, key_h, keys_top)
+}
+
+/// Lay out every key. Letter/digit rows use a fixed column `unit` (10 wide),
+/// centered; the action row fills the same width with weighted keys (space ×4,
+/// the rest ×2 → 10 units).
+fn layout(xres: u32, yres: u32) -> Vec<KeyButton> {
+    let (unit, key_w, key_h, top) = metrics(xres, yres);
+    let stride = key_h + GAP;
     let mut out = Vec::new();
     for (r, row) in ROWS.iter().enumerate() {
         let n = row.chars().count() as i32;
         let start_x = (xres as i32 - n * unit) / 2;
-        let y = top + r as i32 * row_h;
+        let y = top + r as i32 * stride;
         for (i, c) in row.chars().enumerate() {
             out.push(KeyButton {
                 x: start_x + i as i32 * unit,
                 y,
-                w: key_w,
-                h: key_h,
+                w: key_w as u32,
+                h: key_h as u32,
                 key: Key::Char(c),
                 label: c.to_string(),
             });
@@ -82,7 +105,7 @@ fn layout(xres: u32, yres: u32) -> Vec<KeyButton> {
     }
 
     // Action row: weights sum to 10 units, centered like a full letter row.
-    let y = top + 4 * row_h;
+    let y = top + 4 * stride;
     let actions = [
         (Key::Space, "space", 4i32),
         (Key::Backspace, "Del", 2),
@@ -95,7 +118,7 @@ fn layout(xres: u32, yres: u32) -> Vec<KeyButton> {
             x: ax,
             y,
             w: (weight * unit - GAP).max(1) as u32,
-            h: key_h,
+            h: key_h as u32,
             key,
             label: label.to_string(),
         });
@@ -110,8 +133,9 @@ fn full_rect(fb: &Framebuffer) -> MxcfbRect {
 
 /// The query+count band at the top — its own rect so a keystroke refreshes only
 /// this with a fast DU instead of the whole panel.
-fn band_rect(fb: &Framebuffer) -> MxcfbRect {
-    MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: keys_top(fb.var.yres) as u32 }
+fn band_rect(fb: &Framebuffer, lh: u32) -> MxcfbRect {
+    let bb = band_layout(fb.var.xres, fb.var.yres, lh).2;
+    MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: bb }
 }
 
 /// Books passing the active facets **and** the typed query — the same predicate
@@ -124,8 +148,9 @@ fn count_matches(all_books: &[Book], filters: &Filters, query: &str) -> usize {
         .count()
 }
 
-/// Draw the title, the query box (showing the tail when it overflows, like a real
-/// input), and the live match count. Caller white-fills the band first.
+/// Draw the rounded search field (magnifier + typed text or placeholder, the
+/// tail shown when it overflows) and the live match count below it. Matches the
+/// grid's search bar. Caller white-fills the band first.
 fn draw_band(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
@@ -135,28 +160,28 @@ fn draw_band(
     lh: u32,
 ) {
     let xres = fb.var.xres;
-    // Title.
-    let title = "Search";
-    let tw = renderer.measure_width(title);
-    renderer.draw(fb, ((xres as i32 - tw as i32) / 2).max(0), (lh + lh / 2) as i32, title, false);
+    let (field_top, count_baseline, _) = band_layout(xres, fb.var.yres, lh);
+    let fw = (xres as i32 - 2 * MARGIN).max(1) as u32;
+    let fh = field_h(lh);
+    let cy = (field_top + fh / 2) as i32;
+    let baseline = (field_top + fh * 60 / 100) as i32;
 
-    // Query box: a framed strip with the typed text (tail-clamped to the width).
-    let box_x = MARGIN;
-    let box_w = xres - (MARGIN as u32 * 2);
-    let box_y = (lh * 2) as i32;
-    let box_h = lh + lh / 2;
-    outline_rect(fb, box_x, box_y, box_w, box_h, 2, 0x00);
-    let pad = 16u32;
-    let shown = clamp_tail(renderer, query, box_w.saturating_sub(pad * 2));
-    let baseline = box_y + (box_h * 62 / 100) as i32;
+    // Rounded pill + magnifier just inside the left rounded end.
+    grid::stroke_round_rect(fb, MARGIN, field_top as i32, fw, fh, fh / 2, 3, 0x00);
+    let mr = (fh / 2).saturating_sub(12).max(12);
+    let mcx = MARGIN + (fh / 2) as i32 + 6;
+    grid::draw_magnifier(fb, mcx, cy, mr, 0x00);
+    let text_x = mcx + mr as i32 + 22;
+
+    let avail = (MARGIN + fw as i32 - 28 - text_x).max(0) as u32;
+    let shown = clamp_tail(renderer, query, avail);
     if shown.is_empty() {
-        // Placeholder when empty.
-        renderer.draw(fb, box_x + pad as i32, baseline, "type romaji…", false);
+        renderer.draw(fb, text_x, baseline, "Search by romaji", false);
     } else {
-        renderer.draw(fb, box_x + pad as i32, baseline, &shown, false);
+        renderer.draw(fb, text_x, baseline, &shown, false);
     }
 
-    // Match count under the box.
+    // Match count, centered, below the field.
     let n = count_matches(all_books, filters, query);
     let count = if query.trim().is_empty() {
         format!("{n} books")
@@ -168,8 +193,7 @@ fn draw_band(
         format!("{n} matches")
     };
     let cw = renderer.measure_width(&count);
-    let cy = box_y + box_h as i32 + lh as i32;
-    renderer.draw(fb, ((xres as i32 - cw as i32) / 2).max(0), cy, &count, false);
+    renderer.draw(fb, ((xres as i32 - cw as i32) / 2).max(0), count_baseline as i32, &count, false);
 }
 
 /// Trailing substring of `s` that fits `max_width` (so a long query scrolls to
@@ -243,9 +267,10 @@ pub fn run(
     // Refresh just the query+count band after a keystroke (fast DU, no flash).
     macro_rules! refresh_band {
         () => {{
-            fb.fill_rect(0, 0, fb.var.xres, keys_top(fb.var.yres) as u32, 0xFF);
+            let bb = band_layout(fb.var.xres, fb.var.yres, lh).2;
+            fb.fill_rect(0, 0, fb.var.xres, bb, 0xFF);
             draw_band(fb, renderer, all_books, filters, &query, lh);
-            fb.send_update(band_rect(fb), WAVEFORM_MODE_DU)?;
+            fb.send_update(band_rect(fb, lh), WAVEFORM_MODE_DU)?;
         }};
     }
 

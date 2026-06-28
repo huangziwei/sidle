@@ -111,6 +111,101 @@ pub fn outline_rect(fb: &mut Framebuffer, x: i32, y: i32, w: u32, h: u32, thickn
     fb.fill_rect(yu, xu + w - t, t, h, shade); // right
 }
 
+/// Stroke a **rounded-rectangle** border (`thickness` px, corner `radius`) in
+/// `shade` — the search field's pill/box frame. `radius == h/2` gives a full
+/// pill (Amazon-style); a smaller radius gives rounded corners. The straight
+/// edges are `fill_rect`s between the four quarter-circle corner arcs.
+#[allow(clippy::too_many_arguments)] // positional geometry; a struct just moves the list
+pub fn stroke_round_rect(
+    fb: &mut Framebuffer,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    radius: u32,
+    thickness: u32,
+    shade: u8,
+) {
+    if x < 0 || y < 0 || w == 0 || h == 0 {
+        return;
+    }
+    let (xu, yu) = (x as u32, y as u32);
+    let r = radius.min(w / 2).min(h / 2);
+    let t = thickness.min(w).min(h).max(1);
+    let mid_w = w.saturating_sub(2 * r);
+    let mid_h = h.saturating_sub(2 * r);
+    if mid_w > 0 {
+        fb.fill_rect(yu, xu + r, mid_w, t, shade); // top
+        fb.fill_rect(yu + h - t, xu + r, mid_w, t, shade); // bottom
+    }
+    if mid_h > 0 {
+        fb.fill_rect(yu + r, xu, t, mid_h, shade); // left
+        fb.fill_rect(yu + r, xu + w - t, t, mid_h, shade); // right
+    }
+    let (cl, cr) = (x + r as i32, x + w as i32 - 1 - r as i32);
+    let (ct, cb) = (y + r as i32, y + h as i32 - 1 - r as i32);
+    corner_arc(fb, cl, ct, r, t, shade, -1, -1);
+    corner_arc(fb, cr, ct, r, t, shade, 1, -1);
+    corner_arc(fb, cl, cb, r, t, shade, -1, 1);
+    corner_arc(fb, cr, cb, r, t, shade, 1, 1);
+}
+
+/// One quarter-circle arc of the rounded-rect border: pixels in the `r×r` corner
+/// box whose distance from the arc center `(cx, cy)` falls in `[r-t, r]`. `(sx,
+/// sy) ∈ {-1, 1}` selects the quadrant (which way the arc bulges).
+#[allow(clippy::too_many_arguments)] // positional geometry; a struct just moves the list
+fn corner_arc(fb: &mut Framebuffer, cx: i32, cy: i32, r: u32, t: u32, shade: u8, sx: i32, sy: i32) {
+    let rf = r as f32;
+    let inner = r.saturating_sub(t) as f32;
+    for dy in 0..=r as i32 {
+        for dx in 0..=r as i32 {
+            let dist = ((dx * dx + dy * dy) as f32).sqrt();
+            if dist >= inner && dist <= rf {
+                fb.put_pixel(cx + sx * dx, cy + sy * dy, shade);
+            }
+        }
+    }
+}
+
+/// Draw a magnifier glyph (a ring + a lower-right diagonal handle) centered at
+/// `(cx, cy)` with lens radius `r`. The font has no 🔍, so we draw it.
+pub fn draw_magnifier(fb: &mut Framebuffer, cx: i32, cy: i32, r: u32, shade: u8) {
+    const T: u32 = 3;
+    let rf = r as f32;
+    let inner = r.saturating_sub(T) as f32;
+    for dy in -(r as i32)..=r as i32 {
+        for dx in -(r as i32)..=r as i32 {
+            let dist = ((dx * dx + dy * dy) as f32).sqrt();
+            if dist >= inner && dist <= rf {
+                fb.put_pixel(cx + dx, cy + dy, shade);
+            }
+        }
+    }
+    // Handle: a short thick diagonal off the lens's lower-right.
+    let start = rf * 0.78;
+    let len = (rf * 0.95) as i32;
+    for i in 0..len {
+        let d = start + i as f32;
+        let (hx, hy) = (cx + (d * 0.707) as i32, cy + (d * 0.707) as i32);
+        for by in 0..T as i32 {
+            for bx in 0..T as i32 {
+                fb.put_pixel(hx + bx, hy + by, shade);
+            }
+        }
+    }
+}
+
+/// Draw an `✕` (two diagonals) centered at `(cx, cy)`, half-extent `size` — the
+/// search field's clear button.
+pub fn draw_x(fb: &mut Framebuffer, cx: i32, cy: i32, size: i32, shade: u8) {
+    for i in -size..=size {
+        for k in 0..2 {
+            fb.put_pixel(cx + i, cy + i + k, shade);
+            fb.put_pixel(cx + i, cy - i + k, shade);
+        }
+    }
+}
+
 /// Clear the cell to white, aspect-fit the cover into the region between
 /// `top_inset` and the bottom name band, then draw that band with `label`
 /// (single line, centered, ellipsized). Returns the painted cover rect so a

@@ -783,32 +783,38 @@ fn search_bar_hit(tx: u32, ty: u32, xres: u32, query_active: bool) -> Option<Sea
     Some(SearchTap::Open)
 }
 
-/// Draw the top search field: a framed box showing the active query (or a
-/// placeholder), with a right-hand `clear` zone when a query is set. Top-level
-/// chrome only, mirroring the stock Kindle library's search field.
+/// Draw the top search field as a rounded **pill** with a magnifier glyph and
+/// the placeholder/query, plus an `✕` clear button when a query is set —
+/// mirroring the stock Kindle library's search bar. Top-level chrome only.
 fn draw_search_bar(fb: &mut Framebuffer, renderer: &mut TextRenderer, query: &str) {
-    const PAD: u32 = 28;
     let xres = fb.var.xres;
     let x = SEARCH_BAR_MARGIN_X;
     let w = xres.saturating_sub(SEARCH_BAR_MARGIN_X * 2);
-    let baseline = (SEARCH_BAR_TOP + SEARCH_BAR_H * 60 / 100) as i32;
-    grid::outline_rect(fb, x as i32, SEARCH_BAR_TOP as i32, w, SEARCH_BAR_H, 3, 0x00);
+    let cy = (SEARCH_BAR_TOP + SEARCH_BAR_H / 2) as i32;
+    let baseline = (SEARCH_BAR_TOP + SEARCH_BAR_H * 62 / 100) as i32;
+
+    // Pill frame + magnifier just inside the left rounded end.
+    grid::stroke_round_rect(
+        fb, x as i32, SEARCH_BAR_TOP as i32, w, SEARCH_BAR_H, SEARCH_BAR_H / 2, 3, 0x00,
+    );
+    let mr = 18u32;
+    let mcx = (x + SEARCH_BAR_H / 2 + 6) as i32;
+    grid::draw_magnifier(fb, mcx, cy, mr, 0x00);
+    let text_x = mcx + mr as i32 + 24;
 
     if query.trim().is_empty() {
-        renderer.draw(fb, (x + PAD) as i32, baseline, "Search by romaji…", false);
+        renderer.draw(fb, text_x, baseline, "Search by romaji", false);
         return;
     }
-    // Active: query text (clamped to one line) + a `clear` zone on the right.
-    let text_w = w.saturating_sub(SEARCH_CLEAR_W + PAD * 2);
+    // Active: query text (clamped to leave room for the ✕) + the clear button.
+    let right_limit = (x + w).saturating_sub(SEARCH_CLEAR_W) as i32;
+    let text_w = (right_limit - text_x).max(0) as u32;
     let shown = renderer.wrap_and_clamp(query, text_w, 1);
     if let Some(s) = shown.first() {
-        renderer.draw(fb, (x + PAD) as i32, baseline, s, false);
+        renderer.draw(fb, text_x, baseline, s, false);
     }
-    let clear_x = x + w - SEARCH_CLEAR_W;
-    fb.fill_rect(SEARCH_BAR_TOP + 14, clear_x, 2, SEARCH_BAR_H - 28, 0x00);
-    let cw = renderer.measure_width("clear");
-    let cx = clear_x as i32 + ((SEARCH_CLEAR_W as i32 - cw as i32) / 2).max(0);
-    renderer.draw(fb, cx, baseline, "clear", false);
+    let clear_cx = (x + w).saturating_sub(SEARCH_CLEAR_W / 2) as i32;
+    grid::draw_x(fb, clear_cx, cy, 15, 0x00);
 }
 
 /// Draw one page of `cells` with placeholders, the header, and the bottom
