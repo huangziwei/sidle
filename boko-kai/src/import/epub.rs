@@ -14,7 +14,7 @@ use crate::epub::{
 };
 use crate::import::{ChapterId, Importer, SpineEntry, normalize_components, resolve_path_based_href};
 use crate::io::{ByteSource, ByteSourceCursor, FileSource, MemorySource};
-use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
+use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, NodeId, Role, TocEntry};
 use crate::util::percent_decode;
 
 /// EPUB format importer with random-access ZIP reading.
@@ -52,6 +52,12 @@ pub struct EpubImporter {
 
     /// Maps "path#id" -> GlobalNodeId for fragment resolution
     anchor_map: HashMap<String, GlobalNodeId>,
+
+    /// Maps chapter path -> [(whitespace-stripped heading text, element id)] for
+    /// every short id-bearing element. Used by [`resolve_toc`] to repair flat
+    /// TOCs whose hrefs dropped the `#fragment` (a common calibre artifact: two
+    /// episodes share one `part00NN.html`, both pointing at the file start).
+    toc_heading_ids: HashMap<String, Vec<(String, String)>>,
 }
 
 #[derive(Clone, Copy)]
@@ -125,6 +131,7 @@ impl Importer for EpubImporter {
 
     fn index_anchors(&mut self, chapters: &[(ChapterId, Arc<Chapter>)]) {
         self.anchor_map.clear();
+        self.toc_heading_ids.clear();
 
         for (chapter_id, chapter) in chapters {
             // Get the chapter's source path
@@ -139,9 +146,37 @@ impl Importer for EpubImporter {
                     let key = format!("{}#{}", chapter_path, id);
                     self.anchor_map
                         .insert(key, GlobalNodeId::new(*chapter_id, node_id));
+
+                    // Also index the id-bearing element by its (short) heading
+                    // text so a fragment-less TOC href can be repaired to it.
+                    let text = collect_node_text(chapter, node_id, HEADING_TEXT_BYTE_CAP);
+                    let normalized = strip_whitespace(&text);
+                    if !normalized.is_empty() {
+                        self.toc_heading_ids
+                            .entry(chapter_path.to_string())
+                            .or_default()
+                            .push((normalized, id.to_string()));
+                    }
                 }
             }
         }
+    }
+
+    /// Repair flat TOCs. EPUB TOC hrefs are usually authoritative, but calibre
+    /// (and some retail) EPUBs collapse several headings into one file and emit
+    /// a `#fragment`-less href for each, so every entry in that file jumps to
+    /// its top. The fragments the hrefs *should* carry exist as element ids in
+    /// the content; we recover them by matching each fragment-less entry's
+    /// label to a unique id-bearing element in the target file.
+    fn resolve_toc(&mut self) {
+        // Disjoint field borrows: the repair reads the heading index while
+        // mutating the TOC tree.
+        let Self {
+            toc,
+            toc_heading_ids,
+            ..
+        } = self;
+        repair_flat_toc_fragments(toc, toc_heading_ids);
     }
 
     fn resolve_href(&self, from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
@@ -367,6 +402,7 @@ impl EpubImporter {
             path_to_chapter,
             anchor_map: HashMap::new(),
             css_cache: HashMap::new(),
+            toc_heading_ids: HashMap::new(),
         })
     }
 
@@ -564,6 +600,83 @@ fn compression_to_u16(method: zip::CompressionMethod) -> u16 {
         zip::CompressionMethod::Stored => 0,
         zip::CompressionMethod::Deflated => 8,
         _ => 255,
+    }
+}
+
+/// Upper bound (in bytes) on the heading text indexed for TOC repair. Long
+/// enough for any real chapter title, short enough that an id sitting on a
+/// chapter-sized wrapper is rejected without walking its whole subtree.
+const HEADING_TEXT_BYTE_CAP: usize = 400;
+
+/// Concatenate the text of the subtree rooted at `node`, in document order,
+/// stopping once `cap` bytes have been collected.
+fn collect_node_text(chapter: &Chapter, node: NodeId, cap: usize) -> String {
+    let mut out = String::new();
+    collect_subtree_text(chapter, node, cap, &mut out);
+    out
+}
+
+fn collect_subtree_text(chapter: &Chapter, node: NodeId, cap: usize, out: &mut String) {
+    if out.len() >= cap {
+        return;
+    }
+    let Some(n) = chapter.node(node) else {
+        return;
+    };
+    if n.role == Role::Text {
+        out.push_str(chapter.text(n.text));
+    }
+    let mut child = n.first_child;
+    while let Some(c) = child {
+        if out.len() >= cap {
+            break;
+        }
+        collect_subtree_text(chapter, c, cap, out);
+        child = chapter.node(c).and_then(|cn| cn.next_sibling);
+    }
+}
+
+/// Strip every Unicode whitespace char (including the ideographic space U+3000
+/// these EPUBs put between a chapter number and its title) so a TOC label and a
+/// heading that differ only in spacing compare equal.
+fn strip_whitespace(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Repair fragment-less TOC entries in place by matching each entry's label to
+/// a unique id-bearing element in its target file. Entries that already carry a
+/// `#fragment`, that have no matching heading, or whose label matches more than
+/// one heading are left untouched. See [`EpubImporter::resolve_toc`].
+fn repair_flat_toc_fragments(
+    entries: &mut [TocEntry],
+    heading_ids: &HashMap<String, Vec<(String, String)>>,
+) {
+    for entry in entries {
+        if !entry.href.is_empty()
+            && !entry.href.contains('#')
+            && let Some(candidates) = heading_ids.get(entry.href.as_str())
+        {
+            let needle = strip_whitespace(&entry.title);
+            if !needle.is_empty() {
+                let mut matched: Option<&str> = None;
+                let mut ambiguous = false;
+                for (text, id) in candidates {
+                    if *text == needle {
+                        if matched.is_some() {
+                            ambiguous = true;
+                            break;
+                        }
+                        matched = Some(id);
+                    }
+                }
+                if let Some(id) = matched
+                    && !ambiguous
+                {
+                    entry.href = format!("{}#{}", entry.href, id);
+                }
+            }
+        }
+        repair_flat_toc_fragments(&mut entry.children, heading_ids);
     }
 }
 
