@@ -28,7 +28,7 @@ mod wrap;
 use eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16};
 use eink::buttons::{Buttons, PageButton};
 use eink::input::{Input, InputEvent};
-use eink::touch::{Touch, TouchEvent};
+use eink::touch::{SwipeDir, Touch, TouchEvent, classify_swipe};
 use image::DynamicImage;
 use ui::diag;
 use ui::filter::{self, Filters};
@@ -350,12 +350,20 @@ fn run() -> anyhow::Result<()> {
     )?;
 
     let mut armed: Option<Armed> = None;
+    // Where the current touch landed (set on Down, cleared on Up) — lets the Up
+    // handler tell a tap from a horizontal page-flip swipe. Independent of
+    // `armed`, since a swipe can start anywhere, not just on a cover cell.
+    let mut down_pos: Option<(u32, u32)> = None;
     loop {
         let event = input.next()?;
 
         match event {
             InputEvent::Touch(TouchEvent::Down { x, y }) => {
                 log(format!("down: ({x},{y})"));
+                // Remember the landing point so the matching Up can tell a tap
+                // from a horizontal page-flip swipe (the Colorsoft has no bezel
+                // page buttons).
+                down_pos = Some((x, y));
                 // Down on a cell arms it. Down on the strip or in margins
                 // is a no-op — strip actions fire on Up regardless of
                 // hold time, so they don't need to arm.
@@ -397,6 +405,36 @@ fn run() -> anyhow::Result<()> {
             }
             InputEvent::Touch(TouchEvent::Up { x, y }) => {
                 log(format!("up: ({x},{y})"));
+
+                // A horizontal swipe flips the page — the page-turn affordance
+                // the buttonless Colorsoft otherwise lacks. Checked before any
+                // tap/long-press/drill the Down armed, so a deliberate drag
+                // never downloads or drills. `take()` clears the landing point
+                // for this stroke whether or not it turns out to be a swipe.
+                if let Some(dir) = down_pos
+                    .take()
+                    .and_then(|(x0, y0)| classify_swipe(x0, y0, x, y, fb.var.xres))
+                {
+                    // Cancel whatever the Down armed; the repaint clears its
+                    // outline. `had_armed` forces a repaint even at a page
+                    // boundary so a lingering outline doesn't stay on screen.
+                    let had_armed = armed.take().is_some();
+                    let new_page = match dir {
+                        SwipeDir::Next => (page + 1).min(total_pages.saturating_sub(1)),
+                        SwipeDir::Prev => page.saturating_sub(1),
+                    };
+                    log(format!("swipe {dir:?}: page {page} -> {new_page}"));
+                    if new_page != page || had_armed {
+                        page = new_page;
+                        repaint_page(
+                            &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
+                            &mut covers, page, total_pages, grid_left, grid_top, sort,
+                            filters.active_facets(), series_view.as_deref(), &query,
+                        )?;
+                    }
+                    continue;
+                }
+
                 if let Some(a) = armed.take() {
                     // Resolve the armed tile to an owned decision *before* acting:
                     // a `match &cells[..]` borrow would otherwise still be live when
@@ -680,8 +718,10 @@ fn run() -> anyhow::Result<()> {
             }
             InputEvent::Touch(TouchEvent::Screenshot) => {
                 // Two-corner gesture. Cancel any cell the first finger armed so
-                // its lift can't fire a download, then capture + flash.
+                // its lift can't fire a download, then capture + flash. Also drop
+                // the swipe landing point — the suppressed lift won't clear it.
                 armed = None;
+                down_pos = None;
                 match eink::screenshot::capture(&mut fb) {
                     Ok(p) => log(format!("screenshot saved: {}", p.display())),
                     Err(e) => log(format!("screenshot failed: {e:#}")),
@@ -692,8 +732,10 @@ fn run() -> anyhow::Result<()> {
                 // A hardware page-turn cancels any in-progress long-press: the
                 // finger may still be down on a now-stale cell, so drop the
                 // armed state (the redraw below clears its outline) and a later
-                // finger-up won't fire a download on the wrong page.
+                // finger-up won't fire a download on the wrong page. Same for the
+                // swipe landing point — it'd be stale across this page change.
                 armed = None;
+                down_pos = None;
                 let new_page = match pb {
                     PageButton::Prev => page.saturating_sub(1),
                     PageButton::Next => (page + 1).min(total_pages.saturating_sub(1)),

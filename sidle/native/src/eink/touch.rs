@@ -84,6 +84,17 @@ pub enum TouchEvent {
     Screenshot,
 }
 
+/// Horizontal-swipe direction, classified from one touch stroke's start→end
+/// vector (see [`classify_swipe`]). The picker maps these to page turns — the
+/// page-flip affordance the buttonless Colorsoft can't get from bezel keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwipeDir {
+    /// Right-to-left drag → next page (the current page slides off to the left).
+    Next,
+    /// Left-to-right drag → previous page.
+    Prev,
+}
+
 // _IOW('E', 0x90, int): direction(W=1)<<30 | size(4)<<16 | type('E'=0x45)<<8 | nr(0x90)
 // = 0x40000000 | 0x40000 | 0x4500 | 0x90 = 0x40044590
 const EVIOCGRAB: libc::c_int = 0x40044590;
@@ -325,6 +336,25 @@ fn opposite_corners(ax: u32, ay: u32, bx: u32, by: u32, w: u32, h: u32) -> bool 
         || (br(ax, ay) && tl(bx, by))
 }
 
+/// Classify a touch stroke — start `(x0, y0)` to end `(x1, y1)` — as a
+/// horizontal page-flip swipe, or `None` when it's a tap, too short, or too
+/// vertical to read as an unambiguous left/right swipe.
+///
+/// Only the Down→Up endpoints are needed (the picker doesn't track the path).
+/// A swipe must travel at least `xres / 5` horizontally **and** be at least
+/// twice as horizontal as vertical (≈ within 27° of horizontal); that keeps
+/// taps (tiny `dx`) and vertical drifts from flipping pages. `xres` scales the
+/// distance floor so the threshold is resolution-independent across panels.
+pub fn classify_swipe(x0: u32, y0: u32, x1: u32, y1: u32, xres: u32) -> Option<SwipeDir> {
+    let dx = x1 as i32 - x0 as i32;
+    let dy = y1 as i32 - y0 as i32;
+    let min_dx = (xres / 5).max(120) as i32;
+    if dx.abs() < min_dx || dx.abs() < dy.abs() * 2 {
+        return None;
+    }
+    Some(if dx < 0 { SwipeDir::Next } else { SwipeDir::Prev })
+}
+
 impl Drop for Touch {
     fn drop(&mut self) {
         if self.grabbed {
@@ -382,4 +412,41 @@ fn first_hex_word(block: &str, prefix: &str) -> u64 {
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|w| u64::from_str_radix(w, 16).ok())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // KOA2 / Colorsoft portrait width.
+    const XRES: u32 = 1264;
+
+    #[test]
+    fn left_drag_is_next() {
+        // Right→left across a third of the screen, near-horizontal.
+        assert_eq!(classify_swipe(900, 800, 300, 820, XRES), Some(SwipeDir::Next));
+    }
+
+    #[test]
+    fn right_drag_is_prev() {
+        assert_eq!(classify_swipe(300, 800, 900, 790, XRES), Some(SwipeDir::Prev));
+    }
+
+    #[test]
+    fn short_drag_is_not_a_swipe() {
+        // A tap with a little drift — well under the xres/5 floor.
+        assert_eq!(classify_swipe(600, 800, 660, 810, XRES), None);
+    }
+
+    #[test]
+    fn vertical_drag_is_not_a_swipe() {
+        // Long but mostly vertical — not a page flip.
+        assert_eq!(classify_swipe(600, 300, 540, 900, XRES), None);
+    }
+
+    #[test]
+    fn shallow_diagonal_still_counts() {
+        // dx=400, dy=150 → 400 >= 2·150, horizontal enough to flip.
+        assert_eq!(classify_swipe(900, 400, 500, 550, XRES), Some(SwipeDir::Next));
+    }
 }
