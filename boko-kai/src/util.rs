@@ -461,6 +461,48 @@ pub fn extract_xml_encoding(bytes: &[u8]) -> Option<&str> {
 }
 
 // ============================================================================
+// URI path helpers
+// ============================================================================
+
+/// Percent-decode a URI reference into its raw byte form.
+///
+/// Hrefs and `src` attributes inside an EPUB — the OPF manifest, the NCX/nav
+/// TOC, `@import` URLs, `<a>`/`<img>` targets — are URI references, so any byte
+/// outside the unreserved set may appear percent-escaped (`%21` for `!`, `%20`
+/// for a space, `%E8%A1%A8` for a multi-byte UTF-8 character). The container's
+/// ZIP entries, however, are stored under their literal decoded names. Decoding
+/// at every URI→archive-path boundary is what lets a calibre-produced EPUB
+/// whose files are named `CR!….html` but referenced as `CR%21….html` resolve.
+///
+/// `%XX` triples decode to a single byte; the assembled bytes are interpreted
+/// as UTF-8, falling back to the original string if the result is not valid
+/// UTF-8 (so a stray, non-escaped `%` is preserved verbatim). Everything else
+/// passes through unchanged.
+pub fn percent_decode(s: &str) -> String {
+    // Fast path: nothing to decode.
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -536,5 +578,26 @@ mod tests {
         assert_eq!(truncate_to_date("2022-05-26"), "2022-05-26");
         // With timezone offset
         assert_eq!(truncate_to_date("2022-05-26T16:26:51+00:00"), "2022-05-26");
+    }
+
+    #[test]
+    fn test_percent_decode() {
+        // No escapes: returned verbatim.
+        assert_eq!(percent_decode("OEBPS/Text/ch1.html"), "OEBPS/Text/ch1.html");
+        // The calibre case that crashed conversion: `!` escaped as %21.
+        assert_eq!(
+            percent_decode("Text/CR%21Z717_split_000.html"),
+            "Text/CR!Z717_split_000.html"
+        );
+        // Space and lowercase hex.
+        assert_eq!(percent_decode("a%20b%2fc"), "a b/c");
+        // Multi-byte UTF-8 (表) round-trips.
+        assert_eq!(percent_decode("%E8%A1%A8.html"), "表.html");
+        // A lone, non-escape `%` (and a truncated escape) is preserved.
+        assert_eq!(percent_decode("50%25 done"), "50% done");
+        assert_eq!(percent_decode("trailing%"), "trailing%");
+        assert_eq!(percent_decode("bad%2"), "bad%2");
+        // Invalid hex digits are left untouched.
+        assert_eq!(percent_decode("%zz"), "%zz");
     }
 }

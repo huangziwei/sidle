@@ -89,7 +89,7 @@ pub trait Importer: Send + Sync {
             let css_path = if let Some(chapter_path) = self.source_id(id) {
                 resolve_relative_path(chapter_path, &href)
             } else {
-                PathBuf::from(&href)
+                PathBuf::from(crate::util::percent_decode(&href))
             };
 
             if let Some(sheet) = self.load_stylesheet(&css_path) {
@@ -298,8 +298,21 @@ pub fn resolve_path_based_href(
 ///
 /// Fragment-only paths (e.g., "#anchor") are resolved to "base#anchor".
 fn resolve_relative_path(base: &str, relative: &str) -> PathBuf {
-    // Handle absolute paths and URLs
-    if relative.starts_with('/') || relative.contains("://") {
+    // Hierarchical URLs (http://, https://, …) are not archive paths — leave
+    // them untouched. Scheme-only URIs like mailto:/data: are filtered out by
+    // the callers (resolve_semantic_paths) before they reach here.
+    if relative.contains("://") {
+        return PathBuf::from(relative);
+    }
+
+    // The href/src is a URI reference; percent-decode it so it matches the
+    // archive's literal (decoded) zip entry names. `base` is already a decoded
+    // archive path, so the joined result stays in decoded space.
+    let relative = crate::util::percent_decode(relative);
+    let relative = relative.as_str();
+
+    // Handle absolute archive paths
+    if relative.starts_with('/') {
         return PathBuf::from(relative);
     }
 

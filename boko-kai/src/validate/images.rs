@@ -542,7 +542,7 @@ fn resolve_against_zip(
         format!("{}{}", base, trimmed)
     };
     let normalized = normalize_path(&joined);
-    let decoded = percent_decode(&normalized);
+    let decoded = crate::util::percent_decode(&normalized);
     let bundled = zip_entries.contains(&decoded) || zip_entries.contains(&normalized);
     (Some(decoded), bundled)
 }
@@ -575,26 +575,6 @@ fn normalize_path(path: &str) -> String {
         }
     }
     parts.join("/")
-}
-
-fn percent_decode(s: &str) -> String {
-    let mut out = Vec::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hi = (bytes[i + 1] as char).to_digit(16);
-            let lo = (bytes[i + 2] as char).to_digit(16);
-            if let (Some(h), Some(l)) = (hi, lo) {
-                out.push((h * 16 + l) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 fn read_zip_entry<R: std::io::Read + std::io::Seek>(

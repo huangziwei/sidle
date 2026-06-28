@@ -15,6 +15,7 @@ use crate::epub::{
 use crate::import::{ChapterId, Importer, SpineEntry, normalize_components, resolve_path_based_href};
 use crate::io::{ByteSource, ByteSourceCursor, FileSource, MemorySource};
 use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
+use crate::util::percent_decode;
 
 /// EPUB format importer with random-access ZIP reading.
 pub struct EpubImporter {
@@ -209,9 +210,10 @@ impl EpubImporter {
             }
         };
 
-        // 2. Find OPF path from container.xml
+        // 2. Find OPF path from container.xml. The `full-path` is a URI
+        //    reference, so percent-decode it to the literal zip entry name.
         let container_bytes = read_entry(&source, &zip_index, "META-INF/container.xml")?;
-        let opf_path = parse_container_xml(&container_bytes)?;
+        let opf_path = percent_decode(&parse_container_xml(&container_bytes)?);
         let opf_base = Path::new(&opf_path)
             .parent()
             .map(|p| {
@@ -236,7 +238,10 @@ impl EpubImporter {
 
         for (i, spine_id) in opf.spine_ids.iter().enumerate() {
             if let Some((href, _media_type)) = opf.manifest.get(spine_id) {
-                let full_path = format!("{}{}", opf_base, href);
+                // Manifest hrefs are URI references (calibre escapes `!` in
+                // `CR!….html` as `CR%21….html`); decode so the resolved path
+                // matches the literal zip entry name.
+                let full_path = format!("{}{}", opf_base, percent_decode(href));
                 let size_estimate = zip_index
                     .get(&full_path)
                     .map(|loc| loc.compressed_size as usize)
@@ -258,7 +263,7 @@ impl EpubImporter {
         // device shows no chapter list.
         let toc = {
             let ncx_toc = opf.ncx_href.as_ref().and_then(|ncx_href| {
-                let ncx_path = format!("{}{}", opf_base, ncx_href);
+                let ncx_path = format!("{}{}", opf_base, percent_decode(ncx_href));
                 let ncx_bytes = read_entry(&source, &zip_index, &ncx_path).ok()?;
                 let hint_encoding = crate::util::extract_xml_encoding(&ncx_bytes);
                 let ncx_str = crate::util::decode_text(&ncx_bytes, hint_encoding);
@@ -272,7 +277,7 @@ impl EpubImporter {
             if let Some(toc) = ncx_toc {
                 toc
             } else if let Some(nav_href) = &opf.nav_href {
-                let nav_path = format!("{}{}", opf_base, nav_href);
+                let nav_path = format!("{}{}", opf_base, percent_decode(nav_href));
                 read_entry(&source, &zip_index, &nav_path)
                     .ok()
                     .and_then(|nav_bytes| {
@@ -289,13 +294,15 @@ impl EpubImporter {
 
         // 6. Parse landmarks from EPUB 3 nav document
         let mut landmarks = if let Some(nav_href) = &opf.nav_href {
-            let nav_path = format!("{}{}", opf_base, nav_href);
+            let nav_path = format!("{}{}", opf_base, percent_decode(nav_href));
             if let Ok(nav_bytes) = read_entry(&source, &zip_index, &nav_path) {
                 let hint_encoding = crate::util::extract_xml_encoding(&nav_bytes);
                 let nav_str = crate::util::decode_text(&nav_bytes, hint_encoding);
                 let mut parsed = parse_nav_landmarks(&nav_str)?;
-                // Prepend base path to hrefs (nav uses relative paths)
+                // Prepend base path to hrefs (nav uses relative paths) and
+                // percent-decode so the targets match decoded chapter paths.
                 for landmark in &mut parsed {
+                    landmark.href = percent_decode(&landmark.href);
                     if !landmark.href.starts_with('#') && !landmark.href.is_empty() {
                         landmark.href = format!("{}{}", opf_base, landmark.href);
                     }
@@ -317,6 +324,7 @@ impl EpubImporter {
         // still gets the union.
         if let Ok(mut guide_marks) = parse_opf_guide(&opf_str) {
             for landmark in &mut guide_marks {
+                landmark.href = percent_decode(&landmark.href);
                 if !landmark.href.starts_with('#') && !landmark.href.is_empty() {
                     landmark.href = format!("{}{}", opf_base, landmark.href);
                 }
@@ -338,13 +346,13 @@ impl EpubImporter {
 
         // Resolve cover_image to an absolute (zip-relative) path so it matches
         // asset keys downstream. The OPF parser leaves it as a manifest href
-        // relative to opf_base.
+        // relative to opf_base; percent-decode it the same way as every other
+        // href so a cover whose filename contains escaped characters resolves.
         let mut metadata = opf.metadata;
         if let Some(ref href) = metadata.cover_image
             && !href.is_empty()
-            && !opf_base.is_empty()
         {
-            metadata.cover_image = Some(format!("{}{}", opf_base, href));
+            metadata.cover_image = Some(format!("{}{}", opf_base, percent_decode(href)));
         }
 
         Ok(Self {
@@ -451,10 +459,13 @@ where
                 // like `style0011.css` → `url("../Styles/style0007.css")`
                 // yields `OEBPS/Styles/../Styles/style0007.css` and silently
                 // misses the canonical zip entry. Normalize before loading.
+                // `url` is a URI reference; decode it so the child path matches
+                // the literal zip entry name.
+                let url = percent_decode(url);
                 let joined = base
                     .parent()
-                    .map(|p| p.join(url))
-                    .unwrap_or_else(|| PathBuf::from(url));
+                    .map(|p| p.join(&url))
+                    .unwrap_or_else(|| PathBuf::from(&url));
                 let child = normalize_components(&joined);
                 if let Some(child_css) = load(&child) {
                     out.push_str(&child_css);
@@ -557,14 +568,18 @@ fn compression_to_u16(method: zip::CompressionMethod) -> u16 {
 }
 
 /// Prepend base path to TOC entry hrefs (NCX uses relative paths).
+///
+/// TOC hrefs are URI references, so they are percent-decoded here to match the
+/// decoded chapter paths and anchor-map keys they resolve against.
 fn prepend_base_to_toc(entries: &[TocEntry], base: &str) -> Vec<TocEntry> {
     entries
         .iter()
         .map(|entry| {
-            let href = if entry.href.starts_with('#') || entry.href.is_empty() {
-                entry.href.clone()
+            let decoded = percent_decode(&entry.href);
+            let href = if decoded.starts_with('#') || decoded.is_empty() {
+                decoded
             } else {
-                format!("{}{}", base, entry.href)
+                format!("{}{}", base, decoded)
             };
             TocEntry {
                 title: entry.title.clone(),
