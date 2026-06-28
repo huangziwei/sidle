@@ -121,7 +121,20 @@ pub fn search_key(
         parts.push(t.clone());
     }
 
-    canon(&parts.join(" "))
+    // Primary key: NFKD-folded (ä→a, é→e, ß→dropped). Also index the
+    // **digraph-expanded** Latin form (ä→ae, ö→oe, ü→ue, ß→ss, œ→oe, ø→oe) so a
+    // German/Nordic spelling matches both ways — `muller` *and* `mueller` find
+    // "Müller", and `strasse`/`oeuvre` aren't lost to dropped glyphs. Appended
+    // only when it actually differs (i.e. the text had such a character), so
+    // ASCII/CJK books carry no extra bytes. The on-screen keyboard types ASCII,
+    // so the query side needs no expansion.
+    let joined = parts.join(" ");
+    let mut key = canon(&joined);
+    let expanded = canon(&expand_latin(&joined));
+    if expanded != key {
+        key.push_str(&expanded);
+    }
+    key
 }
 
 /// Fold a string to the canonical match form: NFKD ASCII-fold (ō→o, é→e,
@@ -135,6 +148,27 @@ pub fn canon(s: &str) -> String {
         .flat_map(|c| c.to_lowercase())
         .filter(|c| c.is_ascii_alphanumeric())
         .collect()
+}
+
+/// Expand the Latin letters whose conventional ASCII spelling is a **digraph**,
+/// not a single base letter — so they survive `canon` (which would otherwise
+/// fold `ä→a` and *drop* `ß`/`œ`/`ø` entirely, since those have no NFKD
+/// decomposition). German umlauts + eszett, the œ/æ ligatures, and the Nordic ø.
+/// Everything else passes through unchanged (its accent is handled by `canon`'s
+/// NFKD fold). Case is irrelevant — the result is lowercased by `canon`.
+fn expand_latin(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'ä' | 'Ä' => out.push_str("ae"),
+            'ö' | 'Ö' | 'ø' | 'Ø' | 'œ' | 'Œ' => out.push_str("oe"),
+            'ü' | 'Ü' => out.push_str("ue"),
+            'ß' | 'ẞ' => out.push_str("ss"),
+            'æ' | 'Æ' => out.push_str("ae"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// True when `s` is phonetic kana — at least one hiragana/katakana and **no**
@@ -239,6 +273,36 @@ mod tests {
         assert_eq!(canon("Murakami Haruki!"), "murakamiharuki");
         // Fullwidth digits/letters fold to ASCII; CJK drops out.
         assert_eq!(canon("ＡＢ１２ 世界"), "ab12");
+    }
+
+    #[test]
+    fn expand_latin_maps_digraphs_only() {
+        // Only the mapped glyph changes (to a lowercase digraph — case is moot,
+        // canon lowercases); surrounding letters keep their case.
+        assert_eq!(expand_latin("Müller"), "Mueller");
+        assert_eq!(expand_latin("Köln"), "Koeln");
+        assert_eq!(expand_latin("Straße"), "Strasse");
+        assert_eq!(expand_latin("Œuvre"), "oeuvre"); // ligature maps to lowercase
+        assert_eq!(expand_latin("Køln"), "Koeln"); // Nordic ø
+        // French acute etc. are left to canon's NFKD fold (no digraph needed).
+        assert_eq!(expand_latin("Café"), "Café");
+        assert_eq!(expand_latin("Murakami"), "Murakami");
+    }
+
+    #[test]
+    fn search_key_indexes_both_accent_and_digraph_forms() {
+        // ä/ö/ü: BOTH the accent-stripped (a/o/u) and digraph (ae/oe/ue) spellings
+        // index, so either guess on the ASCII keyboard hits.
+        let key = search_key("Müller", "Köln", None, None, &[], "de", "", "");
+        assert!(key.contains("muller") && key.contains("mueller"), "{key}");
+        assert!(key.contains("koln") && key.contains("koeln"), "{key}");
+        // ß and the œ/ø glyphs would otherwise be DROPPED by canon — now ss / oe.
+        assert!(search_key("Straße", "", None, None, &[], "de", "", "").contains("strasse"));
+        assert!(search_key("Œuvre", "", None, None, &[], "fr", "", "").contains("oeuvre"));
+        assert!(search_key("Køln", "", None, None, &[], "da", "", "").contains("koeln"));
+        // A book with no such characters carries no expanded suffix (idempotent).
+        let plain = search_key("Murakami", "", None, None, &[], "en", "", "");
+        assert_eq!(plain, canon("Murakami Murakami"));
     }
 
     #[test]
