@@ -799,8 +799,12 @@ where
 }
 
 fn is_image_format(format: &str) -> bool {
-    matches!(format, "$$png" | "$$jpg" | "$$gif" | "$$webp" | "$$bmp" | "$$svg"
-        | "png" | "jpg" | "gif" | "webp" | "bmp" | "svg")
+    // `jxr` (JPEG-XR) is boko's default interior-plate codec (grayscale/colour);
+    // omitting it made every JXR resource invisible to this validator, so a
+    // JXR-heavy book (e.g. a fixed-layout manga, all pages JXR) reported every
+    // storyline image ref and bcRawMedia entity as orphan.
+    matches!(format, "$$png" | "$$jpg" | "$$gif" | "$$webp" | "$$bmp" | "$$svg" | "$$jxr"
+        | "png" | "jpg" | "gif" | "webp" | "bmp" | "svg" | "jxr")
 }
 
 /// Walk a storyline, count elements with `type: image`, and collect their
@@ -899,6 +903,9 @@ mod tests {
         assert!(is_image_format("$$png"));
         assert!(is_image_format("$$jpg"));
         assert!(is_image_format("png"));
+        // JXR is boko's default interior/manga codec — must count as an image.
+        assert!(is_image_format("$$jxr"));
+        assert!(is_image_format("jxr"));
         assert!(!is_image_format("$$ttf"));
         assert!(!is_image_format("woff2"));
     }

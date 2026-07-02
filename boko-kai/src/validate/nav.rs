@@ -571,13 +571,26 @@ fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
 
     let book_nav_type = KfxSymbol::BookNavigation as u32;
     let storyline_type = KfxSymbol::Storyline as u32;
+    let nav_container_type = KfxSymbol::NavContainer as u32;
 
     let mut nav = KfxNav::default();
+
+    // Index every nav_container ($391) entity by its name first, so
+    // book_navigation's *referenced* (symbol) form — required by fixed-layout /
+    // PDOC books — resolves to the real container instead of counting zero.
+    let mut nav_container_by_name: HashMap<String, IonValue> = HashMap::new();
+    for ent in &entities {
+        if ent.type_id == nav_container_type
+            && let Some(value) = parse_entity(kfx_bytes, ent)
+        {
+            nav_container_by_name.insert(resolve_sym(ent.id as u64), value);
+        }
+    }
 
     for ent in &entities {
         if ent.type_id == book_nav_type {
             if let Some(value) = parse_entity(kfx_bytes, ent) {
-                extract_from_book_nav(&value, &resolve_sym, &mut nav);
+                extract_from_book_nav(&value, &resolve_sym, &nav_container_by_name, &mut nav);
             }
         } else if ent.type_id == storyline_type
             && let Some(value) = parse_entity(kfx_bytes, ent) {
@@ -617,8 +630,12 @@ fn parse_entity(data: &[u8], ent: &crate::kfx::container::EntityLoc) -> Option<I
 /// `nav_containers` (list of {nav_type, entries}). Pick the headings and toc
 /// containers; for each, descend the `entries` tree counting every nav_unit
 /// that carries a `target_position`.
-fn extract_from_book_nav<F>(value: &IonValue, resolve_sym: &F, out: &mut KfxNav)
-where
+fn extract_from_book_nav<F>(
+    value: &IonValue,
+    resolve_sym: &F,
+    containers_by_name: &HashMap<String, IonValue>,
+    out: &mut KfxNav,
+) where
     F: Fn(u64) -> String,
 {
     // book_navigation is List[ Struct{ reading_order_name, nav_containers } ]
@@ -642,18 +659,36 @@ where
                 && let IonValue::List(containers) = v
             {
                 for c in containers {
-                    extract_from_nav_container(c, resolve_sym, out);
+                    extract_from_nav_container(c, resolve_sym, containers_by_name, out);
                 }
             }
         }
     }
 }
 
-fn extract_from_nav_container<F>(value: &IonValue, resolve_sym: &F, out: &mut KfxNav)
-where
+fn extract_from_nav_container<F>(
+    value: &IonValue,
+    resolve_sym: &F,
+    containers_by_name: &HashMap<String, IonValue>,
+    out: &mut KfxNav,
+) where
     F: Fn(u64) -> String,
 {
-    let inner = match value {
+    let unwrapped = match value {
+        IonValue::Annotated(_, b) => b.as_ref(),
+        v => v,
+    };
+    // Referenced form: a symbol naming a separate nav_container entity (the
+    // fixed-layout / PDOC shape). Resolve it to that entity; inline structs pass
+    // through unchanged.
+    let container = match unwrapped {
+        IonValue::Symbol(s) => match containers_by_name.get(&resolve_sym(*s)) {
+            Some(v) => v,
+            None => return,
+        },
+        other => other,
+    };
+    let inner = match container {
         IonValue::Annotated(_, b) => b.as_ref(),
         v => v,
     };

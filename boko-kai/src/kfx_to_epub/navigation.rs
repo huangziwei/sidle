@@ -15,6 +15,27 @@ use crate::kfx::symbols::KfxSymbol;
 
 use super::loader::BookData;
 
+/// Resolve one `book_navigation.nav_containers` entry to its `nav_container`
+/// ($391) struct. Two forms occur: the reflowable path inlines the container
+/// struct directly, while the fixed-layout / PDOC path (which the device
+/// requires) lists a **symbol** naming a separate `nav_container` entity. This
+/// handles both — inline structs pass through; a symbol is looked up in
+/// `by_type[$391]` by its resolved name — so the reader (and Sidle) sees the
+/// TOC / landmarks of a manga KFX, not just reflowable books. Returns an owned
+/// value so the caller can borrow its fields through the loop body.
+fn resolve_nav_container(book: &BookData, container: &IonValue) -> Option<IonValue> {
+    let inner = container.unwrap_annotated();
+    if inner.as_struct().is_some() {
+        return Some(inner.clone());
+    }
+    // Referenced form: a symbol naming a separate nav_container entity.
+    let name = book.symbols.text_of(inner)?;
+    book.by_type
+        .get(&(KfxSymbol::NavContainer as u64))
+        .and_then(|m| m.get(name))
+        .cloned()
+}
+
 /// Per-anchor data extracted from `$266 anchor` entities. Mirrors
 /// calibre's `process_anchors` (yj_to_epub_navigation.py:40).
 #[derive(Debug, Default, Clone)]
@@ -208,8 +229,10 @@ pub fn register_heading_anchors(book: &BookData, table: &mut AnchorTable) {
                 continue;
             };
             for container in containers {
-                let inner = container.unwrap_annotated();
-                let Some(cfields) = inner.as_struct() else {
+                let Some(resolved) = resolve_nav_container(book, container) else {
+                    continue;
+                };
+                let Some(cfields) = resolved.as_struct() else {
                     continue;
                 };
                 let nav_type = get_field(cfields, KfxSymbol::NavType as u64)
@@ -354,8 +377,10 @@ pub fn extract_landmarks(
                 continue;
             };
             for container in containers {
-                let inner = container.unwrap_annotated();
-                let Some(cfields) = inner.as_struct() else {
+                let Some(resolved) = resolve_nav_container(book, container) else {
+                    continue;
+                };
+                let Some(cfields) = resolved.as_struct() else {
                     continue;
                 };
                 let nav_type = get_field(cfields, KfxSymbol::NavType as u64)
@@ -480,8 +505,10 @@ pub fn extract_toc(
                 continue;
             };
             for container in containers {
-                let inner = container.unwrap_annotated();
-                let Some(cfields) = inner.as_struct() else {
+                let Some(resolved) = resolve_nav_container(book, container) else {
+                    continue;
+                };
+                let Some(cfields) = resolved.as_struct() else {
                     continue;
                 };
                 let nav_type = get_field(cfields, KfxSymbol::NavType as u64)

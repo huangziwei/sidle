@@ -93,6 +93,13 @@ fn build_kfx_container(
     book: &mut Book,
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> io::Result<Vec<u8>> {
+    // A pre-paginated image book (manga/comic) is not reflowable content — emit
+    // a fixed-layout `yj_non_pdf_fixed_layout` KFX instead of flowing every page
+    // into one scrolling column. See [`image_fxl_to_kfx`].
+    if is_fixed_layout_image_book(book) {
+        return image_fxl_to_kfx(book, on_progress);
+    }
+
     let container_id = generate_container_id();
     let mut ctx = ExportContext::new();
 
@@ -2073,8 +2080,16 @@ fn encode_asset_for_kfx(data: &[u8], mode: jxr::ColorMode) -> Vec<u8> {
 /// collapse to grayscale via the encoder's auto-detect). `None` if the bytes
 /// aren't a decodable raster or exceed the encoder's range.
 fn encode_jxr_asset(data: &[u8], mode: jxr::ColorMode) -> Option<Vec<u8>> {
-    use jxr::{encode, ColorMode, ImageInput};
     let img = ::image::load_from_memory(data).ok()?;
+    encode_dynimg_jxr(&img, mode)
+}
+
+/// Encode an already-decoded raster as JPEG-XR in the requested
+/// [`ColorMode`][jxr::ColorMode]. Shared by [`encode_jxr_asset`] (which decodes
+/// bytes first) and the fixed-layout manga thumbnailer (which downscales a
+/// `DynamicImage` before encoding).
+fn encode_dynimg_jxr(img: &::image::DynamicImage, mode: jxr::ColorMode) -> Option<Vec<u8>> {
+    use jxr::{encode, ColorMode, ImageInput};
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 || w > (1 << 16) || h > (1 << 16) {
         return None;
@@ -2814,6 +2829,1072 @@ fn serialize_fragments(
             }
         })
         .collect()
+}
+
+// ============================================================================
+// Fixed-layout image manga → KFX (yj_non_pdf_fixed_layout)
+//
+// A comic/manga EPUB is pre-paginated: one image per spine page, no reflowable
+// text. Amazon's KFX for such a book (e.g. その着せ替え人形は恋をする) is a
+// `yj_non_pdf_fixed_layout` + `yj_double_page_spread` document — every page is a
+// fixed-size, scale-to-fit image; consecutive pages pair into right-to-left
+// facing spreads; each full image carries a downscaled thumbnail
+// (`yj_thumbnails_present`) for the device's page scrubber. The reflow emitter
+// (`build_kfx_container`) would flatten this into one scrolling column, so we
+// branch here when `metadata.fixed_layout` is set and every spine page is a lone
+// image (see [`is_fixed_layout_image_book`]).
+//
+// Structure, mirroring the reference KFX entity-for-entity:
+//   - cover  = its own section; the page_template carries the page box +
+//              scale_fit + float:center, and the storyline is the bare cover
+//              image (no wrapping container).
+//   - spread = one section per 1–2 consecutive pages; page_template
+//              layout:page_spread + virtual_panel; the storyline holds one
+//              scale_fit/float:center page container per page, each an inner
+//              vertical container (style `sJ`) wrapping the page image
+//              (style `sG` = the uniform page box, centered).
+//   - document_data: writing_mode horizontal_tb + direction rtl (the device's
+//     RTL page-turn signal for a fixed-layout book — reading_orders' $425 is
+//     device-ignored; see reference_kfx_device_rtl_writing_mode).
+// ============================================================================
+
+/// Downscaled page-thumbnail box (Amazon uses ~270×384 for a portrait manga
+/// page; `yj_thumbnails_present`). Aspect is preserved, so a thumbnail fits
+/// inside this box rather than filling it exactly.
+const MANGA_THUMB_W: u32 = 270;
+const MANGA_THUMB_H: u32 = 384;
+
+/// True when the book should be emitted as a fixed-layout image manga rather
+/// than reflowed: the metadata marks it fixed-layout AND every spine page is a
+/// single image (an SVG-wrapped or bare `<img>` page). A reflowable book, or a
+/// fixed-layout book carrying real text, falls through to `build_kfx_container`.
+fn is_fixed_layout_image_book(book: &mut Book) -> bool {
+    if !book.metadata().fixed_layout {
+        return false;
+    }
+    let ids: Vec<_> = book.spine().iter().map(|e| e.id).collect();
+    if ids.is_empty() {
+        return false;
+    }
+    ids.iter().all(|&id| {
+        book.load_chapter(id)
+            .ok()
+            .and_then(|c| get_chapter_image_path(&c))
+            .is_some()
+    })
+}
+
+/// One page image in a fixed-layout manga: its resource symbols (full + optional
+/// thumbnail), the index of its encoded bytes in the survey's `encs`, and the
+/// content EIDs it occupies in its storyline.
+struct MangaPage {
+    res_name: String,
+    res_sym: u64,
+    thumb_name: String,
+    /// Thumbnail resource-name symbol; `0` when this page has no thumbnail.
+    thumb_sym: u64,
+    /// Index into the survey's encoded-bytes vector (`encs`).
+    enc: usize,
+    /// Nested content EIDs. The cover uses only `image_id` (a bare image); every
+    /// other page uses the outer→inner→image trio.
+    outer_id: u64,
+    inner_id: u64,
+    image_id: u64,
+}
+
+/// One reading unit = one section + one storyline: the cover (a solo page) or a
+/// right-to-left facing spread of 1–2 pages.
+struct MangaUnit {
+    section_name: String,
+    section_sym: u64,
+    story_sym: u64,
+    /// EID of the section's single page_template container.
+    pt_id: u64,
+    is_cover: bool,
+    pages: Vec<MangaPage>,
+}
+
+/// Encoded bytes + dimensions for one page (full image and its thumbnail),
+/// gathered in the survey pass. `img`/`thumb` are moved into `bcRawMedia`
+/// fragments during synthesis.
+struct MangaEnc {
+    img: Vec<u8>,
+    w: u32,
+    h: u32,
+    thumb: Vec<u8>,
+    tw: u32,
+    th: u32,
+}
+
+/// Convert a fixed-layout image book (manga/comic) into a `yj_non_pdf_fixed_layout`
+/// KFX. See the module section comment above for the emitted structure. The
+/// caller has already confirmed [`is_fixed_layout_image_book`].
+fn image_fxl_to_kfx(
+    book: &mut Book,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> io::Result<Vec<u8>> {
+    let container_id = generate_container_id();
+    let mut ctx = ExportContext::new();
+
+    // Book-level layout signals. A manga is horizontal_tb text with an rtl page
+    // turn; `document_direction` resolves rtl from the spine's
+    // page-progression-direction. Both are stamped into document_data and the
+    // reading order (reference_kfx_device_rtl_writing_mode).
+    let writing_mode = book_writing_mode(book);
+    let direction = document_direction(book, writing_mode);
+    ctx.document_writing_mode = writing_mode;
+    ctx.document_direction = direction;
+    let ppd_sym = Some(direction);
+
+    let color_mode = book.image_color_mode();
+    let language = book.metadata().language.clone();
+    let mut box_dims = book.metadata().default_viewport;
+
+    // ---- Load the per-page image href for every spine page ----
+    let mut spine_ids: Vec<_> = book.spine().iter().map(|e| e.id).collect();
+    let mut hrefs: Vec<String> = Vec::with_capacity(spine_ids.len());
+    for &id in &spine_ids {
+        let chapter = book.load_chapter(id)?;
+        let href = get_chapter_image_path(&chapter).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "fixed-layout page is not a single image",
+            )
+        })?;
+        hrefs.push(href);
+    }
+
+    // Resolve each IR image href against the asset list (exact path, else by
+    // file name) so a `images/x.jpg` src still finds its bytes.
+    let assets: Vec<std::path::PathBuf> = book.list_assets().to_vec();
+    let resolve = |href: &str| -> Option<std::path::PathBuf> {
+        let want = std::path::Path::new(href);
+        if assets.iter().any(|a| a.as_path() == want) {
+            return Some(want.to_path_buf());
+        }
+        let fname = want.file_name()?;
+        assets
+            .iter()
+            .find(|a| a.file_name() == Some(fname))
+            .cloned()
+    };
+
+    // Drop calibre's dual cover: its synthetic title page (spine[0]) reuses the
+    // very same image as the first content page (spine[1]), so keeping both
+    // shows the cover twice and offsets every facing spread by one. Amazon's KPR
+    // removes it too (`num-dual-covers-removed`). Detected by identical resolved
+    // image paths; the real first page becomes the solo cover.
+    if spine_ids.len() >= 2
+        && let (Some(a), Some(b)) = (resolve(&hrefs[0]), resolve(&hrefs[1]))
+        && a == b
+    {
+        spine_ids.remove(0);
+        hrefs.remove(0);
+    }
+    let n = spine_ids.len();
+
+    // Register the cover page's image in the resource registry so the reflowable
+    // `build_book_metadata_fragment` resolves the library-tile / sleep-screen
+    // cover. Page 0 is `e0` under both the registry's hex naming and our own
+    // `e{i}` scheme, so the metadata reference matches the actual resource
+    // entity. Interior pages use our `e{i}` names directly and need no registry
+    // entry.
+    if let Some(cover_href) = hrefs.first() {
+        ctx.resource_registry.register(cover_href, &mut ctx.symbols);
+        let _ = ctx.resource_registry.get_or_create_name(cover_href); // -> "e0"
+    }
+
+    let mut encs: Vec<MangaEnc> = Vec::with_capacity(n);
+    for (i, href) in hrefs.iter().enumerate() {
+        on_progress("images", i + 1, n, "Encoding pages");
+        let path = resolve(href).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("fixed-layout page image not found: {href}"),
+            )
+        })?;
+        let raw = book.load_asset(&path)?;
+        let (w, h) = crate::util::extract_image_dimensions(&raw).unwrap_or((0, 0));
+        let img = encode_asset_for_kfx(&raw, color_mode);
+        let (thumb, tw, th) =
+            make_manga_thumbnail(&raw, color_mode).unwrap_or((Vec::new(), 0, 0));
+        encs.push(MangaEnc { img, w, h, thumb, tw, th });
+    }
+    // Fallback page box when no viewport was declared: the largest page image.
+    if box_dims.is_none() {
+        let mx = encs.iter().map(|e| e.w).max().unwrap_or(0);
+        let my = encs.iter().map(|e| e.h).max().unwrap_or(0);
+        if mx > 0 && my > 0 {
+            box_dims = Some((mx, my));
+        }
+    }
+    let (box_w, box_h) = box_dims.unwrap_or((1, 1));
+
+    // Shared image styles (the reference KFX's `sJ` inner-container fill and
+    // `sG` page-box image placement), interned once up front.
+    let sj_sym = ctx.symbols.get_or_intern("sJ");
+    let sg_sym = ctx.symbols.get_or_intern("sG");
+
+    // ---- Group pages into units, allocate section / story / EIDs ----
+    let groups = manga_page_groups(n);
+
+    // Spine page index → its image EID (nav targets) and spine ChapterId → page
+    // index (TOC target resolution), filled as units are built.
+    let mut page_image_id = vec![0u64; n];
+    let chapter_to_index: std::collections::HashMap<ChapterId, usize> =
+        spine_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+
+    let mut units: Vec<MangaUnit> = Vec::with_capacity(groups.len());
+    let mut any_spread = false;
+    let mut any_thumb = false;
+    for (u, group) in groups.iter().enumerate() {
+        let section_name = format!("c{u}");
+        let section_sym = ctx.register_section(&section_name);
+        let story_sym = ctx.symbols.get_or_intern(&format!("story_c{u}"));
+        let is_cover = u == 0;
+        let pt_id = ctx.next_fragment_id();
+        if group.len() > 1 {
+            any_spread = true;
+        }
+        let mut pages = Vec::with_capacity(group.len());
+        for &pi in group {
+            let res_name = format!("e{pi}");
+            let res_sym = ctx.symbols.get_or_intern(&res_name);
+            ctx.symbols.get_or_intern(&format!("resource/{res_name}"));
+            ctx.record_section_image_ref(&section_name, &res_name);
+            let (thumb_name, thumb_sym) = if encs[pi].thumb.is_empty() {
+                (String::new(), 0)
+            } else {
+                any_thumb = true;
+                let tn = format!("e{pi}-thumb");
+                let ts = ctx.symbols.get_or_intern(&tn);
+                ctx.symbols.get_or_intern(&format!("resource/{tn}"));
+                (tn, ts)
+            };
+            // EIDs: cover = bare image; content = outer→inner→image.
+            let (outer_id, inner_id, image_id) = if is_cover {
+                (0, 0, ctx.next_fragment_id())
+            } else {
+                let o = ctx.next_fragment_id();
+                let inr = ctx.next_fragment_id();
+                let im = ctx.next_fragment_id();
+                (o, inr, im)
+            };
+            ctx.record_content_length(image_id, 1);
+            page_image_id[pi] = image_id;
+            pages.push(MangaPage {
+                res_name,
+                res_sym,
+                thumb_name,
+                thumb_sym,
+                enc: pi,
+                outer_id,
+                inner_id,
+                image_id,
+            });
+        }
+        units.push(MangaUnit {
+            section_name,
+            section_sym,
+            story_sym,
+            pt_id,
+            is_cover,
+            pages,
+        });
+    }
+
+    // ---- Synthesis (reference entity order) ----
+    let mut fragments: Vec<KfxFragment> = Vec::new();
+
+    // 1. content_features ($585)
+    fragments.push(build_manga_content_features_fragment(any_spread, any_thumb));
+    // 2. book_metadata ($490) — reuse the reflowable builder (reads Book metadata)
+    fragments.push(build_book_metadata_fragment(book, &container_id, &ctx));
+    // 3. metadata ($258) — reading order + page-progression-direction
+    fragments.push(build_pdf_metadata_fragment(&ctx, ppd_sym));
+    // 4. document_data ($538) — inserted here later, once max_id is known.
+    let document_data_index = fragments.len();
+
+    // 5. sections ($260) + 6. storylines ($259). The solo cover's page_template
+    // is sized to the cover image's own dimensions (shown full-screen, no
+    // letterbox); content pages share the uniform page box so facing pages align.
+    let mut sections = Vec::with_capacity(units.len());
+    let mut storylines = Vec::with_capacity(units.len());
+    for unit in &units {
+        let cover_dims = unit
+            .is_cover
+            .then(|| unit.pages.first())
+            .flatten()
+            .map(|p| &encs[p.enc])
+            .filter(|e| e.w > 0 && e.h > 0)
+            .map(|e| (e.w, e.h));
+        let (sw, sh) = cover_dims.unwrap_or((box_w, box_h));
+        sections.push(build_manga_section(unit, sw, sh));
+        storylines.push(build_manga_storyline(unit, box_w, box_h, sj_sym, sg_sym));
+    }
+    fragments.extend(sections);
+    fragments.extend(storylines);
+
+    // 7. styles ($157) — sJ inner fill + sG page-box image placement
+    fragments.push(build_manga_style_sj(sj_sym, &language));
+    fragments.push(build_manga_style_sg(sg_sym, box_w, box_h));
+
+    // 8. external_resource ($164) — full images (with `thumbnails` link) then thumbs
+    for unit in &units {
+        for p in &unit.pages {
+            let e = &encs[p.enc];
+            let fmt_sym = detect_format_symbol(&p.res_name, &e.img);
+            fragments.push(build_manga_external_resource(p, e.w, e.h, fmt_sym));
+            if p.thumb_sym != 0 {
+                let tfmt = detect_format_symbol(&p.thumb_name, &e.thumb);
+                fragments.push(build_manga_thumb_external_resource(p, e.tw, e.th, tfmt));
+            }
+        }
+    }
+    // 9. bcRawMedia ($417) — the actual bytes (moved out of `encs`)
+    for unit in &units {
+        for p in &unit.pages {
+            let img = std::mem::take(&mut encs[p.enc].img);
+            fragments.push(KfxFragment::raw(
+                KfxSymbol::Bcrawmedia as u64,
+                format!("resource/{}", p.res_name),
+                img,
+            ));
+            if p.thumb_sym != 0 {
+                let thumb = std::mem::take(&mut encs[p.enc].thumb);
+                fragments.push(KfxFragment::raw(
+                    KfxSymbol::Bcrawmedia as u64,
+                    format!("resource/{}", p.thumb_name),
+                    thumb,
+                ));
+            }
+        }
+    }
+
+    // 10. navigation — referenced nav_containers (a `landmarks` cover_page → the
+    // cover's page_template, and a `toc` mapping the source table of contents to
+    // page image EIDs) + a thin book_navigation. A fixed-layout book rejects an
+    // inline nav_container, so this mirrors the PDF path's referenced form
+    // (feedback_kfx_nav_device_strict). `resolve_links` populates the TOC entry
+    // targets; a failure just yields a toc-less (landmarks-only) nav.
+    let _ = book.resolve_links();
+    let toc = book.toc().to_vec();
+    fragments.extend(build_manga_nav_fragments(
+        &units,
+        &toc,
+        &page_image_id,
+        &chapter_to_index,
+        &mut ctx,
+    ));
+
+    // 11. position system — section-keyed, so nav targets resolve on-device.
+    fragments.push(build_manga_position_map_fragment(&units));
+    fragments.push(build_manga_position_id_map_fragment(&units));
+    fragments.extend(build_manga_section_position_id_map_fragments(&units));
+
+    // 12. container metadata
+    fragments.push(build_resource_path_fragment());
+    fragments.push(build_manga_container_entity_map_fragment(
+        &container_id,
+        &fragments,
+        &units,
+        &ctx,
+    ));
+
+    // document_data now that every EID is allocated (max_id correct).
+    fragments.insert(
+        document_data_index,
+        build_manga_document_data_fragment(&ctx, ppd_sym),
+    );
+
+    // ---- Serialize ----
+    let symtab_ion = build_symbol_table_ion(ctx.symbols.local_symbols());
+    let format_caps_ion = build_format_capabilities_ion();
+    let entities = serialize_fragments(&fragments, ctx.symbols.local_symbols());
+    on_progress("finalize", 1, 1, "Finalizing");
+    Ok(serialize_container(
+        &container_id,
+        &entities,
+        &symtab_ion,
+        &format_caps_ion,
+    ))
+}
+
+/// Partition `n` spine pages into reading units: page 0 is the cover (shown
+/// solo), and the rest pair into consecutive facing spreads with an odd tail
+/// page standing alone — matching the reference manga's cover + consecutive-pair
+/// + solo-tail layout. Returns page-index groups (`[[0], [1,2], [3,4], …]`).
+fn manga_page_groups(n: usize) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    if n == 0 {
+        return groups;
+    }
+    groups.push(vec![0]);
+    let mut i = 1;
+    while i < n {
+        if i + 1 < n {
+            groups.push(vec![i, i + 1]);
+            i += 2;
+        } else {
+            groups.push(vec![i]);
+            i += 1;
+        }
+    }
+    groups
+}
+
+/// Downscale a page image to a thumbnail (aspect preserved, fit within
+/// [`MANGA_THUMB_W`]×[`MANGA_THUMB_H`]) and JXR-encode it. `None` if the bytes
+/// aren't a decodable raster or the encoder rejects them — the page then ships
+/// without a thumbnail.
+fn make_manga_thumbnail(data: &[u8], mode: jxr::ColorMode) -> Option<(Vec<u8>, u32, u32)> {
+    let img = ::image::load_from_memory(data).ok()?;
+    let thumb = img.thumbnail(MANGA_THUMB_W, MANGA_THUMB_H);
+    let (tw, th) = (thumb.width(), thumb.height());
+    let bytes = encode_dynimg_jxr(&thumb, mode)?;
+    Some((bytes, tw, th))
+}
+
+/// A KFX `content_features` feature struct `{namespace, key, version_info}`.
+fn manga_feature(namespace: &str, key: &str, major: i64) -> IonValue {
+    IonValue::Struct(vec![
+        (
+            KfxSymbol::Namespace as u64,
+            IonValue::String(namespace.to_string()),
+        ),
+        (KfxSymbol::Key as u64, IonValue::String(key.to_string())),
+        (
+            KfxSymbol::VersionInfo as u64,
+            IonValue::Struct(vec![(
+                KfxSymbol::Version as u64,
+                IonValue::Struct(vec![
+                    (KfxSymbol::MajorVersion as u64, IonValue::Int(major)),
+                    (KfxSymbol::MinorVersion as u64, IonValue::Int(0)),
+                ]),
+            )]),
+        ),
+    ])
+}
+
+/// content_features ($585) for a fixed-layout image manga: `CanonicalFormat` +
+/// `yj_non_pdf_fixed_layout` (v2), plus `yj_double_page_spread` when any unit is
+/// a real 2-page spread and `yj_thumbnails_present` when any page carries a
+/// thumbnail.
+fn build_manga_content_features_fragment(any_spread: bool, any_thumb: bool) -> KfxFragment {
+    const YJ: &str = "com.amazon.yjconversion";
+    let mut feats = vec![manga_feature("SDK.Marker", "CanonicalFormat", 2)];
+    if any_spread {
+        feats.push(manga_feature(YJ, "yj_double_page_spread", 1));
+    }
+    feats.push(manga_feature(YJ, "yj_non_pdf_fixed_layout", 2));
+    if any_thumb {
+        feats.push(manga_feature(YJ, "yj_thumbnails_present", 1));
+    }
+    let ion = IonValue::Struct(vec![(KfxSymbol::Features as u64, IonValue::List(feats))]);
+    KfxFragment::singleton(KfxSymbol::ContentFeatures, ion)
+}
+
+/// document_data ($538) for a fixed-layout image manga: the book-level
+/// writing_mode + direction (the device's page-turn signal), max_id,
+/// spacing_percent_base, and the reading order.
+fn build_manga_document_data_fragment(
+    ctx: &ExportContext,
+    ppd_sym: Option<KfxSymbol>,
+) -> KfxFragment {
+    let reading_order = pdf_reading_order(ctx, ppd_sym);
+    let fields = vec![
+        (
+            KfxSymbol::WritingMode as u64,
+            IonValue::Symbol(ctx.document_writing_mode as u64),
+        ),
+        (
+            KfxSymbol::Direction as u64,
+            IonValue::Symbol(ctx.document_direction as u64),
+        ),
+        (KfxSymbol::MaxId as u64, IonValue::Int(ctx.max_eid() as i64)),
+        (
+            KfxSymbol::SpacingPercentBase as u64,
+            IonValue::Symbol(KfxSymbol::Width as u64),
+        ),
+        (
+            KfxSymbol::ReadingOrders as u64,
+            IonValue::List(vec![reading_order]),
+        ),
+    ];
+    KfxFragment::singleton(KfxSymbol::DocumentData, IonValue::Struct(fields))
+}
+
+/// section ($260) for a manga unit. The cover's page_template carries the page
+/// box + scale_fit (shown solo, full-screen); a content unit's page_template is
+/// `layout:page_spread` (its storyline's page containers hold the dimensions).
+/// Both enable `virtual_panel` (Kindle Panel View).
+fn build_manga_section(unit: &MangaUnit, box_w: u32, box_h: u32) -> KfxFragment {
+    let template = if unit.is_cover {
+        IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Int(unit.pt_id as i64)),
+            (
+                KfxSymbol::StoryName as u64,
+                IonValue::Symbol(unit.story_sym),
+            ),
+            (KfxSymbol::FixedWidth as u64, IonValue::Int(box_w as i64)),
+            (KfxSymbol::FixedHeight as u64, IonValue::Int(box_h as i64)),
+            (
+                KfxSymbol::Layout as u64,
+                IonValue::Symbol(KfxSymbol::ScaleFit as u64),
+            ),
+            (
+                KfxSymbol::Float as u64,
+                IonValue::Symbol(KfxSymbol::Center as u64),
+            ),
+            (
+                KfxSymbol::VirtualPanel as u64,
+                IonValue::Symbol(KfxSymbol::Enabled as u64),
+            ),
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Container as u64),
+            ),
+        ])
+    } else {
+        IonValue::Struct(vec![
+            (KfxSymbol::Id as u64, IonValue::Int(unit.pt_id as i64)),
+            (
+                KfxSymbol::StoryName as u64,
+                IonValue::Symbol(unit.story_sym),
+            ),
+            (
+                KfxSymbol::VirtualPanel as u64,
+                IonValue::Symbol(KfxSymbol::Enabled as u64),
+            ),
+            (
+                KfxSymbol::Layout as u64,
+                IonValue::Symbol(KfxSymbol::PageSpread as u64),
+            ),
+            (
+                KfxSymbol::Type as u64,
+                IonValue::Symbol(KfxSymbol::Container as u64),
+            ),
+        ])
+    };
+    let ion = IonValue::Struct(vec![
+        (
+            KfxSymbol::SectionName as u64,
+            IonValue::Symbol(unit.section_sym),
+        ),
+        (
+            KfxSymbol::PageTemplates as u64,
+            IonValue::List(vec![template]),
+        ),
+    ]);
+    KfxFragment::new(KfxSymbol::Section, &unit.section_name, ion)
+}
+
+/// storyline ($259) for a manga unit. The cover storyline is the bare cover
+/// image; a content unit's storyline holds one page container per page — an
+/// outer scale_fit/float:center box (sized to the page box) wrapping an inner
+/// vertical container (style `sJ`) that holds the page image (style `sG`).
+fn build_manga_storyline(
+    unit: &MangaUnit,
+    box_w: u32,
+    box_h: u32,
+    sj_sym: u64,
+    sg_sym: u64,
+) -> KfxFragment {
+    let content: Vec<IonValue> = if unit.is_cover {
+        unit.pages
+            .iter()
+            .map(|p| {
+                IonValue::Struct(vec![
+                    (KfxSymbol::Id as u64, IonValue::Int(p.image_id as i64)),
+                    (
+                        KfxSymbol::Type as u64,
+                        IonValue::Symbol(KfxSymbol::Image as u64),
+                    ),
+                    (KfxSymbol::ResourceName as u64, IonValue::Symbol(p.res_sym)),
+                ])
+            })
+            .collect()
+    } else {
+        unit.pages
+            .iter()
+            .map(|p| {
+                let image = IonValue::Struct(vec![
+                    (KfxSymbol::Id as u64, IonValue::Int(p.image_id as i64)),
+                    (
+                        KfxSymbol::Type as u64,
+                        IonValue::Symbol(KfxSymbol::Image as u64),
+                    ),
+                    (KfxSymbol::Style as u64, IonValue::Symbol(sg_sym)),
+                    (KfxSymbol::ResourceName as u64, IonValue::Symbol(p.res_sym)),
+                ]);
+                let inner = IonValue::Struct(vec![
+                    (KfxSymbol::Id as u64, IonValue::Int(p.inner_id as i64)),
+                    (
+                        KfxSymbol::Layout as u64,
+                        IonValue::Symbol(KfxSymbol::Vertical as u64),
+                    ),
+                    (KfxSymbol::Style as u64, IonValue::Symbol(sj_sym)),
+                    (
+                        KfxSymbol::Type as u64,
+                        IonValue::Symbol(KfxSymbol::Container as u64),
+                    ),
+                    (KfxSymbol::ContentList as u64, IonValue::List(vec![image])),
+                ]);
+                IonValue::Struct(vec![
+                    (KfxSymbol::Id as u64, IonValue::Int(p.outer_id as i64)),
+                    (
+                        KfxSymbol::WritingMode as u64,
+                        IonValue::Symbol(KfxSymbol::HorizontalTb as u64),
+                    ),
+                    (
+                        KfxSymbol::Direction as u64,
+                        IonValue::Symbol(KfxSymbol::Ltr as u64),
+                    ),
+                    (KfxSymbol::FontSize as u64, IonValue::Int(16)),
+                    (KfxSymbol::FixedWidth as u64, IonValue::Int(box_w as i64)),
+                    (KfxSymbol::FixedHeight as u64, IonValue::Int(box_h as i64)),
+                    (
+                        KfxSymbol::Layout as u64,
+                        IonValue::Symbol(KfxSymbol::ScaleFit as u64),
+                    ),
+                    (
+                        KfxSymbol::Float as u64,
+                        IonValue::Symbol(KfxSymbol::Center as u64),
+                    ),
+                    (
+                        KfxSymbol::Type as u64,
+                        IonValue::Symbol(KfxSymbol::Container as u64),
+                    ),
+                    (KfxSymbol::ContentList as u64, IonValue::List(vec![inner])),
+                ])
+            })
+            .collect()
+    };
+    let ion = IonValue::Struct(vec![
+        (
+            KfxSymbol::StoryName as u64,
+            IonValue::Symbol(unit.story_sym),
+        ),
+        (KfxSymbol::ContentList as u64, IonValue::List(content)),
+    ]);
+    KfxFragment::new(KfxSymbol::Storyline, format!("story_{}", unit.section_name), ion)
+}
+
+/// style ($157) `sJ`: the inner container fill — 100%×100%, tagged with the
+/// book language (mirrors the reference manga's shared inner-container style).
+fn build_manga_style_sj(sj_sym: u64, language: &str) -> KfxFragment {
+    let mut fields = vec![
+        (KfxSymbol::Width as u64, pdf_percent_100()),
+        (KfxSymbol::Height as u64, pdf_percent_100()),
+    ];
+    if !language.is_empty() {
+        fields.push((
+            KfxSymbol::Language as u64,
+            IonValue::String(language.to_string()),
+        ));
+    }
+    fields.push((KfxSymbol::StyleName as u64, IonValue::Symbol(sj_sym)));
+    KfxFragment::new(KfxSymbol::Style, "sJ", IonValue::Struct(fields))
+}
+
+/// style ($157) `sG`: the page-box image placement — the uniform page box,
+/// top-left origin, centered (so a smaller page image is centered within the
+/// spread box rather than pinned to a corner).
+fn build_manga_style_sg(sg_sym: u64, box_w: u32, box_h: u32) -> KfxFragment {
+    let ion = IonValue::Struct(vec![
+        (KfxSymbol::Width as u64, IonValue::Int(box_w as i64)),
+        (KfxSymbol::Height as u64, IonValue::Int(box_h as i64)),
+        (KfxSymbol::Top as u64, IonValue::Int(0)),
+        (KfxSymbol::Left as u64, IonValue::Int(0)),
+        (
+            KfxSymbol::BoxAlign as u64,
+            IonValue::Symbol(KfxSymbol::Center as u64),
+        ),
+        (KfxSymbol::StyleName as u64, IonValue::Symbol(sg_sym)),
+    ]);
+    KfxFragment::new(KfxSymbol::Style, "sG", ion)
+}
+
+/// A resource mime string for a KFX image-format symbol (descriptive; the device
+/// resolves by the `format` symbol). `None` for formats without a stable mime.
+fn manga_format_mime(fmt_sym: u64) -> Option<&'static str> {
+    if fmt_sym == KfxSymbol::Jpg as u64 {
+        Some("image/jpeg")
+    } else if fmt_sym == KfxSymbol::Jxr as u64 {
+        Some("image/vnd.ms-photo")
+    } else if fmt_sym == KfxSymbol::Png as u64 {
+        Some("image/png")
+    } else {
+        None
+    }
+}
+
+/// external_resource ($164) for a page's full image, carrying the `thumbnails`
+/// link to its thumbnail resource when present.
+fn build_manga_external_resource(p: &MangaPage, w: u32, h: u32, fmt_sym: u64) -> KfxFragment {
+    let mut fields = vec![
+        (KfxSymbol::ResourceName as u64, IonValue::Symbol(p.res_sym)),
+        (
+            KfxSymbol::Location as u64,
+            IonValue::String(format!("resource/{}", p.res_name)),
+        ),
+        (KfxSymbol::Format as u64, IonValue::Symbol(fmt_sym)),
+        (KfxSymbol::ResourceWidth as u64, IonValue::Int(w as i64)),
+        (KfxSymbol::ResourceHeight as u64, IonValue::Int(h as i64)),
+    ];
+    if p.thumb_sym != 0 {
+        fields.push((KfxSymbol::Thumbnails as u64, IonValue::Symbol(p.thumb_sym)));
+    }
+    if let Some(m) = manga_format_mime(fmt_sym) {
+        fields.push((KfxSymbol::Mime as u64, IonValue::String(m.to_string())));
+    }
+    KfxFragment::new(KfxSymbol::ExternalResource, &p.res_name, IonValue::Struct(fields))
+}
+
+/// external_resource ($164) for a page's downscaled thumbnail.
+fn build_manga_thumb_external_resource(
+    p: &MangaPage,
+    tw: u32,
+    th: u32,
+    fmt_sym: u64,
+) -> KfxFragment {
+    let mut fields = vec![
+        (KfxSymbol::ResourceName as u64, IonValue::Symbol(p.thumb_sym)),
+        (
+            KfxSymbol::Location as u64,
+            IonValue::String(format!("resource/{}", p.thumb_name)),
+        ),
+        (KfxSymbol::Format as u64, IonValue::Symbol(fmt_sym)),
+        (KfxSymbol::ResourceWidth as u64, IonValue::Int(tw as i64)),
+        (KfxSymbol::ResourceHeight as u64, IonValue::Int(th as i64)),
+    ];
+    if let Some(m) = manga_format_mime(fmt_sym) {
+        fields.push((KfxSymbol::Mime as u64, IonValue::String(m.to_string())));
+    }
+    KfxFragment::new(
+        KfxSymbol::ExternalResource,
+        &p.thumb_name,
+        IonValue::Struct(fields),
+    )
+}
+
+/// Navigation for a fixed-layout manga, in the referenced form the device
+/// requires: a `landmarks` nav_container (cover_page → the cover's
+/// page_template, so the device opens on a full-screen cover), a `toc`
+/// nav_container mapping the source table of contents onto page image EIDs (when
+/// any entry resolves), and a thin `book_navigation` referencing them by name.
+fn build_manga_nav_fragments(
+    units: &[MangaUnit],
+    toc: &[crate::model::TocEntry],
+    page_image_id: &[u64],
+    chapter_to_index: &std::collections::HashMap<ChapterId, usize>,
+    ctx: &mut ExportContext,
+) -> Vec<KfxFragment> {
+    let Some(cover) = units.first() else {
+        return Vec::new();
+    };
+    let mut fragments = Vec::new();
+    let mut container_syms = Vec::new();
+
+    // landmarks: cover_page → the cover section's page_template (full-screen).
+    let landmark = IonValue::Annotated(
+        vec![KfxSymbol::NavUnit as u64],
+        Box::new(IonValue::Struct(vec![
+            (
+                KfxSymbol::LandmarkType as u64,
+                IonValue::Symbol(KfxSymbol::CoverPage as u64),
+            ),
+            (
+                KfxSymbol::Representation as u64,
+                IonValue::Struct(vec![(
+                    KfxSymbol::Label as u64,
+                    IonValue::String("cover-nav-unit".to_string()),
+                )]),
+            ),
+            (
+                KfxSymbol::TargetPosition as u64,
+                IonValue::Struct(vec![
+                    (KfxSymbol::Id as u64, IonValue::Int(cover.pt_id as i64)),
+                    (KfxSymbol::Offset as u64, IonValue::Int(0)),
+                ]),
+            ),
+        ])),
+    );
+    let lmk_sym = ctx.symbols.get_or_intern("nlmk");
+    fragments.push(KfxFragment::new(
+        KfxSymbol::NavContainer,
+        "nlmk",
+        IonValue::Struct(vec![
+            (
+                KfxSymbol::NavType as u64,
+                IonValue::Symbol(KfxSymbol::Landmarks as u64),
+            ),
+            (
+                KfxSymbol::NavContainerName as u64,
+                IonValue::Symbol(lmk_sym),
+            ),
+            (KfxSymbol::Entries as u64, IonValue::List(vec![landmark])),
+        ]),
+    ));
+    container_syms.push(lmk_sym);
+
+    // toc: the source table of contents, each entry retargeted to its page's
+    // image EID (which `position_id_map` registers, so the device resolves it).
+    let toc_entries = build_manga_toc_entries(toc, page_image_id, chapter_to_index);
+    if !toc_entries.is_empty() {
+        let toc_sym = ctx.symbols.get_or_intern("ntoc");
+        fragments.push(KfxFragment::new(
+            KfxSymbol::NavContainer,
+            "ntoc",
+            IonValue::Struct(vec![
+                (
+                    KfxSymbol::NavType as u64,
+                    IonValue::Symbol(KfxSymbol::Toc as u64),
+                ),
+                (
+                    KfxSymbol::NavContainerName as u64,
+                    IonValue::Symbol(toc_sym),
+                ),
+                (KfxSymbol::Entries as u64, IonValue::List(toc_entries)),
+            ]),
+        ));
+        container_syms.push(toc_sym);
+    }
+
+    fragments.push(KfxFragment::singleton(
+        KfxSymbol::BookNavigation,
+        IonValue::List(vec![IonValue::Struct(vec![
+            (
+                KfxSymbol::ReadingOrderName as u64,
+                IonValue::Symbol(KfxSymbol::Default as u64),
+            ),
+            (
+                KfxSymbol::NavContainers as u64,
+                IonValue::List(container_syms.into_iter().map(IonValue::Symbol).collect()),
+            ),
+        ])]),
+    ));
+    fragments
+}
+
+/// Resolve a source TOC entry's target to the spine page index it lands on
+/// (either a chapter start or an intra-chapter anchor — both name a page).
+fn toc_target_index(
+    entry: &crate::model::TocEntry,
+    chapter_to_index: &std::collections::HashMap<ChapterId, usize>,
+) -> Option<usize> {
+    match entry.target.as_ref()? {
+        crate::model::AnchorTarget::Internal(gid) => chapter_to_index.get(&gid.chapter).copied(),
+        crate::model::AnchorTarget::Chapter(cid) => chapter_to_index.get(cid).copied(),
+        crate::model::AnchorTarget::External(_) => None,
+    }
+}
+
+/// Convert source TOC entries into referenced-form KFX toc `nav_unit` entries,
+/// each `target_position` retargeted to its page's image EID. An entry whose
+/// target doesn't resolve to a page is dropped (with its subtree), so a partial
+/// TOC still yields the entries that do resolve.
+fn build_manga_toc_entries(
+    entries: &[crate::model::TocEntry],
+    page_image_id: &[u64],
+    chapter_to_index: &std::collections::HashMap<ChapterId, usize>,
+) -> Vec<IonValue> {
+    entries
+        .iter()
+        .filter_map(|e| {
+            let idx = toc_target_index(e, chapter_to_index)?;
+            let image_id = *page_image_id.get(idx)?;
+            if image_id == 0 {
+                return None;
+            }
+            let mut fields = vec![
+                (
+                    KfxSymbol::Representation as u64,
+                    IonValue::Struct(vec![(
+                        KfxSymbol::Label as u64,
+                        IonValue::String(e.title.clone()),
+                    )]),
+                ),
+                (
+                    KfxSymbol::TargetPosition as u64,
+                    IonValue::Struct(vec![
+                        (KfxSymbol::Id as u64, IonValue::Int(image_id as i64)),
+                        (KfxSymbol::Offset as u64, IonValue::Int(0)),
+                    ]),
+                ),
+            ];
+            let children = build_manga_toc_entries(&e.children, page_image_id, chapter_to_index);
+            if !children.is_empty() {
+                fields.push((KfxSymbol::Entries as u64, IonValue::List(children)));
+            }
+            Some(IonValue::Annotated(
+                vec![KfxSymbol::NavUnit as u64],
+                Box::new(IonValue::Struct(fields)),
+            ))
+        })
+        .collect()
+}
+
+/// The content EIDs of a manga unit, in reading-position order: the
+/// page_template opens it, then each page contributes its EIDs (cover: the bare
+/// image; content: outer→inner→image).
+fn manga_unit_eids(unit: &MangaUnit) -> Vec<u64> {
+    let mut ids = vec![unit.pt_id];
+    for p in &unit.pages {
+        if unit.is_cover {
+            ids.push(p.image_id);
+        } else {
+            ids.push(p.outer_id);
+            ids.push(p.inner_id);
+            ids.push(p.image_id);
+        }
+    }
+    ids
+}
+
+/// position_map ($264): one entry per section listing the EIDs it contains.
+fn build_manga_position_map_fragment(units: &[MangaUnit]) -> KfxFragment {
+    let entries: Vec<IonValue> = units
+        .iter()
+        .map(|unit| {
+            let ids = manga_unit_eids(unit)
+                .into_iter()
+                .map(|id| IonValue::Int(id as i64))
+                .collect();
+            IonValue::Struct(vec![
+                (KfxSymbol::Contains as u64, IonValue::List(ids)),
+                (
+                    KfxSymbol::SectionName as u64,
+                    IonValue::Symbol(unit.section_sym),
+                ),
+            ])
+        })
+        .collect();
+    KfxFragment::singleton(KfxSymbol::PositionMap, IonValue::List(entries))
+}
+
+/// position_id_map ($265): section-keyed `{section_name, pid, length}` — the
+/// fixed-layout form the device resolves nav targets through. `length` is the
+/// section's EID count (each EID is one reading position).
+fn build_manga_position_id_map_fragment(units: &[MangaUnit]) -> KfxFragment {
+    let mut entries = Vec::with_capacity(units.len());
+    let mut pid = 0i64;
+    for unit in units {
+        let length = manga_unit_eids(unit).len() as i64;
+        entries.push(IonValue::Struct(vec![
+            (
+                KfxSymbol::SectionName as u64,
+                IonValue::Symbol(unit.section_sym),
+            ),
+            (KfxSymbol::Pid as u64, IonValue::Int(pid)),
+            (KfxSymbol::Length as u64, IonValue::Int(length)),
+        ]));
+        pid += length;
+    }
+    let ion = IonValue::Struct(vec![(KfxSymbol::Contains as u64, IonValue::List(entries))]);
+    KfxFragment::singleton(KfxSymbol::PositionIdMap, ion)
+}
+
+/// section_position_id_map ($609): one entity per section walking its EIDs (each
+/// span 1), keyed by the section-name symbol (as Amazon does) so the device can
+/// address it. A bare int continues from the previous EID + 1; else `[advance,
+/// eid]`; an `[1, 0]` terminator lands at `pid == length`.
+fn build_manga_section_position_id_map_fragments(units: &[MangaUnit]) -> Vec<KfxFragment> {
+    units
+        .iter()
+        .map(|unit| {
+            let order = manga_unit_eids(unit);
+            let mut contains: Vec<IonValue> = Vec::with_capacity(order.len() + 1);
+            let mut prev: Option<u64> = None;
+            for &eid in &order {
+                let advance = prev.map_or(0, |_| 1);
+                let consecutive = prev.is_some_and(|p| eid == p + 1);
+                if consecutive {
+                    contains.push(IonValue::Int(advance));
+                } else {
+                    contains.push(IonValue::List(vec![
+                        IonValue::Int(advance),
+                        IonValue::Int(eid as i64),
+                    ]));
+                }
+                prev = Some(eid);
+            }
+            contains.push(IonValue::List(vec![IonValue::Int(1), IonValue::Int(0)]));
+            let ion = IonValue::Struct(vec![
+                (
+                    KfxSymbol::SectionName as u64,
+                    IonValue::Symbol(unit.section_sym),
+                ),
+                (KfxSymbol::Contains as u64, IonValue::List(contains)),
+            ]);
+            KfxFragment::new(
+                KfxSymbol::SectionPositionIdMap,
+                unit.section_name.clone(),
+                ion,
+            )
+        })
+        .collect()
+}
+
+/// container_entity_map ($419): the container's entity list + per-section
+/// mandatory dependencies on its page resources (thumbnail then full, the pair
+/// listed twice as the reference manga does).
+fn build_manga_container_entity_map_fragment(
+    container_id: &str,
+    fragments: &[KfxFragment],
+    units: &[MangaUnit],
+    ctx: &ExportContext,
+) -> KfxFragment {
+    let mut entity_names: Vec<IonValue> = Vec::new();
+    for frag in fragments {
+        if frag.fid.starts_with('$') {
+            continue;
+        }
+        if let Some(sym) = ctx.symbols.get(&frag.fid) {
+            entity_names.push(IonValue::Symbol(sym));
+        }
+    }
+    let container_entry = IonValue::Struct(vec![
+        (
+            KfxSymbol::Id as u64,
+            IonValue::String(container_id.to_string()),
+        ),
+        (KfxSymbol::Contains as u64, IonValue::List(entity_names)),
+    ]);
+
+    let dependencies: Vec<IonValue> = units
+        .iter()
+        .map(|unit| {
+            let mut pair: Vec<IonValue> = Vec::new();
+            for p in &unit.pages {
+                if p.thumb_sym != 0 {
+                    pair.push(IonValue::Symbol(p.thumb_sym));
+                }
+                pair.push(IonValue::Symbol(p.res_sym));
+            }
+            let mut deps = pair.clone();
+            deps.extend(pair);
+            IonValue::Struct(vec![
+                (KfxSymbol::Id as u64, IonValue::Symbol(unit.section_sym)),
+                (
+                    KfxSymbol::MandatoryDependencies as u64,
+                    IonValue::List(deps),
+                ),
+            ])
+        })
+        .collect();
+
+    let ion = IonValue::Struct(vec![
+        (
+            KfxSymbol::ContainerList as u64,
+            IonValue::List(vec![container_entry]),
+        ),
+        (
+            KfxSymbol::EntityDependencies as u64,
+            IonValue::List(dependencies),
+        ),
+    ]);
+    KfxFragment::singleton(KfxSymbol::ContainerEntityMap, ion)
 }
 
 // ============================================================================
@@ -5330,5 +6411,140 @@ mod anchor_resolution_tests {
             "Expected anchor entities for the TOC targets, got {}",
             anchor_count
         );
+    }
+}
+
+#[cfg(test)]
+mod manga_fxl_tests {
+    use super::*;
+    use crate::kfx::fragment::FragmentData;
+
+    /// The cover is a solo unit; the rest pair into consecutive spreads with an
+    /// odd tail page standing alone. Every page index appears exactly once, in
+    /// order — the RTL facing order the device reads.
+    #[test]
+    fn page_groups_cover_solo_then_pairs_with_odd_tail() {
+        assert!(manga_page_groups(0).is_empty());
+        assert_eq!(manga_page_groups(1), vec![vec![0]]);
+        assert_eq!(manga_page_groups(2), vec![vec![0], vec![1]]);
+        assert_eq!(manga_page_groups(3), vec![vec![0], vec![1, 2]]);
+        assert_eq!(manga_page_groups(4), vec![vec![0], vec![1, 2], vec![3]]);
+        assert_eq!(manga_page_groups(5), vec![vec![0], vec![1, 2], vec![3, 4]]);
+        let flat: Vec<usize> = manga_page_groups(11).into_iter().flatten().collect();
+        assert_eq!(flat, (0..11).collect::<Vec<_>>());
+    }
+
+    fn unit(is_cover: bool, pages: &[(u64, u64, u64)]) -> MangaUnit {
+        MangaUnit {
+            section_name: "c0".into(),
+            section_sym: 1,
+            story_sym: 2,
+            pt_id: 100,
+            is_cover,
+            pages: pages
+                .iter()
+                .map(|&(o, i, im)| MangaPage {
+                    res_name: "e0".into(),
+                    res_sym: 3,
+                    thumb_name: String::new(),
+                    thumb_sym: 0,
+                    enc: 0,
+                    outer_id: o,
+                    inner_id: i,
+                    image_id: im,
+                })
+                .collect(),
+        }
+    }
+
+    /// A section's reading-position span drives both position maps and must
+    /// match the EIDs actually laid down: a cover contributes its bare image
+    /// (page_template + 1); a content page contributes outer→inner→image
+    /// (page_template + 3 per page). Any drift dangles nav targets on-device.
+    #[test]
+    fn unit_eids_span_cover_vs_spread() {
+        let cover = unit(true, &[(0, 0, 101)]);
+        assert_eq!(manga_unit_eids(&cover), vec![100, 101]);
+
+        let spread = unit(false, &[(101, 102, 103), (104, 105, 106)]);
+        assert_eq!(
+            manga_unit_eids(&spread),
+            vec![100, 101, 102, 103, 104, 105, 106]
+        );
+    }
+
+    /// Collect the feature keys of a content_features fragment.
+    fn feature_keys(frag: &KfxFragment) -> Vec<String> {
+        let FragmentData::Ion(IonValue::Struct(fields)) = &frag.data else {
+            panic!("content_features is not an Ion struct");
+        };
+        let mut keys = Vec::new();
+        for (k, v) in fields {
+            if *k == KfxSymbol::Features as u64
+                && let IonValue::List(feats) = v
+            {
+                for feat in feats {
+                    if let IonValue::Struct(fs) = feat {
+                        for (fk, fv) in fs {
+                            if *fk == KfxSymbol::Key as u64
+                                && let IonValue::String(s) = fv
+                            {
+                                keys.push(s.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        keys
+    }
+
+    /// `yj_non_pdf_fixed_layout` is always advertised; `yj_double_page_spread`
+    /// only when a real spread exists and `yj_thumbnails_present` only when a
+    /// page carries a thumbnail (advertising an absent capability risks a device
+    /// reject).
+    #[test]
+    fn content_features_gate_spread_and_thumbnails() {
+        let full = feature_keys(&build_manga_content_features_fragment(true, true));
+        assert!(full.iter().any(|k| k == "yj_non_pdf_fixed_layout"));
+        assert!(full.iter().any(|k| k == "yj_double_page_spread"));
+        assert!(full.iter().any(|k| k == "yj_thumbnails_present"));
+
+        let minimal = feature_keys(&build_manga_content_features_fragment(false, false));
+        assert!(minimal.iter().any(|k| k == "yj_non_pdf_fixed_layout"));
+        assert!(!minimal.iter().any(|k| k == "yj_double_page_spread"));
+        assert!(!minimal.iter().any(|k| k == "yj_thumbnails_present"));
+    }
+
+    /// document_data carries the book-level page-turn signal: horizontal_tb text
+    /// axis + rtl direction for a manga (reference_kfx_device_rtl_writing_mode).
+    #[test]
+    fn document_data_is_horizontal_rtl() {
+        let mut ctx = ExportContext::new();
+        ctx.register_section("c0");
+        ctx.document_writing_mode = KfxSymbol::HorizontalTb;
+        ctx.document_direction = KfxSymbol::Rtl;
+        let frag = build_manga_document_data_fragment(&ctx, Some(KfxSymbol::Rtl));
+        let FragmentData::Ion(IonValue::Struct(fields)) = &frag.data else {
+            panic!("document_data is not an Ion struct");
+        };
+        let get = |sym: KfxSymbol| {
+            fields
+                .iter()
+                .find(|(k, _)| *k == sym as u64)
+                .map(|(_, v)| v)
+        };
+        assert!(matches!(
+            get(KfxSymbol::WritingMode),
+            Some(IonValue::Symbol(s)) if *s == KfxSymbol::HorizontalTb as u64
+        ));
+        assert!(matches!(
+            get(KfxSymbol::Direction),
+            Some(IonValue::Symbol(s)) if *s == KfxSymbol::Rtl as u64
+        ));
+        assert!(matches!(
+            get(KfxSymbol::SpacingPercentBase),
+            Some(IonValue::Symbol(s)) if *s == KfxSymbol::Width as u64
+        ));
     }
 }

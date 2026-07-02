@@ -548,6 +548,28 @@ impl KfxImporter {
         Ok(())
     }
 
+    /// Resolve one `book_navigation.nav_containers` entry to its nav_container
+    /// struct. Inline structs pass through; a bare symbol is the referenced form
+    /// (fixed-layout / PDOC books, which the device requires) — look up the
+    /// separate nav_container ($391) entity whose id matches and parse it. The
+    /// reference symbol id equals the target entity's id, so no text lookup is
+    /// needed. `None` when it can't be resolved.
+    fn resolve_nav_container(&self, container: &IonValue) -> Option<IonValue> {
+        let inner = container.unwrap_annotated();
+        if inner.as_struct().is_some() {
+            return Some(inner.clone());
+        }
+        let IonValue::Symbol(sym) = inner else {
+            return None;
+        };
+        let loc = self
+            .entities
+            .iter()
+            .find(|e| e.type_id == KfxSymbol::NavContainer as u32 && e.id as u64 == *sym)
+            .copied()?;
+        self.parse_entity_ion(loc).ok()
+    }
+
     /// Parse book navigation (TOC and landmarks).
     fn parse_navigation(&mut self) -> io::Result<()> {
         // Find book_navigation entity
@@ -569,9 +591,14 @@ impl KfxImporter {
                             get_field(ro_fields, sym!(NavContainers)).and_then(|v| v.as_list())
                         {
                             for container in containers {
-                                // Unwrap annotation if present
-                                let inner = container.unwrap_annotated();
-                                if let Some(container_fields) = inner.as_struct() {
+                                // Inline struct, or a symbol referencing a
+                                // separate nav_container entity (the fixed-layout
+                                // / PDOC shape) — resolve both.
+                                let Some(resolved) = self.resolve_nav_container(container)
+                                else {
+                                    continue;
+                                };
+                                if let Some(container_fields) = resolved.as_struct() {
                                     // Check nav_type
                                     let nav_type = get_field(container_fields, sym!(NavType))
                                         .and_then(|v| self.get_symbol_text(v));
