@@ -298,6 +298,7 @@ impl MobiImporter {
             .map(|i| SpineEntry {
                 id: ChapterId(i as u32),
                 size_estimate: split.chapters[i].len(),
+                page_spread: None,
             })
             .collect();
 

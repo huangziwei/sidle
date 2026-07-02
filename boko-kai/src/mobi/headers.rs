@@ -240,6 +240,14 @@ pub struct ExthHeader {
     /// EXTH 527 — "ltr" / "rtl". Maps directly to the OPF spine
     /// `page-progression-direction` attribute.
     pub page_progression_direction: Option<String>,
+    /// EXTH 122 — "true" for a fixed-layout (KF8 comic / picture) book.
+    pub fixed_layout: Option<String>,
+    /// EXTH 123 — "comic" (double-page-spread manga) / "children".
+    pub book_type: Option<String>,
+    /// EXTH 124 — "none" / "portrait" / "landscape" orientation lock.
+    pub orientation_lock: Option<String>,
+    /// EXTH 126 — the fixed-layout page resolution, e.g. "1444x2048".
+    pub original_resolution: Option<String>,
 }
 
 impl ExthHeader {
@@ -330,6 +338,11 @@ impl ExthHeader {
                 524 => exth.language = Some(decode(content).trim().to_string()),
                 525 => exth.primary_writing_mode = Some(decode(content).trim().to_string()),
                 527 => exth.page_progression_direction = Some(decode(content).trim().to_string()),
+                // KF8 fixed-layout (comic / picture book) hints.
+                122 => exth.fixed_layout = Some(decode(content).trim().to_string()),
+                123 => exth.book_type = Some(decode(content).trim().to_string()),
+                124 => exth.orientation_lock = Some(decode(content).trim().to_string()),
+                126 => exth.original_resolution = Some(decode(content).trim().to_string()),
                 _ => {}
             }
 

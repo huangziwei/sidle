@@ -499,11 +499,21 @@ fn generate_opf(
     // attributes that every major reader (Apple Books, Kindle, ADE, calibre)
     // still consults — they're tolerated in EPUB 3 packages even though the
     // canonical EPUB 3 alternative is `<meta refines>`.
+    //
+    // Fixed-layout books declare the `rendition:` vocabulary on the package so
+    // the `rendition:layout` / `rendition:spread` metas below validate.
+    opf.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    if metadata.fixed_layout {
+        opf.push_str(
+            "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"BookId\" prefix=\"rendition: http://www.idpf.org/vocab/rendition/#\">\n",
+        );
+    } else {
+        opf.push_str(
+            "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"BookId\">\n",
+        );
+    }
     opf.push_str(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
-"#,
+        "  <metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:opf=\"http://www.idpf.org/2007/opf\">\n",
     );
 
     // Track IDs for refinements
@@ -698,6 +708,37 @@ fn generate_opf(
             "    <meta name=\"primary-writing-mode\" content=\"{}\"/>\n",
             escape_xml(pwm)
         ));
+    }
+
+    // Fixed-layout (manga / comic / picture book) metadata. Both the EPUB 3
+    // `rendition:*` properties (Apple Books, Kobo) and the Kindle `name`/`content`
+    // hints are emitted so the book renders pre-paginated everywhere and so a
+    // downstream EPUB→KFX sees a fixed-layout source. Mirrors the KF8 source's
+    // own OPF (rendition:layout pre-paginated, book-type comic, viewport).
+    if metadata.fixed_layout {
+        opf.push_str("    <meta property=\"rendition:layout\">pre-paginated</meta>\n");
+        if let Some(ref spread) = metadata.rendition_spread {
+            opf.push_str(&format!(
+                "    <meta property=\"rendition:spread\">{}</meta>\n",
+                escape_xml(spread)
+            ));
+        }
+        if let Some((w, h)) = metadata.default_viewport {
+            // EBPAJ per-viewport meta + the KF8 `original-resolution` twin.
+            opf.push_str(&format!(
+                "    <meta property=\"fixed-layout-jp:viewport\">width={w}, height={h}</meta>\n"
+            ));
+            opf.push_str(&format!(
+                "    <meta name=\"original-resolution\" content=\"{w}x{h}\"/>\n"
+            ));
+        }
+        opf.push_str("    <meta name=\"fixed-layout\" content=\"true\"/>\n");
+        if let Some(ref bt) = metadata.book_type {
+            opf.push_str(&format!(
+                "    <meta name=\"book-type\" content=\"{}\"/>\n",
+                escape_xml(bt)
+            ));
+        }
     }
 
     opf.push_str("  </metadata>\n");

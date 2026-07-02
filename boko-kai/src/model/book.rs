@@ -99,6 +99,55 @@ pub struct Metadata {
     /// distinguishes Japanese vertical-rl from Mongolian vertical-lr, which
     /// share a `rtl` PPD but render differently.
     pub primary_writing_mode: Option<String>,
+    /// Book is fixed-layout (image-based manga / comic, or a paginated
+    /// picture book) — `rendition:layout = pre-paginated`. Drives FXL OPF
+    /// metadata on EPUB export and the `yj_non_pdf_fixed_layout` skeleton on
+    /// KFX export, instead of the reflowable path. When false the book flows.
+    pub fixed_layout: bool,
+    /// `book-type` OPF hint — `"comic"` for double-page-spread manga,
+    /// `"children"` for picture books. Only meaningful when `fixed_layout`.
+    pub book_type: Option<String>,
+    /// `rendition:spread` policy for a fixed-layout book (e.g. `"landscape"`
+    /// = show facing pages as a two-page spread in landscape). `None` leaves
+    /// it to the reader default.
+    pub rendition_spread: Option<String>,
+    /// Book-level default page viewport `(width, height)` in px — the
+    /// `fixed-layout-jp:viewport` / KF8 `original-resolution`. Every FXL page
+    /// is authored to this box unless it carries its own viewport.
+    pub default_viewport: Option<(u32, u32)>,
+}
+
+/// Which half of a two-page spread a fixed-layout page occupies — the OPF
+/// spine itemref `page-spread-left` / `page-spread-right` /
+/// `rendition:page-spread-center` property. Drives facing-page pairing in a
+/// manga/comic; carries the source's declared pairing so it round-trips
+/// losslessly rather than being re-derived by alternation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageSpread {
+    Left,
+    Right,
+    Center,
+}
+
+impl PageSpread {
+    /// The OPF spine itemref property token.
+    pub fn opf_property(self) -> &'static str {
+        match self {
+            PageSpread::Left => "page-spread-left",
+            PageSpread::Right => "page-spread-right",
+            PageSpread::Center => "rendition:page-spread-center",
+        }
+    }
+
+    /// Parse from an OPF itemref `properties` attribute value.
+    pub fn from_opf_properties(props: &str) -> Option<Self> {
+        props.split_whitespace().find_map(|p| match p {
+            "page-spread-left" | "rendition:page-spread-left" => Some(PageSpread::Left),
+            "page-spread-right" | "rendition:page-spread-right" => Some(PageSpread::Right),
+            "page-spread-center" | "rendition:page-spread-center" => Some(PageSpread::Center),
+            _ => None,
+        })
+    }
 }
 
 /// A table of contents entry (hierarchical)

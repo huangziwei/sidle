@@ -285,6 +285,10 @@ impl EpubImporter {
                 spine.push(SpineEntry {
                     id: ChapterId(i as u32),
                     size_estimate,
+                    page_spread: opf
+                        .spine_properties
+                        .get(spine_id)
+                        .and_then(|p| crate::model::PageSpread::from_opf_properties(p)),
                 });
                 spine_paths.push(full_path);
             }

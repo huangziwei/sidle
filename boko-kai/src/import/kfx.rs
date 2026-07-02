@@ -734,6 +734,7 @@ impl KfxImporter {
             self.spine.push(SpineEntry {
                 id: ChapterId(idx as u32),
                 size_estimate,
+                page_spread: None,
             });
         }
 

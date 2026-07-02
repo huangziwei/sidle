@@ -470,6 +470,7 @@ impl Azw3Importer {
             spine.push(SpineEntry {
                 id: ChapterId(i as u32),
                 size_estimate: file.length as usize,
+                page_spread: None,
             });
         }
 
@@ -811,6 +812,12 @@ fn detect_format(
     Ok(MobiFormat::Mobi6)
 }
 
+/// Parse a KF8 `original-resolution` value (`"1444x2048"`) into `(w, h)`.
+fn parse_resolution(s: &str) -> Option<(u32, u32)> {
+    let (w, h) = s.trim().split_once(['x', 'X'])?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
 fn build_metadata(
     pdb: &PdbInfo,
     mobi: &MobiHeader,
@@ -876,6 +883,25 @@ fn build_metadata(
                     }
                 })
             });
+
+        // KF8 fixed-layout (comic / picture book): any of the three FXL EXTH
+        // records marks the book as pre-paginated so it round-trips as a
+        // fixed-layout EPUB instead of being flattened to reflowable.
+        let book_type = exth.book_type.clone().filter(|s| !s.is_empty());
+        let is_comic = book_type.as_deref() == Some("comic");
+        metadata.fixed_layout = exth.fixed_layout.as_deref() == Some("true")
+            || book_type.is_some()
+            || exth.original_resolution.is_some();
+        metadata.book_type = book_type;
+        metadata.default_viewport = exth
+            .original_resolution
+            .as_deref()
+            .and_then(parse_resolution);
+        // KF8 has no explicit `rendition:spread`; a comic implies facing-page
+        // (landscape) spreads, which is how the Kindle renders `book-type:comic`.
+        if metadata.fixed_layout && is_comic {
+            metadata.rendition_spread = Some("landscape".to_string());
+        }
     }
 
     metadata

@@ -33,6 +33,10 @@ pub struct SpineEntry {
     pub id: ChapterId,
     /// Estimated size in bytes (for progress indication).
     pub size_estimate: usize,
+    /// For a fixed-layout book, which half of the two-page spread this page
+    /// occupies (source's declared `page-spread-*`). `None` for reflowable
+    /// books or FXL pages with no declared side. See [`crate::model::PageSpread`].
+    pub page_spread: Option<crate::model::PageSpread>,
 }
 
 /// Polymorphic interface for format-specific backends.
@@ -527,10 +531,12 @@ mod tests {
                 SpineEntry {
                     id: ChapterId(0),
                     size_estimate: 0,
+                    page_spread: None,
                 },
                 SpineEntry {
                     id: ChapterId(1),
                     size_estimate: 0,
+                    page_spread: None,
                 },
             ],
             source_ids: vec!["text/ch1.xhtml".to_string(), "text/ch2.xhtml".to_string()],

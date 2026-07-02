@@ -14,6 +14,10 @@ pub struct OpfData {
     /// Maps manifest id -> (href, media_type)
     pub manifest: HashMap<String, (String, String)>,
     pub spine_ids: Vec<String>,
+    /// Maps spine idref -> its `properties` attribute (e.g. `page-spread-left`,
+    /// `rendition:layout-pre-paginated`). Only ids that declared properties
+    /// appear. Drives per-page fixed-layout spread reconstruction.
+    pub spine_properties: HashMap<String, String>,
     pub ncx_href: Option<String>,
     /// EPUB 3 nav document href (has properties="nav")
     pub nav_href: Option<String>,
@@ -93,6 +97,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     let mut metadata = Metadata::default();
     let mut manifest: HashMap<String, ManifestItem> = HashMap::new();
     let mut spine_ids: Vec<String> = Vec::new();
+    let mut spine_properties: HashMap<String, String> = HashMap::new();
     let mut toc_id: Option<String> = None;
     let mut epub2_cover_id: Option<String> = None;
 
@@ -268,13 +273,30 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                         }
                     }
                     b"itemref" => {
+                        let mut idref: Option<String> = None;
+                        let mut props: Option<String> = None;
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"idref" {
-                                spine_ids.push(
-                                    String::from_utf8(attr.value.to_vec())
-                                        .map_err(io::Error::other)?,
-                                );
+                            match attr.key.as_ref() {
+                                b"idref" => {
+                                    idref = Some(
+                                        String::from_utf8(attr.value.to_vec())
+                                            .map_err(io::Error::other)?,
+                                    );
+                                }
+                                b"properties" => {
+                                    props = Some(
+                                        String::from_utf8(attr.value.to_vec())
+                                            .map_err(io::Error::other)?,
+                                    );
+                                }
+                                _ => {}
                             }
+                        }
+                        if let Some(idref) = idref {
+                            if let Some(props) = props {
+                                spine_properties.insert(idref.clone(), props);
+                            }
+                            spine_ids.push(idref);
                         }
                     }
                     b"meta" if in_metadata => {
@@ -334,11 +356,31 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                         // is the authoritative fixed writing mode when the publisher
                         // declares it; the KFX export prefers it over deriving one
                         // from the content styles.
-                        if meta_name.as_deref() == Some("primary-writing-mode")
-                            && let Some(val) =
-                                content.as_deref().map(str::trim).filter(|v| !v.is_empty())
-                        {
-                            metadata.primary_writing_mode = Some(val.to_string());
+                        if let Some(name) = meta_name.as_deref() {
+                            let val = content.as_deref().map(str::trim).filter(|v| !v.is_empty());
+                            match name {
+                                "primary-writing-mode" => {
+                                    if let Some(v) = val {
+                                        metadata.primary_writing_mode = Some(v.to_string());
+                                    }
+                                }
+                                // KF8/Kindle fixed-layout OPF hints (also carried
+                                // as EXTH records in AZW3/MOBI).
+                                "fixed-layout" => {
+                                    if let Some(v) = val {
+                                        metadata.fixed_layout = v.eq_ignore_ascii_case("true");
+                                    }
+                                }
+                                "book-type" => {
+                                    metadata.book_type = val.map(str::to_string);
+                                }
+                                "original-resolution" => {
+                                    if let Some(vp) = val.and_then(parse_viewport) {
+                                        metadata.default_viewport = Some(vp);
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
 
                         // EPUB3 meta with property but no content - value is in text
@@ -547,12 +589,40 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
         metadata,
         manifest: manifest_simple,
         spine_ids,
+        spine_properties,
         ncx_href,
         nav_href,
     })
 }
 
 /// Handle a top-level meta property (no refines attribute).
+/// Parse a fixed-layout viewport string into `(width, height)`. Accepts both
+/// the EBPAJ form `width=1444, height=2048` and the KF8 `original-resolution`
+/// form `1444x2048`.
+fn parse_viewport(value: &str) -> Option<(u32, u32)> {
+    let v = value.trim();
+    if let Some((w, h)) = v.split_once('x').or_else(|| v.split_once('X'))
+        && let (Ok(w), Ok(h)) = (w.trim().parse(), h.trim().parse())
+    {
+        return Some((w, h));
+    }
+    let mut width = None;
+    let mut height = None;
+    for part in v.split(',') {
+        if let Some((k, val)) = part.split_once('=') {
+            match k.trim() {
+                "width" => width = val.trim().parse().ok(),
+                "height" => height = val.trim().parse().ok(),
+                _ => {}
+            }
+        }
+    }
+    match (width, height) {
+        (Some(w), Some(h)) => Some((w, h)),
+        _ => None,
+    }
+}
+
 fn handle_meta_property(
     property: &str,
     value: &str,
@@ -560,6 +630,28 @@ fn handle_meta_property(
     element_ids: &mut HashMap<String, MetaElement>,
     elem_id: Option<&str>,
 ) {
+    // Fixed-layout (EPUB 3 Multiple-Rendition / EBPAJ) properties carry a
+    // namespace that matters, so match the full property name first.
+    match property {
+        "rendition:layout" => {
+            // "pre-paginated" = fixed layout; "reflowable" = the default.
+            metadata.fixed_layout = value.trim() == "pre-paginated";
+            return;
+        }
+        "rendition:spread" => {
+            metadata.rendition_spread = Some(value.trim().to_string());
+            return;
+        }
+        // EBPAJ Japanese FXL viewport: `width=1444, height=2048`.
+        "fixed-layout-jp:viewport" | "viewport" => {
+            if let Some(vp) = parse_viewport(value) {
+                metadata.default_viewport = Some(vp);
+            }
+            return;
+        }
+        _ => {}
+    }
+
     // Strip namespace prefix if present (e.g., "dcterms:modified" -> "modified")
     let prop_local = property.rsplit(':').next().unwrap_or(property);
 
@@ -1411,6 +1503,48 @@ mod tests {
             result.metadata.primary_writing_mode,
             Some("vertical-rl".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_opf_fixed_layout_manga() {
+        // A fixed-layout comic OPF (EBPAJ + EPUB3 rendition + Kindle hints)
+        // must populate the IR's fixed-layout model, incl. per-page spread.
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" prefix="rendition: http://www.idpf.org/vocab/rendition/#">
+  <metadata>
+    <dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Manga</dc:title>
+    <meta property="rendition:layout">pre-paginated</meta>
+    <meta property="rendition:spread">landscape</meta>
+    <meta property="fixed-layout-jp:viewport">width=1444, height=2048</meta>
+    <meta name="book-type" content="comic"/>
+  </metadata>
+  <manifest>
+    <item id="p1" href="p1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="p2" href="p2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="p1" properties="page-spread-right"/>
+    <itemref idref="p2" properties="page-spread-left"/>
+  </spine>
+</package>"#;
+
+        let r = parse_opf(opf).unwrap();
+        assert!(r.metadata.fixed_layout);
+        assert_eq!(r.metadata.rendition_spread.as_deref(), Some("landscape"));
+        assert_eq!(r.metadata.default_viewport, Some((1444, 2048)));
+        assert_eq!(r.metadata.book_type.as_deref(), Some("comic"));
+        assert_eq!(r.spine_properties.get("p1").map(String::as_str), Some("page-spread-right"));
+        assert_eq!(
+            crate::model::PageSpread::from_opf_properties(r.spine_properties.get("p2").unwrap()),
+            Some(crate::model::PageSpread::Left)
+        );
+    }
+
+    #[test]
+    fn test_parse_viewport_forms() {
+        assert_eq!(parse_viewport("width=1444, height=2048"), Some((1444, 2048)));
+        assert_eq!(parse_viewport("1444x2048"), Some((1444, 2048)));
+        assert_eq!(parse_viewport("garbage"), None);
     }
 
     #[test]

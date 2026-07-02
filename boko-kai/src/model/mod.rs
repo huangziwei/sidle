@@ -19,7 +19,8 @@ mod semantic;
 
 // Re-export book types
 pub use book::{
-    Book, CollectionInfo, Contributor, Format, Landmark, LandmarkType, Metadata, Resource, TocEntry,
+    Book, CollectionInfo, Contributor, Format, Landmark, LandmarkType, Metadata, PageSpread,
+    Resource, TocEntry,
 };
 
 // Re-export chapter and iteration
