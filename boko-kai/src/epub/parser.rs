@@ -285,10 +285,18 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                         let mut refines: Option<String> = None;
                         let mut content: Option<String> = None;
                         let mut elem_id: Option<String> = None;
+                        let mut meta_name: Option<String> = None;
 
                         for attr in e.attributes().flatten() {
                             match attr.key.as_ref() {
-                                b"name" if &*attr.value == b"cover" => is_cover = true,
+                                b"name" => {
+                                    let val = String::from_utf8(attr.value.to_vec())
+                                        .map_err(io::Error::other)?;
+                                    if val == "cover" {
+                                        is_cover = true;
+                                    }
+                                    meta_name = Some(val);
+                                }
                                 b"content" => {
                                     let val = String::from_utf8(attr.value.to_vec())
                                         .map_err(io::Error::other)?;
@@ -319,6 +327,18 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
 
                         if is_cover && !cover_id.is_empty() {
                             epub2_cover_id = Some(cover_id);
+                        }
+
+                        // `<meta name="primary-writing-mode" content="vertical-rl"/>`
+                        // — the Kindle/Kadokawa book-level writing-mode hint. This
+                        // is the authoritative fixed writing mode when the publisher
+                        // declares it; the KFX export prefers it over deriving one
+                        // from the content styles.
+                        if meta_name.as_deref() == Some("primary-writing-mode")
+                            && let Some(val) =
+                                content.as_deref().map(str::trim).filter(|v| !v.is_empty())
+                        {
+                            metadata.primary_writing_mode = Some(val.to_string());
                         }
 
                         // EPUB3 meta with property but no content - value is in text
@@ -1370,6 +1390,40 @@ mod tests {
 
         let result = parse_opf(opf).unwrap();
         assert_eq!(result.metadata.cover_image, Some("cover.png".to_string()));
+    }
+
+    #[test]
+    fn test_parse_opf_primary_writing_mode() {
+        // The Kindle/Kadokawa book-level hint must be captured so the KFX
+        // export can use it as the authoritative writing mode.
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata>
+    <dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Book</dc:title>
+    <meta name="primary-writing-mode" content="vertical-rl"/>
+  </metadata>
+  <manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+
+        let result = parse_opf(opf).unwrap();
+        assert_eq!(
+            result.metadata.primary_writing_mode,
+            Some("vertical-rl".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_opf_no_primary_writing_mode_is_none() {
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Book</dc:title></metadata>
+  <manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+
+        let result = parse_opf(opf).unwrap();
+        assert_eq!(result.metadata.primary_writing_mode, None);
     }
 
     #[test]

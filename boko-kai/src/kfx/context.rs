@@ -691,6 +691,15 @@ pub struct ExportContext {
     /// style fragment emission; defaults to `HorizontalTb`. The KOA2 reads
     /// this to decide whether to expose the vertical-text layout controls.
     pub document_writing_mode: KfxSymbol,
+
+    /// Document-level `direction` symbol (`Ltr` / `Rtl`) for `document_data`.
+    /// The device derives page-progression from this, overriding to rtl when
+    /// `document_writing_mode` ends in `-rl` (i.e. `vertical_rl`). So a
+    /// vertical-rl book keeps `Ltr` here (the override does the work, matching
+    /// Amazon), while a *horizontal* right-to-left book — an rtl manga, a
+    /// horizontally-typeset rtl title — must carry `Rtl` explicitly, since its
+    /// writing mode cannot signal the turn direction. Defaults to `Ltr`.
+    pub document_direction: KfxSymbol,
 }
 
 /// Registry mapping ruby annotation strings to (ruby_name, ruby_id) pairs.
@@ -816,6 +825,7 @@ impl ExportContext {
             section_resource_deps: BTreeMap::new(),
             ruby_registry: RubyContentRegistry::new(),
             document_writing_mode: KfxSymbol::HorizontalTb,
+            document_direction: KfxSymbol::Ltr,
         }
     }
 

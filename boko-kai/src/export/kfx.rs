@@ -297,7 +297,8 @@ fn build_kfx_container(
     // whether an explicit `horizontal-tb` cascade result is an override
     // (in a vertical book) or just the spec default, and the horizontal
     // override silently disappears into KFX's `vertical_rl` inheritance.
-    ctx.document_writing_mode = dominant_writing_mode_from_ir(book);
+    ctx.document_writing_mode = book_writing_mode(book);
+    ctx.document_direction = document_direction(book, ctx.document_writing_mode);
 
     // ========================================================================
     // PASS 2: SYNTHESIS (Generate Ion)
@@ -985,7 +986,7 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
     let document_data = IonValue::Struct(vec![
         (
             KfxSymbol::Direction as u64,
-            IonValue::Symbol(KfxSymbol::Ltr as u64),
+            IonValue::Symbol(ctx.document_direction as u64),
         ),
         (
             KfxSymbol::ColumnCount as u64,
@@ -1040,8 +1041,68 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
     KfxFragment::singleton(KfxSymbol::DocumentData, document_data)
 }
 
-/// Return the writing-mode that best describes the document as a whole, by
-/// scanning every chapter's IR style pool.
+/// Resolve `document_data.direction` from the book's page-progression.
+///
+/// The device computes page-progression as `direction`, then overrides it to
+/// rtl when `writing_mode` ends in `-rl`. So a vertical-rl book reaches rtl via
+/// the writing-mode override and keeps `direction: ltr` (matching Amazon). A
+/// book that turns right-to-left but whose writing mode is *not* `vertical_rl`
+/// — a horizontal rtl manga, a horizontally-typeset rtl title — has no writing
+/// mode to carry the turn, so `direction` itself must be `rtl`. Everything else
+/// is `ltr` (the device default).
+fn document_direction(book: &Book, writing_mode: KfxSymbol) -> KfxSymbol {
+    let turns_rtl = book
+        .metadata()
+        .page_progression_direction
+        .as_deref()
+        .map(str::trim)
+        .map(|d| d.eq_ignore_ascii_case("rtl"))
+        .unwrap_or(false);
+    direction_for_progression(turns_rtl, writing_mode)
+}
+
+/// Pure core of [`document_direction`]: `Rtl` only when the book turns rtl and
+/// its writing mode cannot signal that turn (anything but `vertical_rl`).
+fn direction_for_progression(turns_rtl: bool, writing_mode: KfxSymbol) -> KfxSymbol {
+    if turns_rtl && writing_mode != KfxSymbol::VerticalRl {
+        KfxSymbol::Rtl
+    } else {
+        KfxSymbol::Ltr
+    }
+}
+
+/// The book-level writing mode to stamp into `document_data.writing_mode`.
+///
+/// Writing mode is a fixed, book-level property: the publisher declares it once
+/// and individual pages override it as the exception. The authoritative source
+/// is the OPF `<meta name="primary-writing-mode">` hint, so prefer it whenever
+/// present. Only when the book omits it (many publisher EPUBs, including the
+/// LV999 series, express the mode purely through CSS on content roots) is there
+/// nothing fixed to read, and the mode must be recovered from the content — see
+/// [`dominant_writing_mode_from_ir`].
+fn book_writing_mode(book: &mut Book) -> KfxSymbol {
+    // `primary-writing-mode` is Amazon's book-level hint, and its vocabulary
+    // (`horizontal-lr`, `horizontal-rl`, `vertical-rl`, `vertical-lr`) encodes
+    // both the text axis *and* the page-turn direction — it is NOT a CSS
+    // `writing-mode`. Only the axis maps to KFX `writing_mode`, so both
+    // `horizontal-*` values collapse to `horizontal_tb`. (The page-turn
+    // direction rides on the OPF spine `page-progression-direction`, applied
+    // separately.)
+    if let Some(pwm) = book.metadata().primary_writing_mode.as_deref() {
+        match pwm.trim() {
+            "vertical-rl" | "vertical_rl" => return KfxSymbol::VerticalRl,
+            "vertical-lr" | "vertical_lr" => return KfxSymbol::VerticalLr,
+            "horizontal-lr" | "horizontal-rl" | "horizontal-tb" | "horizontal_lr"
+            | "horizontal_rl" | "horizontal_tb" => return KfxSymbol::HorizontalTb,
+            _ => {} // unrecognised value — fall through to content derivation
+        }
+    }
+    dominant_writing_mode_from_ir(book)
+}
+
+/// Recover the book-level writing mode from the content when the OPF declares
+/// no `primary-writing-mode` (see [`book_writing_mode`]), by scanning every
+/// chapter's IR style pool.
 ///
 /// This runs *before* Pass 2 so the answer is available while IR styles are
 /// being ingested. The ingest side then compares each style's `writing_mode`
@@ -4380,6 +4441,36 @@ mod tests {
         assert_eq!(pick_document_writing_mode(1, 5), KfxSymbol::VerticalLr);
         // vertical-rl wins ties against vertical-lr.
         assert_eq!(pick_document_writing_mode(4, 4), KfxSymbol::VerticalRl);
+    }
+
+    #[test]
+    fn direction_is_rtl_only_for_horizontal_rtl_books() {
+        // Vertical-rl rtl book: the writing-mode `-rl` override does the work,
+        // so direction stays ltr (matches Amazon).
+        assert_eq!(
+            direction_for_progression(true, KfxSymbol::VerticalRl),
+            KfxSymbol::Ltr
+        );
+        // Horizontal rtl book (rtl manga): no `-rl` writing mode, so direction
+        // must carry the turn.
+        assert_eq!(
+            direction_for_progression(true, KfxSymbol::HorizontalTb),
+            KfxSymbol::Rtl
+        );
+        // Vertical-lr rtl (contradictory/Mongolian) still needs direction rtl.
+        assert_eq!(
+            direction_for_progression(true, KfxSymbol::VerticalLr),
+            KfxSymbol::Rtl
+        );
+        // ltr books are always ltr regardless of writing mode.
+        assert_eq!(
+            direction_for_progression(false, KfxSymbol::HorizontalTb),
+            KfxSymbol::Ltr
+        );
+        assert_eq!(
+            direction_for_progression(false, KfxSymbol::VerticalRl),
+            KfxSymbol::Ltr
+        );
     }
 
     #[test]
