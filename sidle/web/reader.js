@@ -1227,7 +1227,8 @@ function tocRowsFor(point, depth, out) {
   li.style.paddingLeft = `${14 + depth * 14}px`; // UI chrome is always LTR
   li.textContent = point.label || "—";
   li.addEventListener("click", () => goToToc(point.href));
-  tocEntries.push({ li, sectionIndex: tocTarget(point.href).index });
+  const t = tocTarget(point.href);
+  tocEntries.push({ li, sectionIndex: t.index, frag: t.frag });
   out.push(li);
   for (const child of point.children || []) tocRowsFor(child, depth + 1, out);
 }
@@ -1245,14 +1246,35 @@ function renderTocPanel() {
   $("#reader-toc-empty").hidden = rows.length > 0;
 }
 
-// Highlight the TOC entry for the current section: the first entry landing in
-// it, else the last entry before it. (Most books are one entry per section.)
-function markTocActive(currentIndex) {
+// Highlight the TOC entry we're currently reading. Across sections, that's the
+// last entry in an earlier section (or landing in this one). WITHIN a section
+// that holds several entries — e.g. a chapter split into scenes, all sharing one
+// `cN.xhtml` — section granularity can't tell them apart, so we resolve each
+// same-section entry's `#fragment` to its element and compare document order
+// against the page's top node: an entry is behind us unless its target sits
+// after the top of the page. `top` (the visible range's start) and the entry
+// elements live in the same loaded section doc, so this needs no position map.
+function markTocActive(currentIndex, doc, range) {
   if (typeof currentIndex !== "number" || !tocEntries.length) return;
-  let active = tocEntries.findIndex((e) => e.sectionIndex === currentIndex);
-  if (active < 0) {
-    for (let i = 0; i < tocEntries.length; i++) {
-      if (tocEntries[i].sectionIndex >= 0 && tocEntries[i].sectionIndex < currentIndex) active = i;
+  const top = range?.startContainer || null;
+  let active = -1;
+  for (let i = 0; i < tocEntries.length; i++) {
+    const e = tocEntries[i];
+    if (e.sectionIndex < 0) continue;
+    if (e.sectionIndex < currentIndex) {
+      active = i; // any entry in an earlier section is behind us
+    } else if (e.sectionIndex === currentIndex) {
+      let behind = true;
+      if (doc && top && e.frag) {
+        const el = doc.getElementById(e.frag);
+        // `el.compareDocumentPosition(top)` has the PRECEDING bit set when `top`
+        // comes before `el` — i.e. this entry's target is still ahead of us.
+        if (el && el.compareDocumentPosition(top) & Node.DOCUMENT_POSITION_PRECEDING) {
+          behind = false;
+        }
+      }
+      if (behind) active = i;
+      // No early break: TOC order is usually monotonic, but don't assume it.
     }
   }
   tocEntries.forEach(({ li }, i) => li.classList.toggle("active", i === active));
@@ -3502,7 +3524,7 @@ async function open(id) {
   });
   paginator.addEventListener("relocate", ({ detail }) => {
     updateProgress(detail);
-    markTocActive(detail.index);
+    markTocActive(detail.index, detail?.range?.startContainer?.ownerDocument, detail?.range);
     updateBookmarkButton(); // after updateProgress sets the page's top eid
     hideNotePopover();
     hideSelectionToolbar();
