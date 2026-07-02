@@ -35,7 +35,7 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use zip::ZipArchive;
 
-use crate::epub::{parse_container_xml, parse_ncx, parse_opf};
+use crate::epub::{parse_container_xml, parse_nav_toc, parse_ncx, parse_opf};
 use crate::kfx::container::{
     extract_doc_symbols, parse_container_header, parse_container_info, parse_index_table,
     skip_enty_header,
@@ -66,24 +66,29 @@ pub struct Report {
     // --- EPUB side ---
     /// Count of `<h1>`–`<h6>` per level in the EPUB spine (level → count).
     pub epub_headings_by_level: HashMap<u8, usize>,
-    /// Flat count of TOC entries from EPUB NCX (recursive total).
+    /// Flat count of TOC entries from the EPUB's authoritative TOC (recursive
+    /// total). Ground truth is the richer of the EPUB 3 nav doc vs the EPUB 2
+    /// NCX — the same selection the importer makes — because retail EPUBs pair a
+    /// full nav with a stub NCX (or vice versa); validating against the NCX
+    /// alone masked whole-chapter TOC losses.
     pub epub_toc_entry_count: usize,
     /// Count of TOC entries pointing at manifest items not in the spine.
     /// These can't be addressed by KFX position-based navigation and are
     /// excluded from the count diff.
     pub epub_non_spine_toc_entries: usize,
-    /// Whether the EPUB has an NCX. If not, TOC checks are skipped.
-    pub epub_has_ncx: bool,
-    /// Distinct `<content src>` paths (everything before `#`) across all NCX
-    /// `<navPoint>` entries. A well-formed NCX has roughly one distinct path
-    /// per top-level chapter; when this collapses to 1 while
-    /// `epub_toc_entry_count` is many, every TOC entry is silently pointing at
-    /// the same placeholder — the most common port defect (boko's
-    /// `nav_unit_to_navpoint` placeholder before `process_position` lands).
-    pub epub_distinct_ncx_hrefs: usize,
-    /// NCX `<content src>` paths (before `#`) that don't resolve to any
-    /// manifest entry. Each one is a broken TOC link.
-    pub epub_unresolved_ncx_hrefs: Vec<String>,
+    /// Whether the EPUB has any usable TOC (nav or NCX). If not, TOC checks are
+    /// skipped.
+    pub epub_has_toc: bool,
+    /// Distinct `<content src>`/`<a href>` paths (everything before `#`) across
+    /// all TOC entries. A well-formed TOC has roughly one distinct path per
+    /// top-level chapter; when this collapses to 1 while `epub_toc_entry_count`
+    /// is many, every TOC entry is silently pointing at the same placeholder —
+    /// the most common port defect (boko's `nav_unit_to_navpoint` placeholder
+    /// before `process_position` lands).
+    pub epub_distinct_toc_hrefs: usize,
+    /// TOC paths (before `#`) that don't resolve to any manifest entry. Each one
+    /// is a broken TOC link.
+    pub epub_unresolved_toc_hrefs: Vec<String>,
 
     // --- KFX side ---
     /// Count of nav_units under the KFX headings container, keyed by level.
@@ -112,18 +117,18 @@ impl Report {
         self.dangling_nav.is_empty()
             && self.heading_count_diffs.is_empty()
             && self.toc_count_diff.unwrap_or(0) == 0
-            && self.epub_unresolved_ncx_hrefs.is_empty()
-            && !self.ncx_collapsed_to_placeholder()
+            && self.epub_unresolved_toc_hrefs.is_empty()
+            && !self.toc_collapsed_to_placeholder()
     }
 
-    /// Heuristic: if the NCX has multiple TOC entries but every entry points
-    /// at the same file (distinct hrefs == 1 while total > 1), the port has
-    /// stamped a placeholder href on every entry. Real NCXs have at least one
-    /// distinct path per chapter.
-    pub fn ncx_collapsed_to_placeholder(&self) -> bool {
-        self.epub_has_ncx
+    /// Heuristic: if the TOC has multiple entries but every entry points at the
+    /// same file (distinct hrefs == 1 while total > 1), the port has stamped a
+    /// placeholder href on every entry. Real TOCs have at least one distinct
+    /// path per chapter.
+    pub fn toc_collapsed_to_placeholder(&self) -> bool {
+        self.epub_has_toc
             && self.epub_toc_entry_count > 1
-            && self.epub_distinct_ncx_hrefs <= 1
+            && self.epub_distinct_toc_hrefs <= 1
     }
 
     pub fn print_summary(&self, dir: super::Direction) {
@@ -146,23 +151,23 @@ impl Report {
         }
         println!("  total: {}", kfx_total);
         println!("TOC entries:");
-        if self.epub_has_ncx {
+        if self.epub_has_toc {
             if self.epub_non_spine_toc_entries > 0 {
                 println!(
-                    "  EPUB NCX:    {} ({} non-spine, can't be addressed in KFX)",
+                    "  EPUB TOC:    {} ({} non-spine, can't be addressed in KFX)",
                     self.epub_toc_entry_count, self.epub_non_spine_toc_entries
                 );
             } else {
-                println!("  EPUB NCX:    {}", self.epub_toc_entry_count);
+                println!("  EPUB TOC:    {}", self.epub_toc_entry_count);
             }
         } else {
-            println!("  EPUB NCX:    (none — TOC check skipped)");
+            println!("  EPUB TOC:    (none — TOC check skipped)");
         }
         println!("  KFX TOC nav: {}", self.kfx_toc_entry_count);
-        if self.epub_has_ncx {
+        if self.epub_has_toc {
             println!(
-                "  EPUB NCX distinct hrefs: {} (of {} entries)",
-                self.epub_distinct_ncx_hrefs, self.epub_toc_entry_count
+                "  EPUB TOC distinct hrefs: {} (of {} entries)",
+                self.epub_distinct_toc_hrefs, self.epub_toc_entry_count
             );
         }
         println!(
@@ -173,12 +178,12 @@ impl Report {
         println!("  dangling nav targets:       {}", self.dangling_nav.len());
         println!("  heading level diffs:        {}", self.heading_count_diffs.len());
         println!(
-            "  NCX hrefs not in manifest:  {}",
-            self.epub_unresolved_ncx_hrefs.len()
+            "  TOC hrefs not in manifest:  {}",
+            self.epub_unresolved_toc_hrefs.len()
         );
-        if self.ncx_collapsed_to_placeholder() {
+        if self.toc_collapsed_to_placeholder() {
             println!(
-                "  NCX collapsed to placeholder: {} of {} TOC entries share 1 href",
+                "  TOC collapsed to placeholder: {} of {} TOC entries share 1 href",
                 self.epub_toc_entry_count, self.epub_toc_entry_count
             );
         }
@@ -194,18 +199,18 @@ impl Report {
                 println!("  h{}:  {:+}", level, diff);
             }
         }
-        if !self.epub_unresolved_ncx_hrefs.is_empty() {
+        if !self.epub_unresolved_toc_hrefs.is_empty() {
             println!(
-                "\n--- NCX <content src> not in manifest [first {}] ---",
+                "\n--- TOC targets not in manifest [first {}] ---",
                 limit
             );
-            for h in self.epub_unresolved_ncx_hrefs.iter().take(limit) {
+            for h in self.epub_unresolved_toc_hrefs.iter().take(limit) {
                 println!("  {}", h);
             }
-            if self.epub_unresolved_ncx_hrefs.len() > limit {
+            if self.epub_unresolved_toc_hrefs.len() > limit {
                 println!(
                     "  ... and {} more",
-                    self.epub_unresolved_ncx_hrefs.len() - limit
+                    self.epub_unresolved_toc_hrefs.len() - limit
                 );
             }
         }
@@ -246,7 +251,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     // into KFX (position-based nav requires spine content) — and discount the
     // synthesized leading cover (表紙) entry boko prepends to match Amazon, which
     // the source NCX never carries, so the comparison stays source-vs-source.
-    let toc_count_diff = epub_side.has_ncx.then(|| {
+    let toc_count_diff = epub_side.has_toc.then(|| {
         let expected = epub_side
             .toc_entry_count
             .saturating_sub(epub_side.non_spine_toc_entries);
@@ -283,9 +288,9 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         epub_headings_by_level: epub_side.headings_by_level,
         epub_toc_entry_count: epub_side.toc_entry_count,
         epub_non_spine_toc_entries: epub_side.non_spine_toc_entries,
-        epub_has_ncx: epub_side.has_ncx,
-        epub_distinct_ncx_hrefs: epub_side.distinct_ncx_hrefs,
-        epub_unresolved_ncx_hrefs: epub_side.unresolved_ncx_hrefs,
+        epub_has_toc: epub_side.has_toc,
+        epub_distinct_toc_hrefs: epub_side.distinct_toc_hrefs,
+        epub_unresolved_toc_hrefs: epub_side.unresolved_toc_hrefs,
         kfx_headings_by_level: kfx.headings_by_level,
         kfx_heading_targets: kfx.heading_targets,
         kfx_toc_entry_count: kfx.toc_targets.len(),
@@ -310,9 +315,9 @@ struct EpubNav {
     /// so these entries are genuinely unreachable — boko silently drops them
     /// and the validator excludes them from the count diff.
     non_spine_toc_entries: usize,
-    has_ncx: bool,
-    distinct_ncx_hrefs: usize,
-    unresolved_ncx_hrefs: Vec<String>,
+    has_toc: bool,
+    distinct_toc_hrefs: usize,
+    unresolved_toc_hrefs: Vec<String>,
 }
 
 fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
@@ -373,35 +378,49 @@ fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
         .map(|(href, _)| href.clone())
         .collect();
 
-    // 2. TOC — parse NCX if present.
-    let (toc_entry_count, non_spine_toc_entries, has_ncx, distinct_ncx_hrefs, unresolved_ncx_hrefs) =
-        if let Some(ncx_href) = &opf.ncx_href {
-            let ncx_path = format!("{}{}", opf_base, ncx_href);
-            match read_zip_entry(&mut archive, &ncx_path) {
-                Ok(ncx_bytes) => {
-                    let enc = crate::util::extract_xml_encoding(&ncx_bytes);
-                    let ncx_str = crate::util::decode_text(&ncx_bytes, enc);
-                    match parse_ncx(&ncx_str) {
-                        Ok(entries) => {
-                            let total = count_toc_entries(&entries);
-                            let non_spine = count_non_spine_entries(&entries, &spine_paths);
-                            let mut href_paths: Vec<String> = Vec::new();
-                            collect_toc_hrefs(&entries, &mut href_paths);
-                            let distinct: HashSet<&String> = href_paths.iter().collect();
-                            let unresolved: Vec<String> = href_paths
-                                .iter()
-                                .filter(|p| !manifest_paths.contains(*p))
-                                .cloned()
-                                .collect::<HashSet<_>>()
-                                .into_iter()
-                                .collect();
-                            (total, non_spine, true, distinct.len(), unresolved)
-                        }
-                        Err(_) => (0, 0, false, 0, Vec::new()),
-                    }
-                }
-                Err(_) => (0, 0, false, 0, Vec::new()),
+    // 2. TOC — parse both the EPUB 2 NCX and the EPUB 3 nav doc, and validate
+    // against the richer of the two (the same selection the importer makes).
+    // Retail EPUBs routinely pair a full nav with a stub NCX (or ship only the
+    // nav); validating against the NCX alone skipped nav-only books entirely and
+    // silently passed a book whose degenerate NCX shadowed a full nav.
+    let mut load_toc = |href: Option<&String>, parse: fn(&str) -> std::io::Result<Vec<TocEntry>>| {
+        let href = href?;
+        let path = format!("{}{}", opf_base, href);
+        let bytes = read_zip_entry(&mut archive, &path).ok()?;
+        let enc = crate::util::extract_xml_encoding(&bytes);
+        let text = crate::util::decode_text(&bytes, enc);
+        let entries = parse(&text).ok()?;
+        (!entries.is_empty()).then_some(entries)
+    };
+    let ncx_entries = load_toc(opf.ncx_href.as_ref(), parse_ncx);
+    let nav_entries = load_toc(opf.nav_href.as_ref(), parse_nav_toc);
+    let toc_entries = match (ncx_entries, nav_entries) {
+        (Some(ncx), Some(nav)) => {
+            if count_toc_entries(&ncx) > count_toc_entries(&nav) {
+                Some(ncx)
+            } else {
+                Some(nav)
             }
+        }
+        (only @ Some(_), None) | (None, only @ Some(_)) => only,
+        (None, None) => None,
+    };
+
+    let (toc_entry_count, non_spine_toc_entries, has_toc, distinct_toc_hrefs, unresolved_toc_hrefs) =
+        if let Some(entries) = toc_entries {
+            let total = count_toc_entries(&entries);
+            let non_spine = count_non_spine_entries(&entries, &spine_paths);
+            let mut href_paths: Vec<String> = Vec::new();
+            collect_toc_hrefs(&entries, &mut href_paths);
+            let distinct: HashSet<&String> = href_paths.iter().collect();
+            let unresolved: Vec<String> = href_paths
+                .iter()
+                .filter(|p| !manifest_paths.contains(*p))
+                .cloned()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            (total, non_spine, true, distinct.len(), unresolved)
         } else {
             (0, 0, false, 0, Vec::new())
         };
@@ -410,9 +429,9 @@ fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
         headings_by_level,
         toc_entry_count,
         non_spine_toc_entries,
-        has_ncx,
-        distinct_ncx_hrefs,
-        unresolved_ncx_hrefs,
+        has_toc,
+        distinct_toc_hrefs,
+        unresolved_toc_hrefs,
     })
 }
 
