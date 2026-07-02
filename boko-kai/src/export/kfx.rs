@@ -1050,13 +1050,10 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
 /// because `extract_ir_field` had already filtered horizontal-tb out as
 /// the CSS-spec default.
 ///
-/// Distinct styles in the pool are counted (the existing semantic; usage
-/// frequency would also be valid but matches what `dominant_writing_mode`
-/// used to do). Defaults to `HorizontalTb` for empty pools / books that
-/// never declare a writing-mode.
+/// Distinct styles in the pool are counted. Only the vertical axes are
+/// tallied; [`pick_document_writing_mode`] then decides the book-level mode.
 fn dominant_writing_mode_from_ir(book: &mut Book) -> KfxSymbol {
     use crate::style::WritingMode;
-    let mut horiz = 0usize;
     let mut vrl = 0usize;
     let mut vlr = 0usize;
     let chapter_ids: Vec<_> = book.spine().iter().map(|e| e.id).collect();
@@ -1068,16 +1065,36 @@ fn dominant_writing_mode_from_ir(book: &mut Book) -> KfxSymbol {
             match style.writing_mode {
                 WritingMode::VerticalRl => vrl += 1,
                 WritingMode::VerticalLr => vlr += 1,
-                WritingMode::HorizontalTb => horiz += 1,
+                WritingMode::HorizontalTb => {}
             }
         }
     }
-    if vrl >= vlr && vrl > horiz {
-        KfxSymbol::VerticalRl
-    } else if vlr > horiz {
-        KfxSymbol::VerticalLr
-    } else {
+    pick_document_writing_mode(vrl, vlr)
+}
+
+/// Choose the book-level writing mode from the count of vertical styles.
+///
+/// `horizontal_tb` is the CSS initial value, so it is the writing mode of every
+/// style that never declares one — including the scaffolding of fixed-layout
+/// image pages. In a book that mixes vertical-rl body text with many such pages
+/// (an illustrated light novel like the LV999 series), that default floods the
+/// tally, and a naive "vertical must outnumber horizontal" majority wrongly
+/// settles on horizontal_tb. The device then derives page-progression from
+/// document_data (`direction` ltr + a writing mode whose suffix is not `-rl`)
+/// and turns pages left-to-right — wrong for a Japanese book. Amazon's own KFX
+/// sets the document writing mode to the book's primary *text* flow and marks
+/// horizontal runs as the exception, so any genuine vertical text makes the
+/// book vertical. Mirror that (and `validate::writing_mode::dominant_mode`):
+/// treat any vertical writing mode as decisive, picking the more-cited axis,
+/// and fall back to horizontal_tb only when the book declares no vertical text
+/// at all.
+fn pick_document_writing_mode(vrl: usize, vlr: usize) -> KfxSymbol {
+    if vrl == 0 && vlr == 0 {
         KfxSymbol::HorizontalTb
+    } else if vrl >= vlr {
+        KfxSymbol::VerticalRl
+    } else {
+        KfxSymbol::VerticalLr
     }
 }
 
@@ -4345,6 +4362,24 @@ mod tests {
         } else {
             panic!("expected Ion data");
         }
+    }
+
+    #[test]
+    fn pick_document_writing_mode_any_vertical_beats_horizontal_majority() {
+        // The LV999 case: 63 vertical-rl styles vs 91 horizontal (from
+        // fixed-layout image pages). Vertical must win so the device turns
+        // pages right-to-left.
+        assert_eq!(
+            pick_document_writing_mode(63, 0),
+            KfxSymbol::VerticalRl,
+            "vertical-rl text must win even when outnumbered by horizontal scaffolding"
+        );
+        // No vertical text at all → horizontal (the common English/LTR book).
+        assert_eq!(pick_document_writing_mode(0, 0), KfxSymbol::HorizontalTb);
+        // A predominantly vertical-lr book (rare) picks that axis.
+        assert_eq!(pick_document_writing_mode(1, 5), KfxSymbol::VerticalLr);
+        // vertical-rl wins ties against vertical-lr.
+        assert_eq!(pick_document_writing_mode(4, 4), KfxSymbol::VerticalRl);
     }
 
     #[test]

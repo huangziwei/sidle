@@ -75,6 +75,20 @@ impl Mode {
     pub fn is_vertical(&self) -> bool {
         matches!(self, Self::VerticalRl | Self::VerticalLr)
     }
+
+    /// Tie-break priority for [`dominant_mode`] (lower wins). Prefers
+    /// `vertical-rl` — the overwhelmingly common Japanese vertical axis — over
+    /// `vertical-lr`, which source CSS often defines only as an unused utility
+    /// class. Without this, an equal declaration count between the two would be
+    /// resolved by `HashMap` iteration order, i.e. differently run-to-run.
+    fn rank(&self) -> u8 {
+        match self {
+            Self::VerticalRl => 0,
+            Self::VerticalLr => 1,
+            Self::Other(_) => 2,
+            Self::HorizontalTb => 3,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -156,7 +170,9 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 /// non-default mode is declared.
 fn dominant_mode(modes: &HashMap<Mode, usize>) -> Mode {
     let mut items: Vec<(&Mode, &usize)> = modes.iter().collect();
-    items.sort_by(|a, b| b.1.cmp(a.1));
+    // Count descending, then by deterministic tie-break rank (HashMap order is
+    // randomised, so ties would otherwise flip run-to-run — see `Mode::rank`).
+    items.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.rank().cmp(&b.0.rank())));
     for (m, _) in &items {
         if **m != Mode::HorizontalTb {
             return (*m).clone();
@@ -448,6 +464,20 @@ mod tests {
     fn dominant_falls_back_to_horizontal_when_empty() {
         let modes = HashMap::new();
         assert_eq!(dominant_mode(&modes), Mode::HorizontalTb);
+    }
+
+    #[test]
+    fn dominant_breaks_vrl_vlr_tie_deterministically_to_vrl() {
+        // A vertical-rl / vertical-lr tie (source CSS commonly defines an
+        // unused vertical-lr utility class alongside the vertical-rl body
+        // rule) must resolve to vertical-rl every time, not by HashMap order.
+        for _ in 0..64 {
+            let mut modes = HashMap::new();
+            modes.insert(Mode::VerticalLr, 2);
+            modes.insert(Mode::VerticalRl, 2);
+            modes.insert(Mode::HorizontalTb, 2);
+            assert_eq!(dominant_mode(&modes), Mode::VerticalRl);
+        }
     }
 
     #[test]
