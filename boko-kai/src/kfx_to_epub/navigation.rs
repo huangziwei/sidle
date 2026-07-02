@@ -203,11 +203,10 @@ pub fn extract_anchors(book: &BookData) -> AnchorTable {
 /// element so `consolidate_html` promotes it to `<hN>` (the element supplies
 /// the `"heading"` layout hint via its `$style`).
 ///
-/// TOC / landmark / page_list anchor registration is intentionally NOT ported
-/// here: boko resolves those eagerly via `id_at` + the chapter-file map, and
-/// registering synthesized TOC anchors would risk new dangling fragments for no
-/// validator benefit. Headings are the one nav class whose level boko cannot
-/// derive any other way (it lives only in the nav, not on the element's style).
+/// TOC target positions are registered separately by [`register_toc_anchors`]
+/// (headings carry a *level*; TOC entries carry a jump *target*). page_list /
+/// landmark anchors are still resolved eagerly via `id_at` + the chapter-file
+/// map, which is enough for those.
 pub fn register_heading_anchors(book: &BookData, table: &mut AnchorTable) {
     let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
         return;
@@ -254,6 +253,101 @@ pub fn register_heading_anchors(book: &BookData, table: &mut AnchorTable) {
     }
 }
 
+/// Register a synthetic id-anchor at every TOC target position, so intra-chapter
+/// nav fragments resolve even for a KFX that ships no internal `$266` anchors.
+///
+/// boko's own e2k KFX is exactly that case: its `$266` table holds only
+/// external-URL anchors, so `id_at(eid, offset)` returns `None` for every TOC
+/// target and [`nav_unit_to_navpoint`] / [`AnchorTable::resolve_uri`] drop the
+/// `#fragment` — every nested entry then collapses to the top of its chapter
+/// file. Unusable in the Sidle reader and the EPUB export; the *device* is
+/// unaffected because it jumps via `book_navigation` positions directly, which
+/// is why it stayed hidden (and why the k2e port originally skipped this).
+///
+/// Anchors are added only at positions that have none, so a real Amazon KFX —
+/// whose `$266` table already anchors these positions — is byte-for-byte
+/// unchanged: `id_at` still returns its real first-anchor id. The synthetic name
+/// (`toc-<eid>-<offset>`) is unique per position and stamped onto the target
+/// element by `content::process_position`.
+pub fn register_toc_anchors(book: &BookData, table: &mut AnchorTable) {
+    let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
+        return;
+    };
+    for value in nav.values() {
+        let unwrapped = value.unwrap_annotated();
+        let candidates: Vec<IonValue> = match unwrapped {
+            IonValue::List(items) => items.clone(),
+            IonValue::Struct(_) => vec![unwrapped.clone()],
+            _ => Vec::new(),
+        };
+        for reading_order in candidates {
+            let Some(ro_fields) = reading_order.as_struct() else {
+                continue;
+            };
+            let Some(containers) =
+                get_field(ro_fields, KfxSymbol::NavContainers as u64).and_then(|v| v.as_list())
+            else {
+                continue;
+            };
+            for container in containers {
+                let Some(resolved) = resolve_nav_container(book, container) else {
+                    continue;
+                };
+                let Some(cfields) = resolved.as_struct() else {
+                    continue;
+                };
+                let nav_type = get_field(cfields, KfxSymbol::NavType as u64)
+                    .and_then(|v| book.symbols.text_of(v))
+                    .unwrap_or("");
+                if nav_type != "toc" {
+                    continue;
+                }
+                let Some(entries) =
+                    get_field(cfields, KfxSymbol::Entries as u64).and_then(|v| v.as_list())
+                else {
+                    continue;
+                };
+                for entry in entries {
+                    register_toc_entry_anchor(entry, table);
+                }
+            }
+        }
+    }
+}
+
+/// Register one TOC entry's target (if the position is not already anchored),
+/// then recurse into its nested entries.
+fn register_toc_entry_anchor(entry: &IonValue, table: &mut AnchorTable) {
+    if let Some((eid, offset)) = nav_target_position(entry) {
+        let occupied = table
+            .position_anchors
+            .get(&eid)
+            .and_then(|m| m.get(&offset))
+            .is_some_and(|names| !names.is_empty());
+        if !occupied {
+            let name = format!("toc-{eid}-{offset}");
+            table
+                .position_anchors
+                .entry(eid)
+                .or_default()
+                .entry(offset)
+                .or_default()
+                .push(name.clone());
+            table.name_to_position.entry(name).or_insert((eid, offset));
+        }
+    }
+    if let Some(children) = entry
+        .unwrap_annotated()
+        .as_struct()
+        .and_then(|f| get_field(f, KfxSymbol::Entries as u64))
+        .and_then(|v| v.as_list())
+    {
+        for child in children {
+            register_toc_entry_anchor(child, table);
+        }
+    }
+}
+
 fn register_heading_level_unit(value: &IonValue, book: &BookData, table: &mut AnchorTable) {
     let inner = value.unwrap_annotated();
     let Some(fields) = inner.as_struct() else {
@@ -270,7 +364,7 @@ fn register_heading_level_unit(value: &IonValue, book: &BookData, table: &mut An
         return;
     };
     for unit in nested {
-        if let Some((eid, offset)) = heading_target_position(unit) {
+        if let Some((eid, offset)) = nav_target_position(unit) {
             table.heading_level.entry((eid, offset)).or_insert(level);
         }
     }
@@ -290,7 +384,10 @@ fn level_of_landmark(name: &str) -> Option<u8> {
     }
 }
 
-fn heading_target_position(unit: &IonValue) -> Option<(i64, i64)> {
+/// The `(location_id, offset)` a nav_unit's `$246 target_position` points at.
+/// Shared by heading-level and TOC-anchor registration (both key off the same
+/// target).
+fn nav_target_position(unit: &IonValue) -> Option<(i64, i64)> {
     let fields = unit.unwrap_annotated().as_struct()?;
     get_field(fields, KfxSymbol::TargetPosition as u64)
         .and_then(|v| v.as_struct())

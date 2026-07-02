@@ -150,6 +150,11 @@ impl<'a> ContentState<'a> {
         // emission so `process_position` can stamp them (calibre runs
         // `process_navigation` before `process_reading_order`).
         super::navigation::register_heading_anchors(book, &mut anchors);
+        // Register a synthetic id-anchor at every TOC target position, so
+        // intra-chapter nav fragments resolve even when the KFX ships no
+        // internal `$266` anchors (boko's own e2k output). Without it every
+        // nested TOC entry collapses to its chapter's top in the reader/export.
+        super::navigation::register_toc_anchors(book, &mut anchors);
         let fxl = detect_fxl(book);
         Self {
             book,

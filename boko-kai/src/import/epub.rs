@@ -294,40 +294,36 @@ impl EpubImporter {
             }
         }
 
-        // 5. Parse TOC. Try NCX first (EPUB 2 and many 3.0 hybrids), then
-        // fall back to the EPUB 3 nav doc's `<nav epub:type="toc">`.
-        // Kadokawa/EBPAJ-style Japanese EPUBs drop NCX entirely and only
-        // ship the nav doc TOC; without this fallback, those books make
-        // it through conversion with no `book_navigation` entries and the
-        // device shows no chapter list.
+        // 5. Parse TOC. The EPUB 3 nav doc is the authoritative TOC; the legacy
+        // EPUB 2 NCX is a fallback. Retail Japanese EPUBs (Kadokawa/EBPAJ)
+        // routinely ship BOTH — a full nav doc AND a stub NCX that lists only
+        // cover/目次/奥付 — so we parse both and keep whichever is richer,
+        // preferring the nav on a tie. The old NCX-first-unless-empty order made
+        // those books lose every chapter: the 3-entry stub NCX shadowed the
+        // 7-entry nav. A book with only one source gets that one; with neither,
+        // the TOC is empty (a headings-only book is handled downstream).
+        let read_toc = |href: Option<&String>, parse: fn(&str) -> io::Result<Vec<TocEntry>>| {
+            let href = href?;
+            let path = format!("{}{}", opf_base, percent_decode(href));
+            let bytes = read_entry(&source, &zip_index, &path).ok()?;
+            let hint_encoding = crate::util::extract_xml_encoding(&bytes);
+            let text = crate::util::decode_text(&bytes, hint_encoding);
+            let entries = parse(&text).ok()?;
+            (!entries.is_empty()).then(|| prepend_base_to_toc(&entries, &opf_base))
+        };
         let toc = {
-            let ncx_toc = opf.ncx_href.as_ref().and_then(|ncx_href| {
-                let ncx_path = format!("{}{}", opf_base, percent_decode(ncx_href));
-                let ncx_bytes = read_entry(&source, &zip_index, &ncx_path).ok()?;
-                let hint_encoding = crate::util::extract_xml_encoding(&ncx_bytes);
-                let ncx_str = crate::util::decode_text(&ncx_bytes, hint_encoding);
-                let entries = parse_ncx(&ncx_str).ok()?;
-                if entries.is_empty() {
-                    None
-                } else {
-                    Some(prepend_base_to_toc(&entries, &opf_base))
+            let ncx_toc = read_toc(opf.ncx_href.as_ref(), parse_ncx);
+            let nav_toc = read_toc(opf.nav_href.as_ref(), parse_nav_toc);
+            match (ncx_toc, nav_toc) {
+                (Some(ncx), Some(nav)) => {
+                    if count_toc_entries(&ncx) > count_toc_entries(&nav) {
+                        ncx
+                    } else {
+                        nav
+                    }
                 }
-            });
-            if let Some(toc) = ncx_toc {
-                toc
-            } else if let Some(nav_href) = &opf.nav_href {
-                let nav_path = format!("{}{}", opf_base, percent_decode(nav_href));
-                read_entry(&source, &zip_index, &nav_path)
-                    .ok()
-                    .and_then(|nav_bytes| {
-                        let hint_encoding = crate::util::extract_xml_encoding(&nav_bytes);
-                        let nav_str = crate::util::decode_text(&nav_bytes, hint_encoding);
-                        parse_nav_toc(&nav_str).ok()
-                    })
-                    .map(|entries| prepend_base_to_toc(&entries, &opf_base))
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
+                (Some(only), None) | (None, Some(only)) => only,
+                (None, None) => Vec::new(),
             }
         };
 
@@ -682,6 +678,16 @@ fn repair_flat_toc_fragments(
         }
         repair_flat_toc_fragments(&mut entry.children, heading_ids);
     }
+}
+
+/// Total entries in a TOC tree, counting nested children. Used to pick the
+/// richer of a book's NCX vs nav-doc TOC when it ships both (some retail EPUBs
+/// pair a full nav with a stub NCX, or vice versa).
+fn count_toc_entries(entries: &[TocEntry]) -> usize {
+    entries
+        .iter()
+        .map(|e| 1 + count_toc_entries(&e.children))
+        .sum()
 }
 
 /// Prepend base path to TOC entry hrefs (NCX uses relative paths).

@@ -100,9 +100,18 @@ pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> 
     // the book has no cover, that section isn't present, or the TOC already
     // leads with it (e.g. a real Amazon KFX, whose `book_navigation` has it).
     let mut toc = toc;
+    // Compare by *section*, ignoring any `#fragment`: a real book_navigation
+    // cover entry now carries a synthesized `#toc-…` anchor (see
+    // `register_toc_anchors`), so an exact-href compare would miss the match and
+    // prepend a duplicate 表紙.
+    let leads_with_cover = |toc: &[NavPoint], sec: &str| {
+        toc.first()
+            .map(|p| p.href.split('#').next().unwrap_or(&p.href) == sec)
+            .unwrap_or(false)
+    };
     if let Some((cover_img, _, _)) = out.cover_image_info()
         && let Some(cover_sec) = sections.iter().find(|s| s.html.contains(cover_img))
-        && toc.first().map(|p| p.href.as_str()) != Some(cover_sec.href.as_str())
+        && !leads_with_cover(&toc, &cover_sec.href)
     {
         let label = if book.metadata.language.to_ascii_lowercase().starts_with("ja") {
             "表紙"
