@@ -2404,6 +2404,17 @@ kbd {
 .reader-pdf-spread.double {
   gap: 12px; /* the gutter between two facing pages */
 }
+/* "Merge seam" spread (manga / comics): the two facing pages butt together with
+   no gutter so a cross-page panel reads as one continuous image. The per-page
+   drop shadow would otherwise draw a seam down the centre, so drop it and frame
+   the whole spread box with a single shadow instead. */
+.reader-pdf-spread.double.merged {
+  gap: 0;
+  box-shadow: 0 1px 10px rgba(0, 0, 0, 0.3);
+}
+.reader-pdf-spread.double.merged .reader-pdf-page {
+  box-shadow: none;
+}
 /* RTL (Japanese/manga) double-spread: the lower-numbered page sits on the right.
    Only the visual order flips — pageL is still the lower index in reader.js. */
 .reader-pdf-spread.rtl.double {

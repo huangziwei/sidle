@@ -1934,11 +1934,17 @@ let pdfTocRows = []; // [{ li, page }] in TOC order, for active-marking
 // PDF display settings — a per-book reading preference, persisted under a key that
 // appends the open document's id, exactly like the reflowable `styleSettings`.
 // `spread`: auto | single | double; `invert`: night mode (invert the page image);
-// `cover`: in double mode, show page 0 as a standalone cover (else pair from 0).
-// `zoom` is per-open (reset to fit on every open). Reloaded per book in openPdf /
-// openNotebook; defaults until then.
+// `cover`: in double mode, show page 0 as a standalone cover (else pair from 0);
+// `merge`: in double mode, butt the two facing pages together with no gutter so a
+// cross-page panel reads as one image (manga / comics) — off keeps the gutter,
+// which suits scanned text PDFs. `zoom` is per-open (reset to fit on every open).
+// Reloaded per book in openPdf / openNotebook; defaults until then.
 const PDF_STYLE_KEY = "sidle.reader.pdf-style"; // base; the open document id is appended
-const PDF_STYLE_DEFAULT = { spread: "auto", invert: false, ink: true, zoom: 1, cover: true };
+const PDF_STYLE_DEFAULT = { spread: "auto", invert: false, ink: true, zoom: 1, cover: true, merge: false };
+// The gutter (px) between two facing pages in a double spread; 0 when the pages
+// are merged. Kept in sync with the `.reader-pdf-spread.double` gap in styles.css.
+const PDF_SPREAD_GAP = 12;
+const pdfGap = () => (pdfStyle.merge ? 0 : PDF_SPREAD_GAP);
 const PDF_ZOOM_MIN = 1; // 1 = fit; below it the page already fits, so no point
 const PDF_ZOOM_MAX = 3;
 // PDF and notebook share this panel, so key off whichever document is open. A
@@ -2480,7 +2486,7 @@ function pdfRenderWidth(page, half) {
   const aspect = p.width / Math.max(1, p.height);
   const dpr = window.devicePixelRatio || 1;
   let dispW = sh * aspect; // fit to height
-  const budget = half ? (sw - 24) / 2 : sw; // ...but never exceed the width share
+  const budget = half ? (sw - 2 * pdfGap()) / 2 : sw; // ...but never exceed the width share
   if (dispW > budget) dispW = budget;
   const zoom = pdfStyle.zoom || 1; // request a bigger raster when zoomed, so it stays crisp
   const raw = Math.max(200, Math.min(Math.round(dispW * dpr * zoom), 3000));
@@ -2540,7 +2546,7 @@ function pdfDisplaySize(page, half) {
   const aspect = (p.width || 612) / Math.max(1, p.height || 792);
   let h = Math.max(1, sh);
   let w = h * aspect;
-  const budget = half ? (sw - 12) / 2 : sw; // .double gap is 12px
+  const budget = half ? (sw - pdfGap()) / 2 : sw; // reserve the facing-page gutter (0 when merged)
   if (w > budget) {
     w = budget;
     h = w / aspect;
@@ -2692,6 +2698,7 @@ async function pdfRenderCurrent() {
   const left = pdf.page;
   const hasRight = pdfHasRight();
   pdf.host.classList.toggle("double", half);
+  pdf.host.classList.toggle("merged", half && !!pdfStyle.merge); // no-gutter manga spread
   pdf.pageR.style.display = hasRight ? "" : "none";
 
   // Wrappers + text layers first — independent of the image fetch.
@@ -2932,10 +2939,15 @@ function syncPdfStylePanel() {
   $("#rps-ink")?.closest(".rs-row")?.toggleAttribute("hidden", notebook);
   // The standalone cover is a PDF concept; a notebook always pairs from page 0.
   $("#rps-cover")?.closest(".rs-row")?.toggleAttribute("hidden", notebook);
+  // Merging the facing-page seam is a PDF / manga concept; handwritten notebook
+  // pages are independent, so there's nothing to join.
+  $("#rps-merge")?.closest(".rs-row")?.toggleAttribute("hidden", notebook);
   const sp = $("#rps-spread");
   if (sp) sp.value = pdfStyle.spread;
   const cov = $("#rps-cover");
   if (cov) cov.checked = pdfStyle.cover !== false;
+  const mrg = $("#rps-merge");
+  if (mrg) mrg.checked = !!pdfStyle.merge;
   const inv = $("#rps-invert");
   if (inv) inv.checked = !!pdfStyle.invert;
   const ink = $("#rps-ink");
@@ -2978,6 +2990,19 @@ function setPdfSpread(v) {
 // boundary so a turn from either alignment lands cleanly.
 function setPdfCover(on) {
   pdfStyle.cover = !!on;
+  savePdfStyle();
+  if (pdf) {
+    pdfRenderCurrent();
+    pdfUpdateProgress();
+  }
+}
+
+// Butt the two facing pages together with no gutter (manga cross-page spreads)
+// vs the default gutter (scanned text PDFs). Re-renders because the page-sizing
+// budget changes with the gutter; a no-op visually unless the current spread is
+// double (the `.merged` class is gated on `half` in pdfRenderCurrent).
+function setPdfMerge(on) {
+  pdfStyle.merge = !!on;
   savePdfStyle();
   if (pdf) {
     pdfRenderCurrent();
@@ -3732,6 +3757,7 @@ function wire() {
   // PDF display settings (spread + night mode). Persist + apply on change.
   $("#rps-spread")?.addEventListener("change", (e) => setPdfSpread(e.target.value));
   $("#rps-cover")?.addEventListener("change", (e) => setPdfCover(e.target.checked));
+  $("#rps-merge")?.addEventListener("change", (e) => setPdfMerge(e.target.checked));
   $("#rps-invert")?.addEventListener("change", (e) => setPdfInvert(e.target.checked));
   $("#rps-ink")?.addEventListener("change", (e) => setPdfInk(e.target.checked));
   $("#rps-zoom")?.addEventListener("input", (e) => setPdfZoom(parseFloat(e.target.value)));
