@@ -1226,20 +1226,49 @@ function matchesFacets(book, facets) {
   return true;
 }
 
+// Canonical match form, mirroring sidle-core's `romaji::canon` (the fold used to
+// build each book's `search_key`): NFKD-decompose, lowercase, then keep only
+// [a-z0-9] — dropping spaces, punctuation, and the combining accent marks NFKD
+// splits off (ō→o, é→e, fullwidth→half). Space-insensitive on both sides, so
+// "sekaisaikou" hits "sekai saikou …". No digraph expansion here: the stored key
+// already indexes both the accent-stripped and digraph spellings, so an ASCII
+// query needs neither.
+function canonSearch(s) {
+  return (s || "")
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
 function matchesSearch(book) {
-  const q = state.search.trim().toLowerCase();
-  if (!q) return true;
+  const raw = state.search.trim().toLowerCase();
+  if (!raw) return true;
+  // (1) Romaji-aware match. Fold the query the same way the backend folded each
+  //     book's `search_key` (curated title/author romaji + auto-romanized
+  //     series/publisher/tags + the raw fields, all canon'd) and test
+  //     containment. This is what lets a romaji query surface a CJK book —
+  //     "murakami" finds 村上春樹 — the same key the on-device picker searches.
+  //     Space-insensitive, so "sekaisaikou" also hits "sekai saikou …".
+  const q = canonSearch(state.search);
+  if (q && book.search_key && book.search_key.includes(q)) return true;
+  // (2) Raw native-text match. `canon` strips CJK to nothing, so it can't match a
+  //     query typed in the actual script; the desktop has a real keyboard (the
+  //     device's on-screen one is ASCII-only), so keep the plain substring search
+  //     over the raw fields — typing 暗殺 or 村上 still filters. The romaji columns
+  //     are folded in too, so they're searchable even on this path.
   const hay = [
     book.title,
     book.author,
     book.publisher,
     book.series_name,
+    book.title_romaji,
+    book.author_romaji,
     ...(book.tags || []),
   ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  return hay.includes(q);
+  return hay.includes(raw);
 }
 
 function visibleBooks(books) {
