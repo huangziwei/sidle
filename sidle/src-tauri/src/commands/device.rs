@@ -6,9 +6,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::device::DeviceInfo;
 use crate::device::dedrm::{self, PullResult};
-use crate::device::kual::{
-    self, KualInstallReport, KualOverall, KualStatus, ServerConfRender,
-};
+use crate::device::kual::{self, KualInstallReport, KualOverall, KualStatus, ServerConfRender};
 use crate::device::monitor::{ensure_transport, evict_transport};
 use crate::device::push::{self, DeleteResult, PushResult};
 use crate::library::{db, ingest};
@@ -290,43 +288,44 @@ pub async fn device_restore(
     let cell = state.transport.clone();
     let serial = device.serial.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ingest::DeviceImportReport> {
-        // Undo every Sidle-side deletion + force a full re-pull, so anything still
-        // on the device is re-imported.
-        {
-            let conn = db_handle.blocking_lock();
-            db::clear_all_deletions(&conn)?;
-            db::clear_device_sync_checkpoints(&conn, &serial)?;
-        }
-        let on_progress = |stage: &str, current: usize, total: usize, label: &str| {
-            let _ = app.emit(
-                "annotations:sync-progress",
-                crate::device::annotations::SyncProgress {
-                    stage: stage.to_string(),
-                    current,
-                    total,
-                    label: label.to_string(),
-                },
+    let result =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<ingest::DeviceImportReport> {
+            // Undo every Sidle-side deletion + force a full re-pull, so anything still
+            // on the device is re-imported.
+            {
+                let conn = db_handle.blocking_lock();
+                db::clear_all_deletions(&conn)?;
+                db::clear_device_sync_checkpoints(&conn, &serial)?;
+            }
+            let on_progress = |stage: &str, current: usize, total: usize, label: &str| {
+                let _ = app.emit(
+                    "annotations:sync-progress",
+                    crate::device::annotations::SyncProgress {
+                        stage: stage.to_string(),
+                        current,
+                        total,
+                        label: label.to_string(),
+                    },
+                );
+            };
+            let report = crate::device::annotations::import_device_annotations(
+                &device,
+                transport.as_ref(),
+                &db_handle,
+                &paths,
+                &on_progress,
+            )?;
+            // Notebooks ride a separate import path; re-pull them too (their records
+            // were just cleared, so any deleted ones come back).
+            let _ = crate::device::notebooks::import_device_notebooks(
+                transport.as_ref(),
+                &paths,
+                &db_handle,
+                &|_done, _total| {},
             );
-        };
-        let report = crate::device::annotations::import_device_annotations(
-            &device,
-            transport.as_ref(),
-            &db_handle,
-            &paths,
-            &on_progress,
-        )?;
-        // Notebooks ride a separate import path; re-pull them too (their records
-        // were just cleared, so any deleted ones come back).
-        let _ = crate::device::notebooks::import_device_notebooks(
-            transport.as_ref(),
-            &paths,
-            &db_handle,
-            &|_done, _total| {},
-        );
-        Ok(report)
-    })
-    .await;
+            Ok(report)
+        })
+        .await;
 
     if matches!(result, Err(_) | Ok(Err(_))) {
         evict_transport(&cell).await;
@@ -371,14 +370,14 @@ pub async fn device_delete(
             let asin = parse_sha_infix(&name)
                 .and_then(|sha| db::find_by_kfx_sha_prefix(&conn, &sha).ok().flatten())
                 .and_then(|b| b.asin);
-            let result =
-                match push::delete_one(&device, transport.as_ref(), &name, asin.as_deref()) {
-                    Ok(r) => r,
-                    Err(e) => DeleteResult::Failed {
-                        filename: name.clone(),
-                        error: format!("{e:#}"),
-                    },
-                };
+            let result = match push::delete_one(&device, transport.as_ref(), &name, asin.as_deref())
+            {
+                Ok(r) => r,
+                Err(e) => DeleteResult::Failed {
+                    filename: name.clone(),
+                    error: format!("{e:#}"),
+                },
+            };
             let _ = app.emit("device:delete-progress", &result);
             out.push(result);
         }
@@ -530,8 +529,8 @@ pub async fn device_import_orphan(
     let cell = state.transport.clone();
     let app_progress = app.clone();
 
-    let outer = tokio::task::spawn_blocking(
-        move || -> anyhow::Result<(PullResult, Option<i64>)> {
+    let outer =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<(PullResult, Option<i64>)> {
             let on_device = crate::device::TPath::parse("documents/Sidle").join(&filename);
             // Live byte-progress for the slow part: pulling the object off the
             // device. Over MTP this spans several PTP sessions (the Scribe's
@@ -540,7 +539,11 @@ pub async fn device_import_orphan(
             let on_progress = |done: u64, total: u64| {
                 let _ = app_progress.emit(
                     "device:import-progress",
-                    ImportProgress { filename: filename.clone(), done, total },
+                    ImportProgress {
+                        filename: filename.clone(),
+                        done,
+                        total,
+                    },
                 );
             };
             let bytes = transport.read_with_progress(&on_device, &on_progress)?;
@@ -562,9 +565,8 @@ pub async fn device_import_orphan(
             let conn = db_handle.blocking_lock();
             let pair = dedrm::pull_one(&conn, &paths, &device, tmp.path());
             Ok(pair)
-        },
-    )
-    .await;
+        })
+        .await;
 
     if matches!(outer, Err(_) | Ok(Err(_))) {
         evict_transport(&cell).await;
@@ -597,7 +599,12 @@ async fn render_conf(state: &AppState, serial: String) -> Option<ServerConfRende
     let host = kual::detect_lan_ipv4()?.to_string();
     let token = server_status.token?;
     let port = server_status.port.unwrap_or(server_status.default_port);
-    Some(ServerConfRender { host, port, serial, token })
+    Some(ServerConfRender {
+        host,
+        port,
+        serial,
+        token,
+    })
 }
 
 #[tauri::command]
@@ -620,22 +627,25 @@ pub async fn kual_status(state: State<'_, AppState>) -> Result<KualStatus, Strin
     // The status will read "server.conf stale" but at least the user
     // sees which other files need pushing.
     let serial = device.serial.clone();
-    let conf = render_conf(&state, serial).await.unwrap_or(ServerConfRender {
-        host: String::new(),
-        port: 0,
-        serial: String::new(),
-        token: String::new(),
-    });
+    let conf = render_conf(&state, serial)
+        .await
+        .unwrap_or(ServerConfRender {
+            host: String::new(),
+            port: 0,
+            serial: String::new(),
+            token: String::new(),
+        });
 
     let source = state.kual_source.clone();
     let transport = ensure_transport(&state.transport, &device)
         .await
         .map_err(|e| format!("open device transport: {e:#}"))?;
     let cell = state.transport.clone();
-    let result =
-        tokio::task::spawn_blocking(move || kual::compute_status(&source, &conf, transport.as_ref()))
-            .await
-            .map_err(|e| e.to_string())?;
+    let result = tokio::task::spawn_blocking(move || {
+        kual::compute_status(&source, &conf, transport.as_ref())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     match result {
         Ok(status) => Ok(status),
         Err(e) => {

@@ -107,7 +107,10 @@ pub fn pull_one(
     path: &Path,
 ) -> (PullResult, Option<i64>) {
     match import::import_file(conn, paths, path) {
-        Ok(ImportOutcome::Imported { book, needs_enqueue }) => {
+        Ok(ImportOutcome::Imported {
+            book,
+            needs_enqueue,
+        }) => {
             let book_id = book.id;
             let result = PullResult::Imported {
                 book_id,

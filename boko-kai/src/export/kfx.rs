@@ -115,27 +115,35 @@ fn build_kfx_container(
     let cover_image = book.metadata().cover_image.clone();
     let first_chapter_id = book.spine().first().map(|e| e.id);
 
-    let (standalone_cover_path, probe_path): (Option<String>, Option<String>) = match (cover_image, first_chapter_id) {
-        (Some(cover_img), Some(first_id)) => {
-            let normalized = normalize_cover_path(&cover_img, &asset_paths);
-            book.load_chapter(first_id).ok().map(|first_chapter| {
-                let in_spine_image = get_chapter_image_path(&first_chapter);
-                let needs_standalone = needs_standalone_cover(&normalized, &first_chapter);
-                // For dimension probe we want the file that's actually going
-                // to render as the cover. Standalone path: the metadata cover.
-                // In-spine titlepage path: whatever single image that chapter
-                // hosts (which may or may not be the same file).
-                let probe = if needs_standalone {
-                    Some(normalized.clone())
-                } else {
-                    in_spine_image.or(Some(normalized.clone()))
-                };
-                let standalone = if needs_standalone { Some(normalized) } else { None };
-                (standalone, probe)
-            }).unwrap_or((None, None))
-        }
-        _ => (None, None),
-    };
+    let (standalone_cover_path, probe_path): (Option<String>, Option<String>) =
+        match (cover_image, first_chapter_id) {
+            (Some(cover_img), Some(first_id)) => {
+                let normalized = normalize_cover_path(&cover_img, &asset_paths);
+                book.load_chapter(first_id)
+                    .ok()
+                    .map(|first_chapter| {
+                        let in_spine_image = get_chapter_image_path(&first_chapter);
+                        let needs_standalone = needs_standalone_cover(&normalized, &first_chapter);
+                        // For dimension probe we want the file that's actually going
+                        // to render as the cover. Standalone path: the metadata cover.
+                        // In-spine titlepage path: whatever single image that chapter
+                        // hosts (which may or may not be the same file).
+                        let probe = if needs_standalone {
+                            Some(normalized.clone())
+                        } else {
+                            in_spine_image.or(Some(normalized.clone()))
+                        };
+                        let standalone = if needs_standalone {
+                            Some(normalized)
+                        } else {
+                            None
+                        };
+                        (standalone, probe)
+                    })
+                    .unwrap_or((None, None))
+            }
+            _ => (None, None),
+        };
     // Probe the cover image's pixel dimensions once, in Pass 1, so both
     // emission paths (standalone c0 in `build_cover_section` and in-spine
     // image-only-chapter in `build_chapter_entities_grouped`) can size the
@@ -358,8 +366,7 @@ fn build_kfx_container(
         // to the image's resource dimensions; any mismatch causes the device
         // to letterbox/pillarbox with `scale_fit`. Falls back to a sane
         // book-cover aspect default when probing fails.
-        let (section, storyline) =
-            build_cover_section(cover_path, section_id, &mut ctx);
+        let (section, storyline) = build_cover_section(cover_path, section_id, &mut ctx);
         section_fragments.push(section);
         storyline_fragments.push(storyline);
 
@@ -451,12 +458,17 @@ fn build_kfx_container(
     // sleep-screen thumbnailer don't read a JXR cover (the book opens fine, but
     // the thumbnail/screensaver go blank). Interior plates still become JXR.
     let cover_filename = book.metadata().cover_image.as_ref().and_then(|c| {
-        std::path::Path::new(c).file_name().map(|s| s.to_string_lossy().to_string())
+        std::path::Path::new(c)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
     });
     // Interior plates become JXR in the book's chosen color mode (default
     // grayscale). Captured before the loop so the `book` borrow inside is free.
     let color_mode = book.image_color_mode();
-    let n_media = asset_paths.iter().filter(|p| is_media_asset(p.as_path())).count();
+    let n_media = asset_paths
+        .iter()
+        .filter(|p| is_media_asset(p.as_path()))
+        .count();
     let mut media_i = 0usize;
     for asset_path in &asset_paths {
         if is_media_asset(asset_path) {
@@ -1435,10 +1447,7 @@ fn build_landmarks_entries(book: &Book, ctx: &ExportContext) -> Vec<IonValue> {
                 ),
                 (
                     KfxSymbol::Representation as u64,
-                    IonValue::Struct(vec![(
-                        KfxSymbol::Label as u64,
-                        IonValue::String(label),
-                    )]),
+                    IonValue::Struct(vec![(KfxSymbol::Label as u64, IonValue::String(label))]),
                 ),
                 (
                     KfxSymbol::TargetPosition as u64,
@@ -1479,7 +1488,12 @@ fn build_landmarks_entries(book: &Book, ctx: &ExportContext) -> Vec<IonValue> {
 /// device shows the landmark's label for the merged Go-To item), and to detect
 /// the source TOC's own cover entry.
 fn cover_label(book: &Book) -> &'static str {
-    if book.metadata().language.to_ascii_lowercase().starts_with("ja") {
+    if book
+        .metadata()
+        .language
+        .to_ascii_lowercase()
+        .starts_with("ja")
+    {
         "表紙"
     } else {
         "Cover"
@@ -1676,9 +1690,7 @@ fn build_chapter_entities_grouped(
     // resolver defaults it to the storyline id; a real Amazon KFX targets the
     // page-template id, which is what makes the device render the cover
     // full-screen (no chrome) instead of as an ordinary flowed page.
-    if is_cover
-        && let Some(target) = ctx.landmark_fragments.get_mut(&LandmarkType::Cover)
-    {
+    if is_cover && let Some(target) = ctx.landmark_fragments.get_mut(&LandmarkType::Cover) {
         target.fragment_id = section_id;
     }
 
@@ -2058,8 +2070,11 @@ fn build_format_capabilities_ion() -> Vec<u8> {
 /// Default per-band quantizer for grayscale-JXR plates: ~Amazon's per-image
 /// size on LN content at high fidelity (the `8/16/32` point of the QP sweep in
 /// `artifacts/jxr-extract`).
-const JXR_DEFAULT_QP: jxr::QpSet =
-    jxr::QpSet { dc: 8, lp: 16, hp: 32 };
+const JXR_DEFAULT_QP: jxr::QpSet = jxr::QpSet {
+    dc: 8,
+    lp: 16,
+    hp: 32,
+};
 
 /// Prepare a media asset's bytes for KFX bundling. Raster images are re-encoded
 /// as **grayscale JPEG-XR** — the device is B&W e-ink and the source EPUB keeps
@@ -2089,7 +2104,7 @@ fn encode_jxr_asset(data: &[u8], mode: jxr::ColorMode) -> Option<Vec<u8>> {
 /// bytes first) and the fixed-layout manga thumbnailer (which downscales a
 /// `DynamicImage` before encoding).
 fn encode_dynimg_jxr(img: &::image::DynamicImage, mode: jxr::ColorMode) -> Option<Vec<u8>> {
-    use jxr::{encode, ColorMode, ImageInput};
+    use jxr::{ColorMode, ImageInput, encode};
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 || w > (1 << 16) || h > (1 << 16) {
         return None;
@@ -2118,7 +2133,12 @@ fn encode_dynimg_jxr(img: &::image::DynamicImage, mode: jxr::ColorMode) -> Optio
             return None;
         }
     };
-    let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+    let input = ImageInput {
+        width: w,
+        height: h,
+        planes: &planes,
+        premultiplied_alpha: false,
+    };
     encode(&input, mode, JXR_DEFAULT_QP).ok()
 }
 
@@ -2438,7 +2458,11 @@ fn section_positions(ctx: &ExportContext, section_names: &[String]) -> Vec<Secti
     let span = |eid: u64| -> i64 {
         // Section roots / images aren't in `content_id_lengths` ⇒ span 1; text
         // content advances by its UTF-16 length.
-        ctx.content_id_lengths.get(&eid).copied().unwrap_or(1).max(1) as i64
+        ctx.content_id_lengths
+            .get(&eid)
+            .copied()
+            .unwrap_or(1)
+            .max(1) as i64
     };
 
     let mut out: Vec<SectionPos> = Vec::new();
@@ -3016,9 +3040,15 @@ fn image_fxl_to_kfx(
         let raw = book.load_asset(&path)?;
         let (w, h) = crate::util::extract_image_dimensions(&raw).unwrap_or((0, 0));
         let img = encode_asset_for_kfx(&raw, color_mode);
-        let (thumb, tw, th) =
-            make_manga_thumbnail(&raw, color_mode).unwrap_or((Vec::new(), 0, 0));
-        encs.push(MangaEnc { img, w, h, thumb, tw, th });
+        let (thumb, tw, th) = make_manga_thumbnail(&raw, color_mode).unwrap_or((Vec::new(), 0, 0));
+        encs.push(MangaEnc {
+            img,
+            w,
+            h,
+            thumb,
+            tw,
+            th,
+        });
     }
     // Fallback page box when no viewport was declared: the largest page image.
     if box_dims.is_none() {
@@ -3041,8 +3071,11 @@ fn image_fxl_to_kfx(
     // Spine page index → its image EID (nav targets) and spine ChapterId → page
     // index (TOC target resolution), filled as units are built.
     let mut page_image_id = vec![0u64; n];
-    let chapter_to_index: std::collections::HashMap<ChapterId, usize> =
-        spine_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    let chapter_to_index: std::collections::HashMap<ChapterId, usize> = spine_ids
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, i))
+        .collect();
 
     let mut units: Vec<MangaUnit> = Vec::with_capacity(groups.len());
     let mut any_spread = false;
@@ -3477,7 +3510,11 @@ fn build_manga_storyline(
         ),
         (KfxSymbol::ContentList as u64, IonValue::List(content)),
     ]);
-    KfxFragment::new(KfxSymbol::Storyline, format!("story_{}", unit.section_name), ion)
+    KfxFragment::new(
+        KfxSymbol::Storyline,
+        format!("story_{}", unit.section_name),
+        ion,
+    )
 }
 
 /// style ($157) `sJ`: the inner container fill — 100%×100%, tagged with the
@@ -3548,7 +3585,11 @@ fn build_manga_external_resource(p: &MangaPage, w: u32, h: u32, fmt_sym: u64) ->
     if let Some(m) = manga_format_mime(fmt_sym) {
         fields.push((KfxSymbol::Mime as u64, IonValue::String(m.to_string())));
     }
-    KfxFragment::new(KfxSymbol::ExternalResource, &p.res_name, IonValue::Struct(fields))
+    KfxFragment::new(
+        KfxSymbol::ExternalResource,
+        &p.res_name,
+        IonValue::Struct(fields),
+    )
 }
 
 /// external_resource ($164) for a page's downscaled thumbnail.
@@ -3559,7 +3600,10 @@ fn build_manga_thumb_external_resource(
     fmt_sym: u64,
 ) -> KfxFragment {
     let mut fields = vec![
-        (KfxSymbol::ResourceName as u64, IonValue::Symbol(p.thumb_sym)),
+        (
+            KfxSymbol::ResourceName as u64,
+            IonValue::Symbol(p.thumb_sym),
+        ),
         (
             KfxSymbol::Location as u64,
             IonValue::String(format!("resource/{}", p.thumb_name)),
@@ -4291,7 +4335,10 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
             KfxSymbol::Type as u64,
             IonValue::Symbol(KfxSymbol::Image as u64),
         ),
-        (KfxSymbol::ResourceName as u64, IonValue::Symbol(rec.res_sym)),
+        (
+            KfxSymbol::ResourceName as u64,
+            IonValue::Symbol(rec.res_sym),
+        ),
     ]);
 
     // Container content: the PDF page image, plus (for a text page) the
@@ -4353,7 +4400,10 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
 
     let ion = IonValue::Struct(vec![
         (KfxSymbol::StoryName as u64, IonValue::Symbol(rec.story_sym)),
-        (KfxSymbol::ContentList as u64, IonValue::List(vec![container])),
+        (
+            KfxSymbol::ContentList as u64,
+            IonValue::List(vec![container]),
+        ),
     ]);
     KfxFragment::new(
         KfxSymbol::Storyline,
@@ -4420,7 +4470,10 @@ fn build_pdf_text_storyline(rec: &PdfPageRec, runs: &[crate::render::TextRun]) -
                     IonValue::Symbol(KfxSymbol::Text as u64),
                 ),
                 (KfxSymbol::StyleEvents as u64, IonValue::List(style_events)),
-                (KfxSymbol::Content as u64, IonValue::String(run.content.clone())),
+                (
+                    KfxSymbol::Content as u64,
+                    IonValue::String(run.content.clone()),
+                ),
             ])
         })
         .collect();
@@ -4538,7 +4591,10 @@ fn build_pdf_external_resource(
             KfxSymbol::Format as u64,
             IonValue::Symbol(KfxSymbol::Pdf as u64),
         ),
-        (KfxSymbol::PageIndex as u64, IonValue::Int(page_index as i64)),
+        (
+            KfxSymbol::PageIndex as u64,
+            IonValue::Int(page_index as i64),
+        ),
         (
             KfxSymbol::Location as u64,
             IonValue::String(raw_location.to_string()),
@@ -4555,7 +4611,10 @@ fn build_pdf_external_resource(
             KfxSymbol::ResourceHeight as u64,
             IonValue::Int(height_pt.round() as i64),
         ),
-        (KfxSymbol::ResourceName as u64, IonValue::Symbol(rec.res_sym)),
+        (
+            KfxSymbol::ResourceName as u64,
+            IonValue::Symbol(rec.res_sym),
+        ),
         (KfxSymbol::Margin as u64, IonValue::Int(0)),
     ]);
     KfxFragment::new(KfxSymbol::ExternalResource, format!("e{page_index}"), ion)
@@ -4947,11 +5006,8 @@ fn build_pdf_section_position_id_map_fragments(recs: &[PdfPageRec]) -> Vec<KfxFr
             // section "anchors" are exactly these page_template EIDs (real, backed
             // elements; inventing fresh anchor EIDs gives dangling references the
             // device rejects with "An error occurred").
-            let mut order: Vec<(u64, i64)> = vec![
-                (rec.pt_id, 1),
-                (rec.container_id, 1),
-                (rec.image_id, 1),
-            ];
+            let mut order: Vec<(u64, i64)> =
+                vec![(rec.pt_id, 1), (rec.container_id, 1), (rec.image_id, 1)];
             if !rec.runs.is_empty() {
                 order.push((rec.text_ref_id, 1));
                 order.extend(rec.runs.iter().map(|r| (r.id, r.len as i64)));
@@ -5087,10 +5143,7 @@ fn build_pdf_page_list_entries(labels: &[String], recs: &[PdfPageRec]) -> Vec<Io
             IonValue::Struct(vec![
                 (
                     KfxSymbol::Representation as u64,
-                    IonValue::Struct(vec![(
-                        KfxSymbol::Label as u64,
-                        IonValue::String(label),
-                    )]),
+                    IonValue::Struct(vec![(KfxSymbol::Label as u64, IonValue::String(label))]),
                 ),
                 (
                     KfxSymbol::TargetPosition as u64,
@@ -5918,7 +5971,10 @@ mod tests {
         // section_position_id_map: one entity per section, keyed by section name.
         let spm = build_section_position_id_map_fragments(&secs);
         assert_eq!(spm.len(), 2);
-        assert!(spm.iter().all(|f| f.ftype == KfxSymbol::SectionPositionIdMap as u64));
+        assert!(
+            spm.iter()
+                .all(|f| f.ftype == KfxSymbol::SectionPositionIdMap as u64)
+        );
         // Section 0 walk: [0,90] [1,100] 1 1 [1,0] — each element advances by the
         // PREVIOUS span; a bare int names previous+1, a pair names an explicit eid.
         let FragmentData::Ion(IonValue::Struct(s0)) = &spm[0].data else {
@@ -5933,7 +5989,9 @@ mod tests {
             panic!("walk should be a list");
         };
         let expect_pair = |v: &IonValue, a: i64, e: i64| {
-            let IonValue::List(p) = v else { panic!("expected [advance, eid]") };
+            let IonValue::List(p) = v else {
+                panic!("expected [advance, eid]")
+            };
             assert_eq!(p[0].as_int(), Some(a));
             assert_eq!(p[1].as_int(), Some(e));
         };
@@ -6168,14 +6226,18 @@ mod resource_export_tests {
         let phases = RefCell::new(Vec::<String>::new());
         let mut sink = Vec::new();
         KfxExporter::new()
-            .export_with_progress(&mut book, &mut std::io::Cursor::new(&mut sink), &|phase, cur, total, _label| {
-                // First sighting of each phase, in emission order. Counts must be sane.
-                assert!(cur >= 1 && cur <= total, "{phase}: {cur}/{total}");
-                let mut p = phases.borrow_mut();
-                if p.last().map(String::as_str) != Some(phase) {
-                    p.push(phase.to_string());
-                }
-            })
+            .export_with_progress(
+                &mut book,
+                &mut std::io::Cursor::new(&mut sink),
+                &|phase, cur, total, _label| {
+                    // First sighting of each phase, in emission order. Counts must be sane.
+                    assert!(cur >= 1 && cur <= total, "{phase}: {cur}/{total}");
+                    let mut p = phases.borrow_mut();
+                    if p.last().map(String::as_str) != Some(phase) {
+                        p.push(phase.to_string());
+                    }
+                },
+            )
             .unwrap();
         let seen = phases.into_inner();
         // The pipeline runs survey → chapters → images → finalize. (A coverless
@@ -6183,8 +6245,11 @@ mod resource_export_tests {
         let order = ["survey", "chapters", "images", "finalize"];
         let idxs: Vec<usize> = order
             .iter()
-            .map(|p| seen.iter().position(|s| s == p)
-                .unwrap_or_else(|| panic!("missing phase {p}; saw {seen:?}")))
+            .map(|p| {
+                seen.iter()
+                    .position(|s| s == p)
+                    .unwrap_or_else(|| panic!("missing phase {p}; saw {seen:?}"))
+            })
             .collect();
         assert!(
             idxs.windows(2).all(|w| w[0] < w[1]),
@@ -6224,7 +6289,11 @@ mod resource_export_tests {
             .unwrap();
         let jxr = encode_jxr_asset(png.get_ref(), jxr::ColorMode::Grayscale)
             .expect("interior plate → JXR");
-        assert_eq!(&jxr[0..3], &[0x49, 0x49, 0xBC], "interior plate must be JXR");
+        assert_eq!(
+            &jxr[0..3],
+            &[0x49, 0x49, 0xBC],
+            "interior plate must be JXR"
+        );
         // The plate's fixed-layout page is sized from these dims; if unreadable
         // the device letterboxes it (margins). Must round-trip through the IFD.
         assert_eq!(
@@ -6258,13 +6327,19 @@ mod resource_export_tests {
         assert_eq!(&g[0..3], &[0x49, 0x49, 0xBC]);
         let (g_uuid, g_nc) = dec(&g);
         assert_eq!(g_nc, 1, "grayscale mode → 1 component");
-        assert!(g_uuid.ends_with("dc908"), "grayscale → 8bppGray UUID, got {g_uuid}");
+        assert!(
+            g_uuid.ends_with("dc908"),
+            "grayscale → 8bppGray UUID, got {g_uuid}"
+        );
         // Color mode → 24bppRGB (3 components).
         let c = encode_jxr_asset(png.get_ref(), ColorMode::Color).unwrap();
         assert_eq!(&c[0..3], &[0x49, 0x49, 0xBC]);
         let (c_uuid, c_nc) = dec(&c);
         assert_eq!(c_nc, 3, "color mode → 3 components");
-        assert!(c_uuid.ends_with("dc90d"), "color → 24bppRGB UUID, got {c_uuid}");
+        assert!(
+            c_uuid.ends_with("dc90d"),
+            "color → 24bppRGB UUID, got {c_uuid}"
+        );
     }
 
     #[test]

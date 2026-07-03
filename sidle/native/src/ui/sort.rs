@@ -229,52 +229,123 @@ mod tests {
     #[test]
     fn title_asc_then_desc() {
         let mut v = vec![
-            Book { title: "Banana".into(), ..book(1) },
-            Book { title: "apple".into(), ..book(2) },
-            Book { title: "Cherry".into(), ..book(3) },
+            Book {
+                title: "Banana".into(),
+                ..book(1)
+            },
+            Book {
+                title: "apple".into(),
+                ..book(2)
+            },
+            Book {
+                title: "Cherry".into(),
+                ..book(3)
+            },
         ];
-        SortState { key: SortKey::Title, dir: SortDir::Asc }.apply(&mut v);
+        SortState {
+            key: SortKey::Title,
+            dir: SortDir::Asc,
+        }
+        .apply(&mut v);
         // Code-point order: uppercase 'B','C' (0x42,0x43) precede lowercase
         // 'a' (0x61). This is the documented stdlib-collation behavior.
         assert_eq!(ids(&v), vec![1, 3, 2]);
-        SortState { key: SortKey::Title, dir: SortDir::Desc }.apply(&mut v);
+        SortState {
+            key: SortKey::Title,
+            dir: SortDir::Desc,
+        }
+        .apply(&mut v);
         assert_eq!(ids(&v), vec![2, 3, 1]);
     }
 
     #[test]
     fn size_is_numeric_not_lexical() {
         let mut v = vec![
-            Book { file_size: 9, ..book(1) },
-            Book { file_size: 100, ..book(2) },
-            Book { file_size: 20, ..book(3) },
+            Book {
+                file_size: 9,
+                ..book(1)
+            },
+            Book {
+                file_size: 100,
+                ..book(2)
+            },
+            Book {
+                file_size: 20,
+                ..book(3)
+            },
         ];
-        SortState { key: SortKey::Size, dir: SortDir::Asc }.apply(&mut v);
+        SortState {
+            key: SortKey::Size,
+            dir: SortDir::Asc,
+        }
+        .apply(&mut v);
         assert_eq!(ids(&v), vec![1, 3, 2]); // 9 < 20 < 100, not "100" < "20" < "9"
     }
 
     #[test]
     fn missing_publisher_sinks_in_both_directions() {
         let mut v = vec![
-            Book { publisher: None, ..book(1) },
-            Book { publisher: Some("Aperture".into()), ..book(2) },
-            Book { publisher: Some("Black Lake".into()), ..book(3) },
+            Book {
+                publisher: None,
+                ..book(1)
+            },
+            Book {
+                publisher: Some("Aperture".into()),
+                ..book(2)
+            },
+            Book {
+                publisher: Some("Black Lake".into()),
+                ..book(3)
+            },
         ];
-        SortState { key: SortKey::Publisher, dir: SortDir::Asc }.apply(&mut v);
+        SortState {
+            key: SortKey::Publisher,
+            dir: SortDir::Asc,
+        }
+        .apply(&mut v);
         assert_eq!(ids(&v), vec![2, 3, 1]); // missing last
-        SortState { key: SortKey::Publisher, dir: SortDir::Desc }.apply(&mut v);
+        SortState {
+            key: SortKey::Publisher,
+            dir: SortDir::Desc,
+        }
+        .apply(&mut v);
         assert_eq!(ids(&v), vec![3, 2, 1]); // still last, not flipped to front
     }
 
     #[test]
     fn series_orders_by_name_then_index_halfsteps() {
         let mut v = vec![
-            Book { series_name: Some("Saga".into()), series_index: Some(2.0), ..book(1) },
-            Book { series_name: Some("Saga".into()), series_index: Some(1.5), ..book(2) },
-            Book { series_name: Some("Saga".into()), series_index: Some(1.0), ..book(3) },
-            Book { series_name: Some("Abyss".into()), series_index: Some(1.0), ..book(4) },
-            Book { series_name: None, series_index: None, ..book(5) },
+            Book {
+                series_name: Some("Saga".into()),
+                series_index: Some(2.0),
+                ..book(1)
+            },
+            Book {
+                series_name: Some("Saga".into()),
+                series_index: Some(1.5),
+                ..book(2)
+            },
+            Book {
+                series_name: Some("Saga".into()),
+                series_index: Some(1.0),
+                ..book(3)
+            },
+            Book {
+                series_name: Some("Abyss".into()),
+                series_index: Some(1.0),
+                ..book(4)
+            },
+            Book {
+                series_name: None,
+                series_index: None,
+                ..book(5)
+            },
         ];
-        SortState { key: SortKey::Series, dir: SortDir::Asc }.apply(&mut v);
+        SortState {
+            key: SortKey::Series,
+            dir: SortDir::Asc,
+        }
+        .apply(&mut v);
         // Abyss#1, then Saga 1 < 1.5 < 2, then the seriesless book last.
         assert_eq!(ids(&v), vec![4, 3, 2, 1, 5]);
     }
@@ -285,10 +356,20 @@ mod tests {
         // in the facet extractor, not here). Just assert determinism + that a
         // CJK string sorts by code point without panicking on byte boundaries.
         let mut v = vec![
-            Book { author: "村上春樹".into(), ..book(1) },
-            Book { author: "夏目漱石".into(), ..book(2) },
+            Book {
+                author: "村上春樹".into(),
+                ..book(1)
+            },
+            Book {
+                author: "夏目漱石".into(),
+                ..book(2)
+            },
         ];
-        SortState { key: SortKey::Author, dir: SortDir::Asc }.apply(&mut v);
+        SortState {
+            key: SortKey::Author,
+            dir: SortDir::Asc,
+        }
+        .apply(&mut v);
         // 村 (U+6751) < 夏 (U+590F)? No: 0x590F < 0x6751, so 夏目漱石 (id 2) first.
         assert_eq!(ids(&v), vec![2, 1]);
     }

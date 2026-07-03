@@ -92,7 +92,10 @@ impl Report {
         let fabricated_total: usize = fabricated.iter().map(|(_, n)| n).sum();
         println!("{} chars (source):  {}", dir.source_label(), source_chars);
         println!("{} chars (target):  {}", dir.target_label(), target_chars);
-        println!("Preservation:  {:.4}%", self.preservation_ratio(dir) * 100.0);
+        println!(
+            "Preservation:  {:.4}%",
+            self.preservation_ratio(dir) * 100.0
+        );
         println!(
             "Dropped (missing in {}): {} ({} unique)",
             dir.target_label(),
@@ -206,8 +209,7 @@ fn char_counts(s: &str) -> HashMap<char, usize> {
 /// flow through as transparent containers — only their text leaves matter.
 pub fn extract_text_from_epub(epub_bytes: &[u8]) -> Result<String, String> {
     let cursor = Cursor::new(epub_bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
 
     let container_bytes = read_zip_entry(&mut archive, "META-INF/container.xml")
         .map_err(|e| format!("container.xml: {}", e))?;
@@ -219,8 +221,8 @@ pub fn extract_text_from_epub(epub_bytes: &[u8]) -> Result<String, String> {
         .unwrap_or("")
         .to_string();
 
-    let opf_bytes = read_zip_entry(&mut archive, &opf_path)
-        .map_err(|e| format!("opf {}: {}", opf_path, e))?;
+    let opf_bytes =
+        read_zip_entry(&mut archive, &opf_path).map_err(|e| format!("opf {}: {}", opf_path, e))?;
     let hint_encoding = crate::util::extract_xml_encoding(&opf_bytes);
     let opf_str = crate::util::decode_text(&opf_bytes, hint_encoding);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
@@ -318,15 +320,14 @@ pub fn extract_text_from_xhtml(xhtml: &str, out: &mut String) {
 /// the ruby pair extractor — it produces one entry per reference — and add
 /// each pair's annotation that many times.
 pub fn extract_text_from_kfx(kfx_bytes: &[u8]) -> Result<String, String> {
-    let header =
-        parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
+    let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
     if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
         return Err("container info out of bounds".into());
     }
-    let info_data = &kfx_bytes[header.container_info_offset
-        ..header.container_info_offset + header.container_info_length];
-    let info = parse_container_info(info_data)
-        .map_err(|e| format!("kfx container info: {:?}", e))?;
+    let info_data = &kfx_bytes
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info =
+        parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
     let extended_symbols = match info.doc_symbols {
         Some((off, len)) if off + len <= kfx_bytes.len() => {
@@ -354,8 +355,7 @@ pub fn extract_text_from_kfx(kfx_bytes: &[u8]) -> Result<String, String> {
     let Some((idx_off, idx_len)) = info.index else {
         return Err("kfx: no index table".into());
     };
-    let entities =
-        parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
     // Iterate every entity type that carries reading text. `$145 content` is
     // the obvious one; `$259 storyline` ALSO carries text via its own
@@ -363,10 +363,7 @@ pub fn extract_text_from_kfx(kfx_bytes: &[u8]) -> Result<String, String> {
     // separate Content entity. Skipping storylines under-counts the source
     // (e.g., on horror.boko.kfx 35 Content entities cover only 35 of 40
     // storylines; the other 5 inline their text and were previously missed).
-    let text_types: [u32; 2] = [
-        KfxSymbol::Content as u32,
-        KfxSymbol::Storyline as u32,
-    ];
+    let text_types: [u32; 2] = [KfxSymbol::Content as u32, KfxSymbol::Storyline as u32];
 
     let mut out = String::new();
     for ent in &entities {

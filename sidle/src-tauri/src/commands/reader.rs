@@ -347,7 +347,8 @@ pub async fn reader_pdf_ink(
         (sha, rows)
     };
     let svg_for = |asin: &str, cid: &str| {
-        std::fs::read_to_string(state.paths.book_ink_overlay_svg(&sha, asin, cid)).unwrap_or_default()
+        std::fs::read_to_string(state.paths.book_ink_overlay_svg(&sha, asin, cid))
+            .unwrap_or_default()
     };
     Ok(rows
         .into_iter()

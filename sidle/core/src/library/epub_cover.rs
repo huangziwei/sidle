@@ -31,8 +31,8 @@ use crate::library::import::write_bytes_atomic;
 ///
 /// No-ops cleanly (returns Ok) when the EPUB has no cover entry.
 pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result<()> {
-    let epub_bytes = std::fs::read(epub_path)
-        .with_context(|| format!("read {}", epub_path.display()))?;
+    let epub_bytes =
+        std::fs::read(epub_path).with_context(|| format!("read {}", epub_path.display()))?;
 
     // boko's EPUB importer resolves cover_image to the zip-absolute path,
     // which is exactly what we need to look up the entry below.
@@ -171,11 +171,7 @@ fn media_type_for_ext(ext: &str) -> &'static str {
 /// directory, so a basename match is correct for the same-directory case
 /// (which is what `kfx_to_epub` emits — `OEBPS/content.opf` plus
 /// `OEBPS/cover.<ext>` next to it).
-fn rewrite_opf_for_cover(
-    opf: &str,
-    cover_basename: &str,
-    new_media_type: &str,
-) -> String {
+fn rewrite_opf_for_cover(opf: &str, cover_basename: &str, new_media_type: &str) -> String {
     let mut out = String::with_capacity(opf.len() + 16);
     let href_needle = format!("href=\"{cover_basename}\"");
     for line in opf.split_inclusive('\n') {

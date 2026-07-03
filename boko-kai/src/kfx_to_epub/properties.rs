@@ -31,17 +31,30 @@ pub struct Prop {
 /// Look up the YJ property mapping for a given symbol id, resolved to its
 /// text name. Returns `None` if we don't know how to map it.
 pub fn prop_for(name: &str) -> Option<&'static Prop> {
-    YJ_PROPERTY_INFO.iter().find(|(k, _)| *k == name).map(|(_, v)| v)
+    YJ_PROPERTY_INFO
+        .iter()
+        .find(|(k, _)| *k == name)
+        .map(|(_, v)| v)
 }
 
 /// CSS length unit ↔ KFX symbol map. Calibre's `YJ_LENGTH_UNITS`.
 pub fn length_unit_for(symbol_name: &str) -> Option<&'static str> {
     match symbol_name {
-        "ch" => Some("ch"), "cm" => Some("cm"), "em" => Some("em"),
-        "ex" => Some("ex"), "in_" | "in" => Some("in"), "lh" => Some("lh"),
-        "mm" => Some("mm"), "percent" => Some("%"), "pt" => Some("pt"),
-        "px" => Some("px"), "rem" => Some("rem"), "vh" => Some("vh"),
-        "vmax" => Some("vmax"), "vmin" => Some("vmin"), "vw" => Some("vw"),
+        "ch" => Some("ch"),
+        "cm" => Some("cm"),
+        "em" => Some("em"),
+        "ex" => Some("ex"),
+        "in_" | "in" => Some("in"),
+        "lh" => Some("lh"),
+        "mm" => Some("mm"),
+        "percent" => Some("%"),
+        "pt" => Some("pt"),
+        "px" => Some("px"),
+        "rem" => Some("rem"),
+        "vh" => Some("vh"),
+        "vmax" => Some("vmax"),
+        "vmin" => Some("vmin"),
+        "vw" => Some("vw"),
         _ => None,
     }
 }
@@ -299,7 +312,11 @@ fn color_str_argb(n: i64) -> String {
     if alpha == 0xff || alpha == 0 {
         // Calibre uses #000000-style; map known shortcuts later.
         let hex = format!("#{:02x}{:02x}{:02x}", r, g, b);
-        if let Some(name) = COLOR_NAME.iter().find(|(h, _)| *h == hex.as_str()).map(|(_, n)| *n) {
+        if let Some(name) = COLOR_NAME
+            .iter()
+            .find(|(h, _)| *h == hex.as_str())
+            .map(|(_, n)| *n)
+        {
             name.to_string()
         } else {
             hex
@@ -312,11 +329,21 @@ fn color_str_argb(n: i64) -> String {
 
 /// Calibre's short color-name table. Used to abbreviate common hex codes.
 static COLOR_NAME: &[(&str, &str)] = &[
-    ("#000000", "black"), ("#000080", "navy"), ("#0000ff", "blue"),
-    ("#008000", "green"), ("#008080", "teal"), ("#00ff00", "lime"),
-    ("#00ffff", "cyan"), ("#800000", "maroon"), ("#800080", "purple"),
-    ("#808000", "olive"), ("#808080", "gray"), ("#ff0000", "red"),
-    ("#ff00ff", "magenta"), ("#ffff00", "yellow"), ("#ffffff", "white"),
+    ("#000000", "black"),
+    ("#000080", "navy"),
+    ("#0000ff", "blue"),
+    ("#008000", "green"),
+    ("#008080", "teal"),
+    ("#00ff00", "lime"),
+    ("#00ffff", "cyan"),
+    ("#800000", "maroon"),
+    ("#800080", "purple"),
+    ("#808000", "olive"),
+    ("#808080", "gray"),
+    ("#ff0000", "red"),
+    ("#ff00ff", "magenta"),
+    ("#ffff00", "yellow"),
+    ("#ffffff", "white"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -341,57 +368,158 @@ static BORDER_STYLES: &[(&str, Option<&str>)] = &[
 
 static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
     // ---- text / font ----
-    ("font_family", Prop { name: "font-family", values: None }),
-    ("font_size", Prop { name: "font-size", values: None }),
-    ("font_style", Prop { name: "font-style", values: Some(&[
-        ("italic", Some("italic")), ("normal", Some("normal")), ("oblique", Some("oblique")),
-    ])}),
+    (
+        "font_family",
+        Prop {
+            name: "font-family",
+            values: None,
+        },
+    ),
+    (
+        "font_size",
+        Prop {
+            name: "font-size",
+            values: None,
+        },
+    ),
+    (
+        "font_style",
+        Prop {
+            name: "font-style",
+            values: Some(&[
+                ("italic", Some("italic")),
+                ("normal", Some("normal")),
+                ("oblique", Some("oblique")),
+            ]),
+        },
+    ),
     // Direct port of calibre's `Prop("font-weight", {...})`
     // (yj_to_epub_properties.py:238), keyed by symbol: $350 normal, $355 thin→100,
     // $356 ultra_light→200, $357 light→300, $359 medium→500, $360 semi_bold→600,
     // $361 bold, $362 ultra_bold→800, $363 heavy→900. ($358 "book" is unmapped, as
     // in calibre.) boko's prior `font_weight_100…` keys never matched a real symbol
     // name, so the whole family silently dropped.
-    ("font_weight", Prop { name: "font-weight", values: Some(&[
-        ("normal", Some("normal")),
-        ("thin", Some("100")),
-        ("ultra_light", Some("200")),
-        ("light", Some("300")),
-        ("medium", Some("500")),
-        ("semi_bold", Some("600")),
-        ("bold", Some("bold")),
-        ("ultra_bold", Some("800")),
-        ("heavy", Some("900")),
-    ])}),
-    ("font_variant", Prop { name: "font-variant", values: Some(&[
-        ("normal", Some("normal")), ("small-caps", Some("small-caps")),
-    ])}),
-    ("font_stretch", Prop { name: "font-stretch", values: Some(&[
-        ("condensed", Some("condensed")), ("expanded", Some("expanded")),
-        ("normal", Some("normal")), ("semi-condensed", Some("semi-condensed")),
-        ("semi-expanded", Some("semi-expanded")),
-    ])}),
-    ("text_color", Prop { name: "color", values: None }),
-    ("text_background_color", Prop { name: "background-color", values: None }),
-    ("text_alignment", Prop { name: "text-align", values: Some(&[
-        ("center", Some("center")), ("justify", Some("justify")),
-        ("left", Some("left")), ("right", Some("right")),
-    ])}),
-    ("text_alignment_last", Prop { name: "text-align-last", values: Some(&[
-        ("auto", Some("auto")), ("center", Some("center")), ("end", Some("end")),
-        ("justify", Some("justify")), ("left", Some("left")), ("right", Some("right")),
-        ("start", Some("start")),
-    ])}),
-    ("text_indent", Prop { name: "text-indent", values: None }),
-    ("text_transform", Prop { name: "text-transform", values: Some(&[
-        ("lowercase", Some("lowercase")), ("none", Some("none")),
-        ("capitalize", Some("capitalize")), ("uppercase", Some("uppercase")),
-    ])}),
-    ("letterspacing", Prop { name: "letter-spacing", values: None }),
-    ("wordspacing", Prop { name: "word-spacing", values: None }),
-    ("line_height", Prop { name: "line-height", values: Some(&[
-        ("auto", Some("normal")),
-    ])}),
+    (
+        "font_weight",
+        Prop {
+            name: "font-weight",
+            values: Some(&[
+                ("normal", Some("normal")),
+                ("thin", Some("100")),
+                ("ultra_light", Some("200")),
+                ("light", Some("300")),
+                ("medium", Some("500")),
+                ("semi_bold", Some("600")),
+                ("bold", Some("bold")),
+                ("ultra_bold", Some("800")),
+                ("heavy", Some("900")),
+            ]),
+        },
+    ),
+    (
+        "font_variant",
+        Prop {
+            name: "font-variant",
+            values: Some(&[
+                ("normal", Some("normal")),
+                ("small-caps", Some("small-caps")),
+            ]),
+        },
+    ),
+    (
+        "font_stretch",
+        Prop {
+            name: "font-stretch",
+            values: Some(&[
+                ("condensed", Some("condensed")),
+                ("expanded", Some("expanded")),
+                ("normal", Some("normal")),
+                ("semi-condensed", Some("semi-condensed")),
+                ("semi-expanded", Some("semi-expanded")),
+            ]),
+        },
+    ),
+    (
+        "text_color",
+        Prop {
+            name: "color",
+            values: None,
+        },
+    ),
+    (
+        "text_background_color",
+        Prop {
+            name: "background-color",
+            values: None,
+        },
+    ),
+    (
+        "text_alignment",
+        Prop {
+            name: "text-align",
+            values: Some(&[
+                ("center", Some("center")),
+                ("justify", Some("justify")),
+                ("left", Some("left")),
+                ("right", Some("right")),
+            ]),
+        },
+    ),
+    (
+        "text_alignment_last",
+        Prop {
+            name: "text-align-last",
+            values: Some(&[
+                ("auto", Some("auto")),
+                ("center", Some("center")),
+                ("end", Some("end")),
+                ("justify", Some("justify")),
+                ("left", Some("left")),
+                ("right", Some("right")),
+                ("start", Some("start")),
+            ]),
+        },
+    ),
+    (
+        "text_indent",
+        Prop {
+            name: "text-indent",
+            values: None,
+        },
+    ),
+    (
+        "text_transform",
+        Prop {
+            name: "text-transform",
+            values: Some(&[
+                ("lowercase", Some("lowercase")),
+                ("none", Some("none")),
+                ("capitalize", Some("capitalize")),
+                ("uppercase", Some("uppercase")),
+            ]),
+        },
+    ),
+    (
+        "letterspacing",
+        Prop {
+            name: "letter-spacing",
+            values: None,
+        },
+    ),
+    (
+        "wordspacing",
+        Prop {
+            name: "word-spacing",
+            values: None,
+        },
+    ),
+    (
+        "line_height",
+        Prop {
+            name: "line-height",
+            values: Some(&[("auto", Some("normal"))]),
+        },
+    ),
     // `language` is intentionally NOT mapped to CSS. Calibre's
     // `-kfx-attrib-xml-lang` is a sentinel for "set xml:lang attribute",
     // not real CSS, and is stripped by simplify_styles before serialization.
@@ -400,198 +528,633 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
     // present in our corpus.
 
     // ---- writing-mode (THE big one for this port) ----
-    ("writing_mode", Prop { name: "writing-mode", values: Some(&[
-        ("horizontal_tb", Some("horizontal-tb")),
-        ("vertical_rl", Some("vertical-rl")),
-        ("vertical_lr", Some("vertical-lr")),
-    ])}),
-
+    (
+        "writing_mode",
+        Prop {
+            name: "writing-mode",
+            values: Some(&[
+                ("horizontal_tb", Some("horizontal-tb")),
+                ("vertical_rl", Some("vertical-rl")),
+                ("vertical_lr", Some("vertical-lr")),
+            ]),
+        },
+    ),
     // ---- margins / padding / dimensions ----
-    ("margin", Prop { name: "margin", values: None }),
-    ("margin_top", Prop { name: "margin-top", values: None }),
-    ("margin_bottom", Prop { name: "margin-bottom", values: None }),
-    ("margin_left", Prop { name: "margin-left", values: None }),
-    ("margin_right", Prop { name: "margin-right", values: None }),
-    ("padding", Prop { name: "padding", values: None }),
-    ("padding_top", Prop { name: "padding-top", values: None }),
-    ("padding_bottom", Prop { name: "padding-bottom", values: None }),
-    ("padding_left", Prop { name: "padding-left", values: None }),
-    ("padding_right", Prop { name: "padding-right", values: None }),
-    ("width", Prop { name: "width", values: None }),
-    ("height", Prop { name: "height", values: None }),
-    ("min_width", Prop { name: "min-width", values: None }),
-    ("min_height", Prop { name: "min-height", values: None }),
-    ("max_width", Prop { name: "max-width", values: None }),
-    ("max_height", Prop { name: "max-height", values: None }),
-    ("top", Prop { name: "top", values: None }),
-    ("left", Prop { name: "left", values: None }),
-    ("right", Prop { name: "right", values: None }),
-    ("bottom", Prop { name: "bottom", values: None }),
-
+    (
+        "margin",
+        Prop {
+            name: "margin",
+            values: None,
+        },
+    ),
+    (
+        "margin_top",
+        Prop {
+            name: "margin-top",
+            values: None,
+        },
+    ),
+    (
+        "margin_bottom",
+        Prop {
+            name: "margin-bottom",
+            values: None,
+        },
+    ),
+    (
+        "margin_left",
+        Prop {
+            name: "margin-left",
+            values: None,
+        },
+    ),
+    (
+        "margin_right",
+        Prop {
+            name: "margin-right",
+            values: None,
+        },
+    ),
+    (
+        "padding",
+        Prop {
+            name: "padding",
+            values: None,
+        },
+    ),
+    (
+        "padding_top",
+        Prop {
+            name: "padding-top",
+            values: None,
+        },
+    ),
+    (
+        "padding_bottom",
+        Prop {
+            name: "padding-bottom",
+            values: None,
+        },
+    ),
+    (
+        "padding_left",
+        Prop {
+            name: "padding-left",
+            values: None,
+        },
+    ),
+    (
+        "padding_right",
+        Prop {
+            name: "padding-right",
+            values: None,
+        },
+    ),
+    (
+        "width",
+        Prop {
+            name: "width",
+            values: None,
+        },
+    ),
+    (
+        "height",
+        Prop {
+            name: "height",
+            values: None,
+        },
+    ),
+    (
+        "min_width",
+        Prop {
+            name: "min-width",
+            values: None,
+        },
+    ),
+    (
+        "min_height",
+        Prop {
+            name: "min-height",
+            values: None,
+        },
+    ),
+    (
+        "max_width",
+        Prop {
+            name: "max-width",
+            values: None,
+        },
+    ),
+    (
+        "max_height",
+        Prop {
+            name: "max-height",
+            values: None,
+        },
+    ),
+    (
+        "top",
+        Prop {
+            name: "top",
+            values: None,
+        },
+    ),
+    (
+        "left",
+        Prop {
+            name: "left",
+            values: None,
+        },
+    ),
+    (
+        "right",
+        Prop {
+            name: "right",
+            values: None,
+        },
+    ),
+    (
+        "bottom",
+        Prop {
+            name: "bottom",
+            values: None,
+        },
+    ),
     // ---- borders ----
     // Keys are the canonical YJ symbol names (per `symbols.rs`): `border_color_top`,
     // `border_style_top`, `border_weight_top` — NOT the CSS-style `border_top_color`
     // ordering. The old keys never matched any KFX field, so every per-side border was
     // silently dropped on import (no box rendered in the reader). The CSS property name
     // (`name:`) is the correct CSS spelling.
-    ("border_color", Prop { name: "border-color", values: None }),
-    ("border_color_top", Prop { name: "border-top-color", values: None }),
-    ("border_color_bottom", Prop { name: "border-bottom-color", values: None }),
-    ("border_color_left", Prop { name: "border-left-color", values: None }),
-    ("border_color_right", Prop { name: "border-right-color", values: None }),
-    ("border_weight", Prop { name: "border-width", values: None }),
-    ("border_weight_top", Prop { name: "border-top-width", values: None }),
-    ("border_weight_bottom", Prop { name: "border-bottom-width", values: None }),
-    ("border_weight_left", Prop { name: "border-left-width", values: None }),
-    ("border_weight_right", Prop { name: "border-right-width", values: None }),
-    ("border_style", Prop { name: "border-style", values: Some(BORDER_STYLES) }),
-    ("border_style_top", Prop { name: "border-top-style", values: Some(BORDER_STYLES) }),
-    ("border_style_bottom", Prop { name: "border-bottom-style", values: Some(BORDER_STYLES) }),
-    ("border_style_left", Prop { name: "border-left-style", values: Some(BORDER_STYLES) }),
-    ("border_style_right", Prop { name: "border-right-style", values: Some(BORDER_STYLES) }),
-
+    (
+        "border_color",
+        Prop {
+            name: "border-color",
+            values: None,
+        },
+    ),
+    (
+        "border_color_top",
+        Prop {
+            name: "border-top-color",
+            values: None,
+        },
+    ),
+    (
+        "border_color_bottom",
+        Prop {
+            name: "border-bottom-color",
+            values: None,
+        },
+    ),
+    (
+        "border_color_left",
+        Prop {
+            name: "border-left-color",
+            values: None,
+        },
+    ),
+    (
+        "border_color_right",
+        Prop {
+            name: "border-right-color",
+            values: None,
+        },
+    ),
+    (
+        "border_weight",
+        Prop {
+            name: "border-width",
+            values: None,
+        },
+    ),
+    (
+        "border_weight_top",
+        Prop {
+            name: "border-top-width",
+            values: None,
+        },
+    ),
+    (
+        "border_weight_bottom",
+        Prop {
+            name: "border-bottom-width",
+            values: None,
+        },
+    ),
+    (
+        "border_weight_left",
+        Prop {
+            name: "border-left-width",
+            values: None,
+        },
+    ),
+    (
+        "border_weight_right",
+        Prop {
+            name: "border-right-width",
+            values: None,
+        },
+    ),
+    (
+        "border_style",
+        Prop {
+            name: "border-style",
+            values: Some(BORDER_STYLES),
+        },
+    ),
+    (
+        "border_style_top",
+        Prop {
+            name: "border-top-style",
+            values: Some(BORDER_STYLES),
+        },
+    ),
+    (
+        "border_style_bottom",
+        Prop {
+            name: "border-bottom-style",
+            values: Some(BORDER_STYLES),
+        },
+    ),
+    (
+        "border_style_left",
+        Prop {
+            name: "border-left-style",
+            values: Some(BORDER_STYLES),
+        },
+    ),
+    (
+        "border_style_right",
+        Prop {
+            name: "border-right-style",
+            values: Some(BORDER_STYLES),
+        },
+    ),
     // ---- text emphasis (圏点) ----
     // Reverse of the export `ValueTransform::Map` in style_schema.rs. Common in
     // Japanese; previously absent here, so 圏点 was dropped on the reader path
     // (the matching export shorthand-parse gap is fixed in declaration.rs).
-    ("text_emphasis_style", Prop { name: "text-emphasis-style", values: Some(&[
-        ("filled_dot", Some("filled dot")), ("open_dot", Some("open dot")),
-        ("filled_circle", Some("filled circle")), ("open_circle", Some("open circle")),
-        ("filled_double_circle", Some("filled double-circle")),
-        ("open_double_circle", Some("open double-circle")),
-        ("filled_triangle", Some("filled triangle")), ("open_triangle", Some("open triangle")),
-        ("filled_sesame", Some("filled sesame")), ("open_sesame", Some("open sesame")),
-        ("none", None),
-    ])}),
+    (
+        "text_emphasis_style",
+        Prop {
+            name: "text-emphasis-style",
+            values: Some(&[
+                ("filled_dot", Some("filled dot")),
+                ("open_dot", Some("open dot")),
+                ("filled_circle", Some("filled circle")),
+                ("open_circle", Some("open circle")),
+                ("filled_double_circle", Some("filled double-circle")),
+                ("open_double_circle", Some("open double-circle")),
+                ("filled_triangle", Some("filled triangle")),
+                ("open_triangle", Some("open triangle")),
+                ("filled_sesame", Some("filled sesame")),
+                ("open_sesame", Some("open sesame")),
+                ("none", None),
+            ]),
+        },
+    ),
     // Packed-int colour (handled by `is_color_prop`).
-    ("text_emphasis_color", Prop { name: "text-emphasis-color", values: None }),
-
+    (
+        "text_emphasis_color",
+        Prop {
+            name: "text-emphasis-color",
+            values: None,
+        },
+    ),
     // ---- text-combine-upright (縦中横) ----
-    ("text_combine", Prop { name: "text-combine-upright", values: Some(&[
-        ("all", Some("all")), ("none", Some("none")),
-    ])}),
-
+    (
+        "text_combine",
+        Prop {
+            name: "text-combine-upright",
+            values: Some(&[("all", Some("all")), ("none", Some("none"))]),
+        },
+    ),
     // ---- fragmentation (page/column breaks) ----
     // `break-inside: avoid` keeps a 罫囲み box from splitting across pages.
-    ("break_inside", Prop { name: "break-inside", values: Some(&[
-        ("auto", Some("auto")), ("avoid", Some("avoid")),
-    ])}),
-    ("break_before", Prop { name: "break-before", values: Some(&[
-        ("auto", Some("auto")), ("avoid", Some("avoid")), ("always", Some("page")),
-    ])}),
-    ("break_after", Prop { name: "break-after", values: Some(&[
-        ("auto", Some("auto")), ("avoid", Some("avoid")), ("always", Some("page")),
-    ])}),
-    ("keep_lines_together", Prop { name: "orphans", values: None }),
-
+    (
+        "break_inside",
+        Prop {
+            name: "break-inside",
+            values: Some(&[("auto", Some("auto")), ("avoid", Some("avoid"))]),
+        },
+    ),
+    (
+        "break_before",
+        Prop {
+            name: "break-before",
+            values: Some(&[
+                ("auto", Some("auto")),
+                ("avoid", Some("avoid")),
+                ("always", Some("page")),
+            ]),
+        },
+    ),
+    (
+        "break_after",
+        Prop {
+            name: "break-after",
+            values: Some(&[
+                ("auto", Some("auto")),
+                ("avoid", Some("avoid")),
+                ("always", Some("page")),
+            ]),
+        },
+    ),
+    (
+        "keep_lines_together",
+        Prop {
+            name: "orphans",
+            values: None,
+        },
+    ),
     // ---- lists ----
-    ("list_style", Prop { name: "list-style-type", values: Some(&[
-        ("none", Some("none")), ("disc", Some("disc")), ("circle", Some("circle")),
-        ("square", Some("square")), ("numeric", Some("decimal")),
-        ("roman_lower", Some("lower-roman")), ("roman_upper", Some("upper-roman")),
-        ("alpha_lower", Some("lower-alpha")), ("alpha_upper", Some("upper-alpha")),
-    ])}),
-    ("list_style_position", Prop { name: "list-style-position", values: Some(&[
-        ("outside", Some("outside")), ("inside", Some("inside")),
-    ])}),
-
+    (
+        "list_style",
+        Prop {
+            name: "list-style-type",
+            values: Some(&[
+                ("none", Some("none")),
+                ("disc", Some("disc")),
+                ("circle", Some("circle")),
+                ("square", Some("square")),
+                ("numeric", Some("decimal")),
+                ("roman_lower", Some("lower-roman")),
+                ("roman_upper", Some("upper-roman")),
+                ("alpha_lower", Some("lower-alpha")),
+                ("alpha_upper", Some("upper-alpha")),
+            ]),
+        },
+    ),
+    (
+        "list_style_position",
+        Prop {
+            name: "list-style-position",
+            values: Some(&[("outside", Some("outside")), ("inside", Some("inside"))]),
+        },
+    ),
     // ---- text wrapping ----
-    ("word_break", Prop { name: "word-break", values: Some(&[
-        ("normal", Some("normal")), ("break_all", Some("break-all")),
-    ])}),
-    ("hyphens", Prop { name: "hyphens", values: Some(&[
-        ("auto", Some("auto")), ("manual", Some("manual")), ("none", Some("none")),
-    ])}),
-
+    (
+        "word_break",
+        Prop {
+            name: "word-break",
+            values: Some(&[("normal", Some("normal")), ("break_all", Some("break-all"))]),
+        },
+    ),
+    (
+        "hyphens",
+        Prop {
+            name: "hyphens",
+            values: Some(&[
+                ("auto", Some("auto")),
+                ("manual", Some("manual")),
+                ("none", Some("none")),
+            ]),
+        },
+    ),
     // ---- box sizing / radius / table borders ----
-    ("sizing_bounds", Prop { name: "box-sizing", values: Some(&[
-        ("content_bounds", Some("content-box")), ("border_bounds", Some("border-box")),
-    ])}),
-    ("border_radius_top_left", Prop { name: "border-top-left-radius", values: None }),
-    ("border_radius_top_right", Prop { name: "border-top-right-radius", values: None }),
-    ("border_radius_bottom_left", Prop { name: "border-bottom-left-radius", values: None }),
-    ("border_radius_bottom_right", Prop { name: "border-bottom-right-radius", values: None }),
-    ("border_spacing_horizontal", Prop { name: "-webkit-border-horizontal-spacing", values: None }),
-    ("border_spacing_vertical", Prop { name: "-webkit-border-vertical-spacing", values: None }),
-    ("table_border_collapse", Prop { name: "border-collapse", values: Some(&[
-        ("true", Some("collapse")), ("false", Some("separate")),
-    ])}),
-
+    (
+        "sizing_bounds",
+        Prop {
+            name: "box-sizing",
+            values: Some(&[
+                ("content_bounds", Some("content-box")),
+                ("border_bounds", Some("border-box")),
+            ]),
+        },
+    ),
+    (
+        "border_radius_top_left",
+        Prop {
+            name: "border-top-left-radius",
+            values: None,
+        },
+    ),
+    (
+        "border_radius_top_right",
+        Prop {
+            name: "border-top-right-radius",
+            values: None,
+        },
+    ),
+    (
+        "border_radius_bottom_left",
+        Prop {
+            name: "border-bottom-left-radius",
+            values: None,
+        },
+    ),
+    (
+        "border_radius_bottom_right",
+        Prop {
+            name: "border-bottom-right-radius",
+            values: None,
+        },
+    ),
+    (
+        "border_spacing_horizontal",
+        Prop {
+            name: "-webkit-border-horizontal-spacing",
+            values: None,
+        },
+    ),
+    (
+        "border_spacing_vertical",
+        Prop {
+            name: "-webkit-border-vertical-spacing",
+            values: None,
+        },
+    ),
+    (
+        "table_border_collapse",
+        Prop {
+            name: "border-collapse",
+            values: Some(&[("true", Some("collapse")), ("false", Some("separate"))]),
+        },
+    ),
     // ---- alignment / decoration / variant / yj breaks ----
     // `box_align` is the container's content alignment (calibre maps $580 →
     // text-align). Values left/center/right.
-    ("box_align", Prop { name: "text-align", values: Some(&[
-        ("center", Some("center")), ("left", Some("left")), ("right", Some("right")),
-    ])}),
-    ("float", Prop { name: "float", values: Some(&[
-        ("none", Some("none")), ("left", Some("left")), ("right", Some("right")),
-    ])}),
-    ("overline", Prop { name: "text-decoration-line", values: Some(&[
-        ("solid", Some("overline")), ("none", None),
-    ])}),
-    ("glyph_transform", Prop { name: "font-variant", values: Some(&[
-        ("small_caps", Some("small-caps")),
-    ])}),
+    (
+        "box_align",
+        Prop {
+            name: "text-align",
+            values: Some(&[
+                ("center", Some("center")),
+                ("left", Some("left")),
+                ("right", Some("right")),
+            ]),
+        },
+    ),
+    (
+        "float",
+        Prop {
+            name: "float",
+            values: Some(&[
+                ("none", Some("none")),
+                ("left", Some("left")),
+                ("right", Some("right")),
+            ]),
+        },
+    ),
+    (
+        "overline",
+        Prop {
+            name: "text-decoration-line",
+            values: Some(&[("solid", Some("overline")), ("none", None)]),
+        },
+    ),
+    (
+        "glyph_transform",
+        Prop {
+            name: "font-variant",
+            values: Some(&[("small_caps", Some("small-caps"))]),
+        },
+    ),
     // yj-internal break props (Amazon emits these alongside the CSS break-*).
-    ("yj_break_before", Prop { name: "break-before", values: Some(&[
-        ("auto", Some("auto")), ("always", Some("page")), ("avoid", Some("avoid")),
-    ])}),
-    ("yj_break_after", Prop { name: "break-after", values: Some(&[
-        ("auto", Some("auto")), ("always", Some("page")), ("avoid", Some("avoid")),
-    ])}),
-
+    (
+        "yj_break_before",
+        Prop {
+            name: "break-before",
+            values: Some(&[
+                ("auto", Some("auto")),
+                ("always", Some("page")),
+                ("avoid", Some("avoid")),
+            ]),
+        },
+    ),
+    (
+        "yj_break_after",
+        Prop {
+            name: "break-after",
+            values: Some(&[
+                ("auto", Some("auto")),
+                ("always", Some("page")),
+                ("avoid", Some("avoid")),
+            ]),
+        },
+    ),
     // ---- ruby ----
     // Canonical YJ symbol names (`symbols.rs`): the previous `ruby_align`/
     // `ruby_position` keys were not real symbols and never matched.
-    ("ruby_text_align", Prop { name: "ruby-align", values: Some(&[
-        ("center", Some("center")), ("space_around", Some("space-around")),
-        ("space_between", Some("space-between")), ("start", Some("start")),
-    ])}),
-    ("ruby_position_vertical", Prop { name: "ruby-position", values: Some(&[
-        ("under", Some("under")), ("over", Some("over")),
-    ])}),
-    ("ruby_position_horizontal", Prop { name: "ruby-position", values: Some(&[
-        ("under", Some("under")), ("over", Some("over")),
-    ])}),
-
+    (
+        "ruby_text_align",
+        Prop {
+            name: "ruby-align",
+            values: Some(&[
+                ("center", Some("center")),
+                ("space_around", Some("space-around")),
+                ("space_between", Some("space-between")),
+                ("start", Some("start")),
+            ]),
+        },
+    ),
+    (
+        "ruby_position_vertical",
+        Prop {
+            name: "ruby-position",
+            values: Some(&[("under", Some("under")), ("over", Some("over"))]),
+        },
+    ),
+    (
+        "ruby_position_horizontal",
+        Prop {
+            name: "ruby-position",
+            values: Some(&[("under", Some("under")), ("over", Some("over"))]),
+        },
+    ),
     // ---- text decoration ----
-    ("underline", Prop { name: "text-decoration", values: Some(&[
-        ("dashed", Some("underline dashed")), ("dotted", Some("underline dotted")),
-        ("double", Some("underline double")), ("none", None),
-        ("solid", Some("underline")),
-    ])}),
-    ("strikethrough", Prop { name: "text-decoration", values: Some(&[
-        ("dashed", Some("line-through dashed")), ("dotted", Some("line-through dotted")),
-        ("double", Some("line-through double")), ("none", None),
-        ("solid", Some("line-through")),
-    ])}),
-
+    (
+        "underline",
+        Prop {
+            name: "text-decoration",
+            values: Some(&[
+                ("dashed", Some("underline dashed")),
+                ("dotted", Some("underline dotted")),
+                ("double", Some("underline double")),
+                ("none", None),
+                ("solid", Some("underline")),
+            ]),
+        },
+    ),
+    (
+        "strikethrough",
+        Prop {
+            name: "text-decoration",
+            values: Some(&[
+                ("dashed", Some("line-through dashed")),
+                ("dotted", Some("line-through dotted")),
+                ("double", Some("line-through double")),
+                ("none", None),
+                ("solid", Some("line-through")),
+            ]),
+        },
+    ),
     // ---- spacing ----
-    ("space_before", Prop { name: "margin-top", values: None }),
-    ("space_after", Prop { name: "margin-bottom", values: None }),
-    ("left_indent", Prop { name: "margin-left", values: None }),
-    ("right_indent", Prop { name: "margin-right", values: None }),
-
+    (
+        "space_before",
+        Prop {
+            name: "margin-top",
+            values: None,
+        },
+    ),
+    (
+        "space_after",
+        Prop {
+            name: "margin-bottom",
+            values: None,
+        },
+    ),
+    (
+        "left_indent",
+        Prop {
+            name: "margin-left",
+            values: None,
+        },
+    ),
+    (
+        "right_indent",
+        Prop {
+            name: "margin-right",
+            values: None,
+        },
+    ),
     // ---- nobreak / whitespace ----
-    ("nobreak", Prop { name: "white-space", values: Some(&[
-        ("false", Some("normal")), ("true", Some("nowrap")),
-    ])}),
-
+    (
+        "nobreak",
+        Prop {
+            name: "white-space",
+            values: Some(&[("false", Some("normal")), ("true", Some("nowrap"))]),
+        },
+    ),
     // ---- text orientation ----
-    ("text_orientation", Prop { name: "text-orientation", values: Some(&[
-        ("auto", Some("mixed")), ("sideways", Some("sideways")),
-        ("upright", Some("upright")),
-    ])}),
-
+    (
+        "text_orientation",
+        Prop {
+            name: "text-orientation",
+            values: Some(&[
+                ("auto", Some("mixed")),
+                ("sideways", Some("sideways")),
+                ("upright", Some("upright")),
+            ]),
+        },
+    ),
     // ---- direction (page progression) ----
-    ("direction", Prop { name: "direction", values: Some(&[
-        ("ltr", Some("ltr")), ("rtl", Some("rtl")),
-    ])}),
-
+    (
+        "direction",
+        Prop {
+            name: "direction",
+            values: Some(&[("ltr", Some("ltr")), ("rtl", Some("rtl"))]),
+        },
+    ),
     // ---- visibility ----
-    ("visibility", Prop { name: "visibility", values: Some(&[
-        ("false", Some("hidden")), ("true", Some("visible")),
-    ])}),
+    (
+        "visibility",
+        Prop {
+            name: "visibility",
+            values: Some(&[("false", Some("hidden")), ("true", Some("visible"))]),
+        },
+    ),
 ];
 
 /// All YJ properties seen in the book — used for the validator scorecard.
@@ -604,7 +1167,10 @@ pub fn all_property_names() -> impl Iterator<Item = &'static str> {
 /// `style_name` in `book.by_type[$157]`, walks the fields, and returns
 /// a `CssDecl`.
 pub fn style_decl_for(style_name: &str, book: &BookData) -> CssDecl {
-    let Some(styles) = book.by_type.get(&(crate::kfx::symbols::KfxSymbol::Style as u64)) else {
+    let Some(styles) = book
+        .by_type
+        .get(&(crate::kfx::symbols::KfxSymbol::Style as u64))
+    else {
         return CssDecl::new();
     };
     let Some(value) = styles.get(style_name) else {
@@ -626,10 +1192,7 @@ pub fn style_decl_for(style_name: &str, book: &BookData) -> CssDecl {
 ///
 /// `layout_hints` is a list because a single style can declare multiple
 /// (e.g. `["heading", "figure"]`). `heading_level` is a string `"1"`..`"6"`.
-pub fn style_layout_hints_for(
-    style_name: &str,
-    book: &BookData,
-) -> (Vec<String>, Option<String>) {
+pub fn style_layout_hints_for(style_name: &str, book: &BookData) -> (Vec<String>, Option<String>) {
     use crate::kfx::symbols::KfxSymbol;
     let Some(styles) = book.by_type.get(&(KfxSymbol::Style as u64)) else {
         return (Vec::new(), None);
@@ -668,13 +1231,11 @@ pub fn style_layout_hints_for(
                     }
                 }
             }
-            "yj.semantics.heading_level" => {
-                match v.unwrap_annotated() {
-                    IonValue::Int(n) => heading_level = Some(n.to_string()),
-                    IonValue::String(s) => heading_level = Some(s.clone()),
-                    _ => {}
-                }
-            }
+            "yj.semantics.heading_level" => match v.unwrap_annotated() {
+                IonValue::Int(n) => heading_level = Some(n.to_string()),
+                IonValue::String(s) => heading_level = Some(s.clone()),
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -696,23 +1257,24 @@ pub fn layout_hints_from_element_fields(
     let mut hints: Vec<String> = Vec::new();
     let mut heading_level: Option<String> = None;
     if let Some(layout_hints) = get_field(fields, KfxSymbol::LayoutHints as u64)
-        && let IonValue::List(items) = layout_hints.unwrap_annotated() {
-            for item in items {
-                let IonValue::Symbol(id) = item.unwrap_annotated() else {
-                    continue;
-                };
-                // Match calibre's `LAYOUT_HINT_ELEMENT_NAMES`: key by the
-                // symbol id, not its name (boko's local symbol table calls
-                // `$760` "treat_as_title", calibre leaves it nameless).
-                let name = match *id {
-                    x if x == KfxSymbol::TreatAsTitle as u64 => "heading",
-                    x if x == KfxSymbol::Figure as u64 => "figure",
-                    x if x == KfxSymbol::Caption as u64 => "caption",
-                    _ => continue,
-                };
-                hints.push(name.to_string());
-            }
+        && let IonValue::List(items) = layout_hints.unwrap_annotated()
+    {
+        for item in items {
+            let IonValue::Symbol(id) = item.unwrap_annotated() else {
+                continue;
+            };
+            // Match calibre's `LAYOUT_HINT_ELEMENT_NAMES`: key by the
+            // symbol id, not its name (boko's local symbol table calls
+            // `$760` "treat_as_title", calibre leaves it nameless).
+            let name = match *id {
+                x if x == KfxSymbol::TreatAsTitle as u64 => "heading",
+                x if x == KfxSymbol::Figure as u64 => "figure",
+                x if x == KfxSymbol::Caption as u64 => "caption",
+                _ => continue,
+            };
+            hints.push(name.to_string());
         }
+    }
     if let Some(level) = get_field(fields, KfxSymbol::YjSemanticsHeadingLevel as u64) {
         match level.unwrap_annotated() {
             IonValue::Int(n) => heading_level = Some(n.to_string()),
@@ -738,7 +1300,11 @@ pub fn render_stylesheet(styles_used: &HashMap<String, CssDecl>) -> String {
         if decl.is_empty() {
             continue;
         }
-        s.push_str(&format!(".{} {{ {} }}\n", safe_class_name(k), decl.to_inline()));
+        s.push_str(&format!(
+            ".{} {{ {} }}\n",
+            safe_class_name(k),
+            decl.to_inline()
+        ));
     }
     s
 }

@@ -26,8 +26,7 @@ pub struct ServerConfig {
 }
 
 pub fn load(path: &Path) -> Result<ServerConfig> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
 
     let mut host = String::new();
     let mut port_str = String::new();
@@ -60,5 +59,10 @@ pub fn load(path: &Path) -> Result<ServerConfig> {
     }
     let port: u16 = port_str.parse().context("server.conf PORT= invalid")?;
 
-    Ok(ServerConfig { host, port, token, serial })
+    Ok(ServerConfig {
+        host,
+        port,
+        token,
+        serial,
+    })
 }

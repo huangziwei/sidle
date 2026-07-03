@@ -10,8 +10,8 @@
 
 use anyhow::Result;
 
-use crate::device::{DeviceInfo, TPath, Transport};
 use crate::device::ink;
+use crate::device::{DeviceInfo, TPath, Transport};
 use crate::library::ingest::{self, CollectedYjr, DeviceImportReport};
 use crate::library::{LibraryPaths, db};
 use crate::state::DbHandle;
@@ -48,11 +48,10 @@ pub fn collect_device_yjr(transport: &dyn Transport) -> Result<Vec<CollectedYjr>
     // every call (O(books²), the same blowup the ink walk had). `.yjr.bad_file` is
     // excluded (it doesn't end in `.yjr`); a `.sdr` with neither sidecar (a
     // pure pagination cache) yields no matching files and is dropped.
-    let pulled = transport.read_files_in_children(
-        &sidle,
-        &|name| name.ends_with(".sdr"),
-        &|file| file.ends_with(".yjr") || file.ends_with(".yjf"),
-    )?;
+    let pulled =
+        transport.read_files_in_children(&sidle, &|name| name.ends_with(".sdr"), &|file| {
+            file.ends_with(".yjr") || file.ends_with(".yjf")
+        })?;
     Ok(pulled
         .into_iter()
         .map(|(sdr_name, files)| {
@@ -206,7 +205,11 @@ mod tests {
         let mut collected = collect_device_yjr(&transport).unwrap();
         collected.sort_by(|a, b| a.sdr_name.cmp(&b.sdr_name)); // dir order is unspecified
 
-        assert_eq!(collected.len(), 2, "annotated + position-only; cache skipped");
+        assert_eq!(
+            collected.len(),
+            2,
+            "annotated + position-only; cache skipped"
+        );
 
         let annotated = &collected[0];
         assert_eq!(annotated.sdr_name, "book.deadbeef.sdr");
@@ -215,7 +218,10 @@ mod tests {
 
         let posonly = &collected[1];
         assert_eq!(posonly.sdr_name, "read.cafef00d.sdr");
-        assert!(posonly.yjr_bytes.is_none(), "no .yjr for a never-highlighted book");
+        assert!(
+            posonly.yjr_bytes.is_none(),
+            "no .yjr for a never-highlighted book"
+        );
         assert_eq!(posonly.yjf_bytes.as_deref(), Some(&b"POS-ONLY"[..]));
     }
 

@@ -21,9 +21,9 @@
 
 use std::io;
 
-use super::fragment::{is_raw, CONTAINER_FRAGMENT_TYPES, YJFragment};
-use super::node::{parse_single_value, serialize_single_value, serialize_value, IonNode, ION_BVM};
-use super::symtab::{LocalSymbolTable, SymbolTableImport, SYSTEM_SIZE};
+use super::fragment::{CONTAINER_FRAGMENT_TYPES, YJFragment, is_raw};
+use super::node::{ION_BVM, IonNode, parse_single_value, serialize_single_value, serialize_value};
+use super::symtab::{LocalSymbolTable, SYSTEM_SIZE, SymbolTableImport};
 
 const CONT_SIGNATURE: &[u8] = b"CONT";
 const ENTY_SIGNATURE: &[u8] = b"ENTY";
@@ -337,18 +337,16 @@ fn entity_to_fragment(
     let mut fid = fid_initial.clone();
     if fid_initial == "$348" {
         if let IonNode::Annotated(anns, inner) = &value
-            && anns.len() == 1 && anns[0] == ftype {
-                let inner_owned = (**inner).clone();
-                value = inner_owned;
-            }
+            && anns.len() == 1
+            && anns[0] == ftype
+        {
+            let inner_owned = (**inner).clone();
+            value = inner_owned;
+        }
         fid = ftype.clone();
     }
 
-    Ok(YJFragment {
-        fid,
-        ftype,
-        value,
-    })
+    Ok(YJFragment { fid, ftype, value })
 }
 
 // =========================================================================
@@ -465,8 +463,7 @@ pub fn serialize_container(fragments: &[YJFragment], symtab: &LocalSymbolTable) 
     ci_fields.push(("$412".into(), IonNode::Int(DEFAULT_CHUNK_SIZE)));
 
     let fc_data = if let Some(fc_frag) = format_caps_fragment {
-        let annotated =
-            IonNode::Annotated(vec!["$593".into()], Box::new(fc_frag.value.clone()));
+        let annotated = IonNode::Annotated(vec!["$593".into()], Box::new(fc_frag.value.clone()));
         serialize_single_value(&annotated, symtab)
     } else {
         Vec::new()
@@ -599,19 +596,20 @@ fn bump_imports_max_id(value: &IonNode, delta: i64) -> IonNode {
     };
     for (k, v) in fields.iter_mut() {
         if k == "imports"
-            && let IonNode::List(items) = v {
-                for item in items {
-                    if let IonNode::Struct(f) = item {
-                        for (kk, vv) in f.iter_mut() {
-                            if kk == "max_id"
-                                && let IonNode::Int(n) = vv
-                            {
-                                *n += delta;
-                            }
+            && let IonNode::List(items) = v
+        {
+            for item in items {
+                if let IonNode::Struct(f) = item {
+                    for (kk, vv) in f.iter_mut() {
+                        if kk == "max_id"
+                            && let IonNode::Int(n) = vv
+                        {
+                            *n += delta;
                         }
                     }
                 }
             }
+        }
     }
     out
 }

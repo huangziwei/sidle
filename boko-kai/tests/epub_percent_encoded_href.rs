@@ -12,8 +12,8 @@
 use std::io::Write;
 use std::path::Path;
 
-use boko::model::AnchorTarget;
 use boko::Book;
+use boko::model::AnchorTarget;
 
 /// Build a minimal EPUB 2.0 whose files carry literal `!` and space characters
 /// but whose hrefs reference them percent-encoded (`%21`, `%20`). Returns the
@@ -104,7 +104,11 @@ fn build_percent_encoded_epub() -> tempfile::TempDir {
 <body><p>Second chapter body.</p></body></html>"#,
     );
 
-    add(&mut zip, "OEBPS/Images/img a.jpg", b"\xff\xd8\xff\xe0JFIF-fake-jpeg-bytes");
+    add(
+        &mut zip,
+        "OEBPS/Images/img a.jpg",
+        b"\xff\xd8\xff\xe0JFIF-fake-jpeg-bytes",
+    );
 
     zip.finish().expect("finish zip");
     dir
@@ -172,9 +176,10 @@ fn percent_encoded_link_resolves_not_broken() {
         links.broken_links()
     );
     assert!(
-        links
-            .iter()
-            .any(|(_, target)| matches!(target, AnchorTarget::Chapter(_) | AnchorTarget::Internal(_))),
+        links.iter().any(|(_, target)| matches!(
+            target,
+            AnchorTarget::Chapter(_) | AnchorTarget::Internal(_)
+        )),
         "expected the next-chapter link to resolve to a chapter target"
     );
 }

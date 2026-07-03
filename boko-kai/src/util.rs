@@ -20,8 +20,8 @@ pub fn time_now_secs() -> u32 {
 /// every export look like a new book to library tools).
 pub fn uuid_v5(name: &str) -> String {
     const URL_NAMESPACE: [u8; 16] = [
-        0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1,
-        0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+        0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30,
+        0xc8,
     ];
     let mut hasher = sha1_smol::Sha1::new();
     hasher.update(&URL_NAMESPACE);
@@ -33,7 +33,22 @@ pub fn uuid_v5(name: &str) -> String {
     b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15],
     )
 }
 

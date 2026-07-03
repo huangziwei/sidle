@@ -168,7 +168,10 @@ mod tests {
             parse_input("Franz Kafka & Jane Doe"),
             vec!["Franz Kafka", "Jane Doe"]
         );
-        assert_eq!(parse_input("村上春樹、夏目漱石"), vec!["村上春樹", "夏目漱石"]);
+        assert_eq!(
+            parse_input("村上春樹、夏目漱石"),
+            vec!["村上春樹", "夏目漱石"]
+        );
         assert!(parse_input("   ").is_empty());
     }
 

@@ -59,8 +59,9 @@ const DEFAULT_MEDIABOX: [f32; 4] = [0.0, 0.0, 612.0, 792.0];
 
 /// Probe a PDF's structure without altering its bytes.
 pub fn probe_pdf(bytes: Vec<u8>) -> io::Result<PdfDoc> {
-    let mut doc = Document::load_mem(&bytes)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("PDF parse failed: {e}")))?;
+    let mut doc = Document::load_mem(&bytes).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("PDF parse failed: {e}"))
+    })?;
 
     // Recover objects lopdf silently dropped from NUL-separated object streams
     // (see `recover_nul_object_streams`). A no-op unless that bug actually bit —
@@ -151,7 +152,9 @@ fn recover_nul_object_streams(doc: &mut Document) {
         // lopdf inflates the ObjStm in place during its (failed) load — content
         // becomes the decompressed bytes and `/Filter` is stripped — so prefer the
         // raw `content` and only inflate if it's still compressed.
-        let content = s.decompressed_content().unwrap_or_else(|_| s.content.clone());
+        let content = s
+            .decompressed_content()
+            .unwrap_or_else(|_| s.content.clone());
         let Ok(first) = s.dict.get(b"First").and_then(Object::as_i64) else {
             continue;
         };
@@ -276,7 +279,10 @@ fn page_dimensions(doc: &Document, page_id: ObjectId) -> (f32, f32) {
 fn info_string(doc: &Document, key: &[u8]) -> Option<String> {
     let info = doc.trailer.get(b"Info").ok()?;
     let dict = deref(doc, info)?.as_dict().ok()?;
-    let raw = dict.get(key).ok().and_then(|o| deref(doc, o)?.as_str().ok())?;
+    let raw = dict
+        .get(key)
+        .ok()
+        .and_then(|o| deref(doc, o)?.as_str().ok())?;
     let s = decode_pdf_string(raw);
     let s = s.trim();
     if s.is_empty() {
@@ -363,7 +369,10 @@ fn pdfdoc_to_char(b: u8) -> char {
 /// real books mix them, so all are handled. Everything is best-effort: an
 /// unresolvable entry is dropped (its children promoted) rather than failing the
 /// conversion.
-fn extract_outline(doc: &Document, page_index_of: &HashMap<ObjectId, usize>) -> Vec<PdfOutlineItem> {
+fn extract_outline(
+    doc: &Document,
+    page_index_of: &HashMap<ObjectId, usize>,
+) -> Vec<PdfOutlineItem> {
     let Ok(catalog) = doc.catalog() else {
         return Vec::new();
     };
@@ -726,7 +735,11 @@ fn parse_label_run(dict: &Dictionary) -> LabelRun {
         .ok()
         .and_then(|o| o.as_name().ok())
         .and_then(|n| n.first().copied());
-    let start = dict.get(b"St").ok().and_then(|o| o.as_i64().ok()).unwrap_or(1);
+    let start = dict
+        .get(b"St")
+        .ok()
+        .and_then(|o| o.as_i64().ok())
+        .unwrap_or(1);
     LabelRun {
         prefix,
         style,
@@ -751,9 +764,19 @@ fn format_page_number(n: i64, style: u8) -> String {
 /// Uppercase roman numeral (subtractive). `n` is assumed positive.
 fn to_roman(mut n: i64) -> String {
     const TABLE: [(i64, &str); 13] = [
-        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"),
-        (90, "XC"), (50, "L"), (40, "XL"), (10, "X"), (9, "IX"),
-        (5, "V"), (4, "IV"), (1, "I"),
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
     ];
     let mut s = String::new();
     for (v, sym) in TABLE {
@@ -822,13 +845,25 @@ mod tests {
 
         // A run mirroring Amazon's PDOC: prefix-only "Cover", then lowercase
         // roman starting at 1.
-        let cover = LabelRun { prefix: "Cover".into(), style: None, start: 1 };
+        let cover = LabelRun {
+            prefix: "Cover".into(),
+            style: None,
+            start: 1,
+        };
         assert_eq!(cover.label(0), "Cover");
-        let roman = LabelRun { prefix: String::new(), style: Some(b'r'), start: 1 };
+        let roman = LabelRun {
+            prefix: String::new(),
+            style: Some(b'r'),
+            start: 1,
+        };
         assert_eq!(roman.label(0), "i");
         assert_eq!(roman.label(6), "vii");
         // Prefix + number (e.g. "A-1").
-        let prefixed = LabelRun { prefix: "A-".into(), style: Some(b'D'), start: 1 };
+        let prefixed = LabelRun {
+            prefix: "A-".into(),
+            style: Some(b'D'),
+            start: 1,
+        };
         assert_eq!(prefixed.label(0), "A-1");
     }
 
@@ -863,12 +898,20 @@ mod tests {
         let mut doc = Document::new();
         doc.objects
             .insert((2, 0), Object::Stream(Stream::new(dict, content)));
-        doc.reference_table
-            .entries
-            .insert(10, XrefEntry::Compressed { container: 2, index: 0 });
-        doc.reference_table
-            .entries
-            .insert(11, XrefEntry::Compressed { container: 2, index: 1 });
+        doc.reference_table.entries.insert(
+            10,
+            XrefEntry::Compressed {
+                container: 2,
+                index: 0,
+            },
+        );
+        doc.reference_table.entries.insert(
+            11,
+            XrefEntry::Compressed {
+                container: 2,
+                index: 1,
+            },
+        );
 
         // Precondition: the compressed objects are unresolved (as after a real
         // lopdf load that hit the NUL-index bug).

@@ -54,8 +54,12 @@ fn run(app: &AppHandle, paths: &LibraryPaths) -> anyhow::Result<()> {
         }
         // A read during the rename window may miss or partial-parse; skip and wait
         // for the settle event rather than emit a half-written report.
-        let Ok(bytes) = std::fs::read(&pulse_path) else { continue };
-        let Some((ts, report)) = parse_pulse(&bytes) else { continue };
+        let Ok(bytes) = std::fs::read(&pulse_path) else {
+            continue;
+        };
+        let Some((ts, report)) = parse_pulse(&bytes) else {
+            continue;
+        };
 
         if ts.is_some() && ts == last_ts {
             continue;

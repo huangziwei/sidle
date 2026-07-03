@@ -59,10 +59,18 @@ fn decodes_libjxr_color444_exactly() {
         for x in 0..16usize {
             let di = y * 16 + x;
             let si = di * 3;
-            let got = [img.image_plane[0][di], img.image_plane[1][di], img.image_plane[2][di]];
+            let got = [
+                img.image_plane[0][di],
+                img.image_plane[1][di],
+                img.image_plane[2][di],
+            ];
             assert_eq!(
                 got,
-                [expected[si] as i32, expected[si + 1] as i32, expected[si + 2] as i32],
+                [
+                    expected[si] as i32,
+                    expected[si + 1] as i32,
+                    expected[si + 2] as i32
+                ],
                 "pixel ({x},{y}) mismatch (R,G,B)"
             );
         }

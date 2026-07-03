@@ -22,7 +22,11 @@ impl BitWriter {
     /// must be `<= 56` so it fits alongside the `< 8` pending bits in a `u64`.
     pub fn write_bits(&mut self, value: u64, size: u32) {
         debug_assert!(size <= 56, "write_bits size {size} > 56");
-        let masked = if size == 0 { 0 } else { value & ((1u64 << size) - 1) };
+        let masked = if size == 0 {
+            0
+        } else {
+            value & ((1u64 << size) - 1)
+        };
         self.cur = (self.cur << size) | masked;
         self.nbits += size;
         while self.nbits >= 8 {
@@ -50,7 +54,6 @@ impl BitWriter {
             self.write_bits(0, 8 - self.nbits);
         }
     }
-
 
     /// Finish, padding the final partial byte with zeros, and return the bytes.
     pub fn finish(mut self) -> Vec<u8> {

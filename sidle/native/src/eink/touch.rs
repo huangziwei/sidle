@@ -74,8 +74,14 @@ const SCREENSHOT_CORNER_PX: u32 = 180;
 /// matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TouchEvent {
-    Down { x: u32, y: u32 },
-    Up { x: u32, y: u32 },
+    Down {
+        x: u32,
+        y: u32,
+    },
+    Up {
+        x: u32,
+        y: u32,
+    },
     /// Two contacts landed simultaneously in opposite screen corners (either
     /// diagonal) — the native Kindle screenshot gesture. We recognize it here
     /// because the OS's own recognizer never fires under Sidle: our
@@ -352,7 +358,11 @@ pub fn classify_swipe(x0: u32, y0: u32, x1: u32, y1: u32, xres: u32) -> Option<S
     if dx.abs() < min_dx || dx.abs() < dy.abs() * 2 {
         return None;
     }
-    Some(if dx < 0 { SwipeDir::Next } else { SwipeDir::Prev })
+    Some(if dx < 0 {
+        SwipeDir::Next
+    } else {
+        SwipeDir::Prev
+    })
 }
 
 impl Drop for Touch {
@@ -379,9 +389,18 @@ fn find_touch_device() -> Result<PathBuf> {
         // device reports absolute axes and is a direct touch surface. The
         // power key (EV=3, no EV_ABS) and accelerometers (no INPUT_PROP_DIRECT)
         // are rejected by the capability test.
-        let name_match = ["touch", "cyttsp", "zforce", "atmel", "fts", "focaltech", "goodix", "elan"]
-            .iter()
-            .any(|needle| name.contains(needle));
+        let name_match = [
+            "touch",
+            "cyttsp",
+            "zforce",
+            "atmel",
+            "fts",
+            "focaltech",
+            "goodix",
+            "elan",
+        ]
+        .iter()
+        .any(|needle| name.contains(needle));
         let has_abs = first_hex_word(block, "B: EV=") & (1 << EV_ABS_BIT) != 0;
         let is_direct = first_hex_word(block, "B: PROP=") & (1 << INPUT_PROP_DIRECT) != 0;
         if !(name_match || (has_abs && is_direct)) {
@@ -424,12 +443,18 @@ mod tests {
     #[test]
     fn left_drag_is_next() {
         // Right→left across a third of the screen, near-horizontal.
-        assert_eq!(classify_swipe(900, 800, 300, 820, XRES), Some(SwipeDir::Next));
+        assert_eq!(
+            classify_swipe(900, 800, 300, 820, XRES),
+            Some(SwipeDir::Next)
+        );
     }
 
     #[test]
     fn right_drag_is_prev() {
-        assert_eq!(classify_swipe(300, 800, 900, 790, XRES), Some(SwipeDir::Prev));
+        assert_eq!(
+            classify_swipe(300, 800, 900, 790, XRES),
+            Some(SwipeDir::Prev)
+        );
     }
 
     #[test]
@@ -447,6 +472,9 @@ mod tests {
     #[test]
     fn shallow_diagonal_still_counts() {
         // dx=400, dy=150 → 400 >= 2·150, horizontal enough to flip.
-        assert_eq!(classify_swipe(900, 400, 500, 550, XRES), Some(SwipeDir::Next));
+        assert_eq!(
+            classify_swipe(900, 400, 500, 550, XRES),
+            Some(SwipeDir::Next)
+        );
     }
 }

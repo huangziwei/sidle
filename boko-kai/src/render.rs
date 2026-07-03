@@ -195,7 +195,9 @@ mod macos {
             let out_w = target_width_px as usize;
             let out_h = ((ph * scale).round() as usize).max(1);
             if out_w > u16::MAX as usize || out_h > u16::MAX as usize {
-                return Err(RenderError::Render(format!("bitmap too large {out_w}x{out_h}")));
+                return Err(RenderError::Render(format!(
+                    "bitmap too large {out_w}x{out_h}"
+                )));
             }
 
             // RGBA bitmap we own; PDFKit draws into it. Premultiplied alpha — we
@@ -244,7 +246,12 @@ mod macos {
 
             let mut out: Vec<u8> = Vec::with_capacity(128 * 1024);
             jpeg_encoder::Encoder::new(&mut out, quality)
-                .encode(&rgb, out_w as u16, out_h as u16, jpeg_encoder::ColorType::Rgb)
+                .encode(
+                    &rgb,
+                    out_w as u16,
+                    out_h as u16,
+                    jpeg_encoder::ColorType::Rgb,
+                )
                 .map_err(|e| RenderError::Encode(e.to_string()))?;
             Ok(out)
         })
@@ -341,8 +348,14 @@ mod macos {
                 return None;
             }
             let min_left = boxed.iter().map(|u| u.left).fold(f32::INFINITY, f32::min);
-            let max_right = boxed.iter().map(|u| u.right).fold(f32::NEG_INFINITY, f32::max);
-            let max_top = boxed.iter().map(|u| u.top).fold(f32::NEG_INFINITY, f32::max);
+            let max_right = boxed
+                .iter()
+                .map(|u| u.right)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let max_top = boxed
+                .iter()
+                .map(|u| u.top)
+                .fold(f32::NEG_INFINITY, f32::max);
             let min_bottom = boxed.iter().map(|u| u.bottom).fold(f32::INFINITY, f32::min);
 
             let left = ((min_left - box_left) * SCALE).round() as i64;
@@ -375,7 +388,13 @@ mod macos {
                     }
                     i += 1;
                 }
-                segs.push(Seg { start, len: i - start, space, l, r });
+                segs.push(Seg {
+                    start,
+                    len: i - start,
+                    space,
+                    l,
+                    r,
+                });
             }
 
             // A word's width is its own ink extent; a space's width is the gap
@@ -388,8 +407,13 @@ mod macos {
                     let width = if !s.space && s.r > s.l {
                         ((s.r - s.l) * SCALE).round() as i64
                     } else if s.space {
-                        let prev_r = segs[..k].iter().rev().find_map(|p| p.r.is_finite().then_some(p.r));
-                        let next_l = segs[k + 1..].iter().find_map(|p| p.l.is_finite().then_some(p.l));
+                        let prev_r = segs[..k]
+                            .iter()
+                            .rev()
+                            .find_map(|p| p.r.is_finite().then_some(p.r));
+                        let next_l = segs[k + 1..]
+                            .iter()
+                            .find_map(|p| p.l.is_finite().then_some(p.l));
                         match (prev_r, next_l) {
                             (Some(pr), Some(nl)) if nl > pr => ((nl - pr) * SCALE).round() as i64,
                             _ => 0,

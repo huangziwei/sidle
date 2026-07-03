@@ -359,9 +359,10 @@ impl<'a> Decoder<'a> {
 
         self.hdr.tiling_flag = self.ds.unpack_bits(1)? as u32;
         self.hdr.frequency_mode = self.ds.unpack_bits(1)? as u32;
-        self.hdr.spatial_xfrm_subordinate = self.ds.check_bit_field(
-            3, "spatial_xfrm_subordinate", &[0, 1, 2, 3, 4, 5, 6, 7],
-        )? as u32;
+        self.hdr.spatial_xfrm_subordinate =
+            self.ds
+                .check_bit_field(3, "spatial_xfrm_subordinate", &[0, 1, 2, 3, 4, 5, 6, 7])?
+                as u32;
         self.hdr.index_table_present_flag = self.ds.unpack_bits(1)? as u32;
         self.hdr.overlap_mode = self.ds.unpack_bits(2)? as u8;
 
@@ -377,16 +378,34 @@ impl<'a> Decoder<'a> {
         self.hdr.alpha_image_plane_flag = self.ds.unpack_bits(1)? as u32;
 
         self.hdr.output_clr_fmt = self.ds.check_bit_field(
-            4, "output_clr_fmt", &[
-                OUT_YONLY as u64, OUT_YUV420 as u64, OUT_YUV422 as u64, OUT_YUV444 as u64,
-                OUT_CMYK as u64, OUT_CMYKDIRECT as u64, OUT_NCOMPONENT as u64,
-                OUT_RGB as u64, OUT_RGBE as u64,
+            4,
+            "output_clr_fmt",
+            &[
+                OUT_YONLY as u64,
+                OUT_YUV420 as u64,
+                OUT_YUV422 as u64,
+                OUT_YUV444 as u64,
+                OUT_CMYK as u64,
+                OUT_CMYKDIRECT as u64,
+                OUT_NCOMPONENT as u64,
+                OUT_RGB as u64,
+                OUT_RGBE as u64,
             ],
         )? as u8;
         self.hdr.output_bitdepth = self.ds.check_bit_field(
-            4, "output_bitdepth", &[
-                BD1WHITE1 as u64, BD8 as u64, BD16 as u64, BD16S as u64, BD16F as u64,
-                BD32S as u64, BD32F as u64, BD5 as u64, BD10 as u64, BD565 as u64,
+            4,
+            "output_bitdepth",
+            &[
+                BD1WHITE1 as u64,
+                BD8 as u64,
+                BD16 as u64,
+                BD16S as u64,
+                BD16F as u64,
+                BD32S as u64,
+                BD32F as u64,
+                BD5 as u64,
+                BD10 as u64,
+                BD565 as u64,
                 BD1BLACK1 as u64,
             ],
         )? as u8;
@@ -466,8 +485,14 @@ impl<'a> Decoder<'a> {
 
         // saturating_add: keeps a near-u32::MAX width from panicking under
         // overflow checks; a saturated value then fails the grid check below.
-        self.hdr.width = self.hdr.width.saturating_add(self.hdr.extra_pixels_left + self.hdr.extra_pixels_right);
-        self.hdr.height = self.hdr.height.saturating_add(self.hdr.extra_pixels_top + self.hdr.extra_pixels_bottom);
+        self.hdr.width = self
+            .hdr
+            .width
+            .saturating_add(self.hdr.extra_pixels_left + self.hdr.extra_pixels_right);
+        self.hdr.height = self
+            .hdr
+            .height
+            .saturating_add(self.hdr.extra_pixels_top + self.hdr.extra_pixels_bottom);
 
         self.hdr.mb_width = (self.hdr.width / 16) as usize;
         self.hdr.mb_height = (self.hdr.height / 16) as usize;
@@ -530,14 +555,27 @@ impl<'a> Decoder<'a> {
     fn image_plane_header(&mut self, p: usize) -> Result<()> {
         let plane = &mut self.planes[p];
         plane.internal_clr_fmt = self.ds.check_bit_field(
-            3, "internal_clr_fmt", &[
-                INT_YONLY as u64, INT_YUV420 as u64, INT_YUV422 as u64,
-                INT_YUV444 as u64, INT_YUVK as u64, INT_NCOMPONENT as u64,
+            3,
+            "internal_clr_fmt",
+            &[
+                INT_YONLY as u64,
+                INT_YUV420 as u64,
+                INT_YUV422 as u64,
+                INT_YUV444 as u64,
+                INT_YUVK as u64,
+                INT_NCOMPONENT as u64,
             ],
         )? as u8;
         plane.scaled_flag = self.ds.unpack_bits(1)? as u8;
         plane.bands_present = self.ds.check_bit_field(
-            4, "bands_present", &[ALL_BANDS as u64, NOFLEXBITS as u64, NOHIGHPASS as u64, DCONLY as u64],
+            4,
+            "bands_present",
+            &[
+                ALL_BANDS as u64,
+                NOFLEXBITS as u64,
+                NOHIGHPASS as u64,
+                DCONLY as u64,
+            ],
         )? as u8;
 
         plane.lp_present = false;
@@ -682,7 +720,9 @@ impl<'a> Decoder<'a> {
                 plane.num_components
             )));
         }
-        plane.mb = (0..mb_width).map(|_| Vec::with_capacity(mb_height)).collect();
+        plane.mb = (0..mb_width)
+            .map(|_| Vec::with_capacity(mb_height))
+            .collect();
         // Fill placeholder so we can index by [MBx][MBy].
         for col in &mut plane.mb {
             for _ in 0..mb_height {
@@ -703,11 +743,13 @@ impl<'a> Decoder<'a> {
                         let mby = mbyt + first_mby;
                         let left_mb = if mbx > 0 { Some((mbx - 1, mby)) } else { None };
                         let top_mb = if mby > 0 { Some((mbx, mby - 1)) } else { None };
-                        let tl_mb = if mbx > 0 && mby > 0 { Some((mbx - 1, mby - 1)) } else { None };
-                        plane.mb[mbx][mby] = MB::new(
-                            mbx, mby, mbxt, mbyt, tile_mb_width,
-                            left_mb, top_mb, tl_mb,
-                        );
+                        let tl_mb = if mbx > 0 && mby > 0 {
+                            Some((mbx - 1, mby - 1))
+                        } else {
+                            None
+                        };
+                        plane.mb[mbx][mby] =
+                            MB::new(mbx, mby, mbxt, mbyt, tile_mb_width, left_mb, top_mb, tl_mb);
                     }
                 }
             }
@@ -755,7 +797,8 @@ impl<'a> Decoder<'a> {
         let mut i_bytes: u64 = 0;
         loop {
             i_bytes += 4;
-            self.ds.check_bit_field(8, "profile_idc", &[44, 55, 66, 88, 111])?;
+            self.ds
+                .check_bit_field(8, "profile_idc", &[44, 55, 66, 88, 111])?;
             self.ds.unpack_bits(8)?; // level_idc
             self.ds.unpack_bits(15)?; // reserved_l
             if self.ds.unpack_bits(1)? != 0 {
@@ -1096,7 +1139,8 @@ impl<'a> Decoder<'a> {
                 let i_topleft_u = self.planes[p].mb[topleft.0][topleft.1].mb_dclp[MB_DCLP_PER_COMP];
                 let i_left_v = self.planes[p].mb[left.0][left.1].mb_dclp[2 * MB_DCLP_PER_COMP];
                 let i_top_v = self.planes[p].mb[top.0][top.1].mb_dclp[2 * MB_DCLP_PER_COMP];
-                let i_topleft_v = self.planes[p].mb[topleft.0][topleft.1].mb_dclp[2 * MB_DCLP_PER_COMP];
+                let i_topleft_v =
+                    self.planes[p].mb[topleft.0][topleft.1].mb_dclp[2 * MB_DCLP_PER_COMP];
                 // Table 128: chroma weighting scale by subsampling.
                 let i_scale = match int_fmt {
                     INT_YUV420 => 8,
@@ -1140,7 +1184,11 @@ impl<'a> Decoder<'a> {
                     let v_l = self.planes[p].mb[left.0][left.1].mb_dclp[dst];
                     let v_t = self.planes[p].mb[top.0][top.1].mb_dclp[dst];
                     // Table 129: chroma of subsampled formats rounds up.
-                    let round = if i_comp > 0 && matches!(int_fmt, INT_YUV420 | INT_YUV422) { 1 } else { 0 };
+                    let round = if i_comp > 0 && matches!(int_fmt, INT_YUV420 | INT_YUV422) {
+                        1
+                    } else {
+                        0
+                    };
                     self.planes[p].mb[mbx][mby].mb_dclp[dst] += (v_t + v_l + round) >> 1;
                 }
                 _ => {}
@@ -1151,14 +1199,22 @@ impl<'a> Decoder<'a> {
             this.planes[p].dc_qp.as_ref().unwrap().scaling_factor(i)
         };
         for i_comp in 0..nc {
-            let v = self.planes[p].mb[mbx][mby].mb_dclp[i_comp * MB_DCLP_PER_COMP] * scaling(self, p, i_comp);
-            self.planes[p].mb[mbx][mby].mb_buffer[i_comp * MB_BUF_PER_COMP + 16 * ICT4X4_INV_PERM[0]] = v;
+            let v = self.planes[p].mb[mbx][mby].mb_dclp[i_comp * MB_DCLP_PER_COMP]
+                * scaling(self, p, i_comp);
+            self.planes[p].mb[mbx][mby].mb_buffer
+                [i_comp * MB_BUF_PER_COMP + 16 * ICT4X4_INV_PERM[0]] = v;
         }
 
         Ok(())
     }
 
-    fn decode_dc(&mut self, p: usize, i_model_bits: i32, b_chroma: bool, b_abs_level: bool) -> Result<i32> {
+    fn decode_dc(
+        &mut self,
+        p: usize,
+        i_model_bits: i32,
+        b_chroma: bool,
+        b_abs_level: bool,
+    ) -> Result<i32> {
         let mut i_dc: i32 = if b_abs_level {
             self.decode_abs_level(p, b_chroma, false, ModelBand::DC)? - 1
         } else {
@@ -1207,7 +1263,11 @@ impl<'a> Decoder<'a> {
         if matches!(int_fmt, INT_YUV444 | INT_YUV420 | INT_YUV422) {
             let i_max = (i_full_planes as i32 * 4) - 5;
             if self.planes[p].count_zero_cbplp <= 0 || self.planes[p].count_max_cbplp < 0 {
-                let table = if is_42x { tables::cbplp_yuv1_42x() } else { tables::cbplp_yuv1_444() };
+                let table = if is_42x {
+                    tables::cbplp_yuv1_42x()
+                } else {
+                    tables::cbplp_yuv1_444()
+                };
                 let cbplp_yuv1 = self.ds.huff(table)?;
                 i_cbplp = if self.planes[p].count_max_cbplp < self.planes[p].count_zero_cbplp {
                     (i_max - cbplp_yuv1) as u32
@@ -1252,7 +1312,11 @@ impl<'a> Decoder<'a> {
                         i += 1;
                     }
                     const REMAP_ARR: [usize; 7] = [4, 1, 2, 3, 5, 6, 7];
-                    let (offset, count) = if int_fmt == INT_YUV420 { (1usize, 6usize) } else { (0, 14) };
+                    let (offset, count) = if int_fmt == INT_YUV420 {
+                        (1usize, 6usize)
+                    } else {
+                        (0, 14)
+                    };
                     for (k, &t) in temp.iter().enumerate().take(count) {
                         lp_input[(k & 1) + 1][REMAP_ARR[(k >> 1) + offset]] = t;
                     }
@@ -1415,7 +1479,14 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    fn adaptive_lp_scan(&mut self, p: usize, n: usize, i: usize, value: i32, lp_input: &mut [Vec<i32>]) {
+    fn adaptive_lp_scan(
+        &mut self,
+        p: usize,
+        n: usize,
+        i: usize,
+        value: i32,
+        lp_input: &mut [Vec<i32>],
+    ) {
         let scan = self.planes[p].lowpass_scan.as_mut().unwrap();
         lp_input[n][scan.translate(i)] = value;
         scan.adapt(i);
@@ -1440,7 +1511,11 @@ impl<'a> Decoder<'a> {
         if value == 0 {
             return Ok(0);
         }
-        Ok(if self.ds.unpack_bits(1)? != 0 { -value } else { value })
+        Ok(if self.ds.unpack_bits(1)? != 0 {
+            -value
+        } else {
+            value
+        })
     }
 
     fn initialize_lp_vlc(&mut self, p: usize) {
@@ -1488,7 +1563,11 @@ impl<'a> Decoder<'a> {
             self.planes[p].dec_num_blk_cbphp.init_table1();
         }
 
-        let outer_iters = if matches!(int_fmt, INT_YUVK | INT_NCOMPONENT) { plane_nc } else { 1 };
+        let outer_iters = if matches!(int_fmt, INT_YUVK | INT_NCOMPONENT) {
+            plane_nc
+        } else {
+            1
+        };
 
         for i_comp in 0..outer_iters {
             let num_cbphp = {
@@ -1505,7 +1584,11 @@ impl<'a> Decoder<'a> {
                     continue;
                 }
                 let idx = self.planes[p].dec_num_blk_cbphp.table_index as usize;
-                let table = if use_table1 { tables::num_cbphp(idx) } else { tables::num_blkcbphp2(idx) };
+                let table = if use_table1 {
+                    tables::num_cbphp(idx)
+                } else {
+                    tables::num_blkcbphp2(idx)
+                };
                 let num_blk_cbphp = self.ds.huff(table)?;
                 let dt = self.planes[p].dec_num_blk_cbphp.delta_table_index as usize;
                 let delta_table: &[i32] = if use_delta1 {
@@ -1513,7 +1596,8 @@ impl<'a> Decoder<'a> {
                 } else {
                     &NUM_BLK_CBPHP_DELTA2[dt][..]
                 };
-                self.planes[p].dec_num_blk_cbphp.discrim_val1 += delta_table[num_blk_cbphp as usize];
+                self.planes[p].dec_num_blk_cbphp.discrim_val1 +=
+                    delta_table[num_blk_cbphp as usize];
 
                 let mut i_val = (num_blk_cbphp + 1) as u32;
                 let mut i_blk_cbphp: i32 = 0;
@@ -1572,7 +1656,11 @@ impl<'a> Decoder<'a> {
 
         // Table 65: 420/422 run the 444 predictor on luma only, then their
         // own chroma predictors.
-        let pred_444_comps = if matches!(int_fmt, INT_YUV420 | INT_YUV422) { 1 } else { plane_nc };
+        let pred_444_comps = if matches!(int_fmt, INT_YUV420 | INT_YUV422) {
+            1
+        } else {
+            plane_nc
+        };
         for i_comp in 0..pred_444_comps {
             let v = self.pred_cbphp_444(p, i_comp, &i_diff_cbphp, mbx, mby);
             self.planes[p].mb[mbx][mby].mb_cbphp[i_comp] = v;
@@ -1747,8 +1835,10 @@ impl<'a> Decoder<'a> {
         if do_hp {
             if self.planes[p].mb[mbx][mby].initialize_context {
                 self.initialize_hp_vlc(p);
-                self.planes[p].highpass_hor_scan = Some(AdaptiveScan::new(&GRGI_ZIGZAG_INV_4X4_H_PRIME));
-                self.planes[p].highpass_ver_scan = Some(AdaptiveScan::new(&GRGI_ZIGZAG_INV_4X4_V_PRIME));
+                self.planes[p].highpass_hor_scan =
+                    Some(AdaptiveScan::new(&GRGI_ZIGZAG_INV_4X4_H_PRIME));
+                self.planes[p].highpass_ver_scan =
+                    Some(AdaptiveScan::new(&GRGI_ZIGZAG_INV_4X4_V_PRIME));
                 self.planes[p].model_hp.initialize_model_mb(HP);
             }
             if self.planes[p].mb[mbx][mby].reset_totals {
@@ -1761,10 +1851,8 @@ impl<'a> Decoder<'a> {
             }
             // CalcHPPredMode (uses mb.MbDCLP[0])
             let mb = &self.planes[p].mb[mbx][mby];
-            let strength_hor =
-                mb.mb_dclp[1].abs() + mb.mb_dclp[2].abs() + mb.mb_dclp[3].abs();
-            let strength_ver =
-                mb.mb_dclp[4].abs() + mb.mb_dclp[8].abs() + mb.mb_dclp[12].abs();
+            let strength_hor = mb.mb_dclp[1].abs() + mb.mb_dclp[2].abs() + mb.mb_dclp[3].abs();
+            let strength_ver = mb.mb_dclp[4].abs() + mb.mb_dclp[8].abs() + mb.mb_dclp[12].abs();
             let (mut s_hor, mut s_ver) = (strength_hor, strength_ver);
             let int_fmt = self.planes[p].internal_clr_fmt;
             if !matches!(int_fmt, INT_YONLY | INT_NCOMPONENT) {
@@ -1814,7 +1902,11 @@ impl<'a> Decoder<'a> {
                 0
             };
 
-            let i_cbphp_init = if do_hp { self.planes[p].mb[mbx][mby].mb_cbphp[i_comp] } else { 0 };
+            let i_cbphp_init = if do_hp {
+                self.planes[p].mb[mbx][mby].mb_cbphp[i_comp]
+            } else {
+                0
+            };
             let mut i_cbphp = i_cbphp_init;
 
             // Tables 69/70/83: chroma of 420/422 has 4/8 blocks per MB and
@@ -1828,17 +1920,36 @@ impl<'a> Decoder<'a> {
                 16
             };
             for raw_block in 0..n_blocks {
-                let i_block = if n_blocks == 16 { I_HIER_SCAN_ORDER[raw_block] } else { raw_block };
+                let i_block = if n_blocks == 16 {
+                    I_HIER_SCAN_ORDER[raw_block]
+                } else {
+                    raw_block
+                };
                 if do_hp {
                     let mode = self.planes[p].mb[mbx][mby].mb_hp_mode;
                     let i_num_non_zero = self.decode_block_adaptive(
-                        p, mbx, mby, (i_cbphp & 1) != 0, i_index != 0, i_comp, i_block, mode,
+                        p,
+                        mbx,
+                        mby,
+                        (i_cbphp & 1) != 0,
+                        i_index != 0,
+                        i_comp,
+                        i_block,
+                        mode,
                     )?;
                     i_lap_mean[i_index] += i_num_non_zero as i32;
                     i_cbphp >>= 1;
                 }
                 if do_flex && self.planes[p].flexbits_present {
-                    self.block_flexbits(p, mbx, mby, i_comp, i_block, i_model_bits, i_trim_flex_bits)?;
+                    self.block_flexbits(
+                        p,
+                        mbx,
+                        mby,
+                        i_comp,
+                        i_block,
+                        i_model_bits,
+                        i_trim_flex_bits,
+                    )?;
                 }
             }
         }
@@ -1916,8 +2027,7 @@ impl<'a> Decoder<'a> {
         let hp_base = i_component * HP_INPUT_PER_COMP + i_block * 16;
         for &n in &I_TRANSPOSE_FLEX[1..] {
             let flex_ref = self.ds.unpack_bits(i_flex_bits_left as u32)? as i32;
-            let i_vlc_coeff =
-                self.planes[p].mb[mbx][mby].hp_input_vlc[hp_base + n];
+            let i_vlc_coeff = self.planes[p].mb[mbx][mby].hp_input_vlc[hp_base + n];
             let i_flex_coeff = if i_vlc_coeff > 0 {
                 flex_ref
             } else if i_vlc_coeff < 0 {
@@ -1949,8 +2059,11 @@ impl<'a> Decoder<'a> {
         let hp_idx = self.planes[p].mb[mbx][mby].mb_qp_index_hp;
         for i_comp in 0..plane_nc {
             let i_index = if i_comp == 0 { 0 } else { 1 };
-            let scaling =
-                self.planes[p].hp_qp.as_ref().unwrap().scaling_factor_at(i_comp, hp_idx);
+            let scaling = self.planes[p]
+                .hp_qp
+                .as_ref()
+                .unwrap()
+                .scaling_factor_at(i_comp, hp_idx);
             let bits = self.planes[p].mb[mbx][mby].model_bits_mb_hp[i_index];
 
             let hp_cbase = i_comp * HP_INPUT_PER_COMP;
@@ -1973,22 +2086,26 @@ impl<'a> Decoder<'a> {
         let mode = self.planes[p].mb[mbx][mby].mb_hp_mode;
         const K_TOP: [usize; 3] = [2, 10, 9];
         const K_LEFT: [usize; 3] = [1, 5, 6];
-        let pred_comps = if matches!(int_fmt, INT_YUV420 | INT_YUV422) { 1 } else { plane_nc };
+        let pred_comps = if matches!(int_fmt, INT_YUV420 | INT_YUV422) {
+            1
+        } else {
+            plane_nc
+        };
         for i_comp in 0..pred_comps {
             let cbase = i_comp * MB_BUF_PER_COMP;
             if mode == PREDICT_FROM_TOP {
                 for &blk_id in &[1usize, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15] {
                     for &k in &K_TOP {
-                        let v_prev = self.planes[p].mb[mbx][mby].mb_buffer
-                            [cbase + 16 * (blk_id - 1) + k];
+                        let v_prev =
+                            self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * (blk_id - 1) + k];
                         self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * blk_id + k] += v_prev;
                     }
                 }
             } else if mode == PREDICT_FROM_LEFT {
                 for blk_id in 4..16 {
                     for &k in &K_LEFT {
-                        let v_prev = self.planes[p].mb[mbx][mby].mb_buffer
-                            [cbase + 16 * (blk_id - 4) + k];
+                        let v_prev =
+                            self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * (blk_id - 4) + k];
                         self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * blk_id + k] += v_prev;
                     }
                 }
@@ -2000,18 +2117,23 @@ impl<'a> Decoder<'a> {
                 // Chroma blocks are SPEC-RASTER indexed (2 columns): our TOP
                 // ≙ spec mode 1 (stride −2 = row above), our LEFT ≙ spec
                 // mode 0 (stride −1 = column left).
-                let (top_blks, top_stride, left_blks, left_stride): (&[usize], usize, &[usize], usize) =
-                    if int_fmt == INT_YUV420 {
-                        (&[2, 3], 2, &[1, 3], 1)
-                    } else {
-                        (&[2, 4, 6, 3, 5, 7], 2, &[1, 3, 5, 7], 1)
-                    };
+                let (top_blks, top_stride, left_blks, left_stride): (
+                    &[usize],
+                    usize,
+                    &[usize],
+                    usize,
+                ) = if int_fmt == INT_YUV420 {
+                    (&[2, 3], 2, &[1, 3], 1)
+                } else {
+                    (&[2, 4, 6, 3, 5, 7], 2, &[1, 3, 5, 7], 1)
+                };
                 if mode == PREDICT_FROM_TOP {
                     for &blk_id in top_blks {
                         for &k in &K_TOP {
                             let v_prev = self.planes[p].mb[mbx][mby].mb_buffer
                                 [cbase + 16 * (blk_id - top_stride) + k];
-                            self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * blk_id + k] += v_prev;
+                            self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * blk_id + k] +=
+                                v_prev;
                         }
                     }
                 } else if mode == PREDICT_FROM_LEFT {
@@ -2019,7 +2141,8 @@ impl<'a> Decoder<'a> {
                         for &k in &K_LEFT {
                             let v_prev = self.planes[p].mb[mbx][mby].mb_buffer
                                 [cbase + 16 * (blk_id - left_stride) + k];
-                            self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * blk_id + k] += v_prev;
+                            self.planes[p].mb[mbx][mby].mb_buffer[cbase + 16 * blk_id + k] +=
+                                v_prev;
                         }
                     }
                 }
@@ -2091,20 +2214,31 @@ impl<'a> Decoder<'a> {
             1
         };
         let level = signed_value(level_val, level_sign_flag);
-        let run = if run_is_zero != 0 { 0 } else { self.decode_run((15 - i_location) as u32)? };
+        let run = if run_is_zero != 0 {
+            0
+        } else {
+            self.decode_run((15 - i_location) as u32)?
+        };
         let mut block = vec![(run, level)];
         let mut i_loc = i_location + run as usize + 1;
 
         let mut next_is_immediate = next_is_immediate;
         let mut next_after_run = next_after_run;
         while next_is_immediate != 0 || next_after_run != 0 {
-            let run = if next_is_immediate != 0 { 0 } else { self.decode_run((15 - i_loc) as u32)? };
+            let run = if next_is_immediate != 0 {
+                0
+            } else {
+                self.decode_run((15 - i_loc) as u32)?
+            };
             i_loc += run as usize + 1;
             if i_loc > 16 {
-                return Err(DecodeError::Unsupported(format!("decode_block iLoc {i_loc}")));
+                return Err(DecodeError::Unsupported(format!(
+                    "decode_block iLoc {i_loc}"
+                )));
             }
 
-            let (table_index, delta1, delta2) = self.index_table_index(p, b_chroma, band, i_context != 0);
+            let (table_index, delta1, delta2) =
+                self.index_table_index(p, b_chroma, band, i_context != 0);
             let i_index = if i_loc < 15 {
                 let v = self.ds.huff(tables::index_a(table_index as usize))?;
                 let dv1 = INDEX1_DELTA[delta1 as usize][v as usize];
@@ -2168,7 +2302,14 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn first_index_apply_delta(&mut self, p: usize, b_chroma: bool, band: ModelBand, v0: i32, v1: i32) {
+    fn first_index_apply_delta(
+        &mut self,
+        p: usize,
+        b_chroma: bool,
+        band: ModelBand,
+        v0: i32,
+        v1: i32,
+    ) {
         let target = match (band, b_chroma) {
             (ModelBand::LP, false) => &mut self.planes[p].dec_first_ind_lp_lum,
             (ModelBand::LP, true) => &mut self.planes[p].dec_first_ind_lp_chr,
@@ -2180,7 +2321,13 @@ impl<'a> Decoder<'a> {
         target.discrim_val2 += v1;
     }
 
-    fn index_table_index(&self, p: usize, b_chroma: bool, band: ModelBand, ctx: bool) -> (u32, u32, u32) {
+    fn index_table_index(
+        &self,
+        p: usize,
+        b_chroma: bool,
+        band: ModelBand,
+        ctx: bool,
+    ) -> (u32, u32, u32) {
         let pl = &self.planes[p];
         let vlc = match (band, b_chroma, ctx) {
             (ModelBand::LP, false, false) => &pl.dec_ind_lp_lum0,
@@ -2193,10 +2340,22 @@ impl<'a> Decoder<'a> {
             (ModelBand::HP, true, true) => &pl.dec_ind_hp_chr1,
             _ => unreachable!(),
         };
-        (vlc.table_index, vlc.delta_table_index, vlc.delta2_table_index)
+        (
+            vlc.table_index,
+            vlc.delta_table_index,
+            vlc.delta2_table_index,
+        )
     }
 
-    fn index_apply_delta(&mut self, p: usize, b_chroma: bool, band: ModelBand, ctx: bool, v0: i32, v1: i32) {
+    fn index_apply_delta(
+        &mut self,
+        p: usize,
+        b_chroma: bool,
+        band: ModelBand,
+        ctx: bool,
+        v0: i32,
+        v1: i32,
+    ) {
         let target = match (band, b_chroma, ctx) {
             (ModelBand::LP, false, false) => &mut self.planes[p].dec_ind_lp_lum0,
             (ModelBand::LP, false, true) => &mut self.planes[p].dec_ind_lp_lum1,
@@ -2215,7 +2374,9 @@ impl<'a> Decoder<'a> {
     // `pub(crate)` as an encoder-test oracle (bitstream-only, no plane state).
     pub(crate) fn decode_run(&mut self, i_max_run: u32) -> Result<u32> {
         if !(1..=14).contains(&i_max_run) {
-            return Err(DecodeError::Unsupported(format!("decode_run iMaxRun {i_max_run}")));
+            return Err(DecodeError::Unsupported(format!(
+                "decode_run iMaxRun {i_max_run}"
+            )));
         }
         let i_run_binx = [10usize, 10, 5, 5, 5, 5, 0, 0, 0, 0];
         let i_run_fixed_length = [0u32, 0, 1, 1, 3, 0, 0, 1, 1, 2, 0, 0, 0, 0, 1];
@@ -2228,7 +2389,8 @@ impl<'a> Decoder<'a> {
                 self.ds.huff(tables::run_value(i_max_run as usize))? as u32
             }
         } else {
-            let i_index = self.ds.huff(tables::run_index())? as usize + i_run_binx[i_max_run as usize - 5];
+            let i_index =
+                self.ds.huff(tables::run_index())? as usize + i_run_binx[i_max_run as usize - 5];
             let i_fixed = i_run_fixed_length[i_index];
             let mut r = i_remap[i_index];
             if i_fixed != 0 {
@@ -2244,13 +2406,25 @@ impl<'a> Decoder<'a> {
         Ok(i_run)
     }
 
-    fn decode_abs_level(&mut self, p: usize, b_chroma: bool, i_context: bool, band: ModelBand) -> Result<i32> {
+    fn decode_abs_level(
+        &mut self,
+        p: usize,
+        b_chroma: bool,
+        i_context: bool,
+        band: ModelBand,
+    ) -> Result<i32> {
         let vlc_idx = self.abs_level_table_index(p, b_chroma, i_context, band);
         let i_remap = [2i32, 3, 4, 6, 10, 14];
         let i_fixed_len = [0u32, 0, 1, 2, 2, 2];
 
         let abs_level_index = self.ds.huff(tables::abs_level_index(vlc_idx as usize))?;
-        self.abs_level_apply_delta(p, b_chroma, i_context, band, ABS_LEVEL_INDEX_DELTA[0][abs_level_index as usize]);
+        self.abs_level_apply_delta(
+            p,
+            b_chroma,
+            i_context,
+            band,
+            ABS_LEVEL_INDEX_DELTA[0][abs_level_index as usize],
+        );
 
         let i_level = if abs_level_index < 6 {
             let i_fixed = i_fixed_len[abs_level_index as usize];
@@ -2273,7 +2447,13 @@ impl<'a> Decoder<'a> {
         Ok(i_level)
     }
 
-    fn abs_level_table_index(&self, p: usize, b_chroma: bool, i_context: bool, band: ModelBand) -> u32 {
+    fn abs_level_table_index(
+        &self,
+        p: usize,
+        b_chroma: bool,
+        i_context: bool,
+        band: ModelBand,
+    ) -> u32 {
         let pl = &self.planes[p];
         let vlc = match (band, b_chroma, i_context) {
             (ModelBand::DC, false, _) => &pl.abs_level_ind_dc_lum,
@@ -2286,7 +2466,14 @@ impl<'a> Decoder<'a> {
         vlc.table_index
     }
 
-    fn abs_level_apply_delta(&mut self, p: usize, b_chroma: bool, i_context: bool, band: ModelBand, dv: i32) {
+    fn abs_level_apply_delta(
+        &mut self,
+        p: usize,
+        b_chroma: bool,
+        i_context: bool,
+        band: ModelBand,
+        dv: i32,
+    ) {
         let pl = &mut self.planes[p];
         let vlc = match (band, b_chroma, i_context) {
             (ModelBand::DC, false, _) => &mut pl.abs_level_ind_dc_lum,
@@ -2303,7 +2490,9 @@ impl<'a> Decoder<'a> {
         let i_model_weight = 70;
         let i_weight0 = [240i32, 12, 1];
         let i_weight1: [[i32; 16]; 3] = [
-            [0, 240, 120, 80, 60, 48, 40, 34, 30, 27, 24, 22, 20, 18, 17, 16],
+            [
+                0, 240, 120, 80, 60, 48, 40, 34, 30, 27, 24, 22, 20, 18, 17, 16,
+            ],
             [0, 12, 6, 4, 3, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1],
             [0, 16, 8, 5, 4, 3, 3, 2, 2, 2, 2, 1, 1, 1, 1, 1],
         ];
@@ -2323,7 +2512,11 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        let i_num_models = if self.planes[p].internal_clr_fmt == INT_YONLY { 1 } else { 2 };
+        let i_num_models = if self.planes[p].internal_clr_fmt == INT_YONLY {
+            1
+        } else {
+            2
+        };
         let model = match band {
             ModelBand::DC => &mut self.planes[p].model_dc,
             ModelBand::LP => &mut self.planes[p].model_lp,
@@ -2510,7 +2703,11 @@ impl<'a> Decoder<'a> {
         let left = self.hdr.left_mb_index_of_tile.clone();
         let top = self.hdr.top_mb_index_of_tile.clone();
         // Bottom-corner block indices differ: 420 row1 = {2,3}; 422 row3 = {6,7}.
-        let (bl, br) = if is420 { (2usize, 3usize) } else { (6usize, 7usize) };
+        let (bl, br) = if is420 {
+            (2usize, 3usize)
+        } else {
+            (6usize, 7usize)
+        };
 
         for ty in 0..rows {
             // Corner differences ("OverlapPostFilter1", −=).
@@ -2562,8 +2759,11 @@ impl<'a> Decoder<'a> {
                     // Interior 2×2 junctions (across both MB axes).
                     for y in y0..y1.saturating_sub(1) {
                         for x in x0..x1.saturating_sub(1) {
-                            self.chroma_f2x2(p, cbase,
-                                [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                            self.chroma_f2x2(
+                                p,
+                                cbase,
+                                [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                            );
                         }
                     }
                 } else {
@@ -2571,11 +2771,17 @@ impl<'a> Decoder<'a> {
                     // across-MB row3↔row0 guarded to non-last rows.
                     for y in y0..y1 {
                         for x in x0..x1.saturating_sub(1) {
-                            self.chroma_f2x2(p, cbase,
-                                [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)]);
+                            self.chroma_f2x2(
+                                p,
+                                cbase,
+                                [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)],
+                            );
                             if y != y1 - 1 {
-                                self.chroma_f2x2(p, cbase,
-                                    [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                                self.chroma_f2x2(
+                                    p,
+                                    cbase,
+                                    [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                                );
                             }
                         }
                     }
@@ -2627,13 +2833,22 @@ impl<'a> Decoder<'a> {
                     let x = x1 - 1;
                     for y in y0..y1.saturating_sub(1) {
                         if is420 {
-                            self.chroma_f2x2(p, cbase,
-                                [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                            self.chroma_f2x2(
+                                p,
+                                cbase,
+                                [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                            );
                         } else {
-                            self.chroma_f2x2(p, cbase,
-                                [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)]);
-                            self.chroma_f2x2(p, cbase,
-                                [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                            self.chroma_f2x2(
+                                p,
+                                cbase,
+                                [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)],
+                            );
+                            self.chroma_f2x2(
+                                p,
+                                cbase,
+                                [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                            );
                         }
                     }
                 }
@@ -2642,13 +2857,22 @@ impl<'a> Decoder<'a> {
                     let y = y1 - 1;
                     for x in x0..x1.saturating_sub(1) {
                         if is420 {
-                            self.chroma_f2x2(p, cbase,
-                                [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                            self.chroma_f2x2(
+                                p,
+                                cbase,
+                                [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                            );
                         } else {
-                            self.chroma_f2x2(p, cbase,
-                                [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)]);
-                            self.chroma_f2x2(p, cbase,
-                                [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                            self.chroma_f2x2(
+                                p,
+                                cbase,
+                                [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)],
+                            );
+                            self.chroma_f2x2(
+                                p,
+                                cbase,
+                                [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                            );
                         }
                     }
                 }
@@ -2656,13 +2880,22 @@ impl<'a> Decoder<'a> {
                     // Diagonal.
                     let (x, y) = (x1 - 1, y1 - 1);
                     if is420 {
-                        self.chroma_f2x2(p, cbase,
-                            [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                        self.chroma_f2x2(
+                            p,
+                            cbase,
+                            [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                        );
                     } else {
-                        self.chroma_f2x2(p, cbase,
-                            [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)]);
-                        self.chroma_f2x2(p, cbase,
-                            [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                        self.chroma_f2x2(
+                            p,
+                            cbase,
+                            [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)],
+                        );
+                        self.chroma_f2x2(
+                            p,
+                            cbase,
+                            [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                        );
                     }
                 }
                 if !hard && tx == 0 && ty != rows - 1 {
@@ -2754,10 +2987,22 @@ impl<'a> Decoder<'a> {
         let blc: [(i32, i32, usize); 4] = [(0, 0, 8), (0, 0, 9), (0, 0, 12), (0, 0, 13)];
         let brc: [(i32, i32, usize); 4] = [(0, 0, 10), (0, 0, 11), (0, 0, 14), (0, 0, 15)];
         let flc: [(i32, i32, usize); 16] = [
-            (0, 0, 10), (0, 0, 11), (1, 0, 8), (1, 0, 9),
-            (0, 0, 14), (0, 0, 15), (1, 0, 12), (1, 0, 13),
-            (0, 1, 2), (0, 1, 3), (1, 1, 0), (1, 1, 1),
-            (0, 1, 6), (0, 1, 7), (1, 1, 4), (1, 1, 5),
+            (0, 0, 10),
+            (0, 0, 11),
+            (1, 0, 8),
+            (1, 0, 9),
+            (0, 0, 14),
+            (0, 0, 15),
+            (1, 0, 12),
+            (1, 0, 13),
+            (0, 1, 2),
+            (0, 1, 3),
+            (1, 1, 0),
+            (1, 1, 1),
+            (0, 1, 6),
+            (0, 1, 7),
+            (1, 1, 4),
+            (1, 1, 5),
         ];
 
         // Closure-free zzz: indexes into mb_buffer.
@@ -2806,48 +3051,157 @@ impl<'a> Decoder<'a> {
                         }
                     }
                     if (tx == 0 && ty == 0) || self.hdr.hard_tiling_flag != 0 {
-                        filter4_op(&mut self.planes[p].mb, i, first_mbx, first_mby, &tlc, &zzz_lookup);
+                        filter4_op(
+                            &mut self.planes[p].mb,
+                            i,
+                            first_mbx,
+                            first_mby,
+                            &tlc,
+                            &zzz_lookup,
+                        );
                     }
-                    if (tx == self.hdr.num_tile_cols - 1 && ty == 0) || self.hdr.hard_tiling_flag != 0 {
-                        filter4_op(&mut self.planes[p].mb, i, last_mbx, first_mby, &trc, &zzz_lookup);
+                    if (tx == self.hdr.num_tile_cols - 1 && ty == 0)
+                        || self.hdr.hard_tiling_flag != 0
+                    {
+                        filter4_op(
+                            &mut self.planes[p].mb,
+                            i,
+                            last_mbx,
+                            first_mby,
+                            &trc,
+                            &zzz_lookup,
+                        );
                     }
-                    if (tx == 0 && ty == self.hdr.num_tile_rows - 1) || self.hdr.hard_tiling_flag != 0 {
-                        filter4_op(&mut self.planes[p].mb, i, first_mbx, last_mby, &blc, &zzz_lookup);
+                    if (tx == 0 && ty == self.hdr.num_tile_rows - 1)
+                        || self.hdr.hard_tiling_flag != 0
+                    {
+                        filter4_op(
+                            &mut self.planes[p].mb,
+                            i,
+                            first_mbx,
+                            last_mby,
+                            &blc,
+                            &zzz_lookup,
+                        );
                     }
                     if (tx == self.hdr.num_tile_cols - 1 && ty == self.hdr.num_tile_rows - 1)
                         || self.hdr.hard_tiling_flag != 0
                     {
-                        filter4_op(&mut self.planes[p].mb, i, last_mbx, last_mby, &brc, &zzz_lookup);
+                        filter4_op(
+                            &mut self.planes[p].mb,
+                            i,
+                            last_mbx,
+                            last_mby,
+                            &brc,
+                            &zzz_lookup,
+                        );
                     }
                     if self.hdr.hard_tiling_flag == 0 {
                         if tx != self.hdr.num_tile_cols - 1 {
                             for y in first_mby..last_mby {
-                                flc4x4_op(&mut self.planes[p].mb, i, last_mbx, y, &flc, &zzz_lookup);
+                                flc4x4_op(
+                                    &mut self.planes[p].mb,
+                                    i,
+                                    last_mbx,
+                                    y,
+                                    &flc,
+                                    &zzz_lookup,
+                                );
                             }
                         }
                         if ty != self.hdr.num_tile_rows - 1 {
                             for x in first_mbx..last_mbx {
-                                flc4x4_op(&mut self.planes[p].mb, i, x, last_mby, &flc, &zzz_lookup);
+                                flc4x4_op(
+                                    &mut self.planes[p].mb,
+                                    i,
+                                    x,
+                                    last_mby,
+                                    &flc,
+                                    &zzz_lookup,
+                                );
                             }
                         }
                         if tx != self.hdr.num_tile_cols - 1 && ty != self.hdr.num_tile_rows - 1 {
-                            flc4x4_op(&mut self.planes[p].mb, i, last_mbx, last_mby, &flc, &zzz_lookup);
+                            flc4x4_op(
+                                &mut self.planes[p].mb,
+                                i,
+                                last_mbx,
+                                last_mby,
+                                &flc,
+                                &zzz_lookup,
+                            );
                         }
                         if tx == 0 && ty != self.hdr.num_tile_rows - 1 {
-                            filter4_op(&mut self.planes[p].mb, i, first_mbx, last_mby, &le1, &zzz_lookup);
-                            filter4_op(&mut self.planes[p].mb, i, first_mbx, last_mby, &le2, &zzz_lookup);
+                            filter4_op(
+                                &mut self.planes[p].mb,
+                                i,
+                                first_mbx,
+                                last_mby,
+                                &le1,
+                                &zzz_lookup,
+                            );
+                            filter4_op(
+                                &mut self.planes[p].mb,
+                                i,
+                                first_mbx,
+                                last_mby,
+                                &le2,
+                                &zzz_lookup,
+                            );
                         }
                         if tx != self.hdr.num_tile_cols - 1 && ty == 0 {
-                            filter4_op(&mut self.planes[p].mb, i, last_mbx, first_mby, &te1, &zzz_lookup);
-                            filter4_op(&mut self.planes[p].mb, i, last_mbx, first_mby, &te2, &zzz_lookup);
+                            filter4_op(
+                                &mut self.planes[p].mb,
+                                i,
+                                last_mbx,
+                                first_mby,
+                                &te1,
+                                &zzz_lookup,
+                            );
+                            filter4_op(
+                                &mut self.planes[p].mb,
+                                i,
+                                last_mbx,
+                                first_mby,
+                                &te2,
+                                &zzz_lookup,
+                            );
                         }
                         if tx == self.hdr.num_tile_cols - 1 && ty != self.hdr.num_tile_rows - 1 {
-                            filter4_op(&mut self.planes[p].mb, i, last_mbx, last_mby, &re1, &zzz_lookup);
-                            filter4_op(&mut self.planes[p].mb, i, last_mbx, last_mby, &re2, &zzz_lookup);
+                            filter4_op(
+                                &mut self.planes[p].mb,
+                                i,
+                                last_mbx,
+                                last_mby,
+                                &re1,
+                                &zzz_lookup,
+                            );
+                            filter4_op(
+                                &mut self.planes[p].mb,
+                                i,
+                                last_mbx,
+                                last_mby,
+                                &re2,
+                                &zzz_lookup,
+                            );
                         }
                         if tx != self.hdr.num_tile_cols - 1 && ty == self.hdr.num_tile_rows - 1 {
-                            filter4_op(&mut self.planes[p].mb, i, last_mbx, last_mby, &be1, &zzz_lookup);
-                            filter4_op(&mut self.planes[p].mb, i, last_mbx, last_mby, &be2, &zzz_lookup);
+                            filter4_op(
+                                &mut self.planes[p].mb,
+                                i,
+                                last_mbx,
+                                last_mby,
+                                &be1,
+                                &zzz_lookup,
+                            );
+                            filter4_op(
+                                &mut self.planes[p].mb,
+                                i,
+                                last_mbx,
+                                last_mby,
+                                &be2,
+                                &zzz_lookup,
+                            );
                         }
                     }
                 }
@@ -2941,8 +3295,8 @@ impl<'a> Decoder<'a> {
                                     let py_x4 = py << 2;
                                     let row = by_x4 + py;
                                     for px in 0..4 {
-                                        plane2d.data[row * stride + bx_x4 + px] =
-                                            mb.mb_buffer[cbase + by_x16 + bx_x64 + MB_PIXEL_MAP[px + py_x4]];
+                                        plane2d.data[row * stride + bx_x4 + px] = mb.mb_buffer
+                                            [cbase + by_x16 + bx_x64 + MB_PIXEL_MAP[px + py_x4]];
                                     }
                                 }
                             }
@@ -2971,7 +3325,11 @@ impl<'a> Decoder<'a> {
         for i in 0..nc {
             // Table 159: identical structure for chroma, with coordinates
             // divided by the subsampling factors.
-            let dx = if i > 0 && matches!(int_fmt, INT_YUV420 | INT_YUV422) { 2 } else { 1 };
+            let dx = if i > 0 && matches!(int_fmt, INT_YUV420 | INT_YUV422) {
+                2
+            } else {
+                1
+            };
             let dy = if i > 0 && int_fmt == INT_YUV420 { 2 } else { 1 };
             for tx in 0..self.hdr.num_tile_cols {
                 for ty in 0..self.hdr.num_tile_rows {
@@ -3033,10 +3391,14 @@ impl<'a> Decoder<'a> {
                     if (tx == 0 && ty == 0) || self.hdr.hard_tiling_flag != 0 {
                         ip_4_op(ip, first_mbx, first_mby, &XY2);
                     }
-                    if (tx == self.hdr.num_tile_cols - 1 && ty == 0) || self.hdr.hard_tiling_flag != 0 {
+                    if (tx == self.hdr.num_tile_cols - 1 && ty == 0)
+                        || self.hdr.hard_tiling_flag != 0
+                    {
                         ip_4_op(ip, next_mbx - 2, first_mby, &XY2);
                     }
-                    if (tx == 0 && ty == self.hdr.num_tile_rows - 1) || self.hdr.hard_tiling_flag != 0 {
+                    if (tx == 0 && ty == self.hdr.num_tile_rows - 1)
+                        || self.hdr.hard_tiling_flag != 0
+                    {
                         ip_4_op(ip, first_mbx, next_mby - 2, &XY2);
                     }
                     if (tx == self.hdr.num_tile_cols - 1 && ty == self.hdr.num_tile_rows - 1)
@@ -3134,7 +3496,9 @@ impl<'a> Decoder<'a> {
         }
 
         // RGBE shares the YUV→RGB lifting; PostScalingF2 packs E afterwards.
-        if matches!(int_fmt, INT_YUV444 | INT_YUV420 | INT_YUV422) && matches!(out_fmt, OUT_RGB | OUT_RGBE) {
+        if matches!(int_fmt, INT_YUV444 | INT_YUV420 | INT_YUV422)
+            && matches!(out_fmt, OUT_RGB | OUT_RGBE)
+        {
             // Packed formats: the pack stage (Table 196/197/198) expects
             // B,G,R plane order; the file's components are already swapped
             // when RED_BLUE_NOT_SWAPPED_FLAG is 0, so swap on flag == 1
@@ -3155,7 +3519,11 @@ impl<'a> Decoder<'a> {
                     let idx = base + col;
                     let (out0, out1, out2) =
                         yuv444_to_rgb(y_plane[idx], u_plane[idx], v_plane[idx]);
-                    let (a, b, c) = if do_swap { (out2, out1, out0) } else { (out0, out1, out2) };
+                    let (a, b, c) = if do_swap {
+                        (out2, out1, out0)
+                    } else {
+                        (out0, out1, out2)
+                    };
                     y_plane[idx] = a;
                     u_plane[idx] = b;
                     v_plane[idx] = c;
@@ -3202,9 +3570,7 @@ impl<'a> Decoder<'a> {
         // Same-color-format passthrough.
         let same = matches!(
             (int_fmt, out_fmt),
-            (INT_YONLY, OUT_YONLY)
-                | (INT_YUV444, OUT_YUV444)
-                | (INT_NCOMPONENT, OUT_NCOMPONENT)
+            (INT_YONLY, OUT_YONLY) | (INT_YUV444, OUT_YUV444) | (INT_NCOMPONENT, OUT_NCOMPONENT)
         );
         if !same {
             return Err(DecodeError::Unsupported(format!(
@@ -3238,7 +3604,8 @@ impl<'a> Decoder<'a> {
             }
         };
         for i in 1..3 {
-            let mut plane = std::mem::replace(&mut self.planes[p].image_plane[i], Plane2D::new(0, 0));
+            let mut plane =
+                std::mem::replace(&mut self.planes[p].image_plane[i], Plane2D::new(0, 0));
             if int_fmt == INT_YUV420 {
                 // Vertical first (Table 178).
                 let (w, h) = (plane.stride, plane.height);
@@ -3272,7 +3639,11 @@ impl<'a> Decoder<'a> {
     fn add_bias(&mut self, p: usize) -> Result<()> {
         // Table 188. The bias for the deep integer formats is pre-shifted
         // down by SHIFT_BITS (PostScalingInt later shifts it back up).
-        let i_scale = if self.planes[p].scaled_flag != 0 { 3 } else { 0 };
+        let i_scale = if self.planes[p].scaled_flag != 0 {
+            3
+        } else {
+            0
+        };
         let mut bias_base = match self.hdr.output_bitdepth {
             BD5 => 1 << 4,
             BD565 => 1 << 5,
@@ -3464,7 +3835,9 @@ impl<'a> Decoder<'a> {
         let n = self.hdr.extra_pixels_top as usize;
         let m = self.hdr.extra_pixels_left as usize;
 
-        if matches!(self.hdr.output_bitdepth, BD5 | BD565 | BD10) && self.hdr.output_clr_fmt == OUT_RGB {
+        if matches!(self.hdr.output_bitdepth, BD5 | BD565 | BD10)
+            && self.hdr.output_clr_fmt == OUT_RGB
+        {
             // Tables 196/197/198: pack the three clipped channels into one
             // value per pixel (single output array). Channel order in the
             // planes at this point is the pack-ready order (the conversion
@@ -3531,7 +3904,11 @@ impl<'a> Decoder<'a> {
         let w = self.hdr.image_width;
         let h = self.hdr.image_height;
         let num_components = self.planes[0].num_components
-            + if self.hdr.alpha_image_plane_flag != 0 { 1 } else { 0 };
+            + if self.hdr.alpha_image_plane_flag != 0 {
+                1
+            } else {
+                0
+            };
 
         // Each Plane2D is already row-major `[y*stride + x]` with stride =
         // image_width after clipping_and_packing_stage, so we can move the

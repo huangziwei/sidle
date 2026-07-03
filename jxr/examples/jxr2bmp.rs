@@ -76,7 +76,11 @@ fn main() {
     write_bmp(&output, buf.width as usize, buf.height as usize, &rgb);
     println!(
         "wrote {output} ({})",
-        if tonemap { "Reinhard tonemap + sRGB" } else { "clamp + per-type encoding" }
+        if tonemap {
+            "Reinhard tonemap + sRGB"
+        } else {
+            "clamp + per-type encoding"
+        }
     );
 }
 
@@ -86,7 +90,11 @@ fn to_display_rgb(buf: &PixelBuffer, tonemap: bool) -> Result<Vec<[u8; 3]>, Stri
     let color_ch: usize = match buf.color {
         ColorModel::Gray => 1,
         ColorModel::Rgb => 3,
-        other => return Err(format!("{other:?} layout needs an interpretation choice this viewer doesn't make — convert explicitly")),
+        other => {
+            return Err(format!(
+                "{other:?} layout needs an interpretation choice this viewer doesn't make — convert explicitly"
+            ));
+        }
     };
     let n = buf.width as usize * buf.height as usize;
     let nch = buf.channels as usize;
@@ -101,9 +109,7 @@ fn to_display_rgb(buf: &PixelBuffer, tonemap: bool) -> Result<Vec<[u8; 3]>, Stri
             SampleType::F16 => {
                 half_to_f32(u16::from_le_bytes([buf.data[i * 2], buf.data[i * 2 + 1]]))
             }
-            SampleType::F32 => f32::from_le_bytes(
-                buf.data[i * 4..i * 4 + 4].try_into().unwrap(),
-            ),
+            SampleType::F32 => f32::from_le_bytes(buf.data[i * 4..i * 4 + 4].try_into().unwrap()),
             _ => unreachable!("rejected above"),
         }
     };
@@ -155,11 +161,20 @@ fn to_display_rgb(buf: &PixelBuffer, tonemap: bool) -> Result<Vec<[u8; 3]>, Stri
         }
         Ok(px
             .iter()
-            .map(|p| [encode8(srgb_encode(p[0])), encode8(srgb_encode(p[1])), encode8(srgb_encode(p[2]))])
+            .map(|p| {
+                [
+                    encode8(srgb_encode(p[0])),
+                    encode8(srgb_encode(p[1])),
+                    encode8(srgb_encode(p[2])),
+                ]
+            })
             .collect())
     } else {
         // Already display-encoded: no transfer, just quantize.
-        Ok(px.iter().map(|p| [encode8(p[0]), encode8(p[1]), encode8(p[2])]).collect())
+        Ok(px
+            .iter()
+            .map(|p| [encode8(p[0]), encode8(p[1]), encode8(p[2])])
+            .collect())
     }
 }
 

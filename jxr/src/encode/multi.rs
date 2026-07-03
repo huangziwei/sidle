@@ -11,6 +11,7 @@
 //! NCOMPONENT keeps them luma-only (decoder lines `mb_dc`/`mb_hp_flex`).
 
 use super::bitstream::BitWriter;
+use super::entropy::write_huff;
 use super::quant::QpSet;
 use super::{codestream, coeff, hp, transform};
 use crate::decode::consts::*;
@@ -18,7 +19,6 @@ use crate::decode::math::chroma_component;
 use crate::decode::math::num_ones;
 use crate::decode::state::{AdaptiveScan, AdaptiveVLC, CBPHPModel};
 use crate::decode::tables;
-use super::entropy::write_huff;
 
 const ABS_DELTA: [i32; 7] = [1, 0, -1, -1, -1, -1, -1]; // ABS_LEVEL_INDEX_DELTA[0]
 
@@ -67,7 +67,13 @@ pub(super) struct MultiPlane {
     cbphp_model: CBPHPModel,
 }
 
-fn fresh_lp_state() -> ([AdaptiveVLC; 2], [AdaptiveVLC; 2], [AdaptiveVLC; 2], AdaptiveVLC, AdaptiveVLC) {
+fn fresh_lp_state() -> (
+    [AdaptiveVLC; 2],
+    [AdaptiveVLC; 2],
+    [AdaptiveVLC; 2],
+    AdaptiveVLC,
+    AdaptiveVLC,
+) {
     let mut first = [AdaptiveVLC::default(), AdaptiveVLC::default()];
     let mut ind0 = [AdaptiveVLC::default(), AdaptiveVLC::default()];
     let mut ind1 = [AdaptiveVLC::default(), AdaptiveVLC::default()];
@@ -109,7 +115,10 @@ impl MultiPlane {
         let nc = comps.len();
         let (wu, hu) = (w as usize, h as usize);
         let (top, left) = (window.0 as usize, window.1 as usize);
-        let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
+        let (pw, ph) = (
+            (wu + left).next_multiple_of(16),
+            (hu + top).next_multiple_of(16),
+        );
         let (mbw, mbh) = (pw / 16, ph / 16);
         let left_mb = super::overlap::bounds(tile_cols_mb, mbw);
         let top_mb = super::overlap::bounds(tile_rows_mb, mbh);
@@ -152,7 +161,11 @@ impl MultiPlane {
                         self.0[mbx][mby][self.1][off] = v;
                     }
                 }
-                super::overlap::dc_pre_filter_luma(&mut CompDc(&mut buf_grid, comp), &left_mb, &top_mb);
+                super::overlap::dc_pre_filter_luma(
+                    &mut CompDc(&mut buf_grid, comp),
+                    &left_mb,
+                    &top_mb,
+                );
             }
         }
 
@@ -252,11 +265,23 @@ impl MultiPlane {
         self.abs_dc_chr = coeff::AdaptiveVlc1::default();
         self.model_lp = coeff::ColorModel::init(1);
         let (f, i0, i1, a0, a1) = fresh_lp_state();
-        (self.lp_first, self.lp_ind0, self.lp_ind1, self.lp_abs0, self.lp_abs1) = (f, i0, i1, a0, a1);
+        (
+            self.lp_first,
+            self.lp_ind0,
+            self.lp_ind1,
+            self.lp_abs0,
+            self.lp_abs1,
+        ) = (f, i0, i1, a0, a1);
         self.scan = AdaptiveScan::new(&GRGI_ZIGZAG_INV_4X4_H);
         self.model_hp = coeff::ColorModel::init(2);
         let (f, i0, i1, a0, a1) = fresh_lp_state();
-        (self.hp_first, self.hp_ind0, self.hp_ind1, self.hp_abs0, self.hp_abs1) = (f, i0, i1, a0, a1);
+        (
+            self.hp_first,
+            self.hp_ind0,
+            self.hp_ind1,
+            self.hp_abs0,
+            self.hp_abs1,
+        ) = (f, i0, i1, a0, a1);
         self.hor_scan = AdaptiveScan::new(&GRGI_ZIGZAG_INV_4X4_H_PRIME);
         self.ver_scan = AdaptiveScan::new(&GRGI_ZIGZAG_INV_4X4_V_PRIME);
         self.num_cbphp = AdaptiveVLC::default();
@@ -375,7 +400,11 @@ impl MultiPlane {
                 };
                 res[comp][j] = self.dclp[mbx][mby][comp][j] - pred;
                 let m = res[comp][j].unsigned_abs() >> mbits;
-                coarse[comp][j] = if res[comp][j] < 0 { -(m as i32) } else { m as i32 };
+                coarse[comp][j] = if res[comp][j] < 0 {
+                    -(m as i32)
+                } else {
+                    m as i32
+                };
             }
         }
         for comp in 0..nc {
@@ -516,7 +545,11 @@ impl MultiPlane {
                 let state = self.cbphp_model.cbphp_state[cls];
                 let i_diff = if state == 0 {
                     let neighbor = if is_left {
-                        if is_top { 1 } else { (self.cbphp_grid[mbx][mby - 1][comp] >> 10) & 1 }
+                        if is_top {
+                            1
+                        } else {
+                            (self.cbphp_grid[mbx][mby - 1][comp] >> 10) & 1
+                        }
                     } else {
                         (self.cbphp_grid[mbx - 1][mby][comp] >> 5) & 1
                     };
@@ -533,7 +566,11 @@ impl MultiPlane {
                 m.count_ones[cls] = (m.count_ones[cls] + n_orig - 3).clamp(-16, 15);
                 m.count_zeroes[cls] = (m.count_zeroes[cls] + (16 - n_orig) - 3).clamp(-16, 15);
                 m.cbphp_state[cls] = if m.count_ones[cls] < 0 {
-                    if m.count_ones[cls] < m.count_zeroes[cls] { 1 } else { 2 }
+                    if m.count_ones[cls] < m.count_zeroes[cls] {
+                        1
+                    } else {
+                        2
+                    }
                 } else if m.count_zeroes[cls] < 0 {
                     2
                 } else {
@@ -618,10 +655,19 @@ impl MultiPlane {
     /// `num_blk_cbphp` state (multi-component planes use the YONLY tables:
     /// `NUM_CBPHP` for both levels, `DELTA1`).
     fn write_cbphp_diff(&mut self, bw: &mut BitWriter, i_diff: i32) {
-        let nibbles = [i_diff & 0xF, (i_diff >> 4) & 0xF, (i_diff >> 8) & 0xF, (i_diff >> 12) & 0xF];
+        let nibbles = [
+            i_diff & 0xF,
+            (i_diff >> 4) & 0xF,
+            (i_diff >> 8) & 0xF,
+            (i_diff >> 12) & 0xF,
+        ];
         let i_cbphp = (0..4).fold(0i32, |m, b| m | (((nibbles[b] != 0) as i32) << b));
         let num = num_ones(i_cbphp as u32) as i32;
-        write_huff(bw, tables::num_cbphp(self.num_cbphp.table_index as usize), num);
+        write_huff(
+            bw,
+            tables::num_cbphp(self.num_cbphp.table_index as usize),
+            num,
+        );
         self.num_cbphp.discrim_val1 +=
             NUM_CBPHP_DELTA[self.num_cbphp.delta_table_index as usize][num as usize];
         match num {
@@ -642,9 +688,13 @@ impl MultiPlane {
                 })
                 .unwrap();
             let num_blk = (i_val - 1) as i32;
-            write_huff(bw, tables::num_cbphp(self.num_blk_cbphp.table_index as usize), num_blk);
-            self.num_blk_cbphp.discrim_val1 +=
-                NUM_BLK_CBPHP_DELTA1[self.num_blk_cbphp.delta_table_index as usize][num_blk as usize];
+            write_huff(
+                bw,
+                tables::num_cbphp(self.num_blk_cbphp.table_index as usize),
+                num_blk,
+            );
+            self.num_blk_cbphp.discrim_val1 += NUM_BLK_CBPHP_DELTA1
+                [self.num_blk_cbphp.delta_table_index as usize][num_blk as usize];
             if I_FLC[i_val] != 0 {
                 bw.write_bits((i_code - I_OFF[i_val]) as u64, I_FLC[i_val]);
             }
@@ -706,7 +756,10 @@ pub(super) fn encode_multi_prebias(
             spec.alpha_image_plane = true;
             let mut alpha_plane =
                 super::gray::YOnlyPlane::new(a, w, h, alpha_qp, window, overlap, tiles, scaled);
-            let mut pair = MultiAlphaPair { primary: &mut primary, alpha: &mut alpha_plane };
+            let mut pair = MultiAlphaPair {
+                primary: &mut primary,
+                alpha: &mut alpha_plane,
+            };
             codestream::emit_codestream(
                 &spec,
                 |head| {
@@ -714,7 +767,13 @@ pub(super) fn encode_multi_prebias(
                         head, int_fmt, nc, ALL_BANDS, qp, chroma_qp, scaled, depth,
                     );
                     codestream::write_image_plane_header_gray_bands(
-                        head, ALL_BANDS, alpha_qp.dc, alpha_qp.lp, alpha_qp.hp, scaled, depth,
+                        head,
+                        ALL_BANDS,
+                        alpha_qp.dc,
+                        alpha_qp.lp,
+                        alpha_qp.hp,
+                        scaled,
+                        depth,
                     );
                 },
                 &codestream::classic_tile_headers(0),

@@ -145,7 +145,10 @@ pub fn backfill_thumbnails(paths: &LibraryPaths) -> Result<usize> {
     if force {
         let marker = paths.cover_thumb_format();
         if let Err(e) = write_bytes_atomic(&marker, THUMB_FORMAT_VERSION.to_string().as_bytes()) {
-            eprintln!("[sidle/thumbnail] write format marker {}: {e:#}", marker.display());
+            eprintln!(
+                "[sidle/thumbnail] write format marker {}: {e:#}",
+                marker.display()
+            );
         }
     }
     Ok(generated)
@@ -204,7 +207,12 @@ mod tests {
         );
 
         // And a genuine shrink in bytes.
-        assert!(thumb.len() < src.len(), "thumb {} >= src {}", thumb.len(), src.len());
+        assert!(
+            thumb.len() < src.len(),
+            "thumb {} >= src {}",
+            thumb.len(),
+            src.len()
+        );
     }
 
     #[test]

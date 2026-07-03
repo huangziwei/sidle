@@ -254,7 +254,10 @@ impl<'a> Parser<'a> {
 
     fn take(&mut self, n: usize) -> io::Result<&'a [u8]> {
         if self.pos + n > self.data.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Ion truncated"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Ion truncated",
+            ));
         }
         let out = &self.data[self.pos..self.pos + n];
         self.pos += n;
@@ -471,7 +474,10 @@ mod tests {
             vec!["$ion_symbol_table".into()],
             Box::new(IonNode::Struct(vec![(
                 "symbols".into(),
-                IonNode::List(vec![IonNode::String("a".into()), IonNode::String("b".into())]),
+                IonNode::List(vec![
+                    IonNode::String("a".into()),
+                    IonNode::String("b".into()),
+                ]),
             )])),
         );
         let bytes = serialize_single_value(&v, &t);

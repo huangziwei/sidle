@@ -29,7 +29,13 @@ fn huff_azw3_imports_and_decompresses_toc_text() {
     collect_titles(book.toc(), &mut titles);
     let joined = titles.join("\n");
 
-    for heading in ["はしがき", "第一の手記", "第二の手記", "第三の手記", "あとがき"] {
+    for heading in [
+        "はしがき",
+        "第一の手記",
+        "第二の手記",
+        "第三の手記",
+        "あとがき",
+    ] {
         assert!(
             joined.contains(heading),
             "HUFF decode lost TOC heading {heading}; got titles: {titles:?}"

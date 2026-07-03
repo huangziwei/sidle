@@ -876,9 +876,11 @@ fn walk_node_for_export(
     // Does this element have block-level children (vs. only inline/text)? A
     // bordered `<div>` of `<p>` lines (Aozora 罫囲み) becomes one bordered
     // `type: container`; a bordered leaf `<p>` keeps the inner-text wrapper.
-    elem.has_block_children = chapter
-        .children(node_id)
-        .any(|c| chapter.node(c).is_some_and(|n| !is_inline_like_role(n.role)));
+    elem.has_block_children = chapter.children(node_id).any(|c| {
+        chapter
+            .node(c)
+            .is_some_and(|n| !is_inline_like_role(n.role))
+    });
 
     // A bordered container is full-width on Kindle; without an explicit
     // `box_align` the device end-aligns its content, leaving a gap before the

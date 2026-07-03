@@ -89,7 +89,12 @@ impl Layout {
 }
 
 fn full_rect(fb: &Framebuffer) -> MxcfbRect {
-    MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: fb.var.yres }
+    MxcfbRect {
+        top: 0,
+        left: 0,
+        width: fb.var.xres,
+        height: fb.var.yres,
+    }
 }
 
 /// Paint the whole panel into the framebuffer (no refresh — caller decides the
@@ -119,7 +124,13 @@ fn render(fb: &mut Framebuffer, renderer: &mut TextRenderer, state: SortState, l
     // Direction toggle row, set off by a divider so it reads as separate from
     // the key list.
     let dir_top = layout.rows_top + SortKey::ALL.len() as u32 * layout.row_h;
-    fb.fill_rect(dir_top, MARGIN_X, xres.saturating_sub(MARGIN_X * 2), 2, 0x00);
+    fb.fill_rect(
+        dir_top,
+        MARGIN_X,
+        xres.saturating_sub(MARGIN_X * 2),
+        2,
+        0x00,
+    );
     let baseline = (dir_top + layout.row_h * 60 / 100) as i32;
     let dir_text = format!("Direction:  {} {}", state.dir.word(), state.dir.arrow());
     renderer.draw(fb, MARGIN_X as i32, baseline, &dir_text, false);

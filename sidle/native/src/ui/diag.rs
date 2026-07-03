@@ -88,7 +88,14 @@ fn rows_for(cfg: &ServerConfig, err: &SidleError) -> (String, String) {
 /// Draw a single left-aligned line at the running `y` cursor, advancing
 /// `y` by one line height. Baseline ≈ 80% down the line box (above the
 /// descender), matching the ratio `pager`/grid placeholders use.
-fn draw_line(fb: &mut Framebuffer, renderer: &mut TextRenderer, x: i32, y: &mut u32, lh: u32, s: &str) {
+fn draw_line(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    x: i32,
+    y: &mut u32,
+    lh: u32,
+    s: &str,
+) {
     let baseline = (*y + lh * 80 / 100) as i32;
     renderer.draw(fb, x, baseline, s, false);
     *y += lh;
@@ -97,7 +104,12 @@ fn draw_line(fb: &mut Framebuffer, renderer: &mut TextRenderer, x: i32, y: &mut 
 /// White-fill the panel, paint the info block + button row, then a single
 /// full-screen GC16 refresh so the screen lands clean (no DU ghosting
 /// from whatever was there before).
-fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, cfg: &ServerConfig, err: &SidleError) -> anyhow::Result<()> {
+fn draw(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    cfg: &ServerConfig,
+    err: &SidleError,
+) -> anyhow::Result<()> {
     fb.fill_rect(0, 0, fb.var.xres, fb.var.yres, 0xFF);
 
     let lh = renderer.line_height().max(1);
@@ -128,7 +140,12 @@ fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, cfg: &ServerConfig, e
     draw_buttons(fb, renderer);
 
     fb.send_update(
-        MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: fb.var.yres },
+        MxcfbRect {
+            top: 0,
+            left: 0,
+            width: fb.var.xres,
+            height: fb.var.yres,
+        },
         WAVEFORM_MODE_GC16,
     )?;
     Ok(())

@@ -15,7 +15,9 @@
 //! forces unscaled arithmetic for 32-bit depths (`strenc.c:961`); we reject
 //! `scaled` there instead of silently clearing it.
 
-use crate::decode::consts::{BD10, BD16, BD16F, BD16S, BD1BLACK1, BD1WHITE1, BD32F, BD32S, BD5, BD565, BD8};
+use crate::decode::consts::{
+    BD1BLACK1, BD1WHITE1, BD5, BD8, BD10, BD16, BD16F, BD16S, BD32F, BD32S, BD565,
+};
 
 /// Typed sample planes for [`crate::encode_typed`] — one `Vec` per component
 /// (R,G,B\[,A\] order, or a single gray plane), each row-major with
@@ -91,11 +93,7 @@ pub enum SamplePlanes<'a> {
 #[inline]
 fn fold_f16(h: u16) -> i32 {
     let m = (h & 0x7fff) as i32;
-    if h & 0x8000 != 0 {
-        -m
-    } else {
-        m
-    }
+    if h & 0x8000 != 0 { -m } else { m }
 }
 
 /// The BD32F fold: IEEE single bits → the custom-float pseudo-integer
@@ -130,11 +128,7 @@ fn fold_f32(bits: u32, lm: i32, eb: i32) -> i32 {
     }
     m &= 0x007f_ffff;
     let h = (e1 << lm) + ((m + (1 << (23 - lm - 1))) >> (23 - lm));
-    if bits >> 31 != 0 {
-        -h
-    } else {
-        h
-    }
+    if bits >> 31 != 0 { -h } else { h }
 }
 
 /// The RGBE per-channel fold (libjxr `forwardRGBE`, strenc.c:315): mantissa
@@ -164,10 +158,7 @@ fn fold_rgbe(mut m: i32, e: i32) -> i32 {
 /// Forward-convert the four RGBE planes to the three pre-bias channel
 /// planes (the shared E plane folds into each channel; the decoder's
 /// PostScalingF2 re-derives it as the per-pixel max exponent).
-pub(super) fn rgbe_prebias(
-    planes: &[Vec<u8>],
-    scaled: bool,
-) -> (Vec<i32>, Vec<i32>, Vec<i32>) {
+pub(super) fn rgbe_prebias(planes: &[Vec<u8>], scaled: bool) -> (Vec<i32>, Vec<i32>, Vec<i32>) {
     let sh = if scaled { 3 } else { 0 };
     let conv = |k: usize| -> Vec<i32> {
         planes[k]
@@ -299,7 +290,8 @@ impl SamplePlanes<'_> {
             SamplePlanes::I32(p) => prebias(p[i].iter().copied(), &d, scaled),
             SamplePlanes::F16(p) => prebias(p[i].iter().map(|&v| fold_f16(v)), &d, scaled),
             SamplePlanes::F32(p) => prebias(
-                p[i].iter().map(|&v| fold_f32(v, d.len_mantissa as i32, d.exp_bias)),
+                p[i].iter()
+                    .map(|&v| fold_f32(v, d.len_mantissa as i32, d.exp_bias)),
                 &d,
                 scaled,
             ),
@@ -307,7 +299,9 @@ impl SamplePlanes<'_> {
             // [`rgbe_prebias`], not the per-plane path.
             SamplePlanes::Rgbe(_) => unreachable!("RGBE converts via rgbe_prebias"),
             // Packed words split into three channels — [`packed_prebias`].
-            SamplePlanes::Packed555(_) | SamplePlanes::Packed565(_) | SamplePlanes::Packed101010(_) => {
+            SamplePlanes::Packed555(_)
+            | SamplePlanes::Packed565(_)
+            | SamplePlanes::Packed101010(_) => {
                 unreachable!("packed formats convert via packed_prebias")
             }
             // Bi-level: 0/1 values, no bias (Table 188 lists no BD1 bias).
@@ -337,29 +331,75 @@ pub struct Depth {
 }
 
 impl Depth {
-    pub const BD8: Depth =
-        Depth { bitdepth: BD8, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
-    pub const BD16: Depth =
-        Depth { bitdepth: BD16, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
-    pub const BD16S: Depth =
-        Depth { bitdepth: BD16S, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
+    pub const BD8: Depth = Depth {
+        bitdepth: BD8,
+        shift_bits: 0,
+        len_mantissa: 0,
+        exp_bias: 0,
+    };
+    pub const BD16: Depth = Depth {
+        bitdepth: BD16,
+        shift_bits: 0,
+        len_mantissa: 0,
+        exp_bias: 0,
+    };
+    pub const BD16S: Depth = Depth {
+        bitdepth: BD16S,
+        shift_bits: 0,
+        len_mantissa: 0,
+        exp_bias: 0,
+    };
     /// libjxr's default pre-shift for 32-bit input (`strenc.c:785`).
-    pub const BD32S: Depth =
-        Depth { bitdepth: BD32S, shift_bits: 10, len_mantissa: 0, exp_bias: 0 };
-    pub const BD16F: Depth =
-        Depth { bitdepth: BD16F, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
-    pub const BD5: Depth = Depth { bitdepth: BD5, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
-    pub const BD565: Depth =
-        Depth { bitdepth: BD565, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
-    pub const BD10: Depth = Depth { bitdepth: BD10, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
-    pub const BD1_WHITE1: Depth =
-        Depth { bitdepth: BD1WHITE1, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
-    pub const BD1_BLACK1: Depth =
-        Depth { bitdepth: BD1BLACK1, shift_bits: 0, len_mantissa: 0, exp_bias: 0 };
+    pub const BD32S: Depth = Depth {
+        bitdepth: BD32S,
+        shift_bits: 10,
+        len_mantissa: 0,
+        exp_bias: 0,
+    };
+    pub const BD16F: Depth = Depth {
+        bitdepth: BD16F,
+        shift_bits: 0,
+        len_mantissa: 0,
+        exp_bias: 0,
+    };
+    pub const BD5: Depth = Depth {
+        bitdepth: BD5,
+        shift_bits: 0,
+        len_mantissa: 0,
+        exp_bias: 0,
+    };
+    pub const BD565: Depth = Depth {
+        bitdepth: BD565,
+        shift_bits: 0,
+        len_mantissa: 0,
+        exp_bias: 0,
+    };
+    pub const BD10: Depth = Depth {
+        bitdepth: BD10,
+        shift_bits: 0,
+        len_mantissa: 0,
+        exp_bias: 0,
+    };
+    pub const BD1_WHITE1: Depth = Depth {
+        bitdepth: BD1WHITE1,
+        shift_bits: 0,
+        len_mantissa: 0,
+        exp_bias: 0,
+    };
+    pub const BD1_BLACK1: Depth = Depth {
+        bitdepth: BD1BLACK1,
+        shift_bits: 0,
+        len_mantissa: 0,
+        exp_bias: 0,
+    };
     /// The reference defaults: `len_mantissa = 13` (strenc.c:790),
     /// `exp_bias = 4` (header-dumped from every jxrencapp BD32F mint).
-    pub const BD32F: Depth =
-        Depth { bitdepth: BD32F, shift_bits: 0, len_mantissa: 13, exp_bias: 4 };
+    pub const BD32F: Depth = Depth {
+        bitdepth: BD32F,
+        shift_bits: 0,
+        len_mantissa: 13,
+        exp_bias: 4,
+    };
 
     /// The bias the decoder's `add_bias` adds back for this depth (Table 188
     /// `bias_base`, before its `>> shift_bits` pre-shift): `1 << 7` for BD8,
@@ -448,7 +488,12 @@ pub(super) fn cmykdirect_prebias(samples: &SamplePlanes<'_>, scaled: bool) -> Ve
     let bias = d.bias_base();
     const MAP: [usize; 4] = [3, 0, 1, 2]; // internal Y,U,V,K ← direct channel
     MAP.iter()
-        .map(|&src| raw_plane(samples, src).iter().map(|&v| (v - bias) << sh).collect())
+        .map(|&src| {
+            raw_plane(samples, src)
+                .iter()
+                .map(|&v| (v - bias) << sh)
+                .collect()
+        })
         .collect()
 }
 
@@ -524,19 +569,49 @@ mod tests {
     fn integer_conversions_invert_the_decoder_chain() {
         // BD16: every 16-bit value, both arithmetic modes, exact.
         for scaled in [false, true] {
-            for x in (0u16..=u16::MAX).step_by(7).chain([0, 1, u16::MAX].into_iter()) {
+            for x in (0u16..=u16::MAX)
+                .step_by(7)
+                .chain([0, 1, u16::MAX].into_iter())
+            {
                 let c = prebias([x as i32].into_iter(), &Depth::BD16, scaled)[0];
-                assert_eq!(decoder_chain(c, &Depth::BD16, scaled), x as i32, "BD16 x={x} scaled={scaled}");
+                assert_eq!(
+                    decoder_chain(c, &Depth::BD16, scaled),
+                    x as i32,
+                    "BD16 x={x} scaled={scaled}"
+                );
             }
-            for x in (i16::MIN..=i16::MAX).step_by(7).chain([i16::MIN, -1, 0, i16::MAX].into_iter()) {
+            for x in (i16::MIN..=i16::MAX)
+                .step_by(7)
+                .chain([i16::MIN, -1, 0, i16::MAX].into_iter())
+            {
                 let c = prebias([x as i32].into_iter(), &Depth::BD16S, scaled)[0];
-                assert_eq!(decoder_chain(c, &Depth::BD16S, scaled), x as i32, "BD16S x={x} scaled={scaled}");
+                assert_eq!(
+                    decoder_chain(c, &Depth::BD16S, scaled),
+                    x as i32,
+                    "BD16S x={x} scaled={scaled}"
+                );
             }
         }
         // BD32S: exact after the 10-bit shift quantization (never scaled).
-        for x in [i32::MIN, -1_000_000_007, -1024, -1023, -1, 0, 1, 1023, 1024, 1_000_000_007, i32::MAX] {
+        for x in [
+            i32::MIN,
+            -1_000_000_007,
+            -1024,
+            -1023,
+            -1,
+            0,
+            1,
+            1023,
+            1024,
+            1_000_000_007,
+            i32::MAX,
+        ] {
             let c = prebias([x].into_iter(), &Depth::BD32S, false)[0];
-            assert_eq!(decoder_chain(c, &Depth::BD32S, false), (x >> 10) << 10, "BD32S x={x}");
+            assert_eq!(
+                decoder_chain(c, &Depth::BD32S, false),
+                (x >> 10) << 10,
+                "BD32S x={x}"
+            );
         }
         // BD8 reproduces the classic ingestion expression.
         for scaled in [false, true] {

@@ -111,8 +111,12 @@ impl Filters {
 pub fn extract_facet_values(book: &Book, facet: Facet) -> Vec<String> {
     match facet {
         Facet::Language => vec![non_empty_or_sentinel(&book.language)],
-        Facet::Publisher => vec![non_empty_or_sentinel(book.publisher.as_deref().unwrap_or(""))],
-        Facet::Series => vec![non_empty_or_sentinel(book.series_name.as_deref().unwrap_or(""))],
+        Facet::Publisher => vec![non_empty_or_sentinel(
+            book.publisher.as_deref().unwrap_or(""),
+        )],
+        Facet::Series => vec![non_empty_or_sentinel(
+            book.series_name.as_deref().unwrap_or(""),
+        )],
         Facet::Tags => {
             if book.tags.is_empty() {
                 vec![NONE.to_string()]
@@ -229,10 +233,22 @@ mod tests {
 
     #[test]
     fn author_splits_on_ascii_and_cjk_comma() {
-        let b = Book { author: "村上春樹、夏目漱石".into(), ..book(1) };
-        assert_eq!(extract_facet_values(&b, Facet::Author), vec!["村上春樹", "夏目漱石"]);
-        let b2 = Book { author: "Strunk, White".into(), ..book(2) };
-        assert_eq!(extract_facet_values(&b2, Facet::Author), vec!["Strunk", "White"]);
+        let b = Book {
+            author: "村上春樹、夏目漱石".into(),
+            ..book(1)
+        };
+        assert_eq!(
+            extract_facet_values(&b, Facet::Author),
+            vec!["村上春樹", "夏目漱石"]
+        );
+        let b2 = Book {
+            author: "Strunk, White".into(),
+            ..book(2)
+        };
+        assert_eq!(
+            extract_facet_values(&b2, Facet::Author),
+            vec!["Strunk", "White"]
+        );
     }
 
     #[test]
@@ -248,31 +264,61 @@ mod tests {
     #[test]
     fn and_across_or_within() {
         let books = [
-            Book { language: "jp".into(), author: "A".into(), ..book(1) },
-            Book { language: "jp".into(), author: "B".into(), ..book(2) },
-            Book { language: "en".into(), author: "A".into(), ..book(3) },
+            Book {
+                language: "jp".into(),
+                author: "A".into(),
+                ..book(1)
+            },
+            Book {
+                language: "jp".into(),
+                author: "B".into(),
+                ..book(2)
+            },
+            Book {
+                language: "en".into(),
+                author: "A".into(),
+                ..book(3)
+            },
         ];
         let mut f = Filters::default();
         f.toggle(Facet::Language, "jp");
         // OR within author: A or B; AND with language=jp.
         f.toggle(Facet::Author, "A");
         f.toggle(Facet::Author, "B");
-        let pass: Vec<i64> = books.iter().filter(|b| matches(b, &f, None)).map(|b| b.id).collect();
+        let pass: Vec<i64> = books
+            .iter()
+            .filter(|b| matches(b, &f, None))
+            .map(|b| b.id)
+            .collect();
         assert_eq!(pass, vec![1, 2]); // both jp; id 3 is en, excluded
     }
 
     #[test]
     fn options_cascade_leave_one_out() {
         let books = vec![
-            Book { language: "jp".into(), author: "A".into(), ..book(1) },
-            Book { language: "jp".into(), author: "B".into(), ..book(2) },
-            Book { language: "en".into(), author: "C".into(), ..book(3) },
+            Book {
+                language: "jp".into(),
+                author: "A".into(),
+                ..book(1)
+            },
+            Book {
+                language: "jp".into(),
+                author: "B".into(),
+                ..book(2)
+            },
+            Book {
+                language: "en".into(),
+                author: "C".into(),
+                ..book(3)
+            },
         ];
         let mut f = Filters::default();
         f.toggle(Facet::Language, "jp");
         // Author options are computed against language=jp → only A, B (not C).
-        let authors: Vec<String> =
-            facet_options(&books, &f, Facet::Author).into_iter().map(|(v, _)| v).collect();
+        let authors: Vec<String> = facet_options(&books, &f, Facet::Author)
+            .into_iter()
+            .map(|(v, _)| v)
+            .collect();
         assert_eq!(authors, vec!["A", "B"]);
         // But Language options ignore the language selection (leave-one-out) →
         // still both languages, with counts.
@@ -283,8 +329,16 @@ mod tests {
     #[test]
     fn selected_value_survives_cross_filter_and_sentinel_sorts_last() {
         let books = vec![
-            Book { language: "jp".into(), publisher: Some("Z".into()), ..book(1) },
-            Book { language: "en".into(), publisher: None, ..book(2) },
+            Book {
+                language: "jp".into(),
+                publisher: Some("Z".into()),
+                ..book(1)
+            },
+            Book {
+                language: "en".into(),
+                publisher: None,
+                ..book(2)
+            },
         ];
         let mut f = Filters::default();
         // Select publisher=Z, then language=en (which excludes Z's only book).

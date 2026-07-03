@@ -62,7 +62,10 @@ pub fn resolve(
         return None;
     }
     let page_key = ref_name(template_id, sym)?;
-    let page = parsed.get(page_key.as_str())?.unwrap_annotated().as_struct()?;
+    let page = parsed
+        .get(page_key.as_str())?
+        .unwrap_annotated()
+        .as_struct()?;
 
     // $141[0] is a content node referencing the template story via $176.
     let content = field(page, PAGE_CONTENT)?
@@ -71,7 +74,10 @@ pub fn resolve(
         .unwrap_annotated()
         .as_struct()?;
     let story_key = ref_name(field(content, STORY_REF)?, sym)?;
-    let story = parsed.get(story_key.as_str())?.unwrap_annotated().as_struct()?;
+    let story = parsed
+        .get(story_key.as_str())?
+        .unwrap_annotated()
+        .as_struct()?;
 
     // $146[0] is the KVG SVG content node ($159 == $272).
     let kvg = field(story, STORY_LIST)?
@@ -247,7 +253,14 @@ mod tests {
 
     #[test]
     fn path_handles_quadratic_and_close() {
-        let cmds = [Float(2.0), Float(1.0), Float(2.0), Float(3.0), Float(4.0), Float(4.0)];
+        let cmds = [
+            Float(2.0),
+            Float(1.0),
+            Float(2.0),
+            Float(3.0),
+            Float(4.0),
+            Float(4.0),
+        ];
         assert_eq!(render_path(&cmds), "Q 1 2 3 4 Z");
     }
 }

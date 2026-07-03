@@ -347,10 +347,7 @@ impl EpubExporter {
         let titlepage_xhtml = if let Some(ref cid) = cover_id {
             let cover_item = manifest_items.iter().find(|i| &i.id == cid);
             cover_item.and_then(|item| {
-                let cover_relative = item
-                    .href
-                    .strip_prefix("OEBPS/")
-                    .unwrap_or(&item.href);
+                let cover_relative = item.href.strip_prefix("OEBPS/").unwrap_or(&item.href);
                 let bytes = asset_bytes
                     .iter()
                     .find(|(p, _)| sanitize_path(p) == cover_relative)
@@ -773,7 +770,10 @@ fn generate_opf(
     // — without it, Kindle/Calibre paginate in the wrong direction.
     let spine_open = match metadata.page_progression_direction.as_deref() {
         Some(dir @ ("rtl" | "ltr" | "default")) => {
-            format!("  <spine toc=\"ncx\" page-progression-direction=\"{}\">\n", dir)
+            format!(
+                "  <spine toc=\"ncx\" page-progression-direction=\"{}\">\n",
+                dir
+            )
         }
         _ => "  <spine toc=\"ncx\">\n".to_string(),
     };

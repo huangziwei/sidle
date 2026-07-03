@@ -70,7 +70,11 @@ impl Buttons {
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
         let grabbed = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB, 1) } == 0;
-        Ok(Some(Self { file, grabbed, orientation: Orientation::Up }))
+        Ok(Some(Self {
+            file,
+            grabbed,
+            orientation: Orientation::Up,
+        }))
     }
 
     /// Raw fd for `poll(2)` multiplexing alongside the touchscreen — see

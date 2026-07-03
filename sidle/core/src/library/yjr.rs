@@ -275,7 +275,10 @@ mod tests {
     fn decodes_known_real_handles() {
         // Lifted from the real 文学少女 / 十角館 .yjr (the P0 oracle).
         let h = decode_handle("AeYEAAAsAAAA:12937").unwrap();
-        assert_eq!((h.type_byte, h.eid, h.offset, h.linear), (1, 1254, 44, 12937));
+        assert_eq!(
+            (h.type_byte, h.eid, h.offset, h.linear),
+            (1, 1254, 44, 12937)
+        );
         let h = decode_handle("AekEAABEAAAA:13054").unwrap();
         assert_eq!((h.eid, h.offset), (1257, 68));
         let h = decode_handle("AdQFAAAAAAAA:22364").unwrap();
@@ -321,14 +324,26 @@ mod tests {
 
         let hl = &anns[0];
         assert_eq!(hl.kind, Kind::Highlight);
-        assert_eq!((hl.start().unwrap().eid, hl.start().unwrap().offset), (1254, 44));
-        assert_eq!((hl.end().unwrap().eid, hl.end().unwrap().offset), (1257, 68));
+        assert_eq!(
+            (hl.start().unwrap().eid, hl.start().unwrap().offset),
+            (1254, 44)
+        );
+        assert_eq!(
+            (hl.end().unwrap().eid, hl.end().unwrap().offset),
+            (1257, 68)
+        );
         assert_eq!(hl.note_body, None);
 
         let note = &anns[1];
         assert_eq!(note.kind, Kind::Note);
-        assert_eq!(note.note_body.as_deref(), Some("Digit normalization required"));
-        assert_eq!((note.start().unwrap().eid, note.end().unwrap().offset), (100, 9));
+        assert_eq!(
+            note.note_body.as_deref(),
+            Some("Digit normalization required")
+        );
+        assert_eq!(
+            (note.start().unwrap().eid, note.end().unwrap().offset),
+            (100, 9)
+        );
 
         let bm = &anns[2];
         assert_eq!(bm.kind, Kind::Bookmark);
@@ -354,7 +369,10 @@ mod tests {
         let hw = &anns[0];
         assert_eq!(hw.kind, Kind::Handwritten);
         assert_eq!(hw.kind.as_str(), "handwritten_note");
-        assert_eq!((hw.start().unwrap().eid, hw.start().unwrap().linear), (1158, 9782));
+        assert_eq!(
+            (hw.start().unwrap().eid, hw.start().unwrap().linear),
+            (1158, 9782)
+        );
         // The body is the container id, NOT a decoded handle.
         assert_eq!(hw.note_body.as_deref(), Some("cC9KkbR1zStWRzxfccUugsw0"));
     }

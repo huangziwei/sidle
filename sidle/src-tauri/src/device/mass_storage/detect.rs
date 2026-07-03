@@ -218,7 +218,10 @@ mod tests {
         // Serial comes from USB (real device) or the device_id/anon fallback —
         // never from version.txt. Either way it must be non-empty.
         assert!(!info.serial.is_empty());
-        assert_eq!(info.model.as_deref(), Some("Kindle 5.16.2.1.1 (409745 002)"));
+        assert_eq!(
+            info.model.as_deref(),
+            Some("Kindle 5.16.2.1.1 (409745 002)")
+        );
         assert_eq!(info.firmware.as_deref(), Some("5.16.2.1.1"));
         match info.transport {
             TransportKind::MassStorage { mount } => {

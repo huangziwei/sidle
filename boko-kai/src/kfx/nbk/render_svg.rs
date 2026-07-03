@@ -163,7 +163,11 @@ fn render_stroke(s: &mut String, stroke: &Stroke) {
             flush(s, &path, path_t, base_thickness);
             path.clear();
             path_t = t;
-            for j in if INCLUDE_PRIOR_LINE_SEGMENT { [2usize, 1] } else { [1, 1] } {
+            for j in if INCLUDE_PRIOR_LINE_SEGMENT {
+                [2usize, 1]
+            } else {
+                [1, 1]
+            } {
                 if i >= j {
                     let (px, py, _, _) = points[i - j];
                     path.push((px, py));
@@ -185,8 +189,8 @@ fn color_str(color: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::template::Template;
+    use super::*;
 
     /// A page with one straight two-point vector stroke and a (dummy) template.
     fn page_with_one_stroke() -> Page {

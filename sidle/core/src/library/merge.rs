@@ -170,7 +170,11 @@ pub fn prepare_with_progress(
     // the WAL sidecars `db::open` created.
     let _ = std::fs::remove_dir_all(&staging);
 
-    Ok(Prepared { dest_root: dest_root.to_path_buf(), books, notebooks })
+    Ok(Prepared {
+        dest_root: dest_root.to_path_buf(),
+        books,
+        notebooks,
+    })
 }
 
 /// Apply a [`Prepared`] to the live DB in one transaction (the only step needing
@@ -200,7 +204,11 @@ pub fn commit(conn: &Connection, prepared: &Prepared) -> Result<MergeOutcome> {
                 if let Some(job) = &b.job {
                     // A backup taken mid-conversion records `converting`; the dest
                     // isn't converting it, so re-pend so bootstrap re-enqueues.
-                    let status = if job.status == "converting" { "pending" } else { job.status.as_str() };
+                    let status = if job.status == "converting" {
+                        "pending"
+                    } else {
+                        job.status.as_str()
+                    };
                     db::insert_job(&tx, id, status, &job.kind)?;
                 }
                 out.books_added += 1;
@@ -227,10 +235,15 @@ pub fn commit(conn: &Connection, prepared: &Prepared) -> Result<MergeOutcome> {
     // alone — its row and files never disagree.
     for nb in &prepared.notebooks {
         // Don't resurrect a notebook the dest library deleted.
-        if db::is_deleted(&tx, db::DELETION_NOTEBOOK, &nb.uuid).context("check notebook tombstone")? {
+        if db::is_deleted(&tx, db::DELETION_NOTEBOOK, &nb.uuid)
+            .context("check notebook tombstone")?
+        {
             continue;
         }
-        if db::get_notebook_by_uuid(&tx, &nb.uuid).context("get notebook")?.is_none() {
+        if db::get_notebook_by_uuid(&tx, &nb.uuid)
+            .context("get notebook")?
+            .is_none()
+        {
             let updated_at = nb.updated_at.as_deref().unwrap_or(&nb.imported_at);
             db::upsert_notebook(
                 &tx,
@@ -262,18 +275,30 @@ fn read_source_books(conn: &Connection) -> Result<Vec<SourceBook>> {
             .query_row(
                 "SELECT status, kind FROM conversion_jobs WHERE book_id = ?1",
                 params![row.id],
-                |r| Ok(SourceJob { status: r.get(0)?, kind: r.get(1)? }),
+                |r| {
+                    Ok(SourceJob {
+                        status: r.get(0)?,
+                        kind: r.get(1)?,
+                    })
+                },
             )
             .optional()
             .context("read source conversion job")?;
-        let annotations = db::list_annotations_for_book(conn, row.id).context("source annotations")?;
+        let annotations =
+            db::list_annotations_for_book(conn, row.id).context("source annotations")?;
         let positions = db::list_reading_positions(conn, row.id)
             .context("source reading positions")?
             .into_iter()
             .filter(|p| p.source == "sidle")
             .collect();
         let ink = db::list_book_ink(conn, row.id).context("source ink")?;
-        out.push(SourceBook { row, job, annotations, positions, ink });
+        out.push(SourceBook {
+            row,
+            job,
+            annotations,
+            positions,
+            ink,
+        });
     }
     Ok(out)
 }
@@ -288,14 +313,20 @@ fn insert_source_book(conn: &Connection, dest_root: &Path, row: &db::BookRow) ->
         let p = stored.as_ref()?;
         let name = Path::new(p).file_name()?;
         let dest_abs = dest_root.join("books").join(sha).join(name);
-        dest_abs.exists().then(|| dest_abs.to_string_lossy().into_owned())
+        dest_abs
+            .exists()
+            .then(|| dest_abs.to_string_lossy().into_owned())
     };
     let epub = remap(&row.epub_path);
     let cover = remap(&row.cover_path);
     let kfx = remap(&row.kfx_path);
     let pdf = remap(&row.pdf_path);
     // `kfx_sha256` is `Some` iff `kfx_path` is — drop it if the KFX didn't come over.
-    let kfx_sha = if kfx.is_some() { row.kfx_sha256.as_deref() } else { None };
+    let kfx_sha = if kfx.is_some() {
+        row.kfx_sha256.as_deref()
+    } else {
+        None
+    };
 
     db::insert_book(
         conn,
@@ -335,8 +366,8 @@ fn overwrite_metadata(conn: &Connection, source: &db::BookRow, local: &db::BookR
         .as_deref()
         .filter(|a| !a.is_empty())
         .or(source.asin.as_deref().filter(|a| !a.is_empty()));
-    let tags_json = serde_json::to_string(&source.tags)
-        .map_err(|e| anyhow::anyhow!("serialize tags: {e}"))?;
+    let tags_json =
+        serde_json::to_string(&source.tags).map_err(|e| anyhow::anyhow!("serialize tags: {e}"))?;
     conn.execute(
         r#"UPDATE books SET
                title = ?1, author = ?2, language = ?3, ppd = ?4, publisher = ?5,
@@ -424,8 +455,12 @@ fn upsert_sidle_position(conn: &Connection, book_id: i64, p: &db::ReadingPositio
 /// whether it was new to this library.
 fn upsert_ink_for(conn: &Connection, book_id: i64, ink: &db::BookInkRow) -> Result<bool> {
     // Don't resurrect ink the dest library deleted (its tombstone wins).
-    if db::is_deleted(conn, db::DELETION_INK, &db::ink_deletion_key(&ink.asin, &ink.container_id))
-        .context("check ink tombstone")?
+    if db::is_deleted(
+        conn,
+        db::DELETION_INK,
+        &db::ink_deletion_key(&ink.asin, &ink.container_id),
+    )
+    .context("check ink tombstone")?
     {
         return Ok(false);
     }
@@ -558,13 +593,22 @@ mod tests {
         let book = db::find_by_sha(&dst_conn, "aaa").unwrap().unwrap().id;
         let ann = db::list_annotations_for_book(&dst_conn, book).unwrap()[0].id;
         assert!(db::delete_annotation(&dst_conn, ann).unwrap());
-        assert!(db::list_annotations_for_book(&dst_conn, book).unwrap().is_empty());
+        assert!(
+            db::list_annotations_for_book(&dst_conn, book)
+                .unwrap()
+                .is_empty()
+        );
 
         // Merge the source (which still has the annotation) — the deletion sticks.
         let outcome = merge_into(&dst_conn, &dst_root, &zip);
-        assert_eq!(outcome.annotations_added, 0, "the dest tombstone blocks the merged-in copy");
+        assert_eq!(
+            outcome.annotations_added, 0,
+            "the dest tombstone blocks the merged-in copy"
+        );
         assert!(
-            db::list_annotations_for_book(&dst_conn, book).unwrap().is_empty(),
+            db::list_annotations_for_book(&dst_conn, book)
+                .unwrap()
+                .is_empty(),
             "a merge must not resurrect a dest-deleted annotation",
         );
     }
@@ -576,7 +620,10 @@ mod tests {
         // Source has A (shared) + B (new). Dest has only A.
         let src_conn = seed(
             &src_root,
-            &[("aaa", "Alpha", "2026-01-01T00:00:00+00:00"), ("bbb", "Beta", "2026-01-01T00:00:00+00:00")],
+            &[
+                ("aaa", "Alpha", "2026-01-01T00:00:00+00:00"),
+                ("bbb", "Beta", "2026-01-01T00:00:00+00:00"),
+            ],
         );
         let out = tempfile::tempdir().unwrap();
         let zip = backup_of(&src_conn, &src_root, out.path());
@@ -589,7 +636,10 @@ mod tests {
         let outcome = merge_into(&dst_conn, &dst_root, &zip);
         assert_eq!(outcome.books_added, 1, "B is new");
         assert_eq!(outcome.books_updated, 0, "A not newer either way");
-        assert_eq!(outcome.annotations_added, 1, "only B's highlight is new (A's dedups)");
+        assert_eq!(
+            outcome.annotations_added, 1,
+            "only B's highlight is new (A's dedups)"
+        );
 
         let books = db::list_books(&dst_conn).unwrap();
         assert_eq!(books.len(), 2);
@@ -617,7 +667,10 @@ mod tests {
         // Same sha both sides; source edited more recently → its title wins.
         let src = tempfile::tempdir().unwrap();
         let src_root = src.path().canonicalize().unwrap();
-        let src_conn = seed(&src_root, &[("aaa", "New Title", "2026-06-01T00:00:00+00:00")]);
+        let src_conn = seed(
+            &src_root,
+            &[("aaa", "New Title", "2026-06-01T00:00:00+00:00")],
+        );
         // Give the source book a real ASIN to fill the dest's empty one.
         let sid = db::find_by_sha(&src_conn, "aaa").unwrap().unwrap().id;
         db::set_asin(&src_conn, sid, "B07ABCDEFG").unwrap();
@@ -627,28 +680,41 @@ mod tests {
 
         let dst = tempfile::tempdir().unwrap();
         let dst_root = dst.path().canonicalize().unwrap();
-        let dst_conn = seed(&dst_root, &[("aaa", "Old Title", "2026-01-01T00:00:00+00:00")]);
+        let dst_conn = seed(
+            &dst_root,
+            &[("aaa", "Old Title", "2026-01-01T00:00:00+00:00")],
+        );
 
         let outcome = merge_into(&dst_conn, &dst_root, &zip);
         assert_eq!(outcome.books_added, 0);
         assert_eq!(outcome.books_updated, 1);
         let a = db::find_by_sha(&dst_conn, "aaa").unwrap().unwrap();
         assert_eq!(a.title, "New Title", "newer source metadata won");
-        assert_eq!(a.asin.as_deref(), Some("B07ABCDEFG"), "empty dest ASIN filled");
+        assert_eq!(
+            a.asin.as_deref(),
+            Some("B07ABCDEFG"),
+            "empty dest ASIN filled"
+        );
     }
 
     #[test]
     fn older_source_does_not_overwrite_and_keeps_present_asin() {
         let src = tempfile::tempdir().unwrap();
         let src_root = src.path().canonicalize().unwrap();
-        let src_conn = seed(&src_root, &[("aaa", "Stale Title", "2026-01-01T00:00:00+00:00")]);
+        let src_conn = seed(
+            &src_root,
+            &[("aaa", "Stale Title", "2026-01-01T00:00:00+00:00")],
+        );
         let out = tempfile::tempdir().unwrap();
         let zip = backup_of(&src_conn, &src_root, out.path());
         drop(src_conn);
 
         let dst = tempfile::tempdir().unwrap();
         let dst_root = dst.path().canonicalize().unwrap();
-        let dst_conn = seed(&dst_root, &[("aaa", "Current Title", "2026-06-01T00:00:00+00:00")]);
+        let dst_conn = seed(
+            &dst_root,
+            &[("aaa", "Current Title", "2026-06-01T00:00:00+00:00")],
+        );
         let did = db::find_by_sha(&dst_conn, "aaa").unwrap().unwrap().id;
         db::set_asin(&dst_conn, did, "B07REALASN").unwrap();
 
@@ -656,7 +722,11 @@ mod tests {
         assert_eq!(outcome.books_updated, 0, "older source loses the tie");
         let a = db::find_by_sha(&dst_conn, "aaa").unwrap().unwrap();
         assert_eq!(a.title, "Current Title", "newer dest metadata kept");
-        assert_eq!(a.asin.as_deref(), Some("B07REALASN"), "present ASIN never blanked");
+        assert_eq!(
+            a.asin.as_deref(),
+            Some("B07REALASN"),
+            "present ASIN never blanked"
+        );
     }
 
     #[test]
@@ -674,13 +744,24 @@ mod tests {
         let dst_conn = seed(&dst_root, &[("zzz", "Zeta", "2026-01-01T00:00:00+00:00")]);
 
         merge_into(&dst_conn, &dst_root, &zip);
-        let shas: Vec<String> =
-            db::list_books(&dst_conn).unwrap().into_iter().map(|b| b.sha256).collect();
+        let shas: Vec<String> = db::list_books(&dst_conn)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.sha256)
+            .collect();
         assert!(shas.contains(&"zzz".to_string()), "Z preserved");
         assert!(shas.contains(&"aaa".to_string()), "A merged in");
         let z = db::find_by_sha(&dst_conn, "zzz").unwrap().unwrap();
-        assert_eq!(fs::read_to_string(z.epub_path.as_ref().unwrap()).unwrap(), "epub-zzz");
-        assert_eq!(db::list_annotations_for_book(&dst_conn, z.id).unwrap().len(), 1);
+        assert_eq!(
+            fs::read_to_string(z.epub_path.as_ref().unwrap()).unwrap(),
+            "epub-zzz"
+        );
+        assert_eq!(
+            db::list_annotations_for_book(&dst_conn, z.id)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -692,7 +773,15 @@ mod tests {
         let nb_pages = src_root.join("notebooks").join("uuid-1").join("pages");
         fs::create_dir_all(&nb_pages).unwrap();
         fs::write(nb_pages.join("page-0.svg"), "<svg>ink</svg>").unwrap();
-        db::upsert_notebook(&src_conn, "uuid-1", 1, "nbksha", "2026-02-02T00:00:00+00:00", "2026-02-02T00:00:00+00:00").unwrap();
+        db::upsert_notebook(
+            &src_conn,
+            "uuid-1",
+            1,
+            "nbksha",
+            "2026-02-02T00:00:00+00:00",
+            "2026-02-02T00:00:00+00:00",
+        )
+        .unwrap();
         let out = tempfile::tempdir().unwrap();
         let zip = backup_of(&src_conn, &src_root, out.path());
         drop(src_conn);

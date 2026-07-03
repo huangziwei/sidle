@@ -235,7 +235,11 @@ fn sanitize(book: &mut Book) {
 /// Drop [`is_ignorable`] characters anywhere in `s`, then trim surrounding
 /// whitespace.
 fn clean(s: &str) -> String {
-    s.chars().filter(|c| !is_ignorable(*c)).collect::<String>().trim().to_string()
+    s.chars()
+        .filter(|c| !is_ignorable(*c))
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// Zero-width / formatting code points that carry no visible glyph and that
@@ -343,8 +347,12 @@ fn device_filename(book: &Book) -> Result<String> {
 }
 
 fn looks_like_sha8_kfx(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".kfx") else { return false; };
-    let Some((_, sha)) = stem.rsplit_once('.') else { return false; };
+    let Some(stem) = name.strip_suffix(".kfx") else {
+        return false;
+    };
+    let Some((_, sha)) = stem.rsplit_once('.') else {
+        return false;
+    };
     sha.len() == SHA_INFIX_LEN && sha.chars().all(|c| c.is_ascii_hexdigit())
 }
 
@@ -474,8 +482,7 @@ pub fn push_annotations(
     let body = res
         .into_string()
         .with_context(|| format!("read body of {url}"))?;
-    let report: SyncReport =
-        serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
+    let report: SyncReport = serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
     Ok(report)
 }
 
@@ -526,8 +533,7 @@ fn read_sidecar(sdr_dir: &Path, suffix: &str) -> Result<Option<Vec<u8>>> {
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.ends_with(suffix));
         if is_match {
-            let bytes =
-                std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
             return Ok(Some(bytes));
         }
     }
@@ -567,7 +573,9 @@ mod tests {
     fn uses_server_device_filename_verbatim() {
         // The non-ASCII name round-trips intact: it rides in the JSON body,
         // not a header, so ureq's ASCII-only header filter never sees it.
-        let book = make_book(Some("[河野 裕] サクラダリセット５ ONE HAND EDEN.9ea26f33.kfx"));
+        let book = make_book(Some(
+            "[河野 裕] サクラダリセット５ ONE HAND EDEN.9ea26f33.kfx",
+        ));
         assert_eq!(
             device_filename(&book).unwrap(),
             "[河野 裕] サクラダリセット５ ONE HAND EDEN.9ea26f33.kfx"
@@ -669,7 +677,10 @@ mod tests {
         r.unmatched = vec!["a.sdr".into(), "b.sdr".into()];
         assert_eq!(r.summary(), "annotation sync: 2 new (2 unmatched)");
         // Unmatched-only (nothing imported) still reads sensibly.
-        let r = SyncReport { unmatched: vec!["a.sdr".into()], ..Default::default() };
+        let r = SyncReport {
+            unmatched: vec!["a.sdr".into()],
+            ..Default::default()
+        };
         assert_eq!(r.summary(), "annotation sync: nothing new (1 unmatched)");
     }
 }

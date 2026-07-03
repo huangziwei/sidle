@@ -118,8 +118,7 @@ mod tests {
         let conn = db::open(&paths.db()).unwrap();
 
         // A real PDF import gives us a book row + a persisted PDF side.
-        let outcome =
-            import_file(&conn, &paths, Path::new("tests/fixtures/minimal.pdf")).unwrap();
+        let outcome = import_file(&conn, &paths, Path::new("tests/fixtures/minimal.pdf")).unwrap();
         let crate::library::import::ImportOutcome::Imported { book, .. } = outcome else {
             panic!("expected fresh import");
         };
@@ -157,14 +156,8 @@ mod tests {
         let want = "[Jane Q. Author] Brand New Title (2021)";
         let pdf = updated.pdf_path.unwrap();
         let kfx = updated.kfx_path.unwrap();
-        assert!(
-            pdf.ends_with(&format!("{want}.pdf")),
-            "pdf renamed: {pdf}"
-        );
-        assert!(
-            kfx.ends_with(&format!("{want}.kfx")),
-            "kfx renamed: {kfx}"
-        );
+        assert!(pdf.ends_with(&format!("{want}.pdf")), "pdf renamed: {pdf}");
+        assert!(kfx.ends_with(&format!("{want}.kfx")), "kfx renamed: {kfx}");
         assert!(Path::new(&pdf).exists(), "renamed pdf on disk");
         assert!(Path::new(&kfx).exists(), "renamed kfx on disk");
         assert!(!old_kfx.exists(), "old kfx name gone");
@@ -182,8 +175,7 @@ mod tests {
         paths.ensure().unwrap();
         let conn = db::open(&paths.db()).unwrap();
 
-        let outcome =
-            import_file(&conn, &paths, Path::new("tests/fixtures/minimal.pdf")).unwrap();
+        let outcome = import_file(&conn, &paths, Path::new("tests/fixtures/minimal.pdf")).unwrap();
         let crate::library::import::ImportOutcome::Imported { book, .. } = outcome else {
             panic!("expected fresh import");
         };

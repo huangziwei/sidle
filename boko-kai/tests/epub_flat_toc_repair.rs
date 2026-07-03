@@ -9,8 +9,8 @@
 
 use std::io::Write;
 
-use boko::model::AnchorTarget;
 use boko::Book;
+use boko::model::AnchorTarget;
 
 /// Build a 3-entry EPUB whose NCX points two chapters at the same file (no
 /// fragments) and a third at a single-chapter file. The bodies carry the ids
@@ -83,7 +83,8 @@ fn build_flat_toc_epub() -> tempfile::TempDir {
   <p>\u{672c}\u{6587}\u{4e00}\u{3002}</p>
   <p class=\"bold\" id=\"h-b\">\u{7b2c}\u{4e8c}\u{8a71}\u{3000}\u{300c}B\u{300d}</p>
   <p>\u{672c}\u{6587}\u{4e8c}\u{3002}</p>
-</body></html>".as_bytes(),
+</body></html>"
+            .as_bytes(),
     );
     add(
         &mut zip,
@@ -94,7 +95,8 @@ fn build_flat_toc_epub() -> tempfile::TempDir {
 <body>
   <p class=\"bold\" id=\"h-c\">\u{7b2c}\u{4e09}\u{8a71}\u{300c}C\u{300d}</p>
   <p>\u{672c}\u{6587}\u{4e09}\u{3002}</p>
-</body></html>".as_bytes(),
+</body></html>"
+            .as_bytes(),
     );
 
     zip.finish().expect("finish zip");
@@ -153,7 +155,8 @@ fn flat_toc_repair_carries_into_kfx_nav() {
     let mut book = Book::open(dir.path().join("book.epub")).expect("open flat-toc epub");
 
     let mut buf = std::io::Cursor::new(Vec::new());
-    book.export(boko::Format::Kfx, &mut buf).expect("export kfx");
+    book.export(boko::Format::Kfx, &mut buf)
+        .expect("export kfx");
     let kfx = buf.into_inner();
     assert!(!kfx.is_empty(), "KFX export should produce bytes");
 

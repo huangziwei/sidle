@@ -561,10 +561,7 @@ impl Azw3Importer {
         // the cover as the first image record, so when 201 is absent
         // fall back to the first `images/` asset.
         if importer.metadata.cover_image.is_none()
-            && let Some(first_image) = importer
-                .assets
-                .iter()
-                .find(|p| p.starts_with("images"))
+            && let Some(first_image) = importer.assets.iter().find(|p| p.starts_with("images"))
         {
             importer.metadata.cover_image = Some(first_image.to_string_lossy().into_owned());
         }
@@ -653,8 +650,7 @@ impl Azw3Importer {
         // illustration wrapper. Must precede `transform_kindle_refs` so the
         // raster-image `kindle:embed:NNNN` refs inside the inlined SVG get
         // rewritten in the same pass below.
-        let inlined =
-            transform::inline_svg_flows(&content, &self.kf8.flow_table, text);
+        let inlined = transform::inline_svg_flows(&content, &self.kf8.flow_table, text);
 
         // Transform kindle: references to standard EPUB-style paths
         // This converts kindle:pos:fid:XXXX:off:YYYY to partNNNN.html#id
@@ -683,8 +679,7 @@ impl Azw3Importer {
         // dropping per-spine-doc xml:lang counts versus the publisher EPUB.
         // We pair them up; the fallback to `metadata.language` covers AZW3s
         // that lack any lang signal on `<html>`.
-        let with_lang =
-            transform::ensure_html_lang_dual(&cleaned, &self.metadata.language);
+        let with_lang = transform::ensure_html_lang_dual(&cleaned, &self.metadata.language);
 
         Ok(with_lang)
     }
@@ -858,11 +853,7 @@ fn build_metadata(
         // writes a freshly-minted UUID there. Only promote to
         // `metadata.asin` when the value actually looks like an Amazon
         // ASIN (10-char alphanumeric starting with B for ebooks).
-        metadata.asin = exth
-            .asin
-            .as_ref()
-            .filter(|s| looks_like_asin(s))
-            .cloned();
+        metadata.asin = exth.asin.as_ref().filter(|s| looks_like_asin(s)).cloned();
         // Writing-mode signals (EXTH 525 / 527). Both calibre-exported AZW3s
         // and native Amazon AZW3s carry these; no fallback to inline HTML
         // class needed. Calibre's `reader/headers.py:96-108` is the spec.

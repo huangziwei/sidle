@@ -67,10 +67,11 @@ pub async fn conversion_retry(
 }
 
 #[tauri::command]
-pub async fn conversion_set_workers(
-    state: State<'_, AppState>,
-    n: usize,
-) -> Result<usize, String> {
-    state.queue.set_workers(n).await.map_err(|e| e.to_string())?;
+pub async fn conversion_set_workers(state: State<'_, AppState>, n: usize) -> Result<usize, String> {
+    state
+        .queue
+        .set_workers(n)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(state.queue.current_workers().await)
 }

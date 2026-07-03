@@ -11,8 +11,8 @@
 
 use std::io::{self, Write};
 
-use zip::write::{SimpleFileOptions, ZipWriter};
 use zip::CompressionMethod;
+use zip::write::{SimpleFileOptions, ZipWriter};
 
 use super::parser_txt::{Document, TocEntry};
 
@@ -94,8 +94,14 @@ pub fn build_epub(input: EpubInput<'_>) -> io::Result<Vec<u8>> {
     // 9. NCX (EPUB 2 compat)
     zip.start_file("OEBPS/toc.ncx", deflated)?;
     zip.write_all(
-        build_ncx(&uuid, &doc.title, &doc.toc, &id_to_file, !doc.colophon.is_empty())
-            .as_bytes(),
+        build_ncx(
+            &uuid,
+            &doc.title,
+            &doc.toc,
+            &id_to_file,
+            !doc.colophon.is_empty(),
+        )
+        .as_bytes(),
     )?;
 
     // 10. OPF (last so the rest of the package is already on the wire)
@@ -352,8 +358,10 @@ fn build_nav_ol(
         escape_xml(title),
     ));
     if entries.is_empty() && has_colophon {
-        ol.push_str(r#"<li><a href="text/colophon.xhtml">底本情報</a></li>
-"#);
+        ol.push_str(
+            r#"<li><a href="text/colophon.xhtml">底本情報</a></li>
+"#,
+        );
         ol.push_str("</ol>");
         return ol;
     }
@@ -398,8 +406,10 @@ fn build_nav_ol(
         }
     }
     if has_colophon {
-        ol.push_str(r#"<li><a href="text/colophon.xhtml">底本情報</a></li>
-"#);
+        ol.push_str(
+            r#"<li><a href="text/colophon.xhtml">底本情報</a></li>
+"#,
+        );
     }
     ol.push_str("</ol>");
     ol
@@ -551,9 +561,8 @@ fn parse_pub_date(colophon: &str) -> String {
         return String::new();
     }
     use std::sync::LazyLock;
-    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r"(\d{4})[（(].*?[）)]\s*年\s*(\d{1,2})\s*月").unwrap()
-    });
+    static RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(\d{4})[（(].*?[）)]\s*年\s*(\d{1,2})\s*月").unwrap());
     RE.captures(colophon)
         .map(|c| {
             let year = c.get(1).unwrap().as_str();
@@ -705,8 +714,8 @@ em.batsu { font-style: normal; -webkit-text-emphasis: "×"; text-emphasis: "×";
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::parser_txt::Document;
+    use super::*;
 
     fn tiny_jpeg() -> Vec<u8> {
         // Minimal valid JPEG: 1x1 white. The bytes were dumped from
@@ -828,7 +837,10 @@ mod tests {
         // Extract OEBPS/content.opf from the zip and check key fields.
         let opf = extract_zip_entry(&bytes, "OEBPS/content.opf");
         assert!(opf.contains("<dc:title>テスト</dc:title>"), "title missing");
-        assert!(opf.contains("<dc:creator>著者</dc:creator>"), "author missing");
+        assert!(
+            opf.contains("<dc:creator>著者</dc:creator>"),
+            "author missing"
+        );
         assert!(opf.contains(r#"xml:lang="ja""#), "lang missing");
         assert!(
             opf.contains(r#"page-progression-direction="rtl""#),
@@ -888,15 +900,32 @@ mod tests {
 "#
             .to_string(),
             toc: vec![
-                TocEntry { id: "h1".to_string(), level: 3, text: "一".to_string() },
-                TocEntry { id: "h2".to_string(), level: 3, text: "二".to_string() },
-                TocEntry { id: "h3".to_string(), level: 3, text: "三".to_string() },
+                TocEntry {
+                    id: "h1".to_string(),
+                    level: 3,
+                    text: "一".to_string(),
+                },
+                TocEntry {
+                    id: "h2".to_string(),
+                    level: 3,
+                    text: "二".to_string(),
+                },
+                TocEntry {
+                    id: "h3".to_string(),
+                    level: 3,
+                    text: "三".to_string(),
+                },
             ],
             colophon: String::new(),
             referenced_images: vec![],
         };
         let chapters = split_into_chapters(&doc);
-        assert_eq!(chapters.len(), 4, "title + 3 chapters, got {}", chapters.len());
+        assert_eq!(
+            chapters.len(),
+            4,
+            "title + 3 chapters, got {}",
+            chapters.len()
+        );
         assert_eq!(chapters[0].file, "title.xhtml");
         assert_eq!(chapters[1].file, "ch1.xhtml");
         assert_eq!(chapters[1].title, "一");
@@ -923,14 +952,27 @@ mod tests {
 "#
             .to_string(),
             toc: vec![
-                TocEntry { id: "h1".to_string(), level: 3, text: "一".to_string() },
-                TocEntry { id: "h2".to_string(), level: 3, text: "二".to_string() },
+                TocEntry {
+                    id: "h1".to_string(),
+                    level: 3,
+                    text: "一".to_string(),
+                },
+                TocEntry {
+                    id: "h2".to_string(),
+                    level: 3,
+                    text: "二".to_string(),
+                },
             ],
             colophon: String::new(),
             referenced_images: vec![],
         };
         let chapters = split_into_chapters(&doc);
-        assert_eq!(chapters.len(), 3, "title + 2 chapters, got {}", chapters.len());
+        assert_eq!(
+            chapters.len(),
+            3,
+            "title + 2 chapters, got {}",
+            chapters.len()
+        );
         assert_eq!(chapters[0].file, "title.xhtml");
         assert!(
             !chapters[0].body.contains(r#"id="h1""#),
@@ -956,7 +998,10 @@ mod tests {
             ncx.contains(r#"<content src="text/colophon.xhtml"/>"#),
             "NCX must include a colophon navPoint:\n{ncx}"
         );
-        assert!(ncx.contains("<text>底本情報</text>"), "colophon navLabel missing");
+        assert!(
+            ncx.contains("<text>底本情報</text>"),
+            "colophon navLabel missing"
+        );
     }
 
     fn extract_zip_entry(zip_bytes: &[u8], name: &str) -> String {

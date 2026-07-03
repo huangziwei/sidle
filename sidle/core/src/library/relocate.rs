@@ -204,7 +204,9 @@ fn copy_path(from: &Path, to: &Path) -> Result<()> {
 
 /// True if `dir` exists and contains no entries.
 fn dir_is_empty(dir: &Path) -> bool {
-    std::fs::read_dir(dir).map(|mut it| it.next().is_none()).unwrap_or(false)
+    std::fs::read_dir(dir)
+        .map(|mut it| it.next().is_none())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -258,8 +260,14 @@ mod tests {
         let n = copy_library(&conn, &books_dir, &dest).unwrap();
         assert_eq!(n, 2);
         assert!(dest.join("library.db").is_file());
-        assert_eq!(std::fs::read_to_string(dest.join("books/aaa/book.epub")).unwrap(), "epub-aaa");
-        assert_eq!(std::fs::read_to_string(dest.join("books/bbb/book.epub")).unwrap(), "epub-bbb");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("books/aaa/book.epub")).unwrap(),
+            "epub-aaa"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("books/bbb/book.epub")).unwrap(),
+            "epub-bbb"
+        );
         // The copied DB reads back as a sidle library with the same count.
         assert_eq!(validate_existing(&dest).unwrap(), 2);
     }
@@ -321,9 +329,15 @@ mod tests {
 
         // Same volume (same tempdir) → rename path; nothing is copied.
         let copied = move_library(&conn, &src_root, &dest_root).unwrap();
-        assert!(copied.is_empty(), "same-volume move renames, nothing copied");
+        assert!(
+            copied.is_empty(),
+            "same-volume move renames, nothing copied"
+        );
         assert!(dest_root.join("library.db").is_file());
-        assert_eq!(std::fs::read_to_string(dest_root.join("books/aaa/book.epub")).unwrap(), "e-aaa");
+        assert_eq!(
+            std::fs::read_to_string(dest_root.join("books/aaa/book.epub")).unwrap(),
+            "e-aaa"
+        );
         // notebooks / kual-dist / token relocated, not stranded.
         assert_eq!(
             std::fs::read_to_string(dest_root.join("notebooks/nb-1/pages/page-0.svg")).unwrap(),
@@ -331,11 +345,26 @@ mod tests {
         );
         assert!(dest_root.join("kual-dist/manifest.json").is_file());
         assert!(dest_root.join(".server-token").is_file());
-        assert!(!src_root.join("books").exists(), "books renamed out of source");
-        assert!(!src_root.join("notebooks").exists(), "notebooks renamed out of source");
-        assert!(!src_root.join("kual-dist").exists(), "kual-dist renamed out of source");
-        assert!(!src_root.join(".server-token").exists(), "token renamed out of source");
-        assert!(src_root.join("library.db").is_file(), "old db kept until finish_move");
+        assert!(
+            !src_root.join("books").exists(),
+            "books renamed out of source"
+        );
+        assert!(
+            !src_root.join("notebooks").exists(),
+            "notebooks renamed out of source"
+        );
+        assert!(
+            !src_root.join("kual-dist").exists(),
+            "kual-dist renamed out of source"
+        );
+        assert!(
+            !src_root.join(".server-token").exists(),
+            "token renamed out of source"
+        );
+        assert!(
+            src_root.join("library.db").is_file(),
+            "old db kept until finish_move"
+        );
         assert_eq!(validate_existing(&dest_root).unwrap(), 2);
 
         // finish_move clears the old db; src_root isn't the state dir and is now
@@ -356,8 +385,14 @@ mod tests {
 
         finish_move(state_dir.path(), state_dir.path(), &[]);
 
-        assert!(!state_dir.path().join("library.db").exists(), "old db dropped");
-        assert!(state_dir.path().join("config.json").is_file(), "pointer kept");
+        assert!(
+            !state_dir.path().join("library.db").exists(),
+            "old db dropped"
+        );
+        assert!(
+            state_dir.path().join("config.json").is_file(),
+            "pointer kept"
+        );
         assert!(state_dir.path().exists(), "state dir kept");
     }
 
@@ -376,8 +411,14 @@ mod tests {
         let state_dir = parent.path().join("state");
         finish_move(&src_root, &state_dir, &copied);
 
-        assert!(!src_root.join("books").exists(), "copied dir source removed");
-        assert!(!src_root.join(".server-token").exists(), "copied file source removed");
+        assert!(
+            !src_root.join("books").exists(),
+            "copied dir source removed"
+        );
+        assert!(
+            !src_root.join(".server-token").exists(),
+            "copied file source removed"
+        );
         assert!(!src_root.exists(), "now-empty old root removed");
     }
 }

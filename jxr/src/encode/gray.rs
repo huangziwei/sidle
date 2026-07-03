@@ -3,7 +3,7 @@
 //! image**. Mirrors the decoder's `mb_dc` + `mb_lp` + `mb_cbphp` + `mb_hp_flex`
 //! per-macroblock sequence, reusing its `AdaptiveVLC` / `AdaptiveScan` state.
 
-use super::quant::{quantize, QpSet};
+use super::quant::{QpSet, quantize};
 use super::{codestream, coeff, container, hp, transform};
 use crate::decode::consts::*;
 use crate::decode::state::{AdaptiveScan, AdaptiveVLC};
@@ -69,7 +69,10 @@ impl YOnlyPlane {
     ) -> Self {
         let (wu, hu) = (w as usize, h as usize);
         let (top, left) = (window.0 as usize, window.1 as usize);
-        let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
+        let (pw, ph) = (
+            (wu + left).next_multiple_of(16),
+            (hu + top).next_multiple_of(16),
+        );
         let mut centered = vec![0i32; pw * ph];
         for y in 0..ph {
             let sy = y.saturating_sub(top).min(hu - 1);
@@ -375,8 +378,16 @@ impl YOnlyPlane {
             self.hp_state.hor_scan.reset_totals();
             self.hp_state.ver_scan.reset_totals();
         }
-        let cbphp_left = if is_left { 0 } else { self.cbphp_grid[mbx - 1][mby] };
-        let cbphp_top = if is_top { 0 } else { self.cbphp_grid[mbx][mby - 1] };
+        let cbphp_left = if is_left {
+            0
+        } else {
+            self.cbphp_grid[mbx - 1][mby]
+        };
+        let cbphp_top = if is_top {
+            0
+        } else {
+            self.cbphp_grid[mbx][mby - 1]
+        };
         let mbcbp = hp::encode_hp_mb(
             sink,
             &mut self.hp_state,
@@ -404,8 +415,6 @@ impl codestream::TileEncode for YOnlyPlane {
         self.encode_mb(sink, mbx, mby);
     }
 }
-
-
 
 /// [`encode_grayscale_scaled`] over the band-truncation envelope: any
 /// `bands_present` (the plane header and per-MB sections shrink together),
@@ -468,7 +477,10 @@ pub(super) fn encode_gray_prebias(
 ) -> Vec<u8> {
     let (wu, hu) = (w as usize, h as usize);
     let (top, left) = (window.0 as usize, window.1 as usize);
-    let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
+    let (pw, ph) = (
+        (wu + left).next_multiple_of(16),
+        (hu + top).next_multiple_of(16),
+    );
     let mut centered = vec![0i32; pw * ph];
     for y in 0..ph {
         let sy = y.saturating_sub(top).min(hu - 1);

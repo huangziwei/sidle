@@ -227,7 +227,9 @@ impl EpubOutput {
             .iter()
             .find(|m| m.href == old_filename)
             .map(|m| m.id.clone())?;
-        let new_id_str = new_id.map(|s| s.to_string()).unwrap_or_else(|| self.make_id(new_filename));
+        let new_id_str = new_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.make_id(new_filename));
         let idx = *self.manifest_by_id.get(&old_id)?;
         self.manifest[idx].href = new_filename.to_string();
         self.manifest[idx].id = new_id_str.clone();
@@ -312,7 +314,10 @@ impl EpubOutput {
     /// resources. `referenced` is the set of `<img src>` hrefs collected from
     /// the emitted pages; the cover image is always kept. Returns the number of
     /// resources pruned.
-    pub fn retain_referenced_images(&mut self, referenced: &std::collections::HashSet<String>) -> usize {
+    pub fn retain_referenced_images(
+        &mut self,
+        referenced: &std::collections::HashSet<String>,
+    ) -> usize {
         let drop: Vec<String> = self
             .manifest
             .iter()
@@ -411,8 +416,7 @@ impl EpubOutput {
         let mut buf = Cursor::new(Vec::new());
         {
             let mut zip = ZipWriter::new(&mut buf);
-            let stored =
-                SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
             let deflated = SimpleFileOptions::default()
                 .compression_method(CompressionMethod::Deflated)
                 .compression_level(Some(6));
@@ -442,7 +446,8 @@ impl EpubOutput {
             // 4b. toc.ncx (legacy fallback for EPUB 2 readers; kept alongside
             //     the nav doc).
             let ncx = self.generate_ncx(meta);
-            zip.start_file("OEBPS/toc.ncx", deflated).map_err(io_error)?;
+            zip.start_file("OEBPS/toc.ncx", deflated)
+                .map_err(io_error)?;
             zip.write_all(ncx.as_bytes())?;
 
             // 5. OEBPS files in insertion order. Already-compressed media
@@ -492,7 +497,11 @@ impl EpubOutput {
 
         // Title — when KFX carries `title_pronunciation` (Japanese yomigana
         // sort key), surface it as `opf:file-as`; otherwise omit the attr.
-        let title = if meta.title.is_empty() { "Untitled" } else { &meta.title };
+        let title = if meta.title.is_empty() {
+            "Untitled"
+        } else {
+            &meta.title
+        };
         if let Some(file_as) = meta.title_pronunciation.as_deref() {
             s.push_str(&format!(
                 "    <dc:title opf:file-as=\"{}\">{}</dc:title>\n",
@@ -519,8 +528,15 @@ impl EpubOutput {
         }
 
         // Language
-        let lang = if meta.language.is_empty() { "en" } else { &meta.language };
-        s.push_str(&format!("    <dc:language>{}</dc:language>\n", xml_escape(lang)));
+        let lang = if meta.language.is_empty() {
+            "en"
+        } else {
+            &meta.language
+        };
+        s.push_str(&format!(
+            "    <dc:language>{}</dc:language>\n",
+            xml_escape(lang)
+        ));
 
         // Identifier — calibre emits multiple <dc:identifier> with
         // opf:scheme="ASIN" / "MOBI-ASIN" / "uuid" / "calibre"; we mirror the
@@ -573,10 +589,7 @@ impl EpubOutput {
             } else {
                 date.to_string()
             };
-            s.push_str(&format!(
-                "    <dc:date>{}</dc:date>\n",
-                xml_escape(&iso)
-            ));
+            s.push_str(&format!("    <dc:date>{}</dc:date>\n", xml_escape(&iso)));
         }
 
         // Publisher (optional)
@@ -607,7 +620,11 @@ impl EpubOutput {
         let wm = self.writing_mode.as_deref().unwrap_or("horizontal-tb");
         let ppd = self.page_progression_direction.as_deref().unwrap_or("ltr");
         let primary_writing_mode = if wm == "horizontal-tb" || wm.is_empty() {
-            if ppd == "rtl" { "horizontal-rl" } else { "horizontal-lr" }
+            if ppd == "rtl" {
+                "horizontal-rl"
+            } else {
+                "horizontal-lr"
+            }
         } else {
             wm
         };
@@ -730,7 +747,11 @@ impl EpubOutput {
     /// optional `<nav epub:type="landmarks">` from `self.guide` (the same
     /// container used to emit the EPUB-2 `<guide>` block).
     fn generate_nav(&self, meta: &BookMetadata) -> String {
-        let title = if meta.title.is_empty() { "Untitled" } else { &meta.title };
+        let title = if meta.title.is_empty() {
+            "Untitled"
+        } else {
+            &meta.title
+        };
         let lang = if meta.language.is_empty() {
             "en"
         } else {
@@ -799,14 +820,19 @@ impl EpubOutput {
     }
 
     fn generate_ncx(&self, meta: &BookMetadata) -> String {
-        let title = if meta.title.is_empty() { "Untitled" } else { &meta.title };
+        let title = if meta.title.is_empty() {
+            "Untitled"
+        } else {
+            &meta.title
+        };
         let id = if meta.identifier.is_empty() {
             "urn:uuid:00000000-0000-0000-0000-000000000000"
         } else {
             &meta.identifier
         };
         let mut s = String::new();
-        s.push_str(&format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+        s.push_str(&format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head>
@@ -817,7 +843,10 @@ impl EpubOutput {
   </head>
   <docTitle><text>{title}</text></docTitle>
   <navMap>
-"#, id = xml_escape(id), title = xml_escape(title)));
+"#,
+            id = xml_escape(id),
+            title = xml_escape(title)
+        ));
 
         // Use the navigation module's NCX if provided; otherwise emit the
         // single-entry fallback pointing at the first spine chapter.

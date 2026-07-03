@@ -47,7 +47,10 @@ struct Inner {
 impl Default for ServerHandle {
     fn default() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Inner { child: None, port: DEFAULT_PORT })),
+            inner: Arc::new(Mutex::new(Inner {
+                child: None,
+                port: DEFAULT_PORT,
+            })),
         }
     }
 }
@@ -256,7 +259,8 @@ fn spawn_detached(bin: &Path, paths: &LibraryPaths, port: u16) -> Result<Child> 
         }
     }
 
-    cmd.spawn().with_context(|| format!("spawn {}", bin.display()))
+    cmd.spawn()
+        .with_context(|| format!("spawn {}", bin.display()))
 }
 
 #[cfg(test)]
@@ -283,7 +287,9 @@ mod tests {
     #[test]
     fn read_pid_parses_and_tolerates_garbage() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = LibraryPaths { root: tmp.path().to_path_buf() };
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
         assert_eq!(ServerHandle::read_pid(&paths), None); // missing file
         std::fs::write(ServerHandle::pid_path(&paths), "  4321\n").unwrap();
         assert_eq!(ServerHandle::read_pid(&paths), Some(4321));
@@ -299,7 +305,9 @@ mod tests {
     async fn start_adopts_already_running_without_spawning() {
         let port = dummy_http_server();
         let tmp = tempfile::tempdir().unwrap();
-        let paths = LibraryPaths { root: tmp.path().to_path_buf() };
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
         paths.ensure().unwrap();
 
         let handle = ServerHandle::default();

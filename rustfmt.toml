@@ -1,0 +1,7 @@
+# rustfmt configuration for the sidle workspace.
+#
+# Default rustfmt style throughout. `edition` is pinned only so that rustfmt
+# invoked directly by an editor (rust-analyzer format-on-save, IDE actions)
+# matches `cargo fmt`, which otherwise reads the edition from each crate's
+# Cargo.toml. Every workspace crate is already on edition 2024.
+edition = "2024"

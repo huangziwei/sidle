@@ -371,8 +371,7 @@ impl Book {
     ///
     /// This is useful for reading from stdin or other non-file sources.
     pub fn from_bytes(data: &[u8], format: Format) -> io::Result<Self> {
-        let source: Arc<dyn crate::io::ByteSource> =
-            Arc::new(MemorySource::new(data.to_vec()));
+        let source: Arc<dyn crate::io::ByteSource> = Arc::new(MemorySource::new(data.to_vec()));
         let backend: Box<dyn Importer> = match format {
             Format::Epub => Box::new(EpubImporter::from_source(source)?),
             Format::Azw3 => Box::new(Azw3Importer::from_source(source)?),

@@ -189,7 +189,11 @@ mod tests {
         let transport = MassStorageTransport::new(tmp.path().to_path_buf());
         let mut got = collect_device_ink(&transport, &known).unwrap();
         got.sort_by(|a, b| a.asin.cmp(&b.asin));
-        assert_eq!(got.len(), 2, "both library books pulled; cloud + uuid skipped");
+        assert_eq!(
+            got.len(),
+            2,
+            "both library books pulled; cloud + uuid skipped"
+        );
         assert_eq!(got[0].asin, "97870D063206CBA0CDD733367F356508");
         assert_eq!(got[0].nbk_bytes, b"HEX");
         assert_eq!(got[1].asin, "LXOGKNCCHUP7BXFVEMCJPWBQHRP6HXOP");

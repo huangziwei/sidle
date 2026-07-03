@@ -9,7 +9,7 @@
 //! resolve straight from `KFX_SYMBOL_TABLE`.
 
 use crate::kfx::ion::{IonParser, IonValue};
-use crate::kfx::symbols::{symbol_name, KFX_SYMBOL_TABLE};
+use crate::kfx::symbols::{KFX_SYMBOL_TABLE, symbol_name};
 
 use super::NbkError;
 
@@ -66,7 +66,9 @@ impl SymTab {
         if id < self.base {
             symbol_name(id)
         } else {
-            self.locals.get((id - self.base) as usize).map(|s| s.as_str())
+            self.locals
+                .get((id - self.base) as usize)
+                .map(|s| s.as_str())
         }
     }
 
@@ -76,7 +78,10 @@ impl SymTab {
         if let Some(i) = self.locals.iter().position(|s| s == name) {
             return Some(self.base + i as u64);
         }
-        KFX_SYMBOL_TABLE.iter().position(|&s| s == name).map(|i| i as u64)
+        KFX_SYMBOL_TABLE
+            .iter()
+            .position(|&s| s == name)
+            .map(|i| i as u64)
     }
 }
 

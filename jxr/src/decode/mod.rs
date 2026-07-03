@@ -29,7 +29,9 @@ pub(crate) mod tables;
 /// separate planar-alpha codestream when the container carries one (the
 /// `-a 2` encoding — alpha as its own YONLY image appended via
 /// ALPHA_OFFSET/ALPHA_BYTE_COUNT), merged as the final component.
-pub fn decode_image(c: &container::JxrContainer<'_>) -> Result<decoder::DecodedImage, decoder::DecodeError> {
+pub fn decode_image(
+    c: &container::JxrContainer<'_>,
+) -> Result<decoder::DecodedImage, decoder::DecodeError> {
     let mut img = decoder::Decoder::new(c.image_data).decode()?;
     if let Some(alpha_bytes) = c.alpha_data {
         let alpha = decoder::Decoder::new(alpha_bytes).decode()?;
@@ -39,7 +41,8 @@ pub fn decode_image(c: &container::JxrContainer<'_>) -> Result<decoder::DecodedI
                 alpha.width, alpha.height, img.width, img.height
             )));
         }
-        img.image_plane.extend(alpha.image_plane.into_iter().take(1));
+        img.image_plane
+            .extend(alpha.image_plane.into_iter().take(1));
         img.num_components += 1;
         img.has_alpha = true;
     }

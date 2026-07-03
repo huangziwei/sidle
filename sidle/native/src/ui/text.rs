@@ -33,8 +33,7 @@ pub struct TextRenderer {
 impl TextRenderer {
     pub fn load(px: f32) -> Result<Self> {
         let path = Path::new(JP_FONT_PATH);
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
         let font = Font::from_bytes(bytes, FontSettings::default())
             .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
         Ok(Self {

@@ -55,8 +55,14 @@ pub fn run(log: impl Fn(String)) -> Result<()> {
     // Application-layer, no-chrome, fullscreen window (the shape KUAL/booklets
     // use). This is a guess; if a plain name works the POC will still show.
     let name = b"L:A_N:application_ID:com.sidle.x11poc_PC:N_O:U";
-    conn.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, name)
-        .context("set WM_NAME")?;
+    conn.change_property8(
+        PropMode::REPLACE,
+        win,
+        AtomEnum::WM_NAME,
+        AtomEnum::STRING,
+        name,
+    )
+    .context("set WM_NAME")?;
 
     conn.map_window(win).context("map_window")?;
 
@@ -71,14 +77,45 @@ pub fn run(log: impl Fn(String)) -> Result<()> {
     .context("create_gc")?;
 
     let bars = [
-        Rectangle { x: 0, y: 0, width: w, height: 10 },
-        Rectangle { x: 0, y: (h - 10) as i16, width: w, height: 10 },
-        Rectangle { x: 0, y: 0, width: 10, height: h },
-        Rectangle { x: (w - 10) as i16, y: 0, width: 10, height: h },
-        Rectangle { x: 120, y: 120, width: w.saturating_sub(240), height: 80 },
-        Rectangle { x: 120, y: 320, width: w.saturating_sub(240), height: 80 },
+        Rectangle {
+            x: 0,
+            y: 0,
+            width: w,
+            height: 10,
+        },
+        Rectangle {
+            x: 0,
+            y: (h - 10) as i16,
+            width: w,
+            height: 10,
+        },
+        Rectangle {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: h,
+        },
+        Rectangle {
+            x: (w - 10) as i16,
+            y: 0,
+            width: 10,
+            height: h,
+        },
+        Rectangle {
+            x: 120,
+            y: 120,
+            width: w.saturating_sub(240),
+            height: 80,
+        },
+        Rectangle {
+            x: 120,
+            y: 320,
+            width: w.saturating_sub(240),
+            height: 80,
+        },
     ];
-    conn.poly_fill_rectangle(win, gc, &bars).context("poly_fill_rectangle")?;
+    conn.poly_fill_rectangle(win, gc, &bars)
+        .context("poly_fill_rectangle")?;
     conn.flush().context("flush")?;
     log("x11poc: mapped + drew test pattern — tap to exit".to_string());
 

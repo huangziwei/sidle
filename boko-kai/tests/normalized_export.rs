@@ -136,7 +136,8 @@ fn extract_style_classes(document: &str) -> Vec<String> {
 
 #[test]
 fn test_normalize_book_emits_css_for_used_classes() {
-    let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").expect("Failed to open test book");
+    let mut book =
+        Book::open("tests/fixtures/[太宰 治] 人間失格.epub").expect("Failed to open test book");
 
     let content = normalize_book(&mut book).expect("normalize_book failed");
 
@@ -167,7 +168,8 @@ fn test_normalize_book_emits_css_for_used_classes() {
 
 #[test]
 fn test_normalized_export_contains_css_and_numbered_chapters() {
-    let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").expect("Failed to open test book");
+    let mut book =
+        Book::open("tests/fixtures/[太宰 治] 人間失格.epub").expect("Failed to open test book");
 
     let mut output = Cursor::new(Vec::new());
 
@@ -205,7 +207,8 @@ fn test_normalized_export_contains_css_and_numbered_chapters() {
 
 #[test]
 fn test_load_chapter_cached_returns_same_arc() {
-    let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").expect("Failed to open test book");
+    let mut book =
+        Book::open("tests/fixtures/[太宰 治] 人間失格.epub").expect("Failed to open test book");
 
     let spine: Vec<_> = book.spine().to_vec();
     assert!(!spine.is_empty(), "Book should have spine entries");

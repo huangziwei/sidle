@@ -67,8 +67,16 @@ impl Input {
         loop {
             let button_fd: RawFd = self.buttons.as_ref().map(|b| b.raw_fd()).unwrap_or(-1);
             let mut fds = [
-                libc::pollfd { fd: touch_fd, events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: button_fd, events: libc::POLLIN, revents: 0 },
+                libc::pollfd {
+                    fd: touch_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: button_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
             ];
             let nfds: libc::nfds_t = if self.buttons.is_some() { 2 } else { 1 };
 

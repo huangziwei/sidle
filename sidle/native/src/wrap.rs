@@ -80,7 +80,12 @@ where
 /// Same `measure` contract as [`wrap_to_width`]. Extracted from the cover
 /// placeholder renderer so the diagnostics panel can clamp long error
 /// strings the same way — one tested path for both.
-pub fn wrap_and_clamp<F>(text: &str, max_width: u32, max_lines: usize, mut measure: F) -> Vec<String>
+pub fn wrap_and_clamp<F>(
+    text: &str,
+    max_width: u32,
+    max_lines: usize,
+    mut measure: F,
+) -> Vec<String>
 where
     F: FnMut(&str) -> u32,
 {

@@ -116,13 +116,23 @@ fn layout(xres: u32, yres: u32) -> Vec<KeyButton> {
 }
 
 fn full_rect(fb: &Framebuffer) -> MxcfbRect {
-    MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: fb.var.yres }
+    MxcfbRect {
+        top: 0,
+        left: 0,
+        width: fb.var.xres,
+        height: fb.var.yres,
+    }
 }
 
 /// The query+count band at the top — its own rect so a keystroke refreshes only
 /// this with a fast DU instead of the whole panel.
 fn band_rect(fb: &Framebuffer, lh: u32) -> MxcfbRect {
-    MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: band_bottom(lh) }
+    MxcfbRect {
+        top: 0,
+        left: 0,
+        width: fb.var.xres,
+        height: band_bottom(lh),
+    }
 }
 
 /// Books passing the active facets **and** the typed query — the same predicate
@@ -162,7 +172,13 @@ fn draw_band(
     };
     let cw = renderer.measure_width(&count);
     let cy = (searchbar::TOP + searchbar::HEIGHT + lh) as i32;
-    renderer.draw(fb, ((xres as i32 - cw as i32) / 2).max(0), cy, &count, false);
+    renderer.draw(
+        fb,
+        ((xres as i32 - cw as i32) / 2).max(0),
+        cy,
+        &count,
+        false,
+    );
 }
 
 fn draw_key(fb: &mut Framebuffer, renderer: &mut TextRenderer, kb: &KeyButton) {

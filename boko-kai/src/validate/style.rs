@@ -24,9 +24,7 @@ use quick_xml::events::Event;
 use zip::ZipArchive;
 
 use crate::epub::{parse_container_xml, parse_opf};
-use crate::kfx::container::{
-    parse_container_header, parse_container_info, parse_index_table,
-};
+use crate::kfx::container::{parse_container_header, parse_container_info, parse_index_table};
 use crate::kfx::symbols::KfxSymbol;
 use crate::style::Declaration;
 
@@ -91,9 +89,7 @@ impl Report {
     }
 
     pub fn is_clean(&self) -> bool {
-        self.dropped == 0
-            && !self.classes_collapsed_to_zero()
-            && !self.paragraphs_stuck_as_divs()
+        self.dropped == 0 && !self.classes_collapsed_to_zero() && !self.paragraphs_stuck_as_divs()
     }
 
     /// True when KFX has styles to emit but the EPUB has no class rules in
@@ -120,7 +116,10 @@ impl Report {
         println!("Dropped:            {}", self.dropped);
         println!("Coverage:           {:.2}%", self.coverage_ratio() * 100.0);
         println!("Class system:");
-        println!("  KFX distinct styles ($style entities): {}", self.kfx_distinct_style_count);
+        println!(
+            "  KFX distinct styles ($style entities): {}",
+            self.kfx_distinct_style_count
+        );
         println!(
             "  EPUB class= occurrences:  {}",
             self.epub_class_attr_occurrences
@@ -134,8 +133,14 @@ impl Report {
             self.epub_class_rule_count
         );
         println!("Leaf-text container shape:");
-        println!("  <p> with text:                    {}", self.epub_leaf_p_text);
-        println!("  <div> with text-only inline kids: {}", self.epub_leaf_div_text);
+        println!(
+            "  <p> with text:                    {}",
+            self.epub_leaf_p_text
+        );
+        println!(
+            "  <div> with text-only inline kids: {}",
+            self.epub_leaf_div_text
+        );
         if self.classes_collapsed_to_zero() {
             println!(
                 "  DEFECT: KFX has {} style structs but EPUB has 0 class rules / 0 class= attrs",
@@ -240,8 +245,7 @@ struct ClassRichness {
 /// stylesheets, and `<p>` vs leaf `<div>` text containers across the spine.
 fn collect_class_richness(epub_bytes: &[u8]) -> Result<ClassRichness, String> {
     let cursor = Cursor::new(epub_bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
 
     let container_bytes = read_zip_entry(&mut archive, "META-INF/container.xml")
         .map_err(|e| format!("container.xml: {}", e))?;
@@ -252,8 +256,8 @@ fn collect_class_richness(epub_bytes: &[u8]) -> Result<ClassRichness, String> {
         .map(|i| &opf_path[..=i])
         .unwrap_or("")
         .to_string();
-    let opf_bytes = read_zip_entry(&mut archive, &opf_path)
-        .map_err(|e| format!("opf {}: {}", opf_path, e))?;
+    let opf_bytes =
+        read_zip_entry(&mut archive, &opf_path).map_err(|e| format!("opf {}: {}", opf_path, e))?;
     let enc = crate::util::extract_xml_encoding(&opf_bytes);
     let opf_str = crate::util::decode_text(&opf_bytes, enc);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
@@ -329,10 +333,12 @@ fn class_selector_count_in_list(selectors: &str) -> usize {
             while i < bytes.len() {
                 if bytes[i] == b'.'
                     && i + 1 < bytes.len()
-                        && (bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_' || bytes[i + 1] == b'-')
-                    {
-                        return true;
-                    }
+                    && (bytes[i + 1].is_ascii_alphabetic()
+                        || bytes[i + 1] == b'_'
+                        || bytes[i + 1] == b'-')
+                {
+                    return true;
+                }
                 i += 1;
             }
             false
@@ -346,7 +352,11 @@ fn class_selector_count_in_list(selectors: &str) -> usize {
 /// like div/p/h*/ul/ol/li/table). The block-vs-inline split mirrors
 /// calibre's `consolidate_html` heuristic: a leaf `<div>` with only
 /// inline runs is paragraph-shaped.
-fn scan_xhtml_richness(xhtml: &str, richness: &mut ClassRichness, class_names: &mut HashSet<String>) {
+fn scan_xhtml_richness(
+    xhtml: &str,
+    richness: &mut ClassRichness,
+    class_names: &mut HashSet<String>,
+) {
     use quick_xml::Reader;
     use quick_xml::events::Event;
 
@@ -384,11 +394,39 @@ fn scan_xhtml_richness(xhtml: &str, richness: &mut ClassRichness, class_names: &
         has_text: bool,
     }
     let block_tags: &[&[u8]] = &[
-        b"div", b"p", b"section", b"article", b"aside", b"header", b"footer",
-        b"nav", b"main", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6",
-        b"ul", b"ol", b"li", b"dl", b"dt", b"dd",
-        b"table", b"thead", b"tbody", b"tfoot", b"tr", b"td", b"th",
-        b"figure", b"figcaption", b"blockquote", b"hr", b"pre",
+        b"div",
+        b"p",
+        b"section",
+        b"article",
+        b"aside",
+        b"header",
+        b"footer",
+        b"nav",
+        b"main",
+        b"h1",
+        b"h2",
+        b"h3",
+        b"h4",
+        b"h5",
+        b"h6",
+        b"ul",
+        b"ol",
+        b"li",
+        b"dl",
+        b"dt",
+        b"dd",
+        b"table",
+        b"thead",
+        b"tbody",
+        b"tfoot",
+        b"tr",
+        b"td",
+        b"th",
+        b"figure",
+        b"figcaption",
+        b"blockquote",
+        b"hr",
+        b"pre",
     ];
     let mut stack: Vec<Frame> = Vec::new();
     loop {
@@ -398,10 +436,9 @@ fn scan_xhtml_richness(xhtml: &str, richness: &mut ClassRichness, class_names: &
                     .unwrap_or("")
                     .to_ascii_lowercase();
                 let is_block = block_tags.iter().any(|t| t == &tag.as_bytes());
-                if is_block
-                    && let Some(parent) = stack.last_mut() {
-                        parent.has_block_child = true;
-                    }
+                if is_block && let Some(parent) = stack.last_mut() {
+                    parent.has_block_child = true;
+                }
                 stack.push(Frame {
                     tag,
                     has_block_child: false,
@@ -413,10 +450,9 @@ fn scan_xhtml_richness(xhtml: &str, richness: &mut ClassRichness, class_names: &
                     .unwrap_or("")
                     .to_ascii_lowercase();
                 let is_block = block_tags.iter().any(|t| t == &tag.as_bytes());
-                if is_block
-                    && let Some(parent) = stack.last_mut() {
-                        parent.has_block_child = true;
-                    }
+                if is_block && let Some(parent) = stack.last_mut() {
+                    parent.has_block_child = true;
+                }
             }
             Ok(Event::Text(t)) => {
                 let s = String::from_utf8_lossy(t.as_ref());
@@ -457,20 +493,18 @@ fn scan_xhtml_richness(xhtml: &str, richness: &mut ClassRichness, class_names: &
 /// Mirrors what calibre's class system would draw from when emitting
 /// `class_sN` rules — one per style struct.
 fn count_kfx_style_structs(kfx_bytes: &[u8]) -> Result<usize, String> {
-    let header =
-        parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
+    let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
     if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
         return Err("container info out of bounds".into());
     }
-    let info_data = &kfx_bytes[header.container_info_offset
-        ..header.container_info_offset + header.container_info_length];
-    let info = parse_container_info(info_data)
-        .map_err(|e| format!("kfx container info: {:?}", e))?;
+    let info_data = &kfx_bytes
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info =
+        parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
     let Some((idx_off, idx_len)) = info.index else {
         return Ok(0);
     };
-    let entities =
-        parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
     let style_type = KfxSymbol::Style as u32;
     Ok(entities
         .iter()
@@ -488,8 +522,7 @@ fn count_kfx_style_structs(kfx_bytes: &[u8]) -> Result<usize, String> {
 /// - element `style=` attributes in spine XHTML.
 fn collect_declarations(epub_bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
     let cursor = Cursor::new(epub_bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
 
     let container_bytes = read_zip_entry(&mut archive, "META-INF/container.xml")
         .map_err(|e| format!("container.xml: {}", e))?;
@@ -501,8 +534,8 @@ fn collect_declarations(epub_bytes: &[u8]) -> Result<Vec<(String, String)>, Stri
         .unwrap_or("")
         .to_string();
 
-    let opf_bytes = read_zip_entry(&mut archive, &opf_path)
-        .map_err(|e| format!("opf {}: {}", opf_path, e))?;
+    let opf_bytes =
+        read_zip_entry(&mut archive, &opf_path).map_err(|e| format!("opf {}: {}", opf_path, e))?;
     let hint_encoding = crate::util::extract_xml_encoding(&opf_bytes);
     let opf_str = crate::util::decode_text(&opf_bytes, hint_encoding);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
@@ -726,7 +759,10 @@ mod tests {
     #[test]
     fn css_blob_collects_declarations() {
         let mut out = Vec::new();
-        parse_css_blob("p { color: red; font-weight: bold } h1 { color: blue }", &mut out);
+        parse_css_blob(
+            "p { color: red; font-weight: bold } h1 { color: blue }",
+            &mut out,
+        );
         // Order of properties within a rule preserved; rules in document order.
         assert!(out.iter().any(|(n, v)| n == "color" && v == "red"));
         assert!(out.iter().any(|(n, v)| n == "font-weight" && v == "bold"));

@@ -14,7 +14,7 @@ use super::transform::{
     overlap_pre_filter_2, overlap_pre_filter_2x2, overlap_pre_filter_4, overlap_pre_filter_4x4,
     str_pre_4x4_stage2_split_alternate,
 };
-use crate::decode::consts::{X4, XY2, XY4, XY_TRANSPOSE, Y4};
+use crate::decode::consts::{X4, XY_TRANSPOSE, XY2, XY4, Y4};
 
 /// Tile boundaries (len `ntiles + 1`) from a tile-size list in MB units;
 /// an empty list is a single tile spanning `total_mb`.
@@ -194,7 +194,12 @@ fn f16(g: &mut dyn DcGrid, x: usize, y: usize, list: &[(i32, i32, usize); 16]) {
     }
     let out = str_pre_4x4_stage2_split_alternate(&arr);
     for (k, (xx, yy, zz)) in list.iter().enumerate() {
-        g.set_dc(x + *xx as usize, y + *yy as usize, XY_TRANSPOSE[*zz] * 16, out[k]);
+        g.set_dc(
+            x + *xx as usize,
+            y + *yy as usize,
+            XY_TRANSPOSE[*zz] * 16,
+            out[k],
+        );
     }
 }
 
@@ -205,7 +210,12 @@ fn f4(g: &mut dyn DcGrid, x: usize, y: usize, list: &[(i32, i32, usize); 4]) {
     }
     let out = overlap_pre_filter_4(arr);
     for (k, (xx, yy, zz)) in list.iter().enumerate() {
-        g.set_dc(x + *xx as usize, y + *yy as usize, XY_TRANSPOSE[*zz] * 16, out[k]);
+        g.set_dc(
+            x + *xx as usize,
+            y + *yy as usize,
+            XY_TRANSPOSE[*zz] * 16,
+            out[k],
+        );
     }
 }
 
@@ -227,10 +237,22 @@ pub(super) fn dc_pre_filter_luma(g: &mut dyn DcGrid, left_mb: &[usize], top_mb: 
     let blc: [(i32, i32, usize); 4] = [(0, 0, 8), (0, 0, 9), (0, 0, 12), (0, 0, 13)];
     let brc: [(i32, i32, usize); 4] = [(0, 0, 10), (0, 0, 11), (0, 0, 14), (0, 0, 15)];
     let flc: [(i32, i32, usize); 16] = [
-        (0, 0, 10), (0, 0, 11), (1, 0, 8), (1, 0, 9),
-        (0, 0, 14), (0, 0, 15), (1, 0, 12), (1, 0, 13),
-        (0, 1, 2), (0, 1, 3), (1, 1, 0), (1, 1, 1),
-        (0, 1, 6), (0, 1, 7), (1, 1, 4), (1, 1, 5),
+        (0, 0, 10),
+        (0, 0, 11),
+        (1, 0, 8),
+        (1, 0, 9),
+        (0, 0, 14),
+        (0, 0, 15),
+        (1, 0, 12),
+        (1, 0, 13),
+        (0, 1, 2),
+        (0, 1, 3),
+        (1, 1, 0),
+        (1, 1, 1),
+        (0, 1, 6),
+        (0, 1, 7),
+        (1, 1, 4),
+        (1, 1, 5),
     ];
 
     let cols = left_mb.len() - 1;
@@ -335,7 +357,10 @@ fn cf2x2(g: &mut dyn DcGrid, cells: [(usize, usize, usize); 4]) {
 }
 
 fn cf2(g: &mut dyn DcGrid, cells: [(usize, usize, usize); 2]) {
-    let arr = [g.dc(cells[0].0, cells[0].1, 16 * cells[0].2), g.dc(cells[1].0, cells[1].1, 16 * cells[1].2)];
+    let arr = [
+        g.dc(cells[0].0, cells[0].1, 16 * cells[0].2),
+        g.dc(cells[1].0, cells[1].1, 16 * cells[1].2),
+    ];
     let out = overlap_pre_filter_2(arr);
     for (k, &(x, y, b)) in cells.iter().enumerate() {
         g.set_dc(x, y, 16 * b, out[k]);
@@ -357,7 +382,11 @@ pub(super) fn dc_pre_filter_chroma(
 ) {
     let cols = left_mb.len() - 1;
     let rows = top_mb.len() - 1;
-    let (bl, br) = if is420 { (2usize, 3usize) } else { (6usize, 7usize) };
+    let (bl, br) = if is420 {
+        (2usize, 3usize)
+    } else {
+        (6usize, 7usize)
+    };
     let x_left = left_mb[0];
     let x_right = left_mb[cols] - 1;
     let y_top = top_mb[0];
@@ -384,7 +413,10 @@ pub(super) fn dc_pre_filter_chroma(
             if is420 {
                 for y in y0..y1.saturating_sub(1) {
                     for x in x0..x1.saturating_sub(1) {
-                        cf2x2(g, [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                        cf2x2(
+                            g,
+                            [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                        );
                     }
                 }
             } else {
@@ -392,7 +424,10 @@ pub(super) fn dc_pre_filter_chroma(
                     for x in x0..x1.saturating_sub(1) {
                         cf2x2(g, [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)]);
                         if y != y1 - 1 {
-                            cf2x2(g, [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                            cf2x2(
+                                g,
+                                [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                            );
                         }
                     }
                 }
@@ -443,10 +478,16 @@ pub(super) fn dc_pre_filter_chroma(
                 let x = x1 - 1;
                 for y in y0..y1.saturating_sub(1) {
                     if is420 {
-                        cf2x2(g, [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                        cf2x2(
+                            g,
+                            [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                        );
                     } else {
                         cf2x2(g, [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)]);
-                        cf2x2(g, [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                        cf2x2(
+                            g,
+                            [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                        );
                     }
                 }
             }
@@ -454,20 +495,32 @@ pub(super) fn dc_pre_filter_chroma(
                 let y = y1 - 1;
                 for x in x0..x1.saturating_sub(1) {
                     if is420 {
-                        cf2x2(g, [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                        cf2x2(
+                            g,
+                            [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                        );
                     } else {
                         cf2x2(g, [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)]);
-                        cf2x2(g, [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                        cf2x2(
+                            g,
+                            [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                        );
                     }
                 }
             }
             if tx != cols - 1 && ty != rows - 1 {
                 let (x, y) = (x1 - 1, y1 - 1);
                 if is420 {
-                    cf2x2(g, [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                    cf2x2(
+                        g,
+                        [(x, y, 3), (x + 1, y, 2), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                    );
                 } else {
                     cf2x2(g, [(x, y, 3), (x + 1, y, 2), (x, y, 5), (x + 1, y, 4)]);
-                    cf2x2(g, [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)]);
+                    cf2x2(
+                        g,
+                        [(x, y, 7), (x + 1, y, 6), (x, y + 1, 1), (x + 1, y + 1, 0)],
+                    );
                 }
             }
             if tx == 0 && ty != rows - 1 {

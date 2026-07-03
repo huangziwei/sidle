@@ -90,7 +90,10 @@ pub async fn notebook_remove(state: State<'_, AppState>, notebook_id: i64) -> Re
         db::remove_notebook(&conn, notebook_id).map_err(|e| e.to_string())?
     };
     if let Some(uuid) = uuid {
-        state.paths.remove_notebook(&uuid).map_err(|e| e.to_string())?;
+        state
+            .paths
+            .remove_notebook(&uuid)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -133,7 +136,11 @@ pub async fn notebook_import_folder(
 
 /// Scan `folder` for notebook dirs and import each. `folder` may itself be one
 /// notebook dir (holds `nbk` directly) or a parent of many.
-fn import_dir(conn: &rusqlite::Connection, paths: &LibraryPaths, folder: &Path) -> NotebookImportSummary {
+fn import_dir(
+    conn: &rusqlite::Connection,
+    paths: &LibraryPaths,
+    folder: &Path,
+) -> NotebookImportSummary {
     let mut summary = NotebookImportSummary {
         imported: 0,
         unchanged: 0,
@@ -248,7 +255,10 @@ pub async fn notebook_import_device(
     let emitter = app.clone();
     let result = tokio::task::spawn_blocking(move || {
         let on_progress = |done: usize, total: usize| {
-            let _ = emitter.emit("notebook:import-progress", NotebookImportProgress { done, total });
+            let _ = emitter.emit(
+                "notebook:import-progress",
+                NotebookImportProgress { done, total },
+            );
         };
         crate::device::notebooks::import_device_notebooks(
             transport.as_ref(),
@@ -265,7 +275,9 @@ pub async fn notebook_import_device(
         evict_transport(&cell).await;
     }
 
-    let summary = result.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    let summary = result
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     eprintln!(
         "[sidle/nbk-import] {serial}: {} imported, {} unchanged, {} failed",
         summary.imported,

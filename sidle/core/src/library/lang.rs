@@ -125,10 +125,24 @@ mod tests {
 
     #[test]
     fn chinese_script_preserved() {
-        for raw in ["zh-Hans", "zh-hans", "zh-CN", "zh_cn", "zh-SG", "zh-Hans-CN"] {
+        for raw in [
+            "zh-Hans",
+            "zh-hans",
+            "zh-CN",
+            "zh_cn",
+            "zh-SG",
+            "zh-Hans-CN",
+        ] {
             assert_eq!(normalize(raw), "zh-Hans", "{raw:?}");
         }
-        for raw in ["zh-Hant", "zh-hant", "zh-TW", "zh-HK", "zh-MO", "zh-Hant-TW"] {
+        for raw in [
+            "zh-Hant",
+            "zh-hant",
+            "zh-TW",
+            "zh-HK",
+            "zh-MO",
+            "zh-Hant-TW",
+        ] {
             assert_eq!(normalize(raw), "zh-Hant", "{raw:?}");
         }
         // Script outranks a conflicting region.

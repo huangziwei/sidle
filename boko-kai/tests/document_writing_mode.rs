@@ -43,7 +43,10 @@ const SELECTION_ENABLED_SUFFIX: &[u8] = &[0x03, 0xB4, 0x72, 0x01, 0xB9];
 #[test]
 fn document_writing_mode_matches_book_orientation() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let books_dir = std::path::PathBuf::from(manifest_dir).parent().unwrap().join("books");
+    let books_dir = std::path::PathBuf::from(manifest_dir)
+        .parent()
+        .unwrap()
+        .join("books");
     let epub_path = books_dir.join("闇.epub");
     if !epub_path.exists() {
         eprintln!("skipping: reference EPUB not available at {:?}", epub_path);
@@ -59,10 +62,18 @@ fn document_writing_mode_matches_book_orientation() {
     // The book-level (document_data) writing-mode for 闇 — a vertical book —
     // must be vertical_rl, isolated via the `writing_mode` → `selection:enabled`
     // adjacency that only the document_data fragment has.
-    let doc_vertical: Vec<u8> =
-        [WRITING_MODE_FIELD_PREFIX, VERTICAL_RL_SYMBOL_MAG, SELECTION_ENABLED_SUFFIX].concat();
-    let doc_horizontal: Vec<u8> =
-        [WRITING_MODE_FIELD_PREFIX, HORIZONTAL_TB_SYMBOL_MAG, SELECTION_ENABLED_SUFFIX].concat();
+    let doc_vertical: Vec<u8> = [
+        WRITING_MODE_FIELD_PREFIX,
+        VERTICAL_RL_SYMBOL_MAG,
+        SELECTION_ENABLED_SUFFIX,
+    ]
+    .concat();
+    let doc_horizontal: Vec<u8> = [
+        WRITING_MODE_FIELD_PREFIX,
+        HORIZONTAL_TB_SYMBOL_MAG,
+        SELECTION_ENABLED_SUFFIX,
+    ]
+    .concat();
     assert_eq!(
         count(&doc_vertical),
         1,
@@ -78,7 +89,10 @@ fn document_writing_mode_matches_book_orientation() {
     // horizontal runs (闇 has one), so we deliberately do NOT assert on the
     // global horizontal_tb count — only that vertical_rl is emitted at all.
     let any_vertical: Vec<u8> = [WRITING_MODE_FIELD_PREFIX, VERTICAL_RL_SYMBOL_MAG].concat();
-    assert!(count(&any_vertical) > 0, "no writing_mode: vertical_rl found at all");
+    assert!(
+        count(&any_vertical) > 0,
+        "no writing_mode: vertical_rl found at all"
+    );
 
     // `spacing_percent_base: width` pins percentage-spacing to the horizontal
     // axis and breaks the Layout > Spacing slider in vertical-rl mode (the

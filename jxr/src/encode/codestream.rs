@@ -26,7 +26,15 @@ pub fn write_image_header(
     premultiplied_alpha: bool,
     alpha_image_plane: bool,
 ) {
-    write_image_header_ext(bw, width, height, output_clr_fmt, premultiplied_alpha, alpha_image_plane, 0)
+    write_image_header_ext(
+        bw,
+        width,
+        height,
+        output_clr_fmt,
+        premultiplied_alpha,
+        alpha_image_plane,
+        0,
+    )
 }
 
 /// [`write_image_header`] with `trim_flexbits` (1–15 sets the flag; the 4-bit
@@ -104,7 +112,10 @@ impl ImageHeaderSpec {
 
     /// Number of tiles (≥ 1 per dimension).
     pub fn num_tiles(&self) -> (usize, usize) {
-        (self.tile_cols_mb.len().max(1), self.tile_rows_mb.len().max(1))
+        (
+            self.tile_cols_mb.len().max(1),
+            self.tile_rows_mb.len().max(1),
+        )
     }
 
     /// Whether the codestream carries an index table (frequency mode or
@@ -203,10 +214,6 @@ pub fn write_trim_flexbits(bw: &mut BitWriter, trim: u8) {
     bw.write_bits(trim as u64 & 0xF, 4);
 }
 
-
-
-
-
 /// The depth-conditional plane-header fields after the format-specific
 /// block (`Decoder::image_plane_header` order): `shift_bits` for the deep
 /// integer depths, `len_mantissa` + `exp_bias` for BD32F, nothing else.
@@ -253,8 +260,6 @@ pub fn write_image_plane_header_gray_bands(
     }
     bw.align_to_byte();
 }
-
-
 
 /// `image_plane_header` for the **color** (`INT_YUV444`, 3-component) plane with
 /// **ALL_BANDS** (DC + LP + HP + flexbits) and uniform per-band quantizers shared
@@ -308,10 +313,21 @@ pub fn write_image_plane_header_yuv_scaled(
     scaled: bool,
 ) {
     let plan = super::quant::QpPlan::uniform(
-        super::quant::QpSet { dc: dc_quant, lp: lp_quant, hp: hp_quant },
+        super::quant::QpSet {
+            dc: dc_quant,
+            lp: lp_quant,
+            hp: hp_quant,
+        },
         None,
     );
-    write_image_plane_header_yuv_plan(bw, int_fmt, bands, &plan, scaled, &super::convert::Depth::BD8);
+    write_image_plane_header_yuv_plan(
+        bw,
+        int_fmt,
+        bands,
+        &plan,
+        scaled,
+        &super::convert::Depth::BD8,
+    );
 }
 
 /// [`write_image_plane_header_yuv_scaled`] over a full [`super::quant::QpPlan`]:
@@ -379,7 +395,11 @@ pub fn write_image_plane_header_multi(
     depth: &super::convert::Depth,
 ) {
     debug_assert!(matches!(int_fmt, INT_YUVK | INT_NCOMPONENT));
-    debug_assert!(if int_fmt == INT_YUVK { nc == 4 } else { (3..=16).contains(&nc) });
+    debug_assert!(if int_fmt == INT_YUVK {
+        nc == 4
+    } else {
+        (3..=16).contains(&nc)
+    });
     bw.write_bits(int_fmt as u64, 3); // internal_clr_fmt
     bw.write_flag(scaled); // scaled_flag
     bw.write_bits(bands as u64, 4); // bands_present
@@ -408,7 +428,6 @@ pub fn write_image_plane_header_multi(
     }
     bw.align_to_byte();
 }
-
 
 /// One band's QP sets, general form — mirrors `QP::read(nc, num_qps, …)`:
 /// per set, a 2-bit `component_mode` (when `nc > 1`) derived from the byte
@@ -549,12 +568,26 @@ pub fn emit_codestream(
     write_image_header_spec(&mut head, spec);
     write_plane_headers(&mut head);
 
-    let cols: Vec<usize> =
-        if spec.tile_cols_mb.is_empty() { vec![mbw] } else { spec.tile_cols_mb.clone() };
-    let rows: Vec<usize> =
-        if spec.tile_rows_mb.is_empty() { vec![mbh] } else { spec.tile_rows_mb.clone() };
-    debug_assert_eq!(cols.iter().sum::<usize>(), mbw, "tile columns must cover the MB grid");
-    debug_assert_eq!(rows.iter().sum::<usize>(), mbh, "tile rows must cover the MB grid");
+    let cols: Vec<usize> = if spec.tile_cols_mb.is_empty() {
+        vec![mbw]
+    } else {
+        spec.tile_cols_mb.clone()
+    };
+    let rows: Vec<usize> = if spec.tile_rows_mb.is_empty() {
+        vec![mbh]
+    } else {
+        spec.tile_rows_mb.clone()
+    };
+    debug_assert_eq!(
+        cols.iter().sum::<usize>(),
+        mbw,
+        "tile columns must cover the MB grid"
+    );
+    debug_assert_eq!(
+        rows.iter().sum::<usize>(),
+        mbh,
+        "tile rows must cover the MB grid"
+    );
 
     // Tile packets, each in its own writer so it starts byte-aligned and its
     // byte offset is known for the index table without back-patching.
@@ -584,9 +617,16 @@ pub fn emit_codestream(
                 // their writers are simply not pushed. The decoder reads this
                 // tile's packets consecutively in DC/LP/HP/FLEX order (its
                 // `coded_tiles` band loop), so they concatenate in that order.
-                let [mut dcw, mut lpw, mut hpw, mut fxw] =
-                    [BitWriter::new(), BitWriter::new(), BitWriter::new(), BitWriter::new()];
-                for (b, w) in [&mut dcw, &mut lpw, &mut hpw, &mut fxw].into_iter().enumerate() {
+                let [mut dcw, mut lpw, mut hpw, mut fxw] = [
+                    BitWriter::new(),
+                    BitWriter::new(),
+                    BitWriter::new(),
+                    BitWriter::new(),
+                ];
+                for (b, w) in [&mut dcw, &mut lpw, &mut hpw, &mut fxw]
+                    .into_iter()
+                    .enumerate()
+                {
                     if b < num_bands {
                         write_common_tile_header(w);
                         tile_headers(w, tile_idx, b);

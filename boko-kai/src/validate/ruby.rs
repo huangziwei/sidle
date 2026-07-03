@@ -196,8 +196,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 /// Extract ruby pairs from a source EPUB. Spine order is preserved.
 pub fn extract_pairs_from_epub(epub_bytes: &[u8]) -> Result<Vec<RubyPair>, String> {
     let cursor = Cursor::new(epub_bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
 
     // Read container.xml to find OPF path.
     let container_bytes = read_zip_entry(&mut archive, "META-INF/container.xml")
@@ -211,8 +210,8 @@ pub fn extract_pairs_from_epub(epub_bytes: &[u8]) -> Result<Vec<RubyPair>, Strin
         .to_string();
 
     // Parse OPF to get spine order.
-    let opf_bytes = read_zip_entry(&mut archive, &opf_path)
-        .map_err(|e| format!("opf {}: {}", opf_path, e))?;
+    let opf_bytes =
+        read_zip_entry(&mut archive, &opf_path).map_err(|e| format!("opf {}: {}", opf_path, e))?;
     let hint_encoding = crate::util::extract_xml_encoding(&opf_bytes);
     let opf_str = crate::util::decode_text(&opf_bytes, hint_encoding);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
@@ -311,14 +310,16 @@ pub fn extract_pairs_from_xhtml(xhtml: &str, out: &mut Vec<RubyPair>) {
                 }
                 _ => {}
             },
-            Ok(Event::Empty(e)) => if e.local_name().as_ref() == b"rt" {
-                // Self-closing rt — emit pair with empty annotation if base exists.
-                if !pending_base.is_empty() {
-                    out.push(RubyPair::from_trimmed(&pending_base, ""));
+            Ok(Event::Empty(e)) => {
+                if e.local_name().as_ref() == b"rt" {
+                    // Self-closing rt — emit pair with empty annotation if base exists.
+                    if !pending_base.is_empty() {
+                        out.push(RubyPair::from_trimmed(&pending_base, ""));
+                    }
+                    pending_base.clear();
+                    pending_annotation.clear();
                 }
-                pending_base.clear();
-                pending_annotation.clear();
-            },
+            }
             Ok(Event::Text(e)) => {
                 if state == RubyState::Outside || state == RubyState::InRp {
                     continue;
@@ -354,15 +355,14 @@ pub fn extract_pairs_from_xhtml(xhtml: &str, out: &mut Vec<RubyPair>) {
 
 /// Extract ruby pairs from a converted KFX file. Storyline order is preserved.
 pub fn extract_pairs_from_kfx(kfx_bytes: &[u8]) -> Result<Vec<RubyPair>, String> {
-    let header =
-        parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
+    let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
     if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
         return Err("container info out of bounds".into());
     }
-    let info_data = &kfx_bytes[header.container_info_offset
-        ..header.container_info_offset + header.container_info_length];
-    let info = parse_container_info(info_data)
-        .map_err(|e| format!("kfx container info: {:?}", e))?;
+    let info_data = &kfx_bytes
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info =
+        parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
     let extended_symbols = match info.doc_symbols {
         Some((off, len)) if off + len <= kfx_bytes.len() => {
@@ -391,8 +391,7 @@ pub fn extract_pairs_from_kfx(kfx_bytes: &[u8]) -> Result<Vec<RubyPair>, String>
     let Some((idx_off, idx_len)) = info.index else {
         return Err("kfx: no index table".into());
     };
-    let entities =
-        parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
     // Pass 1: build content_map (name → Vec<String>) and ruby_lookup
     // (ruby_name → Vec<annotation> indexed by ruby_id-1).
@@ -421,9 +420,10 @@ pub fn extract_pairs_from_kfx(kfx_bytes: &[u8]) -> Result<Vec<RubyPair>, String>
                 content_map.insert(name, texts);
             }
         } else if ent.type_id == ruby_content_type
-            && let Some((ruby_name, annotations)) = extract_ruby_content(&value, &resolve_sym) {
-                ruby_lookup.insert(ruby_name, annotations);
-            }
+            && let Some((ruby_name, annotations)) = extract_ruby_content(&value, &resolve_sym)
+        {
+            ruby_lookup.insert(ruby_name, annotations);
+        }
     }
 
     // Pass 2: walk every storyline, collect pairs in document order.

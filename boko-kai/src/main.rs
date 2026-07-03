@@ -287,9 +287,7 @@ fn main() -> ExitCode {
                 ValidateCheck::Text { epub, kfx, details } => {
                     validate_text(&epub, &kfx, details, dir)
                 }
-                ValidateCheck::Style { epub, kfx, details } => {
-                    validate_style(&epub, &kfx, details)
-                }
+                ValidateCheck::Style { epub, kfx, details } => validate_style(&epub, &kfx, details),
                 ValidateCheck::Tags { epub, details } => validate_tags(&epub, details),
                 ValidateCheck::Links { epub, kfx, details } => {
                     validate_links(&epub, &kfx, details, dir)
@@ -622,7 +620,10 @@ fn validate_metadata(
     if report.is_clean() {
         Ok(())
     } else {
-        Err(format!("{} metadata field(s) mismatched", report.diffs.len()))
+        Err(format!(
+            "{} metadata field(s) mismatched",
+            report.diffs.len()
+        ))
     }
 }
 
@@ -703,7 +704,11 @@ fn validate_all(
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
-    println!("=== Direction: {} → {} ===", dir.source_label(), dir.target_label());
+    println!(
+        "=== Direction: {} → {} ===",
+        dir.source_label(),
+        dir.target_label()
+    );
     let mut all_clean = true;
 
     // Fixed-layout (manga / image) books are image pages: the reflow-text gates
@@ -1223,8 +1228,7 @@ fn convert(
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx"))
     {
-        let kfx_bytes = std::fs::read(input)
-            .map_err(|e| format!("Failed to read input: {e}"))?;
+        let kfx_bytes = std::fs::read(input).map_err(|e| format!("Failed to read input: {e}"))?;
         // A PDF-backed container KFX must round-trip through PDF, not EPUB.
         // Refuse rather than mangle the PDF into reflowed text.
         if boko::kfx::pdf_container::kfx_is_pdf_backed(&kfx_bytes) {
@@ -1260,9 +1264,10 @@ fn convert(
         && std::path::Path::new(input)
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
-        && let Some(()) = aozora_dispatch(input, output, to_stdout, quiet)? {
-            return Ok(());
-        }
+        && let Some(()) = aozora_dispatch(input, output, to_stdout, quiet)?
+    {
+        return Ok(());
+    }
 
     // Fast path: .kfx-zip -> .kfx merges fragments without touching the IR
     // pipeline. This avoids storyline/section resolution (and the
@@ -1276,13 +1281,14 @@ fn convert(
         let mode = match merge_mode {
             "fast" => boko::kfx::merge::MergeMode::Fast,
             "mechanical" | "" => boko::kfx::merge::MergeMode::Mechanical,
-            other => return Err(format!("--mode must be 'mechanical' or 'fast', got '{other}'")),
+            other => {
+                return Err(format!(
+                    "--mode must be 'mechanical' or 'fast', got '{other}'"
+                ));
+            }
         };
-        let bytes = boko::kfx::merge::merge_kfx_zip_with_mode(
-            std::path::Path::new(input),
-            mode,
-        )
-        .map_err(|e| format!("Conversion failed: {e}"))?;
+        let bytes = boko::kfx::merge::merge_kfx_zip_with_mode(std::path::Path::new(input), mode)
+            .map_err(|e| format!("Conversion failed: {e}"))?;
         if to_stdout {
             use std::io::Write;
             std::io::stdout()
@@ -1865,8 +1871,7 @@ fn aozora_dispatch(
 ) -> Result<Option<()>, String> {
     use std::io::Read;
 
-    let file = std::fs::File::open(input)
-        .map_err(|e| format!("Failed to open input: {e}"))?;
+    let file = std::fs::File::open(input).map_err(|e| format!("Failed to open input: {e}"))?;
     let mut archive = match zip::ZipArchive::new(file) {
         Ok(a) => a,
         Err(_) => return Ok(None),
@@ -1875,9 +1880,7 @@ fn aozora_dispatch(
     let mut txt_buf: Option<Vec<u8>> = None;
     let mut images: Vec<(String, Vec<u8>)> = Vec::new();
     for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| format!("zip entry: {e}"))?;
+        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
         if !entry.is_file() {
             continue;
         }
@@ -1938,4 +1941,3 @@ fn aozora_dispatch(
     }
     Ok(Some(()))
 }
-

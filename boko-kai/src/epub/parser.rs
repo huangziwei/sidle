@@ -152,9 +152,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                                     String::from_utf8(attr.value.to_vec())
                                         .map_err(io::Error::other)?,
                                 );
-                            } else if local == b"identifier"
-                                && local_name(key) == b"scheme"
-                            {
+                            } else if local == b"identifier" && local_name(key) == b"scheme" {
                                 current_identifier_scheme = Some(
                                     String::from_utf8(attr.value.to_vec())
                                         .map_err(io::Error::other)?,
@@ -509,12 +507,10 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                             // dedicated field; everything else fills the
                             // generic identifier (first one wins to match
                             // prior behavior).
-                            let is_asin = current_identifier_scheme
-                                .as_deref()
-                                .is_some_and(|s| {
-                                    s.eq_ignore_ascii_case("ASIN")
-                                        || s.eq_ignore_ascii_case("MOBI-ASIN")
-                                });
+                            let is_asin = current_identifier_scheme.as_deref().is_some_and(|s| {
+                                s.eq_ignore_ascii_case("ASIN")
+                                    || s.eq_ignore_ascii_case("MOBI-ASIN")
+                            });
                             if is_asin {
                                 if metadata.asin.is_none() && !text.is_empty() {
                                     metadata.asin = Some(text);
@@ -1533,7 +1529,10 @@ mod tests {
         assert_eq!(r.metadata.rendition_spread.as_deref(), Some("landscape"));
         assert_eq!(r.metadata.default_viewport, Some((1444, 2048)));
         assert_eq!(r.metadata.book_type.as_deref(), Some("comic"));
-        assert_eq!(r.spine_properties.get("p1").map(String::as_str), Some("page-spread-right"));
+        assert_eq!(
+            r.spine_properties.get("p1").map(String::as_str),
+            Some("page-spread-right")
+        );
         assert_eq!(
             crate::model::PageSpread::from_opf_properties(r.spine_properties.get("p2").unwrap()),
             Some(crate::model::PageSpread::Left)
@@ -1542,7 +1541,10 @@ mod tests {
 
     #[test]
     fn test_parse_viewport_forms() {
-        assert_eq!(parse_viewport("width=1444, height=2048"), Some((1444, 2048)));
+        assert_eq!(
+            parse_viewport("width=1444, height=2048"),
+            Some((1444, 2048))
+        );
         assert_eq!(parse_viewport("1444x2048"), Some((1444, 2048)));
         assert_eq!(parse_viewport("garbage"), None);
     }

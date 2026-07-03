@@ -29,9 +29,9 @@ use crate::kfx::container::get_field;
 use crate::kfx::ion::IonValue;
 use crate::kfx::symbols::KfxSymbol;
 
+use super::ConvertError;
 use super::content::resolve_content_text;
 use super::loader::{self, BookData};
-use super::ConvertError;
 
 /// One occurrence of a search query inside a single reading-order element.
 /// Offsets are character indices into the element's base text. `off_end` is
@@ -97,8 +97,10 @@ impl TextIndex {
                     let Some(fields) = entry.unwrap_annotated().as_struct() else {
                         continue;
                     };
-                    if let Some(eid) = get_field(fields, KfxSymbol::Eid as u64).and_then(|v| v.as_int())
-                        && let Some(pid) = get_field(fields, KfxSymbol::Pid as u64).and_then(|v| v.as_int())
+                    if let Some(eid) =
+                        get_field(fields, KfxSymbol::Eid as u64).and_then(|v| v.as_int())
+                        && let Some(pid) =
+                            get_field(fields, KfxSymbol::Pid as u64).and_then(|v| v.as_int())
                     {
                         pid_of.insert(eid, pid);
                     }
@@ -247,7 +249,11 @@ impl TextIndex {
         let mut out = String::new();
         for k in i..=j {
             let eid = self.order[k];
-            let chars: Vec<char> = self.text_of.get(&eid).map(|t| t.chars().collect()).unwrap_or_default();
+            let chars: Vec<char> = self
+                .text_of
+                .get(&eid)
+                .map(|t| t.chars().collect())
+                .unwrap_or_default();
             let a = if k == i { off_start } else { 0 };
             let b = if k == j { off_end } else { chars.len() };
             let a = a.min(chars.len());
@@ -368,7 +374,9 @@ fn collect_eid_text(value: &IonValue, book: &BookData, out: &mut HashMap<i64, St
                 out.insert(eid, text);
             }
         }
-        if let Some(list) = get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list()) {
+        if let Some(list) =
+            get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list())
+        {
             for child in list {
                 collect_eid_text(child, book, out);
             }
@@ -452,7 +460,10 @@ mod tests {
         ] {
             assert_eq!(pid.get(&eid), Some(&want), "eid {eid}");
         }
-        assert!(!pid.contains_key(&0), "terminator eid 0 must not be recorded");
+        assert!(
+            !pid.contains_key(&0),
+            "terminator eid 0 must not be recorded"
+        );
     }
 
     #[test]
@@ -508,7 +519,10 @@ mod tests {
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].eid, 10);
         assert_eq!(m[0].off_start, 2);
-        assert_eq!(m[0].off_end, 3, "inclusive last-char (annotation convention)");
+        assert_eq!(
+            m[0].off_end, 3,
+            "inclusive last-char (annotation convention)"
+        );
         assert_eq!(m[0].linear_pos, 102);
         assert_eq!(m[0].preview_match, "多い");
         assert_eq!(m[0].preview_before, "恥の");
@@ -518,8 +532,16 @@ mod tests {
     fn search_is_ascii_case_insensitive_only() {
         let t = idx(&[(10, "Hello WORLD")], &[(10, 0)]);
         assert_eq!(t.search("hello").len(), 1, "lowercase query matches mixed");
-        assert_eq!(t.search("WORLD").len(), 1, "uppercase query matches uppercase");
-        assert_eq!(t.search("world").len(), 1, "lowercase query matches uppercase");
+        assert_eq!(
+            t.search("WORLD").len(),
+            1,
+            "uppercase query matches uppercase"
+        );
+        assert_eq!(
+            t.search("world").len(),
+            1,
+            "lowercase query matches uppercase"
+        );
         // No non-ASCII folding: fullwidth ＡＢＣ does NOT match ASCII abc.
         let t2 = idx(&[(10, "ＡＢＣ")], &[(10, 0)]);
         assert!(t2.search("abc").is_empty(), "no NFKC folding in v1");
@@ -530,12 +552,18 @@ mod tests {
         let t = idx(&[(10, "abababab")], &[(10, 0)]);
         let m = t.search("ab");
         assert_eq!(m.len(), 4);
-        assert_eq!(m.iter().map(|x| x.off_start).collect::<Vec<_>>(), vec![0, 2, 4, 6]);
+        assert_eq!(
+            m.iter().map(|x| x.off_start).collect::<Vec<_>>(),
+            vec![0, 2, 4, 6]
+        );
         // Stepping by needle length avoids reporting overlapping `aa` inside `aaa`.
         let t2 = idx(&[(10, "aaaaa")], &[(10, 0)]);
         let m2 = t2.search("aa");
         assert_eq!(m2.len(), 2, "non-overlapping: aa at 0, aa at 2");
-        assert_eq!(m2.iter().map(|x| x.off_start).collect::<Vec<_>>(), vec![0, 2]);
+        assert_eq!(
+            m2.iter().map(|x| x.off_start).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
     }
 
     #[test]
@@ -544,7 +572,11 @@ mod tests {
         // the existing extract test). Both have the needle; results must come
         // in pid order with linear_pos = pid + off.
         let t = idx(
-            &[(10, "foo BAR baz"), (20, "no hits here"), (30, "first bar match")],
+            &[
+                (10, "foo BAR baz"),
+                (20, "no hits here"),
+                (30, "first bar match"),
+            ],
             &[(30, 5), (20, 10), (10, 20)],
         );
         let m = t.search("bar");
@@ -581,7 +613,10 @@ mod tests {
         // ruby-only characters that aren't in the base run finds nothing —
         // confirms the "ruby skipped for free" claim in the plan.
         let t = idx(&[(10, "恥の多い生涯")], &[(10, 0)]);
-        assert!(t.search("はじ").is_empty(), "the ruby reading 'はじ' is not in base text_of");
+        assert!(
+            t.search("はじ").is_empty(),
+            "the ruby reading 'はじ' is not in base text_of"
+        );
         assert_eq!(t.search("恥").len(), 1, "base text 恥 is findable");
     }
 

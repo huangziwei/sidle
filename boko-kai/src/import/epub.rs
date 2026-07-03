@@ -9,12 +9,15 @@ use zip::ZipArchive;
 
 use crate::dom::Stylesheet;
 use crate::epub::{
-    parse_container_xml, parse_nav_landmarks, parse_nav_toc, parse_ncx, parse_opf,
-    parse_opf_guide,
+    parse_container_xml, parse_nav_landmarks, parse_nav_toc, parse_ncx, parse_opf, parse_opf_guide,
 };
-use crate::import::{ChapterId, Importer, SpineEntry, normalize_components, resolve_path_based_href};
+use crate::import::{
+    ChapterId, Importer, SpineEntry, normalize_components, resolve_path_based_href,
+};
 use crate::io::{ByteSource, ByteSourceCursor, FileSource, MemorySource};
-use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, NodeId, Role, TocEntry};
+use crate::model::{
+    AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, NodeId, Role, TocEntry,
+};
 use crate::util::percent_decode;
 
 /// EPUB format importer with random-access ZIP reading.
@@ -235,8 +238,7 @@ impl EpubImporter {
                 let raw = source.read_at(0, source.len() as usize)?;
                 match crate::epub::neutralize_spurious_zip64(&raw) {
                     Some(repaired) => {
-                        let repaired: Arc<dyn ByteSource> =
-                            Arc::new(MemorySource::new(repaired));
+                        let repaired: Arc<dyn ByteSource> = Arc::new(MemorySource::new(repaired));
                         let (zip_index, assets) = Self::scan_zip(&repaired)?;
                         (zip_index, assets, repaired)
                     }
@@ -825,14 +827,10 @@ mod tests {
         // working after the normalization patch.
         let base = std::path::Path::new("OEBPS/Styles/flow0011.css");
         let mut requested: Vec<String> = Vec::new();
-        let _ = inline_css_imports(
-            r#"@import url(flow0007.css);"#,
-            base,
-            |p| {
-                requested.push(p.to_string_lossy().into_owned());
-                Some(String::new())
-            },
-        );
+        let _ = inline_css_imports(r#"@import url(flow0007.css);"#, base, |p| {
+            requested.push(p.to_string_lossy().into_owned());
+            Some(String::new())
+        });
         assert_eq!(requested, vec!["OEBPS/Styles/flow0007.css"]);
     }
 }

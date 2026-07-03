@@ -32,7 +32,9 @@ impl LibraryPaths {
     pub fn default_root() -> anyhow::Result<Self> {
         let base = dirs::data_dir()
             .ok_or_else(|| anyhow::anyhow!("could not resolve user data directory"))?;
-        Ok(Self { root: base.join("Sidle") })
+        Ok(Self {
+            root: base.join("Sidle"),
+        })
     }
 
     /// The fixed app-local state dir, `<data_dir>/Sidle` — never moves with the
@@ -78,7 +80,9 @@ impl LibraryPaths {
         let bytes = match std::fs::read(&cfg_path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self { root: state_dir.to_path_buf() });
+                return Ok(Self {
+                    root: state_dir.to_path_buf(),
+                });
             }
             Err(e) => {
                 return Err(anyhow::Error::new(e).context(format!("read {}", cfg_path.display())));
@@ -99,7 +103,9 @@ impl LibraryPaths {
                 }
                 Ok(Self { root })
             }
-            None => Ok(Self { root: state_dir.to_path_buf() }),
+            None => Ok(Self {
+                root: state_dir.to_path_buf(),
+            }),
         }
     }
 
@@ -112,8 +118,7 @@ impl LibraryPaths {
         };
         let json = serde_json::to_vec_pretty(&cfg).context("serialize config.json")?;
         let cfg_path = state_dir.join("config.json");
-        std::fs::write(&cfg_path, json)
-            .with_context(|| format!("write {}", cfg_path.display()))?;
+        std::fs::write(&cfg_path, json).with_context(|| format!("write {}", cfg_path.display()))?;
         Ok(())
     }
 
@@ -255,7 +260,8 @@ impl LibraryPaths {
 
     /// Cached SVG for one 0-based page.
     pub fn notebook_page_svg(&self, uuid: &str, index: usize) -> PathBuf {
-        self.notebook_pages_dir(uuid).join(format!("page-{index}.svg"))
+        self.notebook_pages_dir(uuid)
+            .join(format!("page-{index}.svg"))
     }
 
     /// Create the notebook dir (and its `pages/` subdir).
@@ -322,7 +328,13 @@ impl LibraryPaths {
 /// `book_ink` row — this only names the cached SVG on disk.
 fn sanitize_ink_id(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -415,7 +427,10 @@ pub fn format_basename(authors: &[String], title: &str, date: Option<&str>) -> S
         title
     };
 
-    let author = authors.first().map(|a| sanitize_segment(a)).filter(|s| !s.is_empty());
+    let author = authors
+        .first()
+        .map(|a| sanitize_segment(a))
+        .filter(|s| !s.is_empty());
     let year = date.and_then(extract_year);
 
     let mut out = String::new();
@@ -556,7 +571,8 @@ mod tests {
 
     #[test]
     fn kfx_device_filename_uses_stem_and_sha() {
-        let path = "/Users/me/Library/Application Support/sidle/books/abc/[Author] Title (2024).kfx";
+        let path =
+            "/Users/me/Library/Application Support/sidle/books/abc/[Author] Title (2024).kfx";
         assert_eq!(
             kfx_device_filename(path, SAMPLE_SHA),
             "[Author] Title (2024).deadbeef.kfx"
@@ -565,7 +581,10 @@ mod tests {
 
     #[test]
     fn kfx_device_filename_falls_back_when_no_stem() {
-        assert_eq!(kfx_device_filename("", SAMPLE_SHA), "book-deadbeef.deadbeef.kfx");
+        assert_eq!(
+            kfx_device_filename("", SAMPLE_SHA),
+            "book-deadbeef.deadbeef.kfx"
+        );
     }
 
     #[test]
@@ -654,9 +673,18 @@ mod tests {
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        assert!(names.iter().any(|n| n == "Sidle"), "renamed to Sidle: {names:?}");
-        assert!(!names.iter().any(|n| n == "sidle"), "no lowercase left: {names:?}");
-        assert!(base.path().join("Sidle/config.json").is_file(), "contents preserved");
+        assert!(
+            names.iter().any(|n| n == "Sidle"),
+            "renamed to Sidle: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "sidle"),
+            "no lowercase left: {names:?}"
+        );
+        assert!(
+            base.path().join("Sidle/config.json").is_file(),
+            "contents preserved"
+        );
 
         // Idempotent: a second run is a no-op.
         LibraryPaths::migrate_legacy_state_dir_in(base.path());

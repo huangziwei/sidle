@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 
 use super::container::serialize_container;
-use super::fragment::{fragment_sort_key, is_container_fragment, YJFragment};
+use super::fragment::{YJFragment, fragment_sort_key, is_container_fragment};
 use super::node::IonNode;
 use super::symtab::LocalSymbolTable;
 
@@ -243,10 +243,7 @@ pub fn rebuild_fragments_and_container_map(
         cem_fields.push(("$253".into(), deps_list));
     }
     if !entity_fids.is_empty() {
-        new_fragments.push(YJFragment::singleton(
-            "$419",
-            IonNode::Struct(cem_fields),
-        ));
+        new_fragments.push(YJFragment::singleton("$419", IonNode::Struct(cem_fields)));
     }
 
     new_fragments
@@ -336,20 +333,14 @@ pub fn rebuild_symbol_table(fragments: &mut Vec<YJFragment>, symtab: &mut LocalS
         .collect();
 
     let symtab_value = IonNode::Struct(vec![
-        (
-            "max_id".into(),
-            IonNode::Int(symtab.total_count() as i64),
-        ),
+        ("max_id".into(), IonNode::Int(symtab.total_count() as i64)),
         ("imports".into(), IonNode::List(imports)),
         ("symbols".into(), IonNode::List(symbols_list)),
     ]);
 
     // Drop any existing $ion_symbol_table fragment, then insert at index 0.
     fragments.retain(|f| f.ftype != "$ion_symbol_table");
-    fragments.insert(
-        0,
-        YJFragment::singleton("$ion_symbol_table", symtab_value),
-    );
+    fragments.insert(0, YJFragment::singleton("$ion_symbol_table", symtab_value));
 }
 
 fn is_canonical_id_form(s: &str) -> bool {

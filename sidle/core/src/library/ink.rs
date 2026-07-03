@@ -84,7 +84,9 @@ pub fn import_ink(
     // The nbk must be on disk to decode (a KDF notebook IS a SQLite file). Write
     // the backup first — it's required regardless (the ink must outlive a device
     // wipe) — then decode from it.
-    paths.ensure_book_ink(book_sha, asin).context("create ink dir")?;
+    paths
+        .ensure_book_ink(book_sha, asin)
+        .context("create ink dir")?;
     let nbk_path = paths.book_ink_nbk(book_sha, asin);
     std::fs::write(&nbk_path, nbk_bytes)
         .with_context(|| format!("write nbk backup {}", nbk_path.display()))?;
@@ -128,7 +130,9 @@ pub fn import_ink(
         let anchor = note_by_container.get(cid).and_then(|n| n.start());
         let host_eid = anchor.map(|h| h.eid as i64);
         let host_linear = anchor.map(|h| h.linear as i64);
-        let host_page = host_eid.and_then(|e| eid_page.get(&e).copied()).map(|p| p as i64);
+        let host_page = host_eid
+            .and_then(|e| eid_page.get(&e).copied())
+            .map(|p| p as i64);
 
         // Cache both renders: the transparent overlay (reader) and the white-bg
         // plain page (gallery / standalone view).
@@ -139,9 +143,13 @@ pub fn import_ink(
             // on the page without the horizontal squish a flat canvas→page stretch
             // causes (it pushed margin ink into the text).
             let svg = match host_page.and_then(|hp| geom.get(hp as usize)) {
-                Some(pg) if pg.box_w > 0.0 && pg.box_h > 0.0 => {
-                    crop_overlay_to_page(&svg, page.canvas_width, page.canvas_height, pg.box_w, pg.box_h)
-                }
+                Some(pg) if pg.box_w > 0.0 && pg.box_h > 0.0 => crop_overlay_to_page(
+                    &svg,
+                    page.canvas_width,
+                    page.canvas_height,
+                    pg.box_w,
+                    pg.box_h,
+                ),
                 _ => svg,
             };
             std::fs::write(paths.book_ink_overlay_svg(book_sha, asin, cid), svg)
@@ -211,10 +219,16 @@ pub fn delete_ink_page(conn: &Connection, paths: &LibraryPaths, id: i64) -> Resu
     if let Some(book_id) = row.book_id
         && let Some(book) = db::get_book(conn, book_id).context("read host book")?
     {
-        let _ =
-            std::fs::remove_file(paths.book_ink_overlay_svg(&book.sha256, &row.asin, &row.container_id));
-        let _ =
-            std::fs::remove_file(paths.book_ink_plain_svg(&book.sha256, &row.asin, &row.container_id));
+        let _ = std::fs::remove_file(paths.book_ink_overlay_svg(
+            &book.sha256,
+            &row.asin,
+            &row.container_id,
+        ));
+        let _ = std::fs::remove_file(paths.book_ink_plain_svg(
+            &book.sha256,
+            &row.asin,
+            &row.container_id,
+        ));
     }
     Ok(())
 }

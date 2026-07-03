@@ -92,8 +92,11 @@ impl Report {
     }
 
     pub fn print_details(&self, limit: usize) {
-        let fallback: Vec<&TagStats> =
-            self.tags.iter().filter(|t| t.bucket == Bucket::Fallback).collect();
+        let fallback: Vec<&TagStats> = self
+            .tags
+            .iter()
+            .filter(|t| t.bucket == Bucket::Fallback)
+            .collect();
         if !fallback.is_empty() {
             println!(
                 "\n--- Fallback tags (no role_map entry) [first {}] ---",
@@ -106,8 +109,11 @@ impl Report {
                 println!("  ... and {} more unique tags", fallback.len() - limit);
             }
         }
-        let generic: Vec<&TagStats> =
-            self.tags.iter().filter(|t| t.bucket == Bucket::Generic).collect();
+        let generic: Vec<&TagStats> = self
+            .tags
+            .iter()
+            .filter(|t| t.bucket == Bucket::Generic)
+            .collect();
         if !generic.is_empty() {
             println!(
                 "\n--- Generic-shell tags (Container/Inline only) [first {}] ---",
@@ -136,7 +142,12 @@ pub fn validate(epub_bytes: &[u8]) -> Result<Report, String> {
             let local = LocalName::from(tag.as_str());
             let role = element_to_role_known(&local);
             let bucket = classify(role);
-            TagStats { tag, count, role, bucket }
+            TagStats {
+                tag,
+                count,
+                role,
+                bucket,
+            }
         })
         .collect();
     tags.sort_by(|a, b| b.count.cmp(&a.count).then(a.tag.cmp(&b.tag)));
@@ -166,8 +177,7 @@ fn classify(role: Option<Role>) -> Bucket {
 
 fn collect_tag_counts(epub_bytes: &[u8]) -> Result<HashMap<String, usize>, String> {
     let cursor = Cursor::new(epub_bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
 
     let container_bytes = read_zip_entry(&mut archive, "META-INF/container.xml")
         .map_err(|e| format!("container.xml: {}", e))?;
@@ -179,8 +189,8 @@ fn collect_tag_counts(epub_bytes: &[u8]) -> Result<HashMap<String, usize>, Strin
         .unwrap_or("")
         .to_string();
 
-    let opf_bytes = read_zip_entry(&mut archive, &opf_path)
-        .map_err(|e| format!("opf {}: {}", opf_path, e))?;
+    let opf_bytes =
+        read_zip_entry(&mut archive, &opf_path).map_err(|e| format!("opf {}: {}", opf_path, e))?;
     let hint_encoding = crate::util::extract_xml_encoding(&opf_bytes);
     let opf_str = crate::util::decode_text(&opf_bytes, hint_encoding);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
@@ -223,8 +233,7 @@ pub fn count_tags_in_xhtml(xhtml: &str, counts: &mut HashMap<String, usize>) {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                let name = String::from_utf8_lossy(e.local_name().as_ref())
-                    .to_ascii_lowercase();
+                let name = String::from_utf8_lossy(e.local_name().as_ref()).to_ascii_lowercase();
                 *counts.entry(name).or_insert(0) += 1;
             }
             Ok(Event::Eof) => break,

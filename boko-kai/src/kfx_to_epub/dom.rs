@@ -39,7 +39,10 @@ impl Element {
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        self.attrs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
     }
 
     pub fn set(&mut self, name: impl Into<String>, value: impl Into<String>) {
@@ -145,11 +148,12 @@ impl Dom {
     /// Replace `old`'s position in its parent with `new`. Both must exist.
     pub fn replace(&mut self, old: NodeId, new: NodeId) {
         if let Some(parent) = self.nodes[old].parent
-            && let Some(idx) = self.child_index(parent, old) {
-                self.nodes[parent].children[idx] = new;
-                self.nodes[new].parent = Some(parent);
-                self.nodes[old].parent = None;
-            }
+            && let Some(idx) = self.child_index(parent, old)
+        {
+            self.nodes[parent].children[idx] = new;
+            self.nodes[new].parent = Some(parent);
+            self.nodes[old].parent = None;
+        }
     }
 
     /// Serialize the subtree rooted at `id` to an XHTML string.
@@ -204,8 +208,19 @@ impl Dom {
 fn is_void_element(tag: &str) -> bool {
     matches!(
         tag,
-        "area" | "base" | "br" | "col" | "embed" | "hr" | "img"
-        | "input" | "link" | "meta" | "source" | "track" | "wbr"
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "source"
+            | "track"
+            | "wbr"
     )
 }
 

@@ -22,11 +22,11 @@ use crate::kfx::container::get_field;
 use crate::kfx::ion::IonValue;
 use crate::kfx::symbols::KfxSymbol;
 
+use super::ConvertError;
 use super::dom::{Dom, NodeId};
 use super::loader::BookData;
 use super::properties::{self, CssDecl};
 use super::resources::ResourceIndex;
-use super::ConvertError;
 
 /// Per-book state for content emission. Mirrors the instance attributes
 /// calibre's `KFX_EPUB_Content.__init__` sets up.
@@ -245,13 +245,7 @@ impl<'a> ContentState<'a> {
         // (calibre's main path; conditional templates are prepended).
         let writing_mode = self.writing_mode.clone();
         let main_template = page_templates.last().cloned().unwrap();
-        self.process_content(
-            &main_template,
-            part_index,
-            body_id,
-            &writing_mode,
-            true,
-        )?;
+        self.process_content(&main_template, part_index, body_id, &writing_mode, true)?;
         Ok(())
     }
 
@@ -346,16 +340,17 @@ impl<'a> ContentState<'a> {
             else {
                 return Ok(());
             };
-            let pages: Vec<IonValue> = lookup_fragment(self.book, KfxSymbol::Storyline, &story_name)
-                .and_then(|story| {
-                    story
-                        .unwrap_annotated()
-                        .as_struct()
-                        .and_then(|fs| get_field(fs, KfxSymbol::ContentList as u64))
-                        .and_then(|v| v.as_list())
-                        .map(|v| v.to_vec())
-                })
-                .unwrap_or_default();
+            let pages: Vec<IonValue> =
+                lookup_fragment(self.book, KfxSymbol::Storyline, &story_name)
+                    .and_then(|story| {
+                        story
+                            .unwrap_annotated()
+                            .as_struct()
+                            .and_then(|fs| get_field(fs, KfxSymbol::ContentList as u64))
+                            .and_then(|v| v.as_list())
+                            .map(|v| v.to_vec())
+                    })
+                    .unwrap_or_default();
             // RTL spreads read the right-hand page first.
             let mut prop = if self.page_progression_direction == "ltr" {
                 "page-spread-left"
@@ -467,16 +462,16 @@ impl<'a> ContentState<'a> {
 
         // IonString: emit a span containing the literal text.
         if let IonValue::String(s) = inner {
-            let span = self.book_parts[part_index].dom.sub_element(parent_id, "span");
+            let span = self.book_parts[part_index]
+                .dom
+                .sub_element(parent_id, "span");
             self.book_parts[part_index].dom.get_mut(span).text = Some(s.clone());
             return Ok(());
         }
         // IonSymbol: resolve to a content fragment and recurse.
         if let IonValue::Symbol(id) = inner {
             let name = self.book.symbols.resolve(*id).to_string();
-            if let Some(fragment) =
-                lookup_fragment(self.book, KfxSymbol::Structure, &name)
-            {
+            if let Some(fragment) = lookup_fragment(self.book, KfxSymbol::Structure, &name) {
                 return self.process_content(
                     &fragment,
                     part_index,
@@ -538,8 +533,12 @@ impl<'a> ContentState<'a> {
             // $455 footer→tfoot / $279 table_row→tr. (calibre yj_to_epub_content
             // maps $454→tbody, $151→thead, $455→tfoot.)
             "body" => self.emit_simple_container(fields, part_index, &wm, &style_name, "tbody")?,
-            "header" => self.emit_simple_container(fields, part_index, &wm, &style_name, "thead")?,
-            "footer" => self.emit_simple_container(fields, part_index, &wm, &style_name, "tfoot")?,
+            "header" => {
+                self.emit_simple_container(fields, part_index, &wm, &style_name, "thead")?
+            }
+            "footer" => {
+                self.emit_simple_container(fields, part_index, &wm, &style_name, "tfoot")?
+            }
             "table_row" => self.emit_table_row(fields, part_index, &wm, &style_name)?,
             // $596 horizontal_rule → hr.
             "horizontal_rule" => self.emit_void(fields, part_index, &style_name, "hr")?,
@@ -563,7 +562,13 @@ impl<'a> ContentState<'a> {
         // containers spurious block children and blocked their `<hN>` promotion.
         if get_field(fields, KfxSymbol::Render as u64)
             .map(|v| v.unwrap_annotated())
-            .and_then(|v| if let IonValue::Symbol(s) = v { Some(*s) } else { None })
+            .and_then(|v| {
+                if let IonValue::Symbol(s) = v {
+                    Some(*s)
+                } else {
+                    None
+                }
+            })
             == Some(KfxSymbol::Inline as u64)
         {
             let should_span = {
@@ -595,9 +600,7 @@ impl<'a> ContentState<'a> {
         {
             let dom_ref = &mut self.book_parts[part_index].dom;
             let parent_tag = dom_ref.get(parent_id).tag.clone();
-            if class_name == "caption"
-                && dom_ref.get(elem_id).tag == "div"
-                && parent_tag == "table"
+            if class_name == "caption" && dom_ref.get(elem_id).tag == "div" && parent_tag == "table"
             {
                 dom_ref.get_mut(elem_id).tag = "caption".to_string();
             }
@@ -789,8 +792,18 @@ impl<'a> ContentState<'a> {
             scan_children = false;
         } else if matches!(
             tag.as_str(),
-            "a" | "aside" | "div" | "figure" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li"
-                | "ruby" | "rb"
+            "a" | "aside"
+                | "div"
+                | "figure"
+                | "h1"
+                | "h2"
+                | "h3"
+                | "h4"
+                | "h5"
+                | "h6"
+                | "li"
+                | "ruby"
+                | "rb"
         ) {
             scan_children = true;
         } else {
@@ -801,7 +814,8 @@ impl<'a> ContentState<'a> {
         if scan_children {
             let children = self.book_parts[part_index].dom.get(elem).children.clone();
             for child in children {
-                match self.locate_offset_in(part_index, child, offset_query, split_after, zero_len) {
+                match self.locate_offset_in(part_index, child, offset_query, split_after, zero_len)
+                {
                     LocateResult::Found(n) => return LocateResult::Found(n),
                     LocateResult::Remaining(r) => offset_query = r,
                 }
@@ -936,7 +950,8 @@ impl<'a> ContentState<'a> {
                 let _ = w;
             }
         } else {
-            dom.get_mut(id).set("src", format!("missing_{resource_name}.jpg"));
+            dom.get_mut(id)
+                .set("src", format!("missing_{resource_name}.jpg"));
         }
         // Alt text. Calibre defaults to "" when missing.
         let alt = get_field(fields, KfxSymbol::AltText as u64)
@@ -1045,7 +1060,9 @@ impl<'a> ContentState<'a> {
             return Ok(());
         }
         // $146 = content_list
-        if let Some(list) = get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list()) {
+        if let Some(list) =
+            get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list())
+        {
             for child in list {
                 self.process_content(child, part_index, parent_id, writing_mode, false)?;
             }
@@ -1109,18 +1126,20 @@ impl<'a> ContentState<'a> {
             let Some(ef) = event.unwrap_annotated().as_struct() else {
                 continue;
             };
-            let Some(offset) = get_field(ef, KfxSymbol::Offset as u64).and_then(|v| v.as_int()) else {
+            let Some(offset) = get_field(ef, KfxSymbol::Offset as u64).and_then(|v| v.as_int())
+            else {
                 continue;
             };
-            let Some(length) = get_field(ef, KfxSymbol::Length as u64).and_then(|v| v.as_int()) else {
+            let Some(length) = get_field(ef, KfxSymbol::Length as u64).and_then(|v| v.as_int())
+            else {
                 continue;
             };
 
             // Ruby event takes precedence (a single style_event in horror
             // never carries both ruby_name and link_to, but we'd render the
             // ruby annotation rather than the link if it did).
-            if let Some(ruby_name) = get_field(ef, KfxSymbol::RubyName as u64)
-                .and_then(|v| self.book.symbols.text_of(v))
+            if let Some(ruby_name) =
+                get_field(ef, KfxSymbol::RubyName as u64).and_then(|v| self.book.symbols.text_of(v))
             {
                 let ruby_name = ruby_name.to_string();
                 let id_list: Vec<(i64, i64, String)> = if let Some(id_val) =
@@ -1328,8 +1347,7 @@ impl<'a> ContentState<'a> {
         let Some(fields) = inner.as_struct() else {
             return String::new();
         };
-        let Some(list) =
-            get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list())
+        let Some(list) = get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list())
         else {
             return String::new();
         };
@@ -1378,7 +1396,9 @@ impl<'a> ContentState<'a> {
         if let Some(loc_id) = get_location_id(fields) {
             self.process_position(loc_id, 0, part_index, parent_id);
         }
-        if let Some(list) = get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list()) {
+        if let Some(list) =
+            get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list())
+        {
             let list_clone = list.to_vec();
             for child in &list_clone {
                 self.process_content(child, part_index, parent_id, writing_mode, false)?;
@@ -1478,7 +1498,9 @@ impl<'a> ContentState<'a> {
         if !self.used_kfx_styles.iter().any(|s| s == style_name) {
             self.used_kfx_styles.push(style_name.to_string());
         }
-        self.stylesheet.entry(style_name.to_string()).or_insert(decl);
+        self.stylesheet
+            .entry(style_name.to_string())
+            .or_insert(decl);
         self.book_parts[part_index]
             .dom
             .get_mut(span)
@@ -1542,8 +1564,8 @@ fn extract_doc_data(book: &BookData) -> (String, String) {
     let Some(fields) = inner.as_struct() else {
         return (writing_mode, page_progression_direction);
     };
-    if let Some(wm) = get_field(fields, KfxSymbol::WritingMode as u64)
-        .and_then(|v| book.symbols.text_of(v))
+    if let Some(wm) =
+        get_field(fields, KfxSymbol::WritingMode as u64).and_then(|v| book.symbols.text_of(v))
     {
         writing_mode = match wm {
             "horizontal_tb" => "horizontal-tb",
@@ -1553,8 +1575,8 @@ fn extract_doc_data(book: &BookData) -> (String, String) {
         }
         .to_string();
     }
-    if let Some(dir) = get_field(fields, KfxSymbol::Direction as u64)
-        .and_then(|v| book.symbols.text_of(v))
+    if let Some(dir) =
+        get_field(fields, KfxSymbol::Direction as u64).and_then(|v| book.symbols.text_of(v))
     {
         page_progression_direction = match dir {
             "ltr" => "ltr".to_string(),
@@ -1616,7 +1638,14 @@ fn majority_vertical_style_mode(book: &BookData) -> Option<String> {
     let htb = *counts.get("horizontal-tb").unwrap_or(&0);
     let vertical = vrl + vlr;
     if vertical > 0 && vertical > htb {
-        Some(if vlr > vrl { "vertical-lr" } else { "vertical-rl" }.to_string())
+        Some(
+            if vlr > vrl {
+                "vertical-lr"
+            } else {
+                "vertical-rl"
+            }
+            .to_string(),
+        )
     } else {
         None
     }
@@ -1846,20 +1875,20 @@ fn walk_ids_recursive(
         IonValue::Struct(fields) => {
             // Capture this struct's id field, if any.
             if let Some(id_value) = get_field(fields, KfxSymbol::Id as u64)
-                && let Some(n) = id_value.as_int() {
-                    out.push(n);
-                }
+                && let Some(n) = id_value.as_int()
+            {
+                out.push(n);
+            }
             // Follow story_name references — these point at storylines in
             // book.by_type[storyline], whose content_list holds the actual
             // body of the chapter.
             if let Some(story_value) = get_field(fields, KfxSymbol::StoryName as u64)
                 && let Some(name) = book.symbols.text_of(story_value)
-                    && visited.insert(name.to_string())
-                        && let Some(storyline) =
-                            lookup_fragment(book, KfxSymbol::Storyline, name)
-                        {
-                            walk_ids_recursive(&storyline, book, visited, out);
-                        }
+                && visited.insert(name.to_string())
+                && let Some(storyline) = lookup_fragment(book, KfxSymbol::Storyline, name)
+            {
+                walk_ids_recursive(&storyline, book, visited, out);
+            }
             // Recurse into every field value (covers content_list, nested
             // structs, etc.).
             for (_, v) in fields {
@@ -1934,12 +1963,40 @@ fn safe_class_name(name: &str) -> String {
 /// `yj_to_epub_properties.py:1965`). Used by `consolidate_html` to decide
 /// whether a `<div>` qualifies as a leaf-text paragraph.
 const BLOCK_TAGS: &[&str] = &[
-    "aside", "body", "caption", "div", "figure", "footer", "header", "main",
-    "nav", "section", "article",
-    "h1", "h2", "h3", "h4", "h5", "h6",
-    "li", "ol", "ul", "dl", "dt", "dd",
-    "p", "blockquote", "pre", "hr",
-    "table", "thead", "tbody", "tfoot", "tr", "td", "th",
+    "aside",
+    "body",
+    "caption",
+    "div",
+    "figure",
+    "footer",
+    "header",
+    "main",
+    "nav",
+    "section",
+    "article",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "li",
+    "ol",
+    "ul",
+    "dl",
+    "dt",
+    "dd",
+    "p",
+    "blockquote",
+    "pre",
+    "hr",
+    "table",
+    "thead",
+    "tbody",
+    "tfoot",
+    "tr",
+    "td",
+    "th",
     "figcaption",
 ];
 
@@ -1963,10 +2020,7 @@ fn is_inline_only(dom: &super::dom::Dom, id: NodeId) -> bool {
     ) {
         return false;
     }
-    dom.get(id)
-        .children
-        .iter()
-        .all(|&c| is_inline_only(dom, c))
+    dom.get(id).children.iter().all(|&c| is_inline_only(dom, c))
 }
 
 /// Strip every `<span>` whose attribute list is empty (or carries only an
@@ -2154,14 +2208,19 @@ fn collapse_redundant_divs(part: &mut BookPart) {
                 continue;
             };
             if part.dom.get(parent).children.len() != 1
-                || part.dom.get(parent).text.as_deref().is_some_and(|t| !t.is_empty())
+                || part
+                    .dom
+                    .get(parent)
+                    .text
+                    .as_deref()
+                    .is_some_and(|t| !t.is_empty())
             {
                 continue;
             }
             let ptag = part.dom.get(parent).tag.as_str();
             let ok = match ptag {
-                "aside" | "caption" | "div" | "figure" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-                | "li" | "p" | "td" => true,
+                "aside" | "caption" | "div" | "figure" | "h1" | "h2" | "h3" | "h4" | "h5"
+                | "h6" | "li" | "p" | "td" => true,
                 "body" => {
                     let e = part.dom.get(id);
                     let e_text_empty = e.text.as_deref().is_none_or(|t| t.is_empty());
@@ -2354,7 +2413,12 @@ pub fn resolve_link_placeholders(state: &mut ContentState) {
             // dominated this pass on link-dense books (~300 ms on a 2.5 MB-HTML
             // academic title with many cross-references). `resolve_uri` returns
             // an owned String, so the element borrow ends before `get_mut`.
-            let uri = match part.dom.get(id).get("href").and_then(|v| v.strip_prefix("anchor:")) {
+            let uri = match part
+                .dom
+                .get(id)
+                .get("href")
+                .and_then(|v| v.strip_prefix("anchor:"))
+            {
                 Some(name) => anchors.resolve_uri(name, &map),
                 None => None,
             };
@@ -2396,8 +2460,9 @@ pub fn simplify_styles(state: &mut ContentState) {
                 matches!(v, "0" | "0em" | "0px" | "0rem" | "normal")
             }
             "text-indent" => matches!(v, "0" | "0em" | "0px" | "0rem" | "0%"),
-            "white-space" | "font-style" | "font-weight" | "font-variant"
-            | "font-stretch" => v == "normal",
+            "white-space" | "font-style" | "font-weight" | "font-variant" | "font-stretch" => {
+                v == "normal"
+            }
             "text-decoration" | "text-transform" => v == "none",
             _ => false,
         }
@@ -2564,7 +2629,11 @@ pub fn emit_stylesheet(state: &ContentState) -> String {
         if decl.is_empty() {
             continue;
         }
-        s.push_str(&format!(".{} {{ {} }}\n", safe_class_name(k), decl.to_inline()));
+        s.push_str(&format!(
+            ".{} {{ {} }}\n",
+            safe_class_name(k),
+            decl.to_inline()
+        ));
     }
     // Auto-generated classes from `fixup_styles_and_classes` (inline →
     // class dedupe). Emit in insertion order so class names stay stable

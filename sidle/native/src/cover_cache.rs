@@ -106,7 +106,10 @@ mod tests {
         // A recrawl bumps the rev; storing the new one drops the old file and
         // leaves no stray .partial behind.
         store(&dir, 1, 200, b"new-cover-and-longer").unwrap();
-        assert_eq!(load(&dir, 1, 200).as_deref(), Some(&b"new-cover-and-longer"[..]));
+        assert_eq!(
+            load(&dir, 1, 200).as_deref(),
+            Some(&b"new-cover-and-longer"[..])
+        );
         assert!(!dir.join("1.100.jpg").exists(), "old rev should be pruned");
         assert!(!dir.join("1.200.partial").exists());
         let _ = std::fs::remove_dir_all(&dir);

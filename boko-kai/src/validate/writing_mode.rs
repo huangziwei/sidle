@@ -120,7 +120,11 @@ impl Report {
         println!("  EPUB book mode: {}", self.epub_book_mode.as_css());
         println!("  KFX book mode:  {}", self.kfx_book_mode.as_css());
         if source == target {
-            println!("  {} preserved on {} side", source.as_css(), dir.target_label());
+            println!(
+                "  {} preserved on {} side",
+                source.as_css(),
+                dir.target_label()
+            );
         } else {
             println!(
                 "  MISMATCH: {} ({}) vs {} ({})",
@@ -187,8 +191,7 @@ fn dominant_mode(modes: &HashMap<Mode, usize>) -> Mode {
 
 fn extract_modes_from_epub(epub_bytes: &[u8]) -> Result<HashMap<Mode, usize>, String> {
     let cursor = Cursor::new(epub_bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
 
     let container_bytes = read_zip_entry(&mut archive, "META-INF/container.xml")
         .map_err(|e| format!("container.xml: {}", e))?;
@@ -200,8 +203,8 @@ fn extract_modes_from_epub(epub_bytes: &[u8]) -> Result<HashMap<Mode, usize>, St
         .unwrap_or("")
         .to_string();
 
-    let opf_bytes = read_zip_entry(&mut archive, &opf_path)
-        .map_err(|e| format!("opf {}: {}", opf_path, e))?;
+    let opf_bytes =
+        read_zip_entry(&mut archive, &opf_path).map_err(|e| format!("opf {}: {}", opf_path, e))?;
     let hint = crate::util::extract_xml_encoding(&opf_bytes);
     let opf_str = crate::util::decode_text(&opf_bytes, hint);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
@@ -278,7 +281,9 @@ fn scan_css_for_modes(css: &str, out: &mut HashMap<Mode, usize>) {
         while i < lower.len() && !matches!(lower.as_bytes()[i], b';' | b'}' | b'\n' | b'\r') {
             i += 1;
         }
-        let value = lower[value_start..i].trim().trim_matches(|c| c == '!' || c == '\'' || c == '"');
+        let value = lower[value_start..i]
+            .trim()
+            .trim_matches(|c| c == '!' || c == '\'' || c == '"');
         let value = value.split_whitespace().next().unwrap_or("");
         if !value.is_empty() {
             *out.entry(Mode::from_css_value(value)).or_insert(0) += 1;
@@ -332,15 +337,14 @@ fn scan_xhtml_for_modes(xhtml: &str, out: &mut HashMap<Mode, usize>) {
 // ============================================================================
 
 fn extract_modes_from_kfx(kfx_bytes: &[u8]) -> Result<HashMap<Mode, usize>, String> {
-    let header =
-        parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
+    let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
     if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
         return Err("container info out of bounds".into());
     }
-    let info_data = &kfx_bytes[header.container_info_offset
-        ..header.container_info_offset + header.container_info_length];
-    let info = parse_container_info(info_data)
-        .map_err(|e| format!("kfx container info: {:?}", e))?;
+    let info_data = &kfx_bytes
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info =
+        parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
     let extended_symbols = match info.doc_symbols {
         Some((off, len)) if off + len <= kfx_bytes.len() => {
@@ -368,8 +372,7 @@ fn extract_modes_from_kfx(kfx_bytes: &[u8]) -> Result<HashMap<Mode, usize>, Stri
     let Some((idx_off, idx_len)) = info.index else {
         return Err("kfx: no index table".into());
     };
-    let entities =
-        parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
     let mut modes: HashMap<Mode, usize> = HashMap::new();
     for ent in &entities {

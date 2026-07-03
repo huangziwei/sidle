@@ -475,9 +475,10 @@ fn walk_newest_mtime(dir: &Path) -> Option<u64> {
             if ft.is_dir() {
                 stack.push(path);
             } else if ft.is_file()
-                && let Some(ms) = mtime_ms(&path) {
-                    newest = Some(newest.map_or(ms, |n| n.max(ms)));
-                }
+                && let Some(ms) = mtime_ms(&path)
+            {
+                newest = Some(newest.map_or(ms, |n| n.max(ms)));
+            }
         }
     }
     newest
@@ -519,10 +520,12 @@ pub fn install_all(
 fn install_one(transport: &dyn Transport, slot: &Slot<'_>) -> KualFileInstallResult {
     let bytes_result: Result<Vec<u8>> = match &slot.source {
         Source::Rendered(text) => Ok(text.as_bytes().to_vec()),
-        Source::File(path) => std::fs::read(path)
-            .with_context(|| format!("read source {}", path.display())),
-        Source::BinaryFile(path) => std::fs::read(path)
-            .with_context(|| format!("read binary {}", path.display())),
+        Source::File(path) => {
+            std::fs::read(path).with_context(|| format!("read source {}", path.display()))
+        }
+        Source::BinaryFile(path) => {
+            std::fs::read(path).with_context(|| format!("read binary {}", path.display()))
+        }
     };
 
     let bytes = match bytes_result {
@@ -538,11 +541,12 @@ fn install_one(transport: &dyn Transport, slot: &Slot<'_>) -> KualFileInstallRes
     let tpath = slot.tpath();
     let source_hash = sha256_bytes(&bytes);
     if let Ok(Some(device_hash)) = device_sha_opt(transport, &tpath)
-        && device_hash == source_hash {
-            return KualFileInstallResult::Skipped {
-                device_path: slot.device_rel.to_string(),
-            };
-        }
+        && device_hash == source_hash
+    {
+        return KualFileInstallResult::Skipped {
+            device_path: slot.device_rel.to_string(),
+        };
+    }
 
     if let Err(e) = transport.write_atomic(&tpath, &bytes) {
         return KualFileInstallResult::Failed {
@@ -567,9 +571,8 @@ fn atomic_write(dest: &Path, bytes: &[u8]) -> Result<()> {
         // flush before rename.
         let _ = f.sync_all();
     }
-    std::fs::rename(&partial, dest).with_context(|| {
-        format!("rename {} -> {}", partial.display(), dest.display())
-    })?;
+    std::fs::rename(&partial, dest)
+        .with_context(|| format!("rename {} -> {}", partial.display(), dest.display()))?;
     Ok(())
 }
 
@@ -774,7 +777,10 @@ mod tests {
         write_file(&bundle.join("config.xml"), b"<config/>");
         write_file(&bundle.join("menu.json"), b"{\"items\":[]}");
         write_file(&bundle.join("bin/sidle.sh"), b"#!/bin/sh\nexec sidle\n");
-        write_file(&repo.join("kual/Sidle.sh"), b"#!/bin/sh\n# Name: Sidle\nexec sidle\n");
+        write_file(
+            &repo.join("kual/Sidle.sh"),
+            b"#!/bin/sh\n# Name: Sidle\nexec sidle\n",
+        );
         if include_binary {
             write_file(
                 &repo
@@ -795,7 +801,12 @@ mod tests {
 
         let status = compute_status(&source, &make_conf(), &ms(device.path())).unwrap();
         assert_eq!(status.overall, KualOverall::NotInstalled);
-        assert!(status.files.iter().all(|f| matches!(f.state, KualFileState::Missing { .. })));
+        assert!(
+            status
+                .files
+                .iter()
+                .all(|f| matches!(f.state, KualFileState::Missing { .. }))
+        );
     }
 
     #[test]
@@ -826,7 +837,10 @@ mod tests {
         let status = compute_status(&source, &conf2, &ms(device.path())).unwrap();
 
         match status.overall {
-            KualOverall::Stale { stale_count, missing_count } => {
+            KualOverall::Stale {
+                stale_count,
+                missing_count,
+            } => {
                 assert_eq!(stale_count, 1, "only server.conf should be stale");
                 assert_eq!(missing_count, 0);
             }
@@ -849,7 +863,11 @@ mod tests {
 
         let status = compute_status(&source, &make_conf(), &ms(device.path())).unwrap();
         assert_eq!(status.overall, KualOverall::BinaryNotBuilt);
-        let bin = status.files.iter().find(|f| f.device_path == "bin/sidle").unwrap();
+        let bin = status
+            .files
+            .iter()
+            .find(|f| f.device_path == "bin/sidle")
+            .unwrap();
         assert_eq!(bin.state, KualFileState::SourceMissing);
     }
 
@@ -863,8 +881,13 @@ mod tests {
         install_all(&source, &conf, &ms(device.path()), |_| {}).unwrap();
         let report = install_all(&source, &conf, &ms(device.path()), |_| {}).unwrap();
 
-        assert!(report.results.iter().all(|r| matches!(r, KualFileInstallResult::Skipped { .. })),
-                "second install on identical inputs should skip everything");
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|r| matches!(r, KualFileInstallResult::Skipped { .. })),
+            "second install on identical inputs should skip everything"
+        );
     }
 
     #[test]
@@ -900,12 +923,22 @@ mod tests {
         install_all(&source, &make_conf(), &ms(device.path()), |_| {}).unwrap();
         assert!(device.path().join("extensions/sidle/bin/sidle").exists());
         assert!(device.path().join("extensions/sidle/bin/sidle.sh").exists());
-        assert!(device.path().join("extensions/sidle/etc/server.conf").exists());
+        assert!(
+            device
+                .path()
+                .join("extensions/sidle/etc/server.conf")
+                .exists()
+        );
         assert!(device.path().join("extensions/sidle/config.xml").exists());
         assert!(device.path().join("extensions/sidle/menu.json").exists());
         // The scriptlet is mount-rooted — documents/, NOT under extensions/.
         assert!(device.path().join("documents/Sidle.sh").exists());
-        assert!(!device.path().join("extensions/sidle/documents/Sidle.sh").exists());
+        assert!(
+            !device
+                .path()
+                .join("extensions/sidle/documents/Sidle.sh")
+                .exists()
+        );
     }
 
     #[test]
@@ -951,8 +984,14 @@ mod tests {
 
         install_all(&source, &make_conf(), &ms(device.path()), |_| {}).unwrap();
 
-        assert!(!stale.exists(), "USB install must clear a pending bin/sidle.new");
-        assert!(bin_dir.join("sidle").exists(), "the authoritative bin/sidle is written");
+        assert!(
+            !stale.exists(),
+            "USB install must clear a pending bin/sidle.new"
+        );
+        assert!(
+            bin_dir.join("sidle").exists(),
+            "the authoritative bin/sidle is written"
+        );
     }
 
     #[test]
@@ -961,11 +1000,18 @@ mod tests {
         let source = make_source(tmp.path(), true);
         let dist = tempfile::tempdir().unwrap();
 
-        assert_eq!(stage_dist(&source, dist.path()).unwrap(), StageOutcome::Staged);
+        assert_eq!(
+            stage_dist(&source, dist.path()).unwrap(),
+            StageOutcome::Staged
+        );
 
         let staged = dist.path().join("bin/sidle");
         let src_bytes = std::fs::read(&source.binary_path).unwrap();
-        assert_eq!(std::fs::read(&staged).unwrap(), src_bytes, "staged == source bytes");
+        assert_eq!(
+            std::fs::read(&staged).unwrap(),
+            src_bytes,
+            "staged == source bytes"
+        );
 
         let manifest: KualManifest =
             serde_json::from_slice(&std::fs::read(dist.path().join("manifest.json")).unwrap())
@@ -985,7 +1031,10 @@ mod tests {
         let source = make_source(tmp.path(), false); // binary not built
         let dist = tempfile::tempdir().unwrap();
 
-        assert_eq!(stage_dist(&source, dist.path()).unwrap(), StageOutcome::SourceMissing);
+        assert_eq!(
+            stage_dist(&source, dist.path()).unwrap(),
+            StageOutcome::SourceMissing
+        );
         assert!(!dist.path().join("manifest.json").exists());
         assert!(!dist.path().join("bin/sidle").exists());
     }
@@ -996,11 +1045,20 @@ mod tests {
         let source = make_source(tmp.path(), true);
         let dist = tempfile::tempdir().unwrap();
 
-        assert_eq!(stage_dist(&source, dist.path()).unwrap(), StageOutcome::Staged);
+        assert_eq!(
+            stage_dist(&source, dist.path()).unwrap(),
+            StageOutcome::Staged
+        );
         // Source unchanged + manifest present → near-instant no-op.
-        assert_eq!(stage_dist(&source, dist.path()).unwrap(), StageOutcome::UpToDate);
+        assert_eq!(
+            stage_dist(&source, dist.path()).unwrap(),
+            StageOutcome::UpToDate
+        );
         // A torn prior run (binary written, manifest lost) must re-stage.
         std::fs::remove_file(dist.path().join("manifest.json")).unwrap();
-        assert_eq!(stage_dist(&source, dist.path()).unwrap(), StageOutcome::Staged);
+        assert_eq!(
+            stage_dist(&source, dist.path()).unwrap(),
+            StageOutcome::Staged
+        );
     }
 }

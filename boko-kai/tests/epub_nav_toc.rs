@@ -23,8 +23,8 @@ fn zip_epub(dir: &std::path::Path, entries: &[(&str, &[u8])]) -> std::path::Path
     let path = dir.join("book.epub");
     let file = std::fs::File::create(&path).expect("create epub");
     let mut zip: Zip = zip::ZipWriter::new(file);
-    let stored = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored);
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     for (name, bytes) in entries {
         zip.start_file(*name, stored).expect("start_file");
         zip.write_all(bytes).expect("write entry");
@@ -220,7 +220,11 @@ fn reader_toc_resolves_intra_chapter_anchors_without_kfx_anchor_table() {
         .iter()
         .filter(|(l, _)| l.starts_with("Scene"))
         .collect();
-    assert_eq!(scenes.len(), 3, "three scene entries expected, got {flat:?}");
+    assert_eq!(
+        scenes.len(),
+        3,
+        "three scene entries expected, got {flat:?}"
+    );
 
     // Each entry: a fragment that resolves via getElementById in its section.
     let mut frags = Vec::new();
@@ -243,5 +247,9 @@ fn reader_toc_resolves_intra_chapter_anchors_without_kfx_anchor_table() {
     // The three must be DISTINCT — the bug made them collapse to the same href.
     frags.sort();
     frags.dedup();
-    assert_eq!(frags.len(), 3, "the three scenes must map to distinct anchors");
+    assert_eq!(
+        frags.len(),
+        3,
+        "the three scenes must map to distinct anchors"
+    );
 }

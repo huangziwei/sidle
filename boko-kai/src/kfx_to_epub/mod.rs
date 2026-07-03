@@ -152,19 +152,12 @@ pub(crate) fn build_output(
     // the same path the chapters' <link rel="stylesheet"> point at.
     let css = content::emit_stylesheet(&content_state);
     if !css.is_empty() {
-        out.add_resource(
-            "style.css",
-            css.into_bytes(),
-            "text/css",
-            None,
-            None,
-        );
+        out.add_resource("style.css", css.into_bytes(), "text/css", None, None);
     }
     trace.mark("content::emit_stylesheet");
     // Collect every `<img src>` the emitted pages reference, so fixed-layout
     // books can prune the unreferenced page-thumbnail set below.
-    let mut referenced_images: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut referenced_images: std::collections::HashSet<String> = std::collections::HashSet::new();
     for part in &content_state.book_parts {
         for id in 0..part.dom.len() {
             let el = part.dom.get(id);

@@ -397,7 +397,9 @@ fn base64_url_encode(bytes: &[u8]) -> String {
 /// without a `content_id` lose their `.sdr` binding, which breaks the
 /// in-book exit menu on the device.
 pub fn generate_content_id(identifier: &str) -> String {
-    let digest = sha1_smol::Sha1::from(identifier.as_bytes()).digest().bytes();
+    let digest = sha1_smol::Sha1::from(identifier.as_bytes())
+        .digest()
+        .bytes();
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let mut out = String::with_capacity(32);
     for byte in digest.iter().take(16) {
@@ -466,11 +468,14 @@ pub fn build_category_entries(
                 match field {
                     MetadataField::CoverImage => {
                         // Use the resource name from context, not the path from metadata
-                        ctx.cover_resource_name.map(|s| MetadataValue::Text(s.to_string()))
+                        ctx.cover_resource_name
+                            .map(|s| MetadataValue::Text(s.to_string()))
                     }
                     MetadataField::Date => {
                         // KFX expects YYYY-MM-DD format, not full ISO timestamp
-                        field.extract(meta).map(|s| MetadataValue::Text(truncate_to_date(s)))
+                        field
+                            .extract(meta)
+                            .map(|s| MetadataValue::Text(truncate_to_date(s)))
                     }
                     MetadataField::AssetId => {
                         // Asset ID from context (same as container ID)
@@ -517,7 +522,9 @@ pub fn build_category_entries(
                             }
                         })
                     }
-                    _ => field.extract(meta).map(|s| MetadataValue::Text(s.to_string())),
+                    _ => field
+                        .extract(meta)
+                        .map(|s| MetadataValue::Text(s.to_string())),
                 }
             }
         };
@@ -553,10 +560,7 @@ mod tests {
         };
 
         assert_eq!(MetadataField::Title.extract(&meta), Some("Test Book"));
-        assert_eq!(
-            MetadataField::Author.extract(&meta),
-            Some("Author One")
-        );
+        assert_eq!(MetadataField::Author.extract(&meta), Some("Author One"));
         assert_eq!(MetadataField::Language.extract(&meta), Some("en"));
         assert_eq!(
             MetadataField::Description.extract(&meta),
@@ -773,10 +777,16 @@ mod tests {
             ..Default::default()
         };
         let entries = build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx);
-        assert!(entries.iter().any(|(k, v)| *k == "ASIN" && v == "B0CPJ2B88T"));
-        assert!(entries
-            .iter()
-            .any(|(k, v)| *k == "content_id" && v == "GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2"));
+        assert!(
+            entries
+                .iter()
+                .any(|(k, v)| *k == "ASIN" && v == "B0CPJ2B88T")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|(k, v)| *k == "content_id" && v == "GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2")
+        );
 
         // content_id present, ASIN absent: typical PDOC sideload from an
         // EPUB without a catalogue ASIN.
@@ -784,11 +794,13 @@ mod tests {
             content_id: Some("GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2".to_string()),
             ..Default::default()
         };
-        let entries_pdoc =
-            build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx_pdoc);
+        let entries_pdoc = build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx_pdoc);
         assert!(!entries_pdoc.iter().any(|(k, _)| *k == "ASIN"));
-        assert!(entries_pdoc.iter().any(|(k, v)| *k == "content_id"
-            && v == "GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2"));
+        assert!(
+            entries_pdoc
+                .iter()
+                .any(|(k, v)| *k == "content_id" && v == "GPAAHSEAGDCDOFL5OHPUACEIJSCLNRF2")
+        );
 
         // Both absent (no identifier at all).
         let ctx_empty = MetadataContext::default();

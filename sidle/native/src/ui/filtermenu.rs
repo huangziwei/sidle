@@ -18,12 +18,12 @@
 //! Markers are bracketed ASCII (`[x]` / `[ ]`, `>`) — no glyph-coverage risk,
 //! same reasoning as `ui/diag.rs`.
 
+use crate::api::Book;
 use crate::eink::buttons::PageButton;
 use crate::eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16};
 use crate::eink::input::{Input, InputEvent};
 use crate::eink::touch::TouchEvent;
 use crate::orientation::Orientation;
-use crate::api::Book;
 use crate::ui::filter::{self, Facet, Filters};
 use crate::ui::sort::SortState;
 use crate::ui::sortmenu;
@@ -47,10 +47,20 @@ fn strip_top(yres: u32) -> u32 {
     yres.saturating_sub(STRIP_H)
 }
 fn full_rect(fb: &Framebuffer) -> MxcfbRect {
-    MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: fb.var.yres }
+    MxcfbRect {
+        top: 0,
+        left: 0,
+        width: fb.var.xres,
+        height: fb.var.yres,
+    }
 }
 fn row_rect(top: u32, xres: u32, rh: u32) -> MxcfbRect {
-    MxcfbRect { top, left: 0, width: xres, height: rh }
+    MxcfbRect {
+        top,
+        left: 0,
+        width: xres,
+        height: rh,
+    }
 }
 
 /// Centered title in the top gap.
@@ -125,9 +135,21 @@ fn render_menu(
 
     // Sort row, set off by a divider so it reads as separate from the facets.
     let sort_top = rows_top(lh) + Facet::ALL.len() as u32 * rh;
-    fb.fill_rect(sort_top, MARGIN_X, xres.saturating_sub(MARGIN_X * 2), 2, 0x00);
+    fb.fill_rect(
+        sort_top,
+        MARGIN_X,
+        xres.saturating_sub(MARGIN_X * 2),
+        2,
+        0x00,
+    );
     let baseline = (sort_top + rh * 60 / 100) as i32;
-    renderer.draw(fb, MARGIN_X as i32, baseline, &format!("Sort:  {}", sort.header()), false);
+    renderer.draw(
+        fb,
+        MARGIN_X as i32,
+        baseline,
+        &format!("Sort:  {}", sort.header()),
+        false,
+    );
 
     // [ Done | Clear all ] strip — leave action leftmost, in the same ZONE_W slot
     // as the value picker's Back and the gallery's Exit; Clear all beside it. Two
@@ -260,7 +282,11 @@ fn pick_hit(
         if pages <= 1 {
             return None;
         }
-        return Some(if tx < xres / 2 { PickTap::Prev } else { PickTap::Next });
+        return Some(if tx < xres / 2 {
+            PickTap::Prev
+        } else {
+            PickTap::Next
+        });
     }
     let rt = rows_top(lh);
     if ty < rt {
@@ -280,7 +306,11 @@ fn pick_hit(
 
 /// Text for one option row: `[x] value  (count)`.
 fn row_text(filters: &Filters, facet: Facet, value: &str, count: usize) -> String {
-    let mark = if filters.is_selected(facet, value) { "[x] " } else { "[ ] " };
+    let mark = if filters.is_selected(facet, value) {
+        "[x] "
+    } else {
+        "[ ] "
+    };
     format!("{mark}{value}  ({count})")
 }
 
@@ -313,7 +343,13 @@ fn render_pick_page(
         let (value, c) = &options[idx];
         let row_top = rows_top(lh) + slot as u32 * rh;
         let baseline = (row_top + rh * 60 / 100) as i32;
-        renderer.draw(fb, MARGIN_X as i32, baseline, &row_text(filters, facet, value, *c), false);
+        renderer.draw(
+            fb,
+            MARGIN_X as i32,
+            baseline,
+            &row_text(filters, facet, value, *c),
+            false,
+        );
     }
 
     // [ Back | Clear | ← Prev  N/M  Next → ] strip.
@@ -359,7 +395,13 @@ fn redraw_pick_row(
     fb.fill_rect(row_top, 0, fb.var.xres, rh, 0xFF);
     let (value, c) = &options[idx];
     let baseline = (row_top + rh * 60 / 100) as i32;
-    renderer.draw(fb, MARGIN_X as i32, baseline, &row_text(filters, facet, value, *c), false);
+    renderer.draw(
+        fb,
+        MARGIN_X as i32,
+        baseline,
+        &row_text(filters, facet, value, *c),
+        false,
+    );
     fb.send_update(row_rect(row_top, fb.var.xres, rh), WAVEFORM_MODE_DU)?;
     Ok(())
 }
@@ -389,24 +431,40 @@ fn value_picker(
     loop {
         match input.next()? {
             InputEvent::Touch(TouchEvent::Up { x, y }) => {
-                match pick_hit(x, y, fb.var.xres, fb.var.yres, lh, page, pp, options.len(), pages) {
+                match pick_hit(
+                    x,
+                    y,
+                    fb.var.xres,
+                    fb.var.yres,
+                    lh,
+                    page,
+                    pp,
+                    options.len(),
+                    pages,
+                ) {
                     Some(PickTap::Toggle(idx)) => {
                         filters.toggle(facet, &options[idx].0);
                         redraw_pick_row(fb, renderer, filters, facet, &options, idx, page, pp, lh)?;
                     }
                     Some(PickTap::Clear) => {
                         filters.clear_facet(facet);
-                        render_pick_page(fb, renderer, filters, facet, &options, page, pp, pages, lh);
+                        render_pick_page(
+                            fb, renderer, filters, facet, &options, page, pp, pages, lh,
+                        );
                         fb.send_update(full_rect(fb), WAVEFORM_MODE_GC16)?;
                     }
                     Some(PickTap::Prev) if page > 0 => {
                         page -= 1;
-                        render_pick_page(fb, renderer, filters, facet, &options, page, pp, pages, lh);
+                        render_pick_page(
+                            fb, renderer, filters, facet, &options, page, pp, pages, lh,
+                        );
                         fb.send_update(full_rect(fb), WAVEFORM_MODE_GC16)?;
                     }
                     Some(PickTap::Next) if page + 1 < pages => {
                         page += 1;
-                        render_pick_page(fb, renderer, filters, facet, &options, page, pp, pages, lh);
+                        render_pick_page(
+                            fb, renderer, filters, facet, &options, page, pp, pages, lh,
+                        );
                         fb.send_update(full_rect(fb), WAVEFORM_MODE_GC16)?;
                     }
                     Some(PickTap::Back) => return Ok(()),

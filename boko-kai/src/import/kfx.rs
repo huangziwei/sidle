@@ -594,8 +594,7 @@ impl KfxImporter {
                                 // Inline struct, or a symbol referencing a
                                 // separate nav_container entity (the fixed-layout
                                 // / PDOC shape) — resolve both.
-                                let Some(resolved) = self.resolve_nav_container(container)
-                                else {
+                                let Some(resolved) = self.resolve_nav_container(container) else {
                                     continue;
                                 };
                                 if let Some(container_fields) = resolved.as_struct() {
@@ -844,8 +843,12 @@ impl KfxImporter {
         for type_id in candidate_types {
             let loc = self.entities.iter().find(|e| e.type_id == type_id).copied();
             let Some(loc) = loc else { continue };
-            let Ok(elem) = self.parse_entity_ion(loc) else { continue };
-            let Some(fields) = elem.as_struct() else { continue };
+            let Ok(elem) = self.parse_entity_ion(loc) else {
+                continue;
+            };
+            let Some(fields) = elem.as_struct() else {
+                continue;
+            };
             let Some(orders) = get_field(fields, sym!(ReadingOrders)).and_then(|v| v.as_list())
             else {
                 continue;

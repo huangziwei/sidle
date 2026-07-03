@@ -116,11 +116,7 @@ pub trait Transport: Send + Sync {
     /// seconds. The default reads the whole object via [`read`](Self::read) and
     /// reports a single final tick; only MTP overrides it. `total` of 0 means the
     /// size wasn't known up front.
-    fn read_with_progress(
-        &self,
-        path: &TPath,
-        on_progress: &dyn Fn(u64, u64),
-    ) -> Result<Vec<u8>> {
+    fn read_with_progress(&self, path: &TPath, on_progress: &dyn Fn(u64, u64)) -> Result<Vec<u8>> {
         let bytes = self.read(path)?;
         let n = bytes.len() as u64;
         on_progress(n, n);

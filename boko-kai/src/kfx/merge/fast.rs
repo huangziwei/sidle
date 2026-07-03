@@ -34,8 +34,8 @@
 use std::io::{self, Read};
 use std::path::Path;
 
-use super::node::{parse_single_value, serialize_single_value, IonNode, ION_BVM};
-use super::symtab::{LocalSymbolTable, SymbolTableImport, SYSTEM_SIZE};
+use super::node::{ION_BVM, IonNode, parse_single_value, serialize_single_value};
+use super::symtab::{LocalSymbolTable, SYSTEM_SIZE, SymbolTableImport};
 use crate::trace::Trace;
 
 const CONT_SIGNATURE: &[u8] = b"CONT";
@@ -253,8 +253,7 @@ fn finish_merge<'a>(
     }
     trace.mark("symtab + format_capabilities");
 
-    let (merged_id, app_version, pkg_version, version) =
-        pick_merged_metadata(raws, &symtab)?;
+    let (merged_id, app_version, pkg_version, version) = pick_merged_metadata(raws, &symtab)?;
     trace.mark("pick metadata");
 
     let mut merged_entities: Vec<(RawEntityRow, usize)> = Vec::new();
@@ -263,8 +262,7 @@ fn finish_merge<'a>(
     for (c_idx, r) in raws.iter().enumerate() {
         for row in &r.entity_rows {
             if row.type_idnum == SYM_DOLLAR_419 {
-                let body =
-                    extract_entity_body(&r.data, row.body_offset, row.body_length)?;
+                let body = extract_entity_body(&r.data, row.body_offset, row.body_length)?;
                 let mut node = parse_single_value(body, &symtab)?;
                 if let IonNode::Annotated(_, inner) = node {
                     node = *inner;
@@ -279,8 +277,7 @@ fn finish_merge<'a>(
                 // "PDOC" before re-emitting. We always synthesize the merged
                 // $490 (rather than memcpy from source) because EBOK-flagged
                 // Amazon bundles are sideloaded as personal documents.
-                let body =
-                    extract_entity_body(&r.data, row.body_offset, row.body_length)?;
+                let body = extract_entity_body(&r.data, row.body_offset, row.body_length)?;
                 let mut node = parse_single_value(body, &symtab)?;
                 if let IonNode::Annotated(_, inner) = node {
                     node = *inner;
@@ -460,10 +457,7 @@ fn parse_container_shallow(data: Vec<u8>) -> io::Result<RawContainer> {
     })
 }
 
-fn populate_symtab_from_doc_symbols(
-    symtab: &mut LocalSymbolTable,
-    bytes: &[u8],
-) -> io::Result<()> {
+fn populate_symtab_from_doc_symbols(symtab: &mut LocalSymbolTable, bytes: &[u8]) -> io::Result<()> {
     // We need to parse doc_symbols just to populate the in-memory symtab.
     // Symbol-table parse uses only the SYSTEM symbols, so an initial empty
     // symtab is fine.
@@ -564,10 +558,7 @@ fn pick_merged_metadata(
     Ok((merged_id, app_version, pkg_version, version))
 }
 
-fn find_asset_id(
-    raws: &[&RawContainer],
-    symtab: &LocalSymbolTable,
-) -> io::Result<Option<String>> {
+fn find_asset_id(raws: &[&RawContainer], symtab: &LocalSymbolTable) -> io::Result<Option<String>> {
     // $490 metadata lives in metadata.kfx as an entity. We must parse it.
     // It's small (~3 KB), so the cost is negligible.
     for r in raws {
@@ -595,11 +586,15 @@ fn find_asset_id(
                     continue;
                 };
                 for kv in kvs {
-                    let k = kv.get_field("$492").and_then(|n| n.as_string()).unwrap_or("");
+                    let k = kv
+                        .get_field("$492")
+                        .and_then(|n| n.as_string())
+                        .unwrap_or("");
                     if k == "asset_id"
-                        && let Some(v) = kv.get_field("$307").and_then(|n| n.as_string()) {
-                            return Ok(Some(v.to_string()));
-                        }
+                        && let Some(v) = kv.get_field("$307").and_then(|n| n.as_string())
+                    {
+                        return Ok(Some(v.to_string()));
+                    }
                 }
             }
         }
@@ -691,9 +686,7 @@ fn emit_container_streaming(
         + synth_490_len;
     let ds_len = doc_symbols_bytes.map_or(0, |b| b.len());
     let fc_len = format_capabilities_bytes.map_or(0, |b| b.len());
-    let mut out = Vec::with_capacity(
-        18 + entity_table_size + ds_len + fc_len + 512 + bodies_size,
-    );
+    let mut out = Vec::with_capacity(18 + entity_table_size + ds_len + fc_len + 512 + bodies_size);
 
     // Fixed header (18 bytes), patched at the end.
     out.extend_from_slice(CONT_SIGNATURE);
@@ -911,9 +904,7 @@ fn coalesce_body_chunks(
     let mut cur: Option<(usize, usize, usize)> = None; // (c_idx, off, len)
     for (row, c_idx) in merged_entities {
         match cur {
-            Some((ci, off, len))
-                if ci == *c_idx && off + len == row.body_offset =>
-            {
+            Some((ci, off, len)) if ci == *c_idx && off + len == row.body_offset => {
                 cur = Some((ci, off, len + row.body_length));
             }
             Some(prev) => {

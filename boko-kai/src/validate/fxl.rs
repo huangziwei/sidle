@@ -95,10 +95,14 @@ impl Report {
             "        images: {} referenced / {} manifest ({} orphan)",
             self.epub_referenced_images,
             self.epub_manifest_images,
-            self.epub_manifest_images.saturating_sub(self.epub_referenced_images),
+            self.epub_manifest_images
+                .saturating_sub(self.epub_referenced_images),
         );
         if self.is_clean() {
-            println!("  fixed-layout structure preserved on {} side", dir.target_label());
+            println!(
+                "  fixed-layout structure preserved on {} side",
+                dir.target_label()
+            );
         } else {
             if !self.epub_pre_paginated {
                 println!("  MISSING: rendition:layout pre-paginated");
@@ -130,8 +134,8 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         ..Default::default()
     };
 
-    let mut archive = ZipArchive::new(Cursor::new(epub_bytes))
-        .map_err(|e| format!("not a valid zip: {}", e))?;
+    let mut archive =
+        ZipArchive::new(Cursor::new(epub_bytes)).map_err(|e| format!("not a valid zip: {}", e))?;
     let container_bytes = read_zip_entry(&mut archive, "META-INF/container.xml")
         .map_err(|e| format!("container.xml: {}", e))?;
     let opf_path = parse_container_xml(&container_bytes)
@@ -145,8 +149,8 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     // OPF metadata / itemref scans (the OPF parser doesn't surface spine
     // itemref properties or the FXL `<meta>` set, so read them from the text).
     report.epub_pre_paginated = opf_str.contains("pre-paginated");
-    report.epub_page_spread_props = opf_str.matches("page-spread-left").count()
-        + opf_str.matches("page-spread-right").count();
+    report.epub_page_spread_props =
+        opf_str.matches("page-spread-left").count() + opf_str.matches("page-spread-right").count();
     report.epub_original_resolution = meta_name_content(&opf_str, "original-resolution");
     report.epub_book_type = meta_name_content(&opf_str, "book-type");
     report.epub_primary_writing_mode = meta_name_content(&opf_str, "primary-writing-mode");
@@ -255,7 +259,9 @@ fn img_srcs(html: &str) -> Vec<String> {
         rest = &rest[i + 4..];
         let Some(s) = rest.find("src=\"") else { break };
         let start = s + "src=\"".len();
-        let Some(e) = rest[start..].find('"') else { break };
+        let Some(e) = rest[start..].find('"') else {
+            break;
+        };
         out.push(rest[start..start + e].to_string());
         rest = &rest[start + e..];
     }
@@ -283,7 +289,10 @@ mod tests {
     #[test]
     fn meta_name_content_extracts_value() {
         let opf = r#"<meta name="original-resolution" content="900x1280"/>"#;
-        assert_eq!(meta_name_content(opf, "original-resolution"), Some("900x1280".into()));
+        assert_eq!(
+            meta_name_content(opf, "original-resolution"),
+            Some("900x1280".into())
+        );
         assert_eq!(meta_name_content(opf, "book-type"), None);
     }
 
@@ -303,7 +312,10 @@ mod tests {
             kfx_fixed_layout: false,
             ..Default::default()
         };
-        assert!(r.is_clean(), "a reflowable source is not subject to FXL gates");
+        assert!(
+            r.is_clean(),
+            "a reflowable source is not subject to FXL gates"
+        );
     }
 
     #[test]

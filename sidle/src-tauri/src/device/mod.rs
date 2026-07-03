@@ -19,8 +19,8 @@ use serde::Serialize;
 
 pub mod annotations;
 pub mod dedrm;
-pub mod ink;
 pub mod detect;
+pub mod ink;
 pub mod kual;
 pub mod mass_storage;
 pub mod monitor;
@@ -130,7 +130,10 @@ mod tests {
     #[test]
     fn parses_firmware_with_and_without_build() {
         // No parenthesised build suffix.
-        assert_eq!(parse_firmware("Kindle 5.16.10.4.0\n").as_deref(), Some("5.16.10.4.0"));
+        assert_eq!(
+            parse_firmware("Kindle 5.16.10.4.0\n").as_deref(),
+            Some("5.16.10.4.0")
+        );
         // With a build suffix — only the dotted version token is taken.
         assert_eq!(
             parse_firmware("Kindle 5.19.4.0.1 (476724 003)\n").as_deref(),

@@ -116,7 +116,10 @@ pub fn group_by_series(view: Vec<Book>) -> Vec<Entry> {
                 }
                 None => {
                     seen.insert(name.clone(), out.len());
-                    out.push(Entry::Series { name, books: vec![b] });
+                    out.push(Entry::Series {
+                        name,
+                        books: vec![b],
+                    });
                 }
             },
         }
@@ -229,7 +232,10 @@ mod tests {
 
     #[test]
     fn series_name_trims_and_treats_blank_as_none() {
-        assert_eq!(series_name_of(&with_series(1, "  Saga  ", None)), Some("Saga"));
+        assert_eq!(
+            series_name_of(&with_series(1, "  Saga  ", None)),
+            Some("Saga")
+        );
         assert_eq!(series_name_of(&with_series(2, "   ", None)), None);
         assert_eq!(series_name_of(&book(3)), None);
     }
@@ -262,10 +268,16 @@ mod tests {
     #[test]
     fn members_sort_by_index_nulls_last_then_title() {
         let view = vec![
-            Book { title: "Zeta".into(), ..with_series(1, "S", None) },
+            Book {
+                title: "Zeta".into(),
+                ..with_series(1, "S", None)
+            },
             with_series(2, "S", Some(2.5)),
             with_series(3, "S", Some(1.0)),
-            Book { title: "Alpha".into(), ..with_series(4, "S", None) },
+            Book {
+                title: "Alpha".into(),
+                ..with_series(4, "S", None)
+            },
         ];
         let entries = group_by_series(view);
         // 1.0, 2.5, then the two index-less ones by title (Alpha < Zeta).

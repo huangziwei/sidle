@@ -191,16 +191,28 @@ impl Report {
             // EPUB→KFX: EPUB-only = dropped in KFX; KFX-only = fabricated.
             (
                 &self.external_only_in_epub,
-                self.external_only_in_epub.iter().map(|(_, n)| n).sum::<usize>(),
+                self.external_only_in_epub
+                    .iter()
+                    .map(|(_, n)| n)
+                    .sum::<usize>(),
                 &self.external_only_in_kfx,
-                self.external_only_in_kfx.iter().map(|(_, n)| n).sum::<usize>(),
+                self.external_only_in_kfx
+                    .iter()
+                    .map(|(_, n)| n)
+                    .sum::<usize>(),
             )
         } else {
             (
                 &self.external_only_in_kfx,
-                self.external_only_in_kfx.iter().map(|(_, n)| n).sum::<usize>(),
+                self.external_only_in_kfx
+                    .iter()
+                    .map(|(_, n)| n)
+                    .sum::<usize>(),
                 &self.external_only_in_epub,
-                self.external_only_in_epub.iter().map(|(_, n)| n).sum::<usize>(),
+                self.external_only_in_epub
+                    .iter()
+                    .map(|(_, n)| n)
+                    .sum::<usize>(),
             )
         };
         println!("Defects:");
@@ -216,8 +228,14 @@ impl Report {
             fabricated_count,
             fabricated.len()
         );
-        println!("  dangling KFX anchors:         {}", self.dangling_anchors.len());
-        println!("  orphan link_to symbols:       {}", self.orphan_link_tos.len());
+        println!(
+            "  dangling KFX anchors:         {}",
+            self.dangling_anchors.len()
+        );
+        println!(
+            "  orphan link_to symbols:       {}",
+            self.orphan_link_tos.len()
+        );
     }
 
     pub fn print_details(&self, limit: usize, dir: super::Direction) {
@@ -324,8 +342,8 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
                     resolve_relative(&href.spine_path, path)
                 };
                 let target_key = format!("{}#{}", target_path, fragment);
-                let target_key_filename_only = filename_only(&target_path)
-                    .map(|f| format!("{}#{}", f, fragment));
+                let target_key_filename_only =
+                    filename_only(&target_path).map(|f| format!("{}#{}", f, fragment));
                 let has_target = epub_ids.contains(&target_key)
                     || target_key_filename_only
                         .as_ref()
@@ -424,8 +442,7 @@ pub fn extract_hrefs_and_ids_from_epub(
     epub_bytes: &[u8],
 ) -> Result<(Vec<EpubHref>, HashSet<String>), String> {
     let cursor = Cursor::new(epub_bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
 
     let container_bytes = read_zip_entry(&mut archive, "META-INF/container.xml")
         .map_err(|e| format!("container.xml: {}", e))?;
@@ -437,8 +454,8 @@ pub fn extract_hrefs_and_ids_from_epub(
         .unwrap_or("")
         .to_string();
 
-    let opf_bytes = read_zip_entry(&mut archive, &opf_path)
-        .map_err(|e| format!("opf {}: {}", opf_path, e))?;
+    let opf_bytes =
+        read_zip_entry(&mut archive, &opf_path).map_err(|e| format!("opf {}: {}", opf_path, e))?;
     let hint_encoding = crate::util::extract_xml_encoding(&opf_bytes);
     let opf_str = crate::util::decode_text(&opf_bytes, hint_encoding);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
@@ -638,18 +655,15 @@ pub struct KfxLinkData {
     pub element_ids: HashSet<u64>,
 }
 
-pub fn extract_anchors_and_link_tos_from_kfx(
-    kfx_bytes: &[u8],
-) -> Result<KfxLinkData, String> {
-    let header =
-        parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
+pub fn extract_anchors_and_link_tos_from_kfx(kfx_bytes: &[u8]) -> Result<KfxLinkData, String> {
+    let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
     if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
         return Err("container info out of bounds".into());
     }
-    let info_data = &kfx_bytes[header.container_info_offset
-        ..header.container_info_offset + header.container_info_length];
-    let info = parse_container_info(info_data)
-        .map_err(|e| format!("kfx container info: {:?}", e))?;
+    let info_data = &kfx_bytes
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info =
+        parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
     let extended_symbols = match info.doc_symbols {
         Some((off, len)) if off + len <= kfx_bytes.len() => {
@@ -677,8 +691,7 @@ pub fn extract_anchors_and_link_tos_from_kfx(
     let Some((idx_off, idx_len)) = info.index else {
         return Err("kfx: no index table".into());
     };
-    let entities =
-        parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
     let anchor_type = KfxSymbol::Anchor as u32;
     let storyline_type = KfxSymbol::Storyline as u32;
@@ -696,15 +709,16 @@ pub fn extract_anchors_and_link_tos_from_kfx(
                 anchors.push(a);
             }
         } else if ent.type_id == storyline_type
-            && let Some(value) = parse_entity(kfx_bytes, ent) {
-                walk_storyline(
-                    &value,
-                    &resolve_sym,
-                    &mut link_to_distinct,
-                    &mut link_to_total,
-                    &mut element_ids,
-                );
-            }
+            && let Some(value) = parse_entity(kfx_bytes, ent)
+        {
+            walk_storyline(
+                &value,
+                &resolve_sym,
+                &mut link_to_distinct,
+                &mut link_to_total,
+                &mut element_ids,
+            );
+        }
     }
 
     Ok(KfxLinkData {
@@ -831,8 +845,13 @@ fn walk_storyline<F>(
                     }
                     _ => {}
                 }
+                walk_storyline(v, resolve_sym, link_to_distinct, link_to_total, element_ids);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
                 walk_storyline(
-                    v,
+                    item,
                     resolve_sym,
                     link_to_distinct,
                     link_to_total,
@@ -840,13 +859,14 @@ fn walk_storyline<F>(
                 );
             }
         }
-        IonValue::List(items) => {
-            for item in items {
-                walk_storyline(item, resolve_sym, link_to_distinct, link_to_total, element_ids);
-            }
-        }
         IonValue::Annotated(_, inner) => {
-            walk_storyline(inner, resolve_sym, link_to_distinct, link_to_total, element_ids);
+            walk_storyline(
+                inner,
+                resolve_sym,
+                link_to_distinct,
+                link_to_total,
+                element_ids,
+            );
         }
         _ => {}
     }
@@ -920,10 +940,7 @@ mod tests {
             resolve_relative("OEBPS/text/ch1.xhtml", "../images/c.png"),
             "OEBPS/images/c.png"
         );
-        assert_eq!(
-            resolve_relative("ch1.xhtml", "ch2.xhtml"),
-            "ch2.xhtml"
-        );
+        assert_eq!(resolve_relative("ch1.xhtml", "ch2.xhtml"), "ch2.xhtml");
     }
 
     #[test]
@@ -939,8 +956,12 @@ mod tests {
         extract_from_xhtml(xhtml, "OEBPS/ch1.xhtml", &mut hrefs, &mut ids);
 
         assert_eq!(hrefs.len(), 4);
-        assert!(matches!(hrefs[0].kind, HrefKind::InternalFragment { ref fragment, .. } if fragment == "p1"));
-        assert!(matches!(hrefs[1].kind, HrefKind::InternalFragment { ref path, ref fragment } if path == "ch2.xhtml" && fragment == "start"));
+        assert!(
+            matches!(hrefs[0].kind, HrefKind::InternalFragment { ref fragment, .. } if fragment == "p1")
+        );
+        assert!(
+            matches!(hrefs[1].kind, HrefKind::InternalFragment { ref path, ref fragment } if path == "ch2.xhtml" && fragment == "start")
+        );
         assert!(matches!(hrefs[2].kind, HrefKind::External(ref u) if u == "https://example.com"));
         assert!(matches!(hrefs[3].kind, HrefKind::InternalChapter(ref p) if p == "ch3.xhtml"));
 

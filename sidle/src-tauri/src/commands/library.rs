@@ -538,9 +538,21 @@ pub async fn library_export_books(
         // is generated from the best available content source — the EPUB if it's
         // on disk, else the universal KFX side.
         let src: Option<&Path> = match format.as_str() {
-            "kfx" => book.kfx_path.as_deref().map(Path::new).filter(|p| p.exists()),
-            "epub" => book.epub_path.as_deref().map(Path::new).filter(|p| p.exists()),
-            "pdf" => book.pdf_path.as_deref().map(Path::new).filter(|p| p.exists()),
+            "kfx" => book
+                .kfx_path
+                .as_deref()
+                .map(Path::new)
+                .filter(|p| p.exists()),
+            "epub" => book
+                .epub_path
+                .as_deref()
+                .map(Path::new)
+                .filter(|p| p.exists()),
+            "pdf" => book
+                .pdf_path
+                .as_deref()
+                .map(Path::new)
+                .filter(|p| p.exists()),
             "txt" => [book.epub_path.as_deref(), book.kfx_path.as_deref()]
                 .into_iter()
                 .flatten()
@@ -594,7 +606,9 @@ pub async fn library_export_books(
                 .await
                 .unwrap_or_else(|e| Err(format!("task panicked: {e}")))
         } else {
-            std::fs::copy(src, &target).map(|_| ()).map_err(|e| e.to_string())
+            std::fs::copy(src, &target)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         };
         match outcome {
             Ok(()) => exported += 1,
@@ -705,9 +719,13 @@ async fn recrawl_one(state: &AppState, book: &BookRow) -> RecrawlOutcome {
     // fails — the sidecar is what the sidle gallery uses, so a failed
     // EPUB swap doesn't invalidate the user's "Re-fetch cover" action.
     if let Some(epub) = book.epub_path.as_deref()
-        && let Err(e) = epub_cover::replace_cover(std::path::Path::new(epub), &bytes, "jpg") {
-            eprintln!("[sidle/recrawl] book {} epub cover swap failed: {e:#}", book.id);
-        }
+        && let Err(e) = epub_cover::replace_cover(std::path::Path::new(epub), &bytes, "jpg")
+    {
+        eprintln!(
+            "[sidle/recrawl] book {} epub cover swap failed: {e:#}",
+            book.id
+        );
+    }
     // And into the imported KFX — that's the copy we push to the Kindle, and
     // its embedded cover drives the home tile / sleep-screen art. Rewriting it
     // changes the bytes, so re-stamp `kfx_sha256` (the on-device filename infix).
@@ -717,7 +735,10 @@ async fn recrawl_one(state: &AppState, book: &BookRow) -> RecrawlOutcome {
                 let conn = state.db.lock().await;
                 let _ = db::set_kfx_path_and_sha(&conn, book.id, kfx, &new_sha);
             }
-            Err(e) => eprintln!("[sidle/recrawl] book {} kfx cover swap failed: {e:#}", book.id),
+            Err(e) => eprintln!(
+                "[sidle/recrawl] book {} kfx cover swap failed: {e:#}",
+                book.id
+            ),
         }
     }
     RecrawlOutcome::Updated {
@@ -893,8 +914,7 @@ pub async fn library_set_cover(
     // Best-effort: failure logs and doesn't fail the command (the gallery
     // reads from the sidecar, not the EPUB).
     if let Some(epub) = book.epub_path.as_deref()
-        && let Err(e) =
-            epub_cover::replace_cover(std::path::Path::new(epub), &bytes, ext)
+        && let Err(e) = epub_cover::replace_cover(std::path::Path::new(epub), &bytes, ext)
     {
         eprintln!("[sidle/set-cover] book {book_id} epub cover swap failed: {e:#}");
     }
@@ -932,8 +952,7 @@ fn sniff_image_format(bytes: &[u8]) -> Option<&'static str> {
         return Some("jpg");
     }
     // PNG: 89 50 4E 47 0D 0A 1A 0A
-    if bytes.len() >= 8 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
-    {
+    if bytes.len() >= 8 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
         return Some("png");
     }
     // WebP: "RIFF" .... "WEBP"
@@ -995,7 +1014,9 @@ pub struct LibraryLocation {
 
 #[tauri::command]
 pub async fn library_location(state: State<'_, AppState>) -> Result<LibraryLocation, String> {
-    let default = LibraryPaths::default_root().map_err(|e| e.to_string())?.root;
+    let default = LibraryPaths::default_root()
+        .map_err(|e| e.to_string())?
+        .root;
     Ok(LibraryLocation {
         is_default: state.paths.root == default,
         root: state.paths.root.to_string_lossy().to_string(),
@@ -1107,7 +1128,10 @@ pub struct BackupSummary {
 /// cancelled. Exposed from Rust for the same reason as `library_pick_files`.
 #[tauri::command]
 pub async fn library_backup_pick_dest(app: AppHandle) -> Result<Option<String>, String> {
-    let default_name = format!("sidle-library-{}.sidlebak", chrono::Local::now().format("%Y-%m-%d"));
+    let default_name = format!(
+        "sidle-library-{}.sidlebak",
+        chrono::Local::now().format("%Y-%m-%d")
+    );
     let (tx, rx) = oneshot::channel();
     app.dialog()
         .file()
@@ -1172,7 +1196,11 @@ pub async fn library_backup(
                 last_pct.set(pct);
                 let _ = app.emit(
                     "library:fileop-progress",
-                    FileopProgress { op: "backup", done, total },
+                    FileopProgress {
+                        op: "backup",
+                        done,
+                        total,
+                    },
                 );
             }
         };
@@ -1252,7 +1280,11 @@ pub async fn library_restore(
             last_pct.set(pct);
             let _ = app_progress.emit(
                 "library:fileop-progress",
-                FileopProgress { op: "restore", done, total },
+                FileopProgress {
+                    op: "restore",
+                    done,
+                    total,
+                },
             );
         }
     };
@@ -1320,7 +1352,11 @@ pub async fn library_merge(
                 last_pct.set(pct);
                 let _ = app.emit(
                     "library:fileop-progress",
-                    FileopProgress { op: "merge", done, total },
+                    FileopProgress {
+                        op: "merge",
+                        done,
+                        total,
+                    },
                 );
             }
         };
@@ -1386,7 +1422,6 @@ mod tests {
         assert_eq!(sniff_image_format(&[0xFF, 0xD8]), None);
     }
 
-
     #[test]
     fn canonicalize_collapses_case_and_trims() {
         let got = canonicalize_tags(vec![
@@ -1402,11 +1437,7 @@ mod tests {
 
     #[test]
     fn canonicalize_preserves_order_of_first_occurrence() {
-        let got = canonicalize_tags(vec![
-            "bbb".into(),
-            "aaa".into(),
-            "BBB".into(),
-        ]);
+        let got = canonicalize_tags(vec!["bbb".into(), "aaa".into(), "BBB".into()]);
         assert_eq!(got, vec!["bbb", "aaa"]);
     }
 
@@ -1430,7 +1461,10 @@ mod tests {
     #[test]
     fn percent_encode_query_handles_spaces_and_cjk() {
         // Spaces become '+'; unreserved chars pass through.
-        assert_eq!(percent_encode_query("Foundation Asimov"), "Foundation+Asimov");
+        assert_eq!(
+            percent_encode_query("Foundation Asimov"),
+            "Foundation+Asimov"
+        );
         assert_eq!(percent_encode_query("a-b_c.d~e"), "a-b_c.d~e");
         // CJK is percent-encoded per UTF-8 byte ("ノ" = E3 83 8E).
         assert_eq!(percent_encode_query("ノ"), "%E3%83%8E");

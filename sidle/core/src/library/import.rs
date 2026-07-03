@@ -196,12 +196,11 @@ fn import_one(
         }
         SourceKind::KfxZip => boko::kfx::merge::merge_kfx_zip(src)
             .with_context(|| format!("merge kfx-zip {}", src.display()))?,
-        SourceKind::Azw3 => convert_azw3(src)
-            .with_context(|| format!("azw3 {}", src.display()))?,
-        SourceKind::Mobi => convert_mobi(src)
-            .with_context(|| format!("mobi {}", src.display()))?,
-        SourceKind::AozoraZip => convert_aozora_zip(src)
-            .with_context(|| format!("aozora zip {}", src.display()))?,
+        SourceKind::Azw3 => convert_azw3(src).with_context(|| format!("azw3 {}", src.display()))?,
+        SourceKind::Mobi => convert_mobi(src).with_context(|| format!("mobi {}", src.display()))?,
+        SourceKind::AozoraZip => {
+            convert_aozora_zip(src).with_context(|| format!("aozora zip {}", src.display()))?
+        }
         SourceKind::Unknown => unreachable!("filtered above"),
     };
 
@@ -650,8 +649,7 @@ fn convert_mobi(src: &Path) -> Result<Vec<u8>> {
 /// Pipeline mirrors `aozora_dispatch` in `boko-kai/src/main.rs:1602` so
 /// the CLI and the GUI produce byte-identical EPUBs from the same input.
 fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
-    let file =
-        fs::File::open(src).with_context(|| format!("open {}", src.display()))?;
+    let file = fs::File::open(src).with_context(|| format!("open {}", src.display()))?;
     let mut archive = zip::ZipArchive::new(file).context("not a valid zip archive")?;
 
     let mut txt_buf: Option<Vec<u8>> = None;
@@ -693,8 +691,8 @@ fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
     }
 
     let doc = boko::aozora::parse_txt(&text);
-    let cover = boko::aozora::render_cover_jpeg(&doc.title, &doc.author)
-        .context("aozora cover render")?;
+    let cover =
+        boko::aozora::render_cover_jpeg(&doc.title, &doc.author).context("aozora cover render")?;
     let epub_bytes = boko::aozora::build_epub(boko::aozora::EpubInput {
         document: &doc,
         images: &images,
@@ -735,7 +733,10 @@ mod tests {
         // ALL-CAPS /Info title gets title-cased (Amazon's S2K behavior).
         let doc = boko::import::PdfDoc {
             bytes: b"%PDF-1.4\n".to_vec(),
-            pages: vec![boko::import::PdfPage { width: 612.0, height: 792.0 }],
+            pages: vec![boko::import::PdfPage {
+                width: 612.0,
+                height: 792.0,
+            }],
             title: Some("THE STREET WAS MINE".to_string()),
             author: Some("MEGAN E. ABBOTT".to_string()),
             outline: Vec::new(),
@@ -748,7 +749,10 @@ mod tests {
         // No /Info title → file stem.
         let doc2 = boko::import::PdfDoc {
             bytes: b"%PDF-1.4\n".to_vec(),
-            pages: vec![boko::import::PdfPage { width: 1.0, height: 1.0 }],
+            pages: vec![boko::import::PdfPage {
+                width: 1.0,
+                height: 1.0,
+            }],
             title: None,
             author: None,
             outline: Vec::new(),
@@ -771,8 +775,7 @@ mod tests {
         paths.ensure().unwrap();
         let conn = db::open(&paths.db()).unwrap();
 
-        let outcome =
-            import_file(&conn, &paths, Path::new("tests/fixtures/minimal.pdf")).unwrap();
+        let outcome = import_file(&conn, &paths, Path::new("tests/fixtures/minimal.pdf")).unwrap();
         let ImportOutcome::Imported {
             book,
             needs_enqueue,
@@ -786,7 +789,10 @@ mod tests {
         assert_eq!(book.kind.as_deref(), Some("pdf_to_kfx"));
         assert!(needs_enqueue);
         assert!(book.pdf_path.is_some(), "PDF side must be persisted");
-        assert!(book.kfx_path.is_none(), "KFX is produced later by the worker");
+        assert!(
+            book.kfx_path.is_none(),
+            "KFX is produced later by the worker"
+        );
         assert!(book.epub_path.is_none(), "a PDF book has no EPUB side");
         // Metadata came from the PDF `/Info` dict.
         assert_eq!(book.title, "Tiny Test PDF");

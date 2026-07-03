@@ -6,8 +6,8 @@
 //! `ConvertError`, `jpeg_encoder`, and the `BOKO_KFX2EPUB_TRACE` timing, none
 //! of which belong in the standalone `jxr` crate.
 
-use jxr::decode::{container, decoder};
 use crate::kfx_to_epub::ConvertError;
+use jxr::decode::{container, decoder};
 
 /// Per-stage timing for one transcode call. Always collected — `Instant`'s
 /// read cost is ~10 ns. Caller may aggregate or ignore.
@@ -49,9 +49,7 @@ pub fn transcode(
     let decoded = match decoder::Decoder::new(container.image_data).decode() {
         Ok(d) => d,
         Err(e) => {
-            eprintln!(
-                "kfx_to_epub jxr: decode failed for {resource_name}: {e}; passing through"
-            );
+            eprintln!("kfx_to_epub jxr: decode failed for {resource_name}: {e}; passing through");
             return Ok((jxr_bytes.to_vec(), "jxr".into(), t));
         }
     };
@@ -102,7 +100,11 @@ fn encode_jpeg(img: &decoder::DecodedImage) -> Result<Vec<u8>, ConvertError> {
             .flat_map(|px| px[..n_color].iter().copied())
             .collect()
     };
-    let color = if n_color == 1 { ColorType::Luma } else { ColorType::Rgb };
+    let color = if n_color == 1 {
+        ColorType::Luma
+    } else {
+        ColorType::Rgb
+    };
 
     let mut out: Vec<u8> = Vec::new();
     let encoder = Encoder::new(&mut out, 95);

@@ -41,7 +41,9 @@ impl QueueHandle {
         // First-time conversion ⇒ full color (the pipeline default). The JXR
         // encoder's auto-gray collapse keeps grayscale pages at `8bppGray`, so
         // only genuinely-color images (e.g. cover plates / color inserts) grow.
-        self.tx.send(QueueMsg::Enqueue(book_id, false, true)).await?;
+        self.tx
+            .send(QueueMsg::Enqueue(book_id, false, true))
+            .await?;
         Ok(())
     }
 
@@ -49,7 +51,9 @@ impl QueueHandle {
     /// only — skips the cover-enrichment tail-step so the source KFX (and its
     /// `kfx_sha256`) is left untouched, preserving device annotation-sync matching.
     pub async fn enqueue_reconvert(&self, book_id: i64, color: bool) -> Result<()> {
-        self.tx.send(QueueMsg::Enqueue(book_id, true, color)).await?;
+        self.tx
+            .send(QueueMsg::Enqueue(book_id, true, color))
+            .await?;
         Ok(())
     }
 

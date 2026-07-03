@@ -62,9 +62,7 @@ keyword_parser!(parse_line_break, LineBreak);
 /// Parse `text-combine-upright` (and legacy `text-combine`). Accepts the
 /// spec values `none` / `all` plus the legacy IE/EPUB value `horizontal`,
 /// which is semantically equivalent to `all`.
-pub(crate) fn parse_text_combine_upright(
-    input: &mut Parser<'_, '_>,
-) -> Option<TextCombineUpright> {
+pub(crate) fn parse_text_combine_upright(input: &mut Parser<'_, '_>) -> Option<TextCombineUpright> {
     let ident = input.expect_ident_cloned().ok()?;
     match ident.as_ref() {
         "none" => Some(TextCombineUpright::None),
@@ -105,9 +103,7 @@ pub(crate) fn parse_text_emphasis_position(
 /// shape) in either order, plus the special value `none`. Idents not part of
 /// the spec are tolerated and ignored. Falls back to `filled` when only a
 /// shape is given (per CSS spec default).
-pub(crate) fn parse_text_emphasis_style(
-    input: &mut Parser<'_, '_>,
-) -> Option<TextEmphasisStyle> {
+pub(crate) fn parse_text_emphasis_style(input: &mut Parser<'_, '_>) -> Option<TextEmphasisStyle> {
     use TextEmphasisStyle as T;
     let first = input.expect_ident_cloned().ok()?;
     if first.as_ref() == "none" {
@@ -115,8 +111,17 @@ pub(crate) fn parse_text_emphasis_style(
     }
     let second = input.try_parse(|p| p.expect_ident_cloned()).ok();
 
-    enum Fill { Filled, Open }
-    enum Shape { Dot, Circle, DoubleCircle, Triangle, Sesame }
+    enum Fill {
+        Filled,
+        Open,
+    }
+    enum Shape {
+        Dot,
+        Circle,
+        DoubleCircle,
+        Triangle,
+        Sesame,
+    }
 
     let mut fill: Option<Fill> = None;
     let mut shape: Option<Shape> = None;

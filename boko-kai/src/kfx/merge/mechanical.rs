@@ -13,7 +13,7 @@ use std::io::{self, Read, Seek};
 use std::path::Path;
 
 use super::container::{
-    deserialize_container_phase1, loaded_container_into_fragments, LoadedContainer,
+    LoadedContainer, deserialize_container_phase1, loaded_container_into_fragments,
 };
 use super::fragment::YJFragment;
 use super::structure::{finalize, rebuild_fragments_and_container_map, rebuild_symbol_table};
@@ -101,9 +101,7 @@ pub fn merge_kfx_zip_reader<R: Read + Seek>(reader: R) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn decide_merged_container_metadata(
-    fragments: &[YJFragment],
-) -> (String, String, String, i64) {
+fn decide_merged_container_metadata(fragments: &[YJFragment]) -> (String, String, String, i64) {
     let mut container_ids: std::collections::BTreeSet<String> = Default::default();
     let mut app_version = String::new();
     let mut pkg_version = String::new();
@@ -114,17 +112,20 @@ fn decide_merged_container_metadata(
             continue;
         }
         if let Some(s) = f.value.get_field("$409").and_then(|v| v.as_string())
-            && !s.is_empty() {
-                container_ids.insert(s.to_string());
-            }
+            && !s.is_empty()
+        {
+            container_ids.insert(s.to_string());
+        }
         if let Some(s) = f.value.get_field("$587").and_then(|v| v.as_string())
-            && !s.is_empty() {
-                app_version = s.to_string();
-            }
+            && !s.is_empty()
+        {
+            app_version = s.to_string();
+        }
         if let Some(s) = f.value.get_field("$588").and_then(|v| v.as_string())
-            && !s.is_empty() {
-                pkg_version = s.to_string();
-            }
+            && !s.is_empty()
+        {
+            pkg_version = s.to_string();
+        }
         if let Some(n) = f.value.get_field("version").and_then(|v| v.as_int()) {
             version = n;
         }
@@ -159,11 +160,15 @@ fn lookup_asset_id(fragments: &[YJFragment]) -> Option<String> {
         }
         let kvs = cat.get_field("$258")?.as_list()?;
         for kv in kvs {
-            let k = kv.get_field("$492").and_then(|n| n.as_string()).unwrap_or("");
+            let k = kv
+                .get_field("$492")
+                .and_then(|n| n.as_string())
+                .unwrap_or("");
             if k == "asset_id"
-                && let Some(v) = kv.get_field("$307").and_then(|n| n.as_string()) {
-                    return Some(v.to_string());
-                }
+                && let Some(v) = kv.get_field("$307").and_then(|n| n.as_string())
+            {
+                return Some(v.to_string());
+            }
         }
     }
     None

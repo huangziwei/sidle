@@ -103,14 +103,8 @@ pub fn build_ruby_content_fragments(ctx: &mut ExportContext) -> Vec<KfxFragment>
             .collect();
 
         let ion = IonValue::Struct(vec![
-            (
-                KfxSymbol::RubyName as u64,
-                IonValue::Symbol(kfx_id_symbol),
-            ),
-            (
-                KfxSymbol::ContentList as u64,
-                IonValue::List(content_list),
-            ),
+            (KfxSymbol::RubyName as u64, IonValue::Symbol(kfx_id_symbol)),
+            (KfxSymbol::ContentList as u64, IonValue::List(content_list)),
         ]);
 
         frags.push(KfxFragment::new(KfxSymbol::RubyContent, &kfx_id, ion));

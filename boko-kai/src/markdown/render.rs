@@ -347,9 +347,10 @@ impl<'a> RenderContext<'a> {
                 let global_id = GlobalNodeId::new(self.chapter_id, id);
                 let anchor = match self.resolved.get(global_id) {
                     Some(AnchorTarget::External(url)) => Some(url.clone()),
-                    Some(AnchorTarget::Internal(target)) => {
-                        self.heading_slugs.get(target).map(|slug| format!("#{}", slug))
-                    }
+                    Some(AnchorTarget::Internal(target)) => self
+                        .heading_slugs
+                        .get(target)
+                        .map(|slug| format!("#{}", slug)),
                     Some(AnchorTarget::Chapter(_)) => None,
                     None => {
                         let href = self.chapter.semantics.href(id).unwrap_or("");

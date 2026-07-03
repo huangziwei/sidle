@@ -11,11 +11,11 @@ use std::collections::HashMap;
 
 use crate::kfx::ion::{IonParser, IonValue};
 
+use super::NbkError;
 use super::shapes::{self, ShapeIds};
 use super::stroke::decode_stroke_values;
 use super::symtab::SymTab;
 use super::template::{self, Template};
-use super::NbkError;
 
 // Structural YJ symbol ids (stable, below every notebook's local base, so they
 // resolve from the shared YJ_symbols import — referenced here by id directly).
@@ -123,7 +123,9 @@ impl Ids {
             position_x: need("nmdl.position_x")?,
             position_y: need("nmdl.position_y")?,
             // adjust factors are optional in practice; resolve leniently.
-            thickness_adjust: sym.id_of("nmdl.thickness_adjust_factor").unwrap_or(u64::MAX),
+            thickness_adjust: sym
+                .id_of("nmdl.thickness_adjust_factor")
+                .unwrap_or(u64::MAX),
             density_adjust: sym.id_of("nmdl.density_adjust_factor").unwrap_or(u64::MAX),
         })
     }
@@ -174,8 +176,12 @@ pub fn build_pages(frags: &HashMap<String, Vec<u8>>) -> Result<Vec<Page>, NbkErr
 
     let mut pages = Vec::new();
     for sref in section_refs {
-        let Some(cid) = ref_target(sref) else { continue };
-        let Some(container) = parsed.get(cid) else { continue };
+        let Some(cid) = ref_target(sref) else {
+            continue;
+        };
+        let Some(container) = parsed.get(cid) else {
+            continue;
+        };
         let Some(cfields) = container.unwrap_annotated().as_struct() else {
             continue;
         };
@@ -194,8 +200,8 @@ pub fn build_pages(frags: &HashMap<String, Vec<u8>>) -> Result<Vec<Page>, NbkErr
             }
         }
 
-        let template = field(cfields, ids.template_id)
-            .and_then(|tid| template::resolve(tid, &parsed, &sym));
+        let template =
+            field(cfields, ids.template_id).and_then(|tid| template::resolve(tid, &parsed, &sym));
 
         pages.push(Page {
             container_id: cid.to_string(),
@@ -271,10 +277,16 @@ fn parse_stroke(fields: &[(u64, IonValue)], ids: &Ids) -> Option<Stroke> {
         bounds_list[3].as_int()?,
     ];
 
-    let brush_type = field(fields, ids.brush_type).and_then(|v| v.as_int()).unwrap_or(0);
-    let color = field(fields, ids.color).and_then(|v| v.as_int()).unwrap_or(0);
+    let brush_type = field(fields, ids.brush_type)
+        .and_then(|v| v.as_int())
+        .unwrap_or(0);
+    let color = field(fields, ids.color)
+        .and_then(|v| v.as_int())
+        .unwrap_or(0);
     let thickness = field(fields, ids.thickness).and_then(as_f64).unwrap_or(0.0);
-    let random_seed = field(fields, ids.random_seed).and_then(|v| v.as_int()).unwrap_or(0);
+    let random_seed = field(fields, ids.random_seed)
+        .and_then(|v| v.as_int())
+        .unwrap_or(0);
 
     let sp = field(fields, ids.stroke_points)?.as_struct()?;
     let num_points = field(sp, ids.num_points)?.as_int()? as usize;

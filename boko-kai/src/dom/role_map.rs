@@ -125,8 +125,8 @@ pub fn element_to_role_known(local_name: &LocalName) -> Option<Role> {
         // distinguishes "known-untreated" from "unknown".
         // (`image` is intentionally NOT here — it's handled above as Role::Image
         //  so SVG `<image>` survives as a KFX image.)
-        "svg" | "math" | "audio" | "video" | "source" | "track"
-        | "object" | "embed" | "iframe" | "canvas" => Role::Container,
+        "svg" | "math" | "audio" | "video" | "source" | "track" | "object" | "embed" | "iframe"
+        | "canvas" => Role::Container,
 
         // Form elements — not relevant for ebooks but recognised.
         "form" | "input" | "button" | "select" | "option" | "optgroup" | "textarea"

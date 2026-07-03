@@ -454,16 +454,11 @@ async fn sync_annotations(
             tracing::error!(?err, "sync: open library.db failed");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-        let report = ingest::import_collected(
-            &conn,
-            collected,
-            &device_serial,
-            &db::now_iso(),
-        )
-        .map_err(|err| {
-            tracing::error!(?err, "sync: import_collected failed");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        let report = ingest::import_collected(&conn, collected, &device_serial, &db::now_iso())
+            .map_err(|err| {
+                tracing::error!(?err, "sync: import_collected failed");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
         // Live-repaint signal — only when the import changed annotation state worth
         // repainting an open reader for. The GUI watches this file (sidle-reader.md
         // P3) and re-emits the `annotations:sync-done` event the USB path already
@@ -592,7 +587,10 @@ async fn serve_file(
         StatusCode::NOT_FOUND
     })?;
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(content_type).unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(content_type).unwrap(),
+    );
     if let Some(name) = download_filename {
         // Quote-escape any embedded `"` in the filename. RFC 6266 says we
         // should also percent-encode for non-ASCII via `filename*=UTF-8''…`
@@ -625,9 +623,9 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64;
+    use sidle_core::library::LibraryPaths;
     use sidle_core::library::db::{self, NewBook};
     use sidle_core::library::ingest::{self, CollectedYjr, DeviceImportReport};
-    use sidle_core::library::LibraryPaths;
     use std::path::Path;
     use std::sync::Arc;
     use tower::ServiceExt as _;
@@ -648,7 +646,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn graceful_shutdown_returns_ok_and_frees_port() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = LibraryPaths { root: tmp.path().to_path_buf() };
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
         paths.ensure().unwrap();
         let token = load_or_generate_token(&paths.root).unwrap();
         let port = pick_free_port();
@@ -700,7 +700,10 @@ mod tests {
         let mut refused = false;
         for _ in 0..100 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err()
+            {
                 refused = true;
                 break;
             }
@@ -736,7 +739,9 @@ mod tests {
     /// A fresh library root + one book whose `kfx_sha256` the `book.deadbeef.sdr`
     /// infix prefix-matches (so the bookmark resolves). Returns `(paths, book_id)`.
     fn library_with_matching_book(root: &Path) -> (LibraryPaths, i64) {
-        let paths = LibraryPaths { root: root.to_path_buf() };
+        let paths = LibraryPaths {
+            root: root.to_path_buf(),
+        };
         paths.ensure().unwrap();
         let conn = db::open(&paths.db()).unwrap();
         let book_id = db::insert_book(
@@ -778,7 +783,8 @@ mod tests {
         if let Some(t) = token {
             b = b.header("x-sidle-token", t);
         }
-        b.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()
+        b.body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
     }
 
     /// The decisive P3 gate: a `.yjr` pushed through `POST /sync/annotations`
@@ -845,7 +851,10 @@ mod tests {
 
         // The live-repaint pulse landed (this import changed state).
         let pulse = paths_b.root.join(".sync-pulse.json");
-        assert!(pulse.exists(), "sync pulse not written after a changing import");
+        assert!(
+            pulse.exists(),
+            "sync pulse not written after a changing import"
+        );
         let pulse_json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&pulse).unwrap()).unwrap();
         assert_eq!(pulse_json["device_serial"], device_serial);
@@ -855,7 +864,10 @@ mod tests {
     async fn sync_annotations_rejects_missing_token() {
         let tmp = tempfile::tempdir().unwrap();
         let (paths, _) = library_with_matching_book(tmp.path());
-        let state = AppState { paths, token: Arc::from("the-real-token") };
+        let state = AppState {
+            paths,
+            token: Arc::from("the-real-token"),
+        };
         let body = serde_json::json!({ "device_serial": "X", "sdrs": [] });
         let resp = build_router(state)
             .oneshot(sync_request(None, body))
@@ -869,7 +881,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (paths, _) = library_with_matching_book(tmp.path());
         let token = load_or_generate_token(&paths.root).unwrap();
-        let state = AppState { paths, token: Arc::from(token.as_str()) };
+        let state = AppState {
+            paths,
+            token: Arc::from(token.as_str()),
+        };
         let body = serde_json::json!({
             "device_serial": "X",
             "sdrs": [ { "sdr_name": "book.deadbeef.sdr", "yjr_b64": "@@@not base64@@@" } ],
@@ -886,7 +901,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (paths, _) = library_with_matching_book(tmp.path());
         let token = load_or_generate_token(&paths.root).unwrap();
-        let state = AppState { paths, token: Arc::from(token.as_str()) };
+        let state = AppState {
+            paths,
+            token: Arc::from(token.as_str()),
+        };
         // A body past the 32 MB cap → rejected by DefaultBodyLimit before the
         // handler runs (413), regardless of token validity.
         // A body past the 32 MB cap is built by inflating a sdr_name string —
@@ -941,11 +959,16 @@ mod tests {
     }
 
     fn staged_state(root: &Path) -> (AppState, String, Vec<u8>) {
-        let paths = LibraryPaths { root: root.to_path_buf() };
+        let paths = LibraryPaths {
+            root: root.to_path_buf(),
+        };
         paths.ensure().unwrap();
         let token = load_or_generate_token(&paths.root).unwrap();
         let bytes = stage_fake_dist(&paths);
-        let state = AppState { paths, token: Arc::from(token.as_str()) };
+        let state = AppState {
+            paths,
+            token: Arc::from(token.as_str()),
+        };
         (state, token, bytes)
     }
 
@@ -971,7 +994,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(body.as_ref(), bin_bytes.as_slice(), "served == staged binary");
+        assert_eq!(
+            body.as_ref(),
+            bin_bytes.as_slice(),
+            "served == staged binary"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -986,7 +1013,11 @@ mod tests {
                 .oneshot(get_request(uri, Some(&token)))
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "unlisted {uri} must 404");
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "unlisted {uri} must 404"
+            );
         }
     }
 
@@ -999,17 +1030,26 @@ mod tests {
                 .oneshot(get_request(uri, None))
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{uri} must require a token");
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "{uri} must require a token"
+            );
         }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn kual_manifest_404_when_nothing_staged() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = LibraryPaths { root: tmp.path().to_path_buf() };
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
         paths.ensure().unwrap();
         let token = load_or_generate_token(&paths.root).unwrap();
-        let state = AppState { paths, token: Arc::from(token.as_str()) };
+        let state = AppState {
+            paths,
+            token: Arc::from(token.as_str()),
+        };
         let resp = build_router(state)
             .oneshot(get_request("/kual/manifest.json", Some(&token)))
             .await

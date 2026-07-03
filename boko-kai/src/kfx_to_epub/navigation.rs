@@ -167,8 +167,7 @@ pub fn extract_anchors(book: &BookData) -> AnchorTable {
             let Some(pos_fields) = pos.as_struct() else {
                 continue;
             };
-            let Some(eid) = get_field(pos_fields, KfxSymbol::Id as u64)
-                .and_then(|v| v.as_int())
+            let Some(eid) = get_field(pos_fields, KfxSymbol::Id as u64).and_then(|v| v.as_int())
             else {
                 continue;
             };
@@ -491,8 +490,7 @@ pub fn extract_landmarks(
                     .map(|s| s.to_vec())
                     .unwrap_or_default();
                 for entry in &entries {
-                    if let Some(g) =
-                        nav_unit_to_guide(entry, book, element_id_to_filename, anchors)
+                    if let Some(g) = nav_unit_to_guide(entry, book, element_id_to_filename, anchors)
                     {
                         out.push(g);
                     }
@@ -619,9 +617,7 @@ pub fn extract_toc(
                     .map(|s| s.to_vec())
                     .unwrap_or_default();
                 for entry in &entries {
-                    if let Some(np) =
-                        nav_unit_to_navpoint(entry, element_id_to_filename, anchors)
-                    {
+                    if let Some(np) = nav_unit_to_navpoint(entry, element_id_to_filename, anchors) {
                         toc.push(np);
                     }
                 }
@@ -644,9 +640,7 @@ fn nav_unit_to_navpoint(
         .and_then(|v| v.as_struct())
         .and_then(|s| get_field(s, KfxSymbol::Label as u64))
         .and_then(|v| v.as_string())
-        .or_else(|| {
-            get_field(fields, KfxSymbol::Label as u64).and_then(|v| v.as_string())
-        })
+        .or_else(|| get_field(fields, KfxSymbol::Label as u64).and_then(|v| v.as_string()))
         .unwrap_or("Untitled")
         .to_string();
     if label.is_empty() || label == "heading-nav-unit" {
@@ -684,9 +678,7 @@ fn nav_unit_to_navpoint(
         get_field(fields, KfxSymbol::Entries as u64).and_then(|v| v.as_list())
     {
         for child in child_entries {
-            if let Some(np) =
-                nav_unit_to_navpoint(child, element_id_to_filename, anchors)
-            {
+            if let Some(np) = nav_unit_to_navpoint(child, element_id_to_filename, anchors) {
                 children.push(np);
             }
         }

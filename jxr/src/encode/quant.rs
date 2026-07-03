@@ -27,9 +27,12 @@ pub struct QpSet {
 
 impl QpSet {
     /// Lossless (every band QP = 0 ⇒ scaling factor 1).
-    pub const LOSSLESS: QpSet = QpSet { dc: 0, lp: 0, hp: 0 };
+    pub const LOSSLESS: QpSet = QpSet {
+        dc: 0,
+        lp: 0,
+        hp: 0,
+    };
 }
-
 
 /// Per-band, per-component-class scaling factors at quantizer set `qp` — the
 /// general per-band form. The decoder's `quant_map` derivation
@@ -160,7 +163,11 @@ mod tests {
         for qp in 1u8..=80 {
             let sf = scaling_factor(qp);
             for level in [-300i32, -17, -1, 0, 1, 5, 42, 300] {
-                assert_eq!(quantize(level * sf, sf), level, "qp={qp} sf={sf} level={level}");
+                assert_eq!(
+                    quantize(level * sf, sf),
+                    level,
+                    "qp={qp} sf={sf} level={level}"
+                );
             }
         }
     }
@@ -172,7 +179,10 @@ mod tests {
             let sf = scaling_factor(qp);
             for c in [-3000i32, -513, -1, 0, 1, 200, 1234, 5000] {
                 let recon = quantize(c, sf) * sf;
-                assert!((c - recon).abs() <= sf, "qp={qp} sf={sf} c={c} recon={recon}");
+                assert!(
+                    (c - recon).abs() <= sf,
+                    "qp={qp} sf={sf} c={c} recon={recon}"
+                );
             }
         }
     }

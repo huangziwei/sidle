@@ -239,8 +239,8 @@ impl Transport for MtpTransport {
         // `upload_streamed` then re-chunks the buffer so the SEND still streams
         // bounded bulk-OUT transfers (and ticks `on_progress`). Revisit if
         // pushes start failing on RAM pressure.
-        let bytes = std::fs::read(src_local)
-            .with_context(|| format!("read {}", src_local.display()))?;
+        let bytes =
+            std::fs::read(src_local).with_context(|| format!("read {}", src_local.display()))?;
         let _g = self.op_lock.lock().expect("op_lock poisoned");
         block_on(upload_streamed(&self.storage, dest, &bytes, on_progress))
     }
@@ -311,7 +311,10 @@ impl Transport for MtpTransport {
             let Some(parent) = resolve(storage, dir).await? else {
                 return Ok(Vec::new());
             };
-            let children = storage.list_objects(Some(parent)).await.map_err(map_mtp_err)?;
+            let children = storage
+                .list_objects(Some(parent))
+                .await
+                .map_err(map_mtp_err)?;
             let mut out: Vec<ChildFiles> = Vec::new();
             for child in children {
                 if !child.is_folder() || !pick_dir(&child.filename) {
@@ -326,7 +329,10 @@ impl Transport for MtpTransport {
                     .collect();
                 let mut got_files: Vec<(String, Vec<u8>)> = Vec::new();
                 for obj in files {
-                    let mut dl = storage.download_stream(obj.handle).await.map_err(map_mtp_err)?;
+                    let mut dl = storage
+                        .download_stream(obj.handle)
+                        .await
+                        .map_err(map_mtp_err)?;
                     let mut buf = Vec::with_capacity(dl.size() as usize);
                     while let Some(chunk) = dl.next_chunk().await {
                         buf.extend_from_slice(&chunk.map_err(map_mtp_err)?);
@@ -426,8 +432,7 @@ mod tests {
     fn exclusive_access_error_gets_actionable_text() {
         // Same wording nusb produces on macOS when another process has
         // claimed the device — see ref/mtp-rs/src/error.rs tests.
-        let io_err =
-            std::io::Error::other("could not be opened for exclusive access");
+        let io_err = std::io::Error::other("could not be opened for exclusive access");
         let mapped = map_mtp_err(mtp_rs::Error::Io(io_err));
         let msg = format!("{mapped:#}");
         assert!(
@@ -442,7 +447,10 @@ mod tests {
         let mapped = map_mtp_err(mtp_rs::Error::Io(io_err));
         let msg = format!("{mapped:#}");
         // No exclusive-access hint for unrelated IO errors.
-        assert!(!msg.contains("Image Capture"), "false positive busy hint: {msg}");
+        assert!(
+            !msg.contains("Image Capture"),
+            "false positive busy hint: {msg}"
+        );
         assert!(msg.contains("bus reset"));
     }
 }

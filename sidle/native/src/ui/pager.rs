@@ -77,7 +77,11 @@ pub fn hit(
     if tx < SYNC_LEFT {
         // Inside a drilled-in series this slot is Back (Filter is moot — you're
         // already scoped to one series); at the top level it opens the filter menu.
-        return Some(if drilled { PagerHit::Back } else { PagerHit::Filter });
+        return Some(if drilled {
+            PagerHit::Back
+        } else {
+            PagerHit::Filter
+        });
     }
     if tx < NAV_LEFT {
         return Some(PagerHit::Sync);

@@ -139,7 +139,11 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
     let mut zip = match ZipArchive::new(cursor) {
         Ok(z) => z,
         Err(e) => {
-            report.push(Violation::new(Rule::ZipMalformed, "<archive>", format!("{e}")));
+            report.push(Violation::new(
+                Rule::ZipMalformed,
+                "<archive>",
+                format!("{e}"),
+            ));
             return report;
         }
     };
@@ -167,7 +171,11 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
     let pkg = match opf::parse(&opf_text) {
         Ok(p) => p,
         Err(e) => {
-            report.push(Violation::new(Rule::OpfParseError, opf_path, format!("{e}")));
+            report.push(Violation::new(
+                Rule::OpfParseError,
+                opf_path,
+                format!("{e}"),
+            ));
             return report;
         }
     };
@@ -186,7 +194,12 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
     check_nav_present(&pkg, &opf_path, &mut report);
     check_parent_paths_in_opf(&pkg, &opf_dir, &opf_path, &mut report);
     check_xhtml_hrefs_and_reachability(
-        &pkg, &opf_dir, &mut zip, &zip_paths, &opf_path, &mut report,
+        &pkg,
+        &opf_dir,
+        &mut zip,
+        &zip_paths,
+        &opf_path,
+        &mut report,
     );
 
     report
@@ -695,10 +708,7 @@ mod tests {
         // therefore fine — verified by `aozora_output_passes_after_fix`.)
         let bytes = sample_aozora_epub();
         let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |xhtml| {
-            xhtml.replace(
-                "</body>",
-                r#"<a href="../../escape.xhtml">link</a></body>"#,
-            )
+            xhtml.replace("</body>", r#"<a href="../../escape.xhtml">link</a></body>"#)
         });
         let report = validate(&mutated);
         assert!(
@@ -711,11 +721,7 @@ mod tests {
     /// Rebuild `epub_bytes` with `entry`'s content rewritten by `f`. Uses the
     /// `zip` crate to iterate entries and emit a new archive with the same
     /// per-entry compression methods. Preserves mimetype-first ordering.
-    fn rewrite_zip_entry(
-        epub_bytes: &[u8],
-        target: &str,
-        f: impl Fn(String) -> String,
-    ) -> Vec<u8> {
+    fn rewrite_zip_entry(epub_bytes: &[u8], target: &str, f: impl Fn(String) -> String) -> Vec<u8> {
         use zip::write::{SimpleFileOptions, ZipWriter};
         let cursor = Cursor::new(epub_bytes);
         let mut zin = ZipArchive::new(cursor).unwrap();

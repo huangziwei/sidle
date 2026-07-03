@@ -106,8 +106,13 @@ pub fn encode_cbphp(bw: &mut BitWriter, st: &mut HpState, mb_cbphp: i32, neighbo
 
     // num_cbphp = popcount of i_cbphp, then the pattern refinement.
     let num_cbphp = num_ones(i_cbphp as u32) as i32;
-    super::entropy::write_huff(bw, tables::num_cbphp(st.num_cbphp.table_index as usize), num_cbphp);
-    st.num_cbphp.discrim_val1 += NUM_CBPHP_DELTA[st.num_cbphp.delta_table_index as usize][num_cbphp as usize];
+    super::entropy::write_huff(
+        bw,
+        tables::num_cbphp(st.num_cbphp.table_index as usize),
+        num_cbphp,
+    );
+    st.num_cbphp.discrim_val1 +=
+        NUM_CBPHP_DELTA[st.num_cbphp.delta_table_index as usize][num_cbphp as usize];
     match num_cbphp {
         1 => bw.write_bits(i_cbphp.trailing_zeros() as u64, 2),
         2 => super::entropy::write_huff(bw, tables::ref_cbphp1(), i_cbphp),
@@ -129,7 +134,11 @@ pub fn encode_cbphp(bw: &mut BitWriter, st: &mut HpState, mb_cbphp: i32, neighbo
             })
             .unwrap();
         let num_blk = (i_val - 1) as i32;
-        super::entropy::write_huff(bw, tables::num_cbphp(st.num_blk_cbphp.table_index as usize), num_blk);
+        super::entropy::write_huff(
+            bw,
+            tables::num_cbphp(st.num_blk_cbphp.table_index as usize),
+            num_blk,
+        );
         st.num_blk_cbphp.discrim_val1 +=
             NUM_BLK_CBPHP_DELTA1[st.num_blk_cbphp.delta_table_index as usize][num_blk as usize];
         if I_FLC[i_val] != 0 {
@@ -143,7 +152,11 @@ pub fn encode_cbphp(bw: &mut BitWriter, st: &mut HpState, mb_cbphp: i32, neighbo
     m.count_ones[0] = (m.count_ones[0] + n_orig - 3).clamp(-16, 15);
     m.count_zeroes[0] = (m.count_zeroes[0] + (16 - n_orig) - 3).clamp(-16, 15);
     m.cbphp_state[0] = if m.count_ones[0] < 0 {
-        if m.count_ones[0] < m.count_zeroes[0] { 1 } else { 2 }
+        if m.count_ones[0] < m.count_zeroes[0] {
+            1
+        } else {
+            2
+        }
     } else if m.count_zeroes[0] < 0 {
         2
     } else {
@@ -253,8 +266,14 @@ pub fn encode_hp_mb(
             };
             lap += pairs.len() as i32;
             coeff::encode_block(
-                sink.hp(), &pairs, 1, &mut st.first_ind, &mut st.ind0, &mut st.ind1,
-                &mut st.abs0, &mut st.abs1,
+                sink.hp(),
+                &pairs,
+                1,
+                &mut st.first_ind,
+                &mut st.ind0,
+                &mut st.ind1,
+                &mut st.abs0,
+                &mut st.abs1,
             );
         }
         cbp >>= 1;

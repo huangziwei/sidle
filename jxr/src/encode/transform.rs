@@ -132,13 +132,25 @@ pub fn fdct4x4_stage1(c: &mut [i32; 16]) {
         &[[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]],
     );
     let (a, b, cc, d) = fwd_odd_odd(c[15], c[14], c[13], c[12]);
-    c[15] = a; c[14] = b; c[13] = cc; c[12] = d;
+    c[15] = a;
+    c[14] = b;
+    c[13] = cc;
+    c[12] = d;
     let (a, b, cc, d) = fwd_odd(c[10], c[8], c[11], c[9]);
-    c[10] = a; c[8] = b; c[11] = cc; c[9] = d;
+    c[10] = a;
+    c[8] = b;
+    c[11] = cc;
+    c[9] = d;
     let (a, b, cc, d) = fwd_odd(c[5], c[4], c[7], c[6]);
-    c[5] = a; c[4] = b; c[7] = cc; c[6] = d;
+    c[5] = a;
+    c[4] = b;
+    c[7] = cc;
+    c[6] = d;
     let (a, b, cc, d) = undo_dct2x2up(c[0], c[1], c[2], c[3]);
-    c[0] = a; c[1] = b; c[2] = cc; c[3] = d;
+    c[0] = a;
+    c[1] = b;
+    c[2] = cc;
+    c[3] = d;
 }
 
 /// Forward of [`crate::decode::math::str_idct4x4_stage2`].
@@ -148,16 +160,26 @@ pub fn fdct4x4_stage2(c: &mut [i32; 16]) {
         &[[0, 12, 3, 15], [4, 8, 7, 11], [1, 13, 2, 14], [5, 9, 6, 10]],
     );
     let (a, b, cc, d) = undo_dct2x2up(c[0], c[4], c[1], c[5]);
-    c[0] = a; c[4] = b; c[1] = cc; c[5] = d;
+    c[0] = a;
+    c[4] = b;
+    c[1] = cc;
+    c[5] = d;
     let (a, b, cc, d) = fwd_odd_odd(c[10], c[14], c[11], c[15]);
-    c[10] = a; c[14] = b; c[11] = cc; c[15] = d;
+    c[10] = a;
+    c[14] = b;
+    c[11] = cc;
+    c[15] = d;
     let (a, b, cc, d) = fwd_odd(c[8], c[12], c[9], c[13]);
-    c[8] = a; c[12] = b; c[9] = cc; c[13] = d;
+    c[8] = a;
+    c[12] = b;
+    c[9] = cc;
+    c[13] = d;
     let (a, b, cc, d) = fwd_odd(c[2], c[3], c[6], c[7]);
-    c[2] = a; c[3] = b; c[6] = cc; c[7] = d;
+    c[2] = a;
+    c[3] = b;
+    c[6] = cc;
+    c[7] = d;
 }
-
-
 
 /// Stage 1 only of [`forward_transform_mb_with`]: scatter into the permuted
 /// per-block layout + per-block forward DCT. Block DCs sit raw at
@@ -205,7 +227,6 @@ pub fn forward_stage2_mb(buf: &mut [i32; 256], halve_dclp: bool) {
     }
 }
 
-
 /// Stage 1 only of [`forward_transform_chroma_mb_420`] (per-block forward
 /// DCT; raw block DCs at `buf[16j]` for the DC-domain overlap pre-filter).
 pub fn forward_stage1_chroma_420(samples: &[i32; 64]) -> [i32; 64] {
@@ -241,7 +262,6 @@ pub fn forward_stage2_chroma_420(buf: &mut [i32; 64], halve_dclp: bool) {
         buf[16 * j] = *vj;
     }
 }
-
 
 /// Stage 1 only of [`forward_transform_chroma_mb_422`].
 pub fn forward_stage1_chroma_422(samples: &[i32; 128]) -> [i32; 128] {
@@ -369,35 +389,78 @@ pub fn overlap_pre_filter_4x4(input: [i32; 16]) -> [i32; 16] {
     let mut c = input;
     // undo t2x2h_post
     let r = undo_t2x2h_post([c[0], c[3], c[12], c[15]]);
-    c[0] = r[0]; c[3] = r[1]; c[12] = r[2]; c[15] = r[3];
+    c[0] = r[0];
+    c[3] = r[1];
+    c[12] = r[2];
+    c[15] = r[3];
     let r = undo_t2x2h_post([c[1], c[2], c[13], c[14]]);
-    c[1] = r[0]; c[2] = r[1]; c[13] = r[2]; c[14] = r[3];
+    c[1] = r[0];
+    c[2] = r[1];
+    c[13] = r[2];
+    c[14] = r[3];
     let r = undo_t2x2h_post([c[4], c[7], c[8], c[11]]);
-    c[4] = r[0]; c[7] = r[1]; c[8] = r[2]; c[11] = r[3];
+    c[4] = r[0];
+    c[7] = r[1];
+    c[8] = r[2];
+    c[11] = r[3];
     let r = undo_t2x2h_post([c[5], c[6], c[9], c[10]]);
-    c[5] = r[0]; c[6] = r[1]; c[9] = r[2]; c[10] = r[3];
+    c[5] = r[0];
+    c[6] = r[1];
+    c[9] = r[2];
+    c[10] = r[3];
     // undo inv_scale
-    let (a, b) = undo_scale(c[0], c[15]); c[0] = a; c[15] = b;
-    let (a, b) = undo_scale(c[1], c[14]); c[1] = a; c[14] = b;
-    let (a, b) = undo_scale(c[4], c[11]); c[4] = a; c[11] = b;
-    let (a, b) = undo_scale(c[5], c[10]); c[5] = a; c[10] = b;
+    let (a, b) = undo_scale(c[0], c[15]);
+    c[0] = a;
+    c[15] = b;
+    let (a, b) = undo_scale(c[1], c[14]);
+    c[1] = a;
+    c[14] = b;
+    let (a, b) = undo_scale(c[4], c[11]);
+    c[4] = a;
+    c[11] = b;
+    let (a, b) = undo_scale(c[5], c[10]);
+    c[5] = a;
+    c[10] = b;
     // undo inv_toddodd_post
     let r = undo_toddodd_post([c[10], c[11], c[14], c[15]]);
-    c[10] = r[0]; c[11] = r[1]; c[14] = r[2]; c[15] = r[3];
+    c[10] = r[0];
+    c[11] = r[1];
+    c[14] = r[2];
+    c[15] = r[3];
     // undo inv_rotate (== fwd_rotate1)
-    let (a, b) = fwd_rotate1(c[13], c[12]); c[13] = a; c[12] = b;
-    let (a, b) = fwd_rotate1(c[9], c[8]); c[9] = a; c[8] = b;
-    let (a, b) = fwd_rotate1(c[7], c[3]); c[7] = a; c[3] = b;
-    let (a, b) = fwd_rotate1(c[6], c[2]); c[6] = a; c[2] = b;
+    let (a, b) = fwd_rotate1(c[13], c[12]);
+    c[13] = a;
+    c[12] = b;
+    let (a, b) = fwd_rotate1(c[9], c[8]);
+    c[9] = a;
+    c[8] = b;
+    let (a, b) = fwd_rotate1(c[7], c[3]);
+    c[7] = a;
+    c[3] = b;
+    let (a, b) = fwd_rotate1(c[6], c[2]);
+    c[6] = a;
+    c[2] = b;
     // undo t2x2h
     let r = undo_t2x2h([c[0], c[3], c[12], c[15]], 0);
-    c[0] = r[0]; c[3] = r[1]; c[12] = r[2]; c[15] = r[3];
+    c[0] = r[0];
+    c[3] = r[1];
+    c[12] = r[2];
+    c[15] = r[3];
     let r = undo_t2x2h([c[1], c[2], c[13], c[14]], 0);
-    c[1] = r[0]; c[2] = r[1]; c[13] = r[2]; c[14] = r[3];
+    c[1] = r[0];
+    c[2] = r[1];
+    c[13] = r[2];
+    c[14] = r[3];
     let r = undo_t2x2h([c[4], c[7], c[8], c[11]], 0);
-    c[4] = r[0]; c[7] = r[1]; c[8] = r[2]; c[11] = r[3];
+    c[4] = r[0];
+    c[7] = r[1];
+    c[8] = r[2];
+    c[11] = r[3];
     let r = undo_t2x2h([c[5], c[6], c[9], c[10]], 0);
-    c[5] = r[0]; c[6] = r[1]; c[9] = r[2]; c[10] = r[3];
+    c[5] = r[0];
+    c[6] = r[1];
+    c[9] = r[2];
+    c[10] = r[3];
     c
 }
 
@@ -472,7 +535,12 @@ fn undo_str_hst_dec(w: i32, x: i32, y: i32, z: i32) -> (i32, i32, i32, i32) {
 pub fn str_pre_4x4_stage2_split_alternate(input: &[i32; 16]) -> [i32; 16] {
     let mut c = *input;
     // E⁻¹: undo the four str_hst_dec quads.
-    for &[i0, i1, i2, i3] in &[[0usize, 12, 3, 15], [1, 13, 2, 14], [4, 8, 7, 11], [5, 9, 6, 10]] {
+    for &[i0, i1, i2, i3] in &[
+        [0usize, 12, 3, 15],
+        [1, 13, 2, 14],
+        [4, 8, 7, 11],
+        [5, 9, 6, 10],
+    ] {
         let (a, b, cc, d) = undo_str_hst_dec(c[i0], c[i1], c[i2], c[i3]);
         c[i0] = a;
         c[i1] = b;
@@ -498,7 +566,12 @@ pub fn str_pre_4x4_stage2_split_alternate(input: &[i32; 16]) -> [i32; 16] {
     c[14] = cc;
     c[15] = d;
     // A⁻¹: undo the four str_dct2x2dn quads.
-    for &[i0, i1, i2, i3] in &[[0usize, 3, 12, 15], [1, 2, 13, 14], [4, 7, 8, 11], [5, 6, 9, 10]] {
+    for &[i0, i1, i2, i3] in &[
+        [0usize, 3, 12, 15],
+        [1, 2, 13, 14],
+        [4, 7, 8, 11],
+        [5, 6, 9, 10],
+    ] {
         let (a, b, cc, d) = undo_str_dct2x2dn(c[i0], c[i1], c[i2], c[i3]);
         c[i0] = a;
         c[i1] = b;
@@ -549,7 +622,9 @@ pub fn overlap_pre_filter_4(input: [i32; 4]) -> [i32; 4] {
     c[0] = c[0].wrapping_add(c[3]);
     c[2] = c[2].wrapping_sub((c[1].wrapping_add(1)) >> 1);
     c[3] = c[3].wrapping_sub((c[0].wrapping_add(1)) >> 1);
-    let (a, b) = fwd_rotate1(c[2], c[3]); c[2] = a; c[3] = b;
+    let (a, b) = fwd_rotate1(c[2], c[3]);
+    c[2] = a;
+    c[3] = b;
     c[2] = c[2].wrapping_neg();
     c[3] = c[3].wrapping_neg();
     c[1] = c[1].wrapping_sub(c[2]);
@@ -558,8 +633,12 @@ pub fn overlap_pre_filter_4(input: [i32; 4]) -> [i32; 4] {
     c[3] = c[3].wrapping_add(c[0] >> 1);
     c[1] = c[1].wrapping_sub((c[2].wrapping_mul(3).wrapping_add(4)) >> 3);
     c[0] = c[0].wrapping_sub((c[3].wrapping_mul(3).wrapping_add(4)) >> 3);
-    let (a, b) = undo_scale(c[1], c[2]); c[1] = a; c[2] = b;
-    let (a, b) = undo_scale(c[0], c[3]); c[0] = a; c[3] = b;
+    let (a, b) = undo_scale(c[1], c[2]);
+    c[1] = a;
+    c[2] = b;
+    let (a, b) = undo_scale(c[0], c[3]);
+    c[0] = a;
+    c[3] = b;
     c[2] = c[2].wrapping_add((c[1].wrapping_add(1)) >> 1);
     c[3] = c[3].wrapping_add((c[0].wrapping_add(1)) >> 1);
     c[1] = c[1].wrapping_sub(c[2]);
@@ -762,7 +841,10 @@ mod tests {
         let mut r = Lcg(0x4242_1717);
         for _ in 0..5000 {
             let x = r.block();
-            assert_eq!(dec::str_post_4x4_stage2_split_alternate(&str_pre_4x4_stage2_split_alternate(&x)), x);
+            assert_eq!(
+                dec::str_post_4x4_stage2_split_alternate(&str_pre_4x4_stage2_split_alternate(&x)),
+                x
+            );
             let q = [x[0], x[1], x[2], x[3]];
             assert_eq!(dec::overlap_post_filter_2x2(overlap_pre_filter_2x2(q)), q);
             let p = [x[4], x[5]];
@@ -844,7 +926,10 @@ mod tests {
             for v in x.iter_mut() {
                 *v = r.next();
             }
-            assert_eq!(decode_chroma_mb_420(&forward_transform_chroma_mb_420(&x, false)), x);
+            assert_eq!(
+                decode_chroma_mb_420(&forward_transform_chroma_mb_420(&x, false)),
+                x
+            );
         }
     }
 
@@ -856,7 +941,10 @@ mod tests {
             for v in x.iter_mut() {
                 *v = r.next();
             }
-            assert_eq!(decode_chroma_mb_422(&forward_transform_chroma_mb_422(&x, false)), x);
+            assert_eq!(
+                decode_chroma_mb_422(&forward_transform_chroma_mb_422(&x, false)),
+                x
+            );
         }
     }
 }

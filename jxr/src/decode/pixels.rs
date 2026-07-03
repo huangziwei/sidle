@@ -112,7 +112,9 @@ impl DecodedImage {
                 (ColorModel::NChannel(n as u8), n)
             }
             other => {
-                return Err(PixelError::Unsupported(format!("output color format {other}")));
+                return Err(PixelError::Unsupported(format!(
+                    "output color format {other}"
+                )));
             }
         };
         // RGBE's exponent plane is layout, not alpha; everything beyond the
@@ -216,14 +218,24 @@ mod tests {
 
     #[test]
     fn packs_gray8() {
-        let b = img(vec![vec![-5, 300]], OUT_YONLY, BD8, false).to_pixel_buffer().unwrap();
-        assert_eq!((b.channels, b.sample, b.color), (1, SampleType::U8, ColorModel::Gray));
+        let b = img(vec![vec![-5, 300]], OUT_YONLY, BD8, false)
+            .to_pixel_buffer()
+            .unwrap();
+        assert_eq!(
+            (b.channels, b.sample, b.color),
+            (1, SampleType::U8, ColorModel::Gray)
+        );
         assert_eq!(b.data, vec![0, 255]); // clamped
     }
 
     #[test]
     fn packs_rgba16f_bits() {
-        let planes = vec![vec![0x3c00, 0], vec![0, 0], vec![0, 0], vec![0x3c00, 0x3c00]];
+        let planes = vec![
+            vec![0x3c00, 0],
+            vec![0, 0],
+            vec![0, 0],
+            vec![0x3c00, 0x3c00],
+        ];
         let mut im = img(planes, OUT_RGB, BD16F, true);
         im.premultiplied_alpha = true;
         let b = im.to_pixel_buffer().unwrap();

@@ -199,13 +199,11 @@ pub fn with_dot_suffix(path: &Path, suffix: &str) -> PathBuf {
 pub fn stage_update(bundle: &Path, name: &str, bytes: &[u8]) -> anyhow::Result<PathBuf> {
     let dest = bundle.join(name);
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("mkdir {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     let download = with_dot_suffix(&dest, "download");
     let staged = with_dot_suffix(&dest, "new");
-    std::fs::write(&download, bytes)
-        .with_context(|| format!("write {}", download.display()))?;
+    std::fs::write(&download, bytes).with_context(|| format!("write {}", download.display()))?;
     std::fs::rename(&download, &staged)
         .with_context(|| format!("rename {} -> {}", download.display(), staged.display()))?;
     Ok(staged)
@@ -276,7 +274,11 @@ pub fn run_pull(
             .into());
         }
         let staged_path = stage_update(bundle, &entry.name, &bytes)?;
-        log(&format!("{}: verified + staged {}", entry.name, staged_path.display()));
+        log(&format!(
+            "{}: verified + staged {}",
+            entry.name,
+            staged_path.display()
+        ));
         staged.push(entry.name.clone());
     }
     Ok(if !staged.is_empty() {
@@ -328,7 +330,10 @@ mod tests {
         let v2 = b"new-binary-v2";
         let e = entry_for(v2);
         assert!(needs_update(None, &e), "missing on device → needs update");
-        assert!(needs_update(Some(b"old-binary-v1"), &e), "differs → needs update");
+        assert!(
+            needs_update(Some(b"old-binary-v1"), &e),
+            "differs → needs update"
+        );
         assert!(!needs_update(Some(v2), &e), "identical → up to date");
     }
 
@@ -419,7 +424,10 @@ mod tests {
         assert_eq!(staged, bundle.join("bin/sidle.new"));
         assert_eq!(std::fs::read(&staged).unwrap(), b"staged-v2");
         // Running binary untouched — the swap happens later, in the launcher.
-        assert_eq!(std::fs::read(bundle.join("bin/sidle")).unwrap(), b"running-v1");
+        assert_eq!(
+            std::fs::read(bundle.join("bin/sidle")).unwrap(),
+            b"running-v1"
+        );
         // The fixed-name temp was renamed away, not left behind.
         assert!(!bundle.join("bin/sidle.download").exists());
 

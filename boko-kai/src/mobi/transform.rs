@@ -407,8 +407,8 @@ pub fn inline_svg_flows(
                 .position(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'/' || b == b'>')
                 .unwrap_or(html.len() - tag_body);
         let tag_name = &html[tag_body..tag_name_end];
-        let is_img = tag_name.eq_ignore_ascii_case(b"img")
-            || tag_name.eq_ignore_ascii_case(b"image");
+        let is_img =
+            tag_name.eq_ignore_ascii_case(b"img") || tag_name.eq_ignore_ascii_case(b"image");
 
         // Find the closing `>` of this tag.
         let Some(rel_end) = memchr::memchr(b'>', &html[tag_start..]) else {
@@ -563,10 +563,9 @@ pub fn ensure_html_lang_dual(html: &[u8], default_lang: &str) -> Vec<u8> {
         (Some(_), Some(_)) => return html.to_vec(),
         (Some(l), None) => (None, Some(l)),
         (None, Some(x)) => (Some(x), None),
-        (None, None) if !default_lang.is_empty() => (
-            Some(default_lang.as_bytes()),
-            Some(default_lang.as_bytes()),
-        ),
+        (None, None) if !default_lang.is_empty() => {
+            (Some(default_lang.as_bytes()), Some(default_lang.as_bytes()))
+        }
         (None, None) => return html.to_vec(),
     };
 
@@ -923,7 +922,10 @@ mod tests {
         );
         let out = strip_root_escaping_links(head.as_bytes());
         let s = String::from_utf8_lossy(&out);
-        assert!(!s.contains("a00301_h.css"), "escaping <link> must be dropped");
+        assert!(
+            !s.contains("a00301_h.css"),
+            "escaping <link> must be dropped"
+        );
         assert!(!s.contains(".."), "no `..` href should survive");
         // Valid sibling-relative stylesheet links are untouched.
         assert!(s.contains("styles/style0000.css"));

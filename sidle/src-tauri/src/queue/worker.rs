@@ -20,8 +20,8 @@ use crate::library::import::{
     write_bytes_atomic,
 };
 use crate::library::kfx_cover;
-use crate::library::pdf_geom;
 use crate::library::paths::format_basename;
+use crate::library::pdf_geom;
 use crate::queue::{emit_progress, emit_status};
 use crate::state::DbHandle;
 
@@ -120,9 +120,7 @@ pub async fn run_job(
                     Some(bytes) => {
                         let out = paths.cover(&book.sha256, "jpg");
                         if let Err(e) = std::fs::write(&out, &bytes) {
-                            eprintln!(
-                                "[sidle/queue] book {book_id} color cover write failed: {e}"
-                            );
+                            eprintln!("[sidle/queue] book {book_id} color cover write failed: {e}");
                         } else {
                             // If the worker had just written a grayscale
                             // `cover.<otherext>` (rare — typically the
@@ -174,9 +172,8 @@ pub async fn run_job(
                                 match kfx_cover::replace_cover(Path::new(kfx), &bytes) {
                                     Ok(new_sha) => {
                                         let conn = db.lock().await;
-                                        let _ = db::set_kfx_path_and_sha(
-                                            &conn, book_id, kfx, &new_sha,
-                                        );
+                                        let _ =
+                                            db::set_kfx_path_and_sha(&conn, book_id, kfx, &new_sha);
                                         drop(conn);
                                         eprintln!(
                                             "[sidle/queue] book {book_id} color cover \
@@ -214,12 +211,7 @@ pub async fn run_job(
             // (still None) and re-import wouldn't link back.
             match sha256_of_file(kfx) {
                 Ok(sha) => {
-                    let _ = db::set_kfx_path_and_sha(
-                        &conn,
-                        book_id,
-                        &kfx.to_string_lossy(),
-                        &sha,
-                    );
+                    let _ = db::set_kfx_path_and_sha(&conn, book_id, &kfx.to_string_lossy(), &sha);
                 }
                 Err(e) => {
                     eprintln!(
@@ -538,7 +530,10 @@ fn convert_pdf_to_kfx(
     let kfx_sha = sha256_of_bytes(&kfx);
     let geom = pdf_geom::compute(&kfx);
     if let Err(e) = pdf_geom::write_sidecar(paths, &book.sha256, &kfx_sha, &geom) {
-        eprintln!("[sidle/queue] book {} pdf geom cache: skipped ({e:#})", book.id);
+        eprintln!(
+            "[sidle/queue] book {} pdf geom cache: skipped ({e:#})",
+            book.id
+        );
     } else {
         eprintln!(
             "[sidle/queue] book {} pdf geom cache: {} pages",
@@ -671,11 +666,14 @@ fn book_metadata_override(source: &boko::Metadata, book: &BookRow) -> boko::Meta
     }
     m.publisher = book.publisher.clone();
     m.date = book.published_at.clone();
-    m.collection = book.series_name.clone().map(|name| boko::model::CollectionInfo {
-        name,
-        collection_type: Some("series".to_string()),
-        position: book.series_index,
-    });
+    m.collection = book
+        .series_name
+        .clone()
+        .map(|name| boko::model::CollectionInfo {
+            name,
+            collection_type: Some("series".to_string()),
+            position: book.series_index,
+        });
     m
 }
 
@@ -684,9 +682,10 @@ fn book_metadata_override(source: &boko::Metadata, book: &BookRow) -> boko::Meta
 /// the stem and only re-derive from metadata if the stem is missing or empty.
 fn derived_basename(book: &BookRow, source: &Path) -> String {
     if let Some(stem) = source.file_stem().and_then(|s| s.to_str())
-        && !stem.is_empty() {
-            return stem.to_string();
-        }
+        && !stem.is_empty()
+    {
+        return stem.to_string();
+    }
     let authors = crate::library::authors::split_display(&book.author);
     format_basename(&authors, &book.title, None)
 }
@@ -749,7 +748,10 @@ mod tests {
 
         // Edited fields take the DB value.
         assert_eq!(m.title, "New Title");
-        assert_eq!(m.authors, vec!["Ann Author".to_string(), "Bob Writer".to_string()]);
+        assert_eq!(
+            m.authors,
+            vec!["Ann Author".to_string(), "Bob Writer".to_string()]
+        );
         assert_eq!(m.language, "en");
         assert_eq!(m.publisher.as_deref(), Some("New Press"));
         assert_eq!(m.date.as_deref(), Some("2021"));
@@ -780,4 +782,3 @@ mod tests {
         assert!(!is_jpeg(&[]));
     }
 }
-

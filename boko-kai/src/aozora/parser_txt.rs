@@ -199,16 +199,16 @@ static INDENT_END_RE: LazyLock<Regex> =
 static BLOCK_START_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"［＃ここから(横組み|ゴシック体|斜体|破線罫囲み|破線枠囲み|二重罫囲み|二重枠囲み|罫囲み|枠囲み)］").unwrap()
 });
-static BLOCK_END_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"［＃ここで(横組み|ゴシック体|斜体|[^］]*囲み)終わり］").unwrap()
-});
+static BLOCK_END_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"［＃ここで(横組み|ゴシック体|斜体|[^］]*囲み)終わり］").unwrap());
 /// `字詰め` (characters-per-line) block markers, e.g. `［＃ここから３５字詰め］`
 /// / `［＃ここで字詰め終わり］`. A fixed line length is a print-layout concept
 /// with no equivalent in reflowable text, so these carry no style — but they
 /// must be *consumed* as no-ops. Left to fall through, the stripped-empty line
 /// emitted a stray empty `<p>`.
-static JIZUME_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"［＃ここから[０-９0-9]+字詰め］|［＃ここで字詰め終わり］").unwrap());
+static JIZUME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"［＃ここから[０-９0-9]+字詰め］|［＃ここで字詰め終わり］").unwrap()
+});
 static PAGE_BREAK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"［＃(改ページ|改丁|ページの左右中央)］").unwrap());
 static PAGE_BREAK_LINE_ONLY_RE: LazyLock<Regex> =
@@ -284,7 +284,11 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
         if let Some(cls) = block_style_class(name) {
             if is_box_class(cls) {
                 close_open_boxes(state); // no nesting; flush any prior box
-                let indent = if state.indent_level > 0 { "indent " } else { "" };
+                let indent = if state.indent_level > 0 {
+                    "indent "
+                } else {
+                    ""
+                };
                 state
                     .html
                     .push_str(&format!("<p class=\"{}{}\">", indent, cls));
@@ -350,7 +354,9 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
             text: plain,
         });
         let inner = convert_aozora_line(&h_text, &mut state.referenced_images);
-        state.html.push_str(&format!("<h2 id=\"{}\">{}</h2>\n", id, inner));
+        state
+            .html
+            .push_str(&format!("<h2 id=\"{}\">{}</h2>\n", id, inner));
         return;
     }
     if let Some(caps) = HEADING_NAKAMIDASHI_RE.captures(&raw) {
@@ -365,7 +371,9 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
             text: plain,
         });
         let inner = convert_aozora_line(&h_text, &mut state.referenced_images);
-        state.html.push_str(&format!("<h3 id=\"{}\">{}</h3>\n", id, inner));
+        state
+            .html
+            .push_str(&format!("<h3 id=\"{}\">{}</h3>\n", id, inner));
         return;
     }
     if let Some(caps) = HEADING_KOMIDASHI_RE.captures(&raw) {
@@ -464,7 +472,9 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
         format!(r#" class="{}""#, classes.join(" "))
     };
     let inner = convert_aozora_line(&raw, &mut state.referenced_images);
-    state.html.push_str(&format!("<p{}>{}</p>\n", p_attr, inner));
+    state
+        .html
+        .push_str(&format!("<p{}>{}</p>\n", p_attr, inner));
 }
 
 fn strip_editorial_notes_for_heading(s: &str) -> String {
@@ -474,8 +484,7 @@ fn strip_editorial_notes_for_heading(s: &str) -> String {
 /// Plain-text version of a heading: ruby + explicit-marker `｜` removed.
 /// Mirrors the JS `replace(/《[^》]*》/g, '').replace(/｜/g, '')`.
 fn plain_text_for_heading(s: &str) -> String {
-    static RUBY_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"《[^》]*》").unwrap());
+    static RUBY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"《[^》]*》").unwrap());
     RUBY_RE.replace_all(s, "").replace('｜', "")
 }
 
@@ -499,17 +508,13 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
 
     if has_anno {
         // Image refs: ［＃description（filename、dims）入る］
-        static IMG_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"［＃([^（］]*)（([^、]+)、[^）]*）入る］").unwrap()
-        });
+        static IMG_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"［＃([^（］]*)（([^、]+)、[^）]*）入る］").unwrap());
         s = re_replace_cow(&IMG_RE, s, |caps| {
             let alt = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
             let filename = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             images.push(filename.to_string());
-            format!(
-                r#"<img src="../images/{}" alt="{}"/>"#,
-                filename, alt
-            )
+            format!(r#"<img src="../images/{}" alt="{}"/>"#, filename, alt)
         });
     }
 
@@ -525,10 +530,8 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
         });
         // Ruby on bare CJK runs: kanji《reading》
         static RUBY_CJK_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(
-                r"([\u{4E00}-\u{9FFF}\u{3400}-\u{4DBF}\u{F900}-\u{FAFF}]+)《([^》]+)》",
-            )
-            .unwrap()
+            Regex::new(r"([\u{4E00}-\u{9FFF}\u{3400}-\u{4DBF}\u{F900}-\u{FAFF}]+)《([^》]+)》")
+                .unwrap()
         });
         s = re_replace_cow(&RUBY_CJK_RE, s, |caps| {
             format!(
@@ -556,26 +559,21 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
 
         // 罫囲み / 枠囲み — two name forms map to the same class.
         static FRAME_PLAIN_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"［＃(?:罫囲み|枠囲み)］([^［]*)［＃(?:罫囲み|枠囲み)終わり］")
-                .unwrap()
+            Regex::new(r"［＃(?:罫囲み|枠囲み)］([^［]*)［＃(?:罫囲み|枠囲み)終わり］").unwrap()
         });
         s = re_replace_cow(&FRAME_PLAIN_RE, s, |caps| {
             format!(r#"<span class="keigakomi">{}</span>"#, &caps[1])
         });
         static FRAME_DASHED_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(
-                r"［＃破線(?:罫囲み|枠囲み)］([^［]*)［＃破線(?:罫囲み|枠囲み)終わり］",
-            )
-            .unwrap()
+            Regex::new(r"［＃破線(?:罫囲み|枠囲み)］([^［]*)［＃破線(?:罫囲み|枠囲み)終わり］")
+                .unwrap()
         });
         s = re_replace_cow(&FRAME_DASHED_RE, s, |caps| {
             format!(r#"<span class="keigakomi-dashed">{}</span>"#, &caps[1])
         });
         static FRAME_DOUBLE_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(
-                r"［＃二重(?:罫囲み|枠囲み)］([^［]*)［＃二重(?:罫囲み|枠囲み)終わり］",
-            )
-            .unwrap()
+            Regex::new(r"［＃二重(?:罫囲み|枠囲み)］([^［]*)［＃二重(?:罫囲み|枠囲み)終わり］")
+                .unwrap()
         });
         s = re_replace_cow(&FRAME_DOUBLE_RE, s, |caps| {
             format!(r#"<span class="keigakomi-double">{}</span>"#, &caps[1])
@@ -583,8 +581,7 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
 
         // 返り点 (kanbun reading marks)
         static KAERITEN_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"［＃(返り点)］([^［]*)［＃\u{8FD4}\u{308A}\u{70B9}終わり］")
-                .unwrap()
+            Regex::new(r"［＃(返り点)］([^［]*)［＃\u{8FD4}\u{308A}\u{70B9}終わり］").unwrap()
         });
         s = re_replace_cow(&KAERITEN_RE, s, |caps| {
             format!(r#"<sup class="kaeriten">{}</sup>"#, &caps[2])
@@ -592,8 +589,7 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
 
         // Font size: ［＃N段階大きな文字］...
         static BIGGER_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"［＃([０-９0-9]+)段階大きな文字］([^［]*)［＃大きな文字終わり］")
-                .unwrap()
+            Regex::new(r"［＃([０-９0-9]+)段階大きな文字］([^［]*)［＃大きな文字終わり］").unwrap()
         });
         s = re_replace_cow(&BIGGER_RE, s, |caps| {
             let n = parse_zenkaku_int(&caps[1]).unwrap_or(1);
@@ -601,8 +597,7 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
             format!(r#"<span style="font-size:{}em">{}</span>"#, em, &caps[2])
         });
         static SMALLER_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"［＃([０-９0-9]+)段階小さな文字］([^［]*)［＃小さな文字終わり］")
-                .unwrap()
+            Regex::new(r"［＃([０-９0-9]+)段階小さな文字］([^［]*)［＃小さな文字終わり］").unwrap()
         });
         s = re_replace_cow(&SMALLER_RE, s, |caps| {
             let n = parse_zenkaku_int(&caps[1]).unwrap_or(1);
@@ -619,9 +614,8 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
         }
 
         // Inline notes
-        static WARIRYUU_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"［＃割り注］([^［]*)［＃割り注終わり］").unwrap()
-        });
+        static WARIRYUU_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"［＃割り注］([^［]*)［＃割り注終わり］").unwrap());
         s = re_replace_cow(&WARIRYUU_RE, s, |caps| {
             format!("<small>（{}）</small>", &caps[1])
         });
@@ -629,8 +623,7 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
 
     if has_gaiji {
         // Gaiji: ※［＃description、code］ → keep ※
-        static GAIJI_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"※［＃[^］]*］").unwrap());
+        static GAIJI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"※［＃[^］]*］").unwrap());
         s = match GAIJI_RE.replace_all(&s, "※") {
             Cow::Borrowed(_) => s,
             Cow::Owned(o) => Cow::Owned(o),
@@ -693,7 +686,10 @@ fn convert_aozora_line(line: &str, images: &mut Vec<String>) -> String {
 /// Borrow-first XML escape. Returns the input unchanged when it contains
 /// no XML-meta characters — the common case for Japanese body text.
 fn escape_xml_lazy(s: &str) -> Cow<'_, str> {
-    if !s.bytes().any(|b| matches!(b, b'&' | b'<' | b'>' | b'"' | b'\'')) {
+    if !s
+        .bytes()
+        .any(|b| matches!(b, b'&' | b'<' | b'>' | b'"' | b'\''))
+    {
         return Cow::Borrowed(s);
     }
     let mut out = String::with_capacity(s.len() + 16);
@@ -769,7 +765,11 @@ static PAIRED_FORMS: LazyLock<Vec<PairedForm>> = LazyLock::new(|| {
         paired_form("丸傍点", r#"<em class="circle">"#, "</em>"),
         paired_form("傍点", r#"<em class="sesame">"#, "</em>"),
         // underline / strikethrough variants — long names first
-        paired_form("二重取消線", r#"<span class="strikethrough-double">"#, "</span>"),
+        paired_form(
+            "二重取消線",
+            r#"<span class="strikethrough-double">"#,
+            "</span>",
+        ),
         paired_form("取消線", r#"<span class="strikethrough">"#, "</span>"),
         paired_form("二重傍線", r#"<span class="underline-double">"#, "</span>"),
         paired_form("傍線", r#"<span class="underline">"#, "</span>"),
@@ -787,7 +787,6 @@ static PAIRED_FORMS: LazyLock<Vec<PairedForm>> = LazyLock::new(|| {
         paired_form("行左小書き", "<sub>", "</sub>"),
     ]
 });
-
 
 fn parse_zenkaku_int(s: &str) -> Option<u32> {
     // Convert full-width digits to half-width, then parse.
@@ -845,12 +844,7 @@ fn apply_postfix_annotations(s: &str) -> String {
         .captures_iter(s)
         .map(|caps| {
             let m = caps.get(0).unwrap();
-            (
-                m.start(),
-                m.end(),
-                caps[1].to_string(),
-                caps[2].to_string(),
-            )
+            (m.start(), m.end(), caps[1].to_string(), caps[2].to_string())
         })
         .collect();
 
@@ -974,20 +968,34 @@ mod tests {
             body.contains(r#"<p class="keigakomi">一行目<br/>二行目<br/>三行目</p>"#),
             "body:\n{body}"
         );
-        assert_eq!(body.matches(r#"class="keigakomi""#).count(), 1, "body:\n{body}");
-        assert!(!body.contains("<div"), "box must not be a div; body:\n{body}");
+        assert_eq!(
+            body.matches(r#"class="keigakomi""#).count(),
+            1,
+            "body:\n{body}"
+        );
+        assert!(
+            !body.contains("<div"),
+            "box must not be a div; body:\n{body}"
+        );
     }
 
     #[test]
     fn jizume_markers_leave_no_empty_paragraph() {
         // `字詰め` (chars-per-line) has no reflowable equivalent; the markers
         // must be consumed, not left to emit a stray empty <p>.
-        let src = "T\nA\n\n-------\n前\n［＃ここから３５字詰め］\n本文\n［＃ここで字詰め終わり］\n後\n";
+        let src =
+            "T\nA\n\n-------\n前\n［＃ここから３５字詰め］\n本文\n［＃ここで字詰め終わり］\n後\n";
         let doc = parse_txt(src);
         let body = &doc.body_xhtml;
         assert!(!body.contains("<p></p>"), "no empty <p>; body:\n{body}");
-        assert!(!body.contains(r#"<p class="indent"></p>"#), "no empty indent <p>; body:\n{body}");
-        assert!(!body.contains("字詰"), "marker text stripped; body:\n{body}");
+        assert!(
+            !body.contains(r#"<p class="indent"></p>"#),
+            "no empty indent <p>; body:\n{body}"
+        );
+        assert!(
+            !body.contains("字詰"),
+            "marker text stripped; body:\n{body}"
+        );
         assert!(body.contains("<p>本文</p>"), "body:\n{body}");
     }
 
@@ -1000,10 +1008,19 @@ mod tests {
         let doc = parse_txt(src);
         let body = &doc.body_xhtml;
         let box_open = body.find(r#"<p class="keigakomi">"#).expect("box opened");
-        let box_close = body[box_open..].find("</p>").map(|i| box_open + i).expect("box closed");
+        let box_close = body[box_open..]
+            .find("</p>")
+            .map(|i| box_open + i)
+            .expect("box closed");
         let h_start = body.find("<h3").expect("heading present");
-        assert!(box_close < h_start, "heading after box close; body:\n{body}");
-        assert!(!body[box_open..box_close].contains("<h3"), "heading not inside box; body:\n{body}");
+        assert!(
+            box_close < h_start,
+            "heading after box close; body:\n{body}"
+        );
+        assert!(
+            !body[box_open..box_close].contains("<h3"),
+            "heading not inside box; body:\n{body}"
+        );
     }
 
     #[test]
@@ -1033,11 +1050,16 @@ mod tests {
         // 中見出し (→ <h3>) and emit a TOC entry, not drop it to a plain <p>.
         let src = "T\nA\n\n-------\n［＃５字下げ］二十二　「八月九日　宿命の日」［＃「二十二　「八月九日　宿命の日」」は中見出し］\n本文\n";
         let doc = parse_txt(src);
-        assert_eq!(doc.toc.len(), 1, "nested-quote heading must produce a TOC entry");
+        assert_eq!(
+            doc.toc.len(),
+            1,
+            "nested-quote heading must produce a TOC entry"
+        );
         assert_eq!(doc.toc[0].level, 3);
         assert_eq!(doc.toc[0].text, "二十二　「八月九日　宿命の日」");
         assert!(
-            doc.body_xhtml.contains(r#"<h3 id="h1">二十二　「八月九日　宿命の日」</h3>"#),
+            doc.body_xhtml
+                .contains(r#"<h3 id="h1">二十二　「八月九日　宿命の日」</h3>"#),
             "expected <h3> heading, got body:\n{}",
             doc.body_xhtml
         );

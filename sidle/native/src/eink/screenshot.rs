@@ -50,7 +50,12 @@ pub fn capture(fb: &mut Framebuffer) -> Result<PathBuf> {
     // White flash → brief hold → restore. send_update widens to full rows, so a
     // full-screen rect repaints everything; GC16 is the clean full refresh.
     let (w, h) = (fb.var.xres, fb.var.yres);
-    let full = MxcfbRect { top: 0, left: 0, width: w, height: h };
+    let full = MxcfbRect {
+        top: 0,
+        left: 0,
+        width: w,
+        height: h,
+    };
     fb.fill_rect(0, 0, w, h, 0xFF);
     let _ = fb.send_update(full, WAVEFORM_MODE_GC16);
     std::thread::sleep(Duration::from_millis(FLASH_MS));

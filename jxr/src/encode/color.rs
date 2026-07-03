@@ -19,7 +19,7 @@
 
 use super::bitstream::BitWriter;
 use super::entropy::write_huff;
-use super::quant::{quantize, QpSet};
+use super::quant::{QpSet, quantize};
 use super::{codestream, coeff, container, hp, transform};
 use crate::decode::consts::*;
 use crate::decode::decoder::{ceil_div2, floor_div2};
@@ -133,7 +133,13 @@ pub fn downsample_v(src: &[i32], w: usize, h: usize) -> Vec<i32> {
         let r3 = reflect(c + 1, m) * w;
         let r4 = reflect(c + 2, m) * w;
         for x in 0..w {
-            out[y * w + x] = df_odd(src[r0 + x], src[r1 + x], src[r2 + x], src[r3 + x], src[r4 + x]);
+            out[y * w + x] = df_odd(
+                src[r0 + x],
+                src[r1 + x],
+                src[r2 + x],
+                src[r3 + x],
+                src[r4 + x],
+            );
         }
     }
     out
@@ -199,7 +205,19 @@ impl ColorPlane {
     /// initialize the YUV adaptive entropy state.
     pub(super) fn new(r: &[i32], g: &[i32], b: &[i32], w: u32, h: u32, qp: QpSet) -> Self {
         Self::new_fmt(
-            r, g, b, w, h, qp, INT_YUV444, ALL_BANDS, false, (0, 0), NO_OVERLAP_FILTERING, &[], &[],
+            r,
+            g,
+            b,
+            w,
+            h,
+            qp,
+            INT_YUV444,
+            ALL_BANDS,
+            false,
+            (0, 0),
+            NO_OVERLAP_FILTERING,
+            &[],
+            &[],
             None,
         )
     }
@@ -251,19 +269,32 @@ impl ColorPlane {
             .iter()
             .map(|t| TileFactors {
                 dc: std::array::from_fn(|c| csf(t.dc.0[c], c, scaled, DC)),
-                lp: t.lp.iter().map(|q| std::array::from_fn(|c| csf(q.0[c], c, scaled, LP))).collect(),
-                hp: t.hp.iter().map(|q| std::array::from_fn(|c| csf(q.0[c], c, scaled, HP))).collect(),
+                lp: t
+                    .lp
+                    .iter()
+                    .map(|q| std::array::from_fn(|c| csf(q.0[c], c, scaled, LP)))
+                    .collect(),
+                hp: t
+                    .hp
+                    .iter()
+                    .map(|q| std::array::from_fn(|c| csf(q.0[c], c, scaled, HP)))
+                    .collect(),
             })
             .collect();
         let (num_lp_qps, num_hp_qps) = (plan.num_lp_qps(), plan.num_hp_qps());
         debug_assert!(
-            plan.tiles.iter().all(|t| t.lp.len() == num_lp_qps && t.hp.len() == num_hp_qps),
+            plan.tiles
+                .iter()
+                .all(|t| t.lp.len() == num_lp_qps && t.hp.len() == num_hp_qps),
             "every tile must declare the same LP/HP set counts"
         );
         debug_assert!(num_lp_qps >= 1 && num_lp_qps <= 16 && num_hp_qps >= 1 && num_hp_qps <= 16);
         let (wu, hu) = (w as usize, h as usize);
         let (top, left) = (window.0 as usize, window.1 as usize);
-        let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
+        let (pw, ph) = (
+            (wu + left).next_multiple_of(16),
+            (hu + top).next_multiple_of(16),
+        );
         let (mbw, mbh) = (pw / 16, ph / 16);
 
         // Pad the pre-bias RGB ([`super::convert`] already centered/shifted
@@ -276,7 +307,11 @@ impl ColorPlane {
             pad_plane(g, wu, hu, pw, ph, top, left),
             pad_plane(b, wu, hu, pw, ph, top, left),
         );
-        let mut yuv = [vec![0i32; pw * ph], vec![0i32; pw * ph], vec![0i32; pw * ph]];
+        let mut yuv = [
+            vec![0i32; pw * ph],
+            vec![0i32; pw * ph],
+            vec![0i32; pw * ph],
+        ];
         for i in 0..pw * ph {
             let (y, u, v) = rgb_to_yuv444(rp[i], gp[i], bp[i]);
             yuv[0][i] = y;
@@ -327,7 +362,11 @@ impl ColorPlane {
             for (comp, plane) in yuv.iter_mut().enumerate() {
                 let chroma_42x = comp > 0 && fmt != INT_YUV444;
                 let dx = if chroma_42x { 2 } else { 1 };
-                let dy = if chroma_42x && fmt == INT_YUV420 { 2 } else { 1 };
+                let dy = if chroma_42x && fmt == INT_YUV420 {
+                    2
+                } else {
+                    1
+                };
                 let tile_x: Vec<usize> = left_mb.iter().map(|&m| m * 16 / dx).collect();
                 let tile_y: Vec<usize> = top_mb.iter().map(|&m| m * 16 / dy).collect();
                 let stride = if chroma_42x { cw } else { pw };
@@ -363,8 +402,7 @@ impl ColorPlane {
                         let mut samples = [0i32; 64];
                         for py in 0..8 {
                             for px in 0..8 {
-                                samples[py * 8 + px] =
-                                    plane[(mby * 8 + py) * cw + (mbx * 8 + px)];
+                                samples[py * 8 + px] = plane[(mby * 8 + py) * cw + (mbx * 8 + px)];
                             }
                         }
                         buf_grid[mbx][mby][comp][..64]
@@ -374,8 +412,7 @@ impl ColorPlane {
                         let mut samples = [0i32; 128];
                         for py in 0..16 {
                             for px in 0..8 {
-                                samples[py * 8 + px] =
-                                    plane[(mby * 16 + py) * cw + (mbx * 8 + px)];
+                                samples[py * 8 + px] = plane[(mby * 16 + py) * cw + (mbx * 8 + px)];
                             }
                         }
                         buf_grid[mbx][mby][comp][..128]
@@ -401,7 +438,10 @@ impl ColorPlane {
             }
             for comp in 0..3 {
                 let chroma_42x = comp > 0 && fmt != INT_YUV444;
-                let mut g = CompDc { grid: &mut buf_grid, comp };
+                let mut g = CompDc {
+                    grid: &mut buf_grid,
+                    comp,
+                };
                 if chroma_42x {
                     super::overlap::dc_pre_filter_chroma(
                         &mut g,
@@ -423,9 +463,14 @@ impl ColorPlane {
             if plan.tiles.len() == 1 {
                 return 0;
             }
-            let tx = left_mb[1..].iter().position(|&b| mbx < b).unwrap_or(ncols - 1);
-            let ty =
-                top_mb[1..].iter().position(|&b| mby < b).unwrap_or(top_mb.len() - 2);
+            let tx = left_mb[1..]
+                .iter()
+                .position(|&b| mbx < b)
+                .unwrap_or(ncols - 1);
+            let ty = top_mb[1..]
+                .iter()
+                .position(|&b| mby < b)
+                .unwrap_or(top_mb.len() - 2);
             ty * ncols + tx
         };
         debug_assert!(
@@ -516,7 +561,11 @@ impl ColorPlane {
         let mut lp_ind1 = [AdaptiveVLC::default(), AdaptiveVLC::default()];
         let mut lp_abs0 = AdaptiveVLC::default();
         let mut lp_abs1 = AdaptiveVLC::default();
-        for t in lp_first.iter_mut().chain(lp_ind0.iter_mut()).chain(lp_ind1.iter_mut()) {
+        for t in lp_first
+            .iter_mut()
+            .chain(lp_ind0.iter_mut())
+            .chain(lp_ind1.iter_mut())
+        {
             t.init_table2();
         }
         lp_abs0.init_table1();
@@ -592,11 +641,17 @@ impl ColorPlane {
     /// YUV444 readers do.
     /// This MB's LP QP-set index (0 when no DQUANT map).
     fn lp_idx_at(&self, mbx: usize, mby: usize) -> usize {
-        self.lp_idx_map.get(mby * self.mbw + mbx).copied().unwrap_or(0) as usize
+        self.lp_idx_map
+            .get(mby * self.mbw + mbx)
+            .copied()
+            .unwrap_or(0) as usize
     }
 
     fn hp_idx_at(&self, mbx: usize, mby: usize) -> usize {
-        self.hp_idx_map.get(mby * self.mbw + mbx).copied().unwrap_or(0) as usize
+        self.hp_idx_map
+            .get(mby * self.mbw + mbx)
+            .copied()
+            .unwrap_or(0) as usize
     }
 
     pub(super) fn encode_mb(&mut self, sink: &mut codestream::Sink, mbx: usize, mby: usize) {
@@ -616,7 +671,11 @@ impl ColorPlane {
             codestream::write_qp_index(sink.hp(), self.hp_idx_at(mbx, mby), self.num_hp_qps);
         }
         let dc_of = |mx: usize, my: usize| {
-            [self.dclp[mx][my][0][0], self.dclp[mx][my][1][0], self.dclp[mx][my][2][0]]
+            [
+                self.dclp[mx][my][0][0],
+                self.dclp[mx][my][1][0],
+                self.dclp[mx][my][2][0],
+            ]
         };
 
         // ---------- DC ----------
@@ -636,11 +695,13 @@ impl ColorPlane {
         } else if is_top {
             (PREDICT_FROM_LEFT, dc_of(mbx - 1, mby))
         } else {
-            let (l, t, tl) = (dc_of(mbx - 1, mby), dc_of(mbx, mby - 1), dc_of(mbx - 1, mby - 1));
-            let sh =
-                (tl[0] - l[0]).abs() * i_scale + (tl[1] - l[1]).abs() + (tl[2] - l[2]).abs();
-            let sv =
-                (tl[0] - t[0]).abs() * i_scale + (tl[1] - t[1]).abs() + (tl[2] - t[2]).abs();
+            let (l, t, tl) = (
+                dc_of(mbx - 1, mby),
+                dc_of(mbx, mby - 1),
+                dc_of(mbx - 1, mby - 1),
+            );
+            let sh = (tl[0] - l[0]).abs() * i_scale + (tl[1] - l[1]).abs() + (tl[2] - l[2]).abs();
+            let sv = (tl[0] - t[0]).abs() * i_scale + (tl[1] - t[1]).abs() + (tl[2] - t[2]).abs();
             if sh * 4 < sv {
                 (PREDICT_FROM_TOP, t)
             } else if sv * 4 < sh {
@@ -669,7 +730,11 @@ impl ColorPlane {
         for comp in 0..3 {
             let chroma = chroma_component(comp);
             let mb = self.model_dc.m_bits[chroma];
-            let abs_vlc = if chroma == 0 { &mut self.abs_dc_lum } else { &mut self.abs_dc_chr };
+            let abs_vlc = if chroma == 0 {
+                &mut self.abs_dc_lum
+            } else {
+                &mut self.abs_dc_chr
+            };
             let abs_table = tables::abs_level_index(abs_vlc.table_index as usize);
             let idx = coeff::encode_dc_residual(bw, dc_res[comp], mb, babs[comp], abs_table);
             if babs[comp] {
@@ -831,8 +896,7 @@ impl ColorPlane {
         } else {
             let jmax = self.jmax_ch;
             let cbp_luma = (1..16).any(|j| coarse[0][j] != 0);
-            let cbp_chroma =
-                (1..jmax).any(|j| coarse[1][j] != 0 || coarse[2][j] != 0);
+            let cbp_chroma = (1..jmax).any(|j| coarse[1][j] != 0 || coarse[2][j] != 0);
             let i_cbplp = (cbp_luma as i32) | ((cbp_chroma as i32) << 1);
             let i_max = 2 * 4 - 5; // = 3 (iFullPlanes = 2, Table 53)
             if self.count_zero_cbplp <= 0 || self.count_max_cbplp < 0 {
@@ -887,8 +951,11 @@ impl ColorPlane {
             // component (k&1)+1, coefficient REMAP_ARR[(k>>1)+offset] in our
             // transposed storage. No adaptive-scan participation.
             const REMAP_ARR: [usize; 7] = [4, 1, 2, 3, 5, 6, 7];
-            let (offset, count, i_location) =
-                if self.fmt == INT_YUV420 { (1usize, 6usize, 10usize) } else { (0, 14, 2) };
+            let (offset, count, i_location) = if self.fmt == INT_YUV420 {
+                (1usize, 6usize, 10usize)
+            } else {
+                (0, 14, 2)
+            };
             if cbp_chroma {
                 let mut pairs: Vec<(u32, i32)> = Vec::new();
                 let mut run = 0u32;
@@ -943,8 +1010,16 @@ impl ColorPlane {
             self.hp_state.hor_scan.reset_totals();
             self.hp_state.ver_scan.reset_totals();
         }
-        let cbphp_left = if is_left { [0; 3] } else { self.cbphp_grid[mbx - 1][mby] };
-        let cbphp_top = if is_top { [0; 3] } else { self.cbphp_grid[mbx][mby - 1] };
+        let cbphp_left = if is_left {
+            [0; 3]
+        } else {
+            self.cbphp_grid[mbx - 1][mby]
+        };
+        let cbphp_top = if is_top {
+            [0; 3]
+        } else {
+            self.cbphp_grid[mbx][mby - 1]
+        };
         self.cbphp_grid[mbx][mby] = encode_color_hp_mb(
             sink,
             &mut self.hp_state,
@@ -1023,8 +1098,6 @@ pub fn encode_color(r: &[u8], g: &[u8], b: &[u8], w: u32, h: u32, qp: QpSet) -> 
     bw.align_to_byte();
     container::write_container(&bw.finish(), w, h, &container::pixel_format::RGB24)
 }
-
-
 
 /// Window-margins tuple (top, left, bottom, right) for an image placed at
 /// `(top, left)` inside its minimal 16-aligned grid: bottom/right are the
@@ -1215,7 +1288,12 @@ pub fn encode_color_alpha(
     frequency: bool,
 ) -> Vec<u8> {
     let conv = super::convert::u8_prebias;
-    let (rp, gp, bp, ap) = (conv(r, scaled), conv(g, scaled), conv(b, scaled), conv(a, scaled));
+    let (rp, gp, bp, ap) = (
+        conv(r, scaled),
+        conv(g, scaled),
+        conv(b, scaled),
+        conv(a, scaled),
+    );
     let guid = if premultiplied {
         &container::pixel_format::PBGRA32
     } else {
@@ -1275,7 +1353,20 @@ pub(super) fn encode_color_alpha_prebias(
 ) -> Vec<u8> {
     let plan = super::quant::QpPlan::uniform(qp, chroma_qp);
     let mut primary = ColorPlane::new_fmt(
-        r, g, b, w, h, qp, fmt, ALL_BANDS, scaled, window, overlap, tiles.0, tiles.1, Some(&plan),
+        r,
+        g,
+        b,
+        w,
+        h,
+        qp,
+        fmt,
+        ALL_BANDS,
+        scaled,
+        window,
+        overlap,
+        tiles.0,
+        tiles.1,
+        Some(&plan),
     );
     let mut alpha = super::gray::YOnlyPlane::new(a, w, h, alpha_qp, window, overlap, tiles, scaled);
     let mut spec = codestream::ImageHeaderSpec::new(w, h, OUT_RGB);
@@ -1288,11 +1379,16 @@ pub(super) fn encode_color_alpha_prebias(
     spec.tile_cols_mb = tiles.0.to_vec();
     spec.tile_rows_mb = tiles.1.to_vec();
     let (mbw, mbh) = (primary.mbw, primary.mbh);
-    let mut pair = AlphaPair { primary: &mut primary, alpha: &mut alpha };
+    let mut pair = AlphaPair {
+        primary: &mut primary,
+        alpha: &mut alpha,
+    };
     let body = codestream::emit_codestream(
         &spec,
         |head| {
-            codestream::write_image_plane_header_yuv_plan(head, fmt, ALL_BANDS, &plan, scaled, depth);
+            codestream::write_image_plane_header_yuv_plan(
+                head, fmt, ALL_BANDS, &plan, scaled, depth,
+            );
             // Alpha image plane header: YONLY, own bands + QPs (JxrEncApp
             // analog `-Q`), same depth fields.
             codestream::write_image_plane_header_gray_bands(
@@ -1372,7 +1468,10 @@ pub(super) fn encode_yonly_prebias(
 ) -> Vec<u8> {
     let (wu, hu) = (w as usize, h as usize);
     let (top, left) = (window.0 as usize, window.1 as usize);
-    let (pw, ph) = ((wu + left).next_multiple_of(16), (hu + top).next_multiple_of(16));
+    let (pw, ph) = (
+        (wu + left).next_multiple_of(16),
+        (hu + top).next_multiple_of(16),
+    );
     let (rp, gp, bp) = (
         pad_plane(r, wu, hu, pw, ph, top, left),
         pad_plane(g, wu, hu, pw, ph, top, left),
@@ -1405,13 +1504,7 @@ pub(super) fn encode_yonly_prebias(
         &spec,
         |head| {
             codestream::write_image_plane_header_gray_bands(
-                head,
-                ALL_BANDS,
-                qp.dc,
-                qp.lp,
-                qp.hp,
-                scaled,
-                depth,
+                head, ALL_BANDS, qp.dc, qp.lp, qp.hp, scaled, depth,
             )
         },
         &codestream::classic_tile_headers(0),
@@ -1456,7 +1549,12 @@ impl ColorHpState {
             num_blk_cbphp: AdaptiveVLC::default(),
             cbphp_model: CBPHPModel::default(),
         };
-        for t in s.first.iter_mut().chain(s.ind0.iter_mut()).chain(s.ind1.iter_mut()) {
+        for t in s
+            .first
+            .iter_mut()
+            .chain(s.ind0.iter_mut())
+            .chain(s.ind1.iter_mut())
+        {
             t.init_table2();
         }
         s.abs0.init_table1();
@@ -1551,7 +1649,11 @@ fn encode_color_cbphp(
             (6, 1, 0xFF)
         };
         let neighbor = if is_left {
-            if is_top { 1 } else { (cbphp_top[comp] >> top_shift) & 1 }
+            if is_top {
+                1
+            } else {
+                (cbphp_top[comp] >> top_shift) & 1
+            }
         } else {
             (cbphp_left[comp] >> left_shift) & 1
         };
@@ -1581,7 +1683,11 @@ fn encode_color_cbphp(
         m.count_ones[cf] = (m.count_ones[cf] + n_orig - 3).clamp(-16, 15);
         m.count_zeroes[cf] = (m.count_zeroes[cf] + (16 - n_orig) - 3).clamp(-16, 15);
         m.cbphp_state[cf] = if m.count_ones[cf] < 0 {
-            if m.count_ones[cf] < m.count_zeroes[cf] { 1 } else { 2 }
+            if m.count_ones[cf] < m.count_zeroes[cf] {
+                1
+            } else {
+                2
+            }
         } else if m.count_zeroes[cf] < 0 {
             2
         } else {
@@ -1614,8 +1720,13 @@ fn encode_color_cbphp(
         }
     }
     let num_cbphp = num_ones(i_cbphp as u32) as i32;
-    write_huff(bw, tables::num_cbphp(st.num_cbphp.table_index as usize), num_cbphp);
-    st.num_cbphp.discrim_val1 += NUM_CBPHP_DELTA[st.num_cbphp.delta_table_index as usize][num_cbphp as usize];
+    write_huff(
+        bw,
+        tables::num_cbphp(st.num_cbphp.table_index as usize),
+        num_cbphp,
+    );
+    st.num_cbphp.discrim_val1 +=
+        NUM_CBPHP_DELTA[st.num_cbphp.delta_table_index as usize][num_cbphp as usize];
     write_cbphp_refine(bw, i_cbphp, num_cbphp);
 
     for b in 0..4 {
@@ -1637,7 +1748,11 @@ fn encode_color_cbphp(
         } else {
             base as i32 - 1 // luma-only present group ⇒ base ∈ 1..=5
         };
-        write_huff(bw, tables::num_blkcbphp2(st.num_blk_cbphp.table_index as usize), num_blk);
+        write_huff(
+            bw,
+            tables::num_blkcbphp2(st.num_blk_cbphp.table_index as usize),
+            num_blk,
+        );
         st.num_blk_cbphp.discrim_val1 +=
             NUM_BLK_CBPHP_DELTA2[st.num_blk_cbphp.delta_table_index as usize][num_blk as usize];
         if chroma_bits != 0 {
@@ -1753,8 +1868,11 @@ fn encode_color_hp_mb(
                     }
                 }
             } else {
-                let top_blks: &[usize] =
-                    if fmt == INT_YUV420 { &[2, 3] } else { &[2, 4, 6, 3, 5, 7] };
+                let top_blks: &[usize] = if fmt == INT_YUV420 {
+                    &[2, 3]
+                } else {
+                    &[2, 4, 6, 3, 5, 7]
+                };
                 for &blk in top_blks {
                     for &k in &[2usize, 10, 9] {
                         r[blk][k] = buf[blk * 16 + k] - buf[(blk - 2) * 16 + k];
@@ -1769,8 +1887,11 @@ fn encode_color_hp_mb(
                     }
                 }
             } else {
-                let left_blks: &[usize] =
-                    if fmt == INT_YUV420 { &[1, 3] } else { &[1, 3, 5, 7] };
+                let left_blks: &[usize] = if fmt == INT_YUV420 {
+                    &[1, 3]
+                } else {
+                    &[1, 3, 5, 7]
+                };
                 for &blk in left_blks {
                     for &k in &[1usize, 5, 6] {
                         r[blk][k] = buf[blk * 16 + k] - buf[(blk - 1) * 16 + k];
@@ -1798,7 +1919,16 @@ fn encode_color_hp_mb(
         mb_cbphp[comp] = cbp;
     }
 
-    encode_color_cbphp(sink.hp(), st, fmt, mb_cbphp, cbphp_left, cbphp_top, is_left, is_top);
+    encode_color_cbphp(
+        sink.hp(),
+        st,
+        fmt,
+        mb_cbphp,
+        cbphp_left,
+        cbphp_top,
+        is_left,
+        is_top,
+    );
 
     let mut lap = [0i32; 2];
     for comp in 0..3 {
@@ -1810,7 +1940,11 @@ fn encode_color_hp_mb(
         for k in 0..nblk {
             let blk = if nblk == 16 { I_HIER_SCAN_ORDER[k] } else { k };
             if cbp & 1 != 0 {
-                let scan = if mode == PREDICT_FROM_TOP { &mut st.ver_scan } else { &mut st.hor_scan };
+                let scan = if mode == PREDICT_FROM_TOP {
+                    &mut st.ver_scan
+                } else {
+                    &mut st.hor_scan
+                };
                 let mut pairs: Vec<(u32, i32)> = Vec::new();
                 let mut run = 0u32;
                 for i in 1..16usize {
@@ -1886,7 +2020,23 @@ fn encode_color_scaled(
     bands: u8,
     scaled: bool,
 ) -> Vec<u8> {
-    encode_color_options(r, g, b, w, h, qp, fmt, bands, scaled, 0, (0, 0), (&[], &[]), 0, false, None)
+    encode_color_options(
+        r,
+        g,
+        b,
+        w,
+        h,
+        qp,
+        fmt,
+        bands,
+        scaled,
+        0,
+        (0, 0),
+        (&[], &[]),
+        0,
+        false,
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -1985,15 +2135,15 @@ mod tests {
     #[test]
     fn forward_inverts_saturated_corners() {
         let corners = [
-            (127, -128, -128), // red
-            (-128, 127, -128), // green
-            (-128, -128, 127), // blue
-            (127, 127, -128),  // yellow
-            (127, -128, 127),  // magenta
-            (-128, 127, 127),  // cyan
-            (127, 127, 127),   // white
+            (127, -128, -128),  // red
+            (-128, 127, -128),  // green
+            (-128, -128, 127),  // blue
+            (127, 127, -128),   // yellow
+            (127, -128, 127),   // magenta
+            (-128, 127, 127),   // cyan
+            (127, 127, 127),    // white
             (-128, -128, -128), // black
-            (0, 0, 0),         // mid-gray
+            (0, 0, 0),          // mid-gray
         ];
         for &(r, g, b) in &corners {
             let (y, u, v) = rgb_to_yuv444(r, g, b);
@@ -2003,7 +2153,9 @@ mod tests {
 
     fn decode(jxr: &[u8]) -> crate::decode::decoder::DecodedImage {
         let c = crate::decode::container::parse(jxr).expect("container parse");
-        crate::decode::decoder::Decoder::new(c.image_data).decode().expect("decode")
+        crate::decode::decoder::Decoder::new(c.image_data)
+            .decode()
+            .expect("decode")
     }
 
     fn assert_rgb_exact(jxr: &[u8], w: usize, h: usize, expected: &[(u8, u8, u8)]) {
@@ -2012,7 +2164,11 @@ mod tests {
         assert_eq!(d.num_components, 3, "expected RGB");
         assert_eq!(d.output_clr_fmt, OUT_RGB);
         for i in 0..w * h {
-            let got = (d.image_plane[0][i], d.image_plane[1][i], d.image_plane[2][i]);
+            let got = (
+                d.image_plane[0][i],
+                d.image_plane[1][i],
+                d.image_plane[2][i],
+            );
             let (r, g, b) = expected[i];
             assert_eq!(got, (r as i32, g as i32, b as i32), "pixel {i}");
         }
@@ -2028,12 +2184,23 @@ mod tests {
     fn roundtrip_constant_color_42x_dconly() {
         for &fmt in &[INT_YUV420, INT_YUV422] {
             for &(w, h) in &[(16usize, 16usize), (48, 32), (17, 31), (64, 64)] {
-                for &(r, g, b) in
-                    &[(200u8, 50u8, 100u8), (0, 0, 0), (255, 255, 255), (128, 128, 128), (10, 200, 250)]
-                {
+                for &(r, g, b) in &[
+                    (200u8, 50u8, 100u8),
+                    (0, 0, 0),
+                    (255, 255, 255),
+                    (128, 128, 128),
+                    (10, 200, 250),
+                ] {
                     let (rp, gp, bp) = (vec![r; w * h], vec![g; w * h], vec![b; w * h]);
                     let jxr = encode_color_subsampled(
-                        &rp, &gp, &bp, w as u32, h as u32, QpSet::LOSSLESS, fmt, DCONLY,
+                        &rp,
+                        &gp,
+                        &bp,
+                        w as u32,
+                        h as u32,
+                        QpSet::LOSSLESS,
+                        fmt,
+                        DCONLY,
                     );
                     let expected = vec![(r, g, b); w * h];
                     assert_rgb_exact(&jxr, w, h, &expected);
@@ -2082,10 +2249,16 @@ mod tests {
                 }
                 // R=G=B ⇒ U=V=0 everywhere (constant chroma), Y = gray − 128.
                 let jxr = encode_color_subsampled(
-                    &gray, &gray, &gray, w as u32, h as u32, QpSet::LOSSLESS, fmt, NOHIGHPASS,
+                    &gray,
+                    &gray,
+                    &gray,
+                    w as u32,
+                    h as u32,
+                    QpSet::LOSSLESS,
+                    fmt,
+                    NOHIGHPASS,
                 );
-                let expected: Vec<(u8, u8, u8)> =
-                    gray.iter().map(|&v| (v, v, v)).collect();
+                let expected: Vec<(u8, u8, u8)> = gray.iter().map(|&v| (v, v, v)).collect();
                 assert_rgb_exact(&jxr, w, h, &expected);
             }
         }
@@ -2104,7 +2277,14 @@ mod tests {
                 let n = w * h;
                 let gray: Vec<u8> = (0..n).map(|_| r.byte()).collect();
                 let jxr = encode_color_subsampled(
-                    &gray, &gray, &gray, w as u32, h as u32, QpSet::LOSSLESS, fmt, ALL_BANDS,
+                    &gray,
+                    &gray,
+                    &gray,
+                    w as u32,
+                    h as u32,
+                    QpSet::LOSSLESS,
+                    fmt,
+                    ALL_BANDS,
                 );
                 let expected: Vec<(u8, u8, u8)> = gray.iter().map(|&v| (v, v, v)).collect();
                 assert_rgb_exact(&jxr, w, h, &expected);
@@ -2124,7 +2304,14 @@ mod tests {
                 let rp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
                 let gp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
                 let bp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
-                for &qp in &[QpSet::LOSSLESS, QpSet { dc: 16, lp: 32, hp: 64 }] {
+                for &qp in &[
+                    QpSet::LOSSLESS,
+                    QpSet {
+                        dc: 16,
+                        lp: 32,
+                        hp: 64,
+                    },
+                ] {
                     let jxr = encode_color_subsampled(
                         &rp, &gp, &bp, w as u32, h as u32, qp, fmt, ALL_BANDS,
                     );
@@ -2148,16 +2335,43 @@ mod tests {
         for &(w, h) in &[(48usize, 32usize), (17, 31)] {
             let n = w * h;
             let gray: Vec<u8> = (0..n).map(|_| r.byte()).collect();
-            let jxr = encode_yonly_from_color(&gray, &gray, &gray, w as u32, h as u32, QpSet::LOSSLESS, false, (0, 0), (&[], &[]), 0, false);
+            let jxr = encode_yonly_from_color(
+                &gray,
+                &gray,
+                &gray,
+                w as u32,
+                h as u32,
+                QpSet::LOSSLESS,
+                false,
+                (0, 0),
+                (&[], &[]),
+                0,
+                false,
+            );
             let expected: Vec<(u8, u8, u8)> = gray.iter().map(|&v| (v, v, v)).collect();
             assert_rgb_exact(&jxr, w, h, &expected);
             // Color content: structural (decoder replicates luma; not source-exact).
             let rp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let gp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let bp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
-            let jxr = encode_yonly_from_color(&rp, &gp, &bp, w as u32, h as u32, QpSet::LOSSLESS, false, (0, 0), (&[], &[]), 0, false);
+            let jxr = encode_yonly_from_color(
+                &rp,
+                &gp,
+                &bp,
+                w as u32,
+                h as u32,
+                QpSet::LOSSLESS,
+                false,
+                (0, 0),
+                (&[], &[]),
+                0,
+                false,
+            );
             let d = decode(&jxr);
-            assert_eq!((d.width as usize, d.height as usize, d.num_components), (w, h, 3));
+            assert_eq!(
+                (d.width as usize, d.height as usize, d.num_components),
+                (w, h, 3)
+            );
             // Replication property: all three output channels identical.
             for i in 0..n {
                 assert_eq!(d.image_plane[0][i], d.image_plane[1][i]);
@@ -2178,8 +2392,21 @@ mod tests {
             let gray: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let alpha: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let jxr = encode_color_alpha(
-                &gray, &gray, &gray, &alpha, w as u32, h as u32,
-                QpSet::LOSSLESS, QpSet::LOSSLESS, None, false, fmt, false, (0, 0), (&[], &[]), 0,
+                &gray,
+                &gray,
+                &gray,
+                &alpha,
+                w as u32,
+                h as u32,
+                QpSet::LOSSLESS,
+                QpSet::LOSSLESS,
+                None,
+                false,
+                fmt,
+                false,
+                (0, 0),
+                (&[], &[]),
+                0,
                 false,
             );
             let d = decode(&jxr);
@@ -2207,7 +2434,15 @@ mod tests {
             let n = w * h;
             let gray: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let jxr = encode_color_scaled(
-                &gray, &gray, &gray, w as u32, h as u32, QpSet::LOSSLESS, fmt, ALL_BANDS, true,
+                &gray,
+                &gray,
+                &gray,
+                w as u32,
+                h as u32,
+                QpSet::LOSSLESS,
+                fmt,
+                ALL_BANDS,
+                true,
             );
             let expected: Vec<(u8, u8, u8)> = gray.iter().map(|&v| (v, v, v)).collect();
             assert_rgb_exact(&jxr, w, h, &expected);
@@ -2216,10 +2451,21 @@ mod tests {
             let gp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let bp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
             let jxr = encode_color_scaled(
-                &rp, &gp, &bp, w as u32, h as u32, QpSet::LOSSLESS, fmt, ALL_BANDS, true,
+                &rp,
+                &gp,
+                &bp,
+                w as u32,
+                h as u32,
+                QpSet::LOSSLESS,
+                fmt,
+                ALL_BANDS,
+                true,
             );
             let d = decode(&jxr);
-            assert_eq!((d.width as usize, d.height as usize, d.num_components), (w, h, 3));
+            assert_eq!(
+                (d.width as usize, d.height as usize, d.num_components),
+                (w, h, 3)
+            );
             if fmt == INT_YUV444 {
                 // 444 scaled q1: only the chroma half-step loses — pixel error
                 // is tightly bounded (libjxr accepts this; "lossless" mode in
@@ -2246,7 +2492,14 @@ mod tests {
                 let rp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
                 let gp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
                 let bp: Vec<u8> = (0..n).map(|_| r.byte()).collect();
-                for &qp in &[QpSet::LOSSLESS, QpSet { dc: 16, lp: 32, hp: 0 }] {
+                for &qp in &[
+                    QpSet::LOSSLESS,
+                    QpSet {
+                        dc: 16,
+                        lp: 32,
+                        hp: 0,
+                    },
+                ] {
                     let jxr = encode_color_subsampled(
                         &rp, &gp, &bp, w as u32, h as u32, qp, fmt, NOHIGHPASS,
                     );
@@ -2267,7 +2520,13 @@ mod tests {
     #[test]
     fn roundtrip_constant_color() {
         for &(w, h) in &[(16usize, 16usize), (32, 16), (48, 32)] {
-            for &(r, g, b) in &[(200u8, 50u8, 100u8), (0, 0, 0), (255, 255, 255), (10, 200, 250), (128, 128, 128)] {
+            for &(r, g, b) in &[
+                (200u8, 50u8, 100u8),
+                (0, 0, 0),
+                (255, 255, 255),
+                (10, 200, 250),
+                (128, 128, 128),
+            ] {
                 let (rp, gp, bp) = (vec![r; w * h], vec![g; w * h], vec![b; w * h]);
                 let jxr = encode_color(&rp, &gp, &bp, w as u32, h as u32, QpSet::LOSSLESS);
                 let expected = vec![(r, g, b); w * h];
@@ -2284,7 +2543,11 @@ mod tests {
         let (mbw, mbh) = (3usize, 2usize);
         let (w, h) = (mbw * 16, mbh * 16);
         let color = |mx: usize, my: usize| -> (u8, u8, u8) {
-            (((mx * 70 + 30) % 256) as u8, ((my * 90 + 40) % 256) as u8, ((mx * 50 + my * 33 + 17) % 256) as u8)
+            (
+                ((mx * 70 + 30) % 256) as u8,
+                ((my * 90 + 40) % 256) as u8,
+                ((mx * 50 + my * 33 + 17) % 256) as u8,
+            )
         };
         let (mut rp, mut gp, mut bp) = (vec![0u8; w * h], vec![0u8; w * h], vec![0u8; w * h]);
         let mut expected = vec![(0u8, 0u8, 0u8); w * h];
@@ -2328,7 +2591,14 @@ mod tests {
     #[test]
     fn roundtrip_non_aligned_color_allbands_lossless() {
         let mut r = Lcg(0x9e37_79b9_7f4a_7c15);
-        for &(w, h) in &[(17usize, 31usize), (100, 50), (33, 16), (16, 33), (45, 45), (1, 1)] {
+        for &(w, h) in &[
+            (17usize, 31usize),
+            (100, 50),
+            (33, 16),
+            (16, 33),
+            (45, 45),
+            (1, 1),
+        ] {
             let rp: Vec<u8> = (0..w * h).map(|_| r.byte()).collect();
             let gp: Vec<u8> = (0..w * h).map(|_| r.byte()).collect();
             let bp: Vec<u8> = (0..w * h).map(|_| r.byte()).collect();
@@ -2346,9 +2616,21 @@ mod tests {
     fn lossy_color_roundtrip_is_a_fixpoint() {
         let mut r = Lcg(0x1357_9bdf_2468_ace0);
         let qps = [
-            QpSet { dc: 4, lp: 8, hp: 16 },
-            QpSet { dc: 8, lp: 16, hp: 32 },
-            QpSet { dc: 1, lp: 4, hp: 6 },
+            QpSet {
+                dc: 4,
+                lp: 8,
+                hp: 16,
+            },
+            QpSet {
+                dc: 8,
+                lp: 16,
+                hp: 32,
+            },
+            QpSet {
+                dc: 1,
+                lp: 4,
+                hp: 6,
+            },
         ];
         for &(w, h) in &[(32u32, 32u32), (48, 32), (64, 48)] {
             let n = (w * h) as usize;
@@ -2357,7 +2639,12 @@ mod tests {
             for &qp in &qps {
                 let jxr1 = encode_color(&rp, &gp, &bp, w, h, qp);
                 let d = decode(&jxr1);
-                let ch = |c: usize| -> Vec<u8> { d.image_plane[c].iter().map(|&v| v.clamp(0, 255) as u8).collect() };
+                let ch = |c: usize| -> Vec<u8> {
+                    d.image_plane[c]
+                        .iter()
+                        .map(|&v| v.clamp(0, 255) as u8)
+                        .collect()
+                };
                 let jxr2 = encode_color(&ch(0), &ch(1), &ch(2), w, h, qp);
                 assert_eq!(jxr1, jxr2, "not a fixpoint qp={qp:?} {w}x{h}");
             }
@@ -2392,16 +2679,30 @@ mod tests {
             se / (3 * w * h) as f64
         };
         let m0 = mse(QpSet::LOSSLESS);
-        let m4 = mse(QpSet { dc: 16, lp: 16, hp: 16 });
-        let m8 = mse(QpSet { dc: 32, lp: 32, hp: 32 });
+        let m4 = mse(QpSet {
+            dc: 16,
+            lp: 16,
+            hp: 16,
+        });
+        let m8 = mse(QpSet {
+            dc: 32,
+            lp: 32,
+            hp: 32,
+        });
         assert_eq!(m0, 0.0, "lossless must be exact");
-        assert!(m4 > 0.0 && m8 > m4, "error must grow with QP: m0={m0} m4={m4} m8={m8}");
+        assert!(
+            m4 > 0.0 && m8 > m4,
+            "error must grow with QP: m0={m0} m4={m4} m8={m8}"
+        );
     }
 
     struct Lcg2(u64);
     impl Lcg2 {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             self.0
         }
     }

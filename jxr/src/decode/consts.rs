@@ -112,19 +112,15 @@ pub const FIRST_AND_SECOND_LEVEL_OVERLAP_FILTERING: u8 = 2;
 
 // --- Permutation / scan tables ---
 
-pub(crate) const ICT4X4_INV_PERM: [usize; 16] = [
-    0, 8, 4, 13, 2, 15, 3, 14, 1, 12, 5, 9, 7, 11, 6, 10,
-];
+pub(crate) const ICT4X4_INV_PERM: [usize; 16] =
+    [0, 8, 4, 13, 2, 15, 3, 14, 1, 12, 5, 9, 7, 11, 6, 10];
 
 // Port-parity table (jxr_image.py carries the forward permutation too).
 #[allow(dead_code)]
-pub(crate) const ICT4X4_PERM: [usize; 16] = [
-    0, 8, 4, 6, 2, 10, 14, 12, 1, 11, 15, 13, 9, 3, 7, 5,
-];
+pub(crate) const ICT4X4_PERM: [usize; 16] = [0, 8, 4, 6, 2, 10, 14, 12, 1, 11, 15, 13, 9, 3, 7, 5];
 
-pub(crate) const I_HIER_SCAN_ORDER: [usize; 16] = [
-    0, 4, 1, 5, 8, 12, 9, 13, 2, 6, 3, 7, 10, 14, 11, 15,
-];
+pub(crate) const I_HIER_SCAN_ORDER: [usize; 16] =
+    [0, 4, 1, 5, 8, 12, 9, 13, 2, 6, 3, 7, 10, 14, 11, 15];
 
 /// Zigzag inverse scan for 4x4 LP block (horizontal).
 /// First entry is `None` in Python (unused); we shift by one so index 1..=15.
@@ -134,29 +130,21 @@ pub(crate) const GRGI_ZIGZAG_INV_4X4_H: [usize; 16] = [
 ];
 
 #[allow(dead_code)]
-pub(crate) const GRGI_ZIGZAG_INV_4X4_V: [usize; 16] = [
-    0, 4, 8, 5, 1, 12, 9, 6, 2, 13, 3, 15, 7, 10, 14, 11,
-];
+pub(crate) const GRGI_ZIGZAG_INV_4X4_V: [usize; 16] =
+    [0, 4, 8, 5, 1, 12, 9, 6, 2, 13, 3, 15, 7, 10, 14, 11];
 
-pub(crate) const GRGI_ZIGZAG_INV_4X4_H_PRIME: [usize; 16] = [
-    0, 5, 10, 12, 1, 2, 8, 4, 6, 9, 3, 14, 13, 7, 11, 15,
-];
+pub(crate) const GRGI_ZIGZAG_INV_4X4_H_PRIME: [usize; 16] =
+    [0, 5, 10, 12, 1, 2, 8, 4, 6, 9, 3, 14, 13, 7, 11, 15];
 
-pub(crate) const GRGI_ZIGZAG_INV_4X4_V_PRIME: [usize; 16] = [
-    0, 10, 2, 12, 5, 9, 4, 8, 1, 13, 6, 15, 14, 3, 11, 7,
-];
+pub(crate) const GRGI_ZIGZAG_INV_4X4_V_PRIME: [usize; 16] =
+    [0, 10, 2, 12, 5, 9, 4, 8, 1, 13, 6, 15, 14, 3, 11, 7];
 
-pub(crate) const I_TRANSPOSE_FLEX: [usize; 16] = [
-    0, 5, 1, 6, 10, 12, 8, 14, 2, 4, 3, 7, 9, 13, 11, 15,
-];
+pub(crate) const I_TRANSPOSE_FLEX: [usize; 16] =
+    [0, 5, 1, 6, 10, 12, 8, 14, 2, 4, 3, 7, 9, 13, 11, 15];
 
-pub(crate) const MB_PIXEL_MAP: [usize; 16] = [
-    0, 1, 5, 4, 2, 3, 7, 6, 10, 11, 15, 14, 8, 9, 13, 12,
-];
+pub(crate) const MB_PIXEL_MAP: [usize; 16] = [0, 1, 5, 4, 2, 3, 7, 6, 10, 11, 15, 14, 8, 9, 13, 12];
 
-pub(crate) const XY_TRANSPOSE: [usize; 16] = [
-    0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15,
-];
+pub(crate) const XY_TRANSPOSE: [usize; 16] = [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
 
 // --- CBP delta tables ---
 
@@ -184,10 +172,22 @@ pub(crate) const ABS_LEVEL_INDEX_DELTA: [[i32; 7]; 1] = [[1, 0, -1, -1, -1, -1, 
 // --- Coordinate lists used by the overlap filters ---
 
 pub(crate) const XY4: [(i32, i32); 16] = [
-    (0, 0), (0, 1), (0, 2), (0, 3),
-    (1, 0), (1, 1), (1, 2), (1, 3),
-    (2, 0), (2, 1), (2, 2), (2, 3),
-    (3, 0), (3, 1), (3, 2), (3, 3),
+    (0, 0),
+    (0, 1),
+    (0, 2),
+    (0, 3),
+    (1, 0),
+    (1, 1),
+    (1, 2),
+    (1, 3),
+    (2, 0),
+    (2, 1),
+    (2, 2),
+    (2, 3),
+    (3, 0),
+    (3, 1),
+    (3, 2),
+    (3, 3),
 ];
 
 // Port-parity coordinate list (jxr_image.py keeps both orders).

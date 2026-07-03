@@ -185,13 +185,20 @@ impl Framebuffer {
         // The lab126 WM reads the window name as a layout spec: Application
         // layer, no chrome, fullscreen (the booklet/KUAL shape).
         let name = b"L:A_N:application_ID:com.sidle.picker_PC:N_O:U";
-        conn.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, name)
-            .context("set WM_NAME")?;
+        conn.change_property8(
+            PropMode::REPLACE,
+            win,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            name,
+        )
+        .context("set WM_NAME")?;
 
         conn.map_window(win).context("map_window")?;
 
         let gc = conn.generate_id().context("generate_id gc")?;
-        conn.create_gc(gc, win, &CreateGCAux::new()).context("create_gc")?;
+        conn.create_gc(gc, win, &CreateGCAux::new())
+            .context("create_gc")?;
         conn.flush().context("flush after map")?;
 
         let max_req_bytes = (conn.setup().maximum_request_length as usize)

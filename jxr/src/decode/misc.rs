@@ -121,12 +121,7 @@ impl<'a> Deserializer<'a> {
 
     /// Verify a bit-field's value is in `allowed`. Returns the value on
     /// success. Mirrors calibre's `check_bit_field`.
-    pub fn check_bit_field(
-        &mut self,
-        size: u32,
-        name: &str,
-        allowed: &[u64],
-    ) -> Result<u64> {
+    pub fn check_bit_field(&mut self, size: u32, name: &str, allowed: &[u64]) -> Result<u64> {
         let v = self.unpack_bits(size)?;
         if !allowed.contains(&v) {
             return Err(DeserializerError::Unsupported(format!(

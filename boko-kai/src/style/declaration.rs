@@ -264,9 +264,9 @@ impl Declaration {
         if let Ok(uk) = input.try_parse(|i| {
             let ident = i.expect_ident_cloned()?;
             match ident.as_ref() {
-                "inherit" => Ok::<UniversalKeyword, cssparser::ParseError<'_, ()>>(
-                    UniversalKeyword::Inherit,
-                ),
+                "inherit" => {
+                    Ok::<UniversalKeyword, cssparser::ParseError<'_, ()>>(UniversalKeyword::Inherit)
+                }
                 "initial" => Ok(UniversalKeyword::Initial),
                 "unset" => Ok(UniversalKeyword::Unset),
                 "revert" => Ok(UniversalKeyword::Revert),

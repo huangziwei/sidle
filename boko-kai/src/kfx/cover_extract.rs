@@ -18,11 +18,11 @@
 //! JPEG-XR covers are transcoded to JPEG (mirroring the EPUB resource pass);
 //! every other image format passes through verbatim.
 
+use crate::image::jxr_transcode as transcode;
 use crate::kfx::container::get_field;
 use crate::kfx::ion::IonValue;
 use crate::kfx::symbols::KfxSymbol;
 use crate::kfx_to_epub::ConvertError;
-use crate::image::jxr_transcode as transcode;
 use crate::kfx_to_epub::loader;
 
 /// Extract the declared cover's `(bytes, extension)` from an in-memory KFX.
@@ -31,7 +31,9 @@ use crate::kfx_to_epub::loader;
 /// its cover resource can't be matched to backing bytes, or a JPEG-XR cover
 /// fails to decode — a cover-less outcome, not an error. Returns `Err` only when
 /// the bytes don't parse as a KFX container at all.
-pub fn kfx_extract_cover(kfx_bytes: &[u8]) -> Result<Option<(Vec<u8>, &'static str)>, ConvertError> {
+pub fn kfx_extract_cover(
+    kfx_bytes: &[u8],
+) -> Result<Option<(Vec<u8>, &'static str)>, ConvertError> {
     let book = loader::load(kfx_bytes)?;
     let Some(cover_name) = book.metadata.cover_resource_name.clone() else {
         return Ok(None); // no cover declared — coverless book
@@ -50,8 +52,8 @@ pub fn kfx_extract_cover(kfx_bytes: &[u8]) -> Result<Option<(Vec<u8>, &'static s
         let Some(fields) = v.unwrap_annotated().as_struct() else {
             continue;
         };
-        let rn = get_field(fields, KfxSymbol::ResourceName as u64)
-            .and_then(|x| book.symbols.text_of(x));
+        let rn =
+            get_field(fields, KfxSymbol::ResourceName as u64).and_then(|x| book.symbols.text_of(x));
         if rn != Some(cover_name.as_str()) {
             continue;
         }
@@ -83,7 +85,10 @@ pub fn kfx_extract_cover(kfx_bytes: &[u8]) -> Result<Option<(Vec<u8>, &'static s
         return Ok(Some((bytes, "jpg")));
     }
 
-    Ok(Some((raw.clone(), ext_for(format.as_deref().unwrap_or(""), raw))))
+    Ok(Some((
+        raw.clone(),
+        ext_for(format.as_deref().unwrap_or(""), raw),
+    )))
 }
 
 /// Map a KFX `format` symbol (or, when absent, the file magic) to a sidecar
@@ -154,7 +159,10 @@ mod tests {
             .cover_resource_name
             .clone()
             .expect("fixture has a cover");
-        let resources = book.by_type.get(&(KfxSymbol::ExternalResource as u64)).unwrap();
+        let resources = book
+            .by_type
+            .get(&(KfxSymbol::ExternalResource as u64))
+            .unwrap();
         let mut want: Option<Vec<u8>> = None;
         for v in resources.values() {
             let fields = v.unwrap_annotated().as_struct().unwrap();
@@ -172,7 +180,10 @@ mod tests {
 
         let (got, _ext) = kfx_extract_cover(&kfx).unwrap().unwrap();
         // Fixture cover is a plain JPEG (no JXR), so extraction is byte-exact.
-        assert_eq!(got, want, "extracted cover must be the declared resource bytes");
+        assert_eq!(
+            got, want,
+            "extracted cover must be the declared resource bytes"
+        );
     }
 
     #[test]
@@ -187,7 +198,10 @@ mod tests {
         let pdf_bytes = b"%PDF-1.4\n% fixture\n%%EOF\n".to_vec();
         let doc = PdfDoc {
             bytes: pdf_bytes,
-            pages: vec![PdfPage { width: 612.0, height: 792.0 }],
+            pages: vec![PdfPage {
+                width: 612.0,
+                height: 792.0,
+            }],
             title: Some("Backed".to_string()),
             author: None,
             outline: Vec::new(),
@@ -214,7 +228,10 @@ mod tests {
             .expect("valid KFX")
             .expect("PDF-backed KFX has an embedded cover");
         assert_eq!(ext, "jpg");
-        assert_eq!(bytes, cover, "extracted cover must be the embedded JPEG, verbatim");
+        assert_eq!(
+            bytes, cover,
+            "extracted cover must be the embedded JPEG, verbatim"
+        );
     }
 
     #[test]
@@ -226,7 +243,10 @@ mod tests {
 
         let doc = PdfDoc {
             bytes: b"%PDF-1.4\n%%EOF\n".to_vec(),
-            pages: vec![PdfPage { width: 612.0, height: 792.0 }],
+            pages: vec![PdfPage {
+                width: 612.0,
+                height: 792.0,
+            }],
             title: Some("NoCover".to_string()),
             author: None,
             outline: Vec::new(),

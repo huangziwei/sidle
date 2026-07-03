@@ -108,8 +108,8 @@ pub fn resolve(ann: &Annotation, idx: &TextIndex) -> Resolved {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::yjr::Handle;
+    use super::*;
     use std::collections::HashMap;
 
     fn handle(eid: u32, offset: u32, linear: u64) -> Handle {

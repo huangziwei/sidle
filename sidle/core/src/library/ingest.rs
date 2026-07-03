@@ -88,7 +88,10 @@ fn strip_trailing_author(s: &str) -> Option<&str> {
 /// The key both library and device titles reduce to for T0 comparison.
 fn match_key(title: &str) -> String {
     let n = normalize_title(title);
-    strip_trailing_ascii_paren(&n).unwrap_or(&n).trim().to_string()
+    strip_trailing_ascii_paren(&n)
+        .unwrap_or(&n)
+        .trim()
+        .to_string()
 }
 
 /// The `book_key` an annotation's [`annotation_dedup_hash`] is salted with —
@@ -106,7 +109,8 @@ pub fn book_match_key(title: &str) -> String {
 /// the wanted title, so `…春- (ファミ通文庫)` matches at T0 before T1 ever fires.
 pub fn match_book_id(conn: &Connection, title: &str) -> rusqlite::Result<Option<i64>> {
     let books = db::list_books(conn)?;
-    let candidates: Vec<(i64, String)> = books.iter().map(|b| (b.id, match_key(&b.title))).collect();
+    let candidates: Vec<(i64, String)> =
+        books.iter().map(|b| (b.id, match_key(&b.title))).collect();
     let want = match_key(title);
 
     if let Some((id, _)) = candidates.iter().find(|(_, k)| *k == want) {
@@ -414,7 +418,11 @@ pub fn import_collected_with_progress(
     let total = collected.len();
 
     for (i, item) in collected.into_iter().enumerate() {
-        let CollectedYjr { sdr_name, yjr_bytes, yjf_bytes } = item;
+        let CollectedYjr {
+            sdr_name,
+            yjr_bytes,
+            yjf_bytes,
+        } = item;
         let book = match sdr_infix(&sdr_name) {
             Some(infix) => db::find_by_kfx_sha_prefix(conn, infix)
                 .with_context(|| format!("kfx_sha lookup for {sdr_name}"))?,
@@ -555,9 +563,7 @@ pub fn import_from_device(
 fn sdr_display_name(sdr_name: &str) -> String {
     let stem = sdr_name.strip_suffix(".sdr").unwrap_or(sdr_name);
     match stem.rsplit_once('.') {
-        Some((name, infix))
-            if infix.len() >= 8 && infix.bytes().all(|b| b.is_ascii_hexdigit()) =>
-        {
+        Some((name, infix)) if infix.len() >= 8 && infix.bytes().all(|b| b.is_ascii_hexdigit()) => {
             name.to_string()
         }
         _ => stem.to_string(),
@@ -640,8 +646,7 @@ mod tests {
     }
 
     fn idx() -> TextIndex {
-        let text_of: HashMap<i64, String> =
-            [(10, "Hello world".to_string())].into_iter().collect();
+        let text_of: HashMap<i64, String> = [(10, "Hello world".to_string())].into_iter().collect();
         let pid_of: HashMap<i64, i64> = [(10, 100)].into_iter().collect();
         TextIndex::from_parts(text_of, pid_of)
     }
@@ -650,8 +655,20 @@ mod tests {
         Annotation {
             kind: Kind::Highlight,
             handles: vec![
-                Handle { type_byte: 1, eid, offset: os, linear: 100 + os as u64, b64: String::new() },
-                Handle { type_byte: 1, eid, offset: oe, linear: 100 + oe as u64, b64: String::new() },
+                Handle {
+                    type_byte: 1,
+                    eid,
+                    offset: os,
+                    linear: 100 + os as u64,
+                    b64: String::new(),
+                },
+                Handle {
+                    type_byte: 1,
+                    eid,
+                    offset: oe,
+                    linear: 100 + oe as u64,
+                    b64: String::new(),
+                },
             ],
             note_body: None,
         }
@@ -667,10 +684,7 @@ mod tests {
             Some(1)
         );
         // BOM + extra whitespace tolerated.
-        assert_eq!(
-            match_book_id(&conn, "\u{feff}文学少女  ").unwrap(),
-            Some(1)
-        );
+        assert_eq!(match_book_id(&conn, "\u{feff}文学少女  ").unwrap(), Some(1));
         // No match → None (orphan).
         assert_eq!(match_book_id(&conn, "Some Other Book").unwrap(), None);
     }
@@ -724,10 +738,30 @@ mod tests {
         let conn = mem_db();
         let book = add_book(&conn, "B");
         let anns = vec![highlight(10, 0, 4)]; // "Hello" (inclusive end → +1)
-        let s1 = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, None, "t0").unwrap();
+        let s1 = import_yjr(
+            &conn,
+            &anns,
+            &idx(),
+            Some(book),
+            Some("B"),
+            None,
+            None,
+            "t0",
+        )
+        .unwrap();
         assert_eq!((s1.inserted, s1.duplicate), (1, 0));
         // Re-import: same dedup_hash → no new row.
-        let s2 = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, None, "t1").unwrap();
+        let s2 = import_yjr(
+            &conn,
+            &anns,
+            &idx(),
+            Some(book),
+            Some("B"),
+            None,
+            None,
+            "t1",
+        )
+        .unwrap();
         assert_eq!((s2.inserted, s2.duplicate), (0, 1));
 
         let stored = db::list_annotations_for_book(&conn, book).unwrap();
@@ -743,14 +777,34 @@ mod tests {
 
         // DEV1's first sync: two annotations.
         let first = vec![highlight(10, 0, 4), highlight(20, 0, 4)];
-        let s1 = import_yjr(&conn, &first, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t1").unwrap();
+        let s1 = import_yjr(
+            &conn,
+            &first,
+            &idx(),
+            Some(book),
+            Some("B"),
+            None,
+            Some("DEV1"),
+            "t1",
+        )
+        .unwrap();
         assert_eq!(s1.inserted, 2);
         assert_eq!(db::list_annotations_for_book(&conn, book).unwrap().len(), 2);
 
         // Next DEV1 sync drops the second annotation. Sidle is a backup, so its
         // copy is KEPT — a delete on the device never deletes the backup.
         let second = vec![highlight(10, 0, 4)];
-        import_yjr(&conn, &second, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t2").unwrap();
+        import_yjr(
+            &conn,
+            &second,
+            &idx(),
+            Some(book),
+            Some("B"),
+            None,
+            Some("DEV1"),
+            "t2",
+        )
+        .unwrap();
         assert_eq!(
             db::list_annotations_for_book(&conn, book).unwrap().len(),
             2,
@@ -772,7 +826,17 @@ mod tests {
         let conn = mem_db();
         let book = add_book(&conn, "B");
         let anns = vec![highlight(10, 0, 4)];
-        let s1 = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t1").unwrap();
+        let s1 = import_yjr(
+            &conn,
+            &anns,
+            &idx(),
+            Some(book),
+            Some("B"),
+            None,
+            Some("DEV1"),
+            "t1",
+        )
+        .unwrap();
         assert_eq!(s1.inserted, 1);
 
         // Delete it in Sidle → writes a deletion record.
@@ -780,7 +844,17 @@ mod tests {
         assert!(db::delete_annotation(&conn, id).unwrap());
 
         // Re-sync the same device set → the deletion sticks (not re-added).
-        import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t2").unwrap();
+        import_yjr(
+            &conn,
+            &anns,
+            &idx(),
+            Some(book),
+            Some("B"),
+            None,
+            Some("DEV1"),
+            "t2",
+        )
+        .unwrap();
         assert_eq!(
             db::list_annotations_for_book(&conn, book).unwrap().len(),
             0,
@@ -789,7 +863,17 @@ mod tests {
 
         // Restore (clear records) → re-sync re-adds it.
         db::clear_all_deletions(&conn).unwrap();
-        import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, Some("DEV1"), "t3").unwrap();
+        import_yjr(
+            &conn,
+            &anns,
+            &idx(),
+            Some(book),
+            Some("B"),
+            None,
+            Some("DEV1"),
+            "t3",
+        )
+        .unwrap();
         assert_eq!(
             db::list_annotations_for_book(&conn, book).unwrap().len(),
             1,
@@ -836,7 +920,10 @@ mod tests {
         let s = import_yjr(&conn, &anns, &idx(), Some(book), Some("B"), None, None, "t").unwrap();
         assert_eq!(s.unresolved, 1);
         assert_eq!(s.inserted, 1);
-        assert_eq!(db::list_annotations_for_book(&conn, book).unwrap()[0].text, "");
+        assert_eq!(
+            db::list_annotations_for_book(&conn, book).unwrap()[0].text,
+            ""
+        );
     }
 
     #[test]
@@ -847,8 +934,20 @@ mod tests {
         anns.push(Annotation {
             kind: Kind::Note,
             handles: vec![
-                Handle { type_byte: 1, eid: 10, offset: 6, linear: 106, b64: String::new() },
-                Handle { type_byte: 1, eid: 10, offset: 10, linear: 110, b64: String::new() },
+                Handle {
+                    type_byte: 1,
+                    eid: 10,
+                    offset: 6,
+                    linear: 106,
+                    b64: String::new(),
+                },
+                Handle {
+                    type_byte: 1,
+                    eid: 10,
+                    offset: 10,
+                    linear: 110,
+                    b64: String::new(),
+                },
             ],
             note_body: Some("a thought".to_string()),
         });
@@ -865,7 +964,10 @@ mod tests {
 
     #[test]
     fn sdr_infix_only_accepts_hash_prefixes() {
-        assert_eq!(sdr_infix("[綾辻行人] 十角館 (2007).205b82bc.sdr"), Some("205b82bc"));
+        assert_eq!(
+            sdr_infix("[綾辻行人] 十角館 (2007).205b82bc.sdr"),
+            Some("205b82bc")
+        );
         assert_eq!(sdr_infix("Title_KPN6H7BZB6B5HTAHKMDZ.sdr"), None); // underscore ASIN scheme
         assert_eq!(sdr_infix("サクラダリセット5.boko.sdr"), None); // not hex
         assert_eq!(sdr_infix("nope"), None);
@@ -938,8 +1040,16 @@ mod tests {
         let r1 = import_from_device(&conn, root.path(), "DEV", "now").unwrap();
         assert_eq!(r1.matched, 1);
         assert_eq!(r1.unchanged, 0);
-        assert!(r1.annotations.inserted >= 1, "first import should insert the bookmark");
-        assert!(db::get_yjr_sync_sha(&conn, "DEV", book_id).unwrap().is_some(), "checkpoint recorded");
+        assert!(
+            r1.annotations.inserted >= 1,
+            "first import should insert the bookmark"
+        );
+        assert!(
+            db::get_yjr_sync_sha(&conn, "DEV", book_id)
+                .unwrap()
+                .is_some(),
+            "checkpoint recorded"
+        );
 
         // Identical `.yjr` on the next connect → skipped, nothing inserted.
         let r2 = import_from_device(&conn, root.path(), "DEV", "now").unwrap();
@@ -1008,12 +1118,18 @@ mod tests {
         let r = import_from_device(&conn, root.path(), "DEV", "now").unwrap();
         assert_eq!(r.positions, 1, "the .yjf lpr position imported");
         assert_eq!(r.yjr_books, 0, "no .yjr present");
-        assert_eq!(r.matched, 0, "matched counts .yjr books; a position-only .sdr isn't one");
+        assert_eq!(
+            r.matched, 0,
+            "matched counts .yjr books; a position-only .sdr isn't one"
+        );
 
         let pos = db::list_reading_positions(&conn, book_id).unwrap();
         assert_eq!(pos.len(), 1);
         assert_eq!(pos[0].source, "device");
-        assert_eq!(pos[0].device_serial, "DEV", "tagged with the importing device's serial");
+        assert_eq!(
+            pos[0].device_serial, "DEV",
+            "tagged with the importing device's serial"
+        );
         assert_eq!(
             (pos[0].eid, pos[0].offset, pos[0].linear_pos),
             (Some(978), Some(170), Some(12345)),

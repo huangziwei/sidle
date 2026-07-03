@@ -83,8 +83,6 @@ impl Planes {
         })
     }
 
-
-
     /// Channel-equality in the encoder's auto-gray sense (pre-bias domain):
     /// raw equality for integer families, zero-sign-folded equality for the
     /// float patterns, `>> 10` equality for BD32S.
@@ -98,16 +96,15 @@ impl Planes {
             Planes::I16(p) => p.len() == 3 && eq(p),
             Planes::I32(p) => {
                 p.len() == 3
-                    && p.windows(2).all(|w| {
-                        w[0].iter().zip(&w[1]).all(|(a, b)| (a >> 10) == (b >> 10))
-                    })
+                    && p.windows(2)
+                        .all(|w| w[0].iter().zip(&w[1]).all(|(a, b)| (a >> 10) == (b >> 10)))
             }
             Planes::F16(p) => {
                 p.len() == 3
                     && p.windows(2).all(|w| {
-                        w[0].iter().zip(&w[1]).all(|(&a, &b)| {
-                            a == b || (a & 0x7fff == 0 && b & 0x7fff == 0)
-                        })
+                        w[0].iter()
+                            .zip(&w[1])
+                            .all(|(&a, &b)| a == b || (a & 0x7fff == 0 && b & 0x7fff == 0))
                     })
             }
             Planes::F32(p) => {
@@ -182,7 +179,9 @@ fn fill<T: Default + Copy + Arbitrary<'static>>(
         s ^= s << 17;
         s
     };
-    Ok((0..np).map(|_| (0..n).map(|_| map(next())).collect()).collect())
+    Ok((0..np)
+        .map(|_| (0..n).map(|_| map(next())).collect())
+        .collect())
 }
 
 fn qp(u: &mut Unstructured) -> arbitrary::Result<QpSet> {
@@ -223,8 +222,12 @@ fn qp_plan(
     let mut tiles = Vec::with_capacity(entries);
     for _ in 0..entries {
         let dc = band(u)?;
-        let lp = (0..nlp).map(|_| band(u)).collect::<arbitrary::Result<Vec<_>>>()?;
-        let hp = (0..nhp).map(|_| band(u)).collect::<arbitrary::Result<Vec<_>>>()?;
+        let lp = (0..nlp)
+            .map(|_| band(u))
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        let hp = (0..nhp)
+            .map(|_| band(u))
+            .collect::<arbitrary::Result<Vec<_>>>()?;
         tiles.push(TileQps { dc, lp, hp });
     }
     let nmb = mb_cols * mb_rows;
@@ -240,7 +243,11 @@ fn qp_plan(
     };
     let lp_index = map(u, nlp)?;
     let hp_index = map(u, nhp)?;
-    Ok(QpPlan { tiles, lp_index, hp_index })
+    Ok(QpPlan {
+        tiles,
+        lp_index,
+        hp_index,
+    })
 }
 
 /// Draw one VALID case over the full envelope.
@@ -340,7 +347,10 @@ pub fn draw_valid(u: &mut Unstructured) -> arbitrary::Result<Case> {
         _ => ColorMode::Color,
     };
 
-    let multi = matches!(mode, ColorMode::Cmyk | ColorMode::CmykDirect | ColorMode::NComponent);
+    let multi = matches!(
+        mode,
+        ColorMode::Cmyk | ColorMode::CmykDirect | ColorMode::NComponent
+    );
     let float_like = matches!(fam, Fam::F16 | Fam::F32 | Fam::Rgbe);
     let packed = matches!(fam, Fam::P555 | Fam::P565 | Fam::P101010);
     // Packed is one plane of WORDS but codes as color — not the gray path.
@@ -354,7 +364,11 @@ pub fn draw_valid(u: &mut Unstructured) -> arbitrary::Result<Case> {
     } else if float_like {
         ChromaSampling::Yuv444
     } else if has_alpha {
-        *u.choose(&[ChromaSampling::Yuv444, ChromaSampling::Yuv422, ChromaSampling::Yuv420])?
+        *u.choose(&[
+            ChromaSampling::Yuv444,
+            ChromaSampling::Yuv422,
+            ChromaSampling::Yuv420,
+        ])?
     } else {
         *u.choose(&[
             ChromaSampling::Yuv444,
@@ -379,7 +393,11 @@ pub fn draw_valid(u: &mut Unstructured) -> arbitrary::Result<Case> {
             BandsPresent::DcOnly,
         ])?;
         // Weight trim == 0 up: any trim forfeits exactness.
-        let t = if b == BandsPresent::All && !u.ratio(3, 4)? { u.int_in_range(1..=15)? } else { 0 };
+        let t = if b == BandsPresent::All && !u.ratio(3, 4)? {
+            u.int_in_range(1..=15)?
+        } else {
+            0
+        };
         (b, t)
     };
 
@@ -405,7 +423,13 @@ pub fn draw_valid(u: &mut Unstructured) -> arbitrary::Result<Case> {
     let auto_gray = planes.channels_equal();
     let (chroma_qp, plan) = if plan_legal && !auto_gray && u.ratio(1, 3)? {
         let plan_lossless = lossless && u.arbitrary::<bool>()?;
-        (None, Some((qp_plan(u, ntiles, mb_cols, mb_rows, plan_lossless)?, plan_lossless)))
+        (
+            None,
+            Some((
+                qp_plan(u, ntiles, mb_cols, mb_rows, plan_lossless)?,
+                plan_lossless,
+            )),
+        )
     } else if !gray_path && !lossless && u.arbitrary::<bool>()? {
         (Some(qp(u)?), None)
     } else {
@@ -442,8 +466,10 @@ pub fn draw_valid(u: &mut Unstructured) -> arbitrary::Result<Case> {
         } else {
             Expect::Exact
         }
-    } else if matches!(fam, Fam::U8 | Fam::U16 | Fam::I16 | Fam::CmykU8 | Fam::CmykU16)
-        || (fam == Fam::NComp)
+    } else if matches!(
+        fam,
+        Fam::U8 | Fam::U16 | Fam::I16 | Fam::CmykU8 | Fam::CmykU16
+    ) || (fam == Fam::NComp)
         || fam == Fam::CmykDirect
     {
         if gray_path || auto_gray {
@@ -460,7 +486,11 @@ pub fn draw_valid(u: &mut Unstructured) -> arbitrary::Result<Case> {
     let int_fmt = if auto_gray || gray_path {
         Some(INT_YONLY)
     } else if multi {
-        Some(if mode == ColorMode::NComponent { INT_NCOMPONENT } else { INT_YUVK })
+        Some(if mode == ColorMode::NComponent {
+            INT_NCOMPONENT
+        } else {
+            INT_YUVK
+        })
     } else {
         match chroma {
             ChromaSampling::Yuv444 => Some(INT_YUV444),
@@ -538,13 +568,21 @@ pub fn draw_raw(u: &mut Unstructured) -> arbitrary::Result<Case> {
                 let k = u.int_in_range(0..=18usize)?;
                 Ok((0..k).map(|_| BandQp::uniform(7)).collect())
             };
-            tiles.push(TileQps { dc: BandQp::uniform(3), lp: setn(u)?, hp: setn(u)? });
+            tiles.push(TileQps {
+                dc: BandQp::uniform(3),
+                lp: setn(u)?,
+                hp: setn(u)?,
+            });
         }
         let idx = |u: &mut Unstructured| -> arbitrary::Result<Vec<u8>> {
             let k = u.int_in_range(0..=64usize)?;
             Ok((0..k).map(|i| (i % 19) as u8).collect())
         };
-        Some(QpPlan { tiles, lp_index: idx(u)?, hp_index: idx(u)? })
+        Some(QpPlan {
+            tiles,
+            lp_index: idx(u)?,
+            hp_index: idx(u)?,
+        })
     } else {
         None
     };
@@ -555,9 +593,17 @@ pub fn draw_raw(u: &mut Unstructured) -> arbitrary::Result<Case> {
         premultiplied: u.arbitrary()?,
         mode,
         opts: EncodeOptions {
-            qp: QpSet { dc: u.arbitrary()?, lp: u.arbitrary()?, hp: u.arbitrary()? },
+            qp: QpSet {
+                dc: u.arbitrary()?,
+                lp: u.arbitrary()?,
+                hp: u.arbitrary()?,
+            },
             alpha_qp: if u.arbitrary()? {
-                Some(QpSet { dc: u.arbitrary()?, lp: u.arbitrary()?, hp: u.arbitrary()? })
+                Some(QpSet {
+                    dc: u.arbitrary()?,
+                    lp: u.arbitrary()?,
+                    hp: u.arbitrary()?,
+                })
             } else {
                 None
             },
@@ -582,7 +628,11 @@ pub fn draw_raw(u: &mut Unstructured) -> arbitrary::Result<Case> {
             overlap: *u.choose(&[Overlap::None, Overlap::One, Overlap::Two])?,
             frequency: u.arbitrary()?,
             chroma_qp: if u.arbitrary()? {
-                Some(QpSet { dc: u.arbitrary()?, lp: u.arbitrary()?, hp: u.arbitrary()? })
+                Some(QpSet {
+                    dc: u.arbitrary()?,
+                    lp: u.arbitrary()?,
+                    hp: u.arbitrary()?,
+                })
             } else {
                 None
             },

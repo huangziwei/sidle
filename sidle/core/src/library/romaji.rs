@@ -93,8 +93,12 @@ pub fn search_key(
     let mut parts: Vec<String> = Vec::new();
 
     // Curated romaji (or a live fallback when the column is empty).
-    parts.push(non_empty_or(title_romaji, || romanize_field(title, None, language)));
-    parts.push(non_empty_or(author_romaji, || romanize_field(author, None, language)));
+    parts.push(non_empty_or(title_romaji, || {
+        romanize_field(title, None, language)
+    }));
+    parts.push(non_empty_or(author_romaji, || {
+        romanize_field(author, None, language)
+    }));
 
     // Auto-romanized secondary fields — rarely hand-corrected, so generated on
     // the fly rather than stored (a series is reachable via its members anyway).
@@ -220,7 +224,11 @@ fn primary_subtag(language: &str) -> &str {
 }
 
 fn non_empty_or(s: &str, f: impl FnOnce() -> String) -> String {
-    if s.trim().is_empty() { f() } else { s.to_string() }
+    if s.trim().is_empty() {
+        f()
+    } else {
+        s.to_string()
+    }
 }
 
 /// Collapse runs of whitespace to single spaces and trim — kakasi/pinyin emit a
@@ -238,7 +246,10 @@ mod tests {
         // A phonetic kana yomi for a kanji title → exact romaji, beating the engine.
         assert_eq!(romanize_field("世界", Some("せかい"), "ja"), "sekai");
         // Katakana reading (the real `コチラアミコ` shape from the library).
-        assert_eq!(romanize_field("此方アミ子", Some("コチラアミコ"), "ja"), "kochiraamiko");
+        assert_eq!(
+            romanize_field("此方アミ子", Some("コチラアミコ"), "ja"),
+            "kochiraamiko"
+        );
     }
 
     #[test]
@@ -317,8 +328,14 @@ mod tests {
             "sekai saikou no ansatsusha", // curated title romaji
             "murakami haruki",            // curated author romaji
         );
-        assert!(key.contains("sekaisaikou"), "curated title romaji folded in: {key}");
-        assert!(key.contains("murakamiharuki"), "curated author romaji: {key}");
+        assert!(
+            key.contains("sekaisaikou"),
+            "curated title romaji folded in: {key}"
+        );
+        assert!(
+            key.contains("murakamiharuki"),
+            "curated author romaji: {key}"
+        );
         assert!(key.contains("scifi"), "tags included: {key}");
         // Series romaji (auto) present so a series search surfaces members.
         assert!(key.contains("monogatari"), "series auto-romaji: {key}");
@@ -328,10 +345,22 @@ mod tests {
     fn search_key_falls_back_when_romaji_empty() {
         // Empty stored romaji → live engine fallback, so search still works.
         let key = search_key("世界", "", None, None, &[], "ja", "", "");
-        assert!(key.contains("sekai"), "live fallback romanized the title: {key}");
+        assert!(
+            key.contains("sekai"),
+            "live fallback romanized the title: {key}"
+        );
 
         // English book with empty romaji → raw Latin matches directly.
-        let key = search_key("The Roman Hat Mystery", "Ellery Queen", None, None, &[], "en", "", "");
+        let key = search_key(
+            "The Roman Hat Mystery",
+            "Ellery Queen",
+            None,
+            None,
+            &[],
+            "en",
+            "",
+            "",
+        );
         assert!(key.contains("romanhat"));
         assert!(key.contains("elleryqueen"));
     }

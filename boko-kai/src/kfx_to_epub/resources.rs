@@ -15,10 +15,10 @@ use crate::kfx::container::get_field;
 use crate::kfx::ion::IonValue;
 use crate::kfx::symbols::KfxSymbol;
 
-use crate::image::jxr_transcode as transcode;
+use super::ConvertError;
 use super::loader::{BookData, SymbolTable};
 use super::output::EpubOutput;
-use super::ConvertError;
+use crate::image::jxr_transcode as transcode;
 
 /// Image format symbol values KFX may set on `external_resource.format`.
 /// Calibre's `SYMBOL_FORMATS` mapping for the image side.
@@ -84,14 +84,17 @@ pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, C
     //      it. Items that don't need transcoding (already JPEG/PNG/etc.) carry
     //      their bytes through. Each worker thread owns its slice; we
     //      reassemble in `prepared` order to preserve determinism.
-    let transcoded: Vec<Result<TranscodedBytes, ConvertError>> =
-        parallel_transcode(&prepared);
+    let transcoded: Vec<Result<TranscodedBytes, ConvertError>> = parallel_transcode(&prepared);
 
     // ---- Serial post-pass: filenames, manifest insertion, index.
     let mut totals = transcode::TranscodeTiming::default();
     let mut jxr_count = 0usize;
     for (prep, t_result) in prepared.iter().zip(transcoded) {
-        let TranscodedBytes { bytes, final_format, timing } = t_result?;
+        let TranscodedBytes {
+            bytes,
+            final_format,
+            timing,
+        } = t_result?;
         if let Some(t) = timing {
             totals.container_parse += t.container_parse;
             totals.jxr_decode += t.jxr_decode;
@@ -104,13 +107,7 @@ pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, C
         }
         let final_mime = format_to_mime(&final_format);
         let filename = build_image_filename(&prep.location, &final_format, out);
-        let manifest_id = out.add_resource(
-            &filename,
-            bytes,
-            &final_mime,
-            prep.width,
-            prep.height,
-        );
+        let manifest_id = out.add_resource(&filename, bytes, &final_mime, prep.width, prep.height);
         index.by_name.insert(
             prep.resource_name.clone(),
             ProcessedImage {
@@ -165,9 +162,7 @@ pub fn process(book: &BookData, out: &mut EpubOutput) -> Result<ResourceIndex, C
             .map(|e| if e == "jpg" { "jpeg" } else { e })
             .unwrap_or("jpeg");
         let new_filename = format!("cover.{}", ext);
-        if let Some(new_id) =
-            out.rename_resource(&img.filename, &new_filename, Some("cover"))
-        {
+        if let Some(new_id) = out.rename_resource(&img.filename, &new_filename, Some("cover")) {
             out.mark_cover(&new_id);
             if let Some(slot) = index.by_name.get_mut(cover_name) {
                 slot.filename = new_filename;
@@ -254,8 +249,7 @@ fn prepare_resource<'a>(
         }
     };
 
-    let is_jxr = format_str == FORMAT_JXR
-        || sniff_format(raw_bytes).as_deref() == Some(FORMAT_JXR);
+    let is_jxr = format_str == FORMAT_JXR || sniff_format(raw_bytes).as_deref() == Some(FORMAT_JXR);
 
     Some(PreparedResource {
         resource_name,
@@ -414,7 +408,10 @@ fn build_image_filename(location: &str, format: &str, out: &EpubOutput) -> Strin
     // location commonly uses. For SHORT-form symbols (which is what
     // horror's KFX uses), calibre's `unique_part_of_local_symbol` just
     // strips `^resource/`. We do the same.
-    let unique = stem.strip_prefix("rsrc").map(|r| format!("rsrc{r}")).unwrap_or_else(|| stem.to_string());
+    let unique = stem
+        .strip_prefix("rsrc")
+        .map(|r| format!("rsrc{r}"))
+        .unwrap_or_else(|| stem.to_string());
 
     // Resource-type prefix. Mirrors calibre's RESOURCE_TYPE_OF_EXT mapping
     // for image extensions: image → "image_<unique>". When the unique part
@@ -480,10 +477,7 @@ fn xml_attr_escape(s: &str) -> String {
 fn out_manifest_len(out: &EpubOutput) -> usize {
     out.manifest_view().len()
 }
-fn out_manifest_get(
-    out: &EpubOutput,
-    idx: usize,
-) -> Option<&super::output::ManifestEntry> {
+fn out_manifest_get(out: &EpubOutput, idx: usize) -> Option<&super::output::ManifestEntry> {
     out.manifest_view().get(idx)
 }
 

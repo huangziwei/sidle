@@ -26,7 +26,9 @@ pub fn scan_downloaded_shas(dir: &Path) -> HashSet<String> {
     };
     for entry in entries.flatten() {
         let name_os = entry.file_name();
-        let Some(name) = name_os.to_str() else { continue; };
+        let Some(name) = name_os.to_str() else {
+            continue;
+        };
         if let Some(sha) = extract_sha8(name) {
             out.insert(sha.to_string());
         }
@@ -59,23 +61,20 @@ mod tests {
         );
         // Multi-dot basenames: rsplit_once takes the LAST dot, so the
         // sha is whatever sits between the final two dots.
-        assert_eq!(
-            extract_sha8("foo.bar.baz.12345678.kfx"),
-            Some("12345678"),
-        );
+        assert_eq!(extract_sha8("foo.bar.baz.12345678.kfx"), Some("12345678"),);
     }
 
     #[test]
     fn rejects_malformed_names() {
-        assert_eq!(extract_sha8("Title.kfx"), None);           // no sha segment
-        assert_eq!(extract_sha8("Title.deadbeef"), None);      // no .kfx
-        assert_eq!(extract_sha8("Title.deadbeeZ.kfx"), None);  // not all hex
-        assert_eq!(extract_sha8("Title.deadbee.kfx"), None);   // 7 chars
+        assert_eq!(extract_sha8("Title.kfx"), None); // no sha segment
+        assert_eq!(extract_sha8("Title.deadbeef"), None); // no .kfx
+        assert_eq!(extract_sha8("Title.deadbeeZ.kfx"), None); // not all hex
+        assert_eq!(extract_sha8("Title.deadbee.kfx"), None); // 7 chars
         assert_eq!(extract_sha8("Title.deadbeefa.kfx"), None); // 9 chars
-        assert_eq!(extract_sha8("Title.txt"), None);           // wrong ext
+        assert_eq!(extract_sha8("Title.txt"), None); // wrong ext
         assert_eq!(extract_sha8(""), None);
-        assert_eq!(extract_sha8(".kfx"), None);                // stem empty,
-                                                               // no preceding dot
+        assert_eq!(extract_sha8(".kfx"), None); // stem empty,
+        // no preceding dot
     }
 
     #[test]

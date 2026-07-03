@@ -92,7 +92,9 @@ fn field_value_u64(field_type: u16, field_data: &[u8]) -> Option<u64> {
     match field_type {
         1 | 7 => field_data.first().copied().map(u64::from),
         2 => None, // signed char doesn't apply here
-        3 => field_data.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]]) as u64),
+        3 => field_data
+            .get(..2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]) as u64),
         4 => field_data
             .get(..4)
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64),
@@ -195,9 +197,15 @@ const ODDBALL_UUIDS: &[(&str, &str)] = &[
 pub fn format_name(uuid: &str) -> Option<&'static str> {
     if let Some(suffix) = uuid.strip_prefix(FAMILY_PREFIX) {
         let b = u8::from_str_radix(suffix, 16).ok()?;
-        return FAMILY_FORMATS.iter().find(|(s, _)| *s == b).map(|(_, n)| *n);
+        return FAMILY_FORMATS
+            .iter()
+            .find(|(s, _)| *s == b)
+            .map(|(_, n)| *n);
     }
-    ODDBALL_UUIDS.iter().find(|(u, _)| *u == uuid).map(|(_, n)| *n)
+    ODDBALL_UUIDS
+        .iter()
+        .find(|(u, _)| *u == uuid)
+        .map(|(_, n)| *n)
 }
 
 /// Format the 16 bytes of a UUID in the canonical `8-4-4-4-12` form. We have
@@ -212,8 +220,22 @@ fn format_jxr_uuid(b: &[u8]) -> String {
     debug_assert_eq!(b.len(), 16);
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
     )
 }
 
@@ -232,7 +254,9 @@ pub fn parse(data: &[u8]) -> std::result::Result<JxrContainer<'_>, ContainerErro
     let ifd_offset = read_u32_le(&mut ds)?;
     // Skip ahead to ifd_offset.
     if (ifd_offset as usize) < ds.offset {
-        return Err(ContainerError::BadSignature("IFD offset before header".into()));
+        return Err(ContainerError::BadSignature(
+            "IFD offset before header".into(),
+        ));
     }
     let skip = ifd_offset as usize - ds.offset;
     let _ = ds.extract(skip, true)?;

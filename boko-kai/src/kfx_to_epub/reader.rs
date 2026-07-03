@@ -113,7 +113,12 @@ pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> 
         && let Some(cover_sec) = sections.iter().find(|s| s.html.contains(cover_img))
         && !leads_with_cover(&toc, &cover_sec.href)
     {
-        let label = if book.metadata.language.to_ascii_lowercase().starts_with("ja") {
+        let label = if book
+            .metadata
+            .language
+            .to_ascii_lowercase()
+            .starts_with("ja")
+        {
             "表紙"
         } else {
             "Cover"
@@ -248,7 +253,8 @@ mod tests {
 
     #[test]
     fn reader_book_has_sections_and_stamps_data_eid() {
-        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx")).expect("read [太宰 治] 人間失格.kfx fixture");
+        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx"))
+            .expect("read [太宰 治] 人間失格.kfx fixture");
         let book = kfx_to_reader_book(&bytes).expect("kfx_to_reader_book");
         assert!(!book.sections.is_empty(), "expected at least one section");
         assert!(
@@ -296,9 +302,11 @@ mod tests {
 
     #[test]
     fn epub_export_does_not_stamp_data_eid() {
-        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx")).expect("read [太宰 治] 人間失格.kfx fixture");
+        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx"))
+            .expect("read [太宰 治] 人間失格.kfx fixture");
         // The shippable EPUB path must leave the DOM stamp-free (no bloat).
-        let (out, _book, _toc) = build_output(&bytes, false, &|_, _, _, _| {}).expect("build_output");
+        let (out, _book, _toc) =
+            build_output(&bytes, false, &|_, _, _, _| {}).expect("build_output");
         let stamped: usize = out
             .spine_documents()
             .iter()

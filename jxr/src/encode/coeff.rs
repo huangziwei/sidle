@@ -113,9 +113,7 @@ pub fn encode_block(
     abs1: &mut AdaptiveVLC,
 ) {
     use super::entropy::write_huff;
-    use crate::decode::consts::{
-        ABS_LEVEL_INDEX_DELTA, FIRST_INDEX_DELTA, INDEX1_DELTA,
-    };
+    use crate::decode::consts::{ABS_LEVEL_INDEX_DELTA, FIRST_INDEX_DELTA, INDEX1_DELTA};
     debug_assert!(!pairs.is_empty());
 
     let abs_one = |bw: &mut BitWriter, abs: &mut AdaptiveVLC, mag: i32| {
@@ -129,9 +127,15 @@ pub fn encode_block(
     let level_is_not_1 = (l0.abs() != 1) as i32;
     let (n_imm, n_aft) = next_flags(pairs, 0);
     let first_index = run_is_zero + 2 * level_is_not_1 + 4 * n_imm + 8 * n_aft;
-    write_huff(bw, tables::first_index(first_ind.table_index as usize), first_index);
-    first_ind.discrim_val1 += FIRST_INDEX_DELTA[first_ind.delta_table_index as usize][first_index as usize];
-    first_ind.discrim_val2 += FIRST_INDEX_DELTA[first_ind.delta2_table_index as usize][first_index as usize];
+    write_huff(
+        bw,
+        tables::first_index(first_ind.table_index as usize),
+        first_index,
+    );
+    first_ind.discrim_val1 +=
+        FIRST_INDEX_DELTA[first_ind.delta_table_index as usize][first_index as usize];
+    first_ind.discrim_val2 +=
+        FIRST_INDEX_DELTA[first_ind.delta2_table_index as usize][first_index as usize];
     let mut i_context = run_is_zero & n_imm;
     bw.write_flag(l0 < 0);
     if level_is_not_1 != 0 {
@@ -155,7 +159,11 @@ pub fn encode_block(
         let (ni, na) = next_flags(pairs, j);
         let i_index = lin1 + 2 * ni + 4 * na;
         if i_loc < 15 {
-            let ind = if i_context != 0 { &mut *ind1 } else { &mut *ind0 };
+            let ind = if i_context != 0 {
+                &mut *ind1
+            } else {
+                &mut *ind0
+            };
             write_huff(bw, tables::index_a(ind.table_index as usize), i_index);
             ind.discrim_val1 += INDEX1_DELTA[ind.delta_table_index as usize][i_index as usize];
             ind.discrim_val2 += INDEX1_DELTA[ind.delta2_table_index as usize][i_index as usize];
@@ -301,7 +309,10 @@ impl ColorModel {
     /// `initialize_model_mb(band)`: `m_bits = max((2-band)*4, 0)` for both models.
     pub fn init(band: i32) -> Self {
         let mb = ((2 - band) * 4).max(0);
-        Self { m_bits: [mb; 2], m_state: [0; 2] }
+        Self {
+            m_bits: [mb; 2],
+            m_state: [0; 2],
+        }
     }
 
     /// Mirror of `update_model_mb` for a 2-model plane. `lap` is the per-model
@@ -312,7 +323,9 @@ impl ColorModel {
     pub fn update(&mut self, mut lap: [i32; 2], band: usize, num_components: usize) {
         const W0: [i32; 3] = [240, 12, 1];
         const W1: [[i32; 16]; 3] = [
-            [0, 240, 120, 80, 60, 48, 40, 34, 30, 27, 24, 22, 20, 18, 17, 16],
+            [
+                0, 240, 120, 80, 60, 48, 40, 34, 30, 27, 24, 22, 20, 18, 17, 16,
+            ],
             [0, 12, 6, 4, 3, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1],
             [0, 16, 8, 5, 4, 3, 3, 2, 2, 2, 2, 1, 1, 1, 1, 1],
         ];

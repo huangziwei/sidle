@@ -40,8 +40,7 @@ const BG: &str = "#F2EBDA";
 const BORDER: &str = "#8B9E78";
 const FG: &str = "#2C2418";
 const MUTED: &str = "#6B6256";
-const FONT_STACK: &str =
-    "'Hiragino Mincho ProN', 'Yu Mincho', 'Noto Serif JP', serif";
+const FONT_STACK: &str = "'Hiragino Mincho ProN', 'Yu Mincho', 'Noto Serif JP', serif";
 
 fn inner_w() -> u32 {
     // Matches the JS `var innerW = w - (pad + gap) * 2 - 60;`.
@@ -257,12 +256,11 @@ fn rasterize_to_jpeg(svg: &str) -> io::Result<Vec<u8>> {
         fontdb: cached_fontdb(),
         ..usvg::Options::default()
     };
-    let tree = usvg::Tree::from_str(svg, &opts).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("svg parse: {e}"))
-    })?;
+    let tree = usvg::Tree::from_str(svg, &opts)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("svg parse: {e}")))?;
 
-    let mut pixmap = tiny_skia::Pixmap::new(COVER_W, COVER_H)
-        .ok_or_else(|| io::Error::other("alloc pixmap"))?;
+    let mut pixmap =
+        tiny_skia::Pixmap::new(COVER_W, COVER_H).ok_or_else(|| io::Error::other("alloc pixmap"))?;
     resvg::render(
         &tree,
         tiny_skia::Transform::identity(),
@@ -332,11 +330,7 @@ mod tests {
         // Multi-line render emits multiple <text font-size="..."> tags
         // for the title; just confirm we kept all the chars somewhere.
         for c in "これは少し長めの本のタイトルです".chars() {
-            assert!(
-                svg.contains(c.to_string().as_str()),
-                "char {} missing",
-                c
-            );
+            assert!(svg.contains(c.to_string().as_str()), "char {} missing", c);
         }
     }
 

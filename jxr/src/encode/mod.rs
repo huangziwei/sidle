@@ -364,11 +364,7 @@ pub struct ImageInput<'a> {
 /// (4-plane input) is quantized with the same `qp` — use
 /// [`encode_with_alpha_qp`] to quantize it independently. Output is decodable
 /// by `decode` and structurally clones a real Amazon JXR.
-pub fn encode(
-    input: &ImageInput<'_>,
-    mode: ColorMode,
-    qp: QpSet,
-) -> Result<Vec<u8>, EncodeError> {
+pub fn encode(input: &ImageInput<'_>, mode: ColorMode, qp: QpSet) -> Result<Vec<u8>, EncodeError> {
     encode_with_alpha_qp(input, mode, qp, qp)
 }
 
@@ -384,7 +380,11 @@ pub fn encode_with_alpha_qp(
     encode_with_options(
         input,
         mode,
-        EncodeOptions { qp, alpha_qp: Some(alpha_qp), ..Default::default() },
+        EncodeOptions {
+            qp,
+            alpha_qp: Some(alpha_qp),
+            ..Default::default()
+        },
     )
 }
 
@@ -425,9 +425,14 @@ fn validate_geometry(w: u32, h: u32, opts: &EncodeOptions) -> Result<Geometry, E
     // window margins). Each tile must be ≥ 1 MB; counts are 12-bit fields.
     let mb_cols = ((w + window.1).div_ceil(16)) as usize;
     let mb_rows = ((h + window.0).div_ceil(16)) as usize;
-    let (tc, tr) = (opts.tile_cols.max(1) as usize, opts.tile_rows.max(1) as usize);
+    let (tc, tr) = (
+        opts.tile_cols.max(1) as usize,
+        opts.tile_rows.max(1) as usize,
+    );
     if tc > 4096 || tr > 4096 {
-        return Err(EncodeError::Invalid("tile counts are 12-bit fields (≤ 4096)".into()));
+        return Err(EncodeError::Invalid(
+            "tile counts are 12-bit fields (≤ 4096)".into(),
+        ));
     }
     if tc > mb_cols || tr > mb_rows {
         return Err(EncodeError::Invalid(format!(
@@ -439,7 +444,13 @@ fn validate_geometry(w: u32, h: u32, opts: &EncodeOptions) -> Result<Geometry, E
     } else {
         (Vec::new(), Vec::new())
     };
-    Ok(Geometry { window, tile_cols_mb, tile_rows_mb, mb_cols, mb_rows })
+    Ok(Geometry {
+        window,
+        tile_cols_mb,
+        tile_rows_mb,
+        mb_cols,
+        mb_rows,
+    })
 }
 
 /// Shape-check a caller-supplied [`QpPlan`] against the tile grid — the
@@ -539,7 +550,10 @@ pub fn encode_with_options(
     opts: EncodeOptions,
 ) -> Result<Vec<u8>, EncodeError> {
     use crate::decode::consts::{INT_YUV420, INT_YUV422, INT_YUV444};
-    if matches!(mode, ColorMode::Cmyk | ColorMode::CmykDirect | ColorMode::NComponent) {
+    if matches!(
+        mode,
+        ColorMode::Cmyk | ColorMode::CmykDirect | ColorMode::NComponent
+    ) {
         return encode_multi_typed(
             &SamplePlanes::U8(input.planes),
             input.width,
@@ -694,7 +708,17 @@ pub fn encode_with_options(
         ChromaSampling::YOnly if opts.bands == BandsPresent::All && trim == 0 => {
             reject_qp_plan(&opts, "YOnly")?;
             Ok(color::encode_yonly_from_color(
-                r, g, b, w, h, qp, opts.scaled, window, tiles, overlap, frequency,
+                r,
+                g,
+                b,
+                w,
+                h,
+                qp,
+                opts.scaled,
+                window,
+                tiles,
+                overlap,
+                frequency,
             ))
         }
         ChromaSampling::YOnly => Err(EncodeError::Unsupported(
@@ -714,16 +738,55 @@ pub fn encode_with_options(
             Ok(color::encode_color(r, g, b, w, h, qp))
         }
         ChromaSampling::Yuv444 => Ok(color::encode_color_options(
-            r, g, b, w, h, qp, INT_YUV444, bands, opts.scaled, trim, window, tiles, overlap,
-            frequency, plan,
+            r,
+            g,
+            b,
+            w,
+            h,
+            qp,
+            INT_YUV444,
+            bands,
+            opts.scaled,
+            trim,
+            window,
+            tiles,
+            overlap,
+            frequency,
+            plan,
         )),
         ChromaSampling::Yuv422 => Ok(color::encode_color_options(
-            r, g, b, w, h, qp, INT_YUV422, bands, opts.scaled, trim, window, tiles, overlap,
-            frequency, plan,
+            r,
+            g,
+            b,
+            w,
+            h,
+            qp,
+            INT_YUV422,
+            bands,
+            opts.scaled,
+            trim,
+            window,
+            tiles,
+            overlap,
+            frequency,
+            plan,
         )),
         ChromaSampling::Yuv420 => Ok(color::encode_color_options(
-            r, g, b, w, h, qp, INT_YUV420, bands, opts.scaled, trim, window, tiles, overlap,
-            frequency, plan,
+            r,
+            g,
+            b,
+            w,
+            h,
+            qp,
+            INT_YUV420,
+            bands,
+            opts.scaled,
+            trim,
+            window,
+            tiles,
+            overlap,
+            frequency,
+            plan,
         )),
     }
 }
@@ -742,7 +805,9 @@ fn encode_packed(
 ) -> Result<Vec<u8>, EncodeError> {
     use crate::decode::consts::{INT_YUV420, INT_YUV422, INT_YUV444, OUT_RGB};
     if mode != ColorMode::Color {
-        return Err(EncodeError::Invalid("packed RGB input is inherently color".into()));
+        return Err(EncodeError::Invalid(
+            "packed RGB input is inherently color".into(),
+        ));
     }
     if premultiplied_alpha {
         return Err(EncodeError::Invalid("packed RGB has no alpha plane".into()));
@@ -769,7 +834,18 @@ fn encode_packed(
         ChromaSampling::YOnly if opts.bands == BandsPresent::All && trim == 0 => {
             reject_qp_plan(&opts, "YOnly")?;
             Ok(color::encode_yonly_prebias(
-                &rp, &gp, &bp, w, h, qp, opts.scaled, window, tiles, overlap, frequency, &depth,
+                &rp,
+                &gp,
+                &bp,
+                w,
+                h,
+                qp,
+                opts.scaled,
+                window,
+                tiles,
+                overlap,
+                frequency,
+                &depth,
                 guid,
             ))
         }
@@ -818,7 +894,9 @@ fn encode_bw(
     opts: EncodeOptions,
 ) -> Result<Vec<u8>, EncodeError> {
     if mode != ColorMode::Grayscale {
-        return Err(EncodeError::Invalid("bi-level input is inherently grayscale".into()));
+        return Err(EncodeError::Invalid(
+            "bi-level input is inherently grayscale".into(),
+        ));
     }
     if premultiplied_alpha {
         return Err(EncodeError::Invalid("bi-level has no alpha plane".into()));
@@ -837,7 +915,9 @@ fn encode_bw(
         _ => unreachable!(),
     };
     if bad {
-        return Err(EncodeError::Invalid("bi-level values must be 0 or 1".into()));
+        return Err(EncodeError::Invalid(
+            "bi-level values must be 0 or 1".into(),
+        ));
     }
     let geom = validate_geometry(w, h, &opts)?;
     let window = geom.window;
@@ -885,7 +965,7 @@ fn encode_multi_typed(
                 "CMYK/N-component container formats exist for the 8- and 16-bit \
                  unsigned families only"
                     .into(),
-            ))
+            ));
         }
     };
     if !matches!(opts.chroma, ChromaSampling::Yuv444) {
@@ -922,7 +1002,7 @@ fn encode_multi_typed(
             other => {
                 return Err(EncodeError::Invalid(format!(
                     "CMYK expects 4 planes (C,M,Y,K) or 5 (+alpha), got {other}"
-                )))
+                )));
             }
         }
     } else {
@@ -935,7 +1015,7 @@ fn encode_multi_typed(
                 return Err(EncodeError::Invalid(format!(
                     "N-component expects 3–8 channel planes (the container GUID \
                      family stops at 8 channels; alpha is not offered), got {other}"
-                )))
+                )));
             }
         }
     };
@@ -950,10 +1030,14 @@ fn encode_multi_typed(
     let comps: Vec<Vec<i32>> = match mode {
         ColorMode::Cmyk => convert::cmyk_prebias(samples, opts.scaled),
         ColorMode::CmykDirect => convert::cmykdirect_prebias(samples, opts.scaled),
-        _ => (0..nch).map(|i| samples.prebias_plane(i, opts.scaled)).collect(),
+        _ => (0..nch)
+            .map(|i| samples.prebias_plane(i, opts.scaled))
+            .collect(),
     };
     let alpha_plane = has_alpha.then(|| samples.prebias_plane(nch, opts.scaled));
-    let alpha = alpha_plane.as_ref().map(|a| (&a[..], opts.alpha_qp.unwrap_or(qp)));
+    let alpha = alpha_plane
+        .as_ref()
+        .map(|a| (&a[..], opts.alpha_qp.unwrap_or(qp)));
     let (int_fmt, out_fmt) = match mode {
         ColorMode::Cmyk => (INT_YUVK, OUT_CMYK),
         ColorMode::CmykDirect => (INT_YUVK, OUT_CMYKDIRECT),
@@ -1022,7 +1106,10 @@ pub fn encode_typed(
     use crate::decode::consts::{INT_YUV420, INT_YUV422, INT_YUV444};
     let samples = &input.samples;
     let (w, h) = (input.width, input.height);
-    if matches!(mode, ColorMode::Cmyk | ColorMode::CmykDirect | ColorMode::NComponent) {
+    if matches!(
+        mode,
+        ColorMode::Cmyk | ColorMode::CmykDirect | ColorMode::NComponent
+    ) {
         return encode_multi_typed(samples, w, h, input.premultiplied_alpha, mode, opts);
     }
     if matches!(
@@ -1132,7 +1219,7 @@ pub fn encode_typed(
                 "gray+alpha: JPEG XR has no grayscale-with-alpha container pixel format; \
                  supply RGBA (4 planes)"
                     .into(),
-            ))
+            ));
         }
         4 => {
             use crate::decode::consts::{INT_YUV420, INT_YUV422, INT_YUV444};
@@ -1148,8 +1235,7 @@ pub fn encode_typed(
             }
             if opts.bands != BandsPresent::All || trim != 0 {
                 return Err(EncodeError::Unsupported(
-                    "band truncation / trim_flexbits with an alpha plane is not implemented"
-                        .into(),
+                    "band truncation / trim_flexbits with an alpha plane is not implemented".into(),
                 ));
             }
             let Some(guid) = samples.rgba_guid(input.premultiplied_alpha) else {
@@ -1194,7 +1280,7 @@ pub fn encode_typed(
         other => {
             return Err(EncodeError::Invalid(format!(
                 "expected 1 (gray), 3 (RGB) or 4 (RGBA) planes, got {other}"
-            )))
+            )));
         }
     }
     if input.premultiplied_alpha {
@@ -1315,7 +1401,11 @@ pub fn quality_to_qp(quality: u8) -> QpSet {
         return QpSet::LOSSLESS;
     }
     let base = (((100 - quality as i32) + 2) / 3).clamp(1, 40) as u8;
-    QpSet { dc: base, lp: base.saturating_mul(2), hp: base.saturating_mul(4) }
+    QpSet {
+        dc: base,
+        lp: base.saturating_mul(2),
+        hp: base.saturating_mul(4),
+    }
 }
 
 #[cfg(test)]
@@ -1484,8 +1574,17 @@ mod tests {
     fn roundtrip_non_aligned_grayscale_lossless() {
         // Arbitrary (non-16-aligned) dimensions: edge-pad + decoder crop.
         let mut r = Lcg(0x9090_3434);
-        for &(w, h) in &[(17u32, 31u32), (100, 50), (33, 16), (16, 33), (45, 45), (1, 1)] {
-            let pixels: Vec<u8> = (0..(w * h) as usize).map(|_| (r.next() % 256) as u8).collect();
+        for &(w, h) in &[
+            (17u32, 31u32),
+            (100, 50),
+            (33, 16),
+            (16, 33),
+            (45, 45),
+            (1, 1),
+        ] {
+            let pixels: Vec<u8> = (0..(w * h) as usize)
+                .map(|_| (r.next() % 256) as u8)
+                .collect();
             let input = ImageInput {
                 width: w,
                 height: h,
@@ -1514,12 +1613,26 @@ mod tests {
         // padding, not the quantizer.
         let mut r = Lcg(0x1357_9bdf);
         let qps = [
-            QpSet { dc: 4, lp: 8, hp: 16 },
-            QpSet { dc: 8, lp: 16, hp: 32 },
-            QpSet { dc: 1, lp: 4, hp: 6 },
+            QpSet {
+                dc: 4,
+                lp: 8,
+                hp: 16,
+            },
+            QpSet {
+                dc: 8,
+                lp: 16,
+                hp: 32,
+            },
+            QpSet {
+                dc: 1,
+                lp: 4,
+                hp: 6,
+            },
         ];
         for &(w, h) in &[(32u32, 32u32), (48, 32), (64, 48)] {
-            let pixels: Vec<u8> = (0..(w * h) as usize).map(|_| 96 + (r.next() % 64) as u8).collect();
+            let pixels: Vec<u8> = (0..(w * h) as usize)
+                .map(|_| 96 + (r.next() % 64) as u8)
+                .collect();
             for &qp in &qps {
                 let input = ImageInput {
                     width: w,
@@ -1529,7 +1642,10 @@ mod tests {
                 };
                 let jxr1 = encode(&input, ColorMode::Grayscale, qp).expect("encode");
                 let dec1 = decode_to_planes(&jxr1);
-                let p1: Vec<u8> = dec1.image_plane[0].iter().map(|&v| v.clamp(0, 255) as u8).collect();
+                let p1: Vec<u8> = dec1.image_plane[0]
+                    .iter()
+                    .map(|&v| v.clamp(0, 255) as u8)
+                    .collect();
                 let input2 = ImageInput {
                     width: w,
                     height: h,
@@ -1558,13 +1674,12 @@ mod tests {
             })
             .collect();
         let mse = |qp: QpSet| -> f64 {
-            let input =
-                ImageInput {
-                    width: w as u32,
-                    height: h as u32,
-                    planes: std::slice::from_ref(&pixels),
-                    premultiplied_alpha: false,
-                };
+            let input = ImageInput {
+                width: w as u32,
+                height: h as u32,
+                planes: std::slice::from_ref(&pixels),
+                premultiplied_alpha: false,
+            };
             let jxr = encode(&input, ColorMode::Grayscale, qp).expect("encode");
             let d = decode_to_planes(&jxr);
             let se: f64 = pixels
@@ -1578,10 +1693,21 @@ mod tests {
             se / (w * h) as f64
         };
         let m0 = mse(QpSet::LOSSLESS);
-        let m4 = mse(QpSet { dc: 16, lp: 16, hp: 16 }); // sf = 4
-        let m8 = mse(QpSet { dc: 32, lp: 32, hp: 32 }); // sf = 8
+        let m4 = mse(QpSet {
+            dc: 16,
+            lp: 16,
+            hp: 16,
+        }); // sf = 4
+        let m8 = mse(QpSet {
+            dc: 32,
+            lp: 32,
+            hp: 32,
+        }); // sf = 8
         assert_eq!(m0, 0.0, "lossless must be exact");
-        assert!(m4 > 0.0 && m8 > m4, "error must grow with QP: m0={m0} m4={m4} m8={m8}");
+        assert!(
+            m4 > 0.0 && m8 > m4,
+            "error must grow with QP: m0={m0} m4={m4} m8={m8}"
+        );
     }
 
     #[test]
@@ -1596,22 +1722,40 @@ mod tests {
         let gp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
         let bp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
         let planes = [rp.clone(), gp.clone(), bp.clone()];
-        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
         let jxr = encode(&input, ColorMode::Color, QpSet::LOSSLESS).expect("color encode");
         let d = decode_to_planes(&jxr);
         assert_eq!(d.num_components, 3, "3-plane color must emit RGB");
         for i in 0..n {
             assert_eq!(
-                (d.image_plane[0][i], d.image_plane[1][i], d.image_plane[2][i]),
+                (
+                    d.image_plane[0][i],
+                    d.image_plane[1][i],
+                    d.image_plane[2][i]
+                ),
                 (rp[i] as i32, gp[i] as i32, bp[i] as i32),
                 "pixel {i}"
             );
         }
         // 1-plane in Color mode → grayscale (1 component, no synthesized chroma).
         let gplanes = [rp.clone()];
-        let ginput = ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
+        let ginput = ImageInput {
+            width: w,
+            height: h,
+            planes: &gplanes,
+            premultiplied_alpha: false,
+        };
         let gjxr = encode(&ginput, ColorMode::Color, QpSet::LOSSLESS).expect("gray fallback");
-        assert_eq!(decode_to_planes(&gjxr).num_components, 1, "1-plane color-mode ⇒ grayscale");
+        assert_eq!(
+            decode_to_planes(&gjxr).num_components,
+            1,
+            "1-plane color-mode ⇒ grayscale"
+        );
     }
 
     #[test]
@@ -1622,10 +1766,18 @@ mod tests {
         let n = (w * h) as usize;
         let plane: Vec<u8> = (0..n).map(|_| (r.next() % 256) as u8).collect();
         let planes = [plane.clone(), plane.clone(), plane.clone()];
-        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
         let jxr = encode(&input, ColorMode::Color, QpSet::LOSSLESS).unwrap();
         let d = decode_to_planes(&jxr);
-        assert_eq!(d.num_components, 1, "equal RGB channels must auto-detect to grayscale");
+        assert_eq!(
+            d.num_components, 1,
+            "equal RGB channels must auto-detect to grayscale"
+        );
         for i in 0..n {
             assert_eq!(d.image_plane[0][i], plane[i] as i32, "pixel {i}");
         }
@@ -1644,15 +1796,25 @@ mod tests {
         for &(w, h) in &[(48u32, 32u32), (17, 31), (16, 16), (100, 50)] {
             let n = (w * h) as usize;
             let planes: [Vec<u8>; 4] = noise_planes(&mut r, n);
-            let input =
-                ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+            let input = ImageInput {
+                width: w,
+                height: h,
+                planes: &planes,
+                premultiplied_alpha: false,
+            };
             let jxr = encode(&input, ColorMode::Color, QpSet::LOSSLESS).expect("rgba encode");
             let d = decode_to_planes(&jxr);
             assert_eq!(d.num_components, 4, "{w}x{h}: 3 primary + alpha");
-            assert!(d.has_alpha && !d.premultiplied_alpha, "{w}x{h}: alpha flags");
+            assert!(
+                d.has_alpha && !d.premultiplied_alpha,
+                "{w}x{h}: alpha flags"
+            );
             for c in 0..4 {
                 for i in 0..n {
-                    assert_eq!(d.image_plane[c][i], planes[c][i] as i32, "{w}x{h} ch{c} px{i}");
+                    assert_eq!(
+                        d.image_plane[c][i], planes[c][i] as i32,
+                        "{w}x{h} ch{c} px{i}"
+                    );
                 }
             }
         }
@@ -1666,14 +1828,26 @@ mod tests {
         let (w, h) = (48u32, 32u32);
         let n = (w * h) as usize;
         let planes: [Vec<u8>; 4] = noise_planes(&mut r, n);
-        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
-        let lossy = QpSet { dc: 32, lp: 64, hp: 128 };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
+        let lossy = QpSet {
+            dc: 32,
+            lp: 64,
+            hp: 128,
+        };
 
         let jxr = encode_with_alpha_qp(&input, ColorMode::Color, QpSet::LOSSLESS, lossy).unwrap();
         let d = decode_to_planes(&jxr);
         for c in 0..3 {
             for i in 0..n {
-                assert_eq!(d.image_plane[c][i], planes[c][i] as i32, "RGB must stay exact ch{c}");
+                assert_eq!(
+                    d.image_plane[c][i], planes[c][i] as i32,
+                    "RGB must stay exact ch{c}"
+                );
             }
         }
         assert!(
@@ -1684,7 +1858,10 @@ mod tests {
         let jxr2 = encode_with_alpha_qp(&input, ColorMode::Color, lossy, QpSet::LOSSLESS).unwrap();
         let d2 = decode_to_planes(&jxr2);
         for i in 0..n {
-            assert_eq!(d2.image_plane[3][i], planes[3][i] as i32, "alpha must stay exact px{i}");
+            assert_eq!(
+                d2.image_plane[3][i], planes[3][i] as i32,
+                "alpha must stay exact px{i}"
+            );
         }
         assert!(
             (0..3).any(|c| (0..n).any(|i| d2.image_plane[c][i] != planes[c][i] as i32)),
@@ -1701,21 +1878,36 @@ mod tests {
         let (w, h) = (32u32, 16u32);
         let n = (w * h) as usize;
         let planes: [Vec<u8>; 4] = noise_planes(&mut r, n);
-        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: true };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: true,
+        };
         let jxr = encode(&input, ColorMode::Color, QpSet::LOSSLESS).unwrap();
         let c = crate::decode::container::parse(&jxr).expect("container");
-        assert_eq!(c.pixel_format_uuid, "24c3dd6f-034e-fe4b-b185-3d77768dc910", "32bppPBGRA");
+        assert_eq!(
+            c.pixel_format_uuid, "24c3dd6f-034e-fe4b-b185-3d77768dc910",
+            "32bppPBGRA"
+        );
         let d = crate::decode::decode_image(&c).expect("decode");
         assert!(d.has_alpha && d.premultiplied_alpha);
         let pb = d.to_pixel_buffer().expect("pixel buffer");
         assert_eq!(pb.alpha, AlphaMode::Premultiplied);
         assert_eq!(pb.channels, 4);
 
-        let input2 =
-            ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let input2 = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
         let jxr2 = encode(&input2, ColorMode::Color, QpSet::LOSSLESS).unwrap();
         let c2 = crate::decode::container::parse(&jxr2).expect("container");
-        assert_eq!(c2.pixel_format_uuid, "24c3dd6f-034e-fe4b-b185-3d77768dc90f", "32bppBGRA");
+        assert_eq!(
+            c2.pixel_format_uuid, "24c3dd6f-034e-fe4b-b185-3d77768dc90f",
+            "32bppBGRA"
+        );
         let d2 = crate::decode::decode_image(&c2).expect("decode");
         assert!(d2.has_alpha && !d2.premultiplied_alpha);
         assert_eq!(d2.to_pixel_buffer().unwrap().alpha, AlphaMode::Straight);
@@ -1731,7 +1923,12 @@ mod tests {
         let g: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
         let a: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
         let planes = [g.clone(), g.clone(), g.clone(), a.clone()];
-        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
         let jxr = encode(&input, ColorMode::Color, QpSet::LOSSLESS).unwrap();
         let c = crate::decode::container::parse(&jxr).expect("container");
         assert_eq!(c.pixel_format_uuid, "24c3dd6f-034e-fe4b-b185-3d77768dc90f");
@@ -1756,15 +1953,39 @@ mod tests {
             (0..n).map(|_| 96 + ((r.next() >> 32) as u8 % 64)).collect()
         };
         let planes = [mk(&mut r), mk(&mut r), mk(&mut r), mk(&mut r)];
-        let (qp, aqp) = (QpSet { dc: 4, lp: 8, hp: 16 }, QpSet { dc: 8, lp: 16, hp: 32 });
-        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let (qp, aqp) = (
+            QpSet {
+                dc: 4,
+                lp: 8,
+                hp: 16,
+            },
+            QpSet {
+                dc: 8,
+                lp: 16,
+                hp: 32,
+            },
+        );
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
         let jxr1 = encode_with_alpha_qp(&input, ColorMode::Color, qp, aqp).unwrap();
         let d = decode_to_planes(&jxr1);
         let ch = |c: usize| -> Vec<u8> {
-            d.image_plane[c].iter().map(|&v| v.clamp(0, 255) as u8).collect()
+            d.image_plane[c]
+                .iter()
+                .map(|&v| v.clamp(0, 255) as u8)
+                .collect()
         };
         let p2 = [ch(0), ch(1), ch(2), ch(3)];
-        let input2 = ImageInput { width: w, height: h, planes: &p2, premultiplied_alpha: false };
+        let input2 = ImageInput {
+            width: w,
+            height: h,
+            planes: &p2,
+            premultiplied_alpha: false,
+        };
         let jxr2 = encode_with_alpha_qp(&input2, ColorMode::Color, qp, aqp).unwrap();
         assert_eq!(jxr1, jxr2, "rgba lossy must be a fixpoint");
     }
@@ -1807,16 +2028,36 @@ mod tests {
         let pa = deinterleave(ChannelOrder::Rgba, &rgba, w, h).unwrap();
         let pb = deinterleave(ChannelOrder::Bgra, &bgra, w, h).unwrap();
         assert_eq!(pa, pb, "normalized planes must be identical");
-        let ia = ImageInput { width: w, height: h, planes: &pa, premultiplied_alpha: false };
-        let ib = ImageInput { width: w, height: h, planes: &pb, premultiplied_alpha: false };
+        let ia = ImageInput {
+            width: w,
+            height: h,
+            planes: &pa,
+            premultiplied_alpha: false,
+        };
+        let ib = ImageInput {
+            width: w,
+            height: h,
+            planes: &pb,
+            premultiplied_alpha: false,
+        };
         let fa = encode(&ia, ColorMode::Color, QpSet::LOSSLESS).unwrap();
         let fb = encode(&ib, ColorMode::Color, QpSet::LOSSLESS).unwrap();
         assert_eq!(fa, fb, "same pixels, different input order ⇒ same file");
         // And the file really carries those pixels (spot the first pixel).
         let d = decode_to_planes(&fa);
         assert_eq!(
-            (d.image_plane[0][0], d.image_plane[1][0], d.image_plane[2][0], d.image_plane[3][0]),
-            (rgba[0] as i32, rgba[1] as i32, rgba[2] as i32, rgba[3] as i32)
+            (
+                d.image_plane[0][0],
+                d.image_plane[1][0],
+                d.image_plane[2][0],
+                d.image_plane[3][0]
+            ),
+            (
+                rgba[0] as i32,
+                rgba[1] as i32,
+                rgba[2] as i32,
+                rgba[3] as i32
+            )
         );
     }
 
@@ -1830,7 +2071,12 @@ mod tests {
         let gp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
         let bp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
         let planes = [rp.clone(), gp.clone(), bp.clone()];
-        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
         let dec = |jxr: &[u8]| {
             let c = parse(jxr).unwrap();
             crate::decode::decode_image(&c).unwrap()
@@ -1843,7 +2089,10 @@ mod tests {
         let f = encode_with_options(
             &input,
             ColorMode::Color,
-            EncodeOptions { chroma: ChromaSampling::Yuv420, ..Default::default() },
+            EncodeOptions {
+                chroma: ChromaSampling::Yuv420,
+                ..Default::default()
+            },
         )
         .unwrap();
         let d = dec(&f);
@@ -1852,7 +2101,10 @@ mod tests {
         let f = encode_with_options(
             &input,
             ColorMode::Color,
-            EncodeOptions { chroma: ChromaSampling::YOnly, ..Default::default() },
+            EncodeOptions {
+                chroma: ChromaSampling::YOnly,
+                ..Default::default()
+            },
         )
         .unwrap();
         let d = dec(&f);
@@ -1863,7 +2115,10 @@ mod tests {
         let f = encode_with_options(
             &input,
             ColorMode::Color,
-            EncodeOptions { scaled: true, ..Default::default() },
+            EncodeOptions {
+                scaled: true,
+                ..Default::default()
+            },
         )
         .unwrap();
         let d = dec(&f);
@@ -1872,18 +2127,31 @@ mod tests {
         }
         // YOnly + alpha rejected.
         let four = [rp.clone(), gp.clone(), bp.clone(), rp.clone()];
-        let input4 = ImageInput { width: w, height: h, planes: &four, premultiplied_alpha: false };
-        assert!(encode_with_options(
-            &input4,
-            ColorMode::Color,
-            EncodeOptions { chroma: ChromaSampling::YOnly, ..Default::default() },
-        )
-        .is_err());
+        let input4 = ImageInput {
+            width: w,
+            height: h,
+            planes: &four,
+            premultiplied_alpha: false,
+        };
+        assert!(
+            encode_with_options(
+                &input4,
+                ColorMode::Color,
+                EncodeOptions {
+                    chroma: ChromaSampling::YOnly,
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        );
         // 420 + alpha works.
         let f = encode_with_options(
             &input4,
             ColorMode::Color,
-            EncodeOptions { chroma: ChromaSampling::Yuv420, ..Default::default() },
+            EncodeOptions {
+                chroma: ChromaSampling::Yuv420,
+                ..Default::default()
+            },
         )
         .unwrap();
         let d = dec(&f);
@@ -1900,7 +2168,12 @@ mod tests {
         let n = (w * h) as usize;
         let gray: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
         let planes = [gray.clone()];
-        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
         let dec = |jxr: &[u8]| {
             let c = parse(jxr).unwrap();
             crate::decode::decode_image(&c).unwrap()
@@ -1923,20 +2196,35 @@ mod tests {
             trim_flexbits: trim,
             ..Default::default()
         };
-        let all = encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::All, 0)).unwrap();
-        let noflex =
-            encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::NoFlexbits, 0)).unwrap();
-        let nohp =
-            encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::NoHighpass, 0)).unwrap();
+        let all =
+            encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::All, 0)).unwrap();
+        let noflex = encode_with_options(
+            &input,
+            ColorMode::Grayscale,
+            opts(BandsPresent::NoFlexbits, 0),
+        )
+        .unwrap();
+        let nohp = encode_with_options(
+            &input,
+            ColorMode::Grayscale,
+            opts(BandsPresent::NoHighpass, 0),
+        )
+        .unwrap();
         let dconly =
-            encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::DcOnly, 0)).unwrap();
+            encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::DcOnly, 0))
+                .unwrap();
         assert_eq!(mse(&all), 0.0, "All bands lossless must be exact");
         let (m_nf, m_nh, m_dc) = (mse(&noflex), mse(&nohp), mse(&dconly));
-        assert!(m_nf > 0.0 && m_nh > m_nf && m_dc > m_nh, "{m_nf} {m_nh} {m_dc}");
+        assert!(
+            m_nf > 0.0 && m_nh > m_nf && m_dc > m_nh,
+            "{m_nf} {m_nh} {m_dc}"
+        );
         assert!(noflex.len() < all.len() && nohp.len() < noflex.len() && dconly.len() < nohp.len());
         // Trim: error grows with trim at All bands; trim=15 ≈ NoFlexbits-ish.
-        let t4 = encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::All, 4)).unwrap();
-        let t15 = encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::All, 15)).unwrap();
+        let t4 =
+            encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::All, 4)).unwrap();
+        let t15 =
+            encode_with_options(&input, ColorMode::Grayscale, opts(BandsPresent::All, 15)).unwrap();
         let (m_t4, m_t15) = (mse(&t4), mse(&t15));
         assert!(m_t4 > 0.0 && m_t15 >= m_t4, "{m_t4} {m_t15}");
         assert!(t4.len() < all.len() && t15.len() < t4.len());
@@ -1945,8 +2233,12 @@ mod tests {
         let gp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
         let bp: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
         let cplanes = [rp, gp, bp];
-        let cinput =
-            ImageInput { width: w, height: h, planes: &cplanes, premultiplied_alpha: false };
+        let cinput = ImageInput {
+            width: w,
+            height: h,
+            planes: &cplanes,
+            premultiplied_alpha: false,
+        };
         for (chroma, bands, trim) in [
             (ChromaSampling::Yuv444, BandsPresent::NoFlexbits, 0u8),
             (ChromaSampling::Yuv444, BandsPresent::All, 6),
@@ -1956,7 +2248,12 @@ mod tests {
             let f = encode_with_options(
                 &cinput,
                 ColorMode::Color,
-                EncodeOptions { chroma, bands, trim_flexbits: trim, ..Default::default() },
+                EncodeOptions {
+                    chroma,
+                    bands,
+                    trim_flexbits: trim,
+                    ..Default::default()
+                },
             )
             .unwrap();
             let d = dec(&f);
@@ -1966,8 +2263,12 @@ mod tests {
         let (lw, lh) = (70_000u32, 16u32);
         let big: Vec<u8> = (0..(lw as usize * 16)).map(|i| (i % 251) as u8).collect();
         let bplanes = [big.clone()];
-        let binput =
-            ImageInput { width: lw, height: lh, planes: &bplanes, premultiplied_alpha: false };
+        let binput = ImageInput {
+            width: lw,
+            height: lh,
+            planes: &bplanes,
+            premultiplied_alpha: false,
+        };
         let f = encode(&binput, ColorMode::Grayscale, QpSet::LOSSLESS).unwrap();
         let d = dec(&f);
         assert_eq!((d.width, d.height), (lw, lh));
@@ -1994,14 +2295,26 @@ mod tests {
             let n = (w * h) as usize;
             let gray: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
             let gplanes = [gray.clone()];
-            let ginput =
-                ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
+            let ginput = ImageInput {
+                width: w,
+                height: h,
+                planes: &gplanes,
+                premultiplied_alpha: false,
+            };
             let cplanes: [Vec<u8>; 3] = noise_planes(&mut r, n);
-            let cinput =
-                ImageInput { width: w, height: h, planes: &cplanes, premultiplied_alpha: false };
+            let cinput = ImageInput {
+                width: w,
+                height: h,
+                planes: &cplanes,
+                premultiplied_alpha: false,
+            };
             let aplanes: [Vec<u8>; 4] = noise_planes(&mut r, n);
-            let ainput =
-                ImageInput { width: w, height: h, planes: &aplanes, premultiplied_alpha: false };
+            let ainput = ImageInput {
+                width: w,
+                height: h,
+                planes: &aplanes,
+                premultiplied_alpha: false,
+            };
             for &(top, left) in &windows {
                 let opts = EncodeOptions {
                     window_top: top,
@@ -2013,7 +2326,10 @@ mod tests {
                 let d = dec(&f);
                 assert_eq!((d.width, d.height), (w, h), "({top},{left}) {w}x{h}");
                 for i in 0..n {
-                    assert_eq!(d.image_plane[0][i], gray[i] as i32, "gray ({top},{left}) px{i}");
+                    assert_eq!(
+                        d.image_plane[0][i], gray[i] as i32,
+                        "gray ({top},{left}) px{i}"
+                    );
                 }
                 // Color 4:4:4: exact.
                 let f = encode_with_options(&cinput, ColorMode::Color, opts.clone()).unwrap();
@@ -2060,20 +2376,33 @@ mod tests {
                 );
                 let d = dec(&f);
                 for i in 0..n {
-                    assert_eq!(d.image_plane[0][i], gray[i] as i32, "420 ({top},{left}) px{i}");
+                    assert_eq!(
+                        d.image_plane[0][i], gray[i] as i32,
+                        "420 ({top},{left}) px{i}"
+                    );
                 }
             }
         }
         // Margins are 6-bit fields: 64 is rejected.
         let p = vec![0u8; 256];
         let planes = [p.clone()];
-        let input = ImageInput { width: 16, height: 16, planes: &planes, premultiplied_alpha: false };
-        assert!(encode_with_options(
-            &input,
-            ColorMode::Grayscale,
-            EncodeOptions { window_top: 64, ..Default::default() },
-        )
-        .is_err());
+        let input = ImageInput {
+            width: 16,
+            height: 16,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
+        assert!(
+            encode_with_options(
+                &input,
+                ColorMode::Grayscale,
+                EncodeOptions {
+                    window_top: 64,
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        );
     }
 
     /// 4c: tiling. Multi-tile files (index table, per-tile packets, per-tile
@@ -2103,14 +2432,25 @@ mod tests {
             let n = (w * h) as usize;
             let gray: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
             let gplanes = [gray.clone()];
-            let ginput =
-                ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
-            let opts = EncodeOptions { tile_cols: tc, tile_rows: tr, ..Default::default() };
+            let ginput = ImageInput {
+                width: w,
+                height: h,
+                planes: &gplanes,
+                premultiplied_alpha: false,
+            };
+            let opts = EncodeOptions {
+                tile_cols: tc,
+                tile_rows: tr,
+                ..Default::default()
+            };
             let f = encode_with_options(&ginput, ColorMode::Grayscale, opts.clone()).unwrap();
             let d = dec(&f);
             assert_eq!((d.width, d.height), (w, h));
             for i in 0..n {
-                assert_eq!(d.image_plane[0][i], gray[i] as i32, "gray {tc}x{tr} {w}x{h} px{i}");
+                assert_eq!(
+                    d.image_plane[0][i], gray[i] as i32,
+                    "gray {tc}x{tr} {w}x{h} px{i}"
+                );
             }
             // Color + RGBA, exact at lossless.
             let cplanes: [Vec<u8>; 4] = noise_planes(&mut r, n);
@@ -2130,8 +2470,12 @@ mod tests {
                     );
                 }
             }
-            let ainput =
-                ImageInput { width: w, height: h, planes: &cplanes, premultiplied_alpha: false };
+            let ainput = ImageInput {
+                width: w,
+                height: h,
+                planes: &cplanes,
+                premultiplied_alpha: false,
+            };
             let f = encode_with_options(&ainput, ColorMode::Color, opts.clone()).unwrap();
             let d = dec(&f);
             assert_eq!(d.num_components, 4);
@@ -2148,16 +2492,33 @@ mod tests {
         let (w, h) = (96u32, 64u32);
         let n = (w * h) as usize;
         let cplanes: [Vec<u8>; 3] = noise_planes(&mut r, n);
-        let cinput =
-            ImageInput { width: w, height: h, planes: &cplanes, premultiplied_alpha: false };
+        let cinput = ImageInput {
+            width: w,
+            height: h,
+            planes: &cplanes,
+            premultiplied_alpha: false,
+        };
         for chroma in [ChromaSampling::Yuv444, ChromaSampling::Yuv420] {
-            let qp = QpSet { dc: 16, lp: 32, hp: 64 };
-            let base = EncodeOptions { qp, chroma, scaled: true, ..Default::default() };
+            let qp = QpSet {
+                dc: 16,
+                lp: 32,
+                hp: 64,
+            };
+            let base = EncodeOptions {
+                qp,
+                chroma,
+                scaled: true,
+                ..Default::default()
+            };
             let untiled = encode_with_options(&cinput, ColorMode::Color, base.clone()).unwrap();
             let tiled = encode_with_options(
                 &cinput,
                 ColorMode::Color,
-                EncodeOptions { tile_cols: 3, tile_rows: 2, ..base.clone() },
+                EncodeOptions {
+                    tile_cols: 3,
+                    tile_rows: 2,
+                    ..base.clone()
+                },
             )
             .unwrap();
             let (du, dt) = (dec(&untiled), dec(&tiled));
@@ -2170,8 +2531,12 @@ mod tests {
         }
         // Tiles × explicit window margins.
         let gplanes = [cplanes[0].clone()];
-        let ginput =
-            ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
+        let ginput = ImageInput {
+            width: w,
+            height: h,
+            planes: &gplanes,
+            premultiplied_alpha: false,
+        };
         let f = encode_with_options(
             &ginput,
             ColorMode::Grayscale,
@@ -2187,7 +2552,10 @@ mod tests {
         let d = dec(&f);
         assert_eq!((d.width, d.height), (w, h));
         for i in 0..n {
-            assert_eq!(d.image_plane[0][i], gplanes[0][i] as i32, "tiles×window px{i}");
+            assert_eq!(
+                d.image_plane[0][i], gplanes[0][i] as i32,
+                "tiles×window px{i}"
+            );
         }
         // Large noise tiles: packet offsets beyond 0xfaff exercise the 0xfb
         // 32-bit vlw_esc escape in the index table.
@@ -2195,15 +2563,26 @@ mod tests {
         let bn = (bw * bh) as usize;
         let big: Vec<u8> = (0..bn).map(|_| (r.next() >> 32) as u8).collect();
         let bplanes = [big.clone()];
-        let binput =
-            ImageInput { width: bw, height: bh, planes: &bplanes, premultiplied_alpha: false };
+        let binput = ImageInput {
+            width: bw,
+            height: bh,
+            planes: &bplanes,
+            premultiplied_alpha: false,
+        };
         let f = encode_with_options(
             &binput,
             ColorMode::Grayscale,
-            EncodeOptions { tile_cols: 2, tile_rows: 2, ..Default::default() },
+            EncodeOptions {
+                tile_cols: 2,
+                tile_rows: 2,
+                ..Default::default()
+            },
         )
         .unwrap();
-        assert!(f.len() > 4 * 0xfb00, "noise file must be big enough to need the escape");
+        assert!(
+            f.len() > 4 * 0xfb00,
+            "noise file must be big enough to need the escape"
+        );
         let d = dec(&f);
         for i in 0..bn {
             assert_eq!(d.image_plane[0][i], big[i] as i32, "vlw-escape px{i}");
@@ -2211,14 +2590,23 @@ mod tests {
         // Validation: every tile needs ≥ 1 MB.
         let small = vec![0u8; 256];
         let splanes = [small];
-        let sinput =
-            ImageInput { width: 16, height: 16, planes: &splanes, premultiplied_alpha: false };
-        assert!(encode_with_options(
-            &sinput,
-            ColorMode::Grayscale,
-            EncodeOptions { tile_cols: 2, ..Default::default() },
-        )
-        .is_err());
+        let sinput = ImageInput {
+            width: 16,
+            height: 16,
+            planes: &splanes,
+            premultiplied_alpha: false,
+        };
+        assert!(
+            encode_with_options(
+                &sinput,
+                ColorMode::Grayscale,
+                EncodeOptions {
+                    tile_cols: 2,
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        );
     }
 
     /// 4c: overlap modes 1/2. The pre-filters are exact inverses of the
@@ -2250,7 +2638,10 @@ mod tests {
                 let f = encode_with_options(
                     &gi,
                     ColorMode::Grayscale,
-                    EncodeOptions { overlap, ..Default::default() },
+                    EncodeOptions {
+                        overlap,
+                        ..Default::default()
+                    },
                 )
                 .unwrap();
                 let d = dec(&f);
@@ -2270,7 +2661,10 @@ mod tests {
                 let f = encode_with_options(
                     &ci,
                     ColorMode::Color,
-                    EncodeOptions { overlap, ..Default::default() },
+                    EncodeOptions {
+                        overlap,
+                        ..Default::default()
+                    },
                 )
                 .unwrap();
                 let d = dec(&f);
@@ -2292,7 +2686,10 @@ mod tests {
                 let f = encode_with_options(
                     &ai,
                     ColorMode::Color,
-                    EncodeOptions { overlap, ..Default::default() },
+                    EncodeOptions {
+                        overlap,
+                        ..Default::default()
+                    },
                 )
                 .unwrap();
                 let d = dec(&f);
@@ -2307,9 +2704,10 @@ mod tests {
                 }
                 // Gray content through 420/422 (zero chroma) exact — incl.
                 // the chroma DC-domain pre-filter at overlap Two.
-                for fmt in
-                    [crate::decode::consts::INT_YUV420, crate::decode::consts::INT_YUV422]
-                {
+                for fmt in [
+                    crate::decode::consts::INT_YUV420,
+                    crate::decode::consts::INT_YUV422,
+                ] {
                     let g = &planes4[0];
                     let f = color::encode_color_options(
                         g,
@@ -2343,8 +2741,12 @@ mod tests {
         let n = (w * h) as usize;
         let planes4: [Vec<u8>; 4] = noise_planes(&mut r, n);
         for overlap in [Overlap::One, Overlap::Two] {
-            let ai =
-                ImageInput { width: w, height: h, planes: &planes4, premultiplied_alpha: false };
+            let ai = ImageInput {
+                width: w,
+                height: h,
+                planes: &planes4,
+                premultiplied_alpha: false,
+            };
             let f = encode_with_options(
                 &ai,
                 ColorMode::Color,
@@ -2370,16 +2772,31 @@ mod tests {
             }
         }
         // Lossy with overlap: decodes, and differs from no-overlap bytes.
-        let ci =
-            ImageInput { width: w, height: h, planes: &planes4[..3], premultiplied_alpha: false };
-        let qp = QpSet { dc: 16, lp: 32, hp: 64 };
-        let base = EncodeOptions { qp, scaled: true, ..Default::default() };
+        let ci = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes4[..3],
+            premultiplied_alpha: false,
+        };
+        let qp = QpSet {
+            dc: 16,
+            lp: 32,
+            hp: 64,
+        };
+        let base = EncodeOptions {
+            qp,
+            scaled: true,
+            ..Default::default()
+        };
         let f0 = encode_with_options(&ci, ColorMode::Color, base.clone()).unwrap();
         for overlap in [Overlap::One, Overlap::Two] {
             let f = encode_with_options(
                 &ci,
                 ColorMode::Color,
-                EncodeOptions { overlap, ..base.clone() },
+                EncodeOptions {
+                    overlap,
+                    ..base.clone()
+                },
             )
             .unwrap();
             assert_ne!(f, f0, "{overlap:?} must change the coded bytes");
@@ -2401,7 +2818,12 @@ mod tests {
         let (w, h) = (48u32, 32u32);
         let n = (w * h) as usize;
         let planes: [Vec<u8>; 3] = noise_planes(&mut r, n);
-        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
         let psnr = |jxr: &[u8]| -> f64 {
             let c = parse(jxr).unwrap();
             let d = crate::decode::decode_image(&c).unwrap();
@@ -2414,28 +2836,53 @@ mod tests {
             }
             10.0 * (255.0f64 * 255.0 * (3 * n) as f64 / se).log10()
         };
-        let qp = QpSet { dc: 16, lp: 16, hp: 16 };
-        let unscaled =
-            encode_with_options(&input, ColorMode::Color, EncodeOptions { qp, ..Default::default() })
-                .unwrap();
+        let qp = QpSet {
+            dc: 16,
+            lp: 16,
+            hp: 16,
+        };
+        let unscaled = encode_with_options(
+            &input,
+            ColorMode::Color,
+            EncodeOptions {
+                qp,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let scaled = encode_with_options(
             &input,
             ColorMode::Color,
-            EncodeOptions { qp, scaled: true, ..Default::default() },
+            EncodeOptions {
+                qp,
+                scaled: true,
+                ..Default::default()
+            },
         )
         .unwrap();
         let (pu, ps) = (psnr(&unscaled), psnr(&scaled));
-        assert!(ps > pu - 2.0, "scaled q16 must match unscaled quality: {ps:.2} vs {pu:.2} dB");
+        assert!(
+            ps > pu - 2.0,
+            "scaled q16 must match unscaled quality: {ps:.2} vs {pu:.2} dB"
+        );
         // And the same holds with overlap + 420 in the mix. (On independent
         // RGB noise, 4:2:0 PSNR vs source is dominated by the subsampling
         // loss itself — so the baseline is the UNSCALED 4:2:0 encode, not an
         // absolute figure.)
-        let opts420 = EncodeOptions { qp, chroma: ChromaSampling::Yuv420, ..Default::default() };
+        let opts420 = EncodeOptions {
+            qp,
+            chroma: ChromaSampling::Yuv420,
+            ..Default::default()
+        };
         let u420 = encode_with_options(&input, ColorMode::Color, opts420.clone()).unwrap();
         let f = encode_with_options(
             &input,
             ColorMode::Color,
-            EncodeOptions { scaled: true, overlap: Overlap::Two, ..opts420.clone() },
+            EncodeOptions {
+                scaled: true,
+                overlap: Overlap::Two,
+                ..opts420.clone()
+            },
         )
         .unwrap();
         let (pu420, ps420) = (psnr(&u420), psnr(&f));
@@ -2461,15 +2908,25 @@ mod tests {
         for &(w, h) in &[(48u32, 32u32), (17, 31), (96, 64)] {
             let n = (w * h) as usize;
             let planes4: [Vec<u8>; 4] = noise_planes(&mut r, n);
-            let freq = EncodeOptions { frequency: true, ..Default::default() };
+            let freq = EncodeOptions {
+                frequency: true,
+                ..Default::default()
+            };
             // Gray / RGB / RGBA exact at lossless.
             let gplanes = [planes4[0].clone()];
-            let gi =
-                ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
+            let gi = ImageInput {
+                width: w,
+                height: h,
+                planes: &gplanes,
+                premultiplied_alpha: false,
+            };
             let f = encode_with_options(&gi, ColorMode::Grayscale, freq.clone()).unwrap();
             let d = dec(&f);
             for i in 0..n {
-                assert_eq!(d.image_plane[0][i], gplanes[0][i] as i32, "gray freq {w}x{h} px{i}");
+                assert_eq!(
+                    d.image_plane[0][i], gplanes[0][i] as i32,
+                    "gray freq {w}x{h} px{i}"
+                );
             }
             let ci = ImageInput {
                 width: w,
@@ -2487,8 +2944,12 @@ mod tests {
                     );
                 }
             }
-            let ai =
-                ImageInput { width: w, height: h, planes: &planes4, premultiplied_alpha: false };
+            let ai = ImageInput {
+                width: w,
+                height: h,
+                planes: &planes4,
+                premultiplied_alpha: false,
+            };
             let f = encode_with_options(&ai, ColorMode::Color, freq.clone()).unwrap();
             let d = dec(&f);
             assert_eq!(d.num_components, 4);
@@ -2529,18 +2990,28 @@ mod tests {
             }
             // Frequency × band truncation: fewer packets per tile, decodes
             // to the same pixels as the spatial encode at the same bands.
-            for bands in [BandsPresent::NoFlexbits, BandsPresent::NoHighpass, BandsPresent::DcOnly]
-            {
+            for bands in [
+                BandsPresent::NoFlexbits,
+                BandsPresent::NoHighpass,
+                BandsPresent::DcOnly,
+            ] {
                 let fs = encode_with_options(
                     &gi,
                     ColorMode::Grayscale,
-                    EncodeOptions { bands, ..Default::default() },
+                    EncodeOptions {
+                        bands,
+                        ..Default::default()
+                    },
                 )
                 .unwrap();
                 let ff = encode_with_options(
                     &gi,
                     ColorMode::Grayscale,
-                    EncodeOptions { bands, frequency: true, ..Default::default() },
+                    EncodeOptions {
+                        bands,
+                        frequency: true,
+                        ..Default::default()
+                    },
                 )
                 .unwrap();
                 assert_eq!(
@@ -2554,10 +3025,19 @@ mod tests {
         let (w, h) = (96u32, 64u32);
         let n = (w * h) as usize;
         let planes: [Vec<u8>; 3] = noise_planes(&mut r, n);
-        let ci = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let ci = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
         for chroma in [ChromaSampling::Yuv444, ChromaSampling::Yuv420] {
             let base = EncodeOptions {
-                qp: QpSet { dc: 16, lp: 32, hp: 64 },
+                qp: QpSet {
+                    dc: 16,
+                    lp: 32,
+                    hp: 64,
+                },
                 scaled: true,
                 chroma,
                 trim_flexbits: 4,
@@ -2567,7 +3047,10 @@ mod tests {
             let ff = encode_with_options(
                 &ci,
                 ColorMode::Color,
-                EncodeOptions { frequency: true, ..base.clone() },
+                EncodeOptions {
+                    frequency: true,
+                    ..base.clone()
+                },
             )
             .unwrap();
             let (ds, df) = (dec(&fs), dec(&ff));
@@ -2602,21 +3085,37 @@ mod tests {
         let (w, h) = (64u32, 64u32);
         let n = (w * h) as usize;
         let planes: [Vec<u8>; 3] = noise_planes(&mut r, n);
-        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
         let gray: Vec<u8> = (0..n).map(|_| (r.next() >> 32) as u8).collect();
 
         // (a) chroma_qp == qp ⇒ byte-identical (derived COMP_UNIFORM).
-        let qp = QpSet { dc: 8, lp: 16, hp: 32 };
+        let qp = QpSet {
+            dc: 8,
+            lp: 16,
+            hp: 32,
+        };
         let a = encode_with_options(
             &input,
             ColorMode::Color,
-            EncodeOptions { qp, ..Default::default() },
+            EncodeOptions {
+                qp,
+                ..Default::default()
+            },
         )
         .unwrap();
         let b = encode_with_options(
             &input,
             ColorMode::Color,
-            EncodeOptions { qp, chroma_qp: Some(qp), ..Default::default() },
+            EncodeOptions {
+                qp,
+                chroma_qp: Some(qp),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(a, b, "equal chroma_qp must emit COMP_UNIFORM bytes");
@@ -2624,26 +3123,50 @@ mod tests {
         // the PUBLIC qp_plan surface: the explicit plan also suppresses the
         // auto-gray collapse, so this really emits the color codestream.
         let gcolor = [gray.clone(), gray.clone(), gray.clone()];
-        let ginput =
-            ImageInput { width: w, height: h, planes: &gcolor, premultiplied_alpha: false };
-        let harsh_chroma = QpPlan::uniform(QpSet::LOSSLESS, Some(QpSet { dc: 64, lp: 64, hp: 64 }));
+        let ginput = ImageInput {
+            width: w,
+            height: h,
+            planes: &gcolor,
+            premultiplied_alpha: false,
+        };
+        let harsh_chroma = QpPlan::uniform(
+            QpSet::LOSSLESS,
+            Some(QpSet {
+                dc: 64,
+                lp: 64,
+                hp: 64,
+            }),
+        );
         let f = encode_with_options(
             &ginput,
             ColorMode::Color,
-            EncodeOptions { qp_plan: Some(harsh_chroma.clone()), ..Default::default() },
+            EncodeOptions {
+                qp_plan: Some(harsh_chroma.clone()),
+                ..Default::default()
+            },
         )
         .unwrap();
         let d = dec(&f);
-        assert_eq!(d.num_components, 3, "qp_plan must suppress the auto-gray collapse");
+        assert_eq!(
+            d.num_components, 3,
+            "qp_plan must suppress the auto-gray collapse"
+        );
         for i in 0..n {
-            assert_eq!(d.image_plane[0][i], gray[i] as i32, "zero-chroma separate px{i}");
+            assert_eq!(
+                d.image_plane[0][i], gray[i] as i32,
+                "zero-chroma separate px{i}"
+            );
         }
         // The same single-set plan and the chroma_qp fold are one emission.
         let via_chroma_qp = encode_with_options(
             &input,
             ColorMode::Color,
             EncodeOptions {
-                chroma_qp: Some(QpSet { dc: 64, lp: 64, hp: 64 }),
+                chroma_qp: Some(QpSet {
+                    dc: 64,
+                    lp: 64,
+                    hp: 64,
+                }),
                 ..Default::default()
             },
         )
@@ -2651,19 +3174,35 @@ mod tests {
         let via_plan = encode_with_options(
             &input,
             ColorMode::Color,
-            EncodeOptions { qp_plan: Some(harsh_chroma), ..Default::default() },
+            EncodeOptions {
+                qp_plan: Some(harsh_chroma),
+                ..Default::default()
+            },
         )
         .unwrap();
-        assert_eq!(via_chroma_qp, via_plan, "qp_plan(uniform) must equal the chroma_qp bytes");
+        assert_eq!(
+            via_chroma_qp, via_plan,
+            "qp_plan(uniform) must equal the chroma_qp bytes"
+        );
         // Colored content + harsh chroma: decodes, smaller than all-lossless.
         let lossless = encode(&input, ColorMode::Color, QpSet::LOSSLESS).unwrap();
         let f = encode_with_options(
             &input,
             ColorMode::Color,
-            EncodeOptions { chroma_qp: Some(QpSet { dc: 64, lp: 64, hp: 64 }), ..Default::default() },
+            EncodeOptions {
+                chroma_qp: Some(QpSet {
+                    dc: 64,
+                    lp: 64,
+                    hp: 64,
+                }),
+                ..Default::default()
+            },
         )
         .unwrap();
-        assert!(f.len() < lossless.len(), "harsh chroma must shrink the file");
+        assert!(
+            f.len() < lossless.len(),
+            "harsh chroma must shrink the file"
+        );
         let d = dec(&f);
         assert_eq!((d.width, d.height, d.num_components), (w, h, 3));
 
@@ -2680,12 +3219,18 @@ mod tests {
         let f = encode_with_options(
             &ginput,
             ColorMode::Color,
-            EncodeOptions { qp_plan: Some(plan_indep), ..Default::default() },
+            EncodeOptions {
+                qp_plan: Some(plan_indep),
+                ..Default::default()
+            },
         )
         .unwrap();
         let d = dec(&f);
         for i in 0..n {
-            assert_eq!(d.image_plane[0][i], gray[i] as i32, "independent zero-chroma px{i}");
+            assert_eq!(
+                d.image_plane[0][i], gray[i] as i32,
+                "independent zero-chroma px{i}"
+            );
         }
 
         // (c) per-tile QP sets over a 2x2 grid: all-lossless = exact; mixed =
@@ -2702,7 +3247,12 @@ mod tests {
             hp: vec![BandQp::uniform(96)],
         };
         let all_lossless = QpPlan {
-            tiles: vec![tile_l.clone(), tile_l.clone(), tile_l.clone(), tile_l.clone()],
+            tiles: vec![
+                tile_l.clone(),
+                tile_l.clone(),
+                tile_l.clone(),
+                tile_l.clone(),
+            ],
             lp_index: Vec::new(),
             hp_index: Vec::new(),
         };
@@ -2720,12 +3270,20 @@ mod tests {
         let d = dec(&f);
         for c in 0..3 {
             for i in 0..n {
-                assert_eq!(d.image_plane[c][i], planes[c][i] as i32, "per-tile lossless ch{c} px{i}");
+                assert_eq!(
+                    d.image_plane[c][i], planes[c][i] as i32,
+                    "per-tile lossless ch{c} px{i}"
+                );
             }
         }
         // Mixed: tile 0 (top-left 32x32) lossless, others lossy.
         let mixed = QpPlan {
-            tiles: vec![tile_l.clone(), tile_q.clone(), tile_q.clone(), tile_q.clone()],
+            tiles: vec![
+                tile_l.clone(),
+                tile_q.clone(),
+                tile_q.clone(),
+                tile_q.clone(),
+            ],
             lp_index: Vec::new(),
             hp_index: Vec::new(),
         };
@@ -2763,8 +3321,9 @@ mod tests {
         // harsh] on a checkerboard; set-0 MBs exact, set-1 MBs deviate;
         // frequency mode reconstructs identically.
         let mbh = (h as usize) / 16;
-        let map: Vec<u8> =
-            (0..mbw * mbh).map(|i| (((i % mbw) + (i / mbw)) % 2) as u8).collect();
+        let map: Vec<u8> = (0..mbw * mbh)
+            .map(|i| (((i % mbw) + (i / mbw)) % 2) as u8)
+            .collect();
         let dq = QpPlan {
             tiles: vec![TileQps {
                 dc: BandQp::uniform(0),
@@ -2778,7 +3337,11 @@ mod tests {
             encode_with_options(
                 &input,
                 ColorMode::Color,
-                EncodeOptions { frequency, qp_plan: Some(dq.clone()), ..Default::default() },
+                EncodeOptions {
+                    frequency,
+                    qp_plan: Some(dq.clone()),
+                    ..Default::default()
+                },
             )
             .unwrap()
         };
@@ -2824,7 +3387,12 @@ mod tests {
         let (w, h) = (48u32, 32u32);
         let n = (w * h) as usize;
         let planes: [Vec<u8>; 3] = noise_planes(&mut r, n);
-        let input = ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &planes,
+            premultiplied_alpha: false,
+        };
         let lossless_tile = || TileQps {
             dc: BandQp::uniform(0),
             lp: vec![BandQp::uniform(0)],
@@ -2835,7 +3403,10 @@ mod tests {
             lp_index: Vec::new(),
             hp_index: Vec::new(),
         };
-        let opts_with = |p: QpPlan| EncodeOptions { qp_plan: Some(p), ..Default::default() };
+        let opts_with = |p: QpPlan| EncodeOptions {
+            qp_plan: Some(p),
+            ..Default::default()
+        };
         let invalid = |r: Result<Vec<u8>, EncodeError>, what: &str| {
             assert!(
                 matches!(r, Err(EncodeError::Invalid(_))),
@@ -2856,7 +3427,11 @@ mod tests {
             encode_with_options(
                 &input,
                 ColorMode::Color,
-                EncodeOptions { tile_cols: 2, tile_rows: 2, ..opts_with(p) },
+                EncodeOptions {
+                    tile_cols: 2,
+                    tile_rows: 2,
+                    ..opts_with(p)
+                },
             ),
             "3 tile entries on a 2x2 grid",
         );
@@ -2867,7 +3442,12 @@ mod tests {
             "17 HP sets",
         );
         let mut p = QpPlan {
-            tiles: vec![lossless_tile(), lossless_tile(), lossless_tile(), lossless_tile()],
+            tiles: vec![
+                lossless_tile(),
+                lossless_tile(),
+                lossless_tile(),
+                lossless_tile(),
+            ],
             lp_index: Vec::new(),
             hp_index: Vec::new(),
         };
@@ -2876,7 +3456,11 @@ mod tests {
             encode_with_options(
                 &input,
                 ColorMode::Color,
-                EncodeOptions { tile_cols: 2, tile_rows: 2, ..opts_with(p) },
+                EncodeOptions {
+                    tile_cols: 2,
+                    tile_rows: 2,
+                    ..opts_with(p)
+                },
             ),
             "ragged per-tile LP set counts",
         );
@@ -2913,7 +3497,11 @@ mod tests {
                 &input,
                 ColorMode::Color,
                 EncodeOptions {
-                    chroma_qp: Some(QpSet { dc: 8, lp: 8, hp: 8 }),
+                    chroma_qp: Some(QpSet {
+                        dc: 8,
+                        lp: 8,
+                        hp: 8,
+                    }),
                     ..opts_with(uniform_plan())
                 },
             ),
@@ -2922,7 +3510,12 @@ mod tests {
 
         // -- Path rejections (all Unsupported) --
         let gray = vec![planes[0].clone()];
-        let ginput = ImageInput { width: w, height: h, planes: &gray, premultiplied_alpha: false };
+        let ginput = ImageInput {
+            width: w,
+            height: h,
+            planes: &gray,
+            premultiplied_alpha: false,
+        };
         unsupported(
             encode_with_options(&ginput, ColorMode::Grayscale, opts_with(uniform_plan())),
             "qp_plan x grayscale",
@@ -2931,18 +3524,31 @@ mod tests {
             encode_with_options(
                 &input,
                 ColorMode::Color,
-                EncodeOptions { chroma: ChromaSampling::YOnly, ..opts_with(uniform_plan()) },
+                EncodeOptions {
+                    chroma: ChromaSampling::YOnly,
+                    ..opts_with(uniform_plan())
+                },
             ),
             "qp_plan x YOnly",
         );
         let four: Vec<Vec<u8>> = planes.iter().cloned().chain([planes[0].clone()]).collect();
-        let ainput = ImageInput { width: w, height: h, planes: &four, premultiplied_alpha: false };
+        let ainput = ImageInput {
+            width: w,
+            height: h,
+            planes: &four,
+            premultiplied_alpha: false,
+        };
         unsupported(
             encode_with_options(&ainput, ColorMode::Color, opts_with(uniform_plan())),
             "qp_plan x alpha plane",
         );
         let cmyk: Vec<Vec<u8>> = (0..4).map(|c| planes[c % 3].clone()).collect();
-        let cinput = ImageInput { width: w, height: h, planes: &cmyk, premultiplied_alpha: false };
+        let cinput = ImageInput {
+            width: w,
+            height: h,
+            planes: &cmyk,
+            premultiplied_alpha: false,
+        };
         unsupported(
             encode_with_options(&cinput, ColorMode::Cmyk, opts_with(uniform_plan())),
             "qp_plan x CMYK",
@@ -2964,15 +3570,19 @@ mod tests {
 
         // -- Auto-gray suppression: R==G==B + qp_plan emits the color GUID --
         let gcolor = [planes[0].clone(), planes[0].clone(), planes[0].clone()];
-        let gc_input =
-            ImageInput { width: w, height: h, planes: &gcolor, premultiplied_alpha: false };
+        let gc_input = ImageInput {
+            width: w,
+            height: h,
+            planes: &gcolor,
+            premultiplied_alpha: false,
+        };
         let without = encode_with_options(&gc_input, ColorMode::Color, Default::default()).unwrap();
         assert!(
             parse(&without).unwrap().pixel_format_uuid.ends_with("08"),
             "gray content without a plan still collapses to 8bppGray"
         );
-        let with = encode_with_options(&gc_input, ColorMode::Color, opts_with(uniform_plan()))
-            .unwrap();
+        let with =
+            encode_with_options(&gc_input, ColorMode::Color, opts_with(uniform_plan())).unwrap();
         assert!(
             parse(&with).unwrap().pixel_format_uuid.ends_with("0d"),
             "qp_plan must suppress auto-gray (24bppRGB GUID)"
@@ -2980,8 +3590,9 @@ mod tests {
 
         // -- Typed paths: U16 RGB with per-MB DQUANT (lossless set-0 exact), --
         // -- packed 565 with an all-lossless per-tile plan (words exact).    --
-        let deep: Vec<Vec<u16>> =
-            (0..3).map(|_| (0..n).map(|_| (r.next() >> 24) as u16).collect()).collect();
+        let deep: Vec<Vec<u16>> = (0..3)
+            .map(|_| (0..n).map(|_| (r.next() >> 24) as u16).collect())
+            .collect();
         let map: Vec<u8> = (0..mbw * mbh).map(|i| (i % 2) as u8).collect();
         let mut dq = two_sets();
         dq.lp_index = map.clone();
@@ -3015,7 +3626,10 @@ mod tests {
                 }
             }
         }
-        assert!(deviations > 0, "U16 DQUANT set-1 MBs must actually quantize");
+        assert!(
+            deviations > 0,
+            "U16 DQUANT set-1 MBs must actually quantize"
+        );
         let packed: Vec<Vec<u16>> = vec![(0..n).map(|_| (r.next() >> 40) as u16).collect()];
         let f = encode_typed(
             &TypedInput {
@@ -3025,11 +3639,14 @@ mod tests {
                 premultiplied_alpha: false,
             },
             ColorMode::Color,
-            EncodeOptions { tile_cols: 2, ..opts_with(QpPlan {
-                tiles: vec![lossless_tile(), lossless_tile()],
-                lp_index: Vec::new(),
-                hp_index: Vec::new(),
-            }) },
+            EncodeOptions {
+                tile_cols: 2,
+                ..opts_with(QpPlan {
+                    tiles: vec![lossless_tile(), lossless_tile()],
+                    lp_index: Vec::new(),
+                    hp_index: Vec::new(),
+                })
+            },
         )
         .unwrap();
         let c = parse(&f).unwrap();
@@ -3062,46 +3679,81 @@ mod tests {
             let c = parse(jxr).unwrap();
             crate::decode::decode_image(&c).unwrap()
         };
-        let harsh = QpSet { dc: 64, lp: 64, hp: 64 };
+        let harsh = QpSet {
+            dc: 64,
+            lp: 64,
+            hp: 64,
+        };
         // Zero-chroma RGBA + harsh chroma_qp at q1: exact on all 4 channels.
         let gplanes = vec![gray.clone(), gray.clone(), gray.clone(), alpha.clone()];
-        let ginput =
-            ImageInput { width: w, height: h, planes: &gplanes, premultiplied_alpha: false };
+        let ginput = ImageInput {
+            width: w,
+            height: h,
+            planes: &gplanes,
+            premultiplied_alpha: false,
+        };
         let f = encode_with_options(
             &ginput,
             ColorMode::Color,
-            EncodeOptions { chroma_qp: Some(harsh), ..Default::default() },
+            EncodeOptions {
+                chroma_qp: Some(harsh),
+                ..Default::default()
+            },
         )
         .unwrap();
         let d = dec(&f);
         assert_eq!(d.num_components, 4);
         for (c, plane) in [&gray, &gray, &gray, &alpha].iter().enumerate() {
             for i in 0..n {
-                assert_eq!(d.image_plane[c][i], plane[i] as i32, "alpha chroma_qp ch{c} px{i}");
+                assert_eq!(
+                    d.image_plane[c][i], plane[i] as i32,
+                    "alpha chroma_qp ch{c} px{i}"
+                );
             }
         }
         // Colored RGBA: harsh chroma shrinks the file; still 4-channel.
         let cplanes: [Vec<u8>; 3] = noise_planes(&mut r, n);
-        let four = vec![cplanes[0].clone(), cplanes[1].clone(), cplanes[2].clone(), alpha];
-        let cinput = ImageInput { width: w, height: h, planes: &four, premultiplied_alpha: false };
-        let lossless =
-            encode_with_options(&cinput, ColorMode::Color, Default::default()).unwrap();
+        let four = vec![
+            cplanes[0].clone(),
+            cplanes[1].clone(),
+            cplanes[2].clone(),
+            alpha,
+        ];
+        let cinput = ImageInput {
+            width: w,
+            height: h,
+            planes: &four,
+            premultiplied_alpha: false,
+        };
+        let lossless = encode_with_options(&cinput, ColorMode::Color, Default::default()).unwrap();
         let f = encode_with_options(
             &cinput,
             ColorMode::Color,
-            EncodeOptions { chroma_qp: Some(harsh), ..Default::default() },
+            EncodeOptions {
+                chroma_qp: Some(harsh),
+                ..Default::default()
+            },
         )
         .unwrap();
-        assert!(f.len() < lossless.len(), "harsh chroma must shrink the alpha file");
+        assert!(
+            f.len() < lossless.len(),
+            "harsh chroma must shrink the alpha file"
+        );
         assert_eq!(dec(&f).num_components, 4);
         // chroma_qp == qp derives COMP_UNIFORM: byte-identical to None.
         let same = encode_with_options(
             &cinput,
             ColorMode::Color,
-            EncodeOptions { chroma_qp: Some(QpSet::LOSSLESS), ..Default::default() },
+            EncodeOptions {
+                chroma_qp: Some(QpSet::LOSSLESS),
+                ..Default::default()
+            },
         )
         .unwrap();
-        assert_eq!(same, lossless, "equal chroma_qp must stay byte-stable on the alpha path");
+        assert_eq!(
+            same, lossless,
+            "equal chroma_qp must stay byte-stable on the alpha path"
+        );
     }
 
     #[test]
@@ -3111,20 +3763,40 @@ mod tests {
         let p = vec![128u8; n];
         // 2 planes: no gray+alpha container pixel format exists.
         let two = [p.clone(), p.clone()];
-        let input = ImageInput { width: w, height: h, planes: &two, premultiplied_alpha: false };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &two,
+            premultiplied_alpha: false,
+        };
         assert!(encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).is_err());
         assert!(encode(&input, ColorMode::Color, QpSet::LOSSLESS).is_err());
         // 4 planes in Grayscale mode: alpha cannot ride a grayscale image.
         let four = [p.clone(), p.clone(), p.clone(), p.clone()];
-        let input = ImageInput { width: w, height: h, planes: &four, premultiplied_alpha: false };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &four,
+            premultiplied_alpha: false,
+        };
         assert!(encode(&input, ColorMode::Grayscale, QpSet::LOSSLESS).is_err());
         // premultiplied flag without an alpha plane.
         let three = [p.clone(), p.clone(), p.clone()];
-        let input = ImageInput { width: w, height: h, planes: &three, premultiplied_alpha: true };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &three,
+            premultiplied_alpha: true,
+        };
         assert!(encode(&input, ColorMode::Color, QpSet::LOSSLESS).is_err());
         // wrong plane length among the 4.
         let bad = [p.clone(), p.clone(), p.clone(), vec![0u8; n - 1]];
-        let input = ImageInput { width: w, height: h, planes: &bad, premultiplied_alpha: false };
+        let input = ImageInput {
+            width: w,
+            height: h,
+            planes: &bad,
+            premultiplied_alpha: false,
+        };
         assert!(encode(&input, ColorMode::Color, QpSet::LOSSLESS).is_err());
     }
 
@@ -3140,7 +3812,9 @@ mod tests {
     }
 
     fn guid_of(jxr: &[u8]) -> String {
-        crate::decode::container::parse(jxr).unwrap().pixel_format_uuid
+        crate::decode::container::parse(jxr)
+            .unwrap()
+            .pixel_format_uuid
     }
 
     #[test]
@@ -3150,7 +3824,9 @@ mod tests {
         for &(w, h) in &[(48u32, 32u32), (17, 31), (16, 16)] {
             let n = (w * h) as usize;
             // Full 16-bit range noise (extremes included via the gradient mix).
-            let gray: Vec<u16> = (0..n).map(|i| ((r.next() >> 32) as u16).wrapping_add(i as u16)).collect();
+            let gray: Vec<u16> = (0..n)
+                .map(|i| ((r.next() >> 32) as u16).wrapping_add(i as u16))
+                .collect();
             let planes = [gray.clone()];
             let input = TypedInput {
                 width: w,
@@ -3159,7 +3835,11 @@ mod tests {
                 premultiplied_alpha: false,
             };
             let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
-            assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc90b", "16bppGray GUID");
+            assert_eq!(
+                guid_of(&jxr),
+                "24c3dd6f-034e-fe4b-b185-3d77768dc90b",
+                "16bppGray GUID"
+            );
             let hd = headers_of(&jxr);
             assert_eq!(hd.hdr.output_bitdepth, BD16);
             assert_eq!(hd.planes[0].shift_bits, 0);
@@ -3177,7 +3857,11 @@ mod tests {
                 premultiplied_alpha: false,
             };
             let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-            assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc915", "48bppRGB GUID");
+            assert_eq!(
+                guid_of(&jxr),
+                "24c3dd6f-034e-fe4b-b185-3d77768dc915",
+                "48bppRGB GUID"
+            );
             let d = decode_to_planes(&jxr);
             for c in 0..3 {
                 for i in 0..n {
@@ -3203,7 +3887,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc913", "16bppGrayFixed GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc913",
+            "16bppGrayFixed GUID"
+        );
         let hd = headers_of(&jxr);
         assert_eq!(hd.hdr.output_bitdepth, BD16S);
         assert_eq!(hd.planes[0].shift_bits, 0);
@@ -3220,7 +3908,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc912", "48bppRGBFixed GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc912",
+            "48bppRGBFixed GUID"
+        );
         let d = decode_to_planes(&jxr);
         for c in 0..3 {
             for i in 0..n {
@@ -3246,7 +3938,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc93f", "32bppGrayFixed GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc93f",
+            "32bppGrayFixed GUID"
+        );
         let hd = headers_of(&jxr);
         assert_eq!(hd.hdr.output_bitdepth, BD32S);
         assert_eq!(hd.planes[0].shift_bits, 10, "libjxr's default pre-shift");
@@ -3264,7 +3960,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc918", "96bppRGBFixed GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc918",
+            "96bppRGBFixed GUID"
+        );
         let d = decode_to_planes(&jxr);
         for c in 0..3 {
             for i in 0..n {
@@ -3278,7 +3978,10 @@ mod tests {
             samples: SamplePlanes::I32(&planes),
             premultiplied_alpha: false,
         };
-        let opts = EncodeOptions { scaled: true, ..Default::default() };
+        let opts = EncodeOptions {
+            scaled: true,
+            ..Default::default()
+        };
         assert!(encode_typed(&input, ColorMode::Grayscale, opts.clone()).is_err());
     }
 
@@ -3301,16 +4004,26 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc93e", "16bppGrayHalf GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc93e",
+            "16bppGrayHalf GUID"
+        );
         let hd = headers_of(&jxr);
         assert_eq!(hd.hdr.output_bitdepth, BD16F);
         let d = decode_to_planes(&jxr);
         for i in 0..n {
-            assert_eq!(d.image_plane[0][i], canon(gray[i]), "gray px{i} bits {:#06x}", gray[i]);
+            assert_eq!(
+                d.image_plane[0][i],
+                canon(gray[i]),
+                "gray px{i} bits {:#06x}",
+                gray[i]
+            );
         }
         // Specials, explicitly: ±0, ±Inf, quiet/neg NaN, ±denormal, ±1.0.
-        let mut specials =
-            vec![0x0000u16, 0x8000, 0x7c00, 0xfc00, 0x7e00, 0xfe00, 0x0001, 0x8001, 0x3c00, 0xbc00];
+        let mut specials = vec![
+            0x0000u16, 0x8000, 0x7c00, 0xfc00, 0x7e00, 0xfe00, 0x0001, 0x8001, 0x3c00, 0xbc00,
+        ];
         specials.resize(256, 0x4248); // pad to 16x16 with 3.14-ish
         let planes = [specials.clone()];
         let input = TypedInput {
@@ -3334,7 +4047,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc93b", "48bppRGBHalf GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc93b",
+            "48bppRGBHalf GUID"
+        );
         let d = decode_to_planes(&jxr);
         for c in 0..3 {
             for i in 0..n {
@@ -3348,7 +4065,10 @@ mod tests {
             samples: SamplePlanes::F16(&planes),
             premultiplied_alpha: false,
         };
-        let opts = EncodeOptions { scaled: true, ..Default::default() };
+        let opts = EncodeOptions {
+            scaled: true,
+            ..Default::default()
+        };
         let jxr = encode_typed(&input, ColorMode::Grayscale, opts.clone()).unwrap();
         let d = decode_to_planes(&jxr);
         for i in 0..n {
@@ -3379,13 +4099,25 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc911", "32bppGrayFloat GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc911",
+            "32bppGrayFloat GUID"
+        );
         let hd = headers_of(&jxr);
         assert_eq!(hd.hdr.output_bitdepth, BD32F);
-        assert_eq!((hd.planes[0].len_mantissa, hd.planes[0].exp_bias), (13, 4), "reference defaults");
+        assert_eq!(
+            (hd.planes[0].len_mantissa, hd.planes[0].exp_bias),
+            (13, 4),
+            "reference defaults"
+        );
         let d = decode_to_planes(&jxr);
         for i in 0..n {
-            assert_eq!(d.image_plane[0][i] as u32, gray[i], "grid px{i} bits {:#010x}", gray[i]);
+            assert_eq!(
+                d.image_plane[0][i] as u32, gray[i],
+                "grid px{i} bits {:#010x}",
+                gray[i]
+            );
         }
         // RGB grid values, 128bppRGBFloat.
         let rgb: [Vec<u32>; 3] = std::array::from_fn(|_| (0..n).map(|_| grid(&mut r)).collect());
@@ -3396,7 +4128,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc91b", "128bppRGBFloat GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc91b",
+            "128bppRGBFloat GUID"
+        );
         let d = decode_to_planes(&jxr);
         for c in 0..3 {
             for i in 0..n {
@@ -3441,7 +4177,11 @@ mod tests {
             .map(|_| {
                 let bits = (r.next() >> 32) as u32;
                 let e = (bits >> 23) & 0xff;
-                if e == 0 || e == 0xff { bits & 0x7fff_ffff | 0x3f80_0000 } else { bits }
+                if e == 0 || e == 0xff {
+                    bits & 0x7fff_ffff | 0x3f80_0000
+                } else {
+                    bits
+                }
             })
             .collect();
         let planes = [arb];
@@ -3467,7 +4207,10 @@ mod tests {
             assert_eq!(d2.image_plane[0][i] as u32, canon[i], "fixpoint px{i}");
         }
         // Scaled arithmetic rejected for 32-bit floats too.
-        let opts = EncodeOptions { scaled: true, ..Default::default() };
+        let opts = EncodeOptions {
+            scaled: true,
+            ..Default::default()
+        };
         assert!(encode_typed(&input2, ColorMode::Grayscale, opts.clone()).is_err());
     }
 
@@ -3498,7 +4241,11 @@ mod tests {
                 premultiplied_alpha: false,
             };
             let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-            assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc93d", "32bppRGBE GUID");
+            assert_eq!(
+                guid_of(&jxr),
+                "24c3dd6f-034e-fe4b-b185-3d77768dc93d",
+                "32bppRGBE GUID"
+            );
             let hd = headers_of(&jxr);
             assert_eq!(hd.hdr.output_clr_fmt, OUT_RGBE);
             assert_eq!(hd.hdr.output_bitdepth, BD8);
@@ -3522,12 +4269,7 @@ mod tests {
         // change, the represented value (m · 2^E) is preserved exactly —
         // the half-bit imputation is below the byte's precision.
         let n = 256usize;
-        let planes: [Vec<u8>; 4] = [
-            vec![5u8; n],
-            vec![64u8; n],
-            vec![17u8; n],
-            vec![136u8; n],
-        ];
+        let planes: [Vec<u8>; 4] = [vec![5u8; n], vec![64u8; n], vec![17u8; n], vec![136u8; n]];
         let input = TypedInput {
             width: 16,
             height: 16,
@@ -3537,7 +4279,11 @@ mod tests {
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
         let d = decode_to_planes(&jxr);
         let value = |m: i32, e: i32| -> f64 {
-            if e == 0 { 0.0 } else { m as f64 * ((e - 136) as f64).exp2() }
+            if e == 0 {
+                0.0
+            } else {
+                m as f64 * ((e - 136) as f64).exp2()
+            }
         };
         for i in 0..n {
             for c in 0..3 {
@@ -3554,7 +4300,10 @@ mod tests {
         }
         // Subsampled chroma is rejected for RGBE (and floats).
         for chroma in [ChromaSampling::Yuv420, ChromaSampling::Yuv422] {
-            let opts = EncodeOptions { chroma, ..Default::default() };
+            let opts = EncodeOptions {
+                chroma,
+                ..Default::default()
+            };
             assert!(encode_typed(&input, ColorMode::Color, opts.clone()).is_err());
         }
         // 3-plane RGBE is malformed.
@@ -3584,7 +4333,10 @@ mod tests {
             samples: SamplePlanes::U16(&planes),
             premultiplied_alpha: false,
         };
-        let opts = EncodeOptions { scaled: true, ..Default::default() };
+        let opts = EncodeOptions {
+            scaled: true,
+            ..Default::default()
+        };
         let jxr = encode_typed(&input, ColorMode::Grayscale, opts.clone()).unwrap();
         let d = decode_to_planes(&jxr);
         for i in 0..n {
@@ -3629,7 +4381,11 @@ mod tests {
         // error bounded by the subsample/quant loss (sanity, not parity —
         // parity is the harness's job).
         let opts = EncodeOptions {
-            qp: QpSet { dc: 16, lp: 32, hp: 64 },
+            qp: QpSet {
+                dc: 16,
+                lp: 32,
+                hp: 64,
+            },
             chroma: ChromaSampling::Yuv420,
             bands: BandsPresent::NoFlexbits,
             scaled: true,
@@ -3640,8 +4396,16 @@ mod tests {
         assert_eq!((d.width, d.height, d.num_components), (w, h, 3));
         // chroma_qp (COMP_SEPARATE) smoke on deep color.
         let opts = EncodeOptions {
-            qp: QpSet { dc: 4, lp: 8, hp: 16 },
-            chroma_qp: Some(QpSet { dc: 16, lp: 32, hp: 64 }),
+            qp: QpSet {
+                dc: 4,
+                lp: 8,
+                hp: 16,
+            },
+            chroma_qp: Some(QpSet {
+                dc: 16,
+                lp: 32,
+                hp: 64,
+            }),
             ..Default::default()
         };
         let jxr = encode_typed(&input, ColorMode::Color, opts.clone()).unwrap();
@@ -3663,7 +4427,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc90b", "collapses to 16bppGray");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc90b",
+            "collapses to 16bppGray"
+        );
         let d = decode_to_planes(&jxr);
         assert_eq!(d.num_components, 1);
         for i in 0..n {
@@ -3684,9 +4452,16 @@ mod tests {
             samples: SamplePlanes::U16(&rgb),
             premultiplied_alpha: false,
         };
-        let opts = EncodeOptions { chroma: ChromaSampling::YOnly, ..Default::default() };
+        let opts = EncodeOptions {
+            chroma: ChromaSampling::YOnly,
+            ..Default::default()
+        };
         let jxr = encode_typed(&input, ColorMode::Color, opts.clone()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc915", "stays 48bppRGB");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc915",
+            "stays 48bppRGB"
+        );
         let d = decode_to_planes(&jxr);
         assert_eq!(d.num_components, 3);
         for i in 0..n {
@@ -3703,7 +4478,11 @@ mod tests {
         let n = (w * h) as usize;
         let planes: [Vec<u8>; 3] = noise_planes(&mut r, n);
         let opts = EncodeOptions {
-            qp: QpSet { dc: 4, lp: 8, hp: 16 },
+            qp: QpSet {
+                dc: 4,
+                lp: 8,
+                hp: 16,
+            },
             chroma: ChromaSampling::Yuv420,
             scaled: true,
             ..Default::default()
@@ -3720,7 +4499,12 @@ mod tests {
         )
         .unwrap();
         let via_classic = encode_with_options(
-            &ImageInput { width: w, height: h, planes: &planes, premultiplied_alpha: false },
+            &ImageInput {
+                width: w,
+                height: h,
+                planes: &planes,
+                premultiplied_alpha: false,
+            },
             ColorMode::Color,
             opts.clone(),
         )
@@ -3746,7 +4530,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc916", "64bppRGBA GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc916",
+            "64bppRGBA GUID"
+        );
         let d = decode_to_planes(&jxr);
         assert_eq!(d.num_components, 4);
         assert!(d.has_alpha && !d.premultiplied_alpha);
@@ -3763,7 +4551,11 @@ mod tests {
             premultiplied_alpha: true,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc917", "64bppPRGBA GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc917",
+            "64bppPRGBA GUID"
+        );
         assert!(decode_to_planes(&jxr).premultiplied_alpha);
         // I16 → 64bppRGBAFixedPoint.
         let pi16: [Vec<i16>; 4] =
@@ -3775,7 +4567,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc91d", "64bppRGBAFixed GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc91d",
+            "64bppRGBAFixed GUID"
+        );
         let d = decode_to_planes(&jxr);
         for c in 0..4 {
             for i in 0..n {
@@ -3792,11 +4588,19 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc91e", "128bppRGBAFixed GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc91e",
+            "128bppRGBAFixed GUID"
+        );
         let d = decode_to_planes(&jxr);
         for c in 0..4 {
             for i in 0..n {
-                assert_eq!(d.image_plane[c][i], (pi32[c][i] >> 10) << 10, "I32 ch{c} px{i}");
+                assert_eq!(
+                    d.image_plane[c][i],
+                    (pi32[c][i] >> 10) << 10,
+                    "I32 ch{c} px{i}"
+                );
             }
         }
         // F16 → 64bppRGBAHalf (bit patterns; -0 canonicalizes).
@@ -3810,7 +4614,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc93a", "64bppRGBAHalf GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc93a",
+            "64bppRGBAHalf GUID"
+        );
         let d = decode_to_planes(&jxr);
         for c in 0..4 {
             for i in 0..n {
@@ -3832,7 +4640,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc919", "128bppRGBAFloat GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc919",
+            "128bppRGBAFloat GUID"
+        );
         let d = decode_to_planes(&jxr);
         for c in 0..4 {
             for i in 0..n {
@@ -3846,7 +4658,11 @@ mod tests {
             premultiplied_alpha: true,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc91a", "128bppPRGBAFloat GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc91a",
+            "128bppPRGBAFloat GUID"
+        );
         // Premultiplied has no GUID for the fixed/half families.
         let input = TypedInput {
             width: w,
@@ -3863,7 +4679,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let opts = EncodeOptions {
-            alpha_qp: Some(QpSet { dc: 32, lp: 64, hp: 128 }),
+            alpha_qp: Some(QpSet {
+                dc: 32,
+                lp: 64,
+                hp: 128,
+            }),
             ..Default::default()
         };
         let d = decode_to_planes(&encode_typed(&input, ColorMode::Color, opts.clone()).unwrap());
@@ -3882,7 +4702,7 @@ mod tests {
 
     #[test]
     fn cmyk_q1_roundtrip_exact_u8_and_u16() {
-        use crate::decode::consts::{BD16, BD8, OUT_CMYK};
+        use crate::decode::consts::{BD8, BD16, OUT_CMYK};
         let mut r = Lcg(0xc111_0001);
         for &(w, h) in &[(48u32, 32u32), (17, 31)] {
             let n = (w * h) as usize;
@@ -3895,18 +4715,33 @@ mod tests {
                 premultiplied_alpha: false,
             };
             let jxr = encode_typed(&input, ColorMode::Cmyk, EncodeOptions::default()).unwrap();
-            assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc91c", "32bppCMYK GUID");
+            assert_eq!(
+                guid_of(&jxr),
+                "24c3dd6f-034e-fe4b-b185-3d77768dc91c",
+                "32bppCMYK GUID"
+            );
             let hd = headers_of(&jxr);
-            assert_eq!((hd.hdr.output_clr_fmt, hd.hdr.output_bitdepth), (OUT_CMYK, BD8));
+            assert_eq!(
+                (hd.hdr.output_clr_fmt, hd.hdr.output_bitdepth),
+                (OUT_CMYK, BD8)
+            );
             let d = decode_to_planes(&jxr);
             assert_eq!(d.num_components, 4);
             for c in 0..4 {
                 for i in 0..n {
-                    assert_eq!(d.image_plane[c][i], p8[c][i] as i32, "{w}x{h} u8 ch{c} px{i}");
+                    assert_eq!(
+                        d.image_plane[c][i], p8[c][i] as i32,
+                        "{w}x{h} u8 ch{c} px{i}"
+                    );
                 }
             }
             let via_8bit = encode_with_options(
-                &ImageInput { width: w, height: h, planes: &p8, premultiplied_alpha: false },
+                &ImageInput {
+                    width: w,
+                    height: h,
+                    planes: &p8,
+                    premultiplied_alpha: false,
+                },
                 ColorMode::Cmyk,
                 EncodeOptions::default(),
             )
@@ -3921,12 +4756,19 @@ mod tests {
                 premultiplied_alpha: false,
             };
             let jxr = encode_typed(&input, ColorMode::Cmyk, EncodeOptions::default()).unwrap();
-            assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc91f", "64bppCMYK GUID");
+            assert_eq!(
+                guid_of(&jxr),
+                "24c3dd6f-034e-fe4b-b185-3d77768dc91f",
+                "64bppCMYK GUID"
+            );
             assert_eq!(headers_of(&jxr).hdr.output_bitdepth, BD16);
             let d = decode_to_planes(&jxr);
             for c in 0..4 {
                 for i in 0..n {
-                    assert_eq!(d.image_plane[c][i], p16[c][i] as i32, "{w}x{h} u16 ch{c} px{i}");
+                    assert_eq!(
+                        d.image_plane[c][i], p16[c][i] as i32,
+                        "{w}x{h} u16 ch{c} px{i}"
+                    );
                 }
             }
         }
@@ -3953,10 +4795,35 @@ mod tests {
         // the component>0 half-step floor makes scaled q1 near-exact, not
         // bit-exact — the same caveat as scaled color.)
         let variants: [(&str, EncodeOptions); 5] = [
-            ("tiles", EncodeOptions { tile_cols: 2, tile_rows: 2, ..Default::default() }),
-            ("overlap1", EncodeOptions { overlap: Overlap::One, ..Default::default() }),
-            ("overlap2", EncodeOptions { overlap: Overlap::Two, ..Default::default() }),
-            ("frequency", EncodeOptions { frequency: true, ..Default::default() }),
+            (
+                "tiles",
+                EncodeOptions {
+                    tile_cols: 2,
+                    tile_rows: 2,
+                    ..Default::default()
+                },
+            ),
+            (
+                "overlap1",
+                EncodeOptions {
+                    overlap: Overlap::One,
+                    ..Default::default()
+                },
+            ),
+            (
+                "overlap2",
+                EncodeOptions {
+                    overlap: Overlap::Two,
+                    ..Default::default()
+                },
+            ),
+            (
+                "frequency",
+                EncodeOptions {
+                    frequency: true,
+                    ..Default::default()
+                },
+            ),
             (
                 "combo",
                 EncodeOptions {
@@ -3980,7 +4847,10 @@ mod tests {
         }
         // Scaled q1: bounded by the half-step floor propagated through the
         // ink lifting (a few code values), never unbounded.
-        let opts = EncodeOptions { scaled: true, ..Default::default() };
+        let opts = EncodeOptions {
+            scaled: true,
+            ..Default::default()
+        };
         let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts.clone()).unwrap());
         for c in 0..4 {
             for i in 0..n {
@@ -3988,13 +4858,28 @@ mod tests {
                 assert!(e <= 4, "scaled ch{c} px{i}: err {e}");
             }
         }
-        let opts =
-            EncodeOptions { qp: QpSet { dc: 8, lp: 16, hp: 32 }, scaled: true, ..Default::default() };
+        let opts = EncodeOptions {
+            qp: QpSet {
+                dc: 8,
+                lp: 16,
+                hp: 32,
+            },
+            scaled: true,
+            ..Default::default()
+        };
         let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts.clone()).unwrap());
         assert_eq!((d.width, d.height, d.num_components), (w, h, 4));
         let opts = EncodeOptions {
-            qp: QpSet { dc: 4, lp: 8, hp: 16 },
-            chroma_qp: Some(QpSet { dc: 16, lp: 32, hp: 64 }),
+            qp: QpSet {
+                dc: 4,
+                lp: 8,
+                hp: 16,
+            },
+            chroma_qp: Some(QpSet {
+                dc: 16,
+                lp: 32,
+                hp: 64,
+            }),
             ..Default::default()
         };
         let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts.clone()).unwrap());
@@ -4015,7 +4900,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Cmyk, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc92c", "40bppCMYKAlpha GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc92c",
+            "40bppCMYKAlpha GUID"
+        );
         let d = decode_to_planes(&jxr);
         assert_eq!(d.num_components, 5, "C,M,Y,K + alpha");
         assert!(d.has_alpha);
@@ -4033,7 +4922,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input16, ColorMode::Cmyk, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc92d", "80bppCMYKAlpha GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc92d",
+            "80bppCMYKAlpha GUID"
+        );
         let d = decode_to_planes(&jxr);
         for c in 0..5 {
             for i in 0..n {
@@ -4041,7 +4934,11 @@ mod tests {
             }
         }
         let opts = EncodeOptions {
-            alpha_qp: Some(QpSet { dc: 32, lp: 64, hp: 128 }),
+            alpha_qp: Some(QpSet {
+                dc: 32,
+                lp: 64,
+                hp: 128,
+            }),
             ..Default::default()
         };
         let d = decode_to_planes(&encode_typed(&input, ColorMode::Cmyk, opts.clone()).unwrap());
@@ -4068,7 +4965,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::CmykDirect, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc91c", "CMYK GUID (direct)");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc91c",
+            "CMYK GUID (direct)"
+        );
         assert_eq!(headers_of(&jxr).hdr.output_clr_fmt, OUT_CMYKDIRECT);
         let d = decode_to_planes(&jxr);
         assert_eq!(d.num_components, 4);
@@ -4086,8 +4987,9 @@ mod tests {
         let (w, h) = (48u32, 32u32);
         let n = (w * h) as usize;
         for nch in [3usize, 5, 8] {
-            let planes: Vec<Vec<u8>> =
-                (0..nch).map(|_| (0..n).map(|_| (r.next() >> 32) as u8).collect()).collect();
+            let planes: Vec<Vec<u8>> = (0..nch)
+                .map(|_| (0..n).map(|_| (r.next() >> 32) as u8).collect())
+                .collect();
             let input = TypedInput {
                 width: w,
                 height: h,
@@ -4107,11 +5009,15 @@ mod tests {
             assert_eq!(d.num_components, nch);
             for c in 0..nch {
                 for i in 0..n {
-                    assert_eq!(d.image_plane[c][i], planes[c][i] as i32, "{nch}ch ch{c} px{i}");
+                    assert_eq!(
+                        d.image_plane[c][i], planes[c][i] as i32,
+                        "{nch}ch ch{c} px{i}"
+                    );
                 }
             }
-            let planes16: Vec<Vec<u16>> =
-                (0..nch).map(|_| (0..n).map(|_| (r.next() >> 32) as u16).collect()).collect();
+            let planes16: Vec<Vec<u16>> = (0..nch)
+                .map(|_| (0..n).map(|_| (r.next() >> 32) as u16).collect())
+                .collect();
             let input = TypedInput {
                 width: w,
                 height: h,
@@ -4124,8 +5030,7 @@ mod tests {
             for c in 0..nch {
                 for i in 0..n {
                     assert_eq!(
-                        d.image_plane[c][i],
-                        planes16[c][i] as i32,
+                        d.image_plane[c][i], planes16[c][i] as i32,
                         "u16 {nch}ch ch{c} px{i}"
                     );
                 }
@@ -4140,15 +5045,25 @@ mod tests {
         let p = vec![128u8; n];
         let four = [p.clone(), p.clone(), p.clone(), p.clone()];
         // Subsampled chroma rejected.
-        for chroma in [ChromaSampling::Yuv420, ChromaSampling::Yuv422, ChromaSampling::YOnly] {
-            let opts = EncodeOptions { chroma, ..Default::default() };
+        for chroma in [
+            ChromaSampling::Yuv420,
+            ChromaSampling::Yuv422,
+            ChromaSampling::YOnly,
+        ] {
+            let opts = EncodeOptions {
+                chroma,
+                ..Default::default()
+            };
             let input = TypedInput {
                 width: w,
                 height: h,
                 samples: SamplePlanes::U8(&four),
                 premultiplied_alpha: false,
             };
-            assert!(encode_typed(&input, ColorMode::Cmyk, opts.clone()).is_err(), "{chroma:?}");
+            assert!(
+                encode_typed(&input, ColorMode::Cmyk, opts.clone()).is_err(),
+                "{chroma:?}"
+            );
         }
         // Wrong plane counts.
         let three = [p.clone(), p.clone(), p.clone()];
@@ -4198,7 +5113,7 @@ mod tests {
 
     #[test]
     fn packed_q1_roundtrip_exact() {
-        use crate::decode::consts::{BD10, BD565, BD5};
+        use crate::decode::consts::{BD5, BD10, BD565};
         let mut r = Lcg(0xbacc_0001);
         let (w, h) = (48u32, 32u32);
         let n = (w * h) as usize;
@@ -4212,7 +5127,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc909", "16bppRGB555 GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc909",
+            "16bppRGB555 GUID"
+        );
         assert_eq!(headers_of(&jxr).hdr.output_bitdepth, BD5);
         let d = decode_to_planes(&jxr);
         assert_eq!(d.num_components, 1, "packed output is one word plane");
@@ -4229,14 +5148,20 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc90a", "16bppRGB565 GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc90a",
+            "16bppRGB565 GUID"
+        );
         assert_eq!(headers_of(&jxr).hdr.output_bitdepth, BD565);
         let d = decode_to_planes(&jxr);
         for i in 0..n {
             assert_eq!(d.image_plane[0][i], words[i] as i32, "565 px{i}");
         }
         // 101010.
-        let words: Vec<u32> = (0..n).map(|_| ((r.next() >> 32) as u32) & 0x3fff_ffff).collect();
+        let words: Vec<u32> = (0..n)
+            .map(|_| ((r.next() >> 32) as u32) & 0x3fff_ffff)
+            .collect();
         let planes = [words.clone()];
         let input = TypedInput {
             width: w,
@@ -4245,7 +5170,11 @@ mod tests {
             premultiplied_alpha: false,
         };
         let jxr = encode_typed(&input, ColorMode::Color, EncodeOptions::default()).unwrap();
-        assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc914", "32bppRGB101010 GUID");
+        assert_eq!(
+            guid_of(&jxr),
+            "24c3dd6f-034e-fe4b-b185-3d77768dc914",
+            "32bppRGB101010 GUID"
+        );
         assert_eq!(headers_of(&jxr).hdr.output_bitdepth, BD10);
         let d = decode_to_planes(&jxr);
         for i in 0..n {
@@ -4260,14 +5189,28 @@ mod tests {
             samples: SamplePlanes::Packed565(&planes),
             premultiplied_alpha: false,
         };
-        let opts = EncodeOptions { scaled: true, ..Default::default() };
+        let opts = EncodeOptions {
+            scaled: true,
+            ..Default::default()
+        };
         let d = decode_to_planes(&encode_typed(&input, ColorMode::Color, opts.clone()).unwrap());
         for i in 0..n {
             let (gw, ww) = (d.image_plane[0][i] as u16, words[i]);
-            let un = |v: u16| [(v & 31) as i32, ((v >> 5) & 63) as i32, ((v >> 11) & 31) as i32];
+            let un = |v: u16| {
+                [
+                    (v & 31) as i32,
+                    ((v >> 5) & 63) as i32,
+                    ((v >> 11) & 31) as i32,
+                ]
+            };
             let (a, b) = (un(gw), un(ww));
             for c in 0..3 {
-                assert!((a[c] - b[c]).abs() <= 1, "scaled 565 px{i} ch{c}: {} vs {}", a[c], b[c]);
+                assert!(
+                    (a[c] - b[c]).abs() <= 1,
+                    "scaled 565 px{i} ch{c}: {} vs {}",
+                    a[c],
+                    b[c]
+                );
             }
         }
         // Packed input validation: one plane only, Color only.
@@ -4304,7 +5247,11 @@ mod tests {
                 premultiplied_alpha: false,
             };
             let jxr = encode_typed(&input, ColorMode::Grayscale, EncodeOptions::default()).unwrap();
-            assert_eq!(guid_of(&jxr), "24c3dd6f-034e-fe4b-b185-3d77768dc905", "BlackWhite GUID");
+            assert_eq!(
+                guid_of(&jxr),
+                "24c3dd6f-034e-fe4b-b185-3d77768dc905",
+                "BlackWhite GUID"
+            );
             assert_eq!(headers_of(&jxr).hdr.output_bitdepth, BD1WHITE1);
             let d = decode_to_planes(&jxr);
             for i in 0..n {

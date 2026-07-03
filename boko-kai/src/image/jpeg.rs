@@ -98,8 +98,7 @@ pub fn strip_jpeg_metadata(data: &[u8]) -> Option<Vec<u8>> {
         // EOI as a single slab. Byte-stuffed FF00 sequences and any
         // restart markers inside the scan don't need parsing here.
         if marker == 0xDA {
-            let seg_len =
-                u16::from_be_bytes(data.get(i..i + 2)?.try_into().ok()?) as usize;
+            let seg_len = u16::from_be_bytes(data.get(i..i + 2)?.try_into().ok()?) as usize;
             if i + seg_len > data.len() {
                 return None;
             }
@@ -269,7 +268,10 @@ mod tests {
         let stripped = strip_jpeg_metadata(&tampered).expect("APP1 stripped + APP0 injected");
         // Result starts SOI + APP0(JFIF).
         assert_eq!(&stripped[..4], &[0xFF, 0xD8, 0xFF, 0xE0]);
-        assert_eq!(&stripped[4..11], &[0x00, 0x10, b'J', b'F', b'I', b'F', 0x00]);
+        assert_eq!(
+            &stripped[4..11],
+            &[0x00, 0x10, b'J', b'F', b'I', b'F', 0x00]
+        );
         // APP1 is gone.
         assert!(!contains_subseq(&stripped, &[0xFF, 0xE1]));
     }
@@ -289,14 +291,23 @@ mod tests {
             0x3B, // trailer
         ];
         let out = sanitize_for_kfx(gif).expect("GIF decode succeeds");
-        assert!(out.starts_with(&[0xFF, 0xD8]), "output starts with JPEG SOI");
-        assert!(out.len() > 100, "JPEG should be at least a few hundred bytes");
+        assert!(
+            out.starts_with(&[0xFF, 0xD8]),
+            "output starts with JPEG SOI"
+        );
+        assert!(
+            out.len() > 100,
+            "JPEG should be at least a few hundred bytes"
+        );
     }
 
     #[test]
     fn minimal_png_transcodes_to_jpeg() {
         let out = sanitize_for_kfx(minimal_png()).expect("PNG decode succeeds");
-        assert!(out.starts_with(&[0xFF, 0xD8]), "output starts with JPEG SOI");
+        assert!(
+            out.starts_with(&[0xFF, 0xD8]),
+            "output starts with JPEG SOI"
+        );
     }
 
     fn minimal_png() -> &'static [u8] {

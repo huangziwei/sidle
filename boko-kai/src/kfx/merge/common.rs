@@ -118,10 +118,7 @@ mod tests {
                                 ("$307".into(), IonNode::String("B0XXXX".into())),
                             ]),
                             IonNode::Struct(vec![
-                                (
-                                    "$492".into(),
-                                    IonNode::String("cde_content_type".into()),
-                                ),
+                                ("$492".into(), IonNode::String("cde_content_type".into())),
                                 ("$307".into(), IonNode::String(content_type.into())),
                             ]),
                         ]),

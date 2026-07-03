@@ -46,7 +46,14 @@ pub fn decode_resize(bytes: &[u8]) -> Result<DynamicImage> {
 /// [`blit_fit`] actually paints. Never upscales (`scale` clamped to ≤ 1.0).
 /// Returns `(ox, oy, dw, dh)`; lets callers position chrome (the series tile's
 /// stack bars + count badge) against the displayed cover, not the letterbox box.
-pub fn fit_rect(box_x: i32, box_y: i32, box_w: u32, box_h: u32, iw: u32, ih: u32) -> (i32, i32, u32, u32) {
+pub fn fit_rect(
+    box_x: i32,
+    box_y: i32,
+    box_w: u32,
+    box_h: u32,
+    iw: u32,
+    ih: u32,
+) -> (i32, i32, u32, u32) {
     if iw == 0 || ih == 0 || box_w == 0 || box_h == 0 {
         return (box_x, box_y, 0, 0);
     }
@@ -67,7 +74,14 @@ pub fn fit_rect(box_x: i32, box_y: i32, box_w: u32, box_h: u32, iw: u32, ih: u32
 /// (cheap, fine on the panel; no extra `image::resize` allocation per repaint).
 /// Color reaches the Colorsoft; the grayscale KOA2 collapses it to luma in
 /// `send_update`.
-pub fn blit_fit(fb: &mut Framebuffer, box_x: i32, box_y: i32, box_w: u32, box_h: u32, img: &DynamicImage) -> (i32, i32, u32, u32) {
+pub fn blit_fit(
+    fb: &mut Framebuffer,
+    box_x: i32,
+    box_y: i32,
+    box_w: u32,
+    box_h: u32,
+    img: &DynamicImage,
+) -> (i32, i32, u32, u32) {
     let rgb = img.to_rgb8();
     let (iw, ih) = (rgb.width(), rgb.height());
     let rect = fit_rect(box_x, box_y, box_w, box_h, iw, ih);
@@ -83,7 +97,11 @@ pub fn blit_fit(fb: &mut Framebuffer, box_x: i32, box_y: i32, box_w: u32, box_h:
         for dx in 0..dw {
             let sx = ((dx as f32 / scale) as u32).min(iw - 1);
             let p = (src_row + sx as usize) * 3;
-            fb.put_pixel_rgb(ox + dx as i32, oy + dy as i32, [raw[p], raw[p + 1], raw[p + 2]]);
+            fb.put_pixel_rgb(
+                ox + dx as i32,
+                oy + dy as i32,
+                [raw[p], raw[p + 1], raw[p + 2]],
+            );
         }
     }
     rect
@@ -99,7 +117,15 @@ pub fn outline_cell(fb: &mut Framebuffer, cell_x: i32, cell_y: i32, selected: bo
 /// Draw a `thickness`-px outline rectangle (the four edges of `w × h` at
 /// `(x, y)`) in `shade`. Used by [`outline_cell`] for the selection frame.
 /// Negative origin / zero size no-ops.
-pub fn outline_rect(fb: &mut Framebuffer, x: i32, y: i32, w: u32, h: u32, thickness: u32, shade: u8) {
+pub fn outline_rect(
+    fb: &mut Framebuffer,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    thickness: u32,
+    shade: u8,
+) {
     if x < 0 || y < 0 || w == 0 || h == 0 {
         return;
     }
@@ -325,7 +351,13 @@ pub fn draw_series_cell(
     let badge_h = lh + BADGE_PAD;
     let badge_x = cov_x + BADGE_MARGIN as i32;
     let badge_y = cov_y + cov_h as i32 - badge_h as i32 - BADGE_MARGIN as i32;
-    fb.fill_rect(badge_y.max(cell_y) as u32, badge_x.max(cell_x) as u32, badge_w, badge_h, 0x00);
+    fb.fill_rect(
+        badge_y.max(cell_y) as u32,
+        badge_x.max(cell_x) as u32,
+        badge_w,
+        badge_h,
+        0x00,
+    );
     let text_x = badge_x + ((badge_w as i32 - tw as i32) / 2).max(0);
     let text_baseline = badge_y + (badge_h * 70 / 100) as i32;
     renderer.draw(fb, text_x, text_baseline, &badge_text, true);

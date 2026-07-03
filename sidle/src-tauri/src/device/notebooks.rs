@@ -209,7 +209,11 @@ mod tests {
             .expect("standalone pulls");
         assert_eq!(p.uuid, uuid);
         assert_eq!(p.nbk, b"NBK-BYTES");
-        assert_eq!(p.cover.as_deref(), Some(&b"PNG"[..]), "cover from thumbnails/");
+        assert_eq!(
+            p.cover.as_deref(),
+            Some(&b"PNG"[..]),
+            "cover from thumbnails/"
+        );
         // `updated_at` came from the file mtime (a real wall-clock year), not the
         // import-time fallback.
         assert!(
@@ -220,7 +224,9 @@ mod tests {
 
         // A dir without an `nbk` is not a notebook.
         assert!(
-            pull_one(&transport, &root, &thumbs, "page_cache").unwrap().is_none(),
+            pull_one(&transport, &root, &thumbs, "page_cache")
+                .unwrap()
+                .is_none(),
             "page_cache/ has no nbk → not pulled"
         );
     }
@@ -239,7 +245,10 @@ mod tests {
             "da85e6f7-9672-2e2b-ef94-e57fc3502e4",  // 35 chars
             "da85e6f7_9672_2e2b_ef94_e57fc3502e45", // underscores, not dashes
         ] {
-            assert!(!is_notebook_uuid(junk), "{junk} must not look like a notebook uuid");
+            assert!(
+                !is_notebook_uuid(junk),
+                "{junk} must not look like a notebook uuid"
+            );
         }
     }
 

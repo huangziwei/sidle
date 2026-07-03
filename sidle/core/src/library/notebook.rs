@@ -45,7 +45,9 @@ pub fn import_notebook(
 ) -> Result<NotebookOutcome> {
     // Honor a Sidle-side deletion: don't resurrect a notebook the user removed
     // in Sidle (Restore from device clears the record).
-    if db::is_deleted(conn, db::DELETION_NOTEBOOK, uuid).context("check notebook deletion record")? {
+    if db::is_deleted(conn, db::DELETION_NOTEBOOK, uuid)
+        .context("check notebook deletion record")?
+    {
         return Ok(NotebookOutcome::Suppressed);
     }
     let bytes =
@@ -72,7 +74,9 @@ pub fn import_notebook(
         .map_err(|e| anyhow::anyhow!("decode notebook {uuid}: {e:?}"))?;
     let svgs = notebook.page_svgs();
 
-    paths.ensure_notebook(uuid).with_context(|| "create notebook dir")?;
+    paths
+        .ensure_notebook(uuid)
+        .with_context(|| "create notebook dir")?;
     // Raw backup so the notebook survives a device wipe.
     std::fs::write(paths.notebook_nbk(uuid), &bytes).with_context(|| "write nbk backup")?;
     if let Some(cover) = src_cover {

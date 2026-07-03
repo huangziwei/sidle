@@ -81,7 +81,12 @@ pub(crate) fn find_workspace_root() -> Result<PathBuf> {
         }
         match p.parent() {
             Some(parent) => p = parent,
-            None => return Err(anyhow!("workspace root not found above {}", start.display())),
+            None => {
+                return Err(anyhow!(
+                    "workspace root not found above {}",
+                    start.display()
+                ));
+            }
         }
     }
 }

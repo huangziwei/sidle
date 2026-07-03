@@ -126,9 +126,7 @@ impl Report {
     /// placeholder href on every entry. Real TOCs have at least one distinct
     /// path per chapter.
     pub fn toc_collapsed_to_placeholder(&self) -> bool {
-        self.epub_has_toc
-            && self.epub_toc_entry_count > 1
-            && self.epub_distinct_toc_hrefs <= 1
+        self.epub_has_toc && self.epub_toc_entry_count > 1 && self.epub_distinct_toc_hrefs <= 1
     }
 
     pub fn print_summary(&self, dir: super::Direction) {
@@ -136,7 +134,11 @@ impl Report {
         let kfx_total: usize = self.kfx_headings_by_level.values().sum();
         println!("EPUB headings:");
         for level in 1..=6u8 {
-            let n = self.epub_headings_by_level.get(&level).copied().unwrap_or(0);
+            let n = self
+                .epub_headings_by_level
+                .get(&level)
+                .copied()
+                .unwrap_or(0);
             if n > 0 {
                 println!("  h{}:  {}", level, n);
             }
@@ -176,7 +178,10 @@ impl Report {
             dir.target_label()
         );
         println!("  dangling nav targets:       {}", self.dangling_nav.len());
-        println!("  heading level diffs:        {}", self.heading_count_diffs.len());
+        println!(
+            "  heading level diffs:        {}",
+            self.heading_count_diffs.len()
+        );
         println!(
             "  TOC hrefs not in manifest:  {}",
             self.epub_unresolved_toc_hrefs.len()
@@ -200,10 +205,7 @@ impl Report {
             }
         }
         if !self.epub_unresolved_toc_hrefs.is_empty() {
-            println!(
-                "\n--- TOC targets not in manifest [first {}] ---",
-                limit
-            );
+            println!("\n--- TOC targets not in manifest [first {}] ---", limit);
             for h in self.epub_unresolved_toc_hrefs.iter().take(limit) {
                 println!("  {}", h);
             }
@@ -240,7 +242,11 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     // export::kfx::level_to_symbol). When comparing levels we skip h1.
     let mut heading_count_diffs: Vec<(u8, i64)> = Vec::new();
     for level in 2..=6u8 {
-        let ep = epub_side.headings_by_level.get(&level).copied().unwrap_or(0) as i64;
+        let ep = epub_side
+            .headings_by_level
+            .get(&level)
+            .copied()
+            .unwrap_or(0) as i64;
         let kfx_c = kfx.headings_by_level.get(&level).copied().unwrap_or(0) as i64;
         if ep != kfx_c {
             heading_count_diffs.push((level, ep - kfx_c));
@@ -322,8 +328,7 @@ struct EpubNav {
 
 fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
     let cursor = Cursor::new(epub_bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
 
     let container_bytes = read_zip_entry(&mut archive, "META-INF/container.xml")
         .map_err(|e| format!("container.xml: {}", e))?;
@@ -335,8 +340,8 @@ fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
         .unwrap_or("")
         .to_string();
 
-    let opf_bytes = read_zip_entry(&mut archive, &opf_path)
-        .map_err(|e| format!("opf {}: {}", opf_path, e))?;
+    let opf_bytes =
+        read_zip_entry(&mut archive, &opf_path).map_err(|e| format!("opf {}: {}", opf_path, e))?;
     let hint_encoding = crate::util::extract_xml_encoding(&opf_bytes);
     let opf_str = crate::util::decode_text(&opf_bytes, hint_encoding);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
@@ -362,11 +367,13 @@ fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
     let spine_paths: HashSet<String> = opf
         .spine_ids
         .iter()
-        .filter_map(|id| opf.manifest.get(id).map(|(href, _)| {
-            // NCX hrefs are relative to OPF; spine items live in manifest with the same form.
-            // Normalise to opf_base-prefixed for comparison with NCX (which is also opf_base-relative).
-            href.clone()
-        }))
+        .filter_map(|id| {
+            opf.manifest.get(id).map(|(href, _)| {
+                // NCX hrefs are relative to OPF; spine items live in manifest with the same form.
+                // Normalise to opf_base-prefixed for comparison with NCX (which is also opf_base-relative).
+                href.clone()
+            })
+        })
         .collect();
 
     // Set of all manifest paths (relative to opf_base, like NCX hrefs).
@@ -383,7 +390,8 @@ fn extract_epub_nav(epub_bytes: &[u8]) -> Result<EpubNav, String> {
     // Retail EPUBs routinely pair a full nav with a stub NCX (or ship only the
     // nav); validating against the NCX alone skipped nav-only books entirely and
     // silently passed a book whose degenerate NCX shadowed a full nav.
-    let mut load_toc = |href: Option<&String>, parse: fn(&str) -> std::io::Result<Vec<TocEntry>>| {
+    let mut load_toc = |href: Option<&String>,
+                        parse: fn(&str) -> std::io::Result<Vec<TocEntry>>| {
         let href = href?;
         let path = format!("{}{}", opf_base, href);
         let bytes = read_zip_entry(&mut archive, &path).ok()?;
@@ -549,15 +557,14 @@ struct KfxNav {
 }
 
 fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
-    let header =
-        parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
+    let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
     if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
         return Err("container info out of bounds".into());
     }
-    let info_data = &kfx_bytes[header.container_info_offset
-        ..header.container_info_offset + header.container_info_length];
-    let info = parse_container_info(info_data)
-        .map_err(|e| format!("kfx container info: {:?}", e))?;
+    let info_data = &kfx_bytes
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info =
+        parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
     let extended_symbols = match info.doc_symbols {
         Some((off, len)) if off + len <= kfx_bytes.len() => {
@@ -585,8 +592,7 @@ fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
     let Some((idx_off, idx_len)) = info.index else {
         return Err("kfx: no index table".into());
     };
-    let entities =
-        parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
     let book_nav_type = KfxSymbol::BookNavigation as u32;
     let storyline_type = KfxSymbol::Storyline as u32;
@@ -612,14 +618,15 @@ fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
                 extract_from_book_nav(&value, &resolve_sym, &nav_container_by_name, &mut nav);
             }
         } else if ent.type_id == storyline_type
-            && let Some(value) = parse_entity(kfx_bytes, ent) {
-                collect_element_ids(
-                    &value,
-                    &resolve_sym,
-                    &mut nav.element_ids,
-                    &mut nav.image_element_ids,
-                );
-            }
+            && let Some(value) = parse_entity(kfx_bytes, ent)
+        {
+            collect_element_ids(
+                &value,
+                &resolve_sym,
+                &mut nav.element_ids,
+                &mut nav.image_element_ids,
+            );
+        }
     }
 
     // Heading count per level, now that both the nav targets and the image
@@ -783,9 +790,7 @@ where
                 n == "cover_page" || n == "$cover_page"
             })
     });
-    if is_cover
-        && let Some(target) = extract_target_position(value, resolve_sym)
-    {
+    if is_cover && let Some(target) = extract_target_position(value, resolve_sym) {
         out.cover_target = Some(target.element_id);
     }
 }
@@ -900,7 +905,10 @@ where
                     _ => {}
                 }
             }
-            return id.map(|id| NavTarget { element_id: id, offset });
+            return id.map(|id| NavTarget {
+                element_id: id,
+                offset,
+            });
         }
     }
     None
@@ -942,9 +950,7 @@ fn collect_element_ids<F>(
                 }
                 collect_element_ids(v, resolve_sym, out, image_ids);
             }
-            if is_image
-                && let Some(id) = this_id
-            {
+            if is_image && let Some(id) = this_id {
                 image_ids.insert(id);
             }
         }

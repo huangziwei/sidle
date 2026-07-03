@@ -41,7 +41,6 @@ fn kfx_suffix(sha256: &str) -> String {
     format!(".{}.kfx", sha_infix(sha256))
 }
 
-
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PushResult {
@@ -127,11 +126,7 @@ fn preflight(conn: &rusqlite::Connection, book: &BookRow) -> Result<Option<Strin
 /// companions — macOS drops them next to the real file on FAT volumes,
 /// and matching one of those would have us return (and later delete) the
 /// metadata file instead of the KFX itself.
-fn find_by_sha(
-    transport: &dyn Transport,
-    dir: &TPath,
-    sha256: &str,
-) -> Result<Option<String>> {
+fn find_by_sha(transport: &dyn Transport, dir: &TPath, sha256: &str) -> Result<Option<String>> {
     let suffix = kfx_suffix(sha256);
     for entry in transport.list(dir)? {
         if entry.is_dir || entry.name.starts_with('.') {
@@ -165,8 +160,13 @@ pub enum DeleteResult {
     /// it tried to climb out of `Sidle/` via path separators. Treated as a
     /// hard refusal — better to surface than to silently target the wrong
     /// thing.
-    NotOurs { filename: String },
-    Failed { filename: String, error: String },
+    NotOurs {
+        filename: String,
+    },
+    Failed {
+        filename: String,
+        error: String,
+    },
 }
 
 /// Remove an on-device file (and any `.sdr/` it spawned) by filename. The
@@ -194,7 +194,9 @@ pub fn delete_one(
             filename: filename.to_string(),
         });
     }
-    let stem = filename.strip_suffix(".kfx").expect("parse_sha_infix matched .kfx");
+    let stem = filename
+        .strip_suffix(".kfx")
+        .expect("parse_sha_infix matched .kfx");
 
     let dir = documents_dir();
     let sdr_name = format!("{stem}.sdr");

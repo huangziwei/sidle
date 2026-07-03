@@ -37,13 +37,22 @@ impl std::fmt::Display for PdfExtractError {
         match self {
             PdfExtractError::NotKfx => write!(f, "not a valid KFX container"),
             PdfExtractError::NotPdfBacked => {
-                write!(f, "KFX is not PDF-backed (no PDF resource) — convert to EPUB instead")
+                write!(
+                    f,
+                    "KFX is not PDF-backed (no PDF resource) — convert to EPUB instead"
+                )
             }
             PdfExtractError::NoPdfBlob => {
-                write!(f, "KFX declares a PDF resource but no embedded PDF was found")
+                write!(
+                    f,
+                    "KFX declares a PDF resource but no embedded PDF was found"
+                )
             }
             PdfExtractError::MultipleSlices(n) => {
-                write!(f, "KFX embeds {n} separate PDF blobs (per-page slices); not supported")
+                write!(
+                    f,
+                    "KFX embeds {n} separate PDF blobs (per-page slices); not supported"
+                )
             }
         }
     }
@@ -148,8 +157,14 @@ mod tests {
         let doc = PdfDoc {
             bytes: bytes.clone(),
             pages: vec![
-                PdfPage { width: 612.0, height: 792.0 },
-                PdfPage { width: 595.0, height: 842.0 },
+                PdfPage {
+                    width: 612.0,
+                    height: 792.0,
+                },
+                PdfPage {
+                    width: 595.0,
+                    height: 842.0,
+                },
             ],
             title: Some("Round Trip".to_string()),
             author: Some("Tester".to_string()),
@@ -168,10 +183,16 @@ mod tests {
         // No cover/text here: neither affects the embedded-PDF extraction we test
         // (both need the PDFKit engine, exercised by the gitignored harness).
         let kfx = pdf_to_kfx(&doc, &meta, None, None);
-        assert!(kfx_is_pdf_backed(&kfx), "boko PDF KFX must be detected as PDF-backed");
+        assert!(
+            kfx_is_pdf_backed(&kfx),
+            "boko PDF KFX must be detected as PDF-backed"
+        );
 
         let extracted = kfx_extract_pdf(&kfx).expect("extraction should succeed");
-        assert_eq!(extracted, bytes, "extracted PDF must be byte-identical to the source");
+        assert_eq!(
+            extracted, bytes,
+            "extracted PDF must be byte-identical to the source"
+        );
     }
 
     #[test]
@@ -182,7 +203,10 @@ mod tests {
         let bytes = fake_pdf();
         let doc = PdfDoc {
             bytes: bytes.clone(),
-            pages: vec![PdfPage { width: 612.0, height: 792.0 }],
+            pages: vec![PdfPage {
+                width: 612.0,
+                height: 792.0,
+            }],
             title: Some("T".to_string()),
             author: None,
             outline: Vec::new(),
@@ -206,9 +230,24 @@ mod tests {
                 height: 1700,
                 baseline: 18700,
                 words: vec![
-                    StyleSeg { offset: 0, length: 3, width: 4000, is_word: true },
-                    StyleSeg { offset: 3, length: 1, width: 600, is_word: false },
-                    StyleSeg { offset: 4, length: 3, width: 4200, is_word: true },
+                    StyleSeg {
+                        offset: 0,
+                        length: 3,
+                        width: 4000,
+                        is_word: true,
+                    },
+                    StyleSeg {
+                        offset: 3,
+                        length: 1,
+                        width: 600,
+                        is_word: false,
+                    },
+                    StyleSeg {
+                        offset: 4,
+                        length: 3,
+                        width: 4200,
+                        is_word: true,
+                    },
                 ],
             }],
         }];
@@ -220,12 +259,26 @@ mod tests {
         assert!(kfx_is_pdf_backed(&with_text));
         assert_eq!(kfx_extract_pdf(&with_text).unwrap(), bytes);
 
-        let count = |k: &[u8], t: u32| entities(k).unwrap().iter().filter(|e| e.type_id == t).count();
+        let count = |k: &[u8], t: u32| {
+            entities(k)
+                .unwrap()
+                .iter()
+                .filter(|e| e.type_id == t)
+                .count()
+        };
         let storyline = KfxSymbol::Storyline as u32;
         let aux = KfxSymbol::AuxiliaryData as u32;
         // A text page gets a second, invisible "text" storyline beside the image.
-        assert_eq!(count(&without, storyline), 1, "no-text page: image storyline only");
-        assert_eq!(count(&with_text, storyline), 2, "text page: image + text storyline");
+        assert_eq!(
+            count(&without, storyline),
+            1,
+            "no-text page: image storyline only"
+        );
+        assert_eq!(
+            count(&with_text, storyline),
+            2,
+            "text page: image + text storyline"
+        );
         // ...plus links_extracted (per page) + text_baseline (per run) aux entries.
         assert!(
             count(&with_text, aux) >= count(&without, aux) + 2,
@@ -258,8 +311,14 @@ mod tests {
         let doc = PdfDoc {
             bytes: bytes.clone(),
             pages: vec![
-                PdfPage { width: 600.0, height: 800.0 },
-                PdfPage { width: 600.0, height: 800.0 },
+                PdfPage {
+                    width: 600.0,
+                    height: 800.0,
+                },
+                PdfPage {
+                    width: 600.0,
+                    height: 800.0,
+                },
             ],
             title: Some("T".to_string()),
             author: None,
@@ -276,7 +335,9 @@ mod tests {
         };
         // Page 0: two runs ("hello"=5, "worldly"=7); page 1: no text.
         let text = vec![
-            PageText { runs: vec![mk_run("hello"), mk_run("worldly")] },
+            PageText {
+                runs: vec![mk_run("hello"), mk_run("worldly")],
+            },
             PageText { runs: vec![] },
         ];
         let kfx = pdf_to_kfx(&doc, &meta, None, Some(&text));
@@ -360,7 +421,10 @@ mod tests {
         let bytes = fake_pdf();
         let doc = PdfDoc {
             bytes: bytes.clone(),
-            pages: vec![PdfPage { width: 612.0, height: 792.0 }],
+            pages: vec![PdfPage {
+                width: 612.0,
+                height: 792.0,
+            }],
             title: Some("With Cover".to_string()),
             author: None,
             outline: Vec::new(),
@@ -381,7 +445,10 @@ mod tests {
 
         assert!(kfx_is_pdf_backed(&kfx), "still PDF-backed with a cover");
         let extracted = kfx_extract_pdf(&kfx).expect("extraction should succeed past the cover");
-        assert_eq!(extracted, bytes, "extracted PDF must skip the cover JPEG and be exact");
+        assert_eq!(
+            extracted, bytes,
+            "extracted PDF must skip the cover JPEG and be exact"
+        );
         assert!(
             kfx.windows(cover.len()).any(|w| w == cover.as_slice()),
             "the cover JPEG must be embedded verbatim in the KFX"
@@ -398,8 +465,14 @@ mod tests {
         let doc = PdfDoc {
             bytes: bytes.clone(),
             pages: vec![
-                PdfPage { width: 612.0, height: 792.0 },
-                PdfPage { width: 612.0, height: 792.0 },
+                PdfPage {
+                    width: 612.0,
+                    height: 792.0,
+                },
+                PdfPage {
+                    width: 612.0,
+                    height: 792.0,
+                },
             ],
             title: Some("Nav".to_string()),
             author: None,
@@ -426,7 +499,10 @@ mod tests {
 
         let has = |needle: &[u8]| kfx.windows(needle.len()).any(|w| w == needle);
         assert!(has(b"Chapter One"), "TOC parent label must be embedded");
-        assert!(has(b"Section 1.1"), "nested TOC child label must be embedded");
+        assert!(
+            has(b"Section 1.1"),
+            "nested TOC child label must be embedded"
+        );
         assert_eq!(
             kfx_extract_pdf(&kfx).unwrap(),
             bytes,
@@ -442,7 +518,10 @@ mod tests {
         let bytes = fake_pdf();
         let doc = PdfDoc {
             bytes,
-            pages: vec![PdfPage { width: 612.0, height: 792.0 }],
+            pages: vec![PdfPage {
+                width: 612.0,
+                height: 792.0,
+            }],
             title: Some("Dated".to_string()),
             author: None,
             outline: Vec::new(),
@@ -459,7 +538,10 @@ mod tests {
         let kfx = pdf_to_kfx(&doc, &meta, None, None);
         let has = |needle: &[u8]| kfx.windows(needle.len()).any(|w| w == needle);
         assert!(has(b"issue_date"), "issue_date key must be emitted");
-        assert!(has(b"2021-03-15"), "date truncated to YYYY-MM-DD must be present");
+        assert!(
+            has(b"2021-03-15"),
+            "date truncated to YYYY-MM-DD must be present"
+        );
         assert!(!has(b"T09:00:00"), "the ISO time part must be stripped");
         assert!(has(b"Acme Press"), "edited publisher must be embedded");
     }
@@ -470,7 +552,10 @@ mod tests {
         let bytes = fake_pdf();
         let doc = PdfDoc {
             bytes,
-            pages: vec![PdfPage { width: 612.0, height: 792.0 }],
+            pages: vec![PdfPage {
+                width: 612.0,
+                height: 792.0,
+            }],
             title: Some("Undated".to_string()),
             author: None,
             outline: Vec::new(),
@@ -499,8 +584,14 @@ mod tests {
         let doc = PdfDoc {
             bytes: bytes.clone(),
             pages: vec![
-                PdfPage { width: 612.0, height: 792.0 },
-                PdfPage { width: 612.0, height: 792.0 },
+                PdfPage {
+                    width: 612.0,
+                    height: 792.0,
+                },
+                PdfPage {
+                    width: 612.0,
+                    height: 792.0,
+                },
             ],
             title: Some("Paged".to_string()),
             author: None,
@@ -539,7 +630,10 @@ mod tests {
         let bytes = fake_pdf();
         let doc = PdfDoc {
             bytes,
-            pages: vec![PdfPage { width: 612.0, height: 792.0 }],
+            pages: vec![PdfPage {
+                width: 612.0,
+                height: 792.0,
+            }],
             title: Some("NoToc".to_string()),
             author: None,
             outline: Vec::new(),
@@ -557,7 +651,10 @@ mod tests {
         let has = |n: &[u8]| kfx.windows(n.len()).any(|w| w == n);
         assert!(has(b"npag"), "page_list present without an outline");
         assert!(has(b"folio-7"), "page label embedded");
-        assert!(!has(b"ntoc"), "no toc container when there are no bookmarks");
+        assert!(
+            !has(b"ntoc"),
+            "no toc container when there are no bookmarks"
+        );
     }
 
     #[test]

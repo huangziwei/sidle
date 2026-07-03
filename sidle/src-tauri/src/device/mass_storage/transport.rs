@@ -91,8 +91,8 @@ impl Transport for MassStorageTransport {
             let mut src = std::fs::File::open(src_local)
                 .with_context(|| format!("open {}", src_local.display()))?;
             let total = src.metadata().map(|m| m.len()).unwrap_or(0);
-            let mut dst = std::fs::File::create(&tmp)
-                .with_context(|| format!("create {}", tmp.display()))?;
+            let mut dst =
+                std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
             let mut buf = vec![0u8; 256 * 1024];
             let mut done = 0u64;
             // Force the page cache out to the device every few MiB and report
@@ -271,11 +271,7 @@ mod tests {
             b"kfx-payload"
         );
         // No `.partial` left behind.
-        assert!(
-            !tmp.path()
-                .join("documents/Sidle/book.kfx.partial")
-                .exists()
-        );
+        assert!(!tmp.path().join("documents/Sidle/book.kfx.partial").exists());
     }
 
     #[test]

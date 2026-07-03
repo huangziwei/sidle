@@ -561,7 +561,6 @@ pub fn parse_ncx_index(entries: &[IndexEntry], cncx: &Cncx) -> Vec<NcxEntry> {
 // NcxBuildEntry, align_to_4) was removed alongside `export/azw3.rs` and the
 // `mobi::skeleton` module. Reader-side parsers above stay.
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,5 +582,4 @@ mod tests {
         assert_eq!(count_set_bits(0b1010), 2);
         assert_eq!(count_set_bits(0xFF), 8);
     }
-
 }

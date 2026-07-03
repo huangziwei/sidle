@@ -25,11 +25,12 @@ mod series;
 mod ui;
 mod wrap;
 
-use eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16};
 use eink::buttons::{Buttons, PageButton};
+use eink::fb::{Framebuffer, MxcfbRect, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16};
 use eink::input::{Input, InputEvent};
 use eink::touch::{SwipeDir, Touch, TouchEvent, classify_swipe};
 use image::DynamicImage;
+use series::{Cell, CellKind};
 use ui::diag;
 use ui::filter::{self, Filters};
 use ui::filtermenu;
@@ -39,7 +40,6 @@ use ui::searchbar;
 use ui::sort::SortState;
 use ui::text::TextRenderer;
 use ui::toast;
-use series::{Cell, CellKind};
 
 const LOG_PATH: &str = "/mnt/us/sidle-native.log";
 /// Dedicated log for the LAN self-update, so its trail isn't interleaved with
@@ -124,11 +124,20 @@ fn main() {
 /// then one full-screen GC16 refresh so it lands without DU ghosting from
 /// whatever the framework left on screen. Used for both the `--update` progress
 /// and result toasts (mirrors `diag`'s clean-panel approach).
-fn draw_panel(fb: &mut Framebuffer, renderer: &mut TextRenderer, message: &str) -> anyhow::Result<()> {
+fn draw_panel(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    message: &str,
+) -> anyhow::Result<()> {
     fb.fill_rect(0, 0, fb.var.xres, fb.var.yres, 0xFF);
     let _ = toast::draw(fb, renderer, message);
     fb.send_update(
-        MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: fb.var.yres },
+        MxcfbRect {
+            top: 0,
+            left: 0,
+            width: fb.var.xres,
+            height: fb.var.yres,
+        },
         WAVEFORM_MODE_GC16,
     )?;
     Ok(())
@@ -360,8 +369,21 @@ fn run() -> anyhow::Result<()> {
     let mut page: usize = 0;
     log("initial render (placeholders)");
     repaint_page(
-        &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells, &mut covers, page,
-        total_pages, grid_left, grid_top, sort, filters.active_facets(), series_view.as_deref(), &query,
+        &mut fb,
+        &mut renderer,
+        &agent,
+        &cfg,
+        cache_dir,
+        &cells,
+        &mut covers,
+        page,
+        total_pages,
+        grid_left,
+        grid_top,
+        sort,
+        filters.active_facets(),
+        series_view.as_deref(),
+        &query,
     )?;
 
     let mut armed: Option<Armed> = None;
@@ -382,12 +404,8 @@ fn run() -> anyhow::Result<()> {
                 // Down on a cell arms it. Down on the strip or in margins
                 // is a no-op — strip actions fire on Up regardless of
                 // hold time, so they don't need to arm.
-                let visible_count = cells
-                    .len()
-                    .saturating_sub(page * PAGE_SIZE)
-                    .min(PAGE_SIZE);
-                if let Some(cell_pos) =
-                    grid::cell_at_tap(x, y, grid_left, grid_top, visible_count)
+                let visible_count = cells.len().saturating_sub(page * PAGE_SIZE).min(PAGE_SIZE);
+                if let Some(cell_pos) = grid::cell_at_tap(x, y, grid_left, grid_top, visible_count)
                 {
                     let cell_idx = page * PAGE_SIZE + cell_pos;
                     let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_pos);
@@ -442,9 +460,21 @@ fn run() -> anyhow::Result<()> {
                     if new_page != page || had_armed {
                         page = new_page;
                         repaint_page(
-                            &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
-                            &mut covers, page, total_pages, grid_left, grid_top, sort,
-                            filters.active_facets(), series_view.as_deref(), &query,
+                            &mut fb,
+                            &mut renderer,
+                            &agent,
+                            &cfg,
+                            cache_dir,
+                            &cells,
+                            &mut covers,
+                            page,
+                            total_pages,
+                            grid_left,
+                            grid_top,
+                            sort,
+                            filters.active_facets(),
+                            series_view.as_deref(),
+                            &query,
                         )?;
                     }
                     continue;
@@ -471,9 +501,21 @@ fn run() -> anyhow::Result<()> {
                             page = 0;
                             series_view = Some(name);
                             repaint_page(
-                                &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
-                                &mut covers, page, total_pages, grid_left, grid_top, sort,
-                                filters.active_facets(), series_view.as_deref(), &query,
+                                &mut fb,
+                                &mut renderer,
+                                &agent,
+                                &cfg,
+                                cache_dir,
+                                &cells,
+                                &mut covers,
+                                page,
+                                total_pages,
+                                grid_left,
+                                grid_top,
+                                sort,
+                                filters.active_facets(),
+                                series_view.as_deref(),
+                                &query,
                             )?;
                         }
                         continue;
@@ -489,8 +531,7 @@ fn run() -> anyhow::Result<()> {
                             "long press fired ({held:?}) on book {}: {}",
                             book.id, book.title,
                         ));
-                        let msg =
-                            format!("Downloading {}…", truncate_title(&book.title, 40));
+                        let msg = format!("Downloading {}…", truncate_title(&book.title, 40));
                         let dirty = toast::draw(&mut fb, &mut renderer, &msg);
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
 
@@ -504,10 +545,8 @@ fn run() -> anyhow::Result<()> {
                                         saved.display(),
                                         dl_t0.elapsed()
                                     ));
-                                    let _ =
-                                        Command::new("touch").arg(CLEANINDEX).output();
-                                    "Downloaded → Library will refresh shortly"
-                                        .to_string()
+                                    let _ = Command::new("touch").arg(CLEANINDEX).output();
+                                    "Downloaded → Library will refresh shortly".to_string()
                                 }
                                 Err(err) => {
                                     log(format!("persist failed: {err:#}"));
@@ -530,28 +569,48 @@ fn run() -> anyhow::Result<()> {
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                         thread::sleep(TOAST_LINGER);
                         repaint_page(
-                            &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
-                            &mut covers, page, total_pages, grid_left, grid_top, sort,
-                            filters.active_facets(), series_view.as_deref(), &query,
+                            &mut fb,
+                            &mut renderer,
+                            &agent,
+                            &cfg,
+                            cache_dir,
+                            &cells,
+                            &mut covers,
+                            page,
+                            total_pages,
+                            grid_left,
+                            grid_top,
+                            sort,
+                            filters.active_facets(),
+                            series_view.as_deref(),
+                            &query,
                         )?;
                     } else {
                         // Short tap on a cover — discovery hint. Without
                         // this, a tap-trained user keeps tapping and
                         // wondering why nothing happens.
                         log(format!("short tap ({held:?}), showing hint"));
-                        let dirty = toast::draw(
-                            &mut fb,
-                            &mut renderer,
-                            "Hold cover to download",
-                        );
+                        let dirty = toast::draw(&mut fb, &mut renderer, "Hold cover to download");
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                         thread::sleep(TOAST_LINGER);
                         // Repaint to clear both the toast and the cell
                         // outline that Down left behind.
                         repaint_page(
-                            &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
-                            &mut covers, page, total_pages, grid_left, grid_top, sort,
-                            filters.active_facets(), series_view.as_deref(), &query,
+                            &mut fb,
+                            &mut renderer,
+                            &agent,
+                            &cfg,
+                            cache_dir,
+                            &cells,
+                            &mut covers,
+                            page,
+                            total_pages,
+                            grid_left,
+                            grid_top,
+                            sort,
+                            filters.active_facets(),
+                            series_view.as_deref(),
+                            &query,
                         )?;
                     }
                     continue;
@@ -570,8 +629,7 @@ fn run() -> anyhow::Result<()> {
                     // query/view untouched.
                     if matches!(tap, ui::searchbar::Tap::Update) {
                         log("update-button tap");
-                        let dirty =
-                            toast::draw(&mut fb, &mut renderer, "Checking for update…");
+                        let dirty = toast::draw(&mut fb, &mut renderer, "Checking for update…");
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
 
                         let banner_msg = update_result_message(selfupdate::run_pull(
@@ -586,9 +644,21 @@ fn run() -> anyhow::Result<()> {
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                         thread::sleep(TOAST_LINGER);
                         repaint_page(
-                            &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
-                            &mut covers, page, total_pages, grid_left, grid_top, sort,
-                            filters.active_facets(), series_view.as_deref(), &query,
+                            &mut fb,
+                            &mut renderer,
+                            &agent,
+                            &cfg,
+                            cache_dir,
+                            &cells,
+                            &mut covers,
+                            page,
+                            total_pages,
+                            grid_left,
+                            grid_top,
+                            sort,
+                            filters.active_facets(),
+                            series_view.as_deref(),
+                            &query,
                         )?;
                         continue;
                     }
@@ -598,8 +668,13 @@ fn run() -> anyhow::Result<()> {
                         ui::searchbar::Tap::Open => {
                             log("search-bar tap → keyboard");
                             query = ui::keyboard::run(
-                                &mut fb, &mut input, &mut renderer, &all_books, &filters,
-                                &query, &mut current_orient,
+                                &mut fb,
+                                &mut input,
+                                &mut renderer,
+                                &all_books,
+                                &filters,
+                                &query,
+                                &mut current_orient,
                             )?;
                         }
                         ui::searchbar::Tap::Clear => {
@@ -621,9 +696,21 @@ fn run() -> anyhow::Result<()> {
                         log(format!("search {:?}: {} tiles", query, cells.len()));
                     }
                     repaint_page(
-                        &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells, &mut covers,
-                        page, total_pages, grid_left, grid_top, sort, filters.active_facets(),
-                        series_view.as_deref(), &query,
+                        &mut fb,
+                        &mut renderer,
+                        &agent,
+                        &cfg,
+                        cache_dir,
+                        &cells,
+                        &mut covers,
+                        page,
+                        total_pages,
+                        grid_left,
+                        grid_top,
+                        sort,
+                        filters.active_facets(),
+                        series_view.as_deref(),
+                        &query,
                     )?;
                     continue;
                 }
@@ -631,9 +718,14 @@ fn run() -> anyhow::Result<()> {
                 // No armed cell — Up on the strip means a strip action.
                 // Off-cell-off-strip is ignored. `drilled` swaps the Filter slot
                 // for Back (see pager::hit).
-                if let Some(hit) =
-                    pager::hit(x, y, fb.var.xres, fb.var.yres, total_pages, series_view.is_some())
-                {
+                if let Some(hit) = pager::hit(
+                    x,
+                    y,
+                    fb.var.xres,
+                    fb.var.yres,
+                    total_pages,
+                    series_view.is_some(),
+                ) {
                     match hit {
                         PagerHit::Exit => {
                             log("exit-button tap");
@@ -650,17 +742,22 @@ fn run() -> anyhow::Result<()> {
                             let before_filters = filters.clone();
                             let before_sort = sort;
                             filtermenu::run(
-                                &mut fb, &mut input, &mut renderer, &all_books,
-                                &mut filters, &mut sort, &mut current_orient,
+                                &mut fb,
+                                &mut input,
+                                &mut renderer,
+                                &all_books,
+                                &mut filters,
+                                &mut sort,
+                                &mut current_orient,
                             )?;
                             if filters != before_filters || sort != before_sort {
                                 // Re-filter+sort the master, re-fold into series
                                 // collections, reset paging, and drop the positional
                                 // cover vec — it re-fills from the id-keyed disk
                                 // cache on the paint below (no re-fetch).
-                                entries = series::group_by_series(
-                                    rebuild_view(&all_books, &filters, sort, &query),
-                                );
+                                entries = series::group_by_series(rebuild_view(
+                                    &all_books, &filters, sort, &query,
+                                ));
                                 cells = series::cells_for_top(&entries);
                                 total_pages = pager::n_pages(cells.len());
                                 covers = vec![None; cells.len()];
@@ -674,9 +771,21 @@ fn run() -> anyhow::Result<()> {
                             }
                             // Repaint regardless — the overlay painted over the grid.
                             repaint_page(
-                                &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
-                                &mut covers, page, total_pages, grid_left, grid_top, sort,
-                                filters.active_facets(), series_view.as_deref(), &query,
+                                &mut fb,
+                                &mut renderer,
+                                &agent,
+                                &cfg,
+                                cache_dir,
+                                &cells,
+                                &mut covers,
+                                page,
+                                total_pages,
+                                grid_left,
+                                grid_top,
+                                sort,
+                                filters.active_facets(),
+                                series_view.as_deref(),
+                                &query,
                             )?;
                         }
                         PagerHit::Back => {
@@ -689,9 +798,21 @@ fn run() -> anyhow::Result<()> {
                             covers = vec![None; cells.len()];
                             page = 0;
                             repaint_page(
-                                &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
-                                &mut covers, page, total_pages, grid_left, grid_top, sort,
-                                filters.active_facets(), series_view.as_deref(), &query,
+                                &mut fb,
+                                &mut renderer,
+                                &agent,
+                                &cfg,
+                                cache_dir,
+                                &cells,
+                                &mut covers,
+                                page,
+                                total_pages,
+                                grid_left,
+                                grid_top,
+                                sort,
+                                filters.active_facets(),
+                                series_view.as_deref(),
+                                &query,
                             )?;
                         }
                         PagerHit::Prev => {
@@ -699,9 +820,21 @@ fn run() -> anyhow::Result<()> {
                             if new_page != page {
                                 page = new_page;
                                 repaint_page(
-                                    &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
-                                    &mut covers, page, total_pages, grid_left, grid_top, sort,
-                                    filters.active_facets(), series_view.as_deref(), &query,
+                                    &mut fb,
+                                    &mut renderer,
+                                    &agent,
+                                    &cfg,
+                                    cache_dir,
+                                    &cells,
+                                    &mut covers,
+                                    page,
+                                    total_pages,
+                                    grid_left,
+                                    grid_top,
+                                    sort,
+                                    filters.active_facets(),
+                                    series_view.as_deref(),
+                                    &query,
                                 )?;
                             }
                         }
@@ -710,9 +843,21 @@ fn run() -> anyhow::Result<()> {
                             if new_page != page {
                                 page = new_page;
                                 repaint_page(
-                                    &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
-                                    &mut covers, page, total_pages, grid_left, grid_top, sort,
-                                    filters.active_facets(), series_view.as_deref(), &query,
+                                    &mut fb,
+                                    &mut renderer,
+                                    &agent,
+                                    &cfg,
+                                    cache_dir,
+                                    &cells,
+                                    &mut covers,
+                                    page,
+                                    total_pages,
+                                    grid_left,
+                                    grid_top,
+                                    sort,
+                                    filters.active_facets(),
+                                    series_view.as_deref(),
+                                    &query,
                                 )?;
                             }
                         }
@@ -722,8 +867,7 @@ fn run() -> anyhow::Result<()> {
                             // doesn't change, so toast the report and repaint the
                             // page underneath (in whichever view is showing).
                             log("sync-button tap");
-                            let dirty =
-                                toast::draw(&mut fb, &mut renderer, "Syncing annotations…");
+                            let dirty = toast::draw(&mut fb, &mut renderer, "Syncing annotations…");
                             fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
 
                             let sync_t0 = Instant::now();
@@ -741,7 +885,9 @@ fn run() -> anyhow::Result<()> {
                                     summary
                                 }
                                 Err(api::SidleError::TokenMismatch) => {
-                                    log("token rejected during sync — resync via sidle desktop app");
+                                    log(
+                                        "token rejected during sync — resync via sidle desktop app",
+                                    );
                                     "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
                                         .to_string()
                                 }
@@ -754,9 +900,21 @@ fn run() -> anyhow::Result<()> {
                             fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                             thread::sleep(TOAST_LINGER);
                             repaint_page(
-                                &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
-                                &mut covers, page, total_pages, grid_left, grid_top, sort,
-                                filters.active_facets(), series_view.as_deref(), &query,
+                                &mut fb,
+                                &mut renderer,
+                                &agent,
+                                &cfg,
+                                cache_dir,
+                                &cells,
+                                &mut covers,
+                                page,
+                                total_pages,
+                                grid_left,
+                                grid_top,
+                                sort,
+                                filters.active_facets(),
+                                series_view.as_deref(),
+                                &query,
                             )?;
                         }
                     }
@@ -789,9 +947,21 @@ fn run() -> anyhow::Result<()> {
                 if new_page != page {
                     page = new_page;
                     repaint_page(
-                        &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
-                        &mut covers, page, total_pages, grid_left, grid_top, sort,
-                        filters.active_facets(), series_view.as_deref(), &query,
+                        &mut fb,
+                        &mut renderer,
+                        &agent,
+                        &cfg,
+                        cache_dir,
+                        &cells,
+                        &mut covers,
+                        page,
+                        total_pages,
+                        grid_left,
+                        grid_top,
+                        sort,
+                        filters.active_facets(),
+                        series_view.as_deref(),
+                        &query,
                     )?;
                 }
             }
@@ -809,9 +979,21 @@ fn run() -> anyhow::Result<()> {
                         current_orient = o;
                         input.set_orientation(o);
                         repaint_page(
-                            &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
-                            &mut covers, page, total_pages, grid_left, grid_top, sort,
-                            filters.active_facets(), series_view.as_deref(), &query,
+                            &mut fb,
+                            &mut renderer,
+                            &agent,
+                            &cfg,
+                            cache_dir,
+                            &cells,
+                            &mut covers,
+                            page,
+                            total_pages,
+                            grid_left,
+                            grid_top,
+                            sort,
+                            filters.active_facets(),
+                            series_view.as_deref(),
+                            &query,
                         )?;
                     }
                 }
@@ -909,7 +1091,12 @@ fn draw_gallery_page(
     // total_pages <= 1, so no prev/next labels are shown then.
     pager::draw(fb, renderer, page, total_pages, filter_count, drilled);
     fb.send_update(
-        MxcfbRect { top: 0, left: 0, width: fb.var.xres, height: fb.var.yres },
+        MxcfbRect {
+            top: 0,
+            left: 0,
+            width: fb.var.xres,
+            height: fb.var.yres,
+        },
         WAVEFORM_MODE_GC16,
     )?;
     Ok(())
@@ -944,10 +1131,22 @@ fn repaint_page(
         None => format!("Sorted by {}", sort.header()),
     };
     draw_gallery_page(
-        fb, renderer, cells, covers, page, total_pages, grid_left, grid_top, &header,
-        filter_count, drilled, query,
+        fb,
+        renderer,
+        cells,
+        covers,
+        page,
+        total_pages,
+        grid_left,
+        grid_top,
+        &header,
+        filter_count,
+        drilled,
+        query,
     )?;
-    fetch_and_paint_page(fb, renderer, agent, cfg, cache_dir, cells, covers, page, grid_left, grid_top)?;
+    fetch_and_paint_page(
+        fb, renderer, agent, cfg, cache_dir, cells, covers, page, grid_left, grid_top,
+    )?;
     Ok(())
 }
 

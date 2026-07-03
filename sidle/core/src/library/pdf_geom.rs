@@ -96,7 +96,12 @@ pub fn write_sidecar(
 /// current `kfx_sha` (a reconversion changes the sha → stale → recompute),
 /// otherwise parsed from the KFX file and cached for next time. Empty if the
 /// KFX is unreadable.
-pub fn ensure(paths: &LibraryPaths, book_sha: &str, kfx_path: &Path, kfx_sha: &str) -> Vec<PageGeom> {
+pub fn ensure(
+    paths: &LibraryPaths,
+    book_sha: &str,
+    kfx_path: &Path,
+    kfx_sha: &str,
+) -> Vec<PageGeom> {
     if let Ok(bytes) = std::fs::read(paths.pdf_geom(book_sha))
         && let Ok(cache) = serde_json::from_slice::<GeomCache>(&bytes)
         && cache.kfx_sha256 == kfx_sha
@@ -118,11 +123,21 @@ mod tests {
     #[test]
     fn sidecar_round_trips_and_invalidates_on_sha_change() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = LibraryPaths { root: tmp.path().to_path_buf() };
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
         let sha = "deadbeef";
         let pages = vec![
-            PageGeom { box_w: 442.0, box_h: 663.0, eids: vec![1, 2, 3] },
-            PageGeom { box_w: 442.0, box_h: 663.0, eids: vec![10, 11] },
+            PageGeom {
+                box_w: 442.0,
+                box_h: 663.0,
+                eids: vec![1, 2, 3],
+            },
+            PageGeom {
+                box_w: 442.0,
+                box_h: 663.0,
+                eids: vec![10, 11],
+            },
         ];
         write_sidecar(&paths, sha, "KFXSHA1", &pages).unwrap();
 

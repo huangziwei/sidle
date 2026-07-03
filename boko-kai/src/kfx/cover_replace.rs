@@ -23,10 +23,10 @@
 //! dimensions and, if the slot was previously non-JPEG (e.g. JXR), flip its
 //! `format`/`mime` to JPEG.
 
+use crate::image::jpeg::sanitize_for_kfx;
 use crate::kfx::container::{
     self, get_field, parse_container_header, parse_index_table, symbol_id_for_name,
 };
-use crate::image::jpeg::sanitize_for_kfx;
 use crate::kfx::ion::{IonParser, IonValue};
 use crate::kfx::serialization::{
     SerializedEntity, create_entity_data, create_raw_media_data, serialize_container,
@@ -65,8 +65,8 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
         let Some(fields) = v.unwrap_annotated().as_struct() else {
             continue;
         };
-        let rn = get_field(fields, KfxSymbol::ResourceName as u64)
-            .and_then(|x| book.symbols.text_of(x));
+        let rn =
+            get_field(fields, KfxSymbol::ResourceName as u64).and_then(|x| book.symbols.text_of(x));
         if rn != Some(cover_name.as_str()) {
             continue;
         }
@@ -95,11 +95,13 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
 
     // 3. Re-parse the container for byte offsets and the header sections we pass
     //    through (doc symbols + format capabilities) and the container id.
-    let header = parse_container_header(kfx_bytes)
-        .map_err(|e| ConvertError::InvalidKfx(e.to_string()))?;
+    let header =
+        parse_container_header(kfx_bytes).map_err(|e| ConvertError::InvalidKfx(e.to_string()))?;
     let ci_end = header.container_info_offset + header.container_info_length;
     if ci_end > kfx_bytes.len() {
-        return Err(ConvertError::InvalidKfx("container info out of bounds".into()));
+        return Err(ConvertError::InvalidKfx(
+            "container info out of bounds".into(),
+        ));
     }
     let ci_fields = {
         let mut p = IonParser::new(&kfx_bytes[header.container_info_offset..ci_end]);
@@ -149,7 +151,9 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
     let mut swapped_media = false;
     for e in &entities {
         if e.offset + e.length > kfx_bytes.len() {
-            return Err(ConvertError::InvalidKfx("entity payload out of bounds".into()));
+            return Err(ConvertError::InvalidKfx(
+                "entity payload out of bounds".into(),
+            ));
         }
         let raw = &kfx_bytes[e.offset..e.offset + e.length];
 
@@ -162,9 +166,9 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
             && external_resource_location(raw).as_deref() == Some(cover_location.as_str())
         {
             let payload = container::skip_enty_header(raw);
-            let parsed = IonParser::new(payload)
-                .parse()
-                .map_err(|err| ConvertError::InvalidKfx(format!("parse external_resource: {err}")))?;
+            let parsed = IonParser::new(payload).parse().map_err(|err| {
+                ConvertError::InvalidKfx(format!("parse external_resource: {err}"))
+            })?;
             let rebuilt = rebuild_external_resource(&parsed, new_w, new_h, flip_format, jpg_sym);
             create_entity_data(&rebuilt)
         } else {
@@ -275,11 +279,7 @@ fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         }
         let seg_len = u16::from_be_bytes([*data.get(i)?, *data.get(i + 1)?]) as usize;
         // SOF markers C0–CF, excluding DHT (C4), JPG (C8), DAC (CC).
-        if (0xC0..=0xCF).contains(&marker)
-            && marker != 0xC4
-            && marker != 0xC8
-            && marker != 0xCC
-        {
+        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
             // Segment payload after the 2 length bytes: precision(1),
             // height(2, BE), width(2, BE).
             let height = u16::from_be_bytes([*data.get(i + 3)?, *data.get(i + 4)?]) as u32;
@@ -314,8 +314,10 @@ mod tests {
         // SOI + APP0(JFIF, len 0x10) + SOF0 with 2×3 dims.
         let jpeg = [
             0xFF, 0xD8, // SOI
-            0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, // APP0
-            0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x03, 0x00, 0x02, 0x01, 0x01, 0x11, 0x00, // SOF0 3h×2w
+            0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0, 1, 0,
+            0, // APP0
+            0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x03, 0x00, 0x02, 0x01, 0x01, 0x11,
+            0x00, // SOF0 3h×2w
         ];
         assert_eq!(jpeg_dimensions(&jpeg), Some((2, 3)));
     }
@@ -334,7 +336,10 @@ mod tests {
         let original = IonValue::Struct(vec![
             (KfxSymbol::Format as u64, IonValue::Symbol(jxr_sym)),
             (KfxSymbol::Mime as u64, IonValue::String("image/jxr".into())),
-            (KfxSymbol::Location as u64, IonValue::String("resource/r".into())),
+            (
+                KfxSymbol::Location as u64,
+                IonValue::String("resource/r".into()),
+            ),
             (KfxSymbol::ResourceWidth as u64, IonValue::Int(50)),
             (KfxSymbol::ResourceHeight as u64, IonValue::Int(53)),
         ]);
@@ -450,7 +455,11 @@ mod tests {
         );
         assert_ne!(bytes0, bytes1, "cover bytes must change");
         assert_eq!(&bytes1[..3], &[0xFF, 0xD8, 0xFF], "new cover is JPEG");
-        assert_eq!((w1, h1), (1, 1), "declared dims updated to the 1×1 replacement");
+        assert_eq!(
+            (w1, h1),
+            (1, 1),
+            "declared dims updated to the 1×1 replacement"
+        );
         assert_eq!(
             before.raw_media.len(),
             after.raw_media.len(),

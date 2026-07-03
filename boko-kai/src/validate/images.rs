@@ -180,9 +180,11 @@ impl Report {
     /// direction. `max(0, source_count - target_count)`.
     pub fn dropped_count(&self, dir: super::Direction) -> usize {
         if dir.epub_is_source() {
-            self.epub_image_count.saturating_sub(self.kfx_image_element_count)
+            self.epub_image_count
+                .saturating_sub(self.kfx_image_element_count)
         } else {
-            self.kfx_image_element_count.saturating_sub(self.epub_image_count)
+            self.kfx_image_element_count
+                .saturating_sub(self.epub_image_count)
         }
     }
 
@@ -271,7 +273,10 @@ impl Report {
             );
             for img in self.epub_missing_images.iter().take(limit) {
                 let resolved = img.resolved_path.as_deref().unwrap_or("(unresolved)");
-                println!("  {}  src={:?}  →  {}", img.spine_path, img.raw_src, resolved);
+                println!(
+                    "  {}  src={:?}  →  {}",
+                    img.spine_path, img.raw_src, resolved
+                );
             }
             if self.epub_missing_images.len() > limit {
                 println!("  ... and {} more", self.epub_missing_images.len() - limit);
@@ -284,10 +289,16 @@ impl Report {
             );
             for img in self.epub_unreadable_images.iter().take(limit) {
                 let resolved = img.resolved_path.as_deref().unwrap_or("(unresolved)");
-                println!("  {}  src={:?}  →  {}", img.spine_path, img.raw_src, resolved);
+                println!(
+                    "  {}  src={:?}  →  {}",
+                    img.spine_path, img.raw_src, resolved
+                );
             }
             if self.epub_unreadable_images.len() > limit {
-                println!("  ... and {} more", self.epub_unreadable_images.len() - limit);
+                println!(
+                    "  ... and {} more",
+                    self.epub_unreadable_images.len() - limit
+                );
             }
         }
         if !self.dangling_external_resources.is_empty() {
@@ -299,7 +310,10 @@ impl Report {
                 println!("  {}  →  {}", d.resource_name, d.location);
             }
             if self.dangling_external_resources.len() > limit {
-                println!("  ... and {} more", self.dangling_external_resources.len() - limit);
+                println!(
+                    "  ... and {} more",
+                    self.dangling_external_resources.len() - limit
+                );
             }
         }
         if !self.orphan_image_refs.is_empty() {
@@ -431,8 +445,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 
 pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<EpubImage>, String> {
     let cursor = Cursor::new(epub_bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
 
     let container_bytes = read_zip_entry(&mut archive, "META-INF/container.xml")
         .map_err(|e| format!("container.xml: {}", e))?;
@@ -444,8 +457,8 @@ pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<EpubImage>, Str
         .unwrap_or("")
         .to_string();
 
-    let opf_bytes = read_zip_entry(&mut archive, &opf_path)
-        .map_err(|e| format!("opf {}: {}", opf_path, e))?;
+    let opf_bytes =
+        read_zip_entry(&mut archive, &opf_path).map_err(|e| format!("opf {}: {}", opf_path, e))?;
     let hint_encoding = crate::util::extract_xml_encoding(&opf_bytes);
     let opf_str = crate::util::decode_text(&opf_bytes, hint_encoding);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
@@ -477,8 +490,7 @@ pub fn extract_images_from_epub(epub_bytes: &[u8]) -> Result<Vec<EpubImage>, Str
     let mut head_cache: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
     for img in &mut images {
-        let (resolved, bundled) =
-            resolve_against_zip(&img.spine_path, &img.raw_src, &zip_entries);
+        let (resolved, bundled) = resolve_against_zip(&img.spine_path, &img.raw_src, &zip_entries);
         img.resolved_path = resolved.clone();
         img.bundled = bundled;
         if !bundled {
@@ -590,11 +602,7 @@ fn read_zip_entry<R: std::io::Read + std::io::Seek>(
 
 /// Collect `<img src>` from one XHTML. Also collects SVG `<image href>` and
 /// `<image xlink:href>` since boko emits the same Image role for both.
-pub fn extract_images_from_xhtml(
-    xhtml: &str,
-    spine_path: &str,
-    out: &mut Vec<EpubImage>,
-) {
+pub fn extract_images_from_xhtml(xhtml: &str, spine_path: &str, out: &mut Vec<EpubImage>) {
     let mut reader = Reader::from_str(xhtml);
     reader.config_mut().trim_text(false);
 
@@ -652,15 +660,14 @@ pub struct KfxImageData {
 }
 
 pub fn extract_image_data_from_kfx(kfx_bytes: &[u8]) -> Result<KfxImageData, String> {
-    let header =
-        parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
+    let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
     if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
         return Err("container info out of bounds".into());
     }
-    let info_data = &kfx_bytes[header.container_info_offset
-        ..header.container_info_offset + header.container_info_length];
-    let info = parse_container_info(info_data)
-        .map_err(|e| format!("kfx container info: {:?}", e))?;
+    let info_data = &kfx_bytes
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info =
+        parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
     let extended_symbols = match info.doc_symbols {
         Some((off, len)) if off + len <= kfx_bytes.len() => {
@@ -688,8 +695,7 @@ pub fn extract_image_data_from_kfx(kfx_bytes: &[u8]) -> Result<KfxImageData, Str
     let Some((idx_off, idx_len)) = info.index else {
         return Err("kfx: no index table".into());
     };
-    let entities =
-        parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
     let external_resource_type = KfxSymbol::ExternalResource as u32;
     let bcrawmedia_type = KfxSymbol::Bcrawmedia as u32;
@@ -719,14 +725,15 @@ pub fn extract_image_data_from_kfx(kfx_bytes: &[u8]) -> Result<KfxImageData, Str
                 raw_media_names.insert(name);
             }
         } else if ent.type_id == storyline_type
-            && let Some(value) = parse_entity(kfx_bytes, ent) {
-                walk_storyline_for_images(
-                    &value,
-                    &resolve_sym,
-                    &mut image_refs_distinct,
-                    &mut image_element_count,
-                );
-            }
+            && let Some(value) = parse_entity(kfx_bytes, ent)
+        {
+            walk_storyline_for_images(
+                &value,
+                &resolve_sym,
+                &mut image_refs_distinct,
+                &mut image_element_count,
+            );
+        }
     }
 
     Ok(KfxImageData {
@@ -746,10 +753,7 @@ fn parse_entity(data: &[u8], ent: &crate::kfx::container::EntityLoc) -> Option<I
     IonParser::new(ion).parse().ok()
 }
 
-fn extract_external_resource<F>(
-    value: &IonValue,
-    resolve_sym: &F,
-) -> Option<ExternalResource>
+fn extract_external_resource<F>(value: &IonValue, resolve_sym: &F) -> Option<ExternalResource>
 where
     F: Fn(u64) -> String,
 {
@@ -803,8 +807,23 @@ fn is_image_format(format: &str) -> bool {
     // omitting it made every JXR resource invisible to this validator, so a
     // JXR-heavy book (e.g. a fixed-layout manga, all pages JXR) reported every
     // storyline image ref and bcRawMedia entity as orphan.
-    matches!(format, "$$png" | "$$jpg" | "$$gif" | "$$webp" | "$$bmp" | "$$svg" | "$$jxr"
-        | "png" | "jpg" | "gif" | "webp" | "bmp" | "svg" | "jxr")
+    matches!(
+        format,
+        "$$png"
+            | "$$jpg"
+            | "$$gif"
+            | "$$webp"
+            | "$$bmp"
+            | "$$svg"
+            | "$$jxr"
+            | "png"
+            | "jpg"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "svg"
+            | "jxr"
+    )
 }
 
 /// Walk a storyline, count elements with `type: image`, and collect their

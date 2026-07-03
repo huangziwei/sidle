@@ -63,8 +63,7 @@ pub fn spawn(
                 // serial matches. Initial population comes from the on-connect
                 // refresh task spawned below; without this carry-over the
                 // session-derived fields would flicker back to "—" every tick.
-                if let (Some(new_info), Some(prev_info)) = (next.as_mut(), prev.as_ref())
-                {
+                if let (Some(new_info), Some(prev_info)) = (next.as_mut(), prev.as_ref()) {
                     let same_device = new_info.serial == prev_info.serial;
                     let is_mtp = matches!(new_info.transport, TransportKind::Mtp { .. });
                     if same_device && is_mtp {
@@ -206,7 +205,14 @@ async fn on_mass_storage_connect(
     queue: QueueHandle,
     device: DeviceInfo,
 ) {
-    autopull_on_connect(app.clone(), db.clone(), paths.clone(), queue, device.clone()).await;
+    autopull_on_connect(
+        app.clone(),
+        db.clone(),
+        paths.clone(),
+        queue,
+        device.clone(),
+    )
+    .await;
     sync_annotations_on_connect(app, transport, db, paths, device).await;
 }
 
@@ -264,27 +270,28 @@ async fn sync_annotations_on_connect(
     };
 
     let app_progress = app.clone();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<ingest::DeviceImportReport> {
-        let on_progress = |stage: &str, current: usize, total: usize, label: &str| {
-            let _ = app_progress.emit(
-                "annotations:sync-progress",
-                crate::device::annotations::SyncProgress {
-                    stage: stage.to_string(),
-                    current,
-                    total,
-                    label: label.to_string(),
-                },
-            );
-        };
-        crate::device::annotations::import_device_annotations(
-            &device,
-            shared.as_ref(),
-            &db,
-            &paths,
-            &on_progress,
-        )
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<ingest::DeviceImportReport> {
+            let on_progress = |stage: &str, current: usize, total: usize, label: &str| {
+                let _ = app_progress.emit(
+                    "annotations:sync-progress",
+                    crate::device::annotations::SyncProgress {
+                        stage: stage.to_string(),
+                        current,
+                        total,
+                        label: label.to_string(),
+                    },
+                );
+            };
+            crate::device::annotations::import_device_annotations(
+                &device,
+                shared.as_ref(),
+                &db,
+                &paths,
+                &on_progress,
+            )
+        })
+        .await;
 
     // Same MTP-stall recovery as the Tauri commands: on any error the cached
     // session is likely talking to a wedged USB endpoint, so drop it. The
@@ -346,8 +353,7 @@ async fn autopull_on_connect(
     //     leave the gallery empty during that window.
     let candidates = {
         let device = device.clone();
-        match tokio::task::spawn_blocking(move || dedrm::hash_dedrm_candidates(&device)).await
-        {
+        match tokio::task::spawn_blocking(move || dedrm::hash_dedrm_candidates(&device)).await {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("[sidle/autopull] {serial}: hash task panicked: {e}");

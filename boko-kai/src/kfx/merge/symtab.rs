@@ -145,10 +145,12 @@ impl LocalSymbolTable {
     /// 0 as the "undefined" sentinel).
     pub fn get_id(&self, name: &str) -> u32 {
         if let Some(rest) = name.strip_prefix('$')
-            && !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
-                && let Ok(id) = rest.parse::<u32>() {
-                    return id;
-                }
+            && !rest.is_empty()
+            && rest.bytes().all(|b| b.is_ascii_digit())
+            && let Ok(id) = rest.parse::<u32>()
+        {
+            return id;
+        }
         self.name_to_id.get(name).copied().unwrap_or(0)
     }
 
@@ -177,7 +179,6 @@ impl LocalSymbolTable {
     pub fn total_count(&self) -> u32 {
         self.local_min_id - 1 + (self.local_symbols.len() as u32)
     }
-
 }
 
 /// Constants for callers that need to know the SYSTEM table size etc.

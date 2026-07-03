@@ -1000,11 +1000,7 @@ fn build_metadata(
         // writes a freshly-minted UUID there. Only promote to
         // `metadata.asin` when the value actually looks like an Amazon
         // ASIN (10-char alphanumeric starting with B for ebooks).
-        metadata.asin = exth
-            .asin
-            .as_ref()
-            .filter(|s| looks_like_asin(s))
-            .cloned();
+        metadata.asin = exth.asin.as_ref().filter(|s| looks_like_asin(s)).cloned();
         // Writing-mode signals (EXTH 525 / 527). Both calibre-exported MOBIs
         // and native Amazon MOBIs carry these; no fallback to inline HTML
         // class needed. Calibre's `reader/headers.py:96-108` is the spec.

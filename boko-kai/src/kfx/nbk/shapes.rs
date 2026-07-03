@@ -194,7 +194,10 @@ fn render_shape(out: &mut String, shape: &IonValue, ids: &ShapeIds) {
 
 /// A `shape_dimensions` sub-field as a formatted number (default `0`).
 fn dim(dims: &[(u64, IonValue)], id: u64) -> String {
-    field(dims, id).and_then(as_f64).map(num_str).unwrap_or_else(|| "0".into())
+    field(dims, id)
+        .and_then(as_f64)
+        .map(num_str)
+        .unwrap_or_else(|| "0".into())
 }
 
 /// A flat `[x0,y0, x1,y1, …]` vertex list → SVG `points="x0,y0 x1,y1 …"`.

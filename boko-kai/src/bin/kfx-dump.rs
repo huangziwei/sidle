@@ -5457,7 +5457,11 @@ fn report_dependencies(data: &[u8]) -> IonResult<()> {
 ///
 /// Unlike format_ion_value_simple, this does NOT truncate lists or structs —
 /// the whole point is to see the full shape of the fragment.
-fn format_ion_value_full<F>(value: &boko::kfx::ion::IonValue, indent: usize, resolve_sym: &F) -> String
+fn format_ion_value_full<F>(
+    value: &boko::kfx::ion::IonValue,
+    indent: usize,
+    resolve_sym: &F,
+) -> String
 where
     F: Fn(u64) -> String,
 {
@@ -5479,7 +5483,13 @@ where
             let inner_pad = "  ".repeat(indent + 1);
             let parts: Vec<String> = items
                 .iter()
-                .map(|v| format!("{}{}", inner_pad, format_ion_value_full(v, indent + 1, resolve_sym)))
+                .map(|v| {
+                    format!(
+                        "{}{}",
+                        inner_pad,
+                        format_ion_value_full(v, indent + 1, resolve_sym)
+                    )
+                })
                 .collect();
             format!("[\n{}\n{}]", parts.join(",\n"), pad)
         }
@@ -5490,7 +5500,13 @@ where
             let inner_pad = "  ".repeat(indent + 1);
             let parts: Vec<String> = items
                 .iter()
-                .map(|v| format!("{}{}", inner_pad, format_ion_value_full(v, indent + 1, resolve_sym)))
+                .map(|v| {
+                    format!(
+                        "{}{}",
+                        inner_pad,
+                        format_ion_value_full(v, indent + 1, resolve_sym)
+                    )
+                })
                 .collect();
             format!("(\n{}\n{})", parts.join(",\n"), pad)
         }
@@ -5645,14 +5661,20 @@ fn report_ruby_content(data: &[u8]) -> IonResult<()> {
         let value = match parser.parse() {
             Ok(v) => v,
             Err(e) => {
-                println!("--- entry #{} id={} parse error: {:?}\n", count, id_idnum, e);
+                println!(
+                    "--- entry #{} id={} parse error: {:?}\n",
+                    count, id_idnum, e
+                );
                 continue;
             }
         };
 
         count += 1;
         let id_name = resolve_sym(id_idnum as u64);
-        println!("--- ruby_content #{} (id={} '{}') ---", count, id_idnum, id_name);
+        println!(
+            "--- ruby_content #{} (id={} '{}') ---",
+            count, id_idnum, id_name
+        );
         println!("{}", format_ion_value_full(&value, 0, &resolve_sym));
         println!();
     }
@@ -5904,11 +5926,9 @@ fn report_ruby_pairs(data: &[u8]) -> IonResult<()> {
         };
 
         if type_idnum == content_type {
-            if let Some((name, texts)) = extract_content_texts(
-                &value,
-                &extended_symbols,
-                base_symbol_count as usize,
-            ) {
+            if let Some((name, texts)) =
+                extract_content_texts(&value, &extended_symbols, base_symbol_count as usize)
+            {
                 content_map.insert(name, texts);
             }
         } else if type_idnum == ruby_content_type
@@ -6073,64 +6093,59 @@ fn walk_for_ruby_pairs<F>(
 
             if let (Some(events), false) = (style_events, content_name.is_empty())
                 && let Some(text_vec) = content_map.get(&content_name)
-                    && content_index >= 0
-                    && let Some(text) = text_vec.get(content_index as usize)
-                {
-                    let chars: Vec<char> = text.chars().collect();
-                    for evt in events {
-                        if let IonValue::Struct(evt_fields) = evt {
-                            let mut offset: i64 = -1;
-                            let mut length: i64 = -1;
-                            let mut ruby_name = String::new();
-                            let mut ruby_id: i64 = 0;
-                            for (k, v) in evt_fields {
-                                let key = resolve_sym(*k);
-                                match key.as_str() {
-                                    "offset" => {
-                                        if let IonValue::Int(n) = v {
-                                            offset = *n;
-                                        }
+                && content_index >= 0
+                && let Some(text) = text_vec.get(content_index as usize)
+            {
+                let chars: Vec<char> = text.chars().collect();
+                for evt in events {
+                    if let IonValue::Struct(evt_fields) = evt {
+                        let mut offset: i64 = -1;
+                        let mut length: i64 = -1;
+                        let mut ruby_name = String::new();
+                        let mut ruby_id: i64 = 0;
+                        for (k, v) in evt_fields {
+                            let key = resolve_sym(*k);
+                            match key.as_str() {
+                                "offset" => {
+                                    if let IonValue::Int(n) = v {
+                                        offset = *n;
                                     }
-                                    "length" => {
-                                        if let IonValue::Int(n) = v {
-                                            length = *n;
-                                        }
-                                    }
-                                    "ruby_name" => {
-                                        if let IonValue::Symbol(s) = v {
-                                            ruby_name = resolve_sym(*s);
-                                        }
-                                    }
-                                    "ruby_id" => {
-                                        if let IonValue::Int(n) = v {
-                                            ruby_id = *n;
-                                        }
-                                    }
-                                    _ => {}
                                 }
+                                "length" => {
+                                    if let IonValue::Int(n) = v {
+                                        length = *n;
+                                    }
+                                }
+                                "ruby_name" => {
+                                    if let IonValue::Symbol(s) = v {
+                                        ruby_name = resolve_sym(*s);
+                                    }
+                                }
+                                "ruby_id" => {
+                                    if let IonValue::Int(n) = v {
+                                        ruby_id = *n;
+                                    }
+                                }
+                                _ => {}
                             }
-                            if offset >= 0
-                                && length > 0
-                                && !ruby_name.is_empty()
-                                && ruby_id > 0
-                            {
-                                let start = offset as usize;
-                                let end = (start + length as usize).min(chars.len());
-                                if start < end {
-                                    let base: String =
-                                        chars[start..end].iter().collect();
-                                    let annotation = ruby_lookup
-                                        .get(&ruby_name)
-                                        .and_then(|v| v.get((ruby_id - 1) as usize))
-                                        .cloned()
-                                        .unwrap_or_default();
-                                    println!("{}\t{}", base, annotation);
-                                    *total += 1;
-                                }
+                        }
+                        if offset >= 0 && length > 0 && !ruby_name.is_empty() && ruby_id > 0 {
+                            let start = offset as usize;
+                            let end = (start + length as usize).min(chars.len());
+                            if start < end {
+                                let base: String = chars[start..end].iter().collect();
+                                let annotation = ruby_lookup
+                                    .get(&ruby_name)
+                                    .and_then(|v| v.get((ruby_id - 1) as usize))
+                                    .cloned()
+                                    .unwrap_or_default();
+                                println!("{}\t{}", base, annotation);
+                                *total += 1;
                             }
                         }
                     }
                 }
+            }
 
             // Recurse into fields (e.g. content_list)
             for (_, v) in fields {

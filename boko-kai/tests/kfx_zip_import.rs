@@ -19,8 +19,8 @@ fn pack_single_kfx_as_zip(kfx_path: &Path) -> tempfile::TempDir {
     let zip_path = dir.path().join("bundle.kfx-zip");
     let zip_file = std::fs::File::create(&zip_path).expect("create zip");
     let mut writer = zip::ZipWriter::new(zip_file);
-    let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored);
+    let opts: zip::write::SimpleFileOptions =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     writer.start_file("book.kfx", opts).expect("start_file");
     let kfx_bytes = std::fs::read(kfx_path).expect("read source kfx");
     writer.write_all(&kfx_bytes).expect("write kfx bytes");

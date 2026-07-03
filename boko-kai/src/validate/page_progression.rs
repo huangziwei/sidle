@@ -104,16 +104,31 @@ impl Report {
             self.kfx_raw_writing_mode
         );
         if self.is_clean() {
-            println!("  {} preserved on {} side", self.kfx_ppd.as_str(), dir.target_label());
+            println!(
+                "  {} preserved on {} side",
+                self.kfx_ppd.as_str(),
+                dir.target_label()
+            );
         } else {
             println!(
                 "  MISMATCH: {} ({}) vs {} ({})",
-                if dir.epub_is_source() { self.epub_ppd.as_str() } else { self.kfx_ppd.as_str() },
+                if dir.epub_is_source() {
+                    self.epub_ppd.as_str()
+                } else {
+                    self.kfx_ppd.as_str()
+                },
                 dir.source_label(),
-                if dir.epub_is_source() { self.kfx_ppd.as_str() } else { self.epub_ppd.as_str() },
+                if dir.epub_is_source() {
+                    self.kfx_ppd.as_str()
+                } else {
+                    self.epub_ppd.as_str()
+                },
                 dir.target_label(),
             );
-            if dir.target_label() == "EPUB" && self.kfx_ppd == Direction::Rtl && !self.epub_attr_present {
+            if dir.target_label() == "EPUB"
+                && self.kfx_ppd == Direction::Rtl
+                && !self.epub_attr_present
+            {
                 println!(
                     "  → EPUB OPF should include `<spine page-progression-direction=\"rtl\">`"
                 );
@@ -144,15 +159,14 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 
 fn extract_epub_ppd(epub_bytes: &[u8]) -> Result<(Direction, bool), String> {
     let cursor = Cursor::new(epub_bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
 
     let container_bytes = read_zip_entry(&mut archive, "META-INF/container.xml")
         .map_err(|e| format!("container.xml: {}", e))?;
     let opf_path = parse_container_xml(&container_bytes)
         .map_err(|e| format!("container.xml parse: {:?}", e))?;
-    let opf_bytes = read_zip_entry(&mut archive, &opf_path)
-        .map_err(|e| format!("opf {}: {}", opf_path, e))?;
+    let opf_bytes =
+        read_zip_entry(&mut archive, &opf_path).map_err(|e| format!("opf {}: {}", opf_path, e))?;
     let enc = crate::util::extract_xml_encoding(&opf_bytes);
     let opf_str = crate::util::decode_text(&opf_bytes, enc);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
@@ -179,15 +193,14 @@ fn read_zip_entry<R: std::io::Read + std::io::Seek>(
 
 /// Returns `(resolved_ppd, raw_direction, raw_writing_mode)`.
 fn extract_kfx_ppd(kfx_bytes: &[u8]) -> Result<(Direction, String, String), String> {
-    let header =
-        parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
+    let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
     if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
         return Err("container info out of bounds".into());
     }
-    let info_data = &kfx_bytes[header.container_info_offset
-        ..header.container_info_offset + header.container_info_length];
-    let info = parse_container_info(info_data)
-        .map_err(|e| format!("kfx container info: {:?}", e))?;
+    let info_data = &kfx_bytes
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info =
+        parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
     let extended_symbols = match info.doc_symbols {
         Some((off, len)) if off + len <= kfx_bytes.len() => {
@@ -215,8 +228,7 @@ fn extract_kfx_ppd(kfx_bytes: &[u8]) -> Result<(Direction, String, String), Stri
     let Some((idx_off, idx_len)) = info.index else {
         return Err("kfx: no index table".into());
     };
-    let entities =
-        parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
     let doc_data_type = KfxSymbol::DocumentData as u32;
     let metadata_type = KfxSymbol::Metadata as u32;
@@ -237,7 +249,12 @@ fn extract_kfx_ppd(kfx_bytes: &[u8]) -> Result<(Direction, String, String), Stri
             continue;
         };
         if ent.type_id == doc_data_type {
-            walk_doc_data(&value, &resolve_sym, &mut raw_direction, &mut raw_writing_mode);
+            walk_doc_data(
+                &value,
+                &resolve_sym,
+                &mut raw_direction,
+                &mut raw_writing_mode,
+            );
         }
         walk_reading_order_ppd(&value, &resolve_sym, &mut explicit_ppd);
     }
@@ -297,10 +314,12 @@ fn walk_doc_data<F>(
             if let Some(s) = resolve_v(v) {
                 *raw_direction = s;
             }
-        } else if name == "writing_mode" && raw_writing_mode.is_empty()
-            && let Some(s) = resolve_v(v) {
-                *raw_writing_mode = s;
-            }
+        } else if name == "writing_mode"
+            && raw_writing_mode.is_empty()
+            && let Some(s) = resolve_v(v)
+        {
+            *raw_writing_mode = s;
+        }
     }
 }
 

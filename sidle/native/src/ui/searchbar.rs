@@ -39,7 +39,12 @@ pub fn field_w(xres: u32, with_button: bool) -> u32 {
 /// The Update button's rectangle `(x, y, w, h)` — a pill flush to the right
 /// margin, vertically aligned with the field.
 pub fn button_rect(xres: u32) -> (u32, u32, u32, u32) {
-    (xres.saturating_sub(MARGIN_X + BUTTON_W), TOP, BUTTON_W, HEIGHT)
+    (
+        xres.saturating_sub(MARGIN_X + BUTTON_W),
+        TOP,
+        BUTTON_W,
+        HEIGHT,
+    )
 }
 
 /// A tap on the bar.

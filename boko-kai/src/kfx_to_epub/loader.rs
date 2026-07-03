@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use crate::kfx::container::{
-    self, EntityLoc, extract_doc_symbols, get_field, parse_container_header,
-    parse_container_info, parse_index_table, skip_enty_header,
+    self, EntityLoc, extract_doc_symbols, get_field, parse_container_header, parse_container_info,
+    parse_index_table, skip_enty_header,
 };
 use crate::kfx::ion::{IonParser, IonValue};
 use crate::kfx::symbols::{KFX_SYMBOL_TABLE, KfxSymbol};
@@ -126,23 +126,25 @@ impl SymbolTable {
 
 /// Load a KFX container in memory into `BookData`.
 pub fn load(kfx_bytes: &[u8]) -> Result<BookData, ConvertError> {
-    let header = parse_container_header(kfx_bytes)
-        .map_err(|e| ConvertError::InvalidKfx(e.to_string()))?;
+    let header =
+        parse_container_header(kfx_bytes).map_err(|e| ConvertError::InvalidKfx(e.to_string()))?;
 
     if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
         return Err(ConvertError::InvalidKfx(
             "container info out of bounds".into(),
         ));
     }
-    let info_bytes = &kfx_bytes[header.container_info_offset
-        ..header.container_info_offset + header.container_info_length];
-    let info = parse_container_info(info_bytes)
-        .map_err(|e| ConvertError::InvalidKfx(e.to_string()))?;
+    let info_bytes = &kfx_bytes
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info =
+        parse_container_info(info_bytes).map_err(|e| ConvertError::InvalidKfx(e.to_string()))?;
 
     let (doc_symbols, base_len) = match info.doc_symbols {
         Some((off, len)) if off + len <= kfx_bytes.len() => {
             let doc_bytes = &kfx_bytes[off..off + len];
-            let base = parse_imports_max_id(doc_bytes).map(|m| m + 1).unwrap_or(FALLBACK_BASE_LEN);
+            let base = parse_imports_max_id(doc_bytes)
+                .map(|m| m + 1)
+                .unwrap_or(FALLBACK_BASE_LEN);
             (extract_doc_symbols(doc_bytes), base)
         }
         _ => (Vec::new(), FALLBACK_BASE_LEN),
@@ -302,10 +304,9 @@ fn extract_book_metadata(
             let value_raw = get_field(item_fields, KfxSymbol::Value as u64);
             let value = value_raw.and_then(|v| v.as_string()).unwrap_or("");
             match key {
-                "title"
-                    if meta.title.is_empty() => {
-                        meta.title = value.into();
-                    }
+                "title" if meta.title.is_empty() => {
+                    meta.title = value.into();
+                }
                 // Authors are stored in source order in
                 // `kindle_title_metadata/author` entries. Calibre's library
                 // pathway (`yj_metadata.py:get_yj_metadata_from_book`) uses
@@ -315,37 +316,32 @@ fn extract_book_metadata(
                 // `insert(0)` for the intermediate EPUB stage, but that
                 // intermediate is discarded by calibre's library importer.
                 // We match the library output, which the user reads.
-                "author"
-                    if !value.is_empty() => {
-                        meta.authors.push(value.into());
-                    }
+                "author" if !value.is_empty() => {
+                    meta.authors.push(value.into());
+                }
                 "publisher" => meta.publisher = Some(value.trim().into()),
                 "language" => meta.language = value.into(),
                 "book_id" => meta.identifier = value.into(),
-                "ASIN"
-                    if meta.asin.is_none() && !value.is_empty() => {
-                        meta.asin = Some(value.into());
-                    }
-                "issue_date"
-                    if meta.issue_date.is_none() && !value.is_empty() => {
-                        meta.issue_date = Some(value.into());
-                    }
+                "ASIN" if meta.asin.is_none() && !value.is_empty() => {
+                    meta.asin = Some(value.into());
+                }
+                "issue_date" if meta.issue_date.is_none() && !value.is_empty() => {
+                    meta.issue_date = Some(value.into());
+                }
                 "cover_image" => {
                     if let Some(name) = resolve_cover_value(value_raw, symbols) {
                         meta.cover_resource_name = Some(name);
                     }
                 }
-                "title_pronunciation"
-                    if !value.is_empty() => {
-                        meta.title_pronunciation = Some(value.into());
-                    }
+                "title_pronunciation" if !value.is_empty() => {
+                    meta.title_pronunciation = Some(value.into());
+                }
                 // KFX emits one `author_pronunciation` per `author` in source
                 // order. `import::kfx` keeps the last value; mirror that so the
                 // OPF `opf:file-as` matches what `boko info` reports.
-                "author_pronunciation"
-                    if !value.is_empty() => {
-                        meta.author_pronunciation = Some(value.into());
-                    }
+                "author_pronunciation" if !value.is_empty() => {
+                    meta.author_pronunciation = Some(value.into());
+                }
                 _ => {}
             }
         }
@@ -386,10 +382,7 @@ fn parse_imports_max_id(doc_bytes: &[u8]) -> Option<u64> {
 
     // KFX symbol-table struct field ids: 4=name, 5=version, 6=imports,
     // 7=symbols, 8=max_id. We want imports → list of structs → field 8.
-    let imports_field = fields
-        .iter()
-        .find(|(k, _)| *k == 6)
-        .map(|(_, v)| v)?;
+    let imports_field = fields.iter().find(|(k, _)| *k == 6).map(|(_, v)| v)?;
     let imports = imports_field.as_list()?;
 
     let mut total: u64 = 0;
@@ -412,7 +405,9 @@ pub fn resolve_in_table(id: u64, base_len: u64, doc_symbols: &[String]) -> Optio
     if id < base_len {
         KFX_SYMBOL_TABLE.get(id as usize).copied()
     } else {
-        doc_symbols.get((id - base_len) as usize).map(String::as_str)
+        doc_symbols
+            .get((id - base_len) as usize)
+            .map(String::as_str)
     }
 }
 

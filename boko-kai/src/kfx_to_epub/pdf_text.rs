@@ -350,7 +350,8 @@ fn walk(
         // struct, no height), which `as_int()` rejects, so it is never mistaken
         // for the box.
         if page_box.is_none()
-            && let Some(w) = get_field(fields, KfxSymbol::FixedWidth as u64).and_then(|v| v.as_int())
+            && let Some(w) =
+                get_field(fields, KfxSymbol::FixedWidth as u64).and_then(|v| v.as_int())
             && let Some(h) =
                 get_field(fields, KfxSymbol::FixedHeight as u64).and_then(|v| v.as_int())
         {
@@ -433,9 +434,18 @@ mod tests {
         let doc = PdfDoc {
             bytes: fake_pdf(),
             pages: vec![
-                PdfPage { width: 612.0, height: 792.0 },
-                PdfPage { width: 595.0, height: 842.0 },
-                PdfPage { width: 612.0, height: 792.0 },
+                PdfPage {
+                    width: 612.0,
+                    height: 792.0,
+                },
+                PdfPage {
+                    width: 595.0,
+                    height: 842.0,
+                },
+                PdfPage {
+                    width: 612.0,
+                    height: 792.0,
+                },
             ],
             title: Some("Nav Round Trip".to_string()),
             author: None,
@@ -470,17 +480,27 @@ mod tests {
         let rd = pdf_reader_data(&kfx).expect("pdf_reader_data");
 
         assert_eq!(rd.pages.len(), 3, "one entry per page");
-        assert_eq!(rd.page_labels, vec!["Cover", "i", "1"], "page labels from page_list");
+        assert_eq!(
+            rd.page_labels,
+            vec!["Cover", "i", "1"],
+            "page labels from page_list"
+        );
 
         let (mut want, mut got) = (Vec::new(), Vec::new());
         flat(&doc.outline, 0, &mut want);
         flat(&rd.outline, 0, &mut got);
-        assert_eq!(got, want, "outline (title + page index, nested) must round-trip");
+        assert_eq!(
+            got, want,
+            "outline (title + page index, nested) must round-trip"
+        );
 
         // Page box sizes come back from the KFX page_template (≈ MediaBox pt).
         for (i, p) in doc.pages.iter().enumerate() {
             assert!((rd.pages[i].box_w - p.width).abs() < 0.5, "page {i} width");
-            assert!((rd.pages[i].box_h - p.height).abs() < 0.5, "page {i} height");
+            assert!(
+                (rd.pages[i].box_h - p.height).abs() < 0.5,
+                "page {i} height"
+            );
         }
     }
 }

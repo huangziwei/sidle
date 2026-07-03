@@ -38,7 +38,10 @@ fn transparent_background_does_not_emit_opaque_black() {
     let fill_bug: &[u8] = &[0xC6, 0x24, 0xFF, 0x00, 0x00, 0x00];
 
     let bg_hits = kfx.windows(bg_bug.len()).filter(|w| *w == bg_bug).count();
-    let fill_hits = kfx.windows(fill_bug.len()).filter(|w| *w == fill_bug).count();
+    let fill_hits = kfx
+        .windows(fill_bug.len())
+        .filter(|w| *w == fill_bug)
+        .count();
 
     assert_eq!(
         bg_hits, 0,

@@ -120,8 +120,16 @@ impl Report {
         println!("  EPUB: {:?}", self.epub_language);
         println!("  KFX:  {:?}", self.kfx_language);
         println!("Authors (ordered):");
-        println!("  EPUB ({}): {:?}", self.epub_authors.len(), self.epub_authors);
-        println!("  KFX  ({}): {:?}", self.kfx_authors.len(), self.kfx_authors);
+        println!(
+            "  EPUB ({}): {:?}",
+            self.epub_authors.len(),
+            self.epub_authors
+        );
+        println!(
+            "  KFX  ({}): {:?}",
+            self.kfx_authors.len(),
+            self.kfx_authors
+        );
         println!("Cover image:");
         println!("  EPUB has cover:  {}", self.epub_has_cover);
         println!("  KFX cover_image: {:?}", self.kfx_cover_image);
@@ -388,8 +396,7 @@ struct EpubMetadata {
 
 fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
     let cursor = Cursor::new(epub_bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("not a valid zip: {}", e))?;
 
     let container_bytes = read_zip_entry(&mut archive, "META-INF/container.xml")
         .map_err(|e| format!("container.xml: {}", e))?;
@@ -400,8 +407,8 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
         .map(|i| &opf_path[..=i])
         .unwrap_or("")
         .to_string();
-    let opf_bytes = read_zip_entry(&mut archive, &opf_path)
-        .map_err(|e| format!("opf {}: {}", opf_path, e))?;
+    let opf_bytes =
+        read_zip_entry(&mut archive, &opf_path).map_err(|e| format!("opf {}: {}", opf_path, e))?;
     let enc = crate::util::extract_xml_encoding(&opf_bytes);
     let opf_str = crate::util::decode_text(&opf_bytes, enc);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
@@ -425,10 +432,7 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
             continue;
         };
         let full_path = format!("{}{}", opf_base, href);
-        let chapter_dir = full_path
-            .rfind('/')
-            .map(|i| &full_path[..i])
-            .unwrap_or("");
+        let chapter_dir = full_path.rfind('/').map(|i| &full_path[..i]).unwrap_or("");
         let Ok(xhtml_bytes) = read_zip_entry(&mut archive, &full_path) else {
             continue;
         };
@@ -513,7 +517,9 @@ fn scan_parent_escape_refs(xhtml: &str) -> Vec<String> {
     reader.config_mut().trim_text(false);
     let attr_for = |tag: &[u8]| -> Option<&'static [u8]> {
         match tag {
-            b"img" | b"image" | b"audio" | b"video" | b"source" | b"script" | b"iframe" => Some(b"src"),
+            b"img" | b"image" | b"audio" | b"video" | b"source" | b"script" | b"iframe" => {
+                Some(b"src")
+            }
             b"link" | b"a" => Some(b"href"),
             _ => None,
         }
@@ -647,8 +653,7 @@ fn scan_opf_identifiers(opf_str: &str) -> Vec<(String, String)> {
                     current_scheme = None;
                     for attr in e.attributes().flatten() {
                         if attr.key.local_name().as_ref() == b"scheme" {
-                            current_scheme =
-                                Some(String::from_utf8_lossy(&attr.value).to_string());
+                            current_scheme = Some(String::from_utf8_lossy(&attr.value).to_string());
                         }
                     }
                 }
@@ -776,15 +781,14 @@ struct KfxMetadata {
 }
 
 fn extract_kfx_metadata(kfx_bytes: &[u8]) -> Result<KfxMetadata, String> {
-    let header =
-        parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
+    let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
     if header.container_info_offset + header.container_info_length > kfx_bytes.len() {
         return Err("container info out of bounds".into());
     }
-    let info_data = &kfx_bytes[header.container_info_offset
-        ..header.container_info_offset + header.container_info_length];
-    let info = parse_container_info(info_data)
-        .map_err(|e| format!("kfx container info: {:?}", e))?;
+    let info_data = &kfx_bytes
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info =
+        parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
     let extended_symbols = match info.doc_symbols {
         Some((off, len)) if off + len <= kfx_bytes.len() => {
@@ -812,8 +816,7 @@ fn extract_kfx_metadata(kfx_bytes: &[u8]) -> Result<KfxMetadata, String> {
     let Some((idx_off, idx_len)) = info.index else {
         return Err("kfx: no index table".into());
     };
-    let entities =
-        parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
     let metadata_type = KfxSymbol::Metadata as u32;
     let book_metadata_type = KfxSymbol::BookMetadata as u32;
@@ -830,9 +833,10 @@ fn extract_kfx_metadata(kfx_bytes: &[u8]) -> Result<KfxMetadata, String> {
                 extract_ppd(&value, &resolve_sym, &mut out.ppd);
             }
         } else if ent.type_id == book_metadata_type
-            && let Some(value) = parse_entity(kfx_bytes, ent) {
-                extract_categorised(&value, &resolve_sym, &mut kvs);
-            }
+            && let Some(value) = parse_entity(kfx_bytes, ent)
+        {
+            extract_categorised(&value, &resolve_sym, &mut kvs);
+        }
     }
 
     // Singleton fields take the first occurrence (matches calibre's "if not X"
@@ -872,17 +876,15 @@ fn detect_vertical_writing_mode<F>(
 where
     F: Fn(u64) -> String,
 {
-    let header =
-        parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
-    let info_data = &kfx_bytes[header.container_info_offset
-        ..header.container_info_offset + header.container_info_length];
-    let info = parse_container_info(info_data)
-        .map_err(|e| format!("kfx container info: {:?}", e))?;
+    let header = parse_container_header(kfx_bytes).map_err(|e| format!("kfx header: {:?}", e))?;
+    let info_data = &kfx_bytes
+        [header.container_info_offset..header.container_info_offset + header.container_info_length];
+    let info =
+        parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
     let Some((idx_off, idx_len)) = info.index else {
         return Ok((false, None));
     };
-    let entities =
-        parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
+    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
     let mut counts: HashMap<String, usize> = HashMap::new();
     for ent in &entities {
@@ -1003,13 +1005,17 @@ where
             && let IonValue::List(cats) = v
         {
             for cat in cats {
-                let IonValue::Struct(cfields) = cat else { continue };
+                let IonValue::Struct(cfields) = cat else {
+                    continue;
+                };
                 for (ck, cv) in cfields {
                     if resolve_sym(*ck) == "metadata"
                         && let IonValue::List(entries) = cv
                     {
                         for entry in entries {
-                            let IonValue::Struct(efields) = entry else { continue };
+                            let IonValue::Struct(efields) = entry else {
+                                continue;
+                            };
                             let mut key: String = String::new();
                             let mut val: String = String::new();
                             for (ek, ev) in efields {
@@ -1019,14 +1025,12 @@ where
                                             key = s.clone();
                                         }
                                     }
-                                    "value" => {
-                                        match ev {
-                                            IonValue::String(s) => val = s.clone(),
-                                            IonValue::Symbol(s) => val = resolve_sym(*s),
-                                            IonValue::Bool(b) => val = b.to_string(),
-                                            _ => {}
-                                        }
-                                    }
+                                    "value" => match ev {
+                                        IonValue::String(s) => val = s.clone(),
+                                        IonValue::Symbol(s) => val = resolve_sym(*s),
+                                        IonValue::Bool(b) => val = b.to_string(),
+                                        _ => {}
+                                    },
                                     _ => {}
                                 }
                             }

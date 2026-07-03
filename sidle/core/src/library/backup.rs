@@ -134,12 +134,19 @@ pub fn create_archive_with_progress(
     //     mutate the bytes we're about to hash), so the manifest is internally
     //     consistent with the archived DB + file set.
     let inv = read_snapshot_inventory(&snapshot.path)?;
-    let book_dirs = inv.shas.iter().filter(|s| books_dir.join(s).is_dir()).count() as i64;
+    let book_dirs = inv
+        .shas
+        .iter()
+        .filter(|s| books_dir.join(s).is_dir())
+        .count() as i64;
     // Notebook dirs live a level up from `books/` — a `notebooks/` sibling under
     // the same root.
     let notebooks_dir = source_root.join("notebooks");
-    let notebook_dirs =
-        inv.notebook_uuids.iter().filter(|u| notebooks_dir.join(u).is_dir()).count() as i64;
+    let notebook_dirs = inv
+        .notebook_uuids
+        .iter()
+        .filter(|u| notebooks_dir.join(u).is_dir())
+        .count() as i64;
 
     // (2) Integrity hash over the snapshot bytes.
     let db_sha256 = import::sha256_of_file(&snapshot.path)
@@ -164,15 +171,16 @@ pub fn create_archive_with_progress(
     // (3) Stream into the zip: manifest first (cheap to inspect), then the DB
     //     (deflate — DBs compress well), then the book tree (store — EPUB/KFX
     //     are already compressed, so deflate only burns CPU).
-    let file = File::create(dest_zip)
-        .with_context(|| format!("create {}", dest_zip.display()))?;
+    let file = File::create(dest_zip).with_context(|| format!("create {}", dest_zip.display()))?;
     let mut zw = ZipWriter::new(file);
     let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
     let manifest_json = serde_json::to_vec_pretty(&manifest).context("serialize manifest")?;
-    zw.start_file("manifest.json", deflated).context("zip manifest.json")?;
-    zw.write_all(&manifest_json).context("write manifest.json")?;
+    zw.start_file("manifest.json", deflated)
+        .context("zip manifest.json")?;
+    zw.write_all(&manifest_json)
+        .context("write manifest.json")?;
 
     add_file(&mut zw, "library.db", &snapshot.path, deflated)?;
 
@@ -218,7 +226,14 @@ pub fn create(
 ) -> Result<Manifest> {
     let snap = snapshot(conn)?;
     let db_user_version = db::user_version(conn).context("read user_version")?;
-    create_archive(&snap, books_dir, source_root, app_version, db_user_version, dest_zip)
+    create_archive(
+        &snap,
+        books_dir,
+        source_root,
+        app_version,
+        db_user_version,
+        dest_zip,
+    )
 }
 
 /// The shared front-half of any consumer of a `.sidlebak` (restore and merge):
@@ -246,7 +261,10 @@ pub(crate) fn stage_archive(
     // any disk mutation.
     let manifest = read_manifest(&mut archive)?;
     if manifest.format != FORMAT_TAG {
-        bail!("not a sidle library backup (format = {:?})", manifest.format);
+        bail!(
+            "not a sidle library backup (format = {:?})",
+            manifest.format
+        );
     }
     if manifest.format_version > FORMAT_VERSION {
         bail!(
@@ -335,7 +353,10 @@ pub fn restore_with_progress(
     //     into place. The live app's open Connection points at the old
     //     library.db inode (now under the safety copy); we relaunch right after,
     //     so the next process opens the restored files.
-    let safety = sibling(dest_root, &format!("bak-{}", Utc::now().format("%Y%m%d-%H%M%S")))?;
+    let safety = sibling(
+        dest_root,
+        &format!("bak-{}", Utc::now().format("%Y%m%d-%H%M%S")),
+    )?;
     fs::create_dir_all(&safety)
         .with_context(|| format!("create safety copy {}", safety.display()))?;
     move_payload(dest_root, &safety).context("set current library aside")?;
@@ -376,7 +397,9 @@ impl TempSnapshot {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let name = format!("sidle-backup-{}-{nanos}-{seq}.db", std::process::id());
-        Ok(Self { path: std::env::temp_dir().join(name) })
+        Ok(Self {
+            path: std::env::temp_dir().join(name),
+        })
     }
 }
 
@@ -404,7 +427,9 @@ fn read_snapshot_inventory(db_path: &Path) -> Result<SnapshotInventory> {
     let annotations: i64 = conn
         .query_row("SELECT COUNT(*) FROM annotations", [], |r| r.get(0))
         .context("count annotations")?;
-    let mut stmt = conn.prepare("SELECT sha256 FROM books").context("prepare sha select")?;
+    let mut stmt = conn
+        .prepare("SELECT sha256 FROM books")
+        .context("prepare sha select")?;
     let shas = stmt
         .query_map([], |r| r.get::<_, String>(0))
         .context("query shas")?
@@ -420,7 +445,12 @@ fn read_snapshot_inventory(db_path: &Path) -> Result<SnapshotInventory> {
             .context("collect notebook uuids")?,
         Err(_) => Vec::new(),
     };
-    Ok(SnapshotInventory { books, annotations, shas, notebook_uuids })
+    Ok(SnapshotInventory {
+        books,
+        annotations,
+        shas,
+        notebook_uuids,
+    })
 }
 
 /// What [`read_snapshot_inventory`] returns: the counts plus the on-disk
@@ -433,8 +463,14 @@ struct SnapshotInventory {
 }
 
 /// Stream a single file into the zip under `name`.
-fn add_file(zw: &mut ZipWriter<File>, name: &str, path: &Path, opts: SimpleFileOptions) -> Result<()> {
-    zw.start_file(name, opts).with_context(|| format!("zip entry {name}"))?;
+fn add_file(
+    zw: &mut ZipWriter<File>,
+    name: &str,
+    path: &Path,
+    opts: SimpleFileOptions,
+) -> Result<()> {
+    zw.start_file(name, opts)
+        .with_context(|| format!("zip entry {name}"))?;
     let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
     io::copy(&mut f, zw).with_context(|| format!("write {name} into zip"))?;
     Ok(())
@@ -442,7 +478,12 @@ fn add_file(zw: &mut ZipWriter<File>, name: &str, path: &Path, opts: SimpleFileO
 
 /// Recursively add the contents of `dir` into the zip under `prefix`, entries
 /// sorted for a deterministic archive.
-fn add_dir(zw: &mut ZipWriter<File>, prefix: &str, dir: &Path, opts: SimpleFileOptions) -> Result<()> {
+fn add_dir(
+    zw: &mut ZipWriter<File>,
+    prefix: &str,
+    dir: &Path,
+    opts: SimpleFileOptions,
+) -> Result<()> {
     let mut entries = fs::read_dir(dir)
         .with_context(|| format!("read {}", dir.display()))?
         .collect::<io::Result<Vec<_>>>()
@@ -468,7 +509,9 @@ fn read_manifest(archive: &mut ZipArchive<File>) -> Result<Manifest> {
         .by_name("manifest.json")
         .context("archive has no manifest.json — not a sidle backup")?;
     let mut buf = String::new();
-    entry.read_to_string(&mut buf).context("read manifest.json")?;
+    entry
+        .read_to_string(&mut buf)
+        .context("read manifest.json")?;
     serde_json::from_str(&buf).context("parse manifest.json")
 }
 
@@ -482,7 +525,9 @@ fn extract_all(
     fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
     let total = archive.len() as u64;
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).with_context(|| format!("zip entry {i}"))?;
+        let mut entry = archive
+            .by_index(i)
+            .with_context(|| format!("zip entry {i}"))?;
         // `enclosed_name() == None` is the zip-slip guard (rejects `../` and
         // absolute paths); skip those entries but still count them so progress
         // reaches `total`.
@@ -497,7 +542,8 @@ fn extract_all(
                 }
                 let mut f =
                     File::create(&out).with_context(|| format!("create {}", out.display()))?;
-                io::copy(&mut entry, &mut f).with_context(|| format!("extract {}", out.display()))?;
+                io::copy(&mut entry, &mut f)
+                    .with_context(|| format!("extract {}", out.display()))?;
             }
         }
         on_progress(i as u64 + 1, total);
@@ -509,8 +555,12 @@ fn extract_all(
 /// volume, so moving between it and `root` is a rename, not a copy. `pub(crate)`
 /// so merge can stage alongside the live root the same way restore does.
 pub(crate) fn sibling(root: &Path, suffix: &str) -> Result<PathBuf> {
-    let parent = root.parent().ok_or_else(|| anyhow!("root {} has no parent", root.display()))?;
-    let base = root.file_name().ok_or_else(|| anyhow!("root {} has no name", root.display()))?;
+    let parent = root
+        .parent()
+        .ok_or_else(|| anyhow!("root {} has no parent", root.display()))?;
+    let base = root
+        .file_name()
+        .ok_or_else(|| anyhow!("root {} has no name", root.display()))?;
     let mut name = base.to_os_string();
     name.push(".");
     name.push(suffix);
@@ -619,8 +669,15 @@ mod tests {
         let pages = root.join("notebooks").join("nb-1").join("pages");
         fs::create_dir_all(&pages).unwrap();
         fs::write(pages.join("page-0.svg"), "svg-nb-1").unwrap();
-        db::upsert_notebook(&conn, "nb-1", 1, "nbk-sha", "t", "2026-02-02T00:00:00+00:00")
-            .unwrap();
+        db::upsert_notebook(
+            &conn,
+            "nb-1",
+            1,
+            "nbk-sha",
+            "t",
+            "2026-02-02T00:00:00+00:00",
+        )
+        .unwrap();
         (conn, books)
     }
 
@@ -637,7 +694,10 @@ mod tests {
         assert_eq!(manifest.counts.books, 2);
         assert_eq!(manifest.counts.annotations, 2);
         assert_eq!(manifest.counts.book_dirs, 2);
-        assert_eq!(manifest.counts.notebooks, 1, "notebook tree archived (format v2)");
+        assert_eq!(
+            manifest.counts.notebooks, 1,
+            "notebook tree archived (format v2)"
+        );
         drop(conn);
 
         // Restore into a fresh root with a DIFFERENT absolute path.
@@ -657,7 +717,10 @@ mod tests {
             assert_eq!(row.tags, vec!["fav".to_string()], "user tag carried");
             let epub = row.epub_path.as_ref().expect("epub path");
             // Resolved to absolute UNDER the new root (cross-root portability, §4a).
-            assert!(Path::new(epub).starts_with(&dst_root), "{epub} under {dst_root:?}");
+            assert!(
+                Path::new(epub).starts_with(&dst_root),
+                "{epub} under {dst_root:?}"
+            );
             assert_eq!(
                 fs::read_to_string(epub).unwrap(),
                 format!("epub-bytes-{}", row.sha256),
@@ -678,7 +741,9 @@ mod tests {
 
         // The notebook row AND its rendered page survive — the v2 gap fix (a v1
         // archive carried the row in the DB but lost the files).
-        let nb = db::get_notebook_by_uuid(&rconn, "nb-1").unwrap().expect("notebook row carried");
+        let nb = db::get_notebook_by_uuid(&rconn, "nb-1")
+            .unwrap()
+            .expect("notebook row carried");
         assert_eq!(nb.page_count, 1);
         assert_eq!(
             fs::read_to_string(dst_root.join("notebooks/nb-1/pages/page-0.svg")).unwrap(),
@@ -694,8 +759,11 @@ mod tests {
         )
         .unwrap();
         let mut stmt = raw.prepare("SELECT epub_path FROM books").unwrap();
-        let stored: Vec<String> =
-            stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        let stored: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
         assert!(
             stored.iter().all(|p| !p.starts_with('/')),
             "stored paths stay relative: {stored:?}"
@@ -758,12 +826,18 @@ mod tests {
 
         // The restored library is live; the old book is gone from the root.
         let rconn = db::open(&dst_root.join("library.db")).unwrap();
-        let shas: Vec<String> =
-            db::list_books(&rconn).unwrap().into_iter().map(|b| b.sha256).collect();
+        let shas: Vec<String> = db::list_books(&rconn)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.sha256)
+            .collect();
         assert!(shas.contains(&"aaa".to_string()) && shas.contains(&"bbb".to_string()));
         assert!(!shas.contains(&"zzz".to_string()), "old book replaced");
         assert!(dst_root.join("books/aaa/book.epub").is_file());
-        assert!(!dst_root.join("books/zzz").exists(), "old book dir gone from live root");
+        assert!(
+            !dst_root.join("books/zzz").exists(),
+            "old book dir gone from live root"
+        );
 
         // The pre-restore library is preserved intact in the safety copy (the undo).
         assert!(outcome.safety_copy.join("library.db").is_file());
@@ -790,7 +864,10 @@ mod tests {
         assert!(err.to_string().contains("schema"), "got: {err}");
         // Gate runs before any disk mutation → target untouched, no staging left.
         assert!(!dst_root.join("library.db").exists(), "target untouched");
-        assert!(!sibling(&dst_root, "restoring").unwrap().exists(), "no staging left");
+        assert!(
+            !sibling(&dst_root, "restoring").unwrap().exists(),
+            "no staging left"
+        );
     }
 
     #[test]
@@ -811,14 +888,18 @@ mod tests {
             let mut ar = ZipArchive::new(File::open(&good).unwrap()).unwrap();
             let mut manifest: Manifest = {
                 let mut s = String::new();
-                ar.by_name("manifest.json").unwrap().read_to_string(&mut s).unwrap();
+                ar.by_name("manifest.json")
+                    .unwrap()
+                    .read_to_string(&mut s)
+                    .unwrap();
                 serde_json::from_str(&s).unwrap()
             };
             manifest.db_sha256 = "0".repeat(64); // not the real hash
             let mut zw = ZipWriter::new(File::create(&tampered).unwrap());
             let opts = SimpleFileOptions::default();
             zw.start_file("manifest.json", opts).unwrap();
-            zw.write_all(&serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+            zw.write_all(&serde_json::to_vec_pretty(&manifest).unwrap())
+                .unwrap();
             for i in 0..ar.len() {
                 let mut e = ar.by_index(i).unwrap();
                 let name = e.name().to_string();
@@ -839,7 +920,10 @@ mod tests {
         // Verify fails AFTER extraction, so the swap never runs: target untouched
         // and the staging dir is cleaned up.
         assert!(!dst_root.join("library.db").exists(), "target untouched");
-        assert!(!sibling(&dst_root, "restoring").unwrap().exists(), "staging cleaned up");
+        assert!(
+            !sibling(&dst_root, "restoring").unwrap().exists(),
+            "staging cleaned up"
+        );
     }
 
     #[test]
@@ -849,7 +933,8 @@ mod tests {
         {
             let f = File::create(&zpath).unwrap();
             let mut zw = ZipWriter::new(f);
-            zw.start_file("hello.txt", SimpleFileOptions::default()).unwrap();
+            zw.start_file("hello.txt", SimpleFileOptions::default())
+                .unwrap();
             zw.write_all(b"not a backup").unwrap();
             zw.finish().unwrap();
         }

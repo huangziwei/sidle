@@ -275,8 +275,8 @@ fn relativize_existing_paths(conn: &Connection, db_path: &Path) -> rusqlite::Res
 /// table) we drop the lot and rebuild fresh from the CREATE block below,
 /// which is the only source of truth.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    let needs_reset = has_column(conn, "books", "source_epub_path")?
-        || has_table(conn, "device_history")?;
+    let needs_reset =
+        has_column(conn, "books", "source_epub_path")? || has_table(conn, "device_history")?;
     if needs_reset {
         conn.pragma_update(None, "foreign_keys", "OFF")?;
         conn.execute_batch(
@@ -454,7 +454,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // `(book_id)` then `(book_id, source)`; migrate by rebuilding and carrying over
     // the precious 'sidle' rows (device rows re-sync from the `.yjf` next connect).
     // ADDITIVE and precious: the destructive reset never touches it.
-    if has_table(conn, "reading_position")? && !has_column(conn, "reading_position", "device_serial")? {
+    if has_table(conn, "reading_position")?
+        && !has_column(conn, "reading_position", "device_serial")?
+    {
         conn.execute_batch(
             r#"
             ALTER TABLE reading_position RENAME TO reading_position_old;
@@ -582,10 +584,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // backup, just not painted / not listed by default). Additive columns, default
     // 0. Both tables exist by here (created above), so the ALTERs are safe.
     if !has_column(conn, "annotations", "hidden")? {
-        conn.execute("ALTER TABLE annotations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0", [])?;
+        conn.execute(
+            "ALTER TABLE annotations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     if !has_column(conn, "book_ink", "hidden")? {
-        conn.execute("ALTER TABLE book_ink ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0", [])?;
+        conn.execute(
+            "ALTER TABLE book_ink ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
 
     // Deletion records (tombstones). A Sidle-side delete of an annotation / ink
@@ -616,7 +624,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // text row (its body = the nbk container id, no covered text) — scrub those;
     // import now routes them to the ink path. Unconditional + idempotent, like
     // the clippings scrub above.
-    conn.execute("DELETE FROM annotations WHERE kind = 'handwritten_note'", [])?;
+    conn.execute(
+        "DELETE FROM annotations WHERE kind = 'handwritten_note'",
+        [],
+    )?;
 
     // v10: harmonize language tags (en-US, eng, ZH_cn, … → en / zh-Hans /
     // zh-Hant). Rewritten in Rust over the *distinct* values so the BCP-47 logic
@@ -658,8 +669,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     {
         let rows: Vec<(i64, String, String, String)> = {
-            let mut stmt = conn
-                .prepare("SELECT id, title, author, language FROM books WHERE title_romaji IS NULL")?;
+            let mut stmt = conn.prepare(
+                "SELECT id, title, author, language FROM books WHERE title_romaji IS NULL",
+            )?;
             let mapped =
                 stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
             mapped.collect::<rusqlite::Result<_>>()?
@@ -791,10 +803,18 @@ pub fn insert_book(conn: &Connection, book: &NewBook<'_>) -> rusqlite::Result<i6
     // Store the three file paths root-relative (§4a) so the library is movable;
     // `row_to_book` resolves them back to absolute on read.
     let root = conn_root(conn);
-    let epub_rel = book.epub_path.map(|p| relativize_for_store(root.as_deref(), p));
-    let cover_rel = book.cover_path.map(|p| relativize_for_store(root.as_deref(), p));
-    let kfx_rel = book.kfx_path.map(|p| relativize_for_store(root.as_deref(), p));
-    let pdf_rel = book.pdf_path.map(|p| relativize_for_store(root.as_deref(), p));
+    let epub_rel = book
+        .epub_path
+        .map(|p| relativize_for_store(root.as_deref(), p));
+    let cover_rel = book
+        .cover_path
+        .map(|p| relativize_for_store(root.as_deref(), p));
+    let kfx_rel = book
+        .kfx_path
+        .map(|p| relativize_for_store(root.as_deref(), p));
+    let pdf_rel = book
+        .pdf_path
+        .map(|p| relativize_for_store(root.as_deref(), p));
     conn.execute(
         r#"INSERT INTO books
             (sha256, title, author, language, ppd, epub_path, cover_path, kfx_path,
@@ -906,7 +926,10 @@ pub fn books_missing_kfx_sha(conn: &Connection) -> rusqlite::Result<Vec<(i64, St
          WHERE kfx_path IS NOT NULL AND kfx_sha256 IS NULL",
     )?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, i64>(0)?, resolve_one(root.as_deref(), &r.get::<_, String>(1)?)))
+        Ok((
+            r.get::<_, i64>(0)?,
+            resolve_one(root.as_deref(), &r.get::<_, String>(1)?),
+        ))
     })?;
     rows.collect()
 }
@@ -923,7 +946,10 @@ pub fn books_missing_asin(conn: &Connection) -> rusqlite::Result<Vec<(i64, Strin
          WHERE kfx_path IS NOT NULL AND (asin IS NULL OR asin = '')",
     )?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, i64>(0)?, resolve_one(root.as_deref(), &r.get::<_, String>(1)?)))
+        Ok((
+            r.get::<_, i64>(0)?,
+            resolve_one(root.as_deref(), &r.get::<_, String>(1)?),
+        ))
     })?;
     rows.collect()
 }
@@ -1025,8 +1051,7 @@ pub fn book_id_by_asin(conn: &Connection, asin: &str) -> rusqlite::Result<Option
 /// is a content_id whose alphabet (hex vs Crockford-base32) varies per book, so
 /// "is it one of our books' asins?" is the only reliable test (NOT a hex check).
 pub fn book_asins(conn: &Connection) -> rusqlite::Result<Vec<String>> {
-    let mut stmt =
-        conn.prepare("SELECT asin FROM books WHERE asin IS NOT NULL AND asin != ''")?;
+    let mut stmt = conn.prepare("SELECT asin FROM books WHERE asin IS NOT NULL AND asin != ''")?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     rows.collect()
 }
@@ -1253,7 +1278,10 @@ pub fn remove_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<S
         "DELETE FROM annotation_device WHERE book_id = ?1",
         params![book_id],
     )?;
-    tx.execute("DELETE FROM annotations WHERE book_id = ?1", params![book_id])?;
+    tx.execute(
+        "DELETE FROM annotations WHERE book_id = ?1",
+        params![book_id],
+    )?;
     // Handwritten ink + presence + checkpoint (asin-keyed). A book with no asin
     // can have no ink, so skip these when it's absent/empty.
     if let Some(asin) = asin.as_deref().filter(|a| !a.is_empty()) {
@@ -1526,7 +1554,10 @@ pub fn get_notebook_by_uuid(
 fn default_notebook_title(updated_at: &str) -> String {
     use chrono::{DateTime, Local, NaiveDateTime};
     if let Ok(dt) = DateTime::parse_from_rfc3339(updated_at) {
-        return dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string();
+        return dt
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
     }
     if let Ok(ndt) = NaiveDateTime::parse_from_str(updated_at, "%Y-%m-%dT%H:%M:%S") {
         return ndt.format("%Y-%m-%d %H:%M").to_string();
@@ -1733,8 +1764,12 @@ pub fn list_book_ink(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<Bo
 
 /// One ink row by id (for the reader panel's delete + cache cleanup).
 pub fn get_book_ink(conn: &Connection, id: i64) -> rusqlite::Result<Option<BookInkRow>> {
-    conn.query_row(&format!("{SELECT_BOOK_INK} WHERE id = ?1"), params![id], row_to_book_ink)
-        .optional()
+    conn.query_row(
+        &format!("{SELECT_BOOK_INK} WHERE id = ?1"),
+        params![id],
+        row_to_book_ink,
+    )
+    .optional()
 }
 
 /// Ink pages overlaying one 0-based host PDF page (usually one; possibly more).
@@ -1746,7 +1781,8 @@ pub fn list_book_ink_on_page(
     let mut stmt = conn.prepare(&format!(
         "{SELECT_BOOK_INK} WHERE book_id = ?1 AND host_page = ?2 AND hidden = 0 ORDER BY host_linear, id"
     ))?;
-    stmt.query_map(params![book_id, host_page], row_to_book_ink)?.collect()
+    stmt.query_map(params![book_id, host_page], row_to_book_ink)?
+        .collect()
 }
 
 /// Distinct host pages that carry anchored ink for a book — the reader chrome's
@@ -1976,7 +2012,8 @@ pub fn list_annotations_for_book(
     let mut stmt = conn.prepare(&format!(
         "{SELECT_ANNOTATION} WHERE book_id = ?1 ORDER BY linear_pos, loc_start, id"
     ))?;
-    stmt.query_map(params![book_id], row_to_annotation)?.collect()
+    stmt.query_map(params![book_id], row_to_annotation)?
+        .collect()
 }
 
 /// Unlinked annotations (book not in the library) — the orphan inbox.
@@ -2135,7 +2172,15 @@ pub fn set_reading_position(
                 "offset" = excluded."offset",
                 linear_pos = excluded.linear_pos,
                 updated_at = excluded.updated_at"#,
-        params![book_id, eid, offset, linear_pos, source, device_serial, now_iso()],
+        params![
+            book_id,
+            eid,
+            offset,
+            linear_pos,
+            source,
+            device_serial,
+            now_iso()
+        ],
     )?;
     Ok(())
 }
@@ -2256,8 +2301,14 @@ pub fn clear_device_sync_checkpoints(
     conn: &Connection,
     device_serial: &str,
 ) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM yjr_sync WHERE device_serial = ?1", params![device_serial])?;
-    conn.execute("DELETE FROM ink_sync WHERE device_serial = ?1", params![device_serial])?;
+    conn.execute(
+        "DELETE FROM yjr_sync WHERE device_serial = ?1",
+        params![device_serial],
+    )?;
+    conn.execute(
+        "DELETE FROM ink_sync WHERE device_serial = ?1",
+        params![device_serial],
+    )?;
     Ok(())
 }
 
@@ -2431,9 +2482,16 @@ mod tests {
         migrate(&conn).expect("re-migrate");
 
         let book = get_book(&conn, id).unwrap().unwrap();
-        assert_eq!(book.title_romaji, "sekai", "kakasi backfilled the title romaji");
+        assert_eq!(
+            book.title_romaji, "sekai",
+            "kakasi backfilled the title romaji"
+        );
         // The derived search key folds the backfilled romaji in.
-        assert!(book.search_key.contains("sekai"), "search_key: {}", book.search_key);
+        assert!(
+            book.search_key.contains("sekai"),
+            "search_key: {}",
+            book.search_key
+        );
 
         // Idempotent: a second migrate finds no NULL rows and changes nothing.
         migrate(&conn).expect("re-migrate idempotent");
@@ -2444,14 +2502,30 @@ mod tests {
     fn notebook_imported_at_is_frozen_on_reimport() {
         let conn = fresh_db();
         // First import.
-        let id = upsert_notebook(&conn, "uuid-1", 3, "sha-a", "2026-06-01T10:00:00Z", "2026-06-01T09:00:00")
-            .expect("first import");
+        let id = upsert_notebook(
+            &conn,
+            "uuid-1",
+            3,
+            "sha-a",
+            "2026-06-01T10:00:00Z",
+            "2026-06-01T09:00:00",
+        )
+        .expect("first import");
         // Re-import of the SAME notebook with edited content + a later import time.
-        let id2 = upsert_notebook(&conn, "uuid-1", 5, "sha-b", "2026-06-09T20:00:00Z", "2026-06-09T19:30:00")
-            .expect("re-import");
+        let id2 = upsert_notebook(
+            &conn,
+            "uuid-1",
+            5,
+            "sha-b",
+            "2026-06-09T20:00:00Z",
+            "2026-06-09T19:30:00",
+        )
+        .expect("re-import");
         assert_eq!(id, id2, "re-import upserts the same row");
 
-        let row = get_notebook_by_uuid(&conn, "uuid-1").expect("query").expect("row");
+        let row = get_notebook_by_uuid(&conn, "uuid-1")
+            .expect("query")
+            .expect("row");
         // imported_at must NEVER change on re-import — it's the first-import
         // bookkeeping time (and the list-sort tiebreaker).
         assert_eq!(row.imported_at, "2026-06-01T10:00:00Z");
@@ -2465,28 +2539,59 @@ mod tests {
     fn notebook_title_defaults_to_first_import_datetime_and_is_frozen() {
         let conn = fresh_db();
         // First import: the title is the on-device Date Modified, minute-precise.
-        upsert_notebook(&conn, "uuid-t", 1, "sha-a", "2026-06-01T10:00:00Z", "2026-06-01T09:05:00")
-            .expect("first import");
+        upsert_notebook(
+            &conn,
+            "uuid-t",
+            1,
+            "sha-a",
+            "2026-06-01T10:00:00Z",
+            "2026-06-01T09:05:00",
+        )
+        .expect("first import");
         let row = get_notebook_by_uuid(&conn, "uuid-t").unwrap().unwrap();
         assert_eq!(row.title, "2026-06-01 09:05");
 
         // An edit (new content + a newer mtime) must NOT rewrite the title.
-        upsert_notebook(&conn, "uuid-t", 2, "sha-b", "2026-06-09T20:00:00Z", "2026-06-09T19:30:00")
-            .expect("re-import");
+        upsert_notebook(
+            &conn,
+            "uuid-t",
+            2,
+            "sha-b",
+            "2026-06-09T20:00:00Z",
+            "2026-06-09T19:30:00",
+        )
+        .expect("re-import");
         let row = get_notebook_by_uuid(&conn, "uuid-t").unwrap().unwrap();
-        assert_eq!(row.title, "2026-06-01 09:05", "title frozen at first import");
+        assert_eq!(
+            row.title, "2026-06-01 09:05",
+            "title frozen at first import"
+        );
         assert_eq!(row.updated_at.as_deref(), Some("2026-06-09T19:30:00"));
     }
 
     #[test]
     fn notebook_rename_survives_reimport() {
         let conn = fresh_db();
-        let id = upsert_notebook(&conn, "uuid-r", 1, "sha-a", "2026-06-01T10:00:00Z", "2026-06-01T09:05:00")
-            .expect("import");
+        let id = upsert_notebook(
+            &conn,
+            "uuid-r",
+            1,
+            "sha-a",
+            "2026-06-01T10:00:00Z",
+            "2026-06-01T09:05:00",
+        )
+        .expect("import");
         rename_notebook(&conn, id, "Meeting notes").expect("rename");
         // A later edit must leave the user's chosen title intact.
-        upsert_notebook(&conn, "uuid-r", 2, "sha-b", "2026-06-09T20:00:00Z", "2026-06-09T19:30:00")
-            .expect("re-import");
+        upsert_notebook(
+            &conn,
+            "uuid-r",
+            2,
+            "sha-b",
+            "2026-06-09T20:00:00Z",
+            "2026-06-09T19:30:00",
+        )
+        .expect("re-import");
         let row = get_notebook_by_uuid(&conn, "uuid-r").unwrap().unwrap();
         assert_eq!(row.title, "Meeting notes");
     }
@@ -2502,13 +2607,27 @@ mod tests {
         )
         .unwrap();
         // upsert (changed-content path) upgrades the sentinel to the datetime…
-        upsert_notebook(&conn, "uuid-l", 1, "sha-a", "2026-06-01T10:00:00Z", "2026-06-02T08:15:00")
-            .expect("re-import");
+        upsert_notebook(
+            &conn,
+            "uuid-l",
+            1,
+            "sha-a",
+            "2026-06-01T10:00:00Z",
+            "2026-06-02T08:15:00",
+        )
+        .expect("re-import");
         let row = get_notebook_by_uuid(&conn, "uuid-l").unwrap().unwrap();
         assert_eq!(row.title, "2026-06-02 08:15");
         // …and it's then frozen like any other default.
-        upsert_notebook(&conn, "uuid-l", 2, "sha-b", "2026-06-01T10:00:00Z", "2026-06-09T19:30:00")
-            .expect("edit");
+        upsert_notebook(
+            &conn,
+            "uuid-l",
+            2,
+            "sha-b",
+            "2026-06-01T10:00:00Z",
+            "2026-06-09T19:30:00",
+        )
+        .expect("edit");
         let row = get_notebook_by_uuid(&conn, "uuid-l").unwrap().unwrap();
         assert_eq!(row.title, "2026-06-02 08:15", "upgraded title now frozen");
     }
@@ -2538,7 +2657,10 @@ mod tests {
     fn default_notebook_title_handles_naive_and_rfc3339() {
         // Naive local wall-clock (the common import shape) reflects its digits,
         // dropping seconds — deterministic regardless of the host timezone.
-        assert_eq!(default_notebook_title("2026-06-01T09:05:45"), "2026-06-01 09:05");
+        assert_eq!(
+            default_notebook_title("2026-06-01T09:05:45"),
+            "2026-06-01 09:05"
+        );
         // RFC 3339 (the now_iso fallback) parses + converts to local without
         // panicking; the exact minute depends on the host tz, so assert shape.
         let got = default_notebook_title("2026-06-01T09:05:45Z");
@@ -2656,8 +2778,14 @@ mod tests {
         )
         .expect("insert");
         // A device asserts it → a row lands in `annotation_device`.
-        record_device_book_presence(&conn, "DEV", book_id, &["k1".to_string()], "2026-05-25T00:00:01Z")
-            .expect("record presence");
+        record_device_book_presence(
+            &conn,
+            "DEV",
+            book_id,
+            &["k1".to_string()],
+            "2026-05-25T00:00:01Z",
+        )
+        .expect("record presence");
 
         remove_book(&conn, book_id).expect("remove");
 
@@ -2724,13 +2852,21 @@ mod tests {
         assert_eq!(row.color.as_deref(), Some("blue"));
         assert_eq!(row.dedup_hash, "nh1-v2");
         assert!(get_annotation_by_hash(&conn, "nh1").expect("old").is_none());
-        assert!(get_annotation_by_hash(&conn, "nh1-v2").expect("new").is_some());
+        assert!(
+            get_annotation_by_hash(&conn, "nh1-v2")
+                .expect("new")
+                .is_some()
+        );
 
         // Delete removes it; deleting again is a no-op.
         assert!(delete_annotation(&conn, id).expect("delete"));
         assert!(get_annotation(&conn, id).expect("gone").is_none());
         assert!(!delete_annotation(&conn, id).expect("delete-again"));
-        assert!(list_annotations_for_book(&conn, book_id).expect("list").is_empty());
+        assert!(
+            list_annotations_for_book(&conn, book_id)
+                .expect("list")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2743,21 +2879,65 @@ mod tests {
                 .into_iter()
                 .find(|p| p.source == src && p.device_serial == serial)
         };
-        assert!(list_reading_positions(&conn, book_id).expect("list").is_empty());
+        assert!(
+            list_reading_positions(&conn, book_id)
+                .expect("list")
+                .is_empty()
+        );
 
         // Sidle's own row AND a separate row PER device all coexist — composite PK
         // `(book_id, source, device_serial)`, so none clobbers another.
-        set_reading_position(&conn, book_id, Some(200), Some(0), Some(3000), "sidle", "").expect("s");
-        set_reading_position(&conn, book_id, Some(100), Some(5), Some(2000), "device", "KOA2").expect("a");
-        set_reading_position(&conn, book_id, Some(140), Some(9), Some(2500), "device", "SCRIBE").expect("b");
-        assert_eq!(list_reading_positions(&conn, book_id).expect("list").len(), 3);
+        set_reading_position(&conn, book_id, Some(200), Some(0), Some(3000), "sidle", "")
+            .expect("s");
+        set_reading_position(
+            &conn,
+            book_id,
+            Some(100),
+            Some(5),
+            Some(2000),
+            "device",
+            "KOA2",
+        )
+        .expect("a");
+        set_reading_position(
+            &conn,
+            book_id,
+            Some(140),
+            Some(9),
+            Some(2500),
+            "device",
+            "SCRIBE",
+        )
+        .expect("b");
+        assert_eq!(
+            list_reading_positions(&conn, book_id).expect("list").len(),
+            3
+        );
         assert_eq!(find(&conn, "sidle", "").unwrap().eid, Some(200));
-        assert_eq!(find(&conn, "device", "KOA2").unwrap().linear_pos, Some(2000));
-        assert_eq!(find(&conn, "device", "SCRIBE").unwrap().linear_pos, Some(2500));
+        assert_eq!(
+            find(&conn, "device", "KOA2").unwrap().linear_pos,
+            Some(2000)
+        );
+        assert_eq!(
+            find(&conn, "device", "SCRIBE").unwrap().linear_pos,
+            Some(2500)
+        );
 
         // A second write for the SAME (source, serial) overwrites just that row…
-        set_reading_position(&conn, book_id, Some(160), Some(3), Some(2800), "device", "KOA2").expect("a2");
-        assert_eq!(list_reading_positions(&conn, book_id).expect("list").len(), 3);
+        set_reading_position(
+            &conn,
+            book_id,
+            Some(160),
+            Some(3),
+            Some(2800),
+            "device",
+            "KOA2",
+        )
+        .expect("a2");
+        assert_eq!(
+            list_reading_positions(&conn, book_id).expect("list").len(),
+            3
+        );
         assert_eq!(find(&conn, "device", "KOA2").unwrap().eid, Some(160));
         // …leaving the other device and Sidle untouched.
         assert_eq!(find(&conn, "device", "SCRIBE").unwrap().eid, Some(140));
@@ -2768,20 +2948,48 @@ mod tests {
     fn yjr_sync_sha_upserts() {
         let conn = fresh_db();
         let book_id = insert_minimal(&conn, "sha-yjr", "栞本");
-        assert!(get_yjr_sync_sha(&conn, "DEV1", book_id).expect("get").is_none());
+        assert!(
+            get_yjr_sync_sha(&conn, "DEV1", book_id)
+                .expect("get")
+                .is_none()
+        );
 
         set_yjr_sync_sha(&conn, "DEV1", book_id, "abc123", "t1").expect("set");
-        assert_eq!(get_yjr_sync_sha(&conn, "DEV1", book_id).expect("get").as_deref(), Some("abc123"));
+        assert_eq!(
+            get_yjr_sync_sha(&conn, "DEV1", book_id)
+                .expect("get")
+                .as_deref(),
+            Some("abc123")
+        );
 
         // A changed `.yjr` overwrites this device's checkpoint (composite-PK upsert).
         set_yjr_sync_sha(&conn, "DEV1", book_id, "def456", "t2").expect("set2");
-        assert_eq!(get_yjr_sync_sha(&conn, "DEV1", book_id).expect("get").as_deref(), Some("def456"));
+        assert_eq!(
+            get_yjr_sync_sha(&conn, "DEV1", book_id)
+                .expect("get")
+                .as_deref(),
+            Some("def456")
+        );
 
         // A different device keeps its own checkpoint — no clobber.
-        assert!(get_yjr_sync_sha(&conn, "DEV2", book_id).expect("get").is_none());
+        assert!(
+            get_yjr_sync_sha(&conn, "DEV2", book_id)
+                .expect("get")
+                .is_none()
+        );
         set_yjr_sync_sha(&conn, "DEV2", book_id, "zzz", "t3").expect("set3");
-        assert_eq!(get_yjr_sync_sha(&conn, "DEV1", book_id).expect("get").as_deref(), Some("def456"));
-        assert_eq!(get_yjr_sync_sha(&conn, "DEV2", book_id).expect("get").as_deref(), Some("zzz"));
+        assert_eq!(
+            get_yjr_sync_sha(&conn, "DEV1", book_id)
+                .expect("get")
+                .as_deref(),
+            Some("def456")
+        );
+        assert_eq!(
+            get_yjr_sync_sha(&conn, "DEV2", book_id)
+                .expect("get")
+                .as_deref(),
+            Some("zzz")
+        );
     }
 
     #[test]
@@ -2844,7 +3052,11 @@ mod tests {
 
         // h2 dropped on DEV1: its presence row goes, but the BACKUP row stays.
         record_device_book_presence(&conn, "DEV1", book_id, &v(&["h1", "h3"]), "t2").unwrap();
-        assert_eq!(presence(&conn, "DEV1"), 2, "DEV1 presence mirrors the device");
+        assert_eq!(
+            presence(&conn, "DEV1"),
+            2,
+            "DEV1 presence mirrors the device"
+        );
         assert_eq!(
             hashes(&conn),
             v(&["h1", "h2", "h3"]),
@@ -3262,9 +3474,7 @@ mod tests {
     #[test]
     fn bulk_patch_skips_missing_book() {
         let conn = fresh_db();
-        assert!(
-            !apply_bulk_patch(&conn, 9999, &BulkMetadataPatch::default()).expect("apply")
-        );
+        assert!(!apply_bulk_patch(&conn, 9999, &BulkMetadataPatch::default()).expect("apply"));
     }
 
     /// §4a path portability: paths are stored root-relative, resolved to
@@ -3329,12 +3539,21 @@ mod tests {
             // Stored relative…
             assert_eq!(stored(&conn, "epub_path").as_deref(), Some(rel_epub));
             assert_eq!(stored(&conn, "kfx_path").as_deref(), Some(rel_kfx));
-            assert_eq!(stored(&conn, "cover_path").as_deref(), Some("books/abc123/cover.jpg"));
+            assert_eq!(
+                stored(&conn, "cover_path").as_deref(),
+                Some("books/abc123/cover.jpg")
+            );
 
             // …resolved to absolute on read.
             let row = get_book(&conn, id).expect("get").expect("present");
-            assert_eq!(row.epub_path.as_deref(), Some(epub_abs.to_string_lossy().as_ref()));
-            assert_eq!(row.kfx_path.as_deref(), Some(kfx_abs.to_string_lossy().as_ref()));
+            assert_eq!(
+                row.epub_path.as_deref(),
+                Some(epub_abs.to_string_lossy().as_ref())
+            );
+            assert_eq!(
+                row.kfx_path.as_deref(),
+                Some(kfx_abs.to_string_lossy().as_ref())
+            );
 
             // Read-modify-write invariant: feeding the resolved ABSOLUTE path back
             // into the setter must NOT re-absolutize the column (this is the bug
@@ -3357,7 +3576,10 @@ mod tests {
         let conn = open(&db_path).expect("reopen");
         assert_eq!(stored(&conn, "epub_path").as_deref(), Some(rel_epub));
         let row = get_book(&conn, book_id).expect("get").expect("present");
-        assert_eq!(row.epub_path.as_deref(), Some(epub_abs.to_string_lossy().as_ref()));
+        assert_eq!(
+            row.epub_path.as_deref(),
+            Some(epub_abs.to_string_lossy().as_ref())
+        );
     }
 
     /// `relativize_for_store` must relativize a managed path even when it was
@@ -3393,11 +3615,17 @@ mod tests {
             "books/ghi/x.kfx",
         );
         // …and is idempotent on an already-relative value.
-        assert_eq!(relativize_for_store(Some(live), "books/abc/x.epub"), "books/abc/x.epub");
+        assert_eq!(
+            relativize_for_store(Some(live), "books/abc/x.epub"),
+            "books/abc/x.epub"
+        );
         // A root that itself contains a `books` component resolves to the deepest
         // (managed) one, not the root's.
         assert_eq!(
-            relativize_for_store(Some(Path::new("/srv/books/lib")), "/elsewhere/books/jkl/x.epub"),
+            relativize_for_store(
+                Some(Path::new("/srv/books/lib")),
+                "/elsewhere/books/jkl/x.epub"
+            ),
             "books/jkl/x.epub",
         );
         // A foreign path with no managed component is left untouched.
@@ -3448,12 +3676,22 @@ mod tests {
         // Reopen at the live root → migration relativizes, so reads now resolve
         // under THIS root (where the relocate actually put the files).
         let conn = open(&db_path).expect("reopen");
-        assert_eq!(stored(&conn, "epub_path").as_deref(), Some("books/b600ad79/[N] book.epub"));
-        assert_eq!(stored(&conn, "cover_path").as_deref(), Some("books/b600ad79/cover.jpg"));
+        assert_eq!(
+            stored(&conn, "epub_path").as_deref(),
+            Some("books/b600ad79/[N] book.epub")
+        );
+        assert_eq!(
+            stored(&conn, "cover_path").as_deref(),
+            Some("books/b600ad79/cover.jpg")
+        );
         let row = get_book(&conn, id).expect("get").expect("present");
         assert_eq!(
             row.cover_path.as_deref(),
-            Some(root.join("books/b600ad79/cover.jpg").to_string_lossy().as_ref()),
+            Some(
+                root.join("books/b600ad79/cover.jpg")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
         );
     }
 
@@ -3544,7 +3782,11 @@ mod tests {
             .into_iter()
             .map(|r| r.container_id)
             .collect();
-        assert_eq!(order, ["c0", "c1", "c2"], "sorted by host_linear, not insert order");
+        assert_eq!(
+            order,
+            ["c0", "c1", "c2"],
+            "sorted by host_linear, not insert order"
+        );
         assert_eq!(book_ink_host_pages(&conn, book).unwrap(), vec![1, 2, 8]);
         let on8 = list_book_ink_on_page(&conn, book, 8).unwrap();
         assert_eq!(on8.len(), 1);
@@ -3652,14 +3894,21 @@ mod tests {
         assert_eq!(list_book_ink_on_page(&conn, book, 2).unwrap().len(), 1);
 
         set_book_ink_hidden(&conn, id, true).unwrap();
-        assert!(book_ink_host_pages(&conn, book).unwrap().is_empty(), "hidden ink not painted");
+        assert!(
+            book_ink_host_pages(&conn, book).unwrap().is_empty(),
+            "hidden ink not painted"
+        );
         assert!(list_book_ink_on_page(&conn, book, 2).unwrap().is_empty());
         let rows = list_book_ink(&conn, book).unwrap();
         assert_eq!(rows.len(), 1, "hidden ink stays in the backup list");
         assert!(rows[0].hidden, "flag reflects hidden state");
 
         set_book_ink_hidden(&conn, id, false).unwrap();
-        assert_eq!(book_ink_host_pages(&conn, book).unwrap(), vec![2], "unhide repaints");
+        assert_eq!(
+            book_ink_host_pages(&conn, book).unwrap(),
+            vec![2],
+            "unhide repaints"
+        );
     }
 
     #[test]
@@ -3696,7 +3945,11 @@ mod tests {
 
         set_annotation_hidden(&conn, id, true).unwrap();
         let rows = list_annotations_for_book(&conn, book).unwrap();
-        assert_eq!(rows.len(), 1, "a hidden annotation stays in the backup list");
+        assert_eq!(
+            rows.len(),
+            1,
+            "a hidden annotation stays in the backup list"
+        );
         assert!(rows[0].hidden, "flag reflects hidden state");
     }
 
@@ -3731,7 +3984,8 @@ mod tests {
         )
         .unwrap();
         // A device asserts the page + records a decode checkpoint.
-        record_ink_device_presence(&conn, "DEV", "AS1", Some(book), &["c0".to_string()], "t1").unwrap();
+        record_ink_device_presence(&conn, "DEV", "AS1", Some(book), &["c0".to_string()], "t1")
+            .unwrap();
         set_ink_sync_sha(&conn, "DEV", "AS1", "nbksha", "t1").unwrap();
 
         remove_book(&conn, book).unwrap();
@@ -3762,9 +4016,15 @@ mod tests {
         let conn = fresh_db();
         assert_eq!(get_ink_sync_sha(&conn, "DEV", "AS1").unwrap(), None);
         set_ink_sync_sha(&conn, "DEV", "AS1", "nbksha", "t0").unwrap();
-        assert_eq!(get_ink_sync_sha(&conn, "DEV", "AS1").unwrap().as_deref(), Some("nbksha"));
+        assert_eq!(
+            get_ink_sync_sha(&conn, "DEV", "AS1").unwrap().as_deref(),
+            Some("nbksha")
+        );
         // Upsert overwrites in place.
         set_ink_sync_sha(&conn, "DEV", "AS1", "nbksha2", "t1").unwrap();
-        assert_eq!(get_ink_sync_sha(&conn, "DEV", "AS1").unwrap().as_deref(), Some("nbksha2"));
+        assert_eq!(
+            get_ink_sync_sha(&conn, "DEV", "AS1").unwrap().as_deref(),
+            Some("nbksha2")
+        );
     }
 }

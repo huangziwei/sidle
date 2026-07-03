@@ -14,7 +14,10 @@ fn main() {
     // the fingerprint.
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     fingerprint_dir(Path::new("../web"), &mut hasher);
-    println!("cargo:rustc-env=SIDLE_WEB_FINGERPRINT={:x}", hasher.finish());
+    println!(
+        "cargo:rustc-env=SIDLE_WEB_FINGERPRINT={:x}",
+        hasher.finish()
+    );
 
     tauri_build::build()
 }

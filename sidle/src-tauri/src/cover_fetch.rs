@@ -131,11 +131,7 @@ pub use boko::kfx::metadata::looks_like_real_amazon_asin;
 /// Defaults to `01` (amazon.com / US) for unknown languages; that's the
 /// catalog that covers the broadest set of titles when in doubt.
 fn locale_for_language(lang: &str) -> &'static str {
-    let prefix: String = lang
-        .chars()
-        .take(2)
-        .flat_map(char::to_lowercase)
-        .collect();
+    let prefix: String = lang.chars().take(2).flat_map(char::to_lowercase).collect();
     match prefix.as_str() {
         "ja" => "09", // amazon.co.jp
         "en" => "01", // amazon.com
@@ -154,11 +150,7 @@ fn locale_for_language(lang: &str) -> &'static str {
 /// "Search Amazon" affordance in the metadata editor so the user can find the
 /// real ASIN to paste. Defaults to amazon.com.
 pub fn amazon_search_domain(lang: &str) -> &'static str {
-    let prefix: String = lang
-        .chars()
-        .take(2)
-        .flat_map(char::to_lowercase)
-        .collect();
+    let prefix: String = lang.chars().take(2).flat_map(char::to_lowercase).collect();
     match prefix.as_str() {
         "ja" => "amazon.co.jp",
         "de" => "amazon.de",
@@ -194,12 +186,14 @@ mod tests {
         assert!(looks_like_real_amazon_asin("4087718654"));
         // Fabricated 32-char Crockford-Base32 from boko EPUB→KFX (the
         // exact shape from the bug report).
-        assert!(!looks_like_real_amazon_asin("J3AHLRDVFTGEMNBWMPPYB6CCANPXNWH6"));
+        assert!(!looks_like_real_amazon_asin(
+            "J3AHLRDVFTGEMNBWMPPYB6CCANPXNWH6"
+        ));
         // Off-by-one + casing edge cases.
-        assert!(!looks_like_real_amazon_asin("B07PXGQC1"));    // 9 chars
-        assert!(!looks_like_real_amazon_asin("B07PXGQC1QQ"));  // 11 chars
-        assert!(!looks_like_real_amazon_asin("b07pxgqc1q"));   // lowercase
-        assert!(!looks_like_real_amazon_asin("B07PXGQC-Q"));   // symbol
+        assert!(!looks_like_real_amazon_asin("B07PXGQC1")); // 9 chars
+        assert!(!looks_like_real_amazon_asin("B07PXGQC1QQ")); // 11 chars
+        assert!(!looks_like_real_amazon_asin("b07pxgqc1q")); // lowercase
+        assert!(!looks_like_real_amazon_asin("B07PXGQC-Q")); // symbol
         assert!(!looks_like_real_amazon_asin(""));
     }
 }

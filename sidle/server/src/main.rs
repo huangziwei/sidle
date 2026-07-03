@@ -71,7 +71,9 @@ async fn main() -> Result<()> {
 /// sakabar's port-kill, and a plain `kill` send; SIGINT is an interactive Ctrl-C.
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c().await.expect("install Ctrl-C handler");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl-C handler");
     };
 
     #[cfg(unix)]

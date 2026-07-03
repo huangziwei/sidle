@@ -48,11 +48,27 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!((c.image_width, c.image_height), (case.width, case.height));
     let mut d = jxr::decode::decoder::Decoder::new(c.image_data);
     let s = d.parse_headers().expect("our headers must parse");
-    assert_eq!((s.width, s.height), (case.width, case.height), "header dims");
+    assert_eq!(
+        (s.width, s.height),
+        (case.width, case.height),
+        "header dims"
+    );
     assert_eq!(s.frequency_mode, case.opts.frequency, "frequency mode");
-    assert_eq!(s.overlap_mode, overlap_code(case.opts.overlap), "overlap mode");
-    assert_eq!(s.tile_cols, case.opts.tile_cols.max(1) as usize, "tile cols");
-    assert_eq!(s.tile_rows, case.opts.tile_rows.max(1) as usize, "tile rows");
+    assert_eq!(
+        s.overlap_mode,
+        overlap_code(case.opts.overlap),
+        "overlap mode"
+    );
+    assert_eq!(
+        s.tile_cols,
+        case.opts.tile_cols.max(1) as usize,
+        "tile cols"
+    );
+    assert_eq!(
+        s.tile_rows,
+        case.opts.tile_rows.max(1) as usize,
+        "tile rows"
+    );
     assert_eq!(
         (s.margins.0, s.margins.1),
         (case.opts.window_top as u32, case.opts.window_left as u32),
@@ -72,7 +88,11 @@ fuzz_target!(|data: &[u8]| {
         "alpha image plane flag (mode {:?}, np {np}, {}x{}, opts {:?})",
         case.mode, case.width, case.height, case.opts
     );
-    assert_eq!(s.planes[0].bands_present, bands_code(case.opts.bands), "bands_present");
+    assert_eq!(
+        s.planes[0].bands_present,
+        bands_code(case.opts.bands),
+        "bands_present"
+    );
     assert_eq!(s.planes[0].scaled, case.opts.scaled, "scaled flag");
     if let Some(fmt) = case.int_fmt {
         assert_eq!(s.planes[0].internal_clr_fmt, fmt, "internal color format");
@@ -80,7 +100,10 @@ fuzz_target!(|data: &[u8]| {
 
     // Full decode — our own valid file must never panic or error.
     let img = jxr::decode::decode_image(&c).unwrap_or_else(|e| {
-        panic!("our own file failed to decode: {e} (mode {:?}, opts {:?})", case.mode, case.opts)
+        panic!(
+            "our own file failed to decode: {e} (mode {:?}, opts {:?})",
+            case.mode, case.opts
+        )
     });
     assert_eq!((img.width, img.height), (case.width, case.height));
     // The pixel-buffer packer must never panic either (Err is fine: packed
@@ -95,8 +118,11 @@ fuzz_target!(|data: &[u8]| {
         Expect::F32Idem => {
             // Decoded patterns are on the representable set by construction:
             // re-encoding them must round-trip bit-exactly.
-            let redo: Vec<Vec<u32>> =
-                img.image_plane.iter().map(|p| p.iter().map(|&v| v as u32).collect()).collect();
+            let redo: Vec<Vec<u32>> = img
+                .image_plane
+                .iter()
+                .map(|p| p.iter().map(|&v| v as u32).collect())
+                .collect();
             let n_dec = redo.len();
             let again = jxr::encode_typed(
                 &jxr::TypedInput {
@@ -105,7 +131,11 @@ fuzz_target!(|data: &[u8]| {
                     samples: jxr::SamplePlanes::F32(&redo),
                     premultiplied_alpha: case.premultiplied && n_dec == 4,
                 },
-                if n_dec == 1 { jxr::ColorMode::Grayscale } else { jxr::ColorMode::Color },
+                if n_dec == 1 {
+                    jxr::ColorMode::Grayscale
+                } else {
+                    jxr::ColorMode::Color
+                },
                 case.opts.clone(),
             )
             .expect("re-encode of decoded F32 must be accepted");
@@ -141,7 +171,9 @@ fuzz_target!(|data: &[u8]| {
             );
             for ch in 0..cmp_planes {
                 for i in 0..n {
-                    let Some(want) = case.planes.expected(ch, i) else { continue };
+                    let Some(want) = case.planes.expected(ch, i) else {
+                        continue;
+                    };
                     let got = img.image_plane[ch][i] as i64;
                     assert!(
                         (got - want).abs() <= bound,

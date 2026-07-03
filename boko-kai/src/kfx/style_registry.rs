@@ -378,8 +378,7 @@ impl StyleRegistry {
         // Pass 1: tally em-based line-heights weighted by usage.
         let mut tally: HashMap<u32, u64> = HashMap::new();
         for (_, _, _, style, uses) in self.styles.values() {
-            if let Some(KfxValue::Dimensioned { value, unit }) =
-                style.get(KfxSymbol::LineHeight)
+            if let Some(KfxValue::Dimensioned { value, unit }) = style.get(KfxSymbol::LineHeight)
                 && matches!(unit, KfxSymbol::Em | KfxSymbol::Rem)
             {
                 // Bucket by float bit-pattern to count exact-equal values.
