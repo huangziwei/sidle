@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="2200" viewBox="0 0 1440 2200">
+  <rect width="1440" height="2200" fill="#bd3838"/>
+  <path d="M 1112 -80
+           C 928 140, 928 340, 1112 540
+           C 1296 740, 1296 940, 1112 1140
+           C 928 1340, 928 1540, 1112 1740
+           C 1296 1940, 1296 2140, 1112 2340"
+        fill="none" stroke="#faf8f5" stroke-width="30" stroke-linecap="round"/>
+  <text x="520" y="930" font-family="Hiragino Mincho ProN" font-weight="600" font-size="620" fill="#faf8f5" text-anchor="middle">蛇</text>
+  <text x="520" y="1656" font-family="Hiragino Mincho ProN" font-weight="600" font-size="620" fill="#faf8f5" text-anchor="middle">行</text>
+  <text x="542" y="2010" font-family="Baskerville" font-weight="600" font-size="80" letter-spacing="44" fill="#faf8f5" text-anchor="middle">SIDLE</text>
+</svg>

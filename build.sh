@@ -82,6 +82,7 @@ cp kual/sidle/config.xml    "$RES_KUAL/sidle/config.xml"
 cp kual/sidle/menu.json     "$RES_KUAL/sidle/menu.json"
 cp kual/sidle/bin/sidle.sh  "$RES_KUAL/sidle/bin/sidle.sh"
 cp kual/sidle/bin/update.sh "$RES_KUAL/sidle/bin/update.sh"
+cp kual/Sidle.sh            "$RES_KUAL/Sidle.sh"
 cp "target/$KUAL_TARGET/release/sidle" "$RES_KUAL/native/sidle"
 cp "target/$KUAL_TARGET/release/sidle.build-ts" "$RES_KUAL/native/sidle.build-ts"
 

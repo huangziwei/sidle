@@ -60,6 +60,17 @@ If the picker launches but blanks back to KUAL with no toast, tail
 means `.server-token` rotated and the on-device `server.conf` is
 stale. Click **Update KUAL** in the desktop app to resync.
 
+## One-tap launcher (documents/Sidle.sh)
+
+The install also pushes `kual/Sidle.sh` to `documents/Sidle.sh` — a
+jailbreak-hotfix *scriptlet* the library indexes as a tile named
+**Sidle** (red 蛇行 cover, embedded base64 like `ref/KUAL.sh`). Tapping
+the tile runs the same `bin/sidle.sh` wrapper the KUAL menu entry uses,
+so the picker is one tap from the home screen; KUAL remains the fallback
+entry point and the home of "Update Sidle (Wi-Fi)". Regenerate after a
+cover/body change with `scripts/make-scriptlet.sh` (sources:
+`kual/assets/cover.svg` → `cover.png`).
+
 ## Usage
 
 - 3×3 grid of covers (newest-first, server-side sort).
