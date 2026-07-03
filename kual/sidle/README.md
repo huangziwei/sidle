@@ -67,15 +67,20 @@ jailbreak-hotfix *scriptlet* the library indexes as a tile named
 **Sidle** (red 蛇行 cover, embedded base64 like `ref/KUAL.sh`). Tapping
 the tile runs the same `bin/sidle.sh` wrapper the KUAL menu entry uses,
 so the picker is one tap from the home screen; KUAL remains the fallback
-entry point and the home of "Update Sidle (Wi-Fi)". Regenerate after a
-cover/body change with `scripts/make-scriptlet.sh` (sources:
-`kual/assets/cover.svg` → `cover.png`).
+entry point. Regenerate after a cover/body change with
+`scripts/make-scriptlet.sh` (sources: `kual/assets/cover.svg` → `cover.png`).
 
 ## Usage
 
 - 3×3 grid of covers (newest-first, server-side sort).
 - Tap a cover → file downloads in 1–10s → Kindle library auto-indexes.
 - Tap the **top-left 200×200 region** to exit cleanly.
+- **Update** button (right of the search bar): pulls the picker's own next
+  binary from sidle-server over the LAN, sha256-verifies it, and stages it as
+  `bin/sidle.new`; `bin/sidle.sh` swaps it in on the next launch, so reopen
+  Sidle to apply. This is the everyday self-update — no USB, no separate KUAL
+  tile. (Break-glass: if the gallery won't boot, `sidle --update` runs the same
+  pull with a minimal UI over a shell.)
 
 ## Known issues
 

@@ -8,8 +8,9 @@
 //! (`bin/sidle.sh`) swap `.new` over the running binary on the next start —
 //! the one moment nothing maps it (FAT can't overwrite a running binary).
 //!
-//! Triggered by a dedicated KUAL menu entry that runs `bin/sidle.sh --update`
-//! (see `main::run_update`). The HTTP plumbing reuses `api::get_with_token`;
+//! Triggered by the in-app **Update** button in the picker's search bar (inline
+//! in `main::run`), or by the `--update` recovery launch (`main::run_update`)
+//! for when the gallery won't boot. The HTTP plumbing reuses `api::get_with_token`;
 //! the compare/verify/stage logic here is pure `std` so it host-tests in the
 //! `sidle_native` lib (the framebuffer toast lives in `main.rs`).
 

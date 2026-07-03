@@ -147,7 +147,7 @@ fn draw_band(
     lh: u32,
 ) {
     let xres = fb.var.xres;
-    searchbar::draw(fb, renderer, query);
+    searchbar::draw(fb, renderer, query, false);
 
     // Match count, centered, directly below the bar.
     let n = count_matches(all_books, filters, query);
@@ -230,7 +230,7 @@ pub fn run(
                 // The search bar stays live in the overlay — its `✕` clears,
                 // consistent with the grid view; a field tap is a no-op (already
                 // open). Otherwise resolve a key.
-                if let Some(tap) = searchbar::hit(x, y, fb.var.xres, !query.is_empty()) {
+                if let Some(tap) = searchbar::hit(x, y, fb.var.xres, !query.is_empty(), false) {
                     if matches!(tap, searchbar::Tap::Clear) {
                         query.clear();
                         refresh_band!();

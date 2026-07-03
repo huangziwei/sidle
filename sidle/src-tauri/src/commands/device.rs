@@ -675,7 +675,7 @@ pub async fn kual_install(
             let _ = app_handle.emit("kual:install-progress", progress);
         })
         .map_err(|e| format!("{e:#}"))?;
-        // Refresh the LAN dist so an untethered "Update over Wi-Fi" pulls the
+        // Refresh the LAN dist so an untethered in-app Update pull gets the
         // exact binary this push just wrote. Non-fatal — a staging miss
         // doesn't undo a successful device install.
         if let Err(e) = kual::stage_dist(&source, &dist_dir) {

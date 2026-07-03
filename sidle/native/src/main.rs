@@ -42,9 +42,9 @@ use ui::toast;
 use series::{Cell, CellKind};
 
 const LOG_PATH: &str = "/mnt/us/sidle-native.log";
-/// Dedicated log for the "Update over Wi-Fi" flow (`--update`), so its trail
-/// isn't interleaved with the gallery's `LOG_PATH`. Written by `update_log` +
-/// `bin/update.sh` (which also redirects the binary's stderr here).
+/// Dedicated log for the LAN self-update, so its trail isn't interleaved with
+/// the gallery's `LOG_PATH`. Written by `update_log` from both the in-app
+/// **Update** button (inline in `run`) and the `--update` recovery launch.
 const UPDATE_LOG_PATH: &str = "/mnt/us/sidle-update.log";
 const CONFIG_PATH: &str = "/mnt/us/extensions/sidle/etc/server.conf";
 /// On-device KUAL bundle root. `--update` stages its pulled binary under here as
@@ -88,10 +88,10 @@ struct Armed {
 
 fn main() {
     // `--version`/`-V`: print the compiled version and exit. Cheap — no device
-    // setup, no framebuffer. `bin/update.sh` calls this on its launch line to
-    // record which picker version is actually on the Kindle: the binary is the
-    // only source that stays accurate after a Wi-Fi self-update (that swaps the
-    // binary but not config.xml). Inherits the workspace version through
+    // setup, no framebuffer. The binary is the only source of the on-device
+    // picker version that stays accurate after a Wi-Fi self-update (that swaps
+    // the binary but not config.xml), so anything logging which build is
+    // installed shells out to this. Inherits the workspace version through
     // `version.workspace = true`.
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("sidle {}", env!("CARGO_PKG_VERSION"));
@@ -105,10 +105,12 @@ fn main() {
         log(format!("x11poc done: {r:?}"));
         return;
     }
-    // "Update over Wi-Fi": a dedicated KUAL menu entry runs `bin/sidle.sh
-    // --update`. A separate, focused launch — so it doubles as a recovery path
-    // when the gallery is crashing in its list/grid logic — that pulls the
-    // picker's own next binary from sidle-server and stages it for the launcher.
+    // `--update`: the LAN self-update as a standalone launch. The everyday path
+    // is the in-app **Update** button (inline in `run`); this flag is the
+    // break-glass twin — invokable from a shell when the gallery itself won't
+    // boot (a crash in its list/grid logic), since it does the same pull with
+    // only the minimal device setup, dodging that failing code. No KUAL tile
+    // points at it anymore (the button replaced the old "Update Sidle" entry).
     if std::env::args().any(|a| a == "--update") {
         let result = run_update();
         update_log(format!("--update done: {result:?}"));
@@ -132,16 +134,46 @@ fn draw_panel(fb: &mut Framebuffer, renderer: &mut TextRenderer, message: &str) 
     Ok(())
 }
 
-/// `--update` mode: pull a staged self-update from sidle-server over the LAN and
-/// stage it as `bin/sidle.new` for the launcher to swap in on next start. Shares
-/// the HTTP + config code with the gallery (`api`/`config`/`selfupdate`) and
-/// reuses the gallery's device setup (framebuffer + X11 window + renderer +
-/// input) to show a result toast and block on a tap to exit — the same shape as
-/// `diag::run`. Not a recovery path for a crash in this device setup itself: a
-/// graphics-init failure ends `--update`; only the network/list/grid failures
-/// it's launched separately from are dodged.
+/// Map a [`selfupdate::run_pull`] result to the one-line banner shown to the
+/// user, so the in-app **Update** button (inline in [`run`]) and the `--update`
+/// recovery launch ([`run_update`]) speak identically. `Staged` tells the user
+/// to reopen Sidle — the launcher (`bin/sidle.sh`) swaps the staged `bin/sidle.new`
+/// in on the next start (nothing maps the running binary at that moment). A hard
+/// error is logged to the update log before it's flattened to the terse banner.
+fn update_result_message(result: api::Result<selfupdate::UpdateOutcome>) -> String {
+    match result {
+        Ok(selfupdate::UpdateOutcome::UpToDate) => "Already up to date".to_string(),
+        Ok(selfupdate::UpdateOutcome::Staged(_)) => {
+            "Update staged — reopen Sidle to apply".to_string()
+        }
+        // The server's binary is older/equal — kept the newer one on the device.
+        Ok(selfupdate::UpdateOutcome::RefusedOlder(_)) => {
+            "Server build not newer — kept current".to_string()
+        }
+        // Reuse the gallery's token-mismatch breadcrumb verbatim (see `diag`).
+        Err(api::SidleError::TokenMismatch) => {
+            "Plug Kindle into sidle, click Update KUAL".to_string()
+        }
+        Err(e) => {
+            update_log(format!("FAILED: {e}"));
+            "Update failed — see log".to_string()
+        }
+    }
+}
+
+/// `--update` mode: the LAN self-update as a standalone launch (the break-glass
+/// twin of the in-app **Update** button — see the `--update` dispatch in `main`).
+/// Pulls a staged self-update from sidle-server over the LAN and stages it as
+/// `bin/sidle.new` for the launcher to swap in on next start. Shares the pull +
+/// message code with the button (`selfupdate::run_pull` + [`update_result_message`])
+/// but brings up its OWN minimal device setup (framebuffer + X11 window +
+/// renderer + input) to show a result toast and block on a tap to exit — the same
+/// shape as `diag::run`. That minimal setup is the point: it dodges the gallery's
+/// list/grid code, so it still works when a crash there makes the in-app button
+/// unreachable. Not a recovery path for a crash in this device setup itself: a
+/// graphics-init failure ends `--update` too.
 fn run_update() -> anyhow::Result<()> {
-    update_log("=== Update over Wi-Fi: start ===");
+    update_log("=== LAN self-update (--update): start ===");
     update_log(format!("argv: {:?}", std::env::args().collect::<Vec<_>>()));
     let cfg = config::load(Path::new(CONFIG_PATH))?;
     update_log(format!("server: http://{}:{}", cfg.host, cfg.port));
@@ -160,30 +192,13 @@ fn run_update() -> anyhow::Result<()> {
     draw_panel(&mut fb, &mut renderer, "Checking for update…")?;
 
     // Step-level breadcrumbs go to the dedicated update log via the closure.
-    let message = match selfupdate::run_pull(
+    let message = update_result_message(selfupdate::run_pull(
         &agent,
         &cfg,
         Path::new(BUNDLE_DIR),
         selfupdate::self_build_ts(),
         |m| update_log(m),
-    ) {
-        Ok(selfupdate::UpdateOutcome::UpToDate) => "Already up to date".to_string(),
-        Ok(selfupdate::UpdateOutcome::Staged(_)) => {
-            "Update staged — relaunch to apply".to_string()
-        }
-        // The server's binary is older/equal — kept the newer one on the device.
-        Ok(selfupdate::UpdateOutcome::RefusedOlder(_)) => {
-            "Server build not newer — kept current".to_string()
-        }
-        // Reuse the gallery's token-mismatch breadcrumb verbatim (see `diag`).
-        Err(api::SidleError::TokenMismatch) => {
-            "Plug Kindle into sidle, click Update KUAL".to_string()
-        }
-        Err(e) => {
-            update_log(format!("FAILED: {e}"));
-            "Update failed — see log".to_string()
-        }
-    };
+    ));
     update_log(format!("result: {message}"));
 
     // Result panel, then block until a tap or page button. On return the window
@@ -548,8 +563,36 @@ fn run() -> anyhow::Result<()> {
                 // repaint, since the keyboard overwrote the screen.
                 if series_view.is_none()
                     && let Some(tap) =
-                        ui::searchbar::hit(x, y, fb.var.xres, !query.is_empty())
+                        ui::searchbar::hit(x, y, fb.var.xres, !query.is_empty(), true)
                 {
+                    // Update is an action (LAN self-update), not a query edit —
+                    // handle it inline like the Sync button and loop, leaving the
+                    // query/view untouched.
+                    if matches!(tap, ui::searchbar::Tap::Update) {
+                        log("update-button tap");
+                        let dirty =
+                            toast::draw(&mut fb, &mut renderer, "Checking for update…");
+                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+
+                        let banner_msg = update_result_message(selfupdate::run_pull(
+                            &agent,
+                            &cfg,
+                            Path::new(BUNDLE_DIR),
+                            selfupdate::self_build_ts(),
+                            |m| update_log(m),
+                        ));
+                        update_log(format!("in-app update: {banner_msg}"));
+                        let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
+                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                        thread::sleep(TOAST_LINGER);
+                        repaint_page(
+                            &mut fb, &mut renderer, &agent, &cfg, cache_dir, &cells,
+                            &mut covers, page, total_pages, grid_left, grid_top, sort,
+                            filters.active_facets(), series_view.as_deref(), &query,
+                        )?;
+                        continue;
+                    }
+
                     let before = query.clone();
                     match tap {
                         ui::searchbar::Tap::Open => {
@@ -563,6 +606,9 @@ fn run() -> anyhow::Result<()> {
                             log("search cleared");
                             query.clear();
                         }
+                        // Handled above (early `continue`); the field only yields
+                        // Open/Clear here.
+                        ui::searchbar::Tap::Update => unreachable!(),
                     }
                     if query != before {
                         entries = series::group_by_series(rebuild_view(
@@ -825,7 +871,8 @@ fn draw_gallery_page(
     let hbaseline = if drilled {
         grid_top * 60 / 100
     } else {
-        searchbar::draw(fb, renderer, query);
+        searchbar::draw(fb, renderer, query, true);
+        searchbar::draw_update(fb, renderer);
         (searchbar::TOP + searchbar::HEIGHT) as i32 + renderer.line_height() as i32
     };
     // Header line, clamped to one line so a long series name can't overrun.
@@ -1066,10 +1113,12 @@ fn log(line: impl AsRef<str>) {
     }
 }
 
-/// Append a line to the dedicated "Update over Wi-Fi" log (`--update`), so the
-/// self-update trail isn't buried in the gallery's `LOG_PATH`. File only (no
-/// stderr echo) — `bin/update.sh` redirects the binary's stderr to this same
-/// file, so panics still land without double-logging these explicit lines.
+/// Append a line to the dedicated LAN self-update log, so the update trail isn't
+/// buried in the gallery's `LOG_PATH`. Both the in-app **Update** button and the
+/// `--update` recovery launch write here. File only (no stderr echo): the
+/// standalone `--update` run's own stderr goes wherever its shell caller points
+/// it, and an in-app update's panics land in `LOG_PATH` (that's `run` executing),
+/// so these explicit breadcrumbs never double-log.
 fn update_log(line: impl AsRef<str>) {
     let line = line.as_ref();
     let path = if std::path::Path::new("/mnt/us").is_dir() {

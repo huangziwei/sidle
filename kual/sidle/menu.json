@@ -1,6 +1,5 @@
 {
 	"items": [
-		{"name": "Sidle", "priority": 1, "action": "bin/sidle.sh"},
-		{"name": "Update Sidle (Wi-Fi)", "priority": 2, "action": "bin/update.sh"}
+		{"name": "Sidle", "priority": 1, "action": "bin/sidle.sh"}
 	]
 }

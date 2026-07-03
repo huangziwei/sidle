@@ -4,7 +4,7 @@
 EXT=/mnt/us/extensions/sidle
 LOG=/mnt/us/sidle-native.log
 echo "[$(date)] launch $(uname -m)" >> "$LOG"
-# Apply a staged self-update (written by the picker's "Update over Wi-Fi") before
+# Apply a staged self-update (written by the picker's in-app Update button) before
 # we exec — never overwrite the running binary on FAT (ETXTBSY/corruption). The
 # picker sha256-verifies the download before staging it as .new, so this swap is
 # unconditional; a USB "Update KUAL" clears any pending .new, so it can't clobber

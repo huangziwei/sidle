@@ -282,13 +282,6 @@ fn slots<'a>(source: &'a KualSource, conf: &ServerConfRender) -> Vec<Slot<'a>> {
             source: Source::File(source.bundle_dir.join("bin/sidle.sh")),
         },
         Slot {
-            // The "Update Sidle (Wi-Fi)" launcher — runs `sidle --update`
-            // argless (KUAL didn't reliably pass `--update` via the menu action).
-            device_rel: "bin/update.sh",
-            root: DeviceRoot::Bundle,
-            source: Source::File(source.bundle_dir.join("bin/update.sh")),
-        },
-        Slot {
             device_rel: "config.xml",
             root: DeviceRoot::Bundle,
             source: Source::File(source.bundle_dir.join("config.xml")),
@@ -668,7 +661,7 @@ pub enum StageOutcome {
 
 /// Stage the deployable picker binary + a `manifest.json` into `dist_dir`
 /// (`<data-dir>/kual-dist/`), where `sidle-server` serves it over `/kual/...`
-/// for an untethered "Update over Wi-Fi" pull.
+/// for the picker's untethered in-app Update (LAN self-update) pull.
 ///
 /// v1 stages exactly one file: `bin/sidle`, the armv7 picker. **mtime-gated** —
 /// re-copies only when the freshly cross-built `KualSource.binary_path` is newer
@@ -774,14 +767,13 @@ mod tests {
     }
 
     /// Build a minimal source layout under `repo_root`:
-    /// `<repo>/kual/sidle/{config.xml,menu.json,bin/sidle.sh,bin/update.sh}`,
+    /// `<repo>/kual/sidle/{config.xml,menu.json,bin/sidle.sh}`,
     /// `<repo>/kual/Sidle.sh`, and optionally `<repo>/target/.../release/sidle`.
     fn make_source(repo: &Path, include_binary: bool) -> KualSource {
         let bundle = repo.join("kual/sidle");
         write_file(&bundle.join("config.xml"), b"<config/>");
         write_file(&bundle.join("menu.json"), b"{\"items\":[]}");
         write_file(&bundle.join("bin/sidle.sh"), b"#!/bin/sh\nexec sidle\n");
-        write_file(&bundle.join("bin/update.sh"), b"#!/bin/sh\nexec sidle --update\n");
         write_file(&repo.join("kual/Sidle.sh"), b"#!/bin/sh\n# Name: Sidle\nexec sidle\n");
         if include_binary {
             write_file(
@@ -908,7 +900,6 @@ mod tests {
         install_all(&source, &make_conf(), &ms(device.path()), |_| {}).unwrap();
         assert!(device.path().join("extensions/sidle/bin/sidle").exists());
         assert!(device.path().join("extensions/sidle/bin/sidle.sh").exists());
-        assert!(device.path().join("extensions/sidle/bin/update.sh").exists());
         assert!(device.path().join("extensions/sidle/etc/server.conf").exists());
         assert!(device.path().join("extensions/sidle/config.xml").exists());
         assert!(device.path().join("extensions/sidle/menu.json").exists());
@@ -925,9 +916,9 @@ mod tests {
 
         let mut events = 0;
         install_all(&source, &make_conf(), &ms(device.path()), |_| events += 1).unwrap();
-        // bin/sidle, bin/sidle.sh, bin/update.sh, config.xml, menu.json,
-        // etc/server.conf, documents/Sidle.sh
-        assert_eq!(events, 7);
+        // bin/sidle, bin/sidle.sh, config.xml, menu.json, etc/server.conf,
+        // documents/Sidle.sh
+        assert_eq!(events, 6);
     }
 
     #[test]
