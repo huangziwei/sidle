@@ -25,6 +25,7 @@ use crate::orientation::Orientation;
 const TICK_MS: libc::c_int = 500;
 
 /// A unified input event from either device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
     Touch(TouchEvent),
     Page(PageButton),
@@ -82,13 +83,22 @@ impl Input {
         if unsafe { libc::poll(fds.as_mut_ptr(), nfds, 0) } <= 0 {
             return Ok(None);
         }
+        // Touch first, unlike `next` (which prioritizes bezel presses for
+        // navigation). The only caller is the download loop, where the touch fd
+        // carries both the Cancel button and the two-corner screenshot gesture.
+        // Checking buttons first would let a stale/None button read return early
+        // and *shadow* a pending touch event — stalling the gesture until the
+        // main loop resumes (the "screenshot only works after the download" bug).
+        if fds[0].revents & libc::POLLIN != 0
+            && let Some(ev) = self.touch.next_event()?
+        {
+            return Ok(Some(InputEvent::Touch(ev)));
+        }
         if let Some(buttons) = self.buttons.as_mut()
             && fds[1].revents & libc::POLLIN != 0
+            && let Some(page) = buttons.read_one()?
         {
-            return Ok(buttons.read_one()?.map(InputEvent::Page));
-        }
-        if fds[0].revents & libc::POLLIN != 0 {
-            return Ok(self.touch.next_event()?.map(InputEvent::Touch));
+            return Ok(Some(InputEvent::Page(page)));
         }
         Ok(None)
     }

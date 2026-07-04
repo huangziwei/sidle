@@ -1340,6 +1340,7 @@ fn download_flow(
 
     let mut buf = vec![0u8; DL_CHUNK];
     let mut last_draw = Instant::now();
+    let mut chunks: u64 = 0;
     loop {
         let n = match reader.read(&mut buf) {
             Ok(0) => break,
@@ -1358,6 +1359,7 @@ fn download_flow(
             return Ok(format!("Failed: {err}"));
         }
         written += n as u64;
+        chunks += 1;
 
         if last_draw.elapsed() >= DL_REDRAW_INTERVAL {
             let (rect, cr) =
@@ -1367,23 +1369,41 @@ fn download_flow(
             last_draw = Instant::now();
         }
 
-        // Non-blocking: a Cancel-button tap or any bezel press aborts.
-        if let Some(ev) = input.poll_now()? {
-            let cancelled = match ev {
-                InputEvent::Touch(TouchEvent::Up { x, y }) => rect_hit(&cancel_rect, x, y),
-                InputEvent::Page(_) => true,
-                _ => false,
-            };
-            if cancelled {
-                cleanup_part(file, &part);
-                log(format!("download cancelled by user after {written} bytes"));
-                return Ok("Download cancelled".to_string());
+        // Drain ALL pending input between chunks, not just one event: a
+        // two-corner screenshot is two contacts, and both may have queued during
+        // one network read — a single poll would surface only the first. The
+        // gesture captures the live toast and keeps downloading; a Cancel-button
+        // tap or any bezel press aborts.
+        while let Some(ev) = input.poll_now()? {
+            log(format!("dl input (chunk {chunks}): {ev:?}"));
+            match ev {
+                InputEvent::Touch(TouchEvent::Screenshot) => {
+                    match eink::screenshot::capture(fb) {
+                        Ok(p) => log(format!("screenshot saved: {}", p.display())),
+                        Err(e) => log(format!("screenshot failed: {e:#}")),
+                    }
+                    // capture() already did a full GC16 restore of the toast;
+                    // don't stack a DU redraw straight on top of it.
+                    last_draw = Instant::now();
+                }
+                InputEvent::Touch(TouchEvent::Up { x, y }) if rect_hit(&cancel_rect, x, y) => {
+                    cleanup_part(file, &part);
+                    log(format!("download cancelled by user after {written} bytes"));
+                    return Ok("Download cancelled".to_string());
+                }
+                InputEvent::Page(_) => {
+                    cleanup_part(file, &part);
+                    log(format!("download cancelled by user after {written} bytes"));
+                    return Ok("Download cancelled".to_string());
+                }
+                _ => {}
             }
         }
     }
 
     file.sync_all().ok();
     drop(file);
+    log(format!("dl streamed {written} bytes over {chunks} chunks"));
     // A short transfer that ended in a clean EOF (dropped connection, or the
     // KFX_MAX_BYTES backstop) reads as success up to here — the Content-Length
     // check is what turns it back into a visible failure.
