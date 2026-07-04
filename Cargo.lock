@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "boko-kai"
-version = "0.3.0+kai.3"
+version = "0.3.0+kai.4"
 dependencies = [
  "base64 0.22.1",
  "bstr",
@@ -4758,7 +4758,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "sidle"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4795,7 +4795,7 @@ dependencies = [
 
 [[package]]
 name = "sidle-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4819,7 +4819,7 @@ dependencies = [
 
 [[package]]
 name = "sidle-native"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4836,7 +4836,7 @@ dependencies = [
 
 [[package]]
 name = "sidle-server"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "axum",

@@ -6,11 +6,13 @@
 //! /mnt/us/system/.cleanindex` → overlay "Downloaded" → restore gallery.
 
 use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::io::{Read, Write};
+use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use anyhow::Context;
 
 mod api;
 mod collate;
@@ -74,6 +76,19 @@ const TOAST_LINGER: Duration = Duration::from_millis(1200);
 /// is high enough that deliberateness wins over speed. Tune on
 /// hardware if it feels sluggish.
 const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(1000);
+
+/// Per-read socket timeout for the session agent. Bounds a genuinely stalled
+/// socket (dead radio) without capping total transfer time, so a 300 MB+ book
+/// over a slow Wi-Fi link still completes as long as bytes keep arriving. A
+/// healthy transfer resets this on every chunk; only a true stall trips it.
+const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// Read-buffer size for streaming a book to disk. Large enough to keep syscall
+/// overhead negligible over a ~hundreds-of-MB transfer, small enough that the
+/// Cancel poll between reads stays responsive on a healthy connection.
+const DL_CHUNK: usize = 256 * 1024;
+/// Minimum wall-clock between progress redraws. E-ink can't usefully repaint
+/// faster, and throttling keeps the transfer (not the panel) the bottleneck.
+const DL_REDRAW_INTERVAL: Duration = Duration::from_millis(700);
 
 /// Cell currently outlined and awaiting release. On a book cell, release
 /// decides between a long-enough hold (download) and a too-short tap (discovery
@@ -238,8 +253,15 @@ fn run() -> anyhow::Result<()> {
     log(format!("server: http://{}:{}", cfg.host, cfg.port));
 
     // One agent for the whole session: HTTP keep-alive across list + covers +
-    // download over a single warm connection (see api::get_with_token).
-    let agent = ureq::AgentBuilder::new().build();
+    // download over a single warm connection (see api::get_with_token). The
+    // per-read timeout bounds a stalled socket without capping total transfer
+    // time, so a 300 MB+ book over a slow radio still completes; a dead
+    // connection fails in `SOCKET_READ_TIMEOUT` instead of hanging the picker.
+    // (list/cover keep their own short *overall* deadlines on top, via
+    // get_with_token — this per-read bound only ever tightens them.)
+    let agent = ureq::AgentBuilder::new()
+        .timeout_read(SOCKET_READ_TIMEOUT)
+        .build();
     let cache_dir = Path::new(COVER_CACHE_DIR);
 
     // Open the X11 window, input, and renderer *before* the first network
@@ -531,40 +553,18 @@ fn run() -> anyhow::Result<()> {
                             "long press fired ({held:?}) on book {}: {}",
                             book.id, book.title,
                         ));
-                        let msg = format!("Downloading {}…", truncate_title(&book.title, 40));
-                        let dirty = toast::draw(&mut fb, &mut renderer, &msg);
-                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
-
                         let dl_t0 = Instant::now();
-                        let banner_msg = match api::download_book(&agent, &cfg, book) {
-                            Ok(d) => match persist(&d.filename, &d.bytes) {
-                                Ok(saved) => {
-                                    log(format!(
-                                        "downloaded {} bytes to {} in {:?}",
-                                        d.bytes.len(),
-                                        saved.display(),
-                                        dl_t0.elapsed()
-                                    ));
-                                    let _ = Command::new("touch").arg(CLEANINDEX).output();
-                                    "Downloaded → Library will refresh shortly".to_string()
-                                }
-                                Err(err) => {
-                                    log(format!("persist failed: {err:#}"));
+                        let banner_msg =
+                            download_flow(&mut fb, &mut renderer, &mut input, &agent, &cfg, book)
+                                .unwrap_or_else(|err| {
+                                    log(format!("download flow error: {err:#}"));
                                     format!("Failed: {err}")
-                                }
-                            },
-                            Err(api::SidleError::TokenMismatch) => {
-                                log(
-                                    "token rejected during download — resync via sidle desktop app",
-                                );
-                                "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
-                                    .to_string()
-                            }
-                            Err(api::SidleError::Other(err)) => {
-                                log(format!("download failed: {err:#}"));
-                                format!("Failed: {err}")
-                            }
-                        };
+                                });
+                        log(format!(
+                            "download flow for book {} finished in {:?}",
+                            book.id,
+                            dl_t0.elapsed()
+                        ));
                         let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                         thread::sleep(TOAST_LINGER);
@@ -1271,20 +1271,168 @@ fn load_cover(
     }
 }
 
-/// Persist downloaded bytes to `/mnt/us/documents/Sidle/<filename>`. Creates
-/// the Sidle dir on first download. Returns the final on-disk path.
-fn persist(filename: &str, bytes: &[u8]) -> anyhow::Result<PathBuf> {
+/// Download a book to `/mnt/us/documents/Sidle/<filename>` while showing a live
+/// `transferred / total` overlay with a Cancel button, and return the toast
+/// message to display when it settles (done / cancelled / failed).
+///
+/// The body streams to disk one [`DL_CHUNK`] at a time — never buffered whole
+/// in device RAM, which a 300 MB+ book would otherwise risk OOMing on a 512 MB
+/// Kindle. Bytes land in a `<name>.part` sidecar (which the gallery's `.kfx`
+/// filter ignores) and are renamed into place only once the transfer completes
+/// **and** matches the server's `Content-Length`. So a cancel, a dropped
+/// radio, or a capped stream leaves a `.part` that the next attempt overwrites
+/// — never a truncated `.kfx` masquerading as a finished book (the very bug the
+/// old 256 MB in-RAM cap produced). Mirrors the self-update `.download`
+/// staging.
+///
+/// Between chunks it redraws progress at most every [`DL_REDRAW_INTERVAL`] and
+/// polls input non-blocking: a tap inside the Cancel button, or any bezel
+/// page-button press, aborts the transfer.
+fn download_flow(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    input: &mut Input,
+    agent: &ureq::Agent,
+    cfg: &config::ServerConfig,
+    book: &api::Book,
+) -> anyhow::Result<String> {
+    // Paint the overlay before the GET so a long-press gets instant feedback:
+    // the server reads the whole file before it sends headers, so on a big book
+    // `download_book` can block for a beat — that shouldn't look like a dead
+    // gallery. `title` drives the overlay for the rest of the flow.
+    let title = format!("Downloading {}…", truncate_title(&book.title, 32));
+    let (rect, _) = toast::draw_download(fb, renderer, &title, "Connecting…");
+    fb.send_update(rect, WAVEFORM_MODE_GC16)?;
+
+    let dl = match api::download_book(agent, cfg, book) {
+        Ok(dl) => dl,
+        Err(api::SidleError::TokenMismatch) => {
+            log("token rejected during download — resync via sidle desktop app");
+            return Ok(
+                "Token mismatch.\nPlug Kindle into sidle and click Update KUAL.".to_string(),
+            );
+        }
+        Err(api::SidleError::Other(err)) => {
+            log(format!("download failed: {err:#}"));
+            return Ok(format!("Failed: {err}"));
+        }
+    };
+    let expected = dl.expected_len;
+    let mut reader = dl.reader;
+
     let dir = Path::new(DOWNLOAD_DIR);
     std::fs::create_dir_all(dir)?;
-    // Strip any path components the server might have set in the filename
-    // — defense against `..` traversal even though the server controls it.
-    let safe_name = Path::new(filename)
+    // Strip any path components the server might have set in the filename —
+    // defense against `..` traversal even though the server controls it.
+    let safe_name = Path::new(&dl.filename)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("book.kfx");
     let path = dir.join(safe_name);
-    std::fs::write(&path, bytes)?;
-    Ok(path)
+    let part = dir.join(format!("{safe_name}.part"));
+    let mut file =
+        std::fs::File::create(&part).with_context(|| format!("create {}", part.display()))?;
+
+    let mut written: u64 = 0;
+    let (rect, mut cancel_rect) =
+        toast::draw_download(fb, renderer, &title, &progress_line(written, expected));
+    fb.send_update(rect, WAVEFORM_MODE_DU)?;
+
+    let mut buf = vec![0u8; DL_CHUNK];
+    let mut last_draw = Instant::now();
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(err) => {
+                cleanup_part(file, &part);
+                log(format!("download read failed after {written} bytes: {err}"));
+                return Ok(format!("Failed: {err}"));
+            }
+        };
+        if let Err(err) = file.write_all(&buf[..n]) {
+            cleanup_part(file, &part);
+            log(format!(
+                "download write failed after {written} bytes: {err}"
+            ));
+            return Ok(format!("Failed: {err}"));
+        }
+        written += n as u64;
+
+        if last_draw.elapsed() >= DL_REDRAW_INTERVAL {
+            let (rect, cr) =
+                toast::draw_download(fb, renderer, &title, &progress_line(written, expected));
+            cancel_rect = cr;
+            fb.send_update(rect, WAVEFORM_MODE_DU)?;
+            last_draw = Instant::now();
+        }
+
+        // Non-blocking: a Cancel-button tap or any bezel press aborts.
+        if let Some(ev) = input.poll_now()? {
+            let cancelled = match ev {
+                InputEvent::Touch(TouchEvent::Up { x, y }) => rect_hit(&cancel_rect, x, y),
+                InputEvent::Page(_) => true,
+                _ => false,
+            };
+            if cancelled {
+                cleanup_part(file, &part);
+                log(format!("download cancelled by user after {written} bytes"));
+                return Ok("Download cancelled".to_string());
+            }
+        }
+    }
+
+    file.sync_all().ok();
+    drop(file);
+    // A short transfer that ended in a clean EOF (dropped connection, or the
+    // KFX_MAX_BYTES backstop) reads as success up to here — the Content-Length
+    // check is what turns it back into a visible failure.
+    if let Some(exp) = expected
+        && written != exp
+    {
+        let _ = std::fs::remove_file(&part);
+        log(format!("incomplete download: {written} of {exp} bytes"));
+        return Ok(format!(
+            "Failed: incomplete ({} of {})",
+            human_mb(written),
+            human_mb(exp)
+        ));
+    }
+    std::fs::rename(&part, &path)
+        .with_context(|| format!("rename {} -> {}", part.display(), path.display()))?;
+    log(format!("downloaded {written} bytes to {}", path.display()));
+    let _ = Command::new("touch").arg(CLEANINDEX).output();
+    Ok("Downloaded → Library will refresh shortly".to_string())
+}
+
+/// Close and delete a partial `.part` sidecar after a failed/cancelled
+/// transfer, so it never lingers or gets mistaken for a finished download.
+fn cleanup_part(file: std::fs::File, part: &Path) {
+    drop(file);
+    let _ = std::fs::remove_file(part);
+}
+
+/// `transferred / total (pct)` for the download overlay, e.g.
+/// `"12.3 MB / 305.7 MB  (4%)"`. Falls back to just the transferred size when
+/// the server sent no `Content-Length`.
+fn progress_line(written: u64, total: Option<u64>) -> String {
+    match total {
+        Some(t) if t > 0 => {
+            let pct = (written as f64 / t as f64 * 100.0).round() as u32;
+            format!("{} / {}  ({pct}%)", human_mb(written), human_mb(t))
+        }
+        _ => human_mb(written),
+    }
+}
+
+/// Bytes as a one-decimal MB string (`1 MB == 1024*1024`).
+fn human_mb(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+}
+
+/// Whether `(x, y)` (touch coords) fall inside `r`.
+fn rect_hit(r: &MxcfbRect, x: u32, y: u32) -> bool {
+    x >= r.left && x < r.left + r.width && y >= r.top && y < r.top + r.height
 }
 
 fn truncate_title(s: &str, max_chars: usize) -> String {
@@ -1327,5 +1475,61 @@ fn update_log(line: impl AsRef<str>) {
     };
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{human_mb, progress_line, rect_hit};
+    use crate::eink::fb::MxcfbRect;
+
+    #[test]
+    fn human_mb_is_binary_megabytes_one_decimal() {
+        assert_eq!(human_mb(0), "0.0 MB");
+        assert_eq!(human_mb(1024 * 1024), "1.0 MB");
+        // 305.7 MB — the ballpark of the book that surfaced the 256 MB cap.
+        assert_eq!(human_mb(320_593_920), "305.7 MB");
+    }
+
+    #[test]
+    fn progress_line_shows_fraction_and_percent_when_total_known() {
+        let total = 100 * 1024 * 1024;
+        assert_eq!(progress_line(0, Some(total)), "0.0 MB / 100.0 MB  (0%)");
+        assert_eq!(
+            progress_line(25 * 1024 * 1024, Some(total)),
+            "25.0 MB / 100.0 MB  (25%)"
+        );
+        assert_eq!(
+            progress_line(total, Some(total)),
+            "100.0 MB / 100.0 MB  (100%)"
+        );
+    }
+
+    #[test]
+    fn progress_line_falls_back_to_transferred_only_without_total() {
+        assert_eq!(progress_line(5 * 1024 * 1024, None), "5.0 MB");
+        // A zero Content-Length can't be a denominator — same fallback.
+        assert_eq!(progress_line(5 * 1024 * 1024, Some(0)), "5.0 MB");
+    }
+
+    #[test]
+    fn rect_hit_is_inclusive_of_the_top_left_and_exclusive_of_the_far_edge() {
+        let r = MxcfbRect {
+            top: 100,
+            left: 200,
+            width: 320,
+            height: 84,
+        };
+        assert!(rect_hit(&r, 200, 100), "top-left corner is inside");
+        assert!(rect_hit(&r, 519, 183), "last pixel inside");
+        assert!(
+            !rect_hit(&r, 520, 183),
+            "one past the right edge is outside"
+        );
+        assert!(
+            !rect_hit(&r, 519, 184),
+            "one past the bottom edge is outside"
+        );
+        assert!(!rect_hit(&r, 199, 150), "left of the box is outside");
     }
 }

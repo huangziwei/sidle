@@ -269,14 +269,29 @@ pub fn fetch_cover(agent: &ureq::Agent, cfg: &ServerConfig, id: i64) -> Result<V
     Ok(bytes)
 }
 
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
-/// Cap KFX size at 256MB — any real book is well under that. Defense
-/// against a runaway response.
-const KFX_MAX_BYTES: usize = 256 * 1024 * 1024;
+/// Sanity cap on a single book download. A real KFX — even an image-heavy
+/// manga — is far below this; it only bounds a runaway/misbehaving response
+/// so a broken server can't fill the device. Deliberately generous: the old
+/// 256 MB cap silently *truncated* larger books, because a `.take()` cutoff
+/// reads as a clean EOF — the picker saved a 256 MB partial and reported
+/// "Downloaded". The real short-transfer guard is now the `Content-Length`
+/// check the caller runs against `expected_len`; this is just a storage
+/// backstop. `u64` (not `usize`) so it stays a transfer bound, never a 32-bit
+/// device's address-space limit.
+const KFX_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 pub struct Download {
     pub filename: String,
-    pub bytes: Vec<u8>,
+    /// The response body, left unread. The caller streams it straight to disk
+    /// instead of buffering the whole book in device RAM — a 300 MB+ book
+    /// would otherwise risk an OOM on a 512 MB Kindle. Capped at
+    /// `KFX_MAX_BYTES`.
+    pub reader: Box<dyn Read + Send>,
+    /// The server's `Content-Length`, if present. The caller checks the bytes
+    /// actually written against it and fails a short transfer, so a dropped
+    /// connection or a capped stream surfaces as an error instead of a
+    /// silently-truncated file that reports success.
+    pub expected_len: Option<u64>,
 }
 
 pub fn download_book(agent: &ureq::Agent, cfg: &ServerConfig, book: &Book) -> Result<Download> {
@@ -285,27 +300,28 @@ pub fn download_book(agent: &ureq::Agent, cfg: &ServerConfig, book: &Book) -> Re
     // download instead of after.
     let filename = device_filename(book)?;
     let url = format!("http://{}:{}/get/{}", cfg.host, cfg.port, book.id);
-    // download uses the longer timeout — re-issue the request on the shared
-    // agent instead of routing through `get_with_token` (which uses the short
-    // cover/list timeout).
-    let res = match agent
-        .get(&url)
-        .set("X-Sidle-Token", &cfg.token)
-        .timeout(DOWNLOAD_TIMEOUT)
-        .call()
-    {
+    // No overall request timeout: a big book over a sleepy radio can take
+    // minutes, and an overall deadline would kill a transfer that's making
+    // steady progress (the 256 MB-truncation bug's slow-path twin). The
+    // session agent's per-read timeout (`timeout_read`, set in `main`) bounds a
+    // genuinely stalled socket instead. The body is returned unread so the
+    // caller can stream it to disk with live progress + cancel.
+    let res = match agent.get(&url).set("X-Sidle-Token", &cfg.token).call() {
         Ok(res) => res,
         Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
             return Err(SidleError::TokenMismatch);
         }
         Err(e) => return Err(anyhow!("GET {url}: {e}").into()),
     };
-    let mut bytes = Vec::new();
-    res.into_reader()
-        .take(KFX_MAX_BYTES as u64)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("read body of {url}"))?;
-    Ok(Download { filename, bytes })
+    let expected_len = res
+        .header("Content-Length")
+        .and_then(|s| s.parse::<u64>().ok());
+    let reader: Box<dyn Read + Send> = Box::new(res.into_reader().take(KFX_MAX_BYTES));
+    Ok(Download {
+        filename,
+        reader,
+        expected_len,
+    })
 }
 
 /// The on-device filename, taken straight from `/list.json`'s

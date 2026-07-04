@@ -55,6 +55,44 @@ impl Input {
         }
     }
 
+    /// Non-blocking check for a pending event (zero-timeout `poll`). Returns
+    /// the first ready event, or `None` if neither device has a complete event
+    /// right now. Unlike [`next`](Self::next) it never blocks and never
+    /// surfaces `Tick` — the download loop calls it between network reads to
+    /// notice a Cancel tap or bezel press without stalling the transfer. A
+    /// partial touch stroke reads as `None` and is caught on a later call.
+    pub fn poll_now(&mut self) -> Result<Option<InputEvent>> {
+        let touch_fd: RawFd = self.touch.raw_fd();
+        let button_fd: RawFd = self.buttons.as_ref().map(|b| b.raw_fd()).unwrap_or(-1);
+        let mut fds = [
+            libc::pollfd {
+                fd: touch_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: button_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let nfds: libc::nfds_t = if self.buttons.is_some() { 2 } else { 1 };
+        // Zero timeout → return immediately. A negative rc (EINTR/error) is
+        // treated as "no input this tick"; the caller polls again next chunk.
+        if unsafe { libc::poll(fds.as_mut_ptr(), nfds, 0) } <= 0 {
+            return Ok(None);
+        }
+        if let Some(buttons) = self.buttons.as_mut()
+            && fds[1].revents & libc::POLLIN != 0
+        {
+            return Ok(buttons.read_one()?.map(InputEvent::Page));
+        }
+        if fds[0].revents & libc::POLLIN != 0 {
+            return Ok(self.touch.next_event()?.map(InputEvent::Touch));
+        }
+        Ok(None)
+    }
+
     /// Block until the next event from either device.
     ///
     /// Button presses are checked first each wake: a press is a deliberate

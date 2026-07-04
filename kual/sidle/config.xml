@@ -2,8 +2,7 @@
 <extension>
 	<information>
 		<name>Sidle</name>
-		<version>0.1.5</version>
-		<author>ziwei</author>
+		<version>0.1.6</version>
 		<id>sidle</id>
 	</information>
 	<menus>
