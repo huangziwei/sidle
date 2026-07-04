@@ -340,7 +340,10 @@ fn run() -> anyhow::Result<()> {
     // device_state.rs). Missing kfx_sha256 on the row means we can't
     // dedupe; show it anyway so the user isn't silently dropped books.
     let downloaded = device_state::scan_downloaded_shas(Path::new(DOWNLOAD_DIR));
-    let all_books: Vec<api::Book> = books
+    // `mut`: a mid-session download removes its book from this master set so the
+    // tile hides immediately (see the long-press handler), matching the
+    // boot-time hide of books already on the device.
+    let mut all_books: Vec<api::Book> = books
         .into_iter()
         .filter(|b| match b.kfx_sha256.as_deref() {
             Some(sha) if sha.len() >= 8 => !downloaded.contains(&sha[..8]),
@@ -549,25 +552,60 @@ fn run() -> anyhow::Result<()> {
                         // over the gallery, and the post-download
                         // repaint paints the clean cell.
                         let book = &cells[a.cell_idx].cover_book;
+                        // Grab the identity now: `book` borrows `cells`, and the
+                        // hide-on-success rebuild below reassigns `cells`.
+                        let dl_id = book.id;
                         log(format!(
                             "long press fired ({held:?}) on book {}: {}",
                             book.id, book.title,
                         ));
                         let dl_t0 = Instant::now();
-                        let banner_msg =
+                        let (banner_msg, saved) =
                             download_flow(&mut fb, &mut renderer, &mut input, &agent, &cfg, book)
                                 .unwrap_or_else(|err| {
                                     log(format!("download flow error: {err:#}"));
-                                    format!("Failed: {err}")
+                                    (format!("Failed: {err}"), false)
                                 });
                         log(format!(
-                            "download flow for book {} finished in {:?}",
-                            book.id,
+                            "download flow for book {dl_id} finished in {:?}",
                             dl_t0.elapsed()
                         ));
                         let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                         thread::sleep(TOAST_LINGER);
+                        // Hide the just-downloaded book: it's now on the device,
+                        // and the picker's rule is "on device → not shown". Drop it
+                        // from the master set and re-derive the current view (top
+                        // level, or the drilled-in series' members) so the tile
+                        // vanishes in the repaint below instead of lingering until
+                        // the next launch. Keep the user on their page, clamped if
+                        // its last tile just left.
+                        if saved {
+                            all_books.retain(|b| b.id != dl_id);
+                            entries = series::group_by_series(rebuild_view(
+                                &all_books, &filters, sort, &query,
+                            ));
+                            let drilled = series_view.clone();
+                            cells = match drilled {
+                                Some(name) => match series::members_of(&entries, &name) {
+                                    Some(members) => series::cells_for_series(members),
+                                    // The series' last undownloaded member was the
+                                    // one we grabbed — it's gone; pop to top level.
+                                    None => {
+                                        series_view = None;
+                                        series::cells_for_top(&entries)
+                                    }
+                                },
+                                None => series::cells_for_top(&entries),
+                            };
+                            total_pages = pager::n_pages(cells.len());
+                            covers = vec![None; cells.len()];
+                            page = page.min(total_pages.saturating_sub(1));
+                            log(format!(
+                                "hid downloaded book {dl_id}: {} tiles, {total_pages} pages",
+                                cells.len(),
+                            ));
+                        }
                         repaint_page(
                             &mut fb,
                             &mut renderer,
@@ -1272,8 +1310,10 @@ fn load_cover(
 }
 
 /// Download a book to `/mnt/us/documents/Sidle/<filename>` while showing a live
-/// `transferred / total` overlay with a Cancel button, and return the toast
-/// message to display when it settles (done / cancelled / failed).
+/// `transferred / total` overlay with a Cancel button. Returns the toast
+/// message to display when it settles **and** whether the book actually landed
+/// on the device (`true` only on a verified, renamed-into-place file) — the
+/// caller uses that to hide the now-downloaded tile immediately.
 ///
 /// The body streams to disk one [`DL_CHUNK`] at a time — never buffered whole
 /// in device RAM, which a 300 MB+ book would otherwise risk OOMing on a 512 MB
@@ -1295,7 +1335,7 @@ fn download_flow(
     agent: &ureq::Agent,
     cfg: &config::ServerConfig,
     book: &api::Book,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, bool)> {
     // Paint the overlay before the GET so a long-press gets instant feedback:
     // the server reads the whole file before it sends headers, so on a big book
     // `download_book` can block for a beat — that shouldn't look like a dead
@@ -1308,13 +1348,14 @@ fn download_flow(
         Ok(dl) => dl,
         Err(api::SidleError::TokenMismatch) => {
             log("token rejected during download — resync via sidle desktop app");
-            return Ok(
+            return Ok((
                 "Token mismatch.\nPlug Kindle into sidle and click Update KUAL.".to_string(),
-            );
+                false,
+            ));
         }
         Err(api::SidleError::Other(err)) => {
             log(format!("download failed: {err:#}"));
-            return Ok(format!("Failed: {err}"));
+            return Ok((format!("Failed: {err}"), false));
         }
     };
     let expected = dl.expected_len;
@@ -1348,7 +1389,7 @@ fn download_flow(
             Err(err) => {
                 cleanup_part(file, &part);
                 log(format!("download read failed after {written} bytes: {err}"));
-                return Ok(format!("Failed: {err}"));
+                return Ok((format!("Failed: {err}"), false));
             }
         };
         if let Err(err) = file.write_all(&buf[..n]) {
@@ -1356,7 +1397,7 @@ fn download_flow(
             log(format!(
                 "download write failed after {written} bytes: {err}"
             ));
-            return Ok(format!("Failed: {err}"));
+            return Ok((format!("Failed: {err}"), false));
         }
         written += n as u64;
         chunks += 1;
@@ -1389,12 +1430,12 @@ fn download_flow(
                 InputEvent::Touch(TouchEvent::Up { x, y }) if rect_hit(&cancel_rect, x, y) => {
                     cleanup_part(file, &part);
                     log(format!("download cancelled by user after {written} bytes"));
-                    return Ok("Download cancelled".to_string());
+                    return Ok(("Download cancelled".to_string(), false));
                 }
                 InputEvent::Page(_) => {
                     cleanup_part(file, &part);
                     log(format!("download cancelled by user after {written} bytes"));
-                    return Ok("Download cancelled".to_string());
+                    return Ok(("Download cancelled".to_string(), false));
                 }
                 _ => {}
             }
@@ -1412,17 +1453,23 @@ fn download_flow(
     {
         let _ = std::fs::remove_file(&part);
         log(format!("incomplete download: {written} of {exp} bytes"));
-        return Ok(format!(
-            "Failed: incomplete ({} of {})",
-            human_mb(written),
-            human_mb(exp)
+        return Ok((
+            format!(
+                "Failed: incomplete ({} of {})",
+                human_mb(written),
+                human_mb(exp)
+            ),
+            false,
         ));
     }
     std::fs::rename(&part, &path)
         .with_context(|| format!("rename {} -> {}", part.display(), path.display()))?;
     log(format!("downloaded {written} bytes to {}", path.display()));
     let _ = Command::new("touch").arg(CLEANINDEX).output();
-    Ok("Downloaded → Library will refresh shortly".to_string())
+    Ok((
+        "Downloaded → Library will refresh shortly".to_string(),
+        true,
+    ))
 }
 
 /// Close and delete a partial `.part` sidecar after a failed/cancelled
