@@ -208,19 +208,37 @@ function facetOptionLabel(facet, value) {
 // two list views behave identically. `render(item)` returns a string (plain
 // cell) or a Node (rich cell). sortable=false skips data-sort wiring (Tags is
 // multi-value, Formats is widgets — neither sorts cleanly).
+//
+// `edit` opts a column into click-to-edit: a plain click on the cell of an
+// already-selected row swaps it for an inline editor that writes straight back
+// through `library_update_metadata` (see commitInlineEdit / the TableView).
+// `textEdit(get)` is the common case (a text field seeded from get(book));
+// Language is a <select>. Columns with no `edit` (Date added, Size, Formats, On
+// Kindle) stay read-only — they're derived/system values, not metadata.
+const textEdit = (get) => ({ type: "text", get });
 const BOOK_COLUMNS = [
-  { key: "title",        label: "Title",      sortable: true,  render: (b) => b.title || "Untitled" },
-  { key: "author",       label: "Author",     sortable: true,  render: (b) => b.author || "" },
-  { key: "series",       label: "Series",     sortable: true,  render: (b) => seriesText(b) },
-  { key: "publisher",    label: "Publisher",  sortable: true,  render: (b) => b.publisher || "" },
-  { key: "published_at", label: "Published",  sortable: true,  render: (b) => b.published_at || "" },
-  { key: "language",     label: "Lang",       sortable: true,  render: (b) => languageName(b.language) },
-  { key: "tags",         label: "Tags",       sortable: false, render: (b) => (b.tags || []).join(", ") },
+  { key: "title",        label: "Title",      sortable: true,  render: (b) => b.title || "Untitled",    edit: textEdit((b) => b.title || "") },
+  { key: "author",       label: "Author",     sortable: true,  render: (b) => b.author || "",           edit: textEdit((b) => b.author || "") },
+  { key: "series",       label: "Series",     sortable: true,  render: (b) => seriesText(b),            edit: textEdit((b) => seriesText(b)) },
+  { key: "publisher",    label: "Publisher",  sortable: true,  render: (b) => b.publisher || "",        edit: textEdit((b) => b.publisher || "") },
+  { key: "published_at", label: "Published",  sortable: true,  render: (b) => b.published_at || "",     edit: textEdit((b) => b.published_at || "") },
+  { key: "language",     label: "Lang",       sortable: true,  render: (b) => languageName(b.language), edit: { type: "select", get: (b) => b.language || "", options: () => languageOptions() } },
+  { key: "tags",         label: "Tags",       sortable: false, render: (b) => (b.tags || []).join(", "), edit: textEdit((b) => (b.tags || []).join(", ")) },
   { key: "imported_at",  label: "Date added", sortable: true,  render: (b) => formatDate(b.imported_at) },
   { key: "file_size",    label: "Size",       sortable: true,  render: (b) => formatBytes(b.file_size) },
   { key: "formats",      label: "Formats",    sortable: false, render: (b) => formatsContent(b) },
   { key: "on_kindle",    label: "On Kindle",  sortable: true,  render: (b) => onKindleContent(b) },
 ];
+
+// Options for the Language cell's inline <select>: a blank ("—") plus the same
+// code→name set the cell renders. A stored code that isn't listed is added by
+// the editor itself so opening it never changes the value (see _openEditor).
+function languageOptions() {
+  return [
+    { value: "", label: "—" },
+    ...Object.entries(LANGUAGE_NAMES).map(([code, name]) => ({ value: code, label: name })),
+  ];
+}
 
 function formatsContent(b) {
   const wrap = document.createElement("div");
@@ -269,6 +287,10 @@ const booksTable = new window.TableView({
   },
   onChange: () => render(),
   ctxMenu: document.querySelector("#ctx-menu"),
+  // Click-to-edit: only when this row is the sole selection (a click on an
+  // unselected/multi-selected row selects first; a second click then edits).
+  canEditNow: (id) => booksSelection.count() === 1 && booksSelection.has(id),
+  onCellEdit: (b, key, value) => commitInlineEdit(b, key, value),
 });
 
 // ---------------------------------------------------------------------------
@@ -4811,6 +4833,112 @@ async function onAsinSearchClick() {
     await window.api.invoke("library_amazon_search", { bookId: metadataBook.id });
   } catch (e) {
     showToast(`couldn't open Amazon: ${e}`, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Inline (list-view) metadata editing
+// ---------------------------------------------------------------------------
+//
+// Click a field on a selected list row and the shared TableView swaps in an
+// editor (see table.js). On commit it calls back here with the book, the column
+// key, and the new raw string. We fold that single change into a FULL
+// MetadataPatch built from the book's current values and send it through the
+// SAME command the modal editor uses (`library_update_metadata` is a
+// full-replacement patch) — so canonicalization, the on-disk file rename, and
+// validation are identical no matter which editor the user reached for. Every
+// field but the edited one matches what's already stored, so nothing else moves.
+
+// A MetadataPatch mirroring the book as it stands (what the modal would send
+// with nothing changed). The caller overrides exactly one field.
+function fullPatchFromBook(b) {
+  return {
+    title: b.title || "",
+    author: b.author || "",
+    language: b.language || "",
+    ppd: b.ppd || null, // unchanged here → no force-reconvert
+    publisher: b.publisher || null,
+    published_at: b.published_at || null,
+    series_name: b.series_name || null,
+    series_index:
+      b.series_index != null && Number.isFinite(b.series_index) ? b.series_index : null,
+    tags: b.tags || [],
+    title_romaji: b.title_romaji || "",
+    author_romaji: b.author_romaji || "",
+  };
+}
+
+// Parse the Series cell's single text field back into its two DB columns,
+// mirroring seriesText's "Name #index" display. The index is the LAST
+// "#<number>" (integer or decimal); text before it is the name. A "#" inside
+// the name is fine — only a trailing "#<number>" is read as the index ("C# Guide
+// #3" → {name:"C# Guide", index:3}). No trailing number → index cleared; empty
+// field → whole series cleared.
+function parseSeriesCell(text) {
+  const s = text.trim();
+  if (s === "") return { name: null, index: null };
+  const m = s.match(/^(.*?)\s*#\s*(\d+(?:\.\d+)?)\s*$/);
+  if (m && m[1].trim() !== "") {
+    return { name: m[1].trim(), index: Number(m[2]) };
+  }
+  return { name: s, index: null };
+}
+
+async function commitInlineEdit(book, key, value) {
+  const patch = fullPatchFromBook(book);
+  const v = value.trim();
+  switch (key) {
+    case "title":
+      if (v === "") {
+        showToast("Title cannot be empty.", true);
+        throw new Error("empty title"); // rejects → TableView leaves the old value
+      }
+      patch.title = v;
+      patch.title_romaji = ""; // blank self-heals: regenerated from the new title
+      break;
+    case "author":
+      patch.author = v;
+      patch.author_romaji = ""; // regenerated from the new author
+      break;
+    case "series": {
+      // The Series cell is really two DB fields shown as "Name #index" (see
+      // seriesText). Editing is a single field over that same text: a trailing
+      // "#<number>" becomes series_index, everything before it series_name. No
+      // "#<number>" clears the index; an empty field clears the whole series
+      // (the backend then drops any orphaned index).
+      const parsed = parseSeriesCell(value);
+      patch.series_name = parsed.name;
+      patch.series_index = parsed.index;
+      break;
+    }
+    case "publisher":
+      patch.publisher = v === "" ? null : v;
+      break;
+    case "published_at":
+      patch.published_at = v === "" ? null : v;
+      break;
+    case "language":
+      patch.language = v; // canonicalized backend-side (en-US → en, zh-TW → zh-Hant)
+      break;
+    case "tags":
+      // Split on ASCII or CJK comma (same as the modal); the backend lowercases,
+      // dedupes, and drops empties.
+      patch.tags = v === "" ? [] : v.split(/[,、]/).map((s) => s.trim()).filter(Boolean);
+      break;
+    default:
+      return; // not an editable column
+  }
+
+  try {
+    const updated = await window.api.invoke("library_update_metadata", {
+      bookId: book.id,
+      patch,
+    });
+    mergeBookRow(updated);
+    render();
+  } catch (e) {
+    showToast(`Save failed: ${e}`, true);
+    throw e; // let the editor know the commit didn't take
   }
 }
 

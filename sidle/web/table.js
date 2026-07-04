@@ -24,6 +24,9 @@
 // are the section's.
 (function () {
   const REORDER_THRESHOLD = 4; // px a header drag must travel to become a reorder
+  // How long after an inline editor opens a double-click still counts as "the
+  // user meant to open the item, not edit" — see the row dblclick handler.
+  const EDIT_FRESH_MS = 350;
 
   class TableView {
     constructor(cfg) {
@@ -36,6 +39,10 @@
       this.defaultOrder = cfg.columns.map((c) => c.key);
       this.columnConfig = this._loadConfig();
       this.widths = this._loadWidths();
+      // The cell currently open in an inline editor, or null. Holds enough to
+      // commit/cancel and to survive a background re-render (see render()).
+      this.editing = null;
+      this._editFresh = false; // true briefly after an editor opens
       // The <thead> element persists across renders (only its <tr> is rebuilt),
       // so wire the column-visibility menu ONCE here — not in _wireHeaders, where
       // a fresh arrow each render would accumulate listeners.
@@ -101,9 +108,27 @@
         this.headRow.appendChild(this._headerCell(this.defs[c.key], sort));
       }
 
-      // Body.
+      // Body. Preserve the row currently open in an inline editor across a
+      // background re-render (a conversion-status tick, say) so an open editor
+      // isn't destroyed mid-keystroke: its live <tr> — input, caret and focus
+      // intact — is spliced back in at its new position, other rows rebuild
+      // normally. A column change (which blurs+commits first) or the edited
+      // item leaving the view cancels the edit instead.
+      if (this.editing && this.editing.visKey !== this._visKey(visible)) this._cancelEdit();
+      const editId = this.editing ? this.editing.id : null;
+      let keptEdit = false;
+      const frag = document.createDocumentFragment();
+      for (const item of items) {
+        if (editId != null && this.cfg.idOf(item) === editId) {
+          keptEdit = true;
+          frag.appendChild(this.editing.tr);
+        } else {
+          frag.appendChild(this._row(item, visible));
+        }
+      }
       this.tbody.innerHTML = "";
-      for (const item of items) this.tbody.appendChild(this._row(item, visible));
+      this.tbody.appendChild(frag);
+      if (editId != null && !keptEdit) this._cancelEdit();
 
       this._applyWidths();
       this._wireHeaders();
@@ -139,23 +164,190 @@
         const def = this.defs[c.key];
         const td = document.createElement("td");
         td.dataset.col = c.key; // addressable per-column (mirrors <col>/<th>)
-        const out = def.render(item);
-        if (out instanceof Node) {
-          td.appendChild(out);
-        } else {
-          td.textContent = out == null ? "" : String(out);
-          td.title = td.textContent; // full value on truncation
-        }
-        if (def.align) td.style.textAlign = def.align;
+        if (def.edit) td.classList.add("editable"); // click-to-edit affordance
+        this._fillCell(td, def, item);
         tr.appendChild(td);
       }
-      tr.addEventListener("click", (e) => this.cfg.onRowClick(e, item));
-      tr.addEventListener("dblclick", () => this.cfg.onRowDblClick(item));
+      tr.addEventListener("click", (e) => {
+        // Click-to-edit: on an already-selected row, a plain click on an
+        // editable cell opens an inline editor instead of re-selecting
+        // (Calibre-style). The first click on an unselected row just selects
+        // (canEditNow stays false until it's the sole selection); the second
+        // click of a double-click (detail > 1) is left for the reader.
+        if (this._scheduleEdit(e, item)) return;
+        this.cfg.onRowClick(e, item);
+      });
+      tr.addEventListener("dblclick", () => {
+        // A double-click that only just popped the inline editor open means the
+        // user meant to open the item, not edit it — roll the editor back and
+        // hand off to the reader.
+        if (this.editing && this.editing.tr === tr && this._editFresh) {
+          this._cancelEdit();
+          this.cfg.onRowDblClick(item);
+          return;
+        }
+        if (this.editing) return; // an open editor owns the row; don't read
+        this.cfg.onRowDblClick(item);
+      });
       tr.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         this.cfg.onRowContext(e, item);
       });
       return tr;
+    }
+
+    // Paint a cell's normal (non-editing) content. Shared by the initial row
+    // build and by the inline editor when it commits/cancels and restores the
+    // cell to plain text.
+    _fillCell(td, def, item) {
+      td.innerHTML = "";
+      const out = def.render(item);
+      if (out instanceof Node) {
+        td.title = "";
+        td.appendChild(out);
+      } else {
+        td.textContent = out == null ? "" : String(out);
+        td.title = td.textContent; // full value on truncation
+      }
+      if (def.align) td.style.textAlign = def.align;
+    }
+
+    // ── Inline cell editing ──────────────────────────────────────────────────
+    // Click a field on a selected row to edit it. Opt-in per column via
+    //   def.edit = { type: "text" | "select", get(item), options?(item) }
+    // The section supplies onCellEdit(item, key, value) (persist + re-render)
+    // and an optional canEditNow(id) (defaults to isSelected) gating the first
+    // click. table.js owns only the interaction + the editor widget — it has no
+    // idea what the values mean.
+
+    _visKey(visible) {
+      return (visible || this.columnConfig.filter((c) => c.visible)).map((c) => c.key).join(",");
+    }
+
+    // Decide whether a row click should open an editor; if so, open it and
+    // return true (so the caller skips selection). Returns false to fall through
+    // to normal row selection.
+    _scheduleEdit(e, item) {
+      if (e.detail > 1) return false; // part of a double-click → let it read
+      if (e.metaKey || e.ctrlKey || e.shiftKey) return false; // modifiers select
+      if (this.editing) return false;
+      const td = e.target.closest("td");
+      if (!td) return false;
+      const tr = td.closest("tr");
+      if (tr && tr.classList.contains("just-dragged")) return false; // trailing drag click
+      const def = this.defs[td.dataset.col];
+      if (!def || !def.edit) return false; // column isn't editable
+      const id = this.cfg.idOf(item);
+      const ready = this.cfg.canEditNow ? this.cfg.canEditNow(id) : this.cfg.isSelected(id);
+      if (!ready) return false; // first click just selects the row
+      this._openEditor(td, item, def);
+      return true;
+    }
+
+    _openEditor(td, item, def) {
+      if (this.editing) this._commitEdit(); // moving between cells commits the last
+      const seed = String(def.edit.get(item) ?? "");
+      let input;
+      if (def.edit.type === "select") {
+        input = document.createElement("select");
+        for (const opt of def.edit.options(item)) {
+          const o = document.createElement("option");
+          o.value = opt.value;
+          o.textContent = opt.label;
+          input.appendChild(o);
+        }
+        input.value = seed;
+        // Keep an unlisted stored value (an unusual code) selectable so merely
+        // opening the editor never silently rewrites it.
+        if (input.value !== seed) {
+          const o = document.createElement("option");
+          o.value = seed;
+          o.textContent = seed || "—";
+          input.insertBefore(o, input.firstChild);
+          input.value = seed;
+        }
+      } else {
+        input = document.createElement("input");
+        input.type = "text";
+        input.value = seed;
+      }
+      input.className = "cell-editor";
+      // Keep the field's own mouse gestures from bubbling to the row (select /
+      // read / drag). dblclick is deliberately NOT stopped so a just-opened
+      // editor can still fall back to "open in reader" (see the row handler).
+      input.addEventListener("mousedown", (ev) => ev.stopPropagation());
+      input.addEventListener("click", (ev) => ev.stopPropagation());
+      input.addEventListener("keydown", (ev) => this._onEditorKey(ev));
+      input.addEventListener("blur", () => this._commitEdit());
+      // A <select>: choosing an option is a complete edit, so commit at once.
+      if (def.edit.type === "select") input.addEventListener("change", () => this._commitEdit());
+      td.innerHTML = "";
+      td.title = "";
+      td.appendChild(input);
+
+      // Commit when the user mouses down anywhere outside the field. Blur alone
+      // isn't enough: drag-source rows and the selection lasso preventDefault on
+      // mousedown, which suppresses the input's native blur. Capture phase so
+      // this runs before those handlers.
+      const onDocDown = (ev) => {
+        if (ev.target !== input && !input.contains(ev.target)) this._commitEdit();
+      };
+      document.addEventListener("mousedown", onDocDown, true);
+
+      this.editing = {
+        id: this.cfg.idOf(item),
+        item,
+        def,
+        td,
+        input,
+        seed,
+        tr: td.closest("tr"),
+        visKey: this._visKey(),
+        onDocDown,
+      };
+      this._editFresh = true;
+      setTimeout(() => {
+        this._editFresh = false;
+      }, EDIT_FRESH_MS);
+      input.focus();
+      if (input.select) input.select();
+    }
+
+    _onEditorKey(e) {
+      // Mid-IME-composition (typing kana → kanji), Enter/Escape belong to the
+      // input method (confirm/cancel the candidate), not to the cell.
+      if (e.isComposing) return;
+      if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        this._commitEdit();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        this._cancelEdit();
+      }
+    }
+
+    _commitEdit() {
+      const ed = this.editing;
+      if (!ed) return;
+      this.editing = null; // release before any re-render onCellEdit triggers
+      document.removeEventListener("mousedown", ed.onDocDown, true);
+      const value = ed.input.value;
+      this._fillCell(ed.td, ed.def, ed.item); // drop the input; show current value
+      if (value === ed.seed) return; // unchanged → nothing to persist
+      Promise.resolve(this.cfg.onCellEdit(ed.item, ed.def.key, value)).catch(() => {
+        // The section surfaces its own error toast; the cell already reads back
+        // the pre-edit value, so there's nothing to roll back here.
+      });
+    }
+
+    _cancelEdit() {
+      const ed = this.editing;
+      if (!ed) return;
+      this.editing = null;
+      document.removeEventListener("mousedown", ed.onDocDown, true);
+      this._fillCell(ed.td, ed.def, ed.item); // restore the original cell content
     }
 
     // ── Header interactions ─────────────────────────────────────────────────────
