@@ -63,6 +63,14 @@ pub struct DrmBook {
     pub cover_path: Option<PathBuf>,
 }
 
+/// Is the kfxdedrm engine installed? A cheap dir check that gates entry to the
+/// DRM source, so a user without it gets a clear toast instead of a gallery they
+/// can't act on. The per-ABI `<exe> test` probe ([`probe_exe`]) runs later, at
+/// decrypt time, to also catch a present-but-non-working install.
+pub fn available() -> bool {
+    Path::new(BIN_DIR).is_dir()
+}
+
 /// The working kfxdedrm binary for this device: the first ABI variant whose
 /// `<exe> test` exits 0 (mirrors `run_cmd.sh`'s `check_exec`). `None` when none
 /// runs (wrong ABI, or not installed) — the caller toasts and bails.

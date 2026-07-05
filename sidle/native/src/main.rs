@@ -1030,26 +1030,37 @@ fn run() -> anyhow::Result<()> {
                             let before = source;
                             match source {
                                 Source::Library => {
-                                    // → DRM. Browse whenever ≥1 purchase is present
-                                    // (the decrypt action, not the toggle, gates on
-                                    // the kfxdedrm engine); toast and stay if none.
-                                    drm_books = dedrm::scan();
-                                    if drm_books.is_empty() {
+                                    // → DRM. Gate on the engine being installed (a
+                                    // cheap dir check; the decrypt action re-probes
+                                    // for a *working* ABI binary), then on ≥1
+                                    // purchase present. Any miss toasts and stays.
+                                    if !dedrm::available() {
                                         let dirty = toast::draw(
                                             &mut fb,
                                             &mut renderer,
-                                            "No DRM books in Items01",
+                                            "kfxdedrm not installed",
                                         );
                                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                                         thread::sleep(TOAST_LINGER);
                                     } else {
-                                        // Park the library master so the swap back
-                                        // restores it (with any mid-session hides).
-                                        lib_stash = std::mem::take(&mut all_books);
-                                        all_books =
-                                            drm_books.iter().map(|d| d.book.clone()).collect();
-                                        source = Source::Drm;
-                                        log(format!("→ DRM source: {} books", all_books.len()));
+                                        drm_books = dedrm::scan();
+                                        if drm_books.is_empty() {
+                                            let dirty = toast::draw(
+                                                &mut fb,
+                                                &mut renderer,
+                                                "No DRM books in Items01",
+                                            );
+                                            fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                                            thread::sleep(TOAST_LINGER);
+                                        } else {
+                                            // Park the library master so the swap
+                                            // back restores it (with any hides).
+                                            lib_stash = std::mem::take(&mut all_books);
+                                            all_books =
+                                                drm_books.iter().map(|d| d.book.clone()).collect();
+                                            source = Source::Drm;
+                                            log(format!("→ DRM source: {} books", all_books.len()));
+                                        }
                                     }
                                 }
                                 Source::Drm => {
