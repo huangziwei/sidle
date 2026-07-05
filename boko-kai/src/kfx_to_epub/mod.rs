@@ -250,6 +250,26 @@ pub(crate) fn build_output(
     }
     trace.mark("navigation::extract_toc");
 
+    // Physical page list (`<nav epub:type="page-list">`): flat, kept in page
+    // order (no reading-order sort). Preserves printed page numbers → positions
+    // for "go to page N" and citations — the reverse of what EPUB→KFX now emits,
+    // so a page list survives a full KFX↔EPUB round trip.
+    // Authoritative stamped-id map from the FINAL DOM (after consolidate/
+    // normalize), so a page-list fragment that was never stamped — a page break
+    // landing on an already-anchored chapter start — collapses to the
+    // chapter-file link instead of a dangling `#page-…` (epubcheck RSC-012).
+    let stamped_id_to_file = content::stamped_id_to_file(&content_state);
+    let page_list = navigation::extract_page_list(
+        &book,
+        &content_state.element_id_to_filename,
+        &content_state.anchors,
+        &stamped_id_to_file,
+    );
+    if !page_list.is_empty() {
+        out.page_list_ol_html = Some(navigation::render_nav_ol(&page_list));
+    }
+    trace.mark("navigation::extract_page_list");
+
     // OPF `<guide>` from `nav_type=landmarks` containers (calibre's
     // `add_guide_entry` path). EPUB 2.0 readers (Apple Books, Kindle)
     // surface these as Cover / Table of Contents / Start Reading shortcuts.

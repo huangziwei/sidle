@@ -155,6 +155,11 @@ impl<'a> ContentState<'a> {
         // internal `$266` anchors (boko's own e2k output). Without it every
         // nested TOC entry collapses to its chapter's top in the reader/export.
         super::navigation::register_toc_anchors(book, &mut anchors);
+        // Then stamp anchors for physical page-break positions that the TOC
+        // didn't already claim, so mid-chapter `#page_N` targets resolve to the
+        // exact paragraph in the exported EPUB page-list (must run after the TOC
+        // pass so shared positions reuse the TOC anchor).
+        super::navigation::register_page_list_anchors(book, &mut anchors);
         let fxl = detect_fxl(book);
         Self {
             book,
@@ -2423,6 +2428,27 @@ pub fn replace_eol_with_br(state: &mut ContentState) {
     }
 }
 
+/// Authoritative `html-id → file` map, built from the ids ACTUALLY stamped into
+/// the emitted DOM (not the structural `element_id_to_filename` guess, which
+/// can't tell whether a position was ever stamped). Used by
+/// [`resolve_link_placeholders`] for body links and by
+/// `navigation::extract_page_list` to drop page-list fragments that were never
+/// stamped — a page break that lands on an already-anchored chapter start keeps
+/// only the chapter-file link instead of a dangling `#page-…` (epubcheck
+/// RSC-012).
+pub fn stamped_id_to_file(state: &ContentState) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    for part in &state.book_parts {
+        for id in 0..part.dom.len() {
+            if let Some(html_id) = part.dom.get(id).get("id") {
+                map.entry(html_id.to_string())
+                    .or_insert_with(|| part.filename.clone());
+            }
+        }
+    }
+    map
+}
+
 /// After all chapters are emitted, fold per-element classes + inline styles
 /// back onto the DOM as actual `class=` / `style=` attributes.
 /// Rewrite `<a href="anchor:NAME">` placeholders emitted by `$179 link_to`
@@ -2444,16 +2470,7 @@ pub fn resolve_link_placeholders(state: &mut ContentState) {
     // section than the one that claims its eid (footnotes/cross-refs), and it
     // can't tell whether a position was ever stamped at all. Resolving against
     // reality guarantees no `<a href="chapter#missing">` (epubcheck RSC-012).
-    let mut stamped_id_to_file: HashMap<String, String> = HashMap::new();
-    for part in &state.book_parts {
-        for id in 0..part.dom.len() {
-            if let Some(html_id) = part.dom.get(id).get("id") {
-                stamped_id_to_file
-                    .entry(html_id.to_string())
-                    .or_insert_with(|| part.filename.clone());
-            }
-        }
-    }
+    let stamped_id_to_file = stamped_id_to_file(state);
 
     for part in &mut state.book_parts {
         let n = part.dom.len();

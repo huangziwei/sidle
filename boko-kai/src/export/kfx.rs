@@ -287,6 +287,7 @@ fn build_kfx_container(
     ctx.nav_container_symbols.toc = ctx.symbols.get_or_intern("toc");
     ctx.nav_container_symbols.headings = ctx.symbols.get_or_intern("headings");
     ctx.nav_container_symbols.landmarks = ctx.symbols.get_or_intern("landmarks");
+    ctx.nav_container_symbols.page_list = ctx.symbols.get_or_intern("page_list");
 
     // 1e. Register resource paths and create short names
     // IMPORTANT: Short names must be interned during Pass 1 to ensure
@@ -1186,6 +1187,30 @@ fn pick_document_writing_mode(vrl: usize, vlr: usize) -> KfxSymbol {
 fn build_book_navigation_fragment_with_positions(book: &Book, ctx: &ExportContext) -> KfxFragment {
     let mut nav_containers = Vec::new();
 
+    // 0. Add page_list nav container FIRST (Amazon's canonical order): physical
+    //    page numbers → content positions, driving "go to page N" and citation
+    //    location↔page mapping. Flat, one nav_unit per printed page. Empty when
+    //    the source EPUB carries no `<nav epub:type="page-list">`.
+    let page_list_entries = build_page_list_entries(book.page_list(), ctx);
+    if !page_list_entries.is_empty() {
+        let page_list_container = IonValue::Struct(vec![
+            (
+                KfxSymbol::NavType as u64,
+                IonValue::Symbol(KfxSymbol::PageList as u64),
+            ),
+            (
+                KfxSymbol::NavContainerName as u64,
+                IonValue::Symbol(ctx.nav_container_symbols.page_list),
+            ),
+            (KfxSymbol::Entries as u64, IonValue::List(page_list_entries)),
+        ]);
+        let annotated = IonValue::Annotated(
+            vec![KfxSymbol::NavContainer as u64],
+            Box::new(page_list_container),
+        );
+        nav_containers.push(annotated);
+    }
+
     // 1. Add headings nav container (first, per reference KFX order)
     let headings_entries = build_headings_entries(ctx);
     let headings_container = IonValue::Struct(vec![
@@ -1635,6 +1660,77 @@ fn resolve_toc_target(
     }
 
     eprintln!("Warning: TOC href not resolved: {}", href);
+    None
+}
+
+/// Build flat `page_list` nav entries — one `nav_unit` per physical page,
+/// mapping the printed page label to its content position. Matches Amazon's
+/// shape: `nav_unit::{representation:{label}, target_position:{id, offset}}`.
+/// Entries whose href doesn't resolve are dropped (a dangling nav target makes
+/// the device reject the whole book).
+fn build_page_list_entries(
+    entries: &[crate::model::TocEntry],
+    ctx: &ExportContext,
+) -> Vec<IonValue> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let (fragment_id, offset) = resolve_page_target(&entry.target, &entry.href, ctx)?;
+
+            let representation = IonValue::Struct(vec![(
+                KfxSymbol::Label as u64,
+                IonValue::String(entry.title.clone()),
+            )]);
+            let target = IonValue::Struct(vec![
+                (KfxSymbol::Id as u64, IonValue::Int(fragment_id as i64)),
+                (KfxSymbol::Offset as u64, IonValue::Int(offset as i64)),
+            ]);
+            let nav_unit = IonValue::Struct(vec![
+                (KfxSymbol::Representation as u64, representation),
+                (KfxSymbol::TargetPosition as u64, target),
+            ]);
+            Some(IonValue::Annotated(
+                vec![KfxSymbol::NavUnit as u64],
+                Box::new(nav_unit),
+            ))
+        })
+        .collect()
+}
+
+/// Resolve a page-list entry's target to `(fragment_id, offset)`, **preserving
+/// the byte offset** — the one difference from [`resolve_toc_target`], which
+/// forces offset 0 to land TOC jumps on chapter starts. A physical page break
+/// routinely falls mid-chapter (`…#page_N`), and its precise offset is what
+/// makes "go to page N" land on the right line. Falls back to the chapter start
+/// (offset 0) only for a body-level id or a fragment-less chapter href.
+fn resolve_page_target(
+    target: &Option<AnchorTarget>,
+    href: &str,
+    ctx: &ExportContext,
+) -> Option<(u64, usize)> {
+    match target {
+        Some(AnchorTarget::Internal(gid)) => {
+            if let Some((fragment_id, offset)) = ctx.anchor_registry.get_node_position(*gid) {
+                return Some((fragment_id, offset));
+            }
+            // Body-level ids (promoted to NodeId::ROOT by dom::transform) have no
+            // element of their own — land on the chapter start.
+            if gid.node == crate::model::NodeId::ROOT
+                && let Some(fragment_id) = ctx.anchor_registry.get_chapter_position(gid.chapter)
+            {
+                return Some((fragment_id, 0));
+            }
+        }
+        Some(AnchorTarget::Chapter(chapter_id)) => {
+            if let Some(fragment_id) = ctx.anchor_registry.get_chapter_position(*chapter_id) {
+                return Some((fragment_id, 0));
+            }
+        }
+        Some(AnchorTarget::External(_)) => return None,
+        None => {}
+    }
+
+    eprintln!("Warning: page-list href not resolved: {}", href);
     None
 }
 

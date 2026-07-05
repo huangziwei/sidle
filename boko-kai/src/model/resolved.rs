@@ -196,6 +196,9 @@ pub(crate) fn resolve_book_links(book: &mut crate::model::Book) -> std::io::Resu
     // Step 4: Resolve TOC entry targets
     book.resolve_toc_targets();
 
+    // Step 4b: Resolve page-list entry targets (physical page numbers → positions)
+    book.resolve_page_list_targets();
+
     // Step 5: Walk all chapters, find Link nodes, resolve via importer
     for (chapter_id, chapter) in &chapters {
         for node_id in chapter.iter_dfs() {

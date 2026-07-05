@@ -309,16 +309,73 @@ pub fn register_toc_anchors(book: &BookData, table: &mut AnchorTable) {
                     continue;
                 };
                 for entry in entries {
-                    register_toc_entry_anchor(entry, table);
+                    register_nav_entry_anchor(entry, table, "toc");
                 }
             }
         }
     }
 }
 
-/// Register one TOC entry's target (if the position is not already anchored),
-/// then recurse into its nested entries.
-fn register_toc_entry_anchor(entry: &IonValue, table: &mut AnchorTable) {
+/// Register a synthetic id-anchor at every `page_list` target position, so a
+/// physical page break that falls mid-chapter (`…#page_N`) resolves to the exact
+/// paragraph in the exported EPUB rather than the top of the chapter file.
+///
+/// Runs *after* [`register_toc_anchors`], so a page whose position coincides
+/// with a TOC entry (or a real `$266` anchor) reuses that existing anchor —
+/// only page-only positions get a fresh `page-<eid>-<offset>` anchor. Without
+/// this, [`extract_page_list`] would drop every `#fragment` and collapse the
+/// page list to a run of chapter-top links.
+pub fn register_page_list_anchors(book: &BookData, table: &mut AnchorTable) {
+    let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
+        return;
+    };
+    for value in nav.values() {
+        let unwrapped = value.unwrap_annotated();
+        let candidates: Vec<IonValue> = match unwrapped {
+            IonValue::List(items) => items.clone(),
+            IonValue::Struct(_) => vec![unwrapped.clone()],
+            _ => Vec::new(),
+        };
+        for reading_order in candidates {
+            let Some(ro_fields) = reading_order.as_struct() else {
+                continue;
+            };
+            let Some(containers) =
+                get_field(ro_fields, KfxSymbol::NavContainers as u64).and_then(|v| v.as_list())
+            else {
+                continue;
+            };
+            for container in containers {
+                let Some(resolved) = resolve_nav_container(book, container) else {
+                    continue;
+                };
+                let Some(cfields) = resolved.as_struct() else {
+                    continue;
+                };
+                let nav_type = get_field(cfields, KfxSymbol::NavType as u64)
+                    .and_then(|v| book.symbols.text_of(v))
+                    .unwrap_or("");
+                if nav_type != "page_list" {
+                    continue;
+                }
+                let Some(entries) =
+                    get_field(cfields, KfxSymbol::Entries as u64).and_then(|v| v.as_list())
+                else {
+                    continue;
+                };
+                for entry in entries {
+                    register_nav_entry_anchor(entry, table, "page");
+                }
+            }
+        }
+    }
+}
+
+/// Register one nav entry's target (if the position is not already anchored)
+/// under the given name `prefix` (`toc` / `page`), then recurse into its nested
+/// entries. The prefix only names the synthetic id; positions already anchored
+/// (a real `$266` anchor or an earlier pass) are left untouched and shared.
+fn register_nav_entry_anchor(entry: &IonValue, table: &mut AnchorTable, prefix: &str) {
     if let Some((eid, offset)) = nav_target_position(entry) {
         let occupied = table
             .position_anchors
@@ -326,7 +383,7 @@ fn register_toc_entry_anchor(entry: &IonValue, table: &mut AnchorTable) {
             .and_then(|m| m.get(&offset))
             .is_some_and(|names| !names.is_empty());
         if !occupied {
-            let name = format!("toc-{eid}-{offset}");
+            let name = format!("{prefix}-{eid}-{offset}");
             table
                 .position_anchors
                 .entry(eid)
@@ -344,7 +401,7 @@ fn register_toc_entry_anchor(entry: &IonValue, table: &mut AnchorTable) {
         .and_then(|v| v.as_list())
     {
         for child in children {
-            register_toc_entry_anchor(child, table);
+            register_nav_entry_anchor(child, table, prefix);
         }
     }
 }
@@ -645,6 +702,90 @@ pub fn extract_toc(
         }
     }
     toc
+}
+
+/// Walk `book_navigation` and return the flat physical page list (EPUB
+/// `<nav epub:type="page-list">`), mapping each printed page number to its
+/// content location. Same `nav_unit` shape as the TOC — reuse
+/// [`nav_unit_to_navpoint`] — but the list is flat and stays in page order (no
+/// reading-order sort). Entries with no usable label (Amazon ships a synthetic
+/// unlabelled book-start entry) or no resolvable target file are dropped so the
+/// emitted nav stays epubcheck-clean.
+pub fn extract_page_list(
+    book: &BookData,
+    element_id_to_filename: &HashMap<i64, String>,
+    anchors: &AnchorTable,
+    stamped_id_to_file: &HashMap<String, String>,
+) -> Vec<NavPoint> {
+    let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
+        return Vec::new();
+    };
+    let mut pages: Vec<NavPoint> = Vec::new();
+    for value in nav.values() {
+        let unwrapped = value.unwrap_annotated();
+        let candidates: Vec<IonValue> = match unwrapped {
+            IonValue::List(items) => items.clone(),
+            IonValue::Struct(_) => vec![unwrapped.clone()],
+            _ => Vec::new(),
+        };
+        for reading_order in candidates {
+            let Some(ro_fields) = reading_order.as_struct() else {
+                continue;
+            };
+            let Some(containers) =
+                get_field(ro_fields, KfxSymbol::NavContainers as u64).and_then(|v| v.as_list())
+            else {
+                continue;
+            };
+            for container in containers {
+                let Some(resolved) = resolve_nav_container(book, container) else {
+                    continue;
+                };
+                let Some(cfields) = resolved.as_struct() else {
+                    continue;
+                };
+                let nav_type = get_field(cfields, KfxSymbol::NavType as u64)
+                    .and_then(|v| book.symbols.text_of(v))
+                    .unwrap_or("");
+                if nav_type != "page_list" {
+                    continue;
+                }
+                let entries: Vec<IonValue> = get_field(cfields, KfxSymbol::Entries as u64)
+                    .and_then(|v| v.as_list())
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default();
+                for entry in &entries {
+                    if let Some(mut np) =
+                        nav_unit_to_navpoint(entry, element_id_to_filename, anchors)
+                    {
+                        // Drop the unlabelled book-start sentinel Amazon ships.
+                        if np.label == "Untitled" {
+                            continue;
+                        }
+                        // A page break that lands on an already-anchored chapter
+                        // start registered a `page-<eid>-0` name that
+                        // `process_position` never stamped (the element already
+                        // carries its chapter anchor). `id_at` still returns that
+                        // name, so strip the fragment when it isn't a real stamped
+                        // id — the chapter-file link is where the page starts
+                        // anyway, and this avoids a dangling `#page-…` (RSC-012).
+                        if let Some(hash) = np.href.find('#') {
+                            let stamped = stamped_id_to_file.contains_key(&np.href[hash + 1..]);
+                            if !stamped {
+                                np.href.truncate(hash);
+                            }
+                        }
+                        // A page whose target didn't resolve to any chapter file.
+                        if np.href.is_empty() {
+                            continue;
+                        }
+                        pages.push(np);
+                    }
+                }
+            }
+        }
+    }
+    pages
 }
 
 fn nav_unit_to_navpoint(

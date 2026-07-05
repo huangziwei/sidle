@@ -786,6 +786,7 @@ pub struct NavContainerSymbols {
     pub toc: u64,
     pub headings: u64,
     pub landmarks: u64,
+    pub page_list: u64,
 }
 
 impl ExportContext {

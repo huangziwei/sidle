@@ -89,6 +89,12 @@ pub struct EpubOutput {
     /// single-entry list pointing at the first spine chapter.
     pub nav_ol_html: Option<String>,
 
+    /// EPUB 3 nav doc page-list `<ol>` body (flat), emitted inside
+    /// `<nav epub:type="page-list">`. Populated in `mod.rs` from
+    /// `navigation::extract_page_list` when the source KFX carries a
+    /// `page_list` nav_container; `None` (nav omitted) otherwise.
+    pub page_list_ol_html: Option<String>,
+
     /// Page-progression-direction. Mirrors calibre's `EPUB_Output.
     /// page_progression_direction`. Emitted to `<spine
     /// page-progression-direction="...">` only when set and not `"ltr"`
@@ -119,6 +125,7 @@ impl EpubOutput {
             book_type: None,
             ncx_navmap: None,
             nav_ol_html: None,
+            page_list_ol_html: None,
             page_progression_direction: None,
             writing_mode: None,
             guide: Vec::new(),
@@ -844,6 +851,17 @@ impl EpubOutput {
         }
         s.push_str("  </nav>\n");
 
+        // Page-list nav (`<nav epub:type="page-list">`) — printed page numbers →
+        // positions, round-tripped from the source KFX's `page_list` container.
+        // Emitted only when present; `hidden` like the landmarks nav so it
+        // drives "go to page N" without cluttering the visible TOC.
+        if let Some(ol) = &self.page_list_ol_html {
+            s.push_str("  <nav epub:type=\"page-list\" id=\"page-list\" hidden=\"\">\n");
+            s.push_str("    <h2>List of Pages</h2>\n");
+            s.push_str(ol);
+            s.push_str("  </nav>\n");
+        }
+
         // Landmarks nav, derived from the same `self.guide` source the
         // EPUB-2 `<guide>` block uses. EPUB-3 vocabulary differs from
         // EPUB-2 guide types in a few names (start → bodymatter,
@@ -853,8 +871,18 @@ impl EpubOutput {
             s.push_str("  <nav epub:type=\"landmarks\" id=\"landmarks\" hidden=\"\">\n");
             s.push_str("    <h2>Landmarks</h2>\n");
             s.push_str("    <ol>\n");
+            // EPUB 3 forbids two landmarks that share an epub:type AND reference
+            // the same resource (epubcheck RSC-005). boko's own EPUB→KFX emits
+            // both an `srl` (start-reading) and a `bodymatter` landmark for the
+            // book's opening — which map to the same `bodymatter` + href here —
+            // so keep the first of any (type, href) pair and drop later repeats.
+            let mut seen_landmarks: std::collections::HashSet<(String, String)> =
+                std::collections::HashSet::new();
             for g in &self.guide {
                 let epub_type = guide_type_to_epub3(&g.guide_type);
+                if !seen_landmarks.insert((epub_type.to_string(), g.href.clone())) {
+                    continue;
+                }
                 // EPUB 3 requires every `<nav>` anchor to carry text (RSC-005);
                 // KFX landmark containers sometimes yield an empty label (the
                 // bodymatter/cover start marker), so fall back to a default.

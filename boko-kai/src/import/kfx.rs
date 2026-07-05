@@ -63,6 +63,11 @@ pub struct KfxImporter {
     /// Table of contents.
     toc: Vec<TocEntry>,
 
+    /// Physical page list (from the `page_list` nav_container). Flat; empty
+    /// when the KFX carries no page numbers. Kept so a KFX→KFX reconvert (or the
+    /// IR-based export) re-emits the page list instead of silently dropping it.
+    page_list: Vec<TocEntry>,
+
     /// Landmarks (structural navigation points).
     landmarks: Vec<Landmark>,
 
@@ -132,6 +137,14 @@ impl Importer for KfxImporter {
 
     fn toc_mut(&mut self) -> &mut [TocEntry] {
         &mut self.toc
+    }
+
+    fn page_list(&self) -> &[TocEntry] {
+        &self.page_list
+    }
+
+    fn page_list_mut(&mut self) -> &mut [TocEntry] {
+        &mut self.page_list
     }
 
     fn landmarks(&self) -> &[Landmark] {
@@ -372,6 +385,7 @@ impl KfxImporter {
             doc_symbols: Arc::new(doc_symbols),
             metadata: Metadata::default(),
             toc: Vec::new(),
+            page_list: Vec::new(),
             landmarks: Vec::new(), // TODO: Parse from KFX landmarks nav_container
             spine: Vec::new(),
             section_names: Vec::new(),
@@ -605,6 +619,10 @@ impl KfxImporter {
                                     match nav_type {
                                         Some("toc") => {
                                             self.toc = self.parse_nav_entries(container_fields);
+                                        }
+                                        Some("page_list") => {
+                                            self.page_list =
+                                                self.parse_nav_entries(container_fields);
                                         }
                                         Some("landmarks") => {
                                             self.landmarks =

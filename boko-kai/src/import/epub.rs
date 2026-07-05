@@ -9,7 +9,8 @@ use zip::ZipArchive;
 
 use crate::dom::Stylesheet;
 use crate::epub::{
-    parse_container_xml, parse_nav_landmarks, parse_nav_toc, parse_ncx, parse_opf, parse_opf_guide,
+    parse_container_xml, parse_nav_landmarks, parse_nav_page_list, parse_nav_toc, parse_ncx,
+    parse_opf, parse_opf_guide,
 };
 use crate::import::{
     ChapterId, Importer, SpineEntry, normalize_components, resolve_path_based_href,
@@ -33,6 +34,10 @@ pub struct EpubImporter {
 
     /// Table of contents.
     toc: Vec<TocEntry>,
+
+    /// Physical page-break list from `<nav epub:type="page-list">` (printed
+    /// page number → content location). Flat; empty when the EPUB has none.
+    page_list: Vec<TocEntry>,
 
     /// Landmarks (structural navigation points).
     landmarks: Vec<Landmark>,
@@ -88,6 +93,14 @@ impl Importer for EpubImporter {
 
     fn toc_mut(&mut self) -> &mut [TocEntry] {
         &mut self.toc
+    }
+
+    fn page_list(&self) -> &[TocEntry] {
+        &self.page_list
+    }
+
+    fn page_list_mut(&mut self) -> &mut [TocEntry] {
+        &mut self.page_list
     }
 
     fn landmarks(&self) -> &[Landmark] {
@@ -329,6 +342,13 @@ impl EpubImporter {
             }
         };
 
+        // 5b. Parse the physical page-list (`<nav epub:type="page-list">`) from
+        // the same EPUB 3 nav doc. Base-prefixed exactly like the TOC so its
+        // `cN.xhtml` / `cN.xhtml#page_M` hrefs resolve against chapter paths.
+        // Amazon preserves this as a `page_list` nav_container ("go to page N",
+        // citations); dropping it loses every printed page number.
+        let page_list = read_toc(opf.nav_href.as_ref(), parse_nav_page_list).unwrap_or_default();
+
         // 6. Parse landmarks from EPUB 3 nav document
         let mut landmarks = if let Some(nav_href) = &opf.nav_href {
             let nav_path = format!("{}{}", opf_base, percent_decode(nav_href));
@@ -397,6 +417,7 @@ impl EpubImporter {
             zip_index,
             metadata,
             toc,
+            page_list,
             landmarks,
             spine,
             spine_paths,

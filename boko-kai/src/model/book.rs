@@ -442,6 +442,11 @@ impl Book {
         self.backend.toc()
     }
 
+    /// Physical page-list (EPUB `<nav epub:type="page-list">`); empty if absent.
+    pub fn page_list(&self) -> &[TocEntry] {
+        self.backend.page_list()
+    }
+
     /// Landmarks (structural navigation points).
     pub fn landmarks(&self) -> &[Landmark] {
         self.backend.landmarks()
@@ -630,6 +635,29 @@ impl Book {
 
         let toc = self.backend.toc_mut();
         apply_targets(toc, &mut targets.into_iter());
+    }
+
+    /// Resolve page-list entry targets using `resolve_href()`.
+    ///
+    /// The flat sibling of [`Self::resolve_toc_targets`]: walks the page-list
+    /// entries and sets each `target` so the KFX exporter can look up its
+    /// content position. Called internally by `resolve_links()`.
+    pub(crate) fn resolve_page_list_targets(&mut self) {
+        // Clone hrefs first so the resolve pass holds no borrow of the page
+        // list while we later take it mutably to write the targets back.
+        let hrefs: Vec<String> = self
+            .backend
+            .page_list()
+            .iter()
+            .map(|e| e.href.clone())
+            .collect();
+        let targets: Vec<Option<AnchorTarget>> = hrefs
+            .iter()
+            .map(|href| self.backend.resolve_href(ChapterId(0), href))
+            .collect();
+        for (entry, target) in self.backend.page_list_mut().iter_mut().zip(targets) {
+            entry.target = target;
+        }
     }
 
     /// Resolve a single href using format-specific logic.

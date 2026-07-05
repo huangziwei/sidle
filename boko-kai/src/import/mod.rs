@@ -220,6 +220,20 @@ pub trait Importer: Send + Sync {
     /// Get mutable access to TOC entries for resolution.
     fn toc_mut(&mut self) -> &mut [TocEntry];
 
+    /// Physical page-break list (EPUB 3 `<nav epub:type="page-list">`), mapping
+    /// printed page numbers to content locations. Same `TocEntry` shape as the
+    /// TOC but always flat. Default empty — only formats that carry an explicit
+    /// page list (EPUB) override this; everything else has no page numbers.
+    fn page_list(&self) -> &[TocEntry] {
+        &[]
+    }
+
+    /// Mutable page-list access, so [`crate::model::Book::resolve_page_list_targets`]
+    /// can fill in each entry's resolved `target`. Default empty.
+    fn page_list_mut(&mut self) -> &mut [TocEntry] {
+        &mut []
+    }
+
     /// Resolve an href to its target.
     ///
     /// Handles format-specific href parsing and resolution.

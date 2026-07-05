@@ -893,6 +893,24 @@ pub fn parse_ncx(content: &str) -> io::Result<Vec<TocEntry>> {
 /// (no href) or an entry without any anchor is skipped — we don't want
 /// the implicit `<h1>Navigation</h1>` label leaking in as a TOC row.
 pub fn parse_nav_toc(content: &str) -> io::Result<Vec<TocEntry>> {
+    parse_nav_ol(content, "toc")
+}
+
+/// Parse the page-list from an EPUB 3 nav document.
+///
+/// EPUB 3 records physical page breaks in `<nav epub:type="page-list">` as a
+/// flat `<ol><li><a href="…">N</a></li>…` — each entry maps a printed page
+/// number (the anchor label) to a content location (`href`, optionally a
+/// `#page_N` fragment). It's the same `<ol>` shape as the TOC, so we share the
+/// parser; page lists never nest, so the result is a flat `Vec` (no children).
+pub fn parse_nav_page_list(content: &str) -> io::Result<Vec<TocEntry>> {
+    parse_nav_ol(content, "page-list")
+}
+
+/// Shared `<nav epub:type="…">` `<ol>` reader backing [`parse_nav_toc`] and
+/// [`parse_nav_page_list`]; `wanted_type` selects which sibling nav to read
+/// (a doc may carry `toc`, `landmarks`, `page-list`, `loi`, `lot` side by side).
+fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);
 
@@ -929,7 +947,7 @@ pub fn parse_nav_toc(content: &str) -> io::Result<Vec<TocEntry>> {
                         for attr in e.attributes().flatten() {
                             if local_name(attr.key.as_ref()) == b"type" {
                                 let value = String::from_utf8_lossy(&attr.value);
-                                if value.split_ascii_whitespace().any(|v| v == "toc") {
+                                if value.split_ascii_whitespace().any(|v| v == wanted_type) {
                                     is_toc = true;
                                 }
                             }
@@ -1647,6 +1665,52 @@ mod tests {
         assert_eq!(result[0].children.len(), 2);
         assert_eq!(result[0].children[0].title, "Chapter 1");
         assert_eq!(result[0].children[1].title, "Chapter 2");
+    }
+
+    #[test]
+    fn test_parse_nav_page_list_basic() {
+        // A doc carrying BOTH a toc and a page-list nav: the page-list reader
+        // must pick out only the page-list entries (flat, in order), keep the
+        // `#page_N` fragments, and ignore the sibling toc.
+        let nav = r#"<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+  <body>
+    <nav epub:type="toc"><ol><li><a href="c1.xhtml">Chapter 1</a></li></ol></nav>
+    <nav epub:type="page-list" hidden="">
+      <ol>
+        <li><a href="c9.xhtml">1</a></li>
+        <li><a href="cZ.xhtml">3</a></li>
+        <li><a href="cZ.xhtml#page_4">4</a></li>
+      </ol>
+    </nav>
+  </body>
+</html>"#;
+
+        let pages = parse_nav_page_list(nav).unwrap();
+        assert_eq!(pages.len(), 3, "flat page list, toc excluded");
+        assert!(
+            pages.iter().all(|p| p.children.is_empty()),
+            "page list never nests"
+        );
+        assert_eq!(pages[0].title, "1");
+        assert_eq!(pages[0].href, "c9.xhtml");
+        assert_eq!(pages[2].title, "4");
+        assert_eq!(pages[2].href, "cZ.xhtml#page_4", "fragment preserved");
+
+        // The toc reader on the same doc sees only the toc, never the pages.
+        let toc = parse_nav_toc(nav).unwrap();
+        assert_eq!(toc.len(), 1);
+        assert_eq!(toc[0].title, "Chapter 1");
+    }
+
+    #[test]
+    fn test_parse_nav_page_list_absent() {
+        // No page-list nav → empty (a book without physical page numbers).
+        let nav = r#"<?xml version="1.0"?>
+<html xmlns:epub="http://www.idpf.org/2007/ops"><body>
+  <nav epub:type="toc"><ol><li><a href="c1.xhtml">Ch 1</a></li></ol></nav>
+</body></html>"#;
+        assert!(parse_nav_page_list(nav).unwrap().is_empty());
     }
 
     #[test]
