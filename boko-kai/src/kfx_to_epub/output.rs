@@ -285,6 +285,19 @@ impl EpubOutput {
         &self.manifest
     }
 
+    /// Map each spine item's file (`href`, e.g. `c18.xhtml`) to its 0-based
+    /// position in the spine — i.e. its reading-order rank. Used to sort the
+    /// TOC into reading order (EPUB 3 nav requirement; epubcheck NAV-011).
+    pub fn spine_file_rank(&self) -> HashMap<String, usize> {
+        let mut rank = HashMap::new();
+        for (i, item) in self.spine.iter().enumerate() {
+            if let Some(&idx) = self.manifest_by_id.get(&item.id) {
+                rank.entry(self.manifest[idx].href.clone()).or_insert(i);
+            }
+        }
+        rank
+    }
+
     /// Append a chapter `xhtml` to the spine, bundled at `OEBPS/<filename>`.
     pub fn add_spine_chapter(&mut self, filename: &str, xhtml: String) {
         self.add_spine_chapter_with_props(filename, xhtml, None);

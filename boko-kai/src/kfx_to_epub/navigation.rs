@@ -432,6 +432,24 @@ pub struct NavPoint {
     pub children: Vec<NavPoint>,
 }
 
+/// Stable-sort each level of the TOC tree by the reading-order rank of each
+/// entry's target file. EPUB 3 requires the `toc` nav to be in reading order
+/// (epubcheck warns NAV-011 otherwise); some publisher KFX TOCs list front
+/// matter out of reading order (e.g. the 目次 entry before はじめに when はじめに
+/// physically reads first — verified against the KFX reading_order). Ties (same
+/// file, or a target file not in the spine) keep their original order, so a TOC
+/// already in reading order is left byte-identical.
+pub fn sort_toc_reading_order(toc: &mut [NavPoint], file_rank: &HashMap<String, usize>) {
+    fn rank(np: &NavPoint, fr: &HashMap<String, usize>) -> usize {
+        let file = np.href.split('#').next().unwrap_or(&np.href);
+        fr.get(file).copied().unwrap_or(usize::MAX)
+    }
+    toc.sort_by_key(|np| rank(np, file_rank));
+    for np in toc.iter_mut() {
+        sort_toc_reading_order(&mut np.children, file_rank);
+    }
+}
+
 /// One OPF `<guide><reference>` entry. Mirrors calibre's
 /// `add_guide_entry` (yj_to_epub_metadata.py). The `guide_type` value is
 /// the EPUB 2.0 guide reference type string ("cover", "text", "toc", ...).

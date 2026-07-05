@@ -931,35 +931,50 @@ impl<'a> ContentState<'a> {
         fields: &[(u64, IonValue)],
         part_index: usize,
     ) -> Result<NodeId, ConvertError> {
-        let dom = &mut self.book_parts[part_index].dom;
-        let id = dom.create_element("img");
-
         // Calibre: img_resource = self.process_external_resource(get_fragment_name(content, "$164"))
         // get_fragment_name(content, "$164") pops content["$175"] = resource_name.
         let resource_name = get_field(fields, KfxSymbol::ResourceName as u64)
             .and_then(|v| self.book.symbols.text_of(v))
             .unwrap_or("")
             .to_string();
-        if let Some(img) = self.resources.by_name.get(&resource_name) {
-            // Sibling reference: chapter and image both live under `OEBPS/`,
-            // so the chapter resolves `image_rsrcXX.jpg` to the right path.
-            // Earlier `../OEBPS/<file>` was mathematically equivalent but
-            // tripped Apple Books, which then showed no images.
-            dom.get_mut(id).set("src", img.filename.clone());
-            if let Some(w) = img.width {
-                let _ = w;
-            }
-        } else {
-            dom.get_mut(id)
-                .set("src", format!("missing_{resource_name}.jpg"));
-        }
         // Alt text. Calibre defaults to "" when missing.
         let alt = get_field(fields, KfxSymbol::AltText as u64)
             .and_then(|v| v.as_string())
             .unwrap_or("")
             .to_string();
-        dom.get_mut(id).set("alt", alt);
-        Ok(id)
+        // Resolve to the bundled filename iff the image bytes were extracted.
+        let src = self
+            .resources
+            .by_name
+            .get(&resource_name)
+            .map(|img| img.filename.clone());
+
+        let dom = &mut self.book_parts[part_index].dom;
+        match src {
+            // Sibling reference: chapter and image both live under `OEBPS/`,
+            // so the chapter resolves `image_rsrcXX.jpg` to the right path.
+            // Earlier `../OEBPS/<file>` was mathematically equivalent but
+            // tripped Apple Books, which then showed no images.
+            Some(filename) => {
+                let id = dom.create_element("img");
+                dom.get_mut(id).set("src", filename);
+                dom.get_mut(id).set("alt", alt);
+                Ok(id)
+            }
+            // The image bytes are not embedded in this KFX (Amazon didn't ship
+            // them — resource extraction logged "missing bcRawMedia"). Do NOT
+            // emit a dangling `<img src="missing_…">`: that references a file
+            // that isn't in the container (epubcheck RSC-007). Emit a `<span>`
+            // carrying the alt text instead, so the semantic content survives
+            // without a broken reference.
+            None => {
+                let id = dom.create_element("span");
+                if !alt.is_empty() {
+                    dom.get_mut(id).text = Some(alt);
+                }
+                Ok(id)
+            }
+        }
     }
 
     fn emit_list(
@@ -2458,8 +2473,11 @@ pub fn resolve_link_placeholders(state: &mut ContentState) {
             };
             match anchors.resolve_uri_stamped(&name, &stamped_id_to_file) {
                 // Resolved to a real target (external URI or a stamped id).
+                // Sanitize: external URLs carried verbatim from KFX content can
+                // contain characters illegal in a URL (e.g. a citation link
+                // ending in `]`), which epubcheck rejects as RSC-020.
                 Some(uri) => {
-                    part.dom.get_mut(id).set("href", uri);
+                    part.dom.get_mut(id).set("href", sanitize_href(&uri));
                 }
                 // Unresolvable: the target position was never stamped anywhere.
                 // Drop the placeholder href so we emit a valid (non-linking)
@@ -2468,6 +2486,82 @@ pub fn resolve_link_placeholders(state: &mut ContentState) {
                     part.dom.get_mut(id).remove_attr("href");
                 }
             }
+        }
+    }
+}
+
+/// Percent-encode characters that are illegal in a URL (RFC 3986) so hrefs
+/// carried verbatim from KFX content (e.g. a citation link ending in `]`) don't
+/// trip epubcheck RSC-020. Normal URL characters and existing `%XX` escapes are
+/// left untouched.
+fn sanitize_href(href: &str) -> String {
+    fn is_illegal(c: char) -> bool {
+        matches!(
+            c,
+            ' ' | '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '}' | '|' | '[' | ']'
+        ) || (c as u32) < 0x20
+    }
+    if !href.contains(is_illegal) {
+        return href.to_string();
+    }
+    let mut out = String::with_capacity(href.len() + 8);
+    let mut buf = [0u8; 4];
+    for c in href.chars() {
+        if is_illegal(c) {
+            for b in c.encode_utf8(&mut buf).as_bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Ensure every `<ol>`/`<ul>` has only `<li>` (plus `<script>`/`<template>`)
+/// direct children — the only children a list may have (epubcheck RSC-005). KFX
+/// lists sometimes carry trailing content (images, paragraphs) after the last
+/// item as direct children of the list; absorb each stray child into the
+/// preceding `<li>` (or a fresh one if the list opens with non-`<li>` content)
+/// so the list is valid without dropping content.
+pub fn normalize_lists(state: &mut ContentState) {
+    for part in &mut state.book_parts {
+        let dom = &mut part.dom;
+        for id in 0..dom.len() {
+            if !matches!(dom.get(id).tag.as_str(), "ol" | "ul") {
+                continue;
+            }
+            let children = dom.get(id).children.clone();
+            let allowed = |t: &str| matches!(t, "li" | "script" | "template");
+            if children.iter().all(|&c| allowed(&dom.get(c).tag)) {
+                continue;
+            }
+            let mut new_children: Vec<NodeId> = Vec::new();
+            let mut current_li: Option<NodeId> = None;
+            for c in children {
+                if allowed(&dom.get(c).tag) {
+                    current_li = if dom.get(c).tag == "li" {
+                        Some(c)
+                    } else {
+                        None
+                    };
+                    new_children.push(c);
+                } else {
+                    let li = match current_li {
+                        Some(li) => li,
+                        None => {
+                            let li = dom.create_element("li");
+                            dom.get_mut(li).parent = Some(id);
+                            new_children.push(li);
+                            current_li = Some(li);
+                            li
+                        }
+                    };
+                    dom.get_mut(c).parent = Some(li);
+                    dom.get_mut(li).children.push(c);
+                }
+            }
+            dom.get_mut(id).children = new_children;
         }
     }
 }

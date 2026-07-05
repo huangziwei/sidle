@@ -127,6 +127,10 @@ pub(crate) fn build_output(
     // `class=` / `style=` the original `<div>` accumulated.
     content::consolidate_html(&mut content_state);
     trace.mark("content::consolidate_html");
+    // Ensure `<ol>`/`<ul>` carry only `<li>` children (epubcheck RSC-005);
+    // absorb any stray trailing list content into the preceding item.
+    content::normalize_lists(&mut content_state);
+    trace.mark("content::normalize_lists");
     // EOL → `<br/>` (calibre `yj_to_epub_content.py:1720`). Must run AFTER
     // `consolidate_html` so the div→p promotion sees the original text
     // shape and isn't fooled by inserted `<br/>` block-children. KFX
@@ -231,11 +235,15 @@ pub(crate) fn build_output(
     // element-id → chapter-filename map populated by `process_section` to
     // resolve `nav_unit.target_position.id` to a real chapter file.
     on_progress("nav", 0, 1, "Writing navigation");
-    let toc = navigation::extract_toc(
+    let mut toc = navigation::extract_toc(
         &book,
         &content_state.element_id_to_filename,
         &content_state.anchors,
     );
+    // Normalize the TOC to reading order (spine order) so it satisfies the
+    // EPUB 3 nav ordering requirement (epubcheck NAV-011). The spine is fully
+    // built by now (content sections + any prepended titlepage).
+    navigation::sort_toc_reading_order(&mut toc, &out.spine_file_rank());
     if !toc.is_empty() {
         out.ncx_navmap = Some(navigation::render_navmap(&toc));
         out.nav_ol_html = Some(navigation::render_nav_ol(&toc));
