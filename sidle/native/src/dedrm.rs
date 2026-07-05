@@ -103,6 +103,24 @@ pub fn out_path(kfx_path: &Path) -> PathBuf {
     Path::new(OUT_DIR).join(format!("{stem}.kfx-zip"))
 }
 
+/// Every decrypted book currently in [`OUT_DIR`] (`*.kfx-zip`) — the DRM-mode
+/// Sync button re-pushes all of these to the server (which dedupes, so
+/// already-synced ones are no-ops). Empty (never errors) when the dir is absent.
+pub fn decrypted_books() -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(OUT_DIR) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_str()?;
+            (!name.starts_with("._") && name.ends_with(".kfx-zip") && path.is_file())
+                .then_some(path)
+        })
+        .collect()
+}
+
 /// Scan [`ITEMS_DIR`] for decryptable purchased books, newest download first.
 ///
 /// A candidate is a top-level `<stem>.kfx` file (non-recursive, so the `updates/`

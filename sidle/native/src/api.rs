@@ -556,6 +556,53 @@ fn read_sidecar(sdr_dir: &Path, suffix: &str) -> Result<Option<Vec<u8>>> {
     Ok(None)
 }
 
+// ---------------------------------------------------------------------------
+// Decrypted-book push — POST /sync/book (the WiFi twin of the USB /dedrm pull)
+// ---------------------------------------------------------------------------
+
+/// What the server did with a pushed decrypted book.
+pub enum BookPush {
+    /// New to the library.
+    Imported,
+    /// Already present (matched by content hash) — a harmless re-push.
+    Duplicate,
+}
+
+#[derive(Deserialize)]
+struct BookPushReply {
+    outcome: String,
+}
+
+/// Push one decrypted `.kfx-zip` to sidle-server's `POST /sync/book`, which
+/// imports it exactly as the desktop's USB `/dedrm` auto-pull would (hash-
+/// deduped, so USB and WiFi coexist). Streams the file straight from disk rather
+/// than buffering the whole book in the Kindle's RAM.
+pub fn push_book(agent: &ureq::Agent, cfg: &ServerConfig, path: &Path) -> Result<BookPush> {
+    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let url = format!("http://{}:{}/sync/book", cfg.host, cfg.port);
+    let res = match agent
+        .post(&url)
+        .set("X-Sidle-Token", &cfg.token)
+        .set("Content-Type", "application/octet-stream")
+        .send(file)
+    {
+        Ok(res) => res,
+        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            return Err(SidleError::TokenMismatch);
+        }
+        Err(e) => return Err(anyhow!("POST {url}: {e}").into()),
+    };
+    let body = res
+        .into_string()
+        .with_context(|| format!("read body of {url}"))?;
+    let reply: BookPushReply =
+        serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
+    Ok(match reply.outcome.as_str() {
+        "duplicate" => BookPush::Duplicate,
+        _ => BookPush::Imported,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

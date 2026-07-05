@@ -175,7 +175,7 @@ impl AppState {
         // Watch the daemon's `.sync-pulse.json` to live-repaint an open reader after
         // a LAN annotation sync (the detached server can't emit a Tauri event). Must
         // clone `app` — `monitor::spawn` consumes it below.
-        crate::sync_pulse::spawn(app.clone(), paths.clone());
+        crate::sync_pulse::spawn(app.clone(), paths.clone(), queue.clone());
 
         let device = monitor::new_state();
         let transport: SharedTransport = Arc::new(Mutex::new(None));

@@ -597,11 +597,13 @@ fn run() -> anyhow::Result<()> {
                         // shared.
                         let (banner_msg, saved) = match source {
                             Source::Drm => match drm_books.get(dl_id as usize) {
-                                Some(drm_book) => decrypt_flow(&mut fb, &mut renderer, drm_book)
-                                    .unwrap_or_else(|err| {
-                                        log(format!("decrypt flow error: {err:#}"));
-                                        (format!("Failed: {err}"), false)
-                                    }),
+                                Some(drm_book) => {
+                                    decrypt_flow(&mut fb, &mut renderer, &agent, &cfg, drm_book)
+                                        .unwrap_or_else(|err| {
+                                            log(format!("decrypt flow error: {err:#}"));
+                                            (format!("Failed: {err}"), false)
+                                        })
+                                }
                                 None => ("DRM book not found".to_string(), false),
                             },
                             Source::Library => download_flow(
@@ -760,38 +762,57 @@ fn run() -> anyhow::Result<()> {
                             continue;
                         }
                         ui::searchbar::Tap::Sync => {
-                            // Push this device's reading-state sidecars to the Mac
-                            // — the LAN twin of a USB annotation sync. The grid
-                            // doesn't change, so toast the report and repaint the
-                            // page underneath.
+                            // The Sync button is context-aware: in the library it
+                            // pushes reading-state sidecars (annotations); in DRM
+                            // mode it re-pushes every decrypted book to the desktop.
+                            // Either way the grid is unchanged — toast the report
+                            // and repaint the page underneath.
                             log("sync-button tap");
-                            let dirty = toast::draw(&mut fb, &mut renderer, "Syncing annotations…");
-                            fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
-
-                            let sync_t0 = Instant::now();
-                            let banner_msg = match api::push_annotations(
-                                &agent,
-                                &cfg,
-                                std::path::Path::new(DOWNLOAD_DIR),
-                            ) {
-                                Ok(report) => {
-                                    let summary = report.summary();
-                                    log(format!(
-                                        "annotation sync ok in {:?}: {summary}",
-                                        sync_t0.elapsed()
-                                    ));
-                                    summary
+                            let banner_msg = match source {
+                                Source::Drm => {
+                                    let zips = dedrm::decrypted_books();
+                                    if zips.is_empty() {
+                                        "No decrypted books to sync".to_string()
+                                    } else {
+                                        let dirty = toast::draw(
+                                            &mut fb,
+                                            &mut renderer,
+                                            "Syncing decrypted books…",
+                                        );
+                                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                                        sync_decrypted(&agent, &cfg, &zips)
+                                    }
                                 }
-                                Err(api::SidleError::TokenMismatch) => {
-                                    log(
-                                        "token rejected during sync — resync via sidle desktop app",
-                                    );
-                                    "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
-                                        .to_string()
-                                }
-                                Err(api::SidleError::Other(err)) => {
-                                    log(format!("annotation sync failed: {err:#}"));
-                                    format!("Sync failed: {err}")
+                                Source::Library => {
+                                    let dirty =
+                                        toast::draw(&mut fb, &mut renderer, "Syncing annotations…");
+                                    fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                                    let sync_t0 = Instant::now();
+                                    match api::push_annotations(
+                                        &agent,
+                                        &cfg,
+                                        std::path::Path::new(DOWNLOAD_DIR),
+                                    ) {
+                                        Ok(report) => {
+                                            let summary = report.summary();
+                                            log(format!(
+                                                "annotation sync ok in {:?}: {summary}",
+                                                sync_t0.elapsed()
+                                            ));
+                                            summary
+                                        }
+                                        Err(api::SidleError::TokenMismatch) => {
+                                            log(
+                                                "token rejected during sync — resync via sidle desktop app",
+                                            );
+                                            "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
+                                                .to_string()
+                                        }
+                                        Err(api::SidleError::Other(err)) => {
+                                            log(format!("annotation sync failed: {err:#}"));
+                                            format!("Sync failed: {err}")
+                                        }
+                                    }
                                 }
                             };
                             let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
@@ -1512,6 +1533,34 @@ fn load_cover(
 /// Between chunks it redraws progress at most every [`DL_REDRAW_INTERVAL`] and
 /// polls input non-blocking: a tap inside the Cancel button, or any bezel
 /// page-button press, aborts the transfer.
+/// Push every decrypted `.kfx-zip` to the desktop over the LAN, returning a
+/// one-line toast summary. The manual DRM-mode Sync; server dedupe makes re-runs
+/// safe (a re-push of an already-imported book is a `duplicate` no-op). A token
+/// mismatch aborts early with the re-provision breadcrumb — every push would hit
+/// the same wall.
+fn sync_decrypted(
+    agent: &ureq::Agent,
+    cfg: &config::ServerConfig,
+    zips: &[std::path::PathBuf],
+) -> String {
+    let (mut imported, mut dup, mut failed) = (0u32, 0u32, 0u32);
+    for zip in zips {
+        match api::push_book(agent, cfg, zip) {
+            Ok(api::BookPush::Imported) => imported += 1,
+            Ok(api::BookPush::Duplicate) => dup += 1,
+            Err(api::SidleError::TokenMismatch) => {
+                return "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
+                    .to_string();
+            }
+            Err(api::SidleError::Other(err)) => {
+                log(format!("sync {}: {err:#}", zip.display()));
+                failed += 1;
+            }
+        }
+    }
+    format!("Synced: {imported} new, {dup} already, {failed} failed")
+}
+
 /// Decrypt one on-device DRM purchase in place via the kfxdedrm engine — the DRM
 /// twin of [`download_flow`]. Probe the working ABI binary, spawn `<exe> dedrm
 /// <kfx>`, stream its stdout to the toast, and report exit status. Returns the
@@ -1526,6 +1575,8 @@ fn load_cover(
 fn decrypt_flow(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
+    agent: &ureq::Agent,
+    cfg: &config::ServerConfig,
     book: &dedrm::DrmBook,
 ) -> anyhow::Result<(String, bool)> {
     let short = truncate_title(&book.book.title, 32);
@@ -1581,10 +1632,29 @@ fn decrypt_flow(
         out_path.display(),
         out_path.exists()
     ));
-    match status {
-        Ok(s) if s.success() => Ok(("Decrypted → /mnt/us/dedrm".to_string(), true)),
-        _ => Ok(("Decrypt failed — see log".to_string(), false)),
+    if !matches!(status, Ok(ref s) if s.success()) {
+        return Ok(("Decrypt failed — see log".to_string(), false));
     }
+
+    // Decrypt done → auto-push the fresh .kfx-zip to the desktop over the LAN
+    // (best effort). The decrypt already succeeded, so the tile hides either way;
+    // a failed push is caught by the DRM-mode Sync button, which re-pushes every
+    // dedrm/*.kfx-zip. If the assumed output name isn't on disk (a divergent
+    // kfxdedrm name), don't guess which file is the fresh one — leave it for Sync.
+    if !out_path.exists() {
+        return Ok(("Decrypted (tap Sync to send)".to_string(), true));
+    }
+    let dirty = toast::draw(fb, renderer, &format!("Syncing {short}…"));
+    fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+    let msg = match api::push_book(agent, cfg, &out_path) {
+        Ok(api::BookPush::Imported) => "Decrypted → synced to library".to_string(),
+        Ok(api::BookPush::Duplicate) => "Decrypted → already in library".to_string(),
+        Err(err) => {
+            log(format!("auto-push failed: {err}"));
+            "Decrypted (tap Sync to send)".to_string()
+        }
+    };
+    Ok((msg, true))
 }
 
 fn download_flow(

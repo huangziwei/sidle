@@ -17,6 +17,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -27,6 +28,7 @@ use tokio::net::TcpListener;
 
 use sidle_core::library::{
     LibraryPaths, db,
+    import::{self, ImportOutcome},
     ingest::{self, CollectedYjr, DeviceImportReport},
     paths::kfx_device_filename,
 };
@@ -116,6 +118,10 @@ pub async fn serve_with_shutdown(
 /// sidecars (KB each) fit with generous headroom; bounds the JSON buffer the body
 /// extractor builds so a stray/oversized POST can't exhaust memory.
 const SYNC_BODY_LIMIT: usize = 32 * 1024 * 1024;
+/// Body cap on `POST /sync/book` — a decrypted book (`.kfx-zip`), buffered whole
+/// before it's handed to the importer. Generous for an image-heavy purchase;
+/// single-user LAN, so the transient RAM is fine.
+const BOOK_BODY_LIMIT: usize = 512 * 1024 * 1024;
 
 /// The axum app: routes + per-route layers. Factored out of
 /// [`serve_with_shutdown`] so tests can drive it via `Router::oneshot` without
@@ -132,6 +138,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/sync/annotations",
             post(sync_annotations).layer(DefaultBodyLimit::max(SYNC_BODY_LIMIT)),
+        )
+        .route(
+            "/sync/book",
+            post(sync_book).layer(DefaultBodyLimit::max(BOOK_BODY_LIMIT)),
         )
         // KUAL self-update pull: the picker fetches its own next binary from the
         // staged `kual-dist/` bundle (written by the desktop app). Reads only,
@@ -477,6 +487,82 @@ async fn sync_annotations(
     Ok(Json(report))
 }
 
+/// What `POST /sync/book` reports back, so the Kindle can toast imported-vs-
+/// already-there. `id` is the library book id in both cases.
+#[derive(serde::Serialize)]
+struct BookSyncResult {
+    /// `"imported"` (new) or `"duplicate"` (already in the library by content
+    /// hash — a harmless re-push).
+    outcome: &'static str,
+    id: i64,
+}
+
+/// Ingest one decrypted book pushed over the LAN — the WiFi twin of the desktop's
+/// USB `/dedrm` auto-pull. Token-gated, then the raw `.kfx-zip` body is written to
+/// a temp file and handed to the **exact** import the USB pull uses
+/// ([`import::import_file`]), so a WiFi import is byte-for-byte the same DB
+/// operation (and hash-dedupes against a book already pulled via USB).
+///
+/// `Bytes` is last (a body-consuming extractor). The book converts to its EPUB
+/// side on the next app launch (`state.rs` re-enqueues pending jobs); P4b wires a
+/// pulse so it converts live.
+async fn sync_book(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<BookSyncResult>, StatusCode> {
+    check_token(&headers, &query, &state.token)?;
+
+    let paths = state.paths.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<BookSyncResult, StatusCode> {
+        // import_file dispatches on the extension, so stage the bytes under a
+        // `.kfx-zip` name; the sha keeps concurrent uploads from colliding.
+        let sha = import::sha256_of_bytes(&body);
+        let tmp = std::env::temp_dir().join(format!("sidle-upload-{sha}.kfx-zip"));
+        std::fs::write(&tmp, &body).map_err(|err| {
+            tracing::error!(?err, "sync/book: write temp failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        let conn = db::open(&paths.db()).map_err(|err| {
+            tracing::error!(?err, "sync/book: open library.db failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        let outcome = import::import_file(&conn, &paths, &tmp);
+        let _ = std::fs::remove_file(&tmp);
+
+        match outcome {
+            Ok(ImportOutcome::Imported {
+                book,
+                needs_enqueue,
+            }) => {
+                // Signal the app to enqueue the conversion + refresh the shelf.
+                write_book_pulse(&paths, book.id, needs_enqueue);
+                Ok(BookSyncResult {
+                    outcome: "imported",
+                    id: book.id,
+                })
+            }
+            Ok(ImportOutcome::Duplicate(book)) => Ok(BookSyncResult {
+                outcome: "duplicate",
+                id: book.id,
+            }),
+            Err(err) => {
+                tracing::error!(?err, "sync/book: import failed");
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "sync/book: import task panicked");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })??;
+
+    Ok(Json(result))
+}
+
 /// Base64-decode an optional blob (standard alphabet, with padding); a decode
 /// error maps to `400 Bad Request`.
 fn decode_b64_opt(s: Option<&str>) -> Result<Option<Vec<u8>>, StatusCode> {
@@ -519,6 +605,33 @@ fn write_sync_pulse(paths: &LibraryPaths, device_serial: &str, report: &DeviceIm
     }
     if let Err(err) = std::fs::rename(&tmp_path, &final_path) {
         tracing::warn!(?err, "sync pulse: rename failed");
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+}
+
+/// Atomically write `<root>/.book-pulse.json` — the book twin of
+/// [`write_sync_pulse`]. The detached server can't emit a Tauri event, so the
+/// app's `sync_pulse` watcher reads this to enqueue the pending `kfx_to_epub`
+/// conversion and refresh the shelf. Only a **new** import writes one (a
+/// duplicate re-push changes nothing), so a manual re-sync of already-synced
+/// books stays quiet on the desktop. Best-effort — the DB write already
+/// succeeded, so a failed pulse just defers the conversion to the next launch.
+fn write_book_pulse(paths: &LibraryPaths, book_id: i64, needs_enqueue: bool) {
+    let pulse = serde_json::json!({
+        "ts": db::now_iso(),
+        "books": [ { "id": book_id, "needs_enqueue": needs_enqueue } ],
+    });
+    let Ok(bytes) = serde_json::to_vec(&pulse) else {
+        return;
+    };
+    let final_path = paths.root.join(".book-pulse.json");
+    let tmp_path = paths.root.join(".book-pulse.json.tmp");
+    if let Err(err) = std::fs::write(&tmp_path, &bytes) {
+        tracing::warn!(?err, "book pulse: write tmp failed");
+        return;
+    }
+    if let Err(err) = std::fs::rename(&tmp_path, &final_path) {
+        tracing::warn!(?err, "book pulse: rename failed");
         let _ = std::fs::remove_file(&tmp_path);
     }
 }
@@ -767,6 +880,8 @@ mod tests {
                 series_name: None,
                 series_index: None,
                 tags: &[],
+                title_romaji: "shiori no aru hon",
+                author_romaji: "Author",
             },
         )
         .unwrap();
@@ -785,6 +900,18 @@ mod tests {
         }
         b.body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap()
+    }
+
+    /// A `POST /sync/book` request with raw `.kfx-zip` bytes and an optional token.
+    fn book_request(token: Option<&str>, body: Vec<u8>) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/sync/book")
+            .header("content-type", "application/octet-stream");
+        if let Some(t) = token {
+            b = b.header("x-sidle-token", t);
+        }
+        b.body(Body::from(body)).unwrap()
     }
 
     /// The decisive P3 gate: a `.yjr` pushed through `POST /sync/annotations`
@@ -874,6 +1001,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_book_rejects_missing_token() {
+        // No token → 403 before the body is ever imported (check_token is first).
+        let tmp = tempfile::tempdir().unwrap();
+        let (paths, _) = library_with_matching_book(tmp.path());
+        let state = AppState {
+            paths,
+            token: Arc::from("the-real-token"),
+        };
+        let resp = build_router(state)
+            .oneshot(book_request(None, b"whatever".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_book_with_token_reaches_importer() {
+        // A valid token but a body that isn't a real `.kfx-zip` passes the gate
+        // and fails inside `import_file` (500) — proving the endpoint stages the
+        // bytes and calls the importer, not that it rejects early.
+        let tmp = tempfile::tempdir().unwrap();
+        let (paths, _) = library_with_matching_book(tmp.path());
+        let token = load_or_generate_token(&paths.root).unwrap();
+        let state = AppState {
+            paths,
+            token: Arc::from(token.as_str()),
+        };
+        let resp = build_router(state)
+            .oneshot(book_request(Some(&token), b"not a real kfx-zip".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
