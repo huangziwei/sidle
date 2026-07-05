@@ -110,6 +110,7 @@ pub fn draw(
     total_pages: usize,
     filter_count: usize,
     drilled: bool,
+    drm_active: bool,
 ) {
     let strip_y = strip_top(fb.var.yres);
     // 2px black divider, white strip body below.
@@ -138,8 +139,9 @@ pub fn draw(
     fb.fill_rect(strip_y + 12, SOURCE_LEFT - 2, 2, STRIP_H - 24, 0x00);
 
     // Source (library-switch) zone, right of Filter. Always visible — toggles the
-    // LAN library ↔ on-device DRM books.
-    renderer.draw(fb, SOURCE_LEFT as i32 + 40, baseline, "DRM", false);
+    // LAN library ↔ on-device DRM books; the label names where a tap goes.
+    let source_label = if drm_active { "Library" } else { "DRM" };
+    renderer.draw(fb, SOURCE_LEFT as i32 + 40, baseline, source_label, false);
     fb.fill_rect(strip_y + 12, NAV_LEFT - 2, 2, STRIP_H - 24, 0x00);
 
     if total_pages <= 1 {

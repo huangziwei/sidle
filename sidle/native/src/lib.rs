@@ -10,6 +10,7 @@ pub mod api;
 pub mod collate;
 pub mod config;
 pub mod cover_cache;
+pub mod dedrm;
 pub mod device_state;
 pub mod selfupdate;
 pub mod series;

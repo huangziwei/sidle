@@ -6,7 +6,7 @@
 //! /mnt/us/system/.cleanindex` → overlay "Downloaded" → restore gallery.
 
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -18,6 +18,7 @@ mod api;
 mod collate;
 mod config;
 mod cover_cache;
+mod dedrm;
 mod device_state;
 mod eink;
 mod orientation;
@@ -99,6 +100,24 @@ struct Armed {
     /// grouped top level, or drilled-in members) of the outlined tile.
     cell_idx: usize,
     down_at: Instant,
+}
+
+/// Which library the picker is showing. `Library` is the LAN server library (the
+/// default, download-a-book source); `Drm` is on-device purchased KFX books that
+/// a tap decrypts via kfxdedrm (see [`dedrm`]). The bottom-strip Source button
+/// toggles between them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Library,
+    Drm,
+}
+
+/// The DRM view-models when the DRM source is active, else `None` — the value
+/// threaded into `repaint_page`/`fetch_and_paint_page` so the cover seam loads
+/// local thumbnails (and the strip labels the toggle) only in DRM mode. Keyed by
+/// `book.id` = index in `drm_books` (see [`dedrm::DrmBook`]).
+fn drm_slice(source: Source, drm: &[dedrm::DrmBook]) -> Option<&[dedrm::DrmBook]> {
+    matches!(source, Source::Drm).then_some(drm)
 }
 
 fn main() {
@@ -351,6 +370,14 @@ fn run() -> anyhow::Result<()> {
         })
         .collect();
 
+    // Which source is showing (LAN library vs on-device DRM books) + the DRM
+    // scan when active. `lib_stash` parks the library master while in DRM mode so
+    // the toggle restores it — with any mid-session download-hides — instead of
+    // re-listing the server. See the `PagerHit::Source` handler.
+    let mut source = Source::Library;
+    let mut drm_books: Vec<dedrm::DrmBook> = Vec::new();
+    let mut lib_stash: Vec<api::Book> = Vec::new();
+
     // `all_books` is the master (hide-downloaded) set. The picker is **grouped
     // by series, always** (no flat toggle — see series-grouping.md): the master
     // is filtered+sorted by `rebuild_view`, then folded into `entries` (series
@@ -409,6 +436,7 @@ fn run() -> anyhow::Result<()> {
         filters.active_facets(),
         series_view.as_deref(),
         &query,
+        drm_slice(source, &drm_books),
     )?;
 
     let mut armed: Option<Armed> = None;
@@ -500,6 +528,7 @@ fn run() -> anyhow::Result<()> {
                             filters.active_facets(),
                             series_view.as_deref(),
                             &query,
+                            drm_slice(source, &drm_books),
                         )?;
                     }
                     continue;
@@ -541,16 +570,17 @@ fn run() -> anyhow::Result<()> {
                                 filters.active_facets(),
                                 series_view.as_deref(),
                                 &query,
+                                drm_slice(source, &drm_books),
                             )?;
                         }
                         continue;
                     }
                     let held = a.down_at.elapsed();
                     if held >= LONG_PRESS_THRESHOLD {
-                        // Long press → download. No need to clear the
-                        // outline first — the download toast paints
-                        // over the gallery, and the post-download
-                        // repaint paints the clean cell.
+                        // Long press → act on the book: download it (library) or
+                        // decrypt it in place (DRM). No need to clear the outline
+                        // first — the action toast paints over the gallery, and the
+                        // post-action repaint paints the clean cell.
                         let book = &cells[a.cell_idx].cover_book;
                         // Grab the identity now: `book` borrows `cells`, and the
                         // hide-on-success rebuild below reassigns `cells`.
@@ -560,14 +590,35 @@ fn run() -> anyhow::Result<()> {
                             book.id, book.title,
                         ));
                         let dl_t0 = Instant::now();
-                        let (banner_msg, saved) =
-                            download_flow(&mut fb, &mut renderer, &mut input, &agent, &cfg, book)
-                                .unwrap_or_else(|err| {
-                                    log(format!("download flow error: {err:#}"));
-                                    (format!("Failed: {err}"), false)
-                                });
+                        // In DRM mode the tap decrypts the on-device purchase via
+                        // kfxdedrm (`book.id` = index into `drm_books`); in library
+                        // mode it downloads from the LAN server. Both return
+                        // (toast, landed-on-device) so the hide-on-success path is
+                        // shared.
+                        let (banner_msg, saved) = match source {
+                            Source::Drm => match drm_books.get(dl_id as usize) {
+                                Some(drm_book) => decrypt_flow(&mut fb, &mut renderer, drm_book)
+                                    .unwrap_or_else(|err| {
+                                        log(format!("decrypt flow error: {err:#}"));
+                                        (format!("Failed: {err}"), false)
+                                    }),
+                                None => ("DRM book not found".to_string(), false),
+                            },
+                            Source::Library => download_flow(
+                                &mut fb,
+                                &mut renderer,
+                                &mut input,
+                                &agent,
+                                &cfg,
+                                book,
+                            )
+                            .unwrap_or_else(|err| {
+                                log(format!("download flow error: {err:#}"));
+                                (format!("Failed: {err}"), false)
+                            }),
+                        };
                         log(format!(
-                            "download flow for book {dl_id} finished in {:?}",
+                            "action for book {dl_id} finished in {:?}",
                             dl_t0.elapsed()
                         ));
                         let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
@@ -602,7 +653,7 @@ fn run() -> anyhow::Result<()> {
                             covers = vec![None; cells.len()];
                             page = page.min(total_pages.saturating_sub(1));
                             log(format!(
-                                "hid downloaded book {dl_id}: {} tiles, {total_pages} pages",
+                                "hid book {dl_id}: {} tiles, {total_pages} pages",
                                 cells.len(),
                             ));
                         }
@@ -622,13 +673,18 @@ fn run() -> anyhow::Result<()> {
                             filters.active_facets(),
                             series_view.as_deref(),
                             &query,
+                            drm_slice(source, &drm_books),
                         )?;
                     } else {
                         // Short tap on a cover — discovery hint. Without
                         // this, a tap-trained user keeps tapping and
                         // wondering why nothing happens.
                         log(format!("short tap ({held:?}), showing hint"));
-                        let dirty = toast::draw(&mut fb, &mut renderer, "Hold cover to download");
+                        let hint = match source {
+                            Source::Drm => "Hold cover to decrypt",
+                            Source::Library => "Hold cover to download",
+                        };
+                        let dirty = toast::draw(&mut fb, &mut renderer, hint);
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                         thread::sleep(TOAST_LINGER);
                         // Repaint to clear both the toast and the cell
@@ -649,6 +705,7 @@ fn run() -> anyhow::Result<()> {
                             filters.active_facets(),
                             series_view.as_deref(),
                             &query,
+                            drm_slice(source, &drm_books),
                         )?;
                     }
                     continue;
@@ -698,6 +755,7 @@ fn run() -> anyhow::Result<()> {
                                 filters.active_facets(),
                                 series_view.as_deref(),
                                 &query,
+                                drm_slice(source, &drm_books),
                             )?;
                             continue;
                         }
@@ -755,6 +813,7 @@ fn run() -> anyhow::Result<()> {
                                 filters.active_facets(),
                                 series_view.as_deref(),
                                 &query,
+                                drm_slice(source, &drm_books),
                             )?;
                             continue;
                         }
@@ -809,6 +868,7 @@ fn run() -> anyhow::Result<()> {
                         filters.active_facets(),
                         series_view.as_deref(),
                         &query,
+                        drm_slice(source, &drm_books),
                     )?;
                     continue;
                 }
@@ -884,6 +944,7 @@ fn run() -> anyhow::Result<()> {
                                 filters.active_facets(),
                                 series_view.as_deref(),
                                 &query,
+                                drm_slice(source, &drm_books),
                             )?;
                         }
                         PagerHit::Back => {
@@ -911,6 +972,7 @@ fn run() -> anyhow::Result<()> {
                                 filters.active_facets(),
                                 series_view.as_deref(),
                                 &query,
+                                drm_slice(source, &drm_books),
                             )?;
                         }
                         PagerHit::Prev => {
@@ -933,6 +995,7 @@ fn run() -> anyhow::Result<()> {
                                     filters.active_facets(),
                                     series_view.as_deref(),
                                     &query,
+                                    drm_slice(source, &drm_books),
                                 )?;
                             }
                         }
@@ -956,18 +1019,64 @@ fn run() -> anyhow::Result<()> {
                                     filters.active_facets(),
                                     series_view.as_deref(),
                                     &query,
+                                    drm_slice(source, &drm_books),
                                 )?;
                             }
                         }
                         PagerHit::Source => {
-                            // Library-switch button (former Sync slot): a stub that
-                            // toasts, pending the on-device DRM-books source. The
-                            // grid doesn't change, so repaint the page underneath.
+                            // Library-switch button (former Sync slot): toggle the
+                            // LAN library ↔ on-device DRM books.
                             log("source-button tap");
-                            let dirty =
-                                toast::draw(&mut fb, &mut renderer, "DRM books — coming soon");
-                            fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
-                            thread::sleep(TOAST_LINGER);
+                            let before = source;
+                            match source {
+                                Source::Library => {
+                                    // → DRM. Browse whenever ≥1 purchase is present
+                                    // (the decrypt action, not the toggle, gates on
+                                    // the kfxdedrm engine); toast and stay if none.
+                                    drm_books = dedrm::scan();
+                                    if drm_books.is_empty() {
+                                        let dirty = toast::draw(
+                                            &mut fb,
+                                            &mut renderer,
+                                            "No DRM books in Items01",
+                                        );
+                                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                                        thread::sleep(TOAST_LINGER);
+                                    } else {
+                                        // Park the library master so the swap back
+                                        // restores it (with any mid-session hides).
+                                        lib_stash = std::mem::take(&mut all_books);
+                                        all_books =
+                                            drm_books.iter().map(|d| d.book.clone()).collect();
+                                        source = Source::Drm;
+                                        log(format!("→ DRM source: {} books", all_books.len()));
+                                    }
+                                }
+                                Source::Drm => {
+                                    // → Library. Restore the parked master.
+                                    all_books = std::mem::take(&mut lib_stash);
+                                    source = Source::Library;
+                                    log(format!("→ Library source: {} books", all_books.len()));
+                                }
+                            }
+                            // Only rebuild when the source actually flipped — a
+                            // failed switch (not installed / empty) leaves the
+                            // current view untouched. Fresh query + facets for the
+                            // new set; the sort key carries over.
+                            if source != before {
+                                query.clear();
+                                filters = Filters::default();
+                                series_view = None;
+                                entries = series::group_by_series(rebuild_view(
+                                    &all_books, &filters, sort, &query,
+                                ));
+                                cells = series::cells_for_top(&entries);
+                                total_pages = pager::n_pages(cells.len());
+                                covers = vec![None; cells.len()];
+                                page = 0;
+                            }
+                            // Repaint regardless — a toast (or the swap) painted
+                            // over the grid.
                             repaint_page(
                                 &mut fb,
                                 &mut renderer,
@@ -984,6 +1093,7 @@ fn run() -> anyhow::Result<()> {
                                 filters.active_facets(),
                                 series_view.as_deref(),
                                 &query,
+                                drm_slice(source, &drm_books),
                             )?;
                         }
                     }
@@ -1031,6 +1141,7 @@ fn run() -> anyhow::Result<()> {
                         filters.active_facets(),
                         series_view.as_deref(),
                         &query,
+                        drm_slice(source, &drm_books),
                     )?;
                 }
             }
@@ -1063,6 +1174,7 @@ fn run() -> anyhow::Result<()> {
                             filters.active_facets(),
                             series_view.as_deref(),
                             &query,
+                            drm_slice(source, &drm_books),
                         )?;
                     }
                 }
@@ -1113,6 +1225,7 @@ fn draw_gallery_page(
     filter_count: usize,
     drilled: bool,
     query: &str,
+    drm_active: bool,
 ) -> anyhow::Result<()> {
     fb.fill_rect(0, 0, fb.var.xres, fb.var.yres, 0xFF);
 
@@ -1158,7 +1271,15 @@ fn draw_gallery_page(
     // Strip is the only path to Exit — always draw, even on a single
     // page. `pager::draw` internally returns early after Exit when
     // total_pages <= 1, so no prev/next labels are shown then.
-    pager::draw(fb, renderer, page, total_pages, filter_count, drilled);
+    pager::draw(
+        fb,
+        renderer,
+        page,
+        total_pages,
+        filter_count,
+        drilled,
+        drm_active,
+    );
     fb.send_update(
         MxcfbRect {
             top: 0,
@@ -1193,6 +1314,7 @@ fn repaint_page(
     filter_count: usize,
     series_view: Option<&str>,
     query: &str,
+    drm: Option<&[dedrm::DrmBook]>,
 ) -> anyhow::Result<()> {
     let drilled = series_view.is_some();
     let header = match series_view {
@@ -1212,9 +1334,10 @@ fn repaint_page(
         filter_count,
         drilled,
         query,
+        drm.is_some(),
     )?;
     fetch_and_paint_page(
-        fb, renderer, agent, cfg, cache_dir, cells, covers, page, grid_left, grid_top,
+        fb, renderer, agent, cfg, cache_dir, cells, covers, page, grid_left, grid_top, drm,
     )?;
     Ok(())
 }
@@ -1236,6 +1359,7 @@ fn fetch_and_paint_page(
     page: usize,
     grid_left: i32,
     grid_top: i32,
+    drm: Option<&[dedrm::DrmBook]>,
 ) -> anyhow::Result<()> {
     let start = page * PAGE_SIZE;
     let end = (start + PAGE_SIZE).min(cells.len());
@@ -1246,8 +1370,17 @@ fn fetch_and_paint_page(
             continue;
         }
         // The cover source is the cell's own book (standalone) or its series'
-        // lead member — one fetch per collection, not one per member.
-        let img = load_cover(agent, cfg, cache_dir, &cells[idx].cover_book);
+        // lead member — one fetch per collection, not one per member. In DRM mode
+        // it's the book's local device thumbnail (keyed by `book.id` = drm index);
+        // in library mode a LAN fetch + disk cache.
+        let book = &cells[idx].cover_book;
+        let img = match drm {
+            Some(drm_books) => drm_books
+                .get(book.id as usize)
+                .and_then(|d| d.cover_path.as_deref())
+                .and_then(dedrm_cover),
+            None => load_cover(agent, cfg, cache_dir, book),
+        };
 
         if let Some(img) = img.as_ref() {
             let (cx, cy) = grid::cell_xy(grid_left, grid_top, idx - start);
@@ -1288,6 +1421,15 @@ fn fetch_and_paint_page(
         ));
     }
     Ok(())
+}
+
+/// Decode a DRM book's local device thumbnail into a grid image, or `None` if
+/// it's missing/undecodable (cell stays a placeholder). The DRM cover seam's
+/// local twin of [`load_cover`]'s LAN fetch — no network, no cache, since the
+/// thumbnail is already a small file on the device.
+fn dedrm_cover(path: &Path) -> Option<DynamicImage> {
+    let bytes = std::fs::read(path).ok()?;
+    grid::decode_resize(&bytes).ok()
 }
 
 /// Load one book's cover into a decoded image: disk cache first (instant, no
@@ -1359,6 +1501,81 @@ fn load_cover(
 /// Between chunks it redraws progress at most every [`DL_REDRAW_INTERVAL`] and
 /// polls input non-blocking: a tap inside the Cancel button, or any bezel
 /// page-button press, aborts the transfer.
+/// Decrypt one on-device DRM purchase in place via the kfxdedrm engine — the DRM
+/// twin of [`download_flow`]. Probe the working ABI binary, spawn `<exe> dedrm
+/// <kfx>`, stream its stdout to the toast, and report exit status. Returns the
+/// toast message **and** whether it succeeded (`true` hides the tile, mirroring a
+/// completed download).
+///
+/// No cancel — a single small book decrypts in seconds — and stderr is inherited
+/// (it lands in `sidle.sh`'s log). The engine writes `<stem>.kfx-zip` under
+/// [`dedrm::OUT_DIR`]; whether the file materialized is logged as a breadcrumb
+/// (to confirm the assumed output name on-device) but success is the exit code,
+/// so a divergent output name still reads as success rather than a false failure.
+fn decrypt_flow(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    book: &dedrm::DrmBook,
+) -> anyhow::Result<(String, bool)> {
+    let short = truncate_title(&book.book.title, 32);
+    let dirty = toast::draw(fb, renderer, &format!("Decrypting {short}…"));
+    fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+
+    let Some(exe) = dedrm::probe_exe() else {
+        return Ok(("No working kfxdedrm binary".to_string(), false));
+    };
+
+    let mut child = match Command::new(&exe)
+        .arg("dedrm")
+        .arg(&book.kfx_path)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            log(format!("kfxdedrm spawn failed: {e}"));
+            return Ok((format!("Decrypt failed: {e}"), false));
+        }
+    };
+
+    // Stream stdout → toast at e-ink cadence (stderr is inherited to the log).
+    // `read_line` blocks; the picker is dedicated to this decrypt.
+    if let Some(out) = child.stdout.take() {
+        let mut reader = std::io::BufReader::new(out);
+        let mut line = String::new();
+        let mut last_draw = Instant::now();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let msg = line.trim();
+            if msg.is_empty() {
+                continue;
+            }
+            log(format!("kfxdedrm: {msg}"));
+            if last_draw.elapsed() >= DL_REDRAW_INTERVAL {
+                let dirty = toast::draw(fb, renderer, &format!("Decrypting {short}…\n{msg}"));
+                fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                last_draw = Instant::now();
+            }
+        }
+    }
+
+    let status = child.wait();
+    let out_path = dedrm::out_path(&book.kfx_path);
+    log(format!(
+        "kfxdedrm exit={status:?}; {} exists={}",
+        out_path.display(),
+        out_path.exists()
+    ));
+    match status {
+        Ok(s) if s.success() => Ok(("Decrypted → /mnt/us/dedrm".to_string(), true)),
+        _ => Ok(("Decrypt failed — see log".to_string(), false)),
+    }
+}
+
 fn download_flow(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
