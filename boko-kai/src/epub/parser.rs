@@ -507,10 +507,17 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                             // dedicated field; everything else fills the
                             // generic identifier (first one wins to match
                             // prior behavior).
+                            // Legacy EPUB-2 form carries the scheme as an
+                            // `opf:scheme="ASIN"` attribute; EPUB-3-valid output
+                            // (KFX→EPUB) instead tags the identifier with
+                            // `id="asin"` (the `opf:scheme` attr is illegal in
+                            // 3.x). Recover from either.
                             let is_asin = current_identifier_scheme.as_deref().is_some_and(|s| {
                                 s.eq_ignore_ascii_case("ASIN")
                                     || s.eq_ignore_ascii_case("MOBI-ASIN")
-                            });
+                            }) || current_element_id
+                                .as_deref()
+                                .is_some_and(|id| id.eq_ignore_ascii_case("asin"));
                             if is_asin {
                                 if metadata.asin.is_none() && !text.is_empty() {
                                     metadata.asin = Some(text);

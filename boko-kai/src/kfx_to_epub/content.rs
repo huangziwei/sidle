@@ -1947,8 +1947,15 @@ fn list_tag_for(fields: &[(u64, IonValue)], symbols: &super::loader::SymbolTable
     }
 }
 
-fn safe_class_name(name: &str) -> String {
-    name.chars()
+/// Sanitize a KFX style name into a valid CSS class name (and matching HTML
+/// `class` attribute). Non-identifier characters become `_`; a leading digit
+/// (or `-digit` / lone `-`) is prefixed with `_`, since a CSS identifier can't
+/// start with a digit — an unescaped `.0HrDijd…` selector is a parse error
+/// (epubcheck CSS-008). Applied identically to the selector and the element's
+/// class attribute so they stay in sync.
+pub(crate) fn safe_class_name(name: &str) -> String {
+    let mut out: String = name
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
                 c
@@ -1956,7 +1963,18 @@ fn safe_class_name(name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    let needs_prefix = match out.as_bytes() {
+        [] => true,
+        [b'-'] => true,
+        [b'-', d, ..] if d.is_ascii_digit() => true,
+        [d, ..] if d.is_ascii_digit() => true,
+        _ => false,
+    };
+    if needs_prefix {
+        out.insert(0, '_');
+    }
+    out
 }
 
 /// HTML block-level elements (calibre's set in
@@ -2403,27 +2421,52 @@ pub fn replace_eol_with_br(state: &mut ContentState) {
 /// calibre logs them; we leave them so the validator's link-defects
 /// gate surfaces them.
 pub fn resolve_link_placeholders(state: &mut ContentState) {
-    let map = state.element_id_to_filename.clone();
     let anchors = state.anchors.clone();
+
+    // Authoritative `html-id → file` map, built from the ids ACTUALLY stamped
+    // in the emitted DOM. `element_id_to_filename` is structural-reachability
+    // (first-section-wins) and is wrong for content that emits in a different
+    // section than the one that claims its eid (footnotes/cross-refs), and it
+    // can't tell whether a position was ever stamped at all. Resolving against
+    // reality guarantees no `<a href="chapter#missing">` (epubcheck RSC-012).
+    let mut stamped_id_to_file: HashMap<String, String> = HashMap::new();
+    for part in &state.book_parts {
+        for id in 0..part.dom.len() {
+            if let Some(html_id) = part.dom.get(id).get("id") {
+                stamped_id_to_file
+                    .entry(html_id.to_string())
+                    .or_insert_with(|| part.filename.clone());
+            }
+        }
+    }
+
     for part in &mut state.book_parts {
         let n = part.dom.len();
         for id in 0..n {
             // Read just the `href` (if present) instead of cloning every node's
             // whole attrs vec: most nodes have no `href`, and the clone-per-node
             // dominated this pass on link-dense books (~300 ms on a 2.5 MB-HTML
-            // academic title with many cross-references). `resolve_uri` returns
-            // an owned String, so the element borrow ends before `get_mut`.
-            let uri = match part
+            // academic title with many cross-references).
+            let name = match part
                 .dom
                 .get(id)
                 .get("href")
                 .and_then(|v| v.strip_prefix("anchor:"))
             {
-                Some(name) => anchors.resolve_uri(name, &map),
-                None => None,
+                Some(name) => name.to_string(),
+                None => continue,
             };
-            if let Some(uri) = uri {
-                part.dom.get_mut(id).set("href", uri);
+            match anchors.resolve_uri_stamped(&name, &stamped_id_to_file) {
+                // Resolved to a real target (external URI or a stamped id).
+                Some(uri) => {
+                    part.dom.get_mut(id).set("href", uri);
+                }
+                // Unresolvable: the target position was never stamped anywhere.
+                // Drop the placeholder href so we emit a valid (non-linking)
+                // `<a>` rather than a dangling `anchor:` / `#missing` fragment.
+                None => {
+                    part.dom.get_mut(id).remove_attr("href");
+                }
             }
         }
     }

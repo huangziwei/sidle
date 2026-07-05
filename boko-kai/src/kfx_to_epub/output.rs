@@ -502,28 +502,43 @@ impl EpubOutput {
         } else {
             &meta.title
         };
+        // Title — the yomigana sort key rides an EPUB-3 `<meta refines>`
+        // (`opf:file-as` as a `<dc:title>` attribute is EPUB-2 only, rejected
+        // by epubcheck as RSC-005 under 3.x).
+        s.push_str(&format!(
+            "    <dc:title id=\"title\">{}</dc:title>\n",
+            xml_escape(title)
+        ));
         if let Some(file_as) = meta.title_pronunciation.as_deref() {
             s.push_str(&format!(
-                "    <dc:title opf:file-as=\"{}\">{}</dc:title>\n",
-                xml_escape(file_as),
-                xml_escape(title)
+                "    <meta refines=\"#title\" property=\"file-as\">{}</meta>\n",
+                xml_escape(file_as)
             ));
-        } else {
-            s.push_str(&format!("    <dc:title>{}</dc:title>\n", xml_escape(title)));
         }
 
-        // Authors — `opf:role="aut"` + `opf:file-as`. Prefer the KFX-supplied
+        // Authors — role + file-as via EPUB-3 `<meta refines>` (was EPUB-2
+        // `opf:role`/`opf:file-as` attributes). Prefer the KFX-supplied
         // `author_pronunciation` (yomigana sort key); fall back to the joined
         // author list so EPUB libraries still sort multi-author books.
         let author_file_as = meta
             .author_pronunciation
             .clone()
             .unwrap_or_else(|| meta.authors.join(" & "));
-        for author in &meta.authors {
+        for (i, author) in meta.authors.iter().enumerate() {
+            let cid = format!("creator{}", i + 1);
             s.push_str(&format!(
-                "    <dc:creator opf:file-as=\"{}\" opf:role=\"aut\">{}</dc:creator>\n",
-                xml_escape(&author_file_as),
+                "    <dc:creator id=\"{}\">{}</dc:creator>\n",
+                cid,
                 xml_escape(author)
+            ));
+            s.push_str(&format!(
+                "    <meta refines=\"#{}\" property=\"role\" scheme=\"marc:relators\">aut</meta>\n",
+                cid
+            ));
+            s.push_str(&format!(
+                "    <meta refines=\"#{}\" property=\"file-as\">{}</meta>\n",
+                cid,
+                xml_escape(&author_file_as)
             ));
         }
 
@@ -538,9 +553,12 @@ impl EpubOutput {
             xml_escape(lang)
         ));
 
-        // Identifier — calibre emits multiple <dc:identifier> with
-        // opf:scheme="ASIN" / "MOBI-ASIN" / "uuid" / "calibre"; we mirror the
-        // ASIN ones when present and use the KFX book_id as the unique-id.
+        // Identifier — the primary unique-id is the KFX book_id. EPUB 3.x
+        // forbids the EPUB-2 `opf:scheme` attribute on `<dc:identifier>`
+        // (RSC-005), so the ASIN rides a plain identifier tagged `id="asin"`;
+        // `import::epub` recovers it from that id (round-trips ASIN back to
+        // KFX). The MOBI-ASIN / uuid scheme twins were calibre-isms with no
+        // consumer and are dropped.
         let id = if meta.identifier.is_empty() {
             "urn:uuid:00000000-0000-0000-0000-000000000000"
         } else {
@@ -552,21 +570,10 @@ impl EpubOutput {
         ));
         if let Some(asin) = meta.asin.as_deref() {
             s.push_str(&format!(
-                "    <dc:identifier opf:scheme=\"ASIN\">{}</dc:identifier>\n",
-                xml_escape(asin)
-            ));
-            s.push_str(&format!(
-                "    <dc:identifier opf:scheme=\"MOBI-ASIN\">{}</dc:identifier>\n",
+                "    <dc:identifier id=\"asin\">{}</dc:identifier>\n",
                 xml_escape(asin)
             ));
         }
-        // Reproducible UUID v5 derived from the KFX book_id. Calibre emits a
-        // randomly-generated UUID here; we use a deterministic one so two
-        // converts of the same KFX produce the same OPF identifier.
-        s.push_str(&format!(
-            "    <dc:identifier opf:scheme=\"uuid\">{}</dc:identifier>\n",
-            crate::util::uuid_v5(id)
-        ));
 
         // `dcterms:modified` — required by EPUB 3 (every Publication must
         // declare its last-modified time). Stamps NOW per
@@ -592,8 +599,15 @@ impl EpubOutput {
             s.push_str(&format!("    <dc:date>{}</dc:date>\n", xml_escape(&iso)));
         }
 
-        // Publisher (optional)
-        if let Some(ref pub_) = meta.publisher {
+        // Publisher (optional). Skip when empty/whitespace: the OPF schema
+        // requires `<dc:publisher>` to carry a non-empty string, so an empty
+        // element is RSC-005 ("character content … invalid").
+        if let Some(pub_) = meta
+            .publisher
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
             s.push_str(&format!(
                 "    <dc:publisher>{}</dc:publisher>\n",
                 xml_escape(pub_)
@@ -673,12 +687,36 @@ impl EpubOutput {
             "    <item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>\n",
         );
         for m in &self.manifest {
-            let properties = if m.is_cover_image {
-                " properties=\"cover-image\""
-            } else if m.is_nav {
-                " properties=\"nav\""
+            let mut props: Vec<&str> = Vec::new();
+            if m.is_cover_image {
+                props.push("cover-image");
+            }
+            if m.is_nav {
+                props.push("nav");
+            }
+            // EPUB 3 (OPF-014): a content doc embedding inline SVG / MathML /
+            // scripting must declare it in the manifest `properties`. Scan the
+            // XHTML bytes for real element openings — text-node `<` is escaped
+            // as `&lt;` in XHTML, so a raw `<svg` is always a genuine element,
+            // and we must not over-declare (the inverse, OPF-015).
+            if m.media_type == "application/xhtml+xml"
+                && let Some(f) = self.oebps_files.get(&m.href)
+            {
+                let xml = String::from_utf8_lossy(&f.data);
+                if contains_element(&xml, "svg") {
+                    props.push("svg");
+                }
+                if contains_element(&xml, "math") {
+                    props.push("mathml");
+                }
+                if contains_element(&xml, "script") {
+                    props.push("scripted");
+                }
+            }
+            let properties = if props.is_empty() {
+                String::new()
             } else {
-                ""
+                format!(" properties=\"{}\"", props.join(" "))
             };
             s.push_str(&format!(
                 "    <item id=\"{}\" href=\"{}\" media-type=\"{}\"{}/>\n",
@@ -804,11 +842,19 @@ impl EpubOutput {
             s.push_str("    <ol>\n");
             for g in &self.guide {
                 let epub_type = guide_type_to_epub3(&g.guide_type);
+                // EPUB 3 requires every `<nav>` anchor to carry text (RSC-005);
+                // KFX landmark containers sometimes yield an empty label (the
+                // bodymatter/cover start marker), so fall back to a default.
+                let label = if g.label.trim().is_empty() {
+                    landmark_default_label(epub_type)
+                } else {
+                    g.label.as_str()
+                };
                 s.push_str(&format!(
                     "      <li><a epub:type=\"{}\" href=\"{}\">{}</a></li>\n",
                     epub_type,
                     xml_escape(&g.href),
-                    xml_escape(&g.label),
+                    xml_escape(label),
                 ));
             }
             s.push_str("    </ol>\n");
@@ -905,6 +951,47 @@ fn guide_type_to_epub3(guide_type: &str) -> &str {
         "start" | "text" => "bodymatter",
         "acknowledgements" => "acknowledgments",
         other => other,
+    }
+}
+
+/// True if `xml` contains a real element `<name…>` (open tag), used to compute
+/// EPUB-3 manifest `properties` (svg / mathml / scripted) for OPF-014. Matches
+/// `<name` followed by a tag delimiter so `<svgfoo` doesn't count; text-node
+/// `<` is `&lt;`-escaped in XHTML, so any raw `<name` is a genuine element.
+fn contains_element(xml: &str, name: &str) -> bool {
+    let needle = format!("<{name}");
+    let mut hay = xml;
+    while let Some(pos) = hay.find(&needle) {
+        let after = pos + needle.len();
+        if hay[after..]
+            .chars()
+            .next()
+            .is_none_or(|c| matches!(c, ' ' | '\t' | '\r' | '\n' | '>' | '/'))
+        {
+            return true;
+        }
+        hay = &hay[after..];
+    }
+    false
+}
+
+/// Human-readable fallback label for a landmark whose KFX source carried no
+/// text. EPUB 3 rejects an empty `<nav>` anchor (RSC-005 "Anchors within nav
+/// elements must contain text"), so every landmark link needs a label.
+fn landmark_default_label(epub_type: &str) -> &'static str {
+    match epub_type {
+        "cover" => "Cover",
+        "toc" => "Table of Contents",
+        "frontmatter" => "Front Matter",
+        "backmatter" => "Back Matter",
+        "loi" => "List of Illustrations",
+        "lot" => "List of Tables",
+        "preface" => "Preface",
+        "bibliography" => "Bibliography",
+        "index" => "Index",
+        "glossary" => "Glossary",
+        // "bodymatter" and anything unrecognized: the reading-start marker.
+        _ => "Start of Content",
     }
 }
 

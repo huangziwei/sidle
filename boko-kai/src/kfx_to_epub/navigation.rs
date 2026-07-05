@@ -100,35 +100,37 @@ impl AnchorTable {
         self.heading_level.get(&(eid, offset)).copied()
     }
 
-    /// Resolve an `anchor_name` to its final EPUB URI for `<a href>`
-    /// emission. Calibre's `get_anchor_uri` — looks at three sources
-    /// in order: external `anchor_uri` (a real http URI), then the
-    /// `(eid, offset)` mapping plus the caller-supplied
-    /// `element_id_to_filename` to produce `{chapter}#{html_id}`.
-    /// Returns `None` if the anchor is not registered (caller should
-    /// treat as a dangling link and either drop the href or log).
-    pub fn resolve_uri(
+    /// Resolve an anchor to its final `<a href>` using the AUTHORITATIVE
+    /// `html-id → file` map built from the emitted DOM, guaranteeing
+    /// referential integrity. Unlike `resolve_uri` (which trusts the
+    /// structural `element_id_to_filename`, wrong for content that emits in a
+    /// different section than the one that structurally claims its eid — e.g.
+    /// footnotes — and blind to positions that never got stamped), this
+    /// resolves an internal anchor ONLY when its target id was actually stamped
+    /// somewhere, and to the file it really landed in. Returns `None` when the
+    /// anchor is unresolvable (never stamped, or a blank external URI); the
+    /// caller drops the dangling link so no `<a href="…#missing">` is emitted
+    /// (epubcheck RSC-012). Matches calibre's behavior of dropping anchors it
+    /// can't place.
+    pub fn resolve_uri_stamped(
         &self,
         anchor_name: &str,
-        element_id_to_filename: &HashMap<i64, String>,
+        stamped_id_to_file: &HashMap<String, String>,
     ) -> Option<String> {
-        // Already-resolved external URI?
+        // External URI (real http link); a blank placeholder is unresolvable.
         if let Some(uri) = self.anchor_uri.get(anchor_name) {
-            return Some(uri.clone());
+            return if uri.is_empty() {
+                None
+            } else {
+                Some(uri.clone())
+            };
         }
-        // Internal position anchor — O(1) via the reverse index. The fragment
-        // is the FIRST anchor's id at this position (`id_at`), NOT
-        // `fix_html_id(anchor_name)`: when several anchors share a position
-        // only the first one's id is stamped on the element, so a link naming a
-        // co-located later anchor must resolve to that same id (faithful to
-        // calibre's `get_anchor_uri`, which reads `anchor_uri[name]` =
-        // `filename#elem.id` for the single stamped element).
-        if let Some(&(eid, offset)) = self.name_to_position.get(anchor_name) {
-            let file = element_id_to_filename.get(&eid)?;
-            let frag = self.id_at(eid, offset)?;
-            return Some(format!("{}#{}", file, frag));
-        }
-        None
+        // Internal position anchor — resolve to the file the stamped id is
+        // actually in (not the structural guess).
+        let &(eid, offset) = self.name_to_position.get(anchor_name)?;
+        let frag = self.id_at(eid, offset)?;
+        let file = stamped_id_to_file.get(&frag)?;
+        Some(format!("{file}#{frag}"))
     }
 }
 
@@ -694,9 +696,24 @@ fn nav_unit_to_navpoint(
 /// Render the NCX navMap from a list of nav points.
 pub fn render_navmap(points: &[NavPoint]) -> String {
     let mut s = String::new();
-    let mut play_order = 1usize;
-    write_points(&mut s, points, &mut play_order, 2);
+    let mut ctx = NavmapCtx {
+        next_id: 1,
+        next_play_order: 1,
+        play_order_by_target: HashMap::new(),
+    };
+    write_points(&mut s, points, &mut ctx, 2);
     s
+}
+
+/// Numbering state for the NCX navMap. `id` is always unique (one per
+/// navPoint); `playOrder` is assigned per unique content target so that two
+/// navPoints referencing the same target share a playOrder — the NCX rule
+/// epubcheck enforces (RSC-005 "different playOrder values … that refer to the
+/// same target"). First-occurrence order gives reading-order playOrder.
+struct NavmapCtx {
+    next_id: usize,
+    next_play_order: usize,
+    play_order_by_target: HashMap<String, usize>,
 }
 
 /// Render the EPUB 3 nav doc TOC body — `<ol><li><a href="...">title</a></li></ol>`.
@@ -731,13 +748,23 @@ fn write_nav_ol(s: &mut String, points: &[NavPoint], indent: usize) {
     s.push_str("</ol>\n");
 }
 
-fn write_points(s: &mut String, points: &[NavPoint], play_order: &mut usize, indent: usize) {
+fn write_points(s: &mut String, points: &[NavPoint], ctx: &mut NavmapCtx, indent: usize) {
     let prefix = "  ".repeat(indent);
     for p in points {
+        let id = ctx.next_id;
+        ctx.next_id += 1;
+        // Same content target ⇒ same playOrder (assigned in first-occurrence
+        // order); the `id` stays unique per navPoint.
+        let po = if let Some(&po) = ctx.play_order_by_target.get(&p.href) {
+            po
+        } else {
+            let v = ctx.next_play_order;
+            ctx.next_play_order += 1;
+            ctx.play_order_by_target.insert(p.href.clone(), v);
+            v
+        };
         s.push_str(&format!(
-            "{}<navPoint id=\"navPoint-{po}\" playOrder=\"{po}\">\n",
-            prefix,
-            po = *play_order
+            "{prefix}<navPoint id=\"navPoint-{id}\" playOrder=\"{po}\">\n"
         ));
         s.push_str(&format!(
             "{}  <navLabel><text>{}</text></navLabel>\n",
@@ -749,9 +776,8 @@ fn write_points(s: &mut String, points: &[NavPoint], play_order: &mut usize, ind
             prefix,
             xml_escape(&p.href)
         ));
-        *play_order += 1;
         if !p.children.is_empty() {
-            write_points(s, &p.children, play_order, indent + 1);
+            write_points(s, &p.children, ctx, indent + 1);
         }
         s.push_str(&format!("{}</navPoint>\n", prefix));
     }

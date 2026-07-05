@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use crate::kfx::container::get_field;
 use crate::kfx::ion::IonValue;
 
+use super::content::safe_class_name;
 use super::loader::{BookData, SymbolTable};
 
 /// One entry in the YJ → CSS property map. Mirrors calibre's `Prop` class.
@@ -122,7 +123,14 @@ pub fn convert_yj_properties(
             // Calibre maps Python None to "drop the property"; we map it to
             // skip the declaration entirely.
             if !value_str.is_empty() {
-                out.set(prop.name.to_string(), value_str);
+                let value_str = if prop.name == "font-family" {
+                    normalize_font_family(&value_str)
+                } else {
+                    value_str
+                };
+                if !value_str.is_empty() {
+                    out.set(prop.name.to_string(), value_str);
+                }
             }
         }
     }
@@ -142,6 +150,67 @@ fn is_default_font_name(s: &str) -> bool {
     s == "default" || s == "$amzn_fixup_default_font$"
 }
 
+/// Quote font-family names that aren't safe as unquoted CSS identifiers. KFX
+/// carries legacy vertical-writing font variants (`@ヒラギノ明朝`) and CJK family
+/// names; an unquoted token starting with `@` is parsed as a CSS at-keyword and
+/// rejected (epubcheck CSS-008 "Token … not allowed here"). Generic keywords
+/// and plain ASCII-identifier names stay unquoted (e.g. `times new roman`,
+/// `serif`); everything else is quoted.
+fn normalize_font_family(value: &str) -> String {
+    value
+        .split(',')
+        .filter_map(|fam| {
+            let f = fam.trim();
+            if f.is_empty() {
+                None
+            } else if is_generic_font_keyword(f) || is_safe_unquoted_font(f) {
+                Some(f.to_string())
+            } else {
+                Some(format!(
+                    "\"{}\"",
+                    f.replace('\\', "\\\\").replace('"', "\\\"")
+                ))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn is_generic_font_keyword(f: &str) -> bool {
+    matches!(
+        f.to_ascii_lowercase().as_str(),
+        "serif"
+            | "sans-serif"
+            | "monospace"
+            | "cursive"
+            | "fantasy"
+            | "system-ui"
+            | "math"
+            | "emoji"
+            | "fangsong"
+            | "ui-serif"
+            | "ui-sans-serif"
+            | "ui-monospace"
+            | "ui-rounded"
+            | "inherit"
+            | "initial"
+            | "unset"
+            | "revert"
+    )
+}
+
+/// A font-family value is safe unquoted iff it's a run of CSS identifiers
+/// separated by single spaces: each word ASCII-alphanumeric-or-hyphen and not
+/// starting with a digit/hyphen/`@`. `times new roman` qualifies; `@ipaex明朝`
+/// (non-ASCII, `@`-prefixed) does not.
+fn is_safe_unquoted_font(f: &str) -> bool {
+    f.split(' ').all(|word| {
+        !word.is_empty()
+            && word.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
+}
+
 fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Option<String> {
     let inner = value.unwrap_annotated();
 
@@ -156,8 +225,12 @@ fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Optio
                         return Some(mapped.unwrap_or("").to_string());
                     }
                 }
-                // Unknown enum value; fall through to log + emit raw symbol.
-                Some(format!("/* unknown {}: {} */", prop.name, sym))
+                // Unknown enum value → drop the declaration (calibre maps an
+                // unmapped enum to Python `None`, i.e. skip it). Emitting a CSS
+                // comment as the value (`float: /* unknown center */`) leaves a
+                // dangling `prop:` with no value — invalid CSS, rejected by
+                // epubcheck as CSS-008 ("premature end of grammar").
+                None
             }
             IonValue::Bool(b) => {
                 let key = if *b { "true" } else { "false" };
@@ -1140,13 +1213,12 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         },
     ),
     // ---- direction (page progression) ----
-    (
-        "direction",
-        Prop {
-            name: "direction",
-            values: Some(&[("ltr", Some("ltr")), ("rtl", Some("rtl"))]),
-        },
-    ),
+    // Intentionally NOT mapped to a CSS declaration: the `direction` (and
+    // `unicode-bidi`) CSS properties are forbidden in EPUB style sheets
+    // (epubcheck CSS-001). Page-progression / RTL direction is carried by the
+    // spine `page-progression-direction` (PPD) attribute + `writing-mode`
+    // instead — see [[reference_kfx_device_rtl_writing_mode]]. Per-element
+    // direction, if ever needed, belongs on the HTML `dir` attribute, not CSS.
     // ---- visibility ----
     (
         "visibility",
@@ -1307,16 +1379,4 @@ pub fn render_stylesheet(styles_used: &HashMap<String, CssDecl>) -> String {
         ));
     }
     s
-}
-
-fn safe_class_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
