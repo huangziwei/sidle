@@ -232,6 +232,105 @@ pub fn draw_x(fb: &mut Framebuffer, cx: i32, cy: i32, size: i32, shade: u8) {
     }
 }
 
+/// Draw a **sync** glyph — two arced arrows chasing round a circle (the refresh
+/// pair) — centered at `(cx, cy)` with ring radius `r`. Two arcs with a gap at
+/// each end, each gap capped by a small tangential arrowhead so the ring reads as
+/// rotating. The font has no 🔄, so we draw it. Top-bar Sync button.
+pub fn draw_sync_glyph(fb: &mut Framebuffer, cx: i32, cy: i32, r: i32, shade: u8) {
+    const T: i32 = 5;
+    let rf = r as f32;
+    let inner = (r - T).max(1) as f32;
+    // Ring pixels minus two gaps (screen coords, +y down): near 10° and near
+    // 190°, leaving two arcs spanning roughly [38°,162°] and [218°,342°].
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let dist = ((dx * dx + dy * dy) as f32).sqrt();
+            if dist < inner || dist > rf {
+                continue;
+            }
+            let mut a = (dy as f32).atan2(dx as f32).to_degrees();
+            if a < 0.0 {
+                a += 360.0;
+            }
+            if !(38.0..=162.0).contains(&a) && !(218.0..=342.0).contains(&a) {
+                continue;
+            }
+            fb.put_pixel(cx + dx, cy + dy, shade);
+        }
+    }
+    // Cap each arc's low end with an arrowhead pointing along the clockwise
+    // tangent, so the pair reads as rotation rather than a broken ring.
+    sync_arrowhead(fb, cx, cy, rf, 38.0, shade);
+    sync_arrowhead(fb, cx, cy, rf, 218.0, shade);
+}
+
+/// Small filled triangle capping a [`draw_sync_glyph`] arc at angle `deg`,
+/// pointing along the clockwise tangent (screen `+y` down).
+fn sync_arrowhead(fb: &mut Framebuffer, cx: i32, cy: i32, r: f32, deg: f32, shade: u8) {
+    let a = deg.to_radians();
+    let (c, s) = (a.cos(), a.sin());
+    let (px, py) = (cx as f32 + r * c, cy as f32 + r * s);
+    let (tx, ty) = (s, -c); // clockwise tangent
+    let tip = (px + tx * 13.0, py + ty * 13.0);
+    let b1 = (px + c * 9.0, py + s * 9.0);
+    let b2 = (px - c * 9.0, py - s * 9.0);
+    fill_tri(fb, tip, b1, b2, shade);
+}
+
+/// Fill the triangle `(a, b, c)` (float screen coords) via a barycentric test
+/// over its bounding box. Small glyph triangles only — not a general rasterizer.
+fn fill_tri(fb: &mut Framebuffer, a: (f32, f32), b: (f32, f32), c: (f32, f32), shade: u8) {
+    let area = (b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1);
+    if area.abs() < 1e-3 {
+        return;
+    }
+    let minx = a.0.min(b.0).min(c.0).floor() as i32;
+    let maxx = a.0.max(b.0).max(c.0).ceil() as i32;
+    let miny = a.1.min(b.1).min(c.1).floor() as i32;
+    let maxy = a.1.max(b.1).max(c.1).ceil() as i32;
+    for y in miny..=maxy {
+        for x in minx..=maxx {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let w0 = ((b.0 - px) * (c.1 - py) - (c.0 - px) * (b.1 - py)) / area;
+            let w1 = ((c.0 - px) * (a.1 - py) - (a.0 - px) * (c.1 - py)) / area;
+            if w0 >= 0.0 && w1 >= 0.0 && w0 + w1 <= 1.0 {
+                fb.put_pixel(x, y, shade);
+            }
+        }
+    }
+}
+
+/// Draw a **download** glyph — a vertical stem, a solid down-arrowhead, and a
+/// tray line beneath — centered at `(cx, cy)`, scale `s`. The font has no ⤓, so
+/// we draw it. Top-bar Update button (pull the next picker binary over the LAN).
+pub fn draw_download_glyph(fb: &mut Framebuffer, cx: i32, cy: i32, s: i32, shade: u8) {
+    const T: i32 = 5;
+    let stem_h = s + s / 4;
+    let head_h = s * 3 / 4;
+    let tray_gap = s / 2;
+    // Center the whole glyph (stem + head + gap + tray) on `cy`.
+    let total = stem_h + head_h + tray_gap + T;
+    let stem_top = cy - total / 2;
+    let x0 = (cx - T / 2).max(0) as u32;
+    fb.fill_rect(stem_top.max(0) as u32, x0, T as u32, stem_h as u32, shade);
+    // Arrowhead: a downward filled triangle, flat top at the stem's neck.
+    let head_top = stem_top + stem_h;
+    for row in 0..=head_h {
+        let wpx = ((head_h - row) * 2 + 1) as u32;
+        let left = (cx - (head_h - row)).max(0) as u32;
+        fb.fill_rect((head_top + row).max(0) as u32, left, wpx, 1, shade);
+    }
+    // Tray: a short horizontal base under the arrow.
+    let base_y = head_top + head_h + tray_gap;
+    fb.fill_rect(
+        base_y.max(0) as u32,
+        (cx - s).max(0) as u32,
+        (s * 2) as u32,
+        T as u32,
+        shade,
+    );
+}
+
 /// Clear the cell to white, aspect-fit the cover into the region between
 /// `top_inset` and the bottom name band, then draw that band with `label`
 /// (single line, centered, ellipsized). Returns the painted cover rect so a

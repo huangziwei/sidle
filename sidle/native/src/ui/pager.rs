@@ -6,9 +6,9 @@
 //! - `Exit` — always shown, fixed-width left zone.
 //! - `Filter` — always shown, fixed-width zone; opens the filter & sort menu,
 //!   shows `(N)` when N facets are active.
-//! - `Sync` — always shown, fixed-width zone; pushes this device's
-//!   `.yjr`/`.yjf` + My Clippings.txt to sidle-server (the LAN twin of a USB
-//!   annotation sync).
+//! - `Source` — always shown, fixed-width zone; the library-switch button that
+//!   toggles between the LAN library and on-device DRM books. (Sync moved to a
+//!   round button in the top bar; this slot is its former home.)
 //! - `← Prev / N / Next →` — the remaining width, split in half: left half pages
 //!   back, right half pages forward (shown only when n_pages > 1). Touch nav is
 //!   essential on the Paperwhite, which has no bezel page buttons.
@@ -25,13 +25,13 @@ pub const PAGE_SIZE: usize = 9;
 const EXIT_ZONE_W: u32 = 200;
 /// Filter zone sits immediately right of Exit, same fixed-width pattern.
 const FILTER_ZONE_W: u32 = 220;
-/// Sync zone sits right of Filter, same pattern. The page nav
+/// Source (library-switch) zone sits right of Filter, same pattern. The page nav
 /// (Prev/mid/Next) gets whatever width is left.
-const SYNC_ZONE_W: u32 = 200;
-/// Left edge of the Sync zone (right after Exit + Filter).
-const SYNC_LEFT: u32 = EXIT_ZONE_W + FILTER_ZONE_W;
-/// Left edge of the page-nav region (after Exit + Filter + Sync).
-const NAV_LEFT: u32 = EXIT_ZONE_W + FILTER_ZONE_W + SYNC_ZONE_W;
+const SOURCE_ZONE_W: u32 = 200;
+/// Left edge of the Source zone (right after Exit + Filter).
+const SOURCE_LEFT: u32 = EXIT_ZONE_W + FILTER_ZONE_W;
+/// Left edge of the page-nav region (after Exit + Filter + Source).
+const NAV_LEFT: u32 = EXIT_ZONE_W + FILTER_ZONE_W + SOURCE_ZONE_W;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PagerHit {
@@ -41,8 +41,9 @@ pub enum PagerHit {
     /// strip slot as `Filter` (which is moot inside one series), swapped in when
     /// drilled in — bezel buttons are Prev/Next only, so Back must be on-screen.
     Back,
-    /// Push this device's reading-state sidecars to sidle-server.
-    Sync,
+    /// Library-switch button — toggle between the LAN library and on-device DRM
+    /// books.
+    Source,
     /// Page back / forward — the nav region's left / right half (see `hit`).
     /// Touch nav is the only paging on the Paperwhite (no bezel buttons).
     Prev,
@@ -69,12 +70,12 @@ pub fn hit(
     if ty < strip_top(fb_yres) {
         return None;
     }
-    // Exit, Filter/Back, and Sync take the three leftmost fixed slices; the rest
+    // Exit, Filter/Back, and Source take the three leftmost fixed slices; the rest
     // of the strip is the page-nav zone, live only when there's somewhere to go.
     if tx < EXIT_ZONE_W {
         return Some(PagerHit::Exit);
     }
-    if tx < SYNC_LEFT {
+    if tx < SOURCE_LEFT {
         // Inside a drilled-in series this slot is Back (Filter is moot — you're
         // already scoped to one series); at the top level it opens the filter menu.
         return Some(if drilled {
@@ -84,7 +85,7 @@ pub fn hit(
         });
     }
     if tx < NAV_LEFT {
-        return Some(PagerHit::Sync);
+        return Some(PagerHit::Source);
     }
     if total_pages <= 1 {
         return None;
@@ -134,10 +135,11 @@ pub fn draw(
         "Filter".to_string()
     };
     renderer.draw(fb, EXIT_ZONE_W as i32 + 40, baseline, &filter_label, false);
-    fb.fill_rect(strip_y + 12, SYNC_LEFT - 2, 2, STRIP_H - 24, 0x00);
+    fb.fill_rect(strip_y + 12, SOURCE_LEFT - 2, 2, STRIP_H - 24, 0x00);
 
-    // Sync zone, right of Filter. Always visible — pushes annotations to the Mac.
-    renderer.draw(fb, SYNC_LEFT as i32 + 40, baseline, "Sync", false);
+    // Source (library-switch) zone, right of Filter. Always visible — toggles the
+    // LAN library ↔ on-device DRM books.
+    renderer.draw(fb, SOURCE_LEFT as i32 + 40, baseline, "DRM", false);
     fb.fill_rect(strip_y + 12, NAV_LEFT - 2, 2, STRIP_H - 24, 0x00);
 
     if total_pages <= 1 {

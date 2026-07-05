@@ -662,43 +662,103 @@ fn run() -> anyhow::Result<()> {
                     && let Some(tap) =
                         ui::searchbar::hit(x, y, fb.var.xres, !query.is_empty(), true)
                 {
-                    // Update is an action (LAN self-update), not a query edit —
-                    // handle it inline like the Sync button and loop, leaving the
-                    // query/view untouched.
-                    if matches!(tap, ui::searchbar::Tap::Update) {
-                        log("update-button tap");
-                        let dirty = toast::draw(&mut fb, &mut renderer, "Checking for update…");
-                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                    // Update and Sync are actions (LAN self-update / annotation
+                    // push), not query edits — run inline and loop, leaving the
+                    // query and view untouched.
+                    match tap {
+                        ui::searchbar::Tap::Update => {
+                            log("update-button tap");
+                            let dirty = toast::draw(&mut fb, &mut renderer, "Checking for update…");
+                            fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
 
-                        let banner_msg = update_result_message(selfupdate::run_pull(
-                            &agent,
-                            &cfg,
-                            Path::new(BUNDLE_DIR),
-                            selfupdate::self_build_ts(),
-                            |m| update_log(m),
-                        ));
-                        update_log(format!("in-app update: {banner_msg}"));
-                        let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
-                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
-                        thread::sleep(TOAST_LINGER);
-                        repaint_page(
-                            &mut fb,
-                            &mut renderer,
-                            &agent,
-                            &cfg,
-                            cache_dir,
-                            &cells,
-                            &mut covers,
-                            page,
-                            total_pages,
-                            grid_left,
-                            grid_top,
-                            sort,
-                            filters.active_facets(),
-                            series_view.as_deref(),
-                            &query,
-                        )?;
-                        continue;
+                            let banner_msg = update_result_message(selfupdate::run_pull(
+                                &agent,
+                                &cfg,
+                                Path::new(BUNDLE_DIR),
+                                selfupdate::self_build_ts(),
+                                |m| update_log(m),
+                            ));
+                            update_log(format!("in-app update: {banner_msg}"));
+                            let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
+                            fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                            thread::sleep(TOAST_LINGER);
+                            repaint_page(
+                                &mut fb,
+                                &mut renderer,
+                                &agent,
+                                &cfg,
+                                cache_dir,
+                                &cells,
+                                &mut covers,
+                                page,
+                                total_pages,
+                                grid_left,
+                                grid_top,
+                                sort,
+                                filters.active_facets(),
+                                series_view.as_deref(),
+                                &query,
+                            )?;
+                            continue;
+                        }
+                        ui::searchbar::Tap::Sync => {
+                            // Push this device's reading-state sidecars to the Mac
+                            // — the LAN twin of a USB annotation sync. The grid
+                            // doesn't change, so toast the report and repaint the
+                            // page underneath.
+                            log("sync-button tap");
+                            let dirty = toast::draw(&mut fb, &mut renderer, "Syncing annotations…");
+                            fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+
+                            let sync_t0 = Instant::now();
+                            let banner_msg = match api::push_annotations(
+                                &agent,
+                                &cfg,
+                                std::path::Path::new(DOWNLOAD_DIR),
+                            ) {
+                                Ok(report) => {
+                                    let summary = report.summary();
+                                    log(format!(
+                                        "annotation sync ok in {:?}: {summary}",
+                                        sync_t0.elapsed()
+                                    ));
+                                    summary
+                                }
+                                Err(api::SidleError::TokenMismatch) => {
+                                    log(
+                                        "token rejected during sync — resync via sidle desktop app",
+                                    );
+                                    "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
+                                        .to_string()
+                                }
+                                Err(api::SidleError::Other(err)) => {
+                                    log(format!("annotation sync failed: {err:#}"));
+                                    format!("Sync failed: {err}")
+                                }
+                            };
+                            let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
+                            fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                            thread::sleep(TOAST_LINGER);
+                            repaint_page(
+                                &mut fb,
+                                &mut renderer,
+                                &agent,
+                                &cfg,
+                                cache_dir,
+                                &cells,
+                                &mut covers,
+                                page,
+                                total_pages,
+                                grid_left,
+                                grid_top,
+                                sort,
+                                filters.active_facets(),
+                                series_view.as_deref(),
+                                &query,
+                            )?;
+                            continue;
+                        }
+                        _ => {}
                     }
 
                     let before = query.clone();
@@ -721,7 +781,7 @@ fn run() -> anyhow::Result<()> {
                         }
                         // Handled above (early `continue`); the field only yields
                         // Open/Clear here.
-                        ui::searchbar::Tap::Update => unreachable!(),
+                        ui::searchbar::Tap::Update | ui::searchbar::Tap::Sync => unreachable!(),
                     }
                     if query != before {
                         entries = series::group_by_series(rebuild_view(
@@ -899,42 +959,13 @@ fn run() -> anyhow::Result<()> {
                                 )?;
                             }
                         }
-                        PagerHit::Sync => {
-                            // Push this device's reading-state sidecars to the Mac
-                            // — the LAN twin of a USB annotation sync. The grid
-                            // doesn't change, so toast the report and repaint the
-                            // page underneath (in whichever view is showing).
-                            log("sync-button tap");
-                            let dirty = toast::draw(&mut fb, &mut renderer, "Syncing annotations…");
-                            fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
-
-                            let sync_t0 = Instant::now();
-                            let banner_msg = match api::push_annotations(
-                                &agent,
-                                &cfg,
-                                std::path::Path::new(DOWNLOAD_DIR),
-                            ) {
-                                Ok(report) => {
-                                    let summary = report.summary();
-                                    log(format!(
-                                        "annotation sync ok in {:?}: {summary}",
-                                        sync_t0.elapsed()
-                                    ));
-                                    summary
-                                }
-                                Err(api::SidleError::TokenMismatch) => {
-                                    log(
-                                        "token rejected during sync — resync via sidle desktop app",
-                                    );
-                                    "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
-                                        .to_string()
-                                }
-                                Err(api::SidleError::Other(err)) => {
-                                    log(format!("annotation sync failed: {err:#}"));
-                                    format!("Sync failed: {err}")
-                                }
-                            };
-                            let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
+                        PagerHit::Source => {
+                            // Library-switch button (former Sync slot): a stub that
+                            // toasts, pending the on-device DRM-books source. The
+                            // grid doesn't change, so repaint the page underneath.
+                            log("source-button tap");
+                            let dirty =
+                                toast::draw(&mut fb, &mut renderer, "DRM books — coming soon");
                             fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                             thread::sleep(TOAST_LINGER);
                             repaint_page(
@@ -1092,7 +1123,7 @@ fn draw_gallery_page(
         grid_top * 60 / 100
     } else {
         searchbar::draw(fb, renderer, query, true);
-        searchbar::draw_update(fb, renderer);
+        searchbar::draw_buttons(fb);
         (searchbar::TOP + searchbar::HEIGHT) as i32 + renderer.line_height() as i32
     };
     // Header line, clamped to one line so a long series name can't overrun.
