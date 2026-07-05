@@ -2471,17 +2471,20 @@ pub fn resolve_link_placeholders(state: &mut ContentState) {
                 Some(name) => name.to_string(),
                 None => continue,
             };
-            match anchors.resolve_uri_stamped(&name, &stamped_id_to_file) {
-                // Resolved to a real target (external URI or a stamped id).
-                // Sanitize: external URLs carried verbatim from KFX content can
-                // contain characters illegal in a URL (e.g. a citation link
-                // ending in `]`), which epubcheck rejects as RSC-020.
+            // Resolve, then sanitize the URL. `resolve_uri_stamped` returns None
+            // when the target was never stamped (dangling internal anchor);
+            // `sanitize_href` returns None when the URL can't be made valid
+            // (e.g. a space in the host). In either case we drop the placeholder
+            // href and emit a valid non-linking `<a>` (keeps the text) rather
+            // than a dangling `anchor:`/`#missing` fragment or an invalid URL
+            // (epubcheck RSC-012 / RSC-020).
+            let final_href = anchors
+                .resolve_uri_stamped(&name, &stamped_id_to_file)
+                .and_then(|uri| sanitize_href(&uri));
+            match final_href {
                 Some(uri) => {
-                    part.dom.get_mut(id).set("href", sanitize_href(&uri));
+                    part.dom.get_mut(id).set("href", uri);
                 }
-                // Unresolvable: the target position was never stamped anywhere.
-                // Drop the placeholder href so we emit a valid (non-linking)
-                // `<a>` rather than a dangling `anchor:` / `#missing` fragment.
                 None => {
                     part.dom.get_mut(id).remove_attr("href");
                 }
@@ -2490,19 +2493,31 @@ pub fn resolve_link_placeholders(state: &mut ContentState) {
     }
 }
 
-/// Percent-encode characters that are illegal in a URL (RFC 3986) so hrefs
-/// carried verbatim from KFX content (e.g. a citation link ending in `]`) don't
-/// trip epubcheck RSC-020. Normal URL characters and existing `%XX` escapes are
-/// left untouched.
-fn sanitize_href(href: &str) -> String {
+/// Make an href a valid URL, or return `None` if it can't be (the caller drops
+/// the link, keeping the text). Characters illegal in a URL path/query/fragment
+/// (e.g. a citation link ending in `]`) are percent-encoded — that fixes
+/// RSC-020. But a character illegal in the HOST (e.g. a space, from a typo'd
+/// source domain like `bylon. com`) can't be encoded away — hosts forbid it
+/// even as `%20` — so such an unreachable URL is dropped rather than emitted.
+fn sanitize_href(href: &str) -> Option<String> {
     fn is_illegal(c: char) -> bool {
         matches!(
             c,
             ' ' | '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '}' | '|' | '[' | ']'
         ) || (c as u32) < 0x20
     }
+    // Absolute URL: the authority (host[:port]) can't contain a space or control
+    // char, encoded or not. If it does, the URL is unusable → drop it.
+    if let Some((_, after)) = href.split_once("://") {
+        let auth = &after[..after.find(['/', '?', '#']).unwrap_or(after.len())];
+        if auth.chars().any(|c| c == ' ' || (c as u32) < 0x20)
+            || auth.to_ascii_lowercase().contains("%20")
+        {
+            return None;
+        }
+    }
     if !href.contains(is_illegal) {
-        return href.to_string();
+        return Some(href.to_string());
     }
     let mut out = String::with_capacity(href.len() + 8);
     let mut buf = [0u8; 4];
@@ -2515,7 +2530,7 @@ fn sanitize_href(href: &str) -> String {
             out.push(c);
         }
     }
-    out
+    Some(out)
 }
 
 /// Ensure every `<ol>`/`<ul>` has only `<li>` (plus `<script>`/`<template>`)
