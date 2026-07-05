@@ -66,6 +66,13 @@ pub struct ElementStart {
     /// `罫囲み` `<div>` wrapping `<p>` lines) becomes a `type: container` whose
     /// children form the content list directly.
     pub has_block_children: bool,
+    /// `layout` symbol for a bordered `type: container` — the block-progression
+    /// axis of its children, keyed to the box's own (inheritance-resolved)
+    /// writing mode: `horizontal` for vertical text (縦書き), `vertical` for
+    /// horizontal-tb. A horizontally-typeset box inside a vertical book keeps
+    /// `vertical`. `None` = not a container / fall back to the document axis.
+    /// Set during export. See [`crate::kfx::context::ExportContext::container_layout_symbol`].
+    pub container_layout: Option<u64>,
 }
 
 impl ElementStart {
@@ -83,6 +90,7 @@ impl ElementStart {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_layout: None,
         }
     }
 
@@ -201,6 +209,7 @@ impl TokenStream {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_layout: None,
         }));
     }
 

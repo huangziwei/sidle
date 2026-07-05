@@ -196,6 +196,7 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         style_name,                     // Style name (for import lookup)
         needs_container_wrapper: false, // Only used during export
         has_block_children: false,      // Only used during export
+        container_layout: None,
     }));
 
     // Recurse into children
@@ -881,6 +882,27 @@ fn walk_node_for_export(
             .is_some_and(|n| !is_inline_like_role(n.role))
     });
 
+    // A `type: container`'s `layout` is the block-progression axis of its
+    // children, which follows the box's own (inheritance-resolved) writing
+    // mode: horizontal for vertical text (縦書き), vertical for horizontal-tb.
+    // Emitting `vertical` unconditionally put a 縦書き box in the wrong axis —
+    // it filled the block (an oversized, full-width box) with content pinned to
+    // the left edge. Keying off the box's *computed* mode (not the document's)
+    // keeps a horizontally-typeset box inside a vertical book at `vertical`.
+    if elem.needs_container_wrapper {
+        use crate::style::WritingMode;
+        let wm = chapter
+            .styles
+            .get(node.style)
+            .map(|s| s.writing_mode)
+            .unwrap_or_default();
+        let layout = match wm {
+            WritingMode::VerticalRl | WritingMode::VerticalLr => KfxSymbol::Horizontal,
+            WritingMode::HorizontalTb => KfxSymbol::Vertical,
+        };
+        elem.container_layout = Some(layout as u64);
+    }
+
     // SCHEMA-DRIVEN attribute export
     // Create a closure to get semantic values by target
     let export_ctx = crate::kfx::transforms::ExportContext {
@@ -1491,13 +1513,13 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     // Type: container (not text) - this is key for borders to render
                     outer_fields.push((sym!(Type), IonValue::Symbol(KfxSymbol::Container as u64)));
 
-                    // Layout: block-progression axis, keyed to the document
-                    // writing mode (horizontal for 縦書き). See
-                    // ExportContext::container_layout_symbol.
-                    outer_fields.push((
-                        sym!(Layout),
-                        IonValue::Symbol(ctx.container_layout_symbol() as u64),
-                    ));
+                    // Layout: block-progression axis, keyed to the box's own
+                    // writing mode (horizontal for 縦書き), computed in
+                    // ir_to_tokens; falls back to the document axis.
+                    let layout = elem
+                        .container_layout
+                        .unwrap_or(ctx.container_layout_symbol() as u64);
+                    outer_fields.push((sym!(Layout), IonValue::Symbol(layout)));
 
                     // Add semantic type annotation if the strategy specifies one
                     if let Some(strategy) = schema().export_strategy(elem.role)
@@ -1666,10 +1688,10 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                     // content list directly.
                     if elem.needs_container_wrapper {
                         fields.push((sym!(Type), IonValue::Symbol(KfxSymbol::Container as u64)));
-                        fields.push((
-                            sym!(Layout),
-                            IonValue::Symbol(ctx.container_layout_symbol() as u64),
-                        ));
+                        let layout = elem
+                            .container_layout
+                            .unwrap_or(ctx.container_layout_symbol() as u64);
+                        fields.push((sym!(Layout), IonValue::Symbol(layout)));
                     } else if let Some(kfx_type) = schema().kfx_type_for_role(elem.role) {
                         fields.push((sym!(Type), IonValue::Symbol(kfx_type as u64)));
                     }
@@ -2090,6 +2112,7 @@ mod tests {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_layout: None,
         }));
         stream.end_element();
 
@@ -2121,6 +2144,7 @@ mod tests {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_layout: None,
         }));
         stream.end_element();
 
@@ -2157,6 +2181,7 @@ mod tests {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_layout: None,
         }));
         stream.end_element();
 
@@ -2198,6 +2223,7 @@ mod tests {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_layout: None,
         }));
         stream.end_element();
 
@@ -2694,6 +2720,85 @@ mod tests {
     }
 
     #[test]
+    fn test_bordered_container_layout_follows_writing_mode() {
+        // A bordered `type: container`'s `layout` is the block-progression axis
+        // of its children, keyed to the box's own writing mode: `horizontal`
+        // for vertical text (縦書き — matches Amazon's KFXGEN), `vertical` for
+        // horizontal-tb. Emitting `vertical` unconditionally oversized a
+        // vertical-book box and pinned its content to the left edge.
+        use crate::style::{BorderStyle, ComputedStyle, Length, WritingMode};
+
+        fn container_layout_for(wm: WritingMode) -> Option<u64> {
+            let mut chapter = Chapter::new();
+
+            let mut style = ComputedStyle::default();
+            style.border_style_top = BorderStyle::Solid;
+            style.border_width_top = Length::Px(1.0);
+            style.writing_mode = wm;
+            let style_id = chapter.styles.intern(style);
+
+            let mut boxed = Node::new(Role::Paragraph);
+            boxed.style = style_id;
+            let boxed_id = chapter.alloc_node(boxed);
+            chapter.append_child(chapter.root(), boxed_id);
+
+            let text_range = chapter.append_text("囲み");
+            let mut text_node = Node::new(Role::Text);
+            text_node.text = text_range;
+            let text_id = chapter.alloc_node(text_node);
+            chapter.append_child(boxed_id, text_id);
+
+            let mut ctx = crate::kfx::context::ExportContext::new();
+            let ion = build_storyline_ion(&chapter, &mut ctx);
+
+            fn find_container_layout(ion: &IonValue) -> Option<u64> {
+                match ion {
+                    IonValue::Struct(fields) => {
+                        let is_container = fields.iter().any(|(k, v)| {
+                            *k == KfxSymbol::Type as u64
+                                && matches!(v, IonValue::Symbol(s) if *s == KfxSymbol::Container as u64)
+                        });
+                        if is_container {
+                            for (k, v) in fields {
+                                if *k == KfxSymbol::Layout as u64
+                                    && let IonValue::Symbol(s) = v
+                                {
+                                    return Some(*s);
+                                }
+                            }
+                        }
+                        fields.iter().find_map(|(k, v)| {
+                            (*k == KfxSymbol::ContentList as u64)
+                                .then(|| find_container_layout(v))
+                                .flatten()
+                        })
+                    }
+                    IonValue::List(items) => items.iter().find_map(find_container_layout),
+                    _ => None,
+                }
+            }
+
+            find_container_layout(&ion)
+        }
+
+        assert_eq!(
+            container_layout_for(WritingMode::VerticalRl),
+            Some(KfxSymbol::Horizontal as u64),
+            "vertical-rl (縦書き) box container must be layout: horizontal"
+        );
+        assert_eq!(
+            container_layout_for(WritingMode::VerticalLr),
+            Some(KfxSymbol::Horizontal as u64),
+            "vertical-lr box container must be layout: horizontal"
+        );
+        assert_eq!(
+            container_layout_for(WritingMode::HorizontalTb),
+            Some(KfxSymbol::Vertical as u64),
+            "horizontal-tb box container must be layout: vertical"
+        );
+    }
+
+    #[test]
     fn test_heading_without_border_exports_as_text() {
         // Test that elements without borders use normal type: text
         let mut chapter = Chapter::new();
@@ -2836,6 +2941,7 @@ mod tests {
             style_name: None,
             needs_container_wrapper: false,
             has_block_children: false,
+            container_layout: None,
         }));
         stream.end_element();
 
