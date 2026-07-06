@@ -3905,6 +3905,16 @@ async function open(id) {
     const overlayer = new Overlayer();
     attach(overlayer);
     overlays.push({ doc, overlayer });
+    // Catch up on any deferred images that landed in the gap between this
+    // section's load() (which reserved placeholders) and this event. The
+    // background patch (patchLiveSectionImages on each resource chunk) only
+    // sweeps docs already in `overlays`; a fast-arriving image — e.g. the cover
+    // on first open — could land before create-overlayer pushed this doc, so
+    // that sweep would miss it and no later chunk re-includes the href. Without
+    // this the image sits on its placeholder until a page-turn-and-back forces
+    // a fresh load(). The doc is in `overlays` now, so anything still in flight
+    // is covered by the chunk sweep.
+    if (resLoader) patchPendingImages(doc, resLoader.resolve);
     paintAnnotations(doc, overlayer);
     // If a search is active when a new section first paints, paint its matches
     // into this section too — otherwise scrolling/navigating into the section
