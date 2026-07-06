@@ -75,27 +75,32 @@ pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Resul
 /// that carry no cover slot to overwrite. Three cases, in order:
 ///
 /// 1. The EPUB already declares a cover → fast in-place [`replace_cover`] swap.
-/// 2. The EPUB is cover-less but its KFX has a cover (some EPUBs sidle produced
-///    before the `$258`/loc-0 cover fixes were converted cover-less, while the
-///    KFX now resolves one) → regenerate the EPUB from `kfx_path`, then swap.
-/// 3. The EPUB *and* KFX are both cover-less (e.g. an EPUB import whose source
-///    had no cover) → [`insert_cover`] a fresh cover designation into the EPUB.
+/// 2. The EPUB is cover-less *and is the derived side* of a KFX that has a cover
+///    (a KFX import whose EPUB predates the `$258`/loc-0 cover fixes) →
+///    regenerate the EPUB from `kfx_path`, then swap.
+/// 3. Otherwise → [`insert_cover`] a fresh cover designation into the EPUB.
 ///
-/// `kfx_path` is where the book's KFX lives; `None` skips case 2. Best-effort by
-/// contract: callers treat any `Err` as a non-fatal, logged skip.
+/// `epub_is_derived` enforces the one-way source→target conversion invariant:
+/// case 2 regenerates the EPUB, so it may run **only** when the EPUB is derived
+/// (the book's source is its KFX). For an EPUB-sourced book the EPUB *is* the
+/// source and must never be overwritten by a regeneration — those fall to the
+/// non-destructive insert of case 3. `kfx_path` is the KFX to regenerate from.
+/// Best-effort by contract: callers treat any `Err` as a non-fatal, logged skip.
 pub fn ensure_cover(
     epub_path: &Path,
     kfx_path: Option<&Path>,
     new_bytes: &[u8],
     new_ext: &str,
+    epub_is_derived: bool,
 ) -> Result<()> {
     if replace_cover(epub_path, new_bytes, new_ext)? {
         return Ok(());
     }
-    // Case 2: regenerate from the KFX only if the KFX actually has a cover —
-    // regenerating from a cover-less KFX would just reproduce a cover-less EPUB
-    // (and needlessly overwrite an EPUB import's source file).
-    if let Some(kfx) = kfx_path {
+    // Case 2: regenerate — but only from a KFX that is the source (EPUB derived)
+    // and actually has a cover to carry over.
+    if epub_is_derived
+        && let Some(kfx) = kfx_path
+    {
         let kfx_bytes = std::fs::read(kfx).with_context(|| format!("read {}", kfx.display()))?;
         if kfx_declares_cover(&kfx_bytes) {
             let epub_bytes = boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
@@ -105,7 +110,8 @@ pub fn ensure_cover(
             return Ok(());
         }
     }
-    // Case 3: nothing to swap or regenerate from — insert a cover.
+    // Case 3: the EPUB is the source (or has no covered KFX to derive from) —
+    // insert a cover in place rather than regenerating it.
     insert_cover(epub_path, new_bytes, new_ext)
 }
 

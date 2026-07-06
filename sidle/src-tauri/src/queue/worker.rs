@@ -147,7 +147,9 @@ pub async fn run_job(
                             // EPUB tweak.
                             if let Some(epub) = &produced.epub_path {
                                 let kfx = book.kfx_path.as_deref().map(Path::new);
-                                match epub_cover::ensure_cover(epub, kfx, &bytes, "jpg") {
+                                // This tail runs only for `kfx_to_epub`, so the
+                                // EPUB is always the derived side of the KFX.
+                                match epub_cover::ensure_cover(epub, kfx, &bytes, "jpg", true) {
                                     Ok(()) => eprintln!(
                                         "[sidle/queue] book {book_id} color cover \
                                          swapped inside epub"

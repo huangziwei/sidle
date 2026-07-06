@@ -34,21 +34,6 @@ pub fn replace_cover(kfx_path: &Path, new_image: &[u8]) -> Result<String> {
     Ok(sha256_of_bytes(&patched))
 }
 
-/// True if the KFX at `kfx_path` declares no resolvable cover. Callers use this
-/// to gate [`reconvert_from_epub`]: only a genuinely cover-less KFX should be
-/// rebuilt from its EPUB — a KFX that *has* a cover but failed an in-place swap
-/// for some other reason must be left alone (reconverting a store KFX from its
-/// derived EPUB would replace it with a boko-produced one). A read error counts
-/// as "not cover-less" so we never reconvert on a fluke.
-pub fn is_coverless(kfx_path: &Path) -> bool {
-    let Ok(bytes) = std::fs::read(kfx_path) else {
-        return false;
-    };
-    boko::kfx_to_epub::loader::load(&bytes)
-        .map(|b| b.metadata.cover_resource_name.is_none())
-        .unwrap_or(false)
-}
-
 /// Rebuild the KFX at `kfx_path` by re-converting `epub_path` (which must
 /// already declare a cover). Used to give a cover to a cover-less boko-produced
 /// KFX (an EPUB import whose source had no cover): [`super::epub_cover::insert_cover`]
