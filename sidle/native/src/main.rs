@@ -623,7 +623,19 @@ fn run() -> anyhow::Result<()> {
                             "action for book {dl_id} finished in {:?}",
                             dl_t0.elapsed()
                         ));
-                        let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
+                        // Terminal banner. The DRM decrypt overlay is a plain
+                        // 140px toast, so a plain toast overwrites it cleanly.
+                        // The library download's overlay is the taller
+                        // `draw_download` (title/progress/Cancel), so its result
+                        // reuses that footprint — one banner replacing the live
+                        // one in place, rather than a smaller toast stacked
+                        // inside it leaving the title + Cancel edges showing.
+                        let dirty = match source {
+                            Source::Drm => toast::draw(&mut fb, &mut renderer, &banner_msg),
+                            Source::Library => {
+                                toast::draw_download_done(&mut fb, &mut renderer, &banner_msg)
+                            }
+                        };
                         fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                         thread::sleep(TOAST_LINGER);
                         // Hide the just-downloaded book: it's now on the device,

@@ -106,6 +106,47 @@ pub fn draw_download(
     (banner_rect, cancel_rect)
 }
 
+/// Terminal state of the live download overlay. Reuses [`draw_download`]'s
+/// banner footprint (same width, height, position) so it paints directly over
+/// the running progress/Cancel overlay and leaves none of its edges behind —
+/// the "Downloaded"/"Failed" result and the live overlay are one banner in one
+/// place, not a smaller toast stacked inside the taller one. `message` is
+/// centered as a block, one row per `\n`-delimited line (so multi-line results
+/// like the token-mismatch hint read as real lines, not a stray glyph), with no
+/// Cancel button. Returns the banner's dirty rect.
+pub fn draw_download_done(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    message: &str,
+) -> MxcfbRect {
+    let banner_w = fb.var.xres.saturating_sub(BANNER_MARGIN_X * 2);
+    let banner_x = (fb.var.xres - banner_w) / 2;
+    let banner_y = (fb.var.yres.saturating_sub(DL_BANNER_HEIGHT)) / 2;
+
+    fb.fill_rect(banner_y, banner_x, banner_w, DL_BANNER_HEIGHT, 0x00);
+
+    // Center the (possibly multi-line) message vertically as a block, each row
+    // horizontally centered. White-on-black, matching the live overlay.
+    let lines: Vec<&str> = message.lines().collect();
+    let lh = renderer.line_height();
+    let block_h = lh * lines.len().max(1) as u32;
+    let block_top = banner_y + DL_BANNER_HEIGHT.saturating_sub(block_h) / 2;
+    for (i, line) in lines.iter().enumerate() {
+        let w = renderer.measure_width(line);
+        let x = banner_x as i32 + ((banner_w as i32 - w as i32) / 2).max(0);
+        // Baseline ~72% down each line's slot — headroom for ascenders.
+        let baseline = (block_top + lh * i as u32 + lh * 72 / 100) as i32;
+        renderer.draw(fb, x, baseline, line, true);
+    }
+
+    MxcfbRect {
+        top: banner_y,
+        left: banner_x,
+        width: banner_w,
+        height: DL_BANNER_HEIGHT,
+    }
+}
+
 /// Batch-progress overlay: a `title` line, an `n / total` count line, and a
 /// progress bar filled to `done / total`. White-on-black to match the other
 /// banners; no Cancel (a decrypt runs to completion). Used by the DRM view's
