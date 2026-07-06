@@ -1,7 +1,7 @@
 //! The library search bar — **one** widget, drawn in both the grid view and the
 //! keyboard overlay. Its left edge, top, and height are constant across views, so
 //! tapping to open the keyboard never shifts the field under your finger. Only
-//! the RIGHT edge differs: the grid view leaves room for the Sync + Update
+//! the RIGHT edge differs: the grid view leaves room for the Sync + action
 //! buttons (`with_button = true`), while the keyboard overlay has none, so the
 //! field stretches to full width (`with_button = false`) — reclaiming that space
 //! rather than leaving it blank.
@@ -25,7 +25,7 @@ pub const BUTTON_GAP: u32 = 24;
 
 /// Search-field pill width for a given view. Grid view (`with_button`): the row
 /// between the side margins minus the two round buttons and the two gaps (field↔
-/// Sync, Sync↔Update), so field + gaps + buttons together span `xres - 2·MARGIN_X`.
+/// Sync, Sync↔right), so field + gaps + buttons together span `xres - 2·MARGIN_X`.
 /// Keyboard overlay (no buttons): the full span between the margins, so the field
 /// reclaims their space instead of leaving it blank. The left edge (`MARGIN_X`) is
 /// the same either way — only the right edge moves.
@@ -63,19 +63,34 @@ pub enum Tap {
     /// sidle-server (the LAN twin of a USB annotation sync). Drawn only in the
     /// grid view.
     Sync,
-    /// The **Update** button — pull the picker's next binary from sidle-server
-    /// (the LAN self-update that used to be its own KUAL tile). Drawn only in
-    /// the grid view; the keyboard overlay leaves the slot empty, so a tap there
-    /// is a harmless no-op (its handler acts only on `Clear`).
+    /// The right-hand button in the **library** view: pull the picker's next
+    /// binary from sidle-server (the LAN self-update that used to be its own KUAL
+    /// tile). Drawn only in the grid view; the keyboard overlay leaves the slot
+    /// empty, so a tap there is a harmless no-op (its handler acts only on
+    /// `Clear`).
     Update,
+    /// The right-hand button in the **DRM** view: decrypt every on-device
+    /// purchase and push each to the desktop. Occupies the same slot as `Update`
+    /// (the library view's self-update, useless while browsing DRM books), and is
+    /// returned there in place of it when `drm` is set (see [`hit`]).
+    DecryptAll,
 }
 
 /// Hit-test the bar. `query_active` enables the right-hand `✕` (clear) zone,
 /// which is only drawn when a query is set. `with_button` must match the value
 /// [`draw`] was called with for this view: in the grid view the right-hand pill
-/// is the Update button; in the full-width keyboard overlay it's part of the
-/// field, so no `Tap::Update` is ever returned there.
-pub fn hit(tx: u32, ty: u32, xres: u32, query_active: bool, with_button: bool) -> Option<Tap> {
+/// is an action button; in the full-width keyboard overlay it's part of the
+/// field, so no action tap is ever returned there. `drm` selects that button's
+/// meaning — [`Tap::DecryptAll`] in the DRM view, [`Tap::Update`] in the library
+/// view — matching the glyph [`draw_buttons`] drew for the same view.
+pub fn hit(
+    tx: u32,
+    ty: u32,
+    xres: u32,
+    query_active: bool,
+    with_button: bool,
+    drm: bool,
+) -> Option<Tap> {
     if !(TOP..TOP + HEIGHT).contains(&ty) {
         return None;
     }
@@ -84,7 +99,7 @@ pub fn hit(tx: u32, ty: u32, xres: u32, query_active: bool, with_button: bool) -
     if with_button {
         let (ux, _, ud, _) = update_button_rect(xres);
         if (ux..ux + ud).contains(&tx) {
-            return Some(Tap::Update);
+            return Some(if drm { Tap::DecryptAll } else { Tap::Update });
         }
         let (sx, _, sd, _) = sync_button_rect(xres);
         if (sx..sx + sd).contains(&tx) {
@@ -136,24 +151,29 @@ pub fn draw(fb: &mut Framebuffer, renderer: &mut TextRenderer, query: &str, with
 }
 
 /// Draw the two round action buttons flush to the right margin — **Sync** (left)
-/// and **Update** (right) — each a circle with a hand-drawn glyph (the font has
-/// neither 🔄 nor ⤓). Only the grid view draws them; the keyboard overlay leaves
-/// the slot empty so nothing competes with typing. Sync pushes reading-state to
-/// sidle-server; Update pulls the picker's next binary (see `crate::selfupdate`).
-pub fn draw_buttons(fb: &mut Framebuffer) {
+/// and the source-dependent right disc — each a circle with a hand-drawn glyph
+/// (the font has none of 🔄 / ⤓ / 🔑). Only the grid view draws them; the
+/// keyboard overlay leaves the slot empty so nothing competes with typing. Sync
+/// pushes to sidle-server (annotations in the library, decrypted books in DRM).
+/// The right disc is the library view's **Update** (download glyph — pull the
+/// picker's next binary) or, when `drm` is set, **Decrypt-All** (key glyph —
+/// decrypt every purchase); [`hit`] must be called with the same `drm` so taps
+/// resolve to the glyph shown.
+pub fn draw_buttons(fb: &mut Framebuffer, drm: bool) {
     let xres = fb.var.xres;
-    for (rect, is_sync) in [
-        (sync_button_rect(xres), true),
-        (update_button_rect(xres), false),
-    ] {
-        let (x, y, d, _) = rect;
-        grid::stroke_round_rect(fb, x as i32, y as i32, d, d, d / 2, 3, 0x00);
-        let (cx, cy) = ((x + d / 2) as i32, (y + d / 2) as i32);
-        if is_sync {
-            grid::draw_sync_glyph(fb, cx, cy, 20, 0x00);
-        } else {
-            grid::draw_download_glyph(fb, cx, cy, 18, 0x00);
-        }
+    // Left disc: Sync — same slot and glyph in both sources.
+    let (sx, sy, sd, _) = sync_button_rect(xres);
+    grid::stroke_round_rect(fb, sx as i32, sy as i32, sd, sd, sd / 2, 3, 0x00);
+    grid::draw_sync_glyph(fb, (sx + sd / 2) as i32, (sy + sd / 2) as i32, 20, 0x00);
+
+    // Right disc: Update (library) or Decrypt-All (DRM).
+    let (ux, uy, ud, _) = update_button_rect(xres);
+    grid::stroke_round_rect(fb, ux as i32, uy as i32, ud, ud, ud / 2, 3, 0x00);
+    let (ucx, ucy) = ((ux + ud / 2) as i32, (uy + ud / 2) as i32);
+    if drm {
+        grid::draw_key_glyph(fb, ucx, ucy, 20, 0x00);
+    } else {
+        grid::draw_download_glyph(fb, ucx, ucy, 18, 0x00);
     }
 }
 

@@ -391,13 +391,13 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
         let built = build_reader_open(book, resume_eid);
         // Cache the store only when something is left to serve: deferred
         // images, withheld sections, or pending locations.
-        let entry = (!images.is_empty() || built.withheld).then(|| {
+        let entry = (!images.is_empty() || built.withheld).then_some(
             crate::state::ReaderStoreEntry {
                 images,
                 sections: built.sections,
                 eid_to_section: built.eid_to_section,
-            }
-        });
+            },
+        );
         Ok::<(ReaderOpen, Option<crate::state::ReaderStoreEntry>), String>((
             ReaderOpen::Reflowable(built.dto),
             entry,

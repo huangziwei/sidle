@@ -2939,18 +2939,10 @@ function openContextMenu(x, y, b) {
     add(menu, "Edit metadata…", () => openMetadataModal(b));
     add(menu, "Open in Finder", () => openInFinder(b.id));
     add(menu, "Re-fetch cover", () => recrawlCover(b));
-    // The grayscale/full-color choice only changes EPUB→KFX output — the one
-    // direction that re-encodes raster images as JXR. PDF→KFX embeds the PDF
-    // verbatim and KFX→EPUB/PDF just decode the source, so for those the choice
-    // is a no-op: show a plain "Force re-convert" instead of the nested submenu.
-    if ((b.kind || "epub_to_kfx") === "epub_to_kfx") {
-      addSub(menu, "Force re-convert", [
-        ["Grayscale", () => retryConvert(b.id, false)],
-        ["Full color", () => retryConvert(b.id, true)],
-      ]);
-    } else {
-      add(menu, "Force re-convert", () => retryConvert(b.id));
-    }
+    // Force re-convert is always full color now — the JXR encoder auto-collapses
+    // genuinely-grayscale pages to `8bppGray`, so color is a strict superset with
+    // no size cost on B&W books. No grayscale/color choice anymore.
+    add(menu, "Force re-convert", () => retryConvert(b.id));
     addExportItem(menu, [b]);
     add(menu, "Remove from library", () => removeBook(b), true);
   }
@@ -3041,19 +3033,10 @@ function addSub(menu, label, items) {
 }
 
 // "Force re-convert" for a SET of books (multi-selection or a whole series).
-// Shows the grayscale/full-color submenu exactly when any book is EPUB→KFX —
-// the only direction the color choice affects (the others ignore it) — mirroring
-// the single-book menu; otherwise a plain item.
+// Always full color (the grayscale option is retired — see the single-book
+// menu), so a plain item, no submenu.
 function addReconvertItem(menu, label, books) {
-  const anyEpub = books.some((b) => (b.kind || "epub_to_kfx") === "epub_to_kfx");
-  if (anyEpub) {
-    addSub(menu, label, [
-      ["Grayscale", () => bulkRetryConvert(books, false)],
-      ["Full color", () => bulkRetryConvert(books, true)],
-    ]);
-  } else {
-    add(menu, label, () => bulkRetryConvert(books, false));
-  }
+  add(menu, label, () => bulkRetryConvert(books));
 }
 
 // ---------------------------------------------------------------------------
@@ -3632,15 +3615,14 @@ async function bulkSend() {
 }
 
 // Queue a forced re-convert for every book in `books` (multi-select / whole
-// series). `color` is the EPUB→KFX interior-image choice; the other directions
-// ignore it (see `conversion_retry`). Invokes the command directly rather than
-// `retryConvert` so the batch shows ONE summary toast, not one per book.
-async function bulkRetryConvert(books, color = false) {
+// series). Always full color (grayscale retired). Invokes the command directly
+// rather than `retryConvert` so the batch shows ONE summary toast, not one per book.
+async function bulkRetryConvert(books) {
   if (!books.length) return;
   let failed = 0;
   for (const b of books) {
     try {
-      await window.api.invoke("conversion_retry", { bookId: b.id, color });
+      await window.api.invoke("conversion_retry", { bookId: b.id });
     } catch (e) {
       failed += 1;
       if (failed === 1) showToast(`re-convert failed for "${b.title}": ${e}`, true);
@@ -3822,12 +3804,14 @@ async function openReader(b) {
   }
 }
 
-// `color` chooses interior-image encoding on a forced re-convert (grayscale by
-// default). Failed/pending retries and auto-reconverts (page-direction change,
-// metadata edit) pass the default — they aren't a deliberate color choice.
-async function retryConvert(bookId, color = false) {
+// Queue a re-convert: a forced re-convert of a `done` book, or completing a
+// failed/pending first import. All EPUB→KFX output is full color now (grayscale
+// retired); the encoder auto-collapses B&W pages to `8bppGray`, so there's no
+// choice to make. Shared by the "Force re-convert" menu, the retry button, and
+// auto-reconverts (page-direction change, metadata edit).
+async function retryConvert(bookId) {
   try {
-    await window.api.invoke("conversion_retry", { bookId, color });
+    await window.api.invoke("conversion_retry", { bookId });
   } catch (e) {
     showToast(`retry failed: ${e}`, true);
   }

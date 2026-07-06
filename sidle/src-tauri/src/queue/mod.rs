@@ -18,12 +18,11 @@ use crate::state::DbHandle;
 
 #[derive(Debug)]
 enum QueueMsg {
-    /// `(book_id, reconvert, color)` — `reconvert` = forced re-run (source→target
-    /// only, skip the import-time cover enrichment that mutates the source KFX).
-    /// `color` = encode EPUB→KFX interior plates as full-color JXR (the default;
-    /// grayscale sources auto-collapse to `8bppGray`, so this only changes
-    /// genuinely-color images); ignored by the other conversion directions.
-    Enqueue(i64, bool, bool),
+    /// `(book_id, reconvert)` — `reconvert` = forced re-run (source→target only,
+    /// skip the import-time cover enrichment that mutates the source KFX).
+    /// EPUB→KFX interior plates are always encoded full-color (grayscale sources
+    /// auto-collapse to `8bppGray` in the encoder), so there's no color knob.
+    Enqueue(i64, bool),
     SetWorkers(usize),
     Shutdown,
 }
@@ -38,22 +37,15 @@ impl QueueHandle {
     /// Enqueue a first-time conversion (import / autopull): runs the format
     /// conversion **and** the import-time cover enrichment.
     pub async fn enqueue(&self, book_id: i64) -> Result<()> {
-        // First-time conversion ⇒ full color (the pipeline default). The JXR
-        // encoder's auto-gray collapse keeps grayscale pages at `8bppGray`, so
-        // only genuinely-color images (e.g. cover plates / color inserts) grow.
-        self.tx
-            .send(QueueMsg::Enqueue(book_id, false, true))
-            .await?;
+        self.tx.send(QueueMsg::Enqueue(book_id, false)).await?;
         Ok(())
     }
 
     /// Enqueue a forced re-convert (the "Force re-convert" button): source→target
     /// only — skips the cover-enrichment tail-step so the source KFX (and its
     /// `kfx_sha256`) is left untouched, preserving device annotation-sync matching.
-    pub async fn enqueue_reconvert(&self, book_id: i64, color: bool) -> Result<()> {
-        self.tx
-            .send(QueueMsg::Enqueue(book_id, true, color))
-            .await?;
+    pub async fn enqueue_reconvert(&self, book_id: i64) -> Result<()> {
+        self.tx.send(QueueMsg::Enqueue(book_id, true)).await?;
         Ok(())
     }
 
@@ -105,20 +97,20 @@ async fn dispatcher(
     workers_state: Arc<Mutex<usize>>,
     initial_workers: usize,
 ) {
-    let mut pending: Vec<(i64, bool, bool)> = Vec::new();
+    let mut pending: Vec<(i64, bool)> = Vec::new();
     let mut in_flight: tokio::task::JoinSet<i64> = tokio::task::JoinSet::new();
     let mut cap: usize = initial_workers.max(1);
 
     loop {
         // Spawn as many as cap allows.
         while in_flight.len() < cap
-            && let Some((book_id, reconvert, color)) = pending.pop()
+            && let Some((book_id, reconvert)) = pending.pop()
         {
             let app = app.clone();
             let db = db.clone();
             let paths = paths.clone();
             in_flight.spawn(async move {
-                worker::run_job(&app, &db, &paths, book_id, reconvert, color).await;
+                worker::run_job(&app, &db, &paths, book_id, reconvert).await;
                 book_id
             });
         }
@@ -126,9 +118,9 @@ async fn dispatcher(
         tokio::select! {
             msg = rx.recv() => {
                 match msg {
-                    Some(QueueMsg::Enqueue(id, reconvert, color)) => {
-                        if !pending.iter().any(|(b, _, _)| *b == id) {
-                            pending.insert(0, (id, reconvert, color));
+                    Some(QueueMsg::Enqueue(id, reconvert)) => {
+                        if !pending.iter().any(|(b, _)| *b == id) {
+                            pending.insert(0, (id, reconvert));
                         }
                     }
                     Some(QueueMsg::SetWorkers(n)) => {

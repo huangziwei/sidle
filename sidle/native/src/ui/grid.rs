@@ -331,6 +331,51 @@ pub fn draw_download_glyph(fb: &mut Framebuffer, cx: i32, cy: i32, s: i32, shade
     );
 }
 
+/// Draw a **key** glyph — a ring bow on the left, a horizontal shaft, and two
+/// teeth dropping off its tip — centered at `(cx, cy)`, scale `s`. The font has
+/// no 🔑, so we draw it. The DRM view's right-hand action button (decrypt every
+/// purchase); the library view draws [`draw_download_glyph`] in that slot.
+pub fn draw_key_glyph(fb: &mut Framebuffer, cx: i32, cy: i32, s: i32, shade: u8) {
+    const T: i32 = 5;
+    // Bow: a ring on the left, a hair inside where the shaft meets it.
+    let bow_cx = cx - s / 2;
+    let bow_r = s * 3 / 5;
+    let inner = (bow_r - T).max(1) as f32;
+    let rf = bow_r as f32;
+    for dy in -bow_r..=bow_r {
+        for dx in -bow_r..=bow_r {
+            let dist = ((dx * dx + dy * dy) as f32).sqrt();
+            if dist >= inner && dist <= rf {
+                fb.put_pixel(bow_cx + dx, cy + dy, shade);
+            }
+        }
+    }
+    // Shaft: a horizontal bar from the bow's right edge to the key's tip.
+    let shaft_x0 = bow_cx + bow_r - T / 2;
+    let tip_x = cx + s;
+    let shaft_w = (tip_x - shaft_x0).max(1);
+    let shaft_y = cy - T / 2;
+    fb.fill_rect(
+        shaft_y.max(0) as u32,
+        shaft_x0.max(0) as u32,
+        shaft_w as u32,
+        T as u32,
+        shade,
+    );
+    // Teeth: two short prongs hanging below the shaft near the tip.
+    let tooth_h = s / 2;
+    for off in [0, s * 2 / 5] {
+        let tx = tip_x - off - T;
+        fb.fill_rect(
+            (shaft_y + T).max(0) as u32,
+            tx.max(0) as u32,
+            T as u32,
+            tooth_h as u32,
+            shade,
+        );
+    }
+}
+
 /// Clear the cell to white, aspect-fit the cover into the region between
 /// `top_inset` and the bottom name band, then draw that band with `label`
 /// (single line, centered, ellipsized). Returns the painted cover rect so a

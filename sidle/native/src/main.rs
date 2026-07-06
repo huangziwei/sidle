@@ -718,8 +718,14 @@ fn run() -> anyhow::Result<()> {
                 // the query. Either way re-filter (only if the query changed) and
                 // repaint, since the keyboard overwrote the screen.
                 if series_view.is_none()
-                    && let Some(tap) =
-                        ui::searchbar::hit(x, y, fb.var.xres, !query.is_empty(), true)
+                    && let Some(tap) = ui::searchbar::hit(
+                        x,
+                        y,
+                        fb.var.xres,
+                        !query.is_empty(),
+                        true,
+                        matches!(source, Source::Drm),
+                    )
                 {
                     // Update and Sync are actions (LAN self-update / annotation
                     // push), not query edits — run inline and loop, leaving the
@@ -741,6 +747,72 @@ fn run() -> anyhow::Result<()> {
                             let dirty = toast::draw(&mut fb, &mut renderer, &banner_msg);
                             fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                             thread::sleep(TOAST_LINGER);
+                            repaint_page(
+                                &mut fb,
+                                &mut renderer,
+                                &agent,
+                                &cfg,
+                                cache_dir,
+                                &cells,
+                                &mut covers,
+                                page,
+                                total_pages,
+                                grid_left,
+                                grid_top,
+                                sort,
+                                filters.active_facets(),
+                                series_view.as_deref(),
+                                &query,
+                                drm_slice(source, &drm_books),
+                            )?;
+                            continue;
+                        }
+                        ui::searchbar::Tap::DecryptAll => {
+                            // DRM view's right disc (the library view's Update slot,
+                            // useless while browsing DRM): decrypt every on-device
+                            // purchase and push each to the desktop, behind an
+                            // `n/total` progress bar. Then re-scan — each decrypted
+                            // book now has a `.kfx-zip`, so `dedrm::scan` drops it and
+                            // the DRM view collapses to just the ones left (or empties).
+                            log("decrypt-all button tap");
+                            if drm_books.is_empty() {
+                                let dirty =
+                                    toast::draw(&mut fb, &mut renderer, "No DRM books to decrypt");
+                                fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                                thread::sleep(TOAST_LINGER);
+                            } else {
+                                let summary = decrypt_all_flow(
+                                    &mut fb,
+                                    &mut renderer,
+                                    &agent,
+                                    &cfg,
+                                    &drm_books,
+                                )
+                                .unwrap_or_else(|err| {
+                                    log(format!("decrypt-all flow error: {err:#}"));
+                                    format!("Decrypt-all failed: {err}")
+                                });
+                                // Full-panel summary: the progress banner is taller
+                                // than a plain toast, so a full clear avoids leaving
+                                // its top/bottom edges around the result.
+                                draw_panel(&mut fb, &mut renderer, &summary)?;
+                                thread::sleep(TOAST_LINGER);
+                                drm_books = dedrm::scan();
+                                all_books =
+                                    drm_books.iter().map(|d| d.book.clone()).collect();
+                                series_view = None;
+                                entries = series::group_by_series(rebuild_view(
+                                    &all_books, &filters, sort, &query,
+                                ));
+                                cells = series::cells_for_top(&entries);
+                                total_pages = pager::n_pages(cells.len());
+                                covers = vec![None; cells.len()];
+                                page = 0;
+                                log(format!(
+                                    "post decrypt-all: {} DRM books left",
+                                    all_books.len()
+                                ));
+                            }
                             repaint_page(
                                 &mut fb,
                                 &mut renderer,
@@ -861,7 +933,9 @@ fn run() -> anyhow::Result<()> {
                         }
                         // Handled above (early `continue`); the field only yields
                         // Open/Clear here.
-                        ui::searchbar::Tap::Update | ui::searchbar::Tap::Sync => unreachable!(),
+                        ui::searchbar::Tap::Update
+                        | ui::searchbar::Tap::Sync
+                        | ui::searchbar::Tap::DecryptAll => unreachable!(),
                     }
                     if query != before {
                         entries = series::group_by_series(rebuild_view(
@@ -1268,7 +1342,7 @@ fn draw_gallery_page(
         grid_top * 60 / 100
     } else {
         searchbar::draw(fb, renderer, query, true);
-        searchbar::draw_buttons(fb);
+        searchbar::draw_buttons(fb, drm_active);
         (searchbar::TOP + searchbar::HEIGHT) as i32 + renderer.line_height() as i32
     };
     // Header line, clamped to one line so a long series name can't overrun.
@@ -1655,6 +1729,93 @@ fn decrypt_flow(
         }
     };
     Ok((msg, true))
+}
+
+/// Decrypt every on-device DRM purchase in `books` and push each result to the
+/// desktop — the batch twin of [`decrypt_flow`], run from the DRM view's right
+/// action button (the slot the library view gives to self-update). Steps through
+/// the list behind a [`toast::draw_progress`] `n / total` bar that advances one
+/// book at a time. The ABI binary is probed once up front. Each book's decrypt
+/// is a blocking `<exe> dedrm <kfx>` with stdio inherited (it lands in
+/// `sidle.sh`'s log — no pipe to drain, unlike the single-book streaming flow),
+/// then the resulting `.kfx-zip` is pushed over the LAN. Push is best-effort: an
+/// `Other` error is logged and the book still counts as decrypted; a token
+/// mismatch stops further pushes (every one would hit the same wall) but
+/// decryption continues — a decrypted book is still useful and re-pushable via
+/// the DRM Sync button. Returns the summary toast; the caller re-scans to drop
+/// the now-decrypted tiles.
+fn decrypt_all_flow(
+    fb: &mut Framebuffer,
+    renderer: &mut TextRenderer,
+    agent: &ureq::Agent,
+    cfg: &config::ServerConfig,
+    books: &[dedrm::DrmBook],
+) -> anyhow::Result<String> {
+    let total = books.len();
+    let Some(exe) = dedrm::probe_exe() else {
+        return Ok("No working kfxdedrm binary".to_string());
+    };
+    let t0 = Instant::now();
+    let (mut decrypted, mut synced, mut failed) = (0u32, 0u32, 0u32);
+    let mut token_bad = false;
+    for (i, book) in books.iter().enumerate() {
+        // Draw progress before the book so the bar reflects completed work while
+        // the title names the one now in flight.
+        let short = truncate_title(&book.book.title, 28);
+        let rect =
+            toast::draw_progress(fb, renderer, &format!("Decrypting {short}…"), i, total);
+        fb.send_update(rect, WAVEFORM_MODE_GC16)?;
+
+        // Blocking decrypt with inherited stdio — no pipe to drain (the single
+        // `decrypt_flow` pipes stdout only to stream it to the toast).
+        let status = Command::new(&exe).arg("dedrm").arg(&book.kfx_path).status();
+        let out_path = dedrm::out_path(&book.kfx_path);
+        log(format!(
+            "decrypt-all {}/{}: {} exit={status:?} out_exists={}",
+            i + 1,
+            total,
+            book.book.title,
+            out_path.exists()
+        ));
+        if !matches!(status, Ok(ref s) if s.success()) {
+            failed += 1;
+            continue;
+        }
+        decrypted += 1;
+
+        // Push the fresh output (best effort; skipped once the token is known bad).
+        if out_path.exists() && !token_bad {
+            match api::push_book(agent, cfg, &out_path) {
+                Ok(api::BookPush::Imported | api::BookPush::Duplicate) => synced += 1,
+                Err(api::SidleError::TokenMismatch) => {
+                    log("decrypt-all: token rejected — pausing pushes, still decrypting");
+                    token_bad = true;
+                }
+                Err(api::SidleError::Other(err)) => {
+                    log(format!("decrypt-all push {}: {err:#}", out_path.display()));
+                }
+            }
+        }
+    }
+    // Settle the bar at 100% so the batch visibly completes before the caller's
+    // summary panel replaces it.
+    let rect = toast::draw_progress(fb, renderer, "Done", total, total);
+    fb.send_update(rect, WAVEFORM_MODE_GC16)?;
+    log(format!(
+        "decrypt-all done in {:?}: {decrypted} decrypted, {synced} synced, {failed} failed, token_bad={token_bad}",
+        t0.elapsed()
+    ));
+
+    // A token mismatch means the decrypts landed but nothing synced — point the
+    // user at the re-provision step (the toast is one line, so no `\n` here: the
+    // renderer draws it as a stray glyph, not a break). The books are on disk;
+    // the DRM Sync button re-pushes them once the token is refreshed.
+    if token_bad {
+        return Ok(format!(
+            "Decrypted {decrypted}; sync blocked — plug into sidle, Update KUAL"
+        ));
+    }
+    Ok(format!("Decrypted {decrypted}, synced {synced}, {failed} failed"))
 }
 
 fn download_flow(

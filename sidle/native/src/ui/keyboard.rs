@@ -246,7 +246,10 @@ pub fn run(
                 // The search bar stays live in the overlay — its `✕` clears,
                 // consistent with the grid view; a field tap is a no-op (already
                 // open). Otherwise resolve a key.
-                if let Some(tap) = searchbar::hit(x, y, fb.var.xres, !query.is_empty(), false) {
+                // `with_button = false` here (the overlay draws no action discs),
+                // so `drm` is moot — only `Clear`/`Open` come back.
+                if let Some(tap) = searchbar::hit(x, y, fb.var.xres, !query.is_empty(), false, false)
+                {
                     if matches!(tap, searchbar::Tap::Clear) {
                         query.clear();
                         refresh_band!();

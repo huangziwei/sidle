@@ -42,7 +42,6 @@ pub async fn run_job(
     paths: &LibraryPaths,
     book_id: i64,
     reconvert: bool,
-    color: bool,
 ) {
     let Some(book) = lookup_book(db, book_id).await else {
         eprintln!("[sidle/queue] book {book_id} vanished before conversion");
@@ -75,7 +74,7 @@ pub async fn run_job(
                 emit_progress(&app_owned, book_id, f, label);
             }
         };
-        run_direction(&paths_owned, &book_owned, &kind_owned, color, &on_progress)
+        run_direction(&paths_owned, &book_owned, &kind_owned, &on_progress)
     })
     .await;
 
@@ -279,13 +278,10 @@ fn run_direction(
     paths: &LibraryPaths,
     book: &BookRow,
     kind: &str,
-    color: bool,
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> anyhow::Result<Produced> {
     match kind {
-        // Only EPUB→KFX embeds raster plates the color mode applies to; the
-        // other directions ignore it.
-        "epub_to_kfx" => convert_epub_to_kfx(paths, book, color, on_progress),
+        "epub_to_kfx" => convert_epub_to_kfx(paths, book, on_progress),
         "kfx_to_epub" => convert_kfx_to_epub(paths, book, on_progress),
         "pdf_to_kfx" => convert_pdf_to_kfx(paths, book, on_progress),
         "kfx_to_pdf" => convert_kfx_to_pdf(paths, book, on_progress),
@@ -338,7 +334,6 @@ fn progress_fraction(kind: &str, phase: &str, cur: usize, total: usize) -> f32 {
 fn convert_epub_to_kfx(
     paths: &LibraryPaths,
     book: &BookRow,
-    color: bool,
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> anyhow::Result<Produced> {
     let source = book
@@ -360,14 +355,10 @@ fn convert_epub_to_kfx(
     // import is a no-op (DB == source); only edits diverge. See
     // `book_metadata_override`.
     handle.set_metadata_override(book_metadata_override(handle.metadata(), book));
-    // Interior plates: full-color JXR (the default) unless the user explicitly
-    // picked grayscale on a re-convert. Grayscale source pages auto-collapse to
-    // `8bppGray` regardless. Cover stays JPEG either way (boko handles that).
-    handle.set_image_color_mode(if color {
-        jxr::ColorMode::Color
-    } else {
-        jxr::ColorMode::Grayscale
-    });
+    // Interior plates: always full-color JXR (grayscale is retired). Genuinely
+    // grayscale source pages auto-collapse to `8bppGray` in the encoder, so this
+    // costs nothing on B&W books. Cover stays JPEG either way (boko handles that).
+    handle.set_image_color_mode(jxr::ColorMode::Color);
     let mut writer = File::create(&tmp_path)?;
     handle.export_with_progress(boko::Format::Kfx, &mut writer, on_progress)?;
     writer.sync_all().ok();
