@@ -146,7 +146,8 @@ pub async fn run_job(
                             // than failing the whole job over a cosmetic
                             // EPUB tweak.
                             if let Some(epub) = &produced.epub_path {
-                                match epub_cover::replace_cover(epub, &bytes, "jpg") {
+                                let kfx = book.kfx_path.as_deref().map(Path::new);
+                                match epub_cover::ensure_cover(epub, kfx, &bytes, "jpg") {
                                     Ok(()) => eprintln!(
                                         "[sidle/queue] book {book_id} color cover \
                                          swapped inside epub"

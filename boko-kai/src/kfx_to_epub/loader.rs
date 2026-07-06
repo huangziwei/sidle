@@ -261,22 +261,156 @@ fn extract_book_metadata(
     symbols: &SymbolTable,
 ) -> BookMetadata {
     let mut meta = BookMetadata::default();
+    // Preferred source: Amazon's categorised `book_metadata` ($490) wrapper.
+    extract_categorised_metadata(&mut meta, by_type, symbols);
+    // Fallback: the flat `metadata` ($258) fragment for anything still unset —
+    // notably `cover_image`, which older Amazon KFX store *only* here. See
+    // `fill_missing_from_flat_metadata`.
+    fill_missing_from_flat_metadata(&mut meta, by_type, symbols);
+    // Last resort for the cover: some KFX declare no `cover_image` at all but
+    // open on a full-page cover image (the "loc 0" cover page). Resolve that
+    // image so the cover-swap / cover-extract / EPUB-cover paths can find it.
+    if meta.cover_resource_name.is_none() {
+        meta.cover_resource_name = resolve_cover_from_first_section(by_type, symbols);
+    }
+    meta
+}
 
+/// Resolve the cover image from the first reading-order section when no
+/// `cover_image` metadata exists.
+///
+/// A cover page is the book's first section whose single page-template drives a
+/// storyline that lays out one full-page image. We walk
+/// `reading_orders[0].sections[0]` → `section.$141[0].$176` (story) →
+/// `storyline.$146` → the first `resource_name` ($175) in that content tree,
+/// then confirm it names a real `external_resource`. This is the read-only core
+/// of calibre kfxlib's `check_cover_section_and_storyline` — enough to *find*
+/// the cover resource (calibre's extra validation there guards *rewriting* the
+/// cover page, which we don't do here).
+fn resolve_cover_from_first_section(
+    by_type: &HashMap<u64, HashMap<String, IonValue>>,
+    symbols: &SymbolTable,
+) -> Option<String> {
+    let first_section = first_reading_order_section(by_type, symbols)?;
+    let section = by_type
+        .get(&(KfxSymbol::Section as u64))?
+        .get(&first_section)?;
+    let sfields = section.unwrap_annotated().as_struct()?;
+    let page_templates = get_field(sfields, KfxSymbol::PageTemplates as u64)?.as_list()?;
+    let pt0 = page_templates.first()?.unwrap_annotated().as_struct()?;
+    let story = get_field(pt0, KfxSymbol::StoryName as u64).and_then(|v| symbols.text_of(v))?;
+    let storyline = by_type.get(&(KfxSymbol::Storyline as u64))?.get(story)?;
+    let cfields = storyline.unwrap_annotated().as_struct()?;
+    let content_list = get_field(cfields, KfxSymbol::ContentList as u64)?;
+    let candidate = first_content_resource_name(content_list, symbols)?;
+    // Only accept a name that resolves to an `external_resource` with a raster
+    // image format. This rejects a non-cover first section (e.g. a PDF-backed
+    // KFX, whose first section renders a `format: pdf` page — not a cover).
+    cover_candidate_is_image(by_type, symbols, &candidate).then_some(candidate)
+}
+
+/// `reading_orders[0].sections[0]` from `document_data` ($538), falling back to
+/// the flat `metadata` ($258) fragment (older KFX carry it there).
+fn first_reading_order_section(
+    by_type: &HashMap<u64, HashMap<String, IonValue>>,
+    symbols: &SymbolTable,
+) -> Option<String> {
+    for ftype in [KfxSymbol::DocumentData as u64, KfxSymbol::Metadata as u64] {
+        let Some((_, raw)) = by_type.get(&ftype).and_then(|m| m.iter().next()) else {
+            continue;
+        };
+        let Some(fields) = raw.unwrap_annotated().as_struct() else {
+            continue;
+        };
+        if let Some(name) = get_field(fields, KfxSymbol::ReadingOrders as u64)
+            .and_then(|v| v.as_list())
+            .and_then(|ro| ro.first())
+            .and_then(|first| first.as_struct())
+            .and_then(|rof| get_field(rof, KfxSymbol::Sections as u64))
+            .and_then(|v| v.as_list())
+            .and_then(|secs| secs.first())
+            .and_then(|s0| symbols.text_of(s0))
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// First `resource_name` ($175) found anywhere in a storyline content tree.
+/// The cover storyline lays out exactly one image, so its first `$175` is the
+/// cover resource.
+fn first_content_resource_name(value: &IonValue, symbols: &SymbolTable) -> Option<String> {
+    match value.unwrap_annotated() {
+        IonValue::List(items) => items
+            .iter()
+            .find_map(|it| first_content_resource_name(it, symbols)),
+        IonValue::Struct(fields) => {
+            if let Some(name) =
+                get_field(fields, KfxSymbol::ResourceName as u64).and_then(|v| symbols.text_of(v))
+            {
+                return Some(name.to_string());
+            }
+            fields.iter().find_map(|(_, v)| {
+                matches!(v.unwrap_annotated(), IonValue::List(_) | IonValue::Struct(_))
+                    .then(|| first_content_resource_name(v, symbols))
+                    .flatten()
+            })
+        }
+        _ => None,
+    }
+}
+
+/// True if `name` matches an `external_resource` ($164) whose `format` is a
+/// raster image (the shapes a cover can legitimately be). Excludes `pdf`/`kvg`
+/// and anything unrecognised, so a PDF-backed first section isn't mistaken for
+/// a cover.
+fn cover_candidate_is_image(
+    by_type: &HashMap<u64, HashMap<String, IonValue>>,
+    symbols: &SymbolTable,
+    name: &str,
+) -> bool {
+    const IMAGE_FORMATS: [&str; 7] = ["jpg", "jpeg", "jxr", "png", "gif", "webp", "bmp"];
+    let Some(res) = by_type.get(&(KfxSymbol::ExternalResource as u64)) else {
+        return false;
+    };
+    res.values().any(|v| {
+        let Some(fields) = v.unwrap_annotated().as_struct() else {
+            return false;
+        };
+        let matches_name =
+            get_field(fields, KfxSymbol::ResourceName as u64).and_then(|x| symbols.text_of(x))
+                == Some(name);
+        let is_image = get_field(fields, KfxSymbol::Format as u64)
+            .and_then(|x| symbols.text_of(x))
+            .is_some_and(|fmt| IMAGE_FORMATS.contains(&fmt));
+        matches_name && is_image
+    })
+}
+
+/// Fill `meta` from Amazon's categorised `book_metadata` ($490) wrapper —
+/// `categorised_metadata / kindle_title_metadata` key/value pairs. boko's own
+/// KFX exporter emits this shape too (see `extract_book_metadata` doc).
+fn extract_categorised_metadata(
+    meta: &mut BookMetadata,
+    by_type: &HashMap<u64, HashMap<String, IonValue>>,
+    symbols: &SymbolTable,
+) {
     let Some(entries) = by_type.get(&(KfxSymbol::BookMetadata as u64)) else {
-        return meta;
+        return;
     };
     let Some((_, raw)) = entries.iter().next() else {
-        return meta;
+        return;
     };
     let inner = raw.unwrap_annotated();
     let Some(fields) = inner.as_struct() else {
-        return meta;
+        return;
     };
 
     let Some(cat_list) =
         get_field(fields, KfxSymbol::CategorisedMetadata as u64).and_then(|v| v.as_list())
     else {
-        return meta;
+        return;
     };
 
     for cat in cat_list {
@@ -346,24 +480,91 @@ fn extract_book_metadata(
             }
         }
     }
-
-    meta
 }
 
-/// `cover_image` can be encoded as a plain string or as a list whose first
-/// element is a symbol/string pointing at an external_resource.
+/// Fall back to the flat `metadata` ($258) fragment for any field the
+/// categorised `book_metadata` ($490) wrapper didn't provide. Older Amazon KFX
+/// (roughly pre-2015 `YJConversionTools` output — e.g. RosettaBooks and Open
+/// Yale Courses titles) carry their metadata *only* here, keyed by symbol id
+/// rather than as `kindle_title_metadata` key/value pairs. The most important
+/// of these is `cover_image` ($424): without this fallback the loader reports
+/// no cover, so the cover-swap and cover-extract paths can't find the image and
+/// leave the grayscale store cover in place.
+///
+/// Mirrors the second lookup in calibre kfxlib `YJ_Metadata.get_metadata_value`
+/// (yj_metadata.py), which consults `METADATA_SYMBOLS[name]` against the `$258`
+/// fragment when the `$490` wrapper lacks the key. `$490` always wins, so this
+/// only fills gaps.
+fn fill_missing_from_flat_metadata(
+    meta: &mut BookMetadata,
+    by_type: &HashMap<u64, HashMap<String, IonValue>>,
+    symbols: &SymbolTable,
+) {
+    let Some(entries) = by_type.get(&(KfxSymbol::Metadata as u64)) else {
+        return;
+    };
+    let Some((_, raw)) = entries.iter().next() else {
+        return;
+    };
+    let Some(fields) = raw.unwrap_annotated().as_struct() else {
+        return;
+    };
+
+    let text = |sym: KfxSymbol| get_field(fields, sym as u64).and_then(IonValue::as_string);
+
+    if meta.cover_resource_name.is_none() {
+        meta.cover_resource_name =
+            resolve_cover_value(get_field(fields, KfxSymbol::CoverImage as u64), symbols);
+    }
+    if meta.title.is_empty()
+        && let Some(t) = text(KfxSymbol::Title)
+    {
+        meta.title = t.into();
+    }
+    if meta.authors.is_empty() {
+        // `$222` is a single author string in this shape; tolerate a list too.
+        match get_field(fields, KfxSymbol::Author as u64) {
+            Some(IonValue::String(s)) if !s.is_empty() => meta.authors.push(s.clone()),
+            Some(IonValue::List(items)) => {
+                for it in items {
+                    if let Some(s) = it.as_string().filter(|s| !s.is_empty()) {
+                        meta.authors.push(s.into());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if meta.language.is_empty()
+        && let Some(l) = text(KfxSymbol::Language)
+    {
+        meta.language = l.into();
+    }
+    if meta.publisher.is_none()
+        && let Some(p) = text(KfxSymbol::Publisher)
+    {
+        meta.publisher = Some(p.trim().into());
+    }
+    if meta.asin.is_none()
+        && let Some(a) = text(KfxSymbol::Asin).filter(|s| !s.is_empty())
+    {
+        meta.asin = Some(a.into());
+    }
+}
+
+/// Resolve a `cover_image` value to its external_resource `resource_name`. The
+/// value may be a plain string (the categorised `$490` shape), a bare symbol
+/// (the flat `$258` shape), or a list whose first element is a symbol/string.
 fn resolve_cover_value(value: Option<&IonValue>, symbols: &SymbolTable) -> Option<String> {
     let v = value?;
-    if let Some(s) = v.as_string() {
-        return Some(s.to_string());
+    if let Some(list) = v.as_list() {
+        return list
+            .first()
+            .and_then(|first| symbols.text_of(first))
+            .map(str::to_string);
     }
-    if let Some(list) = v.as_list()
-        && let Some(first) = list.first()
-        && let Some(text) = symbols.text_of(first)
-    {
-        return Some(text.to_string());
-    }
-    None
+    // `text_of` resolves both a plain string and a bare symbol id.
+    symbols.text_of(v).map(str::to_string)
 }
 
 /// Walk the doc_symbol Ion fragment to find the sum of imports' max_ids.
@@ -424,5 +625,75 @@ mod tests {
         let path = "tests/fixtures/[太宰 治] 人間失格.kfx";
         let bytes = std::fs::read(path).expect("read fixture");
         let _ = load(&bytes).expect("load 人間失格.kfx");
+    }
+
+    /// Doc-symbol table where symbol id `i` resolves to `names[i]`.
+    fn doc_symbols(names: &[&str]) -> SymbolTable {
+        SymbolTable {
+            base_len: 0,
+            doc_symbols: names.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn resolve_cover_value_accepts_string_symbol_and_list() {
+        let symbols = doc_symbols(&["resource/cover"]);
+        // Plain string (categorised `$490` shape).
+        assert_eq!(
+            resolve_cover_value(Some(&IonValue::String("e6".into())), &symbols).as_deref(),
+            Some("e6")
+        );
+        // Bare symbol (flat `$258` shape) — the case the original code missed.
+        assert_eq!(
+            resolve_cover_value(Some(&IonValue::Symbol(0)), &symbols).as_deref(),
+            Some("resource/cover")
+        );
+        // List whose first element is a symbol.
+        assert_eq!(
+            resolve_cover_value(Some(&IonValue::List(vec![IonValue::Symbol(0)])), &symbols)
+                .as_deref(),
+            Some("resource/cover")
+        );
+        assert_eq!(resolve_cover_value(None, &symbols), None);
+    }
+
+    #[test]
+    fn first_content_resource_name_walks_nested_content() {
+        let symbols = doc_symbols(&["img-1"]);
+        // storyline content_list → [ { content_list: [ { resource_name: $0 } ] } ]
+        let leaf = IonValue::Struct(vec![(KfxSymbol::ResourceName as u64, IonValue::Symbol(0))]);
+        let mid = IonValue::Struct(vec![(
+            KfxSymbol::ContentList as u64,
+            IonValue::List(vec![leaf]),
+        )]);
+        let content_list = IonValue::List(vec![mid]);
+        assert_eq!(
+            first_content_resource_name(&content_list, &symbols).as_deref(),
+            Some("img-1")
+        );
+    }
+
+    #[test]
+    fn cover_candidate_requires_image_format() {
+        // symbols: 0=name, 1="jpg", 2="pdf"
+        let symbols = doc_symbols(&["cover", "jpg", "pdf"]);
+        let resource = |fmt_sym: u64| {
+            let mut m = HashMap::new();
+            m.insert(
+                "cover".to_string(),
+                IonValue::Struct(vec![
+                    (KfxSymbol::ResourceName as u64, IonValue::Symbol(0)),
+                    (KfxSymbol::Format as u64, IonValue::Symbol(fmt_sym)),
+                ]),
+            );
+            let mut by_type = HashMap::new();
+            by_type.insert(KfxSymbol::ExternalResource as u64, m);
+            by_type
+        };
+        // jpg → accepted; pdf → rejected (guards PDF-backed first sections).
+        assert!(cover_candidate_is_image(&resource(1), &symbols, "cover"));
+        assert!(!cover_candidate_is_image(&resource(2), &symbols, "cover"));
+        // unknown name → rejected.
+        assert!(!cover_candidate_is_image(&resource(1), &symbols, "other"));
     }
 }

@@ -22,6 +22,16 @@
 //! the resource's declared `resource_width`/`resource_height` to the real pixel
 //! dimensions and, if the slot was previously non-JPEG (e.g. JXR), flip its
 //! `format`/`mime` to JPEG.
+//!
+//! Loc-0 covers: some KFX declare no `cover_image` at all — they merely open on
+//! a full-page cover image, which the loader infers from the first section. For
+//! those, swapping the pixels isn't enough: the home tile / sleep screen resolve
+//! their art through `cover_image` metadata, which is missing. So when the cover
+//! wasn't declared, we also backfill the pointer into both metadata shapes
+//! (`book_metadata`/$490 `kindle_title_metadata` and the flat `metadata`/$258
+//! `$424`), keyed to the same resource — leaving the book declaring its cover
+//! exactly like any other. Books that already declare `cover_image` are left
+//! untouched.
 
 use crate::image::jpeg::sanitize_for_kfx;
 use crate::kfx::container::{
@@ -61,14 +71,20 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
         .ok_or_else(|| ConvertError::InvalidKfx("KFX has no external_resource entities".into()))?;
     let mut cover_location: Option<String> = None;
     let mut original_format: Option<String> = None;
+    // The `resource_name` field's symbol id, for keying a `$258` cover_image
+    // pointer (see the loc-0 metadata backfill below).
+    let mut cover_name_sym: Option<u64> = None;
     for v in resources.values() {
         let Some(fields) = v.unwrap_annotated().as_struct() else {
             continue;
         };
-        let rn =
-            get_field(fields, KfxSymbol::ResourceName as u64).and_then(|x| book.symbols.text_of(x));
+        let rn_field = get_field(fields, KfxSymbol::ResourceName as u64);
+        let rn = rn_field.and_then(|x| book.symbols.text_of(x));
         if rn != Some(cover_name.as_str()) {
             continue;
+        }
+        if let Some(IonValue::Symbol(id)) = rn_field {
+            cover_name_sym = Some(*id);
         }
         cover_location = get_field(fields, KfxSymbol::Location as u64)
             .and_then(|x| x.as_string())
@@ -144,6 +160,15 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
     }
     let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
+    // A cover resolved by the loader but *not* declared by `cover_image`
+    // metadata is a "loc-0" cover: the book opens on a full-page cover image and
+    // the loader inferred it from the first section. Such a KFX has color pixels
+    // once we swap them, but the Kindle home tile and sleep screen resolve their
+    // art through `cover_image` metadata — which is absent — so they'd still show
+    // nothing. Backfill the pointer (into both the `$490` and `$258` shapes, as
+    // Amazon/calibre do) so the book declares its cover exactly like every other.
+    let backfill_cover_meta = !metadata_declares_cover(&book);
+
     // 4. Rebuild the entity list: swap the two cover entities, pass the rest
     //    through byte-for-byte (their ENTY-wrapped bytes are copied verbatim).
     let jpg_sym = symbol_id_for_name("jpg").unwrap_or(285);
@@ -157,6 +182,12 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
         }
         let raw = &kfx_bytes[e.offset..e.offset + e.length];
 
+        let reparse = |raw: &[u8]| {
+            IonParser::new(container::skip_enty_header(raw))
+                .parse()
+                .map_err(|err| ConvertError::InvalidKfx(format!("parse entity: {err}")))
+        };
+
         let data = if e.type_id == KfxSymbol::Bcrawmedia as u32
             && book.symbols.resolve(e.id as u64) == cover_location
         {
@@ -165,11 +196,16 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
         } else if e.type_id == KfxSymbol::ExternalResource as u32
             && external_resource_location(raw).as_deref() == Some(cover_location.as_str())
         {
-            let payload = container::skip_enty_header(raw);
-            let parsed = IonParser::new(payload).parse().map_err(|err| {
-                ConvertError::InvalidKfx(format!("parse external_resource: {err}"))
-            })?;
-            let rebuilt = rebuild_external_resource(&parsed, new_w, new_h, flip_format, jpg_sym);
+            let rebuilt = rebuild_external_resource(&reparse(raw)?, new_w, new_h, flip_format, jpg_sym);
+            create_entity_data(&rebuilt)
+        } else if backfill_cover_meta && e.type_id == KfxSymbol::BookMetadata as u32 {
+            let rebuilt = add_cover_image_to_book_metadata(&reparse(raw)?, &cover_name, &book.symbols);
+            create_entity_data(&rebuilt)
+        } else if backfill_cover_meta
+            && e.type_id == KfxSymbol::Metadata as u32
+            && let Some(sym) = cover_name_sym
+        {
+            let rebuilt = add_cover_image_to_flat_metadata(&reparse(raw)?, sym);
             create_entity_data(&rebuilt)
         } else {
             raw.to_vec()
@@ -183,8 +219,12 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
     }
 
     if !swapped_media {
+        // The declared cover has no backing `bcRawMedia` — the whole container
+        // is image-less (its image data lives in a companion resource container
+        // that was never imported). There's nothing to swap; surface it so the
+        // caller can skip rather than emit a cover-onto-an-image-less-book.
         return Err(ConvertError::InvalidKfx(format!(
-            "cover bcRawMedia for {cover_location:?} not found"
+            "cover bcRawMedia for {cover_location:?} not found (image-less container)"
         )));
     }
 
@@ -205,6 +245,139 @@ fn external_resource_location(raw_entity: &[u8]) -> Option<String> {
     get_field(fields, KfxSymbol::Location as u64)
         .and_then(IonValue::as_string)
         .map(str::to_string)
+}
+
+/// True if the book already declares `cover_image` in either metadata shape:
+/// the `$258` (`$424`) field or a `kindle_title_metadata` `cover_image` key
+/// inside `book_metadata` ($490). When false, the cover was inferred from the
+/// first section and needs a pointer backfilled (see `replace_cover`).
+fn metadata_declares_cover(book: &loader::BookData) -> bool {
+    if let Some(m) = book
+        .by_type
+        .get(&(KfxSymbol::Metadata as u64))
+        .and_then(|m| m.values().next())
+        .and_then(|r| r.unwrap_annotated().as_struct())
+        && get_field(m, KfxSymbol::CoverImage as u64).is_some()
+    {
+        return true;
+    }
+    let Some(cats) = book
+        .by_type
+        .get(&(KfxSymbol::BookMetadata as u64))
+        .and_then(|m| m.values().next())
+        .and_then(|r| r.unwrap_annotated().as_struct())
+        .and_then(|f| get_field(f, KfxSymbol::CategorisedMetadata as u64))
+        .and_then(IonValue::as_list)
+    else {
+        return false;
+    };
+    cats.iter().any(|cat| {
+        let Some(cf) = cat.unwrap_annotated().as_struct() else {
+            return false;
+        };
+        get_field(cf, KfxSymbol::Category as u64).and_then(|c| book.symbols.text_of(c))
+            == Some("kindle_title_metadata")
+            && get_field(cf, KfxSymbol::Metadata as u64)
+                .and_then(IonValue::as_list)
+                .is_some_and(|items| {
+                    items.iter().any(|it| {
+                        it.as_struct().and_then(|itf| {
+                            get_field(itf, KfxSymbol::Key as u64).and_then(IonValue::as_string)
+                        }) == Some("cover_image")
+                    })
+                })
+    })
+}
+
+/// Add a `cover_image` → `cover_name` entry to `book_metadata`'s ($490)
+/// `kindle_title_metadata` category (value is the resource name as a string,
+/// matching Amazon's `$490` shape). Preserves annotations and field order.
+fn add_cover_image_to_book_metadata(
+    parsed: &IonValue,
+    cover_name: &str,
+    symbols: &loader::SymbolTable,
+) -> IonValue {
+    if let IonValue::Annotated(anns, inner) = parsed {
+        return IonValue::Annotated(
+            anns.clone(),
+            Box::new(add_cover_image_to_book_metadata(inner, cover_name, symbols)),
+        );
+    }
+    let Some(fields) = parsed.as_struct() else {
+        return parsed.clone();
+    };
+    let mut out: Vec<(u64, IonValue)> = Vec::with_capacity(fields.len());
+    for (k, v) in fields {
+        if *k == KfxSymbol::CategorisedMetadata as u64
+            && let IonValue::List(cats) = v
+        {
+            let new_cats = cats
+                .iter()
+                .map(|cat| append_cover_to_title_metadata(cat, cover_name, symbols))
+                .collect();
+            out.push((*k, IonValue::List(new_cats)));
+        } else {
+            out.push((*k, v.clone()));
+        }
+    }
+    IonValue::Struct(out)
+}
+
+/// If `cat` is the `kindle_title_metadata` category, append a
+/// `{key: "cover_image", value: cover_name}` item to its metadata list.
+fn append_cover_to_title_metadata(
+    cat: &IonValue,
+    cover_name: &str,
+    symbols: &loader::SymbolTable,
+) -> IonValue {
+    let Some(fields) = cat.unwrap_annotated().as_struct() else {
+        return cat.clone();
+    };
+    let is_title = get_field(fields, KfxSymbol::Category as u64).and_then(|c| symbols.text_of(c))
+        == Some("kindle_title_metadata");
+    if !is_title {
+        return cat.clone();
+    }
+    let mut out: Vec<(u64, IonValue)> = Vec::with_capacity(fields.len());
+    for (k, v) in fields {
+        if *k == KfxSymbol::Metadata as u64
+            && let IonValue::List(items) = v
+        {
+            let mut items = items.clone();
+            items.push(IonValue::Struct(vec![
+                (KfxSymbol::Key as u64, IonValue::String("cover_image".into())),
+                (KfxSymbol::Value as u64, IonValue::String(cover_name.into())),
+            ]));
+            out.push((*k, IonValue::List(items)));
+        } else {
+            out.push((*k, v.clone()));
+        }
+    }
+    // Categories are plain structs in practice, but re-wrap if annotated.
+    match cat {
+        IonValue::Annotated(anns, _) => IonValue::Annotated(anns.clone(), Box::new(IonValue::Struct(out))),
+        _ => IonValue::Struct(out),
+    }
+}
+
+/// Add `cover_image` ($424) → `Symbol(cover_name_sym)` to the flat `metadata`
+/// ($258) fragment, mirroring the `$490` backfill in the older shape. No-op if
+/// the fragment already carries it. Preserves annotations and field order.
+fn add_cover_image_to_flat_metadata(parsed: &IonValue, cover_name_sym: u64) -> IonValue {
+    if let IonValue::Annotated(anns, inner) = parsed {
+        return IonValue::Annotated(
+            anns.clone(),
+            Box::new(add_cover_image_to_flat_metadata(inner, cover_name_sym)),
+        );
+    }
+    let Some(fields) = parsed.as_struct() else {
+        return parsed.clone();
+    };
+    let mut out = fields.to_vec();
+    if get_field(fields, KfxSymbol::CoverImage as u64).is_none() {
+        out.push((KfxSymbol::CoverImage as u64, IonValue::Symbol(cover_name_sym)));
+    }
+    IonValue::Struct(out)
 }
 
 /// Rebuild an `external_resource` Ion value with updated dimensions (and,
@@ -478,5 +651,75 @@ mod tests {
         // A non-KFX byte string can't load; ensure we surface an error rather
         // than panic. (Covers the early loader::load failure path.)
         assert!(replace_cover(b"not a kfx container", MINIMAL_PNG).is_err());
+    }
+
+    #[test]
+    fn flat_metadata_backfills_cover_image_symbol_once() {
+        let frag = IonValue::Struct(vec![(KfxSymbol::ReadingOrders as u64, IonValue::Int(0))]);
+        let out = add_cover_image_to_flat_metadata(&frag, 953);
+        match get_field(out.as_struct().unwrap(), KfxSymbol::CoverImage as u64) {
+            Some(IonValue::Symbol(id)) => assert_eq!(*id, 953),
+            other => panic!("cover_image not added as symbol: {other:?}"),
+        }
+        // Idempotent: a second pass doesn't duplicate the field.
+        let again = add_cover_image_to_flat_metadata(&out, 953);
+        let dupes = again
+            .as_struct()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| *k == KfxSymbol::CoverImage as u64)
+            .count();
+        assert_eq!(dupes, 1);
+    }
+
+    #[test]
+    fn book_metadata_backfills_cover_image_into_title_category() {
+        // book_metadata { categorised_metadata: [ {category:"kindle_title_metadata",
+        //   metadata:[{key:"title", value:"T"}]}, {category:"kindle_audit_metadata", ...} ] }
+        let title_cat = IonValue::Struct(vec![
+            (
+                KfxSymbol::Category as u64,
+                IonValue::String("kindle_title_metadata".into()),
+            ),
+            (
+                KfxSymbol::Metadata as u64,
+                IonValue::List(vec![IonValue::Struct(vec![
+                    (KfxSymbol::Key as u64, IonValue::String("title".into())),
+                    (KfxSymbol::Value as u64, IonValue::String("T".into())),
+                ])]),
+            ),
+        ]);
+        let audit_cat = IonValue::Struct(vec![(
+            KfxSymbol::Category as u64,
+            IonValue::String("kindle_audit_metadata".into()),
+        )]);
+        let bm = IonValue::Struct(vec![(
+            KfxSymbol::CategorisedMetadata as u64,
+            IonValue::List(vec![title_cat, audit_cat]),
+        )]);
+
+        let book = crate::kfx_to_epub::loader::empty_book_for_test();
+        let out = add_cover_image_to_book_metadata(&bm, "e6", &book.symbols);
+
+        // The title category's metadata list gained a cover_image=e6 item; the
+        // audit category is untouched.
+        let cats = get_field(out.as_struct().unwrap(), KfxSymbol::CategorisedMetadata as u64)
+            .and_then(IonValue::as_list)
+            .unwrap();
+        let title = cats[0].as_struct().unwrap();
+        let items = get_field(title, KfxSymbol::Metadata as u64)
+            .and_then(IonValue::as_list)
+            .unwrap();
+        let cover = items.iter().find(|it| {
+            it.as_struct()
+                .and_then(|f| get_field(f, KfxSymbol::Key as u64).and_then(IonValue::as_string))
+                == Some("cover_image")
+        });
+        let cover = cover.expect("cover_image item appended").as_struct().unwrap();
+        assert_eq!(
+            get_field(cover, KfxSymbol::Value as u64).and_then(IonValue::as_string),
+            Some("e6")
+        );
+        assert_eq!(cats[1].as_struct().unwrap().len(), 1, "audit category untouched");
     }
 }

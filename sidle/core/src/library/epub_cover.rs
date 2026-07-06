@@ -29,8 +29,10 @@ use crate::library::import::write_bytes_atomic;
 /// references like `<image xlink:href="cover.jpeg"/>` inside
 /// `titlepage.xhtml` and break the cover render in Apple Books.
 ///
-/// No-ops cleanly (returns Ok) when the EPUB has no cover entry.
-pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result<()> {
+/// Returns `Ok(true)` when the cover was swapped, `Ok(false)` when the EPUB
+/// declares no cover entry (nothing to overwrite — see [`ensure_cover`], which
+/// handles that case by regenerating from the KFX).
+pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result<bool> {
     let epub_bytes =
         std::fs::read(epub_path).with_context(|| format!("read {}", epub_path.display()))?;
 
@@ -41,7 +43,7 @@ pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Resul
             .with_context(|| "open epub for cover swap")?;
         match book.metadata().cover_image.as_deref() {
             Some(s) if !s.is_empty() => s.to_string(),
-            _ => return Ok(()), // No cover declared — nothing to do.
+            _ => return Ok(false), // No cover declared — nothing to overwrite.
         }
     };
     let opf_path = find_opf_path(&epub_bytes)?;
@@ -66,6 +68,42 @@ pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Resul
     )?;
 
     write_bytes_atomic(epub_path, &out)?;
+    Ok(true)
+}
+
+/// Ensure the EPUB at `epub_path` shows `new_bytes` as its cover, healing EPUBs
+/// that carry no cover slot to overwrite.
+///
+/// Prefers the fast in-place [`replace_cover`] swap. Some EPUBs sidle produced
+/// before the `$258` cover-metadata fix were converted cover-less (the loader
+/// couldn't see the KFX cover, so `kfx_to_epub` emitted no `<meta name="cover">`
+/// designation); on those `replace_cover` finds nothing to overwrite. For that
+/// case we regenerate the EPUB from `kfx_path` — a fresh conversion now emits a
+/// proper cover — then swap `new_bytes` in, so the result is correct regardless
+/// of whether the KFX's own embedded cover has been recolored yet.
+///
+/// `kfx_path` is where the book's KFX lives; `None` (e.g. a pure-EPUB import)
+/// means there's nothing to regenerate from, so a cover-less EPUB is left as-is.
+/// Best-effort by contract: callers treat any `Err` as a non-fatal, logged skip.
+pub fn ensure_cover(
+    epub_path: &Path,
+    kfx_path: Option<&Path>,
+    new_bytes: &[u8],
+    new_ext: &str,
+) -> Result<()> {
+    if replace_cover(epub_path, new_bytes, new_ext)? {
+        return Ok(());
+    }
+    let Some(kfx) = kfx_path else {
+        return Ok(());
+    };
+    let kfx_bytes = std::fs::read(kfx).with_context(|| format!("read {}", kfx.display()))?;
+    let epub_bytes = boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
+        .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap: {e:?}"))?;
+    write_bytes_atomic(epub_path, &epub_bytes)?;
+    // The freshly converted EPUB now carries a cover designation; swap the
+    // requested bytes in so the cover matches the sidecar exactly.
+    replace_cover(epub_path, new_bytes, new_ext)?;
     Ok(())
 }
 

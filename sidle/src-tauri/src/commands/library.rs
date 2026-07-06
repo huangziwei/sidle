@@ -714,12 +714,18 @@ async fn recrawl_one(state: &AppState, book: &BookRow) -> RecrawlOutcome {
     {
         let _ = std::fs::remove_file(old);
     }
-    // Also swap the cover inside the EPUB so external readers see the
-    // color version. Best-effort: log to stderr and continue if the swap
-    // fails — the sidecar is what the sidle gallery uses, so a failed
-    // EPUB swap doesn't invalidate the user's "Re-fetch cover" action.
+    // Also swap the cover inside the EPUB so external readers see the color
+    // version. `ensure_cover` regenerates the EPUB from the KFX when it has no
+    // cover slot to overwrite (older cover-less conversions). Best-effort: log
+    // to stderr and continue on failure — the sidecar is what the sidle gallery
+    // uses, so a failed EPUB swap doesn't invalidate the user's action.
     if let Some(epub) = book.epub_path.as_deref()
-        && let Err(e) = epub_cover::replace_cover(std::path::Path::new(epub), &bytes, "jpg")
+        && let Err(e) = epub_cover::ensure_cover(
+            std::path::Path::new(epub),
+            book.kfx_path.as_deref().map(std::path::Path::new),
+            &bytes,
+            "jpg",
+        )
     {
         eprintln!(
             "[sidle/recrawl] book {} epub cover swap failed: {e:#}",
@@ -911,10 +917,16 @@ pub async fn library_set_cover(
     }
 
     // Embed in the EPUB so external readers see the user-chosen image.
-    // Best-effort: failure logs and doesn't fail the command (the gallery
-    // reads from the sidecar, not the EPUB).
+    // `ensure_cover` regenerates from the KFX when the EPUB has no cover slot.
+    // Best-effort: failure logs and doesn't fail the command (the gallery reads
+    // from the sidecar, not the EPUB).
     if let Some(epub) = book.epub_path.as_deref()
-        && let Err(e) = epub_cover::replace_cover(std::path::Path::new(epub), &bytes, ext)
+        && let Err(e) = epub_cover::ensure_cover(
+            std::path::Path::new(epub),
+            book.kfx_path.as_deref().map(std::path::Path::new),
+            &bytes,
+            ext,
+        )
     {
         eprintln!("[sidle/set-cover] book {book_id} epub cover swap failed: {e:#}");
     }
