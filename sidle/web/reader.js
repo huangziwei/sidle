@@ -134,10 +134,7 @@ async function fetchHrefs(st, hrefs) {
     }
     for (const h of hrefs) st.attempted.add(h);
     st.onChunk?.(st);
-    if (st.attempted.size >= st.total && st.total > 0) {
-      // Everything lives in webview blobs now — free the backend's parsed KFX.
-      window.api.invoke("reader_release", { bookId: st.bookId }).catch(() => {});
-    }
+    maybeReleaseStore();
   })();
   for (const h of hrefs) {
     st.inflight.set(
@@ -172,15 +169,125 @@ function stopResLoader(st) {
   window.api.invoke("reader_release", { bookId: st.bookId }).catch(() => {});
 }
 
-// The statusbar's "images still streaming" chip (both reader modes). Hidden
-// once every image has been attempted (or the book defers none).
+// ---- deferred section loader ------------------------------------------------
+// A large text book's open DTO ships section HTML only for the resume window
+// (`html: null` elsewhere); this streams the rest via `reader_fetch_sections`
+// — same shape as the image loader, but the payloads are already-built
+// strings (no transcode), so it drains in a few round trips. Arrived HTML
+// lands straight in `dto.sections[i].html`, which is what the kfx-book
+// section loaders read.
+
+let secLoader = null; // per-open section-stream state (large reflowable books)
+let locationsPending = false; // deferred Loc/% map still being synthesized
+
+const SEC_CHUNK = 4; // sections per fetch (~150 KB avg each on a windowed book)
+
+function startSecLoader(id, dto, onChunk) {
+  const missing = [];
+  dto.sections.forEach((s, i) => {
+    if (s.html == null) missing.push(i);
+  });
+  if (!missing.length) return null;
+  // Stream forward from the inline window to the end, then the front stub
+  // walking back toward 0 (nearest-first) — reading-direction bias.
+  const firstInline = dto.sections.findIndex((s) => s.html != null);
+  const st = {
+    bookId: id,
+    dto,
+    queue: [
+      ...missing.filter((i) => i > firstInline),
+      ...missing.filter((i) => i < firstInline).reverse(),
+    ],
+    inflight: new Map(), // index → Promise<string|null>
+    fetched: 0,
+    total: missing.length,
+    cancelled: false,
+    onChunk,
+  };
+  (async () => {
+    while (!st.cancelled && st.queue.length) {
+      await fetchSections(st, st.queue.splice(0, SEC_CHUNK));
+    }
+  })();
+  return st;
+}
+
+async function fetchSections(st, indices) {
+  const batch = (async () => {
+    let rows = [];
+    try {
+      rows = (await window.api.invoke("reader_fetch_sections", {
+        bookId: st.bookId,
+        indices,
+      })) || [];
+    } catch (err) {
+      if (!st.cancelled) console.error("section fetch failed:", err);
+    }
+    if (st.cancelled) return;
+    for (const r of rows) {
+      const s = st.dto.sections[r.index];
+      if (s && s.html == null) s.html = r.html;
+    }
+    st.fetched += indices.length;
+    st.onChunk?.(st);
+    maybeReleaseStore();
+  })();
+  for (const i of indices) {
+    st.inflight.set(
+      i,
+      batch.then(() => st.dto.sections[i]?.html ?? null),
+    );
+  }
+  await batch;
+  for (const i of indices) st.inflight.delete(i);
+}
+
+// Promise for one section's HTML — inline value, in-flight batch, or a solo
+// fetch that jumps the background stream (a TOC/search jump ahead of it).
+function secLoaderRequire(st, index) {
+  if (!st) return Promise.resolve(null);
+  const s = st.dto.sections[index];
+  if (!s) return Promise.resolve(null);
+  if (s.html != null) return Promise.resolve(s.html);
+  if (st.cancelled) return Promise.resolve(null);
+  const pending = st.inflight.get(index);
+  if (pending) return pending;
+  const qi = st.queue.indexOf(index);
+  if (qi >= 0) st.queue.splice(qi, 1);
+  return fetchSections(st, [index]).then(() => st.dto.sections[index]?.html ?? null);
+}
+
+function stopSecLoader(st) {
+  if (!st) return;
+  st.cancelled = true;
+  st.queue.length = 0;
+}
+
+// Free the backend store once everything deferred has been delivered — the
+// webview owns all of it from then on (image blobs, section HTML, the
+// location map). Safe to call often; the backend release is idempotent.
+function maybeReleaseStore() {
+  if (bookId == null) return;
+  const imgsDone = !resLoader || resLoader.cancelled || resLoader.attempted.size >= resLoader.total;
+  const secsDone = !secLoader || secLoader.cancelled || secLoader.fetched >= secLoader.total;
+  if (imgsDone && secsDone && !locationsPending) {
+    window.api.invoke("reader_release", { bookId }).catch(() => {});
+  }
+}
+
+// The statusbar's "still streaming" chip (both reader modes): one combined
+// fraction over deferred images + withheld sections. Hidden at 100% (or when
+// nothing was deferred).
 function updateBufferedIndicator() {
   const el = $("#reader-buffered");
   if (!el) return;
-  const st = resLoader;
-  const active = !!st && !st.cancelled && st.total > 0 && st.attempted.size < st.total;
+  const imgs = resLoader && !resLoader.cancelled ? resLoader : null;
+  const secs = secLoader && !secLoader.cancelled ? secLoader : null;
+  const den = (imgs?.total || 0) + (secs?.total || 0);
+  const num = (imgs?.attempted.size || 0) + (secs?.fetched || 0);
+  const active = den > 0 && num < den;
   el.hidden = !active;
-  el.textContent = active ? `⇣ ${Math.floor((st.attempted.size / st.total) * 100)}%` : "";
+  el.textContent = active ? `⇣ ${Math.floor((num / den) * 100)}%` : "";
 }
 
 const view = () => $("#reader-view");
@@ -764,13 +871,31 @@ function updateBookmarkButton() {
 function buildEidIndex(d) {
   const map = new Map();
   for (let i = 0; i < (d?.sections?.length || 0); i++) {
-    const html = d.sections[i].html || "";
+    const html = d.sections[i].html || ""; // null while a section is unstreamed
     for (const m of html.matchAll(/data-eid="(\d+)"/g)) {
       const eid = Number(m[1]);
       if (!map.has(eid)) map.set(eid, i);
     }
   }
   return map;
+}
+
+// eid → section index, across the section stream: the local index covers
+// every fetched section (it's invalidated per arriving chunk); a miss while
+// sections are still streaming falls back to the backend's complete map.
+async function sectionIndexForEid(eid) {
+  if (eid == null) return null;
+  if (!eidToSection) eidToSection = buildEidIndex(dto);
+  let index = eidToSection.get(eid);
+  if (index == null && secLoader && !secLoader.cancelled && secLoader.fetched < secLoader.total) {
+    try {
+      const i = await window.api.invoke("reader_eid_section", { bookId, eid });
+      index = i == null ? undefined : Number(i);
+    } catch {
+      index = undefined;
+    }
+  }
+  return index ?? null;
 }
 
 async function jumpTo(ann) {
@@ -786,8 +911,7 @@ async function jumpTo(ann) {
     return;
   }
   if (!paginator) return;
-  if (!eidToSection) eidToSection = buildEidIndex(dto);
-  const index = eidToSection.get(ann.eid_start);
+  const index = await sectionIndexForEid(ann.eid_start);
   if (index == null) {
     toast("Couldn't locate that annotation in the book");
     return;
@@ -809,8 +933,7 @@ async function goToEid(eid) {
     return true;
   }
   if (!paginator) return false;
-  if (!eidToSection) eidToSection = buildEidIndex(dto);
-  const index = eidToSection.get(eid);
+  const index = await sectionIndexForEid(eid);
   if (index == null) return false;
   await paginator.goTo({ index, anchor: (d) => d.querySelector(`[data-eid="${eid}"]`) || 0 });
   return true;
@@ -1223,8 +1346,7 @@ async function jumpToSearchMatch(m, i) {
     return;
   }
   if (!paginator) return;
-  if (!eidToSection) eidToSection = buildEidIndex(dto);
-  const index = eidToSection.get(m.eid);
+  const index = await sectionIndexForEid(m.eid);
   if (index == null) {
     toast("Couldn't locate that match in the book");
     return;
@@ -1420,9 +1542,15 @@ function hideTocPanel() {
 function positionedFor(doc) {
   let arr = positionedByDoc.get(doc);
   if (!arr) {
+    // While the deferred location map is still synthesizing (locByEid empty),
+    // keep every [data-eid] element with a null loc — the EID half of the
+    // page anchor (live position, bookmarks) must work from the first paint.
+    // The per-doc caches are rebuilt when the map arrives (open() resets
+    // positionedByDoc).
+    const hasLocs = !!locByEid && locByEid.size > 0;
     arr = [...doc.querySelectorAll("[data-eid]")]
-      .map((el) => ({ el, loc: locByEid?.get(Number(el.getAttribute("data-eid"))) }))
-      .filter((x) => x.loc != null);
+      .map((el) => ({ el, loc: locByEid?.get(Number(el.getAttribute("data-eid"))) ?? null }))
+      .filter((x) => !hasLocs || x.loc != null);
     positionedByDoc.set(doc, arr);
   }
   return arr;
@@ -1579,13 +1707,9 @@ function cycleProgressMode() {
   else renderProgress();
 }
 
-// Base-text char count of a section (ruby `<rt>` excluded, whitespace collapsed)
-// — the content measure behind the time estimates.
-function baseTextLen(html) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  doc.querySelectorAll("rt").forEach((el) => el.remove());
-  return (doc.body?.textContent || "").replace(/\s+/g, " ").trim().length;
-}
+// (Per-section base-text char counts and image-only flags now arrive
+// precomputed from the backend — `ReaderSectionDto.chars` / `.image_only` —
+// so the reader never DOM-parses sections at open.)
 
 // ---- display style (per-book: font, size, colors, spacing, margins) --------
 
@@ -1665,15 +1789,9 @@ function mix(a, b, t) {
   return `#${ch.join("")}`;
 }
 
-// A section that is just a full-page image (the cover, a full-bleed
-// illustration) — no real text. Such sections get a zero-margin, single-column
-// layout so the image fills the page instead of shrinking into one text column.
-function isImageOnlySection(html) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  doc.querySelectorAll("rt").forEach((el) => el.remove());
-  const text = (doc.body?.textContent || "").replace(/\s+/g, "");
-  return text.length === 0 && (doc.body?.querySelector("img, image, svg") != null);
-}
+// (Image-only sections — cover, full-bleed art — are flagged backend-side in
+// `ReaderSectionDto.image_only`; they get the zero-margin, single-column
+// layout so the image fills the page instead of shrinking into a text column.)
 
 // The CSS injected into each section iframe via the paginator's `setStyles`. It
 // lands in the last <style> of the head, so `!important` here beats both the
@@ -2325,12 +2443,10 @@ async function openFxl(id, openDto, anns, positions) {
     );
   }
 
-  // Per page (= per spine section): image href, viewport size, spread side,
-  // and the structural eids (so a bookmark / last-read resolves to its page).
-  const firstImgSrc = (html) => {
-    const m = html.match(/<img[^>]*\bsrc="([^"]+)"/i);
-    return m ? m[1] : null;
-  };
+  // Per page (= per spine section): image href (backend-scanned manifest),
+  // viewport size, spread side, and the structural eids (so a bookmark /
+  // last-read resolves to its page). FXL sections always ship html inline
+  // (tiny scaffolds), so the eid scan stays local.
   const eidsOf = (html) => {
     const out = [];
     const re = /data-eid="(\d+)"/g;
@@ -2342,13 +2458,13 @@ async function openFxl(id, openDto, anns, positions) {
   const pages = [];
   const hrefToPage = new Map();
   openDto.sections.forEach((s, i) => {
-    kfxSrcs.push(firstImgSrc(s.html));
+    kfxSrcs.push(s.image_hrefs?.[0] || null);
     const vp = Array.isArray(s.viewport) ? s.viewport : null;
     pages.push({
       width: vp?.[0] || 0,
       height: vp?.[1] || 0,
       words: [],
-      eids: eidsOf(s.html),
+      eids: eidsOf(s.html || ""),
       spread: s.spread || null,
     });
     hrefToPage.set(s.href, i);
@@ -2592,6 +2708,9 @@ async function closePdf() {
   }
   stopResLoader(resLoader);
   resLoader = null;
+  stopSecLoader(secLoader);
+  secLoader = null;
+  locationsPending = false;
   updateBufferedIndicator();
   pdf = null;
   pdfTocRows = [];
@@ -3623,30 +3742,19 @@ function isNotebookOpen() {
   return readerMode === "notebook" && !view().hidden;
 }
 
-// Image hrefs referenced by each section, in spine order — a regex sweep of
-// the emitted HTML, filtered to the deferred-image manifest (so plain anchors
-// and chapter links never match).
-function sectionImageHrefs(dto) {
-  const known = new Set((dto.images || []).map((i) => i.href));
-  return dto.sections.map((s) => {
-    const out = [];
-    for (const m of s.html.matchAll(/(?:src|href)="([^"]+)"/g)) {
-      if (known.has(m[1])) out.push(m[1]);
-    }
-    return out;
-  });
-}
-
 // Reflowable fetch priority: the resume section's images (±1 section — the
 // reflowable analogue of "back 1%, forward 2%"), then the remaining sections
-// in spine order. Images no section references (if any) trail in manifest
-// order, appended by the loader. The loader dedupes repeats.
+// in spine order. Per-section hrefs come from the backend manifest, so this
+// works whether or not a section's HTML shipped inline; the resume section
+// always ships inline (the backend windows around the same saved position),
+// so the needle scan only has to look at inline sections. Images no section
+// references trail in manifest order, appended by the loader (which dedupes).
 function reflowPriorityHrefs(dto, resumeEid) {
-  const perSection = sectionImageHrefs(dto);
+  const perSection = dto.sections.map((s) => s.image_hrefs || []);
   let idx = 0;
   if (resumeEid != null) {
     const needle = `data-eid="${resumeEid}"`;
-    const found = dto.sections.findIndex((s) => s.html.includes(needle));
+    const found = dto.sections.findIndex((s) => s.html != null && s.html.includes(needle));
     if (found >= 0) idx = found;
   }
   const lo = Math.max(0, idx - 1);
@@ -3706,7 +3814,9 @@ async function open(id) {
   locByEid = new Map(dto.locations || []);
   maxLoc = dto.max_location || 0;
   positionedByDoc = new WeakMap();
-  sectionChars = dto.sections.map((sec) => baseTextLen(sec.html));
+  // Per-section metadata is precomputed backend-side (chars, image-only,
+  // image hrefs) — no DOMParser sweep of the whole book at open anymore.
+  sectionChars = dto.sections.map((sec) => sec.chars || 0);
   charsBefore = [];
   let cumChars = 0;
   for (const n of sectionChars) {
@@ -3716,7 +3826,7 @@ async function open(id) {
   totalChars = cumChars;
   imageSections = new Set();
   dto.sections.forEach((sec, i) => {
-    if (isImageOnlySection(sec.html)) imageSections.add(i);
+    if (sec.image_only) imageSections.add(i);
   });
   layoutMode = null;
   const pace = loadPace();
@@ -3735,8 +3845,47 @@ async function open(id) {
     patchLiveSectionImages();
     updateBufferedIndicator();
   });
+  // Stream withheld section HTML (a large book ships only the resume window
+  // inline). New arrivals invalidate the partial eid→section index.
+  secLoader = startSecLoader(id, dto, () => {
+    eidToSection = null;
+    updateBufferedIndicator();
+  });
+  // Deferred Loc/% map (reflowable book without a position map): fetch in the
+  // background; the statusbar and annotation Locs fill in when it lands. The
+  // page anchor (eid) works from first paint regardless — see positionedFor.
+  locationsPending = !!dto.locations_pending;
+  if (locationsPending) {
+    const forBook = id;
+    window.api
+      .invoke("reader_locations", { bookId: id })
+      .then((r) => {
+        if (bookId !== forBook || readerMode !== "reflowable") return;
+        locByEid = new Map(r?.locations || []);
+        maxLoc = r?.max_location || 0;
+        locationsPending = false;
+        positionedByDoc = new WeakMap(); // per-doc caches were built loc-less
+        if (livePosition?.eid != null) {
+          const loc = locByEid.get(livePosition.eid) ?? null;
+          livePosition.linear_pos = loc;
+          if (lastPos) lastPos.loc = loc;
+        }
+        renderProgress();
+        renderAnnotationsPanel(); // rows can show their Loc now
+        maybeReleaseStore();
+      })
+      .catch(() => {
+        if (bookId !== forBook) return;
+        locationsPending = false;
+        maybeReleaseStore();
+      });
+  }
   updateBufferedIndicator();
-  book = makeKfxBook(dto, resLoader);
+  book = makeKfxBook(dto, {
+    resolve: (h) => resLoader?.resolve(h) ?? null,
+    known: resLoader?.known ?? new Map(),
+    requireSection: (i) => secLoaderRequire(secLoader, i),
+  });
 
   $("#reader-title").textContent = dto.title || "Untitled";
   $("#reader-loc").textContent = "";
@@ -3842,6 +3991,9 @@ async function close() {
   }
   stopResLoader(resLoader);
   resLoader = null;
+  stopSecLoader(secLoader);
+  secLoader = null;
+  locationsPending = false;
   updateBufferedIndicator();
   dto = null;
   bookId = null;

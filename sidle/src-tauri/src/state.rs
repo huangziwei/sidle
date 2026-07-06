@@ -37,13 +37,27 @@ pub type SharedTransport = Arc<Mutex<Option<Arc<dyn Transport>>>>;
 /// for the app session; the keyed-by-`book_id` replacement is the eviction.
 pub type ReaderSearchCache = Arc<Mutex<Option<(i64, Arc<boko::kfx_to_epub::TextIndex>)>>>;
 
-/// Single-entry store backing the open book's on-demand image fetches
-/// (`reader_fetch_resources`). Populated by `reader_open` (lazy KFX→DOM),
-/// dropped by `reader_release` — the frontend releases it on reader close and
-/// as soon as every image has been fetched (the webview keeps the blobs; the
-/// store's parsed KFX raw media is then dead weight). Keyed by `book_id`;
-/// opening another book replaces it.
-pub type ReaderImageCache = Arc<Mutex<Option<(i64, Arc<boko::kfx_to_epub::ReaderImageStore>)>>>;
+/// Everything the open book's deferred fetches are served from: the boko
+/// image store (raw KFX media + transcode work list + deferred-location
+/// synthesis), the full built section HTML (source for windowed section
+/// streaming on large text books), and the eid→section index (jumps into
+/// sections the webview hasn't streamed yet).
+pub struct ReaderStoreEntry {
+    pub images: boko::kfx_to_epub::ReaderImageStore,
+    /// Every section's `(href, html)` in spine order — already built by the
+    /// open; `reader_fetch_sections` hands them out without recompute.
+    pub sections: Vec<(String, String)>,
+    pub eid_to_section: std::collections::HashMap<i64, usize>,
+}
+
+/// Single-entry store backing the open book's on-demand fetches
+/// (`reader_fetch_resources` / `reader_fetch_sections` / `reader_locations` /
+/// `reader_eid_section`). Populated by `reader_open` (lazy KFX→DOM), dropped
+/// by `reader_release` — the frontend releases it on reader close and once
+/// everything deferred has been delivered (the webview keeps the data; the
+/// store is then dead weight). Keyed by `book_id`; opening another book
+/// replaces it.
+pub type ReaderStoreCache = Arc<Mutex<Option<(i64, Arc<ReaderStoreEntry>)>>>;
 
 /// Default to all available cores. Conversion is CPU-bound; the OS scheduler
 /// handles contention with other apps better than we can from a guessed cap.
@@ -67,8 +81,8 @@ pub struct AppState {
     pub kual_source: KualSource,
     /// Reader search's per-session `TextIndex` cache (see [`ReaderSearchCache`]).
     pub reader_search_cache: ReaderSearchCache,
-    /// The open book's on-demand image store (see [`ReaderImageCache`]).
-    pub reader_image_cache: ReaderImageCache,
+    /// The open book's on-demand fetch store (see [`ReaderStoreCache`]).
+    pub reader_store: ReaderStoreCache,
 }
 
 /// Walk up from `CARGO_MANIFEST_DIR` (`<repo>/sidle/src-tauri`) until
@@ -246,7 +260,7 @@ impl AppState {
             server: ServerHandle::default(),
             kual_source,
             reader_search_cache: Arc::new(Mutex::new(None)),
-            reader_image_cache: Arc::new(Mutex::new(None)),
+            reader_store: Arc::new(Mutex::new(None)),
         })
     }
 }

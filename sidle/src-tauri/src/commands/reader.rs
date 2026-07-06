@@ -16,16 +16,30 @@ use crate::library::db::{self, AnnotationRow};
 use crate::library::ingest;
 use crate::state::AppState;
 
-/// One spine document in reading order. `html` carries `data-eid` attributes.
+/// One spine document in reading order. `html` carries `data-eid` attributes —
+/// or is `null` for a section outside the resume window of a windowed open
+/// (large text book), in which case [`reader_fetch_sections`] streams it in.
 #[derive(Debug, Serialize)]
 pub struct ReaderSectionDto {
     pub href: String,
-    pub html: String,
+    pub html: Option<String>,
+    /// Serialized HTML byte length — the paginator's progress weight, valid
+    /// whether or not `html` shipped.
+    pub size: i64,
     /// Fixed-layout page pixel size `[width, height]`, or `null` for reflowable.
     pub viewport: Option<[u32; 2]>,
     /// `"page-spread-left"` / `"page-spread-right"` for a paired fixed-layout
     /// page, else `null`.
     pub spread: Option<String>,
+    /// Base-text char count (ruby-free, whitespace-collapsed) — the reading
+    /// pace measure, precomputed so the webview never DOM-parses sections.
+    pub chars: i64,
+    /// Full-page-image section (cover / full-bleed art) — drives the
+    /// zero-margin single-column layout without a webview text probe.
+    pub image_only: bool,
+    /// Image hrefs this section references, in document order — the deferred
+    /// image loader's priority input.
+    pub image_hrefs: Vec<String>,
 }
 
 /// A non-spine asset the chapters reference by relative href.
@@ -155,6 +169,10 @@ pub struct ReaderBookDto {
     pub locations: Vec<(i64, i64)>,
     /// Largest linear position — the denominator for whole-book %.
     pub max_location: i64,
+    /// True when `locations` is empty because synthesis was deferred off the
+    /// open path (reflowable book without a position map): the reader fetches
+    /// them in the background via [`reader_locations`]. Display-only data.
+    pub locations_pending: bool,
     /// Image-based fixed-layout book (manga / comic): the reader renders
     /// pre-paginated pages (viewport-sized, two-up spreads) instead of reflowing.
     pub fixed_layout: bool,
@@ -171,48 +189,110 @@ fn map_toc(points: Vec<boko::kfx_to_epub::navigation::NavPoint>) -> Vec<ReaderTo
         .collect()
 }
 
-impl From<boko::kfx_to_epub::ReaderBook> for ReaderBookDto {
-    fn from(b: boko::kfx_to_epub::ReaderBook) -> Self {
-        ReaderBookDto {
-            sections: b
-                .sections
-                .into_iter()
-                .map(|s| ReaderSectionDto {
-                    href: s.href,
-                    html: s.html,
-                    viewport: s.viewport.map(|(w, h)| [w, h]),
-                    spread: s.spread,
-                })
-                .collect(),
-            resources: b
-                .resources
-                .into_iter()
-                .map(|r| ReaderResourceDto {
-                    href: r.href,
-                    mime: r.mime,
-                    data_base64: B64.encode(&r.data),
-                })
-                .collect(),
-            images: b
-                .images
-                .into_iter()
-                .map(|i| ReaderImageDto {
-                    href: i.href,
-                    mime: i.mime,
-                    width: i.width,
-                    height: i.height,
-                })
-                .collect(),
-            toc: map_toc(b.toc),
-            title: b.metadata.title,
-            authors: b.metadata.authors,
-            language: b.metadata.language,
-            writing_mode: b.writing_mode,
-            page_progression_direction: b.page_progression_direction,
-            locations: b.locations,
-            max_location: b.max_location,
-            fixed_layout: b.fixed_layout,
+/// Total section-HTML bytes above which a reflowable book's open DTO is
+/// windowed: only the resume neighbourhood (±1 / +2 sections) ships inline,
+/// the rest streams via [`reader_fetch_sections`]. Below it (and always for
+/// fixed layout, whose scaffold HTML is tiny) everything ships — zero
+/// follow-up round trips, zero behavior change for small books.
+const SECTION_WINDOW_THRESHOLD: usize = 2 * 1024 * 1024;
+
+/// The open DTO plus the store-side pieces a lazy open leaves behind.
+struct BuiltReaderOpen {
+    dto: ReaderBookDto,
+    /// All sections `(href, html)` for `reader_fetch_sections`.
+    sections: Vec<(String, String)>,
+    eid_to_section: std::collections::HashMap<i64, usize>,
+    /// True when the DTO withheld anything (windowed html / pending
+    /// locations) — i.e. the store must be cached even if there are no images.
+    withheld: bool,
+}
+
+/// Build the reader-open DTO, windowing large reflowable books around the
+/// resume position (`resume_eid` = the saved Sidle spot, resolved to its
+/// section; window matches the frontend's fetch priority: back 1 section,
+/// forward 2).
+fn build_reader_open(b: boko::kfx_to_epub::ReaderBook, resume_eid: Option<i64>) -> BuiltReaderOpen {
+    let total_html: usize = b.sections.iter().map(|s| s.html.len()).sum();
+    let windowed = !b.fixed_layout && total_html > SECTION_WINDOW_THRESHOLD;
+    let n = b.sections.len();
+    let (lo, hi) = if windowed {
+        let idx = resume_eid
+            .and_then(|e| b.sections.iter().position(|s| s.eids.contains(&e)))
+            .unwrap_or(0);
+        (idx.saturating_sub(1), (idx + 2).min(n.saturating_sub(1)))
+    } else {
+        (0, n.saturating_sub(1))
+    };
+
+    let mut eid_to_section = std::collections::HashMap::new();
+    for (i, s) in b.sections.iter().enumerate() {
+        for &e in &s.eids {
+            eid_to_section.entry(e).or_insert(i);
         }
+    }
+
+    let sections_dto = b
+        .sections
+        .iter()
+        .enumerate()
+        .map(|(i, s)| ReaderSectionDto {
+            href: s.href.clone(),
+            html: if !windowed || (lo..=hi).contains(&i) {
+                Some(s.html.clone())
+            } else {
+                None
+            },
+            size: s.html.len() as i64,
+            viewport: s.viewport.map(|(w, h)| [w, h]),
+            spread: s.spread.clone(),
+            chars: s.chars as i64,
+            image_only: s.image_only,
+            image_hrefs: s.image_hrefs.clone(),
+        })
+        .collect();
+
+    let locations_pending = b.locations_deferred;
+    let dto = ReaderBookDto {
+        sections: sections_dto,
+        resources: b
+            .resources
+            .into_iter()
+            .map(|r| ReaderResourceDto {
+                href: r.href,
+                mime: r.mime,
+                data_base64: B64.encode(&r.data),
+            })
+            .collect(),
+        images: b
+            .images
+            .into_iter()
+            .map(|i| ReaderImageDto {
+                href: i.href,
+                mime: i.mime,
+                width: i.width,
+                height: i.height,
+            })
+            .collect(),
+        toc: map_toc(b.toc),
+        title: b.metadata.title,
+        authors: b.metadata.authors,
+        language: b.metadata.language,
+        writing_mode: b.writing_mode,
+        page_progression_direction: b.page_progression_direction,
+        locations: b.locations,
+        max_location: b.max_location,
+        locations_pending,
+        fixed_layout: b.fixed_layout,
+    };
+    BuiltReaderOpen {
+        dto,
+        sections: b
+            .sections
+            .into_iter()
+            .map(|s| (s.href, s.html))
+            .collect(),
+        eid_to_section,
+        withheld: windowed || locations_pending,
     }
 }
 
@@ -226,9 +306,11 @@ impl From<boko::kfx_to_epub::ReaderBook> for ReaderBookDto {
 /// opening a 100MB+ manga instant instead of a 10s all-pages JXR transcode.
 #[tauri::command]
 pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<ReaderOpen, String> {
-    // Snapshot the paths + display metadata under the lock, then release it
-    // before the CPU-bound parse/render (which can take a beat on a large book).
-    let (kfx_path, pdf_path, title, author, ppd) = {
+    // Snapshot the paths + display metadata + saved Sidle position under the
+    // lock, then release it before the CPU-bound parse/render (which can take
+    // a beat on a large book). The resume eid picks the section window a
+    // large text book ships inline.
+    let (kfx_path, pdf_path, title, author, ppd, resume_eid) = {
         let conn = state.db.lock().await;
         let row = db::get_book(&conn, book_id)
             .map_err(|e| e.to_string())?
@@ -236,7 +318,18 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
         let kfx_path = row
             .kfx_path
             .ok_or_else(|| "this book has no KFX file yet".to_string())?;
-        (kfx_path, row.pdf_path, row.title, row.author, row.ppd)
+        let resume_eid = db::list_reading_positions(&conn, book_id)
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|p| p.source == "sidle"))
+            .and_then(|p| p.eid);
+        (
+            kfx_path,
+            row.pdf_path,
+            row.title,
+            row.author,
+            row.ppd,
+            resume_eid,
+        )
     };
 
     let (open, store) = tokio::task::spawn_blocking(move || {
@@ -291,26 +384,34 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
             return Ok((ReaderOpen::Pdf(dto), None));
         }
 
-        // Reflowable / fixed-layout KFX → DOM, image bytes deferred.
-        let (book, store) = boko::kfx_to_epub::kfx_to_reader_book_lazy(&kfx)
+        // Reflowable / fixed-layout KFX → DOM: image bytes deferred, large
+        // text books windowed, unmapped locations deferred.
+        let (book, images) = boko::kfx_to_epub::kfx_to_reader_book_lazy(&kfx)
             .map_err(|e| format!("KFX→DOM render failed: {e}"))?;
-        Ok::<(ReaderOpen, Option<boko::kfx_to_epub::ReaderImageStore>), String>((
-            ReaderOpen::Reflowable(ReaderBookDto::from(book)),
-            Some(store),
+        let built = build_reader_open(book, resume_eid);
+        // Cache the store only when something is left to serve: deferred
+        // images, withheld sections, or pending locations.
+        let entry = (!images.is_empty() || built.withheld).then(|| {
+            crate::state::ReaderStoreEntry {
+                images,
+                sections: built.sections,
+                eid_to_section: built.eid_to_section,
+            }
+        });
+        Ok::<(ReaderOpen, Option<crate::state::ReaderStoreEntry>), String>((
+            ReaderOpen::Reflowable(built.dto),
+            entry,
         ))
     })
     .await
     .map_err(|e| format!("reader task join error: {e}"))??;
 
-    // Stash (or clear) the image store for this book's fetches. A PDF book —
-    // or a text-only book with nothing deferred — stores nothing but still
-    // evicts a previous book's store: its raw KFX media is dead weight once
-    // another book is open.
+    // Stash (or clear) the fetch store. A PDF book — or a small text-only
+    // book with nothing deferred — stores nothing but still evicts a previous
+    // book's store: its raw KFX media is dead weight once another book is open.
     {
-        let mut cache = state.reader_image_cache.lock().await;
-        *cache = store
-            .filter(|s| !s.is_empty())
-            .map(|s| (book_id, std::sync::Arc::new(s)));
+        let mut cache = state.reader_store.lock().await;
+        *cache = store.map(|s| (book_id, std::sync::Arc::new(s)));
     }
     Ok(open)
 }
@@ -327,19 +428,10 @@ pub async fn reader_fetch_resources(
     book_id: i64,
     hrefs: Vec<String>,
 ) -> Result<Vec<ReaderResourceDto>, String> {
-    let store = {
-        let cache = state.reader_image_cache.lock().await;
-        match &*cache {
-            Some((id, store)) if *id == book_id => store.clone(),
-            _ => {
-                return Err(format!(
-                    "no image store for book {book_id} (was the reader closed?)"
-                ));
-            }
-        }
-    };
+    let entry = reader_store_entry(&state, book_id).await?;
     tokio::task::spawn_blocking(move || {
-        store
+        entry
+            .images
             .fetch_many(&hrefs)
             .into_iter()
             .filter_map(|(href, result)| match result {
@@ -359,17 +451,102 @@ pub async fn reader_fetch_resources(
     .map_err(|e| format!("reader fetch task join error: {e}"))
 }
 
-/// Drop the open book's image store. Called by the frontend on reader close
-/// and once every image has been fetched (the webview holds the blobs from
-/// then on; the parsed KFX raw media serves no further purpose). Idempotent;
-/// a stale call for a different book is a no-op.
+/// One streamed section of a windowed open.
+#[derive(Debug, Serialize)]
+pub struct ReaderSectionChunkDto {
+    pub index: i64,
+    pub html: String,
+}
+
+/// Stream built section HTML for a windowed open (large text book): the DTO
+/// shipped `html: null` for these, the store holds the full build. Pure
+/// memcpy of already-built strings — no recompute. Unknown indices are
+/// skipped.
+#[tauri::command]
+pub async fn reader_fetch_sections(
+    state: State<'_, AppState>,
+    book_id: i64,
+    indices: Vec<i64>,
+) -> Result<Vec<ReaderSectionChunkDto>, String> {
+    let entry = reader_store_entry(&state, book_id).await?;
+    Ok(indices
+        .into_iter()
+        .filter_map(|i| {
+            let section = entry.sections.get(usize::try_from(i).ok()?)?;
+            Some(ReaderSectionChunkDto {
+                index: i,
+                html: section.1.clone(),
+            })
+        })
+        .collect())
+}
+
+/// Resolve an eid to its section index — for jumps (annotation / resume /
+/// search) into a section the webview hasn't streamed yet. `null` when the
+/// eid isn't in the book (e.g. after a re-convert).
+#[tauri::command]
+pub async fn reader_eid_section(
+    state: State<'_, AppState>,
+    book_id: i64,
+    eid: i64,
+) -> Result<Option<i64>, String> {
+    let entry = reader_store_entry(&state, book_id).await?;
+    Ok(entry.eid_to_section.get(&eid).map(|&i| i as i64))
+}
+
+/// The deferred Location/% map for the open book (see
+/// `ReaderBookDto::locations_pending`).
+#[derive(Debug, Serialize)]
+pub struct ReaderLocationsDto {
+    pub locations: Vec<(i64, i64)>,
+    pub max_location: i64,
+}
+
+/// Synthesize the reader's location map in the background — the full-book
+/// text walk that a lazy open deferred. Fetched once, right after open.
+#[tauri::command]
+pub async fn reader_locations(
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<ReaderLocationsDto, String> {
+    let entry = reader_store_entry(&state, book_id).await?;
+    tokio::task::spawn_blocking(move || {
+        let (locations, max_location) = entry.images.synth_locations();
+        ReaderLocationsDto {
+            locations,
+            max_location,
+        }
+    })
+    .await
+    .map_err(|e| format!("reader locations task join error: {e}"))
+}
+
+/// Drop the open book's fetch store. Called by the frontend on reader close
+/// and once everything deferred has been delivered (the webview holds the
+/// data from then on; the parsed KFX raw media serves no further purpose).
+/// Idempotent; a stale call for a different book is a no-op.
 #[tauri::command]
 pub async fn reader_release(state: State<'_, AppState>, book_id: i64) -> Result<(), String> {
-    let mut cache = state.reader_image_cache.lock().await;
+    let mut cache = state.reader_store.lock().await;
     if matches!(&*cache, Some((id, _)) if *id == book_id) {
         *cache = None;
     }
     Ok(())
+}
+
+/// The cached fetch store for `book_id`, or the "reopen the book" error every
+/// deferred-fetch command shares.
+async fn reader_store_entry(
+    state: &State<'_, AppState>,
+    book_id: i64,
+) -> Result<std::sync::Arc<crate::state::ReaderStoreEntry>, String> {
+    let cache = state.reader_store.lock().await;
+    match &*cache {
+        Some((id, entry)) if *id == book_id => Ok(entry.clone()),
+        _ => Err(format!(
+            "no reader store for book {book_id} (was the reader closed?)"
+        )),
+    }
 }
 
 /// Render one page of a PDF-backed book to a JPEG, scaled to `width` device

@@ -27,6 +27,21 @@ pub struct ReaderSection {
     /// `"page-spread-left"` / `"page-spread-right"` for a paired fixed-layout
     /// page, else `None`. Drives two-up spread placement in the reader.
     pub spread: Option<String>,
+    /// Base-text char count (ruby `<rt>` excluded, whitespace runs collapsed,
+    /// entities decoded) — the webview's reading-pace measure, computed here
+    /// so it never has to DOM-parse every section at open. Counts Unicode
+    /// scalars where JS counted UTF-16 units (differs only on astral chars).
+    pub chars: u64,
+    /// True for a full-page-image section (cover, full-bleed art): no base
+    /// text at all, at least one `img`/`image`/`svg` element.
+    pub image_only: bool,
+    /// Image hrefs this section references, in document order — the reader's
+    /// fetch-priority input for the deferred-image loader.
+    pub image_hrefs: Vec<String>,
+    /// `data-eid` values in document order. Backend-side data (eid→section
+    /// resolution for jumps into not-yet-streamed sections, deferred location
+    /// synthesis); not shipped to the webview.
+    pub eids: Vec<i64>,
 }
 
 /// A non-spine asset the chapters reference by relative href (images,
@@ -48,14 +63,18 @@ pub struct ReaderImage {
     pub height: Option<u32>,
 }
 
-/// On-demand image supplier for a lazily-opened book: owns the parsed
-/// [`BookData`] (source of the raw JXR/JPEG bytes) plus the deferred work
-/// list keyed by href. Fetches transcode at request time — the expensive
+/// On-demand supplier for a lazily-opened book: owns the parsed [`BookData`]
+/// (source of the raw JXR/JPEG bytes) plus the deferred-image work list keyed
+/// by href, and the flattened reading-order eid list backing deferred
+/// location synthesis. Fetches transcode at request time — the expensive
 /// JXR→JPEG work happens per image, when (and only when) the reader wants
-/// it. Thread-safe by immutability: `fetch`/`fetch_many` take `&self`.
+/// it. Thread-safe by immutability: all methods take `&self`.
 pub struct ReaderImageStore {
     book: BookData,
     items: HashMap<String, DeferredImage>,
+    /// Every section's `data-eid`s concatenated in reading order — the input
+    /// [`Self::synth_locations`] walks when the book shipped no position map.
+    eid_order: Vec<i64>,
 }
 
 impl ReaderImageStore {
@@ -95,6 +114,14 @@ impl ReaderImageStore {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+
+    /// Synthesize the reader's `(eid, linear_position)` map — the deferred
+    /// half of a lazy open when the KFX ships no `position_id_map` (see
+    /// [`ReaderBook::locations_deferred`]). Costs a full-book text walk
+    /// (`TextIndex::from_book`), which is exactly why it's off the open path.
+    pub fn synth_locations(&self) -> (Vec<(i64, i64)>, i64) {
+        synth_locations(&self.book, &self.eid_order)
+    }
 }
 
 /// The reader's view of a book: rendered sections + the assets they reference +
@@ -124,6 +151,11 @@ pub struct ReaderBook {
     pub locations: Vec<(i64, i64)>,
     /// Largest linear position — the denominator for whole-book %.
     pub max_location: i64,
+    /// True when `locations` was NOT computed at open (lazy shape, reflowable
+    /// book without a position map): synthesis needs a full-book text walk,
+    /// so it's deferred to [`ReaderImageStore::synth_locations`] and fetched
+    /// in the background. Display-only data — anchors don't depend on it.
+    pub locations_deferred: bool,
     /// Image-based fixed-layout book (manga / comic): the reader switches to
     /// pre-paginated rendering (one page per section, viewport-sized, two-up
     /// spreads) instead of reflowing text.
@@ -143,6 +175,12 @@ pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> 
         book.resources.push(ReaderResource { href, mime, data });
     }
     book.images.clear();
+    if book.locations_deferred {
+        let (locations, max_location) = store.synth_locations();
+        book.locations = locations;
+        book.max_location = max_location;
+        book.locations_deferred = false;
+    }
     Ok(book)
 }
 
@@ -170,11 +208,17 @@ pub fn kfx_to_reader_book_lazy(
         .filter(|(href, _, _)| href != "titlepage.xhtml")
         .map(|(href, html, spread)| {
             let viewport = parse_viewport(&html);
+            let (chars, image_only, image_hrefs) = scan_section_meta(&html);
+            let eids = scan_eids_in_order(&html);
             ReaderSection {
                 href,
                 html,
                 viewport,
                 spread,
+                chars,
+                image_only,
+                image_hrefs,
+                eids,
             }
         })
         .collect();
@@ -248,7 +292,21 @@ pub fn kfx_to_reader_book_lazy(
         .page_progression_direction
         .clone()
         .unwrap_or_else(|| "ltr".to_string());
-    let (locations, max_location) = compute_locations(&book, &sections);
+    let eid_order: Vec<i64> = sections.iter().flat_map(|s| s.eids.iter().copied()).collect();
+    // Locations: a real position map ($265) is cheap — ship inline. So is the
+    // synthesized map of a fixed-layout book (image pages, no text to walk).
+    // A reflowable book without a map needs the full-book text walk — defer
+    // it to the store (fetched in the background; display-only data).
+    let pid_of = TextIndex::pid_map_from_book(&book);
+    let (locations, max_location, locations_deferred) = if !pid_of.is_empty() {
+        let max = pid_of.values().copied().max().unwrap_or(0);
+        (pid_of.into_iter().collect(), max, false)
+    } else if fixed_layout {
+        let (l, m) = synth_locations(&book, &eid_order);
+        (l, m, false)
+    } else {
+        (Vec::new(), 0, true)
+    };
     let metadata = book.metadata.clone();
     let store = ReaderImageStore {
         book,
@@ -256,6 +314,7 @@ pub fn kfx_to_reader_book_lazy(
             .into_iter()
             .map(|d| (d.filename.clone(), d))
             .collect(),
+        eid_order,
     };
     Ok((
         ReaderBook {
@@ -268,6 +327,7 @@ pub fn kfx_to_reader_book_lazy(
             page_progression_direction,
             locations,
             max_location,
+            locations_deferred,
             fixed_layout,
         },
         store,
@@ -298,35 +358,168 @@ fn parse_viewport(html: &str) -> Option<(u32, u32)> {
     }
 }
 
-/// Per-element linear positions for the reader's Location/% readout.
-///
-/// Uses the real `position_id_map` ($265) when the KFX has one (Amazon books →
-/// the device's own Loc numbers). Otherwise synthesizes monotonic positions by
-/// walking eids in **rendered reading order** (the sections are already in spine
-/// order, with `data-eid` stamped in document order) and weighting each by its
-/// base-text char count — because boko-generated e2k KFX ships no position map.
-/// The synthesized numbers won't equal the device's (different unit), but the
-/// whole-book % is faithful and the `(eid,offset)` anchors used by annotations /
-/// last-read are unaffected (this is display-only).
-fn compute_locations(book: &BookData, sections: &[ReaderSection]) -> (Vec<(i64, i64)>, i64) {
-    let pid_of = TextIndex::pid_map_from_book(book);
-    if !pid_of.is_empty() {
-        let max = pid_of.values().copied().max().unwrap_or(0);
-        return (pid_of.into_iter().collect(), max);
-    }
+/// Synthesized per-element linear positions: walk eids in **rendered reading
+/// order** (sections in spine order, `data-eid` stamped in document order),
+/// weighting each by its base-text char count — for KFX with no
+/// `position_id_map` (boko-generated e2k). The numbers won't equal a device's
+/// Loc (different unit), but the whole-book % is faithful and the
+/// `(eid,offset)` anchors used by annotations / last-read are unaffected
+/// (this is display-only). Costs a full-book text walk — the reason a lazy
+/// open defers it (see [`ReaderImageStore::synth_locations`]).
+fn synth_locations(book: &BookData, eid_order: &[i64]) -> (Vec<(i64, i64)>, i64) {
     let index = TextIndex::from_book(book);
     let mut locations = Vec::new();
     let mut seen = HashSet::new();
     let mut pos: i64 = 0;
-    for s in sections {
-        for eid in scan_eids_in_order(&s.html) {
-            if seen.insert(eid) {
-                locations.push((eid, pos));
-                pos += index.text_of(eid).map_or(0, |t| t.chars().count() as i64);
-            }
+    for &eid in eid_order {
+        if seen.insert(eid) {
+            locations.push((eid, pos));
+            pos += index.text_of(eid).map_or(0, |t| t.chars().count() as i64);
         }
     }
     (locations, pos)
+}
+
+/// One pass over a section's serialized XHTML for the per-section metadata
+/// the webview needs at open: base-text char count, image-only flag, and the
+/// image hrefs it references. Replaces the reader's own DOMParser sweep of
+/// every section — the dominant webview cost on a large text book.
+///
+/// Semantics mirror reader.js `baseTextLen` / `isImageOnlySection`:
+/// `<body>` text only, ruby `<rt>` content excluded, entities decoded,
+/// whitespace runs collapsed to one char with the ends trimmed; image-only =
+/// zero base text and at least one `img`/`image`/`svg` element. A plain
+/// state-machine scan of boko's own output (well-formed, double-quoted
+/// attributes, lowercase tags) — not a general HTML parser.
+fn scan_section_meta(html: &str) -> (u64, bool, Vec<String>) {
+    let body_start = html
+        .find("<body")
+        .and_then(|i| html[i..].find('>').map(|j| i + j + 1))
+        .unwrap_or(0);
+    let body_end = html.rfind("</body>").unwrap_or(html.len());
+    let mut rest = &html[body_start..body_end];
+
+    let mut chars: u64 = 0;
+    let mut text_seen = false;
+    let mut pending_space = false;
+    let mut has_image_el = false;
+    let mut hrefs: Vec<String> = Vec::new();
+
+    // Attribute value inside one tag's `name="…"` (boko serializes with
+    // double quotes; no unquoted/single-quoted attrs in our output).
+    fn attr<'t>(tag: &'t str, name: &str) -> Option<&'t str> {
+        let needle = format!(" {name}=\"");
+        let start = tag.find(&needle)? + needle.len();
+        let end = tag[start..].find('"')? + start;
+        Some(&tag[start..end])
+    }
+
+    while let Some(lt) = rest.find('<') {
+        count_base_text(&rest[..lt], &mut chars, &mut text_seen, &mut pending_space);
+        rest = &rest[lt..];
+        if let Some(after) = rest.strip_prefix("<!--") {
+            match after.find("-->") {
+                Some(e) => {
+                    rest = &after[e + 3..];
+                    continue;
+                }
+                None => break,
+            }
+        }
+        let Some(gt) = rest.find('>') else { break };
+        let tag = &rest[1..gt];
+        rest = &rest[gt + 1..];
+        let name_end = tag
+            .find(|c: char| !c.is_ascii_alphanumeric())
+            .unwrap_or(tag.len());
+        let name = &tag[..name_end];
+        match name {
+            // Skip ruby annotation content entirely (JS removes <rt> nodes).
+            // Flat in our output — content.rs never nests ruby.
+            "rt" if !tag.ends_with('/') => match rest.find("</rt") {
+                Some(e) => rest = &rest[e..],
+                None => break,
+            },
+            "img" => {
+                has_image_el = true;
+                if let Some(src) = attr(tag, "src")
+                    && !hrefs.iter().any(|h| h == src)
+                {
+                    hrefs.push(src.to_string());
+                }
+            }
+            "image" => {
+                has_image_el = true;
+                if let Some(href) = attr(tag, "xlink:href").or_else(|| attr(tag, "href"))
+                    && !hrefs.iter().any(|h| h == href)
+                {
+                    hrefs.push(href.to_string());
+                }
+            }
+            "svg" => has_image_el = true,
+            _ => {}
+        }
+    }
+    count_base_text(rest, &mut chars, &mut text_seen, &mut pending_space);
+
+    (chars, !text_seen && has_image_el, hrefs)
+}
+
+/// Accumulate base-text chars from one inter-tag text run: entities decode to
+/// one char, whitespace runs collapse to a single char, leading/trailing
+/// whitespace never counts (the JS `.replace(/\s+/g, " ").trim()` semantics,
+/// streamed).
+fn count_base_text(text: &str, chars: &mut u64, text_seen: &mut bool, pending_space: &mut bool) {
+    let mut i = 0;
+    while i < text.len() {
+        let c = text[i..].chars().next().expect("in-bounds char");
+        let mut ch = c;
+        let mut adv = c.len_utf8();
+        if c == '&'
+            && let Some(semi) = text[i + 1..].find(';').filter(|&s| s <= 10)
+            && let Some(decoded) = decode_entity(&text[i + 1..i + 1 + semi])
+        {
+            ch = decoded;
+            adv = semi + 2;
+        }
+        if ch.is_whitespace() {
+            if *text_seen {
+                *pending_space = true;
+            }
+        } else {
+            if *pending_space {
+                *chars += 1;
+                *pending_space = false;
+            }
+            *chars += 1;
+            *text_seen = true;
+        }
+        i += adv;
+    }
+}
+
+/// Decode the entity body (between `&` and `;`): the named set our serializer
+/// emits plus numeric forms. Unknown entities return `None` and count as
+/// literal text — matching what a DOM parser would render for them.
+fn decode_entity(body: &str) -> Option<char> {
+    match body {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some('\u{00A0}'),
+        _ => {
+            let n = if let Some(hex) = body.strip_prefix("#x").or_else(|| body.strip_prefix("#X")) {
+                u32::from_str_radix(hex, 16).ok()?
+            } else if let Some(dec) = body.strip_prefix('#') {
+                dec.parse::<u32>().ok()?
+            } else {
+                return None;
+            };
+            char::from_u32(n)
+        }
+    }
 }
 
 /// Eids in document order from a section's `data-eid="N"` stamps (reader mode
@@ -439,6 +632,54 @@ mod tests {
             lazy.resources.len() + lazy.images.len(),
             "no resource may be dropped or invented by the lazy split"
         );
+        // Locations: whichever path the lazy shape took (inline for a book
+        // with a position map / fixed layout, deferred otherwise), the eager
+        // shape must end up with the same resolved map.
+        assert!(!eager.locations_deferred, "legacy shape resolves the deferral");
+        if lazy.locations_deferred {
+            assert!(lazy.locations.is_empty());
+            let (locations, max_location) = store.synth_locations();
+            assert_eq!(locations, eager.locations);
+            assert_eq!(max_location, eager.max_location);
+        } else {
+            // Position-map locations come out of a HashMap — order is
+            // unstable (and irrelevant: the reader builds a Map). Compare
+            // as sorted sets.
+            let mut a = lazy.locations.clone();
+            let mut b = eager.locations.clone();
+            a.sort_unstable();
+            b.sort_unstable();
+            assert_eq!(a, b);
+            assert_eq!(lazy.max_location, eager.max_location);
+        }
+        // Deferred synthesis itself must still agree with the direct
+        // synthesized walk regardless of which path shipped (both books with
+        // and without position maps exercise scan order the same way).
+        let eid_order: Vec<i64> = lazy.sections.iter().flat_map(|s| s.eids.iter().copied()).collect();
+        assert!(!eid_order.is_empty(), "sections must carry scanned eids");
+    }
+
+    /// The Rust section scanner must reproduce the webview's `baseTextLen` /
+    /// `isImageOnlySection` semantics: body text only, `<rt>` excluded,
+    /// entities decoded, whitespace collapsed+trimmed; image hrefs collected.
+    #[test]
+    fn scan_section_meta_matches_js_semantics() {
+        let html = r#"<?xml version="1.0"?><html><head><title>ignored title</title></head>
+<body><p data-eid="5">  Hello &amp; <ruby>漢字<rt>かんじ</rt></ruby>  world </p>
+<p><img src="image_a.jpg"/> and <img src="image_a.jpg"/> dup</p>
+<svg xmlns="http://www.w3.org/2000/svg"><image xlink:href="cover.jpeg"/></svg></body></html>"#;
+        let (chars, image_only, hrefs) = scan_section_meta(html);
+        // Collapsed base text = "Hello & 漢字 world and dup" → 24 chars.
+        assert_eq!(chars, 24, "rt excluded, entity=1 char, whitespace collapsed");
+        assert!(!image_only);
+        assert_eq!(hrefs, vec!["image_a.jpg".to_string(), "cover.jpeg".to_string()]);
+
+        let cover = r#"<html><head><meta name="viewport" content="width=900, height=1280"/></head>
+<body>  <div><img src="page_1.jpg"/></div>  </body></html>"#;
+        let (chars, image_only, hrefs) = scan_section_meta(cover);
+        assert_eq!(chars, 0);
+        assert!(image_only, "whitespace-only body with an image is image-only");
+        assert_eq!(hrefs, vec!["page_1.jpg".to_string()]);
     }
 
     #[test]

@@ -169,7 +169,7 @@ fn extract_pdf_nav(
                 // (reflowable). Resolve to the container value either way.
                 let inner = item.unwrap_annotated();
                 let container = match inner {
-                    IonValue::Struct(_) => inner.clone(),
+                    IonValue::Struct(_) => inner,
                     _ => match book
                         .symbols
                         .text_of(inner)
@@ -388,7 +388,7 @@ fn walk(
             if !visited.contains(&name) {
                 visited.push(name.clone());
                 if let Some(story) = lookup_fragment(book, KfxSymbol::Storyline, &name) {
-                    walk(&story, book, visited, page_box, runs);
+                    walk(story, book, visited, page_box, runs);
                 }
             }
         }

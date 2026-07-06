@@ -101,6 +101,74 @@ pub struct ContentState<'a> {
     /// OPF `original-resolution` / `rendition:orientation` (calibre
     /// `epub_output.py:932`).
     pub original_resolution: Option<(u32, u32)>,
+
+    /// Hot-path timing accumulators (see [`Perf`]); a bool check per site
+    /// when the trace env var is unset.
+    pub perf: Perf,
+
+    /// Resolved named-style cache. A large book references the same few dozen
+    /// `$style` entities from tens of thousands of elements; re-running the
+    /// yj-properties conversion per element made `attach_style` the single
+    /// hottest path in `process_reading_order` (312 ms / 75k calls on the
+    /// biggest library book). Resolution is cached here; *registration*
+    /// (stylesheet + `used_kfx_styles`) still happens only on first styled
+    /// use, so emitted CSS is unchanged.
+    style_cache: HashMap<String, CachedStyle>,
+}
+
+/// One resolved `$style` entity (see `ContentState::style_cache`).
+struct CachedStyle {
+    /// Whether the style produces any CSS declaration at all (`s0`-style
+    /// defaults don't — they get no class and no stylesheet entry).
+    has_decl: bool,
+    /// CSS-safe class name (`safe_class_name(name)`), precomputed.
+    class_name: String,
+    decl: CssDecl,
+    /// Layout hints + heading level from the style entity (tag promotion).
+    hints: Vec<String>,
+    level: Option<String>,
+}
+
+/// Env-gated cumulative counters over `process_reading_order`'s hot paths —
+/// the in-tree substitute for a sampling profiler (which the dev sandbox
+/// blocks). Printed at the end of `process_reading_order` under
+/// `BOKO_KFX2EPUB_TRACE`; used to decide where the content pass's wall time
+/// actually goes on large books.
+#[derive(Default)]
+pub struct Perf {
+    pub enabled: bool,
+    pub resolve_text: std::time::Duration,
+    pub ruby_events: std::time::Duration,
+    pub style_events: std::time::Duration,
+    pub attach_style: std::time::Duration,
+    pub positions: std::time::Duration,
+    pub n_text: u32,
+    pub n_ruby: u32,
+    pub n_attach: u32,
+}
+
+impl Perf {
+    fn start(&self) -> Option<std::time::Instant> {
+        self.enabled.then(std::time::Instant::now)
+    }
+
+    fn print(&self) {
+        if !self.enabled {
+            return;
+        }
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        eprintln!(
+            "[kfx2epub:content] resolve_text={:.1} ms (×{})  ruby/style_events={:.1} ms (×{})  apply_style_events={:.1} ms  attach_style={:.1} ms (×{})  positions={:.1} ms",
+            ms(self.resolve_text),
+            self.n_text,
+            ms(self.ruby_events),
+            self.n_ruby,
+            ms(self.style_events),
+            ms(self.attach_style),
+            self.n_attach,
+            ms(self.positions),
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -178,7 +246,60 @@ impl<'a> ContentState<'a> {
             is_fixed_layout: fxl.fixed_layout,
             is_comic: fxl.double_page_spread,
             original_resolution: None,
+            perf: Perf {
+                enabled: std::env::var("BOKO_KFX2EPUB_TRACE").is_ok(),
+                ..Perf::default()
+            },
+            style_cache: HashMap::new(),
         }
+    }
+
+    /// Resolve `name`'s `$style` entity into the cache (idempotent). No
+    /// registration side effects — safe for pure lookups like the
+    /// style-event filter.
+    fn ensure_style_cached(&mut self, name: &str) {
+        if self.style_cache.contains_key(name) {
+            return;
+        }
+        let decl = properties::style_decl_for(name, self.book);
+        let (hints, level) = properties::style_layout_hints_for(name, self.book);
+        self.style_cache.insert(
+            name.to_string(),
+            CachedStyle {
+                has_decl: !decl.is_empty(),
+                class_name: safe_class_name(name),
+                decl,
+                hints,
+                level,
+            },
+        );
+    }
+
+    /// Whether `name` resolves to any CSS at all — the style-event filter's
+    /// question, answered from the cache without registering anything.
+    fn style_has_decl(&mut self, name: &str) -> bool {
+        self.ensure_style_cached(name);
+        self.style_cache[name].has_decl
+    }
+
+    /// Record a styled *use*: on the first use of a decl-bearing style, add
+    /// it to `used_kfx_styles` (first-use order, as before) and the
+    /// stylesheet. Returns `has_decl` so callers know whether to attach the
+    /// class. Cache hits make this O(1) instead of a full re-resolution.
+    fn register_style_use(&mut self, name: &str) -> bool {
+        self.ensure_style_cached(name);
+        let (has_decl, first_use_decl) = {
+            let c = &self.style_cache[name];
+            let needs = c.has_decl && !self.stylesheet.contains_key(name);
+            (c.has_decl, needs.then(|| c.decl.clone()))
+        };
+        if let Some(decl) = first_use_decl {
+            if !self.used_kfx_styles.iter().any(|s| s == name) {
+                self.used_kfx_styles.push(name.to_string());
+            }
+            self.stylesheet.insert(name.to_string(), decl);
+        }
+        has_decl
     }
 
     /// Entry point: walk every reading_order → section → page_template and
@@ -197,6 +318,7 @@ impl<'a> ContentState<'a> {
                 used_sections.push(section_name);
             }
         }
+        self.perf.print();
         Ok(())
     }
 
@@ -209,9 +331,8 @@ impl<'a> ContentState<'a> {
         let Some(fields) = inner.as_struct() else {
             return Ok(());
         };
-        let page_templates: Vec<IonValue> = get_field(fields, KfxSymbol::PageTemplates as u64)
+        let page_templates: &[IonValue] = get_field(fields, KfxSymbol::PageTemplates as u64)
             .and_then(|v| v.as_list())
-            .map(|v| v.to_vec())
             .unwrap_or_default();
         if page_templates.is_empty() {
             return Ok(());
@@ -223,8 +344,7 @@ impl<'a> ContentState<'a> {
         // page (calibre's `is_comic` branch → `process_page_spread_page_template`)
         // instead of stacking both halves into a single reflowable document.
         if self.is_fixed_layout {
-            let first = page_templates[0].clone();
-            return self.process_spread_template(&first, section_name, "", true);
+            return self.process_spread_template(&page_templates[0], section_name, "", true);
         }
 
         // Reflowable: calibre's "main page_template" is the last one in the list.
@@ -237,7 +357,7 @@ impl<'a> ContentState<'a> {
         // resolve `nav_unit.target_position.id` to the chapter file the
         // navigation entry belongs in.
         let mut ids: Vec<i64> = Vec::new();
-        for tpl in &page_templates {
+        for tpl in page_templates {
             collect_element_ids(tpl, self.book, &mut ids);
         }
         for eid in ids {
@@ -249,8 +369,8 @@ impl<'a> ContentState<'a> {
         // Process the LAST page_template into the existing body element
         // (calibre's main path; conditional templates are prepended).
         let writing_mode = self.writing_mode.clone();
-        let main_template = page_templates.last().cloned().unwrap();
-        self.process_content(&main_template, part_index, body_id, &writing_mode, true)?;
+        let main_template = page_templates.last().unwrap();
+        self.process_content(main_template, part_index, body_id, &writing_mode, true)?;
         Ok(())
     }
 
@@ -314,15 +434,11 @@ impl<'a> ContentState<'a> {
         is_section: bool,
     ) -> Result<(), ConvertError> {
         // Resolve a `$608 structure` symbol reference to the real struct.
-        let resolved;
         let template = match template.unwrap_annotated() {
             IonValue::Symbol(id) => {
                 let name = self.book.symbols.resolve(*id).to_string();
                 match lookup_fragment(self.book, KfxSymbol::Structure, &name) {
-                    Some(f) => {
-                        resolved = f;
-                        &resolved
-                    }
+                    Some(f) => f,
                     None => return Ok(()),
                 }
             }
@@ -345,24 +461,22 @@ impl<'a> ContentState<'a> {
             else {
                 return Ok(());
             };
-            let pages: Vec<IonValue> =
-                lookup_fragment(self.book, KfxSymbol::Storyline, &story_name)
-                    .and_then(|story| {
-                        story
-                            .unwrap_annotated()
-                            .as_struct()
-                            .and_then(|fs| get_field(fs, KfxSymbol::ContentList as u64))
-                            .and_then(|v| v.as_list())
-                            .map(|v| v.to_vec())
-                    })
-                    .unwrap_or_default();
+            let pages: &[IonValue] = lookup_fragment(self.book, KfxSymbol::Storyline, &story_name)
+                .and_then(|story| {
+                    story
+                        .unwrap_annotated()
+                        .as_struct()
+                        .and_then(|fs| get_field(fs, KfxSymbol::ContentList as u64))
+                        .and_then(|v| v.as_list())
+                })
+                .unwrap_or_default();
             // RTL spreads read the right-hand page first.
             let mut prop = if self.page_progression_direction == "ltr" {
                 "page-spread-left"
             } else {
                 "page-spread-right"
             };
-            for page in &pages {
+            for page in pages {
                 self.process_spread_template(page, section_name, prop, false)?;
                 prop = if prop == "page-spread-left" {
                     "page-spread-right"
@@ -478,7 +592,7 @@ impl<'a> ContentState<'a> {
             let name = self.book.symbols.resolve(*id).to_string();
             if let Some(fragment) = lookup_fragment(self.book, KfxSymbol::Structure, &name) {
                 return self.process_content(
-                    &fragment,
+                    fragment,
                     part_index,
                     parent_id,
                     writing_mode,
@@ -639,6 +753,7 @@ impl<'a> ContentState<'a> {
         // paragraph — including mid-paragraph footnote/cross-ref targets, which
         // the previous offset-0-only stamp left dangling.
         if let Some(loc_id) = get_location_id(fields) {
+            let t = self.perf.start();
             self.process_position(loc_id, 0, part_index, elem_id);
 
             let mut offsets: Vec<i64> = self
@@ -652,6 +767,9 @@ impl<'a> ContentState<'a> {
                 if let Some(located) = self.locate_offset(part_index, elem_id, off, false, true) {
                     self.process_position(loc_id, off, part_index, located);
                 }
+            }
+            if let Some(t) = t {
+                self.perf.positions += t.elapsed();
             }
         }
 
@@ -882,10 +1000,19 @@ impl<'a> ContentState<'a> {
         let dom = &mut self.book_parts[part_index].dom;
         let id = dom.create_element("div");
         // Apply class for style_name.
+        let t = self.perf.start();
         self.attach_style(part_index, id, style_name, fields);
+        if let Some(t) = t {
+            self.perf.attach_style += t.elapsed();
+            self.perf.n_attach += 1;
+        }
 
         self.add_content_children(fields, part_index, id, writing_mode)?;
+        let t = self.perf.start();
         self.apply_style_events(fields, part_index, id, writing_mode)?;
+        if let Some(t) = t {
+            self.perf.style_events += t.elapsed();
+        }
         Ok(id)
     }
 
@@ -1070,8 +1197,19 @@ impl<'a> ContentState<'a> {
     ) -> Result<(), ConvertError> {
         // $145 = text content (string or content_ref)
         if let Some(text_val) = get_field(fields, KfxSymbol::Content as u64) {
+            let t = self.perf.start();
             let text = resolve_content_text(text_val, self.book);
-            if self.try_emit_ruby_text(fields, part_index, parent_id, &text)? {
+            if let Some(t) = t {
+                self.perf.resolve_text += t.elapsed();
+                self.perf.n_text += 1;
+            }
+            let t = self.perf.start();
+            let emitted = self.try_emit_ruby_text(fields, part_index, parent_id, &text)?;
+            if let Some(t) = t {
+                self.perf.ruby_events += t.elapsed();
+                self.perf.n_ruby += 1;
+            }
+            if emitted {
                 return Ok(());
             }
             let dom = &mut self.book_parts[part_index].dom;
@@ -1192,7 +1330,7 @@ impl<'a> ContentState<'a> {
                 collected.push(Ev::Link(offset, length, name.to_string()));
             } else if let Some(style_sym) = get_field(ef, KfxSymbol::Style as u64)
                 && let Some(name) = self.book.symbols.text_of(style_sym)
-                && !properties::style_decl_for(name, self.book).is_empty()
+                && self.style_has_decl(name)
             {
                 // A `$style`-only event (no ruby/link) carrying renderable CSS
                 // (e.g. text-emphasis). Skip styles that produce no declaration
@@ -1419,8 +1557,7 @@ impl<'a> ContentState<'a> {
         if let Some(list) =
             get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list())
         {
-            let list_clone = list.to_vec();
-            for child in &list_clone {
+            for child in list {
                 self.process_content(child, part_index, parent_id, writing_mode, false)?;
             }
         }
@@ -1448,22 +1585,21 @@ impl<'a> ContentState<'a> {
         // ship names that collide with the synthesized `s<N>` shape, and
         // when they do the registry's `taken_names` set keeps them apart.
         if let Some(name) = style_name {
-            let decl = properties::style_decl_for(name, self.book);
-            if !decl.is_empty() {
-                if !self.used_kfx_styles.iter().any(|s| s == name) {
-                    self.used_kfx_styles.push(name.clone());
-                }
-                self.stylesheet.entry(name.clone()).or_insert(decl);
+            if self.register_style_use(name) {
+                let class = self.style_cache[name.as_str()].class_name.clone();
                 self.book_parts[part_index]
                     .element_classes
                     .entry(elem_id)
                     .or_default()
-                    .push(safe_class_name(name));
+                    .push(class);
             }
             // Layout hints + heading level — drive the `<div>` → `<h<N>>`
             // promotion in `consolidate_html`. Not emitted as CSS (calibre
             // uses these as sentinels too and `simplify_styles` strips them).
-            let (hints, level) = properties::style_layout_hints_for(name, self.book);
+            let (hints, level) = {
+                let c = &self.style_cache[name.as_str()];
+                (c.hints.clone(), c.level.clone())
+            };
             if !hints.is_empty() || level.is_some() {
                 self.book_parts[part_index]
                     .element_layout_hints
@@ -1511,20 +1647,14 @@ impl<'a> ContentState<'a> {
     /// which is applied only after `consolidate_html`): `strip_empty_spans`
     /// runs first and would unwrap an attribute-less span, dropping the run.
     fn attach_inline_style(&mut self, part_index: usize, span: NodeId, style_name: &str) {
-        let decl = properties::style_decl_for(style_name, self.book);
-        if decl.is_empty() {
+        if !self.register_style_use(style_name) {
             return;
         }
-        if !self.used_kfx_styles.iter().any(|s| s == style_name) {
-            self.used_kfx_styles.push(style_name.to_string());
-        }
-        self.stylesheet
-            .entry(style_name.to_string())
-            .or_insert(decl);
+        let class = self.style_cache[style_name].class_name.clone();
         self.book_parts[part_index]
             .dom
             .get_mut(span)
-            .set("class", safe_class_name(style_name));
+            .set("class", class);
     }
 
     /// Walk `$142 style_events`: each event names a chunk of text + a style.
@@ -1865,11 +1995,17 @@ fn get_location_id(fields: &[(u64, IonValue)]) -> Option<i64> {
 }
 
 /// Look up a fragment of the given KFX type by name.
-pub(super) fn lookup_fragment(book: &BookData, ftype: KfxSymbol, fid: &str) -> Option<IonValue> {
-    book.by_type
-        .get(&(ftype as u64))
-        .and_then(|m| m.get(fid))
-        .cloned()
+/// Borrowed fragment lookup. Returns a reference into `book` — callers hold
+/// `book` as a shared `&'a BookData` field, so the borrow is independent of
+/// `&mut self` and the walk never clones fragment trees (the previous
+/// `.cloned()` here deep-copied every storyline's entire content tree and was
+/// a top cost of `process_reading_order` on large books).
+pub(super) fn lookup_fragment<'b>(
+    book: &'b BookData,
+    ftype: KfxSymbol,
+    fid: &str,
+) -> Option<&'b IonValue> {
+    book.by_type.get(&(ftype as u64)).and_then(|m| m.get(fid))
 }
 
 /// Walk every Ion value reachable from a page_template (including referenced
@@ -1907,7 +2043,7 @@ fn walk_ids_recursive(
                 && visited.insert(name.to_string())
                 && let Some(storyline) = lookup_fragment(book, KfxSymbol::Storyline, name)
             {
-                walk_ids_recursive(&storyline, book, visited, out);
+                walk_ids_recursive(storyline, book, visited, out);
             }
             // Recurse into every field value (covers content_list, nested
             // structs, etc.).

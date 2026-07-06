@@ -62,9 +62,13 @@ export function patchPendingImages(doc, resolve) {
   }
 }
 
-// `loader` (optional): the reader's resource loader — { resolve(href) → url |
-// null, known: Map<href, {mime,width,height}> }. Without one, only the DTO's
-// inline resources resolve (offline/legacy use).
+// `loader` (optional): the reader's deferred-content interface —
+// { resolve(href) → blob url | null, known: Map<href, {mime,width,height}>,
+//   requireSection(index) → Promise<html|null> }. `resolve`/`known` cover the
+// lazily-streamed images; `requireSection` fetches a section whose HTML was
+// withheld from the open DTO (large text books ship only the resume window —
+// the paginator awaits `load()`, so a jump ahead of the stream just waits a
+// beat). Without a loader, only the DTO's inline content resolves.
 export function makeKfxBook(dto, loader) {
   // href → blob: URL for every eagerly-shipped non-spine resource (style.css).
   const resourceUrls = new Map();
@@ -139,11 +143,16 @@ export function makeKfxBook(dto, loader) {
   const sections = dto.sections.map((s, index) => ({
     id: s.href,
     linear: "yes",
-    // Rough byte weight so the paginator's progress fraction is meaningful.
-    size: s.html.length || 1,
-    load: () => {
+    // Byte weight so the paginator's progress fraction is meaningful — from
+    // the manifest, valid whether or not the HTML shipped inline.
+    size: s.size || s.html?.length || 1,
+    // The paginator awaits load(), so a withheld section (html == null)
+    // simply fetches before its first render. Arrived HTML is written back
+    // to the DTO by the section loader, so later loads are synchronous.
+    load: async () => {
+      const html = s.html != null ? s.html : await loader?.requireSection?.(index);
       const url = URL.createObjectURL(
-        new Blob([rewriteRefs(s.html)], { type: "text/html" }),
+        new Blob([rewriteRefs(html ?? "<html><body></body></html>")], { type: "text/html" }),
       );
       sectionBlobs.set(index, url);
       return url;
