@@ -128,11 +128,20 @@ export function makeKfxBook(dto, loader) {
     // Read by `getDirection` (which runs after this CSS applies), so the whole
     // section paginates as horizontal; the reader pairs this with a zero-margin
     // single-column layout (see `applyLayout`).
+    //
+    // The reset must reach EVERY element, not just html/body: an official-Amazon
+    // KFX can nest the image inside a block whose style carries the KFX
+    // `box_align: center` + `writing_mode: vertical_rl` pair (kfx_to_epub renders
+    // box_align as `text-align: center`, following calibre). In that vertical
+    // wrapper the horizontal axis is the *block* axis, where neither
+    // `text-align` nor `margin: 0 auto` can center — so the image stays pinned to
+    // the right edge unless the wrapper itself is flattened to horizontal-tb.
+    // Safe to blanket the whole subtree here because the section is text-free.
     const text = (doc.body?.textContent || "").replace(/\s+/g, "");
     if (!text && doc.body?.querySelector("img, image, svg")) {
       const fb = doc.createElement("style");
       fb.textContent =
-        "html, body { writing-mode: horizontal-tb !important; direction: ltr !important; }" +
+        "html, body, body * { writing-mode: horizontal-tb !important; direction: ltr !important; }" +
         "body { margin: 0 !important; text-align: center !important; }" +
         "img, image, svg { display: block !important; margin: 0 auto !important; }";
       doc.head.appendChild(fb);
