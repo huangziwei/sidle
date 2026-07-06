@@ -669,6 +669,53 @@ enum RecrawlOutcome {
     Failed { error: String },
 }
 
+/// Embed `bytes` as the KFX cover, returning the new sha256 (for `kfx_sha256`)
+/// or `None` on failure. Prefers an in-place swap; if the KFX declares no cover
+/// (an EPUB import whose source EPUB had none), `ensure_cover` has already
+/// inserted a cover into that EPUB, so we reconvert the KFX from it — giving the
+/// on-device tile / sleep-screen a real cover. Best-effort: failures log under
+/// `[sidle/<tag>]` and yield `None`. Shared by re-fetch and "Change cover…".
+fn swap_or_insert_kfx_cover(book: &BookRow, kfx: &str, bytes: &[u8], tag: &str) -> Option<String> {
+    let kfx_path = std::path::Path::new(kfx);
+    match kfx_cover::replace_cover(kfx_path, bytes) {
+        Ok(sha) => Some(sha),
+        Err(e) => {
+            // Only heal a genuinely cover-less KFX by reconvert; a swap failure
+            // on a KFX that *has* a cover (some other error) must not trigger a
+            // rebuild — that would replace a store KFX with a boko-produced one.
+            let Some(epub) = book.epub_path.as_deref() else {
+                eprintln!("[sidle/{tag}] book {} kfx cover swap failed: {e:#}", book.id);
+                return None;
+            };
+            if !kfx_cover::is_coverless(kfx_path) {
+                eprintln!("[sidle/{tag}] book {} kfx cover swap failed: {e:#}", book.id);
+                return None;
+            }
+            let reconvert = kfx_cover::reconvert_from_epub(
+                std::path::Path::new(epub),
+                kfx_path,
+                |src| crate::queue::worker::book_metadata_override(src, book),
+            );
+            match reconvert {
+                Ok(sha) => {
+                    eprintln!(
+                        "[sidle/{tag}] book {} kfx was coverless; cover inserted via reconvert",
+                        book.id
+                    );
+                    Some(sha)
+                }
+                Err(e2) => {
+                    eprintln!(
+                        "[sidle/{tag}] book {} kfx cover swap failed ({e:#}); reconvert failed: {e2:#}",
+                        book.id
+                    );
+                    None
+                }
+            }
+        }
+    }
+}
+
 /// Re-fetch one book's color cover from Amazon and replace it everywhere we
 /// keep a copy: the cover sidecar (what the gallery shows), the picker
 /// thumbnail, the embedded EPUB cover (for external readers), and the embedded
@@ -735,17 +782,11 @@ async fn recrawl_one(state: &AppState, book: &BookRow) -> RecrawlOutcome {
     // And into the imported KFX — that's the copy we push to the Kindle, and
     // its embedded cover drives the home tile / sleep-screen art. Rewriting it
     // changes the bytes, so re-stamp `kfx_sha256` (the on-device filename infix).
-    if let Some(kfx) = book.kfx_path.as_deref() {
-        match kfx_cover::replace_cover(std::path::Path::new(kfx), &bytes) {
-            Ok(new_sha) => {
-                let conn = state.db.lock().await;
-                let _ = db::set_kfx_path_and_sha(&conn, book.id, kfx, &new_sha);
-            }
-            Err(e) => eprintln!(
-                "[sidle/recrawl] book {} kfx cover swap failed: {e:#}",
-                book.id
-            ),
-        }
+    if let Some(kfx) = book.kfx_path.as_deref()
+        && let Some(new_sha) = swap_or_insert_kfx_cover(book, kfx, &bytes, "recrawl")
+    {
+        let conn = state.db.lock().await;
+        let _ = db::set_kfx_path_and_sha(&conn, book.id, kfx, &new_sha);
     }
     RecrawlOutcome::Updated {
         cover_path: out_str,
@@ -932,15 +973,13 @@ pub async fn library_set_cover(
     }
 
     // And into the imported KFX (boko normalizes png/webp → jpeg). This is the
-    // copy pushed to the Kindle; re-stamp `kfx_sha256` after the rewrite.
-    if let Some(kfx) = book.kfx_path.as_deref() {
-        match kfx_cover::replace_cover(std::path::Path::new(kfx), &bytes) {
-            Ok(new_sha) => {
-                let conn = state.db.lock().await;
-                let _ = db::set_kfx_path_and_sha(&conn, book_id, kfx, &new_sha);
-            }
-            Err(e) => eprintln!("[sidle/set-cover] book {book_id} kfx cover swap failed: {e:#}"),
-        }
+    // copy pushed to the Kindle; re-stamp `kfx_sha256` after the rewrite. A
+    // cover-less KFX (EPUB import with no source cover) is healed by reconvert.
+    if let Some(kfx) = book.kfx_path.as_deref()
+        && let Some(new_sha) = swap_or_insert_kfx_cover(&book, kfx, &bytes, "set-cover")
+    {
+        let conn = state.db.lock().await;
+        let _ = db::set_kfx_path_and_sha(&conn, book_id, kfx, &new_sha);
     }
 
     let updated = {

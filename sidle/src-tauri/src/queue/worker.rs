@@ -648,7 +648,7 @@ fn is_jpeg(bytes: &[u8]) -> bool {
 /// description, writing-mode…) survive untouched; the tracked fields take the
 /// edited DB value. For an unedited book the DB still equals what import read
 /// from the source, so this is a no-op.
-fn book_metadata_override(source: &boko::Metadata, book: &BookRow) -> boko::Metadata {
+pub(crate) fn book_metadata_override(source: &boko::Metadata, book: &BookRow) -> boko::Metadata {
     let mut m = source.clone();
     m.title = book.title.clone();
     m.authors = crate::library::authors::split_display(&book.author);

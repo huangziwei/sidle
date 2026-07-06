@@ -72,19 +72,17 @@ pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Resul
 }
 
 /// Ensure the EPUB at `epub_path` shows `new_bytes` as its cover, healing EPUBs
-/// that carry no cover slot to overwrite.
+/// that carry no cover slot to overwrite. Three cases, in order:
 ///
-/// Prefers the fast in-place [`replace_cover`] swap. Some EPUBs sidle produced
-/// before the `$258` cover-metadata fix were converted cover-less (the loader
-/// couldn't see the KFX cover, so `kfx_to_epub` emitted no `<meta name="cover">`
-/// designation); on those `replace_cover` finds nothing to overwrite. For that
-/// case we regenerate the EPUB from `kfx_path` — a fresh conversion now emits a
-/// proper cover — then swap `new_bytes` in, so the result is correct regardless
-/// of whether the KFX's own embedded cover has been recolored yet.
+/// 1. The EPUB already declares a cover → fast in-place [`replace_cover`] swap.
+/// 2. The EPUB is cover-less but its KFX has a cover (some EPUBs sidle produced
+///    before the `$258`/loc-0 cover fixes were converted cover-less, while the
+///    KFX now resolves one) → regenerate the EPUB from `kfx_path`, then swap.
+/// 3. The EPUB *and* KFX are both cover-less (e.g. an EPUB import whose source
+///    had no cover) → [`insert_cover`] a fresh cover designation into the EPUB.
 ///
-/// `kfx_path` is where the book's KFX lives; `None` (e.g. a pure-EPUB import)
-/// means there's nothing to regenerate from, so a cover-less EPUB is left as-is.
-/// Best-effort by contract: callers treat any `Err` as a non-fatal, logged skip.
+/// `kfx_path` is where the book's KFX lives; `None` skips case 2. Best-effort by
+/// contract: callers treat any `Err` as a non-fatal, logged skip.
 pub fn ensure_cover(
     epub_path: &Path,
     kfx_path: Option<&Path>,
@@ -94,17 +92,108 @@ pub fn ensure_cover(
     if replace_cover(epub_path, new_bytes, new_ext)? {
         return Ok(());
     }
-    let Some(kfx) = kfx_path else {
-        return Ok(());
-    };
-    let kfx_bytes = std::fs::read(kfx).with_context(|| format!("read {}", kfx.display()))?;
-    let epub_bytes = boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
-        .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap: {e:?}"))?;
-    write_bytes_atomic(epub_path, &epub_bytes)?;
-    // The freshly converted EPUB now carries a cover designation; swap the
-    // requested bytes in so the cover matches the sidecar exactly.
-    replace_cover(epub_path, new_bytes, new_ext)?;
+    // Case 2: regenerate from the KFX only if the KFX actually has a cover —
+    // regenerating from a cover-less KFX would just reproduce a cover-less EPUB
+    // (and needlessly overwrite an EPUB import's source file).
+    if let Some(kfx) = kfx_path {
+        let kfx_bytes = std::fs::read(kfx).with_context(|| format!("read {}", kfx.display()))?;
+        if kfx_declares_cover(&kfx_bytes) {
+            let epub_bytes = boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
+                .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap: {e:?}"))?;
+            write_bytes_atomic(epub_path, &epub_bytes)?;
+            replace_cover(epub_path, new_bytes, new_ext)?;
+            return Ok(());
+        }
+    }
+    // Case 3: nothing to swap or regenerate from — insert a cover.
+    insert_cover(epub_path, new_bytes, new_ext)
+}
+
+/// True if the KFX declares a resolvable cover. Used by [`ensure_cover`] to
+/// decide between regenerating the EPUB from the KFX (cover present) and
+/// inserting one directly (cover absent).
+fn kfx_declares_cover(kfx_bytes: &[u8]) -> bool {
+    boko::kfx_to_epub::loader::load(kfx_bytes)
+        .map(|b| b.metadata.cover_resource_name.is_some())
+        .unwrap_or(false)
+}
+
+/// Insert a cover into an EPUB that declares none: write the image next to the
+/// OPF and add a `properties="cover-image"` manifest item (boko's top-priority
+/// cover signal) plus a legacy `<meta name="cover">` for EPUB-2 readers. Unlike
+/// [`replace_cover`], this *adds* the designation rather than overwriting an
+/// existing one — used by [`ensure_cover`] for books whose source had no cover.
+///
+/// The designation is enough for readers to show the cover and for boko's
+/// EPUB→KFX exporter to build a real cover section, so a subsequent reconvert
+/// carries the cover into the KFX too.
+pub fn insert_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result<()> {
+    let epub_bytes =
+        std::fs::read(epub_path).with_context(|| format!("read {}", epub_path.display()))?;
+    let opf_path = find_opf_path(&epub_bytes)?;
+    // Cover asset lives next to the OPF, referenced by its relative basename.
+    let opf_dir = opf_path
+        .rsplit_once('/')
+        .map(|(d, _)| format!("{d}/"))
+        .unwrap_or_default();
+    let cover_basename = format!("sidle_cover.{}", new_ext.to_ascii_lowercase());
+    let cover_zip_path = format!("{opf_dir}{cover_basename}");
+    let media_type = media_type_for_ext(new_ext);
+
+    let cursor = Cursor::new(&epub_bytes);
+    let mut archive = zip::ZipArchive::new(cursor).with_context(|| "read epub zip")?;
+    let mut out: Vec<u8> = Vec::with_capacity(epub_bytes.len() + new_bytes.len());
+    {
+        let mut writer = zip::ZipWriter::new(Cursor::new(&mut out));
+        for i in 0..archive.len() {
+            let entry = archive
+                .by_index(i)
+                .with_context(|| format!("read entry {i}"))?;
+            let name = entry.name().to_string();
+            if name == opf_path {
+                let compression = entry.compression();
+                let mut text = String::new();
+                let mut entry = entry;
+                entry.read_to_string(&mut text).with_context(|| "read opf")?;
+                let rewritten = inject_cover_into_opf(&text, &cover_basename, media_type);
+                let opts = zip::write::SimpleFileOptions::default().compression_method(compression);
+                writer.start_file(&name, opts)?;
+                writer.write_all(rewritten.as_bytes())?;
+            } else {
+                writer
+                    .raw_copy_file(entry)
+                    .with_context(|| format!("copy entry {name}"))?;
+            }
+        }
+        // The cover image itself (JPEG/PNG is already compressed → store).
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file(&cover_zip_path, opts)?;
+        writer.write_all(new_bytes)?;
+        writer.finish().with_context(|| "finish epub zip")?;
+    }
+    write_bytes_atomic(epub_path, &out)?;
     Ok(())
+}
+
+/// Add a `properties="cover-image"` manifest item (+ legacy `<meta name="cover">`)
+/// to an OPF that declares no cover. `cover_basename` is the cover file's name
+/// relative to the OPF. If the expected `</manifest>`/`</metadata>` closers are
+/// missing the corresponding insert is skipped; the manifest item alone is
+/// enough for boko to resolve the cover.
+fn inject_cover_into_opf(opf: &str, cover_basename: &str, media_type: &str) -> String {
+    let item = format!(
+        "<item id=\"sidle-cover\" href=\"{cover_basename}\" media-type=\"{media_type}\" properties=\"cover-image\"/>"
+    );
+    let meta = "<meta name=\"cover\" content=\"sidle-cover\"/>";
+    let mut out = opf.to_string();
+    if out.contains("</manifest>") {
+        out = out.replacen("</manifest>", &format!("  {item}\n</manifest>"), 1);
+    }
+    if out.contains("</metadata>") {
+        out = out.replacen("</metadata>", &format!("  {meta}\n</metadata>"), 1);
+    }
+    out
 }
 
 /// Walks the source EPUB and writes a fresh zip to `out`. The cover entry's
@@ -275,5 +364,28 @@ mod tests {
         assert_eq!(basename("OEBPS/cover.jpg"), "cover.jpg");
         assert_eq!(basename("cover.jpg"), "cover.jpg");
         assert_eq!(basename("a/b/c.png"), "c.png");
+    }
+
+    #[test]
+    fn inject_cover_adds_cover_image_item_and_meta() {
+        let opf = "<package>\n  <metadata>\n    <dc:title>T</dc:title>\n  </metadata>\n  <manifest>\n    <item id=\"toc\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n  </manifest>\n</package>\n";
+        let out = inject_cover_into_opf(opf, "sidle_cover.jpg", "image/jpeg");
+        // A properties="cover-image" manifest item (boko's top-priority signal).
+        assert!(out.contains(r#"href="sidle_cover.jpg""#));
+        assert!(out.contains(r#"properties="cover-image""#));
+        assert!(out.contains(r#"media-type="image/jpeg""#));
+        // A legacy EPUB-2 <meta name="cover"> pointing at it.
+        assert!(out.contains(r#"<meta name="cover" content="sidle-cover"/>"#));
+        // Existing content preserved.
+        assert!(out.contains("href=\"toc.ncx\""));
+        assert!(out.contains("<dc:title>T</dc:title>"));
+    }
+
+    #[test]
+    fn inject_cover_tolerates_missing_closers() {
+        // No </manifest> or </metadata> — must not panic, just no-op that part.
+        let opf = "<package></package>";
+        let out = inject_cover_into_opf(opf, "sidle_cover.png", "image/png");
+        assert_eq!(out, opf);
     }
 }

@@ -33,3 +33,45 @@ pub fn replace_cover(kfx_path: &Path, new_image: &[u8]) -> Result<String> {
     write_bytes_atomic(kfx_path, &patched)?;
     Ok(sha256_of_bytes(&patched))
 }
+
+/// True if the KFX at `kfx_path` declares no resolvable cover. Callers use this
+/// to gate [`reconvert_from_epub`]: only a genuinely cover-less KFX should be
+/// rebuilt from its EPUB — a KFX that *has* a cover but failed an in-place swap
+/// for some other reason must be left alone (reconverting a store KFX from its
+/// derived EPUB would replace it with a boko-produced one). A read error counts
+/// as "not cover-less" so we never reconvert on a fluke.
+pub fn is_coverless(kfx_path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(kfx_path) else {
+        return false;
+    };
+    boko::kfx_to_epub::loader::load(&bytes)
+        .map(|b| b.metadata.cover_resource_name.is_none())
+        .unwrap_or(false)
+}
+
+/// Rebuild the KFX at `kfx_path` by re-converting `epub_path` (which must
+/// already declare a cover). Used to give a cover to a cover-less boko-produced
+/// KFX (an EPUB import whose source had no cover): [`super::epub_cover::insert_cover`]
+/// adds the cover to the EPUB, then this reconverts so the KFX gains a real
+/// cover section via boko's proven EPUB→KFX exporter — cheaper in risk than
+/// splicing a cover resource into an existing container.
+///
+/// `metadata_override` receives the EPUB's own metadata and returns the values
+/// to bake into the KFX, so a normal conversion's edited-metadata handling
+/// (title/author/… from the library row) is preserved through the reconvert.
+/// Returns the new sha256 for `kfx_sha256`.
+pub fn reconvert_from_epub(
+    epub_path: &Path,
+    kfx_path: &Path,
+    metadata_override: impl FnOnce(&boko::Metadata) -> boko::Metadata,
+) -> Result<String> {
+    let mut book =
+        boko::Book::open(epub_path).with_context(|| format!("open {}", epub_path.display()))?;
+    book.set_metadata_override(metadata_override(book.metadata()));
+    let mut buf = std::io::Cursor::new(Vec::new());
+    book.export(boko::Format::Kfx, &mut buf)
+        .with_context(|| "export epub→kfx for cover insert")?;
+    let bytes = buf.into_inner();
+    write_bytes_atomic(kfx_path, &bytes)?;
+    Ok(sha256_of_bytes(&bytes))
+}
