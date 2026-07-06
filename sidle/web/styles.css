@@ -2580,6 +2580,19 @@ kbd {
 .reader-status-loc,
 .reader-status-pct { white-space: nowrap; }
 
+/* Right-side cluster: the streaming-images chip next to the whole-book %. */
+.reader-status-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+}
+.reader-status-buffered {
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+.reader-status-buffered[hidden] { display: none; }
+
 /* Go-to-page: replaces the "Page X" readout in place (notebook mode). Sized to sit
    within the 28px bar without growing it. */
 .reader-goto-input {

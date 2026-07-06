@@ -2,10 +2,15 @@
 // interface": { dir, sections: [{ load, unload, linear, size }] }.
 //
 // boko returns each section as a complete XHTML string plus the non-spine
-// resources (style.css, images) as base64. The paginator loads each section
-// into a sandboxed iframe *by URL* (no base path), so before handing it a blob
-// URL we rewrite the section's relative resource refs (`style.css`,
-// `image_e9.jpg`, SVG `xlink:href`) to blob: URLs built from those resources.
+// resources. `style.css` arrives inline (base64) with the DTO; images arrive
+// *lazily* — the DTO carries only their manifest (href/mime/size), and the
+// reader's resource loader streams the bytes in around the reading position.
+// The paginator loads each section into a sandboxed iframe *by URL* (no base
+// path), so before handing it a blob URL we rewrite the section's relative
+// resource refs (`style.css`, `image_e9.jpg`, SVG `xlink:href`) to blob: URLs.
+// An image whose bytes haven't landed yet gets a same-size SVG placeholder
+// (so pagination doesn't shift when the real pixels swap in) and a
+// `data-kfx-src` marker; `patchPendingImages` swaps arrivals into live docs.
 // Internal chapter links (`c5.xhtml#x`) are left alone — they're navigation.
 
 const b64ToBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -26,10 +31,42 @@ img, image, svg, video {
   height: auto;
   object-fit: contain;
 }
+img[data-kfx-src], image[data-kfx-src] { opacity: 0.15; }
 `;
 
-export function makeKfxBook(dto) {
-  // href → blob: URL for every non-spine resource.
+// A transparent SVG data URI with the manifest's intrinsic size, so the layout
+// box an unloaded image reserves matches the real image under the contain
+// rules above (no pagination jump on swap). 600×800 when the KFX carries no
+// dimensions.
+function placeholderUrl(dims) {
+  const w = dims?.width || 600;
+  const h = dims?.height || 800;
+  return `data:image/svg+xml,${encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"/>`,
+  )}`;
+}
+
+// Swap every pending image in `doc` whose bytes have since arrived.
+// `resolve(href)` → blob URL or null. Safe on dead/detached docs (no-op).
+export function patchPendingImages(doc, resolve) {
+  for (const el of doc.querySelectorAll("[data-kfx-src]")) {
+    const url = resolve(el.getAttribute("data-kfx-src"));
+    if (!url) continue;
+    if (el.localName === "image") {
+      el.setAttributeNS(XLINK, "href", url);
+      el.setAttribute("href", url);
+    } else {
+      el.setAttribute("src", url);
+    }
+    el.removeAttribute("data-kfx-src");
+  }
+}
+
+// `loader` (optional): the reader's resource loader — { resolve(href) → url |
+// null, known: Map<href, {mime,width,height}> }. Without one, only the DTO's
+// inline resources resolve (offline/legacy use).
+export function makeKfxBook(dto, loader) {
+  // href → blob: URL for every eagerly-shipped non-spine resource (style.css).
   const resourceUrls = new Map();
   for (const r of dto.resources) {
     const url = URL.createObjectURL(
@@ -40,19 +77,41 @@ export function makeKfxBook(dto) {
 
   const sectionBlobs = new Map(); // index → live section blob URL (for unload)
 
+  // Ready URL for href, from the inline resources or the lazy loader.
+  const urlFor = (v) =>
+    resourceUrls.get(v) || (loader ? loader.resolve(v) : null) || null;
+
   const rewriteRefs = (html) => {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const fix = (el, attr) => {
       const v = el.getAttribute(attr);
-      if (v && resourceUrls.has(v)) el.setAttribute(attr, resourceUrls.get(v));
+      if (!v) return;
+      const url = urlFor(v);
+      if (url) {
+        el.setAttribute(attr, url);
+      } else if (loader?.known.has(v)) {
+        // Bytes still in flight: reserve the box, mark for patching.
+        el.setAttribute("data-kfx-src", v);
+        el.setAttribute(attr, placeholderUrl(loader.known.get(v)));
+      }
     };
     doc.querySelectorAll("link[href]").forEach((el) => fix(el, "href"));
     doc.querySelectorAll("img[src]").forEach((el) => fix(el, "src"));
     // SVG cover wrapper references the cover via xlink:href (and/or href).
     doc.querySelectorAll("image").forEach((el) => {
-      fix(el, "href");
       const xl = el.getAttributeNS(XLINK, "href") || el.getAttribute("xlink:href");
-      if (xl && resourceUrls.has(xl)) el.setAttributeNS(XLINK, "href", resourceUrls.get(xl));
+      const v = el.getAttribute("href") || xl;
+      if (!v) return;
+      const url = urlFor(v);
+      if (url) {
+        el.setAttributeNS(XLINK, "href", url);
+        el.setAttribute("href", url);
+      } else if (loader?.known.has(v)) {
+        el.setAttribute("data-kfx-src", v);
+        const ph = placeholderUrl(loader.known.get(v));
+        el.setAttributeNS(XLINK, "href", ph);
+        el.setAttribute("href", ph);
+      }
     });
     // Reader stylesheet, appended last so it overrides the book's own styles.
     const style = doc.createElement("style");
@@ -108,7 +167,8 @@ export function makeKfxBook(dto) {
     // index ↔ href, for resolving TOC targets and annotation sections.
     hrefs: dto.sections.map((s) => s.href),
 
-    // Free every blob URL (resources + any live section) when closing.
+    // Free every blob URL (inline resources + any live section) when closing.
+    // Lazily-fetched image blobs belong to the resource loader, not us.
     destroy() {
       for (const url of resourceUrls.values()) URL.revokeObjectURL(url);
       for (const url of sectionBlobs.values()) URL.revokeObjectURL(url);

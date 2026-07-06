@@ -37,6 +37,18 @@ pub struct ReaderResourceDto {
     pub data_base64: String,
 }
 
+/// Manifest entry for an image the frontend fetches on demand via
+/// [`reader_fetch_resources`] — no bytes at open time, so a 100MB manga's
+/// `reader_open` payload is kilobytes. `width`/`height` (when the KFX carries
+/// them) let the reader reserve layout space before the pixels arrive.
+#[derive(Debug, Serialize)]
+pub struct ReaderImageDto {
+    pub href: String,
+    pub mime: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
 /// Table-of-contents entry; `href` points into a section (`"c5.xhtml#anchor"`).
 #[derive(Debug, Serialize)]
 pub struct ReaderTocDto {
@@ -126,7 +138,10 @@ fn map_pdf_toc(items: &[boko::import::PdfOutlineItem]) -> Vec<ReaderPdfTocDto> {
 #[derive(Debug, Serialize)]
 pub struct ReaderBookDto {
     pub sections: Vec<ReaderSectionDto>,
+    /// Eagerly-shipped assets (`style.css`); images are in `images`.
     pub resources: Vec<ReaderResourceDto>,
+    /// Deferred-image manifest; bytes come from [`reader_fetch_resources`].
+    pub images: Vec<ReaderImageDto>,
     pub toc: Vec<ReaderTocDto>,
     pub title: String,
     pub authors: Vec<String>,
@@ -178,6 +193,16 @@ impl From<boko::kfx_to_epub::ReaderBook> for ReaderBookDto {
                     data_base64: B64.encode(&r.data),
                 })
                 .collect(),
+            images: b
+                .images
+                .into_iter()
+                .map(|i| ReaderImageDto {
+                    href: i.href,
+                    mime: i.mime,
+                    width: i.width,
+                    height: i.height,
+                })
+                .collect(),
             toc: map_toc(b.toc),
             title: b.metadata.title,
             authors: b.metadata.authors,
@@ -194,7 +219,11 @@ impl From<boko::kfx_to_epub::ReaderBook> for ReaderBookDto {
 /// Open a library book for the reader. A PDF-backed (container) book opens in
 /// the fixed-layout PDF view (`mode: "pdf"`, pages rendered on demand by
 /// [`reader_pdf_page`]); everything else takes the reflowable KFX→DOM path
-/// (`mode: "reflowable"`, unchanged).
+/// (`mode: "reflowable"`) with image bytes deferred: the DTO carries an image
+/// *manifest* and the parsed book goes into `reader_image_cache`, from which
+/// [`reader_fetch_resources`] transcodes images as the frontend asks for them
+/// (reading-position window first, rest in the background). This is what makes
+/// opening a 100MB+ manga instant instead of a 10s all-pages JXR transcode.
 #[tauri::command]
 pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<ReaderOpen, String> {
     // Snapshot the paths + display metadata under the lock, then release it
@@ -210,7 +239,7 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
         (kfx_path, row.pdf_path, row.title, row.author, row.ppd)
     };
 
-    tokio::task::spawn_blocking(move || {
+    let (open, store) = tokio::task::spawn_blocking(move || {
         // One KFX read serves whichever path this book takes.
         let kfx = std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
 
@@ -259,16 +288,88 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
                     _ => "ltr".to_string(),
                 },
             };
-            return Ok(ReaderOpen::Pdf(dto));
+            return Ok((ReaderOpen::Pdf(dto), None));
         }
 
-        // Reflowable KFX → DOM.
-        let book = boko::kfx_to_epub::kfx_to_reader_book(&kfx)
+        // Reflowable / fixed-layout KFX → DOM, image bytes deferred.
+        let (book, store) = boko::kfx_to_epub::kfx_to_reader_book_lazy(&kfx)
             .map_err(|e| format!("KFX→DOM render failed: {e}"))?;
-        Ok::<ReaderOpen, String>(ReaderOpen::Reflowable(ReaderBookDto::from(book)))
+        Ok::<(ReaderOpen, Option<boko::kfx_to_epub::ReaderImageStore>), String>((
+            ReaderOpen::Reflowable(ReaderBookDto::from(book)),
+            Some(store),
+        ))
     })
     .await
-    .map_err(|e| format!("reader task join error: {e}"))?
+    .map_err(|e| format!("reader task join error: {e}"))??;
+
+    // Stash (or clear) the image store for this book's fetches. A PDF book —
+    // or a text-only book with nothing deferred — stores nothing but still
+    // evicts a previous book's store: its raw KFX media is dead weight once
+    // another book is open.
+    {
+        let mut cache = state.reader_image_cache.lock().await;
+        *cache = store
+            .filter(|s| !s.is_empty())
+            .map(|s| (book_id, std::sync::Arc::new(s)));
+    }
+    Ok(open)
+}
+
+/// Fetch a batch of deferred images for the open book: each href from the
+/// `reader_open` manifest → actual mime + base64 bytes (JXR pages transcode
+/// to JPEG here, in parallel). The frontend drives priority: the spread /
+/// sections around the reading position come first, the rest stream in the
+/// background a chunk at a time. Hrefs that fail (or aren't in the manifest)
+/// are omitted from the reply — the frontend logs and moves on.
+#[tauri::command]
+pub async fn reader_fetch_resources(
+    state: State<'_, AppState>,
+    book_id: i64,
+    hrefs: Vec<String>,
+) -> Result<Vec<ReaderResourceDto>, String> {
+    let store = {
+        let cache = state.reader_image_cache.lock().await;
+        match &*cache {
+            Some((id, store)) if *id == book_id => store.clone(),
+            _ => {
+                return Err(format!(
+                    "no image store for book {book_id} (was the reader closed?)"
+                ));
+            }
+        }
+    };
+    tokio::task::spawn_blocking(move || {
+        store
+            .fetch_many(&hrefs)
+            .into_iter()
+            .filter_map(|(href, result)| match result {
+                Ok((mime, data)) => Some(ReaderResourceDto {
+                    href,
+                    mime,
+                    data_base64: B64.encode(&data),
+                }),
+                Err(e) => {
+                    eprintln!("[reader] fetch {href}: {e}");
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| format!("reader fetch task join error: {e}"))
+}
+
+/// Drop the open book's image store. Called by the frontend on reader close
+/// and once every image has been fetched (the webview holds the blobs from
+/// then on; the parsed KFX raw media serves no further purpose). Idempotent;
+/// a stale call for a different book is a no-op.
+#[tauri::command]
+pub async fn reader_release(state: State<'_, AppState>, book_id: i64) -> Result<(), String> {
+    let mut cache = state.reader_image_cache.lock().await;
+    if matches!(&*cache, Some((id, _)) if *id == book_id) {
+        *cache = None;
+    }
+    Ok(())
 }
 
 /// Render one page of a PDF-backed book to a JPEG, scaled to `width` device

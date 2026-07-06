@@ -7,7 +7,7 @@
 
 import "./foliate-kfx/paginator.js"; // defines <foliate-paginator>
 import { Overlayer } from "./foliate-kfx/overlayer.js";
-import { makeKfxBook } from "./foliate-kfx/kfx-book.js";
+import { makeKfxBook, patchPendingImages } from "./foliate-kfx/kfx-book.js";
 import { rangeFor, textBoundary, anchorFromRange, baseTextOf } from "./foliate-kfx/anchor.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -61,6 +61,126 @@ function readSavedProgressMode() {
   } catch {
     return 0;
   }
+}
+
+// ---- deferred image loader --------------------------------------------------
+// `reader_open` returns an image *manifest* (dto.images) instead of inline
+// bytes; this engine streams the bytes in: the reading-position window first,
+// then the rest in the background, `RES_CHUNK` images per `reader_fetch_
+// resources` call. Arrived images become blob URLs in `urls`; a page/section
+// that needs a specific image immediately awaits `resLoaderRequire`, which
+// fetches it right away (jumping the background queue). When every image has
+// been attempted the backend store is released — the webview's blobs are the
+// only copy needed until close.
+
+let resLoader = null; // per-open loader state (both reflowable and FXL modes)
+
+const RES_CHUNK = 8; // images per fetch — a JXR chunk ≈ 0.5–1 s, keeps preemption snappy
+
+function startResLoader(id, images, priorityHrefs, onChunk) {
+  const known = new Map(); // href → { mime, width, height }
+  for (const im of images || []) known.set(im.href, im);
+  const st = {
+    bookId: id,
+    known,
+    urls: new Map(), // href → blob URL (ready)
+    inflight: new Map(), // href → Promise<url|null> (requested, not yet landed)
+    attempted: new Set(), // hrefs fetched or failed — the indicator's numerator
+    queue: [], // hrefs the background pump hasn't requested yet, in priority order
+    total: known.size,
+    cancelled: false,
+    onChunk,
+    resolve: (href) => st.urls.get(href) || null,
+  };
+  const seen = new Set();
+  for (const h of priorityHrefs || []) {
+    if (known.has(h) && !seen.has(h)) {
+      seen.add(h);
+      st.queue.push(h);
+    }
+  }
+  for (const h of known.keys()) if (!seen.has(h)) st.queue.push(h);
+  // Background pump: one chunk at a time so an urgent `require` (page turn
+  // ahead of the stream) only ever waits for the chunk in flight.
+  (async () => {
+    while (!st.cancelled && st.queue.length) {
+      await fetchHrefs(st, st.queue.splice(0, RES_CHUNK));
+    }
+  })();
+  return st;
+}
+
+// Fetch one batch: invoke, blobify, resolve inflight promises, notify. Failed
+// or missing hrefs still count as attempted (logged backend-side) so the
+// indicator completes and nothing waits forever.
+async function fetchHrefs(st, hrefs) {
+  const batch = (async () => {
+    let rows = [];
+    try {
+      rows = (await window.api.invoke("reader_fetch_resources", {
+        bookId: st.bookId,
+        hrefs,
+      })) || [];
+    } catch (err) {
+      if (!st.cancelled) console.error("image fetch failed:", err);
+    }
+    if (st.cancelled) return;
+    for (const r of rows) {
+      const bytes = Uint8Array.from(atob(r.data_base64), (c) => c.charCodeAt(0));
+      st.urls.set(
+        r.href,
+        URL.createObjectURL(new Blob([bytes], { type: r.mime || "application/octet-stream" })),
+      );
+    }
+    for (const h of hrefs) st.attempted.add(h);
+    st.onChunk?.(st);
+    if (st.attempted.size >= st.total && st.total > 0) {
+      // Everything lives in webview blobs now — free the backend's parsed KFX.
+      window.api.invoke("reader_release", { bookId: st.bookId }).catch(() => {});
+    }
+  })();
+  for (const h of hrefs) {
+    st.inflight.set(
+      h,
+      batch.then(() => st.urls.get(h) || null),
+    );
+  }
+  await batch;
+  for (const h of hrefs) st.inflight.delete(h);
+}
+
+// Promise for one image's blob URL — ready value, in-flight batch, or an
+// immediate solo fetch that jumps the background queue. Null for unknown
+// hrefs or after close.
+function resLoaderRequire(st, href) {
+  if (!st || st.cancelled || !st.known.has(href)) return Promise.resolve(null);
+  const hit = st.urls.get(href);
+  if (hit) return Promise.resolve(hit);
+  const pending = st.inflight.get(href);
+  if (pending) return pending;
+  const i = st.queue.indexOf(href);
+  if (i >= 0) st.queue.splice(i, 1);
+  return fetchHrefs(st, [href]).then(() => st.urls.get(href) || null);
+}
+
+function stopResLoader(st) {
+  if (!st) return;
+  st.cancelled = true;
+  st.queue.length = 0;
+  for (const url of st.urls.values()) URL.revokeObjectURL(url);
+  st.urls.clear();
+  window.api.invoke("reader_release", { bookId: st.bookId }).catch(() => {});
+}
+
+// The statusbar's "images still streaming" chip (both reader modes). Hidden
+// once every image has been attempted (or the book defers none).
+function updateBufferedIndicator() {
+  const el = $("#reader-buffered");
+  if (!el) return;
+  const st = resLoader;
+  const active = !!st && !st.cancelled && st.total > 0 && st.attempted.size < st.total;
+  el.hidden = !active;
+  el.textContent = active ? `⇣ ${Math.floor((st.attempted.size / st.total) * 100)}%` : "";
 }
 
 const view = () => $("#reader-view");
@@ -2191,7 +2311,9 @@ async function openFxl(id, openDto, anns, positions) {
   pdfStyle = loadPdfStyle();
   pdfStyle.zoom = 1; // zoom is per-open (start at fit)
 
-  // Every non-spine resource → a blob URL (the pages reference images by href).
+  // Eagerly-shipped non-spine resources (style.css — unused by the spread
+  // renderer but revoked uniformly on close). Page images are NOT here: they
+  // stream in through the resource loader below.
   const b64ToBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   const resUrls = new Map();
   for (const r of openDto.resources || []) {
@@ -2203,7 +2325,7 @@ async function openFxl(id, openDto, anns, positions) {
     );
   }
 
-  // Per page (= per spine section): image blob URL, viewport size, spread side,
+  // Per page (= per spine section): image href, viewport size, spread side,
   // and the structural eids (so a bookmark / last-read resolves to its page).
   const firstImgSrc = (html) => {
     const m = html.match(/<img[^>]*\bsrc="([^"]+)"/i);
@@ -2216,12 +2338,11 @@ async function openFxl(id, openDto, anns, positions) {
     while ((m = re.exec(html))) out.push(Number(m[1]));
     return out;
   };
-  const kfxImages = [];
+  const kfxSrcs = [];
   const pages = [];
   const hrefToPage = new Map();
   openDto.sections.forEach((s, i) => {
-    const src = firstImgSrc(s.html);
-    kfxImages.push(src ? resUrls.get(src) || null : null);
+    kfxSrcs.push(firstImgSrc(s.html));
     const vp = Array.isArray(s.viewport) ? s.viewport : null;
     pages.push({
       width: vp?.[0] || 0,
@@ -2254,6 +2375,30 @@ async function openFxl(id, openDto, anns, positions) {
     (resumeEid != null ? eidToPage.get(resumeEid) : undefined) ?? sidleResume?.linear_pos ?? 0,
     pageCount,
   );
+
+  // Stream the page images in: the resume window first (the "back 1%, forward
+  // 2%" priority), then forward to the end, then the front-of-book stub. Each
+  // arrival fills its page slot; the spread renderer awaits the specific page
+  // it needs via `pdfFetchPage` → `resLoaderRequire` (queue-jumping), so the
+  // first spread shows as soon as its 1–2 images land.
+  resLoader = startResLoader(
+    id,
+    openDto.images,
+    fxlPriorityHrefs(kfxSrcs, start, pageCount),
+    (st) => {
+      if (pdf?.kfxImages) {
+        for (let i = 0; i < kfxSrcs.length; i++) {
+          if (!pdf.kfxImages[i] && kfxSrcs[i]) {
+            const u = st.urls.get(kfxSrcs[i]);
+            if (u) pdf.kfxImages[i] = u;
+          }
+        }
+      }
+      updateBufferedIndicator();
+    },
+  );
+  updateBufferedIndicator();
+  const kfxImages = kfxSrcs.map((src) => (src ? resLoader.resolve(src) : null));
 
   // Spread host — identical DOM/CSS to the PDF spread (flex pair; `.rtl`
   // row-reverse for manga). Two persistent page wrappers, content swapped per
@@ -2304,7 +2449,8 @@ async function openFxl(id, openDto, anns, positions) {
     inflight: new Map(),
     inkPages: new Set(),
     inkCache: new Map(),
-    kfxImages, // FXL marker + page-index → blob URL (see pdfFetchPage)
+    kfxImages, // FXL marker + page-index → blob URL when arrived (see pdfFetchPage)
+    kfxSrcs, // page-index → image href, for awaiting a not-yet-streamed page
     resUrls, // revoked in closePdf
   };
 
@@ -2344,6 +2490,21 @@ async function openFxl(id, openDto, anns, positions) {
 
   keyHandler = onKey; // forwards to pdfOnKey while readerMode === "pdf"
   document.addEventListener("keydown", keyHandler, true);
+}
+
+// FXL fetch priority: the user's resume window — back max(2, 1%) pages,
+// forward max(4, 2%) — then forward to the end, then the front-of-book stub
+// (reading-direction bias). Page indices are logical reading order, so this
+// is RTL-agnostic. Returns hrefs for the loader queue.
+function fxlPriorityHrefs(srcs, start, count) {
+  const back = Math.max(2, Math.ceil(count * 0.01));
+  const fwd = Math.max(4, Math.ceil(count * 0.02));
+  const pages = [];
+  for (let p = start; p <= Math.min(count - 1, start + fwd); p++) pages.push(p);
+  for (let p = start - 1; p >= Math.max(0, start - back); p--) pages.push(p);
+  for (let p = start + fwd + 1; p < count; p++) pages.push(p);
+  for (let p = Math.max(0, start - back) - 1; p >= 0; p--) pages.push(p);
+  return pages.map((p) => srcs[p]).filter(Boolean);
 }
 
 // eid → page index for a PDF book: every word's eid and every page's structural
@@ -2424,10 +2585,14 @@ async function closePdf() {
   deviceResumes = [];
   searchResults = [];
   searchQuery = "";
-  // Free fixed-layout KFX page-image blobs (plain PDF books have none).
+  // Free fixed-layout KFX blobs: the eager resources here, the streamed page
+  // images via the loader (plain PDF books have neither).
   if (pdf?.resUrls) {
     for (const u of pdf.resUrls.values()) URL.revokeObjectURL(u);
   }
+  stopResLoader(resLoader);
+  resLoader = null;
+  updateBufferedIndicator();
   pdf = null;
   pdfTocRows = [];
   dto = null;
@@ -2506,10 +2671,20 @@ function pdfTrimCache() {
 // Coalesces with an in-flight request for the same key — so navigating onto a
 // page whose prefetch is still running awaits that prefetch instead of erroring.
 function pdfFetchPage(page, width) {
-  // Fixed-layout KFX: the page image is a static blob URL extracted from the
-  // section, not an on-demand render — return it directly (no backend call, no
-  // resolution cache; `width` is irrelevant).
-  if (pdf?.kfxImages) return Promise.resolve(pdf.kfxImages[page] || null);
+  // Fixed-layout KFX: the page image is a blob URL streamed in by the resource
+  // loader — return it directly when it's landed, else await that page's
+  // fetch (queue-jumping the background stream). No resolution cache;
+  // `width` is irrelevant (the blob is the full-size page).
+  if (pdf?.kfxImages) {
+    const hit = pdf.kfxImages[page];
+    if (hit) return Promise.resolve(hit);
+    const href = pdf.kfxSrcs?.[page];
+    if (!href) return Promise.resolve(null);
+    return resLoaderRequire(resLoader, href).then((url) => {
+      if (pdf?.kfxImages && url) pdf.kfxImages[page] = url;
+      return url;
+    });
+  }
   const key = `${page}@${width}`;
   const hit = pdf.cache.get(key);
   if (hit) return Promise.resolve(hit);
@@ -3448,6 +3623,54 @@ function isNotebookOpen() {
   return readerMode === "notebook" && !view().hidden;
 }
 
+// Image hrefs referenced by each section, in spine order — a regex sweep of
+// the emitted HTML, filtered to the deferred-image manifest (so plain anchors
+// and chapter links never match).
+function sectionImageHrefs(dto) {
+  const known = new Set((dto.images || []).map((i) => i.href));
+  return dto.sections.map((s) => {
+    const out = [];
+    for (const m of s.html.matchAll(/(?:src|href)="([^"]+)"/g)) {
+      if (known.has(m[1])) out.push(m[1]);
+    }
+    return out;
+  });
+}
+
+// Reflowable fetch priority: the resume section's images (±1 section — the
+// reflowable analogue of "back 1%, forward 2%"), then the remaining sections
+// in spine order. Images no section references (if any) trail in manifest
+// order, appended by the loader. The loader dedupes repeats.
+function reflowPriorityHrefs(dto, resumeEid) {
+  const perSection = sectionImageHrefs(dto);
+  let idx = 0;
+  if (resumeEid != null) {
+    const needle = `data-eid="${resumeEid}"`;
+    const found = dto.sections.findIndex((s) => s.html.includes(needle));
+    if (found >= 0) idx = found;
+  }
+  const lo = Math.max(0, idx - 1);
+  const hi = Math.min(dto.sections.length - 1, idx + 2);
+  const order = [];
+  for (let i = lo; i <= hi; i++) order.push(...perSection[i]);
+  for (let i = 0; i < perSection.length; i++) {
+    if (i < lo || i > hi) order.push(...perSection[i]);
+  }
+  return order;
+}
+
+// Swap freshly-arrived images into every live section document.
+function patchLiveSectionImages() {
+  if (!resLoader) return;
+  for (const { doc } of overlays) {
+    try {
+      patchPendingImages(doc, resLoader.resolve);
+    } catch {
+      /* detached section doc — ignore */
+    }
+  }
+}
+
 async function open(id) {
   await close(); // tear down any prior session
   let openDto, anns, positions;
@@ -3506,7 +3729,14 @@ async function open(id) {
   sidleResume = (positions || []).find((p) => p.source === "sidle") || null;
   deviceResumes = (positions || []).filter((p) => p.source === "device");
   styleSettings = loadStyle();
-  book = makeKfxBook(dto);
+  // Stream deferred images in: the resume section's neighbourhood first, then
+  // the rest of the spine; swap arrivals into any live section as they land.
+  resLoader = startResLoader(id, dto.images, reflowPriorityHrefs(dto, sidleResume?.eid), () => {
+    patchLiveSectionImages();
+    updateBufferedIndicator();
+  });
+  updateBufferedIndicator();
+  book = makeKfxBook(dto, resLoader);
 
   $("#reader-title").textContent = dto.title || "Untitled";
   $("#reader-loc").textContent = "";
@@ -3610,6 +3840,9 @@ async function close() {
     book.destroy();
     book = null;
   }
+  stopResLoader(resLoader);
+  resLoader = null;
+  updateBufferedIndicator();
   dto = null;
   bookId = null;
   annotations = [];

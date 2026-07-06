@@ -23,7 +23,11 @@ pub use pdf_text::{
     PdfPageText, PdfReaderData, PdfWord, pdf_reader_data, pdf_reader_data_from_book,
     pdf_text_layer, pdf_text_layer_from_book,
 };
-pub use reader::{ReaderBook, ReaderResource, ReaderSection, kfx_to_reader_book};
+pub use reader::{
+    ReaderBook, ReaderImage, ReaderImageStore, ReaderResource, ReaderSection,
+    kfx_to_reader_book, kfx_to_reader_book_lazy,
+};
+pub use resources::DeferredImage;
 pub use text_index::{SearchMatch, TextIndex};
 
 /// Failure modes for the mechanical port.
@@ -75,41 +79,88 @@ pub fn convert_to_epub(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
 /// Like [`convert_to_epub`], but reports coarse phase progress to `on_progress`
 /// as `(phase_key, current, total, human_label)` — sidle's conversion queue
 /// uses this to drive a determinate progress bar.
+///
+/// Emission order is `load → content → nav → resources → finalize`: image
+/// bytes are deferred through the structural pipeline and transcoded *after*
+/// fixed-layout thumbnail pruning, so a manga's unreferenced thumbnail set
+/// (half its images) is never decoded at all. The `resources` phase reports
+/// real per-chunk counts — it's the long pole, and the bar now moves through
+/// it instead of sitting on an opaque single step.
 pub fn convert_to_epub_with_progress(
     kfx_bytes: &[u8],
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> Result<Vec<u8>, ConvertError> {
-    let (out, book, _toc) = build_output(kfx_bytes, false, on_progress)?;
+    let (mut out, book, _toc, deferred) = build_output(kfx_bytes, false, on_progress)?;
+
+    let trace = crate::trace::Trace::new("kfx2epub-fill", "BOKO_KFX2EPUB_TRACE");
+    let total = deferred.len();
+    if total > 0 {
+        on_progress("resources", 0, total, "Decoding images");
+        // Chunked so progress lands between parallel batches; ~2 items per
+        // worker keeps straggler idle time negligible.
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let chunk_size = (workers * 2).max(1);
+        let mut timings = Vec::new();
+        let mut done = 0usize;
+        for chunk in deferred.chunks(chunk_size) {
+            for (item, result) in chunk.iter().zip(resources::transcode_deferred(&book, chunk)) {
+                let t = result?;
+                if let Some(timing) = t.timing {
+                    timings.push(timing);
+                }
+                out.fill_resource_bytes(&item.filename, t.bytes, Some(&t.mime));
+            }
+            done += chunk.len();
+            on_progress("resources", done, total, "Decoding images");
+        }
+        resources::trace_jxr_totals(timings.iter());
+        trace.mark("resources::transcode deferred (JXR → JPEG)");
+    }
+
     on_progress("finalize", 1, 1, "Packaging");
     out.finalize(&book.metadata).map_err(ConvertError::Io)
 }
 
-/// Shared front half of the pipeline: load → resources → content → stylesheet →
-/// per-section XHTML → navigation, stopping *before* the EPUB zip.
-/// `convert_to_epub` finalizes the returned [`EpubOutput`] into a zip;
-/// [`reader::kfx_to_reader_book`] instead extracts the sections / resources /
-/// toc for the Sidle reader. `stamp_eids` toggles `data-eid` attributes — on for
+/// Shared front half of the pipeline: load → resource index → content →
+/// stylesheet → per-section XHTML → navigation, stopping *before* the EPUB
+/// zip — and before any image bytes exist. Images are registered with their
+/// final filename/mime/dimensions but **empty data**; the returned
+/// [`resources::DeferredImage`] list (already filtered to survivors of the
+/// fixed-layout thumbnail prune) is the transcode work list.
+/// `convert_to_epub` transcodes it eagerly, fills the bytes back in, and zips;
+/// [`reader::kfx_to_reader_book_lazy`] hands it to a [`reader::ReaderImageStore`]
+/// for on-demand fetching. `stamp_eids` toggles `data-eid` attributes — on for
 /// the reader (so `(eid, offset)` annotations resolve to DOM Ranges), off for the
 /// shippable EPUB export (no attribute bloat).
 pub(crate) fn build_output(
     kfx_bytes: &[u8],
     stamp_eids: bool,
     on_progress: &dyn Fn(&str, usize, usize, &str),
-) -> Result<(EpubOutput, BookData, Vec<navigation::NavPoint>), ConvertError> {
+) -> Result<
+    (
+        EpubOutput,
+        BookData,
+        Vec<navigation::NavPoint>,
+        Vec<resources::DeferredImage>,
+    ),
+    ConvertError,
+> {
     let trace = crate::trace::Trace::new("kfx2epub", "BOKO_KFX2EPUB_TRACE");
     // Phase emits fire BEFORE each step so the bar's label names the work in
     // progress (not the one just finished); cur=0 lands the bar at the band's
-    // start (see sidle's `progress_fraction`). These are single opaque steps —
-    // the bar advances per phase, the label tells you which one is running.
+    // start (see sidle's `progress_fraction`). The heavy `resources` phase is
+    // emitted by `convert_to_epub_with_progress` (transcode runs after this
+    // function); phases here are single opaque steps.
     on_progress("load", 0, 1, "Reading KFX");
     let book = loader::load(kfx_bytes)?;
     trace.mark("loader::load");
     let mut out = EpubOutput::new();
 
-    // Resources (images, cover).
-    on_progress("resources", 0, 1, "Decoding images");
-    let resources = resources::process(&book, &mut out)?;
-    trace.mark("resources::process (JXR → JPEG)");
+    // Resource index (filenames, mime, dimensions, cover) — bytes deferred.
+    let (resources, mut deferred) = resources::process_deferred(&book, &mut out)?;
+    trace.mark("resources::process_deferred (index only)");
 
     // Content (storyline → XHTML).
     on_progress("content", 0, 1, "Building chapters");
@@ -213,8 +264,11 @@ pub(crate) fn build_output(
     // ships only the pages it shows (calibre manifests only referenced
     // resources). Reflowable books reference all their images, so this is
     // gated on fixed layout to avoid pruning a CSS-only or cover-only image.
+    // Pruning happens BEFORE any transcode (bytes are deferred), so the
+    // thumbnail set — half a manga's images — is never decoded at all.
     if content_state.is_fixed_layout {
         let pruned = out.retain_referenced_images(&referenced_images);
+        deferred.retain(|d| out.has_file(&d.filename));
         trace.mark("resources::prune unreferenced thumbnails");
         let _ = pruned;
     }
@@ -318,7 +372,7 @@ pub(crate) fn build_output(
     // Release the `&book` / `&resources` borrows held by `content_state` so we
     // can move `book` into the return tuple.
     drop(content_state);
-    Ok((out, book, toc))
+    Ok((out, book, toc, deferred))
 }
 
 /// Build calibre-style `titlepage.xhtml`: an SVG viewBox sized to the

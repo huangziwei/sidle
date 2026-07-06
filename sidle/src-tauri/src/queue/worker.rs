@@ -305,11 +305,15 @@ fn progress_fraction(kind: &str, phase: &str, cur: usize, total: usize) -> f32 {
         ("epub_to_kfx", "images") => (0.40, 0.92),
         ("epub_to_kfx", "finalize") => (0.92, 1.00),
 
-        ("kfx_to_epub", "load") => (0.00, 0.15),
-        ("kfx_to_epub", "resources") => (0.15, 0.45),
-        ("kfx_to_epub", "content") => (0.45, 0.80),
-        ("kfx_to_epub", "nav") => (0.80, 0.92),
-        ("kfx_to_epub", "finalize") => (0.92, 1.00),
+        // Emission order changed with the deferred-image pipeline: images are
+        // now transcoded AFTER content/nav (post-prune), with real per-chunk
+        // counts — so `resources` sits late and gets the widest band (it's
+        // 95%+ of the wall time on image-heavy books).
+        ("kfx_to_epub", "load") => (0.00, 0.08),
+        ("kfx_to_epub", "content") => (0.08, 0.20),
+        ("kfx_to_epub", "nav") => (0.20, 0.24),
+        ("kfx_to_epub", "resources") => (0.24, 0.94),
+        ("kfx_to_epub", "finalize") => (0.94, 1.00),
 
         ("pdf_to_kfx", "probe") => (0.00, 0.05),
         ("pdf_to_kfx", "cover") => (0.05, 0.15),

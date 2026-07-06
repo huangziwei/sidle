@@ -102,6 +102,8 @@ pub fn run() {
             commands::server::server_start,
             commands::server::server_stop,
             commands::reader::reader_open,
+            commands::reader::reader_fetch_resources,
+            commands::reader::reader_release,
             commands::reader::reader_pdf_page,
             commands::reader::reader_pdf_ink,
             commands::reader::reader_pdf_ink_pages,

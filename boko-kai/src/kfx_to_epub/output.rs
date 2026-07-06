@@ -202,6 +202,32 @@ impl EpubOutput {
         id
     }
 
+    /// Fill in the bytes of a resource registered with empty data (the
+    /// deferred-image pass). `mime` overrides the predicted media type when
+    /// the transcode's actual output differs (a broken JXR passing through as
+    /// `image/jxr` instead of the predicted `image/jpeg`). Returns false when
+    /// no such file exists (e.g. it was pruned).
+    pub fn fill_resource_bytes(
+        &mut self,
+        filename: &str,
+        data: Vec<u8>,
+        mime: Option<&str>,
+    ) -> bool {
+        let Some(file) = self.oebps_files.get_mut(filename) else {
+            return false;
+        };
+        file.data = data;
+        if let Some(m) = mime
+            && file.mimetype != m
+        {
+            file.mimetype = m.to_string();
+            if let Some(entry) = self.manifest.iter_mut().find(|e| e.href == filename) {
+                entry.media_type = m.to_string();
+            }
+        }
+        true
+    }
+
     /// Mark the manifest entry with the given id as the cover image.
     pub fn mark_cover(&mut self, manifest_id: &str) {
         if let Some(&idx) = self.manifest_by_id.get(manifest_id) {

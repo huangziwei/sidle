@@ -6,10 +6,11 @@
 //! displayed — but with `data-eid` stamping on and the EPUB zip tail replaced
 //! by a structured extraction of the spine documents, resources, and TOC.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::loader::{BookData, BookMetadata};
 use super::navigation::NavPoint;
+use super::resources::{self, DeferredImage};
 use super::text_index::TextIndex;
 use super::{ConvertError, build_output};
 
@@ -36,12 +37,78 @@ pub struct ReaderResource {
     pub data: Vec<u8>,
 }
 
+/// Manifest entry for an image whose bytes are fetched on demand from the
+/// [`ReaderImageStore`] — href/mime/dimensions only, so the open payload
+/// stays small and the reader can reserve layout space before the pixels
+/// arrive. `mime` is the predicted type; the fetch returns the actual one.
+pub struct ReaderImage {
+    pub href: String,
+    pub mime: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// On-demand image supplier for a lazily-opened book: owns the parsed
+/// [`BookData`] (source of the raw JXR/JPEG bytes) plus the deferred work
+/// list keyed by href. Fetches transcode at request time — the expensive
+/// JXR→JPEG work happens per image, when (and only when) the reader wants
+/// it. Thread-safe by immutability: `fetch`/`fetch_many` take `&self`.
+pub struct ReaderImageStore {
+    book: BookData,
+    items: HashMap<String, DeferredImage>,
+}
+
+impl ReaderImageStore {
+    /// Produce one image's bytes: `(actual_mime, data)`. `None` for an href
+    /// this book doesn't defer (already-fetched hrefs stay valid — the store
+    /// is stateless, a re-fetch just re-transcodes).
+    pub fn fetch(&self, href: &str) -> Option<Result<(String, Vec<u8>), ConvertError>> {
+        let item = self.items.get(href)?;
+        Some(resources::transcode_deferred_one(&self.book, item).map(|t| (t.mime, t.bytes)))
+    }
+
+    /// Fetch a batch **in parallel** (scoped threads, one slice per core —
+    /// same policy as the EPUB export's transcode). Unknown hrefs are
+    /// dropped from the result; per-item failures are returned so the caller
+    /// can log/skip without failing the batch.
+    #[allow(clippy::type_complexity)]
+    pub fn fetch_many(
+        &self,
+        hrefs: &[String],
+    ) -> Vec<(String, Result<(String, Vec<u8>), ConvertError>)> {
+        let items: Vec<&DeferredImage> =
+            hrefs.iter().filter_map(|h| self.items.get(h)).collect();
+        let owned: Vec<DeferredImage> = items.iter().map(|d| (*d).clone()).collect();
+        resources::transcode_deferred(&self.book, &owned)
+            .into_iter()
+            .zip(owned.iter())
+            .map(|(r, d)| (d.filename.clone(), r.map(|t| (t.mime, t.bytes))))
+            .collect()
+    }
+
+    /// Number of deferred images (the "total" behind a loaded-% indicator).
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// True when the book defers no images at all.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
 /// The reader's view of a book: rendered sections + the assets they reference +
 /// navigation + metadata, all from the same pipeline that produces the EPUB.
 /// TOC entry `href`s point into `sections` (e.g. `"c5.xhtml#anchor-12"`).
 pub struct ReaderBook {
     pub sections: Vec<ReaderSection>,
+    /// Eagerly-shipped non-spine assets (`style.css`). In the lazy shape,
+    /// images are NOT here — see `images`; the legacy [`kfx_to_reader_book`]
+    /// inlines them here instead.
     pub resources: Vec<ReaderResource>,
+    /// Deferred-image manifest (lazy shape only; empty in the legacy shape).
+    /// Bytes come from the paired [`ReaderImageStore`] on demand.
+    pub images: Vec<ReaderImage>,
     pub toc: Vec<NavPoint>,
     pub metadata: BookMetadata,
     /// Book-level writing mode, e.g. `"vertical-rl"` / `"horizontal-tb"`.
@@ -63,10 +130,32 @@ pub struct ReaderBook {
     pub fixed_layout: bool,
 }
 
-/// Convert a KFX container to the reader's [`ReaderBook`] — the KFX→DOM front
-/// half with `data-eid` stamping, minus the EPUB zip.
+/// Convert a KFX container to the reader's [`ReaderBook`] with every image
+/// inlined in `resources` — the KFX→DOM front half with `data-eid` stamping,
+/// minus the EPUB zip. This is the legacy eager shape (tests, offline
+/// harnesses); Sidle opens books via [`kfx_to_reader_book_lazy`] and streams
+/// the images afterwards.
 pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> {
-    let (out, book, toc) = build_output(kfx_bytes, true, &|_, _, _, _| {})?;
+    let (mut book, store) = kfx_to_reader_book_lazy(kfx_bytes)?;
+    let hrefs: Vec<String> = book.images.iter().map(|i| i.href.clone()).collect();
+    for (href, result) in store.fetch_many(&hrefs) {
+        let (mime, data) = result?;
+        book.resources.push(ReaderResource { href, mime, data });
+    }
+    book.images.clear();
+    Ok(book)
+}
+
+/// Convert a KFX container to the reader's [`ReaderBook`] with image bytes
+/// deferred: the book carries an image *manifest* (`images`) and the returned
+/// [`ReaderImageStore`] produces each image on request. Opening a 100MB+
+/// manga costs milliseconds of structure work instead of the full-book
+/// JXR→JPEG transcode; the reader fetches the pages around the reading
+/// position first and the rest in the background.
+pub fn kfx_to_reader_book_lazy(
+    kfx_bytes: &[u8],
+) -> Result<(ReaderBook, ReaderImageStore), ConvertError> {
+    let (out, book, toc, deferred) = build_output(kfx_bytes, true, &|_, _, _, _| {})?;
     // Drop the synthetic `titlepage.xhtml` cover wrapper that `build_output`
     // prepends for the EPUB export (Apple Books et al. need an explicit cover
     // spine item; see `build_titlepage`). The reader renders the KFX's own
@@ -133,10 +222,23 @@ pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> 
         );
     }
 
+    // Deferred images ship as a manifest; everything else non-spine with real
+    // bytes (`style.css`) ships eagerly — the text render needs it up front.
+    let deferred_hrefs: HashSet<&str> = deferred.iter().map(|d| d.filename.as_str()).collect();
     let resources = out
         .non_spine_resources()
         .into_iter()
+        .filter(|(href, _, _)| !deferred_hrefs.contains(href.as_str()))
         .map(|(href, mime, data)| ReaderResource { href, mime, data })
+        .collect();
+    let images = deferred
+        .iter()
+        .map(|d| ReaderImage {
+            href: d.filename.clone(),
+            mime: d.mime.clone(),
+            width: d.width,
+            height: d.height,
+        })
         .collect();
     let writing_mode = out
         .writing_mode
@@ -147,17 +249,29 @@ pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> 
         .clone()
         .unwrap_or_else(|| "ltr".to_string());
     let (locations, max_location) = compute_locations(&book, &sections);
-    Ok(ReaderBook {
-        sections,
-        resources,
-        toc,
-        metadata: book.metadata,
-        writing_mode,
-        page_progression_direction,
-        locations,
-        max_location,
-        fixed_layout,
-    })
+    let metadata = book.metadata.clone();
+    let store = ReaderImageStore {
+        book,
+        items: deferred
+            .into_iter()
+            .map(|d| (d.filename.clone(), d))
+            .collect(),
+    };
+    Ok((
+        ReaderBook {
+            sections,
+            resources,
+            images,
+            toc,
+            metadata,
+            writing_mode,
+            page_progression_direction,
+            locations,
+            max_location,
+            fixed_layout,
+        },
+        store,
+    ))
 }
 
 /// Parse `width`/`height` from a `<meta name="viewport" content="width=W,
@@ -291,6 +405,42 @@ mod tests {
         );
     }
 
+    /// Lazy shape ↔ eager shape equivalence: every manifest entry fetches to
+    /// the same bytes the legacy inline path ships, and nothing is lost or
+    /// duplicated between `resources` and `images`.
+    #[test]
+    fn lazy_reader_book_matches_eager() {
+        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx")).expect("read fixture");
+        let eager = kfx_to_reader_book(&bytes).expect("eager");
+        let (lazy, store) = kfx_to_reader_book_lazy(&bytes).expect("lazy");
+        assert!(eager.images.is_empty(), "legacy shape inlines images");
+        assert_eq!(store.len(), lazy.images.len());
+        // Every eager resource is either an eager lazy resource (style.css) or
+        // a deferred image whose fetched bytes match exactly.
+        for r in &eager.resources {
+            if let Some(img) = lazy.images.iter().find(|i| i.href == r.href) {
+                let (mime, data) = store
+                    .fetch(&img.href)
+                    .expect("manifest href must fetch")
+                    .expect("fetch must succeed");
+                assert_eq!(data, r.data, "bytes differ for {}", r.href);
+                assert_eq!(mime, r.mime, "mime differs for {}", r.href);
+            } else {
+                let e = lazy
+                    .resources
+                    .iter()
+                    .find(|l| l.href == r.href)
+                    .unwrap_or_else(|| panic!("{} missing from lazy shape", r.href));
+                assert_eq!(e.data, r.data);
+            }
+        }
+        assert_eq!(
+            eager.resources.len(),
+            lazy.resources.len() + lazy.images.len(),
+            "no resource may be dropped or invented by the lazy split"
+        );
+    }
+
     #[test]
     fn parse_viewport_reads_fixed_layout_meta() {
         let html = r#"<html><head><meta name="viewport" content="width=900, height=1280"/></head><body><img src="p.jpg"/></body></html>"#;
@@ -305,7 +455,7 @@ mod tests {
         let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx"))
             .expect("read [太宰 治] 人間失格.kfx fixture");
         // The shippable EPUB path must leave the DOM stamp-free (no bloat).
-        let (out, _book, _toc) =
+        let (out, _book, _toc, _deferred) =
             build_output(&bytes, false, &|_, _, _, _| {}).expect("build_output");
         let stamped: usize = out
             .spine_documents()
