@@ -101,8 +101,10 @@ const booksSelection = new window.SelectionController({
     if (displayMode() === "grouped") return $$("#series-list tbody tr.book-row");
     return $$("#list tbody tr");
   },
-  // Both views stay in sync (the gallery + list DOM both persist across a view
-  // switch), matching the old applyLassoVisuals which painted both.
+  // Paint `.selected` across whichever surface is populated. render() builds
+  // only the active view's surface and clears the other two, so at most one of
+  // these queries is non-empty; a view switch rebuilds (with selection applied
+  // at build time), so nothing goes unpainted.
   paintContainers: () => [
     ...$$("#gallery-grid .book-card"),
     ...$$("#list tbody tr"),
@@ -422,13 +424,13 @@ async function onAddClick() {
 
 function setView(v) {
   state.view = v;
-  applyView();
+  // render() builds the now-active surface (the other view's DOM is cleared each
+  // render) and, via applyView(), toggles visibility + syncs Notes' view and the
+  // list-view column widths (rAF ensureWidths). A view switch is deliberate and
+  // infrequent, so paying one surface build here buys ~half the DOM work on every
+  // other (frequent) render.
+  render();
   persistPreferences();
-  if (v === "list") {
-    requestAnimationFrame(() => {
-      booksTable.ensureWidths();
-    });
-  }
 }
 
 function applyView() {
@@ -972,24 +974,37 @@ function render() {
   }
 
   // Grouping is a presentation layer on the already-filtered, already-sorted
-  // `visible`. We always populate BOTH the gallery and the list DOM (they
-  // persist across a view switch) and clear whichever surface this mode doesn't
-  // use, so the SelectionController's container queries never hit stale rows.
+  // `visible`. Build ONLY the surface the active view shows and clear the other
+  // two — so a gallery render doesn't also rebuild the ~N-row table (and its
+  // per-row listeners) into hidden DOM, and the cross-surface painters
+  // (paintContainers / paintFocus) never iterate stale rows. `setView` re-runs
+  // render() on a gallery⇄list switch, so the newly-active surface is current.
   const mode = displayMode();
+  const galleryView = state.view === "gallery";
   let count;
   if (mode === "grouped") {
     const entries = groupBySeries(visible);
-    renderGalleryGrouped(entries);
-    renderSeriesList(entries);
-    renderList([]); // book table unused at the grouped top level
     count = entries.length;
+    if (galleryView) {
+      renderGalleryGrouped(entries); // #gallery-grid (active)
+      renderSeriesList([]); // #series-list (inactive → clear)
+    } else {
+      renderSeriesList(entries); // #series-list = the grouped-list series index
+      renderGalleryGrouped([]); // #gallery-grid (inactive → clear)
+    }
+    renderList([]); // #list unused at the grouped top level
   } else {
     const books =
       mode === "series" ? membersOfSeries(visible, state.seriesView) : visible;
-    renderGallery(books);
-    renderList(books);
-    renderSeriesList([]); // series index unused when flat / drilled-in
     count = books.length;
+    if (galleryView) {
+      renderGallery(books); // #gallery-grid (active)
+      renderList([]); // #list (inactive → clear)
+    } else {
+      renderList(books); // #list (active)
+      renderGallery([]); // #gallery-grid (inactive → clear)
+    }
+    renderSeriesList([]); // #series-list unused when flat / drilled-in
   }
 
   // Breadcrumb: only while drilled into a series.
@@ -1260,8 +1275,18 @@ function canonSearch(s) {
     .replace(/[^a-z0-9]/g, "");
 }
 
-function matchesSearch(book) {
+// The query-side folds, computed ONCE per filter pass and reused for every book
+// (they don't vary by book): `raw` = trimmed/lowercased query for the native
+// substring path; `q` = NFKD-stripped canon for the romaji-key path (only when
+// the query is non-empty — canonSearch's NFKD+regex is the pass's costliest bit,
+// so we don't want it per book). An empty `raw` short-circuits matchesSearch.
+function searchTerms() {
   const raw = state.search.trim().toLowerCase();
+  return { raw, q: raw ? canonSearch(state.search) : "" };
+}
+
+function matchesSearch(book, terms) {
+  const { raw, q } = terms;
   if (!raw) return true;
   // (1) Romaji-aware match. Fold the query the same way the backend folded each
   //     book's `search_key` (curated title/author romaji + auto-romanized
@@ -1269,7 +1294,6 @@ function matchesSearch(book) {
   //     containment. This is what lets a romaji query surface a CJK book —
   //     "murakami" finds 村上春樹 — the same key the on-device picker searches.
   //     Space-insensitive, so "sekaisaikou" also hits "sekai saikou …".
-  const q = canonSearch(state.search);
   if (q && book.search_key && book.search_key.includes(q)) return true;
   // (2) Raw native-text match. `canon` strips CJK to nothing, so it can't match a
   //     query typed in the actual script; the desktop has a real keyboard (the
@@ -1293,14 +1317,16 @@ function matchesSearch(book) {
 
 function visibleBooks(books) {
   const facets = activeFacetsExcept(null);
-  return books.filter((b) => matchesSearch(b) && matchesFacets(b, facets));
+  const terms = searchTerms();
+  return books.filter((b) => matchesSearch(b, terms) && matchesFacets(b, facets));
 }
 
 function facetOptions(facet) {
   const others = activeFacetsExcept(facet);
+  const terms = searchTerms();
   const counts = new Map();
   for (const b of state.books) {
-    if (!matchesSearch(b)) continue;
+    if (!matchesSearch(b, terms)) continue;
     if (!matchesFacets(b, others)) continue;
     for (const v of extractFacetValues(b, facet)) {
       counts.set(v, (counts.get(v) || 0) + 1);
