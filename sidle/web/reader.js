@@ -4228,7 +4228,7 @@ function wire() {
   // wrapper and reflows for free; the reflowable paginator has its own internal
   // ResizeObserver). Observe the stage so any size change — window, panel, drag —
   // re-fits and repaints. Fires once on observe (harmless: guarded + idempotent).
-  const stageEl = $("#reader-stage");
+  // (`stageEl` is the same element the pinch-zoom handlers above bound to.)
   if (stageEl && typeof ResizeObserver !== "undefined")
     new ResizeObserver(scheduleReaderResize).observe(stageEl);
   // Click anywhere in the app chrome (outside a popover) dismisses it. Clicks
