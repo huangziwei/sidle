@@ -28,7 +28,8 @@ pub type DbHandle = Arc<Mutex<Connection>>;
 /// whichever loses. Mass-storage doesn't care (the transport is a `PathBuf`
 /// wrapper), but using the same lifecycle for both keeps the call sites uniform.
 /// Concurrency inside the shared session is already serialized by
-/// `MtpTransport::op_lock`, so multiple borrowers don't need to coordinate here.
+/// `MtpTransport`'s storage mutex, so multiple borrowers don't need to
+/// coordinate here.
 pub type SharedTransport = Arc<Mutex<Option<Arc<dyn Transport>>>>;
 
 /// Single-entry cache for the reader's search `TextIndex`. Keyed by `book_id`,

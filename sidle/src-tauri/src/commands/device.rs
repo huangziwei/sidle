@@ -7,7 +7,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::device::DeviceInfo;
 use crate::device::dedrm::{self, PullResult};
 use crate::device::kual::{self, KualInstallReport, KualOverall, KualStatus, ServerConfRender};
-use crate::device::monitor::{ensure_transport, evict_transport};
+use crate::device::monitor::{ensure_transport, evict_transport, refresh_free_space};
 use crate::device::push::{self, DeleteResult, PushResult};
 use crate::library::{db, ingest};
 use crate::state::AppState;
@@ -358,6 +358,9 @@ pub async fn device_delete(
         .map_err(|e| e.to_string())?;
     let db_handle = state.db.clone();
     let cell = state.transport.clone();
+    // `app` is moved into the blocking closure below (progress events); keep a
+    // clone for the post-delete free-space refresh.
+    let app_refresh = app.clone();
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<DeleteResult>> {
         let conn = db_handle.blocking_lock();
@@ -397,6 +400,10 @@ pub async fn device_delete(
     if needs_evict {
         evict_transport(&cell).await;
         eprintln!("[sidle/device_delete] transport evicted after error");
+    } else {
+        // Files (and their `.sdr` sidecars) left the device — re-read free
+        // space so the popover climbs back up immediately.
+        refresh_free_space(&app_refresh, &state.device, &state.transport).await;
     }
 
     result
@@ -432,6 +439,9 @@ pub async fn device_send(
         .map_err(|e| e.to_string())?;
     let db_handle = state.db.clone();
     let cell = state.transport.clone();
+    // `app` is moved into the blocking closure below (progress events); keep a
+    // clone for the post-send free-space refresh.
+    let app_refresh = app.clone();
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<PushResult>> {
         let conn = db_handle.blocking_lock();
@@ -487,6 +497,11 @@ pub async fn device_send(
     if needs_evict {
         evict_transport(&cell).await;
         eprintln!("[sidle/device_send] transport evicted after error");
+    } else {
+        // Books landed on the device — re-read free space so the popover drops
+        // by what we just pushed instead of waiting for a reconnect. Skipped on
+        // the evict path (the session is wedged; a reconnect refreshes anyway).
+        refresh_free_space(&app_refresh, &state.device, &state.transport).await;
     }
 
     result

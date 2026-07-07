@@ -33,18 +33,19 @@ use mtp_rs::ptp::{ObjectHandle, ObjectInfo};
 use crate::device::transport::{ChildFiles, TEntry, TPath, Transport};
 
 pub struct MtpTransport {
-    storage: Storage,
-    /// Serializes all on-wire MTP operations against one session — the plan's
-    /// "single-session lock". mtp-rs already serializes PTP operations
-    /// internally, but we still want the *high-level* trait calls (which
-    /// chain multiple MTP round-trips: walk, list, upload) to run one at a
-    /// time so concurrent push/delete from the UI doesn't interleave.
-    op_lock: Mutex<()>,
-    /// `(free, total)` snapshot taken at session open. Real-time refresh
-    /// would need an extra `GetStorageInfo` round-trip per call; Phase 4 can
-    /// expose a refresh hook if the UI needs live numbers.
-    free_at_open: u64,
-    total_capacity: u64,
+    /// The bound MTP storage, behind a `Mutex` that serves two purposes:
+    ///
+    /// 1. Live free space. [`free_space`](Transport::free_space) re-reads
+    ///    `GetStorageInfo` via [`Storage::refresh`], which needs `&mut self` —
+    ///    but the [`Transport`] trait only hands out `&self`. The mutex is the
+    ///    interior mutability that lets the popover show the real free/total
+    ///    after a push or delete instead of a stale session-open snapshot.
+    /// 2. Single-session op lock. Every on-wire operation holds the guard for
+    ///    the whole `block_on`, so the high-level trait calls (which chain
+    ///    multiple MTP round-trips: walk, list, upload) run one at a time and
+    ///    concurrent push/delete from the UI can't interleave transaction IDs
+    ///    against the one PTP session.
+    storage: Mutex<Storage>,
     /// Firmware/OS version parsed from `system/version.txt`, read off the
     /// object tree at session open. `None` if the file wasn't reachable.
     firmware: Option<String>,
@@ -55,7 +56,7 @@ impl MtpTransport {
     /// bound `Storage` holds the PTP session (and the claimed USB interface)
     /// open for the transport's lifetime.
     pub fn open(location_id: u64) -> Result<Self> {
-        let (storage, free, total, firmware) = block_on(async {
+        let (storage, firmware) = block_on(async {
             let device = MtpDevice::open_by_location(location_id)
                 .await
                 .map_err(map_mtp_err)
@@ -68,21 +69,18 @@ impl MtpTransport {
                 .into_iter()
                 .next()
                 .ok_or_else(|| anyhow!("Kindle reports no MTP storage — try reconnecting"))?;
-            let free = storage.info().free_space_bytes;
-            let total = storage.info().max_capacity;
             // Firmware: the Kindle exposes its real filesystem over MTP, so read
             // `system/version.txt` — the same file mass-storage parses. The MTP
             // `GetDeviceInfo.device_version` field comes back empty on Kindle,
             // and none of its device properties carry the OS version. One extra
             // round-trip at session open, alongside the storage-info read.
             let firmware = read_firmware(&storage).await;
-            Ok::<_, anyhow::Error>((storage, free, total, firmware))
+            Ok::<_, anyhow::Error>((storage, firmware))
         })?;
+        // Free/total ride along inside `storage.info()` (captured at open);
+        // `free_space` re-reads them live via `Storage::refresh` on demand.
         Ok(Self {
-            storage,
-            op_lock: Mutex::new(()),
-            free_at_open: free,
-            total_capacity: total,
+            storage: Mutex::new(storage),
             firmware,
         })
     }
@@ -194,8 +192,8 @@ impl Transport for MtpTransport {
     }
 
     fn read_with_progress(&self, path: &TPath, on_progress: &dyn Fn(u64, u64)) -> Result<Vec<u8>> {
-        let _g = self.op_lock.lock().expect("op_lock poisoned");
-        let storage = &self.storage;
+        let guard = self.storage.lock().expect("storage lock poisoned");
+        let storage = &*guard;
         block_on(async {
             let handle = resolve(storage, path)
                 .await?
@@ -218,8 +216,8 @@ impl Transport for MtpTransport {
     }
 
     fn write_atomic(&self, path: &TPath, bytes: &[u8]) -> Result<()> {
-        let _g = self.op_lock.lock().expect("op_lock poisoned");
-        block_on(upload_streamed(&self.storage, path, bytes, &|_, _| {}))
+        let guard = self.storage.lock().expect("storage lock poisoned");
+        block_on(upload_streamed(&guard, path, bytes, &|_, _| {}))
     }
 
     fn copy_in_atomic(&self, src_local: &Path, dest: &TPath) -> Result<()> {
@@ -241,13 +239,13 @@ impl Transport for MtpTransport {
         // pushes start failing on RAM pressure.
         let bytes =
             std::fs::read(src_local).with_context(|| format!("read {}", src_local.display()))?;
-        let _g = self.op_lock.lock().expect("op_lock poisoned");
-        block_on(upload_streamed(&self.storage, dest, &bytes, on_progress))
+        let guard = self.storage.lock().expect("storage lock poisoned");
+        block_on(upload_streamed(&guard, dest, &bytes, on_progress))
     }
 
     fn delete(&self, path: &TPath) -> Result<bool> {
-        let _g = self.op_lock.lock().expect("op_lock poisoned");
-        let storage = &self.storage;
+        let guard = self.storage.lock().expect("storage lock poisoned");
+        let storage = &*guard;
         block_on(async {
             let handle = match resolve(storage, path).await? {
                 Some(h) => h,
@@ -267,8 +265,8 @@ impl Transport for MtpTransport {
         // doesn't loop, and device behavior on non-empty folders is undefined.
         // So we walk children, accumulate handles in preorder, and delete in
         // reverse so leaves go before their parents.
-        let _g = self.op_lock.lock().expect("op_lock poisoned");
-        let storage = &self.storage;
+        let guard = self.storage.lock().expect("storage lock poisoned");
+        let storage = &*guard;
         block_on(async {
             let root = match resolve(storage, path).await? {
                 Some(h) => h,
@@ -305,8 +303,8 @@ impl Transport for MtpTransport {
         // O(N²) that made sync scale badly with library size). `.yjr`/`.yjf`/`nbk`
         // are tiny; this is one `dir` resolve + a quick listing & small read per
         // child, all within the one open session.
-        let _g = self.op_lock.lock().expect("op_lock poisoned");
-        let storage = &self.storage;
+        let guard = self.storage.lock().expect("storage lock poisoned");
+        let storage = &*guard;
         block_on(async {
             let Some(parent) = resolve(storage, dir).await? else {
                 return Ok(Vec::new());
@@ -350,14 +348,14 @@ impl Transport for MtpTransport {
     }
 
     fn exists(&self, path: &TPath) -> Result<bool> {
-        let _g = self.op_lock.lock().expect("op_lock poisoned");
-        let storage = &self.storage;
+        let guard = self.storage.lock().expect("storage lock poisoned");
+        let storage = &*guard;
         block_on(async { Ok(resolve(storage, path).await?.is_some()) })
     }
 
     fn list(&self, dir: &TPath) -> Result<Vec<TEntry>> {
-        let _g = self.op_lock.lock().expect("op_lock poisoned");
-        let storage = &self.storage;
+        let guard = self.storage.lock().expect("storage lock poisoned");
+        let storage = &*guard;
         block_on(async {
             let parent = if dir.is_empty() {
                 None
@@ -383,10 +381,17 @@ impl Transport for MtpTransport {
     }
 
     fn free_space(&self) -> Option<(u64, u64)> {
-        // Snapshot from session open. Live refresh would require another
-        // `GetStorageInfo` round-trip — Phase 4 can wire that to a refresh
-        // button if the static value drifts noticeably in practice.
-        Some((self.free_at_open, self.total_capacity))
+        // Live re-read: `Storage::refresh` issues a fresh `GetStorageInfo` over
+        // the open session so the popover reflects the real free/total after a
+        // push or delete, not the session-open snapshot. Best-effort — if the
+        // round-trip fails we fall back to the last known `info()` (open-time or
+        // a prior refresh) rather than regressing the display to "—".
+        let mut guard = self.storage.lock().expect("storage lock poisoned");
+        if let Err(e) = block_on(guard.refresh()) {
+            eprintln!("[sidle/mtp] free_space refresh failed, using cached: {e}");
+        }
+        let info = guard.info();
+        Some((info.free_space_bytes, info.max_capacity))
     }
 
     fn firmware(&self) -> Option<String> {

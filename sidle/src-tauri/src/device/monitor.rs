@@ -145,7 +145,7 @@ pub fn spawn(
 /// Borrow the shared on-device transport, opening it the first time anyone
 /// asks. Subsequent callers reuse the same `Arc<dyn Transport>` — so two
 /// simultaneous Tauri commands or an on-connect monitor task all share the one
-/// MTP session, and `MtpTransport::op_lock` serializes their on-wire ops
+/// MTP session, and `MtpTransport`'s storage mutex serializes their on-wire ops
 /// inside it. The session is released when the monitor clears the cell on
 /// disconnect (see `just_disconnected` in [`spawn`]).
 ///
@@ -512,6 +512,57 @@ async fn refresh_mtp_storage_info(
                 if firmware.is_some() {
                     current.firmware = firmware;
                 }
+                Some(current.clone())
+            }
+            _ => None,
+        }
+    };
+
+    if let Some(updated) = updated {
+        let _ = app.emit("device:status", &Some(updated));
+    }
+}
+
+/// Re-read the connected device's free/total over the already-open transport
+/// and publish it into `state` + a follow-up `device:status` emit. Called after
+/// any on-device mutation (send / delete) so the popover's free-space number
+/// tracks what's actually on the Kindle instead of waiting for a reconnect.
+///
+/// Transport-agnostic: mass-storage re-runs `statvfs`, MTP re-issues
+/// `GetStorageInfo` via [`Transport::free_space`]. Reuses the cached transport
+/// (the mutation that just ran left it open), so there's no extra USB session
+/// open on the MTP path. Best-effort throughout — no connected device, a failed
+/// re-open, or a failed round-trip simply leaves the last known value in place.
+pub async fn refresh_free_space(app: &AppHandle, state: &DeviceState, transport: &SharedTransport) {
+    let device = match state.lock().await.clone() {
+        Some(d) => d,
+        None => return,
+    };
+    let serial = device.serial.clone();
+    let shared = match ensure_transport(transport, &device).await {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("[sidle/freespace] {serial}: refresh open failed: {e:#}");
+            return;
+        }
+    };
+    let snapshot = tokio::task::spawn_blocking(move || shared.free_space())
+        .await
+        .unwrap_or(None);
+    let Some((free, total)) = snapshot else {
+        return;
+    };
+
+    let updated = {
+        let mut guard = state.lock().await;
+        match guard.as_mut() {
+            // Same-device guard as `refresh_mtp_storage_info`: if the user
+            // unplugged (or swapped devices) between the mutation and this
+            // refresh, drop the result rather than stamping it onto whatever's
+            // connected now.
+            Some(current) if current.serial == serial => {
+                current.free_bytes = Some(free);
+                current.total_bytes = Some(total);
                 Some(current.clone())
             }
             _ => None,
