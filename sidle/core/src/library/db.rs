@@ -23,6 +23,14 @@ pub struct BookRow {
     /// awaiting its background EPUB conversion.
     pub epub_path: Option<String>,
     pub cover_path: Option<String>,
+    /// **Derived, not a column.** The small thumbnail sidecar at
+    /// `books/<sha>/cover.thumb.jpg` (see [`super::thumbnail`]), if it's been
+    /// generated. The desktop gallery prefers it over the full-res `cover_path`
+    /// (~8× fewer bytes, ~15× less decode); a `None` — missing file, or a book
+    /// imported before its thumbnail landed — makes the frontend fall back to
+    /// `cover_path`. Kept out of SQL because it's a pure function of the live
+    /// root + `sha256`, located exactly where `ensure_thumbnail` writes it.
+    pub cover_thumb_path: Option<String>,
     /// Path to the KFX on disk. `None` while an EPUB-imported book is still
     /// awaiting its background KFX conversion.
     pub kfx_path: Option<String>,
@@ -1428,6 +1436,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
     let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
     // Bind the fields the derived `search_key` reads up front, so it can borrow
     // them before they're moved into the struct.
+    let sha256: String = row.get(1)?;
     let title: String = row.get(2)?;
     let author: String = row.get(3)?;
     let language: String = row.get(4)?;
@@ -1448,9 +1457,21 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         &title_romaji,
         &author_romaji,
     );
+    // Derived (not a column): the thumbnail sidecar, when present on disk. A
+    // `None` root (in-memory test conn) or a not-yet-generated thumb yields
+    // `None`, and the gallery falls back to the full cover.
+    let cover_thumb_path = root.and_then(|r| {
+        let thumb = super::LibraryPaths {
+            root: r.to_path_buf(),
+        }
+        .cover_thumb(&sha256);
+        thumb
+            .exists()
+            .then(|| thumb.to_string_lossy().into_owned())
+    });
     Ok(BookRow {
         id: row.get(0)?,
-        sha256: row.get(1)?,
+        sha256,
         title,
         author,
         language,
@@ -1458,6 +1479,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         // Stored root-relative (§4a); resolve to absolute against the live root.
         epub_path: resolve_opt(root, row.get(6)?),
         cover_path: resolve_opt(root, row.get(7)?),
+        cover_thumb_path,
         kfx_path: resolve_opt(root, row.get(8)?),
         file_size: row.get(9)?,
         imported_at: row.get(10)?,

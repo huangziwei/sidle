@@ -1386,7 +1386,7 @@ function seriesCard(entry) {
   stack.className = "series-stack";
   const cover = document.createElement("div");
   cover.className = "cover";
-  const coverUrl = coverUrlFor(lead);
+  const coverUrl = coverUrlFor(lead, { thumb: true });
   if (coverUrl) {
     cover.classList.add("has-image");
     const img = document.createElement("img");
@@ -1500,7 +1500,7 @@ function galleryCard(b) {
   card.dataset.bookId = b.id;
   card.title = `${b.title}\n${b.author}`;
 
-  const coverUrl = coverUrlFor(b);
+  const coverUrl = coverUrlFor(b, { thumb: true });
   const cover = document.createElement("div");
   cover.className = "cover";
   if (coverUrl) {
@@ -1704,9 +1704,17 @@ function subscribeStatus() {
 // cover on disk yet. The `?v=N` cache buster matches the file's "version"
 // from sidle's perspective — incrementing it on every cover overwrite is
 // the cheap way to force the webview to re-fetch.
-function coverUrlFor(b) {
-  if (!b || !b.cover_path) return null;
-  const base = window.api.fileUrl(b.cover_path);
+// `thumb: true` prefers the small gallery-sized thumbnail sidecar
+// (`cover.thumb.jpg`, ~48KB / ≤400×520) that the backend derives when it
+// exists, falling back to the full-res cover — an 8×-smaller download and
+// ~15×-less decode per grid tile, with no visible difference at the 150px cell.
+// The metadata-editor preview and drag-drop target leave `thumb` off: they want
+// the full art. Both resolve through the same asset:// scope (same directory).
+function coverUrlFor(b, { thumb = false } = {}) {
+  if (!b) return null;
+  const path = (thumb && b.cover_thumb_path) || b.cover_path;
+  if (!path) return null;
+  const base = window.api.fileUrl(path);
   if (!base) return null;
   return `${base}?v=${state.coverCacheBust}`;
 }
