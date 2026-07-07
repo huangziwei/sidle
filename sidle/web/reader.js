@@ -4205,21 +4205,32 @@ function wire() {
       el.addEventListener("input", onStyleInput);
       el.addEventListener("change", onStyleInput);
     });
-  // Vertical 2-col mode keys off the paginator's live aspect ratio + height, so
-  // we re-apply layout on window resize. rAF coalesces drag-resize bursts into
-  // one apply per frame.
+  // Re-apply layout whenever the reading area changes size. Vertical 2-col mode
+  // keys off the paginator's live aspect ratio + height; fixed-layout modes re-fit
+  // the spread (auto single/double) AND repaint the viewport-fixed overlay, whose
+  // highlight/bookmark/search coords come from the spans' getClientRects and would
+  // otherwise stay pinned to the old spread position. rAF coalesces bursts into one
+  // apply per frame.
   let resizeTick = null;
-  window.addEventListener("resize", () => {
+  const scheduleReaderResize = () => {
     if (resizeTick) cancelAnimationFrame(resizeTick);
     resizeTick = requestAnimationFrame(() => {
       resizeTick = null;
       if (paginator && styleSettings) applyLayout(lastPos?.index ?? 0, true);
-      // Fixed-layout modes: re-render the current spread (auto single/double at
-      // the new size). Shares this rAF so drag-resize coalesces to one apply.
       if (readerMode === "pdf" && pdf) pdfRenderCurrent();
       else if (readerMode === "notebook" && nbk) nbkShowPage(nbk.page);
     });
-  });
+  };
+  window.addEventListener("resize", scheduleReaderResize);
+  // A side panel (TOC / annotations / search) opening or closing resizes the stage
+  // WITHOUT a window `resize`, so the fixed-layout overlay would keep stale coords
+  // and drift off the re-centered spread (the ink layer is a child of the page
+  // wrapper and reflows for free; the reflowable paginator has its own internal
+  // ResizeObserver). Observe the stage so any size change — window, panel, drag —
+  // re-fits and repaints. Fires once on observe (harmless: guarded + idempotent).
+  const stageEl = $("#reader-stage");
+  if (stageEl && typeof ResizeObserver !== "undefined")
+    new ResizeObserver(scheduleReaderResize).observe(stageEl);
   // Click anywhere in the app chrome (outside a popover) dismisses it. Clicks
   // inside the section iframe live in a separate document and don't reach here,
   // so this never fights the in-text click that opened the note popover.
