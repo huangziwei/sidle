@@ -34,11 +34,8 @@ const state = {
   sentSet: new Set(), // sha256s currently on device, derived from `sent`
   // Column order/visibility + widths for the list view now live in the shared
   // TableView instance (`booksTable`), persisted under "columnConfig"/"columnWidths".
-  // Bumped every time a cover is overwritten (worker tail-step fetch, manual
-  // recrawl, conversion completion). Appended as `?v=N` to each cover URL so
-  // the browser doesn't keep serving the stale grayscale image from cache
-  // after we've swapped the file on disk.
-  coverCacheBust: 0,
+  // Cover cache-busting is now per-book (`BookRow.cover_rev`, the served image's
+  // mtime), appended as `?v=` in `coverUrlFor` — no global counter.
   // Live per-book conversion progress, keyed by book id: `{ fraction, label }`
   // (fraction is a monotonic 0–1 estimate from the worker; label is the current
   // step, e.g. "Encoding images"). Set on the `conversion:progress` event,
@@ -309,6 +306,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // are wired by renderList() itself since the thead is rebuilt on every
   // render — no separate boot call needed.
   wireSelection();
+  wireGalleryDelegation();
   wireFilterBar();
   wireSortPopover();
   wireMetadataModal();
@@ -1352,6 +1350,43 @@ function clearFacet(facet) {
   render();
 }
 
+// One set of listeners on the gallery grid instead of ~4 per card × N books:
+// each event resolves `event.target` up to its `.book-card` and back to the
+// book via `dataset.bookId`. The grid element itself persists across renders
+// (only its children are cleared), so this is wired once at boot. Series tiles
+// live in the same grid but aren't `.book-card`, so they fall through to their
+// own per-tile handlers (seriesCard) untouched.
+function wireGalleryDelegation() {
+  const grid = $("#gallery-grid");
+
+  const hit = (e) => {
+    const card = e.target.closest(".book-card");
+    if (!card || !grid.contains(card)) return null;
+    const book = state.books.find((b) => b.id === Number(card.dataset.bookId));
+    return book ? { card, book } : null;
+  };
+
+  grid.addEventListener("click", (e) => {
+    const h = hit(e);
+    if (h) onItemClick(e, h.book);
+  });
+  grid.addEventListener("dblclick", (e) => {
+    const h = hit(e);
+    if (h) openReader(h.book);
+  });
+  grid.addEventListener("contextmenu", (e) => {
+    const h = hit(e);
+    if (!h) return;
+    e.preventDefault();
+    onItemContext(e, h.book);
+    openContextMenu(e.clientX, e.clientY, h.book);
+  });
+  grid.addEventListener("mousedown", (e) => {
+    const h = hit(e);
+    if (h) onBookDragDown(e, h.card, h.book); // drag onto a series tile to file it
+  });
+}
+
 function renderGallery(books) {
   const grid = $("#gallery-grid");
   grid.innerHTML = "";
@@ -1530,14 +1565,9 @@ function galleryCard(b) {
   meta.append(t, a, metaBadges(b));
   card.appendChild(meta);
 
-  card.addEventListener("click", (e) => onItemClick(e, b));
-  card.addEventListener("dblclick", () => openReader(b));
-  card.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    onItemContext(e, b);
-    openContextMenu(e.clientX, e.clientY, b);
-  });
-  wireBookDragSource(card, b); // drag onto a series tile to file it there
+  // No per-card listeners: click / dblclick / contextmenu / drag are delegated
+  // once on `#gallery-grid` (see wireGalleryDelegation), resolved back to this
+  // book via `dataset.bookId`. Keeps each render's card build pure DOM.
   return card;
 }
 
@@ -1676,12 +1706,11 @@ function subscribeStatus() {
     } else {
       delete state.convProgress[book_id];
     }
-    // When a conversion finishes, fetch the row to pick up kfx_path. Bump
-    // the cache buster too — the worker may have just overwritten the
-    // grayscale cover.jpg with the color-fetch result, and without a fresh
-    // URL the browser would keep showing the cached desaturated image.
+    // When a conversion finishes, re-pull rows to pick up kfx_path — and the
+    // fresh `cover_rev`: the worker may have just overwritten the grayscale
+    // cover.jpg with the color-fetch result, and the new mtime busts that one
+    // tile's `?v=` so the browser drops the cached desaturated image.
     if (status === "done") {
-      state.coverCacheBust += 1;
       refresh();
     } else {
       render();
@@ -1716,7 +1745,11 @@ function coverUrlFor(b, { thumb = false } = {}) {
   if (!path) return null;
   const base = window.api.fileUrl(path);
   if (!base) return null;
-  return `${base}?v=${state.coverCacheBust}`;
+  // Per-book cache token = the served image's mtime (`cover_rev`, from the
+  // backend). It changes iff THIS book's cover file changes, so replacing one
+  // cover re-fetches only its tile — not the whole gallery, as the old global
+  // `coverCacheBust` counter did. `|| 0` for a coverless/unstattable row.
+  return `${base}?v=${b.cover_rev || 0}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -3284,10 +3317,12 @@ function onMainMouseDown(e) {
 // shared controller's. Notes wires its cards straight to its own controller.
 function onItemClick(e, b) {
   // A drag that releases back on its origin tile fires a trailing click; swallow
-  // it once so the drag doesn't also re-select (see wireBookDragSource).
-  const el = e.currentTarget;
-  if (el && el.classList.contains("just-dragged")) {
-    el.classList.remove("just-dragged");
+  // it once so the drag doesn't also re-select (see wireBookDragSource). Key off
+  // the target's ancestry, not `e.currentTarget` — the gallery grid delegates
+  // this handler (currentTarget = the grid), while list rows attach it directly.
+  const dragged = e.target.closest(".just-dragged");
+  if (dragged) {
+    dragged.classList.remove("just-dragged");
     return;
   }
   booksSelection.click(e, b.id);
@@ -3687,9 +3722,9 @@ async function bulkRecrawlCovers(books) {
     if (btn) btn.disabled = false;
   }
 
-  // Covers landed at the same sidecar paths, so each <img> src is unchanged —
-  // bump the cache-bust token to force reloads, then re-pull rows + render.
-  state.coverCacheBust += 1;
+  // Covers landed at the same sidecar paths, so each <img> src is unchanged;
+  // re-pulling rows brings the fresh per-book `cover_rev` (new mtimes), whose
+  // `?v=` change forces the browser to reload exactly the recrawled tiles.
   await refresh();
   const parts = [`${summary.updated} updated`];
   if (summary.failed) parts.push(`${summary.failed} no cover`);
@@ -3841,8 +3876,8 @@ async function recrawlCover(b) {
     showToast(`cover fetch failed: ${result.error}`, true);
     return;
   }
-  // kind === "updated"
-  state.coverCacheBust += 1;
+  // kind === "updated" — re-pull brings this book's new `cover_rev`, busting
+  // just its tile.
   showToast(`cover updated: ${b.title}`);
   await refresh();
 }
@@ -4742,19 +4777,13 @@ async function applyCoverFromPath(src) {
       srcPath: src,
     });
     if (result.kind === "updated") {
-      // Bump the cache-buster so the gallery thumbnail and the modal
-      // preview both reload from disk instead of the cached image.
-      state.coverCacheBust += 1;
-      // Update the in-memory row directly; library:row-updated will
-      // also fire and re-apply, but doing it locally avoids a render
-      // gap.
+      // Re-pull rows so this book's `cover_rev` (new mtime) reloads the tile
+      // and the modal preview from disk instead of the cached image; then
+      // re-point `metadataBook` at the refreshed row and repaint the preview.
+      await refresh();
       const idx = state.books.findIndex((b) => b.id === metadataBook.id);
-      if (idx !== -1) {
-        state.books[idx] = { ...state.books[idx], cover_path: result.cover_path };
-        metadataBook = state.books[idx];
-      }
+      if (idx !== -1) metadataBook = state.books[idx];
       renderCoverPreview(metadataBook);
-      render();
     } else if (result.kind === "failed") {
       showToast(`Cover change failed: ${result.error}`, true);
     }
@@ -4805,13 +4834,11 @@ async function onCoverRefetchClick() {
     showToast(`cover fetch failed: ${result.error}`, true);
     return;
   }
-  // updated — refresh the gallery tile + the open modal preview ourselves.
-  state.coverCacheBust += 1;
+  // updated — re-pull rows so this book's fresh `cover_rev` busts its gallery
+  // tile, then re-point `metadataBook` and repaint the open modal preview.
+  await refresh();
   const idx = state.books.findIndex((b) => b.id === metadataBook.id);
-  if (idx !== -1) {
-    state.books[idx] = { ...state.books[idx], cover_path: result.cover_path };
-    metadataBook = state.books[idx];
-  }
+  if (idx !== -1) metadataBook = state.books[idx];
   renderCoverPreview(metadataBook);
   render();
   showToast(`cover updated: ${metadataBook.title}`);

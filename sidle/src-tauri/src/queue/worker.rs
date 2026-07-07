@@ -706,6 +706,7 @@ mod tests {
             epub_path: None,
             cover_path: None,
             cover_thumb_path: None,
+            cover_rev: 0,
             kfx_path: None,
             kfx_sha256: None,
             pdf_path: None,

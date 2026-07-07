@@ -31,6 +31,16 @@ pub struct BookRow {
     /// `cover_path`. Kept out of SQL because it's a pure function of the live
     /// root + `sha256`, located exactly where `ensure_thumbnail` writes it.
     pub cover_thumb_path: Option<String>,
+    /// **Derived, not a column.** Cache-bust token for the cover: the ms mtime
+    /// of whatever image is actually served (the thumb if present, else the
+    /// full cover), or 0 with no cover. Changes iff the file changes, so a
+    /// recrawl / set-cover / worker color-fetch / thumbnail rebuild — each
+    /// rewrites the sidecar — self-invalidates the stale image. The desktop
+    /// gallery appends it as `?v=` per book (replaces the old global counter);
+    /// the Kindle picker folds it into its on-device cover-cache filename
+    /// (`sidle/native/src/cover_cache.rs`). Computed alongside
+    /// [`Self::cover_thumb_path`] from the same single stat.
+    pub cover_rev: i64,
     /// Path to the KFX on disk. `None` while an EPUB-imported book is still
     /// awaiting its background KFX conversion.
     pub kfx_path: Option<String>,
@@ -1429,6 +1439,48 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
     LIMIT 1
 "#;
 
+/// The served cover image for a book — the color thumbnail if it's been
+/// generated, else the full-res cover — as `(thumbnail path, ms mtime)`. One
+/// `metadata` stat yields both the thumb's existence (→ the gallery prefers it)
+/// and its mtime (→ the shared cache-bust rev); only a thumbnail-less book falls
+/// back to stat'ing `cover_path` for the rev. A `None` root, or any unstattable
+/// file, yields what the caller reads as "no thumb" / "no version" (`None` / 0).
+///
+/// Single source of truth for a cover's cache token, shared by the desktop
+/// gallery ([`BookRow::cover_rev`]) and the Kindle picker's `/list.json`, so
+/// both invalidate in lockstep with the file on disk.
+fn served_cover(root: Option<&Path>, sha: &str, cover_path: Option<&str>) -> (Option<String>, i64) {
+    if let Some(r) = root {
+        let thumb = super::LibraryPaths {
+            root: r.to_path_buf(),
+        }
+        .cover_thumb(sha);
+        if let Ok(meta) = std::fs::metadata(&thumb) {
+            return (
+                Some(thumb.to_string_lossy().into_owned()),
+                mtime_millis(&meta),
+            );
+        }
+    }
+    // No thumb on disk: no gallery thumb, and the rev tracks the full cover so a
+    // cover swap on a thumbnail-less book still busts its `?v=`.
+    let rev = cover_path
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| mtime_millis(&m))
+        .unwrap_or(0);
+    (None, rev)
+}
+
+/// Milliseconds since the Unix epoch for a file's modified time; 0 if it
+/// predates the epoch or the mtime is unreadable.
+fn mtime_millis(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<BookRow> {
     let tags_json: String = row.get(19)?;
     // Defensive parse: we control writes and only emit canonical JSON
@@ -1457,18 +1509,14 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         &title_romaji,
         &author_romaji,
     );
-    // Derived (not a column): the thumbnail sidecar, when present on disk. A
-    // `None` root (in-memory test conn) or a not-yet-generated thumb yields
-    // `None`, and the gallery falls back to the full cover.
-    let cover_thumb_path = root.and_then(|r| {
-        let thumb = super::LibraryPaths {
-            root: r.to_path_buf(),
-        }
-        .cover_thumb(&sha256);
-        thumb
-            .exists()
-            .then(|| thumb.to_string_lossy().into_owned())
-    });
+    // Resolve the stored (root-relative, §4a) cover path up front — it feeds
+    // both the struct field and the served-image rev's fallback stat.
+    let cover_path = resolve_opt(root, row.get(7)?);
+    // Derived (not columns): the thumbnail sidecar (when present on disk) and
+    // the served-image mtime cache token, from a single stat of the served
+    // image. A `None` root (in-memory test conn) or a not-yet-generated thumb
+    // yields `(None, ..)`, and the gallery falls back to the full cover.
+    let (cover_thumb_path, cover_rev) = served_cover(root, &sha256, cover_path.as_deref());
     Ok(BookRow {
         id: row.get(0)?,
         sha256,
@@ -1478,8 +1526,9 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         ppd: row.get(5)?,
         // Stored root-relative (§4a); resolve to absolute against the live root.
         epub_path: resolve_opt(root, row.get(6)?),
-        cover_path: resolve_opt(root, row.get(7)?),
+        cover_path,
         cover_thumb_path,
+        cover_rev,
         kfx_path: resolve_opt(root, row.get(8)?),
         file_size: row.get(9)?,
         imported_at: row.get(10)?,
