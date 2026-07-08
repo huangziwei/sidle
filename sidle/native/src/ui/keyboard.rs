@@ -248,7 +248,8 @@ pub fn run(
                 // open). Otherwise resolve a key.
                 // `with_button = false` here (the overlay draws no action discs),
                 // so `drm` is moot — only `Clear`/`Open` come back.
-                if let Some(tap) = searchbar::hit(x, y, fb.var.xres, !query.is_empty(), false, false)
+                if let Some(tap) =
+                    searchbar::hit(x, y, fb.var.xres, !query.is_empty(), false, false)
                 {
                     if matches!(tap, searchbar::Tap::Clear) {
                         query.clear();

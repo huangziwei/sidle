@@ -308,6 +308,15 @@ impl Touch {
         self.transform_xy(self.cur_x, self.cur_y)
     }
 
+    /// Current primary-contact (slot 0) position in user-visible framebuffer
+    /// coords (orientation-corrected). Meaningful between a `Down` and its `Up`;
+    /// the main loop reads it at the arm deadline to reject a hold that has
+    /// drifted into a drag (the long-press slop guard). Holds the last contact
+    /// point once the finger is up.
+    pub fn current_pos(&self) -> (u32, u32) {
+        self.transform_xy(self.cur_x, self.cur_y)
+    }
+
     /// Map raw panel coords to user-visible framebuffer coords for the current
     /// orientation. Shared by the slot-0 `Down`/`Up` path and the two-finger
     /// gesture so corner detection matches what's drawn.

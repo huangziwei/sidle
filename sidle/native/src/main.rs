@@ -69,14 +69,25 @@ const DOWNLOAD_DIR: &str = "/mnt/us/documents/Sidle";
 const COVER_CACHE_DIR: &str = "/mnt/us/extensions/sidle/cache/covers";
 const CLEANINDEX: &str = "/mnt/us/system/.cleanindex";
 const TOAST_LINGER: Duration = Duration::from_millis(1200);
-/// Minimum hold duration on a cell for a long-press to fire a download.
-/// Shorter than this and we treat the touch as a misclick, showing a
-/// "hold to download" discovery hint instead of starting the download.
-/// 1s is on the slow side (stock Kindle's long-press is ~500ms) but
-/// the cost of a wrong download (1–10s + a wrong file on the device)
-/// is high enough that deliberateness wins over speed. Tune on
-/// hardware if it feels sluggish.
-const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(1000);
+/// How long a finger must rest on a book cover — without drifting more than
+/// [`ARM_SLOP_PX`] — before the tile "arms" and its action (download / decrypt)
+/// auto-fires. The arm is signalled on the cell itself (see
+/// [`grid::draw_arm_cue`]) at this instant and the action starts immediately, so
+/// the user watches for the flip instead of timing a release: a hold that's "too
+/// long" no longer wastes time (it fired the moment it armed) and one that's "too
+/// short" is a visible non-event, not a silent misclick. Long enough to keep an
+/// accidental brush from downloading; tune on hardware. Auto-fire removes the
+/// over-hold cost, so this can drop toward the stock ~500ms if it feels sluggish.
+const ARM_THRESHOLD: Duration = Duration::from_millis(1000);
+/// Max drift (either axis, user-visible px) from the finger's landing point that
+/// still counts as a hold. Past this the stroke is a drag / page-flip swipe in
+/// progress, so the arm is cancelled and the eventual `Up` classifies the swipe.
+const ARM_SLOP_PX: u32 = 40;
+/// Dwell between painting the armed cue and letting the action overlay paint over
+/// it — long enough that the slow e-ink panel actually presents the "armed" frame
+/// (a partial refresh lands in a few hundred ms). Purely for perception; the
+/// action is correct with it at 0.
+const ARM_DWELL: Duration = Duration::from_millis(250);
 
 /// Per-read socket timeout for the session agent. Bounds a genuinely stalled
 /// socket (dead radio) without capping total transfer time, so a 300 MB+ book
@@ -445,7 +456,18 @@ fn run() -> anyhow::Result<()> {
     // `armed`, since a swipe can start anywhere, not just on a cover cell.
     let mut down_pos: Option<(u32, u32)> = None;
     loop {
-        let event = input.next()?;
+        // While a *book* cell is held, wake the loop at the arm threshold so the
+        // tile can flip to the armed cue and its action auto-fire — a `Tick`
+        // otherwise never arrives during a hold (finger micro-jitter keeps `poll`
+        // busy). Series cells have no threshold (they drill on release), so no
+        // deadline is set for them.
+        let deadline = match armed.as_ref() {
+            Some(a) if matches!(cells.get(a.cell_idx).map(|c| &c.kind), Some(CellKind::Book)) => {
+                Some(a.down_at + ARM_THRESHOLD)
+            }
+            _ => None,
+        };
+        let event = input.next_deadline(deadline)?;
 
         match event {
             InputEvent::Touch(TouchEvent::Down { x, y }) => {
@@ -575,153 +597,42 @@ fn run() -> anyhow::Result<()> {
                         }
                         continue;
                     }
-                    let held = a.down_at.elapsed();
-                    if held >= LONG_PRESS_THRESHOLD {
-                        // Long press → act on the book: download it (library) or
-                        // decrypt it in place (DRM). No need to clear the outline
-                        // first — the action toast paints over the gallery, and the
-                        // post-action repaint paints the clean cell.
-                        let book = &cells[a.cell_idx].cover_book;
-                        // Grab the identity now: `book` borrows `cells`, and the
-                        // hide-on-success rebuild below reassigns `cells`.
-                        let dl_id = book.id;
-                        log(format!(
-                            "long press fired ({held:?}) on book {}: {}",
-                            book.id, book.title,
-                        ));
-                        let dl_t0 = Instant::now();
-                        // In DRM mode the tap decrypts the on-device purchase via
-                        // kfxdedrm (`book.id` = index into `drm_books`); in library
-                        // mode it downloads from the LAN server. Both return
-                        // (toast, landed-on-device) so the hide-on-success path is
-                        // shared.
-                        let (banner_msg, saved) = match source {
-                            Source::Drm => match drm_books.get(dl_id as usize) {
-                                Some(drm_book) => {
-                                    decrypt_flow(&mut fb, &mut renderer, &agent, &cfg, drm_book)
-                                        .unwrap_or_else(|err| {
-                                            log(format!("decrypt flow error: {err:#}"));
-                                            (format!("Failed: {err}"), false)
-                                        })
-                                }
-                                None => ("DRM book not found".to_string(), false),
-                            },
-                            Source::Library => download_flow(
-                                &mut fb,
-                                &mut renderer,
-                                &mut input,
-                                &agent,
-                                &cfg,
-                                book,
-                            )
-                            .unwrap_or_else(|err| {
-                                log(format!("download flow error: {err:#}"));
-                                (format!("Failed: {err}"), false)
-                            }),
-                        };
-                        log(format!(
-                            "action for book {dl_id} finished in {:?}",
-                            dl_t0.elapsed()
-                        ));
-                        // Terminal banner. The DRM decrypt overlay is a plain
-                        // 140px toast, so a plain toast overwrites it cleanly.
-                        // The library download's overlay is the taller
-                        // `draw_download` (title/progress/Cancel), so its result
-                        // reuses that footprint — one banner replacing the live
-                        // one in place, rather than a smaller toast stacked
-                        // inside it leaving the title + Cancel edges showing.
-                        let dirty = match source {
-                            Source::Drm => toast::draw(&mut fb, &mut renderer, &banner_msg),
-                            Source::Library => {
-                                toast::draw_download_done(&mut fb, &mut renderer, &banner_msg)
-                            }
-                        };
-                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
-                        thread::sleep(TOAST_LINGER);
-                        // Hide the just-downloaded book: it's now on the device,
-                        // and the picker's rule is "on device → not shown". Drop it
-                        // from the master set and re-derive the current view (top
-                        // level, or the drilled-in series' members) so the tile
-                        // vanishes in the repaint below instead of lingering until
-                        // the next launch. Keep the user on their page, clamped if
-                        // its last tile just left.
-                        if saved {
-                            all_books.retain(|b| b.id != dl_id);
-                            entries = series::group_by_series(rebuild_view(
-                                &all_books, &filters, sort, &query,
-                            ));
-                            let drilled = series_view.clone();
-                            cells = match drilled {
-                                Some(name) => match series::members_of(&entries, &name) {
-                                    Some(members) => series::cells_for_series(members),
-                                    // The series' last undownloaded member was the
-                                    // one we grabbed — it's gone; pop to top level.
-                                    None => {
-                                        series_view = None;
-                                        series::cells_for_top(&entries)
-                                    }
-                                },
-                                None => series::cells_for_top(&entries),
-                            };
-                            total_pages = pager::n_pages(cells.len());
-                            covers = vec![None; cells.len()];
-                            page = page.min(total_pages.saturating_sub(1));
-                            log(format!(
-                                "hid book {dl_id}: {} tiles, {total_pages} pages",
-                                cells.len(),
-                            ));
-                        }
-                        repaint_page(
-                            &mut fb,
-                            &mut renderer,
-                            &agent,
-                            &cfg,
-                            cache_dir,
-                            &cells,
-                            &mut covers,
-                            page,
-                            total_pages,
-                            grid_left,
-                            grid_top,
-                            sort,
-                            filters.active_facets(),
-                            series_view.as_deref(),
-                            &query,
-                            drm_slice(source, &drm_books),
-                        )?;
-                    } else {
-                        // Short tap on a cover — discovery hint. Without
-                        // this, a tap-trained user keeps tapping and
-                        // wondering why nothing happens.
-                        log(format!("short tap ({held:?}), showing hint"));
-                        let hint = match source {
-                            Source::Drm => "Hold cover to decrypt",
-                            Source::Library => "Hold cover to download",
-                        };
-                        let dirty = toast::draw(&mut fb, &mut renderer, hint);
-                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
-                        thread::sleep(TOAST_LINGER);
-                        // Repaint to clear both the toast and the cell
-                        // outline that Down left behind.
-                        repaint_page(
-                            &mut fb,
-                            &mut renderer,
-                            &agent,
-                            &cfg,
-                            cache_dir,
-                            &cells,
-                            &mut covers,
-                            page,
-                            total_pages,
-                            grid_left,
-                            grid_top,
-                            sort,
-                            filters.active_facets(),
-                            series_view.as_deref(),
-                            &query,
-                            drm_slice(source, &drm_books),
-                        )?;
-                    }
+                    // Book cell released. A hold long enough to act already
+                    // auto-fired from the `Tick` arm (which took `armed` and
+                    // cleared the state), so reaching here means the finger lifted
+                    // *before* the arm threshold — a short tap. Show the discovery
+                    // hint; without it a tap-trained user keeps tapping and wonders
+                    // why nothing happens.
+                    log(format!(
+                        "short tap ({:?}), showing hint",
+                        a.down_at.elapsed()
+                    ));
+                    let hint = match source {
+                        Source::Drm => "Hold cover to decrypt",
+                        Source::Library => "Hold cover to download",
+                    };
+                    let dirty = toast::draw(&mut fb, &mut renderer, hint);
+                    fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                    thread::sleep(TOAST_LINGER);
+                    // Repaint to clear both the toast and the cell outline Down left.
+                    repaint_page(
+                        &mut fb,
+                        &mut renderer,
+                        &agent,
+                        &cfg,
+                        cache_dir,
+                        &cells,
+                        &mut covers,
+                        page,
+                        total_pages,
+                        grid_left,
+                        grid_top,
+                        sort,
+                        filters.active_facets(),
+                        series_view.as_deref(),
+                        &query,
+                        drm_slice(source, &drm_books),
+                    )?;
                     continue;
                 }
 
@@ -810,8 +721,7 @@ fn run() -> anyhow::Result<()> {
                                 draw_panel(&mut fb, &mut renderer, &summary)?;
                                 thread::sleep(TOAST_LINGER);
                                 drm_books = dedrm::scan();
-                                all_books =
-                                    drm_books.iter().map(|d| d.book.clone()).collect();
+                                all_books = drm_books.iter().map(|d| d.book.clone()).collect();
                                 series_view = None;
                                 entries = series::group_by_series(rebuild_view(
                                     &all_books, &filters, sort, &query,
@@ -1264,13 +1174,184 @@ fn run() -> anyhow::Result<()> {
                 }
             }
             InputEvent::Tick => {
-                // Idle poll. The X server rotates our window to the framework
-                // orientation but leaves it blank until we repaint, and raw
-                // touch/buttons don't follow the rotation. So on a detected
-                // flip: re-orient input, then repaint the current page (the X
-                // server rotates the repaint correctly, clearing the blank).
-                // Skip while a cell is armed so we don't disrupt a long-press.
-                if armed.is_none() {
+                // A Tick means one of two things now:
+                //  (a) the arm deadline fired while a book cell was held past
+                //      ARM_THRESHOLD — flip the tile to the armed cue and auto-fire
+                //      its action, so the user never has to time a release; or
+                //  (b) an ordinary idle poll with nothing armed — re-check the
+                //      framework orientation.
+                let arm_ready = match armed.as_ref() {
+                    Some(a) => {
+                        matches!(cells.get(a.cell_idx).map(|c| &c.kind), Some(CellKind::Book))
+                            && a.down_at.elapsed() >= ARM_THRESHOLD
+                    }
+                    None => false,
+                };
+                if arm_ready {
+                    let a = armed.take().unwrap();
+                    // Slop guard: a finger that wandered off its landing point is
+                    // mid-drag (a slow page-flip swipe), not a hold — cancel the arm
+                    // and clear its outline, keeping `down_pos` so the eventual Up
+                    // can still classify the swipe out of the full stroke.
+                    let (px, py) = input.touch_pos();
+                    let (dx, dy) = down_pos.unwrap_or((px, py));
+                    if px.abs_diff(dx) > ARM_SLOP_PX || py.abs_diff(dy) > ARM_SLOP_PX {
+                        log(format!(
+                            "arm cancelled: drifted to ({px},{py}) from ({dx},{dy})"
+                        ));
+                        repaint_page(
+                            &mut fb,
+                            &mut renderer,
+                            &agent,
+                            &cfg,
+                            cache_dir,
+                            &cells,
+                            &mut covers,
+                            page,
+                            total_pages,
+                            grid_left,
+                            grid_top,
+                            sort,
+                            filters.active_facets(),
+                            series_view.as_deref(),
+                            &query,
+                            drm_slice(source, &drm_books),
+                        )?;
+                    } else {
+                        // Flip the tile to the armed cue and present it (partial
+                        // refresh + short dwell) before the action overlay paints
+                        // over it, so the "held long enough" signal is actually seen.
+                        let cell_pos = a.cell_idx.saturating_sub(page * PAGE_SIZE);
+                        let (cx, cy) = grid::cell_xy(grid_left, grid_top, cell_pos);
+                        if cx >= 0 && cy >= 0 {
+                            grid::draw_arm_cue(&mut fb, cx, cy);
+                            fb.send_update(
+                                MxcfbRect {
+                                    top: cy as u32,
+                                    left: cx as u32,
+                                    width: grid::CELL_W,
+                                    height: grid::CELL_H,
+                                },
+                                WAVEFORM_MODE_DU,
+                            )?;
+                            thread::sleep(ARM_DWELL);
+                        }
+                        // Auto-fire: act on the book — download it (library) or
+                        // decrypt it in place (DRM). The finger is still down; its
+                        // eventual lift is inert (`down_pos` is cleared below, and a
+                        // lift on the grid maps to no Up action), and a lift landing
+                        // in the download overlay's Cancel is ignored there — Cancel
+                        // now needs a fresh tap (Down+Up in the button).
+                        let book = &cells[a.cell_idx].cover_book;
+                        // Grab the identity now: `book` borrows `cells`, and the
+                        // hide-on-success rebuild below reassigns `cells`.
+                        let dl_id = book.id;
+                        let held = a.down_at.elapsed();
+                        log(format!(
+                            "arm fired ({held:?}) on book {}: {}",
+                            book.id, book.title
+                        ));
+                        let dl_t0 = Instant::now();
+                        let (banner_msg, saved) = match source {
+                            Source::Drm => match drm_books.get(dl_id as usize) {
+                                Some(drm_book) => {
+                                    decrypt_flow(&mut fb, &mut renderer, &agent, &cfg, drm_book)
+                                        .unwrap_or_else(|err| {
+                                            log(format!("decrypt flow error: {err:#}"));
+                                            (format!("Failed: {err}"), false)
+                                        })
+                                }
+                                None => ("DRM book not found".to_string(), false),
+                            },
+                            Source::Library => download_flow(
+                                &mut fb,
+                                &mut renderer,
+                                &mut input,
+                                &agent,
+                                &cfg,
+                                book,
+                            )
+                            .unwrap_or_else(|err| {
+                                log(format!("download flow error: {err:#}"));
+                                (format!("Failed: {err}"), false)
+                            }),
+                        };
+                        log(format!(
+                            "action for book {dl_id} finished in {:?}",
+                            dl_t0.elapsed()
+                        ));
+                        // Terminal banner. The DRM decrypt overlay is a plain 140px
+                        // toast, so a plain toast overwrites it cleanly. The library
+                        // download's overlay is the taller `draw_download`
+                        // (title/progress/Cancel), so its result reuses that
+                        // footprint — one banner replacing the live one in place.
+                        let dirty = match source {
+                            Source::Drm => toast::draw(&mut fb, &mut renderer, &banner_msg),
+                            Source::Library => {
+                                toast::draw_download_done(&mut fb, &mut renderer, &banner_msg)
+                            }
+                        };
+                        fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
+                        thread::sleep(TOAST_LINGER);
+                        // Hide the just-acted book: on the device now, and the
+                        // picker's rule is "on device → not shown". Drop it from the
+                        // master set and re-derive the current view (top level, or
+                        // the drilled-in series' members) so the tile vanishes in the
+                        // repaint below. Keep the user on their page, clamped if its
+                        // last tile just left.
+                        if saved {
+                            all_books.retain(|b| b.id != dl_id);
+                            entries = series::group_by_series(rebuild_view(
+                                &all_books, &filters, sort, &query,
+                            ));
+                            let drilled = series_view.clone();
+                            cells = match drilled {
+                                Some(name) => match series::members_of(&entries, &name) {
+                                    Some(members) => series::cells_for_series(members),
+                                    // The series' last undownloaded member was the
+                                    // one we grabbed — it's gone; pop to top level.
+                                    None => {
+                                        series_view = None;
+                                        series::cells_for_top(&entries)
+                                    }
+                                },
+                                None => series::cells_for_top(&entries),
+                            };
+                            total_pages = pager::n_pages(cells.len());
+                            covers = vec![None; cells.len()];
+                            page = page.min(total_pages.saturating_sub(1));
+                            log(format!(
+                                "hid book {dl_id}: {} tiles, {total_pages} pages",
+                                cells.len(),
+                            ));
+                        }
+                        // The holding finger's eventual lift must not read as a swipe.
+                        down_pos = None;
+                        repaint_page(
+                            &mut fb,
+                            &mut renderer,
+                            &agent,
+                            &cfg,
+                            cache_dir,
+                            &cells,
+                            &mut covers,
+                            page,
+                            total_pages,
+                            grid_left,
+                            grid_top,
+                            sort,
+                            filters.active_facets(),
+                            series_view.as_deref(),
+                            &query,
+                            drm_slice(source, &drm_books),
+                        )?;
+                    }
+                } else if armed.is_none() {
+                    // Idle poll. The X server rotates our window to the framework
+                    // orientation but leaves it blank until we repaint, and raw
+                    // touch/buttons don't follow the rotation. So on a detected
+                    // flip: re-orient input, then repaint the current page (the X
+                    // server rotates the repaint correctly, clearing the blank).
                     let o = orientation::Orientation::detect();
                     if o != current_orient {
                         log(format!("orientation: {current_orient:?} -> {o:?}"));
@@ -1296,6 +1377,8 @@ fn run() -> anyhow::Result<()> {
                         )?;
                     }
                 }
+                // else: armed but below threshold (the deadline gates this Tick, so
+                // this shouldn't occur) — fall through and keep polling.
             }
         }
     }
@@ -1774,8 +1857,7 @@ fn decrypt_all_flow(
         // Draw progress before the book so the bar reflects completed work while
         // the title names the one now in flight.
         let short = truncate_title(&book.book.title, 28);
-        let rect =
-            toast::draw_progress(fb, renderer, &format!("Decrypting {short}…"), i, total);
+        let rect = toast::draw_progress(fb, renderer, &format!("Decrypting {short}…"), i, total);
         fb.send_update(rect, WAVEFORM_MODE_GC16)?;
 
         // Blocking decrypt with inherited stdio — no pipe to drain (the single
@@ -1827,7 +1909,9 @@ fn decrypt_all_flow(
             "Decrypted {decrypted}; sync blocked — plug into sidle, Update KUAL"
         ));
     }
-    Ok(format!("Decrypted {decrypted}, synced {synced}, {failed} failed"))
+    Ok(format!(
+        "Decrypted {decrypted}, synced {synced}, {failed} failed"
+    ))
 }
 
 fn download_flow(
@@ -1884,6 +1968,11 @@ fn download_flow(
     let mut buf = vec![0u8; DL_CHUNK];
     let mut last_draw = Instant::now();
     let mut chunks: u64 = 0;
+    // Cancel needs a *full tap* (Down then Up in the button), not just an Up:
+    // with the arm-flip auto-fire the finger that started the download is still
+    // down when the overlay appears, so its release is an Up with no matching
+    // Down here — that must not trip Cancel just because it lands on the button.
+    let mut cancel_armed = false;
     loop {
         let n = match reader.read(&mut buf) {
             Ok(0) => break,
@@ -1929,10 +2018,21 @@ fn download_flow(
                     // don't stack a DU redraw straight on top of it.
                     last_draw = Instant::now();
                 }
-                InputEvent::Touch(TouchEvent::Up { x, y }) if rect_hit(&cancel_rect, x, y) => {
+                // A Down inside Cancel arms it; the matching Up inside Cancel then
+                // aborts. A Down elsewhere (or the holding finger's Up, which had
+                // no Down here) leaves it disarmed.
+                InputEvent::Touch(TouchEvent::Down { x, y }) => {
+                    cancel_armed = rect_hit(&cancel_rect, x, y);
+                }
+                InputEvent::Touch(TouchEvent::Up { x, y })
+                    if cancel_armed && rect_hit(&cancel_rect, x, y) =>
+                {
                     cleanup_part(file, &part);
                     log(format!("download cancelled by user after {written} bytes"));
                     return Ok(("Download cancelled".to_string(), false));
+                }
+                InputEvent::Touch(TouchEvent::Up { .. }) => {
+                    cancel_armed = false;
                 }
                 InputEvent::Page(_) => {
                     cleanup_part(file, &part);

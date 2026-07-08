@@ -114,6 +114,33 @@ pub fn outline_cell(fb: &mut Framebuffer, cell_x: i32, cell_y: i32, selected: bo
     outline_rect(fb, cell_x, cell_y, CELL_W, CELL_H, 6, shade);
 }
 
+/// Paint the "armed" cue on a held book cell once the hold crosses the long-press
+/// threshold: a solid dark badge with a light download glyph, centered on the
+/// cover region. Drawn over the Down [`outline_cell`] (kept) so the tile reads as
+/// "held long enough — downloading now" in a single partial refresh; the cover
+/// stays visible around the badge so the user still sees which book is arming. The
+/// post-action repaint clears it. `(cell_x, cell_y)` is the on-screen cell origin
+/// (see [`cell_xy`]); off-screen no-ops.
+pub fn draw_arm_cue(fb: &mut Framebuffer, cell_x: i32, cell_y: i32) {
+    if cell_x < 0 || cell_y < 0 {
+        return;
+    }
+    // Center the badge on the cover region (the cell minus the bottom name band).
+    let cover_h = CELL_H - NAME_BAND_H;
+    let cx = cell_x + CELL_W as i32 / 2;
+    let cy = cell_y + cover_h as i32 / 2;
+    const BADGE: u32 = 140;
+    let half = BADGE as i32 / 2;
+    fb.fill_rect(
+        (cy - half).max(cell_y) as u32,
+        (cx - half).max(cell_x) as u32,
+        BADGE,
+        BADGE,
+        0x00,
+    );
+    draw_download_glyph(fb, cx, cy, BADGE as i32 / 4, 0xFF);
+}
+
 /// Draw a `thickness`-px outline rectangle (the four edges of `w × h` at
 /// `(x, y)`) in `shade`. Used by [`outline_cell`] for the selection frame.
 /// Negative origin / zero size no-ops.
