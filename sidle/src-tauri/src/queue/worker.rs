@@ -662,6 +662,13 @@ pub(crate) fn book_metadata_override(source: &boko::Metadata, book: &BookRow) ->
     if let Some(ppd) = &book.ppd {
         m.page_progression_direction = Some(ppd.clone());
     }
+    // An edited reading layout overrides the source's writing mode: the KFX
+    // exporter bakes the vertical/horizontal text axis from primary_writing_mode
+    // (the page-turn rides on `ppd`, set above). Left unset (None), the source's
+    // own writing mode — parsed at import, else content-derived — survives.
+    if let Some(wm) = &book.writing_mode {
+        m.primary_writing_mode = Some(wm.clone());
+    }
     m.publisher = book.publisher.clone();
     m.date = book.published_at.clone();
     m.collection = book
@@ -703,6 +710,7 @@ mod tests {
             search_key: String::new(),
             language: "en".into(),
             ppd: None,
+            writing_mode: None,
             epub_path: None,
             cover_path: None,
             cover_thumb_path: None,

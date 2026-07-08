@@ -328,19 +328,35 @@ impl StyleRegistry {
     /// Returns a list of (style_name, IonValue) pairs for building style
     /// entities. The `style_name` matches the symbol attached to the style —
     /// either the preserved source-class name or the synthesized `s<N>`.
-    pub fn drain_to_ion(&mut self) -> Vec<(String, IonValue)> {
+    pub fn drain_to_ion(&mut self, language: &str) -> Vec<(String, IonValue)> {
         let mut result = Vec::new();
 
-        // First, add the default style
-        let default_ion = IonValue::Struct(vec![(
+        // First, add the default style — stamped with the content language too, so
+        // text that resolves to the default style still gets CJK font/orientation
+        // selection on device (Amazon stamps language on every style).
+        let mut default_fields = vec![(
             KfxSymbol::StyleName as u64,
             IonValue::Symbol(self.default_style_symbol),
-        )]);
-        result.push(("s0".to_string(), default_ion));
+        )];
+        if !language.is_empty() {
+            default_fields.push((
+                KfxSymbol::Language as u64,
+                IonValue::String(language.to_string()),
+            ));
+        }
+        result.push(("s0".to_string(), IonValue::Struct(default_fields)));
 
-        // Then all registered styles.
+        // Then all registered styles, each stamped with the content language.
         for (_, (_style_id, name_symbol, name, style, _uses)) in self.styles.drain() {
-            let ion = style.to_ion(name_symbol);
+            let mut ion = style.to_ion(name_symbol);
+            if !language.is_empty()
+                && let IonValue::Struct(fields) = &mut ion
+            {
+                fields.push((
+                    KfxSymbol::Language as u64,
+                    IonValue::String(language.to_string()),
+                ));
+            }
             result.push((name, ion));
         }
 

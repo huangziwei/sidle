@@ -121,6 +121,14 @@ pub async fn library_update_metadata(
         Some(s) if s == "rtl" || s == "ltr" => Some(s),
         _ => None,
     };
+    // Reading layout / writing mode: canonicalize to one of the four
+    // primary-writing-mode values (or None = Auto). When set it's authoritative
+    // for the page direction — a `-rl` layout turns right-to-left — so derive
+    // `ppd` from it, keeping the two columns in agreement.
+    patch.writing_mode = normalize_writing_mode(patch.writing_mode.take());
+    if let Some(wm) = &patch.writing_mode {
+        patch.ppd = Some(if wm.ends_with("-rl") { "rtl" } else { "ltr" }.to_string());
+    }
     // Romaji: trim + lowercase the editable search fields. A blank field
     // self-heals by re-rendering from the (now-canonicalized) title/author via
     // the engine — so clearing it regenerates a sensible value instead of wiping
@@ -188,6 +196,18 @@ pub async fn library_update_metadata(
 
     let _ = app.emit("library:row-updated", &updated);
     Ok(updated)
+}
+
+/// Canonicalize a reading-layout / writing-mode value to one of the four
+/// `primary-writing-mode` strings (hyphenated, lowercase), or `None` (Auto) for
+/// anything else. The UI only offers valid options, so an unknown value clears
+/// to Auto rather than erroring.
+fn normalize_writing_mode(v: Option<String>) -> Option<String> {
+    let v = v?.trim().to_ascii_lowercase().replace('_', "-");
+    match v.as_str() {
+        "horizontal-lr" | "horizontal-rl" | "vertical-rl" | "vertical-lr" => Some(v),
+        _ => None,
+    }
 }
 
 fn canonicalize_tags(tags: Vec<String>) -> Vec<String> {
@@ -373,6 +393,12 @@ pub async fn library_bulk_update_metadata(
             "" => None,
             _ => return Err("page direction must be 'rtl' or 'ltr'".into()),
         };
+    }
+    // Reading layout / writing mode: canonicalize like a single edit; when set,
+    // it's authoritative for the page direction, so derive `ppd` from it.
+    patch.writing_mode = normalize_writing_mode(patch.writing_mode.take());
+    if let Some(wm) = &patch.writing_mode {
+        patch.ppd = Some(if wm.ends_with("-rl") { "rtl" } else { "ltr" }.to_string());
     }
     normalize_opt(&mut patch.publisher);
     normalize_opt(&mut patch.published_at);

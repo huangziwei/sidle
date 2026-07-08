@@ -322,6 +322,7 @@
           </div>
 
           <div class="metadata-fields">
+            <div class="field-group-title">Title &amp; author</div>
             <label class="field" id="field-title">
               <span>Title</span>
               <input name="title" required autocomplete="off" />
@@ -344,35 +345,49 @@
               </span>
               <input name="author_romaji" placeholder="searchable romaji — editable" autocomplete="off" />
             </label>
-            <label class="field">
-              <span>Language</span>
-              <input name="language" placeholder="ja, en, zh…" autocomplete="off" />
-            </label>
-            <label class="field">
-              <span>Page direction</span>
-              <select name="ppd" autocomplete="off">
-                <option value="">Auto</option>
-                <option value="rtl">Right-to-left (JP/manga)</option>
-                <option value="ltr">Left-to-right</option>
-              </select>
-            </label>
+
+            <div class="field-group-title">Publication</div>
             <label class="field">
               <span>Publisher</span>
               <input name="publisher" placeholder="新潮文庫" autocomplete="off" />
             </label>
+            <div class="field-row">
+              <label class="field">
+                <span>Published</span>
+                <input name="published_at" placeholder="2024-03-15 or 2024" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Language</span>
+                <input name="language" placeholder="ja, en, zh…" autocomplete="off" />
+              </label>
+            </div>
+
+            <div class="field-group-title">Series</div>
+            <div class="field-row">
+              <label class="field">
+                <span>Series</span>
+                <input name="series_name" placeholder="Foundation" autocomplete="off" />
+              </label>
+              <label class="field field-narrow">
+                <span>Series #</span>
+                <input name="series_index" type="number" step="0.5" min="0" placeholder="1"
+                       autocomplete="off" />
+              </label>
+            </div>
+
+            <div class="field-group-title">Format</div>
             <label class="field">
-              <span>Published</span>
-              <input name="published_at" placeholder="2024-03-15 or 2024" autocomplete="off" />
+              <span>Reading layout</span>
+              <select name="reading_layout" autocomplete="off">
+                <option value="">Auto (from source)</option>
+                <option value="horizontal-lr">Horizontal · left-to-right</option>
+                <option value="horizontal-rl">Horizontal · right-to-left</option>
+                <option value="vertical-rl">Vertical · right-to-left (CJK)</option>
+                <option value="vertical-lr">Vertical · left-to-right</option>
+              </select>
             </label>
-            <label class="field">
-              <span>Series</span>
-              <input name="series_name" placeholder="Foundation" autocomplete="off" />
-            </label>
-            <label class="field field-narrow">
-              <span>Series #</span>
-              <input name="series_index" type="number" step="0.5" min="0" placeholder="1"
-                     autocomplete="off" />
-            </label>
+
+            <div class="field-group-title">Organize</div>
             <label class="field" id="field-tags">
               <span id="field-tags-label">Tags</span>
               <input name="tags" placeholder="sci-fi, to-read" autocomplete="off" />

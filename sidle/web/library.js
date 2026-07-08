@@ -4519,13 +4519,23 @@ function wireMetadataModal() {
 const BULK_FIELDS = [
   "author",
   "language",
-  "ppd",
+  "reading_layout",
   "publisher",
   "published_at",
   "series_name",
   "series_index",
   "tags",
 ];
+
+// The "Reading layout" select value for a book: its explicit writing_mode if
+// set, else mapped from a legacy page-direction-only edit (rtl/ltr → the
+// horizontal variant), else "" (Auto — let the converter derive it).
+function readingLayoutValue(book) {
+  if (book.writing_mode) return book.writing_mode;
+  if (book.ppd === "rtl") return "horizontal-rl";
+  if (book.ppd === "ltr") return "horizontal-lr";
+  return "";
+}
 
 // Open the editor for one book (single mode) or, with { bulk: true }, for an
 // array of books (bulk mode). The two modes share the modal; a `.bulk` class
@@ -4579,7 +4589,7 @@ function openMetadataModal(arg, opts = {}) {
   form.title_romaji.value = book.title_romaji || "";
   form.author_romaji.value = book.author_romaji || "";
   form.language.value = book.language || "";
-  form.ppd.value = book.ppd || ""; // "" = Auto
+  form.reading_layout.value = readingLayoutValue(book); // "" = Auto
   form.publisher.value = book.publisher || "";
   form.published_at.value = book.published_at || "";
   form.series_name.value = book.series_name || "";
@@ -4683,7 +4693,14 @@ async function submitMetadataForm() {
     title: form.title.value.trim(),
     author: form.author.value.trim(),
     language: form.language.value.trim(),
-    ppd: form.ppd.value || null, // "" = Auto → null
+    // Reading layout drives the writing-mode axis; the backend re-derives ppd
+    // from it, but we send the derived value too so an Auto stays Auto.
+    writing_mode: form.reading_layout.value || null,
+    ppd: form.reading_layout.value
+      ? form.reading_layout.value.endsWith("-rl")
+        ? "rtl"
+        : "ltr"
+      : null,
     publisher:
       form.publisher.value.trim() === "" ? null : form.publisher.value.trim(),
     published_at:
@@ -4728,9 +4745,10 @@ async function submitMetadataForm() {
     return;
   }
 
-  // Page direction is only honoured once it's baked into a fresh KFX, so a
-  // change kicks off a force-reconvert after the metadata save.
-  const ppdChanged = (form.ppd.value || "") !== (metadataBook.ppd || "");
+  // Reading layout (writing mode + page direction) is only honoured once it's
+  // baked into a fresh KFX, so a change kicks off a force-reconvert after save.
+  const layoutChanged =
+    (form.reading_layout.value || "") !== readingLayoutValue(metadataBook);
   const bookId = metadataBook.id;
 
   try {
@@ -4746,9 +4764,9 @@ async function submitMetadataForm() {
       });
       mergeBookRow(withAsin);
     }
-    if (ppdChanged) {
+    if (layoutChanged) {
       await retryConvert(bookId);
-      showToast("Page direction changed — reconverting…");
+      showToast("Reading layout changed — reconverting…");
     }
     closeMetadataModal();
     render();
@@ -4772,7 +4790,13 @@ async function submitBulkMetadataForm() {
   };
   setIf("author", "author");
   setIf("language", "language");
-  setIf("ppd", "ppd");
+  // Reading layout (writing mode + derived page direction). Empty = leave
+  // unchanged; a chosen layout sets both across every selected book.
+  const rl = form.reading_layout.value;
+  if (rl) {
+    patch.writing_mode = rl;
+    patch.ppd = rl.endsWith("-rl") ? "rtl" : "ltr";
+  }
   setIf("publisher", "publisher");
   setIf("published_at", "published_at");
   setIf("series_name", "series_name");
@@ -4795,6 +4819,7 @@ async function submitBulkMetadataForm() {
   const hasScalar = [
     "author",
     "language",
+    "writing_mode",
     "ppd",
     "publisher",
     "published_at",
@@ -4814,7 +4839,7 @@ async function submitBulkMetadataForm() {
     for (const r of rows) mergeBookRow(r);
     // A bulk page-direction change needs each book's KFX rebuilt; fire the
     // reconverts off (the queue serializes them) without blocking the close.
-    if ("ppd" in patch) {
+    if ("writing_mode" in patch || "ppd" in patch) {
       for (const r of rows) retryConvert(r.id);
     }
     closeMetadataModal();
@@ -4948,6 +4973,7 @@ function fullPatchFromBook(b) {
     author: b.author || "",
     language: b.language || "",
     ppd: b.ppd || null, // unchanged here → no force-reconvert
+    writing_mode: b.writing_mode || null,
     publisher: b.publisher || null,
     published_at: b.published_at || null,
     series_name: b.series_name || null,

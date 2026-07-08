@@ -700,6 +700,24 @@ pub struct ExportContext {
     /// horizontally-typeset rtl title — must carry `Rtl` explicitly, since its
     /// writing mode cannot signal the turn direction. Defaults to `Ltr`.
     pub document_direction: KfxSymbol,
+
+    /// Writing mode the per-style `writing_mode` override is compared against —
+    /// the SOURCE's own content-derived dominant mode, NOT `document_writing_mode`
+    /// (which may be user-forced via `primary-writing-mode`). A style emits an
+    /// override only when it diverges from this. Without the split, a horizontal
+    /// source force-set to vertical stamps `horizontal_tb` on every style,
+    /// cancelling the vertical document default — the device rotates each glyph,
+    /// the webview falls back to horizontal. When the mode isn't forced this
+    /// equals `document_writing_mode`, so behavior is unchanged. Defaults to
+    /// `HorizontalTb`.
+    pub style_writing_mode_baseline: KfxSymbol,
+
+    /// Device-recognized content language stamped on every reflowable `$style`.
+    /// Amazon puts e.g. `zh-tw` on each style so the Kindle selects CJK fonts and
+    /// upright vertical orientation; without it a Chinese book gets Latin fonts
+    /// and sideways (rotated) glyphs. Empty for languages that need no hint (the
+    /// device's Latin default suffices). Set from book metadata at export start.
+    pub content_language: String,
 }
 
 /// Registry mapping ruby annotation strings to (ruby_name, ruby_id) pairs.
@@ -826,7 +844,9 @@ impl ExportContext {
             section_resource_deps: BTreeMap::new(),
             ruby_registry: RubyContentRegistry::new(),
             document_writing_mode: KfxSymbol::HorizontalTb,
+            style_writing_mode_baseline: KfxSymbol::HorizontalTb,
             document_direction: KfxSymbol::Ltr,
+            content_language: String::new(),
         }
     }
 
@@ -896,13 +916,15 @@ impl ExportContext {
         self.register_ir_style_with_hint(ir_style, None)
     }
 
-    /// Mirror `self.document_writing_mode` (a KFX symbol) as the IR
-    /// `WritingMode` enum so the style ingest pipeline can compare against
-    /// it. The export entry point sets `document_writing_mode` before any
-    /// IR style is registered.
-    fn ir_document_writing_mode(&self) -> crate::style::WritingMode {
+    /// Mirror `self.style_writing_mode_baseline` (a KFX symbol) as the IR
+    /// `WritingMode` enum — the baseline the style ingest pipeline compares each
+    /// style against when deciding whether to emit a `writing_mode` override.
+    /// This is the source's own content-derived mode, so a user-forced document
+    /// mode doesn't turn every source style into a spurious override. The export
+    /// entry point sets it before any IR style is registered.
+    fn ir_style_baseline_writing_mode(&self) -> crate::style::WritingMode {
         use crate::style::WritingMode;
-        match self.document_writing_mode {
+        match self.style_writing_mode_baseline {
             KfxSymbol::VerticalRl => WritingMode::VerticalRl,
             KfxSymbol::VerticalLr => WritingMode::VerticalLr,
             _ => WritingMode::HorizontalTb,
@@ -937,7 +959,7 @@ impl ExportContext {
     ) -> u64 {
         let schema = crate::kfx::style_schema::StyleSchema::standard();
         let mut builder = crate::kfx::style_registry::StyleBuilder::new(schema);
-        builder.ingest_ir_style(ir_style, self.ir_document_writing_mode());
+        builder.ingest_ir_style(ir_style, self.ir_style_baseline_writing_mode());
         let kfx_style = builder.build();
         self.style_registry
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
@@ -957,7 +979,7 @@ impl ExportContext {
         use crate::kfx::style_schema::KfxValue;
         let schema = crate::kfx::style_schema::StyleSchema::standard();
         let mut builder = crate::kfx::style_registry::StyleBuilder::new(schema);
-        builder.ingest_ir_style(ir_style, self.ir_document_writing_mode());
+        builder.ingest_ir_style(ir_style, self.ir_style_baseline_writing_mode());
         let mut kfx_style = builder.build();
         if kfx_style.get(KfxSymbol::Underline).is_none() {
             kfx_style.set(

@@ -2084,6 +2084,40 @@ kbd {
   max-width: 100px;
 }
 
+/* Section headers grouping the metadata fields (Title & author / Publication /
+   Series / Format / Organize) — a tier above the muted field micro-labels. */
+.metadata-fields .field-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg);
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.metadata-fields .field-group-title:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+/* Two short fields side by side (Published + Language, Series + Series #). */
+.metadata-fields .field-row {
+  display: flex;
+  gap: 12px;
+}
+
+.metadata-fields .field-row > .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.metadata-fields .field-row > .field-narrow {
+  flex: 0 0 auto;
+}
+
 /* ASIN field: validity hint + "Search Amazon" on one row below the input. */
 .asin-aside {
   display: flex;

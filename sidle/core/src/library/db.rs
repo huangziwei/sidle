@@ -19,6 +19,13 @@ pub struct BookRow {
     pub author: String,
     pub language: String,
     pub ppd: Option<String>,
+    /// OPF `<meta name="primary-writing-mode">` value: one of `horizontal-lr`,
+    /// `horizontal-rl`, `vertical-rl`, `vertical-lr`, or `None` (Auto/derive).
+    /// Edited via the metadata modal's "Reading layout" control and baked into
+    /// the generated KFX's `document_data.writing_mode` (the text axis); with
+    /// `ppd` it also carries the page-turn. `ppd` is kept as its derived mirror,
+    /// so both stay consistent and existing `ppd` readers are undisturbed.
+    pub writing_mode: Option<String>,
     /// Path to the EPUB on disk. `None` while a KFX-imported book is still
     /// awaiting its background EPUB conversion.
     pub epub_path: Option<String>,
@@ -314,6 +321,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             author            TEXT NOT NULL DEFAULT '',
             language          TEXT NOT NULL DEFAULT '',
             ppd               TEXT,
+            writing_mode      TEXT,
             epub_path         TEXT,
             cover_path        TEXT,
             kfx_path          TEXT,
@@ -432,6 +440,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !has_column(conn, "books", "pdf_path")? {
         conn.execute("ALTER TABLE books ADD COLUMN pdf_path TEXT", [])?;
+    }
+    // Reading layout / writing mode, editable in the metadata modal (the axis the
+    // generated KFX bakes into `document_data.writing_mode`; `ppd` mirrors its
+    // page-turn). NULL = Auto/derive, matching the old behaviour for every book.
+    if !has_column(conn, "books", "writing_mode")? {
+        conn.execute("ALTER TABLE books ADD COLUMN writing_mode TEXT", [])?;
     }
     // v7: metadata last-edit time. Seed existing rows from `imported_at` so the
     // column is never NULL in practice (newest-wins reads still COALESCE as a
@@ -1091,6 +1105,12 @@ pub struct MetadataPatch {
     /// the generated KFX's reading order; a change triggers a force-reconvert.
     #[serde(default)]
     pub ppd: Option<String>,
+    /// Reading layout / writing mode: `horizontal-lr` | `horizontal-rl` |
+    /// `vertical-rl` | `vertical-lr` | `None` (Auto). When set it's authoritative
+    /// for `ppd` (the command layer derives one from the other). Baked into the
+    /// generated KFX; a change triggers a force-reconvert.
+    #[serde(default)]
+    pub writing_mode: Option<String>,
     pub publisher: Option<String>,
     pub published_at: Option<String>,
     pub series_name: Option<String>,
@@ -1120,20 +1140,22 @@ pub fn update_metadata(
                   author        = ?2,
                   language      = ?3,
                   ppd           = ?4,
-                  publisher     = ?5,
-                  published_at  = ?6,
-                  series_name   = ?7,
-                  series_index  = ?8,
-                  tags          = ?9,
-                  title_romaji  = ?10,
-                  author_romaji = ?11,
-                  updated_at    = ?12
-              WHERE id = ?13"#,
+                  writing_mode  = ?5,
+                  publisher     = ?6,
+                  published_at  = ?7,
+                  series_name   = ?8,
+                  series_index  = ?9,
+                  tags          = ?10,
+                  title_romaji  = ?11,
+                  author_romaji = ?12,
+                  updated_at    = ?13
+              WHERE id = ?14"#,
         params![
             patch.title,
             patch.author,
             patch.language,
             patch.ppd,
+            patch.writing_mode,
             patch.publisher,
             patch.published_at,
             patch.series_name,
@@ -1166,6 +1188,8 @@ pub struct BulkMetadataPatch {
     pub language: Option<String>,
     #[serde(default)]
     pub ppd: Option<String>,
+    #[serde(default)]
+    pub writing_mode: Option<String>,
     #[serde(default)]
     pub publisher: Option<String>,
     #[serde(default)]
@@ -1201,6 +1225,7 @@ pub fn apply_bulk_patch(
     let author = patch.author.clone().unwrap_or(row.author);
     let language = patch.language.clone().unwrap_or(row.language);
     let ppd = patch.ppd.clone().or(row.ppd);
+    let writing_mode = patch.writing_mode.clone().or(row.writing_mode);
     let publisher = patch.publisher.clone().or(row.publisher);
     let published_at = patch.published_at.clone().or(row.published_at);
     let series_name = patch.series_name.clone().or(row.series_name);
@@ -1231,17 +1256,19 @@ pub fn apply_bulk_patch(
               SET author       = ?1,
                   language     = ?2,
                   ppd          = ?3,
-                  publisher    = ?4,
-                  published_at = ?5,
-                  series_name  = ?6,
-                  series_index = ?7,
-                  tags         = ?8,
-                  updated_at   = ?9
-              WHERE id = ?10"#,
+                  writing_mode = ?4,
+                  publisher    = ?5,
+                  published_at = ?6,
+                  series_name  = ?7,
+                  series_index = ?8,
+                  tags         = ?9,
+                  updated_at   = ?10
+              WHERE id = ?11"#,
         params![
             author,
             language,
             ppd,
+            writing_mode,
             publisher,
             published_at,
             series_name,
@@ -1371,7 +1398,8 @@ const SELECT_BOOKS_WITH_JOBS: &str = r#"
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
-           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, '')
+           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
+           b.writing_mode
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     ORDER BY b.imported_at DESC
@@ -1385,7 +1413,8 @@ const SELECT_BOOK_WITH_JOB_BY_SHA: &str = r#"
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
-           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, '')
+           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
+           b.writing_mode
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.sha256 = ?1
@@ -1399,7 +1428,8 @@ const SELECT_BOOK_WITH_JOB_BY_ID: &str = r#"
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
-           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, '')
+           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
+           b.writing_mode
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.id = ?1
@@ -1413,7 +1443,8 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_SHA_PREFIX: &str = r#"
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
-           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, '')
+           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
+           b.writing_mode
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_sha256 LIKE ?1
@@ -1432,7 +1463,8 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
            b.publisher, b.published_at, b.series_name, b.series_index, b.tags,
            b.kfx_sha256, b.pdf_path,
            COALESCE(b.updated_at, b.imported_at),
-           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, '')
+           COALESCE(b.title_romaji, ''), COALESCE(b.author_romaji, ''),
+           b.writing_mode
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
     WHERE b.kfx_path LIKE ?1
@@ -1524,6 +1556,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
         author,
         language,
         ppd: row.get(5)?,
+        writing_mode: row.get(25)?,
         // Stored root-relative (§4a); resolve to absolute against the live root.
         epub_path: resolve_opt(root, row.get(6)?),
         cover_path,
@@ -3279,6 +3312,7 @@ mod tests {
             author: "村上春樹".into(),
             language: "ja".into(),
             ppd: None,
+            writing_mode: None,
             publisher: Some("新潮文庫".into()),
             published_at: Some("2024-03-15".into()),
             series_name: Some("ハルキ三部作".into()),
@@ -3314,6 +3348,7 @@ mod tests {
                 author: "a".into(),
                 language: "en".into(),
                 ppd: None,
+                writing_mode: None,
                 publisher: None,
                 published_at: None,
                 series_name: Some("Foundation".into()),
@@ -3334,6 +3369,7 @@ mod tests {
                 author: "a".into(),
                 language: "en".into(),
                 ppd: None,
+                writing_mode: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,
@@ -3364,6 +3400,7 @@ mod tests {
                 author: "".into(),
                 language: "".into(),
                 ppd: None,
+                writing_mode: None,
                 publisher: Some("講談社文庫".into()),
                 published_at: None,
                 series_name: None,
@@ -3386,6 +3423,7 @@ mod tests {
                 author: "".into(),
                 language: "".into(),
                 ppd: None,
+                writing_mode: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,
@@ -3419,6 +3457,7 @@ mod tests {
                 author: "".into(),
                 language: "".into(),
                 ppd: None,
+                writing_mode: None,
                 publisher: None,
                 published_at: None,
                 series_name: None,
@@ -3474,6 +3513,7 @@ mod tests {
                 author: "Asimov".into(),
                 language: "en".into(),
                 ppd: None,
+                writing_mode: None,
                 publisher: Some("Spectra".into()),
                 published_at: None,
                 series_name: None,

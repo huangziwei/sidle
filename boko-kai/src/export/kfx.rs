@@ -315,6 +315,17 @@ fn build_kfx_container(
     // override silently disappears into KFX's `vertical_rl` inheritance.
     ctx.document_writing_mode = book_writing_mode(book);
     ctx.document_direction = document_direction(book, ctx.document_writing_mode);
+    // Per-style `writing_mode` overrides compare against the SOURCE's own
+    // content-derived mode, not the (possibly user-forced) document mode above.
+    // Otherwise a horizontal book force-set to vertical stamps `horizontal_tb` on
+    // every style and cancels the vertical document default — the device rotates
+    // each glyph, the webview falls back to horizontal. Unforced, these coincide.
+    ctx.style_writing_mode_baseline = dominant_writing_mode_from_ir(book);
+    // Stamp a device-recognized content language on every reflowable style so the
+    // Kindle selects CJK fonts + upright vertical orientation. Without it a
+    // Chinese/Japanese book renders in Latin fonts with sideways glyphs — Amazon
+    // stamps this on its own styles (e.g. `zh-tw`); boko previously did not.
+    ctx.content_language = kfx_content_language(&book.metadata().language);
 
     // ========================================================================
     // PASS 2: SYNTHESIS (Generate Ion)
@@ -712,8 +723,11 @@ fn build_style_fragments(ctx: &mut ExportContext) -> Vec<KfxFragment> {
     // E-Ink-optimised default.
     ctx.style_registry.normalize_line_heights_to_lh();
 
-    // Drain all styles from the registry to generate Ion fragments
-    let style_pairs = ctx.style_registry.drain_to_ion();
+    // Drain all styles from the registry to generate Ion fragments, stamping the
+    // book's content language on each (so the device selects CJK fonts + upright
+    // vertical orientation). Cloned first to avoid borrowing `ctx` twice.
+    let lang = ctx.content_language.clone();
+    let style_pairs = ctx.style_registry.drain_to_ion(&lang);
 
     style_pairs
         .into_iter()
@@ -1100,6 +1114,28 @@ fn direction_for_progression(turns_rtl: bool, writing_mode: KfxSymbol) -> KfxSym
 /// LV999 series, express the mode purely through CSS on content roots) is there
 /// nothing fixed to read, and the mode must be recovered from the content — see
 /// [`dominant_writing_mode_from_ir`].
+/// The content-level language to stamp on each reflowable `$style`, mapping the
+/// book's (Sidle-normalized) language to the device-recognized locale Amazon
+/// uses on its own KFX styles — so the Kindle selects CJK fonts and upright
+/// vertical orientation instead of the Latin default (rotated glyphs). Returns
+/// empty for languages that need no such hint.
+fn kfx_content_language(book_lang: &str) -> String {
+    let l = book_lang.trim().to_ascii_lowercase().replace('_', "-");
+    if l == "zh-hant" || l == "zh-tw" || l == "zh-hk" || l == "zh-mo" {
+        "zh-tw".to_string()
+    } else if l == "zh-hans" || l == "zh-cn" || l == "zh-sg" || l == "zh-my" {
+        "zh-cn".to_string()
+    } else if l == "zh" {
+        "zh".to_string()
+    } else if l == "ja" || l.starts_with("ja-") {
+        "ja".to_string()
+    } else if l == "ko" || l.starts_with("ko-") {
+        "ko".to_string()
+    } else {
+        String::new()
+    }
+}
+
 fn book_writing_mode(book: &mut Book) -> KfxSymbol {
     // `primary-writing-mode` is Amazon's book-level hint, and its vocabulary
     // (`horizontal-lr`, `horizontal-rl`, `vertical-rl`, `vertical-lr`) encodes
@@ -3063,6 +3099,9 @@ fn image_fxl_to_kfx(
     let writing_mode = book_writing_mode(book);
     let direction = document_direction(book, writing_mode);
     ctx.document_writing_mode = writing_mode;
+    // FXL/image path: no reflowable text styles to override, so the per-style
+    // baseline tracks the document mode (no suppression needed).
+    ctx.style_writing_mode_baseline = writing_mode;
     ctx.document_direction = direction;
     let ppd_sym = Some(direction);
 

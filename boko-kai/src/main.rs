@@ -59,6 +59,14 @@ enum Command {
         /// (ltr). A scanned/text PDF has no such metadata, so set it here.
         #[arg(long = "ppd")]
         ppd: Option<String>,
+
+        /// Force the book's writing mode (EPUB → KFX): `vertical-rl`,
+        /// `vertical-lr`, `horizontal-lr`, or `horizontal-rl`. Sets the same
+        /// `primary-writing-mode` override the Sidle metadata editor bakes, and
+        /// derives the page-turn (a `-rl` mode turns right-to-left). Omit to keep
+        /// the source's own mode.
+        #[arg(long = "writing-mode")]
+        writing_mode: Option<String>,
     },
 
     /// Extract hierarchical section tree (JSON)
@@ -248,6 +256,7 @@ fn main() -> ExitCode {
             quiet,
             merge_mode,
             ppd,
+            writing_mode,
         } => convert(
             &input,
             output.as_deref(),
@@ -256,6 +265,7 @@ fn main() -> ExitCode {
             quiet,
             &merge_mode,
             ppd.as_deref(),
+            writing_mode.as_deref(),
         ),
         Command::Dump {
             file,
@@ -1139,6 +1149,7 @@ fn convert(
     quiet: bool,
     merge_mode: &str,
     ppd: Option<&str>,
+    writing_mode: Option<&str>,
 ) -> Result<(), String> {
     // Check if reading from stdin
     let from_stdin = input == "-";
@@ -1334,6 +1345,17 @@ fn convert(
             Book::open(input).map_err(|e| format!("Failed to open input: {e}"))?
         }
     };
+
+    // Force the writing mode via a metadata override (EPUB → KFX), mirroring the
+    // Sidle worker's `book_metadata_override`. A `-rl` mode also turns the page
+    // right-to-left. Exercises the same export path the app uses.
+    if let Some(wm) = writing_mode {
+        let mut meta = book.metadata().clone();
+        meta.primary_writing_mode = Some(wm.to_string());
+        meta.page_progression_direction =
+            Some(if wm.ends_with("-rl") { "rtl" } else { "ltr" }.to_string());
+        book.set_metadata_override(meta);
+    }
 
     if to_stdout {
         // Write to stdout
