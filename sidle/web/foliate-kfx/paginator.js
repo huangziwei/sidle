@@ -359,10 +359,39 @@ class View {
         // never narrower) and the block axis at the page extent, which a
         // column spans fully (columnize() pads the inline axis only, and the
         // header/footer margins live outside #container).
-        const inlineMax = `${Math.trunc(columnWidth)}px`
-        const maxW = this.#vertical ? `${width}px` : inlineMax
-        const maxH = this.#vertical ? inlineMax : `${height}px`
-        for (const el of doc.body.querySelectorAll('img, svg, video')) {
+        const vertical = this.#vertical
+        const inlineCap = `${Math.trunc(columnWidth)}px`
+        // The block axis is the one a column spans fully and along which content
+        // fragments; its full extent is the page size on that axis.
+        const blockExtent = vertical ? width : height
+        const els = [...doc.body.querySelectorAll('img, svg, video')]
+        // READ pass: the block-axis space each image's wrapper chain consumes
+        // (its own margins + every ancestor's margin/padding/border up to the
+        // multicol root). The block cap MUST leave room for it: an image pinned
+        // to the full column height inside a wrapper with a top/bottom margin —
+        // e.g. `.imagef { margin-top: 0.5em }` around a full-page illustration —
+        // is `margin` taller than the column, and since `break-inside: avoid`
+        // can't hold for a block taller than its fragmentainer, the image splits
+        // across the page break (one page full, a thin sliver on the next).
+        // Subtracting the chrome keeps image + wrapper within a single column.
+        // Batched before the writes so these getComputedStyle reads don't
+        // interleave with the style mutations below and thrash layout.
+        const view = doc.defaultView
+        const [a, b] = vertical ? ['Left', 'Right'] : ['Top', 'Bottom']
+        const px = v => parseFloat(v) || 0
+        const chrome = els.map(el => {
+            let sum = 0
+            for (let n = el; n && n !== doc.documentElement; n = n.parentElement) {
+                const cs = view.getComputedStyle(n)
+                sum += px(cs[`margin${a}`]) + px(cs[`margin${b}`])
+                if (n !== el) sum += px(cs[`padding${a}`]) + px(cs[`padding${b}`])
+                    + px(cs[`border${a}Width`]) + px(cs[`border${b}Width`])
+            }
+            return sum
+        })
+        // WRITE pass.
+        els.forEach((el, i) => {
+            const blockMax = `${Math.max(0, blockExtent - chrome[i])}px`
             setStylesImportant(el, {
                 // Both caps in definite px: a percentage cap resolves against
                 // the multicol container (the whole page, not the column box),
@@ -375,14 +404,22 @@ class View {
                 // the drawing inside it.
                 'width': 'auto',
                 'height': 'auto',
-                'max-width': maxW,
-                'max-height': maxH,
+                'max-width': vertical ? blockMax : inlineCap,
+                'max-height': vertical ? inlineCap : blockMax,
                 'object-fit': 'contain',
                 'page-break-inside': 'avoid',
                 'break-inside': 'avoid',
                 'box-sizing': 'border-box',
+                // A baseline-aligned inline image reserves the line's descent
+                // below it, so its line box is a few px TALLER than the image —
+                // enough to push a column-height figure over the edge and
+                // refragment it even after the cap above. Aligning it off the
+                // baseline drops that reserved descent; the line box collapses to
+                // the image height. (No effect on a block image, e.g. a
+                // text-free section's full-page art.)
+                'vertical-align': 'middle',
             })
-        }
+        })
     }
     expand() {
         const { documentElement } = this.document

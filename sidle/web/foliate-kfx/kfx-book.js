@@ -137,12 +137,23 @@ export function makeKfxBook(dto, loader) {
     // `text-align` nor `margin: 0 auto` can center — so the image stays pinned to
     // the right edge unless the wrapper itself is flattened to horizontal-tb.
     // Safe to blanket the whole subtree here because the section is text-free.
+    //
+    // The wrapper block-margins MUST go too: the book often boxes the image in a
+    // <div> carrying a top/bottom margin (e.g. `.imagef { margin-top: 0.5em }`).
+    // The paginator caps the image at the full column height, so image + that
+    // margin exceeds the column by the margin — and since `break-inside: avoid`
+    // can't be honored for a block taller than the fragmentainer, WebKit splits
+    // the image, filling one page and spilling a thin sliver onto the next.
+    // Zeroing the descendants' block margins/padding keeps the full-page image
+    // truly full-bleed AND within one column. (Inline `margin: 0 auto` centering
+    // on the image survives — we zero only the block axis.)
     const text = (doc.body?.textContent || "").replace(/\s+/g, "");
     if (!text && doc.body?.querySelector("img, image, svg")) {
       const fb = doc.createElement("style");
       fb.textContent =
         "html, body, body * { writing-mode: horizontal-tb !important; direction: ltr !important; }" +
         "body { margin: 0 !important; text-align: center !important; }" +
+        "body * { margin-top: 0 !important; margin-bottom: 0 !important; padding-top: 0 !important; padding-bottom: 0 !important; }" +
         "img, image, svg { display: block !important; margin: 0 auto !important; }";
       doc.head.appendChild(fb);
     }
