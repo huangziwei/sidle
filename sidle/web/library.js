@@ -26,8 +26,13 @@ const state = {
     publisher: new Set(),
     series: new Set(),
     tags: new Set(),
-    formats: new Set(), // the non-KFX side per book: "EPUB" | "PDF" (KFX is universal)
+    formats: new Set(), // "EPUB" | "PDF" (+ "KFX" in source mode) — see formatFacetMode
   },
+  // How the Format facet classifies each book. "companion" (default) = the
+  // non-KFX file it has (EPUB|PDF; KFX is universal, so not an option). "source"
+  // = the format it was imported from (kind's first token), which makes KFX a
+  // real, non-universal option. Persisted; consumed by extractFacetValues.
+  formatFacetMode: "companion", // "companion" | "source"
   search: "", // global free-text search across title, author, series, tags
   device: null, // DeviceInfo | null
   sent: [],     // Vec<DeviceBookRow>
@@ -366,6 +371,8 @@ function loadPreferences() {
       // malformed JSON in localStorage — keep the default
     }
   }
+  const fmtMode = localStorage.getItem("formatFacetMode");
+  if (fmtMode === "source" || fmtMode === "companion") state.formatFacetMode = fmtMode;
   const search = localStorage.getItem("search");
   if (typeof search === "string") state.search = search;
   const section = localStorage.getItem("section");
@@ -382,6 +389,7 @@ function persistPreferences() {
     filtersForStorage[facet] = [...state.filters[facet]];
   }
   localStorage.setItem("filters", JSON.stringify(filtersForStorage));
+  localStorage.setItem("formatFacetMode", state.formatFacetMode);
   localStorage.setItem("search", state.search);
   // booksTable persists "columnConfig"/"columnWidths" itself on reorder/resize.
 }
@@ -1234,10 +1242,15 @@ function extractFacetValues(book, facet) {
     case "tags":
       return book.tags?.length ? book.tags : ["—"];
     case "formats":
-      // Each book pairs KFX with exactly one non-KFX side (EPUB or PDF); KFX is
-      // universal so it isn't an option. Uppercased so the value doubles as the
-      // dropdown / pill label.
-      return [nonKfxFormat(book).toUpperCase()];
+      // Two classifications, chosen by state.formatFacetMode:
+      //  - "companion": the non-KFX file this book has (EPUB|PDF). KFX is
+      //    universal, so it's never an option here.
+      //  - "source": the format it was imported from (kind's first token),
+      //    which makes KFX a real, non-universal option.
+      // Uppercased so the value doubles as the dropdown / pill label.
+      return [
+        (state.formatFacetMode === "source" ? sourceFormat(book) : nonKfxFormat(book)).toUpperCase(),
+      ];
     default:
       return [];
   }
@@ -1373,6 +1386,19 @@ function toggleFilterValue(facet, value) {
 function clearFacet(facet) {
   state.filters[facet] = new Set();
   persistPreferences();
+  render();
+}
+
+// Switch the Format facet between "companion" (non-KFX file present) and
+// "source" (imported-from format). KFX is a valid value only in source mode, so
+// leaving source prunes a selected "KFX" (it would otherwise filter to zero).
+// Re-renders the open dropdown (counts move) and the whole view (pill + list).
+function setFormatFacetMode(mode) {
+  if (mode === state.formatFacetMode) return;
+  state.formatFacetMode = mode;
+  if (mode !== "source") state.filters.formats.delete("KFX");
+  persistPreferences();
+  if (openDropdownFacet === "formats") renderDropdownOptions("formats");
   render();
 }
 
@@ -1655,6 +1681,14 @@ function worstForFormat(books, format) {
 // PDF for PDF-backed (container) books. Derived from the conversion `kind`.
 function nonKfxFormat(b) {
   return b.kind === "pdf_to_kfx" || b.kind === "kfx_to_pdf" ? "pdf" : "epub";
+}
+
+// The format a book was imported *from*: the first token of `b.kind`
+// ("<source>_to_<target>"). Unlike nonKfxFormat (the surviving non-KFX side),
+// this returns "kfx" for a KFX-sourced book, so KFX becomes a real Format-facet
+// option in source mode. Falls back to "epub" for a row without a kind yet.
+function sourceFormat(b) {
+  return (b.kind || "epub_to_kfx").split("_to_")[0];
 }
 
 // Returns the conversion status as it applies to the given format side
@@ -4180,6 +4214,11 @@ function wireFilterBar() {
     if (openDropdownFacet) clearFacet(openDropdownFacet);
   });
 
+  // Format facet: companion ⇄ source mode toggle.
+  $(".filter-dropdown-mode-cb").addEventListener("change", (e) => {
+    setFormatFacetMode(e.target.checked ? "source" : "companion");
+  });
+
   // Dismiss popovers on outside click + Escape.
   document.addEventListener("click", (e) => {
     if (
@@ -4267,6 +4306,13 @@ function openFilterDropdown(facet, anchorPill) {
   const dd = $("#filter-dropdown");
   dd.hidden = false;
   dd.querySelector(".filter-dropdown-search").value = "";
+  // The source/companion mode toggle is a Format-only control: show it only for
+  // that facet, and sync its checked state to the current mode. Set before
+  // positioning so the popover measures its true height.
+  const modeWrap = dd.querySelector(".filter-dropdown-mode");
+  modeWrap.hidden = facet !== "formats";
+  dd.querySelector(".filter-dropdown-mode-cb").checked =
+    state.formatFacetMode === "source";
   positionPopover(dd, anchorPill);
   renderDropdownOptions(facet);
   // Focus the inner search for immediate filtering.

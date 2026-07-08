@@ -84,7 +84,13 @@
       <input type="search" class="filter-dropdown-search" placeholder="Filter options…" />
       <ul class="filter-dropdown-list"></ul>
       <div class="filter-dropdown-empty" hidden>No options match the current filters.</div>
-      <button type="button" class="filter-dropdown-clear">Clear</button>
+      <div class="filter-dropdown-foot">
+        <button type="button" class="filter-dropdown-clear">Clear</button>
+        <label class="filter-dropdown-mode" hidden>
+          <input type="checkbox" class="filter-dropdown-mode-cb" />
+          <span>By source</span>
+        </label>
+      </div>
     </div>
 
     <div class="sort-popover" id="sort-popover" hidden>

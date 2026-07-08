@@ -341,10 +341,16 @@ button {
   text-align: center;
 }
 
+.filter-dropdown-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--border);
+}
+
 .filter-dropdown-clear {
   background: transparent;
   border: 0;
-  border-top: 1px solid var(--border);
   color: var(--accent);
   padding: 8px 12px;
   text-align: left;
@@ -353,6 +359,29 @@ button {
 
 .filter-dropdown-clear:hover {
   background: var(--bg);
+}
+
+/* Format facet only: switch the pill between companion (non-KFX file) and
+   source (imported-from) classification. Hidden for every other facet. */
+.filter-dropdown-mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.filter-dropdown-mode[hidden] {
+  display: none;
+}
+
+.filter-dropdown-mode input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
 }
 
 /* Sort button + popover (single-select keys + Asc/Desc toggle) */
