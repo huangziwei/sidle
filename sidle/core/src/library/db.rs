@@ -781,6 +781,16 @@ pub fn find_by_kfx_sha_prefix(
     .optional()
 }
 
+/// Escape SQL `LIKE` metacharacters (`\`, `%`, `_`) so a value with those
+/// characters matches literally under `LIKE ?1 ESCAPE '\'`. Titles routinely
+/// carry `_` (e.g. `..._ A Very Short Introduction`); without escaping, `_`
+/// matches any single character and can mis-link two near-identical basenames.
+fn like_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Look up the book whose `kfx_path` ends in `/<filename>`. The fallback for
 /// on-device files that predate the `.<sha8>.kfx` naming — those carry the
 /// library row's kfx basename verbatim, so we match by suffix against the
@@ -793,7 +803,24 @@ pub fn find_by_kfx_filename(
     filename: &str,
 ) -> rusqlite::Result<Option<BookRow>> {
     let root = conn_root(conn);
-    let pattern = format!("%/{filename}");
+    let pattern = format!("%/{}", like_escape(filename));
+    conn.query_row(
+        SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME,
+        params![pattern],
+        |row| row_to_book(row, root.as_deref()),
+    )
+    .optional()
+}
+
+/// Look up the book whose `kfx_path` leaf is `<stem>.kfx`. The stable-stem
+/// fallback for on-device `.sdr`/`.kfx` whose `<sha8>` infix has drifted from
+/// the library's `kfx_sha256` after a desktop reconvert: the device filename
+/// is frozen (the Kindle won't re-bind a renamed `.sdr`), but the basename is
+/// unchanged by a reconvert, so it re-links a book fixed after it was pulled.
+/// `stem` is the basename without the `.<sha8>.kfx` / `.<sha8>.sdr` suffix.
+pub fn find_by_kfx_basename(conn: &Connection, stem: &str) -> rusqlite::Result<Option<BookRow>> {
+    let root = conn_root(conn);
+    let pattern = format!("%/{}.kfx", like_escape(stem));
     conn.query_row(
         SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME,
         params![pattern],
@@ -928,10 +955,16 @@ pub fn set_job_status(
     Ok(())
 }
 
-/// Set the KFX path and its content hash atomically. Both columns are
-/// always written together — the push pipeline reads `kfx_sha256` to
-/// build the on-device filename, so a row that has `kfx_path` but no
-/// `kfx_sha256` would be unsendable.
+/// Set the KFX path, and **mint** its content hash only if the row doesn't
+/// have one yet. `kfx_sha256` is the book's permanent identity: the push
+/// pipeline embeds its `<sha8>` prefix in the on-device filename, and the
+/// Kindle binds each `.sdr` (annotations + reading progress) to that exact
+/// name. Re-stamping the hash on a reconvert / cover-swap would rename the
+/// file on the next pull and orphan the `.sdr` — so once set, it is frozen
+/// (`COALESCE` keeps the existing value; only `kfx_path` is rewritten).
+/// A book fixed after it was pulled keeps its identity; the improved bytes
+/// reach the device under the same filename. Callers still pass the freshly
+/// computed hash: it is used only to mint a first-time (NULL) row.
 pub fn set_kfx_path_and_sha(
     conn: &Connection,
     book_id: i64,
@@ -940,7 +973,7 @@ pub fn set_kfx_path_and_sha(
 ) -> rusqlite::Result<()> {
     let kfx_rel = relativize_for_store(conn_root(conn).as_deref(), kfx_path);
     conn.execute(
-        "UPDATE books SET kfx_path = ?1, kfx_sha256 = ?2 WHERE id = ?3",
+        "UPDATE books SET kfx_path = ?1, kfx_sha256 = COALESCE(kfx_sha256, ?2) WHERE id = ?3",
         params![kfx_rel, kfx_sha256, book_id],
     )?;
     Ok(())
@@ -1467,7 +1500,7 @@ const SELECT_BOOK_WITH_JOB_BY_KFX_FILENAME: &str = r#"
            b.writing_mode
     FROM books b
     LEFT JOIN conversion_jobs j ON j.book_id = b.id
-    WHERE b.kfx_path LIKE ?1
+    WHERE b.kfx_path LIKE ?1 ESCAPE '\'
     LIMIT 1
 "#;
 
@@ -2517,6 +2550,53 @@ mod tests {
             },
         )
         .expect("insert")
+    }
+
+    #[test]
+    fn set_kfx_path_and_sha_freezes_identity() {
+        let conn = fresh_db();
+        let id = insert_minimal(&conn, "src-sha", "Book");
+        // First call mints the identity from the fresh KFX bytes.
+        set_kfx_path_and_sha(&conn, id, "books/src-sha/Book.kfx", "aaaa1111").unwrap();
+        assert_eq!(
+            get_book(&conn, id).unwrap().unwrap().kfx_sha256.as_deref(),
+            Some("aaaa1111")
+        );
+        // A reconvert (or cover swap) re-runs the setter with the NEW output hash.
+        // The path may be rewritten, but the identity is frozen — the on-device
+        // filename embeds it and the Kindle binds each `.sdr` to that exact name.
+        set_kfx_path_and_sha(&conn, id, "books/src-sha/Book.kfx", "bbbb2222").unwrap();
+        assert_eq!(
+            get_book(&conn, id).unwrap().unwrap().kfx_sha256.as_deref(),
+            Some("aaaa1111"),
+            "kfx_sha256 is frozen once minted; a reconvert must not re-stamp it"
+        );
+    }
+
+    #[test]
+    fn find_by_kfx_basename_matches_stem_and_escapes_metachars() {
+        let conn = fresh_db();
+        // Two basenames differing only where one has `_`: without escaping, LIKE
+        // treats `_` as "any char" and could mis-link them.
+        let a = insert_minimal(&conn, "sha-a", "A");
+        set_kfx_path_and_sha(&conn, a, "books/sha-a/Title_ Intro.kfx", "aaaa0000").unwrap();
+        let b = insert_minimal(&conn, "sha-b", "B");
+        set_kfx_path_and_sha(&conn, b, "books/sha-b/TitleX Intro.kfx", "bbbb0000").unwrap();
+
+        let hit = find_by_kfx_basename(&conn, "Title_ Intro")
+            .unwrap()
+            .expect("underscore basename resolves");
+        assert_eq!(hit.id, a, "`_` matched literally, not as a wildcard");
+        assert!(
+            find_by_kfx_basename(&conn, "TitleX Intro")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            find_by_kfx_basename(&conn, "No Such Book")
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn insert_with_language(conn: &Connection, sha: &str, language: &str) -> i64 {

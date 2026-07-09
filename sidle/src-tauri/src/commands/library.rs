@@ -809,7 +809,9 @@ async fn recrawl_one(state: &AppState, book: &BookRow) -> RecrawlOutcome {
     }
     // And into the imported KFX — that's the copy we push to the Kindle, and
     // its embedded cover drives the home tile / sleep-screen art. Rewriting it
-    // changes the bytes, so re-stamp `kfx_sha256` (the on-device filename infix).
+    // changes the bytes, but `kfx_sha256` is the book's frozen identity (the
+    // on-device filename infix), so `set_kfx_path_and_sha` preserves it — the
+    // new-cover KFX reaches the device under the same, stable filename.
     if let Some(kfx) = book.kfx_path.as_deref()
         && let Some(new_sha) = swap_or_insert_kfx_cover(book, kfx, &bytes, "recrawl")
     {
@@ -1002,8 +1004,10 @@ pub async fn library_set_cover(
     }
 
     // And into the imported KFX (boko normalizes png/webp → jpeg). This is the
-    // copy pushed to the Kindle; re-stamp `kfx_sha256` after the rewrite. A
-    // cover-less KFX (EPUB import with no source cover) is healed by reconvert.
+    // copy pushed to the Kindle; the rewrite changes the bytes but the frozen
+    // `kfx_sha256` identity is preserved by `set_kfx_path_and_sha`, so the
+    // on-device filename is unchanged. A cover-less KFX (EPUB import with no
+    // source cover) is healed by reconvert.
     if let Some(kfx) = book.kfx_path.as_deref()
         && let Some(new_sha) = swap_or_insert_kfx_cover(&book, kfx, &bytes, "set-cover")
     {

@@ -431,17 +431,29 @@ pub fn import_collected_with_progress(
             yjr_bytes,
             yjf_bytes,
         } = item;
+        // Prefer the exact identity: the `.sdr`'s `<sha8>` infix is the library
+        // `kfx_sha256` the Kindle bound this sidecar to. Fall back to the stem
+        // (`<basename>`) when the infix has drifted — a desktop reconvert changes
+        // `kfx_sha256`, but the device filename is frozen (the Kindle won't
+        // re-bind a renamed `.sdr`), so the stem is the only stable link for a
+        // book fixed after it was pulled. Without this, every reconverted book's
+        // highlights + reading position strand as "unmatched".
         let book = match sdr_infix(&sdr_name) {
             Some(infix) => db::find_by_kfx_sha_prefix(conn, infix)
                 .with_context(|| format!("kfx_sha lookup for {sdr_name}"))?,
             None => None,
+        };
+        let book = match book {
+            Some(b) => Some(b),
+            None => db::find_by_kfx_basename(conn, &sdr_stem(&sdr_name))
+                .with_context(|| format!("stem lookup for {sdr_name}"))?,
         };
 
         // Name what's syncing now — before the costly TextIndex build below.
         let label = book
             .as_ref()
             .map(|b| b.title.clone())
-            .unwrap_or_else(|| sdr_display_name(&sdr_name));
+            .unwrap_or_else(|| sdr_stem(&sdr_name));
         on_book(i + 1, total, &label);
 
         // Last-read position (`.yjf` `lpr`) — stored for every matched book on
@@ -565,10 +577,13 @@ pub fn import_from_device(
     import_collected(conn, collected, device_serial, now)
 }
 
-/// A human label for a `.sdr` dir: its stem with the trailing `.<sha-infix>`
-/// dropped (`"Linear Models with R.86607ef9.sdr"` → `"Linear Models with R"`).
-/// Used for the sync status line when a book hasn't been matched to a title yet.
-fn sdr_display_name(sdr_name: &str) -> String {
+/// The `.sdr` dir's stem: the `<basename>` with the `.sdr` suffix and the
+/// trailing `.<sha-infix>` dropped (`"Linear Models with R.86607ef9.sdr"` →
+/// `"Linear Models with R"`). Doubles as the human label on the sync status
+/// line when a book hasn't been matched to a title yet, and as the stable key
+/// for the stem fallback in [`import_collected_with_progress`] — a reconvert
+/// changes the infix but never the basename.
+fn sdr_stem(sdr_name: &str) -> String {
     let stem = sdr_name.strip_suffix(".sdr").unwrap_or(sdr_name);
     match stem.rsplit_once('.') {
         Some((name, infix)) if infix.len() >= 8 && infix.bytes().all(|b| b.is_ascii_hexdigit()) => {
@@ -1147,5 +1162,81 @@ mod tests {
         let r2 = import_from_device(&conn, root.path(), "DEV", "now").unwrap();
         assert_eq!(r2.positions, 1);
         assert_eq!(db::list_reading_positions(&conn, book_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn device_import_stem_fallback_relinks_reconverted_book() {
+        use base64::Engine as _;
+        fn token(marker: u8, payload: &[u8]) -> Vec<u8> {
+            let len = payload.len();
+            let mut v = vec![marker, (len >> 16) as u8, (len >> 8) as u8, len as u8];
+            v.extend_from_slice(payload);
+            v
+        }
+        fn handle(eid: u32, off: u32, linear: u64) -> String {
+            let mut raw = vec![1u8];
+            raw.extend_from_slice(&eid.to_le_bytes());
+            raw.extend_from_slice(&off.to_le_bytes());
+            let b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&raw);
+            format!("{b64}:{linear}")
+        }
+        let mut yjf = Vec::new();
+        yjf.extend(token(0xfe, b"lpr"));
+        yjf.extend(token(0x03, handle(978, 170, 12345).as_bytes()));
+
+        // The on-device `.sdr` is frozen at the sha8 the book had when it was
+        // pulled (`faf30ffb`); the Kindle binds its highlights + position to that
+        // exact name and it can never be renamed.
+        let root = tempfile::tempdir().unwrap();
+        let sdr = root
+            .path()
+            .join("documents/Sidle/[Homer] The Iliad (2023).faf30ffb.sdr");
+        std::fs::create_dir_all(&sdr).unwrap();
+        std::fs::write(sdr.join("x.yjf"), &yjf).unwrap();
+
+        // The library book was reconverted since (boko fix), so its `kfx_sha256`
+        // has drifted away from the device's frozen `faf30ffb`. Only the stem
+        // (`[Homer] The Iliad (2023)`, unchanged by the reconvert) still links them.
+        let conn = mem_db();
+        let book_id = db::insert_book(
+            &conn,
+            &NewBook {
+                sha256: "iliad-src",
+                title: "The Iliad",
+                author: "Homer",
+                language: "en",
+                ppd: None,
+                epub_path: None,
+                cover_path: None,
+                kfx_path: Some("books/iliad-src/[Homer] The Iliad (2023).kfx"),
+                kfx_sha256: Some(
+                    "632717c800000000000000000000000000000000000000000000000000000000",
+                ),
+                pdf_path: None,
+                file_size: 0,
+                imported_at: "t0",
+                asin: None,
+                publisher: None,
+                published_at: None,
+                series_name: None,
+                series_index: None,
+                tags: &[],
+                title_romaji: "",
+                author_romaji: "",
+            },
+        )
+        .unwrap();
+
+        let r = import_from_device(&conn, root.path(), "DEV", "now").unwrap();
+        assert_eq!(
+            r.positions, 1,
+            "reading position re-linked by stem despite the drifted sha8"
+        );
+        let pos = db::list_reading_positions(&conn, book_id).unwrap();
+        assert_eq!(pos.len(), 1);
+        assert_eq!(
+            (pos[0].eid, pos[0].offset, pos[0].linear_pos),
+            (Some(978), Some(170), Some(12345)),
+        );
     }
 }

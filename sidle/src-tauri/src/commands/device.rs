@@ -129,6 +129,7 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
         let mut orphan = 0usize;
         let mut legacy_matched = 0usize;
         let mut legacy_unmatched = 0usize;
+        let mut stem_relinked = 0usize;
         let mut dirs = 0usize;
         for entry in entries {
             if entry.is_dir {
@@ -144,11 +145,32 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
                 continue;
             }
             // Primary match: the modern `<basename>.<sha8>.kfx` shape, by
-            // `kfx_sha256` prefix. Fallback: legacy Sidle pushes (pre-sha8
-            // naming) whose on-device filename is just the library row's
-            // kfx basename — match by `kfx_path` suffix.
+            // `kfx_sha256` prefix. On a miss, fall back to the stem — a desktop
+            // reconvert changes `kfx_sha256`, but the device filename is frozen
+            // at the old hash (the Kindle won't re-bind a renamed `.sdr`), so the
+            // basename is the only stable link; without it a reconverted book
+            // wrongly shows "not in library". Legacy Sidle pushes (pre-sha8
+            // naming) carry the library row's kfx basename verbatim — match by
+            // `kfx_path` suffix.
             let resolved = match parse_sha_infix(&entry.name) {
-                Some(sha8) => db::find_by_kfx_sha_prefix(&conn, &sha8).map_err(anyhow::Error::from)?,
+                Some(sha8) => match db::find_by_kfx_sha_prefix(&conn, &sha8)
+                    .map_err(anyhow::Error::from)?
+                {
+                    Some(book) => Some(book),
+                    None => {
+                        let stem = entry
+                            .name
+                            .strip_suffix(".kfx")
+                            .and_then(|s| s.rsplit_once('.'))
+                            .map_or(entry.name.as_str(), |(stem, _sha)| stem);
+                        let book =
+                            db::find_by_kfx_basename(&conn, stem).map_err(anyhow::Error::from)?;
+                        if book.is_some() {
+                            stem_relinked += 1;
+                        }
+                        book
+                    }
+                },
                 None => match db::find_by_kfx_filename(&conn, &entry.name)
                     .map_err(anyhow::Error::from)?
                 {
@@ -187,7 +209,7 @@ pub async fn device_list_ours(state: State<'_, AppState>) -> Result<Vec<DeviceRo
             }
         }
         eprintln!(
-            "[sidle/device_list] {inner_serial}: {total} entries → {} rows ({sent} sent, {orphan} orphan; {dirs} dirs, {skipped_meta} mac-meta skipped; legacy: {legacy_matched} matched / {legacy_unmatched} unmatched)",
+            "[sidle/device_list] {inner_serial}: {total} entries → {} rows ({sent} sent, {orphan} orphan; {dirs} dirs, {skipped_meta} mac-meta skipped; legacy: {legacy_matched} matched / {legacy_unmatched} unmatched; {stem_relinked} stem-relinked)",
             out.len(),
         );
         Ok(out)

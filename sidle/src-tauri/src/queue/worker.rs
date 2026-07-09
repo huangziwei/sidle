@@ -165,11 +165,11 @@ pub async fn run_job(
                             // the copy we push to the Kindle, and its embedded
                             // cover is what the home tile / sleep-screen renders.
                             // A store KFX can ship a publisher placeholder there
-                            // (e.g. a house-logo) instead of the real art. The
-                            // rewrite changes the file's bytes, so we re-stamp
-                            // `kfx_sha256` (the on-device filename infix); a prior
-                            // push keyed on the old hash is now stale and a
-                            // re-push lands a fresh file, same as any reconvert.
+                            // (e.g. a house-logo) instead of the real art. This is
+                            // the first-import path, so `set_kfx_path_and_sha`
+                            // mints `kfx_sha256` from `new_sha`; thereafter the
+                            // identity is frozen (COALESCE) and the swapped bytes
+                            // ride to the device under that same, stable filename.
                             if let Some(kfx) = book.kfx_path.as_deref() {
                                 match kfx_cover::replace_cover(Path::new(kfx), &bytes) {
                                     Ok(new_sha) => {
@@ -179,7 +179,7 @@ pub async fn run_job(
                                         drop(conn);
                                         eprintln!(
                                             "[sidle/queue] book {book_id} color cover \
-                                             swapped inside kfx (kfx_sha256 re-stamped)"
+                                             swapped inside kfx (kfx_sha256 minted if new)"
                                         );
                                     }
                                     Err(e) => eprintln!(
@@ -207,20 +207,31 @@ pub async fn run_job(
             let _ = db::set_epub_path(&conn, book_id, &epub.to_string_lossy());
         }
         if let Some(kfx) = &produced.kfx_path {
-            // Hash the freshly-written KFX so push can stamp the on-device
-            // filename with its `<sha8>` infix. Without this the on-device
-            // file's identity drifts from the local row's `kfx_sha256`
-            // (still None) and re-import wouldn't link back.
-            match sha256_of_file(kfx) {
-                Ok(sha) => {
-                    let _ = db::set_kfx_path_and_sha(&conn, book_id, &kfx.to_string_lossy(), &sha);
+            let kfx_str = kfx.to_string_lossy();
+            match book.kfx_sha256.as_deref() {
+                // Reconvert of a book that already has an identity: the fixed
+                // bytes land at the same path, but `kfx_sha256` is the book's
+                // FROZEN identity (the on-device filename embeds its `<sha8>`
+                // and the Kindle binds each `.sdr` to that exact name). Preserve
+                // it — re-stamping would rename the file on the next pull and
+                // orphan the reader's highlights + position. Only the path is
+                // (re)written; `set_kfx_path_and_sha` COALESCEs the hash anyway,
+                // but skipping the re-hash here avoids the needless I/O.
+                Some(sha) => {
+                    let _ = db::set_kfx_path_and_sha(&conn, book_id, &kfx_str, sha);
                 }
-                Err(e) => {
-                    eprintln!(
-                        "[sidle/queue] book {book_id}: hashing produced KFX failed: {e}; \
-                         row will be unsendable until reconvert"
-                    );
-                }
+                // First conversion: mint the identity from the fresh KFX bytes.
+                None => match sha256_of_file(kfx) {
+                    Ok(sha) => {
+                        let _ = db::set_kfx_path_and_sha(&conn, book_id, &kfx_str, &sha);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[sidle/queue] book {book_id}: hashing produced KFX failed: {e}; \
+                             row will be unsendable until reconvert"
+                        );
+                    }
+                },
             }
         }
         if let Some(pdf) = &produced.pdf_path {
