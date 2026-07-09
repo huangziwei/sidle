@@ -773,6 +773,13 @@ fn apply_refinements(
 pub fn parse_ncx(content: &str) -> io::Result<Vec<TocEntry>> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);
+    // mobiunpack-generated NCX/nav embed unescaped `<`/`>` in titles, e.g.
+    // `<text>業物語 <物語> (講談社ＢＯＸ)</text>` — invalid XML. With end-name
+    // checking on, the stray `<物語>` open makes the following `</text>` a
+    // mismatch and quick_xml aborts, so `read_toc`'s `.ok()?` silently drops the
+    // WHOLE table of contents. Tolerate it: the stray tag is ignored and the
+    // navMap still parses.
+    reader.config_mut().check_end_names = false;
 
     struct NavPointState {
         children: Vec<TocEntry>,
@@ -913,6 +920,9 @@ pub fn parse_nav_page_list(content: &str) -> io::Result<Vec<TocEntry>> {
 fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);
+    // Tolerate unescaped `<`/`>` in link text (see `parse_ncx`) so one stray
+    // tag doesn't abort the parse and drop the whole nav.
+    reader.config_mut().check_end_names = false;
 
     // We only care about content inside <nav epub:type="toc">. Track nesting
     // depth so a stray `<ol>` outside that nav (e.g. landmarks, page-list)
@@ -1049,6 +1059,8 @@ fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
 pub fn parse_nav_landmarks(content: &str) -> io::Result<Vec<Landmark>> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);
+    // Tolerate unescaped `<`/`>` in label text (see `parse_ncx`).
+    reader.config_mut().check_end_names = false;
 
     let mut landmarks = Vec::new();
     let mut in_landmarks_nav = false;
@@ -1636,6 +1648,38 @@ mod tests {
         assert_eq!(result[1].title, "Chapter 2");
         assert_eq!(result[1].href, "ch2.xhtml");
         assert_eq!(result[1].play_order, Some(2));
+    }
+
+    #[test]
+    fn test_parse_ncx_tolerates_unescaped_angle_brackets() {
+        // Regression: mobiunpack-generated NCX embed unescaped `<`/`>` in the
+        // docTitle (here `業物語 <物語>`), which is invalid XML. End-name checking
+        // would abort at the following `</text>` and drop the entire TOC; the
+        // parser must recover and still return the navMap entries.
+        let ncx = r#"<?xml version='1.0' encoding='utf-8'?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <docTitle><text>業物語 <物語> (講談社ＢＯＸ)</text></docTitle>
+  <navMap>
+    <navPoint id="np1" playOrder="1">
+      <navLabel><text>あとがき</text></navLabel>
+      <content src="Text/part0067.xhtml#link_005"/>
+    </navPoint>
+    <navPoint id="np2" playOrder="2">
+      <navLabel><text>奥付</text></navLabel>
+      <content src="Text/part0074.xhtml"/>
+    </navPoint>
+  </navMap>
+</ncx>"#;
+
+        let result = parse_ncx(ncx).unwrap();
+        assert_eq!(
+            result.len(),
+            2,
+            "navMap must survive the malformed docTitle"
+        );
+        assert_eq!(result[0].title, "あとがき");
+        assert_eq!(result[0].href, "Text/part0067.xhtml#link_005");
+        assert_eq!(result[1].title, "奥付");
     }
 
     #[test]
