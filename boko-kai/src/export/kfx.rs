@@ -325,7 +325,7 @@ fn build_kfx_container(
     // Kindle selects CJK fonts + upright vertical orientation. Without it a
     // Chinese/Japanese book renders in Latin fonts with sideways glyphs — Amazon
     // stamps this on its own styles (e.g. `zh-tw`); boko previously did not.
-    ctx.content_language = kfx_content_language(&book.metadata().language);
+    ctx.content_language = crate::kfx::metadata::kfx_content_language(&book.metadata().language);
 
     // ========================================================================
     // PASS 2: SYNTHESIS (Generate Ion)
@@ -345,7 +345,7 @@ fn build_kfx_container(
     // M+. content ($145) - all together
 
     // 2a. Content features fragment ($585)
-    fragments.push(build_content_features_fragment());
+    fragments.push(build_content_features_fragment(&ctx));
 
     // 2b. Book metadata fragment ($490) - contains categorised_metadata
     fragments.push(build_book_metadata_fragment(book, &container_id, &ctx));
@@ -912,10 +912,31 @@ fn looks_like_kfx_book_id(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// A `content_features` feature struct `{namespace, key, version_info}`.
+fn content_feature(namespace: &str, key: &str, major: i64) -> IonValue {
+    IonValue::Struct(vec![
+        (
+            KfxSymbol::Namespace as u64,
+            IonValue::String(namespace.to_string()),
+        ),
+        (KfxSymbol::Key as u64, IonValue::String(key.to_string())),
+        (
+            KfxSymbol::VersionInfo as u64,
+            IonValue::Struct(vec![(
+                KfxSymbol::Version as u64,
+                IonValue::Struct(vec![
+                    (KfxSymbol::MajorVersion as u64, IonValue::Int(major)),
+                    (KfxSymbol::MinorVersion as u64, IonValue::Int(0)),
+                ]),
+            )]),
+        ),
+    ])
+}
+
 /// Build the content features fragment ($585).
 ///
 /// This describes the content capabilities/features of the book.
-fn build_content_features_fragment() -> KfxFragment {
+fn build_content_features_fragment(ctx: &ExportContext) -> KfxFragment {
     // Build feature entries matching reference KFX
     let reflow_style = IonValue::Struct(vec![
         (
@@ -980,9 +1001,38 @@ fn build_content_features_fragment() -> KfxFragment {
         ),
     ]);
 
+    let mut features = vec![reflow_style, canonical_format, yj_hdv];
+
+    // CJK reflow-language marker. Amazon stamps this alongside the book
+    // `language` to switch the device into its per-script reflow typography
+    // (CJK fonts, upright short numbers, vertical spacing). Without it a
+    // Chinese/Japanese book renders with Latin fonts and rotated glyphs even
+    // when the `language` tag is right. `content_language` is the per-style
+    // form ("zh-tw"/"ja"/...), which the classifier maps back to the marker.
+    if let Some((key, major)) =
+        crate::kfx::metadata::cjk_reflow_feature(&ctx.content_language)
+    {
+        features.push(content_feature("com.amazon.yjconversion", key, major));
+
+        // Japanese vertical layout has a dedicated feature (no Chinese analog
+        // exists in Amazon's table — Chinese vertical rides on the base marker
+        // plus `document_data.writing_mode`).
+        let vertical = matches!(
+            ctx.document_writing_mode,
+            KfxSymbol::VerticalRl | KfxSymbol::VerticalLr
+        );
+        if vertical && key == "jp-reflow-language" {
+            features.push(content_feature(
+                "com.amazon.yjconversion",
+                "jpvertical-reflow-language",
+                6,
+            ));
+        }
+    }
+
     let content_features = IonValue::Struct(vec![(
         KfxSymbol::Features as u64,
-        IonValue::List(vec![reflow_style, canonical_format, yj_hdv]),
+        IonValue::List(features),
     )]);
 
     KfxFragment::singleton(KfxSymbol::ContentFeatures, content_features)
@@ -1114,28 +1164,6 @@ fn direction_for_progression(turns_rtl: bool, writing_mode: KfxSymbol) -> KfxSym
 /// LV999 series, express the mode purely through CSS on content roots) is there
 /// nothing fixed to read, and the mode must be recovered from the content — see
 /// [`dominant_writing_mode_from_ir`].
-/// The content-level language to stamp on each reflowable `$style`, mapping the
-/// book's (Sidle-normalized) language to the device-recognized locale Amazon
-/// uses on its own KFX styles — so the Kindle selects CJK fonts and upright
-/// vertical orientation instead of the Latin default (rotated glyphs). Returns
-/// empty for languages that need no such hint.
-fn kfx_content_language(book_lang: &str) -> String {
-    let l = book_lang.trim().to_ascii_lowercase().replace('_', "-");
-    if l == "zh-hant" || l == "zh-tw" || l == "zh-hk" || l == "zh-mo" {
-        "zh-tw".to_string()
-    } else if l == "zh-hans" || l == "zh-cn" || l == "zh-sg" || l == "zh-my" {
-        "zh-cn".to_string()
-    } else if l == "zh" {
-        "zh".to_string()
-    } else if l == "ja" || l.starts_with("ja-") {
-        "ja".to_string()
-    } else if l == "ko" || l.starts_with("ko-") {
-        "ko".to_string()
-    } else {
-        String::new()
-    }
-}
-
 fn book_writing_mode(book: &mut Book) -> KfxSymbol {
     // `primary-writing-mode` is Amazon's book-level hint, and its vocabulary
     // (`horizontal-lr`, `horizontal-rl`, `vertical-rl`, `vertical-lr`) encodes
@@ -5662,7 +5690,8 @@ mod tests {
 
     #[test]
     fn test_content_features_fragment() {
-        let frag = build_content_features_fragment();
+        let ctx = ExportContext::new();
+        let frag = build_content_features_fragment(&ctx);
 
         // Should be $585 (content_features) type
         assert_eq!(frag.ftype, KfxSymbol::ContentFeatures as u64);
@@ -5838,7 +5867,8 @@ mod tests {
     #[test]
     fn test_singleton_uses_null_symbol() {
         // Build a singleton fragment and serialize it
-        let frag = build_content_features_fragment();
+        let ctx = ExportContext::new();
+        let frag = build_content_features_fragment(&ctx);
         let local_symbols: Vec<String> = vec![];
         let entities = serialize_fragments(&[frag], &local_symbols);
 
@@ -6176,7 +6206,7 @@ mod entity_structure_tests {
         // Pass 2: Build fragments in correct order
         let mut fragments = Vec::new();
 
-        fragments.push(build_content_features_fragment());
+        fragments.push(build_content_features_fragment(&ctx));
         fragments.push(build_book_metadata_fragment(&book, &container_id, &ctx));
         fragments.push(build_metadata_fragment(book.metadata(), &ctx));
         fragments.push(build_document_data_fragment(&ctx));

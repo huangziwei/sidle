@@ -923,12 +923,51 @@ impl ExportContext {
     /// mode doesn't turn every source style into a spurious override. The export
     /// entry point sets it before any IR style is registered.
     fn ir_style_baseline_writing_mode(&self) -> crate::style::WritingMode {
+        kfx_symbol_to_ir_writing_mode(self.style_writing_mode_baseline)
+    }
+
+    /// The document-effective (possibly user-forced) writing mode as an IR
+    /// enum. This is the axis text actually renders in, whereas
+    /// [`Self::ir_style_baseline_writing_mode`] is the source's own authored axis.
+    fn ir_document_writing_mode(&self) -> crate::style::WritingMode {
+        kfx_symbol_to_ir_writing_mode(self.document_writing_mode)
+    }
+
+    /// Whether text renders along a vertical axis (縦書き), i.e. the document
+    /// writing mode is `vertical-rl`/`vertical-lr`. Used to gate vertical-only
+    /// typography such as tate-chu-yoko.
+    pub fn is_vertical_document(&self) -> bool {
+        matches!(
+            self.document_writing_mode,
+            KfxSymbol::VerticalRl | KfxSymbol::VerticalLr
+        )
+    }
+
+    /// Rotate a style's physical box-model margins/padding into the document's
+    /// writing axis when the style was authored in a different one — i.e. when
+    /// the document mode is force-set (a horizontal EPUB converted to
+    /// vertical-rl). The source's block-flow `margin-top`/`margin-bottom`
+    /// (paragraph spacing) then lands on `margin-right`/`margin-left`, so the
+    /// device renders inter-column spacing instead of dropping it — matching
+    /// Amazon's own vertical KFX, which carries paragraph spacing as
+    /// `margin_right`. Returns the input untouched when the axes already agree
+    /// (the common, non-forced case), so there's no cost or behavior change for
+    /// books converted in their native mode.
+    fn box_transposed_ir_style<'a>(
+        &self,
+        ir_style: &'a crate::style::ComputedStyle,
+    ) -> std::borrow::Cow<'a, crate::style::ComputedStyle> {
         use crate::style::WritingMode;
-        match self.style_writing_mode_baseline {
-            KfxSymbol::VerticalRl => WritingMode::VerticalRl,
-            KfxSymbol::VerticalLr => WritingMode::VerticalLr,
-            _ => WritingMode::HorizontalTb,
+        let is_vertical =
+            |m: WritingMode| matches!(m, WritingMode::VerticalRl | WritingMode::VerticalLr);
+        let source = ir_style.writing_mode;
+        let target = self.ir_document_writing_mode();
+        if is_vertical(source) == is_vertical(target) {
+            return std::borrow::Cow::Borrowed(ir_style);
         }
+        let mut s = ir_style.clone();
+        rotate_box_model(&mut s, source, target);
+        std::borrow::Cow::Owned(s)
     }
 
     /// The `layout` symbol to stamp on a `type: container`. A KFX container
@@ -959,7 +998,8 @@ impl ExportContext {
     ) -> u64 {
         let schema = crate::kfx::style_schema::StyleSchema::standard();
         let mut builder = crate::kfx::style_registry::StyleBuilder::new(schema);
-        builder.ingest_ir_style(ir_style, self.ir_style_baseline_writing_mode());
+        let ir_style = self.box_transposed_ir_style(ir_style);
+        builder.ingest_ir_style(&ir_style, self.ir_style_baseline_writing_mode());
         let kfx_style = builder.build();
         self.style_registry
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
@@ -979,7 +1019,8 @@ impl ExportContext {
         use crate::kfx::style_schema::KfxValue;
         let schema = crate::kfx::style_schema::StyleSchema::standard();
         let mut builder = crate::kfx::style_registry::StyleBuilder::new(schema);
-        builder.ingest_ir_style(ir_style, self.ir_style_baseline_writing_mode());
+        let ir_style = self.box_transposed_ir_style(ir_style);
+        builder.ingest_ir_style(&ir_style, self.ir_style_baseline_writing_mode());
         let mut kfx_style = builder.build();
         if kfx_style.get(KfxSymbol::Underline).is_none() {
             kfx_style.set(
@@ -1020,6 +1061,31 @@ impl ExportContext {
         } else {
             self.default_style_symbol
         }
+    }
+
+    /// Register a node's style with tate-chu-yoko (縦中横) forced on — for a
+    /// leaf whose text is a short digit run in a vertical book (e.g. a
+    /// chapter-number heading). Clones the resolved style so font/alignment
+    /// carry over, sets `text_combine_upright: all`, and registers the variant
+    /// (anonymously — a synthetic combine style needs no source class name).
+    /// The device then renders the digits upright in one cell instead of
+    /// rotating them sideways, and the reader honors it via
+    /// `text-combine-upright`. Falls back to the default symbol when the id
+    /// doesn't resolve.
+    pub fn register_tatechuyoko_style_id(
+        &mut self,
+        style_id: StyleId,
+        style_pool: &crate::style::StylePool,
+    ) -> u64 {
+        let mut s = if style_id == StyleId::DEFAULT {
+            crate::style::ComputedStyle::default()
+        } else if let Some(base) = style_pool.get(style_id) {
+            base.clone()
+        } else {
+            return self.default_style_symbol;
+        };
+        s.text_combine_upright = crate::style::TextCombineUpright::All;
+        self.register_ir_style_with_hint(&s, None)
     }
 
     /// Register a Link element's style by StyleId. See
@@ -1287,6 +1353,79 @@ impl ExportContext {
     }
 }
 
+/// Map a KFX writing-mode symbol to the IR `WritingMode` enum. Non-writing-mode
+/// symbols (and the horizontal default) collapse to `HorizontalTb`.
+fn kfx_symbol_to_ir_writing_mode(sym: KfxSymbol) -> crate::style::WritingMode {
+    use crate::style::WritingMode;
+    match sym {
+        KfxSymbol::VerticalRl => WritingMode::VerticalRl,
+        KfxSymbol::VerticalLr => WritingMode::VerticalLr,
+        _ => WritingMode::HorizontalTb,
+    }
+}
+
+/// Rotate a style's physical margins and padding from the `from` writing mode's
+/// axes into the `to` mode's, preserving logical sides. See
+/// [`ExportContext::box_transposed_ir_style`].
+fn rotate_box_model(
+    s: &mut crate::style::ComputedStyle,
+    from: crate::style::WritingMode,
+    to: crate::style::WritingMode,
+) {
+    let (t, r, b, l) = rotate_sides(
+        s.margin_top,
+        s.margin_right,
+        s.margin_bottom,
+        s.margin_left,
+        from,
+        to,
+    );
+    s.margin_top = t;
+    s.margin_right = r;
+    s.margin_bottom = b;
+    s.margin_left = l;
+
+    let (t, r, b, l) = rotate_sides(
+        s.padding_top,
+        s.padding_right,
+        s.padding_bottom,
+        s.padding_left,
+        from,
+        to,
+    );
+    s.padding_top = t;
+    s.padding_right = r;
+    s.padding_bottom = b;
+    s.padding_left = l;
+}
+
+/// `(top, right, bottom, left)` given in `from`'s axes, re-expressed as
+/// `(top, right, bottom, left)` in `to`'s axes with the same *logical* sides
+/// (block-start/end, inline-start/end). Assumes ltr inline direction for
+/// `horizontal-tb` — true for the CJK books this serves.
+fn rotate_sides<T: Copy>(
+    top: T,
+    right: T,
+    bottom: T,
+    left: T,
+    from: crate::style::WritingMode,
+    to: crate::style::WritingMode,
+) -> (T, T, T, T) {
+    use crate::style::WritingMode::{HorizontalTb, VerticalLr, VerticalRl};
+    // physical -> logical: (block_start, block_end, inline_start, inline_end)
+    let (bs, be, is_, ie) = match from {
+        HorizontalTb => (top, bottom, left, right),
+        VerticalRl => (right, left, top, bottom),
+        VerticalLr => (left, right, top, bottom),
+    };
+    // logical -> physical: (top, right, bottom, left)
+    match to {
+        HorizontalTb => (bs, ie, be, is_),
+        VerticalRl => (is_, bs, ie, be),
+        VerticalLr => (is_, be, ie, bs),
+    }
+}
+
 impl Default for ExportContext {
     fn default() -> Self {
         Self::new()
@@ -1302,6 +1441,35 @@ mod tests {
         let mut symtab = SymbolTable::new();
         assert_eq!(symtab.get_or_intern("$260"), 260);
         assert_eq!(symtab.get_or_intern("$145"), 145);
+    }
+
+    #[test]
+    fn test_rotate_sides_horizontal_to_vertical_rl() {
+        use crate::style::WritingMode::{HorizontalTb, VerticalRl};
+        // Physical (top, right, bottom, left) = (T, R, B, L). Forcing a
+        // horizontal-authored style into vertical-rl must move block-flow
+        // margins (top/bottom = paragraph spacing) onto the block axis, which
+        // is right/left in vertical-rl. Inline margins (left/right) move to
+        // top/bottom.
+        let (t, r, b, l) = rotate_sides("T", "R", "B", "L", HorizontalTb, VerticalRl);
+        assert_eq!((t, r, b, l), ("L", "T", "R", "B"));
+        // margin-top (block-start) → margin-right; margin-bottom → margin-left.
+        assert_eq!(r, "T");
+        assert_eq!(l, "B");
+    }
+
+    #[test]
+    fn test_rotate_sides_roundtrips_and_no_op_same_mode() {
+        use crate::style::WritingMode::{HorizontalTb, VerticalRl};
+        // Same mode in and out is the identity.
+        assert_eq!(
+            rotate_sides(1, 2, 3, 4, HorizontalTb, HorizontalTb),
+            (1, 2, 3, 4)
+        );
+        // Rotating there and back preserves every side.
+        let fwd = rotate_sides(1, 2, 3, 4, HorizontalTb, VerticalRl);
+        let back = rotate_sides(fwd.0, fwd.1, fwd.2, fwd.3, VerticalRl, HorizontalTb);
+        assert_eq!(back, (1, 2, 3, 4));
     }
 
     #[test]

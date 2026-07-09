@@ -6,6 +6,92 @@
 
 use crate::model::Metadata;
 
+/// A CJK language family the Kindle treats specially (CJK fonts, upright
+/// vertical orientation, per-script reflow features). Latin/other languages
+/// don't classify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CjkLang {
+    /// Traditional Chinese (`tcn` in Amazon's reflow-feature vocabulary).
+    ZhHant,
+    /// Simplified Chinese (`cn`).
+    ZhHans,
+    /// Generic Chinese with no script/region — passed through as `zh`.
+    ZhGeneric,
+    /// Japanese.
+    Ja,
+    /// Korean.
+    Ko,
+}
+
+/// Classify a book's (BCP-47-ish) language tag into a [`CjkLang`], or `None`
+/// for Latin/other. Case- and separator-insensitive (`zh_Hant`, `ZH-HANT`,
+/// `zh-hant` all match). This is the single source of truth both language
+/// mappers below share, so the book-level tag and the per-`$style` tag never
+/// drift apart.
+pub fn classify_cjk_language(book_lang: &str) -> Option<CjkLang> {
+    let l = book_lang.trim().to_ascii_lowercase().replace('_', "-");
+    match l.as_str() {
+        "zh-hant" | "zh-tw" | "zh-hk" | "zh-mo" => Some(CjkLang::ZhHant),
+        "zh-hans" | "zh-cn" | "zh-sg" | "zh-my" => Some(CjkLang::ZhHans),
+        "zh" => Some(CjkLang::ZhGeneric),
+        _ if l == "ja" || l.starts_with("ja-") => Some(CjkLang::Ja),
+        _ if l == "ko" || l.starts_with("ko-") => Some(CjkLang::Ko),
+        _ => None,
+    }
+}
+
+/// The book-level `language` metadata value in Amazon's device form. The
+/// Kindle library service reads this to register the book's language (and pick
+/// CJK fonts); it wants the lowercase script-subtag form Amazon ships
+/// (`zh-hant`, not the BCP-47-canonical `zh-Hant`), or the device falls back
+/// to Latin fonts. Non-CJK tags pass through unchanged.
+///
+/// Distinct from [`kfx_content_language`]: Amazon stamps `zh-hant` on the book
+/// but `zh-tw` on each `$style` — verified against its own Chinese KFX.
+pub fn kfx_book_language(book_lang: &str) -> String {
+    match classify_cjk_language(book_lang) {
+        Some(CjkLang::ZhHant) => "zh-hant".to_string(),
+        Some(CjkLang::ZhHans) => "zh-hans".to_string(),
+        Some(CjkLang::ZhGeneric) => "zh".to_string(),
+        Some(CjkLang::Ja) => "ja".to_string(),
+        Some(CjkLang::Ko) => "ko".to_string(),
+        None => book_lang.to_string(),
+    }
+}
+
+/// The content-level `language` to stamp on each reflowable `$style`, mapping
+/// the book's language to the device locale Amazon uses on its own KFX styles —
+/// so the Kindle selects CJK fonts and upright vertical orientation instead of
+/// the Latin default (rotated glyphs). Returns empty for languages that need no
+/// such hint. Note the per-style form differs from the book-level one
+/// ([`kfx_book_language`]): Traditional Chinese is `zh-tw` here, `zh-hant`
+/// there.
+pub fn kfx_content_language(book_lang: &str) -> String {
+    match classify_cjk_language(book_lang) {
+        Some(CjkLang::ZhHant) => "zh-tw".to_string(),
+        Some(CjkLang::ZhHans) => "zh-cn".to_string(),
+        Some(CjkLang::ZhGeneric) => "zh".to_string(),
+        Some(CjkLang::Ja) => "ja".to_string(),
+        Some(CjkLang::Ko) => "ko".to_string(),
+        None => String::new(),
+    }
+}
+
+/// The `com.amazon.yjconversion` `content_features` reflow-language marker key
+/// for a CJK language, or `None` if the language has no such marker. Amazon
+/// stamps this alongside the book `language` to activate the device's per-script
+/// reflow typography; a Chinese/Japanese book without it renders with Latin
+/// fonts even when the `language` tag is correct. Keys and versions are from
+/// `kfxlib/yj_versions.py`. Korean has no marker in that table.
+pub fn cjk_reflow_feature(book_lang: &str) -> Option<(&'static str, i64)> {
+    match classify_cjk_language(book_lang) {
+        Some(CjkLang::ZhHant) => Some(("tcn-reflow-language", 1)),
+        Some(CjkLang::ZhHans | CjkLang::ZhGeneric) => Some(("cn-reflow-language", 1)),
+        Some(CjkLang::Ja) => Some(("jp-reflow-language", 1)),
+        Some(CjkLang::Ko) | None => None,
+    }
+}
+
 /// Category for KFX metadata entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataCategory {
@@ -511,6 +597,14 @@ pub fn build_category_entries(
                         // modified_date describes *this file*, not the work.
                         Some(MetadataValue::Text(crate::util::time_now_iso8601_utc()))
                     }
+                    MetadataField::Language => {
+                        // Normalize to Amazon's device form (e.g. `zh-Hant` →
+                        // `zh-hant`) so the Kindle library service registers the
+                        // language and offers CJK fonts. Non-CJK tags pass through.
+                        field
+                            .extract(meta)
+                            .map(|s| MetadataValue::Text(kfx_book_language(s)))
+                    }
                     MetadataField::SeriesPosition => {
                         // Series position from collection
                         meta.collection.as_ref().and_then(|c| c.position).map(|p| {
@@ -547,6 +641,33 @@ pub fn build_category_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cjk_language_mappers() {
+        // Traditional Chinese: book form differs from per-style form (verified
+        // against Amazon's own KFX: book `zh-hant`, styles `zh-tw`).
+        for tag in ["zh-Hant", "zh-TW", "zh_Hant", "ZH-HANT", "zh-HK"] {
+            assert_eq!(kfx_book_language(tag), "zh-hant", "book {tag}");
+            assert_eq!(kfx_content_language(tag), "zh-tw", "style {tag}");
+            assert_eq!(cjk_reflow_feature(tag), Some(("tcn-reflow-language", 1)));
+        }
+        // Simplified Chinese.
+        assert_eq!(kfx_book_language("zh-Hans"), "zh-hans");
+        assert_eq!(kfx_content_language("zh-CN"), "zh-cn");
+        assert_eq!(cjk_reflow_feature("zh-hans"), Some(("cn-reflow-language", 1)));
+        // Japanese: book and style forms coincide; vertical marker handled at
+        // the call site, base marker here.
+        assert_eq!(kfx_book_language("ja"), "ja");
+        assert_eq!(kfx_content_language("ja-JP"), "ja");
+        assert_eq!(cjk_reflow_feature("ja"), Some(("jp-reflow-language", 1)));
+        // Korean has fonts (book/style tag) but no reflow marker in Amazon's table.
+        assert_eq!(kfx_book_language("ko"), "ko");
+        assert_eq!(cjk_reflow_feature("ko"), None);
+        // Latin passes through untouched, no content tag, no marker.
+        assert_eq!(kfx_book_language("en-US"), "en-US");
+        assert_eq!(kfx_content_language("en"), "");
+        assert_eq!(cjk_reflow_feature("en"), None);
+    }
 
     #[test]
     fn test_metadata_field_extraction() {
