@@ -638,7 +638,7 @@ impl<'a> ContentState<'a> {
             // $269 text: a div container.
             "text" => self.emit_text_container(fields, part_index, &wm, &style_name)?,
             // $271 image.
-            "image" => self.emit_image(fields, part_index)?,
+            "image" => self.emit_image(fields, part_index, &style_name)?,
             // $270 container (the most common wrapper).
             "container" => self.emit_container(fields, part_index, &wm, &style_name)?,
             // $276 list / $277 listitem. (Match on the KFX symbol NAME that
@@ -662,7 +662,7 @@ impl<'a> ContentState<'a> {
             // $596 horizontal_rule → hr.
             "horizontal_rule" => self.emit_void(fields, part_index, &style_name, "hr")?,
             // $272 kvg → minimal svg.
-            "kvg" => self.emit_svg_container(fields, part_index, &wm)?,
+            "kvg" => self.emit_svg_container(fields, part_index, &wm, &style_name)?,
             // $439 zoom_target → hidden div (calibre $439: tag=div, display:none).
             "zoom_target" => self.emit_excerpt(fields, part_index, &wm, &style_name)?,
             // Unknown / not yet ported: emit a div with the children, log.
@@ -1062,6 +1062,7 @@ impl<'a> ContentState<'a> {
         &mut self,
         fields: &[(u64, IonValue)],
         part_index: usize,
+        style_name: &Option<String>,
     ) -> Result<NodeId, ConvertError> {
         // Calibre: img_resource = self.process_external_resource(get_fragment_name(content, "$164"))
         // get_fragment_name(content, "$164") pops content["$175"] = resource_name.
@@ -1081,16 +1082,26 @@ impl<'a> ContentState<'a> {
             .get(&resource_name)
             .map(|img| img.filename.clone());
 
-        let dom = &mut self.book_parts[part_index].dom;
         match src {
             // Sibling reference: chapter and image both live under `OEBPS/`,
             // so the chapter resolves `image_rsrcXX.jpg` to the right path.
             // Earlier `../OEBPS/<file>` was mathematically equivalent but
             // tripped Apple Books, which then showed no images.
             Some(filename) => {
+                let dom = &mut self.book_parts[part_index].dom;
                 let id = dom.create_element("img");
                 dom.get_mut(id).set("src", filename);
                 dom.get_mut(id).set("alt", alt);
+                // Apply the image's own `$style`. Calibre merges the content
+                // element's style onto the `<img>` (`content_style.update(...)`,
+                // `yj_to_epub_content.py:1252`) for every content type, images
+                // included — boko was the only emit path dropping it. Inline
+                // glyph images (rare hanzi with no Unicode code point) carry a
+                // font-relative `{width:1em; height:~1em; max-width:100%}` style
+                // so the Kindle scales them with the font size; without the
+                // class the reader rendered them at intrinsic pixel size,
+                // awkwardly oversized and unaffected by the font-size control.
+                self.attach_style(part_index, id, style_name, fields);
                 Ok(id)
             }
             // The image bytes are not embedded in this KFX (Amazon didn't ship
@@ -1100,6 +1111,7 @@ impl<'a> ContentState<'a> {
             // carrying the alt text instead, so the semantic content survives
             // without a broken reference.
             None => {
+                let dom = &mut self.book_parts[part_index].dom;
                 let id = dom.create_element("span");
                 if !alt.is_empty() {
                     dom.get_mut(id).text = Some(alt);
@@ -1162,24 +1174,35 @@ impl<'a> ContentState<'a> {
 
     fn emit_void(
         &mut self,
-        _fields: &[(u64, IonValue)],
+        fields: &[(u64, IonValue)],
         part_index: usize,
-        _style_name: &Option<String>,
+        style_name: &Option<String>,
         tag: &str,
     ) -> Result<NodeId, ConvertError> {
-        Ok(self.book_parts[part_index].dom.create_element(tag))
+        let id = self.book_parts[part_index].dom.create_element(tag);
+        // Same content-style application calibre does for every type
+        // (`yj_to_epub_content.py:1251`): a styled `<hr>` (rule color/width)
+        // would otherwise lose its `$style`.
+        self.attach_style(part_index, id, style_name, fields);
+        Ok(id)
     }
 
     fn emit_svg_container(
         &mut self,
-        _fields: &[(u64, IonValue)],
+        fields: &[(u64, IonValue)],
         part_index: usize,
         _writing_mode: &str,
+        style_name: &Option<String>,
     ) -> Result<NodeId, ConvertError> {
-        let dom = &mut self.book_parts[part_index].dom;
-        let id = dom.create_element("svg");
-        dom.get_mut(id).set("xmlns", "http://www.w3.org/2000/svg");
-        dom.get_mut(id).set("version", "1.1");
+        let id = {
+            let dom = &mut self.book_parts[part_index].dom;
+            let id = dom.create_element("svg");
+            dom.get_mut(id).set("xmlns", "http://www.w3.org/2000/svg");
+            dom.get_mut(id).set("version", "1.1");
+            id
+        };
+        // Content-style application (calibre `yj_to_epub_content.py:1251`).
+        self.attach_style(part_index, id, style_name, fields);
         Ok(id)
     }
 

@@ -1009,9 +1009,7 @@ fn build_content_features_fragment(ctx: &ExportContext) -> KfxFragment {
     // Chinese/Japanese book renders with Latin fonts and rotated glyphs even
     // when the `language` tag is right. `content_language` is the per-style
     // form ("zh-tw"/"ja"/...), which the classifier maps back to the marker.
-    if let Some((key, major)) =
-        crate::kfx::metadata::cjk_reflow_feature(&ctx.content_language)
-    {
+    if let Some((key, major)) = crate::kfx::metadata::cjk_reflow_feature(&ctx.content_language) {
         features.push(content_feature("com.amazon.yjconversion", key, major));
 
         // Japanese vertical layout has a dedicated feature (no Chinese analog
@@ -1030,10 +1028,8 @@ fn build_content_features_fragment(ctx: &ExportContext) -> KfxFragment {
         }
     }
 
-    let content_features = IonValue::Struct(vec![(
-        KfxSymbol::Features as u64,
-        IonValue::List(features),
-    )]);
+    let content_features =
+        IonValue::Struct(vec![(KfxSymbol::Features as u64, IonValue::List(features))]);
 
     KfxFragment::singleton(KfxSymbol::ContentFeatures, content_features)
 }

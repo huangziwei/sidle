@@ -196,10 +196,12 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
         } else if e.type_id == KfxSymbol::ExternalResource as u32
             && external_resource_location(raw).as_deref() == Some(cover_location.as_str())
         {
-            let rebuilt = rebuild_external_resource(&reparse(raw)?, new_w, new_h, flip_format, jpg_sym);
+            let rebuilt =
+                rebuild_external_resource(&reparse(raw)?, new_w, new_h, flip_format, jpg_sym);
             create_entity_data(&rebuilt)
         } else if backfill_cover_meta && e.type_id == KfxSymbol::BookMetadata as u32 {
-            let rebuilt = add_cover_image_to_book_metadata(&reparse(raw)?, &cover_name, &book.symbols);
+            let rebuilt =
+                add_cover_image_to_book_metadata(&reparse(raw)?, &cover_name, &book.symbols);
             create_entity_data(&rebuilt)
         } else if backfill_cover_meta
             && e.type_id == KfxSymbol::Metadata as u32
@@ -345,7 +347,10 @@ fn append_cover_to_title_metadata(
         {
             let mut items = items.clone();
             items.push(IonValue::Struct(vec![
-                (KfxSymbol::Key as u64, IonValue::String("cover_image".into())),
+                (
+                    KfxSymbol::Key as u64,
+                    IonValue::String("cover_image".into()),
+                ),
                 (KfxSymbol::Value as u64, IonValue::String(cover_name.into())),
             ]));
             out.push((*k, IonValue::List(items)));
@@ -355,7 +360,9 @@ fn append_cover_to_title_metadata(
     }
     // Categories are plain structs in practice, but re-wrap if annotated.
     match cat {
-        IonValue::Annotated(anns, _) => IonValue::Annotated(anns.clone(), Box::new(IonValue::Struct(out))),
+        IonValue::Annotated(anns, _) => {
+            IonValue::Annotated(anns.clone(), Box::new(IonValue::Struct(out)))
+        }
         _ => IonValue::Struct(out),
     }
 }
@@ -375,7 +382,10 @@ fn add_cover_image_to_flat_metadata(parsed: &IonValue, cover_name_sym: u64) -> I
     };
     let mut out = fields.to_vec();
     if get_field(fields, KfxSymbol::CoverImage as u64).is_none() {
-        out.push((KfxSymbol::CoverImage as u64, IonValue::Symbol(cover_name_sym)));
+        out.push((
+            KfxSymbol::CoverImage as u64,
+            IonValue::Symbol(cover_name_sym),
+        ));
     }
     IonValue::Struct(out)
 }
@@ -703,9 +713,12 @@ mod tests {
 
         // The title category's metadata list gained a cover_image=e6 item; the
         // audit category is untouched.
-        let cats = get_field(out.as_struct().unwrap(), KfxSymbol::CategorisedMetadata as u64)
-            .and_then(IonValue::as_list)
-            .unwrap();
+        let cats = get_field(
+            out.as_struct().unwrap(),
+            KfxSymbol::CategorisedMetadata as u64,
+        )
+        .and_then(IonValue::as_list)
+        .unwrap();
         let title = cats[0].as_struct().unwrap();
         let items = get_field(title, KfxSymbol::Metadata as u64)
             .and_then(IonValue::as_list)
@@ -715,11 +728,18 @@ mod tests {
                 .and_then(|f| get_field(f, KfxSymbol::Key as u64).and_then(IonValue::as_string))
                 == Some("cover_image")
         });
-        let cover = cover.expect("cover_image item appended").as_struct().unwrap();
+        let cover = cover
+            .expect("cover_image item appended")
+            .as_struct()
+            .unwrap();
         assert_eq!(
             get_field(cover, KfxSymbol::Value as u64).and_then(IonValue::as_string),
             Some("e6")
         );
-        assert_eq!(cats[1].as_struct().unwrap().len(), 1, "audit category untouched");
+        assert_eq!(
+            cats[1].as_struct().unwrap().len(),
+            1,
+            "audit category untouched"
+        );
     }
 }

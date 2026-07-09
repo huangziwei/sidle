@@ -654,7 +654,10 @@ mod tests {
         // Simplified Chinese.
         assert_eq!(kfx_book_language("zh-Hans"), "zh-hans");
         assert_eq!(kfx_content_language("zh-CN"), "zh-cn");
-        assert_eq!(cjk_reflow_feature("zh-hans"), Some(("cn-reflow-language", 1)));
+        assert_eq!(
+            cjk_reflow_feature("zh-hans"),
+            Some(("cn-reflow-language", 1))
+        );
         // Japanese: book and style forms coincide; vertical marker handled at
         // the call site, base marker here.
         assert_eq!(kfx_book_language("ja"), "ja");

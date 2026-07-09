@@ -95,8 +95,7 @@ impl ReaderImageStore {
         &self,
         hrefs: &[String],
     ) -> Vec<(String, Result<(String, Vec<u8>), ConvertError>)> {
-        let items: Vec<&DeferredImage> =
-            hrefs.iter().filter_map(|h| self.items.get(h)).collect();
+        let items: Vec<&DeferredImage> = hrefs.iter().filter_map(|h| self.items.get(h)).collect();
         let owned: Vec<DeferredImage> = items.iter().map(|d| (*d).clone()).collect();
         resources::transcode_deferred(&self.book, &owned)
             .into_iter()
@@ -292,7 +291,10 @@ pub fn kfx_to_reader_book_lazy(
         .page_progression_direction
         .clone()
         .unwrap_or_else(|| "ltr".to_string());
-    let eid_order: Vec<i64> = sections.iter().flat_map(|s| s.eids.iter().copied()).collect();
+    let eid_order: Vec<i64> = sections
+        .iter()
+        .flat_map(|s| s.eids.iter().copied())
+        .collect();
     // Locations: a real position map ($265) is cheap — ship inline. So is the
     // synthesized map of a fixed-layout book (image pages, no text to walk).
     // A reflowable book without a map needs the full-book text walk — defer
@@ -635,7 +637,10 @@ mod tests {
         // Locations: whichever path the lazy shape took (inline for a book
         // with a position map / fixed layout, deferred otherwise), the eager
         // shape must end up with the same resolved map.
-        assert!(!eager.locations_deferred, "legacy shape resolves the deferral");
+        assert!(
+            !eager.locations_deferred,
+            "legacy shape resolves the deferral"
+        );
         if lazy.locations_deferred {
             assert!(lazy.locations.is_empty());
             let (locations, max_location) = store.synth_locations();
@@ -655,7 +660,11 @@ mod tests {
         // Deferred synthesis itself must still agree with the direct
         // synthesized walk regardless of which path shipped (both books with
         // and without position maps exercise scan order the same way).
-        let eid_order: Vec<i64> = lazy.sections.iter().flat_map(|s| s.eids.iter().copied()).collect();
+        let eid_order: Vec<i64> = lazy
+            .sections
+            .iter()
+            .flat_map(|s| s.eids.iter().copied())
+            .collect();
         assert!(!eid_order.is_empty(), "sections must carry scanned eids");
     }
 
@@ -670,15 +679,24 @@ mod tests {
 <svg xmlns="http://www.w3.org/2000/svg"><image xlink:href="cover.jpeg"/></svg></body></html>"#;
         let (chars, image_only, hrefs) = scan_section_meta(html);
         // Collapsed base text = "Hello & 漢字 world and dup" → 24 chars.
-        assert_eq!(chars, 24, "rt excluded, entity=1 char, whitespace collapsed");
+        assert_eq!(
+            chars, 24,
+            "rt excluded, entity=1 char, whitespace collapsed"
+        );
         assert!(!image_only);
-        assert_eq!(hrefs, vec!["image_a.jpg".to_string(), "cover.jpeg".to_string()]);
+        assert_eq!(
+            hrefs,
+            vec!["image_a.jpg".to_string(), "cover.jpeg".to_string()]
+        );
 
         let cover = r#"<html><head><meta name="viewport" content="width=900, height=1280"/></head>
 <body>  <div><img src="page_1.jpg"/></div>  </body></html>"#;
         let (chars, image_only, hrefs) = scan_section_meta(cover);
         assert_eq!(chars, 0);
-        assert!(image_only, "whitespace-only body with an image is image-only");
+        assert!(
+            image_only,
+            "whitespace-only body with an image is image-only"
+        );
         assert_eq!(hrefs, vec!["page_1.jpg".to_string()]);
     }
 
@@ -689,6 +707,69 @@ mod tests {
         // Reflowable page (no viewport) → None.
         let reflow = r#"<html><head><title>c0</title></head><body><p>text</p></body></html>"#;
         assert_eq!(parse_viewport(reflow), None);
+    }
+
+    /// Every emitted `<img>` must carry its content element's `$style` as a
+    /// class. Calibre applies the content element's own style onto the `<img>`
+    /// (`content_style.update(...)`, `yj_to_epub_content.py:1252`) like it does
+    /// for every content type; boko's `emit_image` was the sole emit path that
+    /// dropped it. The visible fallout: inline glyph images — rare hanzi with
+    /// no Unicode code point, which KFX styles `{width:1em; height:~1em;
+    /// max-width:100%}` so the Kindle scales them with the font — lost that
+    /// font-relative sizing and rendered at intrinsic pixel size, awkwardly
+    /// oversized and immune to the reader's font-size control. This guards that
+    /// the class reaches the DOM and resolves to a real stylesheet rule (the
+    /// committed fixture's only img is its cover, but the mechanism is
+    /// identical; the 1em glyph case is exercised by real library books).
+    #[test]
+    fn reader_images_carry_their_style_class() {
+        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx")).expect("read fixture");
+        let book = kfx_to_reader_book(&bytes).expect("kfx_to_reader_book");
+
+        // First real `<img …>` across all sections. A missing-resource image
+        // deliberately falls back to a `<span>`, so an emitted `<img>` always
+        // has a `src` — the content element whose `$style` must survive.
+        let img_tag = book
+            .sections
+            .iter()
+            .find_map(|s| {
+                let start = s.html.find("<img")?;
+                let end = s.html[start..]
+                    .find('>')
+                    .map(|e| start + e + 1)
+                    .unwrap_or(s.html.len());
+                Some(s.html[start..end].to_string())
+            })
+            .expect("fixture must emit at least one <img>");
+        assert!(
+            img_tag.contains("src="),
+            "expected a real <img src>: {img_tag}"
+        );
+
+        // The regression: the img was previously classless.
+        assert!(
+            img_tag.contains("class=\""),
+            "emitted <img> dropped its $style class: {img_tag}"
+        );
+
+        // And the class must resolve to a real rule in the shipped stylesheet —
+        // the path by which an inline glyph image's `width:1em` reaches the
+        // reader.
+        let class = img_tag
+            .split("class=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .expect("class value");
+        let css = book
+            .resources
+            .iter()
+            .find(|r| r.href == "style.css")
+            .map(|r| String::from_utf8_lossy(&r.data).into_owned())
+            .expect("style.css resource");
+        assert!(
+            css.contains(&format!(".{class} ")),
+            "img class {class:?} has no rule in style.css"
+        );
     }
 
     #[test]

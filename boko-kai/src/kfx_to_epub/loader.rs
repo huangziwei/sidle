@@ -352,9 +352,12 @@ fn first_content_resource_name(value: &IonValue, symbols: &SymbolTable) -> Optio
                 return Some(name.to_string());
             }
             fields.iter().find_map(|(_, v)| {
-                matches!(v.unwrap_annotated(), IonValue::List(_) | IonValue::Struct(_))
-                    .then(|| first_content_resource_name(v, symbols))
-                    .flatten()
+                matches!(
+                    v.unwrap_annotated(),
+                    IonValue::List(_) | IonValue::Struct(_)
+                )
+                .then(|| first_content_resource_name(v, symbols))
+                .flatten()
             })
         }
         _ => None,
@@ -378,9 +381,9 @@ fn cover_candidate_is_image(
         let Some(fields) = v.unwrap_annotated().as_struct() else {
             return false;
         };
-        let matches_name =
-            get_field(fields, KfxSymbol::ResourceName as u64).and_then(|x| symbols.text_of(x))
-                == Some(name);
+        let matches_name = get_field(fields, KfxSymbol::ResourceName as u64)
+            .and_then(|x| symbols.text_of(x))
+            == Some(name);
         let is_image = get_field(fields, KfxSymbol::Format as u64)
             .and_then(|x| symbols.text_of(x))
             .is_some_and(|fmt| IMAGE_FORMATS.contains(&fmt));

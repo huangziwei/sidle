@@ -24,8 +24,8 @@ pub use pdf_text::{
     pdf_text_layer, pdf_text_layer_from_book,
 };
 pub use reader::{
-    ReaderBook, ReaderImage, ReaderImageStore, ReaderResource, ReaderSection,
-    kfx_to_reader_book, kfx_to_reader_book_lazy,
+    ReaderBook, ReaderImage, ReaderImageStore, ReaderResource, ReaderSection, kfx_to_reader_book,
+    kfx_to_reader_book_lazy,
 };
 pub use resources::DeferredImage;
 pub use text_index::{SearchMatch, TextIndex};
@@ -105,7 +105,10 @@ pub fn convert_to_epub_with_progress(
         let mut timings = Vec::new();
         let mut done = 0usize;
         for chunk in deferred.chunks(chunk_size) {
-            for (item, result) in chunk.iter().zip(resources::transcode_deferred(&book, chunk)) {
+            for (item, result) in chunk
+                .iter()
+                .zip(resources::transcode_deferred(&book, chunk))
+            {
                 let t = result?;
                 if let Some(timing) = t.timing {
                     timings.push(timing);

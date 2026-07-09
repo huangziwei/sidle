@@ -227,7 +227,10 @@ pub fn transcode_deferred(
         .unwrap_or(4)
         .min(items.len());
     if n_workers <= 1 {
-        return items.iter().map(|i| transcode_deferred_one(book, i)).collect();
+        return items
+            .iter()
+            .map(|i| transcode_deferred_one(book, i))
+            .collect();
     }
     let mut out: Vec<Option<Result<TranscodedImage, ConvertError>>> =
         (0..items.len()).map(|_| None).collect();
@@ -235,9 +238,14 @@ pub fn transcode_deferred(
         let chunk_size = items.len().div_ceil(n_workers);
         let mut handles = Vec::with_capacity(n_workers);
         for chunk in items.chunks(chunk_size) {
-            handles.push(scope.spawn(move || -> Vec<Result<TranscodedImage, ConvertError>> {
-                chunk.iter().map(|i| transcode_deferred_one(book, i)).collect()
-            }));
+            handles.push(
+                scope.spawn(move || -> Vec<Result<TranscodedImage, ConvertError>> {
+                    chunk
+                        .iter()
+                        .map(|i| transcode_deferred_one(book, i))
+                        .collect()
+                }),
+            );
         }
         let mut write_idx = 0;
         for h in handles {
