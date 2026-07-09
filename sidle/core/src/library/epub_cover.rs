@@ -98,9 +98,7 @@ pub fn ensure_cover(
     }
     // Case 2: regenerate — but only from a KFX that is the source (EPUB derived)
     // and actually has a cover to carry over.
-    if epub_is_derived
-        && let Some(kfx) = kfx_path
-    {
+    if epub_is_derived && let Some(kfx) = kfx_path {
         let kfx_bytes = std::fs::read(kfx).with_context(|| format!("read {}", kfx.display()))?;
         if kfx_declares_cover(&kfx_bytes) {
             let epub_bytes = boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
@@ -160,7 +158,9 @@ pub fn insert_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result
                 let compression = entry.compression();
                 let mut text = String::new();
                 let mut entry = entry;
-                entry.read_to_string(&mut text).with_context(|| "read opf")?;
+                entry
+                    .read_to_string(&mut text)
+                    .with_context(|| "read opf")?;
                 let rewritten = inject_cover_into_opf(&text, &cover_basename, media_type);
                 let opts = zip::write::SimpleFileOptions::default().compression_method(compression);
                 writer.start_file(&name, opts)?;

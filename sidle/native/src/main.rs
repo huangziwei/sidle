@@ -64,6 +64,10 @@ const TOP_MARGIN: u32 = 190;
 /// the existing `documents/Downloads/Items01/` indexed tree). Land here so
 /// our books are grouped and easy to find in the library.
 const DOWNLOAD_DIR: &str = "/mnt/us/documents/Sidle";
+/// USB-drive root — the base for the misc backup scan: screenshots live in
+/// `screenshots/` (and the root itself on KOA2 stock firmware), KUAL logs at the
+/// root. See [`api::push_misc`].
+const MNT_US: &str = "/mnt/us";
 /// On-device cover thumbnail cache, under the extension dir (not documents/,
 /// so the stock indexer never sees it). See [`cover_cache`].
 const COVER_CACHE_DIR: &str = "/mnt/us/extensions/sidle/cache/covers";
@@ -778,8 +782,7 @@ fn run() -> anyhow::Result<()> {
                                     }
                                 }
                                 Source::Library => {
-                                    let dirty =
-                                        toast::draw(&mut fb, &mut renderer, "Syncing annotations…");
+                                    let dirty = toast::draw(&mut fb, &mut renderer, "Syncing…");
                                     fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
                                     let sync_t0 = Instant::now();
                                     match api::push_annotations(
@@ -788,11 +791,31 @@ fn run() -> anyhow::Result<()> {
                                         std::path::Path::new(DOWNLOAD_DIR),
                                     ) {
                                         Ok(report) => {
-                                            let summary = report.summary();
+                                            let mut summary = report.summary();
                                             log(format!(
                                                 "annotation sync ok in {:?}: {summary}",
                                                 sync_t0.elapsed()
                                             ));
+                                            // Same Sync tap also backs up screenshots + KUAL
+                                            // logs over WiFi. Best-effort: annotations already
+                                            // landed, so a misc failure only adds a note — it
+                                            // never turns the sync into a failure.
+                                            match api::push_misc(
+                                                &agent,
+                                                &cfg,
+                                                std::path::Path::new(MNT_US),
+                                            ) {
+                                                Ok(misc) => {
+                                                    if let Some(s) = misc.summary() {
+                                                        log(format!("misc backup: {s}"));
+                                                        summary = format!("{summary}\n{s}");
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    log(format!("misc backup failed: {err}"));
+                                                    summary = format!("{summary}\n(backup failed)");
+                                                }
+                                            }
                                             summary
                                         }
                                         Err(api::SidleError::TokenMismatch) => {

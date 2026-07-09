@@ -11,6 +11,7 @@
 use anyhow::Result;
 
 use crate::device::ink;
+use crate::device::misc;
 use crate::device::{DeviceInfo, TPath, Transport};
 use crate::library::ingest::{self, CollectedYjr, DeviceImportReport};
 use crate::library::{LibraryPaths, db};
@@ -96,7 +97,7 @@ pub fn import_device_annotations(
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> Result<DeviceImportReport> {
     let now = db::now_iso();
-    match device.mass_storage_mount() {
+    let mut report = match device.mass_storage_mount() {
         Some(mount) => {
             // Mass-storage has a real volume — bypass the transport and use
             // the `std::fs` scanner so the USB scan + DB import can happen
@@ -167,7 +168,21 @@ pub fn import_device_annotations(
             // .claude/plans/backup-source-of-truth.md.
             Ok(report)
         }
+    }?;
+
+    // Additive backup of the device's screenshots + KUAL logs, over whichever
+    // transport this Kindle uses. Best-effort: a misc-backup failure must never
+    // fail the annotation sync it rides along with — log it and move on with the
+    // counts we did get. Runs on every Sync (manual button + auto-on-connect).
+    match misc::backup_device_misc(transport, &device.serial, paths) {
+        Ok(m) => {
+            report.misc_screenshots = m.screenshots_added;
+            report.misc_logs = m.logs_updated;
+        }
+        Err(e) => eprintln!("[sidle/annsync] misc backup failed (non-fatal): {e:#}"),
     }
+
+    Ok(report)
 }
 
 #[cfg(test)]

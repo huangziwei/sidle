@@ -28,6 +28,7 @@ use tokio::net::TcpListener;
 
 use sidle_core::library::{
     LibraryPaths, db,
+    device_backup::{self, MiscKind},
     import::{self, ImportOutcome},
     ingest::{self, CollectedYjr, DeviceImportReport},
     paths::kfx_device_filename,
@@ -122,6 +123,11 @@ const SYNC_BODY_LIMIT: usize = 32 * 1024 * 1024;
 /// before it's handed to the importer. Generous for an image-heavy purchase;
 /// single-user LAN, so the transient RAM is fine.
 const BOOK_BODY_LIMIT: usize = 512 * 1024 * 1024;
+/// Body cap on `POST /sync/misc` — the Kindle's screenshots + KUAL logs, base64
+/// in one JSON bundle. Screenshots are small grayscale PNGs; a healthy backlog
+/// fits with headroom, and a 413 on an absurd volume is a clear error (never a
+/// silent drop). The picker re-pushes each Sync; the server dedups screenshots.
+const MISC_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// The axum app: routes + per-route layers. Factored out of
 /// [`serve_with_shutdown`] so tests can drive it via `Router::oneshot` without
@@ -142,6 +148,13 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/sync/book",
             post(sync_book).layer(DefaultBodyLimit::max(BOOK_BODY_LIMIT)),
+        )
+        // The Kindle pushes its screenshots + KUAL logs here on Sync — a WiFi
+        // backup, stored under `device-backup/<serial>/` (no DB, view-only in the
+        // desktop "Misc." tab). Token-gated + body-limited like the rest.
+        .route(
+            "/sync/misc",
+            post(sync_misc).layer(DefaultBodyLimit::max(MISC_BODY_LIMIT)),
         )
         // KUAL self-update pull: the picker fetches its own next binary from the
         // staged `kual-dist/` bundle (written by the desktop app). Reads only,
@@ -530,16 +543,106 @@ async fn sync_book(
     Ok(Json(result))
 }
 
+// ---------------------------------------------------------------------------
+// P3 write surface — POST /sync/misc (screenshots + KUAL logs)
+// ---------------------------------------------------------------------------
+
+/// The push bundle the Kindle picker sends on Sync: each screenshot / KUAL log,
+/// base64 in JSON (same no-multipart-dep reason as `/sync/annotations`). The
+/// server classifies each by name — it does not trust a client-sent kind.
+#[derive(serde::Deserialize)]
+struct MiscSyncRequest {
+    /// The Kindle's serial — keys the `device-backup/<serial>/` subtree, same
+    /// as annotations. Provisioned to the picker via `server.conf`.
+    device_serial: String,
+    files: Vec<MiscSyncFile>,
+}
+
+#[derive(serde::Deserialize)]
+struct MiscSyncFile {
+    /// Bare device filename, e.g. `screenshot_1719430000.png` / `sidle-native.log`.
+    name: String,
+    /// File bytes, base64 (standard alphabet, with padding).
+    data_b64: String,
+}
+
+/// What `POST /sync/misc` backed up, for the picker's toast.
+#[derive(serde::Serialize, Default)]
+struct MiscSyncResult {
+    /// Screenshots newly stored (copy-if-absent; re-pushes of ones we hold are 0).
+    screenshots: usize,
+    /// Logs refreshed (overwrite-always — they grow).
+    logs: usize,
+}
+
+/// Store the Kindle's pushed screenshots + KUAL logs under `device-backup/<serial>/`
+/// — the WiFi backup the desktop "Misc." tab views. Token-gated, then base64-decode
+/// and hand each file to the shared [`device_backup::store_misc_file`] policy
+/// (identical to the desktop's USB pull). No DB touch — these are files, not
+/// library rows. Files whose name isn't a screenshot/log are ignored.
+///
+/// `Json` is last (a body-consuming extractor).
+async fn sync_misc(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    Json(req): Json<MiscSyncRequest>,
+) -> Result<Json<MiscSyncResult>, StatusCode> {
+    check_token(&headers, &query, &state.token)?;
+
+    // Decode every blob up front so a malformed one is a clean 400 (client bug),
+    // kept distinct from a 500 (our write failing) below.
+    let mut decoded = Vec::with_capacity(req.files.len());
+    for f in req.files {
+        decoded.push((f.name, decode_b64(&f.data_b64)?));
+    }
+
+    let paths = state.paths.clone();
+    let serial = req.device_serial;
+
+    // Filesystem writes are blocking; run them off the async executor.
+    let result = tokio::task::spawn_blocking(move || -> Result<MiscSyncResult, StatusCode> {
+        let mut result = MiscSyncResult::default();
+        for (name, bytes) in decoded {
+            let Some(kind) = device_backup::classify_misc(&name) else {
+                continue; // not a screenshot/log — ignore
+            };
+            let wrote = device_backup::store_misc_file(&paths, &serial, kind, &name, &bytes)
+                .map_err(|err| {
+                    tracing::error!(?err, name, "sync/misc: store failed");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            if wrote {
+                match kind {
+                    MiscKind::Screenshot => result.screenshots += 1,
+                    MiscKind::Log => result.logs += 1,
+                }
+            }
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!(?err, "sync/misc: store task panicked");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })??;
+
+    Ok(Json(result))
+}
+
+/// Base64-decode a required blob (standard alphabet, with padding); a decode
+/// error maps to `400 Bad Request`.
+fn decode_b64(s: &str) -> Result<Vec<u8>, StatusCode> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
 /// Base64-decode an optional blob (standard alphabet, with padding); a decode
 /// error maps to `400 Bad Request`.
 fn decode_b64_opt(s: Option<&str>) -> Result<Option<Vec<u8>>, StatusCode> {
-    use base64::Engine as _;
-    s.map(|s| {
-        base64::engine::general_purpose::STANDARD
-            .decode(s)
-            .map_err(|_| StatusCode::BAD_REQUEST)
-    })
-    .transpose()
+    s.map(decode_b64).transpose()
 }
 
 /// Did the import change anything an open reader would render? New or removed
@@ -881,6 +984,19 @@ mod tests {
         b.body(Body::from(body)).unwrap()
     }
 
+    /// A `POST /sync/misc` request with a JSON body and an optional token.
+    fn misc_request(token: Option<&str>, body: serde_json::Value) -> Request<Body> {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/sync/misc")
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            b = b.header("x-sidle-token", t);
+        }
+        b.body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+
     /// The decisive P3 gate: a `.yjr` pushed through `POST /sync/annotations`
     /// produces the **identical** `DeviceImportReport` and the **identical**
     /// stored annotation rows as calling `import_collected` on the same bundle
@@ -952,6 +1068,119 @@ mod tests {
         let pulse_json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&pulse).unwrap()).unwrap();
         assert_eq!(pulse_json["device_serial"], device_serial);
+    }
+
+    /// `POST /sync/misc` stores screenshots (copy-if-absent) and logs
+    /// (overwrite) under `device-backup/<serial>/`, ignores non-misc names, and
+    /// reports the counts — the WiFi twin of the desktop USB pull.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_misc_stores_screenshots_and_logs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
+        paths.ensure().unwrap();
+        let token = load_or_generate_token(&paths.root).unwrap();
+        let serial = "G000TESTSERIAL";
+        let state = AppState {
+            paths: paths.clone(),
+            token: Arc::from(token.as_str()),
+        };
+
+        let body = serde_json::json!({
+            "device_serial": serial,
+            "files": [
+                { "name": "screenshot_100.png", "data_b64": BASE64.encode(b"PNG-A") },
+                { "name": "sidle-native.log", "data_b64": BASE64.encode(b"log v1\n") },
+                { "name": "version.txt", "data_b64": BASE64.encode(b"5.16") },
+            ],
+        });
+        let resp = build_router(state.clone())
+            .oneshot(misc_request(Some(&token), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            report["screenshots"], 1,
+            "the one screenshot (version.txt ignored)"
+        );
+        assert_eq!(report["logs"], 1);
+
+        assert_eq!(
+            std::fs::read(
+                paths
+                    .device_backup_screenshots(serial)
+                    .join("screenshot_100.png")
+            )
+            .unwrap(),
+            b"PNG-A"
+        );
+        assert!(
+            !paths
+                .device_backup_screenshots(serial)
+                .join("version.txt")
+                .exists()
+        );
+        assert!(
+            !paths
+                .device_backup_logs(serial)
+                .join("version.txt")
+                .exists()
+        );
+
+        // Re-push: the screenshot is copy-if-absent (unchanged, count 0); the log
+        // overwrites with its grown content (count 1).
+        let body2 = serde_json::json!({
+            "device_serial": serial,
+            "files": [
+                { "name": "screenshot_100.png", "data_b64": BASE64.encode(b"IGNORED") },
+                { "name": "sidle-native.log", "data_b64": BASE64.encode(b"log v1\nv2\n") },
+            ],
+        });
+        let resp = build_router(state)
+            .oneshot(misc_request(Some(&token), body2))
+            .await
+            .unwrap();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(report["screenshots"], 0, "already held → not re-written");
+        assert_eq!(report["logs"], 1, "log overwritten");
+        assert_eq!(
+            std::fs::read(
+                paths
+                    .device_backup_screenshots(serial)
+                    .join("screenshot_100.png")
+            )
+            .unwrap(),
+            b"PNG-A",
+            "immutable screenshot untouched by re-push"
+        );
+        assert_eq!(
+            std::fs::read(paths.device_backup_logs(serial).join("sidle-native.log")).unwrap(),
+            b"log v1\nv2\n"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_misc_rejects_missing_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
+        paths.ensure().unwrap();
+        let token = load_or_generate_token(&paths.root).unwrap();
+        let state = AppState {
+            paths,
+            token: Arc::from(token.as_str()),
+        };
+        let body = serde_json::json!({ "device_serial": "S", "files": [] });
+        let resp = build_router(state)
+            .oneshot(misc_request(None, body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

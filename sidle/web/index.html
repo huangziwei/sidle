@@ -12,6 +12,8 @@
         <div class="seg" role="tablist" aria-label="Section">
           <button id="section-books" class="seg-btn active" role="tab" aria-selected="true">Books</button>
           <button id="section-notes" class="seg-btn" role="tab" aria-selected="false">Notes</button>
+          <button id="section-misc" class="seg-btn" role="tab" aria-selected="false"
+                  title="Screenshots and logs backed up from your Kindle on Sync">Misc.</button>
         </div>
         <div class="toolbar-sep" aria-hidden="true"></div>
         <div class="seg" id="view-seg" role="tablist" aria-label="View">
@@ -162,6 +164,35 @@
               Import from Kindle
             </button>
           </p>
+        </div>
+      </section>
+
+      <!-- Misc.: screenshots + KUAL logs backed up off the Kindle on Sync
+           (device::misc). Two groups — a screenshot thumbnail grid and a log
+           list — both populated by misc.js (window.Misc), which owns its own
+           in-app viewers (lightbox / log <pre>). -->
+      <section id="misc" class="view misc" aria-label="Misc" hidden>
+        <div id="misc-empty" class="empty" hidden>
+          <p>Nothing backed up yet.</p>
+          <p class="empty-hint">
+            Screenshots and KUAL logs are pulled off your Kindle each time you Sync.
+          </p>
+        </div>
+        <div id="misc-content" hidden>
+          <section class="misc-group" id="misc-shots-group" hidden>
+            <header class="misc-group-header">
+              <strong>Screenshots</strong>
+              <span id="misc-shots-count" class="misc-count"></span>
+            </header>
+            <div id="misc-shots-grid" class="misc-shots-grid"></div>
+          </section>
+          <section class="misc-group" id="misc-logs-group" hidden>
+            <header class="misc-group-header">
+              <strong>Logs</strong>
+              <span id="misc-logs-count" class="misc-count"></span>
+            </header>
+            <ul id="misc-logs-list" class="misc-logs-list"></ul>
+          </section>
         </div>
       </section>
 
@@ -521,6 +552,25 @@
       </div>
     </div>
 
+    <!-- Misc viewer: one overlay for both a screenshot (img) and a log (pre);
+         misc.js shows whichever body applies. -->
+    <div id="misc-viewer" class="modal misc-viewer" hidden>
+      <div class="modal-backdrop" id="misc-viewer-backdrop"></div>
+      <div class="modal-panel misc-viewer-panel" role="dialog" aria-labelledby="misc-viewer-title">
+        <header class="modal-header">
+          <h2 id="misc-viewer-title" class="misc-viewer-title"></h2>
+          <div class="misc-viewer-actions">
+            <button type="button" class="btn-link" id="misc-viewer-reveal">Reveal in Finder</button>
+            <button type="button" class="btn-link" id="misc-viewer-close">Close</button>
+          </div>
+        </header>
+        <div class="modal-body misc-viewer-body">
+          <img id="misc-viewer-img" class="misc-viewer-img" alt="" hidden />
+          <pre id="misc-viewer-log" class="misc-viewer-log" hidden></pre>
+        </div>
+      </div>
+    </div>
+
     <div id="toast" class="toast" hidden></div>
 
     <div id="import-error-report" class="error-report" hidden>
@@ -758,6 +808,7 @@
     <script src="table.js"></script>
     <script src="library.js"></script>
     <script src="notebooks.js"></script>
+    <script src="misc.js"></script>
     <script type="module" src="reader.js"></script>
   </body>
 </html>

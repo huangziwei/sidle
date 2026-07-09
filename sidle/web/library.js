@@ -14,7 +14,7 @@ const state = {
   // When grouped, the series whose contents are being browsed, or null at the
   // top level. Ephemeral navigation — never persisted.
   seriesView: null, // string | null
-  section: "books", // 'books' | 'notes' | 'device' — top-level tab (device = Kindle page)
+  section: "books", // 'books' | 'notes' | 'misc' | 'device' — top-level tab (device = Kindle page)
   sort: { key: "imported_at", asc: false },
   // Facet filters: AND across facets, OR within. Each Set holds the
   // currently-selected values for that facet. See extractFacetValues for
@@ -128,9 +128,10 @@ const booksSelection = new window.SelectionController({
 // keyboard handlers in wireSelection() are written against this, so they're
 // section-agnostic.
 function activeController() {
-  // The Kindle page has no selectable items — return no controller so the lasso
-  // and the Esc/Cmd-A handlers (which bail on a null controller) stay inert there.
-  if (state.section === "device") return null;
+  // The Kindle page and the Misc tab have no selectable items — return no
+  // controller so the lasso and the Esc/Cmd-A handlers (which bail on a null
+  // controller) stay inert there.
+  if (state.section === "device" || state.section === "misc") return null;
   if (state.section === "notes") {
     return window.Notebooks ? window.Notebooks.selection() : null;
   }
@@ -335,6 +336,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     window.Notebooks.setView(state.view);
     window.Notebooks.show();
   }
+  // Likewise for the Misc tab (screenshots + logs backed up on Sync).
+  if (state.section === "misc") window.Misc?.show();
 });
 
 function loadPreferences() {
@@ -376,7 +379,7 @@ function loadPreferences() {
   const search = localStorage.getItem("search");
   if (typeof search === "string") state.search = search;
   const section = localStorage.getItem("section");
-  if (section === "notes") state.section = "notes";
+  if (section === "notes" || section === "misc") state.section = section;
   applySection();
 }
 
@@ -407,6 +410,7 @@ function wireToolbar() {
   $("#series-back").addEventListener("click", () => exitSeries());
   $("#section-books").addEventListener("click", () => setSection("books"));
   $("#section-notes").addEventListener("click", () => setSection("notes"));
+  $("#section-misc").addEventListener("click", () => setSection("misc"));
   $("#btn-notes-import").addEventListener("click", () => {
     if (window.Notebooks) window.Notebooks.importDevice();
   });
@@ -493,13 +497,14 @@ function setGroup(g) {
 }
 
 // The library section to fall back to when leaving the Kindle page (the pill
-// toggles device ⇄ here). Only ever 'books' or 'notes'.
+// toggles device ⇄ here). Only ever 'books', 'notes', or 'misc' (never 'device').
 let lastLibrarySection = "books";
 
-// Top-level Books / Notes / Kindle split. Books and Notes share the Gallery/List
-// view toggle; switching swaps the action button (Add → Import) and hides the
-// Books-only filter chrome. Notes shows the Scribe notebook grid/list (owned by
-// notebooks.js). 'device' is the full-screen Kindle page (entered via the
+// Top-level Books / Notes / Misc / Kindle split. Books and Notes share the
+// Gallery/List view toggle; switching swaps the action button (Add → Import) and
+// hides the Books-only filter chrome. Notes shows the Scribe notebook grid/list
+// (owned by notebooks.js); Misc shows the screenshots + logs backed up on Sync
+// (owned by misc.js). 'device' is the full-screen Kindle page (entered via the
 // upper-right pill or `\`) — transient: never persisted, never the boot home.
 function setSection(s) {
   state.section = s;
@@ -517,6 +522,10 @@ function setSection(s) {
     if (s === "notes") window.Notebooks.show();
     else window.Notebooks.hide();
   }
+  if (window.Misc) {
+    if (s === "misc") window.Misc.show();
+    else window.Misc.hide();
+  }
   if (s === "device") {
     // Entering the Kindle page: re-pull device / KUAL / LAN state. Lives here
     // (not the pill handler) so the `\` shortcut refreshes too.
@@ -533,36 +542,44 @@ function setSection(s) {
 
 function applySection() {
   const notes = state.section === "notes";
+  const misc = state.section === "misc";
   const device = state.section === "device";
   const books = state.section === "books";
-  // Section tabs light up for their own section. Neither Books nor Notes is
+  // Neither the Gallery/List toggle nor a library filter belongs on the Kindle
+  // page or the Misc tab (both are read-only surfaces, not a book library), so
+  // they collapse the toolbar to just the section tabs.
+  const bare = device || misc;
+  // Section tabs light up for their own section. None of Books/Notes/Misc is
   // active on the Kindle page — the upper-right pill carries that state instead.
   $("#section-books").classList.toggle("active", books);
   $("#section-notes").classList.toggle("active", notes);
+  $("#section-misc").classList.toggle("active", misc);
   $("#section-books").setAttribute("aria-selected", String(books));
   $("#section-notes").setAttribute("aria-selected", String(notes));
+  $("#section-misc").setAttribute("aria-selected", String(misc));
   // The pill doubles as the Kindle-page tab — mark it active there.
   $("#device-pill").classList.toggle("active", device);
-  // Add… (Books only) and Import (Notes only); both gone on the device page.
+  // Add… (Books only) and Import (Notes only); both gone elsewhere.
   $("#btn-add").hidden = !books;
   $("#btn-notes-import").hidden = !notes;
-  // The Kindle page is device-management, not a library — strip ALL library
-  // chrome. Notes keeps the Gallery/List toggle + separators; only the device
-  // page also hides the view toggle and both toolbar separators (the section↔view
-  // one and #view-sep), so the toolbar-group collapses to just Books/Notes.
-  $("#filter-bar").hidden = notes || device;
+  // Notes keeps the Gallery/List toggle + separators; the Kindle page and Misc
+  // hide the view toggle and both toolbar separators (the section↔view one and
+  // #view-sep) so the toolbar-group collapses to just the section tabs.
+  $("#filter-bar").hidden = notes || bare;
   const search = document.querySelector(".filter-search");
-  if (search) search.hidden = notes || device;
-  $("#view-seg").hidden = device;
-  $("#view-sep").hidden = device;
+  if (search) search.hidden = notes || bare;
+  $("#view-seg").hidden = bare;
+  $("#view-sep").hidden = bare;
   // First .toolbar-sep in DOM order is the section↔view divider (no id of its own).
   const sectionSep = document.querySelector(".toolbar-sep");
-  if (sectionSep) sectionSep.hidden = device;
-  // `#notes` / `#device-page` use the same `.view`/`.view.active` system: the
-  // `active` class (not `hidden`) is what `display: block`s them. applyView()
-  // owns the book views, which stay inactive whenever the section isn't Books.
+  if (sectionSep) sectionSep.hidden = bare;
+  // `#notes` / `#misc` / `#device-page` use the same `.view`/`.view.active`
+  // system: the `active` class (not `hidden`) is what `display: block`s them.
+  // applyView() owns the book views, which stay inactive when section isn't Books.
   $("#notes").classList.toggle("active", notes);
   $("#notes").hidden = !notes;
+  $("#misc").classList.toggle("active", misc);
+  $("#misc").hidden = !misc;
   $("#device-page").classList.toggle("active", device);
   $("#device-page").hidden = !device;
   applyView();
@@ -2588,19 +2605,23 @@ function subscribePullProgress() {
 function annotationSyncSummary(report) {
   const added = report?.annotations?.inserted ?? 0;
   const inkPages = report?.ink_pages ?? 0;
-  if (added === 0 && inkPages === 0) return "Annotations already up to date";
-  const books = report?.matched ?? 0;
-  const from = books > 0 ? ` across ${books} book${books === 1 ? "" : "s"}` : "";
-  let s = "";
+  const shots = report?.misc_screenshots ?? 0;
+  const logs = report?.misc_logs ?? 0;
+
+  const parts = [];
   if (added > 0) {
-    const noun = added === 1 ? "annotation" : "annotations";
-    s = `synced ${added} ${noun}${from}`;
+    const books = report?.matched ?? 0;
+    const from = books > 0 ? ` across ${books} book${books === 1 ? "" : "s"}` : "";
+    parts.push(`${added} annotation${added === 1 ? "" : "s"}${from}`);
   }
-  if (inkPages > 0) {
-    const ink = `${inkPages} handwritten page${inkPages === 1 ? "" : "s"}`;
-    s = s ? `${s}; ${ink}` : `synced ${ink}`;
-  }
-  return s.charAt(0).toUpperCase() + s.slice(1);
+  if (inkPages > 0) parts.push(`${inkPages} handwritten page${inkPages === 1 ? "" : "s"}`);
+  if (shots > 0) parts.push(`${shots} screenshot${shots === 1 ? "" : "s"}`);
+  if (parts.length > 0) return `Synced ${parts.join("; ")}`;
+
+  // Nothing new to sync. Logs refresh on every sync (they grow by appending), so
+  // surface them only as the fallback message rather than on every toast.
+  if (logs > 0) return `Backed up ${logs} log${logs === 1 ? "" : "s"}`;
+  return "Annotations already up to date";
 }
 
 // Manual re-sync from the device popover button.
@@ -2623,6 +2644,7 @@ async function syncAnnotations() {
     const report = await window.api.invoke("annotations_import_from_device");
     showToast(annotationSyncSummary(report));
     window.sidleReader?.reloadAnnotations?.();
+    window.Misc?.invalidate(); // new screenshots/logs may have landed
   } catch (e) {
     showToast(`annotation sync failed: ${e}`, true);
   } finally {
@@ -2677,6 +2699,7 @@ async function restoreFromDevice() {
       showToast("Nothing to restore — backup already matches the device");
     }
     window.sidleReader?.reloadAnnotations?.();
+    window.Misc?.invalidate(); // restore re-pulls everything, misc included
   } catch (e) {
     showToast(`restore failed: ${e}`, true);
   } finally {
@@ -2707,11 +2730,15 @@ function subscribeAnnotationSync() {
     const report = e.payload;
     const added = report?.annotations?.inserted ?? 0;
     const inkPages = report?.ink_pages ?? 0;
-    // Only toast when the sync actually added something — a no-op reconnect
-    // shouldn't nag.
-    if (added > 0 || inkPages > 0) showToast(annotationSyncSummary(report));
+    const shots = report?.misc_screenshots ?? 0;
+    // Only toast when the sync actually pulled something new — a no-op reconnect
+    // shouldn't nag. New screenshots count; refreshed logs don't (they update on
+    // every sync, so they'd toast on every connect).
+    if (added > 0 || inkPages > 0 || shots > 0) showToast(annotationSyncSummary(report));
     // If the user is reading one of the synced books, repaint in place.
     window.sidleReader?.reloadAnnotations?.();
+    // New screenshots/logs may have landed — refresh the Misc tab if it's open.
+    window.Misc?.invalidate();
   });
   window.api.listen("annotations:sync-error", (e) => {
     state.annotationSync = false;

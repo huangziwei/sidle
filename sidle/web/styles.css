@@ -3351,3 +3351,142 @@ kbd {
   border-radius: 4px;
   padding: 1px 4px;
 }
+
+/* ── Misc. tab: screenshots + KUAL logs backed up on Sync ─────────────────── */
+
+.misc-group {
+  margin-bottom: 28px;
+}
+.misc-group[hidden] {
+  display: none;
+}
+.misc-group-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.misc-group-header strong {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.misc-count {
+  font-size: 12px;
+  color: var(--muted);
+}
+.misc-count::before {
+  content: "·";
+  margin-right: 6px;
+}
+.empty-hint {
+  font-size: 13px;
+}
+
+/* Screenshot thumbnail grid. Kindle screens are portrait, so tiles are tall. */
+.misc-shots-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 16px;
+}
+.misc-shot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  color: var(--muted);
+  text-align: center;
+}
+.misc-shot img {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: contain;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+.misc-shot:hover img {
+  border-color: var(--accent);
+}
+.misc-shot-cap {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Log list. */
+.misc-logs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.misc-log-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.misc-log-name {
+  font-size: 14px;
+}
+.misc-log-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* Viewer overlay: reuses .modal, but wider (screenshots/logs need room) and
+   with a plain flex body instead of the metadata modal's 2-column grid. */
+.misc-viewer-panel {
+  width: min(900px, 100%);
+  height: min(90vh, 100%);
+}
+.misc-viewer .modal-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.misc-viewer-actions {
+  display: flex;
+  gap: 14px;
+  flex-shrink: 0;
+}
+.misc-viewer-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.misc-viewer-body {
+  display: block;
+  grid-template-columns: none;
+  padding: 16px 20px;
+  overflow: auto;
+  flex: 1;
+}
+.misc-viewer-img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  margin: 0 auto;
+  object-fit: contain;
+}
+.misc-viewer-log {
+  margin: 0;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

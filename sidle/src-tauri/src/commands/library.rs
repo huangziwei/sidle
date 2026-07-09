@@ -713,14 +713,16 @@ fn swap_or_insert_kfx_cover(book: &BookRow, kfx: &str, bytes: &[u8], tag: &str) 
             // failure on a KFX-sourced book is just logged, not "healed".
             let epub_is_source = book.kind.as_deref() == Some("epub_to_kfx");
             let Some(epub) = book.epub_path.as_deref().filter(|_| epub_is_source) else {
-                eprintln!("[sidle/{tag}] book {} kfx cover swap failed: {e:#}", book.id);
+                eprintln!(
+                    "[sidle/{tag}] book {} kfx cover swap failed: {e:#}",
+                    book.id
+                );
                 return None;
             };
-            let reconvert = kfx_cover::reconvert_from_epub(
-                std::path::Path::new(epub),
-                kfx_path,
-                |src| crate::queue::worker::book_metadata_override(src, book),
-            );
+            let reconvert =
+                kfx_cover::reconvert_from_epub(std::path::Path::new(epub), kfx_path, |src| {
+                    crate::queue::worker::book_metadata_override(src, book)
+                });
             match reconvert {
                 Ok(sha) => {
                     eprintln!(

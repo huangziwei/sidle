@@ -130,6 +130,9 @@ pub fn run() {
             commands::notebook::notebook_import_folder,
             commands::notebook::notebook_import_device,
             commands::notebook::notebook_export_pdf,
+            commands::misc::misc_list,
+            commands::misc::misc_read_text,
+            commands::misc::misc_reveal,
         ])
         .on_window_event(|window, event| {
             // macOS convention: the red close button (and Cmd+W) closes the

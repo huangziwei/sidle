@@ -603,6 +603,169 @@ pub fn push_book(agent: &ureq::Agent, cfg: &ServerConfig, path: &Path) -> Result
     })
 }
 
+// ---------------------------------------------------------------------------
+// Misc backup push — POST /sync/misc (screenshots + KUAL logs, the WiFi backup)
+// ---------------------------------------------------------------------------
+
+/// The push bundle: each screenshot / KUAL log, base64 in JSON. Mirrors
+/// `sidle-server`'s `MiscSyncRequest`. `device_serial` comes from `server.conf`.
+#[derive(Serialize)]
+struct MiscRequest {
+    device_serial: String,
+    files: Vec<MiscFile>,
+}
+
+#[derive(Serialize)]
+struct MiscFile {
+    name: String,
+    data_b64: String,
+}
+
+/// The server's `MiscSyncResult` — what it backed up, for the picker's toast.
+#[derive(Debug, Default, Deserialize)]
+pub struct MiscReport {
+    #[serde(default)]
+    pub screenshots: usize,
+    #[serde(default)]
+    pub logs: usize,
+}
+
+impl MiscReport {
+    /// A terse toast fragment like `2 screenshots, 1 log`, or `None` when the
+    /// push backed nothing up (so the caller omits it entirely).
+    pub fn summary(&self) -> Option<String> {
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let mut parts = Vec::new();
+        if self.screenshots > 0 {
+            parts.push(format!(
+                "{} screenshot{}",
+                self.screenshots,
+                plural(self.screenshots)
+            ));
+        }
+        if self.logs > 0 {
+            parts.push(format!("{} log{}", self.logs, plural(self.logs)));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(", "))
+        }
+    }
+}
+
+/// Push the Kindle's screenshots + KUAL logs to `POST /sync/misc` — the WiFi
+/// backup the desktop "Misc." tab views. `us_root` is `/mnt/us`. Sends everything
+/// each Sync; the server dedups screenshots (copy-if-absent) and refreshes logs
+/// (overwrite), so a re-run is cheap on the server even though the bytes cross
+/// the LAN again. Returns the server's [`MiscReport`].
+pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Result<MiscReport> {
+    if cfg.serial.is_empty() {
+        return Err(anyhow!(
+            "server.conf has no SERIAL= — re-run Update KUAL in the desktop app \
+             (backups are keyed per device)"
+        )
+        .into());
+    }
+
+    let files = collect_misc_files(us_root);
+    if files.is_empty() {
+        // Nothing on the device to back up — skip the round-trip.
+        return Ok(MiscReport::default());
+    }
+
+    let req = MiscRequest {
+        device_serial: cfg.serial.clone(),
+        files,
+    };
+    let body = serde_json::to_vec(&req).context("serialize misc request")?;
+
+    let url = format!("http://{}:{}/sync/misc", cfg.host, cfg.port);
+    let res = match agent
+        .post(&url)
+        .set("X-Sidle-Token", &cfg.token)
+        .set("Content-Type", "application/json")
+        .timeout(SYNC_TIMEOUT)
+        .send_bytes(&body)
+    {
+        Ok(res) => res,
+        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            return Err(SidleError::TokenMismatch);
+        }
+        Err(e) => return Err(anyhow!("POST {url}: {e}").into()),
+    };
+    let body = res
+        .into_string()
+        .with_context(|| format!("read body of {url}"))?;
+    let report: MiscReport = serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
+    Ok(report)
+}
+
+/// Read every screenshot (`screenshot*` under `screenshots/` and the USB root)
+/// and KUAL log (`*.log` at the root) beneath `us_root`, base64 each. Dedups by
+/// filename so a screenshot in both `screenshots/` and the root is sent once.
+/// Best-effort per file: an unreadable / empty one is skipped.
+fn collect_misc_files(us_root: &Path) -> Vec<MiscFile> {
+    let mut files = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    // `screenshots/` — everyone's screenshots (Sidle's own + newer stock firmware).
+    gather_misc(&us_root.join("screenshots"), true, &mut files, &mut seen);
+    // USB root — KOA2's stock screenshots live loose here; so do our KUAL logs.
+    gather_misc(us_root, false, &mut files, &mut seen);
+    files
+}
+
+/// Append matching files from one directory (non-recursive) to `out`. With
+/// `shots_only`, only screenshots match; otherwise screenshots AND logs. `seen`
+/// dedups by filename across the two scanned directories.
+fn gather_misc(
+    dir: &Path,
+    shots_only: bool,
+    out: &mut Vec<MiscFile>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let wanted = if shots_only {
+            is_screenshot(&name)
+        } else {
+            is_screenshot(&name) || is_log(&name)
+        };
+        if !wanted || seen.contains(&name) {
+            continue;
+        }
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue; // only files carry bytes
+        }
+        match std::fs::read(entry.path()) {
+            Ok(bytes) if !bytes.is_empty() => {
+                seen.insert(name.clone());
+                out.push(MiscFile {
+                    name,
+                    data_b64: BASE64.encode(&bytes),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A Kindle screenshot filename (either generation), case-insensitive. Mirrors
+/// `sidle_core::library::device_backup::classify_misc` — the native crate can't
+/// depend on sidle-core across the cross-compile boundary.
+fn is_screenshot(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("screenshot") && !lower.ends_with(".partial")
+}
+
+/// A KUAL log filename (`*.log`), case-insensitive. Mirrors core's `classify_misc`.
+fn is_log(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".log")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,6 +885,59 @@ mod tests {
         // documents/Sidle doesn't exist → empty bundle, no error.
         let sdrs = collect_sidecars(&base.join("documents/Sidle")).unwrap();
         assert!(sdrs.is_empty());
+    }
+
+    #[test]
+    fn collect_misc_files_scans_both_locations_and_dedups() {
+        let us = scratch("misc");
+        std::fs::create_dir_all(us.join("screenshots")).unwrap();
+        // Newer-style screenshots under screenshots/.
+        std::fs::write(us.join("screenshots/screenshot_100.png"), b"A").unwrap();
+        std::fs::write(us.join("screenshots/screenshot_200.png"), b"B").unwrap();
+        // KOA2 stock capture loose in the root + a KUAL log; and one name that
+        // appears in BOTH screenshots/ and the root (must be sent only once).
+        std::fs::write(us.join("Screenshot_root.png"), b"C").unwrap();
+        std::fs::write(us.join("sidle-native.log"), b"log\n").unwrap();
+        std::fs::write(us.join("screenshot_100.png"), b"DUP").unwrap();
+        // Unrelated root files that must be ignored.
+        std::fs::write(us.join("version.txt"), b"5.16").unwrap();
+
+        let files = collect_misc_files(&us);
+        let mut names: Vec<_> = files.iter().map(|f| f.name.clone()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "Screenshot_root.png",
+                "screenshot_100.png",
+                "screenshot_200.png",
+                "sidle-native.log",
+            ],
+            "both dirs scanned, dup name collapsed, non-misc ignored"
+        );
+        // The screenshots/ copy wins the dedup (its bytes, not the root DUP).
+        let hundred = files
+            .iter()
+            .find(|f| f.name == "screenshot_100.png")
+            .unwrap();
+        assert_eq!(hundred.data_b64, BASE64.encode(b"A"));
+
+        let _ = std::fs::remove_dir_all(&us);
+    }
+
+    #[test]
+    fn misc_report_summary() {
+        assert_eq!(MiscReport::default().summary(), None);
+        let r = MiscReport {
+            screenshots: 2,
+            logs: 1,
+        };
+        assert_eq!(r.summary().as_deref(), Some("2 screenshots, 1 log"));
+        let r = MiscReport {
+            screenshots: 1,
+            logs: 0,
+        };
+        assert_eq!(r.summary().as_deref(), Some("1 screenshot"));
     }
 
     #[test]

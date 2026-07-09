@@ -278,6 +278,39 @@ impl LibraryPaths {
         }
     }
 
+    // ── Misc device backup (screenshots + KUAL logs) ────────────────────────
+    // Layout: `device-backup/<serial>/{screenshots/*.png, logs/*.log}` — the
+    // diagnostic artifacts pulled off a Kindle on Sync (see
+    // `device::misc::backup_device_misc`). Keyed by device serial because logs
+    // share a filename (`sidle-native.log`) across devices and would otherwise
+    // clobber each other.
+
+    /// Root holding every device's misc backup, one `<serial>/` subdir each.
+    pub fn device_backup_dir(&self) -> PathBuf {
+        self.root.join("device-backup")
+    }
+
+    /// Screenshots pulled off one device (`screenshot_*.png`).
+    pub fn device_backup_screenshots(&self, serial: &str) -> PathBuf {
+        self.device_backup_dir()
+            .join(sanitize_device_id(serial))
+            .join("screenshots")
+    }
+
+    /// KUAL native-app logs pulled off one device (`sidle-native.log`, …).
+    pub fn device_backup_logs(&self, serial: &str) -> PathBuf {
+        self.device_backup_dir()
+            .join(sanitize_device_id(serial))
+            .join("logs")
+    }
+
+    /// Create both misc-backup subdirs for one device.
+    pub fn ensure_device_backup(&self, serial: &str) -> std::io::Result<()> {
+        std::fs::create_dir_all(self.device_backup_screenshots(serial))?;
+        std::fs::create_dir_all(self.device_backup_logs(serial))?;
+        Ok(())
+    }
+
     // ── Handwritten ink on a sideloaded doc (PDOC) ──────────────────────────
     // Layout: `books/<sha>/ink/<asin>/{nbk, <container>.overlay.svg,
     // <container>.plain.svg}` — the raw nbk backup (survives a device wipe) plus
@@ -336,6 +369,19 @@ fn sanitize_ink_id(id: &str) -> String {
             }
         })
         .collect()
+}
+
+/// A device serial as a single path segment for `device-backup/<serial>/`.
+/// Serials are alphanumeric in practice ([`sanitize_ink_id`] keeps those), but
+/// fall back to a fixed name when the transport couldn't read one — an empty
+/// segment would collapse the backup dirs into their parent.
+fn sanitize_device_id(serial: &str) -> String {
+    let s = sanitize_ink_id(serial);
+    if s.is_empty() {
+        "unknown-device".to_string()
+    } else {
+        s
+    }
 }
 
 /// Length of the sha256 prefix used as the on-device filename infix

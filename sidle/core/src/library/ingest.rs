@@ -368,6 +368,14 @@ pub struct DeviceImportReport {
     pub ink_pages: usize,
     /// Ink notebooks skipped because their `nbk` was unchanged since last sync.
     pub ink_unchanged: usize,
+    /// Screenshots newly backed up off the device this sync (`screenshot_*.png`
+    /// → `device-backup/<serial>/screenshots/`). Populated by the app layer's
+    /// `device::misc::backup_device_misc`; 0 on the pure-core import paths.
+    pub misc_screenshots: usize,
+    /// KUAL native-app logs refreshed off the device this sync (`*.log` at the
+    /// USB root → `device-backup/<serial>/logs/`). App-populated, like
+    /// [`misc_screenshots`](Self::misc_screenshots).
+    pub misc_logs: usize,
 }
 
 /// The reading-state sidecars pulled from one `.sdr` directory, tagged with the
