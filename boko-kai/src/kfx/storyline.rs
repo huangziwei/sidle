@@ -745,44 +745,6 @@ fn is_short_ascii_digit_run(text: &str) -> bool {
     matches!(text.len(), 1 | 2) && text.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Whether an element's *entire* content is a short ASCII-digit run with no
-/// block-level descendants — e.g. a chapter-number heading `<h3>1</h3>` whose
-/// digit sits in a child `Text` node. Any block child, or more than two total
-/// bytes, disqualifies it (so paragraphs and mixed headings bail immediately).
-fn is_short_digit_leaf(chapter: &Chapter, node_id: NodeId) -> bool {
-    let mut text = String::new();
-    if collect_pure_inline_text(chapter, node_id, &mut text) {
-        is_short_ascii_digit_run(&text)
-    } else {
-        false
-    }
-}
-
-/// Append an element's inline text (`Text`/`Inline`/`Link` descendants) to
-/// `out`, returning `false` as soon as a block-level child is hit or the buffer
-/// exceeds the short-run cap — both mean the element isn't a pure short-number
-/// leaf, so callers stop early without walking a whole paragraph.
-fn collect_pure_inline_text(chapter: &Chapter, node_id: NodeId, out: &mut String) -> bool {
-    for child_id in chapter.children(node_id) {
-        let Some(child) = chapter.node(child_id) else {
-            continue;
-        };
-        match child.role {
-            Role::Text => out.push_str(chapter.text(child.text)),
-            Role::Inline | Role::Link => {
-                if !collect_pure_inline_text(chapter, child_id, out) {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-        if out.len() > 2 {
-            return false;
-        }
-    }
-    true
-}
-
 /// Roles that flatten into their parent's inline text run (Text/Break become
 /// characters; Link/Inline/Ruby become style_events) rather than emitting their
 /// own KFX structure. Used to distinguish a bordered *leaf* element (inline
@@ -859,7 +821,24 @@ fn walk_node_for_export(
         if !node.text.is_empty() {
             let text = chapter.text(node.text);
             if !text.is_empty() {
-                stream.push(KfxToken::Text(text.to_string()));
+                if ctx.is_vertical_document() && is_short_ascii_digit_run(text) {
+                    // Tate-chu-yoko (縦中横): a standalone short digit run (a
+                    // chapter-number heading `<h3>1</h3>`, a short count) is
+                    // wrapped in an inline `text_combine` span so the device
+                    // lays the digits out upright in one cell instead of
+                    // rotating them sideways. `register_tatechuyoko_style`
+                    // supplies the horizontal_tb + character_width the device
+                    // needs; `render: inline` (via StartSpan/EndSpan) matches
+                    // how Amazon's own vertical KFX applies it.
+                    let combine = ctx.register_tatechuyoko_style();
+                    let mut span = SpanStart::new(Role::Inline, 0, 0);
+                    span.style_symbol = Some(combine);
+                    stream.push(KfxToken::StartSpan(span));
+                    stream.push(KfxToken::Text(text.to_string()));
+                    stream.push(KfxToken::EndSpan);
+                } else {
+                    stream.push(KfxToken::Text(text.to_string()));
+                }
             }
         }
         return;
@@ -908,19 +887,7 @@ fn walk_node_for_export(
     // identifiers like "bold" / "vrtl" survive into the KFX style symbol
     // table instead of becoming opaque `s<N>` names.
     let class_hint = chapter.semantics.class(node_id);
-    // Tate-chu-yoko (縦中横): in a vertical book an element whose entire content
-    // is a 1–2 digit ASCII run (a chapter-number heading like `<h3>1</h3>`, a
-    // short count) should sit upright in one combined cell, not rotated
-    // sideways like a Latin word. The digit lives in a child Text node, so we
-    // check the element's collected inline text. Register a text_combine
-    // variant of the element's own style so its font/alignment carry over;
-    // longer numbers (years) keep the default sideways orientation, matching
-    // conventional vertical CJK typography.
-    let style_symbol = if ctx.is_vertical_document() && is_short_digit_leaf(chapter, node_id) {
-        ctx.register_tatechuyoko_style_id(node.style, &chapter.styles)
-    } else {
-        ctx.register_style_id_with_hint(node.style, &chapter.styles, class_hint)
-    };
+    let style_symbol = ctx.register_style_id_with_hint(node.style, &chapter.styles, class_hint);
     elem.style_symbol = Some(style_symbol);
 
     // Check if this element needs container wrapping for borders to render

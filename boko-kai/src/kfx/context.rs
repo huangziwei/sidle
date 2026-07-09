@@ -1000,7 +1000,8 @@ impl ExportContext {
         let mut builder = crate::kfx::style_registry::StyleBuilder::new(schema);
         let ir_style = self.box_transposed_ir_style(ir_style);
         builder.ingest_ir_style(&ir_style, self.ir_style_baseline_writing_mode());
-        let kfx_style = builder.build();
+        let mut kfx_style = builder.build();
+        finalize_tatechuyoko(&mut kfx_style);
         self.style_registry
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
     }
@@ -1032,6 +1033,7 @@ impl ExportContext {
                 }),
             );
         }
+        finalize_tatechuyoko(&mut kfx_style);
         self.style_registry
             .register_with_hint(kfx_style, class_hint, &mut self.symbols)
     }
@@ -1063,28 +1065,21 @@ impl ExportContext {
         }
     }
 
-    /// Register a node's style with tate-chu-yoko (縦中横) forced on — for a
-    /// leaf whose text is a short digit run in a vertical book (e.g. a
-    /// chapter-number heading). Clones the resolved style so font/alignment
-    /// carry over, sets `text_combine_upright: all`, and registers the variant
-    /// (anonymously — a synthetic combine style needs no source class name).
-    /// The device then renders the digits upright in one cell instead of
-    /// rotating them sideways, and the reader honors it via
-    /// `text-combine-upright`. Falls back to the default symbol when the id
-    /// doesn't resolve.
-    pub fn register_tatechuyoko_style_id(
-        &mut self,
-        style_id: StyleId,
-        style_pool: &crate::style::StylePool,
-    ) -> u64 {
-        let mut s = if style_id == StyleId::DEFAULT {
-            crate::style::ComputedStyle::default()
-        } else if let Some(base) = style_pool.get(style_id) {
-            base.clone()
-        } else {
-            return self.default_style_symbol;
+    /// Register the bare tate-chu-yoko (縦中横) style and return its symbol.
+    /// The style carries only `text_combine_upright: all`;
+    /// `register_ir_style_with_hint` completes it with `writing_mode:
+    /// horizontal_tb` + `character_width: auto` (see `finalize_tatechuyoko`),
+    /// matching the combine style in Amazon's own vertical CJK KFX. Applied as
+    /// an INLINE span over a short digit run in a vertical book — the digits
+    /// then lay out flat/upright in one cell instead of rotating sideways.
+    /// Inline (not block) is deliberate: Amazon always renders the combine run
+    /// as `render: inline`, and a block-level `text_combine` is ignored by the
+    /// device.
+    pub fn register_tatechuyoko_style(&mut self) -> u64 {
+        let s = crate::style::ComputedStyle {
+            text_combine_upright: crate::style::TextCombineUpright::All,
+            ..Default::default()
         };
-        s.text_combine_upright = crate::style::TextCombineUpright::All;
         self.register_ir_style_with_hint(&s, None)
     }
 
@@ -1350,6 +1345,27 @@ impl ExportContext {
         };
         let gid = GlobalNodeId::new(chapter_id, node_id);
         self.anchor_registry.is_internal_target(gid)
+    }
+}
+
+/// Complete a tate-chu-yoko (縦中横) style. A run marked `text_combine: all`
+/// must lay out horizontally within the vertical column, so Amazon's own KFX
+/// pairs it with `writing_mode: horizontal_tb` + `character_width: auto` on
+/// every combine style. The schema suppresses `horizontal_tb` (it matches the
+/// source's horizontal baseline in a force-vertical book) and has no
+/// `character_width` rule, so set both here whenever a built style carries
+/// text_combine — otherwise the device leaves the digits rotated.
+fn finalize_tatechuyoko(kfx_style: &mut crate::kfx::style_registry::ComputedStyle) {
+    use crate::kfx::style_schema::KfxValue;
+    if matches!(
+        kfx_style.get(KfxSymbol::TextCombine),
+        Some(KfxValue::Symbol(KfxSymbol::All))
+    ) {
+        kfx_style.set(
+            KfxSymbol::WritingMode,
+            KfxValue::Symbol(KfxSymbol::HorizontalTb),
+        );
+        kfx_style.set(KfxSymbol::CharacterWidth, KfxValue::Symbol(KfxSymbol::Auto));
     }
 }
 
