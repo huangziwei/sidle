@@ -364,7 +364,13 @@ class View {
         // The block axis is the one a column spans fully and along which content
         // fragments; its full extent is the page size on that axis.
         const blockExtent = vertical ? width : height
-        const els = [...doc.body.querySelectorAll('img, svg, video')]
+        // `[data-kfx-inline]` marks KFX render:inline glyph images (rare hanzi
+        // with no Unicode code point, sized to the font via `width:1em` so they
+        // scale with the reader's font-size). They flow within text and must
+        // NOT be capped to the column like a block figure — the `width/height:
+        // auto !important` we stamp below would beat their class rule and
+        // re-inflate them to intrinsic pixel size. Leave their author sizing be.
+        const els = [...doc.body.querySelectorAll('img:not([data-kfx-inline]), svg, video')]
         // READ pass: the block-axis space each image's wrapper chain consumes
         // (its own margins + every ancestor's margin/padding/border up to the
         // multicol root). The block cap MUST leave room for it: an image pinned

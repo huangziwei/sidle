@@ -679,17 +679,7 @@ impl<'a> ContentState<'a> {
         // rendering all `render:inline` elements (119 in one CJK novel) as block
         // `<div>`s — a fidelity loss that, among other things, gave heading
         // containers spurious block children and blocked their `<hN>` promotion.
-        if get_field(fields, KfxSymbol::Render as u64)
-            .map(|v| v.unwrap_annotated())
-            .and_then(|v| {
-                if let IonValue::Symbol(s) = v {
-                    Some(*s)
-                } else {
-                    None
-                }
-            })
-            == Some(KfxSymbol::Inline as u64)
-        {
+        if content_render_is_inline(fields) {
             let should_span = {
                 let dom_ref = &self.book_parts[part_index].dom;
                 dom_ref.get(elem_id).tag == "div"
@@ -1102,6 +1092,20 @@ impl<'a> ContentState<'a> {
                 // class the reader rendered them at intrinsic pixel size,
                 // awkwardly oversized and unaffected by the font-size control.
                 self.attach_style(part_index, id, style_name, fields);
+                // Mark KFX `render:inline` images so the reader's paginator
+                // leaves their author sizing intact. Those are inline-flow
+                // glyph images (the `width:1em` case above); the paginator's
+                // `setImageSize` otherwise stamps `width/height:auto !important`
+                // on every `<img>` to fit block figures to the column, which
+                // beats the class rule and re-inflates the glyph to intrinsic
+                // size. Reader-mode only (same gate as `data-eid`) — external
+                // EPUB readers don't run that paginator.
+                if self.stamp_eids && content_render_is_inline(fields) {
+                    self.book_parts[part_index]
+                        .dom
+                        .get_mut(id)
+                        .set("data-kfx-inline", "1");
+                }
                 Ok(id)
             }
             // The image bytes are not embedded in this KFX (Amazon didn't ship
@@ -2015,6 +2019,19 @@ fn get_location_id(fields: &[(u64, IonValue)]) -> Option<i64> {
     get_field(fields, KfxSymbol::Id as u64)
         .and_then(|v| v.as_int())
         .or_else(|| get_field(fields, KfxSymbol::KfxId as u64).and_then(|v| v.as_int()))
+}
+
+/// `$601 render == $283 inline` (calibre `yj_to_epub_content.py:1278`): the KFX
+/// element requests inline rendering. Drives the `<div>`→`<span>` demotion for
+/// containers and the `data-kfx-inline` reader hint for glyph images.
+fn content_render_is_inline(fields: &[(u64, IonValue)]) -> bool {
+    get_field(fields, KfxSymbol::Render as u64)
+        .map(|v| v.unwrap_annotated())
+        .and_then(|v| match v {
+            IonValue::Symbol(s) => Some(*s),
+            _ => None,
+        })
+        == Some(KfxSymbol::Inline as u64)
 }
 
 /// Look up a fragment of the given KFX type by name.
