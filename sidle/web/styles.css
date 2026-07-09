@@ -109,6 +109,12 @@ button {
   border-radius: 6px;
   overflow: hidden;
 }
+/* The author `display: inline-flex` above shadows the UA `[hidden]{display:none}`,
+   so `$("#view-seg").hidden = true` (Misc + Kindle pages, which have no
+   Gallery/List) wouldn't hide it. Restore it — same fix as .filter-bar/.seg peers. */
+.seg[hidden] {
+  display: none;
+}
 
 .seg-btn {
   background: transparent;
@@ -3393,9 +3399,14 @@ kbd {
   gap: 16px;
 }
 .misc-shot {
+  position: relative;
+  display: flex;
+}
+.misc-shot-open {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  width: 100%;
   padding: 0;
   background: none;
   border: none;
@@ -3404,7 +3415,7 @@ kbd {
   color: var(--muted);
   text-align: center;
 }
-.misc-shot img {
+.misc-shot-open img {
   width: 100%;
   aspect-ratio: 3 / 4;
   object-fit: contain;
@@ -3412,7 +3423,7 @@ kbd {
   border: 1px solid var(--border-strong);
   border-radius: 6px;
 }
-.misc-shot:hover img {
+.misc-shot-open:hover img {
   border-color: var(--accent);
 }
 .misc-shot-cap {
@@ -3420,6 +3431,31 @@ kbd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Delete ✕ — appears on tile hover, top-right corner. */
+.misc-shot-del {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.misc-shot:hover .misc-shot-del,
+.misc-shot-del:focus-visible {
+  opacity: 1;
+}
+.misc-shot-del:hover {
+  background: var(--accent);
 }
 
 /* Log list. */
@@ -3443,6 +3479,19 @@ kbd {
   color: var(--muted);
   margin-left: auto;
   white-space: nowrap;
+}
+/* Delete — muted until the row is hovered, accent on hover. */
+.misc-log-del {
+  font-size: 12px;
+  color: var(--muted);
+  opacity: 0;
+}
+.misc-log-row:hover .misc-log-del,
+.misc-log-del:focus-visible {
+  opacity: 1;
+}
+.misc-log-del:hover {
+  color: var(--accent);
 }
 
 /* Viewer overlay: reuses .modal, but wider (screenshots/logs need room) and

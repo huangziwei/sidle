@@ -73,13 +73,21 @@ pub async fn misc_list(state: State<'_, AppState>) -> Result<Vec<MiscFile>, Stri
                 Err(_) => continue, // subdir may not exist for this device
             };
             for file in files.flatten() {
+                let name = file.file_name().to_string_lossy().into_owned();
+                // Skip dotfiles: our backups are `screenshot_*.png` / `*.log`,
+                // never hidden, so anything starting with `.` is macOS junk
+                // (`.DS_Store`, `._*` resource forks) that Finder dropped here —
+                // e.g. after a "Reveal in Finder". Don't surface it as a screenshot.
+                if name.starts_with('.') {
+                    continue;
+                }
                 let meta = match file.metadata() {
                     Ok(m) if m.is_file() => m,
                     _ => continue,
                 };
                 out.push(MiscFile {
                     kind: kind.to_string(),
-                    name: file.file_name().to_string_lossy().into_owned(),
+                    name,
                     path: file.path().to_string_lossy().into_owned(),
                     size: meta.len(),
                     modified: mtime_iso(&meta),
@@ -138,6 +146,19 @@ pub async fn misc_reveal(
     app.opener()
         .reveal_item_in_dir(p)
         .map_err(|e| e.to_string())
+}
+
+/// Delete one backed-up screenshot / log copy. Local only — this removes Sidle's
+/// backup, not anything on the Kindle (which the picker already cleared for
+/// screenshots on Sync). `NotFound` is treated as success (idempotent).
+#[tauri::command]
+pub async fn misc_delete(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let p = guard_in_backup(&state, &path)?;
+    match std::fs::remove_file(&p) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("delete {}: {e}", p.display())),
+    }
 }
 
 /// Resolve `path` and confirm it lives inside the `device-backup/` tree, so

@@ -133,6 +133,7 @@ pub fn run() {
             commands::misc::misc_list,
             commands::misc::misc_read_text,
             commands::misc::misc_reveal,
+            commands::misc::misc_delete,
         ])
         .on_window_event(|window, event| {
             // macOS convention: the red close button (and Cmd+W) closes the

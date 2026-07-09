@@ -655,10 +655,12 @@ impl MiscReport {
 }
 
 /// Push the Kindle's screenshots + KUAL logs to `POST /sync/misc` — the WiFi
-/// backup the desktop "Misc." tab views. `us_root` is `/mnt/us`. Sends everything
-/// each Sync; the server dedups screenshots (copy-if-absent) and refreshes logs
-/// (overwrite), so a re-run is cheap on the server even though the bytes cross
-/// the LAN again. Returns the server's [`MiscReport`].
+/// backup the desktop "Misc." tab views. `us_root` is `/mnt/us`. On a successful
+/// push the screenshots are **deleted from the device** (they're safely backed
+/// up now, and a Kindle's screenshot folder is scratch space) — logs stay, since
+/// they're the live append-only diagnostic trail. That clear-on-sync also means
+/// each Sync only re-uploads screenshots taken since the last one. Returns the
+/// server's [`MiscReport`].
 pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Result<MiscReport> {
     if cfg.serial.is_empty() {
         return Err(anyhow!(
@@ -668,7 +670,7 @@ pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Res
         .into());
     }
 
-    let files = collect_misc_files(us_root);
+    let (files, screenshot_paths) = collect_misc_files(us_root);
     if files.is_empty() {
         // Nothing on the device to back up — skip the round-trip.
         return Ok(MiscReport::default());
@@ -698,30 +700,56 @@ pub fn push_misc(agent: &ureq::Agent, cfg: &ServerConfig, us_root: &Path) -> Res
         .into_string()
         .with_context(|| format!("read body of {url}"))?;
     let report: MiscReport = serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
+
+    // The server has them now (a non-2xx would have returned above) — clear the
+    // screenshots off the device. Only screenshots: logs are left in place. Best-
+    // effort; a failed unlink just leaves that file for the next Sync to re-push.
+    // eprintln lands in `sidle-native.log` via sidle.sh's `2>>` redirect.
+    for path in &screenshot_paths {
+        if let Err(e) = std::fs::remove_file(path) {
+            eprintln!(
+                "[sidle/misc] delete {} after sync failed: {e}",
+                path.display()
+            );
+        }
+    }
+
     Ok(report)
 }
 
 /// Read every screenshot (`screenshot*` under `screenshots/` and the USB root)
 /// and KUAL log (`*.log` at the root) beneath `us_root`, base64 each. Dedups by
 /// filename so a screenshot in both `screenshots/` and the root is sent once.
-/// Best-effort per file: an unreadable / empty one is skipped.
-fn collect_misc_files(us_root: &Path) -> Vec<MiscFile> {
+/// Best-effort per file: an unreadable / empty one is skipped. Returns the push
+/// bundle plus the on-device paths of the screenshots in it — those get deleted
+/// after a successful push (see [`push_misc`]).
+fn collect_misc_files(us_root: &Path) -> (Vec<MiscFile>, Vec<std::path::PathBuf>) {
     let mut files = Vec::new();
+    let mut screenshot_paths = Vec::new();
     let mut seen = std::collections::HashSet::new();
     // `screenshots/` — everyone's screenshots (Sidle's own + newer stock firmware).
-    gather_misc(&us_root.join("screenshots"), true, &mut files, &mut seen);
+    gather_misc(
+        &us_root.join("screenshots"),
+        true,
+        &mut files,
+        &mut screenshot_paths,
+        &mut seen,
+    );
     // USB root — KOA2's stock screenshots live loose here; so do our KUAL logs.
-    gather_misc(us_root, false, &mut files, &mut seen);
-    files
+    gather_misc(us_root, false, &mut files, &mut screenshot_paths, &mut seen);
+    (files, screenshot_paths)
 }
 
 /// Append matching files from one directory (non-recursive) to `out`. With
 /// `shots_only`, only screenshots match; otherwise screenshots AND logs. `seen`
-/// dedups by filename across the two scanned directories.
+/// dedups by filename across the two scanned directories. A screenshot's device
+/// path is recorded in `screenshot_paths` so [`push_misc`] can delete it after a
+/// successful push (logs are never recorded — they stay on the device).
 fn gather_misc(
     dir: &Path,
     shots_only: bool,
     out: &mut Vec<MiscFile>,
+    screenshot_paths: &mut Vec<std::path::PathBuf>,
     seen: &mut std::collections::HashSet<String>,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -729,10 +757,11 @@ fn gather_misc(
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
+        let is_shot = is_screenshot(&name);
         let wanted = if shots_only {
-            is_screenshot(&name)
+            is_shot
         } else {
-            is_screenshot(&name) || is_log(&name)
+            is_shot || is_log(&name)
         };
         if !wanted || seen.contains(&name) {
             continue;
@@ -740,9 +769,13 @@ fn gather_misc(
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue; // only files carry bytes
         }
-        match std::fs::read(entry.path()) {
+        let path = entry.path();
+        match std::fs::read(&path) {
             Ok(bytes) if !bytes.is_empty() => {
                 seen.insert(name.clone());
+                if is_shot {
+                    screenshot_paths.push(path);
+                }
                 out.push(MiscFile {
                     name,
                     data_b64: BASE64.encode(&bytes),
@@ -902,7 +935,7 @@ mod tests {
         // Unrelated root files that must be ignored.
         std::fs::write(us.join("version.txt"), b"5.16").unwrap();
 
-        let files = collect_misc_files(&us);
+        let (files, screenshot_paths) = collect_misc_files(&us);
         let mut names: Vec<_> = files.iter().map(|f| f.name.clone()).collect();
         names.sort();
         assert_eq!(
@@ -921,6 +954,22 @@ mod tests {
             .find(|f| f.name == "screenshot_100.png")
             .unwrap();
         assert_eq!(hundred.data_b64, BASE64.encode(b"A"));
+
+        // Only screenshots are queued for on-device deletion — never the log.
+        let mut del: Vec<_> = screenshot_paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        del.sort();
+        assert_eq!(
+            del,
+            vec![
+                "Screenshot_root.png",
+                "screenshot_100.png",
+                "screenshot_200.png"
+            ],
+            "logs must not be scheduled for deletion"
+        );
 
         let _ = std::fs::remove_dir_all(&us);
     }

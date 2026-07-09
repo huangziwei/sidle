@@ -100,24 +100,56 @@
   }
 
   function shotTile(f) {
-    const el = document.createElement("button");
-    el.type = "button";
-    el.className = "misc-shot";
-    el.title = `${f.name} · ${fmtSize(f.size)}${f.modified ? " · " + fmtDate(f.modified) : ""}`;
+    const wrap = document.createElement("div");
+    wrap.className = "misc-shot";
+
+    // The image + caption is the click target (opens the lightbox). A nested
+    // button would be invalid HTML, hence the wrapper div.
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "misc-shot-open";
+    open.title = `${f.name} · ${fmtSize(f.size)}${f.modified ? " · " + fmtDate(f.modified) : ""}`;
 
     const img = document.createElement("img");
     img.loading = "lazy";
     img.alt = f.name;
     img.src = api.fileUrl(f.path);
-    el.appendChild(img);
+    open.appendChild(img);
 
     const cap = document.createElement("span");
     cap.className = "misc-shot-cap";
     cap.textContent = f.modified ? fmtDate(f.modified) : f.name;
-    el.appendChild(cap);
+    open.appendChild(cap);
+    open.addEventListener("click", () => openImage(f));
+    wrap.appendChild(open);
 
-    el.addEventListener("click", () => openImage(f));
-    return el;
+    wrap.appendChild(deleteButton(f, "misc-shot-del", "✕"));
+    return wrap;
+  }
+
+  // A delete control for one backup file: removes the local copy, then refreshes.
+  // `label` is the button text; `cls` its extra class.
+  function deleteButton(f, cls, label) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = cls;
+    btn.title = "Delete this backup copy";
+    btn.textContent = label;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation(); // never trigger the tile/row's own open handler
+      deleteFile(f);
+    });
+    return btn;
+  }
+
+  async function deleteFile(f) {
+    try {
+      await api.invoke("misc_delete", { path: f.path });
+      if (state.viewerPath === f.path) closeViewer();
+      await refresh();
+    } catch (e) {
+      toast(`delete failed: ${e}`, true);
+    }
   }
 
   function renderLogs(logs) {
@@ -147,6 +179,8 @@
     if (f.device) bits.push(f.device);
     meta.textContent = bits.join(" · ");
     li.appendChild(meta);
+
+    li.appendChild(deleteButton(f, "misc-log-del btn-link", "Delete"));
     return li;
   }
 
@@ -203,10 +237,16 @@
     }
   }
 
+  // Delete the file the viewer is currently showing (closes the overlay).
+  async function deleteCurrent() {
+    if (state.viewerPath) await deleteFile({ path: state.viewerPath });
+  }
+
   function wireViewer() {
     q("#misc-viewer-close")?.addEventListener("click", closeViewer);
     q("#misc-viewer-backdrop")?.addEventListener("click", closeViewer);
     q("#misc-viewer-reveal")?.addEventListener("click", revealCurrent);
+    q("#misc-viewer-delete")?.addEventListener("click", deleteCurrent);
     // Esc closes the overlay when it's open. Capture-phase + stopPropagation so
     // it beats library.js's global Esc (clear-selection) while the viewer is up;
     // when the viewer is closed this is inert and Esc falls through as usual.
