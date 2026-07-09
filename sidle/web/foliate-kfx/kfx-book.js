@@ -32,6 +32,13 @@ img, image, svg, video {
   object-fit: contain;
 }
 img[data-kfx-src], image[data-kfx-src] { opacity: 0.15; }
+/* Inline glyph images (rare hanzi drawn as a picture because they have no
+   Unicode code point) are full-width ideographs sized to the font. Default
+   baseline alignment sits the box bottom on the alphabetic baseline, so the
+   image rides up above the hanzi; middle (x-height center) drops it too low.
+   Align the box bottom to the font's descent line — where the surrounding
+   hanzi bottoms sit — so the glyph shares their em-box bottom, font-agnostic. */
+img[data-kfx-inline] { vertical-align: text-bottom; }
 `;
 
 // A transparent SVG data URI with the manifest's intrinsic size, so the layout
