@@ -2662,8 +2662,8 @@ kbd {
 }
 .reader-status-buffered[hidden] { display: none; }
 
-/* Go-to-page: replaces the "Page X" readout in place (notebook mode). Sized to sit
-   within the 28px bar without growing it. */
+/* Go-to input: replaces the readout in place — "Page X" (notebook) or "Loc N"
+   (reflowable go-to-location). Sized to sit within the 28px bar without growing it. */
 .reader-goto-input {
   width: 4.5em;
   font: inherit;

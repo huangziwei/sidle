@@ -1141,6 +1141,9 @@ fn parse_format(fmt: &str) -> Result<Format, String> {
     }
 }
 
+// A CLI command entry point: each argument mirrors a distinct flag, so bundling
+// them into a struct would just add indirection over the parsed options.
+#[allow(clippy::too_many_arguments)]
 fn convert(
     input: &str,
     output: Option<&str>,

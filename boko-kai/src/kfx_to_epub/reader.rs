@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use super::loader::{BookData, BookMetadata};
 use super::navigation::NavPoint;
 use super::resources::{self, DeferredImage};
-use super::text_index::TextIndex;
+use super::text_index::{LocationMap, TextIndex};
 use super::{ConvertError, build_output};
 
 /// One spine document in reading order. `html` is a complete XHTML string with
@@ -141,14 +141,18 @@ pub struct ReaderBook {
     pub writing_mode: String,
     /// Spine progression, e.g. `"rtl"` / `"ltr"`.
     pub page_progression_direction: String,
-    /// `(eid, linear_position)` for positioned elements — the reader's "Location"
-    /// readout. From `position_id_map` ($265) when present (Amazon KFX → the
-    /// device's own Loc numbers); otherwise synthesized from reading order +
-    /// base-text char counts (boko-generated e2k KFX ships no map). The
-    /// `(eid, offset)` anchors that annotations and last-read use are intrinsic
-    /// and independent of this — it's only the cosmetic Loc/% display.
+    /// `(eid, location)` for positioned elements — the reader's "Location"
+    /// readout. `location` is the device's human Loc number: the `position_id_map`
+    /// ($265) pid mapped through the book's `location_map` ($550/$621), so it
+    /// matches what the Kindle shows (a raw pid is ~50× larger). Books with a
+    /// position map but no location map get the device's even 110-pid spacing;
+    /// boko-generated e2k KFX (no map at all) fall back to reading-order
+    /// base-text char counts. The `(eid, offset)` anchors that annotations and
+    /// last-read use are intrinsic and independent of this — it's only the
+    /// cosmetic Loc/% display.
     pub locations: Vec<(i64, i64)>,
-    /// Largest linear position — the denominator for whole-book %.
+    /// Location count — the denominator for whole-book % and the "Loc N of M"
+    /// total (char-count total for the e2k fallback).
     pub max_location: i64,
     /// True when `locations` was NOT computed at open (lazy shape, reflowable
     /// book without a position map): synthesis needs a full-book text walk,
@@ -301,8 +305,19 @@ pub fn kfx_to_reader_book_lazy(
     // it to the store (fetched in the background; display-only data).
     let pid_of = TextIndex::pid_map_from_book(&book);
     let (locations, max_location, locations_deferred) = if !pid_of.is_empty() {
-        let max = pid_of.values().copied().max().unwrap_or(0);
-        (pid_of.into_iter().collect(), max, false)
+        // Amazon KFX ships a position map (eid→pid). Turn each pid into the
+        // device's human "Location" via the book's location_map ($550/$621);
+        // a book that has a position map but no location map falls back to the
+        // device's own even spacing. Emitting the raw pid (as this once did)
+        // inflated the number ~50× and broke position matching with the Kindle.
+        let max_pid = pid_of.values().copied().max().unwrap_or(0);
+        let lm = LocationMap::from_book(&book, &pid_of)
+            .unwrap_or_else(|| LocationMap::approximate(max_pid));
+        let locations = pid_of
+            .iter()
+            .map(|(&eid, &pid)| (eid, lm.location_for_pid(pid)))
+            .collect();
+        (locations, lm.count(), false)
     } else if fixed_layout {
         let (l, m) = synth_locations(&book, &eid_order);
         (l, m, false)

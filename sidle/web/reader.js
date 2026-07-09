@@ -994,7 +994,11 @@ function toggleResumeMenu() {
       name.textContent = label;
       const loc = document.createElement("span");
       loc.className = "rri-loc";
-      loc.textContent = pos.linear_pos != null ? `Loc ${pos.linear_pos}` : "";
+      // The saved position's Location, resolved from its eid through the live
+      // loc map (Kindle scale) — NOT the stored `linear_pos`, which is the raw
+      // device pid (~50× larger). PDF/notebook modes keep the page index.
+      const rloc = readerMode === "reflowable" ? locByEid?.get(pos.eid) : pos.linear_pos;
+      loc.textContent = rloc != null ? `Loc ${rloc}` : "";
       item.append(name, loc);
       item.addEventListener("click", async () => {
         hideResumeMenu();
@@ -1315,10 +1319,14 @@ function searchRow(m, i) {
   preview.append(mark);
   preview.append(document.createTextNode(m.preview_after || ""));
   li.append(preview);
-  if (m.linear_pos != null) {
+  // Show the match's Kindle Location, resolved from its eid through the live
+  // loc map (`m.linear_pos` is the raw device pid, ~50× larger). PDF keeps its
+  // own linear_pos.
+  const sloc = readerMode === "reflowable" ? locByEid?.get(m.eid) : m.linear_pos;
+  if (sloc != null) {
     const loc = document.createElement("div");
     loc.className = "search-row-loc";
-    loc.textContent = `Loc ${m.linear_pos}`;
+    loc.textContent = `Loc ${sloc}`;
     li.append(loc);
   }
   li.addEventListener("click", () => jumpToSearchMatch(m, i));
@@ -1707,6 +1715,73 @@ function cycleProgressMode() {
   else renderProgress();
 }
 
+// ---- go to Location --------------------------------------------------------
+
+// Jump to reader "Location" N — the same number shown in the readout and on the
+// Kindle. Inverts the eid→loc map: the last indexed element at or before N (a
+// location spans ~110 pids, so this lands inside the target location). The
+// relocate that follows refreshes the readout.
+async function jumpToLocation(n) {
+  if (readerMode !== "reflowable" || !locByEid || !locByEid.size) return;
+  const idx = [...locByEid.entries()]
+    .map(([eid, loc]) => ({ eid, loc }))
+    .sort((a, b) => a.loc - b.loc);
+  // Floor search for the largest loc ≤ n; clamp to the first entry below range.
+  let lo = 0;
+  let hi = idx.length - 1;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (idx[mid].loc <= n) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (!(await goToEid(idx[best].eid))) toast("Couldn't jump to that location");
+}
+
+// Turn the "Loc N" readout into a number input (mirrors the notebook's go-to-
+// page). Enter jumps; Escape/blur restores the readout. Reflowable-only — a
+// location number is meaningless in a fixed-layout page book.
+function openLocationGoTo() {
+  if (readerMode !== "reflowable" || !maxLoc) return;
+  const locEl = $("#reader-loc");
+  if (!locEl || locEl.querySelector("input")) return; // already open
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = "1";
+  input.max = String(maxLoc);
+  input.value = lastPos?.loc != null ? String(lastPos.loc) : "1";
+  input.className = "reader-goto-input";
+  input.setAttribute("aria-label", `Go to location (1–${maxLoc})`);
+  locEl.replaceChildren(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (jump) => {
+    if (done) return;
+    done = true;
+    const n = parseInt(input.value, 10);
+    if (jump && Number.isFinite(n)) {
+      jumpToLocation(Math.min(maxLoc, Math.max(1, n))); // relocate refreshes the readout
+    } else {
+      renderProgress(); // restore "Loc N"
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(false));
+}
+
 // (Per-section base-text char counts and image-only flags now arrive
 // precomputed from the backend — `ReaderSectionDto.chars` / `.image_only` —
 // so the reader never DOM-parses sections at open.)
@@ -2047,6 +2122,8 @@ function onKey(e) {
   if (readerMode === "pdf") return pdfOnKey(e);
   // A handwritten notebook is a fixed-layout SVG page with its own minimal map.
   if (readerMode === "notebook") return notebookOnKey(e);
+  // The go-to-location input owns its keys (digits, Enter, Esc) while focused.
+  if (e.target?.closest?.(".reader-goto-input")) return;
   // ⌘F / Ctrl+F → open search (replacing the browser's find-in-page, which
   // would search the host doc, not the section iframe's content). Handled
   // before the modifier filter below.
@@ -2129,6 +2206,9 @@ function onKey(e) {
       break;
     case "/":
       toggleSearchPanel();
+      break;
+    case "l":
+      openLocationGoTo();
       break;
     case "n":
       jumpToSection((lastPos?.index ?? 0) + 1);
@@ -4107,9 +4187,15 @@ function wire() {
   // The notebook's "Page X" readout is a go-to-page trigger — its own click region,
   // so it doesn't also cycle the bar; other modes let the click bubble to cycle.
   $("#reader-loc")?.addEventListener("click", (e) => {
-    if (readerMode !== "notebook" || !nbk?.pageCount) return;
-    e.stopPropagation();
-    openNotebookGoTo();
+    if (readerMode === "notebook" && nbk?.pageCount) {
+      e.stopPropagation();
+      openNotebookGoTo();
+    } else if (readerMode === "reflowable" && progressMode === 0 && maxLoc) {
+      // Tapping the "Loc N" readout opens the go-to-location input; stop the
+      // click here so it doesn't also cycle the status bar's progress mode.
+      e.stopPropagation();
+      openLocationGoTo();
+    }
   });
   // Resume is its own tap region: open the chooser, and stop the click from
   // bubbling to the status bar (which would also cycle the progress display).

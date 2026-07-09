@@ -358,6 +358,127 @@ fn fixed_layout_pid_map(
     pid_of
 }
 
+/// One location boundary per this many raw pids — Amazon's own spacing when it
+/// generates an approximate `location_map` (kfxlib `KFX_POSITIONS_PER_LOCATION`).
+/// Used as the fallback spacing for a book that ships a position map but no
+/// location map, so its Location numbers stay on the device's scale.
+const KFX_POSITIONS_PER_LOCATION: i64 = 110;
+
+/// Kindle "Location" numbering for a book — the map the device uses to turn a
+/// raw reading position (a `pid` from [`TextIndex::pid_map_from_book`]) into the
+/// human "Location N" shown on screen. A location boundary sits roughly every
+/// [`KFX_POSITIONS_PER_LOCATION`] pids, so a displayed Location is ~1/110 of the
+/// raw pid; reporting the pid directly inflates the number ~50× and breaks
+/// position matching against the device (the bug this fixes).
+///
+/// Built from the KFX `location_map` ($550) — each location is an `(eid, offset)`
+/// anchor, resolved to a pid through the caller's `pid_of` — or the rarer
+/// `yj.location_pid_map` ($621), which lists boundary pids directly. Both reduce
+/// to the same ascending `boundaries` vector.
+pub struct LocationMap {
+    /// Location boundary pids, ascending. `boundaries[k]` is the pid at the
+    /// start of the `(k+1)`-th location.
+    boundaries: Vec<i64>,
+}
+
+impl LocationMap {
+    /// Parse `$550`/`$621` into sorted boundary pids. `None` when the book ships
+    /// neither map (or none of its entries resolve to a pid) — e.g. a
+    /// boko-generated e2k KFX, which carries no position/location maps at all.
+    pub fn from_book(book: &BookData, pid_of: &HashMap<i64, i64>) -> Option<Self> {
+        let mut boundaries = Vec::new();
+
+        // $550 location_map: [{ $182: [{ $155: eid, $143: offset }, ...] }].
+        if let Some(maps) = book.by_type.get(&(KfxSymbol::LocationMap as u64)) {
+            for frag in maps.values() {
+                let Some(locs) = location_entry_list(frag) else {
+                    continue;
+                };
+                for e in locs {
+                    let Some(ef) = e.unwrap_annotated().as_struct() else {
+                        continue;
+                    };
+                    let Some(eid) = get_field(ef, KfxSymbol::Id as u64).and_then(|v| v.as_int())
+                    else {
+                        continue;
+                    };
+                    let off = get_field(ef, KfxSymbol::Offset as u64)
+                        .and_then(|v| v.as_int())
+                        .unwrap_or(0);
+                    if let Some(&pid) = pid_of.get(&eid) {
+                        boundaries.push(pid + off);
+                    }
+                }
+            }
+        }
+
+        // $621 yj.location_pid_map: [{ $182: [pid, pid, ...] }] — boundary pids
+        // directly, no eid resolution needed. Only consulted when $550 is absent.
+        if boundaries.is_empty()
+            && let Some(maps) = book.by_type.get(&(KfxSymbol::YjLocationPidMap as u64))
+        {
+            for frag in maps.values() {
+                let Some(pids) = location_entry_list(frag) else {
+                    continue;
+                };
+                for p in pids {
+                    if let Some(pid) = p.unwrap_annotated().as_int() {
+                        boundaries.push(pid);
+                    }
+                }
+            }
+        }
+
+        if boundaries.is_empty() {
+            return None;
+        }
+        boundaries.sort_unstable();
+        Some(Self { boundaries })
+    }
+
+    /// Synthesize an evenly-spaced map for a book that has a real position map
+    /// but no `location_map`: one boundary every [`KFX_POSITIONS_PER_LOCATION`]
+    /// pids, matching the device's own approximate-location fallback. Keeps such
+    /// books on the device's Location scale instead of showing raw pids.
+    pub fn approximate(max_pid: i64) -> Self {
+        let mut boundaries = Vec::new();
+        let mut p = 0;
+        while p <= max_pid {
+            boundaries.push(p);
+            p += KFX_POSITIONS_PER_LOCATION;
+        }
+        if boundaries.is_empty() {
+            boundaries.push(0);
+        }
+        Self { boundaries }
+    }
+
+    /// The Kindle "Location" for a raw pid: the count of location boundaries
+    /// strictly before it. A position exactly on a boundary reads as the
+    /// location it *completes*, not the one it starts — the device's convention
+    /// (verified: pid 128880, sitting exactly on boundary #2378, reads as
+    /// "Location 2378"). Floored at 1 so the cover never shows "Loc 0".
+    pub fn location_for_pid(&self, pid: i64) -> i64 {
+        self.boundaries.partition_point(|&b| b < pid).max(1) as i64
+    }
+
+    /// Total number of locations — the "Loc N of M" denominator.
+    pub fn count(&self) -> i64 {
+        self.boundaries.len() as i64
+    }
+}
+
+/// The `$182` entry list inside a `location_map`/`yj.location_pid_map` fragment,
+/// which is wrapped as a single-element list holding one struct. Returns the
+/// inner list (location structs for $550, bare pids for $621) or `None` on a
+/// shape mismatch.
+fn location_entry_list(frag: &IonValue) -> Option<&[IonValue]> {
+    let items = frag.unwrap_annotated().as_list()?;
+    let first = items.first()?;
+    let fields = first.unwrap_annotated().as_struct()?;
+    get_field(fields, KfxSymbol::Locations as u64).and_then(|v| v.as_list())
+}
+
 /// Recursively walk a storyline fragment. Every struct that carries a
 /// `$155 id` and a `$145 content` reference contributes `eid → base text`;
 /// `$146 content_list` children are recursed into. `$176 story_name`
@@ -464,6 +585,67 @@ mod tests {
             !pid.contains_key(&0),
             "terminator eid 0 must not be recorded"
         );
+    }
+
+    // A `$550` location_map wrapping the given (eid, offset) entries in the
+    // `[{ $182: [{ $155, $143 }, ...] }]` shape the device ships.
+    fn location_map_fragment(entries: &[(i64, i64)]) -> IonValue {
+        let locs = entries
+            .iter()
+            .map(|&(eid, off)| {
+                IonValue::Struct(vec![
+                    (KfxSymbol::Id as u64, IonValue::Int(eid)),
+                    (KfxSymbol::Offset as u64, IonValue::Int(off)),
+                ])
+            })
+            .collect();
+        IonValue::List(vec![IonValue::Struct(vec![(
+            KfxSymbol::Locations as u64,
+            IonValue::List(locs),
+        )])])
+    }
+
+    #[test]
+    fn location_map_resolves_entries_to_boundary_pids() {
+        let mut book = loader::empty_book_for_test();
+        book.by_type
+            .entry(KfxSymbol::LocationMap as u64)
+            .or_default()
+            .insert(
+                "$550".into(),
+                location_map_fragment(&[(100, 0), (101, 0), (102, 0)]),
+            );
+        // eid → pid: the three location anchors land at pids 10, 120, 230.
+        let pid_of: HashMap<i64, i64> = [(100, 10), (101, 120), (102, 230)].into_iter().collect();
+
+        let lm = LocationMap::from_book(&book, &pid_of).expect("location_map present");
+        assert_eq!(lm.count(), 3);
+
+        // Boundary convention: strictly-less count, floored at 1. A pid exactly
+        // on a boundary reads as the location it completes, not the next one.
+        assert_eq!(lm.location_for_pid(10), 1, "at first boundary");
+        assert_eq!(lm.location_for_pid(11), 1, "just past first boundary");
+        assert_eq!(lm.location_for_pid(120), 1, "exactly on second boundary");
+        assert_eq!(lm.location_for_pid(121), 2, "just past second boundary");
+        assert_eq!(lm.location_for_pid(230), 2, "exactly on third boundary");
+        assert_eq!(lm.location_for_pid(231), 3, "past the last boundary");
+        assert_eq!(lm.location_for_pid(0), 1, "before any boundary → floor 1");
+    }
+
+    #[test]
+    fn location_map_absent_yields_none() {
+        let book = loader::empty_book_for_test();
+        assert!(LocationMap::from_book(&book, &HashMap::new()).is_none());
+    }
+
+    #[test]
+    fn approximate_location_map_spaces_every_110_pids() {
+        let lm = LocationMap::approximate(250);
+        assert_eq!(lm.count(), 3); // boundaries at 0, 110, 220
+        assert_eq!(lm.location_for_pid(0), 1);
+        assert_eq!(lm.location_for_pid(110), 1);
+        assert_eq!(lm.location_for_pid(111), 2);
+        assert_eq!(lm.location_for_pid(221), 3);
     }
 
     #[test]

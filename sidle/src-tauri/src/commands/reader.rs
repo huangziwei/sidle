@@ -164,10 +164,12 @@ pub struct ReaderBookDto {
     pub writing_mode: String,
     /// `"rtl"` / `"ltr"` — spine progression / page-turn direction.
     pub page_progression_direction: String,
-    /// `[eid, linear]` pairs for the Location/% readout (real device Loc when the
-    /// KFX has a position map, else reader-synthesized). See `ReaderBook::locations`.
+    /// `[eid, location]` pairs for the Location/% readout — `location` is the
+    /// device's human Loc number (position-map pid mapped through the book's
+    /// location_map), so it matches the Kindle; e2k books without a map fall back
+    /// to char counts. See `ReaderBook::locations`.
     pub locations: Vec<(i64, i64)>,
-    /// Largest linear position — the denominator for whole-book %.
+    /// Location count — the denominator for whole-book % and "Loc N of M".
     pub max_location: i64,
     /// True when `locations` is empty because synthesis was deferred off the
     /// open path (reflowable book without a position map): the reader fetches
