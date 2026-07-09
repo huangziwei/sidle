@@ -469,6 +469,12 @@ pub struct SyncReport {
     pub unmatched: Vec<String>,
     #[serde(default)]
     pub annotations: SyncStats,
+    /// Orphaned `.sdr` dirs pruned off the device this sync (a `.sdr` with no
+    /// matching `.kfx` — a copy the user deleted; the Kindle leaves the sidecar
+    /// behind). Set locally by [`push_annotations`], not from the server (hence
+    /// `#[serde(default)]`), so it survives even the "nothing to sync" early exit.
+    #[serde(default)]
+    pub pruned: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -490,6 +496,9 @@ impl SyncReport {
         }
         if self.positions > 0 {
             parts.push(format!("{} positions", self.positions));
+        }
+        if self.pruned > 0 {
+            parts.push(format!("{} stale removed", self.pruned));
         }
         let mut s = if parts.is_empty() {
             "annotation sync: nothing new".to_string()
@@ -529,10 +538,14 @@ pub fn push_annotations(
         .into());
     }
 
-    let sdrs = collect_sidecars(sidle_dir)?;
+    let (sdrs, pruned) = collect_sidecars(sidle_dir)?;
     if sdrs.is_empty() {
-        // Nothing on the device to sync — skip the round-trip, report empty.
-        return Ok(SyncReport::default());
+        // Nothing live to sync — skip the round-trip, but still report any
+        // orphaned copies we pruned off the device this pass.
+        return Ok(SyncReport {
+            pruned,
+            ..Default::default()
+        });
     }
 
     let req = SyncRequest {
@@ -558,21 +571,40 @@ pub fn push_annotations(
     let body = res
         .into_string()
         .with_context(|| format!("read body of {url}"))?;
-    let report: SyncReport = serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
+    let mut report: SyncReport =
+        serde_json::from_str(&body).with_context(|| format!("parse {url}"))?;
+    // `pruned` is device-side hygiene, not in the server's report — fold it in
+    // so the sync toast can surface "N stale removed".
+    report.pruned = pruned;
     Ok(report)
 }
 
-/// Read the `.yjr`/`.yjf` sidecars from every `*.sdr` under `sidle_dir`, base64
-/// each. Mirrors the device-side scan in
+/// Read the `.yjr`/`.yjf` sidecars from every `*.sdr` under `sidle_dir` that
+/// still has its book, base64 each. Returns the sidecars to push plus the count
+/// of orphaned `.sdr` **pruned**. Mirrors the device-side scan in
 /// `sidle_core::library::ingest::import_from_device` (which sidle-native can't
-/// call — no sidle-core dep across the cross-compile boundary). A `.sdr` with
-/// neither sidecar (a pagination cache) is skipped.
-fn collect_sidecars(sidle_dir: &Path) -> Result<Vec<SyncSdr>> {
+/// call — no sidle-core dep across the cross-compile boundary).
+///
+/// The Kindle keeps a book's `.sdr` when you delete its `.kfx`, so an `.sdr`
+/// with no matching `<stem>.kfx` is a copy the user deleted on the device (the
+/// reason stale reconvert copies pile up — 裸命 had six). Those are removed and
+/// not synced: only a live book's reading-state belongs in the library. A live
+/// `.sdr` with neither sidecar (a pagination cache) is kept but not pushed.
+fn collect_sidecars(sidle_dir: &Path) -> Result<(Vec<SyncSdr>, usize)> {
     let mut sdrs = Vec::new();
+    let mut pruned = 0usize;
     if let Ok(entries) = std::fs::read_dir(sidle_dir) {
         for entry in entries.flatten() {
             let sdr = entry.path();
             if sdr.extension().and_then(|e| e.to_str()) != Some("sdr") {
+                continue;
+            }
+            // No live `.kfx` beside it → the user deleted this copy on the device.
+            // Prune the orphaned sidecar and skip it; don't sync a dead copy.
+            if !sdr.with_extension("kfx").exists() {
+                if std::fs::remove_dir_all(&sdr).is_ok() {
+                    pruned += 1;
+                }
                 continue;
             }
             let yjr = read_sidecar(&sdr, ".yjr")?;
@@ -593,7 +625,7 @@ fn collect_sidecars(sidle_dir: &Path) -> Result<Vec<SyncSdr>> {
         }
     }
 
-    Ok(sdrs)
+    Ok((sdrs, pruned))
 }
 
 /// The first file in `sdr_dir` whose name ends with `suffix` (e.g. `.yjr`),
@@ -952,23 +984,40 @@ mod tests {
         let docs = base.join("documents");
         let sidle = docs.join("Sidle");
 
-        // A .sdr with both sidecars (annotations + last-read position).
+        // A live book: .sdr with both sidecars AND its .kfx present → synced.
         let sdr = sidle.join("book.deadbeef.sdr");
         std::fs::create_dir_all(&sdr).unwrap();
         std::fs::write(sdr.join("book.deadbeef0000.yjr"), b"yjr-bytes").unwrap();
         std::fs::write(sdr.join("book.deadbeef0000.yjf"), b"yjf-bytes").unwrap();
-        // A pagination-cache .sdr (neither sidecar) — must be skipped.
-        let cache = sidle.join("other.cafe.sdr");
+        std::fs::write(sidle.join("book.deadbeef.kfx"), b"kfx").unwrap();
+        // A pagination-cache .sdr (neither sidecar) whose .kfx lives → kept, not
+        // synced, not pruned.
+        let cache = sidle.join("other.cafe0000.sdr");
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("page.cache"), b"x").unwrap();
+        std::fs::write(sidle.join("other.cafe0000.kfx"), b"kfx").unwrap();
+        // An orphaned .sdr with annotations but NO .kfx (the user deleted the
+        // book on the device) → pruned, not synced.
+        let orphan = sidle.join("gone.beefcafe.sdr");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("gone.beefcafe0.yjr"), b"stale").unwrap();
 
-        let sdrs = collect_sidecars(&sidle).unwrap();
-        assert_eq!(sdrs.len(), 1, "pagination-cache .sdr should be skipped");
+        let (sdrs, pruned) = collect_sidecars(&sidle).unwrap();
+        assert_eq!(sdrs.len(), 1, "only the live book's .sdr is synced");
         assert_eq!(sdrs[0].sdr_name, "book.deadbeef.sdr");
         let yjr_expected = BASE64.encode(b"yjr-bytes");
         let yjf_expected = BASE64.encode(b"yjf-bytes");
         assert_eq!(sdrs[0].yjr_b64.as_deref(), Some(yjr_expected.as_str()));
         assert_eq!(sdrs[0].yjf_b64.as_deref(), Some(yjf_expected.as_str()));
+        assert_eq!(pruned, 1, "the orphaned .sdr (no .kfx) was pruned");
+        assert!(
+            !orphan.exists(),
+            "orphaned .sdr dir removed from the device"
+        );
+        assert!(
+            cache.exists(),
+            "pagination-cache .sdr kept — its .kfx is live"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -977,8 +1026,9 @@ mod tests {
     fn collect_sidecars_empty_when_no_tree() {
         let base = scratch("empty");
         // documents/Sidle doesn't exist → empty bundle, no error.
-        let sdrs = collect_sidecars(&base.join("documents/Sidle")).unwrap();
+        let (sdrs, pruned) = collect_sidecars(&base.join("documents/Sidle")).unwrap();
         assert!(sdrs.is_empty());
+        assert_eq!(pruned, 0);
     }
 
     #[test]
