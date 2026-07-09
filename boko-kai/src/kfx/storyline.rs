@@ -1150,7 +1150,20 @@ fn flatten_inline_content(
         // image silently vanishes. Common in Japanese EPUBs that use a
         // gaiji glyph image as the base of a ruby pair.
         Role::Image => {
-            let _ = effective_state; // see FlatSegment::Image — state can't transfer to image element
+            // A KFX image element can't carry an anchor, and flattening
+            // otherwise discards the surrounding inline state here. When an
+            // ancestor inline element bears an id — e.g. a linked cover/map
+            // image `<a id="map1"><img/></a>` used as a TOC/nav target — emit
+            // a zero-width-space span first (the same anchor carrier the
+            // empty-element arm below uses) so the id's content position is
+            // recorded just before the image. Without it, any TOC/page-list
+            // entry pointing at that id resolves to nothing and gets dropped.
+            if effective_state.element_id.is_some() {
+                segments.push(FlatSegment::Text {
+                    text: "\u{200B}".to_string(), // Zero-width space
+                    state: effective_state.clone(),
+                });
+            }
             segments.push(FlatSegment::Image { node_id });
         }
         // RUBY TEXT: never recursed into here. Consumed by the parent Ruby
@@ -3124,6 +3137,63 @@ mod tests {
             Some(link_style),
             "Second segment should have Link's style"
         );
+    }
+
+    #[test]
+    fn test_flatten_linked_image_with_id_emits_anchor_carrier() {
+        // Regression: `<a id="map1"><img/></a>` used as a TOC/nav target. A KFX
+        // image element can't hold the anchor, so the flattener must emit a
+        // zero-width-space segment carrying the id + node_id just before the
+        // image; otherwise the id's content position is never recorded and any
+        // TOC entry pointing at it is dropped from the exported book.
+        let mut chapter = Chapter::new();
+
+        let img_id = chapter.alloc_node(Node::new(Role::Image));
+        chapter.semantics.set_src(img_id, "images/map1.jpg");
+
+        let link_id = chapter.alloc_node(Node::new(Role::Link));
+        chapter.append_child(link_id, img_id);
+        chapter.semantics.set_id(link_id, "map1");
+        chapter.semantics.set_href(link_id, "Contents.xhtml#rmap1");
+
+        let mut segments = Vec::new();
+        flatten_inline_content(&chapter, link_id, InlineState::default(), &mut segments);
+
+        assert_eq!(segments.len(), 2, "expected anchor carrier + image");
+        let FlatSegment::Text { text, state } = &segments[0] else {
+            panic!("first segment should be the ZWSP anchor carrier, got an image");
+        };
+        assert_eq!(text, "\u{200B}");
+        assert_eq!(state.element_id, Some("map1".to_string()));
+        assert_eq!(
+            state.node_id,
+            Some(link_id),
+            "carrier must reference the id-bearing <a> node so its position is recorded"
+        );
+        assert!(
+            matches!(segments[1], FlatSegment::Image { node_id } if node_id == img_id),
+            "second segment should be the image itself"
+        );
+    }
+
+    #[test]
+    fn test_flatten_plain_linked_image_emits_no_anchor_carrier() {
+        // Counterpart: an `<a href><img/></a>` with NO id is not an anchor
+        // target, so no zero-width carrier is emitted — just the image.
+        let mut chapter = Chapter::new();
+
+        let img_id = chapter.alloc_node(Node::new(Role::Image));
+        chapter.semantics.set_src(img_id, "images/plain.jpg");
+
+        let link_id = chapter.alloc_node(Node::new(Role::Link));
+        chapter.append_child(link_id, img_id);
+        chapter.semantics.set_href(link_id, "https://example.com");
+
+        let mut segments = Vec::new();
+        flatten_inline_content(&chapter, link_id, InlineState::default(), &mut segments);
+
+        assert_eq!(segments.len(), 1, "no id → no anchor carrier");
+        assert!(matches!(segments[0], FlatSegment::Image { node_id } if node_id == img_id));
     }
 
     #[test]

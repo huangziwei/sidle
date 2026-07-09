@@ -264,17 +264,7 @@ impl EpubImporter {
         //    reference, so percent-decode it to the literal zip entry name.
         let container_bytes = read_entry(&source, &zip_index, "META-INF/container.xml")?;
         let opf_path = percent_decode(&parse_container_xml(&container_bytes)?);
-        let opf_base = Path::new(&opf_path)
-            .parent()
-            .map(|p| {
-                let s = p.to_string_lossy();
-                if s.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}/", s)
-                }
-            })
-            .unwrap_or_default();
+        let opf_base = archive_dir_base(&opf_path);
 
         // 3. Parse OPF
         let opf_bytes = read_entry(&source, &zip_index, &opf_path)?;
@@ -324,7 +314,14 @@ impl EpubImporter {
             let hint_encoding = crate::util::extract_xml_encoding(&bytes);
             let text = crate::util::decode_text(&bytes, hint_encoding);
             let entries = parse(&text).ok()?;
-            (!entries.is_empty()).then(|| prepend_base_to_toc(&entries, &opf_base))
+            // Hrefs in a nav doc / NCX are relative to THAT document's directory,
+            // not the OPF's. They coincide when the OPF and the nav/NCX share a
+            // directory (calibre-style OEBPS/), but retail EPUBs that keep the
+            // OPF+NCX at the archive root and the nav doc in a subdir (e.g.
+            // `xhtml/nav.xhtml`) resolve against different bases — prepending
+            // opf_base there leaves every fragment-less chapter href unmatched.
+            let doc_base = archive_dir_base(&path);
+            (!entries.is_empty()).then(|| prepend_base_to_toc(&entries, &doc_base))
         };
         let toc = {
             let ncx_toc = read_toc(opf.ncx_href.as_ref(), parse_ncx);
@@ -352,6 +349,9 @@ impl EpubImporter {
         // 6. Parse landmarks from EPUB 3 nav document
         let mut landmarks = if let Some(nav_href) = &opf.nav_href {
             let nav_path = format!("{}{}", opf_base, percent_decode(nav_href));
+            // Landmark hrefs are relative to the nav doc's directory, not the
+            // OPF's (see the TOC note above).
+            let nav_base = archive_dir_base(&nav_path);
             if let Ok(nav_bytes) = read_entry(&source, &zip_index, &nav_path) {
                 let hint_encoding = crate::util::extract_xml_encoding(&nav_bytes);
                 let nav_str = crate::util::decode_text(&nav_bytes, hint_encoding);
@@ -361,7 +361,7 @@ impl EpubImporter {
                 for landmark in &mut parsed {
                     landmark.href = percent_decode(&landmark.href);
                     if !landmark.href.starts_with('#') && !landmark.href.is_empty() {
-                        landmark.href = format!("{}{}", opf_base, landmark.href);
+                        landmark.href = format!("{}{}", nav_base, landmark.href);
                     }
                 }
                 parsed
@@ -713,6 +713,18 @@ fn count_toc_entries(entries: &[TocEntry]) -> usize {
         .sum()
 }
 
+/// Directory portion of an archive path, with a trailing `/` (empty string when
+/// the path sits at the archive root). Archive entry names are always
+/// `/`-delimited, so this splits on `/` rather than going through `Path` (whose
+/// separator is platform-dependent). Used to resolve a document's relative
+/// hrefs against the directory that document lives in.
+fn archive_dir_base(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((dir, _)) => format!("{dir}/"),
+        None => String::new(),
+    }
+}
+
 /// Prepend base path to TOC entry hrefs (NCX uses relative paths).
 ///
 /// TOC hrefs are URI references, so they are percent-decoded here to match the
@@ -741,6 +753,36 @@ fn prepend_base_to_toc(entries: &[TocEntry], base: &str) -> Vec<TocEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_archive_dir_base() {
+        // Root-level document → empty base.
+        assert_eq!(archive_dir_base("9781668011799.opf"), "");
+        assert_eq!(archive_dir_base("toc.ncx"), "");
+        // Subdirectory document → its directory, trailing slash.
+        assert_eq!(
+            archive_dir_base("e9781668011799/xhtml/nav.xhtml"),
+            "e9781668011799/xhtml/"
+        );
+        assert_eq!(archive_dir_base("OEBPS/content.opf"), "OEBPS/");
+    }
+
+    #[test]
+    fn test_toc_base_is_document_dir_not_opf_dir() {
+        // Regression: a nav doc in a subdirectory (OPF+NCX at the archive root,
+        // nav at `xhtml/nav.xhtml`) resolves its fragment-less chapter hrefs
+        // against the nav doc's own directory, not the OPF's. Prepending the
+        // OPF base (empty here) once dropped every chapter from the KFX TOC.
+        let nav_path = "e9781668011799/xhtml/nav.xhtml";
+        let doc_base = archive_dir_base(nav_path);
+        let entries = vec![
+            TocEntry::new("Chapter One", "ch01.xhtml"),
+            TocEntry::new("Copyright", "copyright.xhtml"),
+        ];
+        let result = prepend_base_to_toc(&entries, &doc_base);
+        assert_eq!(result[0].href, "e9781668011799/xhtml/ch01.xhtml");
+        assert_eq!(result[1].href, "e9781668011799/xhtml/copyright.xhtml");
+    }
 
     #[test]
     fn test_prepend_base_to_toc_simple() {

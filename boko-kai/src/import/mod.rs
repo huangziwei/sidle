@@ -287,11 +287,20 @@ pub fn resolve_path_based_href(
     }
 
     // Split path and fragment
-    let (path, fragment) = if let Some(hash_pos) = href.find('#') {
+    let (raw_path, fragment) = if let Some(hash_pos) = href.find('#') {
         (&href[..hash_pos], Some(&href[hash_pos + 1..]))
     } else {
         (href, None)
     };
+
+    // Collapse `.` / `..` so a href like `OEBPS/Text/../Text/Ch01.xhtml`
+    // matches the normalized spine path `OEBPS/Text/Ch01.xhtml`. Nav docs (and
+    // in-text links) that live in a subdirectory routinely author hrefs with
+    // `..` back up to a sibling folder; without normalization every such href
+    // misses the chapter/anchor maps (which are keyed by canonical paths).
+    let normalized_path = normalize_components(Path::new(raw_path));
+    let normalized_path = normalized_path.to_string_lossy();
+    let path: &str = &normalized_path;
 
     // Look up target chapter
     let target_chapter = chapter_for_path(path)?;
