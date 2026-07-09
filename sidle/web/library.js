@@ -4557,13 +4557,14 @@ const BULK_FIELDS = [
 ];
 
 // The "Reading layout" select value for a book: its explicit writing_mode if
-// set, else mapped from a legacy page-direction-only edit (rtl/ltr → the
-// horizontal variant), else "" (Auto — let the converter derive it).
+// one was set, else "" (Auto — let the converter derive the axis from source).
+// `ppd` is deliberately NOT consulted: it encodes only the page-turn (rtl/ltr)
+// and is populated at import from the source for every book, so a vertical-rl
+// Japanese book carries ppd=rtl. Deriving "horizontal-rl" from that mislabelled
+// the vast majority of the library as horizontal — the axis is unknown from ppd
+// alone, and Auto is the honest answer.
 function readingLayoutValue(book) {
-  if (book.writing_mode) return book.writing_mode;
-  if (book.ppd === "rtl") return "horizontal-rl";
-  if (book.ppd === "ltr") return "horizontal-lr";
-  return "";
+  return book.writing_mode || "";
 }
 
 // Open the editor for one book (single mode) or, with { bulk: true }, for an
@@ -4722,14 +4723,16 @@ async function submitMetadataForm() {
     title: form.title.value.trim(),
     author: form.author.value.trim(),
     language: form.language.value.trim(),
-    // Reading layout drives the writing-mode axis; the backend re-derives ppd
-    // from it, but we send the derived value too so an Auto stays Auto.
+    // Reading layout drives the writing-mode axis; a chosen layout re-derives
+    // ppd from its `-rl`/`-lr` suffix. On Auto both are left alone: writing_mode
+    // stays null and ppd keeps its existing (source-derived) value — nulling it
+    // would silently wipe the imported page-turn (rtl for Japanese).
     writing_mode: form.reading_layout.value || null,
     ppd: form.reading_layout.value
       ? form.reading_layout.value.endsWith("-rl")
         ? "rtl"
         : "ltr"
-      : null,
+      : metadataBook.ppd || null,
     publisher:
       form.publisher.value.trim() === "" ? null : form.publisher.value.trim(),
     published_at:
