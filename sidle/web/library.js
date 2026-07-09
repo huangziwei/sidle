@@ -1101,12 +1101,14 @@ function sortValue(b, key) {
 function seriesSortKey(b) {
   const name = b.series_name?.trim();
   if (!name) return null;
-  // *10 so half-numbered series (1.5, 2.5) sort correctly; pad to 8
-  // digits so even an unset index (99_999_999) compares cleanly.
+  // Scale by 10000 so sub-volumes down to four decimals (5.1, 5.25, …) sort
+  // correctly under the numeric collator (a pure integer — no "." — keeps the
+  // digit run unambiguous); an unset index uses a large sentinel so those books
+  // sort after every numbered one.
   const rawIdx =
     b.series_index != null && Number.isFinite(b.series_index)
-      ? Math.round(b.series_index * 10)
-      : 99_999_999;
+      ? Math.round(b.series_index * 10000)
+      : 9_999_999_999_999;
   return `${name}${String(rawIdx).padStart(8, "0")}`;
 }
 
