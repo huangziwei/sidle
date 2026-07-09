@@ -196,12 +196,30 @@ impl Importer for EpubImporter {
     }
 
     fn resolve_href(&self, from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
+        self.resolve_href_impl(from_chapter, href, false)
+    }
+
+    fn resolve_toc_href(&self, from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
+        self.resolve_href_impl(from_chapter, href, true)
+    }
+}
+
+impl EpubImporter {
+    /// Shared href resolver; `chapter_fallback` lands a dead `path#fragment` at
+    /// the chapter start (navigation) instead of returning `None` (in-text).
+    fn resolve_href_impl(
+        &self,
+        from_chapter: ChapterId,
+        href: &str,
+        chapter_fallback: bool,
+    ) -> Option<AnchorTarget> {
         let from_path = self.source_id(from_chapter)?;
         resolve_path_based_href(
             from_path,
             href,
             |p| self.path_to_chapter.get(p).copied(),
             |k| self.anchor_map.get(k).copied(),
+            chapter_fallback,
         )
     }
 }

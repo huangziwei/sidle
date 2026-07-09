@@ -2918,8 +2918,10 @@ fn resolve_landmarks_from_ir(
         let chapter_id = source_to_chapter.get(href_path).copied();
 
         if let Some(cid) = chapter_id {
-            // Resolve the landmark's href using the book's resolver
-            let resolved_target = book.resolve_href(cid, &landmark.href);
+            // Resolve the landmark's href using the book's navigation resolver
+            // (a dead fragment on a real chapter falls back to the chapter start
+            // rather than dropping the landmark).
+            let resolved_target = book.resolve_toc_href(cid, &landmark.href);
 
             let target = match resolved_target {
                 Some(AnchorTarget::Internal(gid)) => {

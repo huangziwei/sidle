@@ -249,18 +249,11 @@ impl Importer for Azw3Importer {
     }
 
     fn resolve_href(&self, from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
-        let from_path = self.source_id(from_chapter)?;
-        resolve_path_based_href(
-            from_path,
-            href,
-            |p| {
-                self.chapter_paths
-                    .iter()
-                    .position(|cp| cp == p)
-                    .map(|i| ChapterId(i as u32))
-            },
-            |k| self.element_id_map.get(k).copied(),
-        )
+        self.resolve_href_impl(from_chapter, href, false)
+    }
+
+    fn resolve_toc_href(&self, from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
+        self.resolve_href_impl(from_chapter, href, true)
     }
 
     fn resolve_toc(&mut self) {
@@ -330,6 +323,29 @@ fn resolve_toc_with_positions(
 }
 
 impl Azw3Importer {
+    /// Shared href resolver; `chapter_fallback` lands a dead `path#fragment` at
+    /// the chapter start (navigation) instead of returning `None` (in-text).
+    fn resolve_href_impl(
+        &self,
+        from_chapter: ChapterId,
+        href: &str,
+        chapter_fallback: bool,
+    ) -> Option<AnchorTarget> {
+        let from_path = self.source_id(from_chapter)?;
+        resolve_path_based_href(
+            from_path,
+            href,
+            |p| {
+                self.chapter_paths
+                    .iter()
+                    .position(|cp| cp == p)
+                    .map(|i| ChapterId(i as u32))
+            },
+            |k| self.element_id_map.get(k).copied(),
+            chapter_fallback,
+        )
+    }
+
     /// Create an importer from a ByteSource (metadata only, text deferred).
     pub fn from_source(source: Arc<dyn ByteSource>) -> io::Result<Self> {
         let file_len = source.len();

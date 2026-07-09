@@ -255,6 +255,19 @@ pub trait Importer: Send + Sync {
 
         None
     }
+
+    /// Resolve a navigation href (TOC / page-list / landmarks) to its target.
+    ///
+    /// Same as [`Self::resolve_href`] but, for a `path#fragment` whose file is a
+    /// real chapter yet whose fragment is dead, falls back to the chapter start
+    /// instead of returning `None`. Navigation entries should survive a dangling
+    /// anchor (a common calibre NCX defect) by landing at the top of the target
+    /// file; in-text links must not, so they keep using [`Self::resolve_href`].
+    /// The default delegates to the strict resolver (importers with path-based
+    /// resolution override it).
+    fn resolve_toc_href(&self, from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
+        self.resolve_href(from_chapter, href)
+    }
 }
 
 /// Helper for path-based href resolution (used by EPUB, AZW3, MOBI).
@@ -265,6 +278,7 @@ pub fn resolve_path_based_href(
     href: &str,
     chapter_for_path: impl Fn(&str) -> Option<ChapterId>,
     anchor: impl Fn(&str) -> Option<GlobalNodeId>,
+    chapter_fallback: bool,
 ) -> Option<AnchorTarget> {
     let href = href.trim();
 
@@ -310,6 +324,16 @@ pub fn resolve_path_based_href(
         let key = format!("{}#{}", path, frag);
         if let Some(target) = anchor(&key) {
             return Some(AnchorTarget::Internal(target));
+        }
+        // Dead fragment, but the file itself is a real chapter. For navigation
+        // (TOC/page-list/landmarks) fall back to the chapter start rather than
+        // dropping the entry — calibre-built EPUBs routinely ship an NCX whose
+        // entries point at generated anchor ids it never wrote into the HTML,
+        // and a reader lands those at the top of the target file. Body links
+        // stay strict (`chapter_fallback = false`) so a genuinely broken
+        // in-text link is still reported as broken, not silently redirected.
+        if chapter_fallback {
+            return Some(AnchorTarget::Chapter(target_chapter));
         }
         return None;
     }
@@ -448,6 +472,59 @@ mod tests {
     fn test_resolve_url_unchanged() {
         let result = resolve_relative_path("text/chapter.xhtml", "https://example.com/");
         assert_eq!(result.to_string_lossy(), "https://example.com/");
+    }
+
+    #[test]
+    fn test_dead_fragment_chapter_fallback() {
+        use crate::model::{AnchorTarget, GlobalNodeId, NodeId};
+        // The target file is a real chapter; its fragment id does not exist —
+        // the shape of a calibre NCX pointing at generated anchors it never
+        // wrote into the HTML.
+        let chapter_for = |p: &str| (p == "text/part0001.html").then_some(ChapterId(3));
+        let dead_anchor = |_k: &str| None;
+
+        // In-text link (strict): a dead fragment stays unresolved so the link
+        // is reported broken rather than silently redirected.
+        assert_eq!(
+            resolve_path_based_href(
+                "text/x.html",
+                "text/part0001.html#UGI0",
+                chapter_for,
+                dead_anchor,
+                false,
+            ),
+            None,
+        );
+        // Navigation (fallback): a dead fragment lands at the chapter start so
+        // the TOC/landmark entry survives instead of being dropped.
+        assert_eq!(
+            resolve_path_based_href(
+                "text/x.html",
+                "text/part0001.html#UGI0",
+                chapter_for,
+                dead_anchor,
+                true,
+            ),
+            Some(AnchorTarget::Chapter(ChapterId(3))),
+        );
+        // A fragment that DOES resolve is unaffected by the flag.
+        let live_anchor = |k: &str| {
+            (k == "text/part0001.html#printhead1")
+                .then_some(GlobalNodeId::new(ChapterId(3), NodeId::ROOT))
+        };
+        assert_eq!(
+            resolve_path_based_href(
+                "text/x.html",
+                "text/part0001.html#printhead1",
+                chapter_for,
+                live_anchor,
+                false,
+            ),
+            Some(AnchorTarget::Internal(GlobalNodeId::new(
+                ChapterId(3),
+                NodeId::ROOT
+            ))),
+        );
     }
 
     #[test]

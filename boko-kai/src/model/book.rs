@@ -609,7 +609,7 @@ impl Book {
             results: &mut Vec<Option<AnchorTarget>>,
         ) {
             for entry in entries {
-                results.push(backend.resolve_href(default_chapter, &entry.href));
+                results.push(backend.resolve_toc_href(default_chapter, &entry.href));
                 collect_targets(&entry.children, backend, default_chapter, results);
             }
         }
@@ -653,7 +653,7 @@ impl Book {
             .collect();
         let targets: Vec<Option<AnchorTarget>> = hrefs
             .iter()
-            .map(|href| self.backend.resolve_href(ChapterId(0), href))
+            .map(|href| self.backend.resolve_toc_href(ChapterId(0), href))
             .collect();
         for (entry, target) in self.backend.page_list_mut().iter_mut().zip(targets) {
             entry.target = target;
@@ -666,6 +666,17 @@ impl Book {
     /// importer.
     pub(crate) fn resolve_href(&self, from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
         self.backend.resolve_href(from_chapter, href)
+    }
+
+    /// Resolve a navigation href (TOC / page-list / landmarks), falling back to
+    /// the chapter start when a `path#fragment`'s file resolves but its fragment
+    /// is dead. See [`crate::import::Importer::resolve_toc_href`].
+    pub(crate) fn resolve_toc_href(
+        &self,
+        from_chapter: ChapterId,
+        href: &str,
+    ) -> Option<AnchorTarget> {
+        self.backend.resolve_toc_href(from_chapter, href)
     }
 
     /// Load an asset by path.
