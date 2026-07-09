@@ -277,6 +277,13 @@ struct BookListEntry {
     // flattened `row` — `db::BookRow::cover_rev`, the ms mtime of the served
     // image, computed once in `row_to_book`. No separate field here (a sibling
     // would collide with the flattened key).
+    /// Content revision of the served KFX: the file's ms mtime. `kfx_sha256` is
+    /// a frozen device identity, so a reconvert that rewrites the bytes doesn't
+    /// change the on-device filename — the KUAL client compares this against the
+    /// rev it last downloaded and re-pulls a stale book in place. 0 when the row
+    /// has no `kfx_path` (not downloadable anyway). Distinct sibling key, so no
+    /// collision with the flattened `row`.
+    kfx_rev: i64,
 }
 
 async fn list_json(
@@ -297,9 +304,15 @@ async fn list_json(
                 (Some(path), Some(sha)) => Some(kfx_device_filename(path, sha)),
                 _ => None,
             };
+            let kfx_rev = row
+                .kfx_path
+                .as_deref()
+                .map(db::path_mtime_millis)
+                .unwrap_or(0);
             BookListEntry {
                 row,
                 device_filename,
+                kfx_rev,
             }
         })
         .collect::<Vec<_>>();

@@ -125,7 +125,7 @@ const COVER_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// rusqlite/image and would bloat the armv7l binary).
 pub(crate) const SHA_INFIX_LEN: usize = 8;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct Book {
     pub id: i64,
     pub title: String,
@@ -181,6 +181,15 @@ pub struct Book {
     /// (the prior behavior).
     #[serde(default)]
     pub cover_rev: i64,
+    /// Content revision of the KFX on the server: the file's ms mtime. Because
+    /// `kfx_sha256` (hence `device_filename`) is a frozen identity, a desktop
+    /// reconvert that rewrites the bytes leaves the on-device name unchanged —
+    /// this is the only signal that the device copy is stale. The picker records
+    /// it at download time (`crate::updates`) and re-pulls in place when the
+    /// server's value moves. `#[serde(default)]` → 0 against an older server, i.e.
+    /// "no update tracking" (the prior behavior).
+    #[serde(default)]
+    pub kfx_rev: i64,
     /// Canonical (space/punctuation-free, ASCII-folded, lowercase) search key the
     /// server derives from the book's editable romaji + auto-romanized
     /// series/publisher/tags + raw fields (`sidle_core::library::romaji::search_key`).
@@ -322,6 +331,57 @@ pub fn download_book(agent: &ureq::Agent, cfg: &ServerConfig, book: &Book) -> Re
         reader,
         expected_len,
     })
+}
+
+/// Stream a [`download_book`] body to `target`, atomically: write a sibling
+/// `.part`, verify the byte count against `Content-Length`, then rename over
+/// `target`. The in-place update pass ([`crate::updates`]) uses this to overwrite
+/// a book's *existing* on-device file — the frozen filename is kept, so the
+/// Kindle keeps its `.sdr` (highlights + reading position). No live UI (batch
+/// callers toast per book). A short transfer errors and leaves the original
+/// file untouched, so a dropped radio can't truncate a book already on device.
+pub fn stream_download(dl: Download, target: &std::path::Path) -> Result<u64> {
+    use std::io::Write as _;
+    let fname = target
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("book.kfx");
+    let part = target.with_file_name(format!("{fname}.part"));
+    let mut reader = dl.reader;
+    let mut file =
+        std::fs::File::create(&part).with_context(|| format!("create {}", part.display()))?;
+    let mut written: u64 = 0;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(anyhow!("read body for {}: {e}", target.display()).into());
+            }
+        };
+        if let Err(e) = file.write_all(&buf[..n]) {
+            let _ = std::fs::remove_file(&part);
+            return Err(anyhow!("write {}: {e}", part.display()).into());
+        }
+        written += n as u64;
+    }
+    if let Some(expected) = dl.expected_len
+        && written != expected
+    {
+        let _ = std::fs::remove_file(&part);
+        return Err(anyhow!(
+            "short transfer for {}: {written} of {expected} bytes",
+            target.display()
+        )
+        .into());
+    }
+    let _ = file.flush();
+    drop(file);
+    std::fs::rename(&part, target)
+        .with_context(|| format!("rename {} -> {}", part.display(), target.display()))?;
+    Ok(written)
 }
 
 /// The on-device filename, taken straight from `/list.json`'s
@@ -824,6 +884,7 @@ mod tests {
             imported_at: String::new(),
             tags: Vec::new(),
             cover_rev: 0,
+            kfx_rev: 0,
             search_key: String::new(),
         }
     }

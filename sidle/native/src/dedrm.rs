@@ -260,6 +260,7 @@ fn synth_book(id: i64, title: String, file_size: i64, imported_at: String) -> Bo
         imported_at,
         tags: Vec::new(),
         cover_rev: 0,
+        kfx_rev: 0,
         search_key: String::new(),
     }
 }

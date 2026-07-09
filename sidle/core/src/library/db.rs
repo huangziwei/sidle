@@ -1546,6 +1546,19 @@ fn mtime_millis(meta: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
+/// Millisecond mtime of the file at `path`, or 0 if it can't be stat'd. The
+/// content-revision token for a served KFX (`/list.json` `kfx_rev`), the same
+/// role `cover_rev` plays for the cover image: `kfx_sha256` is a FROZEN device
+/// identity (the on-device filename embeds it and can't change), so a reconvert
+/// that rewrites the bytes is invisible in the name — the KUAL client detects
+/// it by this mtime bump and re-downloads in place over the same filename.
+pub fn path_mtime_millis(path: &str) -> i64 {
+    std::fs::metadata(path)
+        .ok()
+        .map(|m| mtime_millis(&m))
+        .unwrap_or(0)
+}
+
 fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result<BookRow> {
     let tags_json: String = row.get(19)?;
     // Defensive parse: we control writes and only emit canonical JSON

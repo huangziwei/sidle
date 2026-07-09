@@ -26,6 +26,7 @@ mod search;
 mod selfupdate;
 mod series;
 mod ui;
+mod updates;
 mod wrap;
 
 use eink::buttons::{Buttons, PageButton};
@@ -71,6 +72,11 @@ const MNT_US: &str = "/mnt/us";
 /// On-device cover thumbnail cache, under the extension dir (not documents/,
 /// so the stock indexer never sees it). See [`cover_cache`].
 const COVER_CACHE_DIR: &str = "/mnt/us/extensions/sidle/cache/covers";
+/// Records the KFX revision (`Book::kfx_rev`) last written for each on-device
+/// file, so the Sync tap can re-pull a book the desktop reconverted — in place,
+/// under its frozen filename. Under the extension dir, never in documents/.
+/// See [`updates`].
+const SYNCED_REVS_PATH: &str = "/mnt/us/extensions/sidle/cache/synced_revs.json";
 const CLEANINDEX: &str = "/mnt/us/system/.cleanindex";
 const TOAST_LINGER: Duration = Duration::from_millis(1200);
 /// How long a finger must rest on a book cover — without drifting more than
@@ -377,12 +383,16 @@ fn run() -> anyhow::Result<()> {
     // `mut`: a mid-session download removes its book from this master set so the
     // tile hides immediately (see the long-press handler), matching the
     // boot-time hide of books already on the device.
+    // `iter().cloned()` (not `into_iter`) so the full library survives as `books`
+    // — the Sync tap's in-place update pass (`updates::pull_updates`) needs every
+    // row's `kfx_rev` + `device_filename` to spot books the desktop reconverted.
     let mut all_books: Vec<api::Book> = books
-        .into_iter()
+        .iter()
         .filter(|b| match b.kfx_sha256.as_deref() {
             Some(sha) if sha.len() >= 8 => !downloaded.contains(&sha[..8]),
             _ => true,
         })
+        .cloned()
         .collect();
 
     // Which source is showing (LAN library vs on-device DRM books) + the DRM
@@ -814,6 +824,45 @@ fn run() -> anyhow::Result<()> {
                                                 Err(err) => {
                                                     log(format!("misc backup failed: {err}"));
                                                     summary = format!("{summary}\n(backup failed)");
+                                                }
+                                            }
+                                            // Same Sync tap pulls any book the desktop
+                                            // reconverted since last time — in place, under
+                                            // its frozen filename so the Kindle keeps the
+                                            // book's `.sdr` (highlights + position). Automatic
+                                            // upkeep; a failed update only adds a note.
+                                            {
+                                                // Re-fetch the list so a reconvert done while the
+                                                // picker was already open is still seen; fall back
+                                                // to the boot snapshot if the refresh fails.
+                                                let fresh = api::list_books(&agent, &cfg).ok();
+                                                let for_update =
+                                                    fresh.as_deref().unwrap_or(books.as_slice());
+                                                let mut on_book =
+                                                    |cur: usize, total: usize, title: &str| {
+                                                        let dirty = toast::draw(
+                                                            &mut fb,
+                                                            &mut renderer,
+                                                            &format!(
+                                                                "Updating {cur}/{total}: {}…",
+                                                                truncate_title(title, 22)
+                                                            ),
+                                                        );
+                                                        let _ = fb
+                                                            .send_update(dirty, WAVEFORM_MODE_GC16);
+                                                    };
+                                                let up = updates::pull_updates(
+                                                    &agent,
+                                                    &cfg,
+                                                    for_update,
+                                                    std::path::Path::new(DOWNLOAD_DIR),
+                                                    std::path::Path::new(SYNCED_REVS_PATH),
+                                                    &mut on_book,
+                                                    &|line| log(line),
+                                                );
+                                                if let Some(s) = up.summary() {
+                                                    log(format!("book updates: {s}"));
+                                                    summary = format!("{summary}\n{s}");
                                                 }
                                             }
                                             summary
@@ -2089,6 +2138,9 @@ fn download_flow(
     }
     std::fs::rename(&part, &path)
         .with_context(|| format!("rename {} -> {}", part.display(), path.display()))?;
+    // Baseline the rev we just wrote, so the Sync tap's update pass won't re-pull
+    // this book until the desktop actually reconverts it (bumping `kfx_rev`).
+    updates::record_download(Path::new(SYNCED_REVS_PATH), safe_name, book.kfx_rev);
     log(format!("downloaded {written} bytes to {}", path.display()));
     let _ = Command::new("touch").arg(CLEANINDEX).output();
     Ok((

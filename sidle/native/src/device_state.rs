@@ -36,6 +36,22 @@ pub fn scan_downloaded_shas(dir: &Path) -> HashSet<String> {
     out
 }
 
+/// Every on-device `<base>.<sha8>.kfx` filename (not the sha8 — the whole
+/// name), for the in-place update pass ([`crate::updates`]), which matches each
+/// to a library book and overwrites it under its existing name when the server
+/// has a newer revision. Non-`.kfx` entries (`.sdr` dirs, `.part` temporaries,
+/// sideloads) are skipped. Missing dir → empty.
+pub fn scan_downloaded_files(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|name| extract_sha8(name).is_some())
+        .collect()
+}
+
 /// Pull the `<sha8>` segment out of `<base>.<sha8>.kfx`. Returns `None`
 /// if the name doesn't match the shape.
 pub(crate) fn extract_sha8(name: &str) -> Option<&str> {

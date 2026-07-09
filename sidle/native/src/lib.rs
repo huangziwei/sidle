@@ -14,4 +14,5 @@ pub mod dedrm;
 pub mod device_state;
 pub mod selfupdate;
 pub mod series;
+pub mod updates;
 pub mod wrap;
