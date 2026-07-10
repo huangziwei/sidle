@@ -34,13 +34,9 @@
 //! untouched.
 
 use crate::image::jpeg::sanitize_for_kfx;
-use crate::kfx::container::{
-    self, get_field, parse_container_header, parse_index_table, symbol_id_for_name,
-};
+use crate::kfx::container::{self, get_field, symbol_id_for_name};
+use crate::kfx::container_edit::{EntityEdit, edit_container};
 use crate::kfx::ion::{IonParser, IonValue};
-use crate::kfx::serialization::{
-    SerializedEntity, create_entity_data, create_raw_media_data, serialize_container,
-};
 use crate::kfx::symbols::KfxSymbol;
 use crate::kfx_to_epub::ConvertError;
 use crate::kfx_to_epub::loader;
@@ -109,57 +105,6 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
     })?;
     let flip_format = original_format.as_deref() != Some("jpg");
 
-    // 3. Re-parse the container for byte offsets and the header sections we pass
-    //    through (doc symbols + format capabilities) and the container id.
-    let header =
-        parse_container_header(kfx_bytes).map_err(|e| ConvertError::InvalidKfx(e.to_string()))?;
-    let ci_end = header.container_info_offset + header.container_info_length;
-    if ci_end > kfx_bytes.len() {
-        return Err(ConvertError::InvalidKfx(
-            "container info out of bounds".into(),
-        ));
-    }
-    let ci_fields = {
-        let mut p = IonParser::new(&kfx_bytes[header.container_info_offset..ci_end]);
-        p.parse()
-            .ok()
-            .and_then(|v| v.as_struct().map(<[_]>::to_vec))
-            .ok_or_else(|| ConvertError::InvalidKfx("container info is not a struct".into()))?
-    };
-    let geti = |sym: KfxSymbol| {
-        get_field(&ci_fields, sym as u64)
-            .and_then(IonValue::as_int)
-            .map(|n| n as usize)
-    };
-    let idx_off = geti(KfxSymbol::Bcindextaboffset)
-        .ok_or_else(|| ConvertError::InvalidKfx("no index table offset".into()))?;
-    let idx_len = geti(KfxSymbol::Bcindextablength)
-        .ok_or_else(|| ConvertError::InvalidKfx("no index table length".into()))?;
-    let container_id = get_field(&ci_fields, KfxSymbol::Bccontid as u64)
-        .and_then(IonValue::as_string)
-        .unwrap_or("")
-        .to_string();
-
-    let slice_section = |off: Option<usize>, len: Option<usize>| -> &[u8] {
-        match (off, len) {
-            (Some(o), Some(l)) if o + l <= kfx_bytes.len() => &kfx_bytes[o..o + l],
-            _ => &[],
-        }
-    };
-    let symtab_ion = slice_section(
-        geti(KfxSymbol::Bcdocsymboloffset),
-        geti(KfxSymbol::Bcdocsymbollength),
-    );
-    let format_caps_ion = slice_section(
-        geti(KfxSymbol::Bcfcapabilitiesoffset),
-        geti(KfxSymbol::Bcfcapabilitieslength),
-    );
-
-    if idx_off + idx_len > kfx_bytes.len() {
-        return Err(ConvertError::InvalidKfx("index table out of bounds".into()));
-    }
-    let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
-
     // A cover resolved by the loader but *not* declared by `cover_image`
     // metadata is a "loc-0" cover: the book opens on a full-page cover image and
     // the loader inferred it from the first section. Such a KFX has color pixels
@@ -169,56 +114,44 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
     // Amazon/calibre do) so the book declares its cover exactly like every other.
     let backfill_cover_meta = !metadata_declares_cover(&book);
 
-    // 4. Rebuild the entity list: swap the two cover entities, pass the rest
-    //    through byte-for-byte (their ENTY-wrapped bytes are copied verbatim).
+    // 3. Rewrite the container through the shared edit harness: swap the two
+    //    cover entities (and, for a loc-0 cover, backfill the metadata pointer);
+    //    the harness passes every other entity through byte-for-byte and
+    //    recomputes the index-table offsets + payload sha1.
     let jpg_sym = symbol_id_for_name("jpg").unwrap_or(285);
-    let mut out_entities: Vec<SerializedEntity> = Vec::with_capacity(entities.len());
     let mut swapped_media = false;
-    for e in &entities {
-        if e.offset + e.length > kfx_bytes.len() {
-            return Err(ConvertError::InvalidKfx(
-                "entity payload out of bounds".into(),
-            ));
-        }
-        let raw = &kfx_bytes[e.offset..e.offset + e.length];
-
-        let reparse = |raw: &[u8]| {
-            IonParser::new(container::skip_enty_header(raw))
-                .parse()
-                .map_err(|err| ConvertError::InvalidKfx(format!("parse entity: {err}")))
-        };
-
-        let data = if e.type_id == KfxSymbol::Bcrawmedia as u32
-            && book.symbols.resolve(e.id as u64) == cover_location
+    let out = edit_container(kfx_bytes, |e| {
+        let edit = if e.is_type(KfxSymbol::Bcrawmedia)
+            && book.symbols.resolve(e.id() as u64) == cover_location
         {
             swapped_media = true;
-            create_raw_media_data(&clean)
-        } else if e.type_id == KfxSymbol::ExternalResource as u32
-            && external_resource_location(raw).as_deref() == Some(cover_location.as_str())
+            EntityEdit::RawMedia(clean.clone())
+        } else if e.is_type(KfxSymbol::ExternalResource)
+            && external_resource_location(e.raw()).as_deref() == Some(cover_location.as_str())
         {
-            let rebuilt =
-                rebuild_external_resource(&reparse(raw)?, new_w, new_h, flip_format, jpg_sym);
-            create_entity_data(&rebuilt)
-        } else if backfill_cover_meta && e.type_id == KfxSymbol::BookMetadata as u32 {
-            let rebuilt =
-                add_cover_image_to_book_metadata(&reparse(raw)?, &cover_name, &book.symbols);
-            create_entity_data(&rebuilt)
+            EntityEdit::Ion(rebuild_external_resource(
+                &e.parse_ion()?,
+                new_w,
+                new_h,
+                flip_format,
+                jpg_sym,
+            ))
+        } else if backfill_cover_meta && e.is_type(KfxSymbol::BookMetadata) {
+            EntityEdit::Ion(add_cover_image_to_book_metadata(
+                &e.parse_ion()?,
+                &cover_name,
+                &book.symbols,
+            ))
         } else if backfill_cover_meta
-            && e.type_id == KfxSymbol::Metadata as u32
+            && e.is_type(KfxSymbol::Metadata)
             && let Some(sym) = cover_name_sym
         {
-            let rebuilt = add_cover_image_to_flat_metadata(&reparse(raw)?, sym);
-            create_entity_data(&rebuilt)
+            EntityEdit::Ion(add_cover_image_to_flat_metadata(&e.parse_ion()?, sym))
         } else {
-            raw.to_vec()
+            EntityEdit::Keep
         };
-
-        out_entities.push(SerializedEntity {
-            id: e.id,
-            entity_type: e.type_id,
-            data,
-        });
-    }
+        Ok(edit)
+    })?;
 
     if !swapped_media {
         // The declared cover has no backing `bcRawMedia` — the whole container
@@ -230,12 +163,7 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
         )));
     }
 
-    Ok(serialize_container(
-        &container_id,
-        &out_entities,
-        symtab_ion,
-        format_caps_ion,
-    ))
+    Ok(out)
 }
 
 /// Read the `location` string off an ENTY-wrapped `external_resource` entity,

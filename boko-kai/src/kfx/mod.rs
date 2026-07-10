@@ -23,14 +23,17 @@
 
 pub mod auxiliary;
 pub mod container;
+pub mod container_edit;
 pub mod context;
 pub mod cover;
 pub mod cover_extract;
 pub mod cover_replace;
 pub mod fragment;
+pub mod image_extract;
 pub mod ion;
 pub mod merge;
 pub mod metadata;
+pub mod metadata_edit;
 #[cfg(feature = "nbk")]
 pub mod nbk;
 pub mod pdf_container;
@@ -40,5 +43,6 @@ pub mod storyline;
 pub mod style_registry;
 pub mod style_schema;
 pub mod symbols;
+pub mod toc_repair;
 pub mod tokens;
 pub mod transforms;
