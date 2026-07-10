@@ -1,52 +1,39 @@
-//! Conversion validation — verify boko-kai's output preserves the semantics
-//! of the source artifact. Each submodule covers one feature (ruby, text,
-//! images, links, nav, metadata; plus EPUB-only health checks: tags, style)
-//! and exposes:
+//! Book validation, grouped by the question each check answers and who
+//! consumes the answer:
 //!
-//! - an independent extractor for the EPUB side (using minimal XHTML
-//!   tokenization, NOT going through boko's IR — so a parser-side bug
-//!   surfaces here rather than being silently mirrored on both sides),
-//! - an extractor for the KFX side (using boko's own KFX parser,
-//!   since the format is shared with the Kindle reader anyway),
-//! - a `validate(epub_bytes, kfx_bytes)` function producing a `Report`.
+//! - [`source`] — **is one book file well-formed on its own?** Single-input
+//!   structural checks (`source::epub` = a Rust epubcheck replacement;
+//!   `source::toc` = a cross-format declared-TOC audit; a KFX structural
+//!   checker is planned). These flag defects **in the source book** and feed
+//!   the book editor's repair list.
+//! - [`fidelity`] — **did EPUB ⇄ KFX conversion lose anything?** Pair-input
+//!   diffs (`validate(epub_bytes, kfx_bytes)`) comparing semantic preservation
+//!   across a conversion. A loss here is a boko converter bug, so these are the
+//!   CI checks. Direction-aware (see [`Direction`]).
+//! - [`coverage`] — **what does boko not handle yet?** Aggregate reports on
+//!   boko's own parser coverage (unmapped HTML tags, dropped CSS properties).
+//!   These are roadmap tools, **not** book validators — they never judge a book
+//!   right or wrong.
 //!
-//! ## Direction
+//! The `source` extractors read one format natively and never consult a
+//! derived/converted copy. The `fidelity` extractors deliberately parse the
+//! EPUB side with independent, minimal tokenization (NOT boko's IR) so a
+//! parser-side bug surfaces here instead of being mirrored on both sides; the
+//! KFX side reuses boko's own KFX parser (the format is shared with the reader
+//! anyway).
 //!
-//! The validator works in **both directions** of conversion:
-//!
-//! - **EPUB → KFX**: source EPUB is ground truth (publisher's, or
-//!   calibre-converted from azw3). Compare boko's KFX output against it.
-//! - **KFX → EPUB**: source KFX is ground truth (e.g. the one we just
-//!   produced from a `.kfx-zip`). Compare boko's EPUB output against it.
-//!
-//! The extractors and `validate()` signature are direction-agnostic — they
-//! consume one EPUB and one KFX regardless. The diff itself is symmetric.
-//! Only the [`Direction`] passed to print methods changes how the printed
-//! report labels which side is source vs target, and which side's defects
-//! reflect a boko bug.
-//!
-//! Calibre's output is NEVER ground truth — sidle exists to replace it.
-//! See feedback memory: ground-truth-by-direction.
+//! Calibre's output is NEVER ground truth — sidle exists to replace it. See
+//! feedback memory: ground-truth-by-direction.
 
-pub mod epub3;
-pub mod fxl;
-pub mod images;
-pub mod links;
-pub mod metadata;
-pub mod nav;
-pub mod page_progression;
-pub mod ruby;
-pub mod style;
-pub mod tags;
-pub mod text;
-pub mod toc;
-pub mod writing_mode;
+pub mod coverage;
+pub mod fidelity;
+pub mod source;
 
 /// Which way the conversion under validation runs. Determines how printed
-/// reports interpret each side: which is "source / ground truth" vs "target
-/// (boko's output)", and therefore which defects are boko's fault.
+/// [`fidelity`] reports interpret each side: which is "source / ground truth"
+/// vs "target (boko's output)", and therefore which defects are boko's fault.
 ///
-/// All `Report` fields are stored direction-neutrally (`only_in_epub`,
+/// All fidelity `Report` fields are stored direction-neutrally (`only_in_epub`,
 /// `only_in_kfx`, `epub_*`, `kfx_*`). The `Direction` is consulted only at
 /// presentation time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

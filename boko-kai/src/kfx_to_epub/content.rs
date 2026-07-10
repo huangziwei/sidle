@@ -1790,7 +1790,7 @@ fn extract_doc_data(book: &BookData) -> (String, String) {
     // value with an explicit field: `reading_orders[*].page_progression_direction`
     // ($425). Calibre never reads it (it relies solely on the heuristic above —
     // its blind spot), but it is the authoritative source, so trust it when
-    // present. This is what `validate::metadata::extract_ppd` already reads.
+    // present. This is what `validate::fidelity::metadata::extract_ppd` already reads.
     if let Some(explicit) = reading_order_ppd(book) {
         page_progression_direction = explicit;
     }

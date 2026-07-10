@@ -326,7 +326,7 @@ fn walk_doc_data<F>(
 /// Pull the explicit `reading_orders[*].page_progression_direction` ($425) out
 /// of a `document_data` ($538) or `metadata` ($258) Ion struct. PPD is a single
 /// book-level value, so the first order that declares one wins. Mirrors
-/// `validate::metadata::extract_ppd`.
+/// `validate::fidelity::metadata::extract_ppd`.
 fn walk_reading_order_ppd<F>(value: &IonValue, resolve_sym: &F, out: &mut Option<Direction>)
 where
     F: Fn(u64) -> String,

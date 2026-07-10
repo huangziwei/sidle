@@ -650,7 +650,7 @@ fn extract_attr_value<'a>(attrs: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
 /// parts and `styles/` are siblings under the OPF root, so a `..` href both
 /// points at a missing file and climbs out of the container: two EPUB-3
 /// violations that make a strict consumer (Apple Books, the downstream
-/// `epub_to_kfx` job, our own `validate::epub3`) reject the book. The
+/// `epub_to_kfx` job, our own `validate::source::epub`) reject the book. The
 /// `kindle:flow:` sheets are rewritten to sibling `styles/styleNNNN.css`
 /// paths, so no stylesheet boko actually emits needs `..` — dropping these
 /// dangling links is safe and loses nothing a reader would have applied.

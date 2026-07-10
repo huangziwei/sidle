@@ -447,7 +447,7 @@ fn validate_ruby(
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
-    let report = boko::validate::ruby::validate(&epub_bytes, &kfx_bytes)?;
+    let report = boko::validate::fidelity::ruby::validate(&epub_bytes, &kfx_bytes)?;
     report.print_summary(dir);
     if details > 0 {
         report.print_details(details, dir);
@@ -477,7 +477,7 @@ fn validate_text(
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
-    let report = boko::validate::text::validate(&epub_bytes, &kfx_bytes)?;
+    let report = boko::validate::fidelity::text::validate(&epub_bytes, &kfx_bytes)?;
     report.print_summary(dir);
     if details > 0 {
         report.print_details(details, dir);
@@ -502,7 +502,7 @@ fn validate_text(
 fn validate_style(epub_path: &str, kfx_path: &str, details: usize) -> Result<(), String> {
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
-    let report = boko::validate::style::validate(&epub_bytes, &kfx_bytes)?;
+    let report = boko::validate::coverage::style::validate(&epub_bytes, &kfx_bytes)?;
     report.print_summary();
     if details > 0 {
         report.print_details(details);
@@ -526,7 +526,7 @@ fn validate_style(epub_path: &str, kfx_path: &str, details: usize) -> Result<(),
 
 fn validate_tags(epub_path: &str, details: usize) -> Result<(), String> {
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
-    let report = boko::validate::tags::validate(&epub_bytes)?;
+    let report = boko::validate::coverage::tags::validate(&epub_bytes)?;
     report.print_summary();
     if details > 0 {
         report.print_details(details);
@@ -536,7 +536,7 @@ fn validate_tags(epub_path: &str, details: usize) -> Result<(), String> {
     } else {
         let fallback = report
             .by_bucket
-            .get(&boko::validate::tags::Bucket::Fallback)
+            .get(&boko::validate::coverage::tags::Bucket::Fallback)
             .copied()
             .unwrap_or(0);
         Err(format!("{} elements with no role_map entry", fallback))
@@ -552,7 +552,7 @@ fn validate_links(
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
-    let report = boko::validate::links::validate(&epub_bytes, &kfx_bytes)?;
+    let report = boko::validate::fidelity::links::validate(&epub_bytes, &kfx_bytes)?;
     report.print_summary(dir);
     if details > 0 {
         report.print_details(details, dir);
@@ -584,7 +584,7 @@ fn validate_images(
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
-    let report = boko::validate::images::validate(&epub_bytes, &kfx_bytes)?;
+    let report = boko::validate::fidelity::images::validate(&epub_bytes, &kfx_bytes)?;
     report.print_summary(dir);
     if details > 0 {
         report.print_details(details);
@@ -610,7 +610,7 @@ fn validate_nav(
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
-    let report = boko::validate::nav::validate(&epub_bytes, &kfx_bytes)?;
+    let report = boko::validate::fidelity::nav::validate(&epub_bytes, &kfx_bytes)?;
     report.print_summary(dir);
     if details > 0 {
         report.print_details(details, dir);
@@ -636,7 +636,7 @@ fn validate_metadata(
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
-    let report = boko::validate::metadata::validate(&epub_bytes, &kfx_bytes)?;
+    let report = boko::validate::fidelity::metadata::validate(&epub_bytes, &kfx_bytes)?;
     report.print_summary(dir);
     if details > 0 {
         report.print_details(details, dir);
@@ -660,7 +660,7 @@ fn validate_writing_mode(
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
-    let report = boko::validate::writing_mode::validate(&epub_bytes, &kfx_bytes)?;
+    let report = boko::validate::fidelity::writing_mode::validate(&epub_bytes, &kfx_bytes)?;
     report.print_summary(dir);
     if details > 0 {
         report.print_details(details, dir);
@@ -685,7 +685,7 @@ fn validate_page_progression(
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
-    let report = boko::validate::page_progression::validate(&epub_bytes, &kfx_bytes)?;
+    let report = boko::validate::fidelity::page_progression::validate(&epub_bytes, &kfx_bytes)?;
     report.print_summary(dir);
     if details > 0 {
         report.print_details(details, dir);
@@ -710,7 +710,7 @@ fn validate_fxl(
     let epub_bytes = std::fs::read(epub_path).map_err(|e| format!("{}: {}", epub_path, e))?;
     let kfx_bytes = std::fs::read(kfx_path).map_err(|e| format!("{}: {}", kfx_path, e))?;
 
-    let report = boko::validate::fxl::validate(&epub_bytes, &kfx_bytes)?;
+    let report = boko::validate::fidelity::fxl::validate(&epub_bytes, &kfx_bytes)?;
     report.print_summary(dir);
     if report.is_clean() {
         Ok(())
@@ -741,7 +741,7 @@ fn validate_all(
     // horizontal-tb forcing trips the writing-mode gate). Detect up front; for an
     // FXL book those checks still run and print, but as INFORMATION only. The
     // FXL-shape gate plus images / nav / metadata / links / PPD still gate.
-    let fxl = boko::validate::fxl::validate(&epub_bytes, &kfx_bytes)?;
+    let fxl = boko::validate::fidelity::fxl::validate(&epub_bytes, &kfx_bytes)?;
     let reflow_gated = !fxl.kfx_fixed_layout;
     if fxl.kfx_fixed_layout {
         println!(
@@ -751,7 +751,7 @@ fn validate_all(
     }
 
     println!("=== Ruby ===");
-    let ruby = boko::validate::ruby::validate(&epub_bytes, &kfx_bytes)?;
+    let ruby = boko::validate::fidelity::ruby::validate(&epub_bytes, &kfx_bytes)?;
     ruby.print_summary(dir);
     if details > 0 {
         ruby.print_details(details, dir);
@@ -761,7 +761,7 @@ fn validate_all(
     }
 
     println!("\n=== Text ===");
-    let text = boko::validate::text::validate(&epub_bytes, &kfx_bytes)?;
+    let text = boko::validate::fidelity::text::validate(&epub_bytes, &kfx_bytes)?;
     text.print_summary(dir);
     if details > 0 {
         text.print_details(details, dir);
@@ -771,7 +771,7 @@ fn validate_all(
     }
 
     println!("\n=== Style ===");
-    let style = boko::validate::style::validate(&epub_bytes, &kfx_bytes)?;
+    let style = boko::validate::coverage::style::validate(&epub_bytes, &kfx_bytes)?;
     style.print_summary();
     if details > 0 {
         style.print_details(details);
@@ -781,7 +781,7 @@ fn validate_all(
     }
 
     println!("\n=== Tags ===");
-    let tags = boko::validate::tags::validate(&epub_bytes)?;
+    let tags = boko::validate::coverage::tags::validate(&epub_bytes)?;
     tags.print_summary();
     if details > 0 {
         tags.print_details(details);
@@ -791,7 +791,7 @@ fn validate_all(
     }
 
     println!("\n=== Links ===");
-    let links = boko::validate::links::validate(&epub_bytes, &kfx_bytes)?;
+    let links = boko::validate::fidelity::links::validate(&epub_bytes, &kfx_bytes)?;
     links.print_summary(dir);
     if details > 0 {
         links.print_details(details, dir);
@@ -801,7 +801,7 @@ fn validate_all(
     }
 
     println!("\n=== Images ===");
-    let images = boko::validate::images::validate(&epub_bytes, &kfx_bytes)?;
+    let images = boko::validate::fidelity::images::validate(&epub_bytes, &kfx_bytes)?;
     images.print_summary(dir);
     if details > 0 {
         images.print_details(details);
@@ -811,7 +811,7 @@ fn validate_all(
     }
 
     println!("\n=== Nav ===");
-    let nav = boko::validate::nav::validate(&epub_bytes, &kfx_bytes)?;
+    let nav = boko::validate::fidelity::nav::validate(&epub_bytes, &kfx_bytes)?;
     nav.print_summary(dir);
     if details > 0 {
         nav.print_details(details, dir);
@@ -821,7 +821,7 @@ fn validate_all(
     }
 
     println!("\n=== Metadata ===");
-    let metadata = boko::validate::metadata::validate(&epub_bytes, &kfx_bytes)?;
+    let metadata = boko::validate::fidelity::metadata::validate(&epub_bytes, &kfx_bytes)?;
     metadata.print_summary(dir);
     if details > 0 {
         metadata.print_details(details, dir);
@@ -831,14 +831,14 @@ fn validate_all(
     }
 
     println!("\n=== Writing mode ===");
-    let wm = boko::validate::writing_mode::validate(&epub_bytes, &kfx_bytes)?;
+    let wm = boko::validate::fidelity::writing_mode::validate(&epub_bytes, &kfx_bytes)?;
     wm.print_summary(dir);
     if reflow_gated && !wm.is_clean() {
         all_clean = false;
     }
 
     println!("\n=== Page progression direction ===");
-    let ppd = boko::validate::page_progression::validate(&epub_bytes, &kfx_bytes)?;
+    let ppd = boko::validate::fidelity::page_progression::validate(&epub_bytes, &kfx_bytes)?;
     ppd.print_summary(dir);
     if !ppd.is_clean() {
         all_clean = false;
@@ -938,11 +938,23 @@ fn show_sections(path: &str) -> Result<(), String> {
 
 fn validate_toc(path: &str, json: bool) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {}", path, e))?;
-    let audit = boko::validate::toc::validate(&bytes)?;
+    let audit = boko::validate::source::toc::validate(&bytes)?;
     if json {
+        let payload = serde_json::json!({
+            "verdict": audit.verdict.as_str(),
+            "nav_count": audit.nav_count,
+            "nav_chapters": audit.nav_chapters,
+            "fm_only": audit.fm_only,
+            "contents_links": audit.contents_links,
+            "headings": audit.headings,
+            "section_heads": audit.section_heads,
+            "has_toc_landmark": audit.has_toc_landmark,
+            "nav_labels": audit.nav_labels,
+            "contents_sample": audit.contents_sample,
+        });
         println!(
             "{}",
-            serde_json::to_string(&audit.to_json()).map_err(|e| e.to_string())?
+            serde_json::to_string(&payload).map_err(|e| e.to_string())?
         );
     } else {
         audit.print_summary();
@@ -1989,7 +2001,7 @@ fn aozora_dispatch(
         cover_jpeg: &cover,
     })
     .map_err(|e| format!("build epub: {e}"))?;
-    let report = boko::validate::epub3::validate(&epub_bytes);
+    let report = boko::validate::source::epub::validate(&epub_bytes);
     if !report.is_clean() {
         return Err(format!("aozora epub failed validation:\n{report}"));
     }

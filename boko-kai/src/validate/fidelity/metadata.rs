@@ -242,7 +242,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
             kfx: "(missing)".into(),
         });
     }
-    // PPD check moved to `validate::page_progression`, which mirrors calibre's
+    // PPD check moved to `validate::fidelity::page_progression`, which mirrors calibre's
     // writing-mode → ppd override (a KFX with `direction: ltr` + `writing_mode:
     // vertical_rl` still has PPD = rtl, which a literal field-by-field compare
     // here would miss). PPD values are still printed below as informational.

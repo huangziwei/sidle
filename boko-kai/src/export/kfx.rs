@@ -1225,7 +1225,7 @@ fn dominant_writing_mode_from_ir(book: &mut Book) -> KfxSymbol {
 /// and turns pages left-to-right — wrong for a Japanese book. Amazon's own KFX
 /// sets the document writing mode to the book's primary *text* flow and marks
 /// horizontal runs as the exception, so any genuine vertical text makes the
-/// book vertical. Mirror that (and `validate::writing_mode::dominant_mode`):
+/// book vertical. Mirror that (and `validate::fidelity::writing_mode::dominant_mode`):
 /// treat any vertical writing mode as decisive, picking the more-cited axis,
 /// and fall back to horizontal_tb only when the book declares no vertical text
 /// at all.

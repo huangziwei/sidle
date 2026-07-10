@@ -6,7 +6,7 @@
 //! headings, chapter-marker section starts), and an in-book Contents page (a
 //! spine doc that links to many other spine docs). Reads only the EPUB — never a
 //! converted KFX. Structural EPUB conformance is a separate concern owned by
-//! [`crate::validate::epub3`]; this is a TOC-*completeness* check.
+//! [`crate::validate::source::epub`]; this is a TOC-*completeness* check.
 
 use std::collections::HashSet;
 use std::io::{Cursor, Read, Seek};

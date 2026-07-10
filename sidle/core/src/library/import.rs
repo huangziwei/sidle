@@ -613,7 +613,7 @@ fn convert_azw3(src: &Path) -> Result<Vec<u8>> {
         .export(&mut book, &mut buf)
         .context("azw3 -> epub export")?;
     let epub_bytes = buf.into_inner();
-    let report = boko::validate::epub3::validate(&epub_bytes);
+    let report = boko::validate::source::epub::validate(&epub_bytes);
     if !report.is_clean() {
         bail!("azw3 -> epub failed validation:\n{report}");
     }
@@ -634,7 +634,7 @@ fn convert_mobi(src: &Path) -> Result<Vec<u8>> {
         .export(&mut book, &mut buf)
         .context("mobi -> epub export")?;
     let epub_bytes = buf.into_inner();
-    let report = boko::validate::epub3::validate(&epub_bytes);
+    let report = boko::validate::source::epub::validate(&epub_bytes);
     if !report.is_clean() {
         bail!("mobi -> epub failed validation:\n{report}");
     }
@@ -702,7 +702,7 @@ fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
     // Gate the import on the standalone EPUB-3 validator. Bad output here
     // silently corrupts the downstream KFX conversion, so we fail fast
     // instead of writing a broken book into the library.
-    let report = boko::validate::epub3::validate(&epub_bytes);
+    let report = boko::validate::source::epub::validate(&epub_bytes);
     if !report.is_clean() {
         bail!("aozora epub failed validation:\n{report}");
     }

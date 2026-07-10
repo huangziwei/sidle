@@ -171,21 +171,6 @@ impl TocAudit {
             println!("  nav labels: {}", shown.join(" · "));
         }
     }
-
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "verdict": self.verdict.as_str(),
-            "nav_count": self.nav_count,
-            "nav_chapters": self.nav_chapters,
-            "fm_only": self.fm_only,
-            "contents_links": self.contents_links,
-            "headings": self.headings,
-            "section_heads": self.section_heads,
-            "has_toc_landmark": self.has_toc_landmark,
-            "nav_labels": self.nav_labels,
-            "contents_sample": self.contents_sample,
-        })
-    }
 }
 
 /// Front-matter / boilerplate TOC labels (JP + EN). A declared TOC made only of
