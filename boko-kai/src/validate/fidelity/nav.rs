@@ -307,6 +307,26 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     })
 }
 
+/// KFX-only nav reachability, reused by the standalone KFX checker (job 2,
+/// `source::kfx`). Returns the sorted, deduped element ids that navigation
+/// entries (headings + toc) target but no storyline contains — each is a nav
+/// entry that tap-jumps to nowhere on device. `Err` when the container can't be
+/// read (already surfaced as `container-unreadable` there, so the caller drops
+/// it). This is the exact reachability rule used by [`validate`]'s own
+/// `dangling_nav` — the cover / section-root exemption (`cover_target`) included
+/// — so the two can't diverge.
+pub(crate) fn dangling_nav_targets(kfx_bytes: &[u8]) -> Result<Vec<u64>, String> {
+    let kfx = extract_kfx_nav(kfx_bytes)?;
+    let reachable = |id: u64| Some(id) == kfx.cover_target || kfx.element_ids.contains(&id);
+    let mut dangling: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    for t in kfx.heading_targets.iter().chain(&kfx.toc_targets) {
+        if !reachable(t.element_id) {
+            dangling.insert(t.element_id);
+        }
+    }
+    Ok(dangling.into_iter().collect())
+}
+
 // ============================================================================
 // Source-side extraction
 // ============================================================================

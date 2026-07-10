@@ -4190,7 +4190,7 @@ const COVER_RSRC_NAME: &str = "ecover";
 /// by `book_metadata.cover_image` — the library tile / PDOC sleep-screen art
 /// (keyed by the synthesized ASIN). It is *not* a reading-order page; the PDF
 /// pages remain the only sections. Render it with [`crate::render`]. When
-/// `None` (e.g. the PDF engine is unavailable, or the wasm build), the KFX is
+/// `None` (e.g. the PDF engine is unavailable on a non-macOS build), the KFX is
 /// cover-less but otherwise identical — the embedded PDF is unaffected.
 ///
 /// `text`, when present, is the per-page selectable text layer extracted by

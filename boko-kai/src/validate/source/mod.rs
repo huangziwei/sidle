@@ -11,9 +11,8 @@
 //!   and reads only that source.
 //! - [`kfx`] — KFX structural conformance (job 2, the `epubcheck` equivalent for
 //!   KFX — no such tool exists elsewhere): container integrity, required
-//!   entities, resource-byte resolution, cover resolution. (Deeper reference
-//!   walks — section→storyline, content/style refs, nav reachability, position-
-//!   map coverage — are the next increment; see the validator-architecture plan.)
+//!   entities, reference resolution (section→storyline, content/style refs), nav
+//!   reachability, resource-byte and cover resolution, and position-map coverage.
 
 pub mod epub;
 pub mod kfx;
@@ -22,10 +21,14 @@ pub mod toc;
 use super::{Finding, Report, Severity};
 
 /// Run every source check that applies to `bytes` and return one unified
-/// [`Report`]. Sniffs the format (EPUB = zip `PK`, else KFX) and runs the
-/// matching structural checks plus the cross-format TOC audit, lowering each
-/// check's result into [`Finding`]s. This is the single entry the book editor
-/// consumes to build its repair list.
+/// [`Report`]. Sniffs the format and runs the matching structural checks plus
+/// the cross-format TOC audit, lowering each check's result into [`Finding`]s.
+/// This is the single entry the book editor consumes to build its repair list.
+///
+/// Format sniff: a `PK` zip is an EPUB *unless* it bundles `.kfx` entries — an
+/// Amazon `.kfx-zip`, which is merged to a single container and run through the
+/// KFX checks (so `validate` on a bundle matches `validate` on the merged
+/// `.kfx`). Anything else is treated as a single KFX container.
 ///
 /// Infallible by design: a book so broken a check cannot run (e.g. a KFX that
 /// won't load) becomes an `Error` finding rather than an `Err`, so the editor
@@ -34,31 +37,66 @@ pub fn validate(bytes: &[u8]) -> Report {
     let mut report = Report::default();
 
     if bytes.starts_with(b"PK") {
-        // EPUB: structural conformance (epubcheck replacement) + TOC audit.
-        report
-            .findings
-            .extend(epub::validate(bytes).into_findings());
-        report.findings.extend(toc_findings(bytes));
-    } else {
-        // KFX (or an unknown container): structural checks (rules 1–9) + the
-        // cross-format TOC audit (rule 10). A container that won't load is
-        // already reported by `kfx::validate` as `container-unreadable`, so the
-        // TOC audit's own load failure is swallowed here, not double-reported.
-        //
-        // Both `kfx::validate` and the TOC audit load the container once each; a
-        // single shared load is a future optimization (the TOC audit's KFX
-        // evidence extractor is currently private to `toc`).
-        let kfx_findings = kfx::validate(bytes);
-        let unreadable = kfx_findings
-            .iter()
-            .any(|f| f.rule == "container-unreadable");
-        report.findings.extend(kfx_findings);
-        if !unreadable && let Ok(audit) = toc::validate(bytes) {
-            report.findings.extend(audit.into_findings());
+        if zip_bundles_kfx(bytes) {
+            // A `.kfx-zip` bundle, not an EPUB: merge its containers into one
+            // `.kfx` and run the KFX checks on that.
+            match crate::kfx::merge::merge_kfx_zip_bytes(bytes) {
+                Ok(merged) => report.findings.extend(validate_kfx(&merged)),
+                Err(e) => report.findings.push(Finding {
+                    check: "kfx",
+                    rule: "container-unreadable".to_string(),
+                    severity: Severity::Error,
+                    location: "<kfx-zip>".to_string(),
+                    message: format!("KFX bundle could not be merged into a container: {e}"),
+                    fix: None,
+                }),
+            }
+        } else {
+            // EPUB: structural conformance (epubcheck replacement) + TOC audit.
+            report
+                .findings
+                .extend(epub::validate(bytes).into_findings());
+            report.findings.extend(toc_findings(bytes));
         }
+    } else {
+        // A single KFX container (or an unknown blob → container-unreadable).
+        report.findings.extend(validate_kfx(bytes));
     }
 
     report
+}
+
+/// The KFX side of [`validate`]: structural checks (rules 1–9) + the cross-
+/// format TOC audit (rule 10), over one already-merged container. A container
+/// that won't load is already reported by `kfx::validate` as
+/// `container-unreadable`, so the TOC audit's own load failure is swallowed
+/// here, not double-reported.
+///
+/// Both `kfx::validate` and the TOC audit load the container once each; a single
+/// shared load is a future optimization (the TOC audit's KFX evidence extractor
+/// is currently private to `toc`).
+fn validate_kfx(bytes: &[u8]) -> Vec<Finding> {
+    let mut findings = kfx::validate(bytes);
+    let unreadable = findings.iter().any(|f| f.rule == "container-unreadable");
+    if !unreadable && let Ok(audit) = toc::validate(bytes) {
+        findings.extend(audit.into_findings());
+    }
+    findings
+}
+
+/// Does this `PK` zip bundle `.kfx` containers (an Amazon `.kfx-zip`) rather
+/// than being an EPUB? Peeks the entry names — a `.kfx-zip` carries `.kfx`
+/// entries and no EPUB `mimetype`, so one `.kfx` entry is a reliable tell.
+fn zip_bundles_kfx(zip_bytes: &[u8]) -> bool {
+    let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)) else {
+        return false;
+    };
+    (0..archive.len()).any(|i| {
+        archive
+            .by_index(i)
+            .map(|f| f.name().to_ascii_lowercase().ends_with(".kfx"))
+            .unwrap_or(false)
+    })
 }
 
 /// Run the cross-format TOC audit and lower it to findings. A read failure — a

@@ -44,3 +44,38 @@ fn garbage_container_reports_unreadable() {
         "expected kfx/container-unreadable; got:\n{report}"
     );
 }
+
+#[test]
+fn kfx_zip_bundle_routes_through_kfx_checks_not_epub() {
+    use std::io::Write;
+
+    let kfx_path = "tests/fixtures/[太宰 治] 人間失格.kfx";
+    let kfx_bytes = std::fs::read(kfx_path).expect("read fixture");
+
+    // Pack the single .kfx into a one-entry `.kfx-zip` (starts with `PK`, like
+    // an EPUB) in memory.
+    let mut zip_buf: Vec<u8> = Vec::new();
+    {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_buf));
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("book.kfx", opts).expect("start_file");
+        writer.write_all(&kfx_bytes).expect("write kfx bytes");
+        writer.finish().expect("finish zip");
+    }
+
+    let report = boko::validate::source::validate(&zip_buf);
+
+    // Had the bundle been mis-sniffed as an EPUB, `epub::validate` (no mimetype
+    // / container.xml) plus the TOC audit would emit errors. Zero errors + no
+    // `epub` findings proves it was unwrapped and validated as KFX instead.
+    assert_eq!(
+        report.count(boko::validate::Severity::Error),
+        0,
+        "well-formed kfx-zip bundle should validate clean; got:\n{report}"
+    );
+    assert!(
+        !report.findings.iter().any(|f| f.check == "epub"),
+        "a kfx-zip bundle must not be checked as an EPUB; got:\n{report}"
+    );
+}

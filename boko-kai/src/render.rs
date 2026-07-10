@@ -10,8 +10,8 @@
 //!   does the font/encoding/CMap work — which the KFX emit path turns into the
 //!   invisible, selectable text storylines.
 //!
-//! macOS-only by design (`cfg(target_os = "macos")`): the wasm / Kindle builds
-//! don't rasterize (the Kindle never *converts* — conversion is always Mac-side),
+//! macOS-only by design (`cfg(target_os = "macos")`): non-macOS builds don't
+//! rasterize (the Kindle never *converts* — conversion is always Mac-side),
 //! and a future Linux build would slot Poppler (`poppler_page_get_text_layout` =
 //! the same per-char boxes) behind these same two functions. Every other target
 //! gets an `Unavailable` stub, and the emit path treats that as "no cover / no
@@ -116,8 +116,8 @@ pub fn render_pdf_page_jpeg(
 }
 
 /// Non-macOS stub: rasterization needs a platform PDF engine (PDFKit on macOS;
-/// Poppler on a future Linux build). The wasm/Kindle builds produce a
-/// visual-only KFX (no cover).
+/// Poppler on a future Linux build). Non-macOS builds produce a visual-only KFX
+/// (no cover).
 #[cfg(not(target_os = "macos"))]
 pub fn render_pdf_page_jpeg(
     _pdf_bytes: &[u8],
@@ -140,8 +140,8 @@ pub fn extract_pdf_text(pdf_bytes: &[u8]) -> Result<Vec<PageText>, RenderError> 
     macos::extract_text(pdf_bytes)
 }
 
-/// Non-macOS stub: text extraction needs a platform PDF engine. The wasm/Kindle
-/// builds produce a visual-only KFX (no selectable text).
+/// Non-macOS stub: text extraction needs a platform PDF engine, so these builds
+/// produce a visual-only KFX (no selectable text).
 #[cfg(not(target_os = "macos"))]
 pub fn extract_pdf_text(_pdf_bytes: &[u8]) -> Result<Vec<PageText>, RenderError> {
     Err(RenderError::Unavailable(

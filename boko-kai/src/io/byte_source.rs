@@ -87,7 +87,7 @@ impl ByteSource for FileSource {
     }
 
     fn read_at_into(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        // Fallback for WASM and other platforms
+        // Portable fallback: clone the handle and seek to the offset.
         let mut file_clone = self.file.try_clone()?;
         file_clone.seek(SeekFrom::Start(offset))?;
         file_clone.read_exact(buf)?;
