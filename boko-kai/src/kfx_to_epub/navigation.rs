@@ -23,7 +23,7 @@ use super::loader::BookData;
 /// `by_type[$391]` by its resolved name — so the reader (and Sidle) sees the
 /// TOC / landmarks of a manga KFX, not just reflowable books. Returns an owned
 /// value so the caller can borrow its fields through the loop body.
-fn resolve_nav_container(book: &BookData, container: &IonValue) -> Option<IonValue> {
+pub(crate) fn resolve_nav_container(book: &BookData, container: &IonValue) -> Option<IonValue> {
     let inner = container.unwrap_annotated();
     if inner.as_struct().is_some() {
         return Some(inner.clone());

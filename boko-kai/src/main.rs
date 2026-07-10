@@ -75,6 +75,19 @@ enum Command {
         file: String,
     },
 
+    /// KFX TOC quality check. Compares the KFX's nav_container TOC against the
+    /// book's own in-book Contents page (its densest `link_to` chapter cluster,
+    /// or a `toc`-landmark page) and reports whether the nav TOC is deficient.
+    /// KFX-native: never looks at any converted EPUB. Flags only — never edits.
+    TocAudit {
+        /// Input KFX file
+        file: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Dump the IR (Intermediate Representation) for a book
     Dump {
         /// Input file (EPUB, AZW3, or MOBI)
@@ -248,6 +261,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Info { file, json } => show_info(&file, json),
         Command::Sections { file } => show_sections(&file),
+        Command::TocAudit { file, json } => toc_audit_cmd(&file, json),
         Command::Convert {
             input,
             output,
@@ -919,6 +933,47 @@ fn show_sections(path: &str) -> Result<(), String> {
     let tree = extract_section_tree(&mut book).map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(&tree).map_err(|e| e.to_string())?;
     println!("{json}");
+    Ok(())
+}
+
+fn toc_audit_cmd(path: &str, json: bool) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {}", path, e))?;
+    let book = boko::kfx_to_epub::loader::load(&bytes).map_err(|e| e.to_string())?;
+    let a = boko::kfx_to_epub::toc_audit::audit(&book);
+    if json {
+        let out = serde_json::json!({
+            "verdict": a.verdict.as_str(),
+            "nav_count": a.nav_count,
+            "nav_chapters": a.nav_chapters,
+            "fm_only": a.fm_only,
+            "contents_links": a.contents_links,
+            "headings": a.headings,
+            "section_heads": a.section_heads,
+            "has_toc_landmark": a.has_toc_landmark,
+            "nav_labels": a.nav_labels,
+            "contents_sample": a.contents_sample,
+        });
+        println!(
+            "{}",
+            serde_json::to_string(&out).map_err(|e| e.to_string())?
+        );
+    } else {
+        println!(
+            "{}  nav_toc={} (chapters={}, fm_only={})  evidence: {} links / {} headings / {} section-heads  toc_landmark={}",
+            a.verdict.as_str(),
+            a.nav_count,
+            a.nav_chapters,
+            a.fm_only,
+            a.contents_links,
+            a.headings,
+            a.section_heads,
+            a.has_toc_landmark,
+        );
+        if !a.nav_labels.is_empty() {
+            let shown: Vec<&str> = a.nav_labels.iter().take(12).map(|s| s.as_str()).collect();
+            println!("  nav labels: {}", shown.join(" · "));
+        }
+    }
     Ok(())
 }
 

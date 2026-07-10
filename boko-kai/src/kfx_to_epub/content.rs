@@ -2708,6 +2708,20 @@ fn sanitize_href(href: &str) -> Option<String> {
         {
             return None;
         }
+        // The port (everything after the host's `:`) must be all digits, or the
+        // authority is malformed and a strict reader rejects the whole URL. Real
+        // case baked into a source KFX: a double-scheme typo `http://http:://…`
+        // parses as host `http`, port `:…` → epubcheck RSC-020 "Illegal
+        // character in port". Strip any `userinfo@` first, and skip IPv6 literals
+        // (`[::1]:80`) whose host legitimately contains colons.
+        if !auth.starts_with('[') {
+            let host_port = auth.rsplit_once('@').map_or(auth, |(_, hp)| hp);
+            if let Some((host, port)) = host_port.split_once(':')
+                && (host.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()))
+            {
+                return None;
+            }
+        }
     }
     if !href.contains(is_illegal) {
         return Some(href.to_string());
@@ -2995,6 +3009,48 @@ pub fn emit_stylesheet(state: &ContentState) -> String {
 #[cfg(test)]
 mod tests {
     use crate::kfx::symbols::KFX_SYMBOL_TABLE;
+
+    /// `sanitize_href` must reject an absolute URL whose authority carries a
+    /// non-numeric port — the shape a double-scheme source typo bakes in
+    /// (`http://http:://host/…` parses as host `http`, port `:…`), which
+    /// epubcheck rejects as RSC-020 "Illegal character in port". Valid ports,
+    /// userinfo, and portless URLs must survive; path-illegal chars must still
+    /// be percent-encoded rather than dropped.
+    #[test]
+    fn sanitize_href_drops_malformed_authority() {
+        use super::sanitize_href;
+        // Real corpus case (source KFX "Why Love Hurts"): dropped → link removed,
+        // visible text kept.
+        assert_eq!(
+            sanitize_href("http://http:://www.csulb.edu/%E2%88%BCasc/post9.html"),
+            None
+        );
+        // A bare non-numeric port is likewise malformed.
+        assert_eq!(sanitize_href("http://host:port/x"), None);
+        // Valid URLs pass through unchanged.
+        assert_eq!(
+            sanitize_href("http://www.csulb.edu/~asc/post9.html").as_deref(),
+            Some("http://www.csulb.edu/~asc/post9.html")
+        );
+        assert_eq!(
+            sanitize_href("https://example.com:8080/p?q#f").as_deref(),
+            Some("https://example.com:8080/p?q#f")
+        );
+        // Portless and `userinfo@` authorities are not mistaken for a bad port.
+        assert_eq!(
+            sanitize_href("https://example.com/a").as_deref(),
+            Some("https://example.com/a")
+        );
+        assert_eq!(
+            sanitize_href("http://user:pass@example.com/a").as_deref(),
+            Some("http://user:pass@example.com/a")
+        );
+        // Path-illegal chars are still percent-encoded (pre-existing contract).
+        assert_eq!(
+            sanitize_href("http://a.com/x[1]").as_deref(),
+            Some("http://a.com/x%5B1%5D")
+        );
+    }
 
     /// `process_content`'s dispatch matches on the KFX symbol NAME that
     /// `text_of` returns. Every arm string must therefore be a real symbol name

@@ -14,6 +14,7 @@ pub mod properties;
 pub mod reader;
 pub mod resources;
 pub mod text_index;
+pub mod toc_audit;
 
 use std::io;
 
