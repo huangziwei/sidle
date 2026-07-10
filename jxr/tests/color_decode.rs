@@ -8,16 +8,12 @@
 //!
 //! This locks in the fix to `decoder.rs`'s YUV444 plane-header read (it must
 //! consume the *two* 4-bit reserved fields = 8 bits; reading 4 desynced the
-//! whole codestream). See the repo's
-//! `.claude/plans/finished_or_stale/jxr-encoder.md` Track 6.0. The minting
-//! harness lives in `artifacts/jxr-oracle/` (gitignored); this test needs only
-//! the committed fixture.
+//! whole codestream). The fixture is committed; this test needs only that.
 
 use jxr::decode::{container, decoder::Decoder};
 
-/// The exact RGB image the fixture was encoded from (must match the generator
-/// in `artifacts/jxr-oracle/src/main.rs`): per-channel gradients + saturated
-/// corner swatches. `out[(y*16+x)*3 + {0,1,2}]` = R,G,B.
+/// The exact RGB image the fixture was encoded from: per-channel gradients +
+/// saturated corner swatches. `out[(y*16+x)*3 + {0,1,2}]` = R,G,B.
 fn expected_rgb() -> Vec<u8> {
     let (w, h) = (16usize, 16usize);
     let mut v = vec![0u8; w * h * 3];

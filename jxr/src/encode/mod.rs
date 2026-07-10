@@ -1,8 +1,8 @@
 //! JPEG-XR encoder: the decoder's forward mirror, covering every format
 //! the decoder reads (the full T.832 envelope — see the crate README).
 //!
-//! Built bottom-up against [`crate::decode`] as a round-trip oracle
-//! (history: the repo's `.claude/plans/` jxr plans). Entry points:
+//! Built bottom-up against [`crate::decode`] as a round-trip oracle.
+//! Entry points:
 //! [`encode`] / [`encode_with_alpha_qp`] (classic 8-bit),
 //! [`encode_with_options`] (the full 8-bit option surface), and
 //! [`encode_typed`] (deep/HDR/exotic [`SamplePlanes`]).

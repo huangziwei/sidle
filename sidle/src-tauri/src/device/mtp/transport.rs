@@ -6,7 +6,7 @@
 //!
 //! - mtp-rs is runtime-agnostic — its main `nusb` dep has neither the `tokio`
 //!   nor the `smol` feature enabled, and the bulk-transfer futures are
-//!   real waker-driven futures (see `ref/nusb/src/device.rs::next_complete`)
+//!   real waker-driven futures (see nusb's `device.rs::next_complete`)
 //!   that any executor can drive. No tokio runtime needed.
 //! - `tokio::runtime::Runtime::block_on` would panic from inside
 //!   `spawn_blocking` ("can't block a runtime from within a runtime"); a
@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn exclusive_access_error_gets_actionable_text() {
         // Same wording nusb produces on macOS when another process has
-        // claimed the device — see ref/mtp-rs/src/error.rs tests.
+        // claimed the device — see mtp-rs's `error.rs` tests.
         let io_err = std::io::Error::other("could not be opened for exclusive access");
         let mapped = map_mtp_err(mtp_rs::Error::Io(io_err));
         let msg = format!("{mapped:#}");

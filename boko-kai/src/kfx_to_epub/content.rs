@@ -1379,7 +1379,7 @@ impl<'a> ContentState<'a> {
         // nested inside the link's range). Without this split, a link
         // event at (0, N) advances the cursor past the whole text and
         // any ruby events inside `[0, N)` are silently skipped — the bug
-        // that lost 5 ruby pairs after task #10 wired up link_to.
+        // that lost 5 ruby pairs when link_to wrapping was added.
         let mut links: Vec<(usize, usize, String)> = Vec::new();
         // (base_start, base_end, base_text, [(rt_start, rt_end, rt_text)])
         type RubySpan = (usize, usize, String, Vec<(i64, i64, String)>);
@@ -2946,7 +2946,7 @@ pub fn finalize_chapter_attrs(state: &mut ContentState) {
 /// Emit the final stylesheet from the deduplicated map.
 ///
 /// Adds calibre-style `body { writing-mode: ...; }` derived from
-/// `process_document_data`'s book-level writing-mode. Per the plan we do
+/// `process_document_data`'s book-level writing-mode. We do
 /// NOT fabricate PPD from writing-mode (calibre does); they're emitted
 /// independently when KFX declares them.
 pub fn emit_stylesheet(state: &ContentState) -> String {

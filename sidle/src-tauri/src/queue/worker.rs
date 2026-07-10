@@ -435,7 +435,7 @@ fn convert_kfx_to_epub(
 
 /// PDF → KFX: wrap the PDF verbatim into a fixed-layout PDOC KFX for the Scribe.
 /// The book's PDF side is the source; the produced KFX is what gets pushed to
-/// the device. See .claude/plans/pdf-to-kfx.md.
+/// the device.
 fn convert_pdf_to_kfx(
     paths: &LibraryPaths,
     book: &BookRow,

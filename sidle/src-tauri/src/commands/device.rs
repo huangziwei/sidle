@@ -289,8 +289,7 @@ pub async fn annotations_import_from_device(
 /// "Restore from device" — re-import everything the connected Kindle holds and
 /// UNDO Sidle-side deletions: clear all deletion records so accidentally-deleted
 /// annotations / ink / notebooks the device still has come back, then force a full
-/// re-pull (clear this device's sync checkpoints). NEVER deletes a Sidle row. See
-/// .claude/plans/backup-source-of-truth.md.
+/// re-pull (clear this device's sync checkpoints). NEVER deletes a Sidle row.
 #[tauri::command]
 pub async fn device_restore(
     app: AppHandle,

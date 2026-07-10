@@ -15,7 +15,7 @@
 //!
 //! ⚠️ Device strictness: the offline reader is more permissive than a Kindle on
 //! nav. A repaired container must still clear the offline entity differ and a
-//! device round-trip before it's trusted on-device (see the plan's Tier-2 risk).
+//! device round-trip before it's trusted on-device.
 //! The nav-unit shape here mirrors boko's proven `pdf_to_kfx` toc export exactly
 //! (`representation:{label}` + `target_position:{id, offset:0}`).
 //!
@@ -67,7 +67,8 @@ pub fn set_toc(kfx_bytes: &[u8], entries: &[TocEntry]) -> Result<Vec<u8>, Conver
     let book = loader::load(kfx_bytes)?;
     let mode = detect_toc_mode(&book).ok_or_else(|| {
         ConvertError::InvalidKfx(
-            "KFX has no toc nav_container to replace (synthesizing one is not yet supported)".into(),
+            "KFX has no toc nav_container to replace (synthesizing one is not yet supported)"
+                .into(),
         )
     })?;
 
@@ -115,8 +116,8 @@ fn detect_toc_mode(book: &BookData) -> Option<TocMode> {
             let Some(ro_fields) = ro.as_struct() else {
                 continue;
             };
-            let Some(containers) = get_field(ro_fields, KfxSymbol::NavContainers as u64)
-                .and_then(|v| v.as_list())
+            let Some(containers) =
+                get_field(ro_fields, KfxSymbol::NavContainers as u64).and_then(|v| v.as_list())
             else {
                 continue;
             };
@@ -128,7 +129,9 @@ fn detect_toc_mode(book: &BookData) -> Option<TocMode> {
                     continue;
                 }
                 return Some(match container.unwrap_annotated() {
-                    IonValue::Symbol(id) => TocMode::Referenced(book.symbols.resolve(*id).to_string()),
+                    IonValue::Symbol(id) => {
+                        TocMode::Referenced(book.symbols.resolve(*id).to_string())
+                    }
                     _ => TocMode::Inline,
                 });
             }

@@ -36,7 +36,7 @@ use std::fmt;
 // ============================================================================
 //
 // One shape for every [`source`] check's result. Each check (`source::epub`,
-// `source::toc`, the planned `source::kfx`) keeps its own rich internal report
+// `source::toc`, `source::kfx`) keeps its own rich internal report
 // and *lowers* it into `Finding`s (see each module's `into_findings`); the
 // aggregator [`source::validate`] concatenates them into one [`Report`]. That
 // Report is the single type the book editor consumes to build a repair list —

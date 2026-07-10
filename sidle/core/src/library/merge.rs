@@ -3,7 +3,6 @@
 //! test library on another; back the test library up, carry it over, and merge
 //! its curated books (and their highlights / ink / reading position) plus any new
 //! Scribe notebooks into the canonical one — without losing either side.
-//! See `.claude/plans/library-merge.md`.
 //!
 //! ## Why this is safe (and simpler than restore)
 //! Merge is purely **additive**: it only `INSERT`s rows and copies *new*

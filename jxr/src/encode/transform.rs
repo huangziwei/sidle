@@ -7,7 +7,7 @@
 //! sign. We mirror the decoder's own primitives rather than porting libjxr's
 //! forward verbatim, which guarantees `decoder(encoder(x)) == x` bit-for-bit
 //! against *our* decoder. Cross-reference for the spec-forward shape:
-//! `ref/libjxr/image/encode/strFwdTransform.c`.
+//! libjxr's `image/encode/strFwdTransform.c`.
 //!
 //! All arithmetic is `wrapping_*`, matching the decoder, so the round trip is
 //! exact for every `i32` input.

@@ -662,8 +662,7 @@ function wireDragDrop() {
           lower.endsWith(".azw3") ||
           lower.endsWith(".mobi") ||
           // PDF → wrapped into a fixed-layout PDOC KFX for the Scribe (the
-          // device renders the PDF; the pen draws over it). See
-          // .claude/plans/pdf-to-kfx.md.
+          // device renders the PDF; the pen draws over it).
           lower.endsWith(".pdf") ||
           // Plain .zip is accepted silently so an Aozora Bunko archive can
           // be dropped in. Non-aozora .zips fail at the backend with a

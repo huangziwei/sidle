@@ -97,7 +97,7 @@ enum SourceKind {
     /// `.pdf` — wrapped verbatim into a fixed-layout PDOC KFX for the Scribe
     /// (the device renders the PDF; the pen draws over it). PDF is the
     /// canonical non-KFX side, paired with KFX (the EPUB↔KFX analogue), and
-    /// the background job is `pdf_to_kfx`. See .claude/plans/pdf-to-kfx.md.
+    /// the background job is `pdf_to_kfx`.
     Pdf,
     /// `.zip` extension — tentatively an Aozora Bunko archive. The actual
     /// aozora sniff (底本/［＃ markers) happens in `convert_aozora_zip`
@@ -563,8 +563,7 @@ fn insert_row(
                 .map(str::trim)
                 .filter(|s| !s.is_empty()),
             // Series and tags aren't populated from source format yet —
-            // they're set via the metadata editor. Flagged as a follow-up
-            // in `.claude/plans/library-navigation.md` (Phase 5+).
+            // they're set via the metadata editor (a follow-up).
             series_name: None,
             series_index: None,
             tags: &[],

@@ -1,7 +1,7 @@
 //! Mechanical port of calibre's KFX → EPUB pipeline.
 //!
 //! Parallel path from boko's generic `KfxImporter` + `EpubExporter` IR
-//! pipeline. Mirrors `ref/calibre-kfx-input/kfxlib/yj_to_epub_*.py` as
+//! pipeline. Mirrors calibre's kfxlib `yj_to_epub_*.py` as
 //! closely as Rust syntax allows.
 
 pub mod content;
@@ -336,8 +336,7 @@ pub(crate) fn build_output(
         &content_state.anchors,
     );
     // When we synthesized a `titlepage.xhtml` wrapper above, repoint the
-    // cover guide reference at it (calibre's convention; see
-    // `ref/calibre-mobi-output/transforms/...`). KFX's CoverPage landmark
+    // cover guide reference at it (calibre's convention). KFX's CoverPage landmark
     // targets the first content chapter, but the cover the reader actually
     // *sees* is our titlepage SVG wrapper. Apple Books reads the guide
     // `type="cover"` href to render the cover page; without this rewrite

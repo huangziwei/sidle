@@ -57,7 +57,7 @@ pub fn uuid_v5(name: &str) -> String {
 /// Used for `dcterms:modified` / KFX `modified_date` stamps. We synthesize on
 /// every export rather than pass the source value through — modified-date
 /// describes *this file*, not the work, so the value must reflect when this
-/// converter wrote it. See `[[feedback-modified-date-is-conversion-time]]`.
+/// converter wrote it.
 pub fn time_now_iso8601_utc() -> String {
     let secs = time_now_secs() as i64;
     let days = secs.div_euclid(86_400);

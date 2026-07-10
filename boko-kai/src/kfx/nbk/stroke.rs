@@ -5,7 +5,7 @@
 //! instructions (high nibble first; a trailing nibble is zero-padded). Each
 //! instruction yields an `increment`; values are reconstructed by **second-order
 //! (delta-of-delta) integration**. Verbatim port of `decode_stroke_values`
-//! (`ref/scribe-library/kfxlib/yj_to_epub_notebook.py`).
+//! (kfxlib's `yj_to_epub_notebook.py`).
 
 /// Decode `num_points` integer values from a stroke-point blob.
 /// Returns `None` if the blob is malformed or truncated.

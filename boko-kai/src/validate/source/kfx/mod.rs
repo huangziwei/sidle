@@ -503,8 +503,7 @@ fn check_nav_reachability(bytes: &[u8]) -> Vec<Finding> {
 /// contains; the device uses it to resolve "go to location N". A reading-order
 /// section absent from it can't be reached by a location jump. A warning (the
 /// book still opens and scrolls); only checked when a `position_map` exists at
-/// all, since some valid KFX address purely by `position_id_map` ($265) — see
-/// the corpus note in the plan.
+/// all, since some valid KFX address purely by `position_id_map` ($265).
 fn check_position_map_coverage(book: &BookData) -> Vec<Finding> {
     let sections = reading_order_sections(book);
     if sections.is_empty() {

@@ -362,7 +362,7 @@ pub struct DeviceImportReport {
     pub positions: usize,
     /// Handwritten-ink (PDOC) notebooks imported against a host book — Scribe/MTP
     /// only; the LAN-server + mass-storage paths leave the `ink_*` fields 0. One
-    /// notebook per annotated sideloaded doc (see `.claude/plans/scribe-handwritten-annotations.md`).
+    /// notebook per annotated sideloaded doc.
     pub ink_books: usize,
     /// Ink pages written/refreshed across those notebooks.
     pub ink_pages: usize,

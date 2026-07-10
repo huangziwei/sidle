@@ -7,7 +7,7 @@
 //! until the records are removed. This is intrinsic to the format, not a copy
 //! artifact — a clean file (no signature at offset 1024) passes through
 //! untouched. Verbatim port of kfxlib's `SQLiteFingerprintWrapper`
-//! (`ref/scribe-library/kfxlib/kpf_container.py`).
+//! (kfxlib's `kpf_container.py`).
 
 const SIGNATURE: [u8; 4] = [0xfa, 0x50, 0x0a, 0x5f];
 const OFFSET: usize = 1024;

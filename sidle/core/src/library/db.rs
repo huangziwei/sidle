@@ -62,7 +62,7 @@ pub struct BookRow {
     pub kfx_sha256: Option<String>,
     /// Path to the PDF on disk, for a PDF-backed (container) book. This is the
     /// non-KFX side of a PDF↔KFX book (the EPUB↔KFX analogue of `epub_path`);
-    /// `None` for reflowable (EPUB↔KFX) books. See .claude/plans/pdf-to-kfx.md.
+    /// `None` for reflowable (EPUB↔KFX) books.
     pub pdf_path: Option<String>,
     pub file_size: i64,
     pub imported_at: String,
@@ -125,26 +125,23 @@ pub struct BookRow {
 /// v2: dropped the `My Clippings.txt` ingest path entirely — see the DELETE
 /// near the end of [`migrate`].
 /// v3: added `books.pdf_path` — the PDF side of a PDF↔KFX book (PDF-backed
-/// container KFX). See .claude/plans/pdf-to-kfx.md.
+/// container KFX).
 /// v4: added the `notebooks` table — Scribe handwritten-notebook backup +
-/// render. See .claude/plans/scribe-notebook-backup.md.
+/// render.
 /// v5: added `notebooks.updated_at` — the source `nbk`'s on-device mtime (the
 /// Kindle's Date Modified, which only advances on a real edit), captured at
 /// import. The displayed "when" for a notebook; `imported_at` is bookkeeping.
 /// v6: added `book_ink` / `book_ink_device` / `ink_sync` — handwritten ink drawn
-/// on a sideloaded doc (PDOC), keyed per ink page by `(asin, container_id)`. See
-/// .claude/plans/scribe-handwritten-annotations.md.
+/// on a sideloaded doc (PDOC), keyed per ink page by `(asin, container_id)`.
 /// v7: added `books.updated_at` — the metadata last-edit time (distinct from
 /// `imported_at`, which is first-import and never moves). Stamped at insert,
 /// bumped by the user-curation mutators (`update_metadata` / `apply_bulk_patch`
-/// / the ASIN edit), and used by library merge's newest-wins tiebreak. See
-/// .claude/plans/library-merge.md.
+/// / the ASIN edit), and used by library merge's newest-wins tiebreak.
 /// v8: added `artifact_deletions` — tombstones for Sidle-side deletes so the
 /// additive device sync won't re-add a removed annotation / ink page / notebook
-/// (Sidle is the curated backup). See .claude/plans/backup-source-of-truth.md.
+/// (Sidle is the curated backup).
 /// v9: added `annotations.hidden` / `book_ink.hidden` — a reversible "hide from
-/// the reader" flag (kept in the backup, never painted). See
-/// .claude/plans/backup-source-of-truth.md.
+/// the reader" flag (kept in the backup, never painted).
 /// v10: harmonized `books.language` to canonical codes (en-US/eng → en, zh-TW →
 /// zh-Hant). Data-only backfill via [`super::lang`]; no schema change.
 /// v11: added `books.title_romaji` / `author_romaji` — the editable, searchable
@@ -397,7 +394,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         -- and drop this device's stale rows, so the table mirrors what each
         -- device holds now. It never drives deletion of an `annotations` row:
         -- Sidle is the durable backup, so a delete on the device keeps its Sidle
-        -- copy (see .claude/plans/backup-source-of-truth.md). Additive; never
+        -- copy. Additive; never
         -- part of the destructive reset.
         CREATE TABLE IF NOT EXISTS annotation_device (
             dedup_hash    TEXT NOT NULL,
@@ -1630,7 +1627,7 @@ fn row_to_book(row: &rusqlite::Row<'_>, root: Option<&Path>) -> rusqlite::Result
 }
 
 // ---------------------------------------------------------------------------
-// Notebooks (Scribe handwriting; see .claude/plans/scribe-notebook-backup.md).
+// Notebooks (Scribe handwriting).
 // The table lives in `migrate` outside the destructive reset.
 // ---------------------------------------------------------------------------
 
@@ -1813,8 +1810,7 @@ pub fn remove_notebook(conn: &Connection, id: i64) -> rusqlite::Result<Option<St
 }
 
 // ---------------------------------------------------------------------------
-// Handwritten ink on a sideloaded doc (`book_ink`; see
-// .claude/plans/scribe-handwritten-annotations.md). Tables live in `migrate`
+// Handwritten ink on a sideloaded doc (`book_ink`). Tables live in `migrate`
 // outside the destructive reset.
 // ---------------------------------------------------------------------------
 
@@ -2027,8 +2023,7 @@ pub fn record_ink_device_presence(
 }
 
 // ---------------------------------------------------------------------------
-// Annotations + last-read position (imported off the Kindle; see
-// .claude/plans/sidle-reader.md). The tables live in `migrate` outside the
+// Annotations + last-read position (imported off the Kindle). The tables live in `migrate` outside the
 // destructive reset.
 // ---------------------------------------------------------------------------
 
@@ -2374,8 +2369,7 @@ pub fn set_yjr_sync_sha(
 // ---------------------------------------------------------------------------
 // Deletion records (tombstones) — a Sidle-side delete records the artifact's
 // stable identity so the additive device sync won't re-add it (Sidle is the
-// curated backup). "Restore from device" clears them. See
-// .claude/plans/backup-source-of-truth.md.
+// curated backup). "Restore from device" clears them.
 // ---------------------------------------------------------------------------
 
 /// `artifact_deletions.kind` discriminators.
@@ -2488,7 +2482,7 @@ pub fn delete_book_ink(conn: &Connection, id: i64) -> rusqlite::Result<Option<(S
 /// device currently asserts (`current_hashes` = the hashes in the device's `.yjr`
 /// for this book, just imported). This is **provenance only** — it never deletes
 /// a backup row. Sidle is the durable backup; a delete on the device must not
-/// delete Sidle's copy (see `.claude/plans/backup-source-of-truth.md`).
+/// delete Sidle's copy.
 ///
 /// 1. Mark each current hash seen-now (upsert presence with `last_seen = now`).
 /// 2. Drop this `(device, book)`'s presence rows with an older `last_seen` — they

@@ -164,8 +164,7 @@ pub fn import_device_annotations(
 
             // No on-device cleanup: Sidle never deletes data on the device (a
             // backup must not mutate its source). Stranded `.notebooks/<id>!!PDOC!!`
-            // dirs are the device owner's to clear. See
-            // .claude/plans/backup-source-of-truth.md.
+            // dirs are the device owner's to clear.
             Ok(report)
         }
     }?;

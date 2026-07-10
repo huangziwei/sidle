@@ -11,7 +11,6 @@
 //! So the forward direction subtracts the bias from the input RGB **first**, runs
 //! [`rgb_to_yuv444`] on the centered values, and feeds the resulting Y/U/V planes
 //! into the same per-plane forward transform grayscale uses (no further −128).
-//! See `.claude/plans/jxr-encoder.md` Track 6.1.
 //!
 //! The emission path is 4:4:4 (full-resolution chroma). 4:2:0/4:2:2 (4b, in
 //! progress) downsample the centered U/V planes AFTER the color transform —

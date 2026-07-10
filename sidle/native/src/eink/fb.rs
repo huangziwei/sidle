@@ -5,7 +5,7 @@
 //! crucially, recomposites the whole screen (home library + status bar) when
 //! our window is torn down on exit — the kterm model. This removes the
 //! windowless-exit bug (dead status bar) and the cvm freeze that used to mask
-//! the framework drawing over us. See [[project_kual_statusbar_x11]].
+//! the framework drawing over us.
 //!
 //! The compositor ALSO auto-rotates our window 180° to the framework
 //! orientation (page-bezel side), so we render identity here and never rotate

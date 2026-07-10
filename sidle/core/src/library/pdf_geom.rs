@@ -10,7 +10,7 @@
 //! under the DB lock, which is what made one "sync annotations" take seconds
 //! (the actual nbk→SVG decode is ~6 ms next to it). The geometry is a pure
 //! function of the KFX bytes — immutable per `kfx_sha256` — so we cache it as a
-//! derived-asset sidecar ([[feedback_derived_assets_at_import]]) keyed by that
+//! derived-asset sidecar keyed by that
 //! sha: computed once (warmed at conversion, see the worker), read as a few-KB
 //! JSON on every sync thereafter.
 

@@ -1277,8 +1277,7 @@ fn convert(
 
     // KFX → PDF (the return leg of the PDF↔KFX dual format): extract the
     // verbatim embedded PDF from a PDF-backed/container KFX. Dispatched here by
-    // extension, before format parsing (PDF isn't in the `Format` enum). See
-    // .claude/plans/pdf-to-kfx.md.
+    // extension, before format parsing (PDF isn't in the `Format` enum).
     if !from_stdin
         && std::path::Path::new(input)
             .extension()
@@ -1438,8 +1437,7 @@ fn convert(
 
     // PDF → KFX: wrap the PDF verbatim into a fixed-layout PDOC KFX. The PDF
     // is embedded and the *device* renders each page (which lets the Scribe
-    // pen draw over it). Not a content conversion — see
-    // .claude/plans/pdf-to-kfx.md.
+    // pen draw over it). Not a content conversion.
     if !from_stdin
         && output_format == Format::Kfx
         && std::path::Path::new(input)

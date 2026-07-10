@@ -622,9 +622,8 @@ impl EpubOutput {
         }
 
         // `dcterms:modified` — required by EPUB 3 (every Publication must
-        // declare its last-modified time). Stamps NOW per
-        // [[feedback_modified_date_is_conversion_time]] — never the
-        // source's value.
+        // declare its last-modified time). Stamps the conversion time —
+        // never the source's value (the modified date describes this file).
         s.push_str(&format!(
             "    <meta property=\"dcterms:modified\">{}</meta>\n",
             xml_escape(&crate::util::time_now_iso8601_utc())

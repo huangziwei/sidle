@@ -9,7 +9,7 @@
 //! new pieces (vs. KFX books) are the KDF-SQLite read, the `nmdl` stroke decode,
 //! and stroke→SVG.
 //!
-//! Ported from `ref/scribe-library/kfxlib` (GPLv3, compatible with this crate's
+//! Ported from kfxlib (GPLv3, compatible with this crate's
 //! GPL-3.0-or-later). Gated behind the `nbk` feature: pulls `rusqlite`
 //! (bundled C SQLite, native-only).
 

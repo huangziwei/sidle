@@ -1,7 +1,7 @@
 //! Stroke → SVG rendering.
 //!
 //! Ports the pen-path branch of `scribe_notebook_stroke`
-//! (`ref/scribe-library/kfxlib/yj_to_epub_notebook.py`): point coords are
+//! (kfxlib's `yj_to_epub_notebook.py`): point coords are
 //! `position + stroke_bounds origin`; the polyline is split into sub-paths
 //! whenever per-point thickness changes (re-including up to two prior points so
 //! segments stay continuous). v1 renders variable-density (pencil) strokes as a

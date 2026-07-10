@@ -1,8 +1,7 @@
 //! Aozora Bunko → EPUB conversion.
 //!
-//! Faithful port of the standalone JS tool at
-//! `/Users/ziweih/projects/tools/aozora-epub.html`. The HTML tool is the
-//! spec; output is functionally identical, not byte-identical.
+//! Faithful port of the standalone aozora-epub JS reference tool. The HTML
+//! tool is the spec; output is functionally identical, not byte-identical.
 //!
 //! The pipeline lives entirely upstream of the EPUB importer:
 //!

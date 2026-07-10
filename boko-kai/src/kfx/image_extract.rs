@@ -142,11 +142,7 @@ fn resource_location_for_name(
 
 /// Decide the export bytes + extension for one resource's raw payload, or `None`
 /// to skip it (non-image, or an undecodable JPEG-XR).
-fn resolve_image(
-    raw: &[u8],
-    format: Option<&str>,
-    name: &str,
-) -> Option<(Vec<u8>, &'static str)> {
+fn resolve_image(raw: &[u8], format: Option<&str>, name: &str) -> Option<(Vec<u8>, &'static str)> {
     // JPEG-XR (declared, or by the II-BC magic) → transcode to JPEG.
     if format == Some("jxr") || raw.starts_with(&[0x49, 0x49, 0xBC]) {
         let (bytes, final_format, _timing) = transcode::transcode(raw, name).ok()?;
@@ -226,8 +222,14 @@ mod tests {
         let (cover_bytes, cover_ext) = crate::kfx::cover_extract::kfx_extract_cover(&kfx)
             .expect("valid KFX")
             .expect("fixture has a cover");
-        assert_eq!(covers[0].bytes, cover_bytes, "cover bytes agree with cover_extract");
-        assert_eq!(covers[0].ext, cover_ext, "cover ext agrees with cover_extract");
+        assert_eq!(
+            covers[0].bytes, cover_bytes,
+            "cover bytes agree with cover_extract"
+        );
+        assert_eq!(
+            covers[0].ext, cover_ext,
+            "cover ext agrees with cover_extract"
+        );
     }
 
     /// A PDF-backed KFX declares a JPEG cover *and* a `format: pdf` resource: the
@@ -260,7 +262,11 @@ mod tests {
         let kfx = pdf_to_kfx(&doc, &meta, Some(&cover), None);
 
         let images = kfx_extract_images(&kfx).expect("valid KFX");
-        assert_eq!(images.len(), 1, "only the cover image, PDF resource skipped");
+        assert_eq!(
+            images.len(),
+            1,
+            "only the cover image, PDF resource skipped"
+        );
         assert!(images[0].is_cover);
         assert_eq!(images[0].ext, "jpg");
         assert_eq!(images[0].bytes, cover, "cover extracted verbatim");

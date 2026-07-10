@@ -15,7 +15,7 @@
 //! and a future Linux build would slot Poppler (`poppler_page_get_text_layout` =
 //! the same per-char boxes) behind these same two functions. Every other target
 //! gets an `Unavailable` stub, and the emit path treats that as "no cover / no
-//! text layer", never a failed conversion. See `.claude/plans/pdf-to-kfx.md`.
+//! text layer", never a failed conversion.
 
 use std::fmt;
 

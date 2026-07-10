@@ -1,7 +1,6 @@
 //! Build an EPUB byte stream from a parsed Aozora [`Document`].
 //!
-//! Faithful port of `buildEpub` in
-//! `/Users/ziweih/projects/tools/aozora-epub.html` (lines 902-1188).
+//! Faithful port of `buildEpub` in the aozora-epub reference tool.
 //! Output mirrors the HTML tool's package shape: mimetype-first STORE'd,
 //! `META-INF/container.xml`, `OEBPS/style.css`, per-chapter XHTML split at
 //! the shallowest heading level present, EPUB-3 nav doc + NCX (for older

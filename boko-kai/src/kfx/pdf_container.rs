@@ -1,5 +1,5 @@
 //! Detect and extract PDF-backed (container) KFX — the return leg of the
-//! PDF↔KFX dual format. See `.claude/plans/pdf-to-kfx.md`.
+//! PDF↔KFX dual format.
 //!
 //! A PDF-backed KFX (Amazon "Send to Kindle" PDF, or boko's `pdf_to_kfx`
 //! output) embeds the source PDF verbatim as a single `bcRawMedia` and points

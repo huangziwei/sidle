@@ -6,7 +6,7 @@
 //!
 //! Nothing here touches the source or the root pointer: the Tauri command layer
 //! repoints via [`LibraryPaths::set_root`](crate::library::LibraryPaths::set_root)
-//! and relaunches. See `.claude/plans/library-backup-and-portability.md` §6.
+//! and relaunches.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

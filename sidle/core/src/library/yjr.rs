@@ -2,8 +2,8 @@
 //! (`documents/<book>.sdr/<book>.yjr`).
 //!
 //! The `.yjr` is Amazon's custom length-prefixed key/value container (NOT
-//! Ion-binary). Reverse-engineered in P0 and verified against the real device
-//! (see `.claude/plans/sidle-reader.md`). The byte grammar is a flat stream of
+//! Ion-binary). Reverse-engineered in P0 and verified against the real device.
+//! The byte grammar is a flat stream of
 //! tokens, each `[marker:1][len:3 big-endian][payload:len bytes]`:
 //!
 //!   * `0xfe` — a key/symbol (`annotation.personal.highlight`, `font.prefs`, …).

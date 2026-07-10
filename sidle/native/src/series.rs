@@ -1,7 +1,7 @@
 //! Series grouping — the picker's view model.
 //!
-//! The on-Kindle picker is **grouped by series, always** (no flat toggle — see
-//! `.claude/plans/series-grouping.md`): same-series books fold into one
+//! The on-Kindle picker is **grouped by series, always** (no flat toggle):
+//! same-series books fold into one
 //! navigable collection tile, the opposite default from the desktop gallery
 //! (which defaults flat and offers a toggle). Small screen, slow e-ink + LAN,
 //! and one-cover-per-collection fetches are the reasons grouping is the only

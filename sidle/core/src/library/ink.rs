@@ -1,8 +1,7 @@
 //! Handwritten-ink ingest: decode a sideloaded doc's ink notebook (`nbk`) and
 //! store its per-page renders against the host book.
 //!
-//! This is the **third concern** in the annotation system (see
-//! `.claude/plans/scribe-handwritten-annotations.md`): the pen strokes the user
+//! This is the **third concern** in the annotation system: the pen strokes the user
 //! drew *on top of* a book Sidle pushed. It reuses both existing subsystems —
 //! **A** (`yjr`/`anchor`) supplies the host-page anchor + the per-page link, and
 //! **B** (`boko::kfx::nbk`) decodes the strokes to SVG — and adds only the join
@@ -61,7 +60,7 @@ pub struct InkImportStats {
 /// - the raw `nbk` is backed up under `books/<sha>/ink/<asin>/` (so the ink
 ///   survives a device wipe) and each page is rendered to a transparent overlay
 ///   SVG (for the reader) plus a white-bg plain SVG (for the gallery), cached
-///   beside it ([[feedback_derived_assets_at_import]]).
+///   beside it (derived at import time).
 /// - idempotent on `(asin, container_id)`; orphan-capable (`book_id` may be
 ///   `None`); records device presence when `device_serial` is set, but never
 ///   deletes a backup page (mirrors [`crate::library::ingest::import_yjr`]).
@@ -286,8 +285,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     // `import_ink` itself decodes a real KDF `nbk` (a SQLite file) + a real KFX,
-    // so its end-to-end correctness is verified by the gitignored device-data
-    // harness in `artifacts/` (per the no-gitignored-test-data rule), not here.
+    // so its end-to-end correctness is verified by an offline device-data
+    // harness, not here.
     // These cover the pure DB-side logic: orphan-then-relink by asin.
     use super::*;
     use crate::library::db::{self, NewBook, NewBookInk};

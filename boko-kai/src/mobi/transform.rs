@@ -369,7 +369,7 @@ fn find_last_attr_in_window(
 /// contains `<svg viewBox="..."><image xlink:href="kindle:embed:NN"/></svg>`
 /// wrapping a raster image. Calibre's `mobi8.py` handles this by inlining
 /// the SVG bytes where the `<img>` tag was — see
-/// `ref/calibre-mobi-input/reader/mobi8.py` around the
+/// calibre's MOBI input `reader/mobi8.py` around the
 /// `image_tag_pattern.search(from_svg)` branch.
 ///
 /// Must run BEFORE `transform_kindle_refs`: the inlined SVG content

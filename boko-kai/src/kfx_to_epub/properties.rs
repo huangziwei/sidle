@@ -1217,7 +1217,7 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
     // `unicode-bidi`) CSS properties are forbidden in EPUB style sheets
     // (epubcheck CSS-001). Page-progression / RTL direction is carried by the
     // spine `page-progression-direction` (PPD) attribute + `writing-mode`
-    // instead — see [[reference_kfx_device_rtl_writing_mode]]. Per-element
+    // instead. Per-element
     // direction, if ever needed, belongs on the HTML `dir` attribute, not CSS.
     // ---- visibility ----
     (

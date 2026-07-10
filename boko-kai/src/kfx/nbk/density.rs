@@ -2,7 +2,7 @@
 //! data-URI `<image>`.
 //!
 //! Port of the `variable_density` branch of `scribe_notebook_stroke`
-//! (`ref/scribe-library/kfxlib/yj_to_epub_notebook.py`). A pencil stroke is not
+//! (kfxlib's `yj_to_epub_notebook.py`). A pencil stroke is not
 //! a crisp path but a soft, grainy band whose darkness varies with pen
 //! pressure, so kfxlib rasterizes a per-stroke density map — feathered discs
 //! stamped along the centreline, gamma-shaped, then dithered to a transparent

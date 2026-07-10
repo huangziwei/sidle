@@ -2224,8 +2224,7 @@ fn build_format_capabilities_ion() -> Vec<u8> {
 
 /// Build an external_resource fragment ($164) - metadata about a resource.
 /// Default per-band quantizer for grayscale-JXR plates: ~Amazon's per-image
-/// size on LN content at high fidelity (the `8/16/32` point of the QP sweep in
-/// `artifacts/jxr-extract`).
+/// size on LN content at high fidelity (the `8/16/32` point of a QP sweep).
 const JXR_DEFAULT_QP: jxr::QpSet = jxr::QpSet {
     dc: 8,
     lp: 16,
@@ -4103,7 +4102,7 @@ fn build_manga_container_entity_map_fragment(
 }
 
 // ============================================================================
-// PDF → KFX (fixed-layout, PDF-backed PDOC) — see .claude/plans/pdf-to-kfx.md
+// PDF → KFX (fixed-layout, PDF-backed PDOC)
 //
 // This is NOT a content conversion. The PDF is embedded verbatim as a single
 // `bcRawMedia` and the *device* renders each page (which is what lets the

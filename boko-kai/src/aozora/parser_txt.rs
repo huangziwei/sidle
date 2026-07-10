@@ -1,8 +1,8 @@
 //! Aozora Bunko `.txt` parser.
 //!
-//! Faithful port of `parseTxt` + `convertAozoraLine` from
-//! `/Users/ziweih/projects/tools/aozora-epub.html`. The HTML tool is the
-//! spec; output XHTML structure should be functionally identical.
+//! Faithful port of `parseTxt` + `convertAozoraLine` from the aozora-epub
+//! reference tool. The HTML tool is the spec; output XHTML structure should
+//! be functionally identical.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -402,7 +402,7 @@ fn process_line(raw_in: &str, state: &mut BodyState) {
     // after stripping markup (via `plain_text_for_heading`), and render
     // the raw form so `convert_aozora_line` can emit `<ruby>` inside the
     // heading. Strict superset over the JS reference — see the
-    // [[postfix_heading_re]] doc comment.
+    // `POSTFIX_HEADING_RE` doc comment.
     if let Some(caps) = POSTFIX_HEADING_RE.captures(&raw) {
         let m = caps.get(0).unwrap();
         let target = caps.get(1).unwrap().as_str().to_string();

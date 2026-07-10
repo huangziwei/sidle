@@ -5,7 +5,7 @@
 //! read-side counterpart to the EPUB export: it reuses the loader and the
 //! `$145 content` resolution, but builds an eid → text index instead of a DOM.
 //!
-//! Ported from the P0 anchor proof (`artifacts/p0/extract.py`), which was
+//! Ported from the P0 anchor proof, which was
 //! verified against `My Clippings.txt` on real device corpora:
 //!   - `position_id_map` ($265): `eid → pid`, the reading-order sort key.
 //!   - `storyline`        ($259): walked recursively; every struct with a
@@ -793,7 +793,7 @@ mod tests {
     fn search_skips_ruby_because_text_of_already_does() {
         // text_of holds only base text (per collect_eid_text). Searching for
         // ruby-only characters that aren't in the base run finds nothing —
-        // confirms the "ruby skipped for free" claim in the plan.
+        // so ruby readings are skipped for free.
         let t = idx(&[(10, "恥の多い生涯")], &[(10, 0)]);
         assert!(
             t.search("はじ").is_empty(),

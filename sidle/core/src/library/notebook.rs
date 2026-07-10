@@ -3,7 +3,7 @@
 //! Storage mirrors `books/<sha>/`: each notebook lives at `notebooks/<uuid>/`
 //! holding the raw `nbk` backup, an optional `cover.png` (the device
 //! thumbnail), and `pages/page-<n>.svg` — the page renders cached at import
-//! time (per [[feedback_derived_assets_at_import]]), so the viewer never
+//! time, so the viewer never
 //! re-parses the SQLite. Metadata (title, page count, content hash) lives in
 //! the `notebooks` DB table. Decode + render come from `boko::kfx::nbk`.
 

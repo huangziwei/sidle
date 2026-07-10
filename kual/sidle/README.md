@@ -64,7 +64,7 @@ stale. Click **Update KUAL** in the desktop app to resync.
 
 The install also pushes `kual/Sidle.sh` to `documents/Sidle.sh` — a
 jailbreak-hotfix *scriptlet* the library indexes as a tile named
-**Sidle** (red 蛇行 cover, embedded base64 like `ref/KUAL.sh`). Tapping
+**Sidle** (red 蛇行 cover, embedded base64). Tapping
 the tile runs the same `bin/sidle.sh` wrapper the KUAL menu entry uses,
 so the picker is one tap from the home screen; KUAL remains the fallback
 entry point. Regenerate after a cover/body change with

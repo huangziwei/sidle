@@ -342,7 +342,7 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
         // seconds on a large book and ran on every open). The embedded PDF is
         // touched only later, one page at a time, by `reader_pdf_page`. (Verified
         // offline: this reproduces probe's outline/labels/sizes for every library
-        // PDF — see artifacts/reader-profile.)
+        // PDF.)
         if pdf_path.is_some() || boko::kfx::pdf_container::kfx_is_pdf_backed(&kfx) {
             let rd = boko::kfx_to_epub::pdf_reader_data(&kfx)
                 .map_err(|e| format!("read PDF KFX for reader: {e}"))?;

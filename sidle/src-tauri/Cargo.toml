@@ -63,7 +63,7 @@ notify = "8"
 # mass storage. Pinned exact (young crate, recent API churn) — bump
 # deliberately and rerun the device round-trip when upgrading. mtp-rs's
 # nusb-backed enumeration explicitly handles Amazon Kindle's vendor-specific
-# interface descriptors; see ref/mtp-rs/src/transport/nusb.rs.
+# interface descriptors.
 mtp-rs = "=0.15.0"
 # Drives mtp-rs's async API from the sync `Transport` trait via
 # `futures::executor::block_on`. mtp-rs is runtime-agnostic (no tokio in its

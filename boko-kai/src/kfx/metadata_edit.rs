@@ -101,9 +101,7 @@ pub fn edit_metadata(kfx_bytes: &[u8], patch: &MetadataPatch) -> Result<Vec<u8>,
     // Load once for the symbol table (category names may be symbols) and to
     // confirm there is an editable metadata fragment.
     let book = loader::load(kfx_bytes)?;
-    let has_490 = book
-        .by_type
-        .contains_key(&(KfxSymbol::BookMetadata as u64));
+    let has_490 = book.by_type.contains_key(&(KfxSymbol::BookMetadata as u64));
     let has_258 = book.by_type.contains_key(&(KfxSymbol::Metadata as u64));
     if !has_490 && !has_258 {
         return Err(ConvertError::InvalidKfx(
@@ -131,7 +129,11 @@ pub fn edit_metadata(kfx_bytes: &[u8], patch: &MetadataPatch) -> Result<Vec<u8>,
 /// Rewrite `book_metadata` ($490), patching the `kindle_title_metadata`
 /// category's key/value list. Preserves the annotation wrapper and field order;
 /// every category other than `kindle_title_metadata` is left untouched.
-fn patch_book_metadata(parsed: &IonValue, patch: &MetadataPatch, symbols: &SymbolTable) -> IonValue {
+fn patch_book_metadata(
+    parsed: &IonValue,
+    patch: &MetadataPatch,
+    symbols: &SymbolTable,
+) -> IonValue {
     if let IonValue::Annotated(anns, inner) = parsed {
         return IonValue::Annotated(
             anns.clone(),
@@ -359,7 +361,10 @@ mod tests {
         let after = loader::load(&edit_metadata(&kfx, &patch).unwrap()).unwrap();
 
         assert_eq!(after.metadata.publisher.as_deref(), Some("新潮社"));
-        assert_eq!(before.metadata.title, after.metadata.title, "title untouched");
+        assert_eq!(
+            before.metadata.title, after.metadata.title,
+            "title untouched"
+        );
         assert_eq!(
             before.metadata.authors, after.metadata.authors,
             "authors untouched"

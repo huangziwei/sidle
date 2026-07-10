@@ -7,7 +7,7 @@
 //! viewBox plus a `$250` list of path shapes (`$273` — each `$249` path-command
 //! list, `$75` ARGB stroke, `$76` width). Ports the `$272`/`$273` subset of
 //! `process_content` + `process_kvg_shape`
-//! (`ref/scribe-library/kfxlib/yj_to_epub_content.py` / `yj_to_epub_misc.py`) —
+//! (kfxlib's `yj_to_epub_content.py` / `yj_to_epub_misc.py`) —
 //! enough for the line-art templates; other KVG shape types are skipped.
 //!
 //! The template viewBox (e.g. 1860×2480) is authored at device-screen scale,

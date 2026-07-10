@@ -1,6 +1,5 @@
 //! Library backup & restore — a single `.sidlebak` archive (a zip) of the whole
-//! library, restorable on this or another machine. See
-//! `.claude/plans/library-backup-and-portability.md` §5.
+//! library, restorable on this or another machine.
 //!
 //! Archive layout:
 //! ```text

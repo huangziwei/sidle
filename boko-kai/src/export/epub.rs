@@ -596,7 +596,7 @@ fn generate_opf(
     }
 
     // dcterms:modified (required for EPUB 3) — stamp conversion time, not the
-    // source value. See [[feedback-modified-date-is-conversion-time]].
+    // source value.
     opf.push_str(&format!(
         "    <meta property=\"dcterms:modified\">{}</meta>\n",
         escape_xml(&crate::util::time_now_iso8601_utc())

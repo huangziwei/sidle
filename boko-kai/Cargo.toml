@@ -50,8 +50,7 @@ regex = { version = "1.11", optional = true }
 # pure SVG (port of `buildCoverSvg` from `aozora-epub.html`) and rasterize
 # it to a JPEG for the EPUB. `system-fonts` feature pulls macOS fonts
 # (Hiragino Mincho ProN etc.) into usvg's fontdb at runtime — Aozora is
-# personal software per [[feedback_personal_software_no_other_users]], no
-# bundled fallback font needed.
+# macOS-only personal software, so no bundled fallback font is needed.
 resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"], optional = true }
 
 # Base64 encoding for KFX raw media
@@ -122,7 +121,7 @@ rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 # context we render the cover into. macOS-only by design: the Kindle build
 # doesn't rasterize (the Kindle never converts — conversion is always Mac-side),
 # and a future Linux build would slot Poppler behind the same `render.rs`
-# interface. See .claude/plans/pdf-to-kfx.md (PIVOT).
+# interface.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSGeometry"] }
