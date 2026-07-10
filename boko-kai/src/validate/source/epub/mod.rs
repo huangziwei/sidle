@@ -55,6 +55,16 @@ impl Report {
     pub fn has_rule(&self, rule: Rule) -> bool {
         self.violations.iter().any(|v| v.rule == rule)
     }
+
+    /// Lower these EPUB violations into the unified [`Finding`] model the book
+    /// editor consumes (via [`crate::validate::source::validate`]). The rich
+    /// [`Violation`]/[`Rule`] internals stay; this is just the projection.
+    pub fn into_findings(self) -> Vec<crate::validate::Finding> {
+        self.violations
+            .into_iter()
+            .map(Violation::into_finding)
+            .collect()
+    }
 }
 
 impl fmt::Display for Report {
@@ -83,6 +93,17 @@ impl Violation {
             rule,
             location: location.into(),
             message: message.into(),
+        }
+    }
+
+    fn into_finding(self) -> crate::validate::Finding {
+        crate::validate::Finding {
+            check: "epub",
+            rule: self.rule.as_str().to_string(),
+            severity: self.rule.severity(),
+            location: self.location,
+            message: self.message,
+            fix: self.rule.fix_hint(),
         }
     }
 }
@@ -124,6 +145,34 @@ impl Rule {
             Rule::NonLinearUnreachable => "non-linear-unreachable",
             Rule::BrokenHref => "broken-href",
             Rule::HrefEscapesOpfRoot => "href-escapes-opf-root",
+        }
+    }
+
+    /// Severity of this rule in the unified [`crate::validate::Severity`] model.
+    /// Undeclared extra resources are real but widely tolerated (Warning);
+    /// every other rule either violates a MUST or corrupts conversion (Error).
+    fn severity(self) -> crate::validate::Severity {
+        use crate::validate::Severity;
+        match self {
+            Rule::FileNotInManifest => Severity::Warning,
+            _ => Severity::Error,
+        }
+    }
+
+    /// A structured repair proposal for the rules whose fix is unambiguous.
+    /// Others carry no hint yet (the editor still shows the message).
+    fn fix_hint(self) -> Option<crate::validate::FixHint> {
+        use crate::validate::FixHint;
+        match self {
+            Rule::NavMissing => Some(FixHint::new(
+                "add-nav-doc",
+                "add an EPUB 3 nav document (properties=\"nav\") listing the book's chapters",
+            )),
+            Rule::NonLinearUnreachable => Some(FixHint::new(
+                "make-linear-or-link",
+                "make this spine item linear, or add an <a href> to it from another document",
+            )),
+            _ => None,
         }
     }
 }
@@ -715,6 +764,65 @@ mod tests {
             report.has_rule(Rule::HrefEscapesOpfRoot),
             "expected HrefEscapesOpfRoot, got:\n{}",
             report
+        );
+    }
+
+    #[test]
+    fn into_findings_maps_severity_check_and_fix() {
+        use crate::validate::Severity;
+        // Hand-built violations exercise the Rule -> Finding lowering directly.
+        let report = Report {
+            violations: vec![
+                Violation::new(Rule::FileNotInManifest, "OEBPS/content.opf", "extra file"),
+                Violation::new(Rule::NavMissing, "OEBPS/content.opf", "no nav"),
+                Violation::new(Rule::BrokenHref, "OEBPS/text/ch1.xhtml", "dangling"),
+            ],
+        };
+        let findings = report.into_findings();
+        assert_eq!(findings.len(), 3);
+        assert!(findings.iter().all(|f| f.check == "epub"));
+
+        assert_eq!(findings[0].rule, "file-not-in-manifest");
+        assert_eq!(findings[0].severity, Severity::Warning);
+        assert!(findings[0].fix.is_none());
+
+        assert_eq!(findings[1].rule, "nav-missing");
+        assert_eq!(findings[1].severity, Severity::Error);
+        assert_eq!(findings[1].fix.as_ref().unwrap().action, "add-nav-doc");
+
+        assert_eq!(findings[2].rule, "broken-href");
+        assert_eq!(findings[2].severity, Severity::Error);
+        assert!(findings[2].fix.is_none());
+    }
+
+    #[test]
+    fn source_validate_is_clean_for_aozora_epub() {
+        let bytes = sample_aozora_epub();
+        let report = crate::validate::source::validate(&bytes);
+        assert!(
+            report.is_clean(),
+            "aozora epub should be clean through source::validate; got:\n{report}"
+        );
+    }
+
+    #[test]
+    fn source_validate_surfaces_epub_defect() {
+        // A manifest-file-missing epub must surface as an `epub` Finding via the
+        // source aggregator — proving it wires the epub check's lowering.
+        let bytes = sample_aozora_epub();
+        let mutated = rewrite_zip_entry(&bytes, "OEBPS/content.opf", |opf| {
+            opf.replace(
+                r#"<item id="style" href="style.css" media-type="text/css"/>"#,
+                r#"<item id="style" href="nope.css" media-type="text/css"/>"#,
+            )
+        });
+        let report = crate::validate::source::validate(&mutated);
+        assert!(!report.is_clean());
+        assert!(
+            report.findings.iter().any(|f| f.check == "epub"
+                && f.rule == "manifest-file-missing"
+                && f.severity == crate::validate::Severity::Error),
+            "expected an epub/manifest-file-missing error, got:\n{report}"
         );
     }
 

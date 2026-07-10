@@ -171,6 +171,37 @@ impl TocAudit {
             println!("  nav labels: {}", shown.join(" · "));
         }
     }
+
+    /// Lower this TOC audit into the unified [`Finding`] model. A `Suspect`
+    /// verdict — declared TOC chapterless while the book itself lists chapters —
+    /// is the one defect this check reports; `Ok` and `Sparse` are clean /
+    /// inconclusive and yield nothing. Consumed by
+    /// [`crate::validate::source::validate`].
+    pub fn into_findings(self) -> Vec<crate::validate::Finding> {
+        use crate::validate::{Finding, FixHint, Severity};
+        if self.verdict != Verdict::Suspect {
+            return Vec::new();
+        }
+        let in_book = self
+            .contents_links
+            .max(self.headings)
+            .max(self.section_heads);
+        vec![Finding {
+            check: "toc",
+            rule: "toc-deficient".to_string(),
+            severity: Severity::Warning,
+            location: "<toc>".to_string(),
+            message: format!(
+                "declared TOC lists {} chapter entr{} but the book has {in_book} in-book chapters",
+                self.nav_chapters,
+                if self.nav_chapters == 1 { "y" } else { "ies" },
+            ),
+            fix: Some(FixHint::new(
+                "rebuild-toc",
+                "rebuild the declared TOC from the book's in-book chapter list",
+            )),
+        }]
+    }
 }
 
 /// Front-matter / boilerplate TOC labels (JP + EN). A declared TOC made only of
@@ -337,5 +368,38 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(flat.verdict, Verdict::Sparse);
+    }
+
+    #[test]
+    fn into_findings_only_flags_suspect() {
+        use crate::validate::Severity;
+
+        // OK verdict -> no finding.
+        let ok = classify(TocEvidence {
+            nav_labels: (0..30).map(|i| format!("Chapter {i}")).collect(),
+            contents_links: 5000,
+            ..Default::default()
+        });
+        assert!(ok.into_findings().is_empty());
+
+        // SPARSE verdict -> no finding (inconclusive, not a defect).
+        let sparse = classify(TocEvidence {
+            nav_labels: vec!["Cover".into(), "Copyright".into()],
+            ..Default::default()
+        });
+        assert!(sparse.into_findings().is_empty());
+
+        // SUSPECT verdict -> exactly one Warning carrying a rebuild-toc fix.
+        let suspect = classify(TocEvidence {
+            nav_labels: vec!["表紙".into(), "奥付".into()],
+            headings: 20,
+            ..Default::default()
+        });
+        let findings = suspect.into_findings();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].check, "toc");
+        assert_eq!(findings[0].rule, "toc-deficient");
+        assert_eq!(findings[0].severity, Severity::Warning);
+        assert_eq!(findings[0].fix.as_ref().unwrap().action, "rebuild-toc");
     }
 }

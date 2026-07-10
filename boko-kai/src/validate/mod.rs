@@ -29,6 +29,145 @@ pub mod coverage;
 pub mod fidelity;
 pub mod source;
 
+use std::fmt;
+
+// ============================================================================
+// Unified source-finding model
+// ============================================================================
+//
+// One shape for every [`source`] check's result. Each check (`source::epub`,
+// `source::toc`, the planned `source::kfx`) keeps its own rich internal report
+// and *lowers* it into `Finding`s (see each module's `into_findings`); the
+// aggregator [`source::validate`] concatenates them into one [`Report`]. That
+// Report is the single type the book editor consumes to build a repair list —
+// no caller special-cases each check's bespoke report anymore.
+//
+// Deliberately serde-free: the library never depends on `serde` (it is behind
+// boko-kai's `cli` feature, and sidle links boko with `default-features =
+// false`). The CLI serialises by reading these public fields — see `main.rs`.
+
+/// How bad a source [`Finding`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// A spec violation or integrity break that corrupts conversion or gets
+    /// the book rejected by strict readers. Must be fixed.
+    Error,
+    /// A real defect readers usually tolerate but the editor should surface —
+    /// e.g. an undeclared resource, or a chapterless TOC a human should confirm
+    /// before rebuilding.
+    Warning,
+    /// Informational context, not a defect on its own.
+    Info,
+}
+
+impl Severity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Info => "info",
+        }
+    }
+}
+
+/// A machine-actionable repair proposal attached to a [`Finding`]. The book
+/// editor reads [`action`](FixHint::action) to drive a repair panel; `detail`
+/// is the human-facing description. This is the shape the editor consumes;
+/// checks fill in the simple hints they can derive today, and richer payloads
+/// (e.g. a proposed nav tree for a deficient TOC) are added as the editor grows
+/// a UI for them.
+#[derive(Debug, Clone)]
+pub struct FixHint {
+    /// Machine-readable repair action slug, e.g. `"add-nav-doc"`,
+    /// `"rebuild-toc"`, `"make-linear-or-link"`.
+    pub action: String,
+    /// Human-readable description of the proposed repair.
+    pub detail: String,
+}
+
+impl FixHint {
+    pub fn new(action: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            action: action.into(),
+            detail: detail.into(),
+        }
+    }
+}
+
+/// One defect in a source book, in a shape uniform across every source check.
+#[derive(Debug, Clone)]
+pub struct Finding {
+    /// Which source check produced this — `"epub"`, `"toc"`, `"kfx"`.
+    pub check: &'static str,
+    /// Stable machine-readable rule id, e.g. `"broken-href"`, `"nav-missing"`,
+    /// `"toc-deficient"`. Unique within a `check`.
+    pub rule: String,
+    pub severity: Severity,
+    /// Where in the book the defect sits: a spine item / OPF path / container
+    /// offset, or a book-level marker like `"<toc>"`.
+    pub location: String,
+    /// Human-readable explanation.
+    pub message: String,
+    /// Optional structured repair proposal the editor can act on.
+    pub fix: Option<FixHint>,
+}
+
+/// The unified result of running the source checks over one book: a flat list
+/// of [`Finding`]s. Returned by [`source::validate`] and rendered by the book
+/// editor as its fix-list.
+#[derive(Debug, Clone, Default)]
+pub struct Report {
+    pub findings: Vec<Finding>,
+}
+
+impl Report {
+    /// No error- or warning-level findings. Info-only reports are still clean.
+    pub fn is_clean(&self) -> bool {
+        !self
+            .findings
+            .iter()
+            .any(|f| matches!(f.severity, Severity::Error | Severity::Warning))
+    }
+
+    /// Findings at exactly `severity`, in report order.
+    pub fn by_severity(&self, severity: Severity) -> impl Iterator<Item = &Finding> {
+        self.findings.iter().filter(move |f| f.severity == severity)
+    }
+
+    /// How many findings sit at `severity`.
+    pub fn count(&self, severity: Severity) -> usize {
+        self.by_severity(severity).count()
+    }
+}
+
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.findings.is_empty() {
+            return write!(f, "source validate: clean (0 findings)");
+        }
+        writeln!(
+            f,
+            "source validate: {} finding(s) — {} error, {} warning, {} info",
+            self.findings.len(),
+            self.count(Severity::Error),
+            self.count(Severity::Warning),
+            self.count(Severity::Info),
+        )?;
+        for finding in &self.findings {
+            writeln!(
+                f,
+                "  [{}] {}/{} @ {}: {}",
+                finding.severity.as_str(),
+                finding.check,
+                finding.rule,
+                finding.location,
+                finding.message,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// Which way the conversion under validation runs. Determines how printed
 /// [`fidelity`] reports interpret each side: which is "source / ground truth"
 /// vs "target (boko's output)", and therefore which defects are boko's fault.

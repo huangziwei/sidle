@@ -16,3 +16,90 @@
 
 pub mod epub;
 pub mod toc;
+
+use super::{Finding, Report, Severity};
+
+/// Run every source check that applies to `bytes` and return one unified
+/// [`Report`]. Sniffs the format (EPUB = zip `PK`) and runs the matching
+/// structural checks plus the cross-format TOC audit, lowering each check's
+/// result into [`Finding`]s. This is the single entry the book editor consumes
+/// to build its repair list.
+///
+/// Infallible by design: a book so broken a check cannot run (e.g. a KFX that
+/// won't load) becomes an `Error` finding rather than an `Err`, so the editor
+/// always receives a `Report`.
+pub fn validate(bytes: &[u8]) -> Report {
+    let mut report = Report::default();
+
+    // EPUB-only structural conformance (the epubcheck replacement).
+    if bytes.starts_with(b"PK") {
+        report
+            .findings
+            .extend(epub::validate(bytes).into_findings());
+    }
+
+    // The TOC audit sniffs the format itself and runs on both EPUB and KFX.
+    // (Phase C adds a dedicated KFX structural checker for the `CONT` branch.)
+    match toc::validate(bytes) {
+        Ok(audit) => report.findings.extend(audit.into_findings()),
+        Err(e) => report.findings.push(Finding {
+            check: "source",
+            rule: "unreadable".to_string(),
+            severity: Severity::Error,
+            location: "<book>".to_string(),
+            message: format!("could not read the book for the TOC audit: {e}"),
+            fix: None,
+        }),
+    }
+
+    report
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::validate::{Finding, Report, Severity};
+
+    fn finding(severity: Severity, rule: &'static str) -> Finding {
+        Finding {
+            check: "test",
+            rule: rule.to_string(),
+            severity,
+            location: "<x>".to_string(),
+            message: "m".to_string(),
+            fix: None,
+        }
+    }
+
+    #[test]
+    fn is_clean_ignores_info_only() {
+        let mut report = Report::default();
+        assert!(report.is_clean());
+
+        report.findings.push(finding(Severity::Info, "note"));
+        assert!(report.is_clean(), "info-only report is still clean");
+
+        report.findings.push(finding(Severity::Warning, "warn"));
+        assert!(!report.is_clean());
+    }
+
+    #[test]
+    fn by_severity_and_count() {
+        let report = Report {
+            findings: vec![
+                finding(Severity::Error, "e1"),
+                finding(Severity::Warning, "w1"),
+                finding(Severity::Warning, "w2"),
+                finding(Severity::Info, "i1"),
+            ],
+        };
+        assert_eq!(report.count(Severity::Error), 1);
+        assert_eq!(report.count(Severity::Warning), 2);
+        assert_eq!(report.count(Severity::Info), 1);
+
+        let warns: Vec<&str> = report
+            .by_severity(Severity::Warning)
+            .map(|f| f.rule.as_str())
+            .collect();
+        assert_eq!(warns, vec!["w1", "w2"]);
+    }
+}
