@@ -246,6 +246,20 @@ enum ValidateCheck {
         json: bool,
     },
 
+    /// Validate one book file's structural conformance on its own — is it
+    /// well-formed? Sniffs EPUB vs KFX and runs every single-file source check
+    /// for that format (EPUB structural / the KFX structural checker) plus the
+    /// cross-format TOC audit, reporting one unified list of source defects the
+    /// book editor can repair.
+    Source {
+        /// Input book (EPUB or KFX)
+        file: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Run all available validations against the conversion
     All {
         epub: String,
@@ -334,6 +348,7 @@ fn main() -> ExitCode {
                     validate_fxl(&epub, &kfx, details, dir)
                 }
                 ValidateCheck::Toc { file, json } => validate_toc(&file, json),
+                ValidateCheck::Source { file, json } => validate_source(&file, json),
                 ValidateCheck::All { epub, kfx, details } => {
                     validate_all(&epub, &kfx, details, dir)
                 }
@@ -973,6 +988,55 @@ fn validate_toc(path: &str, json: bool) -> Result<(), String> {
                 .max(audit.headings)
                 .max(audit.section_heads),
         ))
+    }
+}
+
+fn validate_source(path: &str, json: bool) -> Result<(), String> {
+    use boko::validate::Severity;
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {}", path, e))?;
+    let report = boko::validate::source::validate(&bytes);
+
+    if json {
+        let findings: Vec<_> = report
+            .findings
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "check": f.check,
+                    "rule": f.rule,
+                    "severity": f.severity.as_str(),
+                    "location": f.location,
+                    "message": f.message,
+                    "fix": f.fix.as_ref().map(|h| serde_json::json!({
+                        "action": h.action,
+                        "detail": h.detail,
+                    })),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "clean": report.is_clean(),
+            "errors": report.count(Severity::Error),
+            "warnings": report.count(Severity::Warning),
+            "infos": report.count(Severity::Info),
+            "findings": findings,
+        });
+        println!(
+            "{}",
+            serde_json::to_string(&payload).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+
+    println!("{report}");
+    // The process fails only on error-level defects (epubcheck convention);
+    // warnings are reported but don't fail the run, so batch/corpus scans read
+    // stdout for the full picture. In --json mode the verdict is in the payload.
+    let errors = report.count(Severity::Error);
+    if errors == 0 {
+        Ok(())
+    } else {
+        Err(format!("{errors} source error(s)"))
     }
 }
 
