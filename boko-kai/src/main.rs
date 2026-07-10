@@ -122,6 +122,17 @@ enum Command {
         #[command(subcommand)]
         check: ValidateCheck,
     },
+
+    /// Rebuild a KFX's table of contents from its own in-book Contents page.
+    /// Prints the chapters the proposer derives; with `output`, writes the
+    /// repaired KFX (fails if the book carries no toc container to overwrite).
+    RepairToc {
+        /// Input KFX file.
+        input: String,
+
+        /// Output KFX path. Omit to only print the proposed chapters (dry run).
+        output: Option<String>,
+    },
 }
 
 fn parse_direction(s: &str) -> Result<boko::validate::Direction, String> {
@@ -132,6 +143,32 @@ fn parse_direction(s: &str) -> Result<boko::validate::Direction, String> {
         other => Err(format!(
             "--direction must be 'epub-to-kfx', 'kfx-to-epub', or 'azw3-to-epub', got '{other}'"
         )),
+    }
+}
+
+/// `boko repair-toc <input> [output]` — derive the chapter list from the KFX's
+/// own in-book Contents page and print it; with `output`, write the repaired
+/// KFX. A dry run (no output) is a safe way to preview what the repair would do.
+fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
+    let kfx = std::fs::read(input).map_err(|e| format!("read {input}: {e}"))?;
+
+    let proposed = boko::kfx::toc_repair::propose_toc(&kfx).map_err(|e| e.to_string())?;
+    println!(
+        "proposed {} chapter(s) from the in-book Contents page:",
+        proposed.len()
+    );
+    for (i, entry) in proposed.iter().enumerate() {
+        println!("  {:>3}. eid {:<8} {}", i + 1, entry.eid, entry.label);
+    }
+
+    match output {
+        None => Ok(()),
+        Some(out) => {
+            let repaired = boko::kfx::toc_repair::repair_toc(&kfx).map_err(|e| e.to_string())?;
+            std::fs::write(out, &repaired).map_err(|e| format!("write {out}: {e}"))?;
+            println!("wrote repaired KFX → {out} ({} bytes)", repaired.len());
+            Ok(())
+        }
     }
 }
 
@@ -354,6 +391,7 @@ fn main() -> ExitCode {
                 }
             },
         },
+        Command::RepairToc { input, output } => repair_toc_cmd(&input, output.as_deref()),
     };
 
     match result {
