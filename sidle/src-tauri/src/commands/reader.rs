@@ -524,11 +524,28 @@ pub async fn reader_locations(
 /// Idempotent; a stale call for a different book is a no-op.
 #[tauri::command]
 pub async fn reader_release(state: State<'_, AppState>, book_id: i64) -> Result<(), String> {
-    let mut cache = state.reader_store.lock().await;
-    if matches!(&*cache, Some((id, _)) if *id == book_id) {
-        *cache = None;
-    }
+    evict_reader(&state, book_id).await;
     Ok(())
+}
+
+/// Drop the open book's cached reader state (fetch store + search index) if it's
+/// for `book_id`. The plain-`&AppState` core of [`reader_release`], so the book
+/// editor can evict a just-edited book after a surgical write — the next
+/// `reader_open` then re-parses the new bytes instead of serving the stale
+/// cache.
+pub(crate) async fn evict_reader(state: &AppState, book_id: i64) {
+    {
+        let mut store = state.reader_store.lock().await;
+        if matches!(&*store, Some((id, _)) if *id == book_id) {
+            *store = None;
+        }
+    }
+    {
+        let mut search = state.reader_search_cache.lock().await;
+        if matches!(&*search, Some((id, _)) if *id == book_id) {
+            *search = None;
+        }
+    }
 }
 
 /// The cached fetch store for `book_id`, or the "reopen the book" error every

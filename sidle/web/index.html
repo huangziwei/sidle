@@ -804,6 +804,30 @@
       </div>
     </div>
 
+    <!-- Book editor — full-screen, parallel to #reader-view. Calibre "Edit
+         book" analog; KFX-source in v1. Driven by editor.js (window.sidleEditor). -->
+    <div id="editor-view" class="editor-view" hidden>
+      <header class="editor-topbar">
+        <button id="editor-close" class="reader-btn" title="Close (Esc)" aria-label="Close editor">←</button>
+        <div id="editor-title" class="editor-title"></div>
+        <div class="editor-topbar-right">
+          <span id="editor-toc-chip" class="editor-chip" hidden></span>
+          <button id="editor-revert" class="btn" type="button" disabled>Revert</button>
+          <button id="editor-save" class="btn btn-primary" type="button" disabled>Save</button>
+        </div>
+      </header>
+      <div class="editor-body">
+        <nav id="editor-rail" class="editor-rail" aria-label="Editor sections">
+          <button class="editor-rail-item active" data-panel="metadata" type="button">Metadata</button>
+          <button class="editor-rail-item" data-panel="cover" type="button" disabled>Cover</button>
+          <button class="editor-rail-item" data-panel="images" type="button" disabled>Images</button>
+          <button class="editor-rail-item" data-panel="toc" type="button" disabled>Table of Contents</button>
+          <button class="editor-rail-item" data-panel="text" type="button" disabled>Text</button>
+        </nav>
+        <main id="editor-center" class="editor-center"></main>
+      </div>
+    </div>
+
     <script src="api.js"></script>
     <script src="selection.js"></script>
     <script src="table.js"></script>
@@ -811,5 +835,6 @@
     <script src="notebooks.js"></script>
     <script src="misc.js"></script>
     <script type="module" src="reader.js"></script>
+    <script type="module" src="editor.js"></script>
   </body>
 </html>

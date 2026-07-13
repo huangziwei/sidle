@@ -3066,6 +3066,11 @@ function openContextMenu(x, y, b) {
       }
     }
     add(menu, "Edit metadata…", () => openMetadataModal(b));
+    // Full "Edit book…" editor — writes the source artifact (metadata/cover/TOC),
+    // not just the DB row. KFX-source books only for now.
+    if (sourceFormat(b) === "kfx" && b.status === "done") {
+      add(menu, "Edit book…", () => openEditor(b));
+    }
     add(menu, "Open in Finder", () => openInFinder(b.id));
     add(menu, "Re-fetch cover", () => recrawlCover(b));
     // Force re-convert is always full color now — the JXR encoder auto-collapses
@@ -3917,6 +3922,16 @@ async function openInFinder(bookId) {
 // line, so opening a second book before the first finishes doesn't blank the
 // "Opening…" message early.
 let openReqSeq = 0;
+// Open the Calibre-style book editor (window.sidleEditor). KFX-source only in
+// v1; the caller gates the menu item so this is reached only for those.
+function openEditor(b) {
+  if (!window.sidleEditor) {
+    showToast("editor not ready", true);
+    return;
+  }
+  window.sidleEditor.open(b.id);
+}
+
 async function openReader(b) {
   if (!window.sidleReader) {
     showToast("reader not ready", true);

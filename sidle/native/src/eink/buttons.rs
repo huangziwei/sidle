@@ -33,7 +33,10 @@ const KEY_PAGEUP: u16 = 104;
 const KEY_PAGEDOWN: u16 = 109;
 const EVENT_BYTES: usize = 16;
 
-// Same EVIOCGRAB as touch.rs — _IOW('E', 0x90, int) = 0x40044590.
+// Same EVIOCGRAB as touch.rs — _IOW('E', 0x90, int) = 0x40044590. The call
+// sites cast with `as _` because `libc::ioctl`'s request arg differs by target
+// (`c_int` on the Kindle's armv7 Linux, `c_ulong` on the desktop host); the
+// value fits both.
 const EVIOCGRAB: libc::c_int = 0x40044590;
 
 /// Which bezel button fired. Hardware-confirmed KOA2 mapping: top button
@@ -69,7 +72,7 @@ impl Buttons {
             .read(true)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
-        let grabbed = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB, 1) } == 0;
+        let grabbed = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB as _, 1) } == 0;
         Ok(Some(Self {
             file,
             grabbed,
@@ -126,7 +129,7 @@ impl Drop for Buttons {
     fn drop(&mut self) {
         if self.grabbed {
             unsafe {
-                libc::ioctl(self.file.as_raw_fd(), EVIOCGRAB, 0);
+                libc::ioctl(self.file.as_raw_fd(), EVIOCGRAB as _, 0);
             }
         }
     }

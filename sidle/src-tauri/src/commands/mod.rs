@@ -1,4 +1,5 @@
 pub mod device;
+pub mod editor;
 pub mod library;
 pub mod misc;
 pub mod notebook;

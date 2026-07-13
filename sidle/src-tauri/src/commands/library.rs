@@ -103,8 +103,20 @@ pub async fn library_update_metadata(
     book_id: i64,
     patch: db::MetadataPatch,
 ) -> Result<BookRow, String> {
-    let mut patch = patch;
+    apply_metadata_patch(&app, &state, book_id, patch).await
+}
 
+/// Canonicalize, validate, persist, and file-rename a full metadata patch, then
+/// emit `library:row-updated` and return the refreshed row. Shared by the
+/// metadata modal (`library_update_metadata`) and the book editor's metadata
+/// panel (`editor_save_metadata`), which layers a surgical KFX write on top so
+/// the edit is durable in the artifact, not just the library row.
+pub(crate) async fn apply_metadata_patch(
+    app: &AppHandle,
+    state: &AppState,
+    book_id: i64,
+    mut patch: db::MetadataPatch,
+) -> Result<BookRow, String> {
     // Trim text fields.
     patch.title = patch.title.trim().to_string();
     // Canonicalize authors: split the field on `&`/「、」 (never a plain comma —

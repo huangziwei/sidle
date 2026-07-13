@@ -103,6 +103,8 @@ pub enum SwipeDir {
 
 // _IOW('E', 0x90, int): direction(W=1)<<30 | size(4)<<16 | type('E'=0x45)<<8 | nr(0x90)
 // = 0x40000000 | 0x40000 | 0x4500 | 0x90 = 0x40044590
+// The call sites cast with `as _`: `libc::ioctl`'s request arg is `c_int` on the
+// Kindle's armv7 Linux but `c_ulong` on the desktop host, and the value fits both.
 const EVIOCGRAB: libc::c_int = 0x40044590;
 
 pub struct Touch {
@@ -160,7 +162,7 @@ impl Touch {
             .with_context(|| format!("open {}", path.display()))?;
         // The kernel treats the arg as a "non-NULL = grab, NULL = ungrab"
         // boolean (see drivers/input/evdev.c). Pass 1.
-        let grab_res = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB, 1) };
+        let grab_res = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB as _, 1) };
         let grabbed = grab_res == 0;
         Ok(Self {
             file,
@@ -378,7 +380,7 @@ impl Drop for Touch {
     fn drop(&mut self) {
         if self.grabbed {
             unsafe {
-                libc::ioctl(self.file.as_raw_fd(), EVIOCGRAB, 0);
+                libc::ioctl(self.file.as_raw_fd(), EVIOCGRAB as _, 0);
             }
         }
     }
