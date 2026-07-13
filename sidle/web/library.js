@@ -1296,23 +1296,37 @@ function matchesFacets(book, facets) {
 // build each book's `search_key`): NFKD-decompose, lowercase, then keep only
 // [a-z0-9] — dropping spaces, punctuation, and the combining accent marks NFKD
 // splits off (ō→o, é→e, fullwidth→half). Space-insensitive on both sides, so
-// "sekaisaikou" hits "sekai saikou …". No digraph expansion here: the stored key
-// already indexes both the accent-stripped and digraph spellings, so an ASCII
-// query needs neither.
+// "sekaisaikou" hits "sekai saikou …".
+//
+// Two query-side deviations from the backend fold:
+//  - ß/œ/ø/æ have no NFKD decomposition and would be dropped; expand them to
+//    the digraph spellings the stored key also indexes (strasse, oeuvre — see
+//    `romaji::expand_latin`), so a query typed with the real glyph stays on
+//    this path ("müller straße" still hits "Müller-Straße 7").
+//  - Lossy-fold guard: kana/kanji strip to *nothing*, so a CJK query would
+//    canon to its stray alnum remnants — "クラスで２" → "2" — and containment
+//    would match every book with a 2 anywhere in its key. If any letter/digit
+//    fails to survive into [a-z0-9], return "" so matchesSearch skips the
+//    romaji path; native-script queries belong to the raw substring path.
 function canonSearch(s) {
-  return (s || "")
+  const folded = (s || "")
+    .replace(/[ßẞ]/g, "ss")
+    .replace(/[œŒøØ]/g, "oe")
+    .replace(/[æÆ]/g, "ae")
     .normalize("NFKD")
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "");
+    .toLowerCase();
+  if (/(?![a-z0-9])[\p{L}\p{N}]/u.test(folded)) return "";
+  return folded.replace(/[^a-z0-9]/g, "");
 }
 
 // The query-side folds, computed ONCE per filter pass and reused for every book
-// (they don't vary by book): `raw` = trimmed/lowercased query for the native
-// substring path; `q` = NFKD-stripped canon for the romaji-key path (only when
-// the query is non-empty — canonSearch's NFKD+regex is the pass's costliest bit,
-// so we don't want it per book). An empty `raw` short-circuits matchesSearch.
+// (they don't vary by book): `raw` = NFKC width-folded (２→2, ｶ→カ, ideographic
+// space→space), trimmed, lowercased query for the native substring path; `q` =
+// NFKD-stripped canon for the romaji-key path (only when the query is non-empty
+// — canonSearch's NFKD+regex is the pass's costliest bit, so we don't want it
+// per book). An empty `raw` short-circuits matchesSearch.
 function searchTerms() {
-  const raw = state.search.trim().toLowerCase();
+  const raw = state.search.normalize("NFKC").trim().toLowerCase();
   return { raw, q: raw ? canonSearch(state.search) : "" };
 }
 
@@ -1330,7 +1344,9 @@ function matchesSearch(book, terms) {
   //     query typed in the actual script; the desktop has a real keyboard (the
   //     device's on-screen one is ASCII-only), so keep the plain substring search
   //     over the raw fields — typing 暗殺 or 村上 still filters. The romaji columns
-  //     are folded in too, so they're searchable even on this path.
+  //     are folded in too, so they're searchable even on this path. NFKC-folded
+  //     like the query, so an IME's width choice doesn't matter: ２/2 and ｶ/カ
+  //     match either way (titles routinely use fullwidth digits, e.g. クラスで２番目).
   const hay = [
     book.title,
     book.author,
@@ -1342,6 +1358,7 @@ function matchesSearch(book, terms) {
   ]
     .filter(Boolean)
     .join(" ")
+    .normalize("NFKC")
     .toLowerCase();
   return hay.includes(raw);
 }
