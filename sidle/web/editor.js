@@ -85,7 +85,7 @@ function removeKeys() {
 // fixes) needs the surgical text-replace primitive that isn't built yet, so it
 // stays gated with an explanatory tooltip.
 function configureRail() {
-  const editable = session.data.kfx_editable;
+  const editable = session.data.editable;
   const live = new Set(["cover", "images", "toc"]);
   for (const item of document.querySelectorAll(".editor-rail-item")) {
     const p = item.dataset.panel;
@@ -165,7 +165,7 @@ function renderTocChip(toc) {
 
 function markDirty(dirty) {
   session.dirty = dirty;
-  $("#editor-save").disabled = !dirty || !session.data.kfx_editable;
+  $("#editor-save").disabled = !dirty || !session.data.editable;
   $("#editor-revert").disabled = !dirty;
 }
 
@@ -173,14 +173,14 @@ function markDirty(dirty) {
 
 function renderMetadataPanel() {
   const m = session.data.metadata;
-  const editable = session.data.kfx_editable;
+  const editable = session.data.editable;
   const center = $("#editor-center");
   center.replaceChildren();
 
   const notice = editable
     ? ""
     : `<div class="editor-notice">Editing ${session.data.format.toUpperCase()} sources isn't
-         supported yet — the KFX editor is available now. These fields are read-only.</div>`;
+         supported yet — KFX and EPUB books are editable now. These fields are read-only.</div>`;
 
   const form = document.createElement("form");
   form.className = "editor-panel metadata-fields";

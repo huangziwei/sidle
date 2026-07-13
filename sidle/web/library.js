@@ -3067,8 +3067,8 @@ function openContextMenu(x, y, b) {
     }
     add(menu, "Edit metadata…", () => openMetadataModal(b));
     // Full "Edit book…" editor — writes the source artifact (metadata/cover/TOC),
-    // not just the DB row. KFX-source books only for now.
-    if (sourceFormat(b) === "kfx" && b.status === "done") {
+    // not just the DB row. KFX- and EPUB-source books (PDF editing is later).
+    if (["kfx", "epub"].includes(sourceFormat(b)) && b.status === "done") {
       add(menu, "Edit book…", () => openEditor(b));
     }
     add(menu, "Open in Finder", () => openInFinder(b.id));
@@ -3922,8 +3922,8 @@ async function openInFinder(bookId) {
 // line, so opening a second book before the first finishes doesn't blank the
 // "Opening…" message early.
 let openReqSeq = 0;
-// Open the Calibre-style book editor (window.sidleEditor). KFX-source only in
-// v1; the caller gates the menu item so this is reached only for those.
+// Open the Calibre-style book editor (window.sidleEditor). KFX- and EPUB-source
+// books; the caller gates the menu item so this is reached only for those.
 function openEditor(b) {
   if (!window.sidleEditor) {
     showToast("editor not ready", true);
