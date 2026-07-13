@@ -80,13 +80,21 @@ function removeKeys() {
 
 // --- left rail -------------------------------------------------------------
 
-// v1 lights up Metadata (always, read-only for non-KFX) and Table of Contents
-// (KFX-source only). Cover / Images / Text are placeholders until their phases.
+// Metadata is always available (read-only for non-KFX sources); Cover, Images
+// and Table of Contents light up for KFX-source books. Text (in-place typo
+// fixes) needs the surgical text-replace primitive that isn't built yet, so it
+// stays gated with an explanatory tooltip.
 function configureRail() {
   const editable = session.data.kfx_editable;
+  const live = new Set(["cover", "images", "toc"]);
   for (const item of document.querySelectorAll(".editor-rail-item")) {
     const p = item.dataset.panel;
-    item.disabled = !(p === "metadata" || (editable && p === "toc"));
+    item.disabled = !(p === "metadata" || (editable && live.has(p)));
+    if (p === "text") {
+      item.title = editable
+        ? "In-place text editing is coming in a later tier."
+        : "";
+    }
   }
 }
 
@@ -104,12 +112,20 @@ function selectPanel(panel) {
   for (const item of document.querySelectorAll(".editor-rail-item")) {
     item.classList.toggle("active", item.dataset.panel === panel);
   }
+  // Every panel except Metadata commits via its own in-panel buttons, so the
+  // top-bar Save/Revert (the metadata panel's) are disabled for them.
   if (panel === "metadata") {
     renderMetadataPanel();
     markDirty(false);
+  } else if (panel === "cover") {
+    $("#editor-save").disabled = true;
+    $("#editor-revert").disabled = true;
+    renderCoverPanel();
+  } else if (panel === "images") {
+    $("#editor-save").disabled = true;
+    $("#editor-revert").disabled = true;
+    renderImagesPanel();
   } else if (panel === "toc") {
-    // The TOC panel commits via its own in-panel buttons; the top-bar
-    // Save/Revert are the metadata panel's.
     $("#editor-save").disabled = true;
     $("#editor-revert").disabled = true;
     renderTocPanel();
@@ -264,6 +280,224 @@ async function saveMetadata() {
   } finally {
     save.textContent = "Save";
     save.disabled = !session.dirty;
+  }
+}
+
+// --- cover panel -----------------------------------------------------------
+
+// The cover flow reuses the library's proven, battle-tested commands
+// (`library_set_cover` / `library_recrawl_cover`): each embeds the image into
+// the KFX (preserving the frozen on-device identity) and the derived EPUB,
+// refreshes the sidecar + gallery thumbnail, and emits `library:row-updated` so
+// the gallery stays in step — the editor just drives them and repaints.
+async function renderCoverPanel() {
+  const center = $("#editor-center");
+  center.replaceChildren(el("div", "editor-panel editor-muted", "Loading cover…"));
+  let path;
+  try {
+    path = await window.api.invoke("library_cover_path", { bookId: session.bookId });
+  } catch (err) {
+    center.replaceChildren(wrapPanel(el("div", "editor-notice", `Couldn't load the cover: ${err}`)));
+    return;
+  }
+  if (session.panel !== "cover") return; // navigated away while loading
+  paintCoverPanel(path);
+}
+
+function paintCoverPanel(coverPath) {
+  session.coverPath = coverPath;
+  const panel = el("div", "editor-panel");
+  panel.append(el("div", "field-group-title", "Cover image"));
+
+  const preview = el("div", "cover-preview");
+  if (coverPath) {
+    const img = el("img", "cover-art");
+    // Cache-bust: the sidecar path is stable across swaps, so force a re-fetch.
+    img.src = `${window.api.fileUrl(coverPath)}?v=${Date.now()}`;
+    img.alt = "Current cover";
+    preview.append(img);
+  } else {
+    preview.append(el("div", "cover-empty", "No cover set"));
+  }
+  panel.append(preview);
+
+  panel.append(
+    el(
+      "p",
+      "editor-muted",
+      "The cover is embedded in the KFX — the on-device home tile and sleep-screen art — " +
+        "and written to the library, keeping the same on-device identity.",
+    ),
+  );
+
+  const actions = el("div", "cover-actions");
+  const change = el("button", "btn btn-primary", "Change cover…");
+  change.type = "button";
+  change.addEventListener("click", changeCover);
+  actions.append(change);
+
+  const asin = session.data.metadata.asin;
+  if (asin) {
+    const refetch = el("button", "btn", "Re-fetch from Amazon");
+    refetch.type = "button";
+    refetch.title = `Fetch the cover by ASIN ${asin}`;
+    refetch.addEventListener("click", refetchCover);
+    actions.append(refetch);
+  }
+  panel.append(actions);
+  $("#editor-center").replaceChildren(panel);
+}
+
+async function changeCover() {
+  let src;
+  try {
+    src = await window.api.invoke("library_pick_image");
+  } catch (err) {
+    toast(`Couldn't pick an image: ${err}`, true);
+    return;
+  }
+  if (!src) return; // cancelled
+  await runCoverWrite(() =>
+    window.api.invoke("library_set_cover", { bookId: session.bookId, srcPath: src }),
+  );
+}
+
+async function refetchCover() {
+  await runCoverWrite(() =>
+    window.api.invoke("library_recrawl_cover", { bookId: session.bookId }),
+  );
+}
+
+// Shared commit wrapper for both cover write paths. Both return a tagged result:
+// {kind:"updated", cover_path} | {kind:"no_asin"} | {kind:"failed", error}.
+async function runCoverWrite(invoke) {
+  const buttons = $("#editor-center").querySelectorAll(".cover-actions button");
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    const res = await invoke();
+    if (res.kind === "updated") {
+      session.data.has_cover = true;
+      paintCoverPanel(res.cover_path); // repaint re-enables the buttons
+      toast("Cover updated.");
+      return;
+    }
+    if (res.kind === "no_asin") {
+      toast("This book has no Amazon ASIN to fetch from.", true);
+    } else {
+      toast(`Couldn't update the cover: ${res.error}`, true);
+    }
+  } catch (err) {
+    toast(`Couldn't update the cover: ${err}`, true);
+  }
+  buttons.forEach((b) => (b.disabled = false));
+}
+
+// --- images panel ----------------------------------------------------------
+
+async function renderImagesPanel() {
+  const center = $("#editor-center");
+  center.replaceChildren(el("div", "editor-panel editor-muted", "Extracting images…"));
+  let images;
+  try {
+    images = await window.api.invoke("editor_images", { bookId: session.bookId });
+  } catch (err) {
+    center.replaceChildren(wrapPanel(el("div", "editor-notice", `Couldn't read images: ${err}`)));
+    return;
+  }
+  if (session.panel !== "images") return; // navigated away while loading
+  session.images = images;
+  paintImagesPanel(images);
+}
+
+function paintImagesPanel(images) {
+  const panel = el("div", "editor-panel");
+  panel.append(
+    el("div", "field-group-title", `Embedded images${images.length ? ` (${images.length})` : ""}`),
+  );
+  if (!images.length) {
+    panel.append(el("p", "editor-muted", "This book has no embedded images."));
+    $("#editor-center").replaceChildren(panel);
+    return;
+  }
+
+  const actions = el("div", "images-actions");
+  const exportAll = el("button", "btn btn-primary", "Export all…");
+  exportAll.type = "button";
+  exportAll.addEventListener("click", exportAllImages);
+  actions.append(exportAll);
+  panel.append(actions);
+
+  const grid = el("div", "images-grid");
+  for (const img of images) grid.append(imageCard(img));
+  panel.append(grid);
+  $("#editor-center").replaceChildren(panel);
+}
+
+function imageCard(img) {
+  const card = el("div", "image-card");
+
+  const thumb = el("div", "image-thumb");
+  const preview = el("img");
+  preview.src = window.api.fileUrl(img.preview_path);
+  preview.alt = img.resource_name;
+  preview.loading = "lazy";
+  thumb.append(preview);
+  if (img.is_cover) thumb.append(el("span", "image-badge", "Cover"));
+  card.append(thumb);
+
+  const meta = el("div", "image-meta");
+  meta.append(el("div", "image-name", img.resource_name));
+  const dims = img.width && img.height ? `${img.width}×${img.height} · ` : "";
+  meta.append(
+    el("div", "image-dims", `${dims}${img.ext.toUpperCase()} · ${formatBytes(img.byte_len)}`),
+  );
+  card.append(meta);
+
+  const save = el("button", "btn btn-small", "Save…");
+  save.type = "button";
+  save.addEventListener("click", () => exportOneImage(img, save));
+  card.append(save);
+  return card;
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function exportOneImage(img, button) {
+  button.disabled = true;
+  try {
+    const saved = await window.api.invoke("editor_export_image", {
+      bookId: session.bookId,
+      index: img.index,
+    });
+    if (saved) toast(`Saved ${img.resource_name}.`);
+  } catch (err) {
+    toast(`Couldn't save the image: ${err}`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function exportAllImages() {
+  let dir;
+  try {
+    dir = await window.api.invoke("library_pick_folder");
+  } catch (err) {
+    toast(`Couldn't pick a folder: ${err}`, true);
+    return;
+  }
+  if (!dir) return; // cancelled
+  try {
+    const res = await window.api.invoke("editor_export_images", {
+      bookId: session.bookId,
+      dir,
+    });
+    toast(`Exported ${res.count} image${res.count === 1 ? "" : "s"}.`);
+  } catch (err) {
+    toast(`Couldn't export images: ${err}`, true);
   }
 }
 

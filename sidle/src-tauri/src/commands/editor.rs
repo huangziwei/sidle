@@ -12,11 +12,15 @@
 //! `kfx_sha256` device identity, then re-derive the EPUB and evict the reader
 //! cache. It mirrors `library_set_cover`'s in-place KFX rewrite.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
+use tokio::sync::oneshot;
 
+use boko::kfx::image_extract;
 use boko::kfx::metadata_edit::{self, MetadataPatch as KfxMetadataPatch};
 use boko::kfx::toc_repair::{self, TocEntry};
 use boko::validate::source::toc as toc_validate;
@@ -364,6 +368,212 @@ pub async fn editor_repair_toc(
         .map_err(|e| e.to_string())?
 }
 
+// --- images ---------------------------------------------------------------
+
+/// One embedded image for the Images panel: identity + declared dimensions + an
+/// on-disk preview copy the webview loads through the asset protocol. The panel
+/// offers extract/export only; KFX image *replacement* is a later tier.
+#[derive(Serialize)]
+pub struct EditorImage {
+    /// Position in the container's image list — the stable key
+    /// [`editor_export_image`] re-resolves against (the list is read-only and
+    /// deterministically sorted by the extractor).
+    pub index: usize,
+    pub resource_name: String,
+    /// Lowercase extension, no dot: `"jpg"`/`"png"`/`"gif"`/`"webp"`/`"bmp"`.
+    pub ext: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// True for the book's declared cover (matched by backing bytes).
+    pub is_cover: bool,
+    pub byte_len: usize,
+    /// Absolute path to a decoded preview copy on disk, for `convertFileSrc`.
+    pub preview_path: String,
+}
+
+/// List every embedded image, writing a preview copy of each into a per-book
+/// cache dir the webview can load. Read-only — the KFX is never touched.
+#[tauri::command]
+pub async fn editor_images(
+    state: State<'_, AppState>,
+    book_id: i64,
+) -> Result<Vec<EditorImage>, String> {
+    let kfx_path = {
+        let conn = state.db.lock().await;
+        let row = db::get_book(&conn, book_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no book with id {book_id}"))?;
+        require_kfx_source(&row)?
+    };
+    // A fresh dir per book keeps only the open book's previews on disk.
+    let preview_dir = state
+        .paths
+        .root
+        .join("editor-images")
+        .join(book_id.to_string());
+    tokio::task::spawn_blocking(move || extract_images_with_previews(&kfx_path, &preview_dir))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Export one embedded image to a user-picked path (save dialog defaulting to
+/// `<resource_name>.<ext>`). Returns the saved path, or `None` if cancelled.
+#[tauri::command]
+pub async fn editor_export_image(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    book_id: i64,
+    index: usize,
+) -> Result<Option<String>, String> {
+    let kfx_path = {
+        let conn = state.db.lock().await;
+        let row = db::get_book(&conn, book_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no book with id {book_id}"))?;
+        require_kfx_source(&row)?
+    };
+    // Re-extract and pick the one image by its stable index (the KFX is
+    // unchanged between listing and export, so the sorted order is identical).
+    let src = kfx_path.clone();
+    let (bytes, default_name) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, String), String> {
+            let data = std::fs::read(&src).map_err(|e| format!("read {src}: {e}"))?;
+            let images = image_extract::kfx_extract_images(&data).map_err(|e| e.to_string())?;
+            let img = images
+                .get(index)
+                .ok_or_else(|| "that image is no longer present".to_string())?;
+            Ok((
+                img.bytes.clone(),
+                format!("{}.{}", sanitize_filename(&img.resource_name), img.ext),
+            ))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+    let (tx, rx) = oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(default_name)
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(dest) = rx.await.map_err(|e| e.to_string())? else {
+        return Ok(None); // cancelled
+    };
+    let dest = PathBuf::from(dest.to_string());
+    std::fs::write(&dest, &bytes).map_err(|e| format!("write {}: {e}", dest.display()))?;
+    Ok(Some(dest.to_string_lossy().to_string()))
+}
+
+/// How many images an [`editor_export_images`] run wrote, and where.
+#[derive(Serialize)]
+pub struct ExportImagesResult {
+    pub dir: String,
+    pub count: usize,
+}
+
+/// Export every embedded image into `dir`, each named `<resource_name>.<ext>`
+/// with a numeric suffix on any name collision.
+#[tauri::command]
+pub async fn editor_export_images(
+    state: State<'_, AppState>,
+    book_id: i64,
+    dir: String,
+) -> Result<ExportImagesResult, String> {
+    let kfx_path = {
+        let conn = state.db.lock().await;
+        let row = db::get_book(&conn, book_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no book with id {book_id}"))?;
+        require_kfx_source(&row)?
+    };
+    let dest_dir = PathBuf::from(&dir);
+    let count = tokio::task::spawn_blocking(move || -> Result<usize, String> {
+        let data = std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
+        let images = image_extract::kfx_extract_images(&data).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dest_dir)
+            .map_err(|e| format!("create {}: {e}", dest_dir.display()))?;
+        let mut used: HashSet<String> = HashSet::new();
+        for img in &images {
+            let stem = sanitize_filename(&img.resource_name);
+            let mut fname = format!("{stem}.{}", img.ext);
+            let mut i = 1;
+            while !used.insert(fname.clone()) {
+                fname = format!("{stem}-{i}.{}", img.ext);
+                i += 1;
+            }
+            let path = dest_dir.join(&fname);
+            std::fs::write(&path, &img.bytes)
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+        }
+        Ok(images.len())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(ExportImagesResult { dir, count })
+}
+
+/// Extract every image and materialize a preview copy on disk. Sync (reads +
+/// parses the container, writes files); call inside `spawn_blocking`.
+fn extract_images_with_previews(
+    kfx_path: &str,
+    preview_dir: &Path,
+) -> Result<Vec<EditorImage>, String> {
+    let bytes = std::fs::read(kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
+    let images = image_extract::kfx_extract_images(&bytes).map_err(|e| e.to_string())?;
+
+    let _ = std::fs::remove_dir_all(preview_dir); // stale previews from a prior open
+    std::fs::create_dir_all(preview_dir)
+        .map_err(|e| format!("create {}: {e}", preview_dir.display()))?;
+
+    let mut out = Vec::with_capacity(images.len());
+    for (index, img) in images.iter().enumerate() {
+        // Index-prefixed so two resources with the same sanitized name (e.g.
+        // both non-ASCII) still land on distinct preview files.
+        let fname = format!(
+            "{index}-{}.{}",
+            sanitize_filename(&img.resource_name),
+            img.ext
+        );
+        let path = preview_dir.join(&fname);
+        std::fs::write(&path, &img.bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+        out.push(EditorImage {
+            index,
+            resource_name: img.resource_name.clone(),
+            ext: img.ext.to_string(),
+            width: img.width,
+            height: img.height,
+            is_cover: img.is_cover,
+            byte_len: img.bytes.len(),
+            preview_path: path.to_string_lossy().to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// Reduce a KFX resource name to a filesystem-safe stem: keep ASCII
+/// alphanumerics plus `.`/`-`/`_`, collapse the rest to `_` (so
+/// `resource/rsrc7` → `resource_rsrc7`). Falls back to `image` when nothing
+/// printable survives.
+fn sanitize_filename(name: &str) -> String {
+    let mapped: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = mapped.trim_matches('_');
+    if trimmed.is_empty() {
+        "image".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Validate-only TOC verdict for the top-bar chip (no proposal — cheaper than
 /// [`read_toc_detail`], which also parses the Contents page). `None` on a read
 /// or parse error. Sync — call inside `spawn_blocking`.
@@ -573,5 +783,16 @@ mod tests {
         }];
         let bad_dto: Vec<TocEntryDto> = bad.iter().map(TocEntryDto::from_entry).collect();
         assert!(any_blank_label(&bad_dto));
+    }
+
+    #[test]
+    fn sanitize_filename_keeps_safe_chars() {
+        assert_eq!(sanitize_filename("resource/rsrc7"), "resource_rsrc7");
+        assert_eq!(sanitize_filename("eF"), "eF");
+        assert_eq!(sanitize_filename("cover-1.2"), "cover-1.2");
+        // Leading/trailing separators are trimmed; an all-symbol name falls back.
+        assert_eq!(sanitize_filename("/leading"), "leading");
+        assert_eq!(sanitize_filename("图片"), "image");
+        assert_eq!(sanitize_filename(""), "image");
     }
 }
