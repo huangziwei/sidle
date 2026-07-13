@@ -35,10 +35,11 @@ const MIN_CHAPTER_LINKS: usize = 3;
 // Proposer
 // ---------------------------------------------------------------------------
 
-/// Derive a chapter list from the EPUB's own structure, for [`set_toc`]. Prefers
-/// the densest cluster of internal chapter links (a Contents page — the page a
-/// `toc` landmark marks, when present); falls back to the spine's headings. Each
-/// entry's `href` is an absolute zip path. Empty when nothing usable is found.
+/// Derive a chapter list from the EPUB's own structure, for [`set_toc`]. Uses the
+/// richest of: the book's own declared TOC (NCX / nav doc, when it lists real
+/// chapters) and the densest in-body Contents-page link cluster; falls back to
+/// the spine's text headings. Each entry's `href` is an absolute zip path. Empty
+/// when nothing usable is found.
 pub fn propose_toc(epub_bytes: &[u8]) -> io::Result<Vec<TocEntry>> {
     let pkg = EpubPackage::parse(epub_bytes)?;
     let opf_path = pkg.opf_path()?;
@@ -68,13 +69,55 @@ fn propose_from_pkg(
     opf_base: &str,
     opf_str: &str,
 ) -> Vec<TocEntry> {
+    // 1. The book's own authored TOC (NCX / nav doc). When it lists real
+    //    chapters it's the most reliable source — and often the *only* one:
+    //    image-heavy books (JP light novels) render both the 目次 and the chapter
+    //    headings as images, so there are no links or heading text to derive from,
+    //    yet the NCX carries the full chapter list. A deficient (chapterless)
+    //    declared TOC has too few real chapters to qualify and is skipped.
+    let declared = existing_declared_toc(pkg, opf, opf_base);
+    let declared_ok = count_chapters(&declared) >= MIN_CHAPTER_LINKS;
+
+    // 2. The densest in-body Contents-page link cluster.
+    let contents = contents_page_links(pkg, opf, opf_base, opf_str);
+    let contents_ok = contents.len() >= MIN_CHAPTER_LINKS;
+
+    // Prefer whichever qualifying source is richer.
+    match (declared_ok, contents_ok) {
+        (true, true) => {
+            if flat_count(&declared) >= contents.len() {
+                declared
+            } else {
+                contents
+            }
+        }
+        (true, false) => declared,
+        (false, true) => contents,
+        // 3. Last resort: one entry per spine doc that opens with a text heading.
+        (false, false) => {
+            let headings = propose_from_headings(pkg, &spine_docs(opf, opf_base));
+            if headings.len() >= MIN_CHAPTER_LINKS {
+                headings
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// The densest cluster of internal chapter links across the spine — a Contents
+/// page. Prefers the page a `toc` landmark marks (guards against a link-dense
+/// chapter out-linking the real Contents page). Empty if none carries links.
+fn contents_page_links(
+    pkg: &EpubPackage,
+    opf: &OpfData,
+    opf_base: &str,
+    opf_str: &str,
+) -> Vec<TocEntry> {
     let spine = spine_docs(opf, opf_base);
     let spine_files: HashSet<&str> = spine.iter().map(|(_, b)| b.as_str()).collect();
     let landmark_file = toc_landmark_basename(pkg, opf, opf_base, opf_str);
 
-    // Walk the spine for the densest internal-link cluster; prefer the toc
-    // landmark's page (guards against a link-dense chapter out-linking the real
-    // Contents page).
     let mut best: Vec<TocEntry> = Vec::new();
     let mut landmark_hit: Option<Vec<TocEntry>> = None;
     for (abs, base) in &spine {
@@ -93,17 +136,71 @@ fn propose_from_pkg(
             landmark_hit = Some(entries);
         }
     }
-    let chosen = landmark_hit.unwrap_or(best);
-    if chosen.len() >= MIN_CHAPTER_LINKS {
-        return chosen;
-    }
+    landmark_hit.unwrap_or(best)
+}
 
-    // Fallback: one entry per spine doc that opens with a heading.
-    let headings = propose_from_headings(pkg, &spine);
-    if headings.len() >= MIN_CHAPTER_LINKS {
-        return headings;
+/// The book's declared TOC (the richer of its NCX and EPUB-3 nav doc), with every
+/// href resolved to an absolute zip path so it can be re-emitted by [`set_toc`].
+fn existing_declared_toc(pkg: &EpubPackage, opf: &OpfData, opf_base: &str) -> Vec<TocEntry> {
+    let read = |href: &str, parse: fn(&str) -> io::Result<Vec<TocEntry>>| -> Vec<TocEntry> {
+        let abs = format!("{opf_base}{}", percent_decode(href));
+        let Some(bytes) = pkg.get(&abs) else {
+            return Vec::new();
+        };
+        let text = decode_text(bytes, extract_xml_encoding(bytes));
+        let entries = parse(&text).unwrap_or_default();
+        // NCX/nav hrefs are relative to that document's own directory.
+        rebase_to_absolute(&entries, &dir_of(&abs))
+    };
+    let ncx = opf
+        .ncx_href
+        .as_deref()
+        .map(|h| read(h, crate::epub::parse_ncx))
+        .unwrap_or_default();
+    let nav = opf
+        .nav_href
+        .as_deref()
+        .map(|h| read(h, crate::epub::parse_nav_toc))
+        .unwrap_or_default();
+    if flat_count(&ncx) >= flat_count(&nav) {
+        ncx
+    } else {
+        nav
     }
-    Vec::new()
+}
+
+/// Resolve every entry's (doc-relative) href to an absolute zip path, recursively.
+fn rebase_to_absolute(entries: &[TocEntry], base_dir: &str) -> Vec<TocEntry> {
+    entries
+        .iter()
+        .map(|e| {
+            let href = if e.href.starts_with('#') || e.href.is_empty() {
+                e.href.clone()
+            } else {
+                resolve_href(base_dir, &e.href)
+            };
+            let mut t = TocEntry::new(e.title.clone(), href);
+            t.children = rebase_to_absolute(&e.children, base_dir);
+            t
+        })
+        .collect()
+}
+
+/// Count entries whose label is a real chapter (not front-matter boilerplate),
+/// recursively — the gate for reusing an existing declared TOC.
+fn count_chapters(entries: &[TocEntry]) -> usize {
+    entries
+        .iter()
+        .map(|e| {
+            let this = usize::from(!crate::validate::source::toc::is_front_matter(&e.title));
+            this + count_chapters(&e.children)
+        })
+        .sum()
+}
+
+/// Total entries in a tree, counting nested children.
+fn flat_count(entries: &[TocEntry]) -> usize {
+    entries.iter().map(|e| 1 + flat_count(&e.children)).sum()
 }
 
 /// `(label, absolute-href)` for every link this doc makes to *another* spine doc
@@ -864,6 +961,124 @@ mod tests {
         assert_eq!(toc[0].title, "第一部");
         let kids: Vec<&str> = toc[0].children.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(kids, ["第一章", "第二章"]);
+    }
+
+    /// Build an EPUB whose 目次 and chapter headings are images (no links, no
+    /// heading text) but which ships a real NCX listing the chapters — the shape
+    /// of image-heavy JP light novels.
+    fn image_toc_and_ncx_epub() -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let stored = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            let mut add = |name: &str, body: &str| {
+                zip.start_file(name, stored).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            };
+            add("mimetype", "application/epub+zip");
+            add(
+                "META-INF/container.xml",
+                r#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            );
+            // 目次 page: an image, no links.
+            add(
+                "OEBPS/Text/mokuji.xhtml",
+                r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>目次</title></head><body class="contents"><div><p><img src="../Images/toc.jpg" alt=""/></p></div></body></html>"#,
+            );
+            let mut manifest = String::from(
+                r#"<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="mokuji" href="Text/mokuji.xhtml" media-type="application/xhtml+xml"/>"#,
+            );
+            let mut spine = String::from(r#"<itemref idref="mokuji"/>"#);
+            let mut navpoints = String::from(
+                r#"<navPoint id="np0" playOrder="1"><navLabel><text>目次</text></navLabel><content src="Text/mokuji.xhtml"/></navPoint>"#,
+            );
+            let titles = [
+                "残酷童話　うつくし姫",
+                "第零話　あせろら",
+                "第零話　かれん",
+                "第零話　つばさ",
+                "あとがき",
+            ];
+            for (i, title) in titles.iter().enumerate() {
+                let n = i + 1;
+                manifest.push_str(&format!(
+                    r#"<item id="c{n}" href="Text/c{n}.xhtml" media-type="application/xhtml+xml"/>"#
+                ));
+                spine.push_str(&format!(r#"<itemref idref="c{n}"/>"#));
+                navpoints.push_str(&format!(
+                    r#"<navPoint id="np{n}" playOrder="{}"><navLabel><text>{title}</text></navLabel><content src="Text/c{n}.xhtml#link{n}"/></navPoint>"#,
+                    n + 1
+                ));
+                // Chapter heading is an image — no text to derive a label from.
+                add(
+                    &format!("OEBPS/Text/c{n}.xhtml"),
+                    &format!(
+                        r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>c{n}</title></head><body class="image-page"><div class="main"><h2 id="link{n}"><img src="../Images/p{n}.jpg" alt=""/></h2></div></body></html>"#
+                    ),
+                );
+            }
+            add(
+                "OEBPS/content.opf",
+                &format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>業物語</dc:title><dc:language>ja</dc:language><dc:identifier id="uid">urn:uuid:image-toc</dc:identifier></metadata><manifest>{manifest}</manifest><spine toc="ncx">{spine}</spine><guide><reference type="toc" title="目次" href="Text/mokuji.xhtml"/></guide></package>"#
+                ),
+            );
+            add(
+                "OEBPS/toc.ncx",
+                &format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="urn:uuid:image-toc"/></head><docTitle><text>業物語</text></docTitle><navMap>{navpoints}</navMap></ncx>"#
+                ),
+            );
+            zip.finish().unwrap();
+        }
+        buf
+    }
+
+    /// The regression: a book with an image 目次 and image chapter headings (no
+    /// links, no heading text) still proposes its chapters — from the declared
+    /// NCX — instead of coming up empty. Repair then writes them so it reopens
+    /// with a real TOC.
+    #[test]
+    fn proposes_from_declared_ncx_when_body_is_images() {
+        let epub = image_toc_and_ncx_epub();
+
+        // The Contents-page / headings paths find nothing here.
+        assert!(
+            contents_page_links(
+                &EpubPackage::parse(&epub).unwrap(),
+                &parse_opf(&decode_text(
+                    EpubPackage::parse(&epub).unwrap().opf_bytes().unwrap(),
+                    None
+                ))
+                .unwrap(),
+                "OEBPS/",
+                ""
+            )
+            .is_empty(),
+            "image 目次 yields no link cluster"
+        );
+
+        // …but the proposer recovers the 5 chapters from the NCX.
+        let proposed = propose_toc(&epub).expect("propose");
+        let labels: Vec<&str> = proposed.iter().map(|e| e.title.as_str()).collect();
+        assert!(labels.contains(&"残酷童話　うつくし姫"), "got {labels:?}");
+        assert!(labels.contains(&"あとがき"), "got {labels:?}");
+        assert!(
+            proposed
+                .iter()
+                .any(|e| e.href == "OEBPS/Text/c1.xhtml#link1"),
+            "href resolved to an absolute zip path: {:?}",
+            proposed.iter().map(|e| &e.href).collect::<Vec<_>>()
+        );
+
+        // Repair writes it back; the book reopens with the chapter list.
+        let out = repair_toc(&epub).expect("repair");
+        let book = Book::from_bytes(&out, Format::Epub).expect("opens");
+        assert!(
+            book.toc().iter().any(|e| e.title.contains("うつくし")),
+            "repaired TOC lists the chapters"
+        );
     }
 
     #[test]

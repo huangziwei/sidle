@@ -207,8 +207,9 @@ impl TocAudit {
 /// Front-matter / boilerplate TOC labels (JP + EN). A declared TOC made only of
 /// these has no chapters. Kept intentionally broad — the cost of a false "front
 /// matter" is only that an entry doesn't count toward `nav_chapters`, and the
-/// flag still requires strong positive in-book evidence.
-fn is_front_matter(label: &str) -> bool {
+/// flag still requires strong positive in-book evidence. Shared with the EPUB
+/// TOC repairer, which counts an existing TOC's real chapters before reusing it.
+pub(crate) fn is_front_matter(label: &str) -> bool {
     let l = label.trim();
     const JP: &[&str] = &[
         "表紙",

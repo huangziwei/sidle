@@ -123,14 +123,14 @@ enum Command {
         check: ValidateCheck,
     },
 
-    /// Rebuild a KFX's table of contents from its own in-book Contents page.
+    /// Rebuild a book's table of contents from its own structure (KFX or EPUB).
     /// Prints the chapters the proposer derives; with `output`, writes the
-    /// repaired KFX (fails if the book carries no toc container to overwrite).
+    /// repaired book.
     RepairToc {
-        /// Input KFX file.
+        /// Input KFX or EPUB file.
         input: String,
 
-        /// Output KFX path. Omit to only print the proposed chapters (dry run).
+        /// Output path. Omit to only print the proposed chapters (dry run).
         output: Option<String>,
     },
 }
@@ -146,30 +146,38 @@ fn parse_direction(s: &str) -> Result<boko::validate::Direction, String> {
     }
 }
 
-/// `boko repair-toc <input> [output]` — derive the chapter list from the KFX's
-/// own in-book Contents page and print it; with `output`, write the repaired
-/// KFX. A dry run (no output) is a safe way to preview what the repair would do.
+/// `boko repair-toc <input> [output]` — derive the chapter list from the book's
+/// own structure and print it; with `output`, write the repaired book. Handles
+/// both KFX (in-book Contents page) and EPUB (declared NCX/nav, Contents page, or
+/// headings). A dry run (no output) is a safe way to preview what repair would do.
 fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
-    let kfx = std::fs::read(input).map_err(|e| format!("read {input}: {e}"))?;
+    let bytes = std::fs::read(input).map_err(|e| format!("read {input}: {e}"))?;
 
-    let proposed = boko::kfx::toc_repair::propose_toc(&kfx).map_err(|e| e.to_string())?;
-    println!(
-        "proposed {} chapter(s) from the in-book Contents page:",
-        proposed.len()
-    );
+    if bytes.starts_with(b"PK") {
+        let proposed = boko::epub::toc_repair::propose_toc(&bytes).map_err(|e| e.to_string())?;
+        println!("proposed {} chapter(s) from the EPUB:", proposed.len());
+        for (i, entry) in proposed.iter().enumerate() {
+            println!("  {:>3}. {:<44} {}", i + 1, entry.title, entry.href);
+        }
+        if let Some(out) = output {
+            let repaired = boko::epub::toc_repair::repair_toc(&bytes).map_err(|e| e.to_string())?;
+            std::fs::write(out, &repaired).map_err(|e| format!("write {out}: {e}"))?;
+            println!("wrote repaired EPUB → {out} ({} bytes)", repaired.len());
+        }
+        return Ok(());
+    }
+
+    let proposed = boko::kfx::toc_repair::propose_toc(&bytes).map_err(|e| e.to_string())?;
+    println!("proposed {} chapter(s) from the KFX:", proposed.len());
     for (i, entry) in proposed.iter().enumerate() {
         println!("  {:>3}. eid {:<8} {}", i + 1, entry.eid, entry.label);
     }
-
-    match output {
-        None => Ok(()),
-        Some(out) => {
-            let repaired = boko::kfx::toc_repair::repair_toc(&kfx).map_err(|e| e.to_string())?;
-            std::fs::write(out, &repaired).map_err(|e| format!("write {out}: {e}"))?;
-            println!("wrote repaired KFX → {out} ({} bytes)", repaired.len());
-            Ok(())
-        }
+    if let Some(out) = output {
+        let repaired = boko::kfx::toc_repair::repair_toc(&bytes).map_err(|e| e.to_string())?;
+        std::fs::write(out, &repaired).map_err(|e| format!("write {out}: {e}"))?;
+        println!("wrote repaired KFX → {out} ({} bytes)", repaired.len());
     }
+    Ok(())
 }
 
 #[derive(Subcommand)]
