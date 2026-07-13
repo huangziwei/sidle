@@ -111,6 +111,11 @@ const DL_CHUNK: usize = 256 * 1024;
 /// Minimum wall-clock between progress redraws. E-ink can't usefully repaint
 /// faster, and throttling keeps the transfer (not the panel) the bottleneck.
 const DL_REDRAW_INTERVAL: Duration = Duration::from_millis(700);
+/// How often the decrypt-all wait loop re-checks the engine child for exit.
+/// Input is serviced the moment it arrives regardless (the wait blocks in
+/// `Input::next_deadline`); this only bounds how stale the exit check can get,
+/// so the progress bar advances promptly without spinning on `try_wait`.
+const DEDRM_WAIT_POLL: Duration = Duration::from_millis(50);
 
 /// Cell currently outlined and awaiting release. On a book cell, release
 /// decides between a long-enough hold (download) and a too-short tap (discovery
@@ -721,6 +726,7 @@ fn run() -> anyhow::Result<()> {
                                 let summary = decrypt_all_flow(
                                     &mut fb,
                                     &mut renderer,
+                                    &mut input,
                                     &agent,
                                     &cfg,
                                     &drm_books,
@@ -1326,13 +1332,18 @@ fn run() -> anyhow::Result<()> {
                         let dl_t0 = Instant::now();
                         let (banner_msg, saved) = match source {
                             Source::Drm => match drm_books.get(dl_id as usize) {
-                                Some(drm_book) => {
-                                    decrypt_flow(&mut fb, &mut renderer, &agent, &cfg, drm_book)
-                                        .unwrap_or_else(|err| {
-                                            log(format!("decrypt flow error: {err:#}"));
-                                            (format!("Failed: {err}"), false)
-                                        })
-                                }
+                                Some(drm_book) => decrypt_flow(
+                                    &mut fb,
+                                    &mut renderer,
+                                    &mut input,
+                                    &agent,
+                                    &cfg,
+                                    drm_book,
+                                )
+                                .unwrap_or_else(|err| {
+                                    log(format!("decrypt flow error: {err:#}"));
+                                    (format!("Failed: {err}"), false)
+                                }),
                                 None => ("DRM book not found".to_string(), false),
                             },
                             Source::Library => download_flow(
@@ -1802,6 +1813,34 @@ fn sync_decrypted(
     format!("Synced: {imported} new, {dup} already, {failed} failed")
 }
 
+/// Handle one input event that arrives while a decrypt flow owns the screen.
+/// The two-corner gesture captures right now, while the toast it should show
+/// is still up (`capture` restores the screen itself, so the toast survives
+/// the flash); everything else is consumed and dropped — the decrypt flows
+/// have no cancel affordance, and letting taps queue would fire them as grid
+/// actions on whatever the screen shows once the flow returns.
+fn decrypt_input_event(fb: &mut Framebuffer, ev: InputEvent) {
+    log(format!("decrypt input: {ev:?}"));
+    if ev == InputEvent::Touch(TouchEvent::Screenshot) {
+        match eink::screenshot::capture(fb) {
+            Ok(p) => log(format!("screenshot saved: {}", p.display())),
+            Err(e) => log(format!("screenshot failed: {e:#}")),
+        }
+    }
+}
+
+/// Drain every queued input event through [`decrypt_input_event`]. Called
+/// between the blocking steps of the decrypt flows; all pending events are
+/// surfaced, not just one, because the two-corner gesture is two contacts and
+/// both may have queued during a single blocking step (same reason as the
+/// download loop's drain).
+fn drain_decrypt_input(input: &mut Input, fb: &mut Framebuffer) -> anyhow::Result<()> {
+    while let Some(ev) = input.poll_now()? {
+        decrypt_input_event(fb, ev);
+    }
+    Ok(())
+}
+
 /// Decrypt one on-device DRM purchase in place via the kfxdedrm engine — the DRM
 /// twin of [`download_flow`]. Probe the working ABI binary, spawn `<exe> dedrm
 /// <kfx>`, stream its stdout to the toast, and report exit status. Returns the
@@ -1813,9 +1852,15 @@ fn sync_decrypted(
 /// [`dedrm::OUT_DIR`]; whether the file materialized is logged as a breadcrumb
 /// (to confirm the assumed output name on-device) but success is the exit code,
 /// so a divergent output name still reads as success rather than a false failure.
+///
+/// Input is drained between engine prints and after the push, so the two-corner
+/// screenshot lands on the live toast. The drain rides the stdout stream —
+/// `read_line` blocks between prints — so worst-case gesture latency is one
+/// engine line, the same cadence that feeds the toast itself.
 fn decrypt_flow(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
+    input: &mut Input,
     agent: &ureq::Agent,
     cfg: &config::ServerConfig,
     book: &dedrm::DrmBook,
@@ -1853,6 +1898,7 @@ fn decrypt_flow(
                 Ok(0) | Err(_) => break,
                 Ok(_) => {}
             }
+            drain_decrypt_input(input, fb)?;
             let msg = line.trim();
             if msg.is_empty() {
                 continue;
@@ -1895,6 +1941,9 @@ fn decrypt_flow(
             "Decrypted (tap Sync to send)".to_string()
         }
     };
+    // A gesture during the push queued behind the blocking send — capture it
+    // while the Syncing toast is still the live screen.
+    drain_decrypt_input(input, fb)?;
     Ok((msg, true))
 }
 
@@ -1903,9 +1952,13 @@ fn decrypt_flow(
 /// action button (the slot the library view gives to self-update). Steps through
 /// the list behind a [`toast::draw_progress`] `n / total` bar that advances one
 /// book at a time. The ABI binary is probed once up front. Each book's decrypt
-/// is a blocking `<exe> dedrm <kfx>` with stdio inherited (it lands in
-/// `sidle.sh`'s log — no pipe to drain, unlike the single-book streaming flow),
-/// then the resulting `.kfx-zip` is pushed over the LAN. Push is best-effort: an
+/// is `<exe> dedrm <kfx>` with stdio inherited (it lands in `sidle.sh`'s log —
+/// no pipe to drain, unlike the single-book streaming flow), spawned and waited
+/// on in a poll loop that keeps input serviced: the touchscreen is grabbed, so
+/// anything the user does during the batch — above all the two-corner
+/// screenshot — queues on the fd until someone polls, and a blocking wait would
+/// sit on that queue for the whole book. Then the resulting `.kfx-zip` is
+/// pushed over the LAN. Push is best-effort: an
 /// `Other` error is logged and the book still counts as decrypted; a token
 /// mismatch stops further pushes (every one would hit the same wall) but
 /// decryption continues — a decrypted book is still useful and re-pushable via
@@ -1914,6 +1967,7 @@ fn decrypt_flow(
 fn decrypt_all_flow(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,
+    input: &mut Input,
     agent: &ureq::Agent,
     cfg: &config::ServerConfig,
     books: &[dedrm::DrmBook],
@@ -1932,9 +1986,26 @@ fn decrypt_all_flow(
         let rect = toast::draw_progress(fb, renderer, &format!("Decrypting {short}…"), i, total);
         fb.send_update(rect, WAVEFORM_MODE_GC16)?;
 
-        // Blocking decrypt with inherited stdio — no pipe to drain (the single
-        // `decrypt_flow` pipes stdout only to stream it to the toast).
-        let status = Command::new(&exe).arg("dedrm").arg(&book.kfx_path).status();
+        // Spawn + wait-poll rather than a blocking `status()`, so input stays
+        // serviced while the engine works. Stdio is inherited — no pipe to
+        // drain (the single `decrypt_flow` pipes stdout only to stream it to
+        // the toast), so the wait blocks in `next_deadline`: a gesture wakes
+        // it instantly, and an idle `Tick` bounds the exit check at
+        // [`DEDRM_WAIT_POLL`].
+        let status = match Command::new(&exe).arg("dedrm").arg(&book.kfx_path).spawn() {
+            Ok(mut child) => loop {
+                match child.try_wait() {
+                    Ok(Some(s)) => break Ok(s),
+                    Ok(None) => {}
+                    Err(e) => break Err(e),
+                }
+                match input.next_deadline(Some(Instant::now() + DEDRM_WAIT_POLL))? {
+                    InputEvent::Tick => {}
+                    ev => decrypt_input_event(fb, ev),
+                }
+            },
+            Err(e) => Err(e),
+        };
         let out_path = dedrm::out_path(&book.kfx_path);
         log(format!(
             "decrypt-all {}/{}: {} exit={status:?} out_exists={}",
@@ -1961,6 +2032,9 @@ fn decrypt_all_flow(
                     log(format!("decrypt-all push {}: {err:#}", out_path.display()));
                 }
             }
+            // A gesture during the push queued behind the blocking send —
+            // capture it while this book's bar is still the live screen.
+            drain_decrypt_input(input, fb)?;
         }
     }
     // Settle the bar at 100% so the batch visibly completes before the caller's

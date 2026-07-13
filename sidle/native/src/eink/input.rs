@@ -67,9 +67,10 @@ impl Input {
     /// Non-blocking check for a pending event (zero-timeout `poll`). Returns
     /// the first ready event, or `None` if neither device has a complete event
     /// right now. Unlike [`next`](Self::next) it never blocks and never
-    /// surfaces `Tick` — the download loop calls it between network reads to
-    /// notice a Cancel tap or bezel press without stalling the transfer. A
-    /// partial touch stroke reads as `None` and is caught on a later call.
+    /// surfaces `Tick` — the blocking flows (download, decrypt) call it
+    /// between their blocking steps to notice a Cancel tap, bezel press, or
+    /// screenshot gesture without stalling the work. A partial touch stroke
+    /// reads as `None` and is caught on a later call.
     pub fn poll_now(&mut self) -> Result<Option<InputEvent>> {
         let touch_fd: RawFd = self.touch.raw_fd();
         let button_fd: RawFd = self.buttons.as_ref().map(|b| b.raw_fd()).unwrap_or(-1);
@@ -92,11 +93,12 @@ impl Input {
             return Ok(None);
         }
         // Touch first, unlike `next` (which prioritizes bezel presses for
-        // navigation). The only caller is the download loop, where the touch fd
-        // carries both the Cancel button and the two-corner screenshot gesture.
-        // Checking buttons first would let a stale/None button read return early
-        // and *shadow* a pending touch event — stalling the gesture until the
-        // main loop resumes (the "screenshot only works after the download" bug).
+        // navigation). The callers are blocking flows (download, decrypt),
+        // where the touch fd carries both the Cancel button and the two-corner
+        // screenshot gesture. Checking buttons first would let a stale/None
+        // button read return early and *shadow* a pending touch event —
+        // stalling the gesture until the main loop resumes (the "screenshot
+        // only works after the download" bug).
         if fds[0].revents & libc::POLLIN != 0
             && let Some(ev) = self.touch.next_event()?
         {
