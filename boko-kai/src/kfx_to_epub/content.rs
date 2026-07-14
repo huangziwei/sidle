@@ -1092,14 +1092,14 @@ impl<'a> ContentState<'a> {
                 // class the reader rendered them at intrinsic pixel size,
                 // awkwardly oversized and unaffected by the font-size control.
                 self.attach_style(part_index, id, style_name, fields);
-                // Mark KFX `render:inline` images so the reader's paginator
-                // leaves their author sizing intact. Those are inline-flow
-                // glyph images (the `width:1em` case above); the paginator's
-                // `setImageSize` otherwise stamps `width/height:auto !important`
-                // on every `<img>` to fit block figures to the column, which
-                // beats the class rule and re-inflates the glyph to intrinsic
-                // size. Reader-mode only (same gate as `data-eid`) — external
-                // EPUB readers don't run that paginator.
+                // Mark KFX `render:inline` images so the reader treats them as
+                // text, not figures. Those are inline-flow glyph images (the
+                // `width:1em` case above); the paginator's `setImageSize`
+                // exempts them from its column/page max-size caps and from the
+                // `vertical-align: middle` stamp, and the reader CSS aligns
+                // them `text-bottom` so they sit on the surrounding glyphs'
+                // em-box bottom. Reader-mode only (same gate as `data-eid`) —
+                // external EPUB readers don't run that paginator.
                 if self.stamp_eids && content_render_is_inline(fields) {
                     self.book_parts[part_index]
                         .dom

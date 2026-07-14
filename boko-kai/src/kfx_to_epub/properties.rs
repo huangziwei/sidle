@@ -214,7 +214,14 @@ fn is_safe_unquoted_font(f: &str) -> bool {
 fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Option<String> {
     let inner = value.unwrap_annotated();
 
-    // Enum value lookup.
+    // Enum value lookup — for symbol/bool values ONLY. A property can carry
+    // both enum keywords and plain values: `line_height` is `auto` (→ enum
+    // table → `normal`) on some styles and a `{value: 0.6, unit: lh}` length
+    // struct on others. Calibre dispatches on the VALUE's type before ever
+    // consulting the enum map (`property_value`,
+    // yj_to_epub_properties.py:1174 — the IonStruct branch precedes the
+    // value_map lookup); matching the table first and bailing on a miss
+    // silently dropped every numeric value of an enum-carrying property.
     if let Some(table) = prop.values {
         // The lookup key can be a symbol id (most common) or a bool.
         match inner {
@@ -230,7 +237,7 @@ fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Optio
                 // comment as the value (`float: /* unknown center */`) leaves a
                 // dangling `prop:` with no value — invalid CSS, rejected by
                 // epubcheck as CSS-008 ("premature end of grammar").
-                None
+                return None;
             }
             IonValue::Bool(b) => {
                 let key = if *b { "true" } else { "false" };
@@ -239,35 +246,35 @@ fn property_value(prop: &Prop, value: &IonValue, symbols: &SymbolTable) -> Optio
                         return Some(mapped.unwrap_or("").to_string());
                     }
                 }
+                return None;
+            }
+            _ => {}
+        }
+    }
+
+    // Plain value: numeric, length-struct, string, color int.
+    match inner {
+        IonValue::Int(n) => Some(format_int_value(prop.name, *n)),
+        IonValue::Float(f) => Some(format!("{}", f)),
+        IonValue::Decimal(d) => Some(d.clone()),
+        // `font-family: $amzn_fixup_default_font$` / `default` mean "the
+        // document default font"; calibre substitutes the real family in its
+        // font pass (deferred here), so emit nothing rather than invalid CSS.
+        IonValue::String(s) if prop.name == "font-family" && is_default_font_name(s) => None,
+        IonValue::String(s) => Some(s.clone()),
+        IonValue::Symbol(id) => {
+            let s = symbols.resolve(*id).to_string();
+            if prop.name == "font-family" && is_default_font_name(&s) {
                 None
+            } else {
+                Some(s)
             }
-            _ => None,
         }
-    } else {
-        // Plain value: numeric, length-struct, string, color int.
-        match inner {
-            IonValue::Int(n) => Some(format_int_value(prop.name, *n)),
-            IonValue::Float(f) => Some(format!("{}", f)),
-            IonValue::Decimal(d) => Some(d.clone()),
-            // `font-family: $amzn_fixup_default_font$` / `default` mean "the
-            // document default font"; calibre substitutes the real family in its
-            // font pass (deferred here), so emit nothing rather than invalid CSS.
-            IonValue::String(s) if prop.name == "font-family" && is_default_font_name(s) => None,
-            IonValue::String(s) => Some(s.clone()),
-            IonValue::Symbol(id) => {
-                let s = symbols.resolve(*id).to_string();
-                if prop.name == "font-family" && is_default_font_name(&s) {
-                    None
-                } else {
-                    Some(s)
-                }
-            }
-            IonValue::Struct(struct_fields) => {
-                // KFX length structs: { value: N, unit: "px" }
-                format_length_struct(struct_fields, symbols)
-            }
-            _ => None,
+        IonValue::Struct(struct_fields) => {
+            // KFX length structs: { value: N, unit: "px" }
+            format_length_struct(struct_fields, symbols)
         }
+        _ => None,
     }
 }
 
@@ -1067,6 +1074,20 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
                 ("none", Some("none")),
                 ("left", Some("left")),
                 ("right", Some("right")),
+            ]),
+        },
+    ),
+    // `yj.float_clear` is `$628` → `clear` in calibre; the epub→kfx direction
+    // already maps `clear` back to it (`style_schema.rs`).
+    (
+        "yj.float_clear",
+        Prop {
+            name: "clear",
+            values: Some(&[
+                ("none", Some("none")),
+                ("left", Some("left")),
+                ("right", Some("right")),
+                ("both", Some("both")),
             ]),
         },
     ),

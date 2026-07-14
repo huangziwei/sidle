@@ -367,9 +367,9 @@ class View {
         // `[data-kfx-inline]` marks KFX render:inline glyph images (rare hanzi
         // with no Unicode code point, sized to the font via `width:1em` so they
         // scale with the reader's font-size). They flow within text and must
-        // NOT be capped to the column like a block figure — the `width/height:
-        // auto !important` we stamp below would beat their class rule and
-        // re-inflate them to intrinsic pixel size. Leave their author sizing be.
+        // NOT be treated like a block figure at all — no column caps, no
+        // `vertical-align: middle` (READER_CSS aligns them `text-bottom` to sit
+        // on the surrounding glyphs' em-box bottom). Leave them out entirely.
         const els = [...doc.body.querySelectorAll('img:not([data-kfx-inline]), svg, video')]
         // READ pass: the block-axis space each image's wrapper chain consumes
         // (its own margins + every ancestor's margin/padding/border up to the
@@ -404,12 +404,22 @@ class View {
                 // and silently fails to resolve at all where the containing
                 // block has no definite size — e.g. full-page illustrations in
                 // `writing-mode: horizontal-tb` wrapper <div>s nested inside a
-                // vertical-rl body. `width/height: auto` neutralises any
-                // intrinsic-attribute or inherited sizing so only the caps and
-                // the aspect ratio decide the box; `object-fit: contain` keeps
-                // the drawing inside it.
-                'width': 'auto',
-                'height': 'auto',
+                // vertical-rl body.
+                //
+                // An <img>'s own width/height CSS is left alone: KFX books size
+                // decorative art through their stylesheet (a `width: 6.25%`
+                // floated chapter glyph, a `width: 100%` image inside a
+                // `width: 20%` floated box), and a forced `width/height: auto`
+                // re-inflates those to intrinsic pixel size — a full-column
+                // arrow where a small glyph belongs, painting over the text
+                // beside its float box. boko's converter never emits width/
+                // height ATTRIBUTES on <img>, so author CSS (or the `auto`
+                // initial value for unsized figures) is the whole story, and
+                // the max-* caps below still bound whatever it computes to.
+                // <svg>/<video> DO carry sizing attributes, which only
+                // `width/height: auto` can neutralise — keep the reset there
+                // so a single-axis cap doesn't distort them.
+                ...(el.localName === 'img' ? null : { 'width': 'auto', 'height': 'auto' }),
                 'max-width': vertical ? blockMax : inlineCap,
                 'max-height': vertical ? inlineCap : blockMax,
                 'object-fit': 'contain',
