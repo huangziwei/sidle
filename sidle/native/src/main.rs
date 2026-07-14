@@ -713,9 +713,11 @@ fn run() -> anyhow::Result<()> {
                             // DRM view's right disc (the library view's Update slot,
                             // useless while browsing DRM): decrypt every on-device
                             // purchase and push each to the desktop, behind an
-                            // `n/total` progress bar. Then re-scan — each decrypted
-                            // book now has a `.kfx-zip`, so `dedrm::scan` drops it and
-                            // the DRM view collapses to just the ones left (or empties).
+                            // `n/total` progress bar. Then re-scan — a synced book has
+                            // had its `.kfx` removed (cleanup) while a decrypted-but-
+                            // unsynced one still shows its `.kfx-zip`, so `dedrm::scan`
+                            // drops it either way and the DRM view collapses to just
+                            // the ones left (or empties).
                             log("decrypt-all button tap");
                             if drm_books.is_empty() {
                                 let dirty =
@@ -1766,30 +1768,14 @@ fn load_cover(
     }
 }
 
-/// Download a book to `/mnt/us/documents/Sidle/<filename>` while showing a live
-/// `transferred / total` overlay with a Cancel button. Returns the toast
-/// message to display when it settles **and** whether the book actually landed
-/// on the device (`true` only on a verified, renamed-into-place file) — the
-/// caller uses that to hide the now-downloaded tile immediately.
-///
-/// The body streams to disk one [`DL_CHUNK`] at a time — never buffered whole
-/// in device RAM, which a 300 MB+ book would otherwise risk OOMing on a 512 MB
-/// Kindle. Bytes land in a `<name>.part` sidecar (which the gallery's `.kfx`
-/// filter ignores) and are renamed into place only once the transfer completes
-/// **and** matches the server's `Content-Length`. So a cancel, a dropped
-/// radio, or a capped stream leaves a `.part` that the next attempt overwrites
-/// — never a truncated `.kfx` masquerading as a finished book (the very bug the
-/// old 256 MB in-RAM cap produced). Mirrors the self-update `.download`
-/// staging.
-///
-/// Between chunks it redraws progress at most every [`DL_REDRAW_INTERVAL`] and
-/// polls input non-blocking: a tap inside the Cancel button, or any bezel
-/// page-button press, aborts the transfer.
 /// Push every decrypted `.kfx-zip` to the desktop over the LAN, returning a
 /// one-line toast summary. The manual DRM-mode Sync; server dedupe makes re-runs
-/// safe (a re-push of an already-imported book is a `duplicate` no-op). A token
-/// mismatch aborts early with the re-provision breadcrumb — every push would hit
-/// the same wall.
+/// safe (a re-push of an already-imported book is a `duplicate` no-op). Each
+/// confirmed push (`imported` **or** `duplicate`) then clears that book's
+/// on-device leftovers via [`dedrm::cleanup_synced`] — the same stem-scoped
+/// removal the auto-push flows do, so a book recovered here doesn't linger. A
+/// token mismatch aborts early with the re-provision breadcrumb — every push
+/// would hit the same wall.
 fn sync_decrypted(
     agent: &ureq::Agent,
     cfg: &config::ServerConfig,
@@ -1798,8 +1784,21 @@ fn sync_decrypted(
     let (mut imported, mut dup, mut failed) = (0u32, 0u32, 0u32);
     for zip in zips {
         match api::push_book(agent, cfg, zip) {
-            Ok(api::BookPush::Imported) => imported += 1,
-            Ok(api::BookPush::Duplicate) => dup += 1,
+            Ok(outcome) => {
+                match outcome {
+                    api::BookPush::Imported => imported += 1,
+                    api::BookPush::Duplicate => dup += 1,
+                }
+                // Confirmed on the desktop → remove this book's on-device
+                // leftovers. This path only has the `.kfx-zip`, so recover the
+                // Items01 `.kfx` from its stem; cleanup then drops the `.kfx`, its
+                // `.sdr`, and this same `.kfx-zip`. Best effort — failures logged.
+                if let Some(kfx) = dedrm::source_kfx(zip) {
+                    for (path, err) in dedrm::cleanup_synced(&kfx) {
+                        log(format!("sync cleanup {}: {err}", path.display()));
+                    }
+                }
+            }
             Err(api::SidleError::TokenMismatch) => {
                 return "Token mismatch.\nPlug Kindle into sidle and click Update KUAL."
                     .to_string();
@@ -1934,8 +1933,19 @@ fn decrypt_flow(
     let dirty = toast::draw(fb, renderer, &format!("Syncing {short}…"));
     fb.send_update(dirty, WAVEFORM_MODE_GC16)?;
     let msg = match api::push_book(agent, cfg, &out_path) {
-        Ok(api::BookPush::Imported) => "Decrypted → synced to library".to_string(),
-        Ok(api::BookPush::Duplicate) => "Decrypted → already in library".to_string(),
+        Ok(outcome) => {
+            // Confirmed on the desktop → remove both on-device leftovers (this
+            // `.kfx-zip` plus the encrypted `.kfx`/`.sdr` under Items01), scoped
+            // to just this book's stem. Best effort: a failed removal is a logged
+            // breadcrumb, not an error — the desktop already has the book.
+            for (path, err) in dedrm::cleanup_synced(&book.kfx_path) {
+                log(format!("cleanup {}: {err}", path.display()));
+            }
+            match outcome {
+                api::BookPush::Imported => "Decrypted → synced to library".to_string(),
+                api::BookPush::Duplicate => "Decrypted → already in library".to_string(),
+            }
+        }
         Err(err) => {
             log(format!("auto-push failed: {err}"));
             "Decrypted (tap Sync to send)".to_string()
@@ -2023,7 +2033,15 @@ fn decrypt_all_flow(
         // Push the fresh output (best effort; skipped once the token is known bad).
         if out_path.exists() && !token_bad {
             match api::push_book(agent, cfg, &out_path) {
-                Ok(api::BookPush::Imported | api::BookPush::Duplicate) => synced += 1,
+                Ok(api::BookPush::Imported | api::BookPush::Duplicate) => {
+                    synced += 1;
+                    // Confirmed on the desktop → drop this book's leftovers (its
+                    // `.kfx-zip` output plus the `.kfx`/`.sdr` under Items01),
+                    // scoped to this stem. Best effort — failures are just logged.
+                    for (path, err) in dedrm::cleanup_synced(&book.kfx_path) {
+                        log(format!("decrypt-all cleanup {}: {err}", path.display()));
+                    }
+                }
                 Err(api::SidleError::TokenMismatch) => {
                     log("decrypt-all: token rejected — pausing pushes, still decrypting");
                     token_bad = true;
@@ -2060,6 +2078,25 @@ fn decrypt_all_flow(
     ))
 }
 
+/// Download a book to `/mnt/us/documents/Sidle/<filename>` while showing a live
+/// `transferred / total` overlay with a Cancel button. Returns the toast
+/// message to display when it settles **and** whether the book actually landed
+/// on the device (`true` only on a verified, renamed-into-place file) — the
+/// caller uses that to hide the now-downloaded tile immediately.
+///
+/// The body streams to disk one [`DL_CHUNK`] at a time — never buffered whole
+/// in device RAM, which a 300 MB+ book would otherwise risk OOMing on a 512 MB
+/// Kindle. Bytes land in a `<name>.part` sidecar (which the gallery's `.kfx`
+/// filter ignores) and are renamed into place only once the transfer completes
+/// **and** matches the server's `Content-Length`. So a cancel, a dropped
+/// radio, or a capped stream leaves a `.part` that the next attempt overwrites
+/// — never a truncated `.kfx` masquerading as a finished book (the very bug the
+/// old 256 MB in-RAM cap produced). Mirrors the self-update `.download`
+/// staging.
+///
+/// Between chunks it redraws progress at most every [`DL_REDRAW_INTERVAL`] and
+/// polls input non-blocking: a tap inside the Cancel button, or any bezel
+/// page-button press, aborts the transfer.
 fn download_flow(
     fb: &mut Framebuffer,
     renderer: &mut TextRenderer,

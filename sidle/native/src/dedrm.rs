@@ -103,6 +103,25 @@ pub fn out_path(kfx_path: &Path) -> PathBuf {
     Path::new(OUT_DIR).join(format!("{stem}.kfx-zip"))
 }
 
+/// The inverse of [`out_path`]: the encrypted `<stem>.kfx` under [`ITEMS_DIR`]
+/// that produced a given `<stem>.kfx-zip`. The DRM Sync path works from the
+/// `dedrm/` outputs (see [`decrypted_books`]) and needs the original back to
+/// clean it up after a confirmed push. `None` if `zip_path` isn't a `.kfx-zip`.
+pub fn source_kfx(zip_path: &Path) -> Option<PathBuf> {
+    let stem = zip_path.file_name()?.to_str()?.strip_suffix(".kfx-zip")?;
+    Some(Path::new(ITEMS_DIR).join(format!("{stem}.kfx")))
+}
+
+/// A purchased book's sidecar dir: the `<stem>.sdr/` sitting beside its `.kfx`
+/// (it holds `assets/voucher`, the decrypt key). Derived from the input path's
+/// own parent + stem, so it resolves both on-device (under [`ITEMS_DIR`]) and
+/// against a test's temp tree.
+fn sdr_dir(kfx_path: &Path) -> PathBuf {
+    let parent = kfx_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = kfx_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    parent.join(format!("{stem}.sdr"))
+}
+
 /// Every decrypted book currently in [`OUT_DIR`] (`*.kfx-zip`) — the DRM-mode
 /// Sync button re-pushes all of these to the server (which dedupes, so
 /// already-synced ones are no-ops). Empty (never errors) when the dir is absent.
@@ -119,6 +138,49 @@ pub fn decrypted_books() -> Vec<PathBuf> {
                 .then_some(path)
         })
         .collect()
+}
+
+/// Remove one purchased book's entire on-device footprint once it's confirmed on
+/// the desktop: the encrypted `<stem>.kfx` input, its `<stem>.sdr/` sidecar, and
+/// the decrypted `<stem>.kfx-zip` output. Every target is derived from
+/// `kfx_path`'s stem — the two siblings beside it, the output under [`OUT_DIR`] —
+/// so this only ever touches the three paths belonging to this one book; it never
+/// scans or globs a directory. An already-absent target is a success (cleanup is
+/// idempotent). Returns each `(path, error)` it failed to remove so the caller can
+/// log it; a leftover is harmless (the desktop has the book), so nothing aborts.
+///
+/// Call this **only** after [`crate::api::push_book`] returns
+/// `Imported`/`Duplicate` for this book — never on a failed push, whose sole
+/// decrypted copy is the `.kfx-zip` the DRM Sync button will retry.
+pub fn cleanup_synced(kfx_path: &Path) -> Vec<(PathBuf, std::io::Error)> {
+    cleanup_paths(kfx_path, &sdr_dir(kfx_path), &out_path(kfx_path))
+}
+
+/// [`cleanup_synced`] with the three targets injected, so the removal is
+/// host-testable against a temp tree (the public entry wires the stem-derived
+/// paths). Order is input → sidecar → output; each is removed leniently.
+fn cleanup_paths(kfx: &Path, sdr: &Path, zip: &Path) -> Vec<(PathBuf, std::io::Error)> {
+    let mut failures = Vec::new();
+    remove_lenient(kfx, false, &mut failures);
+    remove_lenient(sdr, true, &mut failures);
+    remove_lenient(zip, false, &mut failures);
+    failures
+}
+
+/// Remove one path — a file (`is_dir` false) or a whole dir tree (`is_dir` true)
+/// — treating an already-absent path as success and pushing any real error onto
+/// `failures` for the caller to log.
+fn remove_lenient(path: &Path, is_dir: bool, failures: &mut Vec<(PathBuf, std::io::Error)>) {
+    let res = if is_dir {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match res {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => failures.push((path.to_path_buf(), e)),
+    }
 }
 
 /// Scan [`ITEMS_DIR`] for decryptable purchased books, newest download first.
@@ -384,6 +446,63 @@ mod tests {
         let mut ids: Vec<i64> = found.iter().map(|d| d.book.id).collect();
         ids.sort();
         assert_eq!(ids, vec![0, 1]);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn source_kfx_inverts_out_path() {
+        // A dotted title exercises the suffix-strip vs. a naive extension split.
+        let kfx = Path::new(ITEMS_DIR).join("All of Us_ Vol. 1_B00XST7S8C.kfx");
+        assert_eq!(source_kfx(&out_path(&kfx)).as_deref(), Some(kfx.as_path()));
+        // Not a `.kfx-zip` name → None (decrypted_books only ever yields those).
+        assert_eq!(source_kfx(Path::new("/x/foo.kfx")), None);
+    }
+
+    #[test]
+    fn cleanup_removes_only_this_books_footprint() {
+        let base = std::env::temp_dir().join(format!("sidle-cleanup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let items = base.join("Items01");
+        let out = base.join("dedrm");
+        std::fs::create_dir_all(&items).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+
+        // The synced book: encrypted `.kfx`, its `.sdr` sidecar (with voucher),
+        // and the decrypted `.kfx-zip` output.
+        let kfx = items.join("Good Book_B000O76ON6.kfx");
+        let sdr = items.join("Good Book_B000O76ON6.sdr");
+        let zip = out.join("Good Book_B000O76ON6.kfx-zip");
+        std::fs::write(&kfx, b"kfx").unwrap();
+        std::fs::create_dir_all(sdr.join("assets")).unwrap();
+        std::fs::write(sdr.join("assets/voucher"), b"v").unwrap();
+        std::fs::write(&zip, b"z").unwrap();
+
+        // A neighbouring book that must be left fully intact.
+        let other_kfx = items.join("Other_B01MXXZOEW.kfx");
+        let other_sdr = items.join("Other_B01MXXZOEW.sdr");
+        let other_zip = out.join("Other_B01MXXZOEW.kfx-zip");
+        std::fs::write(&other_kfx, b"kfx").unwrap();
+        std::fs::create_dir_all(&other_sdr).unwrap();
+        std::fs::write(&other_zip, b"z").unwrap();
+
+        // sdr_dir must resolve the sidecar from the `.kfx`'s own parent.
+        assert_eq!(sdr_dir(&kfx), sdr);
+
+        let failures = cleanup_paths(&kfx, &sdr_dir(&kfx), &zip);
+        assert!(failures.is_empty(), "unexpected failures: {failures:?}");
+
+        // The synced book's three parts are gone…
+        assert!(!kfx.exists());
+        assert!(!sdr.exists());
+        assert!(!zip.exists());
+        // …and the neighbour is untouched.
+        assert!(other_kfx.exists());
+        assert!(other_sdr.exists());
+        assert!(other_zip.exists());
+
+        // Idempotent: a second pass over the now-absent footprint is a no-op.
+        assert!(cleanup_paths(&kfx, &sdr_dir(&kfx), &zip).is_empty());
 
         let _ = std::fs::remove_dir_all(&base);
     }
