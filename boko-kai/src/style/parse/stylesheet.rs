@@ -104,6 +104,28 @@ impl Stylesheet {
     }
 }
 
+/// Parse a bare declaration list — the contents of a `style=""` attribute.
+///
+/// Returns (normal, important) declarations. Parsing is lenient like
+/// `Stylesheet::parse`: invalid declarations are skipped.
+pub fn parse_declaration_list(css: &str) -> (Vec<Declaration>, Vec<Declaration>) {
+    let mut input = ParserInput::new(css);
+    let mut parser = Parser::new(&mut input);
+    let mut declarations = Vec::new();
+    let mut important_declarations = Vec::new();
+    let mut decl_parser = DeclarationListParser {
+        declarations: &mut declarations,
+        important_declarations: &mut important_declarations,
+    };
+
+    for result in RuleBodyParser::new(&mut parser, &mut decl_parser) {
+        // Ignore errors - lenient parsing
+        let _ = result;
+    }
+
+    (declarations, important_declarations)
+}
+
 /// Parser for top-level stylesheet rules.
 struct TopLevelRuleParser<'a> {
     rules: &'a mut Vec<CssRule>,

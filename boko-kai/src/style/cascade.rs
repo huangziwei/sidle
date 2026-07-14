@@ -9,7 +9,7 @@ use std::cmp::Ordering;
 use selectors::context::{MatchingContext, SelectorCaches};
 
 use super::declaration::Declaration;
-use super::parse::{CssRule, Origin, Specificity, Stylesheet};
+use super::parse::{CssRule, Origin, Specificity, Stylesheet, parse_declaration_list};
 use super::properties::{Length, ROOT_FONT_SIZE_PX};
 use super::style_pool::StylePool;
 use super::types::ComputedStyle;
@@ -20,9 +20,29 @@ use crate::dom::element_ref::ElementRef;
 struct MatchedRule<'a> {
     declaration: &'a Declaration,
     origin: Origin,
+    /// From the element's `style=""` attribute rather than a selector rule.
+    from_style_attr: bool,
     specificity: Specificity,
     order: usize,
     important: bool,
+}
+
+/// Cascade precedence bucket (css-cascade §6.1), lowest first. Declarations
+/// are applied in ascending order so later writes win; within a bucket the
+/// tie-breakers are specificity, then source order.
+///
+/// Normal declarations escalate UA → author → style attribute, while
+/// importance inverts the origin order (author !important loses to UA
+/// !important).
+fn cascade_bucket(rule: &MatchedRule) -> u8 {
+    match (rule.important, rule.origin, rule.from_style_attr) {
+        (false, Origin::UserAgent, _) => 0,
+        (false, Origin::Author, false) => 1,
+        (false, Origin::Author, true) => 2,
+        (true, Origin::Author, false) => 3,
+        (true, Origin::Author, true) => 4,
+        (true, Origin::UserAgent, _) => 5,
+    }
 }
 
 /// Create a new style with only CSS-inherited properties from parent.
@@ -99,6 +119,7 @@ pub fn compute_styles(
                     matched.push(MatchedRule {
                         declaration: decl,
                         origin: *origin,
+                        from_style_attr: false,
                         specificity: rule.specificity,
                         order,
                         important: false,
@@ -110,6 +131,7 @@ pub fn compute_styles(
                     matched.push(MatchedRule {
                         declaration: decl,
                         origin: *origin,
+                        from_style_attr: false,
                         specificity: rule.specificity,
                         order,
                         important: true,
@@ -120,19 +142,35 @@ pub fn compute_styles(
         }
     }
 
+    // The element's own style="" attribute participates as author-origin
+    // declarations that outrank any selector rule.
+    let (attr_decls, attr_important_decls) = elem
+        .dom
+        .get_attr(elem.id, "style")
+        .map(parse_declaration_list)
+        .unwrap_or_default();
+    for (decls, important) in [(&attr_decls, false), (&attr_important_decls, true)] {
+        for decl in decls {
+            matched.push(MatchedRule {
+                declaration: decl,
+                origin: Origin::Author,
+                from_style_attr: true,
+                specificity: Specificity::default(),
+                order,
+                important,
+            });
+            order += 1;
+        }
+    }
+
     // Sort by cascade order (skip if 0-1 matches)
     if matched.len() > 1 {
         // Use unstable sort - faster and order of equal elements doesn't matter
         matched.sort_unstable_by(|a, b| {
-            // Important declarations win
-            if a.important != b.important {
-                return b.important.cmp(&a.important);
-            }
-
-            // Then by origin (author > user-agent)
-            let origin_cmp = a.origin.cmp(&b.origin);
-            if origin_cmp != Ordering::Equal {
-                return origin_cmp;
+            // Precedence bucket (importance/origin/style-attr)
+            let bucket_cmp = cascade_bucket(a).cmp(&cascade_bucket(b));
+            if bucket_cmp != Ordering::Equal {
+                return bucket_cmp;
             }
 
             // Then by specificity

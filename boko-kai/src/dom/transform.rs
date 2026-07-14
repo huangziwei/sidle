@@ -461,31 +461,66 @@ mod tests {
 
         let chapter = transform(&dom, &stylesheets);
 
-        // Text nodes carry the default style; the computed style lives on
-        // the enclosing element node.
-        let font_px_of = |needle: &str| -> f32 {
-            for id in chapter.iter_dfs() {
-                let node = chapter.node(id).unwrap();
-                if node.role == Role::Text && chapter.text(node.text).contains(needle) {
-                    let parent = node.parent.expect("text node has a parent element");
-                    let style_id = chapter.node(parent).unwrap().style;
-                    match chapter.styles.get(style_id).unwrap().font_size {
-                        crate::style::Length::Px(v) => return v,
-                        other => panic!("expected computed px for {needle:?}, got {other:?}"),
-                    }
-                }
-            }
-            panic!("text {needle:?} not found");
-        };
-
         // h1 text: UA 2em × 16px root
-        assert_eq!(font_px_of("Introduction"), 32.0);
+        assert_eq!(font_px_of(&chapter, "Introduction"), 32.0);
         // The 24px span overrides the inherited h1 size
-        assert_eq!(font_px_of("The Shadow"), 24.0);
+        assert_eq!(font_px_of(&chapter, "The Shadow"), 24.0);
         // Author 2em on h2 resolves against body, and the nested 50% span
         // compounds against the h2's computed size
-        assert_eq!(font_px_of("Nested"), 32.0);
-        assert_eq!(font_px_of("half"), 16.0);
+        assert_eq!(font_px_of(&chapter, "Nested"), 32.0);
+        assert_eq!(font_px_of(&chapter, "half"), 16.0);
+    }
+
+    /// Computed font size (px) of the element enclosing the text `needle`.
+    /// Text nodes carry the default style; the computed style lives on the
+    /// enclosing element node.
+    fn font_px_of(chapter: &Chapter, needle: &str) -> f32 {
+        for id in chapter.iter_dfs() {
+            let node = chapter.node(id).unwrap();
+            if node.role == Role::Text && chapter.text(node.text).contains(needle) {
+                let parent = node.parent.expect("text node has a parent element");
+                let style_id = chapter.node(parent).unwrap().style;
+                match chapter.styles.get(style_id).unwrap().font_size {
+                    crate::style::Length::Px(v) => return v,
+                    other => panic!("expected computed px for {needle:?}, got {other:?}"),
+                }
+            }
+        }
+        panic!("text {needle:?} not found");
+    }
+
+    #[test]
+    fn test_style_attribute_participates_in_cascade() {
+        let dom = parse_html(
+            r#"<html><body>
+            <p class="a" style="font-size: 24px">attr beats selector</p>
+            <p style="font-size: 1.5em">relative attr<span>inherits</span></p>
+        </body></html>"#,
+        );
+        let ua = user_agent_stylesheet();
+        let author = Stylesheet::parse("p.a { font-size: 12px; }");
+        let stylesheets = vec![(ua, Origin::UserAgent), (author, Origin::Author)];
+
+        let chapter = transform(&dom, &stylesheets);
+
+        // style="" outranks any selector specificity
+        assert_eq!(font_px_of(&chapter, "attr beats selector"), 24.0);
+        // Relative units in style="" resolve through the cascade and inherit
+        assert_eq!(font_px_of(&chapter, "relative attr"), 24.0);
+        assert_eq!(font_px_of(&chapter, "inherits"), 24.0);
+    }
+
+    #[test]
+    fn test_important_beats_later_higher_specificity() {
+        let dom = parse_html(r#"<html><body><p class="b">text</p></body></html>"#);
+        let ua = user_agent_stylesheet();
+        // The normal rule comes later AND has higher specificity — the
+        // !important declaration must still win.
+        let author = Stylesheet::parse(".b { font-size: 20px !important; } p.b { font-size: 10px; }");
+        let stylesheets = vec![(ua, Origin::UserAgent), (author, Origin::Author)];
+
+        let chapter = transform(&dom, &stylesheets);
+        assert_eq!(font_px_of(&chapter, "text"), 20.0);
     }
 
     #[test]
