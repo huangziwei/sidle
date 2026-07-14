@@ -1078,10 +1078,20 @@ impl<'a> ContentState<'a> {
             // Earlier `../OEBPS/<file>` was mathematically equivalent but
             // tripped Apple Books, which then showed no images.
             Some(filename) => {
+                let render_inline = content_render_is_inline(fields);
                 let dom = &mut self.book_parts[part_index].dom;
                 let id = dom.create_element("img");
                 dom.get_mut(id).set("src", filename);
                 dom.get_mut(id).set("alt", alt);
+                // A block-flow image whose style carries block-level
+                // properties gets a wrapper `<div>` holding those properties
+                // (see `wrap_block_image`); anchors/eids stamp onto the
+                // wrapper, matching calibre's `move_anchor`.
+                if !render_inline
+                    && let Some(wrapper) = self.wrap_block_image(part_index, id, style_name, fields)
+                {
+                    return Ok(wrapper);
+                }
                 // Apply the image's own `$style`. Calibre merges the content
                 // element's style onto the `<img>` (`content_style.update(...)`,
                 // `yj_to_epub_content.py:1252`) for every content type, images
@@ -1100,7 +1110,7 @@ impl<'a> ContentState<'a> {
                 // them `text-bottom` so they sit on the surrounding glyphs'
                 // em-box bottom. Reader-mode only (same gate as `data-eid`) —
                 // external EPUB readers don't run that paginator.
-                if self.stamp_eids && content_render_is_inline(fields) {
+                if self.stamp_eids && render_inline {
                     self.book_parts[part_index]
                         .dom
                         .get_mut(id)
@@ -1123,6 +1133,93 @@ impl<'a> ContentState<'a> {
                 Ok(id)
             }
         }
+    }
+
+    /// Wrap a block-flow `<img>` in a `<div>` carrying the block-level half of
+    /// its style. Port of calibre's `create_container(...,
+    /// BLOCK_CONTAINER_PROPERTIES)` for images (`yj_to_epub_content.py:1312`).
+    ///
+    /// The split is what makes KFX sizing semantics come out right in CSS:
+    /// KFX resolves a percentage `width` against the space left between the
+    /// element's own margins — which is how CSS sizes a block wrapper's
+    /// CONTENT box, but not how it sizes a replaced element (whose % width
+    /// resolves against the containing block, margins be damned). A figure
+    /// styled `{width: 100%, margin-left: 35%, margin-right: 35%}` must paint
+    /// 30% wide and centered; as a bare `<img>` it paints full-width, shoved
+    /// 35% rightward into the neighbouring column. Likewise `float`, `clear`,
+    /// `text-align` (KFX `box_align`) and the `break-*` family are dead or
+    /// wrong on a replaced inline element and only work on a block box.
+    ///
+    /// Returns the wrapper (the caller stamps eids/anchors on it — calibre's
+    /// `move_anchor` equivalent), or `None` when the merged style has no
+    /// block-level properties and the image stays bare. The partitioned halves
+    /// go into `element_styles` (not the named class): `fixup_styles_and_classes`
+    /// dedupes repeated halves into shared `g<N>` rules.
+    fn wrap_block_image(
+        &mut self,
+        part_index: usize,
+        img_id: NodeId,
+        style_name: &Option<String>,
+        fields: &[(u64, IonValue)],
+    ) -> Option<NodeId> {
+        // Merged style: the named `$style` decl, then the content element's
+        // own inline fields on top (calibre `content_style.update(...,
+        // replace=True)`, `yj_to_epub_content.py:1252`).
+        let mut merged = CssDecl::new();
+        if let Some(name) = style_name {
+            self.ensure_style_cached(name);
+            for (k, v) in &self.style_cache[name.as_str()].decl.items {
+                merged.set(k.clone(), v.clone());
+            }
+        }
+        let inline = properties::convert_yj_properties(fields, &self.book.symbols, self.book);
+        for (k, v) in inline.items {
+            merged.set(k, v);
+        }
+        if !merged.items.iter().any(|(k, _)| img_wrapper_trigger(k)) {
+            return None;
+        }
+
+        let mut wrapper_decl = CssDecl::new();
+        let mut img_decl = CssDecl::new();
+        for (k, v) in merged.items {
+            if img_wrapper_prop(&k) {
+                wrapper_decl.set(k, v);
+            } else {
+                img_decl.set(k, v);
+            }
+        }
+        // % width hoisting for floats (calibre's fit_width hoist,
+        // `yj_to_epub_content.py:1334`): a float is shrink-to-fit, so a child's
+        // percentage width would resolve against the float's own
+        // content-derived width — circular; the author meant % of the column.
+        // Hoist the % onto the float and let the image fill it.
+        if wrapper_decl
+            .items
+            .iter()
+            .any(|(k, v)| k == "float" && v != "none")
+            && let Some(pos) = img_decl
+                .items
+                .iter()
+                .position(|(k, v)| k == "width" && v.ends_with('%'))
+        {
+            let (_, w) = img_decl.items.remove(pos);
+            wrapper_decl.set("width", w);
+            img_decl.set("width", "100%");
+        }
+
+        let part = &mut self.book_parts[part_index];
+        let wrapper = part.dom.create_element("div");
+        part.dom.append(wrapper, img_id);
+        if !wrapper_decl.is_empty() {
+            part.element_styles.insert(wrapper, wrapper_decl);
+        }
+        if !img_decl.is_empty() {
+            part.element_styles.insert(img_id, img_decl);
+        }
+        // Figure/heading promotion hints belong to the block box.
+        self.attach_layout_hints(part_index, wrapper, style_name, fields);
+        Some(wrapper)
     }
 
     fn emit_list(
@@ -1611,18 +1708,40 @@ impl<'a> ContentState<'a> {
         // `StyleRegistry::register_with_hint`. Source EPUBs almost never
         // ship names that collide with the synthesized `s<N>` shape, and
         // when they do the registry's `taken_names` set keeps them apart.
+        if let Some(name) = style_name
+            && self.register_style_use(name)
+        {
+            let class = self.style_cache[name.as_str()].class_name.clone();
+            self.book_parts[part_index]
+                .element_classes
+                .entry(elem_id)
+                .or_default()
+                .push(class);
+        }
+        self.attach_layout_hints(part_index, elem_id, style_name, fields);
+        // 2. Inline content properties (writing-mode, etc.).
+        let inline = properties::convert_yj_properties(fields, &self.book.symbols, self.book);
+        if !inline.is_empty() {
+            self.book_parts[part_index]
+                .element_styles
+                .insert(elem_id, inline);
+        }
+    }
+
+    /// Layout hints + heading level — drive the `<div>` → `<h<N>>` promotion
+    /// in `consolidate_html`. Not emitted as CSS (calibre uses these as
+    /// sentinels too and `simplify_styles` strips them). The named-style and
+    /// inline halves of [`attach_style`], also used on its own by
+    /// [`wrap_block_image`], whose partitioned styles bypass `attach_style`.
+    fn attach_layout_hints(
+        &mut self,
+        part_index: usize,
+        elem_id: NodeId,
+        style_name: &Option<String>,
+        fields: &[(u64, IonValue)],
+    ) {
         if let Some(name) = style_name {
-            if self.register_style_use(name) {
-                let class = self.style_cache[name.as_str()].class_name.clone();
-                self.book_parts[part_index]
-                    .element_classes
-                    .entry(elem_id)
-                    .or_default()
-                    .push(class);
-            }
-            // Layout hints + heading level — drive the `<div>` → `<h<N>>`
-            // promotion in `consolidate_html`. Not emitted as CSS (calibre
-            // uses these as sentinels too and `simplify_styles` strips them).
+            self.ensure_style_cached(name);
             let (hints, level) = {
                 let c = &self.style_cache[name.as_str()];
                 (c.hints.clone(), c.level.clone())
@@ -1633,7 +1752,7 @@ impl<'a> ContentState<'a> {
                     .insert(elem_id, (hints, level));
             }
         }
-        // 1b. Layout hints + heading level can also be carried inline on the
+        // Layout hints + heading level can also be carried inline on the
         // content element's outer fields rather than on a named style entity.
         // boko's `export::kfx` writes them this way (storyline.rs adds
         // `$761 layout_hints` and `$790 yj.semantics.heading_level` to
@@ -1655,13 +1774,6 @@ impl<'a> ContentState<'a> {
             if entry.1.is_none() {
                 entry.1 = inline_level;
             }
-        }
-        // 2. Inline content properties (writing-mode, etc.).
-        let inline = properties::convert_yj_properties(fields, &self.book.symbols, self.book);
-        if !inline.is_empty() {
-            self.book_parts[part_index]
-                .element_styles
-                .insert(elem_id, inline);
         }
     }
 
@@ -2032,6 +2144,45 @@ fn content_render_is_inline(fields: &[(u64, IonValue)]) -> bool {
             _ => None,
         })
         == Some(KfxSymbol::Inline as u64)
+}
+
+/// Properties whose presence on an image's style forces the [`wrap_block_image`]
+/// wrapper: block-layout behavior that CSS ignores (`clear`, `break-*`,
+/// `text-align`) or mis-resolves (own-margin interaction with % `width`) on a
+/// replaced inline element. The boko-emittable subset of calibre's
+/// `BLOCK_CONTAINER_PROPERTIES` (`yj_to_epub_content.py:49`), plus `clear`
+/// (calibre leaves it dead on the `<img>`; Kindle honors it, the wrapper is
+/// where CSS does too).
+fn img_wrapper_trigger(prop: &str) -> bool {
+    matches!(
+        prop,
+        "margin"
+            | "margin-top"
+            | "margin-left"
+            | "margin-bottom"
+            | "margin-right"
+            | "float"
+            | "clear"
+            | "text-indent"
+            | "text-align"
+            | "text-align-last"
+            | "break-before"
+            | "break-after"
+            | "break-inside"
+            | "page-break-before"
+            | "page-break-after"
+            | "page-break-inside"
+            | "overflow"
+            | "transform"
+            | "transform-origin"
+            | "display"
+    )
+}
+
+/// What moves onto the wrapper once it exists: every trigger plus `box-sizing`
+/// (rides along per calibre's set, but alone never warrants a wrapper).
+fn img_wrapper_prop(prop: &str) -> bool {
+    img_wrapper_trigger(prop) || prop == "box-sizing"
 }
 
 /// Look up a fragment of the given KFX type by name.
