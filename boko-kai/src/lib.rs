@@ -54,6 +54,7 @@ pub mod epub;
 pub mod kfx;
 pub mod kfx_to_epub;
 pub mod mobi;
+pub mod pdf;
 pub mod render;
 pub mod validate;
 
