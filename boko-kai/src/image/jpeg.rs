@@ -59,6 +59,36 @@ pub fn sanitize_for_kfx(data: &[u8]) -> Option<Vec<u8>> {
     encode_as_jpeg(&img)
 }
 
+/// Decode any raster image and re-encode it as a **baseline RGB** JPEG,
+/// returning the bytes with the pixel dimensions.
+///
+/// Unlike [`sanitize_for_kfx`], this always re-encodes — including JPEG input —
+/// and that is the point: it guarantees a known encoding and colorspace. The
+/// caller is [`crate::pdf::cover`], which embeds the result as a PDF Image
+/// XObject declaring `/DeviceRGB` + `/DCTDecode`. Passing a JPEG through
+/// untouched would let a progressive, CMYK, or Adobe-inverted source reach that
+/// declaration and render as garbage (or not at all).
+///
+/// Alpha is flattened onto white, matching [`sanitize_for_kfx`]'s reasoning.
+/// `None` if the bytes aren't a decodable raster, or exceed JPEG's 65535px limit.
+pub fn to_baseline_rgb_jpeg(data: &[u8], quality: u8) -> Option<(Vec<u8>, u32, u32)> {
+    let reader = ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .ok()?;
+    let img = reader.decode().ok()?;
+    let (w, h) = (img.width(), img.height());
+    let rgb = flatten_to_rgb(&img);
+    let (w16, h16) = (u16::try_from(w).ok()?, u16::try_from(h).ok()?);
+    if w16 == 0 || h16 == 0 {
+        return None;
+    }
+    let mut out = Vec::new();
+    jpeg_encoder::Encoder::new(&mut out, quality)
+        .encode(&rgb, w16, h16, jpeg_encoder::ColorType::Rgb)
+        .ok()?;
+    Some((out, w, h))
+}
+
 /// Walk a JPEG, drop APP1–APP15 and COM segments, and ensure a JFIF APP0
 /// segment is present right after SOI. Image data (SOS + entropy-coded
 /// scan) is copied verbatim — no decode, no re-encode. Returns `None` for

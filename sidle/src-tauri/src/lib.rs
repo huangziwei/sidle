@@ -106,6 +106,7 @@ pub fn run() {
             commands::editor::editor_toc,
             commands::editor::editor_set_toc,
             commands::editor::editor_repair_toc,
+            commands::editor::editor_set_pdf_cover,
             commands::editor::editor_images,
             commands::editor::editor_export_image,
             commands::editor::editor_export_images,

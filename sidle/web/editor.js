@@ -88,8 +88,7 @@ function configureRail() {
   const editable = session.data.editable;
   // The backend reports which panels this source format can actually back, so
   // the rail follows capability rather than re-deriving it from the format name.
-  // PDF omits cover (its cover is re-rendered from page 1 on every reconvert) and
-  // images (no page-XObject walk yet).
+  // PDF omits images (no page-XObject walk yet).
   const panels = new Set(session.data.panels || []);
   const format = session.data.format;
   for (const item of document.querySelectorAll(".editor-rail-item")) {
@@ -99,13 +98,8 @@ function configureRail() {
       item.title = editable
         ? "In-place text editing is coming in a later tier."
         : "";
-    } else if (item.disabled && editable && format === "pdf") {
-      item.title =
-        p === "cover"
-          ? "A PDF book's cover is rendered from its first page, so it isn't editable here."
-          : p === "images"
-            ? "Extracting images from a PDF isn't supported yet."
-            : "";
+    } else if (item.disabled && editable && format === "pdf" && p === "images") {
+      item.title = "Extracting images from a PDF isn't supported yet.";
     } else {
       item.title = "";
     }
@@ -322,46 +316,92 @@ async function renderCoverPanel() {
 
 function paintCoverPanel(coverPath) {
   session.coverPath = coverPath;
+  const pdfCover = session.data.format === "pdf";
   const panel = el("div", "editor-panel");
-  panel.append(el("div", "field-group-title", "Cover image"));
+  // For a PDF this preview *is* the book's first page (the library tile is a
+  // render of it), and seeing it is how you decide between Replace and Insert —
+  // so name it for what it is rather than "Cover image".
+  panel.append(
+    el("div", "field-group-title", pdfCover ? "Current first page" : "Cover image"),
+  );
 
   const preview = el("div", "cover-preview");
   if (coverPath) {
     const img = el("img", "cover-art");
     // Cache-bust: the sidecar path is stable across swaps, so force a re-fetch.
     img.src = `${window.api.fileUrl(coverPath)}?v=${Date.now()}`;
-    img.alt = "Current cover";
+    img.alt = pdfCover ? "The book's current first page" : "Current cover";
     preview.append(img);
   } else {
-    preview.append(el("div", "cover-empty", "No cover set"));
+    preview.append(el("div", "cover-empty", pdfCover ? "No preview" : "No cover set"));
   }
   panel.append(preview);
 
+  // A PDF's cover isn't an embeddable resource like the EPUB/KFX one — it *is*
+  // the book's first page. So the choice is which page edit to make, and the
+  // wording says so rather than pretending it's the same operation.
+  const pdf = session.data.format === "pdf";
   panel.append(
     el(
       "p",
       "editor-muted",
-      "The cover is embedded in the KFX — the on-device home tile and sleep-screen art — " +
-        "and written to the library, keeping the same on-device identity.",
+      pdf
+        ? "A PDF's cover is its first page. Replace that page with an image, or insert " +
+          "a new first page if the book opens straight onto its text. The library tile " +
+          "and the Kindle file follow from it."
+        : "The cover is embedded in the KFX — the on-device home tile and sleep-screen art — " +
+          "and written to the library, keeping the same on-device identity.",
     ),
   );
 
   const actions = el("div", "cover-actions");
-  const change = el("button", "btn btn-primary", "Change cover…");
-  change.type = "button";
-  change.addEventListener("click", changeCover);
-  actions.append(change);
+  if (pdf) {
+    const replace = el("button", "btn btn-primary", "Replace first page…");
+    replace.type = "button";
+    replace.title = "Overwrite the book's existing first page with an image";
+    replace.addEventListener("click", () => setPdfCover("replace"));
+    const insert = el("button", "btn", "Insert cover page…");
+    insert.type = "button";
+    insert.title = "Add a new first page in front of the book (page count grows by one)";
+    insert.addEventListener("click", () => setPdfCover("insert"));
+    actions.append(replace, insert);
+  } else {
+    const change = el("button", "btn btn-primary", "Change cover…");
+    change.type = "button";
+    change.addEventListener("click", changeCover);
+    actions.append(change);
 
-  const asin = session.data.metadata.asin;
-  if (asin) {
-    const refetch = el("button", "btn", "Re-fetch from Amazon");
-    refetch.type = "button";
-    refetch.title = `Fetch the cover by ASIN ${asin}`;
-    refetch.addEventListener("click", refetchCover);
-    actions.append(refetch);
+    const asin = session.data.metadata.asin;
+    if (asin) {
+      const refetch = el("button", "btn", "Re-fetch from Amazon");
+      refetch.type = "button";
+      refetch.title = `Fetch the cover by ASIN ${asin}`;
+      refetch.addEventListener("click", refetchCover);
+      actions.append(refetch);
+    }
   }
   panel.append(actions);
   $("#editor-center").replaceChildren(panel);
+}
+
+// Pick an image and write it into the PDF as its cover page. `mode` is
+// "replace" (overwrite page 1) or "insert" (add a new page 1).
+async function setPdfCover(mode) {
+  let src;
+  try {
+    src = await window.api.invoke("library_pick_image");
+  } catch (err) {
+    toast(`Couldn't open the picker: ${err}`, true);
+    return;
+  }
+  if (!src) return; // cancelled
+  await runCoverWrite(() =>
+    window.api.invoke("editor_set_pdf_cover", {
+      bookId: session.bookId,
+      srcPath: src,
+      mode,
+    }),
+  );
 }
 
 async function changeCover() {

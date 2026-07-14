@@ -1042,7 +1042,7 @@ pub async fn library_set_cover(
 
 /// Magic-byte sniff for the three image formats sidle accepts as covers.
 /// Returns the canonical lowercase extension or None if no header matches.
-fn sniff_image_format(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn sniff_image_format(bytes: &[u8]) -> Option<&'static str> {
     // JPEG: FF D8 FF
     if bytes.len() >= 3 && bytes[0..3] == [0xFF, 0xD8, 0xFF] {
         return Some("jpg");

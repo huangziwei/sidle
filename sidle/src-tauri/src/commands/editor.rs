@@ -10,11 +10,14 @@
 //! source format and an `editable` flag; the UI gates individual panels by
 //! format (see [`EditorOpen::panels`]).
 //!
-//! PDF is deliberately narrower than the other two — metadata (`/Info`) and the
-//! table of contents (`/Outlines`) only:
-//! - **Cover** is excluded because a PDF-source book's cover is *rendered* from
-//!   page 1 by `pdf_to_kfx`, so an embedded swap would be silently reverted by
-//!   the next reconvert. It isn't a source-editable property.
+//! PDF is narrower than the other two — metadata (`/Info`), the table of
+//! contents (`/Outlines`), and the cover page:
+//! - **Cover** works differently from EPUB/KFX and so has its own command
+//!   ([`editor_set_pdf_cover`]) rather than reusing `library_set_cover`. The
+//!   other two formats carry a cover as a designated *resource* to swap; a PDF's
+//!   cover **is its first page**, which is exactly what `pdf_to_kfx` renders for
+//!   the library tile. So the edit is to that page — replace it, or insert one
+//!   when the book opens straight onto body text.
 //! - **Images** is excluded because the PDF page-XObject walk isn't built yet.
 //! - **Auto-repair TOC** is excluded because PDF has no proposer: a PDF lacking
 //!   an outline usually has no links to mine either, so its TOC is hand-authored
@@ -31,7 +34,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 
@@ -43,10 +46,12 @@ use boko::kfx::image_extract;
 use boko::kfx::metadata_edit::{self, MetadataPatch as KfxMetadataPatch};
 use boko::kfx::toc_repair::{self, TocEntry as KfxTocEntry};
 use boko::model::TocEntry as EpubTocEntry;
+use boko::pdf::cover::{self as pdf_cover, CoverMode};
 use boko::pdf::metadata_edit::{self as pdf_meta, MetadataPatch as PdfMetadataPatch};
 use boko::pdf::toc_repair as pdf_toc;
 use boko::validate::source::toc as toc_validate;
 
+use crate::commands::library::SetCoverResult;
 use crate::library::{authors, db, db::BookRow};
 use crate::state::AppState;
 
@@ -88,12 +93,12 @@ fn require_editable_source(row: &BookRow) -> Result<(SourceKind, String), String
 }
 
 /// Which editor panels a source format can actually back, so the UI gates the
-/// rail on capability rather than hardcoding format names. See the module docs
-/// for why PDF excludes cover/images.
+/// rail on capability rather than hardcoding format names. PDF omits `images`
+/// (no page-XObject walk yet); its `cover` panel takes a different path from the
+/// other two — see the module docs.
 fn panels_for(kind: SourceKind) -> Vec<String> {
-    let mut p = vec!["metadata", "toc"];
+    let mut p = vec!["metadata", "toc", "cover"];
     if kind != SourceKind::Pdf {
-        p.push("cover");
         p.push("images");
     }
     p.into_iter().map(str::to_string).collect()
@@ -159,7 +164,7 @@ pub struct EditorOpen {
     /// source file does not.
     pub editable: bool,
     /// Which panels this source can back (`"metadata"`, `"toc"`, `"cover"`,
-    /// `"images"`). The rail enables exactly these; PDF omits cover/images.
+    /// `"images"`). The rail enables exactly these; PDF omits `"images"`.
     pub panels: Vec<String>,
     pub metadata: EditorMetadata,
     pub has_cover: bool,
@@ -344,6 +349,107 @@ pub async fn editor_save_metadata(
     crate::commands::reader::evict_reader(&state, book_id).await;
 
     Ok(updated)
+}
+
+// --- cover (PDF) ----------------------------------------------------------
+
+/// Give a PDF-source book a cover page.
+///
+/// The PDF analog of `library_set_cover`, and deliberately a separate command:
+/// EPUB and KFX swap a designated cover *resource*, but a PDF's cover **is its
+/// first page**, so this edits that page. `mode` is `"replace"` (overwrite the
+/// existing first page) or `"insert"` (add one in front, for a book that opens
+/// straight onto body text).
+///
+/// Also writes the picked image as the library's sidecar cover, so the gallery
+/// tile updates immediately rather than waiting on the reconvert — and the
+/// PDF→KFX worker prefers that sidecar over its own page-1 render, so the two
+/// agree. Then re-derives the KFX and refreshes the row.
+///
+/// Returns [`SetCoverResult`], the same contract as `library_set_cover`, so the
+/// editor's Cover panel drives both formats through one path.
+#[tauri::command]
+pub async fn editor_set_pdf_cover(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    book_id: i64,
+    src_path: String,
+    mode: String,
+) -> Result<SetCoverResult, String> {
+    let mode = match mode.as_str() {
+        "replace" => CoverMode::Replace,
+        "insert" => CoverMode::Insert,
+        other => return Err(format!("unknown cover mode {other:?}")),
+    };
+    let row = {
+        let conn = state.db.lock().await;
+        db::get_book(&conn, book_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no book with id {book_id}"))?
+    };
+    let (kind, path) = require_editable_source(&row)?;
+    if kind != SourceKind::Pdf {
+        return Err("this command is for PDF-source books only".into());
+    }
+
+    let image = match std::fs::read(&src_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(SetCoverResult::Failed {
+                error: format!("read {src_path}: {e}"),
+            });
+        }
+    };
+    let Some(ext) = crate::commands::library::sniff_image_format(&image) else {
+        return Ok(SetCoverResult::Failed {
+            error: "unsupported image format (expected JPG, PNG, or WebP)".into(),
+        });
+    };
+
+    // 1) Write the cover page into the PDF and commit it.
+    let (src, img) = (path.clone(), image.clone());
+    let edited = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let bytes = std::fs::read(&src).map_err(|e| format!("read {src}: {e}"))?;
+        pdf_cover::set_cover_page(&bytes, &img, mode).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let new_bytes = match edited {
+        Ok(b) => b,
+        Err(error) => return Ok(SetCoverResult::Failed { error }),
+    };
+    commit_edited_source(&state, book_id, kind, &path, new_bytes).await?;
+
+    // 2) Point the library at the same image, so the tile matches the book's new
+    //    first page without waiting for the reconvert to render it.
+    let out = state.paths.cover(&row.sha256, ext);
+    std::fs::write(&out, &image).map_err(|e| format!("write {}: {e}", out.display()))?;
+    let out_str = out.to_string_lossy().to_string();
+    {
+        let conn = state.db.lock().await;
+        db::set_cover_path(&conn, book_id, &out_str).map_err(|e| e.to_string())?;
+    }
+    let _ = crate::library::thumbnail::ensure_thumbnail(&state.paths, &row.sha256, &out);
+    // A previous cover under a different extension would otherwise linger.
+    if let Some(old) = row.cover_path.as_deref()
+        && old != out_str.as_str()
+    {
+        let _ = std::fs::remove_file(old);
+    }
+
+    // 3) Re-derive the KFX from the edited PDF and refresh the UI.
+    let _ = state.queue.enqueue_reconvert(book_id).await;
+    crate::commands::reader::evict_reader(&state, book_id).await;
+
+    if let Ok(Some(updated)) = {
+        let conn = state.db.lock().await;
+        db::get_book(&conn, book_id)
+    } {
+        let _ = app.emit("library:row-updated", &updated);
+    }
+    Ok(SetCoverResult::Updated {
+        cover_path: out_str,
+    })
 }
 
 /// One TOC entry crossing the wire — the full `TocEntry` tree, nesting intact.
@@ -1077,11 +1183,15 @@ mod tests {
         assert_eq!(source_format(None), "epub");
     }
 
-    /// The rail's capability gate: PDF backs metadata + TOC only (its cover is a
-    /// page-1 render that reconvert would revert; images aren't built).
+    /// The rail's capability gate. PDF backs metadata + TOC + cover (its cover is
+    /// its first page, edited via `editor_set_pdf_cover`), but not images — the
+    /// page-XObject walk isn't built.
     #[test]
     fn panels_are_gated_by_source_capability() {
-        assert_eq!(panels_for(SourceKind::Pdf), vec!["metadata", "toc"]);
+        assert_eq!(
+            panels_for(SourceKind::Pdf),
+            vec!["metadata", "toc", "cover"]
+        );
         for kind in [SourceKind::Kfx, SourceKind::Epub] {
             let p = panels_for(kind);
             assert!(p.contains(&"cover".to_string()) && p.contains(&"images".to_string()));

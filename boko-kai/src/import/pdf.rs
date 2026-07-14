@@ -17,7 +17,7 @@ use std::io;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
-use crate::pdf::doc::{decode_pdf_string, deref, load_pdf};
+use crate::pdf::doc::{decode_pdf_string, deref, load_pdf, page_dimensions};
 
 /// One PDF page's display size, in PDF points (1/72 inch).
 #[derive(Debug, Clone, Copy)]
@@ -53,10 +53,6 @@ pub struct PdfDoc {
     /// and falls back to sequential `"1".."N"` when the PDF declares none.
     pub page_labels: Vec<String>,
 }
-
-/// Default page size when a PDF declares no MediaBox anywhere in the tree:
-/// US Letter (612×792 pt), matching lopdf's own creator default.
-const DEFAULT_MEDIABOX: [f32; 4] = [0.0, 0.0, 612.0, 792.0];
 
 /// Probe a PDF's structure without altering its bytes.
 pub fn probe_pdf(bytes: Vec<u8>) -> io::Result<PdfDoc> {
@@ -104,74 +100,6 @@ pub fn probe_pdf(bytes: Vec<u8>) -> io::Result<PdfDoc> {
         outline,
         page_labels,
     })
-}
-
-/// Compute a page's displayed size in points: resolve `/MediaBox` (walking the
-/// `/Pages` tree for the inherited value) and apply `/Rotate`.
-///
-/// Uses the **MediaBox** (not the CropBox): it is the page a viewer renders (=
-/// Preview), and `render.rs` rasterizes it MediaBox origin-relative — so the
-/// container dimensions, the rendered image, and the text-layer overlay share one
-/// box. (A press PDF whose CropBox is larger than its MediaBox carries trim marks
-/// in the difference; the MediaBox is the trimmed page.)
-fn page_dimensions(doc: &Document, page_id: ObjectId) -> (f32, f32) {
-    let mut media: Option<[f32; 4]> = None;
-    let mut rotate: i64 = 0;
-    let mut found_rotate = false;
-
-    // Walk the page node up through its `/Parent` chain. Both MediaBox and
-    // Rotate are inheritable page-tree attributes.
-    let mut node: Option<ObjectId> = Some(page_id);
-    let mut seen: HashSet<ObjectId> = HashSet::new();
-    while let Some(id) = node {
-        if !seen.insert(id) {
-            break; // cycle guard
-        }
-        let Ok(dict) = doc.get_dictionary(id) else {
-            break;
-        };
-
-        if media.is_none()
-            && let Ok(mb) = dict.get(b"MediaBox")
-            && let Some(arr) = deref(doc, mb).and_then(|o| o.as_array().ok())
-            && arr.len() == 4
-        {
-            let v: Vec<f32> = arr
-                .iter()
-                .filter_map(|o| deref(doc, o).and_then(|x| x.as_float().ok()))
-                .collect();
-            if v.len() == 4 {
-                media = Some([v[0], v[1], v[2], v[3]]);
-            }
-        }
-
-        if !found_rotate
-            && let Ok(r) = dict.get(b"Rotate")
-            && let Some(n) = deref(doc, r).and_then(|o| o.as_i64().ok())
-        {
-            rotate = n;
-            found_rotate = true;
-        }
-
-        node = dict.get(b"Parent").and_then(|o| o.as_reference()).ok();
-    }
-
-    let [llx, lly, urx, ury] = media.unwrap_or(DEFAULT_MEDIABOX);
-    let mut w = (urx - llx).abs();
-    let mut h = (ury - lly).abs();
-
-    // Normalize rotation to [0,360) and swap axes for quarter turns.
-    let rot = rotate.rem_euclid(360);
-    if rot == 90 || rot == 270 {
-        std::mem::swap(&mut w, &mut h);
-    }
-
-    // Guard against degenerate boxes.
-    if w <= 0.0 || h <= 0.0 {
-        (612.0, 792.0)
-    } else {
-        (w, h)
-    }
 }
 
 /// Read a string field from the document `/Info` dictionary, decoded to UTF-8.
