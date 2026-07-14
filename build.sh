@@ -15,8 +15,7 @@
 # Then ditto the bundle into /Applications, replacing any prior copy.
 #
 # Why a script and not `cargo tauri build`'s build.rs: nesting cargo
-# inside cargo livelocks on the shared workspace lockfile. See
-# .claude/plans/build-sh-script.md for the history.
+# inside cargo livelocks on the shared workspace lockfile. 
 
 set -eu
 
@@ -69,8 +68,7 @@ HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 
 # The PDF→KFX cover + selectable-text layer render through macOS PDFKit / Core
 # Graphics (the system engine Preview uses) — a system framework, so there is NO
-# libpdfium to fetch or bundle anymore (pivoted off pdfium 2026-05-30; see
-# .claude/plans/pdf-to-kfx.md). Nothing to stage here.
+# libpdfium to fetch or bundle anymore.
 
 echo "==> Staging sidle-server sidecar ($HOST_TRIPLE) + KUAL resources for bundling"
 SIDECAR_DIR="sidle/src-tauri/binaries"
