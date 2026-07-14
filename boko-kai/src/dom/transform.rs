@@ -516,7 +516,8 @@ mod tests {
         let ua = user_agent_stylesheet();
         // The normal rule comes later AND has higher specificity — the
         // !important declaration must still win.
-        let author = Stylesheet::parse(".b { font-size: 20px !important; } p.b { font-size: 10px; }");
+        let author =
+            Stylesheet::parse(".b { font-size: 20px !important; } p.b { font-size: 10px; }");
         let stylesheets = vec![(ua, Origin::UserAgent), (author, Origin::Author)];
 
         let chapter = transform(&dom, &stylesheets);

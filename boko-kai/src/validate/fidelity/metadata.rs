@@ -195,7 +195,11 @@ impl Report {
     }
 }
 
-pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
+pub fn validate(
+    epub_bytes: &[u8],
+    kfx_bytes: &[u8],
+    dir: super::Direction,
+) -> Result<Report, String> {
     let epub = extract_epub_metadata(epub_bytes)?;
     let kfx = extract_kfx_metadata(kfx_bytes)?;
 
@@ -247,41 +251,80 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     // vertical_rl` still has PPD = rtl, which a literal field-by-field compare
     // here would miss). PPD values are still printed below as informational.
 
+    // The remaining checks depend on which side is boko's output. When the
+    // EPUB is generated from a KFX ("port"), it must carry the KFX's
+    // metadata and satisfy EPUB-product hygiene. When the EPUB is the
+    // ground-truth source, those same conditions describe the *source* and
+    // are not conversion defects — the mirrored checks below apply instead
+    // (source hygiene is `validate source`'s job).
+    let epub_is_output = !dir.epub_is_source();
+
     // ASIN: KFX `kindle_title_metadata.ASIN` is the Amazon catalogue id.
-    // Calibre emits it as `<dc:identifier opf:scheme="ASIN">B0CPJ2B88T</...>`.
-    // If KFX has it but EPUB lacks any ASIN-scheme identifier (or no
-    // identifier matching the value), that's a port defect.
-    if let Some(asin) = kfx.asin.as_deref() {
-        let epub_has_asin = epub
+    // Calibre emits it as `<dc:identifier opf:scheme="ASIN">B0CPJ2B88T</...>`;
+    // EPUB-3-valid output tags it `id="asin"` instead (see
+    // `scan_opf_identifiers`).
+    if epub_is_output {
+        // If KFX has it but EPUB lacks any ASIN identifier (or no
+        // identifier matching the value), that's a port defect.
+        if let Some(asin) = kfx.asin.as_deref() {
+            let epub_has_asin = epub
+                .identifiers
+                .iter()
+                .any(|(scheme, value)| is_asin_identifier(scheme) && value == asin);
+            if !epub_has_asin {
+                diffs.push(FieldDiff {
+                    field: "ASIN identifier",
+                    epub: format!("{:?}", epub.identifiers),
+                    kfx: asin.to_string(),
+                });
+            }
+        }
+    } else {
+        // A source ASIN must survive into the KFX. An EPUB without one is
+        // fine — KFX requires an ASIN, so the exporter synthesizes it.
+        let epub_asin = epub
             .identifiers
             .iter()
-            .any(|(scheme, value)| scheme.eq_ignore_ascii_case("ASIN") && value == asin);
-        if !epub_has_asin {
+            .find(|(scheme, _)| is_asin_identifier(scheme))
+            .map(|(_, value)| value.as_str());
+        if let Some(src_asin) = epub_asin
+            && kfx.asin.as_deref() != Some(src_asin)
+        {
             diffs.push(FieldDiff {
                 field: "ASIN identifier",
-                epub: format!("{:?}", epub.identifiers),
-                kfx: asin.to_string(),
+                epub: src_asin.to_string(),
+                kfx: kfx.asin.clone().unwrap_or_else(|| "(missing)".into()),
             });
         }
     }
 
-    // Publication date: KFX `kindle_title_metadata.issue_date` → EPUB
+    // Publication date: KFX `kindle_title_metadata.issue_date` ↔ EPUB
     // `<dc:date>`. We don't compare formats — KFX uses `YYYY-MM-DD` strings,
     // calibre normalises to ISO-8601 with offset. The defect we catch is
-    // "KFX has a date, EPUB has none."
-    if kfx.issue_date.is_some() && epub.date.is_none() {
+    // "the source has a date, boko's output has none."
+    if epub_is_output {
+        if kfx.issue_date.is_some() && epub.date.is_none() {
+            diffs.push(FieldDiff {
+                field: "dc:date",
+                epub: "(missing)".into(),
+                kfx: kfx.issue_date.clone().unwrap_or_default(),
+            });
+        }
+    } else if epub.date.is_some() && kfx.issue_date.is_none() {
         diffs.push(FieldDiff {
-            field: "dc:date",
-            epub: "(missing)".into(),
-            kfx: kfx.issue_date.clone().unwrap_or_default(),
+            field: "issue_date",
+            epub: epub.date.clone().unwrap_or_default(),
+            kfx: "(missing)".into(),
         });
     }
 
     // Primary writing mode hint: calibre emits
     // `<meta name="primary-writing-mode" content="vertical-rl"/>` for
     // vertical books. The Kindle app uses it as a layout hint. When KFX
-    // declares a vertical writing mode, the EPUB should carry the meta.
-    if kfx.is_vertical && epub.primary_writing_mode.is_none() {
+    // declares a vertical writing mode, a generated EPUB should carry the
+    // meta. (In the EPUB→KFX direction, mode fidelity is covered by the
+    // dedicated writing-mode validator.)
+    if epub_is_output && kfx.is_vertical && epub.primary_writing_mode.is_none() {
         diffs.push(FieldDiff {
             field: "meta primary-writing-mode",
             epub: "(missing)".into(),
@@ -292,8 +335,10 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     // `xml:lang` on each spine XHTML `<html>` root — calibre adds it for
     // every spine doc (the per-doc language hint that reading systems use
     // for font selection and word-break behaviour). Source-of-truth is
-    // KFX `language`. If any spine doc is missing it, that's a port defect.
-    if !kfx.language.is_empty()
+    // KFX `language`. If any generated spine doc is missing it, that's a
+    // port defect.
+    if epub_is_output
+        && !kfx.language.is_empty()
         && epub.html_doc_count > 0
         && epub.html_lang_present < epub.html_doc_count
     {
@@ -312,7 +357,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
     // resolve, causing missing images and an unloaded stylesheet (which
     // suppresses vertical writing mode in CJK books). The correct path
     // for a chapter resource is sibling-relative to the chapter file.
-    if !epub.parent_escape_refs.is_empty() {
+    if epub_is_output && !epub.parent_escape_refs.is_empty() {
         diffs.push(FieldDiff {
             field: "spine resource refs with .. parent escape",
             epub: format!(
@@ -326,7 +371,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 
     // EPUB 3.x without nav.xhtml. Strict readers (Apple Books) reject
     // these silently — the package opens, no content renders.
-    if epub.epub3_missing_nav {
+    if epub_is_output && epub.epub3_missing_nav {
         diffs.push(FieldDiff {
             field: "EPUB3 missing <item properties=\"nav\">",
             epub: epub.opf_version.clone(),
@@ -361,6 +406,14 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         kfx_vertical_mode: kfx.vertical_mode,
         diffs,
     })
+}
+
+/// Whether an OPF identifier scheme (scheme-or-id, per
+/// `scan_opf_identifiers`) denotes the Amazon ASIN. Mirrors
+/// `epub::parser`'s recovery: EPUB-2 `opf:scheme="ASIN"` / `"MOBI-ASIN"`,
+/// or the EPUB-3 `id="asin"` tag.
+fn is_asin_identifier(scheme: &str) -> bool {
+    scheme.eq_ignore_ascii_case("ASIN") || scheme.eq_ignore_ascii_case("MOBI-ASIN")
 }
 
 // ============================================================================
@@ -632,12 +685,29 @@ fn html_root_has_xml_lang(xhtml: &str) -> bool {
 }
 
 /// Scan the raw OPF XML for every `<dc:identifier>` element and return
-/// `(scheme, value)` pairs. The `scheme` comes from `opf:scheme` if present;
-/// otherwise `""`. (The shared `parse_opf` picks one identifier and loses
-/// schemes; we don't want to widen that struct for a validator-only need.)
+/// `(scheme, value)` pairs. The `scheme` comes from `opf:scheme` if present,
+/// falling back to the `id` attribute — EPUB 3 forbids `opf:scheme`
+/// (RSC-005), so EPUB-3-valid output tags identifiers by id (`id="asin"`),
+/// the same convention `epub::parser` recovers from. Otherwise `""`.
+/// (The shared `parse_opf` picks one identifier and loses schemes; we don't
+/// want to widen that struct for a validator-only need.)
 fn scan_opf_identifiers(opf_str: &str) -> Vec<(String, String)> {
     use quick_xml::Reader;
     use quick_xml::events::Event;
+
+    fn scheme_of(e: &quick_xml::events::BytesStart) -> String {
+        let mut scheme: Option<String> = None;
+        let mut id: Option<String> = None;
+        for attr in e.attributes().flatten() {
+            match attr.key.local_name().as_ref() {
+                b"scheme" => scheme = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                b"id" => id = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                _ => {}
+            }
+        }
+        scheme.or(id).unwrap_or_default()
+    }
+
     let mut reader = Reader::from_str(opf_str);
     reader.config_mut().trim_text(false);
     let mut out = Vec::new();
@@ -650,23 +720,12 @@ fn scan_opf_identifiers(opf_str: &str) -> Vec<(String, String)> {
                 if e.local_name().as_ref() == b"identifier" {
                     in_identifier = true;
                     text_buf.clear();
-                    current_scheme = None;
-                    for attr in e.attributes().flatten() {
-                        if attr.key.local_name().as_ref() == b"scheme" {
-                            current_scheme = Some(String::from_utf8_lossy(&attr.value).to_string());
-                        }
-                    }
+                    current_scheme = Some(scheme_of(&e));
                 }
             }
             Ok(Event::Empty(e)) => {
                 if e.local_name().as_ref() == b"identifier" {
-                    let mut scheme = String::new();
-                    for attr in e.attributes().flatten() {
-                        if attr.key.local_name().as_ref() == b"scheme" {
-                            scheme = String::from_utf8_lossy(&attr.value).to_string();
-                        }
-                    }
-                    out.push((scheme, String::new()));
+                    out.push((scheme_of(&e), String::new()));
                 }
             }
             Ok(Event::Text(e)) if in_identifier => {
@@ -1042,5 +1101,36 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifier_scheme_falls_back_to_id_attr() {
+        // EPUB 2 carries the scheme as `opf:scheme`; EPUB-3-valid output
+        // (where that attribute is illegal) tags identifiers by `id`.
+        let opf = r#"<?xml version="1.0"?>
+            <package xmlns:opf="http://www.idpf.org/2007/opf">
+              <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+                <dc:identifier id="BookId">urn:uuid:1234</dc:identifier>
+                <dc:identifier id="asin">B0CPJ2B88T</dc:identifier>
+                <dc:identifier opf:scheme="MOBI-ASIN">B000000000</dc:identifier>
+              </metadata>
+            </package>"#;
+        let ids = scan_opf_identifiers(opf);
+        assert_eq!(
+            ids,
+            vec![
+                ("BookId".to_string(), "urn:uuid:1234".to_string()),
+                ("asin".to_string(), "B0CPJ2B88T".to_string()),
+                ("MOBI-ASIN".to_string(), "B000000000".to_string()),
+            ]
+        );
+        assert!(!is_asin_identifier(&ids[0].0));
+        assert!(is_asin_identifier(&ids[1].0));
+        assert!(is_asin_identifier(&ids[2].0));
     }
 }
