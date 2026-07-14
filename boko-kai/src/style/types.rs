@@ -16,6 +16,10 @@ impl StyleId {
 pub struct ComputedStyle {
     // Font properties
     pub font_family: Option<String>,
+    /// Computed font size. The cascade resolves declarations to absolute
+    /// `Px` (em/% against the parent, rem against the root); `Auto` means
+    /// no declaration applied and the root default is in effect. Styles
+    /// built outside the cascade (e.g. KFX import) may hold relative units.
     pub font_size: Length,
     pub font_weight: FontWeight,
     pub font_style: FontStyle,

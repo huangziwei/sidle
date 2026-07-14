@@ -3,9 +3,10 @@
 use cssparser::{ParseError, Parser, Token};
 
 use crate::model::FontFace;
-use crate::style::properties::{FontStyle, FontWeight, Length};
+use crate::style::Declaration;
+use crate::style::properties::{FontStyle, FontVariant, FontWeight, Length};
 
-use super::keywords::parse_font_style;
+use super::keywords::{parse_font_style, parse_font_variant};
 
 /// Parse font-size value (handles lengths, percentages, and keywords).
 ///
@@ -19,7 +20,12 @@ pub(crate) fn parse_font_size(input: &mut Parser<'_, '_>) -> Option<Length> {
                 "em" => Length::Em(*value),
                 "rem" => Length::Rem(*value),
                 "%" => Length::Percent(*value),
-                "pt" => Length::Px(*value * 96.0 / 72.0), // Convert pt to px
+                // Absolute units convert to px (96 px per inch, 72 pt per inch)
+                "pt" => Length::Px(*value * 96.0 / 72.0),
+                "pc" => Length::Px(*value * 16.0),
+                "in" => Length::Px(*value * 96.0),
+                "cm" => Length::Px(*value * 96.0 / 2.54),
+                "mm" => Length::Px(*value * 96.0 / 25.4),
                 _ => return None,
             };
             Some(length)
@@ -93,6 +99,101 @@ pub(crate) fn parse_font_weight(input: &mut Parser<'_, '_>) -> Option<FontWeight
     }
 
     None
+}
+
+/// Run an Option-returning parser under `try_parse` so the input rewinds
+/// when the value doesn't match.
+fn try_opt<'i, T>(
+    input: &mut Parser<'i, '_>,
+    f: impl FnOnce(&mut Parser<'i, '_>) -> Option<T>,
+) -> Option<T> {
+    input
+        .try_parse(|i| -> Result<T, ParseError<'i, ()>> {
+            f(i).ok_or_else(|| i.new_custom_error(()))
+        })
+        .ok()
+}
+
+/// Parse the `font` shorthand:
+/// `[ <style> || <variant> || <weight> || <stretch> ]? <size> [ / <line-height> ]? <family>#`
+///
+/// Omitted prefix components and line-height reset to their initial values
+/// per CSS shorthand semantics. Font-stretch keywords are accepted but
+/// dropped (the IR has no stretch field). System-font keywords (`menu`,
+/// `caption`, …) fail the size parse and invalidate the whole declaration.
+pub(crate) fn parse_font_shorthand(input: &mut Parser<'_, '_>) -> Vec<Declaration> {
+    let mut style: Option<FontStyle> = None;
+    let mut variant: Option<FontVariant> = None;
+    let mut weight: Option<FontWeight> = None;
+
+    // Prefix components in any order. `normal` is valid for all three; which
+    // one consumes it doesn't matter since omitted components reset to
+    // normal anyway.
+    loop {
+        if style.is_none()
+            && let Some(s) = try_opt(input, parse_font_style)
+        {
+            style = Some(s);
+            continue;
+        }
+        if variant.is_none()
+            && let Some(v) = try_opt(input, parse_font_variant)
+        {
+            variant = Some(v);
+            continue;
+        }
+        if weight.is_none()
+            && let Some(w) = try_opt(input, parse_font_weight)
+        {
+            weight = Some(w);
+            continue;
+        }
+        let stretch = try_opt(input, |i| {
+            let ident = i.expect_ident_cloned().ok()?;
+            matches!(
+                ident.as_ref(),
+                "ultra-condensed"
+                    | "extra-condensed"
+                    | "condensed"
+                    | "semi-condensed"
+                    | "semi-expanded"
+                    | "expanded"
+                    | "extra-expanded"
+                    | "ultra-expanded"
+            )
+            .then_some(())
+        });
+        if stretch.is_some() {
+            continue;
+        }
+        break;
+    }
+
+    let Some(size) = try_opt(input, parse_font_size) else {
+        while input.next().is_ok() {}
+        return Vec::new();
+    };
+
+    let line_height = input
+        .try_parse(|i| -> Result<Length, ParseError<'_, ()>> {
+            i.expect_delim('/')?;
+            parse_line_height(i).ok_or_else(|| i.new_custom_error(()))
+        })
+        .ok();
+
+    let Some(family) = parse_font_family(input) else {
+        while input.next().is_ok() {}
+        return Vec::new();
+    };
+
+    vec![
+        Declaration::FontStyle(style.unwrap_or_default()),
+        Declaration::FontVariant(variant.unwrap_or_default()),
+        Declaration::FontWeight(weight.unwrap_or(FontWeight::NORMAL)),
+        Declaration::FontSize(size),
+        Declaration::LineHeight(line_height.unwrap_or(Length::Auto)),
+        Declaration::FontFamily(family),
+    ]
 }
 
 pub(crate) fn parse_font_family(input: &mut Parser<'_, '_>) -> Option<String> {

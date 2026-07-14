@@ -10,6 +10,7 @@ use selectors::context::{MatchingContext, SelectorCaches};
 
 use super::declaration::Declaration;
 use super::parse::{CssRule, Origin, Specificity, Stylesheet};
+use super::properties::{Length, ROOT_FONT_SIZE_PX};
 use super::style_pool::StylePool;
 use super::types::ComputedStyle;
 use crate::dom::element_ref::ElementRef;
@@ -152,12 +153,46 @@ pub fn compute_styles(
         ComputedStyle::default()
     };
 
+    // Relative font-size declarations resolve against the parent's computed
+    // size (not against each other), so capture it before applying.
+    let parent_font_px = parent_style.map_or(ROOT_FONT_SIZE_PX, computed_font_px);
+
     // Apply matched declarations in cascade order
     for matched_rule in &matched {
-        apply_declaration(&mut style, matched_rule.declaration);
+        apply_declaration(&mut style, matched_rule.declaration, parent_font_px);
     }
 
     style
+}
+
+/// The computed font size of a style, in CSS pixels.
+///
+/// `Auto` means no font-size was declared anywhere up the chain and resolves
+/// to the root default. Relative variants cannot survive the cascade (see
+/// `resolve_font_size`), but resolve them against the root to stay total.
+fn computed_font_px(style: &ComputedStyle) -> f32 {
+    match style.font_size {
+        Length::Px(v) => v,
+        Length::Auto => ROOT_FONT_SIZE_PX,
+        Length::Em(v) | Length::Rem(v) => v * ROOT_FONT_SIZE_PX,
+        Length::Percent(v) => v / 100.0 * ROOT_FONT_SIZE_PX,
+    }
+}
+
+/// Resolve a declared font-size to its computed pixel value (CSS "computed
+/// value"): em/% scale the parent's computed size, rem scales the root.
+///
+/// KFX styles are flat — a text run's style carries its final size with no
+/// element tree to re-resolve relative units against — so the cascade must
+/// resolve them while the parent chain is still known.
+fn resolve_font_size(declared: Length, parent_px: f32) -> Length {
+    match declared {
+        Length::Auto => Length::Auto,
+        Length::Px(v) => Length::Px(v),
+        Length::Em(v) => Length::Px(v * parent_px),
+        Length::Rem(v) => Length::Px(v * ROOT_FONT_SIZE_PX),
+        Length::Percent(v) => Length::Px(v / 100.0 * parent_px),
+    }
 }
 
 /// Check if a rule matches an element (with shared caches for better performance).
@@ -181,7 +216,10 @@ fn rule_matches_with_caches(
 }
 
 /// Apply a declaration to a computed style.
-fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration) {
+///
+/// `parent_font_px` is the parent's computed font size, the base for
+/// resolving relative font-size declarations.
+fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration, parent_font_px: f32) {
     match decl {
         // Colors
         Declaration::Color(c) => style.color = Some(*c),
@@ -189,7 +227,7 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration) {
 
         // Font properties
         Declaration::FontFamily(s) => style.font_family = Some(s.clone()),
-        Declaration::FontSize(l) => style.font_size = *l,
+        Declaration::FontSize(l) => style.font_size = resolve_font_size(*l, parent_font_px),
         Declaration::FontWeight(w) => style.font_weight = *w,
         Declaration::FontStyle(s) => style.font_style = *s,
         Declaration::FontVariant(v) => style.font_variant = *v,

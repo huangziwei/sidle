@@ -28,6 +28,7 @@ pub trait ToCss {
 }
 
 // Re-export property types
+pub use properties::ROOT_FONT_SIZE_PX;
 pub use properties::{
     BorderCollapse, BorderStyle, BoxSizing, BreakValue, Clear, Color, DecorationStyle, Display,
     Float, FontStyle, FontVariant, FontWeight, Hyphens, Length, LineBreak, ListStylePosition,

@@ -535,6 +535,10 @@ impl ToCss for Color {
     }
 }
 
+/// Root (default) font size in CSS pixels — the browser and Kindle default.
+/// `rem` values and the cascade's computed font sizes resolve against this.
+pub const ROOT_FONT_SIZE_PX: f32 = 16.0;
+
 /// Length value with unit.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Length {

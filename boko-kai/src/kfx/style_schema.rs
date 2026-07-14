@@ -25,7 +25,7 @@ use crate::style::{self as ir_style, ToCss};
 ///
 /// Used for converting CSS units (em, rem, %) to absolute values.
 /// 16px is the standard browser default.
-pub const DEFAULT_BASE_FONT_SIZE: f64 = 16.0;
+pub const DEFAULT_BASE_FONT_SIZE: f64 = ir_style::ROOT_FONT_SIZE_PX as f64;
 
 // ============================================================================
 // Value Transform System
@@ -67,10 +67,12 @@ pub enum ValueTransform {
         default_value: Option<KfxValue>,
     },
 
-    /// Dimensioned value: wraps a number with a unit symbol.
-    /// Example: 1.2 with unit=em -> { value: 1.2, unit: em }
-    /// NOTE: This does NOT convert units - use ConvertToDimensioned for that.
-    Dimensioned { unit: KfxSymbol },
+    /// Font-size conversion following Amazon's convention of root-relative
+    /// sizes: absolute CSS lengths (px/pt/in/…) are normalized to `rem`
+    /// against the 16px root default so the device font-size slider keeps
+    /// scaling them; relative units (em/rem/%) pass through unchanged.
+    /// Example: "24px" -> { value: 1.5, unit: rem }
+    FontSize,
 
     /// Convert CSS units and output as KFX dimensioned value.
     ///
@@ -423,9 +425,7 @@ impl StyleSchema {
             ir_key: "font-size",
             ir_field: Some(IrField::FontSize),
             kfx_symbol: KfxSymbol::FontSize,
-            transform: ValueTransform::Dimensioned {
-                unit: KfxSymbol::Rem,
-            },
+            transform: ValueTransform::FontSize,
             context: StyleContext::Any,
         });
 
@@ -1475,18 +1475,21 @@ impl ValueTransform {
                 extract_shorthand_value(&parts, *index, default_value.clone())
             }
 
-            ValueTransform::Dimensioned { unit } => {
+            ValueTransform::FontSize => {
                 let (num, css_unit) = parse_css_length(raw)?;
-                // Preserve percentage values (don't replace % with the rule's unit)
-                let actual_unit = if css_unit == "%" {
-                    KfxSymbol::Percent
-                } else {
-                    *unit
+                let (value, unit) = match css_unit.as_str() {
+                    "em" => (num, KfxSymbol::Em),
+                    "rem" => (num, KfxSymbol::Rem),
+                    "%" => (num, KfxSymbol::Percent),
+                    _ => {
+                        let pixels = convert_to_pixels(num, &css_unit, DEFAULT_BASE_FONT_SIZE);
+                        // Round away f32→string→f64 noise from the cascade's
+                        // computed pixel values (sub-0.001px is invisible).
+                        let rem = pixels / DEFAULT_BASE_FONT_SIZE;
+                        ((rem * 1e5).round() / 1e5, KfxSymbol::Rem)
+                    }
                 };
-                Some(KfxValue::Dimensioned {
-                    value: num,
-                    unit: actual_unit,
-                })
+                Some(KfxValue::Dimensioned { value, unit })
             }
 
             ValueTransform::ConvertToDimensioned {
@@ -2384,7 +2387,7 @@ impl ValueTransform {
                 None
             }
 
-            ValueTransform::Dimensioned { .. }
+            ValueTransform::FontSize
             | ValueTransform::ConvertToDimensioned { .. }
             | ValueTransform::PreserveUnit => {
                 // Parse {value: N, unit: sym} struct
@@ -3685,6 +3688,61 @@ mod tests {
             }
             _ => panic!("Expected Dimensioned, got {:?}", result),
         }
+    }
+
+    #[test]
+    fn test_font_size_transform() {
+        let transform = ValueTransform::FontSize;
+
+        // Absolute sizes must divide by the 16px root, not adopt the rem
+        // unit with their raw value (24px relabeled "24rem" renders a span
+        // at 24x the base font size).
+        let result = transform.apply("24px").unwrap();
+        assert_eq!(
+            result,
+            KfxValue::Dimensioned {
+                value: 1.5,
+                unit: KfxSymbol::Rem
+            }
+        );
+
+        // pt is absolute too: 12pt = 16px → 1rem
+        let result = transform.apply("12pt").unwrap();
+        assert_eq!(
+            result,
+            KfxValue::Dimensioned {
+                value: 1.0,
+                unit: KfxSymbol::Rem
+            }
+        );
+
+        // Relative units pass through unchanged
+        let result = transform.apply("1.66667em").unwrap();
+        assert_eq!(
+            result,
+            KfxValue::Dimensioned {
+                value: 1.66667,
+                unit: KfxSymbol::Em
+            }
+        );
+
+        let result = transform.apply("2rem").unwrap();
+        assert_eq!(
+            result,
+            KfxValue::Dimensioned {
+                value: 2.0,
+                unit: KfxSymbol::Rem
+            }
+        );
+
+        let result = transform.apply("150%").unwrap();
+        assert_eq!(
+            result,
+            KfxValue::Dimensioned {
+                value: 150.0,
+                unit: KfxSymbol::Percent
+            }
+        );
     }
 
     #[test]

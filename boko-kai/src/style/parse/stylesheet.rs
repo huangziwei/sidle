@@ -296,6 +296,44 @@ mod tests {
     use crate::style::WritingMode;
 
     #[test]
+    fn font_shorthand_expands_to_longhands() {
+        use crate::style::properties::{
+            FontStyle, FontVariant, FontWeight, Length,
+        };
+
+        let find = |css: &str| -> Vec<Declaration> {
+            let sheet = Stylesheet::parse(css);
+            assert_eq!(sheet.rules.len(), 1, "rule should parse: {css}");
+            sheet.rules[0].declarations.clone()
+        };
+
+        // Full form with prefix components and line-height
+        let decls = find(r#"p { font: italic small-caps bold 24px/1.5 "Gentium", serif; }"#);
+        assert!(decls.iter().any(|d| matches!(d, Declaration::FontStyle(FontStyle::Italic))));
+        assert!(decls.iter().any(|d| matches!(d, Declaration::FontVariant(FontVariant::SmallCaps))));
+        assert!(decls.iter().any(|d| matches!(d, Declaration::FontWeight(w) if *w == FontWeight::BOLD)));
+        assert!(decls.iter().any(|d| matches!(d, Declaration::FontSize(Length::Px(v)) if *v == 24.0)));
+        assert!(decls.iter().any(|d| matches!(d, Declaration::LineHeight(Length::Em(v)) if *v == 1.5)));
+        assert!(decls.iter().any(|d| matches!(d, Declaration::FontFamily(f) if f == "Gentium, serif")));
+
+        // Minimal form: omitted components reset to their initial values
+        let decls = find("p { font: 16px serif; }");
+        assert!(decls.iter().any(|d| matches!(d, Declaration::FontStyle(FontStyle::Normal))));
+        assert!(decls.iter().any(|d| matches!(d, Declaration::FontWeight(w) if *w == FontWeight::NORMAL)));
+        assert!(decls.iter().any(|d| matches!(d, Declaration::LineHeight(Length::Auto))));
+        assert!(decls.iter().any(|d| matches!(d, Declaration::FontSize(Length::Px(v)) if *v == 16.0)));
+
+        // Numeric weight
+        let decls = find("p { font: 700 1em serif; }");
+        assert!(decls.iter().any(|d| matches!(d, Declaration::FontWeight(w) if *w == FontWeight::BOLD)));
+        assert!(decls.iter().any(|d| matches!(d, Declaration::FontSize(Length::Em(v)) if *v == 1.0)));
+
+        // System-font keyword is not representable — declaration dropped
+        let sheet = Stylesheet::parse("p { font: menu; }");
+        assert!(sheet.rules.is_empty() || sheet.rules[0].declarations.is_empty());
+    }
+
+    #[test]
     fn writing_mode_parses_with_vendor_prefixes() {
         let css = r#"
             .vrtl {

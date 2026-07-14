@@ -442,6 +442,53 @@ mod tests {
     }
 
     #[test]
+    fn test_font_size_computed_through_cascade() {
+        // Font sizes must come out of the cascade as computed px — the KFX
+        // exporter emits flat styles with no element tree to resolve
+        // relative units against. Covers a px span overriding an em heading
+        // and relative sizes compounding through nesting.
+        let dom = parse_html(
+            r#"<html><body>
+            <h1>Introduction:<span class="big">The Shadow</span></h1>
+            <h2 class="scaled">Nested<span class="half">half</span></h2>
+        </body></html>"#,
+        );
+        let ua = user_agent_stylesheet();
+        let author = Stylesheet::parse(
+            ".big { font-size: 24px; } .scaled { font-size: 2em; } .half { font-size: 50%; }",
+        );
+        let stylesheets = vec![(ua, Origin::UserAgent), (author, Origin::Author)];
+
+        let chapter = transform(&dom, &stylesheets);
+
+        // Text nodes carry the default style; the computed style lives on
+        // the enclosing element node.
+        let font_px_of = |needle: &str| -> f32 {
+            for id in chapter.iter_dfs() {
+                let node = chapter.node(id).unwrap();
+                if node.role == Role::Text && chapter.text(node.text).contains(needle) {
+                    let parent = node.parent.expect("text node has a parent element");
+                    let style_id = chapter.node(parent).unwrap().style;
+                    match chapter.styles.get(style_id).unwrap().font_size {
+                        crate::style::Length::Px(v) => return v,
+                        other => panic!("expected computed px for {needle:?}, got {other:?}"),
+                    }
+                }
+            }
+            panic!("text {needle:?} not found");
+        };
+
+        // h1 text: UA 2em × 16px root
+        assert_eq!(font_px_of("Introduction"), 32.0);
+        // The 24px span overrides the inherited h1 size
+        assert_eq!(font_px_of("The Shadow"), 24.0);
+        // Author 2em on h2 resolves against body, and the nested 50% span
+        // compounds against the h2's computed size
+        assert_eq!(font_px_of("Nested"), 32.0);
+        assert_eq!(font_px_of("half"), 16.0);
+    }
+
+    #[test]
     fn test_hidden_elements() {
         let dom = parse_html(
             r#"<html><head><title>Test</title></head><body><p>Visible</p></body></html>"#,
