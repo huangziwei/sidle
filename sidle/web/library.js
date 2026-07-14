@@ -3084,8 +3084,9 @@ function openContextMenu(x, y, b) {
     }
     add(menu, "Edit metadata…", () => openMetadataModal(b));
     // Full "Edit book…" editor — writes the source artifact (metadata/cover/TOC),
-    // not just the DB row. KFX- and EPUB-source books (PDF editing is later).
-    if (["kfx", "epub"].includes(sourceFormat(b)) && b.status === "done") {
+    // not just the DB row. All three source formats; the editor's rail gates the
+    // panels each one can actually back.
+    if (["kfx", "epub", "pdf"].includes(sourceFormat(b)) && b.status === "done") {
       add(menu, "Edit book…", () => openEditor(b));
     }
     add(menu, "Open in Finder", () => openInFinder(b.id));

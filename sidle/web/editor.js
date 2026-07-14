@@ -86,14 +86,28 @@ function removeKeys() {
 // stays gated with an explanatory tooltip.
 function configureRail() {
   const editable = session.data.editable;
-  const live = new Set(["cover", "images", "toc"]);
+  // The backend reports which panels this source format can actually back, so
+  // the rail follows capability rather than re-deriving it from the format name.
+  // PDF omits cover (its cover is re-rendered from page 1 on every reconvert) and
+  // images (no page-XObject walk yet).
+  const panels = new Set(session.data.panels || []);
+  const format = session.data.format;
   for (const item of document.querySelectorAll(".editor-rail-item")) {
     const p = item.dataset.panel;
-    item.disabled = !(p === "metadata" || (editable && live.has(p)));
+    item.disabled = !(editable && panels.has(p));
     if (p === "text") {
       item.title = editable
         ? "In-place text editing is coming in a later tier."
         : "";
+    } else if (item.disabled && editable && format === "pdf") {
+      item.title =
+        p === "cover"
+          ? "A PDF book's cover is rendered from its first page, so it isn't editable here."
+          : p === "images"
+            ? "Extracting images from a PDF isn't supported yet."
+            : "";
+    } else {
+      item.title = "";
     }
   }
 }
@@ -177,10 +191,12 @@ function renderMetadataPanel() {
   const center = $("#editor-center");
   center.replaceChildren();
 
+  // All three source formats are editable; the only way here is a book whose
+  // source file is missing from disk, so say that rather than blaming the format.
   const notice = editable
     ? ""
-    : `<div class="editor-notice">Editing ${session.data.format.toUpperCase()} sources isn't
-         supported yet — KFX and EPUB books are editable now. These fields are read-only.</div>`;
+    : `<div class="editor-notice">This book's ${session.data.format.toUpperCase()} source
+         file isn't on disk, so it can't be edited. These fields are read-only.</div>`;
 
   const form = document.createElement("form");
   form.className = "editor-panel metadata-fields";
@@ -534,16 +550,24 @@ function wrapPanel(...children) {
 }
 
 function paintTocPanel(detail) {
-  // The editable model — a deep copy of the proposal so edits and Reset don't
-  // mutate the cached detail. The proposal keeps the book's own nesting (a flat
-  // Contents page → flat, a Part→chapter page → nested); we never reshape it.
+  // The editable model — a deep copy so edits and Reset don't mutate the cached
+  // detail. For KFX/EPUB this is a proposal that keeps the book's own nesting (a
+  // flat Contents page → flat, a Part→chapter page → nested); we never reshape
+  // it. For PDF it's the book's existing outline, or empty.
   session.tocTree = JSON.parse(JSON.stringify(detail.proposed || []));
+
+  // PDF has no proposer, so its panel is a hand-authoring surface instead: each
+  // row targets a page number the user types, and rows can be added.
+  const pdf = detail.page_count != null;
+  const pageCount = detail.page_count || 0;
 
   const panel = el("div", "editor-panel");
 
-  // Verdict summary.
-  const summary =
-    detail.verdict === "OK"
+  const summary = pdf
+    ? detail.nav_count
+      ? `This PDF declares ${detail.nav_count} bookmark${detail.nav_count === 1 ? "" : "s"}. Edit them below, or add more.`
+      : `This PDF has no table of contents. Add entries below — each jumps to a page in 1–${pageCount}.`
+    : detail.verdict === "OK"
       ? "This book's table of contents already lists its chapters."
       : detail.verdict === "SUSPECT"
         ? `The declared table of contents looks deficient — ${detail.nav_count} entr${
@@ -566,32 +590,61 @@ function paintTocPanel(detail) {
     panel.append(el("p", "editor-muted", "No table of contents is declared."));
   }
 
-  // Proposed TOC (editable, nesting preserved).
   const total = countEntries(session.tocTree);
   panel.append(
-    el("div", "field-group-title", `Proposed${total ? ` (${total})` : ""}`),
+    el(
+      "div",
+      "field-group-title",
+      pdf
+        ? `Table of contents${total ? ` (${total})` : ""}`
+        : `Proposed${total ? ` (${total})` : ""}`,
+    ),
   );
-  if (total) {
+
+  // PDF always gets the editable surface (that's how an absent TOC gets
+  // authored); KFX/EPUB only when there's a proposal to review.
+  if (total || pdf) {
+    if (!total && detail.note) {
+      panel.append(el("div", "editor-notice", detail.note));
+    }
     const tree = el("div", "toc-proposed");
     tree.id = "toc-tree";
     panel.append(tree);
 
     const actions = el("div", "toc-actions");
+    if (pdf) {
+      const add = el("button", "btn", "Add entry");
+      add.type = "button";
+      add.title = "Append a new top-level entry";
+      add.addEventListener("click", () => {
+        session.tocTree.push({ label: "", eid: 0, href: "", page: 1, children: [] });
+        // Must pass pageCount — a bare re-render drops every row's page input.
+        renderProposedTree(pageCount);
+        // Focus the row just added so typing can start immediately.
+        const rows = $("#toc-tree").querySelectorAll(".toc-label");
+        rows[rows.length - 1]?.focus();
+      });
+      actions.append(add);
+    }
     const apply = el("button", "btn btn-primary", "Apply table of contents");
     apply.type = "button";
     apply.addEventListener("click", applyToc);
-    const auto = el("button", "btn", "Repair automatically");
-    auto.type = "button";
-    auto.title = "Re-derive the TOC and write it in one step, ignoring edits above";
-    auto.addEventListener("click", autoRepairToc);
+    actions.append(apply);
+    if (detail.can_auto_repair) {
+      const auto = el("button", "btn", "Repair automatically");
+      auto.type = "button";
+      auto.title = "Re-derive the TOC and write it in one step, ignoring edits above";
+      auto.addEventListener("click", autoRepairToc);
+      actions.append(auto);
+    }
     const reset = el("button", "btn", "Reset");
     reset.type = "button";
     reset.addEventListener("click", () => paintTocPanel(session.tocDetail));
-    actions.append(apply, auto, reset);
+    actions.append(reset);
     panel.append(actions);
 
     $("#editor-center").replaceChildren(panel);
-    renderProposedTree();
+    renderProposedTree(pageCount);
   } else {
     panel.append(el("div", "editor-notice", detail.note || "No table of contents could be proposed."));
     $("#editor-center").replaceChildren(panel);
@@ -604,17 +657,18 @@ function chipText(verdict) {
 
 // Render #toc-tree from session.tocTree, indenting by depth so the book's Part→
 // chapter structure is visible. A full re-render after each removal keeps every
-// row's splice closure bound to the right (array, index).
-function renderProposedTree() {
+// row's splice closure bound to the right (array, index). `pageCount > 0` puts
+// rows in PDF mode, adding a page-number input.
+function renderProposedTree(pageCount = 0) {
   const tree = $("#toc-tree");
   if (!tree) return;
   tree.replaceChildren();
   const walk = (nodes, depth) => {
     nodes.forEach((node, i) => {
       tree.append(
-        tocRow(node, depth, () => {
+        tocRow(node, depth, pageCount, () => {
           nodes.splice(i, 1);
-          renderProposedTree();
+          renderProposedTree(pageCount);
         }),
       );
       if (node.children && node.children.length) walk(node.children, depth + 1);
@@ -624,8 +678,10 @@ function renderProposedTree() {
 }
 
 // One editable row bound to its model node: a label input (writes back to the
-// node) and a remove button (splices the node — and its sub-entries — out).
-function tocRow(node, depth, onRemove) {
+// node), a page input for PDF (the only user-editable target — KFX eids and EPUB
+// hrefs round-trip opaquely), and a remove button (splices the node — and its
+// sub-entries — out).
+function tocRow(node, depth, pageCount, onRemove) {
   const row = el("div", "toc-row");
   if (depth) {
     row.style.marginLeft = `${depth * 20}px`;
@@ -633,16 +689,38 @@ function tocRow(node, depth, onRemove) {
   }
   const input = el("input", "toc-label");
   input.value = node.label;
+  input.placeholder = "Chapter title";
   input.addEventListener("input", () => {
     node.label = input.value;
   });
+  row.append(input);
+
+  if (pageCount > 0) {
+    const page = el("input", "toc-page");
+    page.type = "number";
+    page.min = "1";
+    page.max = String(pageCount);
+    page.value = String(node.page || 1);
+    page.title = `Page this entry jumps to (1–${pageCount})`;
+    page.addEventListener("input", () => {
+      // Clamp here so an out-of-range page can't reach the writer, which would
+      // reject the whole TOC over one bad row.
+      const n = Math.min(Math.max(parseInt(page.value, 10) || 1, 1), pageCount);
+      node.page = n;
+    });
+    page.addEventListener("blur", () => {
+      page.value = String(node.page || 1);
+    });
+    row.append(el("span", "toc-page-label", "p."), page);
+  }
+
   const remove = el("button", "toc-remove", "×");
   remove.type = "button";
   remove.title = node.children && node.children.length
     ? "Remove this entry and its sub-entries"
     : "Remove this entry";
   remove.addEventListener("click", onRemove);
-  row.append(input, remove);
+  row.append(remove);
   return row;
 }
 
@@ -691,9 +769,11 @@ async function runTocWrite(invoke) {
       nav_chapters: detail.nav_chapters,
     });
     paintTocPanel(detail);
+    // Every source format re-derives its counterpart on save; name the right one.
+    const derived = session.data.format === "kfx" ? "EPUB" : "Kindle file";
     toast(
       detail.verdict === "OK"
-        ? "Table of contents fixed — regenerating the derived EPUB…"
+        ? `Table of contents written — regenerating the derived ${derived}…`
         : "Table of contents written.",
     );
   } catch (err) {

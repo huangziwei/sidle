@@ -3758,6 +3758,28 @@ kbd {
 .toc-label:focus {
   border-color: var(--accent);
 }
+/* PDF-only: the page an entry jumps to. PDF is the one format whose TOC target
+   is user-authored (KFX eids / EPUB hrefs round-trip opaquely). */
+.toc-page-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+.toc-page {
+  flex: 0 0 auto;
+  width: 72px;
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 6px 8px;
+  outline: none;
+  transition: border-color 80ms ease;
+}
+.toc-page:focus {
+  border-color: var(--accent);
+}
 .toc-remove {
   flex: 0 0 auto;
   width: 28px;
