@@ -1,8 +1,9 @@
 // Book editor — a Calibre "Edit book"-style surface built into Sidle. Full-screen
 // #editor-view, parallel to #reader-view, driven entirely from the built
-// boko-kai KFX edit primitives via the `editor_*` Tauri commands. v1 edits
-// KFX-source books; the left rail's other panels (Cover / Images / TOC / Text)
-// light up in later phases. Exposed as `window.sidleEditor`.
+// boko-kai source-edit primitives via the `editor_*` Tauri commands. Edits
+// KFX-, EPUB- and PDF-source books through the Metadata / Cover / Images / TOC
+// panels; the rail's Text panel lights up in a later phase. Exposed as
+// `window.sidleEditor`.
 
 const $ = (sel) => document.querySelector(sel);
 const toast = (msg, isError) => window.showToast?.(msg, isError);
@@ -80,17 +81,15 @@ function removeKeys() {
 
 // --- left rail -------------------------------------------------------------
 
-// Metadata is always available (read-only for non-KFX sources); Cover, Images
-// and Table of Contents light up for KFX-source books. Text (in-place typo
-// fixes) needs the surgical text-replace primitive that isn't built yet, so it
-// stays gated with an explanatory tooltip.
+// Metadata, Cover, Images and Table of Contents are live for every editable
+// source (KFX, EPUB, PDF); a book whose source file is missing gets none of
+// them. Text (in-place typo fixes) needs the surgical text-replace primitive
+// that isn't built yet, so it stays gated with an explanatory tooltip.
 function configureRail() {
   const editable = session.data.editable;
   // The backend reports which panels this source format can actually back, so
   // the rail follows capability rather than re-deriving it from the format name.
-  // PDF omits images (no page-XObject walk yet).
   const panels = new Set(session.data.panels || []);
-  const format = session.data.format;
   for (const item of document.querySelectorAll(".editor-rail-item")) {
     const p = item.dataset.panel;
     item.disabled = !(editable && panels.has(p));
@@ -98,8 +97,6 @@ function configureRail() {
       item.title = editable
         ? "In-place text editing is coming in a later tier."
         : "";
-    } else if (item.disabled && editable && format === "pdf" && p === "images") {
-      item.title = "Extracting images from a PDF isn't supported yet.";
     } else {
       item.title = "";
     }
@@ -450,7 +447,12 @@ async function runCoverWrite(invoke) {
 
 // --- images panel ----------------------------------------------------------
 
+// KFX and EPUB carry a list of embedded images to pull out. A PDF doesn't: its
+// pages *are* its images, so it gets a different panel entirely — a page grid
+// you select from and export (see `renderPdfPagesPanel`).
+
 async function renderImagesPanel() {
+  if (session.data.format === "pdf") return renderPdfPagesPanel();
   const center = $("#editor-center");
   center.replaceChildren(el("div", "editor-panel editor-muted", "Extracting images…"));
   let images;
@@ -554,6 +556,249 @@ async function exportAllImages() {
     toast(`Exported ${res.count} image${res.count === 1 ? "" : "s"}.`);
   } catch (err) {
     toast(`Couldn't export images: ${err}`, true);
+  }
+}
+
+// --- PDF pages panel -------------------------------------------------------
+
+// The PDF arm of Images: a grid of pages to select and export. Thumbnails load
+// lazily — a scanned novel runs to hundreds of pages, and rendering them all up
+// front would stall the panel for seconds to draw what's mostly off-screen.
+
+const PDF_EXPORT_DPI = [150, 300, 600];
+const PDF_THUMB_WIDTH = 200;
+
+async function renderPdfPagesPanel() {
+  const center = $("#editor-center");
+  center.replaceChildren(el("div", "editor-panel editor-muted", "Reading pages…"));
+  let pages;
+  try {
+    pages = await window.api.invoke("editor_pdf_pages", { bookId: session.bookId });
+  } catch (err) {
+    center.replaceChildren(wrapPanel(el("div", "editor-notice", `Couldn't read pages: ${err}`)));
+    return;
+  }
+  if (session.panel !== "images") return; // navigated away while loading
+  session.pdfPages = { pages, selected: new Set(), dpi: 300, format: "jpeg" };
+  paintPdfPagesPanel();
+}
+
+// Painted once. Selection and DPI changes patch the affected nodes in place
+// rather than repainting: a repaint would drop every rendered thumbnail and
+// re-render it, so ticking one checkbox would cost as much as opening the panel.
+function paintPdfPagesPanel() {
+  const st = session.pdfPages;
+  const panel = el("div", "editor-panel");
+  panel.append(el("div", "field-group-title", `Pages (${st.pages.length})`));
+  panel.append(
+    el("p", "editor-muted", "A PDF page is an image. Pick the pages you want and export them."),
+  );
+
+  const actions = el("div", "images-actions page-export-bar");
+  actions.append(
+    labeledSelect(
+      "Resolution",
+      PDF_EXPORT_DPI.map((d) => [d, `${d} DPI`]),
+      st.dpi,
+      (v) => {
+        st.dpi = Number(v);
+        for (const p of st.pages) st.dims.get(p.page).textContent = pageDims(p, st.dpi);
+      },
+    ),
+  );
+  actions.append(
+    labeledSelect(
+      "Format",
+      [
+        ["jpeg", "JPEG (smaller)"],
+        ["png", "PNG (lossless)"],
+      ],
+      st.format,
+      (v) => {
+        st.format = v;
+      },
+    ),
+  );
+
+  const selectAll = el("button", "btn btn-small", "Select all");
+  selectAll.type = "button";
+  selectAll.addEventListener("click", () => setAllPdfPagesSelected(true));
+  const clear = el("button", "btn btn-small", "Clear");
+  clear.type = "button";
+  clear.addEventListener("click", () => setAllPdfPagesSelected(false));
+
+  const exportBtn = el("button", "btn btn-primary", "Export…");
+  exportBtn.type = "button";
+  exportBtn.addEventListener("click", exportSelectedPdfPages);
+
+  actions.append(selectAll, clear, exportBtn);
+  panel.append(actions);
+
+  const grid = el("div", "images-grid");
+  st.dims = new Map(); // page -> the dims node its DPI label lives in
+  st.checks = new Map(); // page -> its checkbox
+  for (const p of st.pages) grid.append(pdfPageCard(p, st));
+  panel.append(grid);
+
+  st.el = { clear, exportBtn };
+  syncPdfExportBar();
+  $("#editor-center").replaceChildren(panel);
+  observePdfThumbs(grid);
+}
+
+// The two controls that depend on how many pages are ticked.
+function syncPdfExportBar() {
+  const st = session.pdfPages;
+  const n = st.selected.size;
+  st.el.clear.disabled = n === 0;
+  st.el.exportBtn.disabled = n === 0;
+  st.el.exportBtn.textContent = n ? `Export ${n} page${n === 1 ? "" : "s"}…` : "Export…";
+}
+
+function setAllPdfPagesSelected(on) {
+  const st = session.pdfPages;
+  st.selected.clear();
+  if (on) st.pages.forEach((p) => st.selected.add(p.page));
+  for (const check of st.checks.values()) check.checked = on;
+  syncPdfExportBar();
+}
+
+// What one page exports as at `dpi` — points are 1/72", same maths as the
+// backend's `render_page`.
+function pageDims(p, dpi) {
+  const px = (pt) => Math.round((pt * dpi) / 72);
+  return `${px(p.width_pt)}×${px(p.height_pt)}`;
+}
+
+// A <label>Text <select>…</select></label> pair for the export bar.
+function labeledSelect(label, options, value, onChange) {
+  const wrap = el("label", "page-export-field");
+  wrap.append(el("span", null, label));
+  const sel = el("select", "input-small");
+  for (const [v, text] of options) {
+    const opt = el("option", null, text);
+    opt.value = v;
+    if (String(v) === String(value)) opt.selected = true;
+    sel.append(opt);
+  }
+  sel.addEventListener("change", () => onChange(sel.value));
+  wrap.append(sel);
+  return wrap;
+}
+
+function pdfPageCard(p, st) {
+  const card = el("div", "image-card");
+
+  const thumb = el("div", "image-thumb");
+  const img = el("img");
+  img.alt = `Page ${p.page}`;
+  img.dataset.page = p.page; // the lazy loader's handle
+  thumb.append(img);
+  if (p.page === 1) thumb.append(el("span", "image-badge", "Cover"));
+  card.append(thumb);
+
+  const meta = el("div", "image-meta");
+  const name = el("label", "image-name page-card-name");
+  const check = el("input");
+  check.type = "checkbox";
+  check.checked = st.selected.has(p.page);
+  check.addEventListener("change", () => {
+    if (check.checked) st.selected.add(p.page);
+    else st.selected.delete(p.page);
+    syncPdfExportBar();
+  });
+  st.checks.set(p.page, check);
+  name.append(check, el("span", null, `Page ${p.page}`));
+  meta.append(name);
+
+  const dims = el("div", "image-dims", pageDims(p, st.dpi));
+  st.dims.set(p.page, dims);
+  meta.append(dims);
+  card.append(meta);
+
+  const save = el("button", "btn btn-small", "Save…");
+  save.type = "button";
+  save.addEventListener("click", () => savePdfPage(p.page, save));
+  card.append(save);
+  return card;
+}
+
+// Render each page's thumbnail only once its card nears the viewport. Each
+// render is a ~15ms PDFKit call, so a few dozen on screen is nothing, while
+// eagerly doing all of them would not be.
+function observePdfThumbs(grid) {
+  const io = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        io.unobserve(e.target); // one render per card, ever
+        loadPdfThumb(e.target);
+      }
+    },
+    { root: null, rootMargin: "300px" },
+  );
+  for (const img of grid.querySelectorAll("img[data-page]")) io.observe(img);
+}
+
+async function loadPdfThumb(img) {
+  const page = Number(img.dataset.page);
+  try {
+    // `reader_pdf_page` is 0-based and stateless — it re-resolves the PDF per
+    // call rather than needing an open reader session.
+    const b64 = await window.api.invoke("reader_pdf_page", {
+      bookId: session.bookId,
+      page: page - 1,
+      width: PDF_THUMB_WIDTH,
+    });
+    if (!img.isConnected) return; // panel repainted or closed mid-render
+    img.src = `data:image/jpeg;base64,${b64}`;
+  } catch {
+    // A page that won't render shouldn't take the grid down with it; the empty
+    // frame is the message.
+  }
+}
+
+async function savePdfPage(page, button) {
+  const st = session.pdfPages;
+  button.disabled = true;
+  try {
+    const saved = await window.api.invoke("editor_export_pdf_page", {
+      bookId: session.bookId,
+      page,
+      dpi: st.dpi,
+      format: st.format,
+    });
+    if (saved) toast(`Saved page ${page}.`);
+  } catch (err) {
+    toast(`Couldn't save page ${page}: ${err}`, true);
+  }
+  button.disabled = false;
+}
+
+async function exportSelectedPdfPages() {
+  const st = session.pdfPages;
+  const pages = [...st.selected].sort((a, b) => a - b);
+  if (!pages.length) return;
+  let dir;
+  try {
+    dir = await window.api.invoke("library_pick_folder");
+  } catch (err) {
+    toast(`Couldn't pick a folder: ${err}`, true);
+    return;
+  }
+  if (!dir) return; // cancelled
+  toast(`Exporting ${pages.length} page${pages.length === 1 ? "" : "s"}…`);
+  try {
+    const res = await window.api.invoke("editor_export_pdf_pages", {
+      bookId: session.bookId,
+      pages,
+      dir,
+      dpi: st.dpi,
+      format: st.format,
+    });
+    toast(`Exported ${res.count} page${res.count === 1 ? "" : "s"}.`);
+  } catch (err) {
+    toast(`Couldn't export pages: ${err}`, true);
   }
 }
 

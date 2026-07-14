@@ -3848,6 +3848,43 @@ kbd {
   display: flex;
   gap: 8px;
 }
+/* The PDF arm of the Images panel: page export controls above the page grid. */
+.page-export-bar {
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+/* Push the export button to the right of the resolution/format/selection controls. */
+.page-export-bar .btn-primary {
+  margin-left: auto;
+}
+.page-export-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.page-export-field select {
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 3px 6px;
+}
+/* The page number doubles as its select-for-export checkbox. */
+.page-card-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.page-card-name input {
+  flex: 0 0 auto;
+  margin: 0;
+}
 .images-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));

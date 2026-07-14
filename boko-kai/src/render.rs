@@ -2,9 +2,15 @@
 //! — the system engine Preview uses. No bundled `libpdfium`: we call the OS.
 //!
 //! Two jobs, one engine:
-//! - **Cover** ([`render_pdf_page_jpeg`]): `PDFPage.draw(with:to:)` into a Core
-//!   Graphics bitmap context → JPEG. This is exactly Preview's "export page as
-//!   image", and the one thing we do that Amazon's cover-less PDOC doesn't.
+//! - **Page images** ([`render_pdf_page_jpeg`] / [`render_pdf_page_png`]):
+//!   `PDFPage.draw(with:to:)` into a Core Graphics bitmap context → JPEG/PNG.
+//!   This is exactly Preview's "export page as image". It renders the book's
+//!   **cover** (page 1 — the one thing we do that Amazon's cover-less PDOC
+//!   doesn't), backs the fixed-layout reader, and is how the editor exports
+//!   pages: a PDF page *is* an image, so this is the only honest way to get one
+//!   out — it shows the page, not merely the largest thing drawn on it, and it
+//!   works whatever the page's images are encoded with (JPEG 2000, CCITT and
+//!   JBIG2 all render, and none of them have a decoder in this codebase).
 //! - **Text layer** ([`extract_pdf_text`]): `PDFPage.string` +
 //!   `characterBounds(at:)` give Unicode + per-glyph boxes — Apple's Core Text
 //!   does the font/encoding/CMap work — which the KFX emit path turns into the
@@ -115,6 +121,33 @@ pub fn render_pdf_page_jpeg(
     macos::render_page_jpeg(pdf_bytes, page_index, target_width_px, quality)
 }
 
+/// Render one PDF page to a PNG — the lossless counterpart of
+/// [`render_pdf_page_jpeg`], sharing its rasterizer.
+///
+/// Worth the (much) larger file for a page of text or line art, where JPEG rings
+/// around every glyph edge. A scanned page, already JPEG inside the PDF, gains
+/// nothing from it.
+#[cfg(target_os = "macos")]
+pub fn render_pdf_page_png(
+    pdf_bytes: &[u8],
+    page_index: usize,
+    target_width_px: u32,
+) -> Result<Vec<u8>, RenderError> {
+    macos::render_page_png(pdf_bytes, page_index, target_width_px)
+}
+
+/// Non-macOS stub — see [`render_pdf_page_jpeg`].
+#[cfg(not(target_os = "macos"))]
+pub fn render_pdf_page_png(
+    _pdf_bytes: &[u8],
+    _page_index: usize,
+    _target_width_px: u32,
+) -> Result<Vec<u8>, RenderError> {
+    Err(RenderError::Unavailable(
+        "PDF rasterization needs macOS PDFKit".into(),
+    ))
+}
+
 /// Non-macOS stub: rasterization needs a platform PDF engine (PDFKit on macOS;
 /// Poppler on a future Linux build). Non-macOS builds produce a visual-only KFX
 /// (no cover).
@@ -170,12 +203,14 @@ mod macos {
             .ok_or_else(|| RenderError::Render("PDFKit could not parse the PDF".into()))
     }
 
-    pub(super) fn render_page_jpeg(
+    /// Rasterize one page to packed RGB8 (no alpha), returning `(rgb, w, h)`.
+    /// The shared core of every page-image path — what gets encoded on top of it
+    /// is the caller's choice.
+    pub(super) fn render_page_rgb(
         pdf_bytes: &[u8],
         page_index: usize,
         target_width_px: u32,
-        quality: u8,
-    ) -> Result<Vec<u8>, RenderError> {
+    ) -> Result<(Vec<u8>, u32, u32), RenderError> {
         autoreleasepool(|_| {
             let doc = load(pdf_bytes)?;
             let page = unsafe { doc.pageAtIndex(page_index) }
@@ -244,17 +279,38 @@ mod macos {
                 rgb.push(over_white(px[2]));
             }
 
-            let mut out: Vec<u8> = Vec::with_capacity(128 * 1024);
-            jpeg_encoder::Encoder::new(&mut out, quality)
-                .encode(
-                    &rgb,
-                    out_w as u16,
-                    out_h as u16,
-                    jpeg_encoder::ColorType::Rgb,
-                )
-                .map_err(|e| RenderError::Encode(e.to_string()))?;
-            Ok(out)
+            Ok((rgb, out_w as u32, out_h as u32))
         })
+    }
+
+    pub(super) fn render_page_jpeg(
+        pdf_bytes: &[u8],
+        page_index: usize,
+        target_width_px: u32,
+        quality: u8,
+    ) -> Result<Vec<u8>, RenderError> {
+        let (rgb, w, h) = render_page_rgb(pdf_bytes, page_index, target_width_px)?;
+        let mut out: Vec<u8> = Vec::with_capacity(128 * 1024);
+        jpeg_encoder::Encoder::new(&mut out, quality)
+            .encode(&rgb, w as u16, h as u16, jpeg_encoder::ColorType::Rgb)
+            .map_err(|e| RenderError::Encode(e.to_string()))?;
+        Ok(out)
+    }
+
+    pub(super) fn render_page_png(
+        pdf_bytes: &[u8],
+        page_index: usize,
+        target_width_px: u32,
+    ) -> Result<Vec<u8>, RenderError> {
+        use image::codecs::png::PngEncoder;
+        use image::{ExtendedColorType, ImageEncoder};
+
+        let (rgb, w, h) = render_page_rgb(pdf_bytes, page_index, target_width_px)?;
+        let mut out: Vec<u8> = Vec::with_capacity(256 * 1024);
+        PngEncoder::new(&mut out)
+            .write_image(&rgb, w, h, ExtendedColorType::Rgb8)
+            .map_err(|e| RenderError::Encode(e.to_string()))?;
+        Ok(out)
     }
 
     pub(super) fn extract_text(pdf_bytes: &[u8]) -> Result<Vec<PageText>, RenderError> {

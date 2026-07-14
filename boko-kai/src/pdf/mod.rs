@@ -7,6 +7,10 @@
 //! [`metadata_edit`] (`/Info`), [`toc_repair`] (`/Outlines`) and [`cover`] (the
 //! first page) are its consumers.
 //!
+//! There is deliberately no image-extract primitive here, unlike the KFX and
+//! EPUB families. A PDF page *is* an image, so pulling images out of a PDF means
+//! rendering its pages — [`crate::render`], not an object-model walk.
+//!
 //! Reading a PDF's *structure* — page sizes, outline, page labels — lives in
 //! [`crate::import::pdf`] (`probe_pdf`), which feeds the PDF→KFX path and is
 //! built on this module's core.
