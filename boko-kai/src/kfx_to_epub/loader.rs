@@ -187,13 +187,7 @@ pub(crate) fn empty_book_for_test() -> BookData {
 /// the name inside the payload (`resource_name`, `style_name`, etc.) for
 /// redundancy. We prefer the entry-level id because it's always present.
 fn resolve_fid(ent: &EntityLoc, _value: &IonValue, symbols: &SymbolTable) -> String {
-    let name = symbols.resolve(ent.id as u64);
-    if name.is_empty() || name == "?" {
-        // Fall back to an opaque identifier so collisions still distinguish.
-        format!("#entity_{}", ent.id)
-    } else {
-        name.to_string()
-    }
+    crate::kfx::resource_index::entity_fid(ent.id as u64, symbols)
 }
 
 /// Walk `book_metadata` ($490) to fill the `BookMetadata` struct.
@@ -286,32 +280,7 @@ fn first_reading_order_section(
     None
 }
 
-/// First `resource_name` ($175) found anywhere in a storyline content tree.
-/// The cover storyline lays out exactly one image, so its first `$175` is the
-/// cover resource.
-fn first_content_resource_name(value: &IonValue, symbols: &SymbolTable) -> Option<String> {
-    match value.unwrap_annotated() {
-        IonValue::List(items) => items
-            .iter()
-            .find_map(|it| first_content_resource_name(it, symbols)),
-        IonValue::Struct(fields) => {
-            if let Some(name) =
-                get_field(fields, KfxSymbol::ResourceName as u64).and_then(|v| symbols.text_of(v))
-            {
-                return Some(name.to_string());
-            }
-            fields.iter().find_map(|(_, v)| {
-                matches!(
-                    v.unwrap_annotated(),
-                    IonValue::List(_) | IonValue::Struct(_)
-                )
-                .then(|| first_content_resource_name(v, symbols))
-                .flatten()
-            })
-        }
-        _ => None,
-    }
-}
+use crate::kfx::resource_index::first_content_resource_name;
 
 /// True if `name` matches an `external_resource` ($164) whose `format` is a
 /// raster image (the shapes a cover can legitimately be). Excludes `pdf`/`kvg`
@@ -518,9 +487,6 @@ fn resolve_cover_value(value: Option<&IonValue>, symbols: &SymbolTable) -> Optio
     // `text_of` resolves both a plain string and a bare symbol id.
     symbols.text_of(v).map(str::to_string)
 }
-
-/// Walk the doc_symbol Ion fragment to find the sum of imports' max_ids.
-/// In Amazon's KFX format the imports section is typically
 
 #[cfg(test)]
 mod tests {

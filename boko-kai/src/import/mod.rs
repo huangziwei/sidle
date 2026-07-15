@@ -134,6 +134,24 @@ pub trait Importer: Send + Sync {
     /// Load an asset by path.
     fn load_asset(&mut self, path: &Path) -> std::io::Result<Vec<u8>>;
 
+    /// Load several assets, one result per input path. Implementations may
+    /// parallelize expensive per-asset work (KFX transcodes JPEG-XR images
+    /// to JPEG across all cores here); the default is a serial
+    /// [`Self::load_asset`] loop.
+    fn load_assets(&mut self, paths: &[PathBuf]) -> Vec<std::io::Result<Vec<u8>>> {
+        paths.iter().map(|p| self.load_asset(p)).collect()
+    }
+
+    /// The authoritative asset list for a normalized EPUB export, in
+    /// manifest order — or `None` when the importer has no such notion and
+    /// the exporter should fall back to the assets the normalized content
+    /// references. KFX returns its canonical image set (all images, cover
+    /// included; fonts stay out of the package until the CSS pass emits the
+    /// `@font-face` rules that would reference them).
+    fn bundled_assets(&self) -> Option<Vec<PathBuf>> {
+        None
+    }
+
     /// Load and parse a stylesheet, optionally using a cache.
     ///
     /// The default implementation loads the asset bytes and parses CSS.

@@ -684,9 +684,21 @@ impl Book {
         self.backend.load_asset(path)
     }
 
+    /// Load several assets, one result per input path (implementations may
+    /// parallelize expensive per-asset work, e.g. KFX image transcodes).
+    pub fn load_assets(&mut self, paths: &[std::path::PathBuf]) -> Vec<io::Result<Vec<u8>>> {
+        self.backend.load_assets(paths)
+    }
+
     /// List all assets.
     pub fn list_assets(&self) -> &[std::path::PathBuf] {
         self.backend.list_assets()
+    }
+
+    /// The authoritative asset list for a normalized EPUB export (`None`
+    /// when the importer defers to the assets the content references).
+    pub fn bundled_assets(&self) -> Option<Vec<std::path::PathBuf>> {
+        self.backend.bundled_assets()
     }
 
     /// Collect all @font-face definitions from CSS files.

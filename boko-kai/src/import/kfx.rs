@@ -17,6 +17,7 @@ use crate::kfx::container::{
     parse_container_info, parse_index_table, skip_enty_header,
 };
 use crate::kfx::ion::{IonParser, IonValue};
+use crate::kfx::resource_index::{self, ImageResource};
 use crate::kfx::schema::schema;
 use crate::kfx::storyline::parse_storyline_to_ir;
 use crate::kfx::symbols::KfxSymbol;
@@ -87,6 +88,17 @@ pub struct KfxImporter {
     resources: HashMap<String, EntityLoc>,
     /// Whether resources have been indexed
     resources_indexed: bool,
+
+    /// Canonical image list from the shared external_resource walk —
+    /// port-identical filenames, deterministic (sorted-fid) order, cover
+    /// renamed to `cover.<ext>`. Built once in `from_source`.
+    images: Vec<ImageResource>,
+    /// resource_name → `images` index (duplicates: last one wins).
+    image_by_name: HashMap<String, usize>,
+    /// Exported filename → `images` index.
+    image_by_filename: HashMap<String, usize>,
+    /// bcRawMedia location key (resolved entity symbol name) → payload location.
+    image_media: HashMap<String, EntityLoc>,
 
     /// Content cache: name -> list of strings (lazily populated)
     content_cache: HashMap<String, Vec<String>>,
@@ -197,6 +209,22 @@ impl Importer for KfxImporter {
         // Run optimization passes (KFX builds IR directly, not through compile_html)
         crate::dom::optimize::optimize(&mut chapter);
 
+        // Rewrite image references from KFX resource names ("eF") to the
+        // exported asset filenames ("image_rsrc7.jpg" / "cover.jpeg") so the
+        // IR speaks file paths, exactly like an EPUB-sourced book.
+        let node_ids: Vec<_> = chapter.iter_dfs().collect();
+        for node_id in node_ids {
+            let Some(filename) = chapter
+                .semantics
+                .src(node_id)
+                .and_then(|src| self.image_by_name.get(src))
+                .map(|&i| self.images[i].filename.clone())
+            else {
+                continue;
+            };
+            chapter.semantics.set_src(node_id, &filename);
+        }
+
         Ok(chapter)
     }
 
@@ -235,6 +263,12 @@ impl Importer for KfxImporter {
             return Err(io::Error::new(io::ErrorKind::NotFound, "Entity not found"));
         }
 
+        // Exported image filename (what `list_assets` returns): serve the
+        // final bytes — JXR sources transcode to JPEG here.
+        if let Some(&idx) = self.image_by_filename.get(&*name) {
+            return self.load_image_bytes(idx);
+        }
+
         // Ensure resources are indexed for name-based lookup
         if !self.resources_indexed {
             self.index_resources()?;
@@ -246,6 +280,45 @@ impl Importer for KfxImporter {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Asset not found"))?;
 
         self.read_entity(*loc)
+    }
+
+    fn bundled_assets(&self) -> Option<Vec<PathBuf>> {
+        Some(
+            self.images
+                .iter()
+                .map(|img| PathBuf::from(&img.filename))
+                .collect(),
+        )
+    }
+
+    fn load_assets(&mut self, paths: &[PathBuf]) -> Vec<io::Result<Vec<u8>>> {
+        // Resolve raw bytes serially (cheap reads), then run the CPU-bound
+        // JPEG-XR→JPEG transcodes in parallel across cores — the mechanical
+        // route parallelizes the same stage the same way.
+        let mut results: Vec<Option<io::Result<Vec<u8>>>> = Vec::with_capacity(paths.len());
+        let mut jxr_jobs: Vec<(usize, usize, Vec<u8>)> = Vec::new(); // (slot, image idx, raw)
+        for (slot, path) in paths.iter().enumerate() {
+            let name = path.to_string_lossy();
+            match self.image_by_filename.get(&*name).copied() {
+                Some(idx) if self.images[idx].is_jxr => match self.read_image_raw(idx) {
+                    Ok(raw) => {
+                        jxr_jobs.push((slot, idx, raw));
+                        results.push(None);
+                    }
+                    Err(e) => results.push(Some(Err(e))),
+                },
+                _ => results.push(Some(self.load_asset(path))),
+            }
+        }
+        let transcoded = crate::util::parallel_map(&jxr_jobs, |(_, idx, raw)| {
+            crate::image::jxr_transcode::transcode(raw, &self.images[*idx].resource_name)
+                .map(|(bytes, _format, _timing)| bytes)
+                .map_err(|e| io::Error::other(e.to_string()))
+        });
+        for ((slot, _, _), result) in jxr_jobs.iter().zip(transcoded) {
+            results[*slot] = Some(result);
+        }
+        results.into_iter().map(|r| r.expect("filled")).collect()
     }
 
     fn requires_normalized_export(&self) -> bool {
@@ -397,6 +470,10 @@ impl KfxImporter {
             section_storylines_indexed: false,
             resources: HashMap::new(),
             resources_indexed: false,
+            images: Vec::new(),
+            image_by_name: HashMap::new(),
+            image_by_filename: HashMap::new(),
+            image_media: HashMap::new(),
             content_cache: HashMap::new(),
             anchors: Arc::new(HashMap::new()),
             anchors_indexed: false,
@@ -412,6 +489,11 @@ impl KfxImporter {
         importer.parse_navigation()?;
         importer.index_section_storylines()?;
         importer.parse_spine()?;
+        // Image index: needs metadata (declared cover) and the spine /
+        // section→storyline maps (first-section cover fallback). Cheap —
+        // external_resource fragments are tiny and media bytes are only
+        // peeked (≤ 64 bytes each) for format sniffing.
+        importer.build_image_index();
 
         Ok(importer)
     }
@@ -1077,6 +1159,137 @@ impl KfxImporter {
 
         self.resources_indexed = true;
         Ok(())
+    }
+
+    /// Build the canonical image list via the shared external_resource walk
+    /// (`kfx::resource_index`) — the same code the mechanical converter runs,
+    /// so filenames, order, and format predictions match it byte-for-byte.
+    /// Resolves the cover (declared metadata name, falling back to the first
+    /// reading-order section's full-page image), renames it to `cover.<ext>`,
+    /// and rewrites `metadata.cover_image` to the exported filename.
+    fn build_image_index(&mut self) {
+        // bcRawMedia payloads keyed by their resolved entity symbol name —
+        // the exact string `external_resource.location` carries.
+        let mut media: HashMap<String, EntityLoc> = HashMap::new();
+        for loc in self
+            .entities
+            .iter()
+            .filter(|e| e.type_id == KfxSymbol::Bcrawmedia as u32)
+        {
+            let name = self.symbols.resolve(loc.id as u64);
+            if !name.is_empty() && name != "?" {
+                media.insert(name.to_string(), *loc);
+            }
+        }
+
+        // Parse every external_resource fragment up front (tiny Ion structs).
+        let fragments: Vec<(String, IonValue)> = self
+            .entities
+            .iter()
+            .filter(|e| e.type_id == KfxSymbol::ExternalResource as u32)
+            .filter_map(|loc| {
+                let ion = self.parse_entity_ion(*loc).ok()?;
+                Some((
+                    resource_index::entity_fid(loc.id as u64, &self.symbols),
+                    ion,
+                ))
+            })
+            .collect();
+
+        let source = Arc::clone(&self.source);
+        let mut images = resource_index::build_image_index(
+            fragments.iter().map(|(fid, v)| (fid.as_str(), v)).collect(),
+            &self.symbols,
+            |location| {
+                let loc = media.get(location)?;
+                let head_len = loc.length.min(64);
+                let bytes = source.read_at(loc.offset as u64, head_len).ok()?;
+                Some(skip_enty_header(&bytes).to_vec())
+            },
+        );
+
+        let mut by_name: HashMap<String, usize> = HashMap::new();
+        for (i, img) in images.iter().enumerate() {
+            by_name.insert(img.resource_name.clone(), i); // duplicates: last wins
+        }
+
+        // Cover: metadata's declared resource name, else the first
+        // reading-order section's full-page image (Amazon KFX often carries
+        // the cover only as that "loc 0" cover page).
+        let cover_name = self
+            .metadata
+            .cover_image
+            .clone()
+            .or_else(|| self.first_section_cover_candidate(&images));
+        if let Some(name) = cover_name
+            && let Some(&idx) = by_name.get(&name)
+        {
+            images[idx].filename = resource_index::cover_filename(&images[idx].filename);
+            self.metadata.cover_image = Some(images[idx].filename.clone());
+        }
+
+        self.image_by_filename = images
+            .iter()
+            .enumerate()
+            .map(|(i, img)| (img.filename.clone(), i))
+            .collect();
+        // Asset list: exported image filenames (replacing the raw `#id`
+        // bcRawMedia placeholders) + the font paths built in `from_source`.
+        let fonts: Vec<PathBuf> = self
+            .asset_paths
+            .iter()
+            .filter(|p| p.to_string_lossy().starts_with("fonts/"))
+            .cloned()
+            .collect();
+        self.asset_paths = images
+            .iter()
+            .map(|img| PathBuf::from(&img.filename))
+            .chain(fonts)
+            .collect();
+        self.image_by_name = by_name;
+        self.image_media = media;
+        self.images = images;
+    }
+
+    /// Cover fallback: the first `resource_name` laid out by the first
+    /// reading-order section's storyline, accepted only when it names a
+    /// raster image (a PDF-backed first section is not a cover). Read-only
+    /// core of calibre kfxlib's `check_cover_section_and_storyline`.
+    fn first_section_cover_candidate(&self, images: &[ImageResource]) -> Option<String> {
+        let first_section = self.section_names.first()?;
+        let storyline_loc = *self.section_storylines.get(first_section)?;
+        let storyline_ion = self.parse_entity_ion(storyline_loc).ok()?;
+        let fields = storyline_ion.unwrap_annotated().as_struct()?;
+        let content_list = get_field(fields, sym!(ContentList))?;
+        let candidate = resource_index::first_content_resource_name(content_list, &self.symbols)?;
+        resource_index::is_raster_cover(images, &candidate).then_some(candidate)
+    }
+
+    /// Bytes for `images[idx]` as exported: JPEG-XR sources are transcoded to
+    /// JPEG (decode failures pass through unchanged, same policy as the
+    /// mechanical route); every other format is copied verbatim.
+    fn load_image_bytes(&self, idx: usize) -> io::Result<Vec<u8>> {
+        let img = &self.images[idx];
+        let raw = self.read_image_raw(idx)?;
+        if img.is_jxr {
+            crate::image::jxr_transcode::transcode(&raw, &img.resource_name)
+                .map(|(bytes, _format, _timing)| bytes)
+                .map_err(|e| io::Error::other(e.to_string()))
+        } else {
+            Ok(raw)
+        }
+    }
+
+    /// Raw (pre-transcode) bcRawMedia bytes for `images[idx]`.
+    fn read_image_raw(&self, idx: usize) -> io::Result<Vec<u8>> {
+        let img = &self.images[idx];
+        let loc = self.image_media.get(&img.location).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("missing bcRawMedia at {:?}", img.location),
+            )
+        })?;
+        self.read_entity(*loc)
     }
 
     /// Index anchor entities to build anchor_name → uri/position maps.

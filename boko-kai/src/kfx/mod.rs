@@ -37,6 +37,7 @@ pub mod metadata_edit;
 #[cfg(feature = "nbk")]
 pub mod nbk;
 pub mod pdf_container;
+pub mod resource_index;
 pub mod schema;
 pub mod serialization;
 pub mod storyline;

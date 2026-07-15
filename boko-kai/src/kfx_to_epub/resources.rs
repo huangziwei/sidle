@@ -1,9 +1,11 @@
 //! Image + raw media extraction + cover declaration.
 //!
 //! Port of (the image-handling parts of) calibre's `yj_to_epub_resources.py`.
-//! Walks every `external_resource` ($164) entity, locates the matching
-//! `bcRawMedia` ($417) bytes, and registers the result in the EPUB manifest
-//! under `OEBPS/<filename>`. Marks the cover image as such on the way out.
+//! The external_resource walk, filename convention, and format prediction
+//! live in the shared [`crate::kfx::resource_index`] module (the IR route
+//! uses the same code, which is what keeps both routes' image trees
+//! byte-identical); this module registers the results in the EPUB manifest
+//! under `OEBPS/<filename>` and marks the cover image on the way out.
 //!
 //! Image *bytes* are deferred: [`process_deferred`] registers every image
 //! with its final filename/mime/dimensions but empty data (the content and
@@ -19,24 +21,13 @@
 
 use std::collections::HashMap;
 
-use crate::kfx::container::get_field;
-use crate::kfx::ion::IonValue;
+use crate::kfx::resource_index::{build_image_index, cover_filename, format_to_mime};
 use crate::kfx::symbols::KfxSymbol;
 
 use super::ConvertError;
-use super::loader::{BookData, SymbolTable};
+use super::loader::BookData;
 use super::output::EpubOutput;
 use crate::image::jxr_transcode as transcode;
-
-/// Image format symbol values KFX may set on `external_resource.format`.
-/// Calibre's `SYMBOL_FORMATS` mapping for the image side.
-const FORMAT_JPG: &str = "jpg";
-const FORMAT_PNG: &str = "png";
-const FORMAT_GIF: &str = "gif";
-const FORMAT_WEBP: &str = "webp";
-const FORMAT_BMP: &str = "bmp";
-const FORMAT_SVG: &str = "svg";
-const FORMAT_JXR: &str = "jxr";
 
 /// One bundled image, exposed so later steps (content emission, cover wiring)
 /// know what filename / resource_name to reference.
@@ -110,45 +101,34 @@ pub fn process_deferred(
         return Ok((index, deferred));
     };
 
-    // Sort for deterministic output (HashMap iteration order is random).
-    let mut keys: Vec<&String> = resources.keys().collect();
-    keys.sort();
+    let entries = build_image_index(
+        resources.iter().map(|(fid, v)| (fid.as_str(), v)).collect(),
+        &book.symbols,
+        |location| book.raw_media.get(location).cloned(),
+    );
 
-    for key in keys {
-        let Some(prep) = prepare_resource(key, &resources[key], book) else {
-            continue;
-        };
-        // Predict the final format without decoding: a JXR will be transcoded
-        // to JPEG; everything else passes through as sniffed (falling back to
-        // the KFX `format` field) — exactly the eager pass's non-JXR logic.
-        let final_format = if prep.is_jxr {
-            FORMAT_JPG.to_string()
-        } else {
-            sniff_format(prep.raw_bytes).unwrap_or_else(|| prep.format_str.clone())
-        };
-        let final_mime = format_to_mime(&final_format);
-        let filename = build_image_filename(&prep.location, &final_format, out);
+    for img in &entries {
         let manifest_id =
-            out.add_resource(&filename, Vec::new(), &final_mime, prep.width, prep.height);
+            out.add_resource(&img.filename, Vec::new(), &img.mime, img.width, img.height);
         index.by_name.insert(
-            prep.resource_name.clone(),
+            img.resource_name.clone(),
             ProcessedImage {
-                resource_name: prep.resource_name.clone(),
-                filename: filename.clone(),
+                resource_name: img.resource_name.clone(),
+                filename: img.filename.clone(),
                 manifest_id,
-                mime: final_mime.clone(),
-                width: prep.width,
-                height: prep.height,
+                mime: img.mime.clone(),
+                width: img.width,
+                height: img.height,
             },
         );
         deferred.push(DeferredImage {
-            resource_name: prep.resource_name,
-            location: prep.location,
-            filename,
-            mime: final_mime,
-            is_jxr: prep.is_jxr,
-            width: prep.width,
-            height: prep.height,
+            resource_name: img.resource_name.clone(),
+            location: img.location.clone(),
+            filename: img.filename.clone(),
+            mime: img.mime.clone(),
+            is_jxr: img.is_jxr,
+            width: img.width,
+            height: img.height,
         });
     }
 
@@ -160,12 +140,7 @@ pub fn process_deferred(
     if let Some(cover_name) = &book.metadata.cover_resource_name
         && let Some(img) = index.by_name.get(cover_name).cloned()
     {
-        let ext = std::path::Path::new(&img.filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| if e == "jpg" { "jpeg" } else { e })
-            .unwrap_or("jpeg");
-        let new_filename = format!("cover.{}", ext);
+        let new_filename = cover_filename(&img.filename);
         if let Some(new_id) = out.rename_resource(&img.filename, &new_filename, Some("cover")) {
             out.mark_cover(&new_id);
             if let Some(slot) = index.by_name.get_mut(cover_name) {
@@ -212,51 +187,14 @@ pub fn transcode_deferred_one(
 }
 
 /// Run [`transcode_deferred_one`] over `items` **in parallel** across all
-/// available CPU cores via `std::thread::scope`, preserving order. Each
-/// worker owns a contiguous slice — static striping is fine because all JXR
-/// images on the corpus cost ~20 ms ± 30%.
+/// available CPU cores, preserving order (static striping via
+/// [`crate::util::parallel_map`] — fine because all JXR images on the corpus
+/// cost ~20 ms ± 30%).
 pub fn transcode_deferred(
     book: &BookData,
     items: &[DeferredImage],
 ) -> Vec<Result<TranscodedImage, ConvertError>> {
-    if items.is_empty() {
-        return Vec::new();
-    }
-    let n_workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(items.len());
-    if n_workers <= 1 {
-        return items
-            .iter()
-            .map(|i| transcode_deferred_one(book, i))
-            .collect();
-    }
-    let mut out: Vec<Option<Result<TranscodedImage, ConvertError>>> =
-        (0..items.len()).map(|_| None).collect();
-    std::thread::scope(|scope| {
-        let chunk_size = items.len().div_ceil(n_workers);
-        let mut handles = Vec::with_capacity(n_workers);
-        for chunk in items.chunks(chunk_size) {
-            handles.push(
-                scope.spawn(move || -> Vec<Result<TranscodedImage, ConvertError>> {
-                    chunk
-                        .iter()
-                        .map(|i| transcode_deferred_one(book, i))
-                        .collect()
-                }),
-            );
-        }
-        let mut write_idx = 0;
-        for h in handles {
-            let results = h.join().expect("transcode worker panicked");
-            for r in results {
-                out[write_idx] = Some(r);
-                write_idx += 1;
-            }
-        }
-    });
-    out.into_iter().map(|slot| slot.expect("filled")).collect()
+    crate::util::parallel_map(items, |i| transcode_deferred_one(book, i))
 }
 
 /// Aggregate JXR timings from transcode results and print the
@@ -308,188 +246,6 @@ pub fn trace_jxr_totals<'a>(timings: impl Iterator<Item = &'a transcode::Transco
     );
 }
 
-/// Everything `prepare_resource` extracts up-front. Borrows from
-/// `book.raw_media` for the source image bytes (used here only for format
-/// sniffing; the transcode re-resolves them by `location`).
-struct PreparedResource<'a> {
-    resource_name: String,
-    location: String,
-    raw_bytes: &'a [u8],
-    width: Option<u32>,
-    height: Option<u32>,
-    /// True iff the bytes are JPEG-XR (by `format` field or by file magic).
-    is_jxr: bool,
-    /// `format` field as a String for the non-JXR pass-through path.
-    format_str: String,
-}
-
-fn prepare_resource<'a>(
-    fid: &str,
-    raw: &'a IonValue,
-    book: &'a BookData,
-) -> Option<PreparedResource<'a>> {
-    let inner = raw.unwrap_annotated();
-    let fields = inner.as_struct()?;
-
-    // Pull the fields we care about. We use symbol-id lookups rather than
-    // string keys for speed and to match calibre's $-symbol style.
-    let resource_name = get_field(fields, KfxSymbol::ResourceName as u64)
-        .and_then(|v| book.symbols.text_of(v))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| fid.to_string());
-
-    let format_raw = get_field(fields, KfxSymbol::Format as u64)
-        .and_then(|v| book.symbols.text_of(v))
-        .map(|s| s.to_string());
-
-    let mime_raw = get_field(fields, KfxSymbol::Mime as u64)
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_string());
-
-    let location = get_field(fields, KfxSymbol::Location as u64)
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_string())?;
-
-    let width = get_field(fields, KfxSymbol::ResourceWidth as u64)
-        .and_then(|v| v.as_int())
-        .map(|n| n as u32);
-    let height = get_field(fields, KfxSymbol::ResourceHeight as u64)
-        .and_then(|v| v.as_int())
-        .map(|n| n as u32);
-
-    // Skip non-image formats here (fonts come in via the fonts step).
-    let format_str = format_raw.as_deref().unwrap_or("");
-    if !is_image_format_symbol(format_str, mime_raw.as_deref()) {
-        return None;
-    }
-
-    let raw_bytes = match book.raw_media.get(&location) {
-        Some(b) => b.as_slice(),
-        None => {
-            // Calibre logs "Missing bcRawMedia" here and skips.
-            eprintln!("kfx_to_epub: missing bcRawMedia at {location:?}");
-            return None;
-        }
-    };
-
-    let is_jxr = format_str == FORMAT_JXR || sniff_format(raw_bytes).as_deref() == Some(FORMAT_JXR);
-
-    Some(PreparedResource {
-        resource_name,
-        location,
-        raw_bytes,
-        width,
-        height,
-        is_jxr,
-        format_str: format_str.to_string(),
-    })
-}
-
-fn is_image_format_symbol(format: &str, mime: Option<&str>) -> bool {
-    matches!(
-        format,
-        FORMAT_JPG | FORMAT_PNG | FORMAT_GIF | FORMAT_WEBP | FORMAT_BMP | FORMAT_SVG | FORMAT_JXR
-    ) || mime.is_some_and(|m| m.starts_with("image/"))
-}
-
-/// Detect image format from leading bytes. Used as a sanity check and as a
-/// fallback when the `format` field is missing.
-fn sniff_format(bytes: &[u8]) -> Option<String> {
-    if bytes.len() >= 3 && bytes[..3] == [0xFF, 0xD8, 0xFF] {
-        return Some(FORMAT_JPG.into());
-    }
-    if bytes.len() >= 8 && bytes[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
-        return Some(FORMAT_PNG.into());
-    }
-    if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
-        return Some(FORMAT_GIF.into());
-    }
-    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return Some(FORMAT_WEBP.into());
-    }
-    if bytes.len() >= 2 && &bytes[..2] == b"BM" {
-        return Some(FORMAT_BMP.into());
-    }
-    // JPEG-XR / WMP container: II-BC magic.
-    if bytes.len() >= 3 && bytes[..3] == [0x49, 0x49, 0xBC] {
-        return Some(FORMAT_JXR.into());
-    }
-    None
-}
-
-fn format_to_mime(format: &str) -> String {
-    match format {
-        FORMAT_JPG => "image/jpeg".into(),
-        FORMAT_PNG => "image/png".into(),
-        FORMAT_GIF => "image/gif".into(),
-        FORMAT_WEBP => "image/webp".into(),
-        FORMAT_BMP => "image/bmp".into(),
-        FORMAT_SVG => "image/svg+xml".into(),
-        FORMAT_JXR => "image/jxr".into(),
-        _ => "application/octet-stream".into(),
-    }
-}
-
-fn format_to_ext(format: &str) -> &'static str {
-    match format {
-        FORMAT_JPG => ".jpg",
-        FORMAT_PNG => ".png",
-        FORMAT_GIF => ".gif",
-        FORMAT_WEBP => ".webp",
-        FORMAT_BMP => ".bmp",
-        FORMAT_SVG => ".svg",
-        FORMAT_JXR => ".jxr",
-        _ => ".bin",
-    }
-}
-
-/// Mirror calibre's `resource_location_filename`: take the external_resource
-/// `location` (e.g. `"resource/rsrc562"`), strip the `resource/` prefix to
-/// the unique part, prepend the resource-type prefix (`"image"` for image
-/// formats), and apply the extension. Result: `"image_rsrc562.jpg"`.
-fn build_image_filename(location: &str, format: &str, out: &EpubOutput) -> String {
-    let ext = format_to_ext(format);
-    // Sanitise: only `[A-Za-z0-9_/.-]` survives; everything else → `_`.
-    let safe: String = location
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '/' || c == '.' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    // Split path / name; pull the basename's root (no extension).
-    let name = safe.rsplit('/').next().unwrap_or(&safe);
-    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
-    // Unique part: strip the `resource/`-style prefix that the on-disk
-    // location commonly uses. For SHORT-form symbols (which is what
-    // horror's KFX uses), calibre's `unique_part_of_local_symbol` just
-    // strips `^resource/`. We do the same.
-    let unique = stem
-        .strip_prefix("rsrc")
-        .map(|r| format!("rsrc{r}"))
-        .unwrap_or_else(|| stem.to_string());
-
-    // Resource-type prefix. Mirrors calibre's RESOURCE_TYPE_OF_EXT mapping
-    // for image extensions: image → "image_<unique>". When the unique part
-    // already starts with a letter the prefix joins with `_`.
-    let prefixed = if unique.is_empty() {
-        "image".to_string()
-    } else {
-        format!("image_{unique}")
-    };
-
-    let mut candidate = format!("{prefixed}{ext}");
-    let mut n = 0;
-    while out.has_file(&candidate) {
-        candidate = format!("{prefixed}-{n}{ext}");
-        n += 1;
-    }
-    candidate
-}
-
 /// Fallback when the content pipeline emits no chapters: one minimal XHTML
 /// chapter per bundled image so the validator still sees an `<img src>` for
 /// each.
@@ -539,7 +295,3 @@ fn out_manifest_len(out: &EpubOutput) -> usize {
 fn out_manifest_get(out: &EpubOutput, idx: usize) -> Option<&super::output::ManifestEntry> {
     out.manifest_view().get(idx)
 }
-
-// Suppress unused-warning until later steps consume.
-#[allow(dead_code)]
-fn _unused_symbol_table_marker(_: &SymbolTable) {}

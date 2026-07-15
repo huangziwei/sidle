@@ -79,6 +79,43 @@ pub fn time_now_iso8601_utc() -> String {
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, m, s)
 }
 
+/// Map `f` over `items` in parallel across all available CPU cores,
+/// preserving input order. Each worker owns one contiguous chunk (static
+/// striping — appropriate when per-item cost is roughly uniform, e.g. the
+/// KFX JPEG-XR→JPEG transcode where images cost ~20 ms ± 30%). Falls back
+/// to a plain serial map for empty/single-item input or one core.
+pub fn parallel_map<T, R, F>(items: &[T], f: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> R + Sync,
+{
+    let n_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(items.len());
+    if n_workers <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let mut out: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let chunk_size = items.len().div_ceil(n_workers);
+        let f = &f;
+        let mut handles = Vec::with_capacity(n_workers);
+        for chunk in items.chunks(chunk_size) {
+            handles.push(scope.spawn(move || chunk.iter().map(f).collect::<Vec<R>>()));
+        }
+        let mut write_idx = 0;
+        for h in handles {
+            for r in h.join().expect("parallel_map worker panicked") {
+                out[write_idx] = Some(r);
+                write_idx += 1;
+            }
+        }
+    });
+    out.into_iter().map(|slot| slot.expect("filled")).collect()
+}
+
 // Howard Hinnant's `civil_from_days`. Days are counted from 1970-01-01.
 // Reference: https://howardhinnant.github.io/date_algorithms.html
 fn civil_from_days(z: i64) -> (i32, u32, u32) {

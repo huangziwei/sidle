@@ -305,35 +305,51 @@ impl EpubExporter {
             spine_refs.push(id);
         }
 
-        // Add assets to manifest (from normalized content). Sort for stable
-        // ordering across runs, and force-include the cover image even if no
-        // chapter references it inline (Amazon's KFX stores the cover as a
-        // bcRawMedia that's only mentioned in metadata).
-        let mut asset_paths: Vec<String> = content.assets.iter().cloned().collect();
-        asset_paths.sort();
-        if let Some(cover) = book.metadata().cover_image.as_ref()
-            && !cover.trim().is_empty()
-            && !asset_paths.iter().any(|a| a == cover)
-        {
-            asset_paths.push(cover.clone());
-        }
-        // Pre-load asset bytes so we can sniff MIME types for extensionless
-        // assets (KFX stores resources as `e0`/`eF`/… without extensions). We
-        // reuse the bytes when writing to the zip below.
-        let mut asset_bytes: Vec<(String, Vec<u8>)> = Vec::with_capacity(asset_paths.len());
-        for asset_path in &asset_paths {
-            let bytes = book
-                .load_asset(std::path::Path::new(asset_path))
-                .unwrap_or_default();
-            asset_bytes.push((asset_path.clone(), bytes));
-        }
-        for (asset_idx, (asset_path, bytes)) in asset_bytes.iter().enumerate() {
-            let mut media_type = guess_media_type(asset_path);
-            if media_type == "application/octet-stream"
-                && let Some(sniffed) = sniff_image_media_type(bytes)
+        // Add assets to manifest. When the importer declares an authoritative
+        // bundle (KFX: the canonical image index shared with the mechanical
+        // route — deterministic order, exported filenames, cover included
+        // even when no chapter references it inline), use it verbatim; bytes
+        // load in one bulk call so the KFX JPEG-XR→JPEG transcode runs across
+        // cores. Otherwise fall back to the assets the normalized content
+        // references, sorted for stable ordering, force-including the cover
+        // image (it may be referenced by metadata only).
+        let asset_bytes: Vec<(String, Vec<u8>)> = if let Some(asset_list) = book.bundled_assets() {
+            asset_list
+                .iter()
+                .zip(book.load_assets(&asset_list))
+                .map(|(path, bytes)| {
+                    (
+                        path.to_string_lossy().to_string(),
+                        bytes.unwrap_or_default(),
+                    )
+                })
+                .collect()
+        } else {
+            let mut asset_paths: Vec<String> = content.assets.iter().cloned().collect();
+            asset_paths.sort();
+            if let Some(cover) = book.metadata().cover_image.as_ref()
+                && !cover.trim().is_empty()
+                && !asset_paths.iter().any(|a| a == cover)
             {
-                media_type = sniffed.to_string();
+                asset_paths.push(cover.clone());
             }
+            asset_paths
+                .into_iter()
+                .map(|path| {
+                    let bytes = book
+                        .load_asset(std::path::Path::new(&path))
+                        .unwrap_or_default();
+                    (path, bytes)
+                })
+                .collect()
+        };
+        for (asset_idx, (asset_path, bytes)) in asset_bytes.iter().enumerate() {
+            // Sniff first: post-transcode bytes are the truth (a JPEG-XR that
+            // failed to decode passes through as image/jxr despite its .jpg
+            // name). Extension guess covers unsniffable formats (SVG).
+            let media_type = sniff_image_media_type(bytes)
+                .map(str::to_string)
+                .unwrap_or_else(|| guess_media_type(asset_path));
             let id = format!("asset_{}", asset_idx);
             let href = format!("OEBPS/{}", sanitize_path(asset_path));
 
@@ -1125,6 +1141,9 @@ fn guess_media_type(path: &str) -> String {
         "png" => "image/png".to_string(),
         "gif" => "image/gif".to_string(),
         "svg" => "image/svg+xml".to_string(),
+        "webp" => "image/webp".to_string(),
+        "bmp" => "image/bmp".to_string(),
+        "jxr" => "image/jxr".to_string(),
         "ttf" => "font/ttf".to_string(),
         "otf" => "font/otf".to_string(),
         "woff" => "font/woff".to_string(),
@@ -1151,6 +1170,13 @@ fn sniff_image_media_type(bytes: &[u8]) -> Option<&'static str> {
     }
     if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         return Some("image/webp");
+    }
+    if bytes.len() >= 2 && &bytes[..2] == b"BM" {
+        return Some("image/bmp");
+    }
+    // JPEG-XR / WMP container: II-BC magic.
+    if bytes.len() >= 3 && bytes[..3] == [0x49, 0x49, 0xBC] {
+        return Some("image/jxr");
     }
     // SVG: text format, sniff by the first non-whitespace char + signature
     if bytes.len() >= 5 {
