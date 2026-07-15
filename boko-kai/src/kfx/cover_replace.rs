@@ -543,12 +543,13 @@ mod tests {
         None
     }
 
-    /// End-to-end on the committed `tests/fixtures/[太宰 治] 人間失格.kfx` (cover at
+    /// End-to-end on the committed `tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx` (cover at
     /// `resource/rsrc7`): swap the cover, then prove the patched container
     /// re-parses with the new cover and still converts to EPUB.
     #[test]
     fn replace_cover_roundtrip_on_fixture() {
-        let kfx = std::fs::read("tests/fixtures/[太宰 治] 人間失格.kfx").expect("read fixture");
+        let kfx = std::fs::read("tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx")
+            .expect("read fixture");
 
         let before = loader::load(&kfx).expect("load original");
         let (loc0, _, _, bytes0) = declared_cover(&before).expect("fixture has a cover");

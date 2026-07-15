@@ -195,7 +195,7 @@ fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    const FIXTURE: &str = "tests/fixtures/[太宰 治] 人間失格.kfx";
+    const FIXTURE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
 
     /// Extraction on the real fixture: every image has non-empty bytes and a
     /// valid extension, exactly one is flagged the cover, and that cover image

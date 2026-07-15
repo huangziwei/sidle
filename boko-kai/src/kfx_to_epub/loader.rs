@@ -492,12 +492,12 @@ fn resolve_cover_value(value: Option<&IonValue>, symbols: &SymbolTable) -> Optio
 mod tests {
     use super::*;
 
-    /// Minimum-viable load check on the committed 人間失格 KFX fixture.
+    /// Minimum-viable load check on the committed 黒死館殺人事件 KFX fixture.
     #[test]
     fn load_ningen_shikkaku_kfx_smoke() {
-        let path = "tests/fixtures/[太宰 治] 人間失格.kfx";
+        let path = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
         let bytes = std::fs::read(path).expect("read fixture");
-        let _ = load(&bytes).expect("load 人間失格.kfx");
+        let _ = load(&bytes).expect("load 黒死館殺人事件.kfx");
     }
 
     /// Doc-symbol table where symbol id `i` resolves to `names[i]`.

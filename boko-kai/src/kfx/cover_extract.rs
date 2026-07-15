@@ -152,7 +152,8 @@ mod tests {
     fn extracts_cover_from_fixture_kfx_matching_cover_replace() {
         // The committed KFX fixture declares a cover at `resource/rsrc7`; the
         // extractor must return the same backing bytes `cover_replace` resolves.
-        let kfx = std::fs::read("tests/fixtures/[太宰 治] 人間失格.kfx").expect("read fixture");
+        let kfx = std::fs::read("tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx")
+            .expect("read fixture");
         let book = loader::load(&kfx).expect("load fixture");
         let cover_name = book
             .metadata

@@ -9,7 +9,7 @@ use std::path::Path;
 
 #[test]
 fn wellformed_kfx_fixture_has_no_structural_defects() {
-    let path = "tests/fixtures/[太宰 治] 人間失格.kfx";
+    let path = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
     assert!(Path::new(path).exists(), "fixture missing: {path}");
     let bytes = std::fs::read(path).expect("read fixture");
 
@@ -49,7 +49,7 @@ fn garbage_container_reports_unreadable() {
 fn kfx_zip_bundle_routes_through_kfx_checks_not_epub() {
     use std::io::Write;
 
-    let kfx_path = "tests/fixtures/[太宰 治] 人間失格.kfx";
+    let kfx_path = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
     let kfx_bytes = std::fs::read(kfx_path).expect("read fixture");
 
     // Pack the single .kfx into a one-entry `.kfx-zip` (starts with `PK`, like

@@ -577,8 +577,8 @@ mod tests {
 
     #[test]
     fn reader_book_has_sections_and_stamps_data_eid() {
-        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx"))
-            .expect("read [太宰 治] 人間失格.kfx fixture");
+        let bytes = std::fs::read(fixture("[小栗 虫太郎] 黒死館殺人事件 (2012).kfx"))
+            .expect("read [小栗 虫太郎] 黒死館殺人事件 (2012).kfx fixture");
         let book = kfx_to_reader_book(&bytes).expect("kfx_to_reader_book");
         assert!(!book.sections.is_empty(), "expected at least one section");
         assert!(
@@ -600,7 +600,8 @@ mod tests {
     /// section, and never doubled.
     #[test]
     fn reader_toc_leads_with_synthesized_cover() {
-        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx")).expect("read fixture");
+        let bytes = std::fs::read(fixture("[小栗 虫太郎] 黒死館殺人事件 (2012).kfx"))
+            .expect("read fixture");
         let book = kfx_to_reader_book(&bytes).expect("kfx_to_reader_book");
         let first = book.toc.first().expect("toc should have entries");
         // 表紙 for this Japanese book, at the first rendered section (the cover,
@@ -620,7 +621,8 @@ mod tests {
     /// duplicated between `resources` and `images`.
     #[test]
     fn lazy_reader_book_matches_eager() {
-        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx")).expect("read fixture");
+        let bytes = std::fs::read(fixture("[小栗 虫太郎] 黒死館殺人事件 (2012).kfx"))
+            .expect("read fixture");
         let eager = kfx_to_reader_book(&bytes).expect("eager");
         let (lazy, store) = kfx_to_reader_book_lazy(&bytes).expect("lazy");
         assert!(eager.images.is_empty(), "legacy shape inlines images");
@@ -738,7 +740,8 @@ mod tests {
     /// identical; the 1em glyph case is exercised by real library books).
     #[test]
     fn reader_images_carry_their_style_class() {
-        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx")).expect("read fixture");
+        let bytes = std::fs::read(fixture("[小栗 虫太郎] 黒死館殺人事件 (2012).kfx"))
+            .expect("read fixture");
         let book = kfx_to_reader_book(&bytes).expect("kfx_to_reader_book");
 
         // First real `<img …>` across all sections. A missing-resource image
@@ -789,8 +792,8 @@ mod tests {
 
     #[test]
     fn epub_export_does_not_stamp_data_eid() {
-        let bytes = std::fs::read(fixture("[太宰 治] 人間失格.kfx"))
-            .expect("read [太宰 治] 人間失格.kfx fixture");
+        let bytes = std::fs::read(fixture("[小栗 虫太郎] 黒死館殺人事件 (2012).kfx"))
+            .expect("read [小栗 虫太郎] 黒死館殺人事件 (2012).kfx fixture");
         // The shippable EPUB path must leave the DOM stamp-free (no bloat).
         let (out, _book, _toc, _deferred) =
             build_output(&bytes, false, &|_, _, _, _| {}).expect("build_output");

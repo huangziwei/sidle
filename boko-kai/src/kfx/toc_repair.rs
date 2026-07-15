@@ -716,7 +716,7 @@ mod tests {
     use crate::kfx_to_epub::navigation::extract_toc;
     use std::collections::HashMap;
 
-    const FIXTURE: &str = "tests/fixtures/[太宰 治] 人間失格.kfx";
+    const FIXTURE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
 
     /// A real target eid from the fixture's existing toc — any valid nav target,
     /// so the write test points at a position the container already trusts.

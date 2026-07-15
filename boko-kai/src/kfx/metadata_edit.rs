@@ -307,7 +307,7 @@ fn authors_ion(authors: &[String]) -> IonValue {
 mod tests {
     use super::*;
 
-    const FIXTURE: &str = "tests/fixtures/[太宰 治] 人間失格.kfx";
+    const FIXTURE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
 
     /// End-to-end: patch title + authors on the real fixture, then prove the
     /// rewritten container re-loads with the new values, leaves other metadata

@@ -75,7 +75,7 @@ fn test_mobi_toc_resolution() {
 
 #[test]
 fn test_kfx_toc_resolution() {
-    let path = "tests/fixtures/[太宰 治] 人間失格.kfx";
+    let path = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
     let mut book = Book::open(path).expect("Should open KFX");
     let _ = book.resolve_links().expect("Should resolve links");
 
@@ -84,12 +84,13 @@ fn test_kfx_toc_resolution() {
 
 #[test]
 fn test_kfx_asset_is_binary_media_with_expected_hash() {
-    let path = "tests/fixtures/[太宰 治] 人間失格.kfx";
+    let path = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
     let mut book = Book::open(path).expect("Should open KFX");
 
-    // 人間失格 has a single image asset — the cover JPEG. The asset list
-    // carries exported filenames (shared with the mechanical route), so the
-    // cover appears under its `cover.<ext>` rename.
+    // The asset list carries exported filenames (shared with the mechanical
+    // route), so the declared cover appears under its `cover.<ext>` rename
+    // alongside the 49 `image_rsrc*` content images.
+    assert_eq!(book.list_assets().len(), 50, "expected 50 image assets");
     assert!(
         book.list_assets()
             .iter()
@@ -112,17 +113,17 @@ fn test_kfx_asset_is_binary_media_with_expected_hash() {
         bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
         "Expected cover.jpeg to be a JPEG"
     );
-    assert_eq!(bytes.len(), 32316, "cover.jpeg payload size");
+    assert_eq!(bytes.len(), 731241, "cover.jpeg payload size");
     assert_eq!(
         sha1_hex(bytes.as_slice()),
-        "2180e85c65eaa649e770645853c1c94bc4f77618",
+        "b8bc3dc3d6ba8744929bb91632a7e724f324c760",
         "Unexpected SHA-1 for cover.jpeg"
     );
 
     // Raw entity addressing (`#<id>`) still works for direct extraction and
-    // returns the identical payload.
+    // returns the identical payload (1160 is the cover's bcRawMedia entity).
     let by_id = book
-        .load_asset(Path::new("#880"))
-        .expect("Expected asset #880 to load");
+        .load_asset(Path::new("#1160"))
+        .expect("Expected asset #1160 to load");
     assert_eq!(sha1_hex(by_id.as_slice()), sha1_hex(bytes.as_slice()));
 }

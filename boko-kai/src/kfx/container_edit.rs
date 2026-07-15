@@ -229,7 +229,7 @@ mod tests {
     use super::*;
     use crate::kfx_to_epub::loader;
 
-    const FIXTURE: &str = "tests/fixtures/[太宰 治] 人間失格.kfx";
+    const FIXTURE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
 
     /// An all-`Keep` edit is a faithful passthrough: the rewritten container
     /// re-loads, preserves every entity + raw-media resource, and still converts
