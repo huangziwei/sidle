@@ -12,11 +12,11 @@
 use std::collections::HashMap;
 
 use crate::kfx::container::{
-    self, EntityLoc, extract_doc_symbols, get_field, parse_container_header, parse_container_info,
-    parse_index_table, skip_enty_header,
+    EntityLoc, get_field, parse_container_header, parse_container_info, parse_index_table,
+    skip_enty_header,
 };
 use crate::kfx::ion::{IonParser, IonValue};
-use crate::kfx::symbols::{KFX_SYMBOL_TABLE, KfxSymbol};
+use crate::kfx::symbols::KfxSymbol;
 
 use super::ConvertError;
 
@@ -80,49 +80,10 @@ pub struct BookData {
     pub metadata: BookMetadata,
 }
 
-/// Resolved symbol table — base + per-container doc_symbols.
-///
-/// `base_len` must match calibre's `LocalSymbolTable.local_min_id - 1`, i.e.
-/// the count of imported (system + shared) symbols. Calibre's value is 839
-/// (9 system + 830 YJ_SYMBOLS), so doc_symbols start at id 840. Our static
-/// `KFX_SYMBOL_TABLE` has 852 entries — 13 trailing additions Amazon shipped
-/// after calibre's YJ_SYMBOLS table was last updated — but for reading
-/// Amazon-produced KFX containers we must follow calibre's offset, otherwise
-/// doc_symbols are looked up 12 positions off and every entity id resolves
-/// to the wrong name.
-pub struct SymbolTable {
-    base_len: u64,
-    doc_symbols: Vec<String>,
-}
-
-/// Fallback base when the doc_symbol fragment doesn't declare imports.
-/// Real KFX files always declare YJ_symbols and we read max_id from there.
-const FALLBACK_BASE_LEN: u64 = 833;
-
-impl SymbolTable {
-    /// Resolve a symbol id to its text. Returns `"?"` for out-of-range ids.
-    ///
-    /// For ids below `base_len` we look up the static KFX table (which matches
-    /// calibre's system + YJ_SYMBOLS for ids 0..839); above, we index into
-    /// the per-container doc_symbols.
-    pub fn resolve(&self, id: u64) -> &str {
-        if id < self.base_len {
-            KFX_SYMBOL_TABLE.get(id as usize).copied().unwrap_or("?")
-        } else {
-            let idx = (id - self.base_len) as usize;
-            self.doc_symbols.get(idx).map(String::as_str).unwrap_or("?")
-        }
-    }
-
-    /// Resolve a value that may be a Symbol or a String to its text.
-    pub fn text_of<'a>(&'a self, v: &'a IonValue) -> Option<&'a str> {
-        match v {
-            IonValue::Symbol(id) => Some(self.resolve(*id)),
-            IonValue::String(s) => Some(s),
-            _ => None,
-        }
-    }
-}
+// The resolver lives in the shared substrate so every KFX reader (this
+// loader, the IR importer, validators, kfx-dump) resolves identically;
+// re-exported here for the existing `loader::SymbolTable` paths.
+pub use crate::kfx::container::SymbolTable;
 
 /// Load a KFX container in memory into `BookData`.
 pub fn load(kfx_bytes: &[u8]) -> Result<BookData, ConvertError> {
@@ -139,19 +100,11 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, ConvertError> {
     let info =
         parse_container_info(info_bytes).map_err(|e| ConvertError::InvalidKfx(e.to_string()))?;
 
-    let (doc_symbols, base_len) = match info.doc_symbols {
+    let symbols = match info.doc_symbols {
         Some((off, len)) if off + len <= kfx_bytes.len() => {
-            let doc_bytes = &kfx_bytes[off..off + len];
-            let base = parse_imports_max_id(doc_bytes)
-                .map(|m| m + 1)
-                .unwrap_or(FALLBACK_BASE_LEN);
-            (extract_doc_symbols(doc_bytes), base)
+            SymbolTable::from_fragment(Some(&kfx_bytes[off..off + len]))
         }
-        _ => (Vec::new(), FALLBACK_BASE_LEN),
-    };
-    let symbols = SymbolTable {
-        base_len,
-        doc_symbols,
+        _ => SymbolTable::from_fragment(None),
     };
 
     let (idx_off, idx_len) = info
@@ -218,17 +171,13 @@ pub fn load(kfx_bytes: &[u8]) -> Result<BookData, ConvertError> {
 }
 
 /// An empty `BookData` for unit tests that only exercise logic which doesn't
-/// read fragments (e.g. resolving inline `IonValue::String` content). The
-/// `SymbolTable` fields are private to this module, so this lives here.
+/// read fragments (e.g. resolving inline `IonValue::String` content).
 #[cfg(test)]
 pub(crate) fn empty_book_for_test() -> BookData {
     BookData {
         by_type: HashMap::new(),
         raw_media: HashMap::new(),
-        symbols: SymbolTable {
-            base_len: FALLBACK_BASE_LEN,
-            doc_symbols: Vec::new(),
-        },
+        symbols: SymbolTable::from_fragment(None),
         metadata: BookMetadata::default(),
     }
 }
@@ -572,51 +521,6 @@ fn resolve_cover_value(value: Option<&IonValue>, symbols: &SymbolTable) -> Optio
 
 /// Walk the doc_symbol Ion fragment to find the sum of imports' max_ids.
 /// In Amazon's KFX format the imports section is typically
-/// `[{name: "YJ_symbols", version: 10, max_id: N}]`, and local symbols
-/// occupy ids `N+1..`. We add 1 so the caller can use the return value as
-/// the base-id for the first local symbol.
-///
-/// Returns `None` if the fragment doesn't parse or doesn't declare imports
-/// — the caller falls back to a known-good constant.
-fn parse_imports_max_id(doc_bytes: &[u8]) -> Option<u64> {
-    let mut parser = IonParser::new(doc_bytes);
-    let value = parser.parse().ok()?;
-    let inner = value.unwrap_annotated();
-    let fields = inner.as_struct()?;
-
-    // KFX symbol-table struct field ids: 4=name, 5=version, 6=imports,
-    // 7=symbols, 8=max_id. We want imports → list of structs → field 8.
-    let imports_field = fields.iter().find(|(k, _)| *k == 6).map(|(_, v)| v)?;
-    let imports = imports_field.as_list()?;
-
-    let mut total: u64 = 0;
-    for entry in imports {
-        if let Some(entry_fields) = entry.as_struct()
-            && let Some(max_id_val) = entry_fields.iter().find(|(k, _)| *k == 8).map(|(_, v)| v)
-            && let Some(n) = max_id_val.as_int()
-        {
-            total += n as u64;
-        }
-    }
-    Some(total)
-}
-
-/// Re-export for `container::resolve_symbol`-style call sites that don't
-/// hold a `SymbolTable`. Mirrors `kfx::container::resolve_symbol` for
-/// `Vec<String>`-shaped doc_symbols.
-#[allow(dead_code)]
-pub fn resolve_in_table(id: u64, base_len: u64, doc_symbols: &[String]) -> Option<&str> {
-    if id < base_len {
-        KFX_SYMBOL_TABLE.get(id as usize).copied()
-    } else {
-        doc_symbols
-            .get((id - base_len) as usize)
-            .map(String::as_str)
-    }
-}
-
-#[allow(unused_imports)]
-use container as _container; // silence unused warning when modules grow
 
 #[cfg(test)]
 mod tests {
@@ -632,10 +536,7 @@ mod tests {
 
     /// Doc-symbol table where symbol id `i` resolves to `names[i]`.
     fn doc_symbols(names: &[&str]) -> SymbolTable {
-        SymbolTable {
-            base_len: 0,
-            doc_symbols: names.iter().map(|s| s.to_string()).collect(),
-        }
+        SymbolTable::new(0, names.iter().map(|s| s.to_string()).collect())
     }
 
     #[test]

@@ -194,7 +194,13 @@ impl EpubExporter {
         zip.write_all(opf.as_bytes())?;
 
         // 6a. Write nav.xhtml (EPUB 3 navigation document)
-        let nav = generate_nav(book.metadata(), book.toc(), book.landmarks());
+        let nav_fallback = book
+            .spine()
+            .first()
+            .and_then(|e| book.source_id(e.id))
+            .map(sanitize_path)
+            .unwrap_or_else(|| "chapter_0.xhtml".to_string());
+        let nav = generate_nav(book.metadata(), book.toc(), book.landmarks(), &nav_fallback);
         zip.start_file("OEBPS/nav.xhtml", deflated)
             .map_err(io_error)?;
         zip.write_all(nav.as_bytes())?;
@@ -249,6 +255,13 @@ impl EpubExporter {
         // Normalize the book content
         let content = normalize_book(book)?;
 
+        // Output filename per chapter, derived from the chapter's source id
+        // (for KFX: the section name). Must match the mechanical
+        // `kfx_to_epub` route byte-for-byte — same `{section}.xhtml` shape,
+        // same `-N` collision suffix (`content::push_book_part`) — so the
+        // two routes' trees can converge to identical.
+        let chapter_files = chapter_filenames(&content.chapters);
+
         let mut zip = ZipWriter::new(writer);
 
         let compression_level = self.config.compression_level.unwrap_or(6);
@@ -282,7 +295,7 @@ impl EpubExporter {
         // Add chapters to manifest
         for (i, _) in content.chapters.iter().enumerate() {
             let id = format!("chapter_{}", i);
-            let href = format!("OEBPS/chapter_{}.xhtml", i);
+            let href = format!("OEBPS/{}", chapter_files[i]);
 
             manifest_items.push(ManifestItem {
                 id: id.clone(),
@@ -384,7 +397,11 @@ impl EpubExporter {
         zip.write_all(opf.as_bytes())?;
 
         // 6a. Write nav.xhtml (EPUB 3 navigation document)
-        let nav = generate_nav(book.metadata(), book.toc(), book.landmarks());
+        let nav_fallback = chapter_files
+            .first()
+            .map(String::as_str)
+            .unwrap_or("chapter_0.xhtml");
+        let nav = generate_nav(book.metadata(), book.toc(), book.landmarks(), nav_fallback);
         zip.start_file("OEBPS/nav.xhtml", deflated)
             .map_err(io_error)?;
         zip.write_all(nav.as_bytes())?;
@@ -411,7 +428,7 @@ impl EpubExporter {
 
         // 8. Write synthesized chapters
         for (i, chapter) in content.chapters.iter().enumerate() {
-            let zip_path = format!("OEBPS/chapter_{}.xhtml", i);
+            let zip_path = format!("OEBPS/{}", chapter_files[i]);
             zip.start_file(&zip_path, deflated).map_err(io_error)?;
             zip.write_all(chapter.document.as_bytes())?;
         }
@@ -815,6 +832,7 @@ fn generate_nav(
     metadata: &crate::model::Metadata,
     toc: &[TocEntry],
     landmarks: &[Landmark],
+    first_chapter_href: &str,
 ) -> String {
     let mut s = String::new();
     s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -841,7 +859,10 @@ fn generate_nav(
         // Spec requires the nav to be non-empty; fall back to the title
         // pointing at the first content document. Empty TOC is unusual but
         // exists on minimal books.
-        s.push_str("    <ol>\n      <li><a href=\"chapter_0.xhtml\">");
+        s.push_str(&format!(
+            "    <ol>\n      <li><a href=\"{}\">",
+            escape_xml(first_chapter_href)
+        ));
         s.push_str(&escape_xml(if metadata.title.is_empty() {
             "Content"
         } else {
@@ -1057,6 +1078,37 @@ fn sanitize_path(path: &str) -> String {
         .replace("//", "/")
 }
 
+/// Output filename for each normalized chapter: `{source_id}.xhtml` (for KFX,
+/// the section name), unique via a `-N` suffix on collision. Both rules match
+/// the mechanical route's `kfx_to_epub::content::push_book_part` exactly —
+/// the two kfx→epub engines must name spine files identically to converge.
+/// Chapters without a usable source id fall back to positional names.
+fn chapter_filenames(chapters: &[super::normalize::ChapterContent]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::with_capacity(chapters.len());
+    for (i, ch) in chapters.iter().enumerate() {
+        let source = sanitize_path(&ch.source_path);
+        let base = if source.is_empty() || source == "unknown.xhtml" {
+            format!("chapter_{i}")
+        } else {
+            source.trim_end_matches(".xhtml").to_string()
+        };
+        let mut candidate = format!("{base}.xhtml");
+        if names.contains(&candidate) {
+            let mut n = 1;
+            loop {
+                let cand = format!("{base}-{n}.xhtml");
+                if !names.contains(&cand) {
+                    candidate = cand;
+                    break;
+                }
+                n += 1;
+            }
+        }
+        names.push(candidate);
+    }
+    names
+}
+
 /// Guess media type from file extension.
 fn guess_media_type(path: &str) -> String {
     let ext = Path::new(path)
@@ -1115,6 +1167,37 @@ fn sniff_image_media_type(bytes: &[u8]) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chapter(source_path: &str) -> super::super::normalize::ChapterContent {
+        super::super::normalize::ChapterContent {
+            id: crate::import::ChapterId(0),
+            source_path: source_path.to_string(),
+            document: String::new(),
+        }
+    }
+
+    #[test]
+    fn chapter_filenames_use_source_ids_with_port_dedup() {
+        // KFX section names (no extension) get `.xhtml`; collisions get `-N`
+        // (the `push_book_part` rule); placeholders fall back positionally.
+        let chapters = vec![
+            chapter("secA"),
+            chapter("secA"),
+            chapter("secA"),
+            chapter("unknown.xhtml"),
+            chapter("secB.xhtml"),
+        ];
+        assert_eq!(
+            chapter_filenames(&chapters),
+            vec![
+                "secA.xhtml",
+                "secA-1.xhtml",
+                "secA-2.xhtml",
+                "chapter_3.xhtml",
+                "secB.xhtml"
+            ]
+        );
+    }
 
     #[test]
     fn test_escape_xml() {

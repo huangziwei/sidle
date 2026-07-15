@@ -17,7 +17,7 @@
 //! 4. Extract ALL attributes using schema's AttrRules
 //! 5. Apply transformers to convert values
 
-use crate::kfx::container::get_field;
+use crate::kfx::container::{SymbolTable, get_field};
 use crate::kfx::ion::IonValue;
 use crate::kfx::schema::{SemanticTarget, schema};
 use crate::kfx::symbols::KfxSymbol;
@@ -28,7 +28,7 @@ use std::collections::HashMap;
 
 /// Context for tokenization including anchor resolution.
 struct TokenizeContext<'a> {
-    doc_symbols: &'a [String],
+    symbols: &'a SymbolTable,
     anchors: Option<&'a HashMap<String, String>>,
     /// Map of ruby_name (e.g. "b_ruby_0") → ordered list of annotation texts.
     /// Built from `ruby_content` entities by the importer. Style events with
@@ -56,7 +56,7 @@ macro_rules! sym {
 /// The `styles` map is passed through for the IR building phase.
 pub fn tokenize_storyline(
     storyline: &IonValue,
-    doc_symbols: &[String],
+    symbols: &SymbolTable,
     anchors: Option<&HashMap<String, String>>,
     _styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
     ruby_index: Option<&HashMap<String, Vec<String>>>,
@@ -74,7 +74,7 @@ pub fn tokenize_storyline(
     };
 
     let ctx = TokenizeContext {
-        doc_symbols,
+        symbols,
         anchors,
         ruby_index,
     };
@@ -124,7 +124,7 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
 
     // Check for semantic type annotation (yj.semantics.type) which uses local symbols.
     // The schema's StructureWithSemanticType strategies define what values map to what roles.
-    if let Some(semantic_type) = get_semantic_type_annotation(fields, ctx.doc_symbols)
+    if let Some(semantic_type) = get_semantic_type_annotation(fields, ctx.symbols)
         && let Some(mapped_role) = schema().role_for_semantic_type(&semantic_type)
     {
         role = mapped_role;
@@ -163,7 +163,7 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         .and_then(|v| v.as_struct())
         .and_then(|content_fields| {
             let name = get_field(content_fields, sym!(Name))
-                .and_then(|v| resolve_symbol_or_string(v, ctx.doc_symbols))?;
+                .and_then(|v| resolve_symbol_or_string(v, ctx.symbols))?;
             let index = get_field(content_fields, sym!(Index))
                 .and_then(|v| v.as_int())
                 .map(|n| n as usize)?;
@@ -181,7 +181,7 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
 
     // Get style reference (symbol ID or name) for later lookup
     let style_name =
-        get_field(fields, sym!(Style)).and_then(|v| resolve_symbol_or_string(v, ctx.doc_symbols));
+        get_field(fields, sym!(Style)).and_then(|v| resolve_symbol_or_string(v, ctx.symbols));
 
     // Emit StartElement token
     stream.push(KfxToken::StartElement(ElementStart {
@@ -214,15 +214,13 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
 /// its value as a string. Used for bidirectional BlockQuote mapping.
 fn get_semantic_type_annotation(
     fields: &[(u64, IonValue)],
-    doc_symbols: &[String],
+    symbols: &SymbolTable,
 ) -> Option<String> {
-    // Find the field ID for "yj.semantics.type" in local symbols.
-    // Local symbol IDs are offset by the base symbol table size.
-    let doc_idx = doc_symbols.iter().position(|s| s == "yj.semantics.type")?;
-    let field_id = crate::kfx::symbols::KFX_SYMBOL_TABLE_SIZE + doc_idx;
-
-    // Get the value and resolve it to a string
-    get_field(fields, field_id as u64).and_then(|v| resolve_symbol_or_string(v, doc_symbols))
+    // Find the field ID for "yj.semantics.type" in local symbols. Local
+    // symbol ids start at the container's declared base, NOT at our static
+    // table's length — `local_symbol_id` owns that offset.
+    let field_id = symbols.local_symbol_id("yj.semantics.type")?;
+    get_field(fields, field_id).and_then(|v| resolve_symbol_or_string(v, symbols))
 }
 
 /// Extract ALL semantic attributes for an element using schema rules.
@@ -237,7 +235,6 @@ fn extract_all_element_attrs(
 ) -> HashMap<SemanticTarget, String> {
     let mut result = HashMap::new();
     let import_ctx = ImportContext {
-        doc_symbols: ctx.doc_symbols,
         chapter_id: None,
         anchors: ctx.anchors,
     };
@@ -245,7 +242,7 @@ fn extract_all_element_attrs(
     // Extract using element attr rules
     for rule in schema().element_attr_rules(kfx_type_id) {
         if let Some(raw_value) = get_field(fields, rule.kfx_field as u64)
-            .and_then(|v| resolve_symbol_or_string(v, ctx.doc_symbols))
+            .and_then(|v| resolve_symbol_or_string(v, ctx.symbols))
         {
             let parsed = rule.transform.import(&raw_value, &import_ctx);
             let final_value = match parsed {
@@ -265,7 +262,7 @@ fn extract_all_element_attrs(
             continue;
         }
         if let Some(raw_value) = get_field(fields, rule.kfx_field as u64)
-            .and_then(|v| resolve_symbol_or_string(v, ctx.doc_symbols))
+            .and_then(|v| resolve_symbol_or_string(v, ctx.symbols))
         {
             let parsed = rule.transform.import(&raw_value, &import_ctx);
             let final_value = match parsed {
@@ -302,7 +299,7 @@ fn parse_style_events(events: &[IonValue], ctx: &TokenizeContext) -> Vec<SpanSta
             // special-cased rather than schema-driven because ruby requires
             // combining two fields plus an external lookup.
             if let Some(ruby_name) = get_field(fields, sym!(RubyName))
-                .and_then(|v| resolve_symbol_or_string(v, ctx.doc_symbols))
+                .and_then(|v| resolve_symbol_or_string(v, ctx.symbols))
             {
                 let ruby_id_1 = get_field(fields, sym!(RubyId))
                     .and_then(|v| v.as_int())
@@ -361,14 +358,13 @@ where
 {
     let mut result = HashMap::new();
     let import_ctx = ImportContext {
-        doc_symbols: ctx.doc_symbols,
         chapter_id: None,
         anchors: ctx.anchors,
     };
 
     for rule in schema().span_attr_rules(&has_field) {
         if let Some(raw_value) = get_field(fields, rule.kfx_field as u64)
-            .and_then(|v| resolve_symbol_or_string(v, ctx.doc_symbols))
+            .and_then(|v| resolve_symbol_or_string(v, ctx.symbols))
         {
             // Apply the transformer to convert the raw value
             let parsed = rule.transform.import(&raw_value, &import_ctx);
@@ -396,10 +392,10 @@ where
 /// Uses a stack-based approach to handle nested elements.
 /// Applies semantics **generically** from the token's semantics map.
 /// The `styles` map is used to look up style definitions by name.
-/// The `doc_symbols` are used to resolve style symbol IDs to names.
+/// The `symbols` table resolves style symbol IDs to names.
 pub fn build_ir_from_tokens<F>(
     tokens: &TokenStream,
-    doc_symbols: &[String],
+    symbols: &SymbolTable,
     styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
     mut content_lookup: F,
 ) -> Chapter
@@ -455,7 +451,7 @@ where
                             node_id,
                             &text,
                             &elem.style_events,
-                            doc_symbols,
+                            symbols,
                             styles,
                         );
                     }
@@ -519,15 +515,15 @@ fn kfx_style_to_ir(props: &[(u64, IonValue)]) -> crate::style::ComputedStyle {
 
 /// Build text nodes with inline spans applied.
 ///
-/// The `doc_symbols` and `styles` parameters are used to resolve span styles:
-/// - `doc_symbols`: resolves style symbol IDs to style names
+/// The `symbols` and `styles` parameters are used to resolve span styles:
+/// - `symbols`: resolves style symbol IDs to style names
 /// - `styles`: maps style names to KFX style properties
 fn build_text_with_spans(
     chapter: &mut Chapter,
     parent: NodeId,
     text: &str,
     spans: &[SpanStart],
-    doc_symbols: &[String],
+    symbols: &SymbolTable,
     styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
 ) {
     // Sort spans by offset, then by length (shorter first for same offset)
@@ -553,7 +549,7 @@ fn build_text_with_spans(
 
         // Apply style from the styles map (if present)
         if let Some(style_sym) = span.style_symbol
-            && let Some(style_name) = resolve_symbol(style_sym, doc_symbols)
+            && let Some(style_name) = symbols.resolve_opt(style_sym)
             && let Some(styles_map) = styles
             && let Some(kfx_props) = styles_map.get(style_name)
         {
@@ -674,18 +670,9 @@ fn char_to_byte_offset(text: &str, char_offset: usize) -> usize {
 // Helper functions
 // ============================================================================
 
-/// Resolve a symbol ID to its string representation.
-fn resolve_symbol(id: u64, doc_symbols: &[String]) -> Option<&str> {
-    crate::kfx::container::resolve_symbol(id, doc_symbols)
-}
-
 /// Resolve a value that could be either a symbol or string.
-fn resolve_symbol_or_string(value: &IonValue, doc_symbols: &[String]) -> Option<String> {
-    match value {
-        IonValue::String(s) => Some(s.clone()),
-        IonValue::Symbol(id) => resolve_symbol(*id, doc_symbols).map(|s| s.to_string()),
-        _ => None,
-    }
+fn resolve_symbol_or_string(value: &IonValue, symbols: &SymbolTable) -> Option<String> {
+    symbols.text_of_opt(value).map(str::to_string)
 }
 
 // ============================================================================
@@ -700,7 +687,7 @@ fn resolve_symbol_or_string(value: &IonValue, doc_symbols: &[String]) -> Option<
 /// The `styles` map is used to resolve style references (style_name → properties).
 pub fn parse_storyline_to_ir<F>(
     storyline: &IonValue,
-    doc_symbols: &[String],
+    symbols: &SymbolTable,
     anchors: Option<&HashMap<String, String>>,
     styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
     ruby_index: Option<&HashMap<String, Vec<String>>>,
@@ -709,8 +696,8 @@ pub fn parse_storyline_to_ir<F>(
 where
     F: FnMut(&str, usize) -> Option<String>,
 {
-    let tokens = tokenize_storyline(storyline, doc_symbols, anchors, styles, ruby_index);
-    build_ir_from_tokens(&tokens, doc_symbols, styles, content_lookup)
+    let tokens = tokenize_storyline(storyline, symbols, anchors, styles, ruby_index);
+    build_ir_from_tokens(&tokens, symbols, styles, content_lookup)
 }
 
 // ============================================================================
@@ -2118,6 +2105,11 @@ pub fn build_storyline_ion(chapter: &Chapter, ctx: &mut ExportContext) -> IonVal
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+
+    /// Empty symbol table for tests that carry no doc-local symbols.
+    fn no_symbols() -> SymbolTable {
+        SymbolTable::new(0, Vec::new())
+    }
     use crate::model::{GlobalNodeId, Role};
 
     #[test]
@@ -2142,7 +2134,7 @@ mod tests {
         stream.text("Hello");
         stream.end_element();
 
-        let chapter = build_ir_from_tokens(&stream, &[], None, |_, _| None);
+        let chapter = build_ir_from_tokens(&stream, &no_symbols(), None, |_, _| None);
         assert_eq!(chapter.node_count(), 3); // root + para + text
     }
 
@@ -2168,7 +2160,7 @@ mod tests {
         }));
         stream.end_element();
 
-        let chapter = build_ir_from_tokens(&stream, &[], None, |_, _| None);
+        let chapter = build_ir_from_tokens(&stream, &no_symbols(), None, |_, _| None);
 
         let children: Vec<_> = chapter.children(chapter.root()).collect();
         assert_eq!(children.len(), 1);
@@ -2200,7 +2192,7 @@ mod tests {
         }));
         stream.end_element();
 
-        let chapter = build_ir_from_tokens(&stream, &[], None, |name, idx| {
+        let chapter = build_ir_from_tokens(&stream, &no_symbols(), None, |name, idx| {
             if name == "content_1" && idx == 0 {
                 Some("Hello, world!".to_string())
             } else {
@@ -2237,8 +2229,9 @@ mod tests {
         }));
         stream.end_element();
 
-        let chapter =
-            build_ir_from_tokens(&stream, &[], None, |_, _| Some("Chapter 1".to_string()));
+        let chapter = build_ir_from_tokens(&stream, &no_symbols(), None, |_, _| {
+            Some("Chapter 1".to_string())
+        });
 
         let heading_id = chapter.children(chapter.root()).next().unwrap();
         let heading = chapter.node(heading_id).unwrap();
@@ -2280,8 +2273,9 @@ mod tests {
         stream.end_element();
 
         // Text is "Hello, world!" - span at offset 7, length 5 = "world"
-        let chapter =
-            build_ir_from_tokens(&stream, &[], None, |_, _| Some("Hello, world!".to_string()));
+        let chapter = build_ir_from_tokens(&stream, &no_symbols(), None, |_, _| {
+            Some("Hello, world!".to_string())
+        });
 
         // Should have: root -> para -> [text("Hello, "), link("world"), text("!")]
         let para_id = chapter.children(chapter.root()).next().unwrap();
@@ -2997,7 +2991,7 @@ mod tests {
         }));
         stream.end_element();
 
-        let chapter = build_ir_from_tokens(&stream, &[], None, |_, _| {
+        let chapter = build_ir_from_tokens(&stream, &no_symbols(), None, |_, _| {
             Some("1. Easy Concurrency".to_string())
         });
 

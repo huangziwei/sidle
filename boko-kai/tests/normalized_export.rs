@@ -167,9 +167,19 @@ fn test_normalize_book_emits_css_for_used_classes() {
 }
 
 #[test]
-fn test_normalized_export_contains_css_and_numbered_chapters() {
+fn test_normalized_export_contains_css_and_source_named_chapters() {
     let mut book =
         Book::open("tests/fixtures/[太宰 治] 人間失格.epub").expect("Failed to open test book");
+
+    // Chapters are named from their source ids (KFX: section names; EPUB:
+    // source-relative paths) so the normalized tree can converge on the
+    // mechanical kfx→epub route's `{section}.xhtml` naming.
+    let first_source = {
+        let spine: Vec<_> = book.spine().to_vec();
+        book.source_id(spine[0].id)
+            .expect("first spine entry has a source id")
+            .to_string()
+    };
 
     let mut output = Cursor::new(Vec::new());
 
@@ -187,21 +197,22 @@ fn test_normalized_export_contains_css_and_numbered_chapters() {
     let mut archive = zip::ZipArchive::new(reader).expect("Failed to read ZIP");
 
     let mut found_style = false;
-    let mut found_chapter_0 = false;
+    let mut found_first_chapter = false;
     for i in 0..archive.len() {
         let file = archive.by_index(i).expect("Failed to read ZIP entry");
         if file.name().ends_with("style.css") {
             found_style = true;
         }
-        if file.name().contains("chapter_0.xhtml") {
-            found_chapter_0 = true;
+        if file.name() == format!("OEBPS/{first_source}") {
+            found_first_chapter = true;
         }
     }
 
     assert!(found_style, "Normalized EPUB should contain style.css");
     assert!(
-        found_chapter_0,
-        "Normalized EPUB should have numbered chapter files"
+        found_first_chapter,
+        "Normalized EPUB should name chapters after their source ids \
+         (expected OEBPS/{first_source})"
     );
 }
 

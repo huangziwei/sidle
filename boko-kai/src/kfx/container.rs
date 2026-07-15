@@ -277,25 +277,146 @@ pub fn extract_doc_symbols(data: &[u8]) -> Vec<String> {
 
 // --- Symbol resolution ---
 
-/// Resolve a symbol ID to its text representation.
+/// Fallback base when the doc_symbol fragment doesn't declare imports.
+/// Real KFX files always declare YJ_symbols and we read max_id from there.
+const FALLBACK_BASE_LEN: u64 = 833;
+
+/// Read the declared import size from a doc-symbols fragment: the fragment
+/// annotates a symbol-table struct whose `imports` list carries
+/// `[{name: "YJ_symbols", version: 10, max_id: N}]`, and local symbols
+/// occupy ids `N+1..`. We add 1 so the caller can use the return value as
+/// the base-id for the first local symbol.
 ///
-/// Checks the base KFX symbol table first, then document-local symbols.
-pub fn resolve_symbol(id: u64, doc_symbols: &[String]) -> Option<&str> {
-    let id = id as usize;
-    if id < KFX_SYMBOL_TABLE.len() {
-        Some(KFX_SYMBOL_TABLE[id])
-    } else {
-        let doc_idx = id.saturating_sub(KFX_SYMBOL_TABLE.len());
-        doc_symbols.get(doc_idx).map(|s| s.as_str())
+/// Returns `None` if the fragment doesn't parse or doesn't declare imports
+/// — the caller falls back to a known-good constant.
+pub fn parse_imports_max_id(doc_bytes: &[u8]) -> Option<u64> {
+    let mut parser = IonParser::new(doc_bytes);
+    let value = parser.parse().ok()?;
+    let inner = value.unwrap_annotated();
+    let fields = inner.as_struct()?;
+
+    // KFX symbol-table struct field ids: 4=name, 5=version, 6=imports,
+    // 7=symbols, 8=max_id. We want imports → list of structs → field 8.
+    let imports_field = fields.iter().find(|(k, _)| *k == 6).map(|(_, v)| v)?;
+    let imports = imports_field.as_list()?;
+
+    let mut total: u64 = 0;
+    for entry in imports {
+        if let Some(entry_fields) = entry.as_struct()
+            && let Some(max_id_val) = entry_fields.iter().find(|(k, _)| *k == 8).map(|(_, v)| v)
+            && let Some(n) = max_id_val.as_int()
+        {
+            total += n as u64;
+        }
     }
+    Some(total)
 }
 
-/// Get a symbol's text from an IonValue (handles both Symbol and String).
-pub fn get_symbol_text<'a>(value: &'a IonValue, doc_symbols: &'a [String]) -> Option<&'a str> {
-    match value {
-        IonValue::Symbol(id) => resolve_symbol(*id, doc_symbols),
-        IonValue::String(s) => Some(s.as_str()),
-        _ => None,
+/// Resolved symbol table — base + per-container doc_symbols.
+///
+/// `base_len` must match calibre's `LocalSymbolTable.local_min_id - 1`, i.e.
+/// the count of imported (system + shared) symbols **as declared by this
+/// container** — read from the doc-symbols fragment's imports `max_id`, NOT
+/// hardcoded. Our static `KFX_SYMBOL_TABLE` has 852 entries (13 trailing
+/// additions Amazon shipped after calibre's YJ_SYMBOLS was last updated);
+/// containers built against the older table declare a smaller max_id, and
+/// resolving their doc_symbols at a fixed `KFX_SYMBOL_TABLE.len()` base
+/// looks every one of them up ~12 positions off — doc-local names silently
+/// resolve to static-tail names like `character_width`.
+///
+/// This is THE symbol resolver: every KFX reader (importer, mechanical
+/// converter, validators, kfx-dump) must resolve through it.
+pub struct SymbolTable {
+    base_len: u64,
+    doc_symbols: Vec<String>,
+}
+
+impl SymbolTable {
+    /// Build from explicit parts (tests, pre-extracted symbol lists).
+    pub fn new(base_len: u64, doc_symbols: Vec<String>) -> Self {
+        Self {
+            base_len,
+            doc_symbols,
+        }
+    }
+
+    /// Build from a container's doc-symbols fragment bytes (`None` when the
+    /// container has no such fragment): reads the declared import max_id for
+    /// the base and extracts the local symbol strings.
+    pub fn from_fragment(doc_bytes: Option<&[u8]>) -> Self {
+        match doc_bytes {
+            Some(bytes) => Self {
+                base_len: parse_imports_max_id(bytes)
+                    .map(|m| m + 1)
+                    .unwrap_or(FALLBACK_BASE_LEN),
+                doc_symbols: extract_doc_symbols(bytes),
+            },
+            None => Self {
+                base_len: FALLBACK_BASE_LEN,
+                doc_symbols: Vec::new(),
+            },
+        }
+    }
+
+    /// First local symbol id (== declared import count).
+    pub fn base_len(&self) -> u64 {
+        self.base_len
+    }
+
+    /// Resolve a symbol id to its text. Returns `"?"` for out-of-range ids.
+    ///
+    /// For ids below `base_len` we look up the static KFX table (whose head
+    /// matches every shipped YJ_symbols import); above, we index into the
+    /// per-container doc_symbols.
+    pub fn resolve(&self, id: u64) -> &str {
+        self.resolve_opt(id).unwrap_or("?")
+    }
+
+    /// Like [`Self::resolve`] but `None` for out-of-range ids, for callers
+    /// that skip unresolvable symbols instead of printing placeholders.
+    pub fn resolve_opt(&self, id: u64) -> Option<&str> {
+        if id < self.base_len {
+            KFX_SYMBOL_TABLE.get(id as usize).copied()
+        } else {
+            self.doc_symbols
+                .get((id - self.base_len) as usize)
+                .map(String::as_str)
+        }
+    }
+
+    /// Resolve a value that may be a Symbol or a String to its text.
+    /// Unresolvable symbols come back as `"?"` (see [`Self::text_of_opt`]).
+    pub fn text_of<'a>(&'a self, v: &'a IonValue) -> Option<&'a str> {
+        match v {
+            IonValue::Symbol(id) => Some(self.resolve(*id)),
+            IonValue::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Like [`Self::text_of`] but unresolvable symbols yield `None`, so
+    /// filter-style callers drop them instead of collecting `"?"`.
+    pub fn text_of_opt<'a>(&'a self, v: &'a IonValue) -> Option<&'a str> {
+        match v {
+            IonValue::Symbol(id) => self.resolve_opt(*id),
+            IonValue::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Symbol id of a doc-local symbol by its text (`base + position`), for
+    /// field-id lookups of extension fields like `yj.semantics.type`.
+    pub fn local_symbol_id(&self, text: &str) -> Option<u64> {
+        self.doc_symbols
+            .iter()
+            .position(|s| s == text)
+            .map(|i| self.base_len + i as u64)
+    }
+
+    /// Decompose into `(base_len, doc_symbols)` for callers that thread the
+    /// pair through existing signatures (kfx-dump).
+    pub fn into_parts(self) -> (u64, Vec<String>) {
+        (self.base_len, self.doc_symbols)
     }
 }
 
@@ -407,21 +528,33 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_symbol_base_table() {
-        let doc_symbols: Vec<String> = vec![];
+    fn symbol_table_resolves_base_and_doc_local() {
+        let table = SymbolTable::new(
+            KFX_SYMBOL_TABLE.len() as u64,
+            vec!["custom_symbol".to_string()],
+        );
         // Symbol 10 is "language" in the base table
-        assert_eq!(resolve_symbol(10, &doc_symbols), Some("language"));
+        assert_eq!(table.resolve_opt(10), Some("language"));
+        assert_eq!(
+            table.resolve_opt(KFX_SYMBOL_TABLE.len() as u64),
+            Some("custom_symbol")
+        );
+        assert_eq!(table.resolve(u64::MAX), "?");
     }
 
     #[test]
-    fn test_resolve_symbol_doc_local() {
-        let doc_symbols = vec!["custom_symbol".to_string()];
-        // Document-local symbols start after the base table
-        let doc_symbol_id = KFX_SYMBOL_TABLE.len() as u64;
-        assert_eq!(
-            resolve_symbol(doc_symbol_id, &doc_symbols),
-            Some("custom_symbol")
-        );
+    fn symbol_table_honors_declared_base_smaller_than_static_table() {
+        // A container built against an older YJ_symbols table declares a
+        // smaller import max_id; its doc symbols start BELOW our static
+        // table's length. Resolving them at a hardcoded
+        // KFX_SYMBOL_TABLE.len() base was the bug that made the IR route
+        // name sections `character_width` etc.
+        let base = KFX_SYMBOL_TABLE.len() as u64 - 13;
+        let table = SymbolTable::new(base, vec!["jZK3Kk0dQPOTMEngNHyfig1".to_string()]);
+        assert_eq!(table.resolve_opt(base), Some("jZK3Kk0dQPOTMEngNHyfig1"));
+        assert_eq!(table.local_symbol_id("jZK3Kk0dQPOTMEngNHyfig1"), Some(base));
+        // Below the declared base still hits the static table.
+        assert_eq!(table.resolve_opt(10), Some("language"));
     }
 
     #[test]

@@ -37,11 +37,10 @@ use zip::ZipArchive;
 
 use crate::epub::{parse_container_xml, parse_nav_toc, parse_ncx, parse_opf};
 use crate::kfx::container::{
-    extract_doc_symbols, parse_container_header, parse_container_info, parse_index_table,
-    skip_enty_header,
+    SymbolTable, parse_container_header, parse_container_info, parse_index_table, skip_enty_header,
 };
 use crate::kfx::ion::{IonParser, IonValue};
-use crate::kfx::symbols::{KFX_SYMBOL_TABLE, KfxSymbol};
+use crate::kfx::symbols::KfxSymbol;
 use crate::model::TocEntry;
 
 /// A nav_unit's resolved target inside KFX.
@@ -586,28 +585,17 @@ fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
     let info =
         parse_container_info(info_data).map_err(|e| format!("kfx container info: {:?}", e))?;
 
-    let extended_symbols = match info.doc_symbols {
+    // Declared-base symbol table: doc-local ids start at the container's
+    // declared import max_id, not at our static table's length (see
+    // kfx::container::SymbolTable).
+    let symbols = match info.doc_symbols {
         Some((off, len)) if off + len <= kfx_bytes.len() => {
-            extract_doc_symbols(&kfx_bytes[off..off + len])
+            SymbolTable::from_fragment(Some(&kfx_bytes[off..off + len]))
         }
-        _ => Vec::new(),
+        _ => SymbolTable::from_fragment(None),
     };
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
-    let resolve_sym = |id: u64| -> String {
-        if id < base_symbol_count {
-            KFX_SYMBOL_TABLE
-                .get(id as usize)
-                .copied()
-                .unwrap_or("?")
-                .to_string()
-        } else {
-            let idx = (id - base_symbol_count) as usize;
-            extended_symbols
-                .get(idx)
-                .cloned()
-                .unwrap_or_else(|| "?".to_string())
-        }
-    };
+
+    let resolve_sym = |id: u64| -> String { symbols.resolve(id).to_string() };
 
     let Some((idx_off, idx_len)) = info.index else {
         return Err("kfx: no index table".into());

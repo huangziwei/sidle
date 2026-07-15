@@ -16,10 +16,11 @@ use std::fmt::Debug;
 use crate::kfx::context::ResourceRegistry;
 
 /// Context provided during import transformation.
+///
+/// Symbol ids are resolved to strings *before* transformers run (see
+/// `kfx::container::SymbolTable`), so no symbol table rides along here.
 #[derive(Debug, Default)]
 pub struct ImportContext<'a> {
-    /// Document-local symbol table for resolving symbol IDs.
-    pub doc_symbols: &'a [String],
     /// Current chapter/section ID if known.
     pub chapter_id: Option<&'a str>,
     /// Anchor map: anchor_name → uri (for resolving external links).

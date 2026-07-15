@@ -7,6 +7,16 @@ use std::borrow::Cow;
 /// Uses `SystemTime::now()`.
 pub fn time_now_secs() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
+    // Reproducible-builds convention: SOURCE_DATE_EPOCH, when set, pins every
+    // timestamp this converter stamps (EPUB `dcterms:modified`, KFX
+    // `modified_date`), making repeat conversions byte-comparable. Unset =
+    // wall clock (a modified-date describes the produced file, so it defaults
+    // to the moment of writing).
+    if let Ok(epoch) = std::env::var("SOURCE_DATE_EPOCH")
+        && let Ok(secs) = epoch.trim().parse::<u64>()
+    {
+        return secs as u32;
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)

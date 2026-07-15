@@ -13,8 +13,8 @@ use std::sync::Arc;
 use crate::import::{ChapterId, Importer, SpineEntry};
 use crate::io::{ByteSource, FileSource};
 use crate::kfx::container::{
-    self, ContainerError, EntityLoc, extract_doc_symbols, get_field, get_symbol_text,
-    parse_container_header, parse_container_info, parse_index_table, skip_enty_header,
+    ContainerError, EntityLoc, SymbolTable, get_field, parse_container_header,
+    parse_container_info, parse_index_table, skip_enty_header,
 };
 use crate::kfx::ion::{IonParser, IonValue};
 use crate::kfx::schema::schema;
@@ -54,8 +54,9 @@ pub struct KfxImporter {
     /// Font entity map: font path (e.g., "fonts/font_0000.otf") -> EntityLoc.
     font_entities: HashMap<String, EntityLoc>,
 
-    /// Document-specific symbols (extended symbol table).
-    doc_symbols: Arc<Vec<String>>,
+    /// Resolved symbol table (static base as declared by the container +
+    /// doc-local symbols).
+    symbols: Arc<SymbolTable>,
 
     /// Book metadata.
     metadata: Metadata,
@@ -178,7 +179,7 @@ impl Importer for KfxImporter {
         let storyline_ion = self.parse_entity_ion(storyline_loc)?;
 
         // Clone Arc handles to avoid borrow conflict with content lookup closure
-        let doc_symbols = Arc::clone(&self.doc_symbols);
+        let symbols = Arc::clone(&self.symbols);
         let anchors = Arc::clone(&self.anchors);
         let styles = Arc::clone(&self.styles);
         let ruby_index = Arc::clone(&self.ruby_index);
@@ -186,7 +187,7 @@ impl Importer for KfxImporter {
         // Parse storyline and build IR using schema-driven tokenization
         let mut chapter = parse_storyline_to_ir(
             &storyline_ion,
-            doc_symbols.as_ref(),
+            symbols.as_ref(),
             Some(anchors.as_ref()),
             Some(styles.as_ref()),
             Some(ruby_index.as_ref()),
@@ -342,16 +343,19 @@ impl KfxImporter {
             )
         })?;
 
-        // Read and parse document symbols (optional)
-        let doc_symbols = if let Some((offset, length)) = container_info.doc_symbols {
+        // Read and parse document symbols (optional). `from_fragment` reads
+        // the container's declared import max_id as the doc-symbol base —
+        // never assume our static table's length (older containers declare a
+        // smaller base and would mis-resolve every doc-local name).
+        let symbols = if let Some((offset, length)) = container_info.doc_symbols {
             if length > 0 {
                 let doc_sym_data = source.read_at(offset as u64, length)?;
-                extract_doc_symbols(&doc_sym_data)
+                SymbolTable::from_fragment(Some(&doc_sym_data))
             } else {
-                Vec::new()
+                SymbolTable::from_fragment(None)
             }
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         };
 
         // Read and parse index table
@@ -382,7 +386,7 @@ impl KfxImporter {
             entities,
             asset_paths,
             font_entities,
-            doc_symbols: Arc::new(doc_symbols),
+            symbols: Arc::new(symbols),
             metadata: Metadata::default(),
             toc: Vec::new(),
             page_list: Vec::new(),
@@ -434,7 +438,7 @@ impl KfxImporter {
 
     /// Get a symbol's text from an IonValue (handles both Symbol and String).
     fn get_symbol_text<'a>(&'a self, value: &'a IonValue) -> Option<&'a str> {
-        get_symbol_text(value, self.doc_symbols.as_ref())
+        self.symbols.text_of_opt(value)
     }
 
     /// Parse book metadata.
@@ -1016,9 +1020,7 @@ impl KfxImporter {
             .filter(|e| e.type_id == KfxSymbol::Bcrawmedia as u32)
             .copied()
         {
-            if let Some(name) =
-                container::resolve_symbol(raw_loc.id as u64, self.doc_symbols.as_ref())
-            {
+            if let Some(name) = self.symbols.resolve_opt(raw_loc.id as u64) {
                 raw_media_by_name.insert(name.to_string(), raw_loc);
                 if let Some(rest) = name.strip_prefix("resource/") {
                     raw_media_by_name.insert(rest.to_string(), raw_loc);
@@ -1047,7 +1049,7 @@ impl KfxImporter {
 
                 // Also index by resource_name (e.g., "eF") for cover lookup
                 let name = get_field(fields, sym!(ResourceName))
-                    .and_then(|v| container::get_symbol_text(v, self.doc_symbols.as_ref()))
+                    .and_then(|v| self.symbols.text_of_opt(v))
                     .map(|s| s.to_string());
 
                 let resolved_loc = location
@@ -1103,7 +1105,7 @@ impl KfxImporter {
             {
                 // Get anchor_name
                 let anchor_name = get_field(fields, sym!(AnchorName))
-                    .and_then(|v| container::get_symbol_text(v, self.doc_symbols.as_ref()))
+                    .and_then(|v| self.symbols.text_of_opt(v))
                     .map(|s| s.to_string());
 
                 let Some(name) = anchor_name else {
@@ -1176,7 +1178,7 @@ impl KfxImporter {
             {
                 // Get style_name
                 let style_name = get_field(fields, sym!(StyleName))
-                    .and_then(|v| container::get_symbol_text(v, self.doc_symbols.as_ref()))
+                    .and_then(|v| self.symbols.text_of_opt(v))
                     .map(|s| s.to_string());
 
                 if let Some(name) = style_name {
@@ -1237,7 +1239,7 @@ impl KfxImporter {
                 && let Some(fields) = elem.unwrap_annotated().as_struct()
             {
                 let ruby_name = get_field(fields, sym!(RubyName))
-                    .and_then(|v| container::get_symbol_text(v, self.doc_symbols.as_ref()))
+                    .and_then(|v| self.symbols.text_of_opt(v))
                     .map(|s| s.to_string());
 
                 let Some(name) = ruby_name else {

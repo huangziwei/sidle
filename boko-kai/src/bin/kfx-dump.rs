@@ -1,3 +1,4 @@
+use boko::kfx::container::SymbolTable;
 use boko::kfx::symbols::KFX_SYMBOL_TABLE;
 use clap::Parser;
 use ion_rs::{
@@ -200,8 +201,11 @@ fn dump_kfx_container(data: &[u8], resolve: bool) -> IonResult<()> {
     );
     eprintln!();
 
-    // Extended symbols from doc symbol table
+    // Extended symbols from doc symbol table. The base (first doc-local id)
+    // comes from the container's declared import max_id once the fragment is
+    // parsed below; the static-table length is only the no-fragment fallback.
     let mut extended_symbols: Vec<String> = Vec::new();
+    let mut base_symbol_count = KFX_SYMBOL_TABLE.len();
 
     // Parse container info (Ion struct)
     if container_info_offset + container_info_length <= data.len() {
@@ -223,10 +227,13 @@ fn dump_kfx_container(data: &[u8], resolve: bool) -> IonResult<()> {
             );
             if doc_sym_offset + doc_sym_length <= data.len() {
                 let doc_sym_data = &data[doc_sym_offset..doc_sym_offset + doc_sym_length];
-                extended_symbols = extract_doc_symbols(doc_sym_data);
+                let (base, syms) = SymbolTable::from_fragment(Some(doc_sym_data)).into_parts();
+                base_symbol_count = base as usize;
+                extended_symbols = syms;
                 eprintln!(
-                    "Extracted {} document-specific symbols",
-                    extended_symbols.len()
+                    "Extracted {} document-specific symbols (base id {})",
+                    extended_symbols.len(),
+                    base_symbol_count
                 );
                 eprintln!();
             }
@@ -255,6 +262,7 @@ fn dump_kfx_container(data: &[u8], resolve: bool) -> IonResult<()> {
                     index_offset,
                     num_entries,
                     &extended_symbols,
+                    base_symbol_count,
                 )
             } else {
                 ResolutionMaps {
@@ -711,19 +719,20 @@ fn report_anchors(data: &[u8]) -> IonResult<()> {
         &data[container_info_offset..container_info_offset + container_info_length];
 
     // Extract extended symbols
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len();
+    let base_symbol_count = base_symbol_count as usize;
 
     // Get index table location
     let Some((index_offset, index_length)) = parse_container_info_for_index(container_info_data)
@@ -997,19 +1006,20 @@ fn report_navigation(data: &[u8]) -> IonResult<()> {
         &data[container_info_offset..container_info_offset + container_info_length];
 
     // Extract extended symbols
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len();
+    let base_symbol_count = base_symbol_count as usize;
 
     // Get index table location
     let Some((index_offset, index_length)) = parse_container_info_for_index(container_info_data)
@@ -2022,6 +2032,7 @@ fn build_maps(
     index_offset: usize,
     num_entries: usize,
     extended_symbols: &[String],
+    base_symbol_count: usize,
 ) -> ResolutionMaps {
     use boko::kfx::ion::IonParser;
     use boko::kfx::symbols::KfxSymbol;
@@ -2029,7 +2040,6 @@ fn build_maps(
     let mut entity_map = HashMap::new();
     let mut fragment_map = HashMap::new();
     let entry_size = 24;
-    let base_symbol_count = KFX_SYMBOL_TABLE.len();
 
     for i in 0..num_entries {
         let entry_offset = index_offset + i * entry_size;
@@ -2217,52 +2227,6 @@ fn ion_value_to_string(
         IonValue::Int(i) => Some(i.to_string()),
         _ => None,
     }
-}
-
-/// Extract document-specific symbols from the doc symbols section.
-/// The doc symbols section is Ion binary containing a $ion_symbol_table struct.
-/// We extract the "symbols" list which contains the local symbol names.
-fn extract_doc_symbols(data: &[u8]) -> Vec<String> {
-    use boko::kfx::ion::{IonParser, IonValue};
-
-    // Use our own IonParser which doesn't do special symbol table handling
-    let mut parser = IonParser::new(data);
-    let value = match parser.parse() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("DEBUG: Failed to parse Ion: {}", e);
-            return Vec::new();
-        }
-    };
-
-    // The value should be an annotated struct: $3::{ imports: [...], symbols: [...] }
-    // We need to find the "symbols" field (symbol ID 7)
-    let inner = match &value {
-        IonValue::Annotated(_, inner) => inner.as_ref(),
-        _ => &value,
-    };
-
-    if let IonValue::Struct(fields) = inner {
-        for (field_id, field_value) in fields {
-            // Symbol ID 7 = "symbols"
-            if *field_id == 7
-                && let IonValue::List(items) = field_value
-            {
-                return items
-                    .iter()
-                    .filter_map(|item| {
-                        if let IonValue::String(s) = item {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-            }
-        }
-    }
-
-    Vec::new()
 }
 
 /// Parse and dump an entity (ENTY format)
@@ -2801,19 +2765,19 @@ fn report_features(data: &[u8]) -> IonResult<()> {
     };
 
     // Extract extended symbols
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
 
@@ -3002,19 +2966,19 @@ fn report_metadata(data: &[u8]) -> IonResult<()> {
     };
 
     // Extract extended symbols
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
 
@@ -3206,19 +3170,19 @@ fn report_reading_orders(data: &[u8]) -> IonResult<()> {
     };
 
     // Extract extended symbols
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
 
@@ -3394,19 +3358,19 @@ fn report_document(data: &[u8]) -> IonResult<()> {
     };
 
     // Extract extended symbols
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
 
@@ -3598,19 +3562,19 @@ fn report_sections(data: &[u8]) -> IonResult<()> {
     };
 
     // Extract extended symbols
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
 
@@ -3801,19 +3765,19 @@ fn report_resources(data: &[u8]) -> IonResult<()> {
     };
 
     // Extract extended symbols
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
 
@@ -3974,19 +3938,19 @@ fn report_storylines(data: &[u8]) -> IonResult<()> {
         return Ok(());
     };
 
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
     let storyline_type = KfxSymbol::Storyline as u32;
@@ -4288,19 +4252,19 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
     };
 
     // Extract extended symbols for resolving
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let resolve_sym = |id: u64| -> String {
         if id < base_symbol_count {
             KFX_SYMBOL_TABLE
@@ -4815,19 +4779,19 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
         return Ok(());
     };
 
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
     let position_map_type = KfxSymbol::PositionMap as u32;
@@ -5064,19 +5028,19 @@ fn report_content(data: &[u8]) -> IonResult<()> {
         return Ok(());
     };
 
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
     let content_type = KfxSymbol::Content as u32;
@@ -5249,19 +5213,19 @@ fn report_dependencies(data: &[u8]) -> IonResult<()> {
         return Ok(());
     };
 
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
     let container_entity_map_type = KfxSymbol::ContainerEntityMap as u32;
@@ -5580,19 +5544,19 @@ fn report_ruby_content(data: &[u8]) -> IonResult<()> {
         return Ok(());
     };
 
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
     let ruby_content_type = KfxSymbol::RubyContent as u32;
@@ -5713,19 +5677,19 @@ fn report_raw_storylines(data: &[u8]) -> IonResult<()> {
         return Ok(());
     };
 
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
     let storyline_type = KfxSymbol::Storyline as u32;
@@ -5836,19 +5800,19 @@ fn report_ruby_pairs(data: &[u8]) -> IonResult<()> {
         return Ok(());
     };
 
-    let extended_symbols = if let Some((doc_sym_offset, doc_sym_length)) =
+    let symtab = if let Some((doc_sym_offset, doc_sym_length)) =
         parse_container_info_for_doc_symbols(container_info_data)
     {
         if doc_sym_offset + doc_sym_length <= data.len() {
-            extract_doc_symbols(&data[doc_sym_offset..doc_sym_offset + doc_sym_length])
+            SymbolTable::from_fragment(Some(&data[doc_sym_offset..doc_sym_offset + doc_sym_length]))
         } else {
-            Vec::new()
+            SymbolTable::from_fragment(None)
         }
     } else {
-        Vec::new()
+        SymbolTable::from_fragment(None)
     };
+    let (base_symbol_count, extended_symbols) = symtab.into_parts();
 
-    let base_symbol_count = KFX_SYMBOL_TABLE.len() as u64;
     let entry_size = 24;
     let num_entries = index_length / entry_size;
     let storyline_type = KfxSymbol::Storyline as u32;

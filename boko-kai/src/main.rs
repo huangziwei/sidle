@@ -67,6 +67,14 @@ enum Command {
         /// the source's own mode.
         #[arg(long = "writing-mode")]
         writing_mode: Option<String>,
+
+        /// KFX → EPUB engine: `mechanical` (default — the `kfx_to_epub`
+        /// calibre port) or `ir` (the generic `KfxImporter` → IR →
+        /// `EpubExporter` pipeline). The two must converge to byte-identical
+        /// output (see plans/ir-route-migration.md); until then `ir` is the
+        /// side under test.
+        #[arg(long = "route", default_value = "mechanical")]
+        route: String,
     },
 
     /// Extract hierarchical section tree (JSON)
@@ -305,6 +313,21 @@ enum ValidateCheck {
         json: bool,
     },
 
+    /// Strict A/B tree diff of two EPUBs (byte-exact per zip entry) — the
+    /// 1:1 convergence gate for the mechanical-vs-IR kfx→epub routes
+    EpubDiff {
+        /// Oracle EPUB (A — today: the mechanical route's output)
+        a: String,
+        /// Candidate EPUB (B — the IR route's output)
+        b: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Show first N per-file differences (default 20)
+        #[arg(long, default_value_t = 20)]
+        details: usize,
+    },
+
     /// Run all available validations against the conversion
     All {
         epub: String,
@@ -329,6 +352,7 @@ fn main() -> ExitCode {
             merge_mode,
             ppd,
             writing_mode,
+            route,
         } => convert(
             &input,
             output.as_deref(),
@@ -338,6 +362,7 @@ fn main() -> ExitCode {
             &merge_mode,
             ppd.as_deref(),
             writing_mode.as_deref(),
+            &route,
         ),
         Command::Dump {
             file,
@@ -394,6 +419,12 @@ fn main() -> ExitCode {
                 }
                 ValidateCheck::Toc { file, json } => validate_toc(&file, json),
                 ValidateCheck::Source { file, json } => validate_source(&file, json),
+                ValidateCheck::EpubDiff {
+                    a,
+                    b,
+                    json,
+                    details,
+                } => validate_epub_diff(&a, &b, json, details),
                 ValidateCheck::All { epub, kfx, details } => {
                     validate_all(&epub, &kfx, details, dir)
                 }
@@ -1086,6 +1117,69 @@ fn validate_source(path: &str, json: bool) -> Result<(), String> {
     }
 }
 
+fn validate_epub_diff(
+    a_path: &str,
+    b_path: &str,
+    json: bool,
+    details: usize,
+) -> Result<(), String> {
+    let a = std::fs::read(a_path).map_err(|e| format!("{}: {}", a_path, e))?;
+    let b = std::fs::read(b_path).map_err(|e| format!("{}: {}", b_path, e))?;
+
+    let report = boko::validate::fidelity::epub_diff::validate(&a, &b)?;
+
+    if json {
+        let tally: serde_json::Map<String, serde_json::Value> = report
+            .class_tally()
+            .into_iter()
+            .map(|(k, n)| (k.as_str().to_string(), serde_json::json!(n)))
+            .collect();
+        let payload = serde_json::json!({
+            "identical": report.is_clean(),
+            "identical_entries": report.identical,
+            "only_in_a": report.only_in_a,
+            "only_in_b": report.only_in_b,
+            "class_tally": tally,
+            "differing": report
+                .differing
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "path": d.path,
+                        "class": d.kind.as_str(),
+                        "a_len": d.a_len,
+                        "b_len": d.b_len,
+                        "first_diff": d.first_diff,
+                        "a_context": d.a_context,
+                        "b_context": d.b_context,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string(&payload).map_err(|e| e.to_string())?
+        );
+        // Batch tools read the verdict from stdout; don't double-signal.
+        return Ok(());
+    }
+
+    report.print_summary();
+    if details > 0 {
+        report.print_details(details);
+    }
+    if report.is_clean() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} differing, {} only in A, {} only in B",
+            report.differing.len(),
+            report.only_in_a.len(),
+            report.only_in_b.len()
+        ))
+    }
+}
+
 fn print_json(book: &mut Book, path: &str) -> Result<(), String> {
     let meta = book.metadata().clone();
     let asset_paths: Vec<_> = book.list_assets().to_vec();
@@ -1317,6 +1411,7 @@ fn convert(
     merge_mode: &str,
     ppd: Option<&str>,
     writing_mode: Option<&str>,
+    route: &str,
 ) -> Result<(), String> {
     // Check if reading from stdin
     let from_stdin = input == "-";
@@ -1396,9 +1491,9 @@ fn convert(
         );
     }
 
-    // Mechanical port: .kfx -> .epub via the dedicated `kfx_to_epub` module
-    // (parallel to the generic IR pipeline). Selected automatically when the
-    // input file has a `.kfx` extension.
+    // KFX -> EPUB. Two engines: the mechanical `kfx_to_epub` calibre port
+    // (default) and the generic IR pipeline (`--route ir`). Both refuse a
+    // PDF-backed container — that must round-trip through PDF, not EPUB.
     if !from_stdin
         && output_format == Format::Epub
         && std::path::Path::new(input)
@@ -1406,8 +1501,6 @@ fn convert(
             .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx"))
     {
         let kfx_bytes = std::fs::read(input).map_err(|e| format!("Failed to read input: {e}"))?;
-        // A PDF-backed container KFX must round-trip through PDF, not EPUB.
-        // Refuse rather than mangle the PDF into reflowed text.
         if boko::kfx::pdf_container::kfx_is_pdf_backed(&kfx_bytes) {
             return Err(
                 "this KFX is a PDF-backed container; extract it with a .pdf output \
@@ -1415,8 +1508,23 @@ fn convert(
                     .to_string(),
             );
         }
-        let bytes = boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
-            .map_err(|e| format!("Conversion failed: {e}"))?;
+        let bytes = match route {
+            "mechanical" | "" => boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
+                .map_err(|e| format!("Conversion failed: {e}"))?,
+            "ir" => {
+                let mut book = Book::from_bytes(&kfx_bytes, Format::Kfx)
+                    .map_err(|e| format!("Failed to open input: {e}"))?;
+                let mut cursor = std::io::Cursor::new(Vec::new());
+                book.export(Format::Epub, &mut cursor)
+                    .map_err(|e| format!("Conversion failed: {e}"))?;
+                cursor.into_inner()
+            }
+            other => {
+                return Err(format!(
+                    "--route must be 'mechanical' or 'ir', got '{other}'"
+                ));
+            }
+        };
         if to_stdout {
             use std::io::Write;
             std::io::stdout()
