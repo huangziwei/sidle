@@ -1519,8 +1519,19 @@ function markTocActive(currentIndex, doc, range) {
         const el = doc.getElementById(e.frag);
         // `el.compareDocumentPosition(top)` has the PRECEDING bit set when `top`
         // comes before `el` — i.e. this entry's target is still ahead of us.
-        if (el && el.compareDocumentPosition(top) & Node.DOCUMENT_POSITION_PRECEDING) {
-          behind = false;
+        // An ancestor ALSO sets PRECEDING (spec: a container precedes its
+        // contents), but a range starting at a container of the anchor — e.g.
+        // the body fallback when nothing on the page is cleanly visible — says
+        // nothing about being before the anchor, so require a strict
+        // precedes: PRECEDING without CONTAINS.
+        if (el) {
+          const pos = el.compareDocumentPosition(top);
+          if (
+            pos & Node.DOCUMENT_POSITION_PRECEDING &&
+            !(pos & Node.DOCUMENT_POSITION_CONTAINS)
+          ) {
+            behind = false;
+          }
         }
       }
       if (behind) active = i;

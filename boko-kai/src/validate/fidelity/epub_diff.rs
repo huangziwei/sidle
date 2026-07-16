@@ -1,5 +1,5 @@
-//! Strict A/B tree diff between two EPUBs — the 1:1 gate for the IR-route
-//! migration (plans/ir-route-migration.md).
+//! Strict A/B tree diff between two EPUBs — the 1:1 gate for converging the
+//! two KFX→EPUB routes.
 //!
 //! Unlike the sibling fidelity checks, both inputs are EPUBs: `a` is the
 //! oracle (today: the mechanical `kfx_to_epub` output) and `b` the candidate

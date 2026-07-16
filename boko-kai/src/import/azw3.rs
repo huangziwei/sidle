@@ -5,7 +5,7 @@
 //! - Div elements for content fragments
 //! - NCX index for table of contents
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -68,6 +68,12 @@ pub struct Azw3Importer {
 
     /// Cached decompressed text (loaded on first chapter request).
     text_cache: Option<Vec<u8>>,
+
+    /// `aid` attribute values that are link targets (some `kindle:pos:fid`
+    /// link or NCX position resolves to them). Computed once from the full
+    /// text; `build_chapter` keeps these as `id="aid-{value}"` instead of
+    /// stripping them, so the resolved `#aid-…` hrefs land somewhere.
+    linked_aids: Option<HashSet<String>>,
 
     /// Cached chapter content.
     chapter_cache: HashMap<u32, Vec<u8>>,
@@ -147,10 +153,12 @@ impl Importer for Azw3Importer {
         if self.text_cache.is_none() {
             self.text_cache = Some(self.extract_text()?);
         }
+        self.ensure_linked_aids();
 
         // Build the requested chapter
         let text = self.text_cache.as_ref().unwrap();
-        let content = self.build_chapter(id.0, text)?;
+        let linked_aids = self.linked_aids.as_ref().unwrap();
+        let content = self.build_chapter(id.0, text, linked_aids)?;
 
         self.chapter_cache.insert(id.0, content.clone());
         Ok(content)
@@ -197,7 +205,11 @@ impl Importer for Azw3Importer {
             // resolve the import chain (otherwise the writing-mode / class
             // rules in the imported sheet never load). Calibre-converted
             // AZW3s don't carry such imports — the pass is a no-op for them.
-            return Ok(transform::rewrite_kindle_flow_in_css(&text[start..end]));
+            // Embedded-font `@font-face` rules are dropped: their
+            // `kindle:embed:` sources point at FONT records the EPUB doesn't
+            // ship, so the rule can only ever dangle.
+            let css = transform::rewrite_kindle_flow_in_css(&text[start..end]);
+            return Ok(transform::strip_kindle_embed_font_faces(&css));
         }
 
         // Image: images/image_NNNN.ext
@@ -555,6 +567,7 @@ impl Azw3Importer {
                 elems,
             },
             text_cache: None,
+            linked_aids: None,
             chapter_cache: HashMap::new(),
             assets: Vec::new(),
             css_cache: HashMap::new(),
@@ -637,8 +650,53 @@ impl Azw3Importer {
         Ok(text)
     }
 
+    /// Compute the link-target `aid` set once (see the `linked_aids` field).
+    /// Requires `text_cache` to be populated; sets `Some` even on a missing
+    /// cache (empty set) so callers can unwrap after a successful text load.
+    fn ensure_linked_aids(&mut self) {
+        if self.linked_aids.is_some() {
+            return;
+        }
+        let Some(text) = self.text_cache.as_ref() else {
+            self.linked_aids = Some(HashSet::new());
+            return;
+        };
+        let (html_start, html_end) = self
+            .kf8
+            .flow_table
+            .first()
+            .copied()
+            .unwrap_or((0, text.len()));
+        let html_text = &text[html_start..html_end.min(text.len())];
+        let file_starts: Vec<(u32, u32)> = self
+            .kf8
+            .files
+            .iter()
+            .map(|f| (f.start_pos, f.file_number as u32))
+            .collect();
+        // NCX TOC entries resolve through the same nearest-attribute lookup
+        // (`resolve_toc`), so their positions are link sources too.
+        let toc_targets: Vec<(usize, usize)> = self
+            .toc_positions
+            .values()
+            .map(|p| (p.byte_pos as usize, p.file_num as usize))
+            .collect();
+        self.linked_aids = Some(transform::collect_linked_aids(
+            text,
+            html_text,
+            &self.kf8.elems,
+            &file_starts,
+            &toc_targets,
+        ));
+    }
+
     /// Build a specific chapter from cached text.
-    fn build_chapter(&self, chapter_id: u32, text: &[u8]) -> io::Result<Vec<u8>> {
+    fn build_chapter(
+        &self,
+        chapter_id: u32,
+        text: &[u8],
+        linked_aids: &HashSet<String>,
+    ) -> io::Result<Vec<u8>> {
         // Get HTML content (flow 0)
         let (html_start, html_end) = self
             .kf8
@@ -680,6 +738,10 @@ impl Azw3Importer {
         let transformed =
             transform::transform_kindle_refs(&inlined, &self.kf8.elems, html_text, &file_starts);
 
+        // kindlegen's in-book TOC "Cover" rows can link straight at the
+        // cover image — an EPUB 3 violation (RSC-010). Keep the label only.
+        let transformed = transform::unlink_image_anchors(&transformed);
+
         // Drop dangling `<link>`s that escape the package root (e.g. the
         // Aozora `../styles/aNNNNN_h.css` horizontal alternate stylesheet that
         // was never embedded as a flow). transform_kindle_refs only rewrites
@@ -687,8 +749,9 @@ impl Azw3Importer {
         // survive and fail strict EPUB-3 validation on import.
         let delinked = transform::strip_root_escaping_links(&transformed);
 
-        // Strip Amazon-specific attributes (aid, data-Amzn*)
-        let cleaned = transform::strip_kindle_attributes_fast(&delinked);
+        // Strip Amazon-specific attributes (aid, data-Amzn*) — except
+        // link-target aids, which become `id="aid-{value}"` anchors.
+        let cleaned = transform::strip_kindle_attributes_fast(&delinked, linked_aids);
 
         // Ensure the root `<html>` carries both `xml:lang` and `lang`.
         // Calibre's AZW3 exporter scrubs `xml:lang` and leaves only `lang=`,

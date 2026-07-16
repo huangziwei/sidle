@@ -148,14 +148,10 @@ fn generate_replacement(
             format!("styles/style{:04}.css", css_idx).into_bytes()
         }
         RefKind::PosFid { elem_idx, offset } => {
-            let (file_num, target_pos) = if let Some(elem) = elems.get(*elem_idx) {
-                (elem.file_number as usize, elem.insert_pos + *offset as u32)
-            } else {
-                (0, 0)
-            };
-
-            let anchor = find_nearest_id_fast(raw_text, target_pos as usize, file_num, file_starts);
-            if let Some(id) = anchor {
+            let (file_num, anchor) =
+                resolve_pos_fid(*elem_idx, *offset, elems, raw_text, file_starts);
+            if let Some((val, is_aid)) = anchor {
+                let id = format_anchor_name(&val, is_aid);
                 format!("part{:04}.html#{}", file_num, id).into_bytes()
             } else {
                 format!("part{:04}.html", file_num).into_bytes()
@@ -175,6 +171,84 @@ fn generate_replacement(
     }
 }
 
+/// Resolve a `kindle:pos:fid` target to its skeleton file number and the
+/// nearest anchor attribute: `(value, came_from_aid)`.
+fn resolve_pos_fid(
+    elem_idx: usize,
+    offset: usize,
+    elems: &[DivElement],
+    raw_text: &[u8],
+    file_starts: &[(u32, u32)],
+) -> (usize, Option<(String, bool)>) {
+    let (file_num, target_pos) = if let Some(elem) = elems.get(elem_idx) {
+        (elem.file_number as usize, elem.insert_pos + offset as u32)
+    } else {
+        (0, 0)
+    };
+    let anchor = find_nearest_id_kind(raw_text, target_pos as usize, file_num, file_starts);
+    (file_num, anchor)
+}
+
+/// The anchor name a resolved attribute produces in hrefs: `aid` attributes
+/// get an `aid-` prefix (KindleUnpack convention), real ids pass through.
+fn format_anchor_name(val: &str, is_aid: bool) -> String {
+    if is_aid {
+        format!("aid-{}", val)
+    } else {
+        val.to_string()
+    }
+}
+
+/// Collect the set of `aid` attribute values that are link targets.
+///
+/// KF8 stamps kindlegen's `aid` attribute on skeleton elements; internal
+/// links (`kindle:pos:fid:XXXX:off:YYYY`) resolve to the nearest `id`,
+/// `name`, or `aid` attribute. When the nearest is an `aid`, the emitted
+/// href fragment is `#aid-{value}` — so that element must keep an
+/// `id="aid-{value}"` in the output or the link dangles. This scans every
+/// pos:fid reference in `scan_text` (the whole decompressed text, so links
+/// inside auxiliary flows count too) plus the NCX TOC byte positions in
+/// `extra_positions` (`(byte_pos, file_num)` pairs — `resolve_toc` runs the
+/// same nearest-attribute lookup), and returns the aid values those targets
+/// resolve to. Mirrors calibre's `linked_aids` (mobi8.py).
+pub fn collect_linked_aids(
+    scan_text: &[u8],
+    resolve_text: &[u8],
+    elems: &[DivElement],
+    file_starts: &[(u32, u32)],
+    extra_positions: &[(usize, usize)],
+) -> std::collections::HashSet<String> {
+    let mut linked = std::collections::HashSet::new();
+    let finder = memmem::Finder::new(b"kindle:pos:fid:");
+    let mut pos = 0;
+    while let Some(rel) = finder.find(&scan_text[pos..]) {
+        let start = pos + rel;
+        match parse_kindle_ref(&scan_text[start..]) {
+            Some(KindleRef {
+                end,
+                kind: RefKind::PosFid { elem_idx, offset },
+            }) => {
+                let (_, anchor) =
+                    resolve_pos_fid(elem_idx, offset, elems, resolve_text, file_starts);
+                if let Some((val, true)) = anchor {
+                    linked.insert(val);
+                }
+                pos = start + end;
+            }
+            Some(KindleRef { end, .. }) => pos = start + end,
+            None => pos = start + b"kindle:pos:fid:".len(),
+        }
+    }
+    for &(byte_pos, file_num) in extra_positions {
+        if let Some((val, true)) =
+            find_nearest_id_kind(resolve_text, byte_pos, file_num, file_starts)
+        {
+            linked.insert(val);
+        }
+    }
+    linked
+}
+
 /// Find nearest id/name/aid attribute in raw text near the target position.
 ///
 /// Matches KindleUnpack's getIDTag behavior:
@@ -189,6 +263,19 @@ pub fn find_nearest_id_fast(
     file_num: usize,
     file_starts: &[(u32, u32)],
 ) -> Option<String> {
+    find_nearest_id_kind(raw_text, pos, file_num, file_starts)
+        .map(|(val, is_aid)| format_anchor_name(&val, is_aid))
+}
+
+/// Kind-aware core of [`find_nearest_id_fast`]: returns the raw attribute
+/// value and whether it came from an `aid` attribute (callers decide how to
+/// prefix — and [`collect_linked_aids`] needs the raw value).
+fn find_nearest_id_kind(
+    raw_text: &[u8],
+    pos: usize,
+    file_num: usize,
+    file_starts: &[(u32, u32)],
+) -> Option<(String, bool)> {
     // Calculate file bounds
     let (file_start, file_end) = {
         let mut start = 0usize;
@@ -240,11 +327,7 @@ pub fn find_nearest_id_fast(
 
         // Pick the closest one
         if let Some((_, val, is_aid)) = candidates.into_iter().min_by_key(|(p, _, _)| *p) {
-            if is_aid {
-                return Some(format!("aid-{}", val));
-            } else {
-                return Some(val);
-            }
+            return Some((val, is_aid));
         }
     }
 
@@ -262,7 +345,7 @@ pub fn find_nearest_id_fast(
         let body_pos = memmem::find(back_window, b"<body ");
 
         // Find the closest one that's after any <body tag
-        let mut best: Option<(usize, String)> = None;
+        let mut best: Option<(usize, String, bool)> = None;
 
         for (opt_pos, opt_val, is_aid) in [(last_id, false), (last_name, false), (last_aid, true)]
             .into_iter()
@@ -275,21 +358,17 @@ pub fn find_nearest_id_fast(
                 continue;
             }
 
-            let val = if is_aid {
-                format!("aid-{}", opt_val)
-            } else {
-                opt_val
-            };
-
             match &best {
-                None => best = Some((opt_pos, val)),
-                Some((best_pos, _)) if opt_pos > *best_pos => best = Some((opt_pos, val)),
+                None => best = Some((opt_pos, opt_val, is_aid)),
+                Some((best_pos, _, _)) if opt_pos > *best_pos => {
+                    best = Some((opt_pos, opt_val, is_aid))
+                }
                 _ => {}
             }
         }
 
-        if let Some((_, val)) = best {
-            return Some(val);
+        if let Some((_, val, is_aid)) = best {
+            return Some((val, is_aid));
         }
     }
 
@@ -556,6 +635,40 @@ pub fn ensure_html_lang_dual(html: &[u8], default_lang: &str) -> Vec<u8> {
     let tag_end = after_html + rel_end;
     let attrs = &html[after_html..tag_end];
 
+    // A repeated `lang`/`xml:lang` is malformed XML (epubcheck RSC-016
+    // fatal, which kills all content checks for the file). Earlier versions
+    // of this pass produced exactly that whenever the source `<html>` led
+    // with a lang attribute, so already-converted books can carry the dup —
+    // keep only the first occurrence of each before filling in gaps.
+    let mut lang_spans = attr_spans(attrs, b"lang");
+    let mut xml_lang_spans = attr_spans(attrs, b"xml:lang");
+    if lang_spans.len() > 1 || xml_lang_spans.len() > 1 {
+        let mut drop = if lang_spans.len() > 1 {
+            lang_spans.split_off(1)
+        } else {
+            Vec::new()
+        };
+        if xml_lang_spans.len() > 1 {
+            drop.extend(xml_lang_spans.split_off(1));
+        }
+        drop.sort_unstable();
+        let mut rebuilt = Vec::with_capacity(html.len());
+        rebuilt.extend_from_slice(&html[..after_html]);
+        let mut p = 0;
+        for (s, e) in drop {
+            let mut s = s;
+            // Eat the whitespace run before the dropped attribute.
+            while s > p && attrs[s - 1].is_ascii_whitespace() {
+                s -= 1;
+            }
+            rebuilt.extend_from_slice(&attrs[p..s]);
+            p = e;
+        }
+        rebuilt.extend_from_slice(&attrs[p..]);
+        rebuilt.extend_from_slice(&html[tag_end..]);
+        return ensure_html_lang_dual(&rebuilt, default_lang);
+    }
+
     let existing_lang = extract_attr_value(attrs, b"lang");
     let existing_xml_lang = extract_attr_value(attrs, b"xml:lang");
 
@@ -587,56 +700,62 @@ pub fn ensure_html_lang_dual(html: &[u8], default_lang: &str) -> Vec<u8> {
     out
 }
 
+/// Byte spans (`start..end` into `attrs`) of every `name="…"`/`name='…'`
+/// occurrence, whitespace-boundary matched so `xml:lang` never matches a
+/// search for `lang`. Used to detect (and drop) repeated attributes.
+fn attr_spans(attrs: &[u8], name: &[u8]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let finder = memmem::Finder::new(name);
+    let mut from = 0;
+    while let Some(rel) = finder.find(&attrs[from..]) {
+        let start = from + rel;
+        let bounded = start == 0 || attrs[start - 1].is_ascii_whitespace();
+        if !bounded {
+            from = start + 1;
+            continue;
+        }
+        let mut i = start + name.len();
+        while i < attrs.len() && attrs[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= attrs.len() || attrs[i] != b'=' {
+            from = start + 1;
+            continue;
+        }
+        i += 1;
+        while i < attrs.len() && attrs[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < attrs.len() && (attrs[i] == b'"' || attrs[i] == b'\'') {
+            let quote = attrs[i];
+            i += 1;
+            while i < attrs.len() && attrs[i] != quote {
+                i += 1;
+            }
+            if i < attrs.len() {
+                i += 1;
+            }
+            spans.push((start, i));
+            from = i;
+        } else {
+            from = start + 1;
+        }
+    }
+    spans
+}
+
 /// Find `attr="value"` (or `attr='value'`) inside an attribute byte slice and
 /// return the value. Looks for the attribute name preceded by ASCII
 /// whitespace OR appearing at the start of the slice — avoids matching e.g.
 /// `xml:lang` when searching for `lang`.
 fn extract_attr_value<'a>(attrs: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
-    let mut pos = 0;
-    while pos < attrs.len() {
-        let abs = if pos == 0 {
-            0
-        } else {
-            // Require a whitespace boundary so `xml:lang` doesn't match `lang`.
-            let rest = &attrs[pos..];
-            let off = rest.iter().position(|b| b.is_ascii_whitespace())?;
-            pos + off + 1
-        };
-        if abs >= attrs.len() {
-            return None;
-        }
-        let window = &attrs[abs..];
-        if window.starts_with(name) {
-            let after_name = &window[name.len()..];
-            // Allow optional whitespace before `=`.
-            let mut p = 0;
-            while p < after_name.len() && after_name[p].is_ascii_whitespace() {
-                p += 1;
-            }
-            if p < after_name.len() && after_name[p] == b'=' {
-                p += 1;
-                while p < after_name.len() && after_name[p].is_ascii_whitespace() {
-                    p += 1;
-                }
-                if p < after_name.len() {
-                    let quote = after_name[p];
-                    if quote == b'"' || quote == b'\'' {
-                        p += 1;
-                        let value_start = p;
-                        while p < after_name.len() && after_name[p] != quote {
-                            p += 1;
-                        }
-                        if p <= after_name.len() {
-                            return Some(&after_name[value_start..p]);
-                        }
-                    }
-                }
-            }
-        }
-        // Advance to the next whitespace-separated attribute.
-        pos = abs + 1;
-    }
-    None
+    let (start, end) = attr_spans(attrs, name).into_iter().next()?;
+    let span = &attrs[start..end];
+    let q = span.iter().position(|&b| b == b'"' || b == b'\'')?;
+    let quote = span[q];
+    let value_start = q + 1;
+    let value_len = span[value_start..].iter().position(|&b| b == quote)?;
+    Some(&span[value_start..value_start + value_len])
 }
 
 /// Drop `<link>` elements whose `href` escapes the package root (contains
@@ -714,7 +833,98 @@ fn is_root_escaping_link(tag: &[u8]) -> bool {
     memmem::find(&body[..close], b"..").is_some()
 }
 
-pub fn strip_kindle_attributes_fast(html: &[u8]) -> Vec<u8> {
+/// Drop `href`s on `<a>` elements that point at raster images.
+///
+/// kindlegen's in-book TOC sometimes links its "Cover" row straight at the
+/// cover JPEG (`kindle:embed:…`, which [`transform_kindle_refs`] rewrites to
+/// `images/image_NNNN.jpg`). EPUB 3 forbids hyperlinks to non-content
+/// documents (epubcheck RSC-010) and every downstream consumer drops the
+/// link anyway — keep the label, lose the href.
+pub fn unlink_image_anchors(html: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(html.len());
+    let mut pos = 0;
+    while let Some(rel) = memmem::find(&html[pos..], b"<a ") {
+        let start = pos + rel;
+        out.extend_from_slice(&html[pos..start]);
+        let Some(end_rel) = memchr::memchr(b'>', &html[start..]) else {
+            out.extend_from_slice(&html[start..]);
+            return out;
+        };
+        let end = start + end_rel + 1;
+        out.extend_from_slice(&drop_image_href(&html[start..end]));
+        pos = end;
+    }
+    out.extend_from_slice(&html[pos..]);
+    out
+}
+
+/// [`unlink_image_anchors`] helper: rewrite one `<a …>` tag without its
+/// `href` when that href targets an `images/…` raster file.
+fn drop_image_href(tag: &[u8]) -> Vec<u8> {
+    let attrs_start = 2; // past "<a"
+    let attrs_end = tag.len() - 1; // before '>'
+    let attrs = &tag[attrs_start..attrs_end];
+    for (s, e) in attr_spans(attrs, b"href") {
+        let span = &attrs[s..e];
+        let Some(q) = span.iter().position(|&b| b == b'"' || b == b'\'') else {
+            continue;
+        };
+        let val = &span[q + 1..span.len().saturating_sub(1)];
+        let exts: [&[u8]; 4] = [b".jpg", b".jpeg", b".png", b".gif"];
+        if val.starts_with(b"images/") && exts.iter().any(|ext| val.ends_with(ext)) {
+            let mut s = s;
+            while s > 0 && attrs[s - 1].is_ascii_whitespace() {
+                s -= 1;
+            }
+            let mut out = Vec::with_capacity(tag.len());
+            out.extend_from_slice(&tag[..attrs_start + s]);
+            out.extend_from_slice(&attrs[e..]);
+            out.push(b'>');
+            return out;
+        }
+    }
+    tag.to_vec()
+}
+
+/// Drop `@font-face` rules whose `src` references a `kindle:embed:` resource.
+///
+/// KF8 embedded fonts live in FONT records boko doesn't extract, so the URL
+/// would dangle in the emitted EPUB (epubcheck RSC-008/OPF-014); dropping the
+/// whole rule lets the `font-family` fall back down its declared stack.
+pub fn strip_kindle_embed_font_faces(css: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(css.len());
+    let mut pos = 0;
+    let finder = memmem::Finder::new(b"@font-face");
+    while let Some(rel) = finder.find(&css[pos..]) {
+        let start = pos + rel;
+        let Some(open_rel) = memchr::memchr(b'{', &css[start..]) else {
+            break;
+        };
+        let open = start + open_rel;
+        let Some(close_rel) = memchr::memchr(b'}', &css[open..]) else {
+            break;
+        };
+        let close = open + close_rel;
+        out.extend_from_slice(&css[pos..start]);
+        let block = &css[start..=close];
+        if memmem::find(block, b"kindle:embed:").is_none() {
+            out.extend_from_slice(block);
+        }
+        pos = close + 1;
+    }
+    out.extend_from_slice(&css[pos..]);
+    out
+}
+
+/// Strip Amazon-specific attributes (`aid`, `data-Amzn*`) from every tag —
+/// except link-target aids: an `aid` whose value is in `linked_aids` (some
+/// `kindle:pos:fid` link resolves to it) is rewritten to `id="aid-{value}"`
+/// so the `#aid-{value}` hrefs [`transform_kindle_refs`] emits actually
+/// resolve. Pass an empty set to strip unconditionally.
+pub fn strip_kindle_attributes_fast(
+    html: &[u8],
+    linked_aids: &std::collections::HashSet<String>,
+) -> Vec<u8> {
     let mut output = Vec::with_capacity(html.len());
     let mut pos = 0;
 
@@ -727,7 +937,7 @@ pub fn strip_kindle_attributes_fast(html: &[u8]) -> Vec<u8> {
                 let abs_tag_end = abs_tag_start + tag_end + 1;
                 let tag = &html[abs_tag_start..abs_tag_end];
 
-                let cleaned = clean_tag(tag);
+                let cleaned = clean_tag(tag, linked_aids);
                 output.extend_from_slice(&cleaned);
 
                 pos = abs_tag_end;
@@ -745,7 +955,7 @@ pub fn strip_kindle_attributes_fast(html: &[u8]) -> Vec<u8> {
 }
 
 /// Clean a single tag by removing Amazon-specific attributes.
-fn clean_tag(tag: &[u8]) -> Vec<u8> {
+fn clean_tag(tag: &[u8], linked_aids: &std::collections::HashSet<String>) -> Vec<u8> {
     // Skip comments and special tags
     if tag.starts_with(b"<!--")
         || tag.starts_with(b"<!DOCTYPE")
@@ -757,6 +967,7 @@ fn clean_tag(tag: &[u8]) -> Vec<u8> {
 
     let mut result = Vec::with_capacity(tag.len());
     let mut i = 0;
+    let mut injected_id = false;
 
     // Copy tag name
     result.push(b'<');
@@ -793,23 +1004,45 @@ fn clean_tag(tag: &[u8]) -> Vec<u8> {
             || attr_name.starts_with(b"data-amzn");
 
         if should_strip {
-            // Skip the attribute value
+            // Skip the attribute value, capturing it — a link-target aid is
+            // rewritten to an id below.
+            let mut value: &[u8] = b"";
             if i < tag.len() && tag[i] == b'=' {
                 i += 1;
                 if i < tag.len() && (tag[i] == b'"' || tag[i] == b'\'') {
                     let quote = tag[i];
                     i += 1;
+                    let value_start = i;
                     while i < tag.len() && tag[i] != quote {
                         i += 1;
                     }
+                    value = &tag[value_start..i];
                     if i < tag.len() {
                         i += 1;
                     }
                 } else {
+                    let value_start = i;
                     while i < tag.len() && tag[i] != b' ' && tag[i] != b'>' {
                         i += 1;
                     }
+                    value = &tag[value_start..i];
                 }
+            }
+            // A linked aid becomes the element's id — `transform_kindle_refs`
+            // emits hrefs pointing at `#aid-{value}`. Skipped when the tag
+            // already carries an id (a second id attribute would be malformed
+            // XML), so that rare link stays unresolved rather than breaking
+            // the document.
+            if attr_name == b"aid"
+                && !injected_id
+                && let Ok(val) = std::str::from_utf8(value)
+                && linked_aids.contains(val)
+                && !tag_has_id_attr(tag)
+            {
+                result.extend_from_slice(b"id=\"aid-");
+                result.extend_from_slice(value);
+                result.push(b'"');
+                injected_id = true;
             }
         } else {
             // Keep this attribute
@@ -853,6 +1086,57 @@ fn clean_tag(tag: &[u8]) -> Vec<u8> {
     }
 
     result
+}
+
+/// Whether a raw tag slice carries a real `id` attribute. Attribute-walk,
+/// not substring search — ` aid=` and tab/newline separators must not fool
+/// it, since a false negative here would inject a second id attribute
+/// (malformed XML) in `clean_tag`.
+fn tag_has_id_attr(tag: &[u8]) -> bool {
+    let mut i = 1; // past '<'
+    while i < tag.len()
+        && tag[i] != b' '
+        && tag[i] != b'\t'
+        && tag[i] != b'\n'
+        && tag[i] != b'>'
+        && tag[i] != b'/'
+    {
+        i += 1;
+    }
+    while i < tag.len() {
+        while i < tag.len() && (tag[i] == b' ' || tag[i] == b'\t' || tag[i] == b'\n') {
+            i += 1;
+        }
+        if i >= tag.len() || tag[i] == b'>' || tag[i] == b'/' {
+            break;
+        }
+        let attr_start = i;
+        while i < tag.len() && tag[i] != b'=' && tag[i] != b' ' && tag[i] != b'>' && tag[i] != b'/'
+        {
+            i += 1;
+        }
+        if &tag[attr_start..i] == b"id" {
+            return true;
+        }
+        if i < tag.len() && tag[i] == b'=' {
+            i += 1;
+            if i < tag.len() && (tag[i] == b'"' || tag[i] == b'\'') {
+                let quote = tag[i];
+                i += 1;
+                while i < tag.len() && tag[i] != quote {
+                    i += 1;
+                }
+                if i < tag.len() {
+                    i += 1;
+                }
+            } else {
+                while i < tag.len() && tag[i] != b' ' && tag[i] != b'>' {
+                    i += 1;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Ensure img tag has alt attribute.
@@ -899,7 +1183,7 @@ mod tests {
     #[test]
     fn test_strip_aid_attribute() {
         let input = b"<p aid=\"0001\">Hello</p>";
-        let output = strip_kindle_attributes_fast(input);
+        let output = strip_kindle_attributes_fast(input, &Default::default());
         let output_str = String::from_utf8_lossy(&output);
         eprintln!("Output: {:?}", output_str);
         assert!(!output.contains_str("aid="));
@@ -908,6 +1192,161 @@ mod tests {
             output_str.starts_with("<p") && output_str.contains(">Hello</p>"),
             "Expected <p...>Hello</p>, got: {}",
             output_str
+        );
+    }
+
+    #[test]
+    fn test_linked_aid_becomes_id() {
+        // A link somewhere resolves to `#aid-5N3C2`, so the element carrying
+        // aid="5N3C2" must keep that identity as an id; unlinked aids are
+        // stripped as before.
+        let linked: std::collections::HashSet<String> = ["5N3C2".to_string()].into();
+        let input = b"<p aid=\"5N3C2\">target</p><p aid=\"XXXX\">other</p>";
+        let out = strip_kindle_attributes_fast(input, &linked);
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains("id=\"aid-5N3C2\""),
+            "linked aid must be rewritten to an id, got: {s}"
+        );
+        assert!(
+            !s.contains("aid=\""),
+            "raw aid attributes must not survive: {s}"
+        );
+        assert!(!s.contains("XXXX"), "unlinked aid must be stripped: {s}");
+    }
+
+    #[test]
+    fn test_linked_aid_on_tag_with_existing_id_is_dropped() {
+        // The tag already has an id — injecting a second id attribute would
+        // be malformed XML, so the aid is stripped instead.
+        let linked: std::collections::HashSet<String> = ["B4".to_string()].into();
+        let input = b"<h1 id=\"ch1\" aid=\"B4\">One</h1>";
+        let out = strip_kindle_attributes_fast(input, &linked);
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains("id=\"ch1\""), "existing id must survive: {s}");
+        assert!(!s.contains("aid-B4"), "no second id may be injected: {s}");
+        assert!(!s.contains("aid=\""), "aid attribute must be stripped: {s}");
+    }
+
+    #[test]
+    fn test_tag_has_id_attr() {
+        assert!(tag_has_id_attr(b"<p id=\"x\">"));
+        assert!(tag_has_id_attr(b"<p class=\"c\" id='x'>"));
+        // ` aid=` is not ` id=`.
+        assert!(!tag_has_id_attr(b"<p aid=\"x\">"));
+        // `id` inside an attribute VALUE doesn't count.
+        assert!(!tag_has_id_attr(b"<p title=\"id=\">"));
+        // Tab/newline separators still find the id.
+        assert!(tag_has_id_attr(b"<p\tid=\"x\">"));
+        assert!(tag_has_id_attr(b"<p\nid=\"x\">"));
+        assert!(!tag_has_id_attr(b"<br/>"));
+    }
+
+    #[test]
+    fn test_lang_as_first_attribute_is_found() {
+        // `<html lang=… xml:lang=…>` with lang as the FIRST attribute: the
+        // old candidate walk never looked at the first attribute (the attrs
+        // slice starts with the separator space), returned None for `lang`,
+        // and appended a duplicate — an XML well-formedness error (epubcheck
+        // RSC-016) on every retail AZW3 whose html tag leads with lang.
+        let html = b"<html lang=\"en-US\" xml:lang=\"en-US\" xmlns=\"http://www.w3.org/1999/xhtml\"><head></head></html>";
+        assert_eq!(ensure_html_lang_dual(html, "en"), html);
+    }
+
+    #[test]
+    fn test_duplicate_lang_attr_deduped() {
+        // A repeated attribute is an XML well-formedness error (epubcheck
+        // RSC-016); older boko builds emitted this shape themselves (see
+        // `test_lang_as_first_attribute_is_found`).
+        let html = b"<html lang=\"en-US\" xml:lang=\"en-US\" xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"en-US\"><head></head></html>";
+        let out = ensure_html_lang_dual(html, "en");
+        let s = String::from_utf8_lossy(&out);
+        assert_eq!(
+            s.matches("lang=").count(),
+            2, // one lang= + one xml:lang=
+            "exactly one lang and one xml:lang must survive: {s}"
+        );
+        assert!(s.contains("xml:lang=\"en-US\""));
+        assert!(s.contains("xmlns=\"http://www.w3.org/1999/xhtml\""));
+
+        // Duplicate lang and NO xml:lang: dedupe, then the pair-up fills it in.
+        let html = b"<html lang=\"ja\" lang=\"ja\"><head></head></html>";
+        let out = ensure_html_lang_dual(html, "en");
+        let s = String::from_utf8_lossy(&out);
+        assert_eq!(s.matches("lang=\"ja\"").count(), 2, "lang + xml:lang: {s}");
+        assert!(s.contains("xml:lang=\"ja\""));
+
+        // No duplicates: byte-identical to the old behavior.
+        let html = b"<html lang=\"en\" xml:lang=\"en\"><head></head></html>";
+        assert_eq!(ensure_html_lang_dual(html, ""), html);
+    }
+
+    #[test]
+    fn test_strip_kindle_embed_font_faces() {
+        let css = b"/* fonts */\n@font-face {\n\tfont-family:\"X\";\n\tsrc:url(kindle:embed:0001);\n}\n\n.para { margin: 0; }\n@font-face { font-family:\"Y\"; src:url(fonts/y.ttf); }\n";
+        let out = strip_kindle_embed_font_faces(css);
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.contains("kindle:embed"), "embed font-face dropped: {s}");
+        assert!(
+            s.contains("font-family:\"Y\""),
+            "local-src font-face kept: {s}"
+        );
+        assert!(s.contains(".para { margin: 0; }"));
+    }
+
+    #[test]
+    fn test_unlink_image_anchors() {
+        // The in-book TOC "Cover" row linking the raw cover JPEG loses its
+        // href (RSC-010); content-document links are untouched.
+        let html = b"<p><a href=\"images/image_0002.jpg\" >Cover</a></p>\
+<p><a href=\"part0003.html#d1\">Part One</a></p><img src=\"images/image_0001.jpg\"/>";
+        let out = unlink_image_anchors(html);
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.contains("<a href=\"images/"), "image href dropped: {s}");
+        assert!(s.contains(">Cover</a>"), "label survives: {s}");
+        assert!(
+            s.contains("<a href=\"part0003.html#d1\">"),
+            "doc link kept: {s}"
+        );
+        assert!(
+            s.contains("<img src=\"images/image_0001.jpg\"/>"),
+            "img untouched: {s}"
+        );
+    }
+
+    #[test]
+    fn test_collect_linked_aids() {
+        // One skeleton file (file 0 starting at 0). The body has two aid
+        // elements; a pos:fid link targets the second one's byte position.
+        let html = b"<body ><a href=\"kindle:pos:fid:0001:off:0000000000\">go</a>\
+<p aid=\"AA\">first</p><p aid=\"BB\">second</p></body>";
+        // elems[1].insert_pos points at the second <p>.
+        let elem = |insert_pos: u32| DivElement {
+            insert_pos,
+            toc_text: None,
+            file_number: 0,
+            sequence_number: 0,
+            start_pos: 0,
+            length: 0,
+        };
+        let second_p = memmem::find(html, b"<p aid=\"BB\"").unwrap() as u32;
+        let elems = vec![elem(7), elem(second_p)];
+        let file_starts = [(0u32, 0u32)];
+        let linked = collect_linked_aids(html, html, &elems, &file_starts, &[]);
+        assert!(
+            linked.contains("BB"),
+            "pos:fid:0001 resolves to the BB element, got {linked:?}"
+        );
+        assert!(
+            !linked.contains("AA"),
+            "AA is not a link target, got {linked:?}"
+        );
+
+        // NCX positions count as link sources too.
+        let linked = collect_linked_aids(html, html, &elems, &file_starts, &[(7usize, 0usize)]);
+        assert!(
+            linked.contains("AA"),
+            "NCX position at the first <p> must mark AA linked, got {linked:?}"
         );
     }
 

@@ -71,8 +71,7 @@ enum Command {
         /// KFX → EPUB engine: `mechanical` (default — the `kfx_to_epub`
         /// calibre port) or `ir` (the generic `KfxImporter` → IR →
         /// `EpubExporter` pipeline). The two must converge to byte-identical
-        /// output (see plans/ir-route-migration.md); until then `ir` is the
-        /// side under test.
+        /// output; until then `ir` is the side under test.
         #[arg(long = "route", default_value = "mechanical")]
         route: String,
     },
