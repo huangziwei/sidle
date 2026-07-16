@@ -1988,7 +1988,10 @@ function applyLayout(index, force) {
   // The block-`margin` attribute only re-paginates via a ResizeObserver, which
   // can miss; force it so a vertical top/bottom-margin change always takes hold.
   // (No-op before the first section loads — render() bails without a view.)
-  paginator.render?.();
+  // `force` rides through to the view so a settings change re-lays-out even
+  // when the resolved geometry is unchanged (image caps depend on font
+  // metrics); mode flips leave it false and let the geometry diff decide.
+  paginator.render?.(force === true);
 }
 
 // Push the current settings into the live view: section CSS + chrome + layout
@@ -3981,6 +3984,14 @@ async function open(id) {
   paginator.setAttribute("flow", "paginated");
   $("#reader-paginator-host").replaceChildren(paginator);
 
+  // Apply the incoming section's layout mode (full-bleed image vs text) while
+  // the paginator has no live view — the attribute writes are free then, and
+  // the section's first columnize runs directly in its final geometry instead
+  // of laying out in the outgoing section's mode and re-rendering on relocate
+  // (which cost several full re-layouts per section entry; seconds on a long
+  // vertical chapter). The relocate handler's applyLayout stays as a safety
+  // net and no-ops when the mode already matches.
+  paginator.addEventListener("prerender", ({ detail }) => applyLayout(detail.index));
   paginator.addEventListener("create-overlayer", ({ detail: { doc, attach } }) => {
     const overlayer = new Overlayer();
     attach(overlayer);

@@ -223,6 +223,8 @@ class View {
     #column = true
     #size
     #layout = {}
+    #expandKey // last-applied expand geometry, so no-op echoes skip the writes
+    #expandedSize // cached for #placeOverlayer (attach can precede any change)
     constructor({ container, onExpand }) {
         this.container = container
         this.onExpand = onExpand
@@ -271,6 +273,14 @@ class View {
                 this.#vertical = vertical
                 this.#rtl = rtl
 
+                // The document just swapped in (about:blank → section). Any
+                // geometry applied before this (a ResizeObserver render racing
+                // the iframe load) styled the OLD document — drop the caches so
+                // the render below can't be skipped as "unchanged".
+                this.#layout = {}
+                this.#expandKey = undefined
+                this.#expandedSize = undefined
+
                 this.#contentRange.selectNodeContents(doc.body)
                 const layout = beforeRender?.({ vertical, rtl, background })
                 this.#iframe.style.display = 'block'
@@ -287,8 +297,20 @@ class View {
             this.#iframe.src = src
         })
     }
-    render(layout) {
+    render(layout, force) {
         if (!layout) return
+        // Same geometry → nothing to do. Re-applying identical column styles
+        // still dirties style and forces a full re-layout of the section
+        // (~200-900ms for a long ruby-annotated vertical chapter), and render()
+        // gets echoed by the host's ResizeObserver + explicit calls after
+        // attribute writes. Content-driven changes (images landing, font size)
+        // are handled by expand() via the body ResizeObserver, not here.
+        // `force` bypasses the skip for content-affecting style changes (the
+        // reader's font/spacing settings feed setImageSize's wrapper-chrome
+        // measurements, which px-identical geometry would otherwise cache).
+        const last = this.#layout
+        if (!force && ['flow', 'width', 'height', 'margin', 'gap', 'columnWidth']
+            .every(k => last[k] === layout[k])) return
         this.#column = layout.flow !== 'scrolled'
         this.#layout = layout
         if (this.#column) this.columnize(layout)
@@ -332,8 +354,16 @@ class View {
             'position': 'static', 'border': '0', 'margin': '0',
             'max-height': 'none', 'max-width': 'none',
             'min-height': 'none', 'min-width': 'none',
-            // fix glyph clipping in WebKit
-            '-webkit-line-box-contain': 'block glyphs replaced',
+            // fix glyph clipping in WebKit — horizontal text only. Computing
+            // per-glyph ink bounds makes WebKit lay out a ruby-annotated
+            // vertical-rl section ~13× slower (measured ~870ms → ~66ms on a
+            // 100KB chapter), and for CJK vertical text it buys nothing: the
+            // rendered geometry is identical with and without (every element
+            // rect byte-equal, same page count), because CJK glyph ink stays
+            // inside the em box. Keep it for horizontal scripts, whose
+            // descenders/diacritics genuinely overflow line boxes and clip at
+            // column breaks without it.
+            ...(vertical ? {} : { '-webkit-line-box-contain': 'block glyphs replaced' }),
         })
         setStylesImportant(doc.body, {
             'max-height': 'none',
@@ -451,18 +481,20 @@ class View {
             const contentSize = contentStart + contentRect[side]
             const pageCount = Math.ceil(contentSize / this.#size)
             const expandedSize = pageCount * this.#size
-            this.#element.style.padding = '0'
-            this.#iframe.style[side] = `${expandedSize}px`
-            this.#element.style[side] = `${expandedSize + this.#size * 2}px`
-            this.#iframe.style[otherSide] = '100%'
-            this.#element.style[otherSide] = '100%'
-            documentElement.style[side] = `${this.#size}px`
-            if (this.#overlayer) {
-                this.#overlayer.element.style.margin = '0'
-                this.#overlayer.element.style.left = this.#vertical ? '0' : `${this.#size}px`
-                this.#overlayer.element.style.top = this.#vertical ? `${this.#size}px` : '0'
-                this.#overlayer.element.style[side] = `${expandedSize}px`
-                this.#overlayer.redraw()
+            // Skip the size writes when nothing changed: writing identical
+            // values still dirties style and the next read then re-lays-out
+            // the whole section, so the body-ResizeObserver echo after each
+            // real expand would double every layout otherwise.
+            const key = `col:${expandedSize}:${this.#size}`
+            if (this.#expandKey !== key) {
+                this.#expandKey = key
+                this.#expandedSize = expandedSize
+                this.#element.style.padding = '0'
+                this.#iframe.style[side] = `${expandedSize}px`
+                this.#element.style[side] = `${expandedSize + this.#size * 2}px`
+                this.#iframe.style[otherSide] = '100%'
+                this.#element.style[otherSide] = '100%'
+                documentElement.style[side] = `${this.#size}px`
             }
         } else {
             const side = this.#vertical ? 'width' : 'height'
@@ -470,25 +502,52 @@ class View {
             const contentSize = documentElement.getBoundingClientRect()[side]
             const expandedSize = contentSize
             const { margin } = this.#layout
-            const padding = this.#vertical ? `0 ${margin}px` : `${margin}px 0`
-            this.#element.style.padding = padding
-            this.#iframe.style[side] = `${expandedSize}px`
-            this.#element.style[side] = `${expandedSize}px`
-            this.#iframe.style[otherSide] = '100%'
-            this.#element.style[otherSide] = '100%'
-            if (this.#overlayer) {
-                this.#overlayer.element.style.margin = padding
-                this.#overlayer.element.style.left = '0'
-                this.#overlayer.element.style.top = '0'
-                this.#overlayer.element.style[side] = `${expandedSize}px`
-                this.#overlayer.redraw()
+            const key = `scr:${expandedSize}:${margin}`
+            if (this.#expandKey !== key) {
+                this.#expandKey = key
+                this.#expandedSize = expandedSize
+                const padding = this.#vertical ? `0 ${margin}px` : `${margin}px 0`
+                this.#element.style.padding = padding
+                this.#iframe.style[side] = `${expandedSize}px`
+                this.#element.style[side] = `${expandedSize}px`
+                this.#iframe.style[otherSide] = '100%'
+                this.#element.style[otherSide] = '100%'
             }
         }
+        // Reposition + redraw the overlay on every expand, changed or not —
+        // a reflow can move content without changing the page count (font
+        // swap), and redraw's clean-layout rect reads are cheap. Only the
+        // view-size writes above are worth skipping.
+        this.#placeOverlayer()
         this.onExpand()
+    }
+    // Position + size the overlay SVG over the expanded view. Runs on every
+    // expand and on attach — the attach-time call matters because expand()
+    // may skip between attach and the next geometry change.
+    #placeOverlayer() {
+        if (!this.#overlayer || this.#expandedSize == null) return
+        const expandedSize = this.#expandedSize
+        if (this.#column) {
+            const side = this.#vertical ? 'height' : 'width'
+            this.#overlayer.element.style.margin = '0'
+            this.#overlayer.element.style.left = this.#vertical ? '0' : `${this.#size}px`
+            this.#overlayer.element.style.top = this.#vertical ? `${this.#size}px` : '0'
+            this.#overlayer.element.style[side] = `${expandedSize}px`
+        } else {
+            const side = this.#vertical ? 'width' : 'height'
+            const { margin } = this.#layout
+            const padding = this.#vertical ? `0 ${margin}px` : `${margin}px 0`
+            this.#overlayer.element.style.margin = padding
+            this.#overlayer.element.style.left = '0'
+            this.#overlayer.element.style.top = '0'
+            this.#overlayer.element.style[side] = `${expandedSize}px`
+        }
+        this.#overlayer.redraw()
     }
     set overlayer(overlayer) {
         this.#overlayer = overlayer
         this.#element.append(overlayer.element)
+        this.#placeOverlayer()
     }
     get overlayer() {
         return this.#overlayer
@@ -741,11 +800,15 @@ export class Paginator extends HTMLElement {
                     `break-${x}: ${y ?? ''}column`))
         })
     }
-    #createView() {
+    #destroyView() {
         if (this.#view) {
             this.#view.destroy()
             this.#container.removeChild(this.#view.element)
+            this.#view = null
         }
+    }
+    #createView() {
+        this.#destroyView()
         this.#view = new View({
             container: this,
             onExpand: () => this.#scrollToAnchor(this.#anchor),
@@ -829,12 +892,12 @@ export class Paginator extends HTMLElement {
 
         return { height, width, margin, gap, columnWidth }
     }
-    render() {
+    render(force) {
         if (!this.#view) return
         this.#view.render(this.#beforeRender({
             vertical: this.#vertical,
             rtl: this.#rtl,
-        }))
+        }), force === true)
         this.#scrollToAnchor(this.#anchor)
     }
     get scrolled() {
@@ -1051,6 +1114,13 @@ export class Paginator extends HTMLElement {
         this.#index = index
         const hasFocus = this.#view?.document?.hasFocus()
         if (src) {
+            // Drop the old view FIRST, then let the host set the incoming
+            // section's layout attributes (margin / measure / column count)
+            // while no view is live: the attribute-triggered render()s no-op,
+            // and the new section's first columnize runs directly in its final
+            // geometry — one layout instead of one per attribute flip.
+            this.#destroyView()
+            this.dispatchEvent(new CustomEvent('prerender', { detail: { index } }))
             const view = this.#createView()
             const afterLoad = doc => {
                 if (doc.head) {
