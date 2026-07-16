@@ -458,7 +458,11 @@ where
                 // Create the node. Image-typed elements always emit an
                 // `<img>` node — a role override (a `link_to` making the
                 // element a Link, a figure layout hint) must not swallow it.
-                let node_role = if elem.is_image { Role::Image } else { elem.role };
+                let node_role = if elem.is_image {
+                    Role::Image
+                } else {
+                    elem.role
+                };
                 let node_id = chapter.alloc_node(Node::new(node_role));
 
                 // An image element's `link_to` becomes an `<a>` wrapping the

@@ -1466,7 +1466,13 @@ impl<'a> ContentState<'a> {
         let mut links: Vec<(usize, usize, String, Option<String>)> = Vec::new();
         // (base_start, base_end, base_text, [(rt_start, rt_end, rt_text)],
         // style_name)
-        type RubySpan = (usize, usize, String, Vec<(i64, i64, String)>, Option<String>);
+        type RubySpan = (
+            usize,
+            usize,
+            String,
+            Vec<(i64, i64, String)>,
+            Option<String>,
+        );
         let mut rubies: Vec<RubySpan> = Vec::new();
         // (start, end, style_name) — narrow styled runs, emitted alongside ruby.
         let mut styled: Vec<(usize, usize, String)> = Vec::new();
@@ -1501,7 +1507,13 @@ impl<'a> ContentState<'a> {
 
         // Merge ruby + styled runs into one offset-sorted list of inline marks.
         enum Mark {
-            Ruby(usize, usize, String, Vec<(i64, i64, String)>, Option<String>),
+            Ruby(
+                usize,
+                usize,
+                String,
+                Vec<(i64, i64, String)>,
+                Option<String>,
+            ),
             Styled(usize, usize, String),
         }
         let mut marks: Vec<Mark> = Vec::new();
