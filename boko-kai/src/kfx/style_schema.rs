@@ -2335,12 +2335,26 @@ pub fn extract_ir_field(
 // ============================================================================
 
 impl StyleSchema {
-    /// Look up a schema rule by its KFX symbol.
-    pub fn get_by_kfx_symbol(&self, kfx_symbol: u64) -> Option<&StylePropertyRule> {
-        self.rules
+    /// Every schema rule carrying this KFX symbol, in stable `ir_key` order.
+    ///
+    /// A KFX property can back several CSS properties (e.g. `$underline`
+    /// feeds both `text-decoration` and `text-decoration-style`), and the
+    /// rules map is an unordered HashMap — an unsorted walk would pick a
+    /// different winner per process and make conversion output flap.
+    pub fn get_all_by_kfx_symbol(&self, kfx_symbol: u64) -> Vec<&StylePropertyRule> {
+        let mut matches: Vec<&StylePropertyRule> = self
+            .rules
             .values()
             .flatten()
-            .find(|r| r.kfx_symbol as u64 == kfx_symbol)
+            .filter(|r| r.kfx_symbol as u64 == kfx_symbol)
+            .collect();
+        matches.sort_by_key(|r| r.ir_key);
+        matches
+    }
+
+    /// Look up the first schema rule for a KFX symbol (`ir_key` order).
+    pub fn get_by_kfx_symbol(&self, kfx_symbol: u64) -> Option<&StylePropertyRule> {
+        self.get_all_by_kfx_symbol(kfx_symbol).into_iter().next()
     }
 }
 
@@ -2930,8 +2944,10 @@ pub fn import_kfx_style(
     let mut style = ir_style::ComputedStyle::default();
 
     for (kfx_symbol, kfx_value) in props {
-        // Look up the schema rule for this KFX symbol
-        if let Some(rule) = schema.get_by_kfx_symbol(*kfx_symbol) {
+        // Apply EVERY rule backed by this KFX symbol (e.g. `$underline`
+        // populates both the underline flag and the underline style), in the
+        // schema's stable order.
+        for rule in schema.get_all_by_kfx_symbol(*kfx_symbol) {
             // Apply inverse transform to get CSS value
             if let Some(css_value) = rule.transform.inverse(kfx_value) {
                 // Apply to IR field (if the rule has an IR field mapping)

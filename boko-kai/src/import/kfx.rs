@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use crate::import::{ChapterId, Importer, SpineEntry};
 use crate::io::{ByteSource, FileSource};
+use crate::kfx::anchor_table::{AnchorTable, register_heading_levels, register_nav_synthetics};
 use crate::kfx::container::{
     ContainerError, EntityLoc, SymbolTable, get_field, parse_container_header,
     parse_container_info, parse_index_table, skip_enty_header,
@@ -91,6 +92,12 @@ pub struct KfxImporter {
     /// to the section's chapter start.
     section_eids: HashMap<i64, String>,
 
+    /// Section name → the main (last) page template's own element id and
+    /// `$style` name. The template becomes the chapter's root container —
+    /// the same body-level `<div>` the mechanical route emits — and anchors
+    /// at `(template_eid, offset)` stamp onto/inside it.
+    section_templates: HashMap<String, SectionTemplate>,
+
     /// Resources: name -> EntityLoc (lazily populated)
     resources: HashMap<String, EntityLoc>,
     /// Whether resources have been indexed
@@ -127,11 +134,23 @@ pub struct KfxImporter {
     ruby_indexed: bool,
 
     // --- Link resolution ---
-    /// Internal anchors: anchor_name -> (position_id, offset)
-    internal_anchors: Arc<HashMap<String, (i64, i64)>>,
+    /// The shared KFX anchor table (real `$266` anchors + synthetic toc/page
+    /// anchors at nav target positions) — the same rule set the mechanical
+    /// route stamps ids from, so both engines name content anchors
+    /// identically. Built by `index_anchor_entities`; `load_chapter` stamps
+    /// `semantics.id` from it.
+    anchor_table: Arc<AnchorTable>,
 
-    /// Maps element string ID -> GlobalNodeId (built during index_anchors)
+    /// Maps element string ID -> GlobalNodeId (built during index_anchors).
+    /// Ids are the STAMPED anchor ids (`a85J`, `toc-148-0`, …), the same
+    /// namespace the emitted XHTML carries.
     element_id_map: HashMap<String, GlobalNodeId>,
+
+    /// Element id (`$155`) → owning chapter, accumulated as chapters load
+    /// (every eid in the parsed storyline counts, whether or not its element
+    /// survives into the IR). The structural file-resolution map for nav
+    /// targets — the mechanical route's `element_id_to_filename` analog.
+    eid_chapters: HashMap<i64, ChapterId>,
 }
 
 impl From<ContainerError> for io::Error {
@@ -197,11 +216,23 @@ impl Importer for KfxImporter {
         // Parse storyline entity
         let storyline_ion = self.parse_entity_ion(storyline_loc)?;
 
+        // Record every eid the storyline declares against this chapter —
+        // whether or not the element survives into the IR — so nav targets
+        // resolve to the right file (the mechanical route's structural
+        // `element_id_to_filename`). First registration wins: the exporter
+        // loads chapters in spine order, matching that route's walk.
+        let mut declared_eids = Vec::new();
+        collect_declared_eids(&storyline_ion, &mut declared_eids);
+        for eid in declared_eids {
+            self.eid_chapters.entry(eid).or_insert(id);
+        }
+
         // Clone Arc handles to avoid borrow conflict with content lookup closure
         let symbols = Arc::clone(&self.symbols);
         let anchors = Arc::clone(&self.anchors);
         let styles = Arc::clone(&self.styles);
         let ruby_index = Arc::clone(&self.ruby_index);
+        let anchor_table = Arc::clone(&self.anchor_table);
 
         // Parse storyline and build IR using schema-driven tokenization
         let mut chapter = parse_storyline_to_ir(
@@ -210,7 +241,33 @@ impl Importer for KfxImporter {
             Some(anchors.as_ref()),
             Some(styles.as_ref()),
             Some(ruby_index.as_ref()),
+            Some(anchor_table.as_ref()),
             |name, index| self.lookup_content_text(name, index),
+        );
+
+        // Re-root under the section's main page-template container — the
+        // mechanical route's body-level `<div>` — so anchors targeting the
+        // template or the storyline root (a common page-list/TOC shape)
+        // stamp onto a real element.
+        let template = self
+            .section_templates
+            .get(&section_name)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(eid) = template.eid {
+            self.eid_chapters.entry(eid).or_insert(id);
+        }
+        let story_eid = storyline_ion
+            .as_struct()
+            .and_then(|f| get_field(f, sym!(Id)))
+            .and_then(|v| v.as_int());
+        crate::kfx::storyline::apply_section_template(
+            &mut chapter,
+            template.eid,
+            template.style.as_deref(),
+            story_eid,
+            Some(styles.as_ref()),
+            Some(anchor_table.as_ref()),
         );
 
         // Run optimization passes (KFX builds IR directly, not through compile_html)
@@ -374,40 +431,45 @@ impl Importer for KfxImporter {
             return Some(AnchorTarget::External(uri.clone()));
         }
 
-        // Check internal anchors (anchor_name → position.id → element_id)
-        // The position.id in anchor entities references element IDs in storylines
-        if let Some(&(pos_id, _offset)) = self.internal_anchors.as_ref().get(anchor_name) {
-            let id_str = pos_id.to_string();
-            if let Some(target) = self.element_id_map.get(&id_str) {
+        // Internal anchor NAME (`link_to` targets): resolve through the
+        // anchor table to the node its stamped id landed on — precise even
+        // for content that emits outside the section that structurally owns
+        // its eid. An unstamped position falls through to eid resolution.
+        if let Some(&(pos_id, offset)) = self.anchor_table.name_to_position.get(anchor_name) {
+            if let Some(target) = self
+                .anchor_table
+                .id_at(pos_id, offset)
+                .and_then(|frag| self.element_id_map.get(&frag))
+            {
                 return Some(AnchorTarget::Internal(*target));
+            }
+            if let Some(target) = self.resolve_eid_chapter(pos_id) {
+                return Some(target);
             }
         }
 
-        // Try direct element ID lookup (anchor_name might be the numeric ID directly)
+        // Try direct element ID lookup (stamped anchor ids: `a85J`,
+        // `toc-148-0`, …).
         if let Some(target) = self.element_id_map.get(anchor_name) {
             return Some(AnchorTarget::Internal(*target));
         }
 
-        // Try parsing as numeric ID
+        // Numeric eid (`#911` / `#911:4` nav placeholders): the element's
+        // chapter, from the structural eid walk; section-declared ids
+        // (page-template containers) fall back to the owning section.
         if let Ok(numeric_id) = anchor_name.parse::<i64>() {
-            let id_str = numeric_id.to_string();
-            if let Some(target) = self.element_id_map.get(&id_str) {
-                return Some(AnchorTarget::Internal(*target));
-            }
-            // Section-declared ids (page-template containers) aren't content
-            // elements; resolve them to the owning section's chapter start.
-            if let Some(section) = self.section_eids.get(&numeric_id)
-                && let Some(idx) = self.section_names.iter().position(|s| s == section)
-            {
-                return Some(AnchorTarget::Internal(GlobalNodeId::new(
-                    ChapterId(idx as u32),
-                    crate::model::NodeId::ROOT,
-                )));
-            }
+            return self.resolve_eid_chapter(numeric_id);
         }
 
         // Not found
         None
+    }
+
+    fn nav_fragment(&self, href: &str) -> Option<(String, bool)> {
+        let (eid, offset) = parse_position_href(href)?;
+        let frag = self.anchor_table.id_at(eid, offset)?;
+        let stamped = self.element_id_map.contains_key(&frag);
+        Some((frag, stamped))
     }
 }
 
@@ -486,6 +548,7 @@ impl KfxImporter {
             section_storylines: HashMap::new(),
             section_storylines_indexed: false,
             section_eids: HashMap::new(),
+            section_templates: HashMap::new(),
             resources: HashMap::new(),
             resources_indexed: false,
             images: Vec::new(),
@@ -499,8 +562,9 @@ impl KfxImporter {
             styles_indexed: false,
             ruby_index: Arc::new(HashMap::new()),
             ruby_indexed: false,
-            internal_anchors: Arc::new(HashMap::new()),
+            anchor_table: Arc::new(AnchorTable::default()),
             element_id_map: HashMap::new(),
+            eid_chapters: HashMap::new(),
         };
 
         importer.parse_metadata()?;
@@ -982,6 +1046,25 @@ impl KfxImporter {
         self.metadata.page_progression_direction = Some(ppd);
     }
 
+    /// Resolve an eid to its owning chapter's start: the structural
+    /// `eid_chapters` walk first (storyline-declared ids, accumulated as
+    /// chapters load), then the section-declared ids (page-template
+    /// containers, known from construction).
+    fn resolve_eid_chapter(&self, eid: i64) -> Option<AnchorTarget> {
+        if let Some(&chapter) = self.eid_chapters.get(&eid) {
+            return Some(AnchorTarget::Internal(GlobalNodeId::new(
+                chapter,
+                crate::model::NodeId::ROOT,
+            )));
+        }
+        let section = self.section_eids.get(&eid)?;
+        let idx = self.section_names.iter().position(|s| s == section)?;
+        Some(AnchorTarget::Internal(GlobalNodeId::new(
+            ChapterId(idx as u32),
+            crate::model::NodeId::ROOT,
+        )))
+    }
+
     /// Resolve a section name to its storyline entity location.
     fn resolve_section_to_storyline(&self, section_name: &str) -> io::Result<EntityLoc> {
         self.section_storylines
@@ -1017,7 +1100,11 @@ impl KfxImporter {
         // Then, map each section to its storyline, and record the element
         // ids the section struct itself declares (page-template containers)
         // so navigation targets pointing at them resolve to the section.
+        // The MAIN template is the LAST entry in `page_templates` (calibre's
+        // rule; earlier entries are conditional templates); its own id and
+        // style ride onto the chapter's root container.
         let mut section_eids: Vec<(i64, String)> = Vec::new();
+        let mut section_templates: Vec<(String, SectionTemplate)> = Vec::new();
         for loc in &self.entities {
             if loc.type_id == KfxSymbol::Section as u32
                 && let Ok(elem) = self.parse_entity_ion(*loc)
@@ -1026,10 +1113,11 @@ impl KfxImporter {
                 let section_name =
                     get_field(fields, sym!(SectionName)).and_then(|v| self.get_symbol_text(v));
 
-                let story_name = get_field(fields, sym!(PageTemplates))
+                let main_template = get_field(fields, sym!(PageTemplates))
                     .and_then(|v| v.as_list())
-                    .and_then(|templates| templates.first())
-                    .and_then(|t| t.as_struct())
+                    .and_then(|templates| templates.last())
+                    .and_then(|t| t.as_struct());
+                let story_name = main_template
                     .and_then(|f| get_field(f, sym!(StoryName)))
                     .and_then(|v| self.get_symbol_text(v));
 
@@ -1038,6 +1126,15 @@ impl KfxImporter {
                     collect_declared_eids(&elem, &mut eids);
                     for eid in eids {
                         section_eids.push((eid, sec_name.to_string()));
+                    }
+                    if let Some(tf) = main_template {
+                        let template = SectionTemplate {
+                            eid: get_field(tf, sym!(Id)).and_then(|v| v.as_int()),
+                            style: get_field(tf, sym!(Style))
+                                .and_then(|v| self.get_symbol_text(v))
+                                .map(|s| s.to_string()),
+                        };
+                        section_templates.push((sec_name.to_string(), template));
                     }
                 }
 
@@ -1051,6 +1148,9 @@ impl KfxImporter {
         }
         for (eid, sec_name) in section_eids {
             self.section_eids.entry(eid).or_insert(sec_name);
+        }
+        for (sec_name, template) in section_templates {
+            self.section_templates.entry(sec_name).or_insert(template);
         }
 
         self.section_storylines_indexed = true;
@@ -1426,66 +1526,77 @@ impl KfxImporter {
             return Ok(());
         }
 
-        // Find all anchor entities (type $266)
+        // Real `$266` anchors, registered in sorted-name order — the same
+        // deterministic rule the mechanical route uses, so a position carrying
+        // several anchors picks the same first (= stamped) name on both
+        // engines.
         let locs: Vec<_> = self
             .entities
             .iter()
             .filter(|e| e.type_id == KfxSymbol::Anchor as u32)
             .copied()
             .collect();
-
-        let mut new_external = Vec::new();
-        let mut new_internal = Vec::new();
-
+        let mut parsed: Vec<(String, IonValue)> = Vec::with_capacity(locs.len());
         for loc in locs {
             if let Ok(elem) = self.parse_entity_ion(loc)
                 && let Some(fields) = elem.as_struct()
-            {
-                // Get anchor_name
-                let anchor_name = get_field(fields, sym!(AnchorName))
+                && let Some(name) = get_field(fields, sym!(AnchorName))
                     .and_then(|v| self.symbols.text_of_opt(v))
-                    .map(|s| s.to_string());
+                    .map(|s| s.to_string())
+            {
+                parsed.push((name, elem.clone()));
+            }
+        }
+        parsed.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-                let Some(name) = anchor_name else {
-                    continue;
-                };
-
-                // Get uri (present for external links)
-                let uri = get_field(fields, sym!(Uri))
-                    .and_then(|v| v.as_string())
-                    .map(|s| s.to_string());
-
-                if let Some(uri) = uri {
-                    // External anchor
-                    new_external.push((name, uri));
-                } else if let Some(position) =
-                    get_field(fields, sym!(Position)).and_then(|v| v.as_struct())
-                {
-                    // Internal anchor with position
-                    let id = get_field(position, sym!(Id)).and_then(|v| v.as_int());
-                    let offset = get_field(position, sym!(Offset))
-                        .and_then(|v| v.as_int())
-                        .unwrap_or(0);
-
-                    if let Some(pos_id) = id {
-                        new_internal.push((name, (pos_id, offset)));
-                    }
-                }
+        let mut table = AnchorTable::default();
+        for (name, elem) in &parsed {
+            if let Some(fields) = elem.as_struct() {
+                table.register_anchor_fields(name, fields);
             }
         }
 
-        if !new_external.is_empty() {
-            let anchors = Arc::make_mut(&mut self.anchors);
-            for (name, uri) in new_external {
-                anchors.insert(name, uri);
-            }
+        // Synthetic anchors at nav target positions: TOC first, then
+        // page-list (a page break on a TOC-claimed position reuses the TOC
+        // anchor), plus `$798` heading levels. Runs on the RAW nav entries —
+        // display filtering (empty labels, placeholder units) must not change
+        // the stamped-id set.
+        if let Some(loc) = self
+            .entities
+            .iter()
+            .find(|e| e.type_id == KfxSymbol::BookNavigation as u32)
+            .copied()
+            && let Ok(nav) = self.parse_entity_ion(loc)
+        {
+            let nav_values = [nav];
+            register_heading_levels(
+                &mut table,
+                nav_values.iter(),
+                |c| self.resolve_nav_container(c),
+                &self.symbols,
+            );
+            register_nav_synthetics(
+                &mut table,
+                nav_values.iter(),
+                |c| self.resolve_nav_container(c),
+                &self.symbols,
+                "toc",
+                "toc",
+            );
+            register_nav_synthetics(
+                &mut table,
+                nav_values.iter(),
+                |c| self.resolve_nav_container(c),
+                &self.symbols,
+                "page_list",
+                "page",
+            );
         }
-        if !new_internal.is_empty() {
-            let internal_anchors = Arc::make_mut(&mut self.internal_anchors);
-            for (name, pos) in new_internal {
-                internal_anchors.insert(name, pos);
-            }
-        }
+
+        // The external-URI map keeps its own handle: the storyline tokenizer
+        // resolves `link_to` names through it.
+        self.anchors = Arc::new(table.anchor_uri.clone());
+        self.anchor_table = Arc::new(table);
 
         self.anchors_indexed = true;
         Ok(())
@@ -1635,6 +1746,31 @@ impl KfxImporter {
         self.ruby_indexed = true;
         Ok(())
     }
+}
+
+/// The main page template's identity within one section: its own `$155` id
+/// and `$157 style` name, carried onto the chapter's root container.
+#[derive(Debug, Default, Clone)]
+struct SectionTemplate {
+    eid: Option<i64>,
+    style: Option<String>,
+}
+
+/// Parse a `#eid[:offset]` nav placeholder href into its position. Returns
+/// `None` for anything that isn't a purely numeric internal position (real
+/// file paths, anchor names, external URLs).
+fn parse_position_href(href: &str) -> Option<(i64, i64)> {
+    let rest = href.trim().strip_prefix('#')?;
+    let (eid_str, off_str) = match rest.find(':') {
+        Some(pos) => (&rest[..pos], Some(&rest[pos + 1..])),
+        None => (rest, None),
+    };
+    let eid: i64 = eid_str.parse().ok()?;
+    let offset: i64 = match off_str {
+        Some(s) => s.parse().ok()?,
+        None => 0,
+    };
+    Some((eid, offset))
 }
 
 /// Collect every element id (`$155`) declared anywhere inside `value` — used

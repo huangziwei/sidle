@@ -64,6 +64,7 @@ fn synthesize_html_with_resolver<R: StyleResolver>(ir: &Chapter, resolver: &R) -
         ir,
         resolver,
         indent_level: 0,
+        href_resolver: None,
     };
 
     // Walk children of root (skip the root node itself)
@@ -105,8 +106,48 @@ pub fn synthesize_xhtml_document_with_class_list(
     title: &str,
     stylesheet_href: Option<&str>,
 ) -> SynthesisResult {
-    let body_result = synthesize_html_with_class_list(ir, class_list);
+    synthesize_xhtml_document_with_links(ir, class_list, title, stylesheet_href, None)
+}
+
+/// [`synthesize_xhtml_document_with_class_list`] with link resolution: every
+/// `href` consults the resolver, which may rewrite it (internal anchor →
+/// `chapter.xhtml#id`, URL sanitation) or drop it (unresolvable target — the
+/// `<a>` stays as a non-linking element so its text survives, and no dangling
+/// fragment reaches the output; epubcheck RSC-012/RSC-020).
+pub fn synthesize_xhtml_document_with_links(
+    ir: &Chapter,
+    class_list: &[Option<&str>],
+    title: &str,
+    stylesheet_href: Option<&str>,
+    href_resolver: Option<&dyn Fn(&str) -> LinkOutcome>,
+) -> SynthesisResult {
+    let resolver = ClassListResolver { list: class_list };
+    let mut ctx = SynthesisContext {
+        out: String::new(),
+        assets: HashSet::new(),
+        ir,
+        resolver: &resolver,
+        indent_level: 0,
+        href_resolver,
+    };
+    for child_id in ir.children(NodeId::ROOT) {
+        walk_node(child_id, &mut ctx);
+    }
+    let body_result = SynthesisResult {
+        body: ctx.out,
+        assets: ctx.assets,
+    };
     synthesize_xhtml_from_body(body_result, title, stylesheet_href)
+}
+
+/// What a synthesis-time link resolver decided for one `href` value.
+pub enum LinkOutcome {
+    /// Emit the href unchanged.
+    Keep,
+    /// Emit this replacement href.
+    Rewrite(String),
+    /// Emit the element without any href.
+    DropHref,
 }
 
 fn synthesize_xhtml_from_body(
@@ -151,6 +192,9 @@ struct SynthesisContext<'a, R: StyleResolver> {
     ir: &'a Chapter,
     resolver: &'a R,
     indent_level: usize,
+    /// Optional link resolution (see [`LinkOutcome`]); `None` emits hrefs
+    /// verbatim.
+    href_resolver: Option<&'a dyn Fn(&str) -> LinkOutcome>,
 }
 
 impl<R: StyleResolver> SynthesisContext<'_, R> {
@@ -210,9 +254,19 @@ fn walk_node<R: StyleResolver>(id: NodeId, ctx: &mut SynthesisContext<'_, R>) {
         attrs.push('"');
     }
     if let Some(href) = ctx.ir.semantics.href(id) {
-        attrs.push_str(" href=\"");
-        escape_xml_into(&mut attrs, href);
-        attrs.push('"');
+        match ctx.href_resolver.map(|resolve| resolve(href)) {
+            None | Some(LinkOutcome::Keep) => {
+                attrs.push_str(" href=\"");
+                escape_xml_into(&mut attrs, href);
+                attrs.push('"');
+            }
+            Some(LinkOutcome::Rewrite(new_href)) => {
+                attrs.push_str(" href=\"");
+                escape_xml_into(&mut attrs, &new_href);
+                attrs.push('"');
+            }
+            Some(LinkOutcome::DropHref) => {}
+        }
     }
     if let Some(src) = ctx.ir.semantics.src(id) {
         attrs.push_str(" src=\"");

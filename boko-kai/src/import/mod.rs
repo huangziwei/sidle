@@ -286,6 +286,22 @@ pub trait Importer: Send + Sync {
     fn resolve_toc_href(&self, from_chapter: ChapterId, href: &str) -> Option<AnchorTarget> {
         self.resolve_href(from_chapter, href)
     }
+
+    /// The fragment id a navigation href should carry in normalized export,
+    /// plus whether that id was actually stamped into a loaded chapter.
+    ///
+    /// KFX nav targets are `#eid[:offset]` position placeholders; the anchor
+    /// registered at the position names the html id (`a85J`, `toc-148-0`, …)
+    /// that content stamping emits. TOC and guide entries append the fragment
+    /// whenever an anchor is registered; the page list additionally requires
+    /// it stamped (a page break on an already-anchored chapter start
+    /// registers a name that content never stamps — the bare chapter link is
+    /// where the page starts anyway). Only meaningful after `index_anchors`.
+    /// Default `None`: formats whose nav hrefs are real `path#fragment`
+    /// strings don't split resolution this way.
+    fn nav_fragment(&self, _href: &str) -> Option<(String, bool)> {
+        None
+    }
 }
 
 /// Helper for path-based href resolution (used by EPUB, AZW3, MOBI).

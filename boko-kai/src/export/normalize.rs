@@ -29,10 +29,11 @@ use std::io;
 use std::sync::Arc;
 
 use crate::import::ChapterId;
-use crate::model::{Book, Chapter, NodeId, Role};
+use crate::model::{AnchorTarget, Book, Chapter, NodeId, Role};
 use crate::style::{StyleId, StylePool};
 
-use super::{generate_css, synthesize_xhtml_document_with_class_list};
+use super::html_synth::LinkOutcome;
+use super::{generate_css, synthesize_xhtml_document_with_links};
 
 /// Collects styles from all chapters into a unified pool.
 ///
@@ -196,6 +197,65 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
     let css_artifact = generate_css(global_styles.pool(), &used_styles);
 
     // =========================================================================
+    // Link resolution (normalized-only sources)
+    // =========================================================================
+    //
+    // KFX chapters carry `link_to` targets as `#anchor-name` placeholders;
+    // resolve each to the chapter file its stamped id actually landed in
+    // (`chapter.xhtml#id`), sanitize external URLs, and drop the href — the
+    // `<a>` stays as a non-linking element — when the target was never
+    // stamped. The same rules the mechanical route applies in
+    // `resolve_link_placeholders`, so both engines emit (or drop) the same
+    // links. Passthrough-capable sources keep their hrefs verbatim.
+    let resolve_links = book.requires_normalized_export();
+    if resolve_links {
+        let anchor_chapters: Vec<(ChapterId, Arc<Chapter>)> = ir_chapters
+            .iter()
+            .map(|(id, _, ch)| (*id, Arc::clone(ch)))
+            .collect();
+        book.index_anchors(&anchor_chapters);
+    }
+    let chapter_files =
+        super::epub::chapter_filenames(ir_chapters.iter().map(|(_, sp, _)| sp.as_str()));
+    let chapter_pos: HashMap<ChapterId, usize> = ir_chapters
+        .iter()
+        .enumerate()
+        .map(|(i, (id, _, _))| (*id, i))
+        .collect();
+    let chapters_by_id: HashMap<ChapterId, Arc<Chapter>> = ir_chapters
+        .iter()
+        .map(|(id, _, ch)| (*id, Arc::clone(ch)))
+        .collect();
+    let href_resolver = |href: &str| -> LinkOutcome {
+        match book.resolve_href(ChapterId(0), href) {
+            Some(AnchorTarget::External(url)) => match crate::util::sanitize_href(&url) {
+                Some(clean) if clean == href => LinkOutcome::Keep,
+                Some(clean) => LinkOutcome::Rewrite(clean),
+                None => LinkOutcome::DropHref,
+            },
+            Some(AnchorTarget::Internal(target)) => {
+                // Only a target whose id was actually stamped resolves; the
+                // chapter-start fallback (ROOT) has no id and drops, exactly
+                // like the mechanical route's unstamped-anchor rule.
+                let frag = chapters_by_id
+                    .get(&target.chapter)
+                    .and_then(|ch| ch.semantics.id(target.node));
+                match (chapter_pos.get(&target.chapter), frag) {
+                    (Some(&idx), Some(frag)) => {
+                        LinkOutcome::Rewrite(format!("{}#{}", chapter_files[idx], frag))
+                    }
+                    _ => LinkOutcome::DropHref,
+                }
+            }
+            Some(AnchorTarget::Chapter(cid)) => match chapter_pos.get(&cid) {
+                Some(&idx) => LinkOutcome::Rewrite(chapter_files[idx].clone()),
+                None => LinkOutcome::DropHref,
+            },
+            None => LinkOutcome::DropHref,
+        }
+    };
+
+    // =========================================================================
     // Pass 2: Synthesize XHTML with remapped styles
     // =========================================================================
 
@@ -219,11 +279,12 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
         let title = extract_chapter_title(ir).unwrap_or_else(|| source_path.clone());
 
         // Synthesize XHTML document
-        let result = synthesize_xhtml_document_with_class_list(
+        let result = synthesize_xhtml_document_with_links(
             ir,
             &remapped_class_list,
             &title,
             Some("style.css"),
+            resolve_links.then_some(&href_resolver as &dyn Fn(&str) -> LinkOutcome),
         );
 
         // Collect assets

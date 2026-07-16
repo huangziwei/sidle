@@ -564,6 +564,60 @@ pub fn percent_decode(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
+/// Make an href a valid URL, or return `None` if it can't be (the caller drops
+/// the link, keeping the text). Characters illegal in a URL path/query/fragment
+/// (e.g. a citation link ending in `]`) are percent-encoded — that fixes
+/// epubcheck RSC-020. But a character illegal in the HOST (e.g. a space, from a
+/// typo'd source domain like `bylon. com`) can't be encoded away — hosts forbid
+/// it even as `%20` — so such an unreachable URL is dropped rather than emitted.
+pub fn sanitize_href(href: &str) -> Option<String> {
+    fn is_illegal(c: char) -> bool {
+        matches!(
+            c,
+            ' ' | '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '}' | '|' | '[' | ']'
+        ) || (c as u32) < 0x20
+    }
+    // Absolute URL: the authority (host[:port]) can't contain a space or control
+    // char, encoded or not. If it does, the URL is unusable → drop it.
+    if let Some((_, after)) = href.split_once("://") {
+        let auth = &after[..after.find(['/', '?', '#']).unwrap_or(after.len())];
+        if auth.chars().any(|c| c == ' ' || (c as u32) < 0x20)
+            || auth.to_ascii_lowercase().contains("%20")
+        {
+            return None;
+        }
+        // The port (everything after the host's `:`) must be all digits, or the
+        // authority is malformed and a strict reader rejects the whole URL. Real
+        // case baked into a source KFX: a double-scheme typo `http://http:://…`
+        // parses as host `http`, port `:…` → epubcheck RSC-020 "Illegal
+        // character in port". Strip any `userinfo@` first, and skip IPv6 literals
+        // (`[::1]:80`) whose host legitimately contains colons.
+        if !auth.starts_with('[') {
+            let host_port = auth.rsplit_once('@').map_or(auth, |(_, hp)| hp);
+            if let Some((host, port)) = host_port.split_once(':')
+                && (host.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()))
+            {
+                return None;
+            }
+        }
+    }
+    if !href.contains(is_illegal) {
+        return Some(href.to_string());
+    }
+    let mut out = String::with_capacity(href.len() + 8);
+    let mut buf = [0u8; 4];
+    for c in href.chars() {
+        if is_illegal(c) {
+            for b in c.encode_utf8(&mut buf).as_bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

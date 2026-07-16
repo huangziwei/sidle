@@ -301,7 +301,8 @@ impl EpubExporter {
         // `kfx_to_epub` route byte-for-byte — same `{section}.xhtml` shape,
         // same `-N` collision suffix (`content::push_book_part`) — so the
         // two routes' trees can converge to identical.
-        let chapter_files = chapter_filenames(&content.chapters);
+        let chapter_files =
+            chapter_filenames(content.chapters.iter().map(|c| c.source_path.as_str()));
 
         let mut zip = ZipWriter::new(writer);
 
@@ -470,10 +471,7 @@ impl EpubExporter {
         // normalize pass already cached, so this costs one DFS per chapter,
         // not a re-parse. Unresolvable landmarks and page-list entries are
         // dropped (never emit a dangling reference); TOC entries keep their
-        // label with an empty href, like the mechanical route. Fragment
-        // precision (`#anchor` on the target element) needs content-side id
-        // stamping — the pending importer anchors work — so entries land on
-        // their chapter file for now.
+        // label with an empty href, like the mechanical route.
         if !book.toc().is_empty() || !book.page_list().is_empty() || !book.landmarks().is_empty() {
             let mut anchor_chapters = Vec::with_capacity(spine.len());
             for entry in &spine {
@@ -493,8 +491,25 @@ impl EpubExporter {
                 .get(&target.chapter)
                 .map(|&idx| chapter_files[idx].clone())
         };
+        // Fragment rules match the mechanical route: TOC and guide/landmark
+        // entries carry the anchor registered at the target position whenever
+        // one exists; the page list only keeps a fragment that was actually
+        // stamped into content (a page break on an already-anchored chapter
+        // start registers a name content never stamps — the bare chapter link
+        // is where the page starts anyway, and a dangling `#page-…` would
+        // trip epubcheck RSC-012).
+        let resolve_nav_href = |book: &Book, href: &str, require_stamped: bool| -> Option<String> {
+            let file = resolve_to_file(book, href)?;
+            match book.nav_fragment(href) {
+                Some((frag, stamped)) if !require_stamped || stamped => {
+                    Some(format!("{file}#{frag}"))
+                }
+                _ => Some(file),
+            }
+        };
 
-        let mut toc_points = toc_to_navpoints(book.toc(), &|href| resolve_to_file(book, href));
+        let mut toc_points =
+            toc_to_navpoints(book.toc(), &|href| resolve_nav_href(book, href, false));
         // EPUB 3 requires the toc nav in reading order (epubcheck NAV-011);
         // the mechanical route sorts, so sort identically.
         let file_rank: HashMap<String, usize> = chapter_files
@@ -515,7 +530,7 @@ impl EpubExporter {
             .filter_map(|e| {
                 Some(NavPoint {
                     label: e.title.clone(),
-                    href: resolve_to_file(book, &e.href)?,
+                    href: resolve_nav_href(book, &e.href, true)?,
                     children: Vec::new(),
                 })
             })
@@ -523,7 +538,7 @@ impl EpubExporter {
 
         let mut guide: Vec<OpfGuideRef> = Vec::new();
         for lm in book.landmarks() {
-            let Some(href) = resolve_to_file(book, &lm.href) else {
+            let Some(href) = resolve_nav_href(book, &lm.href, false) else {
                 continue;
             };
             guide.push(OpfGuideRef {
@@ -822,11 +837,18 @@ fn sanitize_path(path: &str) -> String {
 /// the section name), unique via a `-N` suffix on collision. Both rules match
 /// the mechanical route's `kfx_to_epub::content::push_book_part` exactly —
 /// the two kfx→epub engines must name spine files identically to converge.
-/// Chapters without a usable source id fall back to positional names.
-fn chapter_filenames(chapters: &[super::normalize::ChapterContent]) -> Vec<String> {
-    let mut names: Vec<String> = Vec::with_capacity(chapters.len());
-    for (i, ch) in chapters.iter().enumerate() {
-        let source = sanitize_path(&ch.source_path);
+/// Chapters without a usable source id fall back to positional names. Takes
+/// the chapters' source paths (also used pre-synthesis by the normalize
+/// pass's link resolver, which must know target filenames before any
+/// document exists).
+pub(super) fn chapter_filenames<'a, I>(source_paths: I) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let source_paths: Vec<&str> = source_paths.into_iter().collect();
+    let mut names: Vec<String> = Vec::with_capacity(source_paths.len());
+    for (i, sp) in source_paths.iter().enumerate() {
+        let source = sanitize_path(sp);
         let base = if source.is_empty() || source == "unknown.xhtml" {
             format!("chapter_{i}")
         } else {
@@ -918,27 +940,12 @@ fn sniff_image_media_type(bytes: &[u8]) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    fn chapter(source_path: &str) -> super::super::normalize::ChapterContent {
-        super::super::normalize::ChapterContent {
-            id: crate::import::ChapterId(0),
-            source_path: source_path.to_string(),
-            document: String::new(),
-        }
-    }
-
     #[test]
     fn chapter_filenames_use_source_ids_with_port_dedup() {
         // KFX section names (no extension) get `.xhtml`; collisions get `-N`
         // (the `push_book_part` rule); placeholders fall back positionally.
-        let chapters = vec![
-            chapter("secA"),
-            chapter("secA"),
-            chapter("secA"),
-            chapter("unknown.xhtml"),
-            chapter("secB.xhtml"),
-        ];
         assert_eq!(
-            chapter_filenames(&chapters),
+            chapter_filenames(["secA", "secA", "secA", "unknown.xhtml", "secB.xhtml"]),
             vec![
                 "secA.xhtml",
                 "secA-1.xhtml",

@@ -17,6 +17,7 @@
 //! 4. Extract ALL attributes using schema's AttrRules
 //! 5. Apply transformers to convert values
 
+use crate::kfx::anchor_table::AnchorTable;
 use crate::kfx::container::{SymbolTable, get_field};
 use crate::kfx::ion::IonValue;
 use crate::kfx::schema::{SemanticTarget, schema};
@@ -105,6 +106,13 @@ fn tokenize_content_list(list: &IonValue, ctx: &TokenizeContext, stream: &mut To
 fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut TokenStream) {
     // Unwrap annotation if present
     let inner = item.unwrap_annotated();
+    // A bare string is an inline text run: paragraphs that embed a replaced
+    // element (`render: inline` images) carry their text as literal strings
+    // in `content_list`, interleaved with the embedded structs.
+    if let IonValue::String(text) = inner {
+        stream.push(KfxToken::Text(text.clone()));
+        return;
+    }
     let fields = match inner.as_struct() {
         Some(f) => f,
         None => return,
@@ -397,6 +405,25 @@ pub fn build_ir_from_tokens<F>(
     tokens: &TokenStream,
     symbols: &SymbolTable,
     styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    content_lookup: F,
+) -> Chapter
+where
+    F: FnMut(&str, usize) -> Option<String>,
+{
+    build_ir_from_tokens_anchored(tokens, symbols, styles, None, content_lookup)
+}
+
+/// [`build_ir_from_tokens`] with anchor stamping: elements at anchored
+/// `(eid, 0)` positions get their `semantics.id` from the anchor table (the
+/// same `a85J` / `toc-148-0` names the mechanical route stamps), and
+/// registered offsets > 0 are located inside the element's text and marked
+/// with a zero-length anchor span. Elements' raw eids are never emitted —
+/// shipped EPUBs carry only anchor-backed ids.
+pub fn build_ir_from_tokens_anchored<F>(
+    tokens: &TokenStream,
+    symbols: &SymbolTable,
+    styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    anchor_table: Option<&AnchorTable>,
     mut content_lookup: F,
 ) -> Chapter
 where
@@ -404,6 +431,9 @@ where
 {
     let mut chapter = Chapter::new();
     let mut stack: Vec<NodeId> = vec![chapter.root()];
+    // Every element's declared eid, in document order — the offset-anchor
+    // pass below locates offsets inside these elements' finished subtrees.
+    let mut eid_nodes: Vec<(i64, NodeId)> = Vec::new();
 
     for token in tokens {
         match token {
@@ -430,9 +460,17 @@ where
                 // Apply ALL semantic attributes from the generic map
                 apply_semantics_to_node(&mut chapter, node_id, &elem.semantics);
 
-                // Apply element ID if present (KFX stores as integer, we store as string)
-                if let Some(id) = elem.id {
-                    chapter.semantics.set_id(node_id, &id.to_string());
+                // Anchored element: stamp the html id registered at
+                // `(eid, 0)`, never the raw eid (the mechanical route ships
+                // no element ids beyond anchor stamps, and neither do we).
+                if let Some(eid) = elem.id {
+                    eid_nodes.push((eid, node_id));
+                    if let Some(table) = anchor_table
+                        && chapter.semantics.id(node_id).is_none()
+                        && let Some(anchor_id) = table.id_at(eid, 0)
+                    {
+                        chapter.semantics.set_id(node_id, &anchor_id);
+                    }
                 }
 
                 // Handle text content with style events
@@ -477,7 +515,273 @@ where
         }
     }
 
+    // Offset anchors (`(eid, offset > 0)`): locate each offset inside the
+    // element's finished subtree and stamp a zero-length span there, so
+    // mid-paragraph nav targets (`…#page-911-2`) land on the exact position.
+    if let Some(table) = anchor_table {
+        stamp_offset_anchors(&mut chapter, &eid_nodes, table);
+    }
+
     chapter
+}
+
+/// Re-root the chapter under the section's main page-template container —
+/// the body-level `<div>` the mechanical route emits for every reflowable
+/// section — carrying the template's style, then stamp the anchors reaching
+/// this level: the template's `(eid, 0)` first, then the storyline root's
+/// (calibre's `process_section` → `process_story` order; first id wins). The
+/// template's offsets > 0 locate across the whole chapter text; a storyline
+/// root never walks offsets (calibre stamps it at offset 0 only).
+pub fn apply_section_template(
+    chapter: &mut Chapter,
+    template_eid: Option<i64>,
+    template_style: Option<&str>,
+    story_eid: Option<i64>,
+    styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    anchor_table: Option<&AnchorTable>,
+) {
+    let root = chapter.root();
+    let wrapper = chapter.alloc_node(Node::new(Role::Container));
+
+    if let Some(style_name) = template_style
+        && let Some(styles_map) = styles
+        && let Some(kfx_props) = styles_map.get(style_name)
+    {
+        let ir_style = kfx_style_to_ir(kfx_props);
+        let style_id = chapter.styles.intern(ir_style);
+        if let Some(node) = chapter.node_mut(wrapper) {
+            node.style = style_id;
+        }
+    }
+
+    // Re-parent: the root's children become the wrapper's, the wrapper
+    // becomes the root's only child.
+    let children: Vec<NodeId> = chapter.children(root).collect();
+    if let Some(w) = chapter.node_mut(wrapper) {
+        w.first_child = children.first().copied();
+    }
+    for child in &children {
+        if let Some(c) = chapter.node_mut(*child) {
+            c.parent = Some(wrapper);
+        }
+    }
+    if let Some(r) = chapter.node_mut(root) {
+        r.first_child = None;
+    }
+    chapter.append_child(root, wrapper);
+
+    let Some(table) = anchor_table else {
+        return;
+    };
+    for eid in [template_eid, story_eid].into_iter().flatten() {
+        if chapter.semantics.id(wrapper).is_none()
+            && let Some(anchor_id) = table.id_at(eid, 0)
+        {
+            chapter.semantics.set_id(wrapper, &anchor_id);
+        }
+    }
+    if let Some(eid) = template_eid {
+        stamp_offset_anchors(chapter, &[(eid, wrapper)], table);
+    }
+}
+
+/// Stamp every registered `(eid, offset > 0)` anchor into the built chapter.
+/// Offsets ascend per element; earlier stamps insert only zero-length nodes,
+/// so later locates count the same character stream.
+fn stamp_offset_anchors(chapter: &mut Chapter, eid_nodes: &[(i64, NodeId)], table: &AnchorTable) {
+    for &(eid, elem) in eid_nodes {
+        for off in table.offsets_beyond_zero(eid) {
+            let Some(anchor_id) = table.id_at(eid, off) else {
+                continue;
+            };
+            if let Some(target) = locate_offset_ir(chapter, elem, off)
+                && chapter.semantics.id(target).is_none()
+            {
+                chapter.semantics.set_id(target, &anchor_id);
+            }
+        }
+    }
+}
+
+/// Outcome of an offset walk below one node: the located anchor target, or
+/// the still-unconsumed remaining offset.
+enum Located {
+    Found(NodeId),
+    Remaining(i64),
+}
+
+/// Locate `offset` code points into `root`'s text and return the node to
+/// stamp — the IR analog of the mechanical route's `locate_offset` (calibre
+/// `yj_to_epub_content.py:1540`, `split_after=false, zero_len=true`): a
+/// mid-text offset splits the text run around a fresh zero-length span, an
+/// offset at the very end appends one to the element, an offset past the text
+/// stamps nothing.
+fn locate_offset_ir(chapter: &mut Chapter, root: NodeId, offset: i64) -> Option<NodeId> {
+    let children: Vec<NodeId> = chapter.children(root).collect();
+    let mut remaining = offset;
+    for child in children {
+        match locate_offset_in_ir(chapter, child, remaining) {
+            Located::Found(n) => return Some(n),
+            Located::Remaining(r) => remaining = r,
+        }
+    }
+    if remaining == 0 {
+        // End-of-text position: fresh zero-length span as the element's last
+        // child (the port's `SubElement(root, "span")`).
+        let span = chapter.alloc_node(Node::new(Role::Inline));
+        chapter.append_child(root, span);
+        return Some(span);
+    }
+    None
+}
+
+/// One node's contribution to the offset walk. Counting mirrors the
+/// mechanical route's `locate_offset_in`: text runs count code points,
+/// replaced elements (images) count one position, ruby annotation text and
+/// table/list containers are opaque, other containers descend in document
+/// order.
+fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> Located {
+    if offset < 0 {
+        return Located::Remaining(offset);
+    }
+    let Some(n) = chapter.node(node) else {
+        return Located::Remaining(offset);
+    };
+    let role = n.role;
+    match role {
+        Role::Text => {
+            // The mechanical route splits a text run at `\n` into span text
+            // plus `<br>` tail text at emission, and its offset walk counts
+            // only span text — the newline and everything after it in the
+            // run are invisible to anchor location (the br contributes
+            // nothing and tail text is never visited). Mirror that: count
+            // only the chars before the first newline.
+            let countable = chapter
+                .text(n.text)
+                .chars()
+                .take_while(|&c| c != '\n')
+                .count() as i64;
+            if countable > 0 {
+                if offset == 0 {
+                    // The run starts exactly at the offset: anchor just
+                    // before it (the port stamps the run's `<span>`; a bare
+                    // IR text node has no element to carry the id).
+                    return Located::Found(insert_anchor_span_before(chapter, node));
+                }
+                if offset < countable {
+                    return Located::Found(split_text_run(chapter, node, offset));
+                }
+            }
+            Located::Remaining(offset - countable)
+        }
+        // Replaced elements count as a single position; the id lands on the
+        // element itself.
+        Role::Image => {
+            if offset == 0 {
+                return Located::Found(node);
+            }
+            Located::Remaining(offset - 1)
+        }
+        // `<br>` contributes nothing (see the text-run rule above).
+        Role::Break => Located::Remaining(offset),
+        // Opaque subtrees. Ruby contributes NOTHING: the mechanical route
+        // (like calibre) emits `<ruby><rb>base</rb><rt>anno</rt></ruby>` and
+        // its offset walk counts only `<span>` direct text — rb text is
+        // skipped, rt never descended — so an offset past a ruby run fails to
+        // locate there; mirroring that keeps the two engines' stamped-id sets
+        // (and page-list fragments) identical. Table and list containers are
+        // likewise never descended.
+        Role::Ruby
+        | Role::RubyText
+        | Role::Table
+        | Role::TableHead
+        | Role::TableBody
+        | Role::OrderedList
+        | Role::UnorderedList => Located::Remaining(offset),
+        // Everything else descends in document order.
+        _ => {
+            let children: Vec<NodeId> = chapter.children(node).collect();
+            for child in children {
+                match locate_offset_in_ir(chapter, child, offset) {
+                    Located::Found(n) => return Located::Found(n),
+                    Located::Remaining(r) => offset = r,
+                }
+            }
+            Located::Remaining(offset)
+        }
+    }
+}
+
+/// Insert a fresh zero-length anchor span immediately before `node` and
+/// return it.
+fn insert_anchor_span_before(chapter: &mut Chapter, node: NodeId) -> NodeId {
+    let parent = chapter.node(node).and_then(|n| n.parent);
+    let span = chapter.alloc_node(Node::new(Role::Inline));
+    if let Some(s) = chapter.node_mut(span) {
+        s.parent = parent;
+        s.next_sibling = Some(node);
+    }
+    if let Some(parent) = parent {
+        // Relink: either the parent's first_child or the previous sibling
+        // points at `node`.
+        let first = chapter.node(parent).and_then(|p| p.first_child);
+        if first == Some(node) {
+            if let Some(p) = chapter.node_mut(parent) {
+                p.first_child = Some(span);
+            }
+        } else {
+            let mut cur = first;
+            while let Some(c) = cur {
+                let next = chapter.node(c).and_then(|n| n.next_sibling);
+                if next == Some(node) {
+                    if let Some(prev) = chapter.node_mut(c) {
+                        prev.next_sibling = Some(span);
+                    }
+                    break;
+                }
+                cur = next;
+            }
+        }
+    }
+    span
+}
+
+/// Split the text run `node` at `char_offset` (0 < offset < len) code points:
+/// the run keeps the head, a zero-length anchor span and the tail run follow
+/// as new siblings. Returns the anchor span.
+fn split_text_run(chapter: &mut Chapter, node: NodeId, char_offset: i64) -> NodeId {
+    let (range, byte_split) = {
+        let n = chapter.node(node).expect("split target exists");
+        let text = chapter.text(n.text);
+        let byte = text
+            .char_indices()
+            .nth(char_offset as usize)
+            .map(|(b, _)| b)
+            .unwrap_or(text.len());
+        (n.text, byte as u32)
+    };
+    let old_next = chapter.node(node).and_then(|n| n.next_sibling);
+    let parent = chapter.node(node).and_then(|n| n.parent);
+
+    let span = chapter.alloc_node(Node::new(Role::Inline));
+    let tail = chapter.alloc_node(Node::text(crate::model::TextRange::new(
+        range.start + byte_split,
+        range.len - byte_split,
+    )));
+
+    if let Some(n) = chapter.node_mut(node) {
+        n.text = crate::model::TextRange::new(range.start, byte_split);
+        n.next_sibling = Some(span);
+    }
+    if let Some(s) = chapter.node_mut(span) {
+        s.parent = parent;
+        s.next_sibling = Some(tail);
+    }
+    if let Some(t) = chapter.node_mut(tail) {
+        t.parent = parent;
+        t.next_sibling = old_next;
+    }
+    span
 }
 
 /// Apply semantic attributes to a node from a generic map.
@@ -685,19 +989,21 @@ fn resolve_symbol_or_string(value: &IonValue, symbols: &SymbolTable) -> Option<S
 ///
 /// The `anchors` map is used to resolve external links (anchor_name → uri).
 /// The `styles` map is used to resolve style references (style_name → properties).
+/// The `anchor_table` stamps html ids at anchored `(eid, offset)` positions.
 pub fn parse_storyline_to_ir<F>(
     storyline: &IonValue,
     symbols: &SymbolTable,
     anchors: Option<&HashMap<String, String>>,
     styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
     ruby_index: Option<&HashMap<String, Vec<String>>>,
+    anchor_table: Option<&AnchorTable>,
     content_lookup: F,
 ) -> Chapter
 where
     F: FnMut(&str, usize) -> Option<String>,
 {
     let tokens = tokenize_storyline(storyline, symbols, anchors, styles, ruby_index);
-    build_ir_from_tokens(&tokens, symbols, styles, content_lookup)
+    build_ir_from_tokens_anchored(&tokens, symbols, styles, anchor_table, content_lookup)
 }
 
 // ============================================================================

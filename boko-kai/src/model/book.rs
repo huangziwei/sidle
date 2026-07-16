@@ -679,6 +679,13 @@ impl Book {
         self.backend.resolve_toc_href(from_chapter, href)
     }
 
+    /// The fragment id a navigation href carries in normalized export, plus
+    /// whether it was stamped into content. See
+    /// [`crate::import::Importer::nav_fragment`].
+    pub(crate) fn nav_fragment(&self, href: &str) -> Option<(String, bool)> {
+        self.backend.nav_fragment(href)
+    }
+
     /// Load an asset by path.
     pub fn load_asset(&mut self, path: &Path) -> io::Result<Vec<u8>> {
         self.backend.load_asset(path)

@@ -21,6 +21,7 @@
 //! - `cover` - Cover section detection and generation
 //! - `auxiliary` - Auxiliary data generation for navigation targets
 
+pub mod anchor_table;
 pub mod auxiliary;
 pub mod container;
 pub mod container_edit;
