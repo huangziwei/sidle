@@ -2,7 +2,7 @@
 //!
 //! Creates EPUB 2/3 files from Book structures using passthrough for content.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Seek, Write};
 use std::path::Path;
 
@@ -10,9 +10,13 @@ use zip::CompressionMethod;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-use crate::model::{Book, Landmark, LandmarkType, TocEntry};
+use crate::model::{AnchorTarget, Book, Landmark, LandmarkType, TocEntry};
 
 use super::Exporter;
+use super::opf::{
+    self, OpfCollection, OpfCreator, OpfFixedLayout, OpfGuideRef, OpfItem, OpfItemref, OpfMetadata,
+    OpfPackage,
+};
 
 /// Configuration for EPUB export.
 #[derive(Debug, Clone, Default)]
@@ -97,54 +101,39 @@ impl EpubExporter {
             .map_err(io_error)?;
         zip.write_all(CONTAINER_XML)?;
 
-        // 3. Collect content info for manifest
+        // 3. Collect content info for manifest (hrefs relative to the OPF;
+        // the emitter adds the fixed NCX/nav items itself)
         let spine: Vec<_> = book.spine().to_vec();
-        let mut manifest_items: Vec<ManifestItem> = Vec::new();
-        let mut spine_refs: Vec<String> = Vec::new();
+        let mut manifest_items: Vec<OpfItem> = Vec::new();
+        let mut spine_items: Vec<OpfItemref> = Vec::new();
 
         // Add chapters to manifest
         for (i, entry) in spine.iter().enumerate() {
             let source_path = book.source_id(entry.id).unwrap_or("unknown.xhtml");
-            let filename = format!("chapter_{}.xhtml", i);
             let id = format!("chapter_{}", i);
-
-            manifest_items.push(ManifestItem {
+            manifest_items.push(OpfItem {
                 id: id.clone(),
-                href: filename,
+                href: sanitize_path(source_path),
                 media_type: "application/xhtml+xml".to_string(),
+                properties: Vec::new(),
             });
-            spine_refs.push(id);
-
-            // Store original path for content writing
-            manifest_items.last_mut().unwrap().href =
-                format!("OEBPS/{}", sanitize_path(source_path));
+            spine_items.push(OpfItemref {
+                idref: id,
+                properties: None,
+            });
         }
 
         // Add assets to manifest
         let assets: Vec<_> = book.list_assets().to_vec();
-        let mut asset_map: HashMap<String, String> = HashMap::new();
-
         for (i, asset_path) in assets.iter().enumerate() {
             let path_str = asset_path.to_string_lossy();
-            let media_type = guess_media_type(&path_str);
-            let id = format!("asset_{}", i);
-            let href = format!("OEBPS/{}", sanitize_path(&path_str));
-
-            manifest_items.push(ManifestItem {
-                id: id.clone(),
-                href: href.clone(),
-                media_type,
+            manifest_items.push(OpfItem {
+                id: format!("asset_{}", i),
+                href: sanitize_path(&path_str),
+                media_type: guess_media_type(&path_str),
+                properties: Vec::new(),
             });
-            asset_map.insert(path_str.to_string(), href);
         }
-
-        // EPUB 3 navigation document (required by spec; Apple Books rejects
-        // EPUB 3 packages missing it). NCX remains for backwards-compat.
-        manifest_items.push(ManifestItem {
-            id: "nav".to_string(),
-            href: "OEBPS/nav.xhtml".to_string(),
-            media_type: "application/xhtml+xml".to_string(),
-        });
 
         // 4. Build titlepage. Apple Books / Kindle only render a cover *page*
         // in the reading flow when a spine-positioned cover doc exists; the
@@ -152,43 +141,55 @@ impl EpubExporter {
         // thumbnail. Cover image dimensions come from a JPEG SOF / PNG IHDR
         // probe of the actual asset bytes — `viewBox` collapses without them.
         let cover_id = find_cover_manifest_id(book.metadata(), &manifest_items);
+        if let Some(cid) = &cover_id
+            && let Some(item) = manifest_items.iter_mut().find(|i| &i.id == cid)
+        {
+            item.properties.push("cover-image".to_string());
+        }
         let titlepage_xhtml = if let Some(ref cid) = cover_id {
             let cover_item = manifest_items.iter().find(|i| &i.id == cid);
             cover_item.and_then(|item| {
-                let cover_zip_path = &item.href;
-                let cover_relative = cover_zip_path
-                    .strip_prefix("OEBPS/")
-                    .unwrap_or(cover_zip_path);
-                // Resolve to the on-disk asset path to load bytes.
-                let asset_path = std::path::Path::new(cover_relative);
-                let bytes = book.load_asset(asset_path).ok()?;
+                let bytes = book.load_asset(std::path::Path::new(&item.href)).ok()?;
                 let (w, h) = crate::util::extract_image_dimensions(&bytes)?;
-                Some(build_titlepage(cover_relative, w, h))
+                Some(build_titlepage(&item.href, w, h))
             })
         } else {
             None
         };
-        if titlepage_xhtml.is_some() {
+        if let Some(xhtml) = &titlepage_xhtml {
             manifest_items.insert(
                 0,
-                ManifestItem {
+                OpfItem {
                     id: "titlepage".to_string(),
-                    href: "OEBPS/titlepage.xhtml".to_string(),
+                    href: "titlepage.xhtml".to_string(),
                     media_type: "application/xhtml+xml".to_string(),
+                    properties: opf::xhtml_content_properties(xhtml)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
                 },
             );
-            spine_refs.insert(0, "titlepage".to_string());
+            spine_items.insert(
+                0,
+                OpfItemref {
+                    idref: "titlepage".to_string(),
+                    properties: None,
+                },
+            );
         }
 
-        // 5. Write content.opf
-        let titlepage_href = titlepage_xhtml.as_ref().map(|_| "titlepage.xhtml");
-        let opf = generate_opf(
-            book.metadata(),
-            &manifest_items,
-            &spine_refs,
-            cover_id.as_deref(),
-            titlepage_href,
-        );
+        // 5. Write content.opf. The guide keeps its single cover reference
+        // (readers use it to open on the cover page).
+        let mut guide: Vec<OpfGuideRef> = Vec::new();
+        if titlepage_xhtml.is_some() {
+            opf::repoint_cover_guide(&mut guide, "titlepage.xhtml");
+        }
+        let opf = opf::emit_opf(&OpfPackage {
+            metadata: build_opf_metadata(book.metadata(), false, cover_id),
+            manifest: manifest_items,
+            spine: spine_items,
+            guide,
+        });
         zip.start_file("OEBPS/content.opf", deflated)
             .map_err(io_error)?;
         zip.write_all(opf.as_bytes())?;
@@ -254,6 +255,7 @@ impl EpubExporter {
 
         // Normalize the book content
         let content = normalize_book(book)?;
+        let spine: Vec<_> = book.spine().to_vec();
 
         // Output filename per chapter, derived from the chapter's source id
         // (for KFX: the section name). Must match the mechanical
@@ -279,38 +281,27 @@ impl EpubExporter {
             .map_err(io_error)?;
         zip.write_all(CONTAINER_XML)?;
 
-        // 3. Build manifest
-        let mut manifest_items: Vec<ManifestItem> = Vec::new();
-        let mut spine_refs: Vec<String> = Vec::new();
+        // 3. Build manifest, in the mechanical route's registration order —
+        // images (canonical index order), stylesheet, chapters, titlepage
+        // last — with ids derived from filenames (`opf::make_manifest_id`),
+        // so a KFX conversion produces the same package document on both
+        // engines. Manifest ids therefore depend on registration order:
+        // don't reorder these blocks.
+        let mut taken_ids: HashSet<String> = HashSet::new();
+        let next_id = |taken: &mut HashSet<String>, name: &str| -> String {
+            let id = opf::make_manifest_id(name, |candidate| taken.contains(candidate));
+            taken.insert(id.clone());
+            id
+        };
+        let mut manifest_items: Vec<OpfItem> = Vec::new();
+        let mut spine_items: Vec<OpfItemref> = Vec::new();
 
-        // Add stylesheet to manifest
-        if !content.css.is_empty() {
-            manifest_items.push(ManifestItem {
-                id: "stylesheet".to_string(),
-                href: "OEBPS/style.css".to_string(),
-                media_type: "text/css".to_string(),
-            });
-        }
-
-        // Add chapters to manifest
-        for (i, _) in content.chapters.iter().enumerate() {
-            let id = format!("chapter_{}", i);
-            let href = format!("OEBPS/{}", chapter_files[i]);
-
-            manifest_items.push(ManifestItem {
-                id: id.clone(),
-                href,
-                media_type: "application/xhtml+xml".to_string(),
-            });
-            spine_refs.push(id);
-        }
-
-        // Add assets to manifest. When the importer declares an authoritative
-        // bundle (KFX: the canonical image index shared with the mechanical
-        // route — deterministic order, exported filenames, cover included
-        // even when no chapter references it inline), use it verbatim; bytes
-        // load in one bulk call so the KFX JPEG-XR→JPEG transcode runs across
-        // cores. Otherwise fall back to the assets the normalized content
+        // Assets first. When the importer declares an authoritative bundle
+        // (KFX: the canonical image index shared with the mechanical route —
+        // deterministic order, exported filenames, cover included even when
+        // no chapter references it inline), use it verbatim; bytes load in
+        // one bulk call so the KFX JPEG-XR→JPEG transcode runs across cores.
+        // Otherwise fall back to the assets the normalized content
         // references, sorted for stable ordering, force-including the cover
         // image (it may be referenced by metadata only).
         let asset_bytes: Vec<(String, Vec<u8>)> = if let Some(asset_list) = book.bundled_assets() {
@@ -343,71 +334,144 @@ impl EpubExporter {
                 })
                 .collect()
         };
-        for (asset_idx, (asset_path, bytes)) in asset_bytes.iter().enumerate() {
+        for (asset_path, bytes) in &asset_bytes {
             // Sniff first: post-transcode bytes are the truth (a JPEG-XR that
             // failed to decode passes through as image/jxr despite its .jpg
             // name). Extension guess covers unsniffable formats (SVG).
             let media_type = sniff_image_media_type(bytes)
                 .map(str::to_string)
                 .unwrap_or_else(|| guess_media_type(asset_path));
-            let id = format!("asset_{}", asset_idx);
-            let href = format!("OEBPS/{}", sanitize_path(asset_path));
-
-            manifest_items.push(ManifestItem {
-                id,
+            let href = sanitize_path(asset_path);
+            manifest_items.push(OpfItem {
+                id: next_id(&mut taken_ids, &href),
                 href,
                 media_type,
+                properties: Vec::new(),
             });
         }
 
-        // EPUB 3 navigation document (required by spec; Apple Books rejects
-        // EPUB 3 packages missing it). NCX remains for backwards-compat.
-        manifest_items.push(ManifestItem {
-            id: "nav".to_string(),
-            href: "OEBPS/nav.xhtml".to_string(),
-            media_type: "application/xhtml+xml".to_string(),
-        });
+        // Stylesheet.
+        if !content.css.is_empty() {
+            manifest_items.push(OpfItem {
+                id: next_id(&mut taken_ids, "style.css"),
+                href: "style.css".to_string(),
+                media_type: "text/css".to_string(),
+                properties: Vec::new(),
+            });
+        }
+
+        // Chapters. Spine `properties` carry the FXL page-spread pairing
+        // when the importer set one.
+        for (i, chapter) in content.chapters.iter().enumerate() {
+            let id = next_id(&mut taken_ids, &chapter_files[i]);
+            manifest_items.push(OpfItem {
+                id: id.clone(),
+                href: chapter_files[i].clone(),
+                media_type: "application/xhtml+xml".to_string(),
+                properties: opf::xhtml_content_properties(&chapter.document)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            });
+            spine_items.push(OpfItemref {
+                idref: id,
+                properties: spine
+                    .get(i)
+                    .and_then(|e| e.page_spread)
+                    .map(|p| p.opf_property().to_string()),
+            });
+        }
 
         // 4. Build titlepage from the cover (same rationale as export_raw —
         // Apple Books needs a spine-positioned cover doc to render the cover
         // page in the reading flow). Asset bytes are already pre-loaded above
         // for MIME sniffing, so we don't pay a second `load_asset`.
         let cover_id = find_cover_manifest_id(book.metadata(), &manifest_items);
+        if let Some(cid) = &cover_id
+            && let Some(item) = manifest_items.iter_mut().find(|i| &i.id == cid)
+        {
+            item.properties.push("cover-image".to_string());
+        }
         let titlepage_xhtml = if let Some(ref cid) = cover_id {
             let cover_item = manifest_items.iter().find(|i| &i.id == cid);
             cover_item.and_then(|item| {
-                let cover_relative = item.href.strip_prefix("OEBPS/").unwrap_or(&item.href);
                 let bytes = asset_bytes
                     .iter()
-                    .find(|(p, _)| sanitize_path(p) == cover_relative)
+                    .find(|(p, _)| sanitize_path(p) == item.href)
                     .map(|(_, b)| b.as_slice())?;
                 let (w, h) = crate::util::extract_image_dimensions(bytes)?;
-                Some(build_titlepage(cover_relative, w, h))
+                Some(build_titlepage(&item.href, w, h))
             })
         } else {
             None
         };
-        if titlepage_xhtml.is_some() {
-            manifest_items.insert(
+        if let Some(xhtml) = &titlepage_xhtml {
+            let id = next_id(&mut taken_ids, "titlepage.xhtml");
+            manifest_items.push(OpfItem {
+                id: id.clone(),
+                href: "titlepage.xhtml".to_string(),
+                media_type: "application/xhtml+xml".to_string(),
+                properties: opf::xhtml_content_properties(xhtml)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            });
+            spine_items.insert(
                 0,
-                ManifestItem {
-                    id: "titlepage".to_string(),
-                    href: "OEBPS/titlepage.xhtml".to_string(),
-                    media_type: "application/xhtml+xml".to_string(),
+                OpfItemref {
+                    idref: id,
+                    properties: None,
                 },
             );
-            spine_refs.insert(0, "titlepage".to_string());
         }
 
-        // 5. Write content.opf
-        let titlepage_href = titlepage_xhtml.as_ref().map(|_| "titlepage.xhtml");
-        let opf = generate_opf(
-            book.metadata(),
-            &manifest_items,
-            &spine_refs,
-            cover_id.as_deref(),
-            titlepage_href,
-        );
+        // 5. Write content.opf. Landmarks become the EPUB 2 `<guide>`; their
+        // hrefs arrive as `#eid[:offset]` placeholders and resolve to chapter
+        // files through the importer's anchor index — built from chapters the
+        // normalize pass already cached, so this costs one DFS per chapter,
+        // not a re-parse. Unresolvable landmarks are dropped (never emit a
+        // dangling guide reference).
+        let mut guide: Vec<OpfGuideRef> = Vec::new();
+        if !book.landmarks().is_empty() {
+            let mut anchor_chapters = Vec::with_capacity(spine.len());
+            for entry in &spine {
+                anchor_chapters.push((entry.id, book.load_chapter_cached(entry.id)?));
+            }
+            book.index_anchors(&anchor_chapters);
+            let chapter_pos: HashMap<crate::import::ChapterId, usize> =
+                spine.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+            for lm in book.landmarks() {
+                let Some(AnchorTarget::Internal(target)) =
+                    book.resolve_toc_href(crate::import::ChapterId(0), &lm.href)
+                else {
+                    continue;
+                };
+                let Some(&idx) = chapter_pos.get(&target.chapter) else {
+                    continue;
+                };
+                guide.push(OpfGuideRef {
+                    guide_type: opf::landmark_guide_type(lm.landmark_type).to_string(),
+                    title: lm.label.clone(),
+                    href: chapter_files[idx].clone(),
+                });
+            }
+        }
+        if titlepage_xhtml.is_some() {
+            opf::repoint_cover_guide(&mut guide, "titlepage.xhtml");
+        }
+        // A KFX source's metadata mirrors the mechanical route's curated
+        // field set (see `build_opf_metadata`), keeping the two KFX→EPUB
+        // engines' package documents identical.
+        let opf = opf::emit_opf(&OpfPackage {
+            metadata: build_opf_metadata(
+                book.metadata(),
+                book.requires_normalized_export(),
+                cover_id,
+            ),
+            manifest: manifest_items,
+            spine: spine_items,
+            guide,
+        });
         zip.start_file("OEBPS/content.opf", deflated)
             .map_err(io_error)?;
         zip.write_all(opf.as_bytes())?;
@@ -478,22 +542,16 @@ const CONTAINER_XML: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 </container>
 "#;
 
-struct ManifestItem {
-    id: String,
-    href: String,
-    media_type: String,
-}
-
 /// Find the manifest item whose asset corresponds to `metadata.cover_image`.
 ///
 /// `cover_image` carries the value populated by the importer: for an EPUB
 /// source this is typically a path like `images/cover.jpg`; for a KFX source
-/// it's a resource name like `eF`. Manifest hrefs always end with the asset's
-/// raw path (e.g. `OEBPS/eF` or `OEBPS/images/cover.jpg`), so a suffix match
-/// covers both cases without needing format-aware normalization.
+/// the exported cover filename (`cover.jpeg`). Manifest hrefs always end
+/// with the asset's raw path, so a suffix match covers both cases without
+/// format-aware normalization.
 fn find_cover_manifest_id(
     metadata: &crate::model::Metadata,
-    manifest: &[ManifestItem],
+    manifest: &[OpfItem],
 ) -> Option<String> {
     let cover = metadata.cover_image.as_ref()?;
     let cover_trim = cover.trim_start_matches('/');
@@ -502,336 +560,98 @@ fn find_cover_manifest_id(
     }
     manifest
         .iter()
-        .find(|item| {
-            let h = item.href.strip_prefix("OEBPS/").unwrap_or(&item.href);
-            h == cover_trim || h.ends_with(cover_trim)
-        })
+        .find(|item| item.href == cover_trim || item.href.ends_with(cover_trim))
         .map(|item| item.id.clone())
 }
 
-/// Generate content.opf from metadata and manifest.
+/// Build the OPF `<metadata>` block from the book's metadata.
 ///
-/// `cover_manifest_id`: when set, emits `<meta name="cover" content="...">` in
-/// the metadata block and `properties="cover-image"` on the matching manifest
-/// item. EPUB2 readers find the cover via the meta; EPUB3 readers via the
-/// properties attribute. We emit both for compatibility.
-fn generate_opf(
-    metadata: &crate::model::Metadata,
-    manifest: &[ManifestItem],
-    spine_refs: &[String],
-    cover_manifest_id: Option<&str>,
-    titlepage_href: Option<&str>,
-) -> String {
-    let mut opf = String::new();
+/// With `kfx_parity` set (KFX sources), the field set and value shapes match
+/// the mechanical `kfx_to_epub` route exactly: `dc:date` gets the
+/// `issue_date` ISO formatting, every creator shares one sort key, and the
+/// fields that route never emits (description, subjects, rights,
+/// contributors, collection) are omitted so both engines produce one package
+/// document. Other sources keep the full field set.
+fn build_opf_metadata(
+    md: &crate::model::Metadata,
+    kfx_parity: bool,
+    cover_manifest_id: Option<String>,
+) -> OpfMetadata {
+    // One sort key for every creator: the author sort key when the source
+    // declares one, else the joined author list so EPUB libraries still
+    // sort multi-author books.
+    let author_file_as = md
+        .author_sort
+        .clone()
+        .unwrap_or_else(|| md.authors.join(" & "));
+    let creators = md
+        .authors
+        .iter()
+        .map(|author| OpfCreator {
+            name: author.clone(),
+            role: Some("aut".to_string()),
+            file_as: Some(author_file_as.clone()),
+        })
+        .collect();
 
-    // Use EPUB3 for extended metadata support. `xmlns:opf` is declared so we
-    // can use the EPUB-2-style `opf:role` / `opf:file-as` / `opf:scheme`
-    // attributes that every major reader (Apple Books, Kindle, ADE, calibre)
-    // still consults — they're tolerated in EPUB 3 packages even though the
-    // canonical EPUB 3 alternative is `<meta refines>`.
-    //
-    // Fixed-layout books declare the `rendition:` vocabulary on the package so
-    // the `rendition:layout` / `rendition:spread` metas below validate.
-    opf.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    if metadata.fixed_layout {
-        opf.push_str(
-            "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"BookId\" prefix=\"rendition: http://www.idpf.org/vocab/rendition/#\">\n",
-        );
+    let (contributors, description, subjects, rights, collection) = if kfx_parity {
+        (Vec::new(), None, Vec::new(), None, None)
     } else {
-        opf.push_str(
-            "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"BookId\">\n",
-        );
-    }
-    opf.push_str(
-        "  <metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:opf=\"http://www.idpf.org/2007/opf\">\n",
-    );
-
-    // Track IDs for refinements
-    let mut next_id = 1;
-
-    // Title with optional file-as refinement
-    let title_id = format!("title{}", next_id);
-    next_id += 1;
-    opf.push_str(&format!(
-        "    <dc:title id=\"{}\">{}</dc:title>\n",
-        title_id,
-        escape_xml(&metadata.title)
-    ));
-    if let Some(ref title_sort) = metadata.title_sort {
-        opf.push_str(&format!(
-            "    <meta refines=\"#{}\" property=\"file-as\">{}</meta>\n",
-            title_id,
-            escape_xml(title_sort)
-        ));
-    }
-
-    // Authors — emit `opf:role="aut"` and `opf:file-as` on every creator,
-    // matching calibre's reference output. `file-as` falls back to the
-    // display name when no sort key is provided (calibre's convention).
-    for (i, author) in metadata.authors.iter().enumerate() {
-        let creator_id = format!("creator{}", next_id);
-        next_id += 1;
-        let file_as = if i == 0 {
-            metadata.author_sort.as_deref().unwrap_or(author)
-        } else {
-            author.as_str()
-        };
-        opf.push_str(&format!(
-            "    <dc:creator id=\"{}\" opf:file-as=\"{}\" opf:role=\"aut\">{}</dc:creator>\n",
-            creator_id,
-            escape_xml(file_as),
-            escape_xml(author)
-        ));
-    }
-
-    // Language
-    if !metadata.language.is_empty() {
-        opf.push_str(&format!(
-            "    <dc:language>{}</dc:language>\n",
-            escape_xml(&metadata.language)
-        ));
-    } else {
-        opf.push_str("    <dc:language>en</dc:language>\n");
-    }
-
-    // Identifiers — primary `BookId` plus ASIN-scheme siblings when an
-    // Amazon ASIN was preserved through the import. Calibre emits the same
-    // pattern (`ASIN` + `MOBI-ASIN`); both are surfaced so library tools
-    // that key off either scheme find the book.
-    let primary_id = if metadata.identifier.is_empty() {
-        "urn:uuid:00000000-0000-0000-0000-000000000000".to_string()
-    } else {
-        metadata.identifier.clone()
+        (
+            md.contributors
+                .iter()
+                .map(|c| OpfCreator {
+                    name: c.name.clone(),
+                    role: c.role.clone(),
+                    file_as: c.file_as.clone(),
+                })
+                .collect(),
+            md.description.clone(),
+            md.subjects.clone(),
+            md.rights.clone(),
+            md.collection.as_ref().map(|c| OpfCollection {
+                name: c.name.clone(),
+                collection_type: c.collection_type.clone(),
+                position: c.position,
+            }),
+        )
     };
-    opf.push_str(&format!(
-        "    <dc:identifier id=\"BookId\">{}</dc:identifier>\n",
-        escape_xml(&primary_id)
-    ));
-    if let Some(ref asin) = metadata.asin {
-        opf.push_str(&format!(
-            "    <dc:identifier opf:scheme=\"ASIN\">{}</dc:identifier>\n",
-            escape_xml(asin)
-        ));
-        opf.push_str(&format!(
-            "    <dc:identifier opf:scheme=\"MOBI-ASIN\">{}</dc:identifier>\n",
-            escape_xml(asin)
-        ));
-    }
-    // Deterministic UUID v5 derived from the primary id (URL namespace).
-    // Re-converting the same source yields the same uuid so library tools
-    // can dedupe across re-imports. Skipped when the primary id is already
-    // a UUID literal — emitting a derived uuid would be redundant noise.
-    if !looks_like_uuid(&primary_id) {
-        opf.push_str(&format!(
-            "    <dc:identifier opf:scheme=\"uuid\">{}</dc:identifier>\n",
-            escape_xml(&crate::util::uuid_v5(&primary_id))
-        ));
-    }
 
-    // dcterms:modified (required for EPUB 3) — stamp conversion time, not the
-    // source value.
-    opf.push_str(&format!(
-        "    <meta property=\"dcterms:modified\">{}</meta>\n",
-        escape_xml(&crate::util::time_now_iso8601_utc())
-    ));
-
-    // Contributors with role refinements
-    for contrib in &metadata.contributors {
-        let contrib_id = format!("contrib{}", next_id);
-        next_id += 1;
-        opf.push_str(&format!(
-            "    <dc:contributor id=\"{}\">{}</dc:contributor>\n",
-            contrib_id,
-            escape_xml(&contrib.name)
-        ));
-        if let Some(ref role) = contrib.role {
-            opf.push_str(&format!(
-                "    <meta refines=\"#{}\" property=\"role\" scheme=\"marc:relators\">{}</meta>\n",
-                contrib_id,
-                escape_xml(role)
-            ));
-        }
-        if let Some(ref file_as) = contrib.file_as {
-            opf.push_str(&format!(
-                "    <meta refines=\"#{}\" property=\"file-as\">{}</meta>\n",
-                contrib_id,
-                escape_xml(file_as)
-            ));
-        }
-    }
-
-    // Collection/series info
-    if let Some(ref coll) = metadata.collection {
-        let coll_id = format!("collection{}", next_id);
-        next_id += 1;
-        opf.push_str(&format!(
-            "    <meta property=\"belongs-to-collection\" id=\"{}\">{}</meta>\n",
-            coll_id,
-            escape_xml(&coll.name)
-        ));
-        if let Some(ref coll_type) = coll.collection_type {
-            opf.push_str(&format!(
-                "    <meta refines=\"#{}\" property=\"collection-type\">{}</meta>\n",
-                coll_id,
-                escape_xml(coll_type)
-            ));
-        }
-        if let Some(pos) = coll.position {
-            let pos_str = if pos.fract() == 0.0 {
-                format!("{}", pos as i64)
-            } else {
-                format!("{}", pos)
-            };
-            opf.push_str(&format!(
-                "    <meta refines=\"#{}\" property=\"group-position\">{}</meta>\n",
-                coll_id, pos_str
-            ));
-        }
-    }
-
-    // Suppress unused variable warning
-    let _ = next_id;
-
-    // Optional metadata
-    if let Some(ref publisher) = metadata.publisher {
-        opf.push_str(&format!(
-            "    <dc:publisher>{}</dc:publisher>\n",
-            escape_xml(publisher)
-        ));
-    }
-    if let Some(ref description) = metadata.description {
-        opf.push_str(&format!(
-            "    <dc:description>{}</dc:description>\n",
-            escape_xml(description)
-        ));
-    }
-    for subject in &metadata.subjects {
-        opf.push_str(&format!(
-            "    <dc:subject>{}</dc:subject>\n",
-            escape_xml(subject)
-        ));
-    }
-    if let Some(ref date) = metadata.date {
-        opf.push_str(&format!("    <dc:date>{}</dc:date>\n", escape_xml(date)));
-    }
-    if let Some(ref rights) = metadata.rights {
-        opf.push_str(&format!(
-            "    <dc:rights>{}</dc:rights>\n",
-            escape_xml(rights)
-        ));
-    }
-
-    // EPUB2-style cover declaration. EPUB3 readers also accept this and many
-    // tools (Calibre, ADE) only find the cover via this meta.
-    if let Some(cover_id) = cover_manifest_id {
-        opf.push_str(&format!(
-            "    <meta name=\"cover\" content=\"{}\"/>\n",
-            escape_xml(cover_id)
-        ));
-    }
-
-    // primary-writing-mode hint for vertical-RTL / vertical-LR books. Apple
-    // Books, ADE and the Kindle apps read this to switch the reader into
-    // vertical pagination mode. Calibre emits the same meta from EXTH 525.
-    if let Some(ref pwm) = metadata.primary_writing_mode {
-        opf.push_str(&format!(
-            "    <meta name=\"primary-writing-mode\" content=\"{}\"/>\n",
-            escape_xml(pwm)
-        ));
-    }
-
-    // Fixed-layout (manga / comic / picture book) metadata. Both the EPUB 3
-    // `rendition:*` properties (Apple Books, Kobo) and the Kindle `name`/`content`
-    // hints are emitted so the book renders pre-paginated everywhere and so a
-    // downstream EPUB→KFX sees a fixed-layout source. Mirrors the KF8 source's
-    // own OPF (rendition:layout pre-paginated, book-type comic, viewport).
-    if metadata.fixed_layout {
-        opf.push_str("    <meta property=\"rendition:layout\">pre-paginated</meta>\n");
-        if let Some(ref spread) = metadata.rendition_spread {
-            opf.push_str(&format!(
-                "    <meta property=\"rendition:spread\">{}</meta>\n",
-                escape_xml(spread)
-            ));
-        }
-        if let Some((w, h)) = metadata.default_viewport {
-            // EBPAJ per-viewport meta + the KF8 `original-resolution` twin.
-            opf.push_str(&format!(
-                "    <meta property=\"fixed-layout-jp:viewport\">width={w}, height={h}</meta>\n"
-            ));
-            opf.push_str(&format!(
-                "    <meta name=\"original-resolution\" content=\"{w}x{h}\"/>\n"
-            ));
-        }
-        opf.push_str("    <meta name=\"fixed-layout\" content=\"true\"/>\n");
-        if let Some(ref bt) = metadata.book_type {
-            opf.push_str(&format!(
-                "    <meta name=\"book-type\" content=\"{}\"/>\n",
-                escape_xml(bt)
-            ));
-        }
-    }
-
-    opf.push_str("  </metadata>\n");
-
-    // Manifest
-    opf.push_str("  <manifest>\n");
-    opf.push_str(
-        "    <item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n",
-    );
-
-    for item in manifest {
-        // Get relative path from OEBPS/
-        let href = item.href.strip_prefix("OEBPS/").unwrap_or(&item.href);
-        let properties = if item.id == "nav" {
-            " properties=\"nav\""
-        } else if Some(item.id.as_str()) == cover_manifest_id {
-            " properties=\"cover-image\""
-        } else {
-            ""
-        };
-        opf.push_str(&format!(
-            "    <item id=\"{}\" href=\"{}\" media-type=\"{}\"{}/>\n",
-            escape_xml(&item.id),
-            escape_xml(href),
-            escape_xml(&item.media_type),
-            properties
-        ));
-    }
-    opf.push_str("  </manifest>\n");
-
-    // Spine. Carry page-progression-direction through for vertical-RTL books
-    // — without it, Kindle/Calibre paginate in the wrong direction.
-    let spine_open = match metadata.page_progression_direction.as_deref() {
-        Some(dir @ ("rtl" | "ltr" | "default")) => {
-            format!(
-                "  <spine toc=\"ncx\" page-progression-direction=\"{}\">\n",
-                dir
-            )
-        }
-        _ => "  <spine toc=\"ncx\">\n".to_string(),
+    let date = if kfx_parity {
+        md.date.as_deref().map(opf::format_opf_date)
+    } else {
+        md.date.clone()
     };
-    opf.push_str(&spine_open);
-    for id in spine_refs {
-        opf.push_str(&format!("    <itemref idref=\"{}\"/>\n", escape_xml(id)));
-    }
-    opf.push_str("  </spine>\n");
 
-    // `<guide>` cover reference — EPUB 2 holdover that Apple Books / Kindle /
-    // calibre still consult for the cover page in the reading flow (the
-    // `properties="cover-image"` on the manifest item only drives the library
-    // thumbnail). Emitted only when a titlepage.xhtml has been prepended to
-    // the spine; without that, the reader has nothing to point at.
-    if let Some(href) = titlepage_href {
-        opf.push_str("  <guide>\n");
-        opf.push_str(&format!(
-            "    <reference type=\"cover\" title=\"Cover\" href=\"{}\"/>\n",
-            escape_xml(href)
-        ));
-        opf.push_str("  </guide>\n");
-    }
+    // Fixed-layout: the source viewport doubles as the EBPAJ viewport meta
+    // and the KF8 `original-resolution` twin.
+    let fixed_layout = md.fixed_layout.then(|| OpfFixedLayout {
+        rendition_spread: md.rendition_spread.clone(),
+        ebpaj_viewport: md.default_viewport,
+        original_resolution: md.default_viewport,
+        book_type: md.book_type.clone(),
+    });
 
-    opf.push_str("</package>\n");
-    opf
+    OpfMetadata {
+        title: md.title.clone(),
+        title_file_as: md.title_sort.clone(),
+        creators,
+        contributors,
+        language: md.language.clone(),
+        identifier: md.identifier.clone(),
+        asin: md.asin.clone(),
+        modified: crate::util::time_now_iso8601_utc(),
+        date,
+        publisher: md.publisher.clone(),
+        description,
+        subjects,
+        rights,
+        collection,
+        cover_manifest_id,
+        primary_writing_mode: md.primary_writing_mode.clone(),
+        page_progression_direction: md.page_progression_direction.clone(),
+        fixed_layout,
+    }
 }
 
 /// Generate `nav.xhtml`, the EPUB 3 navigation document.
@@ -1071,20 +891,6 @@ fn build_titlepage(cover_href: &str, w: u32, h: u32) -> String {
         h = h,
         href = escape_xml(cover_href),
     )
-}
-
-/// 36-char `8-4-4-4-12` hex pattern. Used to decide whether `metadata.identifier`
-/// is already a UUID (in which case the OPF skips the derived `opf:scheme="uuid"`
-/// entry to avoid redundant noise).
-fn looks_like_uuid(s: &str) -> bool {
-    let s = s.strip_prefix("urn:uuid:").unwrap_or(s);
-    if s.len() != 36 {
-        return false;
-    }
-    s.as_bytes().iter().enumerate().all(|(i, b)| match i {
-        8 | 13 | 18 | 23 => *b == b'-',
-        _ => b.is_ascii_hexdigit(),
-    })
 }
 
 /// Sanitize a path for use in ZIP (remove leading slashes, normalize).

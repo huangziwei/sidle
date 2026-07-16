@@ -47,3 +47,4 @@ pub mod symbols;
 pub mod toc_repair;
 pub mod tokens;
 pub mod transforms;
+pub mod writing_mode;

@@ -84,6 +84,13 @@ pub struct KfxImporter {
     /// Whether section→storyline mapping has been built
     section_storylines_indexed: bool,
 
+    /// Element ids declared on section entities themselves (page-template
+    /// containers) → owning section name. These eids never appear in chapter
+    /// content, so `element_id_map` can't resolve them; navigation targets
+    /// pointing at them (a common shape for cover/TOC landmarks) fall back
+    /// to the section's chapter start.
+    section_eids: HashMap<i64, String>,
+
     /// Resources: name -> EntityLoc (lazily populated)
     resources: HashMap<String, EntityLoc>,
     /// Whether resources have been indexed
@@ -387,6 +394,16 @@ impl Importer for KfxImporter {
             if let Some(target) = self.element_id_map.get(&id_str) {
                 return Some(AnchorTarget::Internal(*target));
             }
+            // Section-declared ids (page-template containers) aren't content
+            // elements; resolve them to the owning section's chapter start.
+            if let Some(section) = self.section_eids.get(&numeric_id)
+                && let Some(idx) = self.section_names.iter().position(|s| s == section)
+            {
+                return Some(AnchorTarget::Internal(GlobalNodeId::new(
+                    ChapterId(idx as u32),
+                    crate::model::NodeId::ROOT,
+                )));
+            }
         }
 
         // Not found
@@ -463,11 +480,12 @@ impl KfxImporter {
             metadata: Metadata::default(),
             toc: Vec::new(),
             page_list: Vec::new(),
-            landmarks: Vec::new(), // TODO: Parse from KFX landmarks nav_container
+            landmarks: Vec::new(),
             spine: Vec::new(),
             section_names: Vec::new(),
             section_storylines: HashMap::new(),
             section_storylines_indexed: false,
+            section_eids: HashMap::new(),
             resources: HashMap::new(),
             resources_indexed: false,
             images: Vec::new(),
@@ -489,6 +507,9 @@ impl KfxImporter {
         importer.parse_navigation()?;
         importer.index_section_storylines()?;
         importer.parse_spine()?;
+        // Needs the explicit reading-order direction captured by
+        // `parse_spine` (it is the strongest override).
+        importer.derive_writing_direction();
         // Image index: needs metadata (declared cover) and the spine /
         // section→storyline maps (first-section cover fallback). Cheap —
         // external_resource fragments are tiny and media bytes are only
@@ -563,7 +584,13 @@ impl KfxImporter {
                                     .unwrap_or("");
 
                                 match key {
-                                    "title" => self.metadata.title = value.to_string(),
+                                    // First-wins / skip-empty guards match
+                                    // `kfx_to_epub::loader`'s duplicate-key
+                                    // handling so both KFX readers agree on
+                                    // containers that repeat a key.
+                                    "title" if self.metadata.title.is_empty() => {
+                                        self.metadata.title = value.to_string()
+                                    }
                                     "author" => {
                                         // calibre joins multiple authors with " & " in a
                                         // single `author` field (yj_metadata.py:209) and
@@ -576,7 +603,7 @@ impl KfxImporter {
                                         }
                                     }
                                     "publisher" => {
-                                        self.metadata.publisher = Some(value.to_string())
+                                        self.metadata.publisher = Some(value.trim().to_string())
                                     }
                                     "language" => self.metadata.language = value.to_string(),
                                     "description" => {
@@ -591,7 +618,11 @@ impl KfxImporter {
                                         if !value.is_empty() && self.metadata.asin.is_none() => {
                                             self.metadata.asin = Some(value.to_string());
                                         }
-                                    "issue_date" => self.metadata.date = Some(value.to_string()),
+                                    "issue_date"
+                                        if self.metadata.date.is_none() && !value.is_empty() =>
+                                    {
+                                        self.metadata.date = Some(value.to_string())
+                                    }
                                     "cover_image" => {
                                         let value_elem = get_field(meta_fields, sym!(Value));
                                         if let Some(cover) = self.resolve_cover_value(value_elem) {
@@ -606,10 +637,10 @@ impl KfxImporter {
                                         file_as: None,
                                         role: Some("trl".to_string()),
                                     }),
-                                    "title_pronunciation" => {
+                                    "title_pronunciation" if !value.is_empty() => {
                                         self.metadata.title_sort = Some(value.to_string())
                                     }
-                                    "author_pronunciation" => {
+                                    "author_pronunciation" if !value.is_empty() => {
                                         self.metadata.author_sort = Some(value.to_string())
                                     }
                                     "series_name" => {
@@ -748,11 +779,14 @@ impl KfxImporter {
                         continue;
                     };
 
-                    // Get label from representation.label
+                    // Get label from representation.label. "cover-nav-unit"
+                    // is a placeholder, not a display label (calibre's
+                    // `add_guide_entry` strips it too).
                     let label = get_field(entry_fields, sym!(Representation))
                         .and_then(|v| v.as_struct())
                         .and_then(|s| get_field(s, sym!(Label)))
                         .and_then(|v| v.as_string())
+                        .filter(|s| *s != "cover-nav-unit")
                         .unwrap_or("")
                         .to_string();
 
@@ -871,6 +905,72 @@ impl KfxImporter {
         Ok(())
     }
 
+    /// Derive the book-level writing mode and page-progression direction
+    /// onto `metadata.{primary_writing_mode, page_progression_direction}`.
+    ///
+    /// `document_data.writing_mode` is only a default (see
+    /// `kfx::writing_mode`): when it reads `horizontal_tb`, the style pool's
+    /// majority vertical mode corrects it. Any `-rl` writing mode forces an
+    /// RTL page turn — the common case for CJK vertical books, whose
+    /// `direction` field literally says `ltr` — while an explicit
+    /// `reading_orders[*].page_progression_direction` (captured by
+    /// `parse_spine`) outranks both heuristics.
+    fn derive_writing_direction(&mut self) {
+        let mut writing_mode = "horizontal-tb".to_string();
+        let mut ppd = "ltr".to_string();
+
+        if let Some(loc) = self
+            .entities
+            .iter()
+            .find(|e| e.type_id == KfxSymbol::DocumentData as u32)
+            .copied()
+            && let Ok(elem) = self.parse_entity_ion(loc)
+            && let Some(fields) = elem.unwrap_annotated().as_struct()
+        {
+            if let Some(wm) =
+                get_field(fields, sym!(WritingMode)).and_then(|v| self.symbols.text_of(v))
+            {
+                writing_mode = crate::kfx::writing_mode::normalize_writing_mode(wm).to_string();
+            }
+            if let Some(dir) =
+                get_field(fields, sym!(Direction)).and_then(|v| self.symbols.text_of(v))
+            {
+                ppd = dir.to_string();
+            }
+        }
+
+        if writing_mode == "horizontal-tb" {
+            let styles: Vec<IonValue> = self
+                .entities
+                .iter()
+                .filter(|e| e.type_id == KfxSymbol::Style as u32)
+                .filter_map(|loc| self.parse_entity_ion(*loc).ok())
+                .collect();
+            if let Some(vertical) =
+                crate::kfx::writing_mode::majority_vertical_mode(styles.iter(), &self.symbols)
+            {
+                writing_mode = vertical;
+            }
+        }
+        if writing_mode.ends_with("-rl") {
+            ppd = "rtl".to_string();
+        }
+        // `$default` defers to the reader, i.e. to the heuristics above —
+        // only a concrete direction overrides them.
+        if let Some(explicit) = self
+            .metadata
+            .page_progression_direction
+            .as_deref()
+            .filter(|d| matches!(*d, "rtl" | "ltr"))
+        {
+            ppd = explicit.to_string();
+        }
+
+        self.metadata.primary_writing_mode =
+            crate::export::opf::primary_writing_mode(Some(&writing_mode), Some(&ppd));
+        self.metadata.page_progression_direction = Some(ppd);
+    }
+
     /// Resolve a section name to its storyline entity location.
     fn resolve_section_to_storyline(&self, section_name: &str) -> io::Result<EntityLoc> {
         self.section_storylines
@@ -903,7 +1003,10 @@ impl KfxImporter {
             }
         }
 
-        // Then, map each section to its storyline
+        // Then, map each section to its storyline, and record the element
+        // ids the section struct itself declares (page-template containers)
+        // so navigation targets pointing at them resolve to the section.
+        let mut section_eids: Vec<(i64, String)> = Vec::new();
         for loc in &self.entities {
             if loc.type_id == KfxSymbol::Section as u32
                 && let Ok(elem) = self.parse_entity_ion(*loc)
@@ -919,6 +1022,14 @@ impl KfxImporter {
                     .and_then(|f| get_field(f, sym!(StoryName)))
                     .and_then(|v| self.get_symbol_text(v));
 
+                if let Some(sec_name) = section_name {
+                    let mut eids = Vec::new();
+                    collect_declared_eids(&elem, &mut eids);
+                    for eid in eids {
+                        section_eids.push((eid, sec_name.to_string()));
+                    }
+                }
+
                 if let (Some(sec_name), Some(story_name)) = (section_name, story_name)
                     && let Some(storyline_loc) = storyline_map.get(story_name)
                 {
@@ -926,6 +1037,9 @@ impl KfxImporter {
                         .insert(sec_name.to_string(), *storyline_loc);
                 }
             }
+        }
+        for (eid, sec_name) in section_eids {
+            self.section_eids.entry(eid).or_insert(sec_name);
         }
 
         self.section_storylines_indexed = true;
@@ -1509,5 +1623,27 @@ impl KfxImporter {
 
         self.ruby_indexed = true;
         Ok(())
+    }
+}
+
+/// Collect every element id (`$155`) declared anywhere inside `value` — used
+/// on section entities, whose page-template containers carry ids that never
+/// appear in storyline content.
+fn collect_declared_eids(value: &IonValue, out: &mut Vec<i64>) {
+    match value.unwrap_annotated() {
+        IonValue::Struct(fields) => {
+            if let Some(id) = get_field(fields, sym!(Id)).and_then(|v| v.as_int()) {
+                out.push(id);
+            }
+            for (_, v) in fields {
+                collect_declared_eids(v, out);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                collect_declared_eids(item, out);
+            }
+        }
+        _ => {}
     }
 }

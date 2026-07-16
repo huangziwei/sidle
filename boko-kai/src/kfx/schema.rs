@@ -597,6 +597,10 @@ impl KfxSchema {
         self.landmark_mapping = vec![
             (LandmarkType::Cover, KfxSymbol::CoverPage),
             (LandmarkType::StartReading, KfxSymbol::Srl),
+            // `$text` is an alternate start-reading marker some containers
+            // use instead of `$srl`. Listed after it so `landmark_to_kfx`
+            // (first match wins) keeps emitting `$srl`.
+            (LandmarkType::StartReading, KfxSymbol::Text),
             (LandmarkType::TitlePage, KfxSymbol::Titlepage),
             (LandmarkType::Toc, KfxSymbol::Toc),
             (LandmarkType::BodyMatter, KfxSymbol::Bodymatter),
@@ -1209,11 +1213,17 @@ mod tests {
     #[test]
     fn test_landmark_roundtrip() {
         let s = schema();
-        // All mapped landmark types should roundtrip correctly
+        // Every KFX symbol maps to its IR type; the IR type maps back to its
+        // FIRST listed symbol (aliases like `$text` → StartReading re-emit
+        // as the canonical `$srl`).
         for (ir_type, kfx_sym) in &s.landmark_mapping {
-            let kfx_id = *kfx_sym as u64;
-            assert_eq!(s.landmark_from_kfx(kfx_id), Some(*ir_type));
-            assert_eq!(s.landmark_to_kfx(*ir_type), Some(*kfx_sym));
+            assert_eq!(s.landmark_from_kfx(*kfx_sym as u64), Some(*ir_type));
+            let canonical = s
+                .landmark_mapping
+                .iter()
+                .find(|(ir, _)| ir == ir_type)
+                .map(|(_, kfx)| *kfx);
+            assert_eq!(s.landmark_to_kfx(*ir_type), canonical);
         }
     }
 }

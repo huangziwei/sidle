@@ -36,6 +36,7 @@ mod epub;
 mod html_synth;
 mod kfx;
 mod normalize;
+pub mod opf;
 mod text;
 
 pub use css_gen::{CssArtifact, generate_css, generate_css_all};

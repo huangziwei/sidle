@@ -135,38 +135,7 @@ impl EpubOutput {
     /// Reserve a manifest id derived from `filename` (no path, no extension).
     /// EPUB ids must start with a letter; we prefix with `id_` when needed.
     pub fn make_id(&self, filename: &str) -> String {
-        let stem = filename
-            .rsplit('/')
-            .next()
-            .unwrap_or(filename)
-            .split('.')
-            .next()
-            .unwrap_or(filename);
-        let mut id: String = stem
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        if id.is_empty() || !id.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
-            id = format!("id_{}", id);
-        }
-        // Disambiguate against existing ids.
-        if !self.manifest_by_id.contains_key(&id) {
-            return id;
-        }
-        let mut n = 1;
-        loop {
-            let candidate = format!("{}_{}", id, n);
-            if !self.manifest_by_id.contains_key(&candidate) {
-                return candidate;
-            }
-            n += 1;
-        }
+        crate::export::opf::make_manifest_id(filename, |id| self.manifest_by_id.contains_key(id))
     }
 
     /// Add a file under `OEBPS/` and register a manifest entry. Returns the
@@ -520,302 +489,122 @@ impl EpubOutput {
         Ok(buf.into_inner())
     }
 
+    /// Assemble the OPF package and serialize it through the shared emitter
+    /// (`export::opf`) — the same code path the IR exporter uses, so both
+    /// engines produce an identical package document from identical inputs.
     fn generate_opf(&self, meta: &BookMetadata) -> String {
-        // EPUB 3.0 package. Earlier we downgraded to 2.0 to placate strict
-        // readers (notably Apple Books) that rejected EPUB 3 packages
-        // missing the spec-required `nav.xhtml` document. We now emit a
-        // proper nav doc (see `generate_nav` + the `OEBPS/nav.xhtml`
-        // entry written in `into_zip_bytes`), so EPUB 3 conformance is
-        // back — with `properties="nav"` / `properties="cover-image"` on
-        // manifest items and `<meta property="dcterms:modified">` in
-        // metadata. NCX still emitted for legacy EPUB 2 readers.
-        let mut s = String::new();
-        // Declare the `rendition:` property vocabulary on `<package>` for
-        // fixed-layout books (EPUB 3 Multiple-Rendition / FXL metadata).
-        let prefix_attr = if self.fixed_layout {
-            " prefix=\"rendition: http://www.idpf.org/vocab/rendition/#\""
-        } else {
-            ""
-        };
-        s.push_str(&format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"BookId\"{prefix_attr}>\n  <metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:opf=\"http://www.idpf.org/2007/opf\">\n"
-        ));
+        use crate::export::opf;
 
-        // Title — when KFX carries `title_pronunciation` (Japanese yomigana
-        // sort key), surface it as `opf:file-as`; otherwise omit the attr.
-        let title = if meta.title.is_empty() {
-            "Untitled"
-        } else {
-            &meta.title
-        };
-        // Title — the yomigana sort key rides an EPUB-3 `<meta refines>`
-        // (`opf:file-as` as a `<dc:title>` attribute is EPUB-2 only, rejected
-        // by epubcheck as RSC-005 under 3.x).
-        s.push_str(&format!(
-            "    <dc:title id=\"title\">{}</dc:title>\n",
-            xml_escape(title)
-        ));
-        if let Some(file_as) = meta.title_pronunciation.as_deref() {
-            s.push_str(&format!(
-                "    <meta refines=\"#title\" property=\"file-as\">{}</meta>\n",
-                xml_escape(file_as)
-            ));
-        }
-
-        // Authors — role + file-as via EPUB-3 `<meta refines>` (was EPUB-2
-        // `opf:role`/`opf:file-as` attributes). Prefer the KFX-supplied
-        // `author_pronunciation` (yomigana sort key); fall back to the joined
-        // author list so EPUB libraries still sort multi-author books.
+        // Authors — prefer the KFX-supplied `author_pronunciation` (yomigana
+        // sort key); fall back to the joined author list so EPUB libraries
+        // still sort multi-author books.
         let author_file_as = meta
             .author_pronunciation
             .clone()
             .unwrap_or_else(|| meta.authors.join(" & "));
-        for (i, author) in meta.authors.iter().enumerate() {
-            let cid = format!("creator{}", i + 1);
-            s.push_str(&format!(
-                "    <dc:creator id=\"{}\">{}</dc:creator>\n",
-                cid,
-                xml_escape(author)
-            ));
-            s.push_str(&format!(
-                "    <meta refines=\"#{}\" property=\"role\" scheme=\"marc:relators\">aut</meta>\n",
-                cid
-            ));
-            s.push_str(&format!(
-                "    <meta refines=\"#{}\" property=\"file-as\">{}</meta>\n",
-                cid,
-                xml_escape(&author_file_as)
-            ));
-        }
+        let creators = meta
+            .authors
+            .iter()
+            .map(|author| opf::OpfCreator {
+                name: author.clone(),
+                role: Some("aut".to_string()),
+                file_as: Some(author_file_as.clone()),
+            })
+            .collect();
 
-        // Language
-        let lang = if meta.language.is_empty() {
-            "en"
-        } else {
-            &meta.language
-        };
-        s.push_str(&format!(
-            "    <dc:language>{}</dc:language>\n",
-            xml_escape(lang)
-        ));
-
-        // Identifier — the primary unique-id is the KFX book_id. EPUB 3.x
-        // forbids the EPUB-2 `opf:scheme` attribute on `<dc:identifier>`
-        // (RSC-005), so the ASIN rides a plain identifier tagged `id="asin"`;
-        // `import::epub` recovers it from that id (round-trips ASIN back to
-        // KFX). The MOBI-ASIN / uuid scheme twins were calibre-isms with no
-        // consumer and are dropped.
-        let id = if meta.identifier.is_empty() {
-            "urn:uuid:00000000-0000-0000-0000-000000000000"
-        } else {
-            &meta.identifier
-        };
-        s.push_str(&format!(
-            "    <dc:identifier id=\"BookId\">{}</dc:identifier>\n",
-            xml_escape(id)
-        ));
-        if let Some(asin) = meta.asin.as_deref() {
-            s.push_str(&format!(
-                "    <dc:identifier id=\"asin\">{}</dc:identifier>\n",
-                xml_escape(asin)
-            ));
-        }
-
-        // `dcterms:modified` — required by EPUB 3 (every Publication must
-        // declare its last-modified time). Stamps the conversion time —
-        // never the source's value (the modified date describes this file).
-        s.push_str(&format!(
-            "    <meta property=\"dcterms:modified\">{}</meta>\n",
-            xml_escape(&crate::util::time_now_iso8601_utc())
-        ));
-
-        // Publication date — calibre uses `kindle_title_metadata/issue_date`
-        // (KFX stores as YYYY-MM-DD). Emit as ISO-8601 with a UTC offset to
-        // match calibre's output format.
-        if let Some(date) = meta.issue_date.as_deref() {
-            let iso = if date.len() == 10
-                && date.chars().nth(4) == Some('-')
-                && date.chars().nth(7) == Some('-')
-            {
-                format!("{}T00:00:00+00:00", date)
-            } else {
-                date.to_string()
-            };
-            s.push_str(&format!("    <dc:date>{}</dc:date>\n", xml_escape(&iso)));
-        }
-
-        // Publisher (optional). Skip when empty/whitespace: the OPF schema
-        // requires `<dc:publisher>` to carry a non-empty string, so an empty
-        // element is RSC-005 ("character content … invalid").
-        if let Some(pub_) = meta
-            .publisher
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-        {
-            s.push_str(&format!(
-                "    <dc:publisher>{}</dc:publisher>\n",
-                xml_escape(pub_)
-            ));
-        }
-
-        // Cover meta (EPUB2-compat)
-        if let Some(cover_id) = self
+        let manifest = self
             .manifest
             .iter()
-            .find(|m| m.is_cover_image)
-            .map(|m| &m.id)
-        {
-            s.push_str(&format!(
-                "    <meta name=\"cover\" content=\"{}\"/>\n",
-                xml_escape(cover_id)
-            ));
-        }
+            .map(|m| {
+                let mut props: Vec<String> = Vec::new();
+                if m.is_cover_image {
+                    props.push("cover-image".to_string());
+                }
+                if m.is_nav {
+                    props.push("nav".to_string());
+                }
+                // EPUB 3 (OPF-014): a content doc embedding inline SVG /
+                // MathML / scripting must declare it in `properties`.
+                if m.media_type == "application/xhtml+xml"
+                    && let Some(f) = self.oebps_files.get(&m.href)
+                {
+                    let xml = String::from_utf8_lossy(&f.data);
+                    props.extend(
+                        opf::xhtml_content_properties(&xml)
+                            .into_iter()
+                            .map(str::to_string),
+                    );
+                }
+                opf::OpfItem {
+                    id: m.id.clone(),
+                    href: m.href.clone(),
+                    media_type: m.media_type.clone(),
+                    properties: props,
+                }
+            })
+            .collect();
 
-        // Primary writing mode hint (calibre epub_output.py:954). For a
-        // horizontal book the primary mode encodes the page-turn direction
-        // (`horizontal-rl` for RTL manga); for a vertical book it's the
-        // writing mode itself. `horizontal-lr` is the default and omitted.
-        let wm = self.writing_mode.as_deref().unwrap_or("horizontal-tb");
-        let ppd = self.page_progression_direction.as_deref().unwrap_or("ltr");
-        let primary_writing_mode = if wm == "horizontal-tb" || wm.is_empty() {
-            if ppd == "rtl" {
-                "horizontal-rl"
-            } else {
-                "horizontal-lr"
-            }
-        } else {
-            wm
+        let spine = self
+            .spine
+            .iter()
+            .map(|item| opf::OpfItemref {
+                idref: item.id.clone(),
+                properties: item.properties.clone(),
+            })
+            .collect();
+
+        let guide = self
+            .guide
+            .iter()
+            .map(|g| opf::OpfGuideRef {
+                guide_type: g.guide_type.clone(),
+                title: g.label.clone(),
+                href: g.href.clone(),
+            })
+            .collect();
+
+        let fixed_layout = self.fixed_layout.then(|| opf::OpfFixedLayout {
+            rendition_spread: None,
+            ebpaj_viewport: None,
+            original_resolution: self.original_resolution,
+            book_type: self.book_type.clone(),
+        });
+
+        let pkg = opf::OpfPackage {
+            metadata: opf::OpfMetadata {
+                title: meta.title.clone(),
+                title_file_as: meta.title_pronunciation.clone(),
+                creators,
+                contributors: Vec::new(),
+                language: meta.language.clone(),
+                identifier: meta.identifier.clone(),
+                asin: meta.asin.clone(),
+                // Stamps the conversion time — never the source's value (the
+                // modified date describes this file).
+                modified: crate::util::time_now_iso8601_utc(),
+                date: meta.issue_date.as_deref().map(opf::format_opf_date),
+                publisher: meta.publisher.clone(),
+                description: None,
+                subjects: Vec::new(),
+                rights: None,
+                collection: None,
+                cover_manifest_id: self
+                    .manifest
+                    .iter()
+                    .find(|m| m.is_cover_image)
+                    .map(|m| m.id.clone()),
+                primary_writing_mode: opf::primary_writing_mode(
+                    self.writing_mode.as_deref(),
+                    self.page_progression_direction.as_deref(),
+                ),
+                page_progression_direction: self.page_progression_direction.clone(),
+                fixed_layout,
+            },
+            manifest,
+            spine,
+            guide,
         };
-        if primary_writing_mode != "horizontal-lr" {
-            s.push_str(&format!(
-                "    <meta name=\"primary-writing-mode\" content=\"{}\"/>\n",
-                xml_escape(primary_writing_mode)
-            ));
-        }
-
-        // Fixed-layout (manga / comic) metadata — calibre epub_output.py:926.
-        if self.fixed_layout {
-            s.push_str("    <meta property=\"rendition:layout\">pre-paginated</meta>\n");
-            s.push_str("    <meta name=\"fixed-layout\" content=\"true\"/>\n");
-            if let Some((w, h)) = self.original_resolution {
-                s.push_str(&format!(
-                    "    <meta name=\"original-resolution\" content=\"{w}x{h}\"/>\n"
-                ));
-                let orientation = if w > h { "landscape" } else { "portrait" };
-                s.push_str(&format!(
-                    "    <meta property=\"rendition:orientation\">{orientation}</meta>\n"
-                ));
-                s.push_str(&format!(
-                    "    <meta name=\"orientation-lock\" content=\"{orientation}\"/>\n"
-                ));
-            }
-            if let Some(bt) = self.book_type.as_deref() {
-                s.push_str(&format!(
-                    "    <meta name=\"book-type\" content=\"{}\"/>\n",
-                    xml_escape(bt)
-                ));
-            }
-        }
-
-        s.push_str("  </metadata>\n");
-
-        // Manifest. The `<meta name="cover">` marker in metadata is kept
-        // alongside `properties="cover-image"` here for EPUB-2-reader
-        // compatibility — both are honoured by most readers, and emitting
-        // both is the calibre convention.
-        s.push_str("  <manifest>\n");
-        s.push_str(
-            "    <item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n",
-        );
-        s.push_str(
-            "    <item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>\n",
-        );
-        for m in &self.manifest {
-            let mut props: Vec<&str> = Vec::new();
-            if m.is_cover_image {
-                props.push("cover-image");
-            }
-            if m.is_nav {
-                props.push("nav");
-            }
-            // EPUB 3 (OPF-014): a content doc embedding inline SVG / MathML /
-            // scripting must declare it in the manifest `properties`. Scan the
-            // XHTML bytes for real element openings — text-node `<` is escaped
-            // as `&lt;` in XHTML, so a raw `<svg` is always a genuine element,
-            // and we must not over-declare (the inverse, OPF-015).
-            if m.media_type == "application/xhtml+xml"
-                && let Some(f) = self.oebps_files.get(&m.href)
-            {
-                let xml = String::from_utf8_lossy(&f.data);
-                if contains_element(&xml, "svg") {
-                    props.push("svg");
-                }
-                if contains_element(&xml, "math") {
-                    props.push("mathml");
-                }
-                if contains_element(&xml, "script") {
-                    props.push("scripted");
-                }
-            }
-            let properties = if props.is_empty() {
-                String::new()
-            } else {
-                format!(" properties=\"{}\"", props.join(" "))
-            };
-            s.push_str(&format!(
-                "    <item id=\"{}\" href=\"{}\" media-type=\"{}\"{}/>\n",
-                xml_escape(&m.id),
-                xml_escape(&m.href),
-                xml_escape(&m.media_type),
-                properties,
-            ));
-        }
-        s.push_str("  </manifest>\n");
-
-        // Spine — calibre emits page-progression-direction only when it
-        // diverges from the default `ltr` (epub_output.py:1052).
-        let ppd_attr = self
-            .page_progression_direction
-            .as_deref()
-            .filter(|v| !v.is_empty() && *v != "ltr")
-            .map(|v| format!(" page-progression-direction=\"{}\"", xml_escape(v)))
-            .unwrap_or_default();
-        s.push_str(&format!("  <spine toc=\"ncx\"{}>\n", ppd_attr));
-        for item in &self.spine {
-            let props = item
-                .properties
-                .as_deref()
-                .map(|p| format!(" properties=\"{}\"", xml_escape(p)))
-                .unwrap_or_default();
-            s.push_str(&format!(
-                "    <itemref idref=\"{}\"{}/>\n",
-                xml_escape(&item.id),
-                props,
-            ));
-        }
-        s.push_str("  </spine>\n");
-
-        // `<guide>` (EPUB 2.0 landmarks). Mirrors calibre's
-        // `add_guide_entry` output. Each entry is one
-        // `<reference type="..." title="..." href="..."/>`. Skipped when
-        // empty so the OPF stays clean for inputs with no landmark
-        // metadata.
-        if !self.guide.is_empty() {
-            s.push_str("  <guide>\n");
-            for g in &self.guide {
-                s.push_str(&format!(
-                    "    <reference type=\"{}\" title=\"{}\" href=\"{}\"/>\n",
-                    xml_escape(&g.guide_type),
-                    xml_escape(&g.label),
-                    xml_escape(&g.href),
-                ));
-            }
-            s.push_str("  </guide>\n");
-        }
-
-        s.push_str("</package>\n");
-        s
+        opf::emit_opf(&pkg)
     }
 
     /// Generate `nav.xhtml`, the EPUB 3 navigation document.
@@ -1018,27 +807,6 @@ fn guide_type_to_epub3(guide_type: &str) -> &str {
         "acknowledgements" => "acknowledgments",
         other => other,
     }
-}
-
-/// True if `xml` contains a real element `<name…>` (open tag), used to compute
-/// EPUB-3 manifest `properties` (svg / mathml / scripted) for OPF-014. Matches
-/// `<name` followed by a tag delimiter so `<svgfoo` doesn't count; text-node
-/// `<` is `&lt;`-escaped in XHTML, so any raw `<name` is a genuine element.
-fn contains_element(xml: &str, name: &str) -> bool {
-    let needle = format!("<{name}");
-    let mut hay = xml;
-    while let Some(pos) = hay.find(&needle) {
-        let after = pos + needle.len();
-        if hay[after..]
-            .chars()
-            .next()
-            .is_none_or(|c| matches!(c, ' ' | '\t' | '\r' | '\n' | '>' | '/'))
-        {
-            return true;
-        }
-        hay = &hay[after..];
-    }
-    false
 }
 
 /// Human-readable fallback label for a landmark whose KFX source carried no
