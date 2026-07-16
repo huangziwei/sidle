@@ -15,6 +15,12 @@ use crate::kfx::symbols::KfxSymbol;
 
 use super::loader::BookData;
 
+// The emit-side machinery (NavPoint tree, reading-order sort, nav.xhtml/NCX
+// serialization) is shared with the IR exporter — this module only *extracts*
+// navigation from KFX and hands the shared types to `export::nav`.
+pub use crate::export::nav::{NavPoint, sort_toc_reading_order};
+use crate::export::opf::OpfGuideRef;
+
 /// Resolve one `book_navigation.nav_containers` entry to its `nav_container`
 /// ($391) struct. Two forms occur: the reflowable path inlines the container
 /// struct directly, while the fixed-layout / PDOC path (which the device
@@ -480,43 +486,6 @@ fn fix_html_id(name: &str) -> String {
     out
 }
 
-/// One NCX nav point.
-#[derive(Debug, Clone)]
-pub struct NavPoint {
-    pub label: String,
-    /// `chapter.xhtml#fragment` or `chapter.xhtml` href, relative to OEBPS/.
-    pub href: String,
-    pub children: Vec<NavPoint>,
-}
-
-/// Stable-sort each level of the TOC tree by the reading-order rank of each
-/// entry's target file. EPUB 3 requires the `toc` nav to be in reading order
-/// (epubcheck warns NAV-011 otherwise); some publisher KFX TOCs list front
-/// matter out of reading order (e.g. the 目次 entry before はじめに when はじめに
-/// physically reads first — verified against the KFX reading_order). Ties (same
-/// file, or a target file not in the spine) keep their original order, so a TOC
-/// already in reading order is left byte-identical.
-pub fn sort_toc_reading_order(toc: &mut [NavPoint], file_rank: &HashMap<String, usize>) {
-    fn rank(np: &NavPoint, fr: &HashMap<String, usize>) -> usize {
-        let file = np.href.split('#').next().unwrap_or(&np.href);
-        fr.get(file).copied().unwrap_or(usize::MAX)
-    }
-    toc.sort_by_key(|np| rank(np, file_rank));
-    for np in toc.iter_mut() {
-        sort_toc_reading_order(&mut np.children, file_rank);
-    }
-}
-
-/// One OPF `<guide><reference>` entry. Mirrors calibre's
-/// `add_guide_entry` (yj_to_epub_metadata.py). The `guide_type` value is
-/// the EPUB 2.0 guide reference type string ("cover", "text", "toc", ...).
-#[derive(Debug, Clone)]
-pub struct GuideRef {
-    pub guide_type: String,
-    pub label: String,
-    pub href: String,
-}
-
 /// Extract `<guide>` entries from KFX `nav_type=landmarks` containers.
 ///
 /// Calibre's path is `yj_to_epub_navigation.py:140`: iterate every
@@ -528,11 +497,11 @@ pub fn extract_landmarks(
     book: &BookData,
     element_id_to_filename: &HashMap<i64, String>,
     anchors: &AnchorTable,
-) -> Vec<GuideRef> {
+) -> Vec<OpfGuideRef> {
     let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
         return Vec::new();
     };
-    let mut out: Vec<GuideRef> = Vec::new();
+    let mut out: Vec<OpfGuideRef> = Vec::new();
     for value in nav.values() {
         let unwrapped = value.unwrap_annotated();
         let candidates: Vec<IonValue> = match unwrapped {
@@ -583,7 +552,7 @@ fn nav_unit_to_guide(
     book: &BookData,
     element_id_to_filename: &HashMap<i64, String>,
     anchors: &AnchorTable,
-) -> Option<GuideRef> {
+) -> Option<OpfGuideRef> {
     let inner = entry.unwrap_annotated();
     let fields = inner.as_struct()?;
 
@@ -633,9 +602,9 @@ fn nav_unit_to_guide(
         return None;
     }
 
-    Some(GuideRef {
+    Some(OpfGuideRef {
         guide_type,
-        label,
+        title: label,
         href,
     })
 }
@@ -850,110 +819,4 @@ fn nav_unit_to_navpoint(
         href,
         children,
     })
-}
-
-/// Render the NCX navMap from a list of nav points.
-pub fn render_navmap(points: &[NavPoint]) -> String {
-    let mut s = String::new();
-    let mut ctx = NavmapCtx {
-        next_id: 1,
-        next_play_order: 1,
-        play_order_by_target: HashMap::new(),
-    };
-    write_points(&mut s, points, &mut ctx, 2);
-    s
-}
-
-/// Numbering state for the NCX navMap. `id` is always unique (one per
-/// navPoint); `playOrder` is assigned per unique content target so that two
-/// navPoints referencing the same target share a playOrder — the NCX rule
-/// epubcheck enforces (RSC-005 "different playOrder values … that refer to the
-/// same target"). First-occurrence order gives reading-order playOrder.
-struct NavmapCtx {
-    next_id: usize,
-    next_play_order: usize,
-    play_order_by_target: HashMap<String, usize>,
-}
-
-/// Render the EPUB 3 nav doc TOC body — `<ol><li><a href="...">title</a></li></ol>`.
-/// Used inside `<nav epub:type="toc">` (mandatory in EPUB 3 per W3C spec).
-pub fn render_nav_ol(points: &[NavPoint]) -> String {
-    let mut s = String::new();
-    write_nav_ol(&mut s, points, 4);
-    s
-}
-
-fn write_nav_ol(s: &mut String, points: &[NavPoint], indent: usize) {
-    let pad = "  ".repeat(indent);
-    s.push_str(&pad);
-    s.push_str("<ol>\n");
-    for p in points {
-        s.push_str(&pad);
-        s.push_str(&format!(
-            "  <li><a href=\"{}\">{}</a>",
-            xml_escape(&p.href),
-            xml_escape(&p.label)
-        ));
-        if !p.children.is_empty() {
-            s.push('\n');
-            write_nav_ol(s, &p.children, indent + 2);
-            s.push_str(&pad);
-            s.push_str("  </li>\n");
-        } else {
-            s.push_str("</li>\n");
-        }
-    }
-    s.push_str(&pad);
-    s.push_str("</ol>\n");
-}
-
-fn write_points(s: &mut String, points: &[NavPoint], ctx: &mut NavmapCtx, indent: usize) {
-    let prefix = "  ".repeat(indent);
-    for p in points {
-        let id = ctx.next_id;
-        ctx.next_id += 1;
-        // Same content target ⇒ same playOrder (assigned in first-occurrence
-        // order); the `id` stays unique per navPoint.
-        let po = if let Some(&po) = ctx.play_order_by_target.get(&p.href) {
-            po
-        } else {
-            let v = ctx.next_play_order;
-            ctx.next_play_order += 1;
-            ctx.play_order_by_target.insert(p.href.clone(), v);
-            v
-        };
-        s.push_str(&format!(
-            "{prefix}<navPoint id=\"navPoint-{id}\" playOrder=\"{po}\">\n"
-        ));
-        s.push_str(&format!(
-            "{}  <navLabel><text>{}</text></navLabel>\n",
-            prefix,
-            xml_escape(&p.label)
-        ));
-        s.push_str(&format!(
-            "{}  <content src=\"{}\"/>\n",
-            prefix,
-            xml_escape(&p.href)
-        ));
-        if !p.children.is_empty() {
-            write_points(s, &p.children, ctx, indent + 1);
-        }
-        s.push_str(&format!("{}</navPoint>\n", prefix));
-    }
-}
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-/// Total nav-point count (including nested children) — useful for logging.
-pub fn count_points(points: &[NavPoint]) -> usize {
-    let mut n = 0;
-    for p in points {
-        n += 1 + count_points(&p.children);
-    }
-    n
 }

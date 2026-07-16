@@ -733,17 +733,24 @@ impl KfxImporter {
                                     let nav_type = get_field(container_fields, sym!(NavType))
                                         .and_then(|v| self.get_symbol_text(v));
 
+                                    // Append: a book can carry several
+                                    // containers of one nav_type (one per
+                                    // reading order) — calibre and the
+                                    // mechanical route collect them all;
+                                    // last-wins would drop entries.
                                     match nav_type {
                                         Some("toc") => {
-                                            self.toc = self.parse_nav_entries(container_fields);
+                                            let entries = self.parse_nav_entries(container_fields);
+                                            self.toc.extend(entries);
                                         }
                                         Some("page_list") => {
-                                            self.page_list =
-                                                self.parse_nav_entries(container_fields);
+                                            let entries = self.parse_nav_entries(container_fields);
+                                            self.page_list.extend(entries);
                                         }
                                         Some("landmarks") => {
-                                            self.landmarks =
+                                            let entries =
                                                 self.parse_landmark_entries(container_fields);
+                                            self.landmarks.extend(entries);
                                         }
                                         _ => {}
                                     }
@@ -826,7 +833,13 @@ impl KfxImporter {
                 // Unwrap annotation if present (nav_unit::...)
                 let inner = entry.unwrap_annotated();
                 if let Some(entry_fields) = inner.as_struct() {
-                    // Get label (try representation.label first, then direct label)
+                    // Get label (try representation.label first, then direct label).
+                    // A MISSING label falls back to "Untitled" and the entry is
+                    // kept — Amazon ships unlabeled nav_units (e.g. the page-list
+                    // book-start sentinel) and the mechanical route keeps them in
+                    // the TOC; page-list consumers drop the sentinel at emission.
+                    // A PRESENT-but-empty label and the "heading-nav-unit"
+                    // placeholder are dropped, matching calibre.
                     let label = get_field(entry_fields, sym!(Representation))
                         .and_then(|v| v.as_struct())
                         .and_then(|s| get_field(s, sym!(Label)))
@@ -835,9 +848,7 @@ impl KfxImporter {
                             get_field(entry_fields, sym!(Label)).and_then(|v| v.as_string())
                         })
                         .unwrap_or("Untitled");
-
-                    // Skip placeholder labels
-                    if label == "heading-nav-unit" || label == "Untitled" {
+                    if label.is_empty() || label == "heading-nav-unit" {
                         continue;
                     }
 

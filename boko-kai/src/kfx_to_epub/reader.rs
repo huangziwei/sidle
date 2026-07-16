@@ -196,7 +196,10 @@ pub fn kfx_to_reader_book(kfx_bytes: &[u8]) -> Result<ReaderBook, ConvertError> 
 pub fn kfx_to_reader_book_lazy(
     kfx_bytes: &[u8],
 ) -> Result<(ReaderBook, ReaderImageStore), ConvertError> {
-    let (out, book, toc, deferred) = build_output(kfx_bytes, true, &|_, _, _, _| {})?;
+    let (mut out, book, deferred) = build_output(kfx_bytes, true, &|_, _, _, _| {})?;
+    // The EPUB emitters read `out.toc`; the reader owns and adapts its copy
+    // (cover prepend below) without touching the output state.
+    let toc = std::mem::take(&mut out.toc);
     // Drop the synthetic `titlepage.xhtml` cover wrapper that `build_output`
     // prepends for the EPUB export (Apple Books et al. need an explicit cover
     // spine item; see `build_titlepage`). The reader renders the KFX's own
@@ -795,7 +798,7 @@ mod tests {
         let bytes = std::fs::read(fixture("[小栗 虫太郎] 黒死館殺人事件 (2012).kfx"))
             .expect("read [小栗 虫太郎] 黒死館殺人事件 (2012).kfx fixture");
         // The shippable EPUB path must leave the DOM stamp-free (no bloat).
-        let (out, _book, _toc, _deferred) =
+        let (out, _book, _deferred) =
             build_output(&bytes, false, &|_, _, _, _| {}).expect("build_output");
         let stamped: usize = out
             .spine_documents()

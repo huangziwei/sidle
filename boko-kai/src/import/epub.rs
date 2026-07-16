@@ -317,6 +317,35 @@ impl EpubImporter {
             }
         }
 
+        // Assets = non-spine resources (images / CSS / fonts / audio).
+        // `scan_zip` collected every entry; drop the container structure
+        // (mimetype, META-INF/*, the OPF) and the navigation documents the
+        // exporters regenerate (NCX, nav doc), plus every spine chapter —
+        // re-bundling chapters as loose assets made an epub→epub re-export
+        // write each chapter twice (duplicate-zip-entry error).
+        let mut assets = assets;
+        {
+            let spine_set: std::collections::HashSet<&str> =
+                spine_paths.iter().map(|s| s.as_str()).collect();
+            let ncx_path = opf
+                .ncx_href
+                .as_ref()
+                .map(|h| format!("{}{}", opf_base, percent_decode(h)));
+            let nav_path = opf
+                .nav_href
+                .as_ref()
+                .map(|h| format!("{}{}", opf_base, percent_decode(h)));
+            assets.retain(|p| {
+                let name = p.to_string_lossy();
+                name != "mimetype"
+                    && !name.starts_with("META-INF/")
+                    && name != opf_path
+                    && Some(name.as_ref()) != ncx_path.as_deref()
+                    && Some(name.as_ref()) != nav_path.as_deref()
+                    && !spine_set.contains(name.as_ref())
+            });
+        }
+
         // 5. Parse TOC. The EPUB 3 nav doc is the authoritative TOC; the legacy
         // EPUB 2 NCX is a fallback. Retail Japanese EPUBs (Kadokawa/EBPAJ)
         // routinely ship BOTH — a full nav doc AND a stub NCX that lists only

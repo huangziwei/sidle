@@ -77,23 +77,16 @@ pub struct EpubOutput {
     /// (calibre `epub_output.py:941`).
     pub book_type: Option<String>,
 
-    /// NCX navMap content (the inner <navPoint>…</navPoint> sequence).
-    /// When set, `generate_ncx` uses this instead of the spine-derived
-    /// fallback.
-    pub ncx_navmap: Option<String>,
+    /// TOC tree (reading-order sorted), rendered into both the EPUB 3 nav
+    /// doc and the NCX navMap by the shared `export::nav` emitters. Empty
+    /// falls back to a single entry pointing at the first spine chapter.
+    pub toc: Vec<crate::export::nav::NavPoint>,
 
-    /// EPUB 3 nav doc TOC `<ol>` body, paired with `ncx_navmap` (both
-    /// derived from the same `NavPoint` tree). Populated alongside
-    /// `ncx_navmap` in `mod.rs`. When set, `generate_nav` emits this
-    /// inside `<nav epub:type="toc">`; otherwise falls back to a
-    /// single-entry list pointing at the first spine chapter.
-    pub nav_ol_html: Option<String>,
-
-    /// EPUB 3 nav doc page-list `<ol>` body (flat), emitted inside
+    /// Physical page list (flat, page order), rendered as
     /// `<nav epub:type="page-list">`. Populated in `mod.rs` from
     /// `navigation::extract_page_list` when the source KFX carries a
-    /// `page_list` nav_container; `None` (nav omitted) otherwise.
-    pub page_list_ol_html: Option<String>,
+    /// `page_list` nav_container; empty omits the nav.
+    pub page_list: Vec<crate::export::nav::NavPoint>,
 
     /// Page-progression-direction. Mirrors calibre's `EPUB_Output.
     /// page_progression_direction`. Emitted to `<spine
@@ -108,8 +101,9 @@ pub struct EpubOutput {
 
     /// OPF `<guide>` entries (EPUB 2.0 landmark references). Populated from
     /// KFX `nav_type=landmarks` containers; emitted as
-    /// `<reference type="..." href="..." title="..."/>` inside `<guide>`.
-    pub guide: Vec<super::navigation::GuideRef>,
+    /// `<reference type="..." href="..." title="..."/>` inside `<guide>`
+    /// and re-mapped to the EPUB 3 vocabulary for the nav doc's landmarks.
+    pub guide: Vec<crate::export::opf::OpfGuideRef>,
 }
 
 impl EpubOutput {
@@ -123,9 +117,8 @@ impl EpubOutput {
             fixed_layout: false,
             original_resolution: None,
             book_type: None,
-            ncx_navmap: None,
-            nav_ol_html: None,
-            page_list_ol_html: None,
+            toc: Vec::new(),
+            page_list: Vec::new(),
             page_progression_direction: None,
             writing_mode: None,
             guide: Vec::new(),
@@ -558,7 +551,7 @@ impl EpubOutput {
             .iter()
             .map(|g| opf::OpfGuideRef {
                 guide_type: g.guide_type.clone(),
-                title: g.label.clone(),
+                title: g.title.clone(),
                 href: g.href.clone(),
             })
             .collect();
@@ -607,167 +600,41 @@ impl EpubOutput {
         opf::emit_opf(&pkg)
     }
 
-    /// Generate `nav.xhtml`, the EPUB 3 navigation document.
-    ///
-    /// The W3C EPUB 3.3 spec requires every Publication to include exactly
-    /// one nav doc, and conformant readers (Apple Books) reject EPUB 3
-    /// packages without it. NCX no longer satisfies the requirement on
-    /// its own — it's strictly legacy.
-    ///
-    /// Body shape (mirrors calibre's EPUB 3 nav output):
-    /// `<nav epub:type="toc"><ol><li><a href=…>…</a></li></ol></nav>`,
-    /// optional `<nav epub:type="landmarks">` from `self.guide` (the same
-    /// container used to emit the EPUB-2 `<guide>` block).
-    fn generate_nav(&self, meta: &BookMetadata) -> String {
-        let title = if meta.title.is_empty() {
-            "Untitled"
-        } else {
-            &meta.title
-        };
-        let lang = if meta.language.is_empty() {
-            "en"
-        } else {
-            meta.language.as_str()
-        };
-
-        let mut s = String::new();
-        s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-        s.push_str("<!DOCTYPE html>\n");
-        s.push_str(&format!(
-            "<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\" xml:lang=\"{lang}\" lang=\"{lang}\">\n",
-            lang = xml_escape(lang),
-        ));
-        s.push_str("<head>\n");
-        s.push_str("  <meta charset=\"utf-8\"/>\n");
-        s.push_str(&format!("  <title>{}</title>\n", xml_escape(title)));
-        s.push_str("</head>\n<body>\n");
-
-        // TOC nav.
-        s.push_str("  <nav epub:type=\"toc\" id=\"toc\">\n");
-        s.push_str("    <h1>Table of Contents</h1>\n");
-        if let Some(ol) = &self.nav_ol_html {
-            s.push_str(ol);
-        } else if let Some(first) = self.spine.first() {
-            // Fallback: single entry pointing at the first spine chapter
-            // (mirrors what `generate_ncx` does when `ncx_navmap` is unset).
-            let href = self
-                .manifest_by_id
+    /// The empty-TOC fallback target: the first spine document's href
+    /// (`None` when the spine is empty). Shared by the nav doc and the NCX.
+    fn toc_fallback_href(&self) -> Option<String> {
+        let first = self.spine.first()?;
+        Some(
+            self.manifest_by_id
                 .get(&first.id)
                 .map(|&idx| self.manifest[idx].href.clone())
-                .unwrap_or_default();
-            s.push_str(&format!(
-                "    <ol>\n      <li><a href=\"{}\">{}</a></li>\n    </ol>\n",
-                xml_escape(&href),
-                xml_escape(title),
-            ));
-        } else {
-            s.push_str("    <ol></ol>\n");
-        }
-        s.push_str("  </nav>\n");
-
-        // Page-list nav (`<nav epub:type="page-list">`) — printed page numbers →
-        // positions, round-tripped from the source KFX's `page_list` container.
-        // Emitted only when present; `hidden` like the landmarks nav so it
-        // drives "go to page N" without cluttering the visible TOC.
-        if let Some(ol) = &self.page_list_ol_html {
-            s.push_str("  <nav epub:type=\"page-list\" id=\"page-list\" hidden=\"\">\n");
-            s.push_str("    <h2>List of Pages</h2>\n");
-            s.push_str(ol);
-            s.push_str("  </nav>\n");
-        }
-
-        // Landmarks nav, derived from the same `self.guide` source the
-        // EPUB-2 `<guide>` block uses. EPUB-3 vocabulary differs from
-        // EPUB-2 guide types in a few names (start → bodymatter,
-        // acknowledgements vs acknowledgments); map at emit time so the
-        // GuideRef struct stays a single source of truth.
-        if !self.guide.is_empty() {
-            s.push_str("  <nav epub:type=\"landmarks\" id=\"landmarks\" hidden=\"\">\n");
-            s.push_str("    <h2>Landmarks</h2>\n");
-            s.push_str("    <ol>\n");
-            // EPUB 3 forbids two landmarks that share an epub:type AND reference
-            // the same resource (epubcheck RSC-005). boko's own EPUB→KFX emits
-            // both an `srl` (start-reading) and a `bodymatter` landmark for the
-            // book's opening — which map to the same `bodymatter` + href here —
-            // so keep the first of any (type, href) pair and drop later repeats.
-            let mut seen_landmarks: std::collections::HashSet<(String, String)> =
-                std::collections::HashSet::new();
-            for g in &self.guide {
-                let epub_type = guide_type_to_epub3(&g.guide_type);
-                if !seen_landmarks.insert((epub_type.to_string(), g.href.clone())) {
-                    continue;
-                }
-                // EPUB 3 requires every `<nav>` anchor to carry text (RSC-005);
-                // KFX landmark containers sometimes yield an empty label (the
-                // bodymatter/cover start marker), so fall back to a default.
-                let label = if g.label.trim().is_empty() {
-                    landmark_default_label(epub_type)
-                } else {
-                    g.label.as_str()
-                };
-                s.push_str(&format!(
-                    "      <li><a epub:type=\"{}\" href=\"{}\">{}</a></li>\n",
-                    epub_type,
-                    xml_escape(&g.href),
-                    xml_escape(label),
-                ));
-            }
-            s.push_str("    </ol>\n");
-            s.push_str("  </nav>\n");
-        }
-
-        s.push_str("</body>\n</html>\n");
-        s
+                .unwrap_or_default(),
+        )
     }
 
+    /// Assemble `nav.xhtml` through the shared emitter (`export::nav`) —
+    /// the same code path the IR exporter uses.
+    fn generate_nav(&self, meta: &BookMetadata) -> String {
+        let fallback = self.toc_fallback_href();
+        crate::export::nav::emit_nav(&crate::export::nav::NavDoc {
+            title: &meta.title,
+            language: &meta.language,
+            toc: &self.toc,
+            toc_fallback_href: fallback.as_deref(),
+            page_list: &self.page_list,
+            landmarks: &self.guide,
+        })
+    }
+
+    /// Assemble `toc.ncx` through the shared emitter (`export::nav`).
     fn generate_ncx(&self, meta: &BookMetadata) -> String {
-        let title = if meta.title.is_empty() {
-            "Untitled"
-        } else {
-            &meta.title
-        };
-        let id = if meta.identifier.is_empty() {
-            "urn:uuid:00000000-0000-0000-0000-000000000000"
-        } else {
-            &meta.identifier
-        };
-        let mut s = String::new();
-        s.push_str(&format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
-<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
-  <head>
-    <meta name="dtb:uid" content="{id}"/>
-    <meta name="dtb:depth" content="1"/>
-    <meta name="dtb:totalPageCount" content="0"/>
-    <meta name="dtb:maxPageNumber" content="0"/>
-  </head>
-  <docTitle><text>{title}</text></docTitle>
-  <navMap>
-"#,
-            id = xml_escape(id),
-            title = xml_escape(title)
-        ));
-
-        // Use the navigation module's NCX if provided; otherwise emit the
-        // single-entry fallback pointing at the first spine chapter.
-        if let Some(navmap) = &self.ncx_navmap {
-            s.push_str(navmap);
-        } else if let Some(first) = self.spine.first() {
-            let href = self
-                .manifest_by_id
-                .get(&first.id)
-                .map(|&idx| self.manifest[idx].href.clone())
-                .unwrap_or_default();
-            s.push_str(&format!(
-                "    <navPoint id=\"navPoint-1\" playOrder=\"1\">\n      <navLabel><text>{}</text></navLabel>\n      <content src=\"{}\"/>\n    </navPoint>\n",
-                xml_escape(title),
-                xml_escape(&href)
-            ));
-        }
-
-        s.push_str("  </navMap>\n</ncx>\n");
-        s
+        let fallback = self.toc_fallback_href();
+        crate::export::nav::emit_ncx(&crate::export::nav::NcxDoc {
+            title: &meta.title,
+            identifier: &meta.identifier,
+            toc: &self.toc,
+            toc_fallback_href: fallback.as_deref(),
+        })
     }
 }
 
@@ -785,48 +652,8 @@ const CONTAINER_XML: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 </container>
 "#;
 
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
 fn io_error<E: std::error::Error + Send + Sync + 'static>(e: E) -> std::io::Error {
     std::io::Error::other(e)
-}
-
-/// Map an EPUB 2.0 `<guide>` reference type to the EPUB 3 nav-doc
-/// `epub:type` vocabulary. Most types are identical; a few names differ
-/// (`start` → `bodymatter`, `acknowledgements` → `acknowledgments`).
-/// Unknown types pass through verbatim — readers ignore unknown values.
-fn guide_type_to_epub3(guide_type: &str) -> &str {
-    match guide_type {
-        "start" | "text" => "bodymatter",
-        "acknowledgements" => "acknowledgments",
-        other => other,
-    }
-}
-
-/// Human-readable fallback label for a landmark whose KFX source carried no
-/// text. EPUB 3 rejects an empty `<nav>` anchor (RSC-005 "Anchors within nav
-/// elements must contain text"), so every landmark link needs a label.
-fn landmark_default_label(epub_type: &str) -> &'static str {
-    match epub_type {
-        "cover" => "Cover",
-        "toc" => "Table of Contents",
-        "frontmatter" => "Front Matter",
-        "backmatter" => "Back Matter",
-        "loi" => "List of Illustrations",
-        "lot" => "List of Tables",
-        "preface" => "Preface",
-        "bibliography" => "Bibliography",
-        "index" => "Index",
-        "glossary" => "Glossary",
-        // "bodymatter" and anything unrecognized: the reading-start marker.
-        _ => "Start of Content",
-    }
 }
 
 /// Media types whose bytes are already compressed; running deflate over them

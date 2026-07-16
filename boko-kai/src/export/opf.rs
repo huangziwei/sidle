@@ -107,6 +107,9 @@ pub struct OpfItemref {
 
 /// One `<guide>` reference (EPUB 2.0 landmarks — still consulted by Apple
 /// Books / Kindle / calibre). An empty `title` is emitted as `title=""`.
+/// The nav doc's `<nav epub:type="landmarks">` renders from the same
+/// entries (see `export::nav::emit_nav`), so the two stay in lockstep.
+#[derive(Debug, Clone)]
 pub struct OpfGuideRef {
     pub guide_type: String,
     pub title: String,

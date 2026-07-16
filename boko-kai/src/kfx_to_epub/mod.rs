@@ -90,7 +90,7 @@ pub fn convert_to_epub_with_progress(
     kfx_bytes: &[u8],
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> Result<Vec<u8>, ConvertError> {
-    let (mut out, book, _toc, deferred) = build_output(kfx_bytes, false, on_progress)?;
+    let (mut out, book, deferred) = build_output(kfx_bytes, false, on_progress)?;
 
     let trace = crate::trace::Trace::new("kfx2epub-fill", "BOKO_KFX2EPUB_TRACE");
     let total = deferred.len();
@@ -141,15 +141,7 @@ pub(crate) fn build_output(
     kfx_bytes: &[u8],
     stamp_eids: bool,
     on_progress: &dyn Fn(&str, usize, usize, &str),
-) -> Result<
-    (
-        EpubOutput,
-        BookData,
-        Vec<navigation::NavPoint>,
-        Vec<resources::DeferredImage>,
-    ),
-    ConvertError,
-> {
+) -> Result<(EpubOutput, BookData, Vec<resources::DeferredImage>), ConvertError> {
     let trace = crate::trace::Trace::new("kfx2epub", "BOKO_KFX2EPUB_TRACE");
     // Phase emits fire BEFORE each step so the bar's label names the work in
     // progress (not the one just finished); cur=0 lands the bar at the band's
@@ -288,9 +280,10 @@ pub(crate) fn build_output(
         out.prepend_spine_chapter("titlepage.xhtml", titlepage);
     }
 
-    // Navigation. Build NCX from book_navigation, using the
+    // Navigation. Build the TOC tree from book_navigation, using the
     // element-id → chapter-filename map populated by `process_section` to
-    // resolve `nav_unit.target_position.id` to a real chapter file.
+    // resolve `nav_unit.target_position.id` to a real chapter file; the
+    // shared `export::nav` emitters render it into nav.xhtml + toc.ncx.
     on_progress("nav", 0, 1, "Writing navigation");
     let mut toc = navigation::extract_toc(
         &book,
@@ -301,10 +294,7 @@ pub(crate) fn build_output(
     // EPUB 3 nav ordering requirement (epubcheck NAV-011). The spine is fully
     // built by now (content sections + any prepended titlepage).
     navigation::sort_toc_reading_order(&mut toc, &out.spine_file_rank());
-    if !toc.is_empty() {
-        out.ncx_navmap = Some(navigation::render_navmap(&toc));
-        out.nav_ol_html = Some(navigation::render_nav_ol(&toc));
-    }
+    out.toc = toc;
     trace.mark("navigation::extract_toc");
 
     // Physical page list (`<nav epub:type="page-list">`): flat, kept in page
@@ -316,15 +306,12 @@ pub(crate) fn build_output(
     // landing on an already-anchored chapter start — collapses to the
     // chapter-file link instead of a dangling `#page-…` (epubcheck RSC-012).
     let stamped_id_to_file = content::stamped_id_to_file(&content_state);
-    let page_list = navigation::extract_page_list(
+    out.page_list = navigation::extract_page_list(
         &book,
         &content_state.element_id_to_filename,
         &content_state.anchors,
         &stamped_id_to_file,
     );
-    if !page_list.is_empty() {
-        out.page_list_ol_html = Some(navigation::render_nav_ol(&page_list));
-    }
     trace.mark("navigation::extract_page_list");
 
     // OPF `<guide>` from `nav_type=landmarks` containers (calibre's
@@ -343,21 +330,7 @@ pub(crate) fn build_output(
     // it ends up rendering c0.xhtml's first paragraph instead of the
     // cover image.
     if out.has_file("titlepage.xhtml") {
-        if let Some(cover_ref) = out.guide.iter_mut().find(|g| g.guide_type == "cover") {
-            cover_ref.href = "titlepage.xhtml".to_string();
-            if cover_ref.label.is_empty() {
-                cover_ref.label = "Cover".to_string();
-            }
-        } else {
-            out.guide.insert(
-                0,
-                navigation::GuideRef {
-                    guide_type: "cover".to_string(),
-                    label: "Cover".to_string(),
-                    href: "titlepage.xhtml".to_string(),
-                },
-            );
-        }
+        crate::export::opf::repoint_cover_guide(&mut out.guide, "titlepage.xhtml");
     }
     trace.mark("navigation::extract_landmarks");
 
@@ -374,7 +347,7 @@ pub(crate) fn build_output(
     // Release the `&book` / `&resources` borrows held by `content_state` so we
     // can move `book` into the return tuple.
     drop(content_state);
-    Ok((out, book, toc, deferred))
+    Ok((out, book, deferred))
 }
 
 /// Build calibre-style `titlepage.xhtml`: an SVG viewBox sized to the

@@ -35,6 +35,7 @@ mod css_gen;
 mod epub;
 mod html_synth;
 mod kfx;
+pub mod nav;
 mod normalize;
 pub mod opf;
 mod text;

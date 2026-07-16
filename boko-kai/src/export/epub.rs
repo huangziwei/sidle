@@ -10,9 +10,10 @@ use zip::CompressionMethod;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-use crate::model::{AnchorTarget, Book, Landmark, LandmarkType, TocEntry};
+use crate::model::{AnchorTarget, Book, TocEntry};
 
 use super::Exporter;
+use super::nav::{self, NavPoint};
 use super::opf::{
     self, OpfCollection, OpfCreator, OpfFixedLayout, OpfGuideRef, OpfItem, OpfItemref, OpfMetadata,
     OpfPackage,
@@ -107,16 +108,28 @@ impl EpubExporter {
         let mut manifest_items: Vec<OpfItem> = Vec::new();
         let mut spine_items: Vec<OpfItemref> = Vec::new();
 
-        // Add chapters to manifest
+        // Add chapters to manifest. Chapter bytes load once here — the
+        // OPF-014 property scan (a content doc embedding inline SVG / MathML
+        // / scripting must declare it on its manifest item) needs the text,
+        // and step 7 writes the same bytes.
+        let mut chapter_bytes: Vec<Vec<u8>> = Vec::with_capacity(spine.len());
         for (i, entry) in spine.iter().enumerate() {
-            let source_path = book.source_id(entry.id).unwrap_or("unknown.xhtml");
+            let source_path = book
+                .source_id(entry.id)
+                .unwrap_or("unknown.xhtml")
+                .to_string();
+            let content = book.load_raw(entry.id)?;
             let id = format!("chapter_{}", i);
             manifest_items.push(OpfItem {
                 id: id.clone(),
-                href: sanitize_path(source_path),
+                href: sanitize_path(&source_path),
                 media_type: "application/xhtml+xml".to_string(),
-                properties: Vec::new(),
+                properties: opf::xhtml_content_properties(&String::from_utf8_lossy(&content))
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
             });
+            chapter_bytes.push(content);
             spine_items.push(OpfItemref {
                 idref: id,
                 properties: None,
@@ -194,20 +207,47 @@ impl EpubExporter {
             .map_err(io_error)?;
         zip.write_all(opf.as_bytes())?;
 
-        // 6a. Write nav.xhtml (EPUB 3 navigation document)
-        let nav_fallback = book
-            .spine()
-            .first()
-            .and_then(|e| book.source_id(e.id))
-            .map(sanitize_path)
-            .unwrap_or_else(|| "chapter_0.xhtml".to_string());
-        let nav = generate_nav(book.metadata(), book.toc(), book.landmarks(), &nav_fallback);
+        // 6a. Write nav.xhtml (EPUB 3 navigation document). Passthrough TOC
+        // hrefs are already file paths — no resolution pass; entries keep
+        // their source order (sources ship reading-ordered TOCs). Landmarks
+        // reuse the OPF guide-type vocabulary; the emitter maps to EPUB 3.
+        let toc_points = toc_to_navpoints(book.toc(), &|href| Some(href.to_string()));
+        let nav_landmarks: Vec<OpfGuideRef> = book
+            .landmarks()
+            .iter()
+            .map(|lm| OpfGuideRef {
+                guide_type: opf::landmark_guide_type(lm.landmark_type).to_string(),
+                title: lm.label.clone(),
+                href: lm.href.clone(),
+            })
+            .collect();
+        let toc_fallback = if titlepage_xhtml.is_some() {
+            Some("titlepage.xhtml".to_string())
+        } else {
+            book.spine()
+                .first()
+                .and_then(|e| book.source_id(e.id))
+                .map(sanitize_path)
+        };
+        let nav = nav::emit_nav(&nav::NavDoc {
+            title: &book.metadata().title,
+            language: &book.metadata().language,
+            toc: &toc_points,
+            toc_fallback_href: toc_fallback.as_deref(),
+            page_list: &[],
+            landmarks: &nav_landmarks,
+        });
         zip.start_file("OEBPS/nav.xhtml", deflated)
             .map_err(io_error)?;
         zip.write_all(nav.as_bytes())?;
 
         // 6b. Write toc.ncx (legacy fallback for EPUB 2 readers)
-        let ncx = generate_ncx(book.metadata(), book.toc());
+        let ncx = nav::emit_ncx(&nav::NcxDoc {
+            title: &book.metadata().title,
+            identifier: &book.metadata().identifier,
+            toc: &toc_points,
+            toc_fallback_href: toc_fallback.as_deref(),
+        });
         zip.start_file("OEBPS/toc.ncx", deflated)
             .map_err(io_error)?;
         zip.write_all(ncx.as_bytes())?;
@@ -219,17 +259,16 @@ impl EpubExporter {
             zip.write_all(xhtml.as_bytes())?;
         }
 
-        // 7. Write chapters
-        for entry in &spine {
+        // 7. Write chapters (bytes already loaded for the manifest scan).
+        for (entry, content) in spine.iter().zip(&chapter_bytes) {
             let source_path = book
                 .source_id(entry.id)
                 .unwrap_or("unknown.xhtml")
                 .to_string();
-            let content = book.load_raw(entry.id)?;
             let zip_path = format!("OEBPS/{}", sanitize_path(&source_path));
 
             zip.start_file(&zip_path, deflated).map_err(io_error)?;
-            zip.write_all(&content)?;
+            zip.write_all(content)?;
         }
 
         // 8. Write assets
@@ -425,43 +464,81 @@ impl EpubExporter {
             );
         }
 
-        // 5. Write content.opf. Landmarks become the EPUB 2 `<guide>`; their
-        // hrefs arrive as `#eid[:offset]` placeholders and resolve to chapter
+        // 5. Resolve navigation targets (TOC tree, page list, landmarks).
+        // Hrefs arrive as `#eid[:offset]` placeholders and resolve to chapter
         // files through the importer's anchor index — built from chapters the
         // normalize pass already cached, so this costs one DFS per chapter,
-        // not a re-parse. Unresolvable landmarks are dropped (never emit a
-        // dangling guide reference).
-        let mut guide: Vec<OpfGuideRef> = Vec::new();
-        if !book.landmarks().is_empty() {
+        // not a re-parse. Unresolvable landmarks and page-list entries are
+        // dropped (never emit a dangling reference); TOC entries keep their
+        // label with an empty href, like the mechanical route. Fragment
+        // precision (`#anchor` on the target element) needs content-side id
+        // stamping — the pending importer anchors work — so entries land on
+        // their chapter file for now.
+        if !book.toc().is_empty() || !book.page_list().is_empty() || !book.landmarks().is_empty() {
             let mut anchor_chapters = Vec::with_capacity(spine.len());
             for entry in &spine {
                 anchor_chapters.push((entry.id, book.load_chapter_cached(entry.id)?));
             }
             book.index_anchors(&anchor_chapters);
-            let chapter_pos: HashMap<crate::import::ChapterId, usize> =
-                spine.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
-            for lm in book.landmarks() {
-                let Some(AnchorTarget::Internal(target)) =
-                    book.resolve_toc_href(crate::import::ChapterId(0), &lm.href)
-                else {
-                    continue;
-                };
-                let Some(&idx) = chapter_pos.get(&target.chapter) else {
-                    continue;
-                };
-                guide.push(OpfGuideRef {
-                    guide_type: opf::landmark_guide_type(lm.landmark_type).to_string(),
-                    title: lm.label.clone(),
-                    href: chapter_files[idx].clone(),
-                });
-            }
+        }
+        let chapter_pos: HashMap<crate::import::ChapterId, usize> =
+            spine.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+        let resolve_to_file = |book: &Book, href: &str| -> Option<String> {
+            let AnchorTarget::Internal(target) =
+                book.resolve_toc_href(crate::import::ChapterId(0), href)?
+            else {
+                return None;
+            };
+            chapter_pos
+                .get(&target.chapter)
+                .map(|&idx| chapter_files[idx].clone())
+        };
+
+        let mut toc_points = toc_to_navpoints(book.toc(), &|href| resolve_to_file(book, href));
+        // EPUB 3 requires the toc nav in reading order (epubcheck NAV-011);
+        // the mechanical route sorts, so sort identically.
+        let file_rank: HashMap<String, usize> = chapter_files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.clone(), i))
+            .collect();
+        nav::sort_toc_reading_order(&mut toc_points, &file_rank);
+
+        // Page list: flat, kept in page order. The unlabelled book-start
+        // sentinel Amazon ships ("Untitled" after the importer's label
+        // fallback) and entries whose target never resolves are dropped —
+        // the mechanical route's `extract_page_list` rules.
+        let page_points: Vec<NavPoint> = book
+            .page_list()
+            .iter()
+            .filter(|e| e.title != "Untitled")
+            .filter_map(|e| {
+                Some(NavPoint {
+                    label: e.title.clone(),
+                    href: resolve_to_file(book, &e.href)?,
+                    children: Vec::new(),
+                })
+            })
+            .collect();
+
+        let mut guide: Vec<OpfGuideRef> = Vec::new();
+        for lm in book.landmarks() {
+            let Some(href) = resolve_to_file(book, &lm.href) else {
+                continue;
+            };
+            guide.push(OpfGuideRef {
+                guide_type: opf::landmark_guide_type(lm.landmark_type).to_string(),
+                title: lm.label.clone(),
+                href,
+            });
         }
         if titlepage_xhtml.is_some() {
             opf::repoint_cover_guide(&mut guide, "titlepage.xhtml");
         }
         // A KFX source's metadata mirrors the mechanical route's curated
         // field set (see `build_opf_metadata`), keeping the two KFX→EPUB
-        // engines' package documents identical.
+        // engines' package documents identical. The guide is cloned into the
+        // package — the nav doc's landmarks render from the same entries.
         let opf = opf::emit_opf(&OpfPackage {
             metadata: build_opf_metadata(
                 book.metadata(),
@@ -470,24 +547,39 @@ impl EpubExporter {
             ),
             manifest: manifest_items,
             spine: spine_items,
-            guide,
+            guide: guide.clone(),
         });
         zip.start_file("OEBPS/content.opf", deflated)
             .map_err(io_error)?;
         zip.write_all(opf.as_bytes())?;
 
-        // 6a. Write nav.xhtml (EPUB 3 navigation document)
-        let nav_fallback = chapter_files
-            .first()
-            .map(String::as_str)
-            .unwrap_or("chapter_0.xhtml");
-        let nav = generate_nav(book.metadata(), book.toc(), book.landmarks(), nav_fallback);
+        // 6a. Write nav.xhtml (EPUB 3 navigation document). The empty-TOC
+        // fallback points at the first spine document — the titlepage when
+        // one was synthesized, like the mechanical route.
+        let toc_fallback = if titlepage_xhtml.is_some() {
+            Some("titlepage.xhtml")
+        } else {
+            chapter_files.first().map(String::as_str)
+        };
+        let nav = nav::emit_nav(&nav::NavDoc {
+            title: &book.metadata().title,
+            language: &book.metadata().language,
+            toc: &toc_points,
+            toc_fallback_href: toc_fallback,
+            page_list: &page_points,
+            landmarks: &guide,
+        });
         zip.start_file("OEBPS/nav.xhtml", deflated)
             .map_err(io_error)?;
         zip.write_all(nav.as_bytes())?;
 
         // 6b. Write toc.ncx (legacy fallback for EPUB 2 readers)
-        let ncx = generate_ncx(book.metadata(), book.toc());
+        let ncx = nav::emit_ncx(&nav::NcxDoc {
+            title: &book.metadata().title,
+            identifier: &book.metadata().identifier,
+            toc: &toc_points,
+            toc_fallback_href: toc_fallback,
+        });
         zip.start_file("OEBPS/toc.ncx", deflated)
             .map_err(io_error)?;
         zip.write_all(ncx.as_bytes())?;
@@ -654,197 +746,23 @@ fn build_opf_metadata(
     }
 }
 
-/// Generate `nav.xhtml`, the EPUB 3 navigation document.
-///
-/// Every EPUB 3 publication MUST contain exactly one navigation document
-/// per the W3C EPUB 3.3 spec (NCX is a legacy fallback that does NOT
-/// satisfy this requirement). Apple Books enforces the spec strictly and
-/// rejects EPUB 3 packages missing this document.
-///
-/// Emits `<nav epub:type="toc">` from `Metadata::toc`, plus
-/// `<nav epub:type="landmarks">` from `Metadata::landmarks` when any
-/// landmarks are present.
-fn generate_nav(
-    metadata: &crate::model::Metadata,
-    toc: &[TocEntry],
-    landmarks: &[Landmark],
-    first_chapter_href: &str,
-) -> String {
-    let mut s = String::new();
-    s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    s.push_str("<!DOCTYPE html>\n");
-    let lang = if metadata.language.is_empty() {
-        "en"
-    } else {
-        metadata.language.as_str()
-    };
-    s.push_str(&format!(
-        "<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\" xml:lang=\"{}\" lang=\"{}\">\n",
-        escape_xml(lang),
-        escape_xml(lang),
-    ));
-    s.push_str("<head>\n");
-    s.push_str("  <meta charset=\"utf-8\"/>\n");
-    s.push_str("  <title>Navigation</title>\n");
-    s.push_str("</head>\n<body>\n");
-
-    // Table of contents.
-    s.push_str("  <nav epub:type=\"toc\" id=\"toc\">\n");
-    s.push_str("    <h1>Table of Contents</h1>\n");
-    if toc.is_empty() {
-        // Spec requires the nav to be non-empty; fall back to the title
-        // pointing at the first content document. Empty TOC is unusual but
-        // exists on minimal books.
-        s.push_str(&format!(
-            "    <ol>\n      <li><a href=\"{}\">",
-            escape_xml(first_chapter_href)
-        ));
-        s.push_str(&escape_xml(if metadata.title.is_empty() {
-            "Content"
-        } else {
-            metadata.title.as_str()
-        }));
-        s.push_str("</a></li>\n    </ol>\n");
-    } else {
-        write_nav_list(&mut s, toc, 2);
-    }
-    s.push_str("  </nav>\n");
-
-    // Landmarks — hidden from rendered TOC view but used by readers for
-    // "skip to start reading" / "go to cover" actions.
-    if !landmarks.is_empty() {
-        s.push_str("  <nav epub:type=\"landmarks\" id=\"landmarks\" hidden=\"\">\n");
-        s.push_str("    <h2>Landmarks</h2>\n");
-        s.push_str("    <ol>\n");
-        for lm in landmarks {
-            let epub_type = landmark_epub_type(lm.landmark_type);
-            s.push_str(&format!(
-                "      <li><a epub:type=\"{}\" href=\"{}\">{}</a></li>\n",
-                epub_type,
-                escape_xml(&lm.href),
-                escape_xml(&lm.label),
-            ));
-        }
-        s.push_str("    </ol>\n");
-        s.push_str("  </nav>\n");
-    }
-
-    s.push_str("</body>\n</html>\n");
-    s
-}
-
-/// Recursively write `<ol><li>...</li></ol>` for the TOC tree.
-fn write_nav_list(s: &mut String, entries: &[TocEntry], indent: usize) {
-    let pad = "  ".repeat(indent);
-    s.push_str(&pad);
-    s.push_str("<ol>\n");
-    for entry in entries {
-        s.push_str(&pad);
-        s.push_str(&format!(
-            "  <li><a href=\"{}\">{}</a>",
-            escape_xml(&entry.href),
-            escape_xml(&entry.title),
-        ));
-        if !entry.children.is_empty() {
-            s.push('\n');
-            write_nav_list(s, &entry.children, indent + 2);
-            s.push_str(&pad);
-            s.push_str("  </li>\n");
-        } else {
-            s.push_str("</li>\n");
-        }
-    }
-    s.push_str(&pad);
-    s.push_str("</ol>\n");
-}
-
-/// Map an internal LandmarkType to the EPUB 3 `epub:type` vocabulary.
-fn landmark_epub_type(t: LandmarkType) -> &'static str {
-    match t {
-        LandmarkType::Cover => "cover",
-        LandmarkType::TitlePage => "titlepage",
-        LandmarkType::Toc => "toc",
-        // EPUB 3.3 deprecated `start` in favor of `bodymatter`; lump
-        // StartReading + BodyMatter into bodymatter — both denote where
-        // the main content begins.
-        LandmarkType::StartReading | LandmarkType::BodyMatter => "bodymatter",
-        LandmarkType::FrontMatter => "frontmatter",
-        LandmarkType::BackMatter => "backmatter",
-        LandmarkType::Acknowledgements => "acknowledgments",
-        LandmarkType::Bibliography => "bibliography",
-        LandmarkType::Glossary => "glossary",
-        LandmarkType::Index => "index",
-        LandmarkType::Preface => "preface",
-        LandmarkType::Endnotes => "endnotes",
-        LandmarkType::Loi => "loi",
-        LandmarkType::Lot => "lot",
-    }
-}
-
-/// Generate toc.ncx from TOC entries.
-fn generate_ncx(metadata: &crate::model::Metadata, toc: &[TocEntry]) -> String {
-    let mut ncx = String::new();
-
-    ncx.push_str(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
-<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
-  <head>
-    <meta name="dtb:uid" content=""#,
-    );
-    ncx.push_str(&escape_xml(&metadata.identifier));
-    ncx.push_str(
-        r#""/>
-    <meta name="dtb:depth" content="1"/>
-    <meta name="dtb:totalPageCount" content="0"/>
-    <meta name="dtb:maxPageNumber" content="0"/>
-  </head>
-  <docTitle>
-    <text>"#,
-    );
-    ncx.push_str(&escape_xml(&metadata.title));
-    ncx.push_str(
-        r#"</text>
-  </docTitle>
-  <navMap>
-"#,
-    );
-
-    let mut play_order = 1;
-    write_nav_points(&mut ncx, toc, &mut play_order, 2);
-
-    ncx.push_str("  </navMap>\n</ncx>\n");
-    ncx
-}
-
-/// Recursively write navPoint elements.
-fn write_nav_points(ncx: &mut String, entries: &[TocEntry], play_order: &mut usize, indent: usize) {
-    let indent_str = "  ".repeat(indent);
-
-    for entry in entries {
-        ncx.push_str(&format!(
-            "{}<navPoint id=\"navPoint-{}\" playOrder=\"{}\">\n",
-            indent_str, play_order, play_order
-        ));
-        ncx.push_str(&format!(
-            "{}  <navLabel><text>{}</text></navLabel>\n",
-            indent_str,
-            escape_xml(&entry.title)
-        ));
-        ncx.push_str(&format!(
-            "{}  <content src=\"{}\"/>\n",
-            indent_str,
-            escape_xml(&entry.href)
-        ));
-
-        *play_order += 1;
-
-        if !entry.children.is_empty() {
-            write_nav_points(ncx, &entry.children, play_order, indent + 1);
-        }
-
-        ncx.push_str(&format!("{}</navPoint>\n", indent_str));
-    }
+/// Convert the model TOC tree to the shared emitter's [`NavPoint`] tree.
+/// `resolve` maps a model href to the emitted document href — identity for
+/// the passthrough path (source hrefs are file paths), anchor-index
+/// resolution for the normalized path. Entries whose target doesn't resolve
+/// keep their label with an empty href, matching the mechanical route.
+fn toc_to_navpoints(
+    entries: &[TocEntry],
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> Vec<NavPoint> {
+    entries
+        .iter()
+        .map(|entry| NavPoint {
+            label: entry.title.clone(),
+            href: resolve(&entry.href).unwrap_or_default(),
+            children: toc_to_navpoints(&entry.children, resolve),
+        })
+        .collect()
 }
 
 /// Escape XML special characters.
