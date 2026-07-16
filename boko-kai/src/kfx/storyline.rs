@@ -17,6 +17,7 @@
 //! 4. Extract ALL attributes using schema's AttrRules
 //! 5. Apply transformers to convert values
 
+use crate::export::css::{CssDecl, partition_image_style};
 use crate::kfx::anchor_table::AnchorTable;
 use crate::kfx::container::{SymbolTable, get_field};
 use crate::kfx::ion::IonValue;
@@ -24,6 +25,7 @@ use crate::kfx::schema::{SemanticTarget, schema};
 use crate::kfx::symbols::KfxSymbol;
 use crate::kfx::tokens::{ContentRef, ElementStart, KfxToken, SpanStart, TokenStream};
 use crate::kfx::transforms::ImportContext;
+use crate::kfx::yj_properties::convert_yj_properties;
 use crate::model::{Chapter, Node, NodeId, Role};
 use std::collections::HashMap;
 
@@ -191,6 +193,16 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
     let style_name =
         get_field(fields, sym!(Style)).and_then(|v| resolve_symbol_or_string(v, ctx.symbols));
 
+    // The element's own convertible properties (writing-mode resets,
+    // per-image sizing, …) — the inline half of its styling, alongside the
+    // named `$style` above.
+    let inline_style = crate::kfx::yj_properties::convert_yj_properties(fields, ctx.symbols).items;
+
+    // `render: inline` — an inline-flow replaced element (glyph image).
+    let render_inline = get_field(fields, sym!(Render))
+        .and_then(|v| v.as_symbol())
+        .is_some_and(|s| s == sym!(Inline));
+
     // Emit StartElement token
     stream.push(KfxToken::StartElement(ElementStart {
         role,
@@ -205,6 +217,9 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         needs_container_wrapper: false, // Only used during export
         has_block_children: false,      // Only used during export
         container_layout: None,
+        inline_style,
+        render_inline,
+        is_image: kfx_type_id == KfxSymbol::Image as u32,
     }));
 
     // Recurse into children
@@ -440,36 +455,117 @@ where
             KfxToken::StartElement(elem) => {
                 let parent = *stack.last().unwrap_or(&chapter.root());
 
-                // Create the node
-                let node = Node::new(elem.role);
-                let node_id = chapter.alloc_node(node);
-                chapter.append_child(parent, node_id);
+                // Create the node. Image-typed elements always emit an
+                // `<img>` node — a role override (a `link_to` making the
+                // element a Link, a figure layout hint) must not swallow it.
+                let node_role = if elem.is_image { Role::Image } else { elem.role };
+                let node_id = chapter.alloc_node(Node::new(node_role));
 
-                // Apply style from the styles map (if present)
-                if let Some(style_name) = &elem.style_name
-                    && let Some(styles_map) = styles
-                    && let Some(kfx_props) = styles_map.get(style_name)
-                {
-                    let ir_style = kfx_style_to_ir(kfx_props);
-                    let style_id = chapter.styles.intern(ir_style);
-                    if let Some(node) = chapter.node_mut(node_id) {
-                        node.style = style_id;
+                // An image element's `link_to` becomes an `<a>` wrapping the
+                // whole emitted structure (the mechanical route wraps the
+                // returned element the same way).
+                let linked_image_href = elem
+                    .is_image
+                    .then(|| elem.semantics.get(&SemanticTarget::Href))
+                    .flatten();
+                let attach_parent = match linked_image_href {
+                    Some(href) => {
+                        let a = chapter.alloc_node(Node::new(Role::Link));
+                        chapter.append_child(parent, a);
+                        chapter.semantics.set_href(a, href);
+                        a
                     }
+                    None => parent,
+                };
+
+                // Block images get calibre's wrapper partition: the named
+                // `$style` and the element's own properties merge, the
+                // block-level half moves onto a wrapper `<div>`, and neither
+                // half keeps the named class — both are inline styles from
+                // here on. Everything else keeps the named class as its
+                // source identity plus its own properties inline.
+                let mut wrap: Option<(CssDecl, CssDecl)> = None;
+                if elem.is_image && !elem.render_inline {
+                    let mut merged = CssDecl::new();
+                    if let Some(style_name) = &elem.style_name
+                        && let Some(styles_map) = styles
+                        && let Some(kfx_props) = styles_map.get(style_name)
+                    {
+                        for (k, v) in convert_yj_properties(kfx_props, symbols).items {
+                            merged.set(k, v);
+                        }
+                    }
+                    for (k, v) in &elem.inline_style {
+                        merged.set(k.clone(), v.clone());
+                    }
+                    wrap = partition_image_style(merged);
                 }
 
-                // Apply ALL semantic attributes from the generic map
-                apply_semantics_to_node(&mut chapter, node_id, &elem.semantics);
+                // Anchors/eids stamp onto the wrapper when one exists
+                // (calibre's `move_anchor`).
+                let anchor_node;
+                if let Some((wrapper_decl, img_decl)) = wrap {
+                    let wrapper = chapter.alloc_node(Node::new(Role::Container));
+                    chapter.append_child(attach_parent, wrapper);
+                    chapter.append_child(wrapper, node_id);
+                    if !wrapper_decl.is_empty() {
+                        chapter
+                            .semantics
+                            .set_style(wrapper, &wrapper_decl.to_inline());
+                    }
+                    if !img_decl.is_empty() {
+                        chapter.semantics.set_style(node_id, &img_decl.to_inline());
+                    }
+                    anchor_node = wrapper;
+                } else {
+                    chapter.append_child(attach_parent, node_id);
+                    // Apply style from the styles map (if present). The raw
+                    // KFX style name is kept as the node's source class
+                    // identity — normalized export names its stylesheet
+                    // rules after it.
+                    if let Some(style_name) = &elem.style_name {
+                        chapter.semantics.set_class(node_id, style_name);
+                        if let Some(styles_map) = styles
+                            && let Some(kfx_props) = styles_map.get(style_name)
+                        {
+                            let ir_style = kfx_style_to_ir(kfx_props);
+                            let style_id = chapter.styles.intern(ir_style);
+                            if let Some(node) = chapter.node_mut(node_id) {
+                                node.style = style_id;
+                            }
+                        }
+                    }
+                    if !elem.inline_style.is_empty() {
+                        let mut decl = CssDecl::new();
+                        for (k, v) in &elem.inline_style {
+                            decl.set(k.clone(), v.clone());
+                        }
+                        chapter.semantics.set_style(node_id, &decl.to_inline());
+                    }
+                    anchor_node = node_id;
+                }
+
+                // Apply ALL semantic attributes from the generic map — minus
+                // the href a linked image's `<a>` wrapper already consumed
+                // (an `<img href>` would be invalid).
+                if linked_image_href.is_some() {
+                    let mut rest = elem.semantics.clone();
+                    rest.remove(&SemanticTarget::Href);
+                    apply_semantics_to_node(&mut chapter, node_id, &rest);
+                } else {
+                    apply_semantics_to_node(&mut chapter, node_id, &elem.semantics);
+                }
 
                 // Anchored element: stamp the html id registered at
                 // `(eid, 0)`, never the raw eid (the mechanical route ships
                 // no element ids beyond anchor stamps, and neither do we).
                 if let Some(eid) = elem.id {
-                    eid_nodes.push((eid, node_id));
+                    eid_nodes.push((eid, anchor_node));
                     if let Some(table) = anchor_table
-                        && chapter.semantics.id(node_id).is_none()
+                        && chapter.semantics.id(anchor_node).is_none()
                         && let Some(anchor_id) = table.id_at(eid, 0)
                     {
-                        chapter.semantics.set_id(node_id, &anchor_id);
+                        chapter.semantics.set_id(anchor_node, &anchor_id);
                     }
                 }
 
@@ -536,6 +632,7 @@ pub fn apply_section_template(
     chapter: &mut Chapter,
     template_eid: Option<i64>,
     template_style: Option<&str>,
+    template_inline: &[(String, String)],
     story_eid: Option<i64>,
     styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
     anchor_table: Option<&AnchorTable>,
@@ -543,15 +640,24 @@ pub fn apply_section_template(
     let root = chapter.root();
     let wrapper = chapter.alloc_node(Node::new(Role::Container));
 
-    if let Some(style_name) = template_style
-        && let Some(styles_map) = styles
-        && let Some(kfx_props) = styles_map.get(style_name)
-    {
-        let ir_style = kfx_style_to_ir(kfx_props);
-        let style_id = chapter.styles.intern(ir_style);
-        if let Some(node) = chapter.node_mut(wrapper) {
-            node.style = style_id;
+    if let Some(style_name) = template_style {
+        chapter.semantics.set_class(wrapper, style_name);
+        if let Some(styles_map) = styles
+            && let Some(kfx_props) = styles_map.get(style_name)
+        {
+            let ir_style = kfx_style_to_ir(kfx_props);
+            let style_id = chapter.styles.intern(ir_style);
+            if let Some(node) = chapter.node_mut(wrapper) {
+                node.style = style_id;
+            }
         }
+    }
+    if !template_inline.is_empty() {
+        let mut decl = CssDecl::new();
+        for (k, v) in template_inline {
+            decl.set(k.clone(), v.clone());
+        }
+        chapter.semantics.set_style(wrapper, &decl.to_inline());
     }
 
     // Re-parent: the root's children become the wrapper's, the wrapper
@@ -851,16 +957,20 @@ fn build_text_with_spans(
     let create_span_node = |chapter: &mut Chapter, span: &SpanStart| -> NodeId {
         let span_node = chapter.alloc_node(Node::new(span.role));
 
-        // Apply style from the styles map (if present)
+        // Apply style from the styles map (if present); the resolved KFX
+        // style name doubles as the span's source class identity.
         if let Some(style_sym) = span.style_symbol
             && let Some(style_name) = symbols.resolve_opt(style_sym)
-            && let Some(styles_map) = styles
-            && let Some(kfx_props) = styles_map.get(style_name)
         {
-            let ir_style = kfx_style_to_ir(kfx_props);
-            let style_id = chapter.styles.intern(ir_style);
-            if let Some(node) = chapter.node_mut(span_node) {
-                node.style = style_id;
+            chapter.semantics.set_class(span_node, style_name);
+            if let Some(styles_map) = styles
+                && let Some(kfx_props) = styles_map.get(style_name)
+            {
+                let ir_style = kfx_style_to_ir(kfx_props);
+                let style_id = chapter.styles.intern(ir_style);
+                if let Some(node) = chapter.node_mut(span_node) {
+                    node.style = style_id;
+                }
             }
         }
 
@@ -2463,6 +2573,9 @@ mod tests {
             needs_container_wrapper: false,
             has_block_children: false,
             container_layout: None,
+            inline_style: Vec::new(),
+            render_inline: false,
+            is_image: false,
         }));
         stream.end_element();
 
@@ -2495,6 +2608,9 @@ mod tests {
             needs_container_wrapper: false,
             has_block_children: false,
             container_layout: None,
+            inline_style: Vec::new(),
+            render_inline: false,
+            is_image: false,
         }));
         stream.end_element();
 
@@ -2532,6 +2648,9 @@ mod tests {
             needs_container_wrapper: false,
             has_block_children: false,
             container_layout: None,
+            inline_style: Vec::new(),
+            render_inline: false,
+            is_image: false,
         }));
         stream.end_element();
 
@@ -2575,6 +2694,9 @@ mod tests {
             needs_container_wrapper: false,
             has_block_children: false,
             container_layout: None,
+            inline_style: Vec::new(),
+            render_inline: false,
+            is_image: false,
         }));
         stream.end_element();
 
@@ -3294,6 +3416,9 @@ mod tests {
             needs_container_wrapper: false,
             has_block_children: false,
             container_layout: None,
+            inline_style: Vec::new(),
+            render_inline: false,
+            is_image: false,
         }));
         stream.end_element();
 

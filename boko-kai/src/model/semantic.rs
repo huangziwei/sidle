@@ -54,6 +54,12 @@ pub struct SemanticMap {
     /// round-trip. The cascade resolves styling independently; this field is
     /// purely a name hint for the KFX style symbol and the output `class`.
     class: HashMap<NodeId, TextRange>,
+    /// Per-node inline style declarations (`"k: v; k2: v2"` — the
+    /// `style="…"` attribute form). Carries source styling that has no named
+    /// rule: a KFX content element's own properties, and the partitioned
+    /// halves of a wrapped block image. Normalized export promotes repeated
+    /// values to generated classes and emits the rest as `style` attributes.
+    style: HashMap<NodeId, TextRange>,
 }
 
 impl SemanticMap {
@@ -300,6 +306,21 @@ impl SemanticMap {
         self.class.get(&node).map(|r| self.get_str(*r))
     }
 
+    // --- style ---
+
+    /// Set the inline style declarations for a node (`"k: v; k2: v2"`).
+    pub fn set_style(&mut self, node: NodeId, style: &str) {
+        if !style.is_empty() {
+            let range = self.append(style);
+            self.style.insert(node, range);
+        }
+    }
+
+    /// Get the inline style declarations for a node.
+    pub fn style(&self, node: NodeId) -> Option<&str> {
+        self.style.get(&node).map(|r| self.get_str(*r))
+    }
+
     // --- Generic access ---
 
     /// Get an attribute by name.
@@ -419,6 +440,7 @@ impl SemanticMap {
             + self.is_header_cell.len()
             + self.language.len()
             + self.class.len()
+            + self.style.len()
     }
 
     /// Check if the map is empty.

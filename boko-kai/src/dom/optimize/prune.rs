@@ -81,6 +81,17 @@ fn should_prune(chapter: &Chapter, node_id: NodeId) -> bool {
         return false;
     }
 
+    // An empty box still paints when it carries a style (margins, height,
+    // background — vertical-text spacer divs are exactly this shape), and a
+    // classed one is a stylesheet target with the same potential. Only a
+    // default-styled, classless empty container is truly dead.
+    if node.style != crate::style::StyleId::DEFAULT {
+        return false;
+    }
+    if chapter.semantics.class(node_id).is_some() || chapter.semantics.style(node_id).is_some() {
+        return false;
+    }
+
     true
 }
 

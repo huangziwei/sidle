@@ -91,4 +91,6 @@ pub fn has_semantic_attrs(chapter: &Chapter, node_id: NodeId) -> bool {
         || s.row_span(node_id).is_some()
         || s.col_span(node_id).is_some()
         || s.is_header_cell(node_id)
+        || s.class(node_id).is_some()
+        || s.style(node_id).is_some()
 }

@@ -1172,41 +1172,11 @@ impl<'a> ContentState<'a> {
                 merged.set(k.clone(), v.clone());
             }
         }
-        let inline = properties::convert_yj_properties(fields, &self.book.symbols, self.book);
+        let inline = properties::convert_yj_properties(fields, &self.book.symbols);
         for (k, v) in inline.items {
             merged.set(k, v);
         }
-        if !merged.items.iter().any(|(k, _)| img_wrapper_trigger(k)) {
-            return None;
-        }
-
-        let mut wrapper_decl = CssDecl::new();
-        let mut img_decl = CssDecl::new();
-        for (k, v) in merged.items {
-            if img_wrapper_prop(&k) {
-                wrapper_decl.set(k, v);
-            } else {
-                img_decl.set(k, v);
-            }
-        }
-        // % width hoisting for floats (calibre's fit_width hoist,
-        // `yj_to_epub_content.py:1334`): a float is shrink-to-fit, so a child's
-        // percentage width would resolve against the float's own
-        // content-derived width — circular; the author meant % of the column.
-        // Hoist the % onto the float and let the image fill it.
-        if wrapper_decl
-            .items
-            .iter()
-            .any(|(k, v)| k == "float" && v != "none")
-            && let Some(pos) = img_decl
-                .items
-                .iter()
-                .position(|(k, v)| k == "width" && v.ends_with('%'))
-        {
-            let (_, w) = img_decl.items.remove(pos);
-            wrapper_decl.set("width", w);
-            img_decl.set("width", "100%");
-        }
+        let (wrapper_decl, img_decl) = crate::export::css::partition_image_style(merged)?;
 
         let part = &mut self.book_parts[part_index];
         let wrapper = part.dom.create_element("div");
@@ -1390,11 +1360,18 @@ impl<'a> ContentState<'a> {
         };
 
         enum Ev {
-            // (offset, length, ruby_name, id_list[(sub_off, sub_len, ruby_id)])
-            Ruby(i64, i64, String, Vec<(i64, i64, String)>),
-            // (offset, length, anchor_name) — the link target name; resolved
-            // to a `chapter.xhtml#id` URI by `resolve_link_placeholders`.
-            Link(i64, i64, String),
+            // (offset, length, ruby_name, id_list[(sub_off, sub_len, ruby_id)],
+            // style_name) — the event's own `$style` (decl-bearing only)
+            // lands on the emitted `<ruby>`, like calibre's `add_kfx_style`.
+            Ruby(i64, i64, String, Vec<(i64, i64, String)>, Option<String>),
+            // (offset, length, anchor_name, style_name) — the link target
+            // name, resolved to a `chapter.xhtml#id` URI by
+            // `resolve_link_placeholders`, plus the event's own `$style`
+            // (decl-bearing only). Calibre applies the event style to the
+            // emitted `<a>` (`add_kfx_style` in its style_event loop);
+            // dropping it loses e.g. the overline TOC-link decoration
+            // vertical books carry.
+            Link(i64, i64, String, Option<String>),
             // (offset, length, style_name) — an inline run carrying a `$style`
             // with no ruby/link, e.g. 圏点 (text-emphasis), gothic, italics.
             // Emitted as `<span class="<style>">`. Without this the run renders
@@ -1447,11 +1424,20 @@ impl<'a> ContentState<'a> {
                 } else {
                     continue;
                 };
-                collected.push(Ev::Ruby(offset, length, ruby_name, id_list));
+                let style = get_field(ef, KfxSymbol::Style as u64)
+                    .and_then(|v| self.book.symbols.text_of(v))
+                    .map(str::to_string)
+                    .filter(|s| self.style_has_decl(s));
+                collected.push(Ev::Ruby(offset, length, ruby_name, id_list, style));
             } else if let Some(link_sym) = get_field(ef, KfxSymbol::LinkTo as u64)
                 && let Some(name) = self.book.symbols.text_of(link_sym)
             {
-                collected.push(Ev::Link(offset, length, name.to_string()));
+                let name = name.to_string();
+                let style = get_field(ef, KfxSymbol::Style as u64)
+                    .and_then(|v| self.book.symbols.text_of(v))
+                    .map(str::to_string)
+                    .filter(|s| self.style_has_decl(s));
+                collected.push(Ev::Link(offset, length, name, style));
             } else if let Some(style_sym) = get_field(ef, KfxSymbol::Style as u64)
                 && let Some(name) = self.book.symbols.text_of(style_sym)
                 && self.style_has_decl(name)
@@ -1477,29 +1463,30 @@ impl<'a> ContentState<'a> {
         // event at (0, N) advances the cursor past the whole text and
         // any ruby events inside `[0, N)` are silently skipped — the bug
         // that lost 5 ruby pairs when link_to wrapping was added.
-        let mut links: Vec<(usize, usize, String)> = Vec::new();
-        // (base_start, base_end, base_text, [(rt_start, rt_end, rt_text)])
-        type RubySpan = (usize, usize, String, Vec<(i64, i64, String)>);
+        let mut links: Vec<(usize, usize, String, Option<String>)> = Vec::new();
+        // (base_start, base_end, base_text, [(rt_start, rt_end, rt_text)],
+        // style_name)
+        type RubySpan = (usize, usize, String, Vec<(i64, i64, String)>, Option<String>);
         let mut rubies: Vec<RubySpan> = Vec::new();
         // (start, end, style_name) — narrow styled runs, emitted alongside ruby.
         let mut styled: Vec<(usize, usize, String)> = Vec::new();
         for ev in collected {
             match ev {
-                Ev::Link(off, len, name) => {
+                Ev::Link(off, len, name, style) => {
                     let off = off as usize;
                     let len = len as usize;
                     if off + len > chars.len() {
                         continue;
                     }
-                    links.push((off, len, name));
+                    links.push((off, len, name, style));
                 }
-                Ev::Ruby(off, len, name, id_list) => {
+                Ev::Ruby(off, len, name, id_list, style) => {
                     let off = off as usize;
                     let len = len as usize;
                     if off + len > chars.len() {
                         continue;
                     }
-                    rubies.push((off, len, name, id_list));
+                    rubies.push((off, len, name, id_list, style));
                 }
                 Ev::Styled(off, len, name) => {
                     let off = off as usize;
@@ -1514,12 +1501,12 @@ impl<'a> ContentState<'a> {
 
         // Merge ruby + styled runs into one offset-sorted list of inline marks.
         enum Mark {
-            Ruby(usize, usize, String, Vec<(i64, i64, String)>),
+            Ruby(usize, usize, String, Vec<(i64, i64, String)>, Option<String>),
             Styled(usize, usize, String),
         }
         let mut marks: Vec<Mark> = Vec::new();
-        for (off, len, name, ids) in rubies {
-            marks.push(Mark::Ruby(off, len, name, ids));
+        for (off, len, name, ids, style) in rubies {
+            marks.push(Mark::Ruby(off, len, name, ids, style));
         }
         for (off, len, name) in styled {
             marks.push(Mark::Styled(off, len, name));
@@ -1547,9 +1534,12 @@ impl<'a> ContentState<'a> {
                     this.emit_span(part_index, parent, &chars[cursor..off]);
                 }
                 match mark {
-                    Mark::Ruby(off, _len, ruby_name, id_list) => {
+                    Mark::Ruby(off, _len, ruby_name, id_list, style) => {
                         let off = *off;
                         let ruby_el = this.book_parts[part_index].dom.sub_element(parent, "ruby");
+                        if let Some(style_name) = style {
+                            this.attach_inline_style(part_index, ruby_el, style_name);
+                        }
                         for (sub_off, sub_len, ruby_id_str) in id_list {
                             let sub_off = *sub_off as usize;
                             let sub_len = *sub_len as usize;
@@ -1584,7 +1574,7 @@ impl<'a> ContentState<'a> {
         // Walk the text top-to-bottom. Inside a link's range emit into
         // the `<a>`; outside, into the parent. Links don't nest in horror.
         let mut cursor: usize = 0;
-        for (link_off, link_len, anchor_name) in &links {
+        for (link_off, link_len, anchor_name, style_name) in &links {
             if *link_off < cursor {
                 continue;
             }
@@ -1596,6 +1586,9 @@ impl<'a> ContentState<'a> {
                 .dom
                 .get_mut(a)
                 .set("href", format!("anchor:{}", anchor_name));
+            if let Some(style_name) = style_name {
+                self.attach_inline_style(part_index, a, style_name);
+            }
             emit_range(self, a, *link_off, *link_off + *link_len);
             cursor = *link_off + *link_len;
         }
@@ -1720,7 +1713,7 @@ impl<'a> ContentState<'a> {
         }
         self.attach_layout_hints(part_index, elem_id, style_name, fields);
         // 2. Inline content properties (writing-mode, etc.).
-        let inline = properties::convert_yj_properties(fields, &self.book.symbols, self.book);
+        let inline = properties::convert_yj_properties(fields, &self.book.symbols);
         if !inline.is_empty() {
             self.book_parts[part_index]
                 .element_styles
@@ -1759,8 +1752,7 @@ impl<'a> ContentState<'a> {
         // `outer_fields`), so on a boko→boko roundtrip the named-style path
         // above never fires. Merge with anything from the named style so
         // both sources contribute.
-        let (inline_hints, inline_level) =
-            properties::layout_hints_from_element_fields(fields, &self.book.symbols);
+        let (inline_hints, inline_level) = properties::layout_hints_from_element_fields(fields);
         if !inline_hints.is_empty() || inline_level.is_some() {
             let entry = self.book_parts[part_index]
                 .element_layout_hints
@@ -2088,45 +2080,6 @@ fn content_render_is_inline(fields: &[(u64, IonValue)]) -> bool {
         == Some(KfxSymbol::Inline as u64)
 }
 
-/// Properties whose presence on an image's style forces the [`wrap_block_image`]
-/// wrapper: block-layout behavior that CSS ignores (`clear`, `break-*`,
-/// `text-align`) or mis-resolves (own-margin interaction with % `width`) on a
-/// replaced inline element. The boko-emittable subset of calibre's
-/// `BLOCK_CONTAINER_PROPERTIES` (`yj_to_epub_content.py:49`), plus `clear`
-/// (calibre leaves it dead on the `<img>`; Kindle honors it, the wrapper is
-/// where CSS does too).
-fn img_wrapper_trigger(prop: &str) -> bool {
-    matches!(
-        prop,
-        "margin"
-            | "margin-top"
-            | "margin-left"
-            | "margin-bottom"
-            | "margin-right"
-            | "float"
-            | "clear"
-            | "text-indent"
-            | "text-align"
-            | "text-align-last"
-            | "break-before"
-            | "break-after"
-            | "break-inside"
-            | "page-break-before"
-            | "page-break-after"
-            | "page-break-inside"
-            | "overflow"
-            | "transform"
-            | "transform-origin"
-            | "display"
-    )
-}
-
-/// What moves onto the wrapper once it exists: every trigger plus `box-sizing`
-/// (rides along per calibre's set, but alone never warrants a wrapper).
-fn img_wrapper_prop(prop: &str) -> bool {
-    img_wrapper_trigger(prop) || prop == "box-sizing"
-}
-
 /// Look up a fragment of the given KFX type by name.
 /// Borrowed fragment lookup. Returns a reference into `book` — callers hold
 /// `book` as a shared `&'a BookData` field, so the borrow is independent of
@@ -2236,35 +2189,7 @@ fn list_tag_for(fields: &[(u64, IonValue)], symbols: &super::loader::SymbolTable
     }
 }
 
-/// Sanitize a KFX style name into a valid CSS class name (and matching HTML
-/// `class` attribute). Non-identifier characters become `_`; a leading digit
-/// (or `-digit` / lone `-`) is prefixed with `_`, since a CSS identifier can't
-/// start with a digit — an unescaped `.0HrDijd…` selector is a parse error
-/// (epubcheck CSS-008). Applied identically to the selector and the element's
-/// class attribute so they stay in sync.
-pub(crate) fn safe_class_name(name: &str) -> String {
-    let mut out: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let needs_prefix = match out.as_bytes() {
-        [] => true,
-        [b'-'] => true,
-        [b'-', d, ..] if d.is_ascii_digit() => true,
-        [d, ..] if d.is_ascii_digit() => true,
-        _ => false,
-    };
-    if needs_prefix {
-        out.insert(0, '_');
-    }
-    out
-}
+pub(crate) use crate::export::css::safe_class_name;
 
 /// HTML block-level elements (calibre's set in
 /// `yj_to_epub_properties.py:1965`). Used by `consolidate_html` to decide
@@ -2831,56 +2756,27 @@ pub fn normalize_lists(state: &mut ContentState) {
     }
 }
 
-/// Drop declarations that match their CSS spec default value.
+/// Drop declarations that match their CSS spec default value, everywhere a
+/// declaration can live (stylesheet rules, generated classes, per-element
+/// inline styles).
 ///
 /// Minimal port of calibre's `simplify_styles` — the full version does
 /// inheritance-aware partition (drop declarations that would inherit
 /// the same value from an ancestor), but the per-element walk requires
-/// reproducing the CSS cascade in Rust. The default-pruning pass is
-/// the high-impact 80% of the win: declarations like
-/// `letter-spacing: 0em` / `white-space: normal` / `text-indent: 0`
-/// are no-ops that calibre's pass strips. On horror those three
-/// account for ~150 redundant decls (~3 per stylesheet rule × 50
-/// rules), shrinking the stylesheet without changing rendering.
-///
-/// Properties pruned to their spec default:
-///   - `letter-spacing`: `0` / `0em` / `0px` → drop (default `normal`)
-///   - `word-spacing`: `0` / `0em` / `0px` → drop (default `normal`)
-///   - `text-indent`: `0` / `0em` / `0px` / `0%` → drop (default `0`)
-///   - `white-space`: `normal` → drop
-///   - `font-style`: `normal` → drop
-///   - `font-weight`: `normal` → drop
-///   - `font-variant`: `normal` → drop
-///   - `font-stretch`: `normal` → drop
-///   - `text-decoration`: `none` → drop
-///   - `text-transform`: `none` → drop
+/// reproducing the CSS cascade in Rust. The default-pruning pass is the
+/// high-impact 80% of the win; the property table lives in
+/// [`crate::export::css::prune_default_decls`], shared with the IR route.
 pub fn simplify_styles(state: &mut ContentState) {
-    let prunable = |name: &str, value: &str| -> bool {
-        let v = value.trim();
-        match name {
-            "letter-spacing" | "word-spacing" => {
-                matches!(v, "0" | "0em" | "0px" | "0rem" | "normal")
-            }
-            "text-indent" => matches!(v, "0" | "0em" | "0px" | "0rem" | "0%"),
-            "white-space" | "font-style" | "font-weight" | "font-variant" | "font-stretch" => {
-                v == "normal"
-            }
-            "text-decoration" | "text-transform" => v == "none",
-            _ => false,
-        }
-    };
-    let prune = |decl: &mut CssDecl| {
-        decl.items.retain(|(k, v)| !prunable(k, v));
-    };
+    use crate::export::css::prune_default_decls;
     for v in state.stylesheet.values_mut() {
-        prune(v);
+        prune_default_decls(v);
     }
     for (_, decl) in &mut state.generated_classes {
-        prune(decl);
+        prune_default_decls(decl);
     }
     for part in &mut state.book_parts {
         for decl in part.element_styles.values_mut() {
-            prune(decl);
+            prune_default_decls(decl);
         }
     }
 }
@@ -2900,44 +2796,20 @@ pub fn simplify_styles(state: &mut ContentState) {
 /// what calibre uses to drive class-rule generation on books with
 /// heavy inline overrides.
 pub fn fixup_styles_and_classes(state: &mut ContentState) {
-    // Build occurrence map: serialized inline style → count.
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for part in &state.book_parts {
-        for decl in part.element_styles.values() {
-            if decl.is_empty() {
-                continue;
-            }
-            *counts.entry(decl.to_inline()).or_insert(0) += 1;
-        }
-    }
-    // Promote any style that appears ≥ 2 times. Calibre promotes all,
-    // but for our purposes the small-count noise (1× one-off styles)
-    // is better left inline — keeps the stylesheet readable.
-    let mut promoted: HashMap<String, String> = HashMap::new();
-    let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    for (style_str, count) in sorted {
-        if count < 2 {
-            break; // Remaining entries are all single-occurrence.
-        }
-        let class_name = format!("g{}", state.generated_classes.len());
-        // Rebuild a CssDecl from the serialized string so we can emit
-        // the rule via the same path as named-style rules.
-        let mut decl = CssDecl::new();
-        for chunk in style_str.split(';') {
-            let chunk = chunk.trim();
-            if chunk.is_empty() {
-                continue;
-            }
-            if let Some(colon) = chunk.find(':') {
-                let k = chunk[..colon].trim();
-                let v = chunk[colon + 1..].trim();
-                decl.set(k, v);
-            }
-        }
-        state.generated_classes.push((class_name.clone(), decl));
-        promoted.insert(style_str, class_name);
-    }
+    // Promote any inline style that appears ≥ 2 times (threshold and class
+    // numbering live in the shared implementation). Calibre promotes all,
+    // but the small-count noise (1× one-off styles) is better left inline —
+    // keeps the stylesheet readable.
+    let inline_decls = state.book_parts.iter().flat_map(|part| {
+        part.element_styles
+            .values()
+            .filter(|decl| !decl.is_empty())
+            .map(|decl| decl.to_inline())
+    });
+    let promoted = crate::export::css::promote_repeated_inline_styles(
+        inline_decls,
+        &mut state.generated_classes,
+    );
     if promoted.is_empty() {
         return;
     }
@@ -2986,67 +2858,23 @@ pub fn finalize_chapter_attrs(state: &mut ContentState) {
     }
 }
 
-/// Emit the final stylesheet from the deduplicated map.
-///
-/// Adds calibre-style `body { writing-mode: ...; }` derived from
-/// `process_document_data`'s book-level writing-mode. We do
-/// NOT fabricate PPD from writing-mode (calibre does); they're emitted
-/// independently when KFX declares them.
+/// Emit the final stylesheet from the deduplicated map via the shared
+/// [`crate::export::css::StylesheetDoc`] emitter (fixed-layout reset /
+/// `body { writing-mode: … }` header, sorted named rules, generated
+/// classes). We do NOT fabricate PPD from writing-mode (calibre does);
+/// they're emitted independently when KFX declares them.
 pub fn emit_stylesheet(state: &ContentState) -> String {
-    let mut s = String::new();
-    s.push_str("@charset \"utf-8\";\n");
-
-    // Fixed-layout reset (calibre's RESET_CSS, linked on every FXL page): the
-    // `<meta name="viewport">` sizes the page to the image's pixel box and the
-    // reader scales that box to the screen. Two things must hold for the image
-    // to fill the page:
-    //   1. The image must size to the *viewport*, not to its wrapper divs. The
-    //      KFX page wrapper (`.g0`/`.sJ`) establishes no definite height, so a
-    //      percentage `height: 100%` collapses and the page white-boxes. `vw`/
-    //      `vh` resolve against the viewport directly, bypassing the chain.
-    //   2. The body must be `horizontal-tb`. An image-based FXL book often
-    //      carries `vertical-rl` text metadata (the pages are scanned vertical
-    //      text); a vertical-rl body flips the block axis so `width: 100%`
-    //      resolves against the wrong dimension and the image shrinks. The
-    //      page-turn direction is carried by `page-progression-direction`, not
-    //      the writing mode, so forcing horizontal-tb here is safe.
-    // Only emitted for image-based fixed-layout books; reflowable books below
-    // keep their author writing mode + margins.
-    if state.is_fixed_layout {
-        s.push_str("html, body { margin: 0; padding: 0; writing-mode: horizontal-tb; }\n");
-        s.push_str("body { text-align: center; }\n");
-        s.push_str("img { display: block; width: 100vw; height: 100vh; object-fit: contain; }\n");
-    } else if state.writing_mode != "horizontal-tb" {
-        // Body defaults — writing-mode comes from document_data.
-        s.push_str(&format!(
-            "body {{ writing-mode: {wm}; -webkit-writing-mode: {wm}; -epub-writing-mode: {wm}; }}\n",
-            wm = state.writing_mode
-        ));
-    }
-
-    let mut keys: Vec<&String> = state.stylesheet.keys().collect();
-    keys.sort();
-    for k in keys {
-        let decl = &state.stylesheet[k];
-        if decl.is_empty() {
-            continue;
-        }
-        s.push_str(&format!(
-            ".{} {{ {} }}\n",
-            safe_class_name(k),
-            decl.to_inline()
-        ));
-    }
-    // Auto-generated classes from `fixup_styles_and_classes` (inline →
-    // class dedupe). Emit in insertion order so class names stay stable
-    // (g0, g1, ...) across runs on the same input.
-    for (class_name, decl) in &state.generated_classes {
-        if decl.is_empty() {
-            continue;
-        }
-        s.push_str(&format!(".{} {{ {} }}\n", class_name, decl.to_inline()));
-    }
-    s
+    let doc = crate::export::css::StylesheetDoc {
+        fixed_layout: state.is_fixed_layout,
+        writing_mode: state.writing_mode.clone(),
+        named_rules: state
+            .stylesheet
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        generated_classes: state.generated_classes.clone(),
+    };
+    doc.emit()
 }
 
 #[cfg(test)]

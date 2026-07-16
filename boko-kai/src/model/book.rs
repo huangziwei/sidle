@@ -686,6 +686,12 @@ impl Book {
         self.backend.nav_fragment(href)
     }
 
+    /// The source's named-style program for normalized export. See
+    /// [`crate::import::Importer::stylesheet_program`].
+    pub(crate) fn stylesheet_program(&mut self) -> Option<crate::export::css::CssProgram> {
+        self.backend.stylesheet_program()
+    }
+
     /// Load an asset by path.
     pub fn load_asset(&mut self, path: &Path) -> io::Result<Vec<u8>> {
         self.backend.load_asset(path)

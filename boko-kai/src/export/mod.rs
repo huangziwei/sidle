@@ -31,6 +31,7 @@ use std::io::{self, Seek, Write};
 
 use crate::model::Book;
 
+pub mod css;
 mod css_gen;
 mod epub;
 mod html_synth;
@@ -43,8 +44,8 @@ mod text;
 pub use css_gen::{CssArtifact, generate_css, generate_css_all};
 pub use epub::{EpubConfig, EpubExporter};
 pub use html_synth::{
-    LinkOutcome, SynthesisResult, escape_xml, escape_xml_into, synthesize_html,
-    synthesize_html_with_class_list, synthesize_xhtml_document,
+    InlineStyleEmit, LinkOutcome, SourceStyles, SynthesisResult, escape_xml, escape_xml_into,
+    synthesize_html, synthesize_html_with_class_list, synthesize_xhtml_document,
     synthesize_xhtml_document_with_class_list, synthesize_xhtml_document_with_links,
 };
 pub use kfx::{KfxConfig, KfxExporter, PdfKfxMeta, pdf_to_kfx};

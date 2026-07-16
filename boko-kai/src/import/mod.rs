@@ -302,6 +302,20 @@ pub trait Importer: Send + Sync {
     fn nav_fragment(&self, _href: &str) -> Option<(String, bool)> {
         None
     }
+
+    /// The source's named-style program for normalized export: every named
+    /// style converted to CSS declarations, plus the doc-level writing mode
+    /// and fixed-layout flag the stylesheet header needs.
+    ///
+    /// When this returns `Some`, normalized export synthesizes `style.css`
+    /// from it and class attributes come from each node's `semantics.class`
+    /// (names sanitized via [`crate::export::css::safe_class_name`], gated on
+    /// the named declaration being non-empty) instead of the interned
+    /// computed-style pool. Default `None`: formats that ship their own CSS
+    /// assets, or whose classes carry no stylesheet of their own.
+    fn stylesheet_program(&mut self) -> Option<crate::export::css::CssProgram> {
+        None
+    }
 }
 
 /// Helper for path-based href resolution (used by EPUB, AZW3, MOBI).

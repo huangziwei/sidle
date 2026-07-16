@@ -151,6 +151,12 @@ pub struct KfxImporter {
     /// survives into the IR). The structural file-resolution map for nav
     /// targets — the mechanical route's `element_id_to_filename` analog.
     eid_chapters: HashMap<i64, ChapterId>,
+
+    /// Doc-level CSS writing mode (`horizontal-tb` / `vertical-rl` / …),
+    /// resolved by `derive_writing_direction`. Feeds the normalized
+    /// stylesheet's `body { writing-mode: … }` header;
+    /// `metadata.primary_writing_mode` carries the OPF-vocabulary form.
+    css_writing_mode: String,
 }
 
 impl From<ContainerError> for io::Error {
@@ -265,6 +271,7 @@ impl Importer for KfxImporter {
             &mut chapter,
             template.eid,
             template.style.as_deref(),
+            &template.inline_style,
             story_eid,
             Some(styles.as_ref()),
             Some(anchor_table.as_ref()),
@@ -471,6 +478,25 @@ impl Importer for KfxImporter {
         let stamped = self.element_id_map.contains_key(&frag);
         Some((frag, stamped))
     }
+
+    fn stylesheet_program(&mut self) -> Option<crate::export::css::CssProgram> {
+        self.index_styles().ok()?;
+        let named = self
+            .styles
+            .iter()
+            .map(|(name, fields)| {
+                (
+                    name.clone(),
+                    crate::kfx::yj_properties::convert_yj_properties(fields, &self.symbols),
+                )
+            })
+            .collect();
+        Some(crate::export::css::CssProgram {
+            named,
+            writing_mode: self.css_writing_mode.clone(),
+            fixed_layout: self.metadata.fixed_layout,
+        })
+    }
 }
 
 impl KfxImporter {
@@ -565,6 +591,7 @@ impl KfxImporter {
             anchor_table: Arc::new(AnchorTable::default()),
             element_id_map: HashMap::new(),
             eid_chapters: HashMap::new(),
+            css_writing_mode: "horizontal-tb".to_string(),
         };
 
         importer.parse_metadata()?;
@@ -1044,6 +1071,7 @@ impl KfxImporter {
         self.metadata.primary_writing_mode =
             crate::export::opf::primary_writing_mode(Some(&writing_mode), Some(&ppd));
         self.metadata.page_progression_direction = Some(ppd);
+        self.css_writing_mode = writing_mode;
     }
 
     /// Resolve an eid to its owning chapter's start: the structural
@@ -1133,6 +1161,11 @@ impl KfxImporter {
                             style: get_field(tf, sym!(Style))
                                 .and_then(|v| self.get_symbol_text(v))
                                 .map(|s| s.to_string()),
+                            inline_style: crate::kfx::yj_properties::convert_yj_properties(
+                                tf,
+                                &self.symbols,
+                            )
+                            .items,
                         };
                         section_templates.push((sec_name.to_string(), template));
                     }
@@ -1748,12 +1781,15 @@ impl KfxImporter {
     }
 }
 
-/// The main page template's identity within one section: its own `$155` id
-/// and `$157 style` name, carried onto the chapter's root container.
+/// The main page template's identity within one section: its own `$155` id,
+/// `$157 style` name, and the CSS declarations converted from its remaining
+/// outer fields (a per-section `writing_mode` is the common one), carried
+/// onto the chapter's root container.
 #[derive(Debug, Default, Clone)]
 struct SectionTemplate {
     eid: Option<i64>,
     style: Option<String>,
+    inline_style: Vec<(String, String)>,
 }
 
 /// Parse a `#eid[:offset]` nav placeholder href into its position. Returns

@@ -125,8 +125,7 @@ fn count_headings_in(
                 });
             }
             if !is_heading {
-                let (hints, _) =
-                    properties::layout_hints_from_element_fields(fields, &book.symbols);
+                let (hints, _) = properties::layout_hints_from_element_fields(fields);
                 is_heading = hints.iter().any(|h| h == "heading");
             }
             if is_heading {

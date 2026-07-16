@@ -32,7 +32,7 @@ use crate::import::ChapterId;
 use crate::model::{AnchorTarget, Book, Chapter, NodeId, Role};
 use crate::style::{StyleId, StylePool};
 
-use super::html_synth::LinkOutcome;
+use super::html_synth::{InlineStyleEmit, LinkOutcome, SourceStyles};
 use super::{generate_css, synthesize_xhtml_document_with_links};
 
 /// Collects styles from all chapters into a unified pool.
@@ -192,9 +192,101 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
     // =========================================================================
     // Generate unified CSS
     // =========================================================================
-
-    let used_styles = global_styles.used_styles();
-    let css_artifact = generate_css(global_styles.pool(), &used_styles);
+    //
+    // Two regimes. Sources with a named-style program (KFX): the stylesheet
+    // is the source's own styles, converted by the shared `export::css`
+    // machinery — rules keyed by the raw style names each node carries in
+    // `semantics.class`, so both KFX→EPUB routes emit identical CSS. All
+    // other normalized sources: classes are interned computed styles
+    // (`.c<N>`) from the global pool.
+    let css_program = book.stylesheet_program();
+    let (css_text, source_style_maps, css_artifact) = match &css_program {
+        Some(program) => {
+            // One walk collects both style channels: used named classes and
+            // per-node inline declarations. Class attributes reference every
+            // used style whose conversion yields any declaration;
+            // stylesheet rules additionally drop spec-default declarations
+            // (a rule pruned to empty vanishes from the sheet while its
+            // class attribute stays — both render identically). Inline
+            // declarations prune the same way, then values repeating across
+            // the book promote to shared `g<N>` classes.
+            let mut used: HashSet<String> = HashSet::new();
+            let mut pruned_of_raw: HashMap<String, Option<String>> = HashMap::new();
+            let mut inline_occurrences: Vec<String> = Vec::new();
+            for (_, _, ch) in &ir_chapters {
+                for node in ch.iter_dfs() {
+                    if let Some(name) = ch.semantics.class(node) {
+                        used.insert(name.to_string());
+                    }
+                    if let Some(raw) = ch.semantics.style(node) {
+                        let pruned = pruned_of_raw.entry(raw.to_string()).or_insert_with(|| {
+                            let mut decl = super::css::parse_inline_decl(raw);
+                            super::css::prune_default_decls(&mut decl);
+                            (!decl.is_empty()).then(|| decl.to_inline())
+                        });
+                        if let Some(p) = pruned {
+                            inline_occurrences.push(p.clone());
+                        }
+                    }
+                }
+            }
+            let mut named_rules: Vec<(String, super::css::CssDecl)> = used
+                .iter()
+                .filter_map(|name| {
+                    program
+                        .named
+                        .get(name)
+                        .map(|decl| (name.clone(), decl.clone()))
+                })
+                .collect();
+            let named_attr: HashMap<String, Option<String>> = used
+                .iter()
+                .map(|name| {
+                    let has_decl = program.named.get(name).is_some_and(|d| !d.is_empty());
+                    (
+                        name.clone(),
+                        has_decl.then(|| super::css::safe_class_name(name)),
+                    )
+                })
+                .collect();
+            for (_, decl) in &mut named_rules {
+                super::css::prune_default_decls(decl);
+            }
+            let mut generated_classes = Vec::new();
+            let promoted = super::css::promote_repeated_inline_styles(
+                inline_occurrences,
+                &mut generated_classes,
+            );
+            let inline_attr: HashMap<String, InlineStyleEmit> = pruned_of_raw
+                .into_iter()
+                .map(|(raw, pruned)| {
+                    let emit = match pruned {
+                        None => InlineStyleEmit::Drop,
+                        Some(p) => match promoted.get(&p) {
+                            Some(class) => InlineStyleEmit::Class(class.clone()),
+                            None => InlineStyleEmit::Style(p),
+                        },
+                    };
+                    (raw, emit)
+                })
+                .collect();
+            let doc = super::css::StylesheetDoc {
+                fixed_layout: program.fixed_layout,
+                writing_mode: program.writing_mode.clone(),
+                named_rules,
+                generated_classes,
+            };
+            (doc.emit(), Some((named_attr, inline_attr)), None)
+        }
+        None => {
+            let used_styles = global_styles.used_styles();
+            let artifact = generate_css(global_styles.pool(), &used_styles);
+            (artifact.stylesheet.clone(), None, Some(artifact))
+        }
+    };
+    let source_styles = source_style_maps
+        .as_ref()
+        .map(|(named, inline)| SourceStyles { named, inline });
 
     // =========================================================================
     // Link resolution (normalized-only sources)
@@ -263,15 +355,20 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
     let mut all_assets = HashSet::new();
 
     for (idx, (chapter_id, source_path, ir)) in ir_chapters.iter().enumerate() {
-        // Build remapped style map for this chapter
-        let mut remapped_class_list: Vec<Option<&str>> = vec![None; ir.styles.len()];
-        for (local_id, _) in ir.styles.iter() {
-            let global_id = global_styles.remap(idx, local_id);
-            if let Some(class_name) = css_artifact.class_name_fast(global_id) {
-                let slot = remapped_class_list
-                    .get_mut(local_id.0 as usize)
-                    .expect("style id out of bounds");
-                *slot = Some(class_name);
+        // Computed-style class list for this chapter — only meaningful in
+        // the `.c<N>` regime; with a named-style program the class resolver
+        // supersedes it and the list stays empty.
+        let mut remapped_class_list: Vec<Option<&str>> = Vec::new();
+        if let Some(artifact) = &css_artifact {
+            remapped_class_list = vec![None; ir.styles.len()];
+            for (local_id, _) in ir.styles.iter() {
+                let global_id = global_styles.remap(idx, local_id);
+                if let Some(class_name) = artifact.class_name_fast(global_id) {
+                    let slot = remapped_class_list
+                        .get_mut(local_id.0 as usize)
+                        .expect("style id out of bounds");
+                    *slot = Some(class_name);
+                }
             }
         }
 
@@ -285,6 +382,7 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
             &title,
             Some("style.css"),
             resolve_links.then_some(&href_resolver as &dyn Fn(&str) -> LinkOutcome),
+            source_styles.as_ref(),
         );
 
         // Collect assets
@@ -301,7 +399,7 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
         styles: global_styles,
         chapters,
         assets: all_assets,
-        css: css_artifact.stylesheet,
+        css: css_text,
     })
 }
 

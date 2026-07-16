@@ -65,6 +65,7 @@ fn synthesize_html_with_resolver<R: StyleResolver>(ir: &Chapter, resolver: &R) -
         resolver,
         indent_level: 0,
         href_resolver: None,
+        source_styles: None,
     };
 
     // Walk children of root (skip the root node itself)
@@ -106,20 +107,29 @@ pub fn synthesize_xhtml_document_with_class_list(
     title: &str,
     stylesheet_href: Option<&str>,
 ) -> SynthesisResult {
-    synthesize_xhtml_document_with_links(ir, class_list, title, stylesheet_href, None)
+    synthesize_xhtml_document_with_links(ir, class_list, title, stylesheet_href, None, None)
 }
 
-/// [`synthesize_xhtml_document_with_class_list`] with link resolution: every
-/// `href` consults the resolver, which may rewrite it (internal anchor →
-/// `chapter.xhtml#id`, URL sanitation) or drop it (unresolvable target — the
-/// `<a>` stays as a non-linking element so its text survives, and no dangling
-/// fragment reaches the output; epubcheck RSC-012/RSC-020).
+/// [`synthesize_xhtml_document_with_class_list`] with link and class
+/// resolution.
+///
+/// Every `href` consults `href_resolver`, which may rewrite it (internal
+/// anchor → `chapter.xhtml#id`, URL sanitation) or drop it (unresolvable
+/// target — the `<a>` stays as a non-linking element so its text survives,
+/// and no dangling fragment reaches the output; epubcheck RSC-012/RSC-020).
+///
+/// When `source_styles` is given (see [`SourceStyles`]), class and style
+/// attributes come from each node's `semantics.class` / `semantics.style`
+/// and the computed-style `class_list` is ignored entirely. Sources with
+/// named stylesheets (KFX) use this so attributes match their emitted
+/// `style.css` rules.
 pub fn synthesize_xhtml_document_with_links(
     ir: &Chapter,
     class_list: &[Option<&str>],
     title: &str,
     stylesheet_href: Option<&str>,
     href_resolver: Option<&dyn Fn(&str) -> LinkOutcome>,
+    source_styles: Option<&SourceStyles<'_>>,
 ) -> SynthesisResult {
     let resolver = ClassListResolver { list: class_list };
     let mut ctx = SynthesisContext {
@@ -129,6 +139,7 @@ pub fn synthesize_xhtml_document_with_links(
         resolver: &resolver,
         indent_level: 0,
         href_resolver,
+        source_styles,
     };
     for child_id in ir.children(NodeId::ROOT) {
         walk_node(child_id, &mut ctx);
@@ -148,6 +159,30 @@ pub enum LinkOutcome {
     Rewrite(String),
     /// Emit the element without any href.
     DropHref,
+}
+
+/// What to emit for one raw `semantics.style` inline-declaration string.
+pub enum InlineStyleEmit {
+    /// The declaration repeats across the book and was promoted to a
+    /// generated class — emit `class="<name>"`.
+    Class(String),
+    /// Emit as a `style="…"` attribute (already pruned of spec defaults).
+    Style(String),
+    /// Every declaration was a spec default — emit nothing.
+    Drop,
+}
+
+/// Source-style resolution for normalized synthesis of named-stylesheet
+/// sources (KFX): maps each node's `semantics.class` to the emitted class
+/// attribute and its `semantics.style` to a promoted class or an inline
+/// `style` attribute. When present, the computed-style class list is
+/// ignored entirely.
+pub struct SourceStyles<'a> {
+    /// Raw source style name → sanitized class name (`None` = the style
+    /// produced no declarations, so no class attribute).
+    pub named: &'a HashMap<String, Option<String>>,
+    /// Raw inline-declaration string → what to emit for it.
+    pub inline: &'a HashMap<String, InlineStyleEmit>,
 }
 
 fn synthesize_xhtml_from_body(
@@ -195,6 +230,9 @@ struct SynthesisContext<'a, R: StyleResolver> {
     /// Optional link resolution (see [`LinkOutcome`]); `None` emits hrefs
     /// verbatim.
     href_resolver: Option<&'a dyn Fn(&str) -> LinkOutcome>,
+    /// Optional source-style resolution (see [`SourceStyles`]). When present
+    /// it replaces the computed-style class path entirely.
+    source_styles: Option<&'a SourceStyles<'a>>,
 }
 
 impl<R: StyleResolver> SynthesisContext<'_, R> {
@@ -242,8 +280,35 @@ fn walk_node<R: StyleResolver>(id: NodeId, ctx: &mut SynthesisContext<'_, R>) {
     // Build attributes
     let mut attrs = String::new();
 
-    // Class attribute (from style)
-    if let Some(class) = ctx.resolver.class_for(style_id) {
+    // Class/style attributes: with source-style resolution, the node's
+    // source class name and inline declarations decide (named class first,
+    // then a promoted inline class; unpromoted declarations stay a `style`
+    // attribute — the same shape the mechanical route finalizes). Otherwise
+    // the computed style supplies the class.
+    if let Some(src) = ctx.source_styles {
+        let mut classes: Vec<&str> = Vec::new();
+        let mut style_attr: Option<&str> = None;
+        if let Some(name) = ctx.ir.semantics.class(id)
+            && let Some(Some(class)) = src.named.get(name)
+        {
+            classes.push(class);
+        }
+        if let Some(raw) = ctx.ir.semantics.style(id) {
+            match src.inline.get(raw) {
+                Some(InlineStyleEmit::Class(g)) => classes.push(g),
+                Some(InlineStyleEmit::Style(s)) => style_attr = Some(s),
+                Some(InlineStyleEmit::Drop) | None => {}
+            }
+        }
+        if !classes.is_empty() {
+            write!(attrs, " class=\"{}\"", classes.join(" ")).unwrap();
+        }
+        if let Some(s) = style_attr {
+            attrs.push_str(" style=\"");
+            escape_xml_into(&mut attrs, s);
+            attrs.push('"');
+        }
+    } else if let Some(class) = ctx.resolver.class_for(style_id) {
         write!(attrs, " class=\"{}\"", class).unwrap();
     }
 

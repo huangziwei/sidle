@@ -73,6 +73,20 @@ pub struct ElementStart {
     /// `vertical`. `None` = not a container / fall back to the document axis.
     /// Set during export. See [`crate::kfx::context::ExportContext::container_layout_symbol`].
     pub container_layout: Option<u64>,
+    /// CSS declarations converted from the content element's own outer
+    /// fields (as opposed to its named `$style` entity) — writing-mode
+    /// resets, per-image sizing, etc. Populated during import; carried into
+    /// the IR as the node's inline style.
+    pub inline_style: Vec<(String, String)>,
+    /// Whether the element declares `render: inline` (KFX `$601 = $283`) —
+    /// an inline-flow replaced element (glyph image). Populated during
+    /// import; inline images never get a block wrapper.
+    pub render_inline: bool,
+    /// Whether the KFX content type is `$271 image`. Populated during
+    /// import. Role overrides (a `link_to` making the element a Link, a
+    /// figure layout hint) must not swallow the `<img>` itself — the IR
+    /// builder keys its image handling on this, not on `role`.
+    pub is_image: bool,
 }
 
 impl ElementStart {
@@ -91,6 +105,9 @@ impl ElementStart {
             needs_container_wrapper: false,
             has_block_children: false,
             container_layout: None,
+            inline_style: Vec::new(),
+            render_inline: false,
+            is_image: false,
         }
     }
 
@@ -210,6 +227,9 @@ impl TokenStream {
             needs_container_wrapper: false,
             has_block_children: false,
             container_layout: None,
+            inline_style: Vec::new(),
+            render_inline: false,
+            is_image: false,
         }));
     }
 
