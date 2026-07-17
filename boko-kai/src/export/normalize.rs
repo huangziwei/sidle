@@ -353,11 +353,33 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
 
     let mut chapters = Vec::with_capacity(ir_chapters.len());
     let mut all_assets = HashSet::new();
+    let language = book.metadata().language.clone();
 
     for (idx, (chapter_id, source_path, ir)) in ir_chapters.iter().enumerate() {
-        // Computed-style class list for this chapter — only meaningful in
-        // the `.c<N>` regime; with a named-style program the class resolver
-        // supersedes it and the list stays empty.
+        // KFX (named-style program): build the chapter through the shared
+        // XHTML DOM + consolidation passes — the same code the mechanical
+        // route serializes with, so both engines' chapter files are
+        // byte-identical by construction. The title is the section name
+        // (NOT the deduped filename), matching the mechanical
+        // `push_book_part`.
+        if let Some(src) = &source_styles {
+            let opts = super::epub_dom::KfxChapterEmit {
+                title: source_path,
+                language: &language,
+                source_styles: src,
+                href_resolver: &href_resolver,
+            };
+            let document = super::epub_dom::emit_kfx_chapter(ir, &opts, &mut all_assets);
+            chapters.push(ChapterContent {
+                id: *chapter_id,
+                source_path: source_path.clone(),
+                document,
+            });
+            continue;
+        }
+
+        // Computed-style `.c<N>` regime (non-KFX normalized sources):
+        // string synthesis with the interned class list.
         let mut remapped_class_list: Vec<Option<&str>> = Vec::new();
         if let Some(artifact) = &css_artifact {
             remapped_class_list = vec![None; ir.styles.len()];
@@ -382,7 +404,7 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
             &title,
             Some("style.css"),
             resolve_links.then_some(&href_resolver as &dyn Fn(&str) -> LinkOutcome),
-            source_styles.as_ref(),
+            None,
         );
 
         // Collect assets

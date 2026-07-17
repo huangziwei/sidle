@@ -87,6 +87,13 @@ pub struct ElementStart {
     /// figure layout hint) must not swallow the `<img>` itself — the IR
     /// builder keys its image handling on this, not on `role`.
     pub is_image: bool,
+    /// `$761 layout_hints` carried on the content element's own fields
+    /// ("heading" / "figure" / "caption"). Populated during import; the IR
+    /// builder merges these with the named style's hints to settle the
+    /// element's role (calibre `attach_layout_hints` merge order).
+    pub layout_hints: Vec<String>,
+    /// `$790 yj.semantics.heading_level` from the element's own fields.
+    pub heading_level: Option<String>,
 }
 
 impl ElementStart {
@@ -108,6 +115,8 @@ impl ElementStart {
             inline_style: Vec::new(),
             render_inline: false,
             is_image: false,
+            layout_hints: Vec::new(),
+            heading_level: None,
         }
     }
 
@@ -158,6 +167,13 @@ pub struct SpanStart {
     /// (import only; `role` is `Role::Ruby` when set). The IR builder appends a
     /// `Role::RubyText` child carrying this text when the Ruby span closes.
     pub ruby_annotation: Option<String>,
+    /// Per-sub-run ruby pairs from a `ruby_id_list` style_event
+    /// (import only): `(sub_offset, sub_length, annotation)` relative to the
+    /// event's own offset. When non-empty the IR builder emits interleaved
+    /// base-slice / `RubyText` pairs — calibre's grouped
+    /// `<ruby><rb>…</rb><rt>…</rt><rb>…</rb><rt>…</rt></ruby>` shape —
+    /// instead of the single-annotation form.
+    pub ruby_pairs: Vec<(usize, usize, String)>,
 }
 
 impl SpanStart {
@@ -172,6 +188,7 @@ impl SpanStart {
             style_symbol: None,
             kfx_attrs: Vec::new(),
             ruby_annotation: None,
+            ruby_pairs: Vec::new(),
         }
     }
 
@@ -230,6 +247,8 @@ impl TokenStream {
             inline_style: Vec::new(),
             render_inline: false,
             is_image: false,
+            layout_hints: Vec::new(),
+            heading_level: None,
         }));
     }
 
@@ -251,6 +270,7 @@ impl TokenStream {
             style_symbol: None,
             kfx_attrs: Vec::new(),
             ruby_annotation: None,
+            ruby_pairs: Vec::new(),
         }));
     }
 

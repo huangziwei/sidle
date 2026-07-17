@@ -164,7 +164,7 @@ impl EpubExporter {
             cover_item.and_then(|item| {
                 let bytes = book.load_asset(std::path::Path::new(&item.href)).ok()?;
                 let (w, h) = crate::util::extract_image_dimensions(&bytes)?;
-                Some(build_titlepage(&item.href, w, h))
+                Some(build_titlepage(&item.href, Some((w, h))))
             })
         } else {
             None
@@ -440,7 +440,7 @@ impl EpubExporter {
                     .find(|(p, _)| sanitize_path(p) == item.href)
                     .map(|(_, b)| b.as_slice())?;
                 let (w, h) = crate::util::extract_image_dimensions(bytes)?;
-                Some(build_titlepage(&item.href, w, h))
+                Some(build_titlepage(&item.href, Some((w, h))))
             })
         } else {
             None
@@ -780,51 +780,9 @@ fn toc_to_navpoints(
         .collect()
 }
 
-/// Escape XML special characters.
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-/// Calibre-shaped `titlepage.xhtml` — an SVG `viewBox` sized to the cover
-/// image's pixel dimensions, with the cover JPEG/PNG referenced via
-/// `xlink:href`. Renders full-bleed in Apple Books / Kindle because the
-/// `viewBox` is self-contained CSS-wise (bypasses the reader's body margin
-/// defaults a plain `<img>` would inherit). `<meta name="calibre:cover">`
-/// flags this as the title page rather than first content page.
-///
-/// `cover_href` is the spine-doc-relative path to the cover image (e.g.
-/// `images/cover.jpg`). `w` / `h` come from a JPEG SOF / PNG IHDR probe.
-fn build_titlepage(cover_href: &str, w: u32, h: u32) -> String {
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <!DOCTYPE html>\n\
-         <html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\">\n\
-         <head>\n\
-         <meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\"/>\n\
-         <meta name=\"calibre:cover\" content=\"true\"/>\n\
-         <title>Cover</title>\n\
-         <style type=\"text/css\" title=\"override_css\">\n\
-         @page {{padding: 0pt; margin:0pt}}\n\
-         body {{ text-align: center; padding:0pt; margin: 0pt; }}\n\
-         </style>\n\
-         </head>\n\
-         <body>\n\
-         <div>\n\
-         <svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" version=\"1.1\" width=\"100%\" height=\"100%\" viewBox=\"0 0 {w} {h}\" preserveAspectRatio=\"none\">\n\
-         <image width=\"{w}\" height=\"{h}\" xlink:href=\"{href}\"/>\n\
-         </svg>\n\
-         </div>\n\
-         </body>\n\
-         </html>\n",
-        w = w,
-        h = h,
-        href = escape_xml(cover_href),
-    )
-}
+// `titlepage.xhtml` comes from the shared calibre-shaped builder
+// (`export::titlepage`), the same one the mechanical KFX→EPUB route ships.
+use super::titlepage::build_titlepage;
 
 /// Sanitize a path for use in ZIP (remove leading slashes, normalize).
 fn sanitize_path(path: &str) -> String {
@@ -954,13 +912,6 @@ mod tests {
                 "secB.xhtml"
             ]
         );
-    }
-
-    #[test]
-    fn test_escape_xml() {
-        assert_eq!(escape_xml("Hello & World"), "Hello &amp; World");
-        assert_eq!(escape_xml("<tag>"), "&lt;tag&gt;");
-        assert_eq!(escape_xml("\"quoted\""), "&quot;quoted&quot;");
     }
 
     #[test]

@@ -277,8 +277,15 @@ impl Importer for KfxImporter {
             Some(anchor_table.as_ref()),
         );
 
-        // Run optimization passes (KFX builds IR directly, not through compile_html)
-        crate::dom::optimize::optimize(&mut chapter);
+        // No generic `dom::optimize` pass here: the KFX token→IR builder
+        // already produces a tree that mirrors the mechanical route's
+        // pre-consolidation DOM, and the shared `export::xdom::consolidate_part`
+        // (run on both KFX→EPUB routes) does the port-faithful cleanup.
+        // Generic HTML-cleanup passes (list fusion, empty-node prune, span
+        // merge) only DIVERGE from the reference — e.g. `fuse_lists` merged
+        // two adjacent single-item `<ul>`s the port keeps separate — so they
+        // must not run on the KFX path. `optimize` still serves the
+        // HTML-sourced importers via `compile_html`.
 
         // Rewrite image references from KFX resource names ("eF") to the
         // exported asset filenames ("image_rsrc7.jpg" / "cover.jpeg") so the
@@ -767,6 +774,79 @@ impl KfxImporter {
             }
         }
 
+        // Fallback: the flat `$258 metadata` entity carries the same fields as
+        // direct symbol keys (`title`, `language`, `publisher`, `author`,
+        // `ASIN`, `cover_image`). Amazon KFX often ships `language` (and
+        // sometimes others) ONLY here, not in `kindle_title_metadata`; the
+        // port's loader reads both and fills empties from this struct, so
+        // mirror it — else the `<html lang>` and other fields silently drop
+        // on the IR route.
+        self.parse_flat_metadata_fallback()?;
+
+        Ok(())
+    }
+
+    /// Fill still-empty metadata from the flat `$258 metadata` entity's direct
+    /// fields (the mechanical `loader.rs::parse_metadata_struct` fallback).
+    /// Every write is empty-guarded so `kindle_title_metadata` wins.
+    fn parse_flat_metadata_fallback(&mut self) -> io::Result<()> {
+        let loc = self
+            .entities
+            .iter()
+            .find(|e| e.type_id == KfxSymbol::Metadata as u32)
+            .copied();
+        let Some(loc) = loc else {
+            return Ok(());
+        };
+        let elem = self.parse_entity_ion(loc)?;
+        let Some(fields) = elem.unwrap_annotated().as_struct().map(<[_]>::to_vec) else {
+            return Ok(());
+        };
+        let text = |sym: KfxSymbol| {
+            get_field(&fields, sym as u64)
+                .and_then(IonValue::as_string)
+                .map(str::to_string)
+        };
+
+        if self.metadata.cover_image.is_none() {
+            let value = get_field(&fields, KfxSymbol::CoverImage as u64);
+            if let Some(cover) = self.resolve_cover_value(value) {
+                self.metadata.cover_image = Some(cover);
+            }
+        }
+        if self.metadata.title.is_empty()
+            && let Some(t) = text(KfxSymbol::Title)
+        {
+            self.metadata.title = t;
+        }
+        if self.metadata.authors.is_empty() {
+            match get_field(&fields, KfxSymbol::Author as u64) {
+                Some(IonValue::String(s)) if !s.is_empty() => self.metadata.authors.push(s.clone()),
+                Some(IonValue::List(items)) => {
+                    for it in items {
+                        if let Some(s) = it.as_string().filter(|s| !s.is_empty()) {
+                            self.metadata.authors.push(s.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.metadata.language.is_empty()
+            && let Some(l) = text(KfxSymbol::Language)
+        {
+            self.metadata.language = l;
+        }
+        if self.metadata.publisher.is_none()
+            && let Some(p) = text(KfxSymbol::Publisher)
+        {
+            self.metadata.publisher = Some(p.trim().to_string());
+        }
+        if self.metadata.asin.is_none()
+            && let Some(a) = text(KfxSymbol::Asin).filter(|s| !s.is_empty())
+        {
+            self.metadata.asin = Some(a);
+        }
         Ok(())
     }
 

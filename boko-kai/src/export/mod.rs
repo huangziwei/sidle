@@ -34,12 +34,15 @@ use crate::model::Book;
 pub mod css;
 mod css_gen;
 mod epub;
+mod epub_dom;
 mod html_synth;
 mod kfx;
 pub mod nav;
 mod normalize;
 pub mod opf;
 mod text;
+pub(crate) mod titlepage;
+pub mod xdom;
 
 pub use css_gen::{CssArtifact, generate_css, generate_css_all};
 pub use epub::{EpubConfig, EpubExporter};

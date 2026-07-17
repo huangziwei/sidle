@@ -217,10 +217,7 @@ pub(crate) fn build_output(
                 referenced_images.insert(src.to_string());
             }
         }
-        let xhtml = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE html>\n{}",
-            part.dom.serialize(part.dom.root)
-        );
+        let xhtml = crate::export::xdom::chapter_document(&part.dom);
         out.add_spine_chapter_with_props(&part.filename, xhtml, part.spread_property.clone());
     }
     trace.mark("dom serialize + add spine chapters");
@@ -350,52 +347,12 @@ pub(crate) fn build_output(
     Ok((out, book, deferred))
 }
 
-/// Build calibre-style `titlepage.xhtml`: an SVG viewBox sized to the
-/// cover image's pixel dimensions, with the JPEG referenced via
-/// `xlink:href`. Returns `None` if no cover image was bundled. The
-/// `<meta name="calibre:cover" content="true"/>` marker matches calibre's
-/// output so cover-aware readers identify the page as a title page rather
-/// than the first content page.
+/// Build calibre-style `titlepage.xhtml` via the shared
+/// [`crate::export::titlepage`] builder (one template for both KFX→EPUB
+/// routes). Returns `None` if no cover image was bundled; missing pixel
+/// dimensions fall back to the bare `<img>` variant.
 fn build_titlepage(out: &EpubOutput) -> Option<String> {
     let (href, width, height) = out.cover_image_info()?;
-    let w = width.unwrap_or(0);
-    let h = height.unwrap_or(0);
-    if w == 0 || h == 0 {
-        // Without dimensions the viewBox would collapse; fall back to a
-        // bare image wrapper rather than emit a zero-size SVG.
-        return Some(format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-             <!DOCTYPE html>\n\
-             <html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\">\n\
-             <head>\n\
-             <meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\"/>\n\
-             <meta name=\"calibre:cover\" content=\"true\"/>\n\
-             <title>Cover</title>\n\
-             </head>\n\
-             <body><div><img src=\"{href}\" alt=\"\"/></div></body>\n\
-             </html>\n"
-        ));
-    }
-    Some(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <!DOCTYPE html>\n\
-         <html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\">\n\
-         <head>\n\
-         <meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\"/>\n\
-         <meta name=\"calibre:cover\" content=\"true\"/>\n\
-         <title>Cover</title>\n\
-         <style type=\"text/css\" title=\"override_css\">\n\
-         @page {{padding: 0pt; margin:0pt}}\n\
-         body {{ text-align: center; padding:0pt; margin: 0pt; }}\n\
-         </style>\n\
-         </head>\n\
-         <body>\n\
-         <div>\n\
-         <svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" version=\"1.1\" width=\"100%\" height=\"100%\" viewBox=\"0 0 {w} {h}\" preserveAspectRatio=\"xMidYMid meet\">\n\
-         <image width=\"{w}\" height=\"{h}\" xlink:href=\"{href}\"/>\n\
-         </svg>\n\
-         </div>\n\
-         </body>\n\
-         </html>\n"
-    ))
+    let dims = width.zip(height);
+    Some(crate::export::titlepage::build_titlepage(href, dims))
 }

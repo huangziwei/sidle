@@ -162,6 +162,22 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         role = override_role;
     }
 
+    // List tag parity with the mechanical route (calibre's LIST_STYLE_TYPES):
+    // only the five alpha/roman/decimal styles make an `<ol>`; everything
+    // else — including KFX's own `numeric`, whose numbering rides the CSS
+    // `list-style-type` instead — stays a `<ul>`.
+    if matches!(role, Role::OrderedList | Role::UnorderedList) {
+        let style = get_field(fields, sym!(ListStyle))
+            .and_then(|v| ctx.symbols.text_of(v))
+            .unwrap_or("");
+        role = match style {
+            "lower_alpha" | "upper_alpha" | "decimal" | "lower_roman" | "upper_roman" => {
+                Role::OrderedList
+            }
+            _ => Role::UnorderedList,
+        };
+    }
+
     // Get element ID
     let id = get_field(fields, sym!(Id)).and_then(|v| v.as_int());
 
@@ -203,6 +219,11 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         .and_then(|v| v.as_symbol())
         .is_some_and(|s| s == sym!(Inline));
 
+    // Element-side `$761 layout_hints` / `$790 heading_level` — merged with
+    // the named style's hints by the IR builder to settle the role.
+    let (layout_hints, heading_level) =
+        crate::kfx::yj_properties::layout_hints_from_element_fields(fields);
+
     // Emit StartElement token
     stream.push(KfxToken::StartElement(ElementStart {
         role,
@@ -220,6 +241,8 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         inline_style,
         render_inline,
         is_image: kfx_type_id == KfxSymbol::Image as u32,
+        layout_hints,
+        heading_level,
     }));
 
     // Recurse into children
@@ -328,11 +351,34 @@ fn parse_style_events(events: &[IonValue], ctx: &TokenizeContext) -> Vec<SpanSta
                     .and_then(|v| v.as_int())
                     .map(|n| n as usize)
                     .unwrap_or(0);
-                let ruby_annotation = ctx
-                    .ruby_index
-                    .and_then(|idx| idx.get(&ruby_name))
-                    .and_then(|annotations| annotations.get(ruby_id_1.saturating_sub(1)))
-                    .cloned();
+                // Annotation lookups always resolve to `Some`: a miss still
+                // emits an empty `<rt>` (the mechanical route's
+                // `lookup_ruby_annotation` returns "" and appends the rt
+                // unconditionally).
+                let annotation_for = |id_1: usize| -> String {
+                    ctx.ruby_index
+                        .and_then(|idx| idx.get(&ruby_name))
+                        .and_then(|annotations| annotations.get(id_1.saturating_sub(1)))
+                        .cloned()
+                        .unwrap_or_default()
+                };
+                // `ruby_id_list`: per-sub-run pairs (grouped ruby covering
+                // several base segments, each with its own annotation).
+                let ruby_pairs: Vec<(usize, usize, String)> =
+                    match get_field(fields, sym!(RubyIdList)).and_then(|v| v.as_list()) {
+                        Some(list) => list
+                            .iter()
+                            .filter_map(|entry| {
+                                let f = entry.unwrap_annotated().as_struct()?;
+                                let o = get_field(f, sym!(Offset))?.as_int()? as usize;
+                                let l = get_field(f, sym!(Length))?.as_int()? as usize;
+                                let id_1 = get_field(f, sym!(RubyId))?.as_int()? as usize;
+                                Some((o, l, annotation_for(id_1)))
+                            })
+                            .collect(),
+                        None => Vec::new(),
+                    };
+                let ruby_annotation = ruby_pairs.is_empty().then(|| annotation_for(ruby_id_1));
                 return Some(SpanStart {
                     role: Role::Ruby,
                     node_id: None,
@@ -342,6 +388,7 @@ fn parse_style_events(events: &[IonValue], ctx: &TokenizeContext) -> Vec<SpanSta
                     style_symbol,
                     kfx_attrs: Vec::new(),
                     ruby_annotation,
+                    ruby_pairs,
                 });
             }
 
@@ -363,6 +410,7 @@ fn parse_style_events(events: &[IonValue], ctx: &TokenizeContext) -> Vec<SpanSta
                 style_symbol,
                 kfx_attrs: Vec::new(),
                 ruby_annotation: None,
+                ruby_pairs: Vec::new(),
             })
         })
         .collect()
@@ -445,7 +493,9 @@ where
     F: FnMut(&str, usize) -> Option<String>,
 {
     let mut chapter = Chapter::new();
-    let mut stack: Vec<NodeId> = vec![chapter.root()];
+    // (node, pending render-inline demotion) — the demotion check runs when
+    // the element closes and its subtree is complete.
+    let mut stack: Vec<(NodeId, bool)> = vec![(chapter.root(), false)];
     // Every element's declared eid, in document order — the offset-anchor
     // pass below locates offsets inside these elements' finished subtrees.
     let mut eid_nodes: Vec<(i64, NodeId)> = Vec::new();
@@ -453,7 +503,10 @@ where
     for token in tokens {
         match token {
             KfxToken::StartElement(elem) => {
-                let parent = *stack.last().unwrap_or(&chapter.root());
+                let parent = stack
+                    .last()
+                    .map(|(n, _)| *n)
+                    .unwrap_or_else(|| chapter.root());
 
                 // Create the node. Image-typed elements always emit an
                 // `<img>` node — a role override (a `link_to` making the
@@ -461,7 +514,7 @@ where
                 let node_role = if elem.is_image {
                     Role::Image
                 } else {
-                    elem.role
+                    resolve_hinted_role(elem, styles, symbols, anchor_table)
                 };
                 let node_id = chapter.alloc_node(Node::new(node_role));
 
@@ -509,7 +562,14 @@ where
                 // (calibre's `move_anchor`).
                 let anchor_node;
                 if let Some((wrapper_decl, img_decl)) = wrap {
-                    let wrapper = chapter.alloc_node(Node::new(Role::Container));
+                    // The wrapper carries the image element's layout hints
+                    // (calibre's `attach_layout_hints(wrapper, …)`), so a
+                    // heading/figure/caption-hinted block image promotes the
+                    // wrapper `<div>` to `<hN>` / `<figure>` / `<figcaption>`
+                    // in consolidation.
+                    let wrapper_role = hinted_wrapper_role(elem, styles, symbols, anchor_table)
+                        .unwrap_or(Role::Container);
+                    let wrapper = chapter.alloc_node(Node::new(wrapper_role));
                     chapter.append_child(attach_parent, wrapper);
                     chapter.append_child(wrapper, node_id);
                     if !wrapper_decl.is_empty() {
@@ -595,15 +655,42 @@ where
                     }
                 }
 
-                stack.push(node_id);
+                stack.push((node_id, elem.render_inline && !elem.is_image));
             }
 
             KfxToken::EndElement => {
-                stack.pop();
+                if let Some((node_id, demote)) = stack.pop()
+                    && demote
+                {
+                    // `render: inline` block containers demote to a span when
+                    // every descendant is inline-only (the mechanical route's
+                    // calibre `$601 = $283` demotion). A block child — or a
+                    // forced line break, which the mechanical DOM materializes
+                    // as a `<br>` — keeps the block box.
+                    let all_inline = chapter
+                        .children(node_id)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .all(|c| is_inline_only_ir(&chapter, c));
+                    if all_inline
+                        && matches!(
+                            chapter.node(node_id).map(|n| n.role),
+                            Some(Role::Paragraph | Role::Container)
+                        )
+                    {
+                        if let Some(n) = chapter.node_mut(node_id) {
+                            n.role = Role::Inline;
+                        }
+                        chapter.semantics.set_render_inline(node_id);
+                    }
+                }
             }
 
             KfxToken::Text(text) => {
-                let parent = *stack.last().unwrap_or(&chapter.root());
+                let parent = stack
+                    .last()
+                    .map(|(n, _)| *n)
+                    .unwrap_or_else(|| chapter.root());
                 let range = chapter.append_text(text);
                 let text_node = chapter.alloc_node(Node::text(range));
                 chapter.append_child(parent, text_node);
@@ -623,6 +710,149 @@ where
     }
 
     chapter
+}
+
+/// The IR analog of the mechanical route's `is_inline_only` (calibre
+/// `yj_to_epub_content.py:1900`): inline elements with every descendant
+/// inline-only. A text run containing `\n` counts as NOT inline — the
+/// mechanical DOM materializes the break as a `<br>` child, which is
+/// outside calibre's inline tag set and blocks the demotion there.
+fn is_inline_only_ir(chapter: &Chapter, node: NodeId) -> bool {
+    let Some(n) = chapter.node(node) else {
+        return false;
+    };
+    match n.role {
+        Role::Text => !chapter.text(n.text).contains('\n'),
+        Role::Link | Role::Image | Role::Ruby | Role::RubyText | Role::Inline => chapter
+            .children(node)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .all(|c| is_inline_only_ir(chapter, c)),
+        _ => false,
+    }
+}
+
+/// Settle a block element's role from the merged `$761 layout_hints` /
+/// `$790 heading_level` channels — the mechanical route's
+/// `attach_layout_hints` precedence: the named style's hints/level first,
+/// the element's own fields merged after (level fills only when unset),
+/// then the anchor table's nav-registered heading level as the last level
+/// fallback (calibre `process_position`), default level 1.
+///
+/// Promotion to a heading requires the "heading" hint — a bare `$790`
+/// level never promotes (so a schema-assigned `Heading` role without any
+/// heading hint demotes back to `Paragraph`, exactly like the mechanical
+/// route, whose `<hN>` rename fires only off the hint). Figure / caption
+/// hints settle the role the same way; the EPUB emitter keeps them as
+/// `<div>` (EPUB-2.0 gate) but their presence blocks the bare-div collapse.
+fn resolve_hinted_role(
+    elem: &ElementStart,
+    styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    symbols: &SymbolTable,
+    anchor_table: Option<&AnchorTable>,
+) -> Role {
+    let role = elem.role;
+    let (hints, level) = merged_layout_hints(elem, styles, symbols);
+    if hints.is_empty() && level.is_none() && !matches!(role, Role::Heading(_)) {
+        return role;
+    }
+    if hints.iter().any(|h| h == "heading") {
+        if matches!(
+            role,
+            Role::Paragraph | Role::Container | Role::Heading(_) | Role::BlockQuote
+        ) {
+            return Role::Heading(resolve_heading_level(level, elem.id, anchor_table));
+        }
+        return role;
+    }
+    if let Role::Heading(_) = role {
+        // `$790` without a "heading" hint anywhere: the mechanical route
+        // never promotes these.
+        return Role::Paragraph;
+    }
+    if matches!(role, Role::Paragraph | Role::Container) {
+        if hints.iter().any(|h| h == "figure") {
+            return Role::Figure;
+        }
+        if hints.iter().any(|h| h == "caption") {
+            return Role::Caption;
+        }
+    }
+    role
+}
+
+/// Merge the element's layout hints / heading level: the named style's
+/// hints/level first (calibre inserts these), the element's own fields
+/// after (level fills only when unset) — the mechanical route's
+/// `attach_layout_hints` precedence.
+fn merged_layout_hints(
+    elem: &ElementStart,
+    styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    symbols: &SymbolTable,
+) -> (Vec<String>, Option<String>) {
+    let (mut hints, mut level) = match elem
+        .style_name
+        .as_ref()
+        .and_then(|name| styles.and_then(|m| m.get(name)))
+    {
+        Some(props) => crate::kfx::yj_properties::style_fields_layout_hints(props, symbols),
+        None => (Vec::new(), None),
+    };
+    for h in &elem.layout_hints {
+        if !hints.iter().any(|existing| existing == h) {
+            hints.push(h.clone());
+        }
+    }
+    if level.is_none() {
+        level = elem.heading_level.clone();
+    }
+    (hints, level)
+}
+
+/// Resolve a heading level: the explicit `$790` level, else the anchor
+/// table's nav-registered level at `(eid, 0)` (calibre `process_position`),
+/// else 1.
+fn resolve_heading_level(
+    level: Option<String>,
+    eid: Option<i64>,
+    anchor_table: Option<&AnchorTable>,
+) -> u8 {
+    let anchor_level = anchor_table
+        .zip(eid)
+        .and_then(|(t, eid)| t.heading_level_at(eid, 0))
+        .map(|l| l.to_string());
+    level
+        .or(anchor_level)
+        .and_then(|s| s.parse::<u8>().ok())
+        .unwrap_or(1)
+}
+
+/// The block role a wrapped block image's `<div>` wrapper should take from
+/// the image element's merged layout hints — the mechanical route attaches
+/// the hints to the wrapper (`wrap_block_image` → `attach_layout_hints`),
+/// which `consolidate_html` then promotes (a heading whose content is a
+/// single block image becomes `<hN>`; an `<img>` is not a block descendant,
+/// so the promotion fires). `None` keeps the plain `Container`.
+fn hinted_wrapper_role(
+    elem: &ElementStart,
+    styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
+    symbols: &SymbolTable,
+    anchor_table: Option<&AnchorTable>,
+) -> Option<Role> {
+    let (hints, level) = merged_layout_hints(elem, styles, symbols);
+    if hints.iter().any(|h| h == "heading") {
+        Some(Role::Heading(resolve_heading_level(
+            level,
+            elem.id,
+            anchor_table,
+        )))
+    } else if hints.iter().any(|h| h == "figure") {
+        Some(Role::Figure)
+    } else if hints.iter().any(|h| h == "caption") {
+        Some(Role::Caption)
+    } else {
+        None
+    }
 }
 
 /// Re-root the chapter under the section's main page-template container —
@@ -773,10 +1003,12 @@ fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
                 .count() as i64;
             if countable > 0 {
                 if offset == 0 {
-                    // The run starts exactly at the offset: anchor just
-                    // before it (the port stamps the run's `<span>`; a bare
-                    // IR text node has no element to carry the id).
-                    return Located::Found(insert_anchor_span_before(chapter, node));
+                    // The run starts exactly at the offset: the mechanical
+                    // route stamps the id on the run's own `<span>` (which
+                    // then survives `strip_empty_spans` with its full text).
+                    // Mirror that shape by wrapping the run in a span that
+                    // carries the id — NOT a zero-length span before it.
+                    return Located::Found(wrap_text_run_in_span(chapter, node));
                 }
                 if offset < countable {
                     return Located::Found(split_text_run(chapter, node, offset));
@@ -794,6 +1026,29 @@ fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
         }
         // `<br>` contributes nothing (see the text-run rule above).
         Role::Break => Located::Remaining(offset),
+        // A styled/event span whose own text starts exactly at the offset
+        // carries the id itself — the mechanical route's `locate_offset`
+        // returns the span (its `text` attribute is the run) rather than
+        // wrapping or nesting. Only real event spans qualify: a demoted
+        // `render: inline` block has no own text in the mechanical DOM
+        // (children spans hold it), so it descends like any container.
+        Role::Inline
+            if offset == 0
+                && !chapter.semantics.render_inline(node)
+                && chapter.children(node).next().is_some_and(|first| {
+                    chapter.node(first).is_some_and(|f| {
+                        f.role == Role::Text
+                            && chapter
+                                .text(f.text)
+                                .chars()
+                                .take_while(|&c| c != '\n')
+                                .next()
+                                .is_some()
+                    })
+                }) =>
+        {
+            Located::Found(node)
+        }
         // Opaque subtrees. Ruby contributes NOTHING: the mechanical route
         // (like calibre) emits `<ruby><rb>base</rb><rt>anno</rt></ruby>` and
         // its offset walk counts only `<span>` direct text — rb text is
@@ -822,18 +1077,22 @@ fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
     }
 }
 
-/// Insert a fresh zero-length anchor span immediately before `node` and
-/// return it.
-fn insert_anchor_span_before(chapter: &mut Chapter, node: NodeId) -> NodeId {
+/// Wrap the text run `node` in a fresh anchor span: the span takes `node`'s
+/// place in the sibling chain and `node` becomes its only child. The stamped
+/// id then wraps the run's full text, matching the mechanical route's
+/// run-boundary stamp (`locate_offset` returning the existing `<span>`).
+fn wrap_text_run_in_span(chapter: &mut Chapter, node: NodeId) -> NodeId {
     let parent = chapter.node(node).and_then(|n| n.parent);
+    let old_next = chapter.node(node).and_then(|n| n.next_sibling);
     let span = chapter.alloc_node(Node::new(Role::Inline));
     if let Some(s) = chapter.node_mut(span) {
         s.parent = parent;
-        s.next_sibling = Some(node);
+        s.next_sibling = old_next;
+        s.first_child = Some(node);
     }
     if let Some(parent) = parent {
         // Relink: either the parent's first_child or the previous sibling
-        // points at `node`.
+        // points at `node`; point it at the span instead.
         let first = chapter.node(parent).and_then(|p| p.first_child);
         if first == Some(node) {
             if let Some(p) = chapter.node_mut(parent) {
@@ -852,6 +1111,10 @@ fn insert_anchor_span_before(chapter: &mut Chapter, node: NodeId) -> NodeId {
                 cur = next;
             }
         }
+    }
+    if let Some(n) = chapter.node_mut(node) {
+        n.parent = Some(span);
+        n.next_sibling = None;
     }
     span
 }
@@ -1030,6 +1293,13 @@ fn build_text_with_spans(
             }
         }
 
+        // A span starting inside an already-consumed range (only a grouped
+        // ruby consumes ahead) is malformed nesting — skip it, like the
+        // mechanical route's covered-mark skip.
+        if span_start < char_pos {
+            continue;
+        }
+
         // Add text between char_pos and span_start to current parent
         if char_pos < span_start {
             let byte_start = char_to_byte_offset(text, char_pos);
@@ -1042,6 +1312,34 @@ fn build_text_with_spans(
                 chapter.append_child(*current_parent, text_node);
             }
             char_pos = span_start;
+        }
+
+        // Grouped ruby (`ruby_id_list`): one `<ruby>` holding interleaved
+        // base-slice / `<rt>` pairs. Built whole here — nothing nests inside
+        // a ruby (the mechanical route slices rb text straight off the
+        // id_list too) — and the cursor jumps past the event's range.
+        if span.role == Role::Ruby && !span.ruby_pairs.is_empty() && span_end > span_start {
+            let ruby_node = create_span_node(chapter, span);
+            let (current_parent, _, _) = span_stack.last().unwrap();
+            chapter.append_child(*current_parent, ruby_node);
+            let total_chars = text.chars().count();
+            for (sub_off, sub_len, annotation) in &span.ruby_pairs {
+                let s = span_start + sub_off;
+                let e = s + sub_len;
+                if e > total_chars {
+                    break;
+                }
+                let byte_s = char_to_byte_offset(text, s);
+                let byte_e = char_to_byte_offset(text, e);
+                if byte_e > byte_s {
+                    let range = chapter.append_text(&text[byte_s..byte_e]);
+                    let text_node = chapter.alloc_node(Node::text(range));
+                    chapter.append_child(ruby_node, text_node);
+                }
+                append_ruby_text(chapter, ruby_node, annotation);
+            }
+            char_pos = span_end;
+            continue;
         }
 
         // Create this span and push onto stack
@@ -2580,6 +2878,8 @@ mod tests {
             inline_style: Vec::new(),
             render_inline: false,
             is_image: false,
+            layout_hints: Vec::new(),
+            heading_level: None,
         }));
         stream.end_element();
 
@@ -2615,6 +2915,8 @@ mod tests {
             inline_style: Vec::new(),
             render_inline: false,
             is_image: false,
+            layout_hints: Vec::new(),
+            heading_level: None,
         }));
         stream.end_element();
 
@@ -2655,6 +2957,10 @@ mod tests {
             inline_style: Vec::new(),
             render_inline: false,
             is_image: false,
+            // A `$790` level alone never promotes (mechanical-route rule);
+            // the "heading" hint must accompany it.
+            layout_hints: vec!["heading".to_string()],
+            heading_level: Some("2".to_string()),
         }));
         stream.end_element();
 
@@ -2690,6 +2996,7 @@ mod tests {
                 length: 5,
                 style_symbol: None,
                 ruby_annotation: None,
+                ruby_pairs: Vec::new(),
                 kfx_attrs: Vec::new(),
             }],
             kfx_attrs: Vec::new(),
@@ -2701,6 +3008,8 @@ mod tests {
             inline_style: Vec::new(),
             render_inline: false,
             is_image: false,
+            layout_hints: Vec::new(),
+            heading_level: None,
         }));
         stream.end_element();
 
@@ -3402,6 +3711,7 @@ mod tests {
                     style_symbol: None,
                     kfx_attrs: Vec::new(),
                     ruby_annotation: None,
+                    ruby_pairs: Vec::new(),
                 },
                 SpanStart {
                     role: Role::Inline,
@@ -3412,6 +3722,7 @@ mod tests {
                     style_symbol: None,
                     kfx_attrs: Vec::new(),
                     ruby_annotation: None,
+                    ruby_pairs: Vec::new(),
                 },
             ],
             kfx_attrs: Vec::new(),
@@ -3423,6 +3734,8 @@ mod tests {
             inline_style: Vec::new(),
             render_inline: false,
             is_image: false,
+            layout_hints: Vec::new(),
+            heading_level: None,
         }));
         stream.end_element();
 

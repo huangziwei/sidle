@@ -47,6 +47,11 @@ pub struct SemanticMap {
     col_span: HashMap<NodeId, u32>,
     /// Whether a table cell is a header cell (th vs td).
     is_header_cell: HashMap<NodeId, bool>,
+    /// KFX `render: inline` — an element demoted to inline flow (span) at
+    /// import because every descendant is inline-only. Emission keeps the
+    /// block attribute channels (id before class) and the epub→kfx
+    /// direction can re-emit the `render` field from it.
+    render_inline: HashMap<NodeId, bool>,
     /// Programming language for code blocks.
     language: HashMap<NodeId, TextRange>,
     /// Original `class` attribute string (verbatim, space-separated). Used to
@@ -276,6 +281,18 @@ impl SemanticMap {
         self.is_header_cell.get(&node).copied().unwrap_or(false)
     }
 
+    // --- render_inline ---
+
+    /// Mark a node as a KFX `render: inline` element demoted to inline flow.
+    pub fn set_render_inline(&mut self, node: NodeId) {
+        self.render_inline.insert(node, true);
+    }
+
+    /// Whether the node is a demoted KFX `render: inline` element.
+    pub fn render_inline(&self, node: NodeId) -> bool {
+        self.render_inline.get(&node).copied().unwrap_or(false)
+    }
+
     // --- language ---
 
     /// Set the programming language for a code block.
@@ -438,6 +455,7 @@ impl SemanticMap {
             + self.row_span.len()
             + self.col_span.len()
             + self.is_header_cell.len()
+            + self.render_inline.len()
             + self.language.len()
             + self.class.len()
             + self.style.len()

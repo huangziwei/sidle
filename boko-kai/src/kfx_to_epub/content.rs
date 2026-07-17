@@ -27,6 +27,7 @@ use super::dom::{Dom, NodeId};
 use super::loader::BookData;
 use super::properties::{self, CssDecl};
 use super::resources::ResourceIndex;
+use crate::export::xdom::is_inline_only;
 
 /// Per-book state for content emission. Mirrors the instance attributes
 /// calibre's `KFX_EPUB_Content.__init__` sets up.
@@ -182,6 +183,29 @@ pub struct AnchorTarget {
 enum LocateResult {
     Found(NodeId),
     Remaining(i64),
+}
+
+/// One inline mark inside a text run's `$142 style_events`: a ruby
+/// annotation `(offset, length, ruby_name, id_list, style)` or a styled run
+/// `(offset, length, style_name)`. Kept offset-sorted with enclosing marks
+/// first; [`ContentState::emit_marks`] nests contained marks.
+enum Mark {
+    Ruby(
+        usize,
+        usize,
+        String,
+        Vec<(i64, i64, String)>,
+        Option<String>,
+    ),
+    Styled(usize, usize, String),
+}
+
+impl Mark {
+    fn bounds(&self) -> (usize, usize) {
+        match self {
+            Mark::Ruby(off, len, ..) | Mark::Styled(off, len, ..) => (*off, *len),
+        }
+    }
 }
 
 pub struct BookPart {
@@ -754,7 +778,23 @@ impl<'a> ContentState<'a> {
                 .unwrap_or_default();
             offsets.sort_unstable();
             for off in offsets {
+                let dbg =
+                    std::env::var("BOKO_DEBUG_LOCATE").is_ok_and(|v| v == format!("{loc_id}"));
+                if dbg {
+                    eprintln!(
+                        "PRE-LOCATE eid={loc_id} off={off} subtree={}",
+                        self.book_parts[part_index].dom.serialize(elem_id)
+                    );
+                }
                 if let Some(located) = self.locate_offset(part_index, elem_id, off, false, true) {
+                    if dbg {
+                        let dom = &self.book_parts[part_index].dom;
+                        eprintln!(
+                            "LOCATE eid={loc_id} off={off} -> tag={} text={:?}",
+                            dom.get(located).tag,
+                            dom.get(located).text,
+                        );
+                    }
                     self.process_position(loc_id, off, part_index, located);
                 }
             }
@@ -881,10 +921,24 @@ impl<'a> ContentState<'a> {
                     if offset_query == 0 {
                         return LocateResult::Found(elem);
                     } else if offset_query < text_len {
-                        let new_span = self.split_span(part_index, elem, offset_query);
                         if zero_len {
-                            self.split_span(part_index, new_span, 0);
+                            // Nest the anchor inside the span: the head keeps
+                            // the span's own text, a fresh zero-length anchor
+                            // span sits at the offset, and the tail follows in
+                            // a plain nested span (`strip_empty_spans` unwraps
+                            // it later). Keeping everything inside preserves
+                            // the span's class/style on the tail — the earlier
+                            // sibling split copied neither (a styled run's
+                            // tail silently lost its styling) — and any `<br>`
+                            // children stay after the whole text, where they
+                            // belong. The IR route builds this same shape.
+                            return LocateResult::Found(self.nest_anchor_split(
+                                part_index,
+                                elem,
+                                offset_query,
+                            ));
                         }
+                        let new_span = self.split_span(part_index, elem, offset_query);
                         return LocateResult::Found(new_span);
                     }
                 } else if offset_query == text_len - 1 {
@@ -937,6 +991,36 @@ impl<'a> ContentState<'a> {
         LocateResult::Remaining(offset_query)
     }
 
+    /// Split `span`'s text at `offset` code points around a fresh
+    /// zero-length anchor span, keeping everything INSIDE the span:
+    /// `text` keeps the head, the anchor and a plain span holding the tail
+    /// are prepended to the children (any existing children — `<br>`s from
+    /// the run's newlines — semantically follow the whole text and stay
+    /// after them). Returns the anchor span. The span's own class/style
+    /// keep applying to the tail, and later offset walks still count
+    /// head + nested tail exactly as before the split.
+    fn nest_anchor_split(&mut self, part_index: usize, span: NodeId, offset: i64) -> NodeId {
+        let part = &mut self.book_parts[part_index];
+        let text: Vec<char> = part
+            .dom
+            .get(span)
+            .text
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .collect();
+        let n = (offset.max(0) as usize).min(text.len());
+        let head: String = text[..n].iter().collect();
+        let tail: String = text[n..].iter().collect();
+        part.dom.get_mut(span).text = if head.is_empty() { None } else { Some(head) };
+        let tail_span = part.dom.create_element("span");
+        part.dom.get_mut(tail_span).text = if tail.is_empty() { None } else { Some(tail) };
+        let anchor = part.dom.create_element("span");
+        part.dom.insert(span, 0, tail_span);
+        part.dom.insert(span, 0, anchor);
+        anchor
+    }
+
     /// Port of calibre `split_span` (`yj_to_epub_content.py:1635`). Splits
     /// `old_span`'s text at `first_text_len` code points; the tail becomes a
     /// new sibling `<span>` inserted right after, inheriting the same class /
@@ -958,6 +1042,18 @@ impl<'a> ContentState<'a> {
         part.dom.get_mut(old_span).text = if head.is_empty() { None } else { Some(head) };
         let new_span = part.dom.create_element("span");
         part.dom.get_mut(new_span).text = if tail.is_empty() { None } else { Some(tail) };
+        // The old span's children (the `<br/>`s `set_inline_text` made from
+        // the run's `\n`s, with their tail text) semantically follow the
+        // WHOLE of the span's text, so they move to the tail half. Leaving
+        // them on the head half rendered the run's line-break — and any
+        // post-break text riding the br tails — at the split point,
+        // mid-sentence (calibre never hits this: it splits raw `\n`-bearing
+        // text and converts EOLs only at output time).
+        let moved: Vec<NodeId> = part.dom.get(old_span).children.clone();
+        part.dom.get_mut(old_span).children.clear();
+        for child in moved {
+            part.dom.append(new_span, child);
+        }
         // Inherit class + inline style so the split halves render identically.
         if let Some(cls) = part.element_classes.get(&old_span).cloned() {
             part.element_classes.insert(new_span, cls);
@@ -1505,17 +1601,9 @@ impl<'a> ContentState<'a> {
             }
         }
 
-        // Merge ruby + styled runs into one offset-sorted list of inline marks.
-        enum Mark {
-            Ruby(
-                usize,
-                usize,
-                String,
-                Vec<(i64, i64, String)>,
-                Option<String>,
-            ),
-            Styled(usize, usize, String),
-        }
+        // Merge ruby + styled runs into one list of inline marks, sorted by
+        // offset with enclosing marks first (longer before shorter at the
+        // same offset) so containment nests below.
         let mut marks: Vec<Mark> = Vec::new();
         for (off, len, name, ids, style) in rubies {
             marks.push(Mark::Ruby(off, len, name, ids, style));
@@ -1523,65 +1611,11 @@ impl<'a> ContentState<'a> {
         for (off, len, name) in styled {
             marks.push(Mark::Styled(off, len, name));
         }
-        marks.sort_by_key(|m| match m {
-            Mark::Ruby(off, ..) | Mark::Styled(off, ..) => *off,
+        marks.sort_by(|a, b| {
+            let (ao, al) = a.bounds();
+            let (bo, bl) = b.bounds();
+            ao.cmp(&bo).then_with(|| bl.cmp(&al))
         });
-
-        // Helper: emit ruby/styled/text pieces into `parent` for range
-        // [from, to). Picks up any mark whose `[off, off+len)` falls inside the
-        // range; leaves the rest as a plain `<span>`.
-        let emit_range = |this: &mut Self, parent: NodeId, from: usize, to: usize| {
-            let mut cursor = from;
-            for mark in &marks {
-                let (off, len) = match mark {
-                    Mark::Ruby(off, len, ..) | Mark::Styled(off, len, ..) => (*off, *len),
-                };
-                if off + len <= from || off >= to {
-                    continue;
-                }
-                if off < cursor {
-                    continue;
-                }
-                if off > cursor {
-                    this.emit_span(part_index, parent, &chars[cursor..off]);
-                }
-                match mark {
-                    Mark::Ruby(off, _len, ruby_name, id_list, style) => {
-                        let off = *off;
-                        let ruby_el = this.book_parts[part_index].dom.sub_element(parent, "ruby");
-                        if let Some(style_name) = style {
-                            this.attach_inline_style(part_index, ruby_el, style_name);
-                        }
-                        for (sub_off, sub_len, ruby_id_str) in id_list {
-                            let sub_off = *sub_off as usize;
-                            let sub_len = *sub_len as usize;
-                            let slice_start = off + sub_off;
-                            let slice_end = slice_start + sub_len;
-                            if slice_end > chars.len() {
-                                break;
-                            }
-                            let rb_text: String = chars[slice_start..slice_end].iter().collect();
-                            let rb = this.book_parts[part_index].dom.sub_element(ruby_el, "rb");
-                            this.book_parts[part_index].dom.get_mut(rb).text = Some(rb_text);
-
-                            let rt_text = this.lookup_ruby_annotation(ruby_name, ruby_id_str);
-                            let rt = this.book_parts[part_index].dom.sub_element(ruby_el, "rt");
-                            this.book_parts[part_index].dom.get_mut(rt).text = Some(rt_text);
-                        }
-                    }
-                    Mark::Styled(off, len, style_name) => {
-                        let span = this.book_parts[part_index].dom.sub_element(parent, "span");
-                        this.attach_inline_style(part_index, span, style_name);
-                        let text: String = chars[*off..*off + *len].iter().collect();
-                        this.book_parts[part_index].dom.set_inline_text(span, &text);
-                    }
-                }
-                cursor = off + len;
-            }
-            if cursor < to {
-                this.emit_span(part_index, parent, &chars[cursor..to]);
-            }
-        };
 
         // Walk the text top-to-bottom. Inside a link's range emit into
         // the `<a>`; outside, into the parent. Links don't nest in horror.
@@ -1591,7 +1625,7 @@ impl<'a> ContentState<'a> {
                 continue;
             }
             if *link_off > cursor {
-                emit_range(self, parent_id, cursor, *link_off);
+                self.emit_marks(part_index, parent_id, &chars, &marks, cursor, *link_off);
             }
             let a = self.book_parts[part_index].dom.sub_element(parent_id, "a");
             self.book_parts[part_index]
@@ -1601,13 +1635,102 @@ impl<'a> ContentState<'a> {
             if let Some(style_name) = style_name {
                 self.attach_inline_style(part_index, a, style_name);
             }
-            emit_range(self, a, *link_off, *link_off + *link_len);
+            self.emit_marks(
+                part_index,
+                a,
+                &chars,
+                &marks,
+                *link_off,
+                *link_off + *link_len,
+            );
             cursor = *link_off + *link_len;
         }
         if cursor < chars.len() {
-            emit_range(self, parent_id, cursor, chars.len());
+            self.emit_marks(part_index, parent_id, &chars, &marks, cursor, chars.len());
         }
         Ok(true)
+    }
+
+    /// Emit ruby / styled / plain-text pieces of `chars[from..to)` into
+    /// `parent`. Marks are (offset, enclosing-first) sorted; a styled run
+    /// containing further marks nests them by recursion — a ruby annotation
+    /// inside a styled run previously fell to the flat walk's
+    /// "already-covered" skip and was silently dropped (the base text kept,
+    /// the `<rt>` gone). Marks outside the range, or overlapping a consumed
+    /// one without being contained, are skipped as before.
+    fn emit_marks(
+        &mut self,
+        part_index: usize,
+        parent: NodeId,
+        chars: &[char],
+        marks: &[Mark],
+        from: usize,
+        to: usize,
+    ) {
+        let mut cursor = from;
+        let mut i = 0;
+        while i < marks.len() {
+            let (off, len) = marks[i].bounds();
+            if off + len <= from || off >= to || off < cursor || off + len > to {
+                i += 1;
+                continue;
+            }
+            if off > cursor {
+                self.emit_span(part_index, parent, &chars[cursor..off]);
+            }
+            match &marks[i] {
+                Mark::Ruby(off, _len, ruby_name, id_list, style) => {
+                    let off = *off;
+                    let ruby_name = ruby_name.clone();
+                    let id_list = id_list.clone();
+                    let style = style.clone();
+                    let ruby_el = self.book_parts[part_index].dom.sub_element(parent, "ruby");
+                    if let Some(style_name) = &style {
+                        self.attach_inline_style(part_index, ruby_el, style_name);
+                    }
+                    for (sub_off, sub_len, ruby_id_str) in &id_list {
+                        let sub_off = *sub_off as usize;
+                        let sub_len = *sub_len as usize;
+                        let slice_start = off + sub_off;
+                        let slice_end = slice_start + sub_len;
+                        if slice_end > chars.len() {
+                            break;
+                        }
+                        let rb_text: String = chars[slice_start..slice_end].iter().collect();
+                        let rb = self.book_parts[part_index].dom.sub_element(ruby_el, "rb");
+                        self.book_parts[part_index].dom.get_mut(rb).text = Some(rb_text);
+
+                        let rt_text = self.lookup_ruby_annotation(&ruby_name, ruby_id_str);
+                        let rt = self.book_parts[part_index].dom.sub_element(ruby_el, "rt");
+                        self.book_parts[part_index].dom.get_mut(rt).text = Some(rt_text);
+                    }
+                    i += 1;
+                }
+                Mark::Styled(off, len, style_name) => {
+                    let (off, len) = (*off, *len);
+                    let style_name = style_name.clone();
+                    let span = self.book_parts[part_index].dom.sub_element(parent, "span");
+                    self.attach_inline_style(part_index, span, &style_name);
+                    // Marks contained in this run (they sort right after it)
+                    // nest inside the styled span.
+                    let mut j = i + 1;
+                    while j < marks.len() && marks[j].bounds().0 < off + len {
+                        j += 1;
+                    }
+                    if j == i + 1 {
+                        let text: String = chars[off..off + len].iter().collect();
+                        self.book_parts[part_index].dom.set_inline_text(span, &text);
+                    } else {
+                        self.emit_marks(part_index, span, chars, &marks[i + 1..j], off, off + len);
+                    }
+                    i = j;
+                }
+            }
+            cursor = off + len;
+        }
+        if cursor < to {
+            self.emit_span(part_index, parent, &chars[cursor..to]);
+        }
     }
 
     fn emit_span(&mut self, part_index: usize, parent: NodeId, chars: &[char]) {
@@ -2203,383 +2326,18 @@ fn list_tag_for(fields: &[(u64, IonValue)], symbols: &super::loader::SymbolTable
 
 pub(crate) use crate::export::css::safe_class_name;
 
-/// HTML block-level elements (calibre's set in
-/// `yj_to_epub_properties.py:1965`). Used by `consolidate_html` to decide
-/// whether a `<div>` qualifies as a leaf-text paragraph.
-const BLOCK_TAGS: &[&str] = &[
-    "aside",
-    "body",
-    "caption",
-    "div",
-    "figure",
-    "footer",
-    "header",
-    "main",
-    "nav",
-    "section",
-    "article",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "li",
-    "ol",
-    "ul",
-    "dl",
-    "dt",
-    "dd",
-    "p",
-    "blockquote",
-    "pre",
-    "hr",
-    "table",
-    "thead",
-    "tbody",
-    "tfoot",
-    "tr",
-    "td",
-    "th",
-    "figcaption",
-];
-
-fn is_block_tag(tag: &str) -> bool {
-    BLOCK_TAGS.contains(&tag)
-}
-
-/// Calibre's `is_inline_only` (`yj_to_epub_content.py:1900`): an element is
-/// inline-only if it's an `<svg>`, or it's one of the inline tags
-/// (a/audio/img/rb/rt/ruby/span/video) with every descendant inline-only. Used
-/// by the `render:inline` demotion to decide whether a `<div>` can become a
-/// `<span>` without swallowing a block child.
-fn is_inline_only(dom: &super::dom::Dom, id: NodeId) -> bool {
-    let tag = dom.get(id).tag.as_str();
-    if tag == "svg" {
-        return true;
-    }
-    if !matches!(
-        tag,
-        "a" | "audio" | "img" | "rb" | "rt" | "ruby" | "span" | "video"
-    ) {
-        return false;
-    }
-    dom.get(id).children.iter().all(|&c| is_inline_only(dom, c))
-}
-
-/// Strip every `<span>` whose attribute list is empty (or carries only an
-/// empty `class=""`), inlining its text and children into the parent.
-/// Mirrors calibre's `consolidate_html` span pass (epub_output.py:783).
-///
-/// lxml semantics for `strip_tags`:
-/// - `span.text` appends to previous-sibling.tail (or parent.text when
-///   span is the first child),
-/// - span's children move into span's position in parent.children, in
-///   order,
-/// - `span.tail` appends to the new last-child-of-span's tail (or the
-///   previous tail-bearer when span had no children).
-fn strip_empty_spans(dom: &mut super::dom::Dom) {
-    // Snapshot ids to iterate; the strip mutates parent.children but we
-    // walk via a stable id list. Repeat until a pass produces zero strips,
-    // since a stripped span may unwrap a nested empty span.
-    loop {
-        let mut stripped_any = false;
-        for id in 0..dom.len() {
-            let elem = dom.get(id);
-            if elem.tag != "span" {
-                continue;
-            }
-            // "Empty" = no attrs, OR only attrs that are noise (empty class).
-            let has_meaningful_attr = elem.attrs.iter().any(|(k, v)| {
-                if k == "class" {
-                    !v.trim().is_empty()
-                } else {
-                    !v.is_empty() || !k.is_empty()
-                }
-            });
-            if has_meaningful_attr {
-                continue;
-            }
-            let Some(parent_id) = elem.parent else {
-                continue;
-            };
-            let Some(pos) = dom.child_index(parent_id, id) else {
-                continue;
-            };
-            // Pull the span's text + children + tail before mutating.
-            let span_text = dom.get(id).text.clone().unwrap_or_default();
-            let span_children: Vec<NodeId> = dom.get(id).children.clone();
-            let span_tail = dom.get(id).tail.clone().unwrap_or_default();
-
-            // 1. Splice span.text into the preceding text slot:
-            //    - if span is first child: parent.text += span_text
-            //    - else: prev-sibling.tail += span_text
-            if !span_text.is_empty() {
-                if pos == 0 {
-                    let parent = dom.get_mut(parent_id);
-                    let mut t = parent.text.clone().unwrap_or_default();
-                    t.push_str(&span_text);
-                    parent.text = Some(t);
-                } else {
-                    let prev_id = dom.get(parent_id).children[pos - 1];
-                    let prev = dom.get_mut(prev_id);
-                    let mut t = prev.tail.clone().unwrap_or_default();
-                    t.push_str(&span_text);
-                    prev.tail = Some(t);
-                }
-            }
-
-            // 2. Remove span from parent.children, then insert span_children
-            //    at the same pos (in order). Reparent each.
-            {
-                let parent = dom.get_mut(parent_id);
-                parent.children.remove(pos);
-                for (i, &child) in span_children.iter().enumerate() {
-                    parent.children.insert(pos + i, child);
-                }
-            }
-            for &child in &span_children {
-                dom.get_mut(child).parent = Some(parent_id);
-            }
-
-            // 3. Splice span.tail. If span had children, append onto the
-            //    last child's tail; else handle like the text case (onto
-            //    the new previous sibling, or parent.text).
-            if !span_tail.is_empty() {
-                if let Some(&last) = span_children.last() {
-                    let e = dom.get_mut(last);
-                    let mut t = e.tail.clone().unwrap_or_default();
-                    t.push_str(&span_tail);
-                    e.tail = Some(t);
-                } else if pos == 0 {
-                    // No prev sibling, no inserted children — falls onto
-                    // parent.text.
-                    let parent = dom.get_mut(parent_id);
-                    let mut t = parent.text.clone().unwrap_or_default();
-                    t.push_str(&span_tail);
-                    parent.text = Some(t);
-                } else {
-                    let prev_id = dom.get(parent_id).children[pos - 1];
-                    let prev = dom.get_mut(prev_id);
-                    let mut t = prev.tail.clone().unwrap_or_default();
-                    t.push_str(&span_tail);
-                    prev.tail = Some(t);
-                }
-            }
-
-            // Orphan the stripped span (leave the node in the arena —
-            // node ids are stable; nothing references it from a parent now).
-            dom.get_mut(id).parent = None;
-            dom.get_mut(id).children.clear();
-            stripped_any = true;
-        }
-        if !stripped_any {
-            break;
-        }
-    }
-}
-
-/// Port of calibre's `consolidate_html` (epub_output.py:742) +
-/// div→p promotion (yj_to_epub_properties.py:1921).
-///
-/// Three passes per chapter:
-/// 1. Strip attribute-less `<span>` (and class-less ones) — merges their
-///    text/children into the parent so the spine isn't 90% `<span>` noise.
-/// 2. Compute (has_block_desc, has_text_desc) per node.
-/// 3. Rename leaf-text `<div>`s to `<p>` (no block child + has text).
-///
-/// Does NOT yet do `kfx-layout-hints: heading → h<N>` or `figure → figure`
-/// promotions — those need YJ_PROPERTY_INFO entries for $761 / $790, owned
-/// by step 6.
-/// True when a `<div>` carries no attributes of any kind — directly on the DOM
-/// node (e.g. an `id` stamped by `process_position`) OR pending in the part's
-/// class / inline-style / layout-hint maps (not yet flushed to attrs at
-/// consolidate time). Calibre's div-collapse only unwraps genuinely-empty
-/// wrapper divs (`len(e.attrib) == 0`), and `-kfx-layout-hints` /
-/// `-kfx-heading-level` count as attributes there.
-fn div_is_bare(part: &BookPart, id: NodeId) -> bool {
-    part.dom.get(id).attrs.is_empty()
-        && part.element_classes.get(&id).is_none_or(|c| c.is_empty())
-        && part.element_styles.get(&id).is_none_or(|s| s.is_empty())
-        && !part.element_layout_hints.contains_key(&id)
-}
-
-/// Unwrap `e` (an attribute-less div that is the SOLE child of `parent`, whose
-/// `text` is empty) into `parent`: `e`'s leading text becomes the parent's
-/// text, `e`'s children take `e`'s place, and `e`'s tail trails the last child
-/// (lxml `strip_tags` semantics, specialised to the sole-child case).
-fn unwrap_into_parent(dom: &mut super::dom::Dom, e: NodeId, parent: NodeId) {
-    let e_text = dom.get(e).text.clone();
-    let e_children = dom.get(e).children.clone();
-    let e_tail = dom.get(e).tail.clone();
-    dom.get_mut(parent).text = e_text;
-    dom.get_mut(parent).children = e_children.clone();
-    for &c in &e_children {
-        dom.get_mut(c).parent = Some(parent);
-    }
-    if let Some(tail) = e_tail.filter(|t| !t.is_empty()) {
-        if let Some(&last) = e_children.last() {
-            let cur = dom.get(last).tail.clone().unwrap_or_default();
-            dom.get_mut(last).tail = Some(cur + &tail);
-        } else {
-            let cur = dom.get(parent).text.clone().unwrap_or_default();
-            dom.get_mut(parent).text = Some(cur + &tail);
-        }
-    }
-    dom.get_mut(e).parent = None;
-    dom.get_mut(e).children.clear();
-}
-
-/// Port of calibre's `consolidate_html` div-collapse (`epub_output.py:792-814`).
-/// Strips an attribute-less `<div>` that is the sole child of a block-level
-/// parent (with no leading parent text), splicing its contents up into the
-/// parent. KFX wraps content in redundant nested `<div>`s; without this, a
-/// heading container holding a single bare wrapper `<div>` keeps a spurious
-/// block child and never promotes to `<hN>`. Re-scans after each collapse
-/// (one removal can expose another), matching calibre's `while True`.
-fn collapse_redundant_divs(part: &mut BookPart) {
-    const BODY_CHILD_BLOCKS: &[&str] = &[
-        "aside", "div", "figure", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "iframe", "ol", "p",
-        "table", "ul",
-    ];
-    loop {
-        let mut target: Option<(NodeId, NodeId)> = None;
-        for id in 0..part.dom.len() {
-            if part.dom.get(id).tag != "div" || !div_is_bare(part, id) {
-                continue;
-            }
-            let Some(parent) = part.dom.get(id).parent else {
-                continue;
-            };
-            if part.dom.get(parent).children.len() != 1
-                || part
-                    .dom
-                    .get(parent)
-                    .text
-                    .as_deref()
-                    .is_some_and(|t| !t.is_empty())
-            {
-                continue;
-            }
-            let ptag = part.dom.get(parent).tag.as_str();
-            let ok = match ptag {
-                "aside" | "caption" | "div" | "figure" | "h1" | "h2" | "h3" | "h4" | "h5"
-                | "h6" | "li" | "p" | "td" => true,
-                "body" => {
-                    let e = part.dom.get(id);
-                    let e_text_empty = e.text.as_deref().is_none_or(|t| t.is_empty());
-                    e_text_empty
-                        && e.children.iter().all(|&c| {
-                            BODY_CHILD_BLOCKS.contains(&part.dom.get(c).tag.as_str())
-                                && part.dom.get(c).tail.as_deref().is_none_or(|t| t.is_empty())
-                        })
-                }
-                _ => false,
-            };
-            if ok {
-                target = Some((id, parent));
-                break;
-            }
-        }
-        let Some((e, parent)) = target else { break };
-        unwrap_into_parent(&mut part.dom, e, parent);
-    }
-}
-
+/// Calibre's `consolidate_html` + div→p / heading promotion, one shared
+/// implementation per part in [`crate::export::xdom::consolidate_part`] —
+/// both KFX→EPUB routes run it, so the final tag shape is identical by
+/// construction.
 pub fn consolidate_html(state: &mut ContentState) {
     for part in &mut state.book_parts {
-        strip_empty_spans(&mut part.dom);
-        // Collapse redundant single-child wrapper `<div>`s BEFORE computing
-        // block/text descendants, so a heading container holding only a bare
-        // wrapper div is seen as having no block child and can promote to
-        // `<hN>` (calibre's `consolidate_html` div-collapse, epub_output.py:792).
-        collapse_redundant_divs(part);
-
-        // First pass: compute (has_block_desc, has_text_desc) per node.
-        let n = part.dom.len();
-        let mut has_block_desc = vec![false; n];
-        let mut has_text_desc = vec![false; n];
-        // Reverse-post-order (children before parents): do iteratively.
-        let mut order: Vec<NodeId> = Vec::with_capacity(n);
-        let mut stack: Vec<NodeId> = vec![part.dom.root];
-        while let Some(id) = stack.pop() {
-            order.push(id);
-            for &child in &part.dom.get(id).children {
-                stack.push(child);
-            }
-        }
-        // Process in reverse so children fold into parents.
-        for id in order.iter().rev() {
-            let elem = part.dom.get(*id);
-            let mut block = has_block_desc[*id];
-            let mut text = has_text_desc[*id];
-            // Element's own text counts as text.
-            if let Some(t) = &elem.text
-                && t.chars().any(|c| !c.is_whitespace())
-            {
-                text = true;
-            }
-            for &child in &elem.children {
-                let child_tag = part.dom.get(child).tag.clone();
-                if is_block_tag(&child_tag) {
-                    block = true;
-                }
-                if has_block_desc[child] {
-                    block = true;
-                }
-                if has_text_desc[child] {
-                    text = true;
-                }
-                // Tail text on the child counts as text under this parent.
-                if let Some(tail) = &part.dom.get(child).tail
-                    && tail.chars().any(|c| !c.is_whitespace())
-                {
-                    text = true;
-                }
-            }
-            has_block_desc[*id] = block;
-            has_text_desc[*id] = text;
-        }
-        // Second pass: rename `<div>` to `<p>` when it's a leaf-text container.
-        for id in 0..n {
-            let elem = part.dom.get_mut(id);
-            if elem.tag == "div" && !has_block_desc[id] && has_text_desc[id] {
-                elem.tag = "p".to_string();
-            }
-        }
-
-        // Third pass: promote `<div>` / `<p>` to `<h<N>>` for elements whose
-        // KFX style carries `$761 layout_hints` containing `heading`. The
-        // heading level comes from `$790 yj.semantics.heading_level` (default
-        // 1 if missing — calibre carries the "last seen" value forward in
-        // `simplify_styles`, but that's an EPUB-output ordering concern;
-        // defaulting to 1 is a safe fallback for now).
-        //
-        // Figure promotion (`<figure>`) is calibre-gated on `not epub2_desired`
-        // — we're emitting EPUB 2.0, so we skip it. The `<figure>` element
-        // is HTML5; most EPUB2 readers render it as a generic block, but the
-        // calibre rule is the conservative choice.
-        let layout_hints: Vec<(NodeId, Vec<String>, Option<String>)> = part
-            .element_layout_hints
-            .iter()
-            .map(|(k, (hints, level))| (*k, hints.clone(), level.clone()))
-            .collect();
-        for (id, hints, level) in layout_hints {
-            if !hints.iter().any(|h| h == "heading") {
-                continue;
-            }
-            if has_block_desc[id] {
-                // Calibre's promotion requires `not contains_block_elem` —
-                // a heading with block children would be invalid HTML.
-                continue;
-            }
-            let elem = part.dom.get_mut(id);
-            if elem.tag != "div" && elem.tag != "p" {
-                continue;
-            }
-            let lvl = level.as_deref().unwrap_or("1");
-            elem.tag = format!("h{}", lvl);
-        }
+        crate::export::xdom::consolidate_part(
+            &mut part.dom,
+            &part.element_classes,
+            &part.element_styles,
+            &part.element_layout_hints,
+        );
     }
 }
 
@@ -2597,40 +2355,8 @@ pub fn consolidate_html(state: &mut ContentState) {
 /// `Vec<Element>` is push-only), so insertion never shifts existing ids and
 /// no restart is needed.
 pub fn replace_eol_with_br(state: &mut ContentState) {
-    const EOL_CHARS: &[char] = &['\n', '\r', '\u{2028}', '\u{2029}'];
     for part in &mut state.book_parts {
-        let mut id = 0;
-        while id < part.dom.len() {
-            // Element text — split at the first EOL, insert `<br/>` as the
-            // new first child. The new br's id is the highest in the arena,
-            // so the same walk visits it later and handles its tail.
-            if let Some(text) = part.dom.get(id).text.clone()
-                && let Some(idx) = text.find(EOL_CHARS)
-            {
-                let eol_len = text[idx..].chars().next().unwrap().len_utf8();
-                let head = text[..idx].to_string();
-                let tail = text[idx + eol_len..].to_string();
-                let br = part.dom.create_element("br");
-                part.dom.get_mut(br).tail = if tail.is_empty() { None } else { Some(tail) };
-                part.dom.get_mut(id).text = if head.is_empty() { None } else { Some(head) };
-                part.dom.insert(id, 0, br);
-            }
-            // Element tail — split, insert `<br/>` as the next sibling.
-            if let Some(tail_text) = part.dom.get(id).tail.clone()
-                && let Some(idx) = tail_text.find(EOL_CHARS)
-                && let Some(parent) = part.dom.get(id).parent
-                && let Some(pos) = part.dom.child_index(parent, id)
-            {
-                let eol_len = tail_text[idx..].chars().next().unwrap().len_utf8();
-                let head = tail_text[..idx].to_string();
-                let tail = tail_text[idx + eol_len..].to_string();
-                let br = part.dom.create_element("br");
-                part.dom.get_mut(br).tail = if tail.is_empty() { None } else { Some(tail) };
-                part.dom.get_mut(id).tail = if head.is_empty() { None } else { Some(head) };
-                part.dom.insert(parent, pos + 1, br);
-            }
-            id += 1;
-        }
+        crate::export::xdom::replace_eol_with_br_dom(&mut part.dom);
     }
 }
 
@@ -2728,43 +2454,7 @@ use crate::util::sanitize_href;
 /// so the list is valid without dropping content.
 pub fn normalize_lists(state: &mut ContentState) {
     for part in &mut state.book_parts {
-        let dom = &mut part.dom;
-        for id in 0..dom.len() {
-            if !matches!(dom.get(id).tag.as_str(), "ol" | "ul") {
-                continue;
-            }
-            let children = dom.get(id).children.clone();
-            let allowed = |t: &str| matches!(t, "li" | "script" | "template");
-            if children.iter().all(|&c| allowed(&dom.get(c).tag)) {
-                continue;
-            }
-            let mut new_children: Vec<NodeId> = Vec::new();
-            let mut current_li: Option<NodeId> = None;
-            for c in children {
-                if allowed(&dom.get(c).tag) {
-                    current_li = if dom.get(c).tag == "li" {
-                        Some(c)
-                    } else {
-                        None
-                    };
-                    new_children.push(c);
-                } else {
-                    let li = match current_li {
-                        Some(li) => li,
-                        None => {
-                            let li = dom.create_element("li");
-                            dom.get_mut(li).parent = Some(id);
-                            new_children.push(li);
-                            current_li = Some(li);
-                            li
-                        }
-                    };
-                    dom.get_mut(c).parent = Some(li);
-                    dom.get_mut(li).children.push(c);
-                }
-            }
-            dom.get_mut(id).children = new_children;
-        }
+        crate::export::xdom::normalize_lists_dom(&mut part.dom);
     }
 }
 
@@ -2844,29 +2534,11 @@ pub fn fixup_styles_and_classes(state: &mut ContentState) {
 
 pub fn finalize_chapter_attrs(state: &mut ContentState) {
     for part in &mut state.book_parts {
-        // Apply class assignments.
-        let classes_map: Vec<(NodeId, Vec<String>)> = part
-            .element_classes
-            .iter()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
-        for (id, classes) in classes_map {
-            if !classes.is_empty() {
-                let joined = classes.join(" ");
-                part.dom.get_mut(id).set("class", joined);
-            }
-        }
-        // Apply inline styles.
-        let styles_map: Vec<(NodeId, CssDecl)> = part
-            .element_styles
-            .iter()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
-        for (id, decl) in styles_map {
-            if !decl.is_empty() {
-                part.dom.get_mut(id).set("style", decl.to_inline());
-            }
-        }
+        crate::export::xdom::finalize_attrs(
+            &mut part.dom,
+            &part.element_classes,
+            &part.element_styles,
+        );
     }
 }
 
