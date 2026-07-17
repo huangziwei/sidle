@@ -17,7 +17,7 @@ use std::io;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
-use crate::pdf::doc::{decode_pdf_string, deref, load_pdf, page_dimensions};
+use crate::formats::pdf::doc::{decode_pdf_string, deref, load_pdf, page_dimensions};
 
 /// One PDF page's display size, in PDF points (1/72 inch).
 #[derive(Debug, Clone, Copy)]

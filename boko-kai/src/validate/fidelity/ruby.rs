@@ -21,12 +21,12 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use zip::ZipArchive;
 
-use crate::epub::{parse_container_xml, parse_opf};
-use crate::kfx::container::{
+use crate::formats::epub::{parse_container_xml, parse_opf};
+use crate::formats::kfx::container::{
     SymbolTable, parse_container_header, parse_container_info, parse_index_table, skip_enty_header,
 };
-use crate::kfx::ion::{IonParser, IonValue};
-use crate::kfx::symbols::KfxSymbol;
+use crate::formats::kfx::ion::{IonParser, IonValue};
+use crate::formats::kfx::symbols::KfxSymbol;
 
 /// A single ruby pair: base text plus its annotation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -384,7 +384,7 @@ pub fn extract_pairs_from_kfx(kfx_bytes: &[u8]) -> Result<Vec<RubyPair>, String>
     // (ruby_name → Vec<annotation> indexed by ruby_id-1).
     let mut content_map: HashMap<String, Vec<String>> = HashMap::new();
     let mut ruby_lookup: HashMap<String, Vec<String>> = HashMap::new();
-    let mut storyline_locs: Vec<&crate::kfx::container::EntityLoc> = Vec::new();
+    let mut storyline_locs: Vec<&crate::formats::kfx::container::EntityLoc> = Vec::new();
 
     let content_type = KfxSymbol::Content as u32;
     let ruby_content_type = KfxSymbol::RubyContent as u32;
@@ -425,7 +425,7 @@ pub fn extract_pairs_from_kfx(kfx_bytes: &[u8]) -> Result<Vec<RubyPair>, String>
     Ok(pairs)
 }
 
-fn parse_entity(data: &[u8], ent: &crate::kfx::container::EntityLoc) -> Option<IonValue> {
+fn parse_entity(data: &[u8], ent: &crate::formats::kfx::container::EntityLoc) -> Option<IonValue> {
     if ent.offset + ent.length > data.len() {
         return None;
     }

@@ -1,6 +1,6 @@
 //! Minimal OPF parser tailored to the EPUB-3 standalone validator.
 //!
-//! Independent from [`crate::epub::parse_opf`] by design (per
+//! Independent from [`crate::formats::epub::parse_opf`] by design (per
 //! `crate::validate` philosophy: a parser-side bug should surface in the
 //! validator instead of being silently mirrored). Captures the attributes
 //! the standalone validator needs that the full parser drops:

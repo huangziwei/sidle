@@ -64,7 +64,7 @@ pub fn sanitize_for_kfx(data: &[u8]) -> Option<Vec<u8>> {
 ///
 /// Unlike [`sanitize_for_kfx`], this always re-encodes — including JPEG input —
 /// and that is the point: it guarantees a known encoding and colorspace. The
-/// caller is [`crate::pdf::cover`], which embeds the result as a PDF Image
+/// caller is [`crate::formats::pdf::cover`], which embeds the result as a PDF Image
 /// XObject declaring `/DeviceRGB` + `/DCTDecode`. Passing a JPEG through
 /// untouched would let a progressive, CMYK, or Adobe-inverted source reach that
 /// declaration and render as garbage (or not at all).

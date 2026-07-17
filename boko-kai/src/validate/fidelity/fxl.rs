@@ -22,10 +22,10 @@ use std::io::{Cursor, Read};
 
 use zip::ZipArchive;
 
-use crate::epub::{parse_container_xml, parse_opf};
-use crate::kfx::container::get_field;
-use crate::kfx::ion::IonValue;
-use crate::kfx::symbols::KfxSymbol;
+use crate::formats::epub::{parse_container_xml, parse_opf};
+use crate::formats::kfx::container::get_field;
+use crate::formats::kfx::ion::IonValue;
+use crate::formats::kfx::symbols::KfxSymbol;
 
 #[derive(Debug, Default)]
 pub struct Report {

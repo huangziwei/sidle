@@ -3,25 +3,27 @@
 //! KFX is Amazon's Kindle Format 10, using Ion binary data format.
 //!
 //! This module handles I/O operations for reading KFX containers.
-//! Pure parsing functions are in `crate::kfx::container`.
+//! Pure parsing functions are in `crate::formats::kfx::container`.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::import::{ChapterId, Importer, SpineEntry};
-use crate::io::{ByteSource, FileSource};
-use crate::kfx::anchor_table::{AnchorTable, register_heading_levels, register_nav_synthetics};
-use crate::kfx::container::{
+use crate::formats::kfx::anchor_table::{
+    AnchorTable, register_heading_levels, register_nav_synthetics,
+};
+use crate::formats::kfx::container::{
     ContainerError, EntityLoc, SymbolTable, get_field, parse_container_header,
     parse_container_info, parse_index_table, skip_enty_header,
 };
-use crate::kfx::ion::{IonParser, IonValue};
-use crate::kfx::resource_index::{self, ImageResource};
-use crate::kfx::schema::schema;
-use crate::kfx::storyline::parse_storyline_to_ir;
-use crate::kfx::symbols::KfxSymbol;
+use crate::formats::kfx::ion::{IonParser, IonValue};
+use crate::formats::kfx::resource_index::{self, ImageResource};
+use crate::formats::kfx::schema::schema;
+use crate::formats::kfx::storyline::parse_storyline_to_ir;
+use crate::formats::kfx::symbols::KfxSymbol;
+use crate::import::{ChapterId, Importer, SpineEntry};
+use crate::io::{ByteSource, FileSource};
 use crate::model::Chapter;
 use crate::model::{
     AnchorTarget, CollectionInfo, Contributor, GlobalNodeId, Landmark, Metadata, TocEntry,
@@ -267,7 +269,7 @@ impl Importer for KfxImporter {
             .as_struct()
             .and_then(|f| get_field(f, sym!(Id)))
             .and_then(|v| v.as_int());
-        crate::kfx::storyline::apply_section_template(
+        crate::formats::kfx::storyline::apply_section_template(
             &mut chapter,
             template.eid,
             template.style.as_deref(),
@@ -494,7 +496,10 @@ impl Importer for KfxImporter {
             .map(|(name, fields)| {
                 (
                     name.clone(),
-                    crate::kfx::yj_properties::convert_yj_properties(fields, &self.symbols),
+                    crate::formats::kfx::yj_properties::convert_yj_properties(
+                        fields,
+                        &self.symbols,
+                    ),
                 )
             })
             .collect();
@@ -1112,7 +1117,8 @@ impl KfxImporter {
             if let Some(wm) =
                 get_field(fields, sym!(WritingMode)).and_then(|v| self.symbols.text_of(v))
             {
-                writing_mode = crate::kfx::writing_mode::normalize_writing_mode(wm).to_string();
+                writing_mode =
+                    crate::formats::kfx::writing_mode::normalize_writing_mode(wm).to_string();
             }
             if let Some(dir) =
                 get_field(fields, sym!(Direction)).and_then(|v| self.symbols.text_of(v))
@@ -1128,9 +1134,10 @@ impl KfxImporter {
                 .filter(|e| e.type_id == KfxSymbol::Style as u32)
                 .filter_map(|loc| self.parse_entity_ion(*loc).ok())
                 .collect();
-            if let Some(vertical) =
-                crate::kfx::writing_mode::majority_vertical_mode(styles.iter(), &self.symbols)
-            {
+            if let Some(vertical) = crate::formats::kfx::writing_mode::majority_vertical_mode(
+                styles.iter(),
+                &self.symbols,
+            ) {
                 writing_mode = vertical;
             }
         }
@@ -1241,11 +1248,12 @@ impl KfxImporter {
                             style: get_field(tf, sym!(Style))
                                 .and_then(|v| self.get_symbol_text(v))
                                 .map(|s| s.to_string()),
-                            inline_style: crate::kfx::yj_properties::convert_yj_properties(
-                                tf,
-                                &self.symbols,
-                            )
-                            .items,
+                            inline_style:
+                                crate::formats::kfx::yj_properties::convert_yj_properties(
+                                    tf,
+                                    &self.symbols,
+                                )
+                                .items,
                         };
                         section_templates.push((sec_name.to_string(), template));
                     }

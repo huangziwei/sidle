@@ -10,17 +10,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::dom::Stylesheet;
-use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href};
-use crate::io::{ByteSource, FileSource};
-use crate::mobi::parser::{
+use crate::formats::mobi::parser::{
     DivElement, SkeletonFile, parse_div_index, parse_ncx_index, parse_skel_index, read_index,
 };
-use crate::mobi::{
+use crate::formats::mobi::{
     Compression, Encoding, HuffCdicReader, MobiFormat, MobiHeader, NULL_INDEX, PdbInfo, TocNode,
     build_toc_from_ncx, detect_image_type, is_metadata_record, palmdoc, parse_exth, parse_fdst,
     strip_trailing_data, transform,
 };
+use crate::html::Stylesheet;
+use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href};
+use crate::io::{ByteSource, FileSource};
 use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
 
 /// AZW3/KF8 format importer with lazy loading.
@@ -863,7 +863,7 @@ impl Azw3Importer {
 
 fn detect_format(
     mobi: &MobiHeader,
-    exth: &Option<crate::mobi::ExthHeader>,
+    exth: &Option<crate::formats::mobi::ExthHeader>,
     pdb: &PdbInfo,
     read_record: &dyn Fn(usize) -> io::Result<Vec<u8>>,
 ) -> io::Result<MobiFormat> {
@@ -895,7 +895,7 @@ fn parse_resolution(s: &str) -> Option<(u32, u32)> {
 fn build_metadata(
     pdb: &PdbInfo,
     mobi: &MobiHeader,
-    exth: &Option<crate::mobi::ExthHeader>,
+    exth: &Option<crate::formats::mobi::ExthHeader>,
 ) -> Metadata {
     let title = exth
         .as_ref()

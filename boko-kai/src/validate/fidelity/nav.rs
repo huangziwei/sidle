@@ -35,12 +35,12 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use zip::ZipArchive;
 
-use crate::epub::{parse_container_xml, parse_nav_toc, parse_ncx, parse_opf};
-use crate::kfx::container::{
+use crate::formats::epub::{parse_container_xml, parse_nav_toc, parse_ncx, parse_opf};
+use crate::formats::kfx::container::{
     SymbolTable, parse_container_header, parse_container_info, parse_index_table, skip_enty_header,
 };
-use crate::kfx::ion::{IonParser, IonValue};
-use crate::kfx::symbols::KfxSymbol;
+use crate::formats::kfx::ion::{IonParser, IonValue};
+use crate::formats::kfx::symbols::KfxSymbol;
 use crate::model::TocEntry;
 
 /// A nav_unit's resolved target inside KFX.
@@ -651,7 +651,7 @@ fn extract_kfx_nav(kfx_bytes: &[u8]) -> Result<KfxNav, String> {
     Ok(nav)
 }
 
-fn parse_entity(data: &[u8], ent: &crate::kfx::container::EntityLoc) -> Option<IonValue> {
+fn parse_entity(data: &[u8], ent: &crate::formats::kfx::container::EntityLoc) -> Option<IonValue> {
     if ent.offset + ent.length > data.len() {
         return None;
     }

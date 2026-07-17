@@ -40,7 +40,7 @@ pub fn validate(bytes: &[u8]) -> Report {
         if zip_bundles_kfx(bytes) {
             // A `.kfx-zip` bundle, not an EPUB: merge its containers into one
             // `.kfx` and run the KFX checks on that.
-            match crate::kfx::merge::merge_kfx_zip_bytes(bytes) {
+            match crate::formats::kfx::merge::merge_kfx_zip_bytes(bytes) {
                 Ok(merged) => report.findings.extend(validate_kfx(&merged)),
                 Err(e) => report.findings.push(Finding {
                     check: "kfx",

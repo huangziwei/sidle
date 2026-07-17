@@ -27,12 +27,12 @@ use std::io::Cursor;
 
 use zip::ZipArchive;
 
-use crate::epub::{parse_container_xml, parse_opf};
-use crate::kfx::container::{
+use crate::formats::epub::{parse_container_xml, parse_opf};
+use crate::formats::kfx::container::{
     SymbolTable, parse_container_header, parse_container_info, parse_index_table, skip_enty_header,
 };
-use crate::kfx::ion::{IonParser, IonValue};
-use crate::kfx::symbols::KfxSymbol;
+use crate::formats::kfx::ion::{IonParser, IonValue};
+use crate::formats::kfx::symbols::KfxSymbol;
 
 /// A field-level mismatch between EPUB and KFX. Direction-neutral: `epub` is
 /// the value seen on the EPUB side, `kfx` is the value seen on the KFX side,
@@ -991,7 +991,7 @@ where
     }
 }
 
-fn parse_entity(data: &[u8], ent: &crate::kfx::container::EntityLoc) -> Option<IonValue> {
+fn parse_entity(data: &[u8], ent: &crate::formats::kfx::container::EntityLoc) -> Option<IonValue> {
     if ent.offset + ent.length > data.len() {
         return None;
     }

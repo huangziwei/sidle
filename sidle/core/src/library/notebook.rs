@@ -5,7 +5,7 @@
 //! thumbnail), and `pages/page-<n>.svg` — the page renders cached at import
 //! time, so the viewer never
 //! re-parses the SQLite. Metadata (title, page count, content hash) lives in
-//! the `notebooks` DB table. Decode + render come from `boko::kfx::nbk`.
+//! the `notebooks` DB table. Decode + render come from `boko::formats::kfx::nbk`.
 
 use std::path::Path;
 
@@ -70,7 +70,7 @@ pub fn import_notebook(
     }
 
     // Decode + render every page up front — this is the cached derived asset.
-    let notebook = boko::kfx::nbk::open(src_nbk)
+    let notebook = boko::formats::kfx::nbk::open(src_nbk)
         .map_err(|e| anyhow::anyhow!("decode notebook {uuid}: {e:?}"))?;
     let svgs = notebook.page_svgs();
 

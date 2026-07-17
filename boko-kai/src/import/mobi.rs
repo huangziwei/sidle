@@ -11,14 +11,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::dom::Stylesheet;
-use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href};
-use crate::io::{ByteSource, FileSource};
-use crate::mobi::{
+use crate::formats::mobi::{
     Compression, Encoding, HuffCdicReader, MobiHeader, NULL_INDEX, PdbInfo, TocNode,
     build_toc_from_ncx, detect_image_type, filepos, is_metadata_record, palmdoc, parse_exth,
     parse_ncx_index, read_index, strip_trailing_data,
 };
+use crate::html::Stylesheet;
+use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href};
+use crate::io::{ByteSource, FileSource};
 use crate::model::{AnchorTarget, Chapter, GlobalNodeId, Landmark, Metadata, TocEntry};
 
 /// MOBI6 format importer with chapter splitting.
@@ -979,7 +979,7 @@ fn discover_assets_from_source(
 fn build_metadata(
     pdb: &PdbInfo,
     mobi: &MobiHeader,
-    exth: &Option<crate::mobi::ExthHeader>,
+    exth: &Option<crate::formats::mobi::ExthHeader>,
 ) -> Metadata {
     let title = exth
         .as_ref()

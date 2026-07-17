@@ -50,7 +50,7 @@ fn kfx_zip_with_single_container_matches_plain_kfx() {
     assert_eq!(bundled.toc().len(), plain_toc_len);
 }
 
-/// `boko::kfx::merge::merge_kfx_zip` produces a self-contained `.kfx` that
+/// `boko::formats::kfx::merge::merge_kfx_zip` produces a self-contained `.kfx` that
 /// loads identically to the source bundle. Verifies the merge fast-path used
 /// by `boko convert in.kfx-zip out.kfx`.
 #[test]
@@ -59,7 +59,7 @@ fn merge_produces_loadable_single_kfx() {
     let dir = pack_single_kfx_as_zip(Path::new(kfx_path));
     let zip_path = dir.path().join("bundle.kfx-zip");
 
-    let merged_bytes = boko::kfx::merge::merge_kfx_zip(&zip_path).expect("merge");
+    let merged_bytes = boko::formats::kfx::merge::merge_kfx_zip(&zip_path).expect("merge");
     assert!(
         merged_bytes.starts_with(b"CONT"),
         "merge output must be a CONT container"

@@ -23,9 +23,11 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use zip::ZipArchive;
 
-use crate::epub::{parse_container_xml, parse_opf};
-use crate::kfx::container::{parse_container_header, parse_container_info, parse_index_table};
-use crate::kfx::symbols::KfxSymbol;
+use crate::formats::epub::{parse_container_xml, parse_opf};
+use crate::formats::kfx::container::{
+    parse_container_header, parse_container_info, parse_index_table,
+};
+use crate::formats::kfx::symbols::KfxSymbol;
 use crate::style::Declaration;
 
 /// Per-property statistics: how many times boko parsed it vs dropped it.

@@ -7,24 +7,24 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{self, Seek, Write};
 
 use crate::export::Exporter;
-use crate::import::ChapterId;
-use crate::kfx::auxiliary::{build_auxiliary_data_fragment, build_ruby_content_fragments};
-use crate::kfx::context::{ExportContext, LandmarkTarget};
-use crate::kfx::cover::{
+use crate::formats::kfx::auxiliary::{build_auxiliary_data_fragment, build_ruby_content_fragments};
+use crate::formats::kfx::context::{ExportContext, LandmarkTarget};
+use crate::formats::kfx::cover::{
     COVER_SECTION_NAME, build_cover_section, get_chapter_image_path, is_image_only_chapter,
     needs_standalone_cover, normalize_cover_path,
 };
-use crate::kfx::fragment::KfxFragment;
-use crate::kfx::ion::IonValue;
-use crate::kfx::metadata::{
+use crate::formats::kfx::fragment::KfxFragment;
+use crate::formats::kfx::ion::IonValue;
+use crate::formats::kfx::metadata::{
     MetadataCategory, MetadataContext, build_category_entries, generate_book_id,
 };
-use crate::kfx::serialization::{
+use crate::formats::kfx::serialization::{
     SerializedEntity, create_entity_data, generate_container_id, serialize_annotated_ion,
     serialize_container,
 };
-use crate::kfx::symbols::KfxSymbol;
-use crate::kfx::transforms::format_to_kfx_symbol;
+use crate::formats::kfx::symbols::KfxSymbol;
+use crate::formats::kfx::transforms::format_to_kfx_symbol;
+use crate::import::ChapterId;
 use crate::model::{
     AnchorTarget, Book, Chapter, GlobalNodeId, LandmarkType, NodeId, ResolvedLinks, Role,
 };
@@ -325,7 +325,8 @@ fn build_kfx_container(
     // Kindle selects CJK fonts + upright vertical orientation. Without it a
     // Chinese/Japanese book renders in Latin fonts with sideways glyphs — Amazon
     // stamps this on its own styles (e.g. `zh-tw`); boko previously did not.
-    ctx.content_language = crate::kfx::metadata::kfx_content_language(&book.metadata().language);
+    ctx.content_language =
+        crate::formats::kfx::metadata::kfx_content_language(&book.metadata().language);
 
     // ========================================================================
     // PASS 2: SYNTHESIS (Generate Ion)
@@ -855,7 +856,7 @@ fn build_book_metadata_fragment(
     // `kfx::metadata::resolve_export_asin` so sidle can call the same
     // function to learn what we stamp here (it needs the value to clean
     // up the on-device `<title>_<ASIN>.sdr/` sidecar Kindle invents).
-    let asin = crate::kfx::metadata::resolve_export_asin(meta);
+    let asin = crate::formats::kfx::metadata::resolve_export_asin(meta);
 
     // content_id mirrors ASIN (calibre convention). The device `.sdr`
     // directory uses this as the per-book state key; matching ASIN means
@@ -914,10 +915,10 @@ fn build_book_metadata_fragment(
 /// Helper to create a metadata key-value struct. `value` may be a string or
 /// an Ion-native boolean (Amazon and calibre both emit `is_sample` and
 /// `override_kindle_font` as bool literals).
-fn metadata_kv(key: &str, value: &crate::kfx::metadata::MetadataValue) -> IonValue {
+fn metadata_kv(key: &str, value: &crate::formats::kfx::metadata::MetadataValue) -> IonValue {
     let ion_value = match value {
-        crate::kfx::metadata::MetadataValue::Text(s) => IonValue::String(s.clone()),
-        crate::kfx::metadata::MetadataValue::Bool(b) => IonValue::Bool(*b),
+        crate::formats::kfx::metadata::MetadataValue::Text(s) => IonValue::String(s.clone()),
+        crate::formats::kfx::metadata::MetadataValue::Bool(b) => IonValue::Bool(*b),
     };
     IonValue::Struct(vec![
         (KfxSymbol::Key as u64, IonValue::String(key.to_string())),
@@ -1030,7 +1031,9 @@ fn build_content_features_fragment(ctx: &ExportContext) -> KfxFragment {
     // Chinese/Japanese book renders with Latin fonts and rotated glyphs even
     // when the `language` tag is right. `content_language` is the per-style
     // form ("zh-tw"/"ja"/...), which the classifier maps back to the marker.
-    if let Some((key, major)) = crate::kfx::metadata::cjk_reflow_feature(&ctx.content_language) {
+    if let Some((key, major)) =
+        crate::formats::kfx::metadata::cjk_reflow_feature(&ctx.content_language)
+    {
         features.push(content_feature("com.amazon.yjconversion", key, major));
 
         // Japanese vertical layout has a dedicated feature (no Chinese analog
@@ -1118,7 +1121,7 @@ fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
                 (
                     KfxSymbol::Value as u64,
                     IonValue::Decimal(
-                        crate::kfx::style_schema::DOCUMENT_LINE_HEIGHT_EM.to_string(),
+                        crate::formats::kfx::style_schema::DOCUMENT_LINE_HEIGHT_EM.to_string(),
                     ),
                 ),
                 (
@@ -1416,7 +1419,8 @@ fn build_headings_entries(ctx: &ExportContext) -> Vec<IonValue> {
     use std::collections::BTreeMap;
 
     // Group headings by level
-    let mut by_level: BTreeMap<u8, Vec<&crate::kfx::context::HeadingPosition>> = BTreeMap::new();
+    let mut by_level: BTreeMap<u8, Vec<&crate::formats::kfx::context::HeadingPosition>> =
+        BTreeMap::new();
     for heading in &ctx.heading_positions {
         by_level.entry(heading.level).or_default().push(heading);
     }
@@ -1515,7 +1519,7 @@ fn build_headings_entries(ctx: &ExportContext) -> Vec<IonValue> {
 /// Iterates over all landmarks in ctx.landmark_fragments and converts each
 /// to a KFX nav_unit using the schema for type conversion.
 fn build_landmarks_entries(book: &Book, ctx: &ExportContext) -> Vec<IonValue> {
-    use crate::kfx::schema::schema;
+    use crate::formats::kfx::schema::schema;
 
     let mut entries = Vec::new();
 
@@ -1828,7 +1832,7 @@ fn build_chapter_entities_grouped(
     section_name: &str,
     ctx: &mut ExportContext,
 ) -> (KfxFragment, KfxFragment, Option<KfxFragment>) {
-    use crate::kfx::storyline::{ir_to_tokens, tokens_to_ion};
+    use crate::formats::kfx::storyline::{ir_to_tokens, tokens_to_ion};
 
     // Check if this is a cover chapter (image-only).
     // Three gates:
@@ -2070,7 +2074,7 @@ fn build_chapter_entities(
     section_name: &str,
     ctx: &mut ExportContext,
 ) -> Vec<KfxFragment> {
-    use crate::kfx::storyline::{ir_to_tokens, tokens_to_ion};
+    use crate::formats::kfx::storyline::{ir_to_tokens, tokens_to_ion};
 
     let mut fragments = Vec::new();
 
@@ -2194,8 +2198,8 @@ fn build_chapter_entities(
 /// IMPORTANT: The symbols in the list must appear in the exact same order
 /// they were interned, so that symbol ID = KFX_SYMBOL_TABLE_SIZE + index.
 fn build_symbol_table_ion(local_symbols: &[String]) -> Vec<u8> {
-    use crate::kfx::ion::IonWriter;
-    use crate::kfx::symbols::KFX_MAX_SYMBOL_ID;
+    use crate::formats::kfx::ion::IonWriter;
+    use crate::formats::kfx::symbols::KFX_MAX_SYMBOL_ID;
 
     let mut writer = IonWriter::new();
     writer.write_bvm();
@@ -3048,14 +3052,16 @@ fn serialize_fragments(
                 local_symbols
                     .iter()
                     .position(|s| s == &frag.fid)
-                    .map(|i| (crate::kfx::symbols::KFX_SYMBOL_TABLE_SIZE + i) as u32)
+                    .map(|i| (crate::formats::kfx::symbols::KFX_SYMBOL_TABLE_SIZE + i) as u32)
                     .unwrap_or(0)
             };
 
             let data = match &frag.data {
-                crate::kfx::fragment::FragmentData::Ion(value) => create_entity_data(value),
-                crate::kfx::fragment::FragmentData::Raw(bytes) => {
-                    crate::kfx::serialization::create_raw_media_data(bytes)
+                crate::formats::kfx::fragment::FragmentData::Ion(value) => {
+                    create_entity_data(value)
+                }
+                crate::formats::kfx::fragment::FragmentData::Raw(bytes) => {
+                    crate::formats::kfx::serialization::create_raw_media_data(bytes)
                 }
             };
 
@@ -5033,7 +5039,7 @@ fn build_pdf_book_metadata_fragment(
 
 /// Deterministic content_id/ASIN for a PDOC — in the SAME 32-char Crockford-style
 /// base32 shape as every other sideload, via the single canonical
-/// [`crate::kfx::metadata::generate_content_id`]. (Previously this rolled its own
+/// [`crate::formats::kfx::metadata::generate_content_id`]. (Previously this rolled its own
 /// 32-hex value, so a PDF→KFX baked a *different alphabet* than `resolve_export_asin`
 /// recomputes — `books.asin` never matched the on-device `.sdr`/`.notebooks` key.
 /// One fabricator now.) Seeded by the PDF's stable identity (title + author + byte
@@ -5047,7 +5053,7 @@ fn synth_pdoc_content_id(meta: &PdfKfxMeta, pdf: &crate::import::pdf::PdfDoc) ->
         pdf.bytes.len(),
         pdf.pages.len(),
     );
-    crate::kfx::metadata::generate_content_id(&seed)
+    crate::formats::kfx::metadata::generate_content_id(&seed)
 }
 
 /// Resolve a page-progression-direction string to its KFX symbol: `"rtl"` →
@@ -5536,7 +5542,7 @@ mod tests {
         assert!(frag.is_singleton());
 
         // Extract Ion and verify structure
-        if let crate::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
+        if let crate::formats::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
             if let IonValue::Struct(fields) = ion {
                 // Should have reading_orders field
                 let has_reading_orders = fields
@@ -5565,7 +5571,7 @@ mod tests {
         assert!(frag.is_singleton());
 
         // Extract Ion and verify structure
-        if let crate::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
+        if let crate::formats::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
             if let IonValue::Struct(fields) = ion {
                 // Should have categorised_metadata field
                 let has_categorised = fields
@@ -5602,7 +5608,7 @@ mod tests {
     fn test_metadata_kv_helper() {
         let kv = metadata_kv(
             "test_key",
-            &crate::kfx::metadata::MetadataValue::Text("test_value".to_string()),
+            &crate::formats::kfx::metadata::MetadataValue::Text("test_value".to_string()),
         );
 
         if let IonValue::Struct(fields) = kv {
@@ -5657,7 +5663,7 @@ mod tests {
         // Should be $389 (book_navigation) type
         assert_eq!(frag.ftype, KfxSymbol::BookNavigation as u64);
 
-        if let crate::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
+        if let crate::formats::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
             // Should be a list with one reading order entry
             if let IonValue::List(reading_orders) = ion {
                 assert_eq!(reading_orders.len(), 1, "should have one reading order");
@@ -5751,7 +5757,7 @@ mod tests {
         assert!(frag.is_singleton());
 
         // Extract Ion and verify structure
-        if let crate::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
+        if let crate::formats::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
             if let IonValue::Struct(fields) = ion {
                 // Should have features field
                 let features = fields
@@ -5840,7 +5846,7 @@ mod tests {
         assert!(frag.is_singleton());
 
         // Extract Ion and verify structure
-        if let crate::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
+        if let crate::formats::kfx::fragment::FragmentData::Ion(ion) = &frag.data {
             if let IonValue::Struct(fields) = ion {
                 // Check for required fields
                 let field_ids: Vec<u64> = fields.iter().map(|(id, _)| *id).collect();
@@ -5898,7 +5904,9 @@ mod tests {
         let frag = build_document_data_fragment(&ctx);
 
         // Extract max_id from the fragment
-        if let crate::kfx::fragment::FragmentData::Ion(IonValue::Struct(fields)) = &frag.data {
+        if let crate::formats::kfx::fragment::FragmentData::Ion(IonValue::Struct(fields)) =
+            &frag.data
+        {
             let max_id_field = fields.iter().find(|(id, _)| *id == KfxSymbol::MaxId as u64);
 
             if let Some((_, IonValue::Int(max_id))) = max_id_field {
@@ -5941,7 +5949,7 @@ mod tests {
 
     #[test]
     fn test_build_headings_entries_single_level() {
-        use crate::kfx::context::HeadingPosition;
+        use crate::formats::kfx::context::HeadingPosition;
 
         let mut ctx = ExportContext::new();
 
@@ -5996,7 +6004,7 @@ mod tests {
 
     #[test]
     fn test_build_headings_entries_multiple_levels() {
-        use crate::kfx::context::HeadingPosition;
+        use crate::formats::kfx::context::HeadingPosition;
 
         let mut ctx = ExportContext::new();
 
@@ -6064,7 +6072,7 @@ mod tests {
 
     #[test]
     fn test_build_headings_entries_ignores_h1() {
-        use crate::kfx::context::HeadingPosition;
+        use crate::formats::kfx::context::HeadingPosition;
 
         let mut ctx = ExportContext::new();
 
@@ -6080,7 +6088,7 @@ mod tests {
 
     #[test]
     fn test_build_headings_entries_target_position() {
-        use crate::kfx::context::HeadingPosition;
+        use crate::formats::kfx::context::HeadingPosition;
 
         let mut ctx = ExportContext::new();
 
@@ -6126,7 +6134,7 @@ mod tests {
     #[test]
     fn position_maps_are_section_keyed_with_per_section_walk() {
         use crate::ChapterId;
-        use crate::kfx::fragment::FragmentData;
+        use crate::formats::kfx::fragment::FragmentData;
 
         let mut ctx = ExportContext::new();
         let c0 = ctx.register_section("c0");
@@ -6226,7 +6234,7 @@ mod tests {
 #[allow(clippy::vec_init_then_push, clippy::needless_range_loop)]
 mod entity_structure_tests {
     use super::*;
-    use crate::kfx::fragment::FragmentData;
+    use crate::formats::kfx::fragment::FragmentData;
     use crate::model::Book;
 
     #[test]
@@ -6744,7 +6752,7 @@ mod anchor_resolution_tests {
         let kfx_data = build_kfx_container(&mut book, &|_, _, _, _| {}).unwrap();
 
         // Parse the KFX container to find anchor entities
-        use crate::kfx::container::{
+        use crate::formats::kfx::container::{
             parse_container_header, parse_container_info, parse_index_table,
         };
 
@@ -6780,7 +6788,7 @@ mod anchor_resolution_tests {
 #[cfg(test)]
 mod manga_fxl_tests {
     use super::*;
-    use crate::kfx::fragment::FragmentData;
+    use crate::formats::kfx::fragment::FragmentData;
 
     /// The cover is a solo unit; the rest pair into consecutive spreads with an
     /// odd tail page standing alone. Every page index appears exactly once, in

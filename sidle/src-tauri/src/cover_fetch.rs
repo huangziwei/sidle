@@ -122,8 +122,8 @@ async fn fetch_variant(client: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
 /// kai's fabricated fallback (stamped on EPUB→KFX so Kindle's ingestion is
 /// happy) is 32-char Crockford-Base32. Length alone distinguishes them.
 /// Re-exported from boko-kai so the fabrication source-of-truth is in one
-/// place (`boko::kfx::metadata::resolve_export_asin` uses the same gate).
-pub use boko::kfx::metadata::looks_like_real_amazon_asin;
+/// place (`boko::formats::kfx::metadata::resolve_export_asin` uses the same gate).
+pub use boko::formats::kfx::metadata::looks_like_real_amazon_asin;
 
 /// Map a book language (BCP-47 — "ja", "ja-JP", "en-US", …) to Amazon's
 /// numeric locale segment in the `/images/P/` URL.

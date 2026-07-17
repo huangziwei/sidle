@@ -329,7 +329,7 @@ impl Book {
                 let file = std::fs::File::open(path)?;
                 let source: Arc<dyn crate::io::ByteSource> =
                     Arc::new(crate::io::FileSource::new(file)?);
-                if crate::mobi::sniff_format(&*source)?.is_kf8() {
+                if crate::formats::mobi::sniff_format(&*source)?.is_kf8() {
                     Box::new(Azw3Importer::from_source(source)?)
                 } else {
                     Box::new(MobiImporter::from_source(source)?)
@@ -345,7 +345,7 @@ impl Book {
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx-zip"))
                 {
-                    let bytes = crate::kfx::merge::merge_kfx_zip(path)?;
+                    let bytes = crate::formats::kfx::merge::merge_kfx_zip(path)?;
                     let source = Arc::new(MemorySource::new(bytes));
                     Box::new(KfxImporter::from_source(source)?)
                 } else {
@@ -379,7 +379,7 @@ impl Book {
             // The sniff is cheap (PDB + record 0); branching here keeps the
             // dispatch on a single .mobi extension across both entry points.
             Format::Mobi => {
-                if crate::mobi::sniff_format(&*source)?.is_kf8() {
+                if crate::formats::mobi::sniff_format(&*source)?.is_kf8() {
                     Box::new(Azw3Importer::from_source(source)?)
                 } else {
                     Box::new(MobiImporter::from_source(source)?)

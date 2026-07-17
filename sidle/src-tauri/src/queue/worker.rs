@@ -384,7 +384,7 @@ fn convert_epub_to_kfx(
     // The DB row started life from the EPUB metadata which usually has no
     // ASIN at all; we need the stamped value on the row so device-delete
     // can wipe Kindle's `<title>_<ASIN>.sdr/` catalog sidecar.
-    let asin = boko::kfx::metadata::resolve_export_asin(handle.metadata());
+    let asin = boko::formats::kfx::metadata::resolve_export_asin(handle.metadata());
 
     Ok(Produced {
         kfx_path: Some(out_path),
@@ -615,7 +615,7 @@ fn convert_kfx_to_pdf(
     let kfx_bytes = std::fs::read(source_path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
     on_progress("extract", 0, 1, "Extracting PDF");
-    let pdf = boko::kfx::pdf_container::kfx_extract_pdf(&kfx_bytes)
+    let pdf = boko::formats::kfx::pdf_container::kfx_extract_pdf(&kfx_bytes)
         .map_err(|e| anyhow::anyhow!("kfx→pdf extract: {e}"))?;
     write_bytes_atomic(&out_path, &pdf)?;
 

@@ -1,5 +1,5 @@
-use boko::kfx::container::SymbolTable;
-use boko::kfx::symbols::KFX_SYMBOL_TABLE;
+use boko::formats::kfx::container::SymbolTable;
+use boko::formats::kfx::symbols::KFX_SYMBOL_TABLE;
 use clap::Parser;
 use ion_rs::{
     AnyEncoding, Decoder, ElementReader, IonResult, MapCatalog, Reader, SharedSymbolTable,
@@ -44,7 +44,7 @@ struct EntityInfo {
 /// Build an Ion binary preamble that imports our KFX symbol table.
 /// This allows parsing Ion data that uses KFX symbols without an embedded import.
 fn build_symbol_table_preamble() -> Vec<u8> {
-    use boko::kfx::symbols::KFX_MAX_SYMBOL_ID;
+    use boko::formats::kfx::symbols::KFX_MAX_SYMBOL_ID;
     build_symbol_table_preamble_with_max_id(KFX_MAX_SYMBOL_ID as i64)
 }
 
@@ -478,8 +478,8 @@ fn dump_kfx_stats(data: &[u8]) -> IonResult<()> {
 
 /// Extract details from a singleton entity (list counts, etc.)
 fn extract_singleton_details(entity_data: &[u8], type_name: &str) -> Option<String> {
-    use boko::kfx::ion::{IonParser, IonValue};
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::{IonParser, IonValue};
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     // Check for ENTY format
     if entity_data.len() < 10 || &entity_data[0..4] != b"ENTY" {
@@ -625,9 +625,9 @@ fn extract_singleton_details(entity_data: &[u8], type_name: &str) -> Option<Stri
 }
 
 /// Count navigation entries recursively (including nested children)
-fn count_nav_entries(entries: &[boko::kfx::ion::IonValue]) -> usize {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+fn count_nav_entries(entries: &[boko::formats::kfx::ion::IonValue]) -> usize {
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     let mut count = entries.len();
     for entry in entries {
@@ -688,8 +688,8 @@ struct LinkToRef {
 
 /// Report all anchors from a KFX container
 fn report_anchors(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -975,8 +975,8 @@ struct NavEntryInfo {
 
 /// Report navigation (headings, toc, landmarks) from a KFX container
 fn report_navigation(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -1166,15 +1166,15 @@ fn report_navigation(data: &[u8]) -> IonResult<()> {
 
 /// Extract navigation entries from book_navigation and print them
 fn extract_and_print_navigation(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     extended_symbols: &[String],
     base_symbol_count: usize,
     content_map: &HashMap<String, Vec<String>>,
     fragment_content_map: &HashMap<i64, (String, i64)>,
     container_type_map: &HashMap<i64, String>,
 ) {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     // Unwrap list if present (book_navigation contains a list with one struct)
     let inner = match value {
@@ -1334,7 +1334,7 @@ fn extract_and_print_navigation(
 /// Recursively extract navigation entries from nav_unit list
 #[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
 fn extract_nav_entries(
-    entries: &[boko::kfx::ion::IonValue],
+    entries: &[boko::formats::kfx::ion::IonValue],
     extended_symbols: &[String],
     base_symbol_count: usize,
     content_map: &HashMap<String, Vec<String>>,
@@ -1343,8 +1343,8 @@ fn extract_nav_entries(
     depth: usize,
     result: &mut Vec<NavEntryInfo>,
 ) {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     for entry in entries {
         // Each entry is nav_unit (393) annotated struct
@@ -1485,12 +1485,12 @@ fn resolve_symbol(sym_id: u64, extended_symbols: &[String], base_symbol_count: u
 
 /// Extract name and content_list texts from a content entity
 fn extract_content_texts(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     extended_symbols: &[String],
     base_symbol_count: usize,
 ) -> Option<(String, Vec<String>)> {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     let inner = match value {
         IonValue::Annotated(_, inner) => inner.as_ref(),
@@ -1525,14 +1525,14 @@ fn extract_content_texts(
 
 /// Extract fragment ID → content references from a storyline
 fn extract_fragment_content_refs(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     extended_symbols: &[String],
     base_symbol_count: usize,
     refs: &mut HashMap<i64, (String, i64)>,
     container_types: &mut HashMap<i64, String>,
 ) {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     let inner = match value {
         IonValue::Annotated(_, inner) => inner.as_ref(),
@@ -1559,14 +1559,14 @@ fn extract_fragment_content_refs(
 
 /// Recursively extract fragment ID → content refs and container types from content_list
 fn extract_fragment_content_from_list(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     extended_symbols: &[String],
     base_symbol_count: usize,
     refs: &mut HashMap<i64, (String, i64)>,
     container_types: &mut HashMap<i64, String>,
 ) {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if let IonValue::List(items) = value {
         for item in items {
@@ -1647,13 +1647,13 @@ fn extract_fragment_content_from_list(
 
 /// Extract link_to references from a storyline
 fn extract_link_to_refs(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     extended_symbols: &[String],
     base_symbol_count: usize,
     refs: &mut Vec<LinkToRef>,
 ) {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     let inner = match value {
         IonValue::Annotated(_, inner) => inner.as_ref(),
@@ -1679,13 +1679,13 @@ fn extract_link_to_refs(
 
 /// Recursively extract link_to refs from storyline content_list
 fn extract_link_to_from_content_list(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     extended_symbols: &[String],
     base_symbol_count: usize,
     refs: &mut Vec<LinkToRef>,
 ) {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if let IonValue::List(items) = value {
         for item in items {
@@ -1760,13 +1760,13 @@ fn extract_link_to_from_content_list(
 
 /// Extract inline link_to references (offset, length, link_to)
 fn extract_inline_link_to(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     extended_symbols: &[String],
     base_symbol_count: usize,
     refs: &mut Vec<(String, i64, i64)>,
 ) {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if let IonValue::List(items) = value {
         for item in items {
@@ -1807,15 +1807,15 @@ fn extract_inline_link_to(
 
 /// Extract anchor info from an Ion value
 fn extract_anchor_info(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     extended_symbols: &[String],
     base_symbol_count: usize,
     content_map: &HashMap<String, Vec<String>>,
     fragment_content_map: &HashMap<i64, (String, i64)>,
     anchor_source_text: &HashMap<String, String>,
 ) -> Option<AnchorInfo> {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     let inner = match value {
         IonValue::Annotated(_, inner) => inner.as_ref(),
@@ -2034,8 +2034,8 @@ fn build_maps(
     extended_symbols: &[String],
     base_symbol_count: usize,
 ) -> ResolutionMaps {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     let mut entity_map = HashMap::new();
     let mut fragment_map = HashMap::new();
@@ -2107,12 +2107,12 @@ fn build_maps(
 
 /// Extract fragment IDs from storyline content_list and map them to the story name
 fn extract_fragment_ids(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     story_name: &str,
     fragment_map: &mut HashMap<u64, String>,
 ) {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     let inner = match value {
         IonValue::Annotated(_, inner) => inner.as_ref(),
@@ -2131,11 +2131,11 @@ fn extract_fragment_ids(
 
 /// Recursively extract fragment IDs from a content_list
 fn extract_fragment_ids_from_list(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     story_name: &str,
     fragment_map: &mut HashMap<u64, String>,
 ) {
-    use boko::kfx::ion::IonValue;
+    use boko::formats::kfx::ion::IonValue;
 
     if let IonValue::List(items) = value {
         for item in items {
@@ -2146,12 +2146,12 @@ fn extract_fragment_ids_from_list(
 
 /// Extract id field from a content_list item struct, and recurse into nested content_lists
 fn extract_id_from_content_item(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     story_name: &str,
     fragment_map: &mut HashMap<u64, String>,
 ) {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     let inner = match value {
         IonValue::Annotated(_, inner) => inner.as_ref(),
@@ -2175,12 +2175,12 @@ fn extract_id_from_content_item(
 
 /// Extract a name field from an Ion value for entity identification
 fn extract_name_from_ion(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     extended_symbols: &[String],
     base_symbol_count: usize,
 ) -> Option<String> {
-    use boko::kfx::ion::IonValue;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonValue;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     let inner = match value {
         IonValue::Annotated(_, inner) => inner.as_ref(),
@@ -2206,11 +2206,11 @@ fn extract_name_from_ion(
 
 /// Convert an Ion value to a string representation for display
 fn ion_value_to_string(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     extended_symbols: &[String],
     base_symbol_count: usize,
 ) -> Option<String> {
-    use boko::kfx::ion::IonValue;
+    use boko::formats::kfx::ion::IonValue;
 
     match value {
         IonValue::String(s) => Some(s.clone()),
@@ -2307,7 +2307,7 @@ fn dump_ion_data_extended(
     }
 
     // max_id for import: base symbols (0-851) plus extended document symbols
-    use boko::kfx::symbols::KFX_MAX_SYMBOL_ID;
+    use boko::formats::kfx::symbols::KFX_MAX_SYMBOL_ID;
     let max_id = (KFX_MAX_SYMBOL_ID + extended_symbols.len()) as i64;
 
     // Create catalog with extended symbol table
@@ -2727,8 +2727,8 @@ fn report_container(data: &[u8]) -> IonResult<()> {
 
 /// Report features (content_features entity) from a KFX file
 fn report_features(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -2842,15 +2842,15 @@ fn report_features(data: &[u8]) -> IonResult<()> {
             };
 
             // Extract and display features list
-            if let boko::kfx::ion::IonValue::Struct(fields) = &value {
+            if let boko::formats::kfx::ion::IonValue::Struct(fields) = &value {
                 for (field_id, field_value) in fields {
                     let field_name = resolve_sym(*field_id);
 
                     if field_name == "features"
-                        && let boko::kfx::ion::IonValue::List(features) = field_value
+                        && let boko::formats::kfx::ion::IonValue::List(features) = field_value
                     {
                         for (idx, feature) in features.iter().enumerate() {
-                            if let boko::kfx::ion::IonValue::Struct(ffields) = feature {
+                            if let boko::formats::kfx::ion::IonValue::Struct(ffields) = feature {
                                 let mut namespace = String::new();
                                 let mut key = String::new();
                                 let mut major = 0i64;
@@ -2861,35 +2861,41 @@ fn report_features(data: &[u8]) -> IonResult<()> {
 
                                     match fname {
                                         "namespace" => {
-                                            if let boko::kfx::ion::IonValue::String(s) = fval {
+                                            if let boko::formats::kfx::ion::IonValue::String(s) =
+                                                fval
+                                            {
                                                 namespace = s.clone();
                                             }
                                         }
                                         "key" => {
-                                            if let boko::kfx::ion::IonValue::String(s) = fval {
+                                            if let boko::formats::kfx::ion::IonValue::String(s) =
+                                                fval
+                                            {
                                                 key = s.clone();
                                             }
                                         }
                                         "version_info" => {
                                             // Extract version from nested struct
-                                            if let boko::kfx::ion::IonValue::Struct(vi) = fval {
+                                            if let boko::formats::kfx::ion::IonValue::Struct(vi) =
+                                                fval
+                                            {
                                                 for (vid, vval) in vi {
                                                     let vname = resolve_sym(*vid);
                                                     if vname == "version"
-                                                        && let boko::kfx::ion::IonValue::Struct(ver) =
+                                                        && let boko::formats::kfx::ion::IonValue::Struct(ver) =
                                                             vval
                                                     {
                                                         for (verid, verval) in ver {
                                                             let vername = resolve_sym(*verid);
                                                             if vername == "major_version"
-                                                                && let boko::kfx::ion::IonValue::Int(
+                                                                && let boko::formats::kfx::ion::IonValue::Int(
                                                                     v,
                                                                 ) = verval
                                                             {
                                                                 major = *v;
                                                             }
                                                             if vername == "minor_version"
-                                                                && let boko::kfx::ion::IonValue::Int(
+                                                                && let boko::formats::kfx::ion::IonValue::Int(
                                                                     v,
                                                                 ) = verval
                                                             {
@@ -2928,8 +2934,8 @@ fn report_features(data: &[u8]) -> IonResult<()> {
 
 /// Report metadata (book_metadata entity) from a KFX file
 fn report_metadata(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -3041,15 +3047,16 @@ fn report_metadata(data: &[u8]) -> IonResult<()> {
             };
 
             // Extract and display categorised_metadata
-            if let boko::kfx::ion::IonValue::Struct(fields) = &value {
+            if let boko::formats::kfx::ion::IonValue::Struct(fields) = &value {
                 for (field_id, field_value) in fields {
                     let field_name = resolve_sym(*field_id);
 
                     if field_name == "categorised_metadata"
-                        && let boko::kfx::ion::IonValue::List(categories) = field_value
+                        && let boko::formats::kfx::ion::IonValue::List(categories) = field_value
                     {
                         for category in categories {
-                            if let boko::kfx::ion::IonValue::Struct(cat_fields) = category {
+                            if let boko::formats::kfx::ion::IonValue::Struct(cat_fields) = category
+                            {
                                 let mut cat_name = String::new();
                                 let mut metadata_list = Vec::new();
 
@@ -3057,14 +3064,18 @@ fn report_metadata(data: &[u8]) -> IonResult<()> {
                                     let cname = resolve_sym(*cid);
                                     match cname {
                                         "category" => {
-                                            if let boko::kfx::ion::IonValue::String(s) = cval {
+                                            if let boko::formats::kfx::ion::IonValue::String(s) =
+                                                cval
+                                            {
                                                 cat_name = s.clone();
                                             }
                                         }
                                         "metadata" => {
-                                            if let boko::kfx::ion::IonValue::List(items) = cval {
+                                            if let boko::formats::kfx::ion::IonValue::List(items) =
+                                                cval
+                                            {
                                                 for item in items {
-                                                    if let boko::kfx::ion::IonValue::Struct(
+                                                    if let boko::formats::kfx::ion::IonValue::Struct(
                                                         item_fields,
                                                     ) = item
                                                     {
@@ -3075,15 +3086,15 @@ fn report_metadata(data: &[u8]) -> IonResult<()> {
                                                             let iname = resolve_sym(*iid);
                                                             match iname {
                                                                     "key" => {
-                                                                        if let boko::kfx::ion::IonValue::String(s) = ival {
+                                                                        if let boko::formats::kfx::ion::IonValue::String(s) = ival {
                                                                             key = s.clone();
                                                                         }
                                                                     }
                                                                     "value" => {
                                                                         val = match ival {
-                                                                            boko::kfx::ion::IonValue::String(s) => s.clone(),
-                                                                            boko::kfx::ion::IonValue::Int(i) => i.to_string(),
-                                                                            boko::kfx::ion::IonValue::Bool(b) => b.to_string(),
+                                                                            boko::formats::kfx::ion::IonValue::String(s) => s.clone(),
+                                                                            boko::formats::kfx::ion::IonValue::Int(i) => i.to_string(),
+                                                                            boko::formats::kfx::ion::IonValue::Bool(b) => b.to_string(),
                                                                             _ => format!("{:?}", ival),
                                                                         };
                                                                     }
@@ -3132,8 +3143,8 @@ fn report_metadata(data: &[u8]) -> IonResult<()> {
 
 /// Report reading orders from a KFX file
 fn report_reading_orders(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -3247,15 +3258,15 @@ fn report_reading_orders(data: &[u8]) -> IonResult<()> {
             println!("=== Reading Orders ===\n");
 
             // Extract reading_orders field
-            if let boko::kfx::ion::IonValue::Struct(fields) = &value {
+            if let boko::formats::kfx::ion::IonValue::Struct(fields) = &value {
                 for (field_id, field_value) in fields {
                     let field_name = resolve_sym(*field_id);
 
                     if field_name == "reading_orders"
-                        && let boko::kfx::ion::IonValue::List(orders) = field_value
+                        && let boko::formats::kfx::ion::IonValue::List(orders) = field_value
                     {
                         for (idx, order) in orders.iter().enumerate() {
-                            if let boko::kfx::ion::IonValue::Struct(order_fields) = order {
+                            if let boko::formats::kfx::ion::IonValue::Struct(order_fields) = order {
                                 let mut order_name = String::new();
                                 let mut sections: Vec<String> = Vec::new();
                                 let mut page_progression_direction: Option<String> = None;
@@ -3264,17 +3275,17 @@ fn report_reading_orders(data: &[u8]) -> IonResult<()> {
                                     let oname = resolve_sym(*oid);
                                     match oname {
                                         "reading_order_name" => {
-                                            if let boko::kfx::ion::IonValue::Symbol(s) = oval {
+                                            if let boko::formats::kfx::ion::IonValue::Symbol(s) = oval {
                                                 order_name = resolve_sym(*s).to_string();
-                                            } else if let boko::kfx::ion::IonValue::String(s) = oval
+                                            } else if let boko::formats::kfx::ion::IonValue::String(s) = oval
                                             {
                                                 order_name = s.clone();
                                             }
                                         }
                                         "sections" => {
-                                            if let boko::kfx::ion::IonValue::List(secs) = oval {
+                                            if let boko::formats::kfx::ion::IonValue::List(secs) = oval {
                                                 for sec in secs {
-                                                    if let boko::kfx::ion::IonValue::Symbol(s) = sec
+                                                    if let boko::formats::kfx::ion::IonValue::Symbol(s) = sec
                                                     {
                                                         sections.push(resolve_sym(*s).to_string());
                                                     }
@@ -3282,7 +3293,7 @@ fn report_reading_orders(data: &[u8]) -> IonResult<()> {
                                             }
                                         }
                                         "page_progression_direction" => {
-                                            if let boko::kfx::ion::IonValue::Symbol(s) = oval {
+                                            if let boko::formats::kfx::ion::IonValue::Symbol(s) = oval {
                                                 page_progression_direction =
                                                     Some(resolve_sym(*s).to_string());
                                             }
@@ -3320,8 +3331,8 @@ fn report_reading_orders(data: &[u8]) -> IonResult<()> {
 
 /// Report document data from a KFX file
 fn report_document(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -3439,7 +3450,7 @@ fn report_document(data: &[u8]) -> IonResult<()> {
             println!("=== Document Data ===\n");
 
             // Extract and display document properties
-            if let boko::kfx::ion::IonValue::Struct(fields) = &value {
+            if let boko::formats::kfx::ion::IonValue::Struct(fields) = &value {
                 for (field_id, field_value) in fields {
                     let field_name = resolve_sym(*field_id);
 
@@ -3462,11 +3473,11 @@ fn report_document(data: &[u8]) -> IonResult<()> {
 }
 
 /// Format an IonValue simply for display
-fn format_ion_value_simple<F>(value: &boko::kfx::ion::IonValue, resolve_sym: &F) -> String
+fn format_ion_value_simple<F>(value: &boko::formats::kfx::ion::IonValue, resolve_sym: &F) -> String
 where
     F: Fn(u64) -> String,
 {
-    use boko::kfx::ion::IonValue;
+    use boko::formats::kfx::ion::IonValue;
     match value {
         IonValue::Null => "null".to_string(),
         IonValue::Bool(b) => b.to_string(),
@@ -3524,8 +3535,8 @@ where
 
 /// Report sections from a KFX file
 fn report_sections(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -3643,7 +3654,7 @@ fn report_sections(data: &[u8]) -> IonResult<()> {
             };
 
             // Extract section info
-            if let boko::kfx::ion::IonValue::Struct(fields) = &value {
+            if let boko::formats::kfx::ion::IonValue::Struct(fields) = &value {
                 let mut section_name = String::new();
                 let mut templates: Vec<String> = Vec::new();
 
@@ -3651,14 +3662,16 @@ fn report_sections(data: &[u8]) -> IonResult<()> {
                     let field_name = resolve_sym(*field_id);
                     match field_name.as_str() {
                         "section_name" => {
-                            if let boko::kfx::ion::IonValue::Symbol(s) = field_value {
+                            if let boko::formats::kfx::ion::IonValue::Symbol(s) = field_value {
                                 section_name = resolve_sym(*s);
                             }
                         }
                         "page_templates" => {
-                            if let boko::kfx::ion::IonValue::List(tpls) = field_value {
+                            if let boko::formats::kfx::ion::IonValue::List(tpls) = field_value {
                                 for tpl in tpls {
-                                    if let boko::kfx::ion::IonValue::Struct(tpl_fields) = tpl {
+                                    if let boko::formats::kfx::ion::IonValue::Struct(tpl_fields) =
+                                        tpl
+                                    {
                                         let mut tpl_type = String::new();
                                         let mut story_name = String::new();
                                         let mut dims = String::new();
@@ -3667,26 +3680,26 @@ fn report_sections(data: &[u8]) -> IonResult<()> {
                                             let tname = resolve_sym(*tid);
                                             match tname.as_str() {
                                                 "type" => {
-                                                    if let boko::kfx::ion::IonValue::Symbol(s) =
+                                                    if let boko::formats::kfx::ion::IonValue::Symbol(s) =
                                                         tval
                                                     {
                                                         tpl_type = resolve_sym(*s);
                                                     }
                                                 }
                                                 "story_name" => {
-                                                    if let boko::kfx::ion::IonValue::Symbol(s) =
+                                                    if let boko::formats::kfx::ion::IonValue::Symbol(s) =
                                                         tval
                                                     {
                                                         story_name = resolve_sym(*s);
                                                     }
                                                 }
                                                 "fixed_width" => {
-                                                    if let boko::kfx::ion::IonValue::Int(w) = tval {
+                                                    if let boko::formats::kfx::ion::IonValue::Int(w) = tval {
                                                         dims = format!("{}x", w);
                                                     }
                                                 }
                                                 "fixed_height" => {
-                                                    if let boko::kfx::ion::IonValue::Int(h) = tval {
+                                                    if let boko::formats::kfx::ion::IonValue::Int(h) = tval {
                                                         dims = format!("{}{}", dims, h);
                                                     }
                                                 }
@@ -3727,8 +3740,8 @@ fn report_sections(data: &[u8]) -> IonResult<()> {
 
 /// Report external resources from a KFX file
 fn report_resources(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -3846,7 +3859,7 @@ fn report_resources(data: &[u8]) -> IonResult<()> {
             };
 
             // Extract resource info
-            if let boko::kfx::ion::IonValue::Struct(fields) = &value {
+            if let boko::formats::kfx::ion::IonValue::Struct(fields) = &value {
                 let mut resource_name = String::new();
                 let mut format = String::new();
                 let mut location = String::new();
@@ -3857,27 +3870,27 @@ fn report_resources(data: &[u8]) -> IonResult<()> {
                     let field_name = resolve_sym(*field_id);
                     match field_name.as_str() {
                         "resource_name" => {
-                            if let boko::kfx::ion::IonValue::Symbol(s) = field_value {
+                            if let boko::formats::kfx::ion::IonValue::Symbol(s) = field_value {
                                 resource_name = resolve_sym(*s);
                             }
                         }
                         "format" => {
-                            if let boko::kfx::ion::IonValue::Symbol(s) = field_value {
+                            if let boko::formats::kfx::ion::IonValue::Symbol(s) = field_value {
                                 format = resolve_sym(*s);
                             }
                         }
                         "location" => {
-                            if let boko::kfx::ion::IonValue::String(s) = field_value {
+                            if let boko::formats::kfx::ion::IonValue::String(s) = field_value {
                                 location = s.clone();
                             }
                         }
                         "resource_width" => {
-                            if let boko::kfx::ion::IonValue::Int(w) = field_value {
+                            if let boko::formats::kfx::ion::IonValue::Int(w) = field_value {
                                 width = Some(*w);
                             }
                         }
                         "resource_height" => {
-                            if let boko::kfx::ion::IonValue::Int(h) = field_value {
+                            if let boko::formats::kfx::ion::IonValue::Int(h) = field_value {
                                 height = Some(*h);
                             }
                         }
@@ -3903,8 +3916,8 @@ fn report_resources(data: &[u8]) -> IonResult<()> {
 
 /// Report storylines from a KFX file
 fn report_storylines(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -4015,7 +4028,7 @@ fn report_storylines(data: &[u8]) -> IonResult<()> {
                 }
             };
 
-            if let boko::kfx::ion::IonValue::Struct(fields) = &value {
+            if let boko::formats::kfx::ion::IonValue::Struct(fields) = &value {
                 let mut story_name = String::new();
                 let mut stats = ContentStats::default();
 
@@ -4023,12 +4036,12 @@ fn report_storylines(data: &[u8]) -> IonResult<()> {
                     let field_name = resolve_sym(*field_id);
                     match field_name.as_str() {
                         "story_name" => {
-                            if let boko::kfx::ion::IonValue::Symbol(s) = field_value {
+                            if let boko::formats::kfx::ion::IonValue::Symbol(s) = field_value {
                                 story_name = resolve_sym(*s);
                             }
                         }
                         "content_list" => {
-                            if let boko::kfx::ion::IonValue::List(items) = field_value {
+                            if let boko::formats::kfx::ion::IonValue::List(items) = field_value {
                                 collect_content_stats(items, &resolve_sym, &mut stats);
                             }
                         }
@@ -4109,14 +4122,14 @@ struct ContentStats {
 
 /// Collect content stats recursively from a content_list
 fn collect_content_stats<F>(
-    items: &[boko::kfx::ion::IonValue],
+    items: &[boko::formats::kfx::ion::IonValue],
     resolve_sym: &F,
     stats: &mut ContentStats,
 ) where
     F: Fn(u64) -> String,
 {
     for item in items {
-        if let boko::kfx::ion::IonValue::Struct(fields) = item {
+        if let boko::formats::kfx::ion::IonValue::Struct(fields) = item {
             let mut is_image = false;
             let mut is_heading = false;
             let mut has_links = false;
@@ -4125,7 +4138,7 @@ fn collect_content_stats<F>(
                 let field_name = resolve_sym(*field_id);
                 match field_name.as_str() {
                     "type" => {
-                        if let boko::kfx::ion::IonValue::Symbol(s) = field_value {
+                        if let boko::formats::kfx::ion::IonValue::Symbol(s) = field_value {
                             let type_name = resolve_sym(*s);
                             if type_name == "image" {
                                 is_image = true;
@@ -4136,9 +4149,11 @@ fn collect_content_stats<F>(
                         is_heading = true;
                     }
                     "style_events" => {
-                        if let boko::kfx::ion::IonValue::List(events) = field_value {
+                        if let boko::formats::kfx::ion::IonValue::List(events) = field_value {
                             for event in events {
-                                if let boko::kfx::ion::IonValue::Struct(event_fields) = event {
+                                if let boko::formats::kfx::ion::IonValue::Struct(event_fields) =
+                                    event
+                                {
                                     for (eid, _) in event_fields {
                                         if resolve_sym(*eid) == "link_to" {
                                             has_links = true;
@@ -4149,12 +4164,12 @@ fn collect_content_stats<F>(
                         }
                     }
                     "content_list" => {
-                        if let boko::kfx::ion::IonValue::List(nested) = field_value {
+                        if let boko::formats::kfx::ion::IonValue::List(nested) = field_value {
                             collect_content_stats(nested, resolve_sym, stats);
                         }
                     }
                     "name" => {
-                        if let boko::kfx::ion::IonValue::Symbol(s) = field_value {
+                        if let boko::formats::kfx::ion::IonValue::Symbol(s) = field_value {
                             let name = resolve_sym(*s);
                             if name.starts_with("content_") && !stats.content_refs.contains(&name) {
                                 stats.content_refs.push(name);
@@ -4162,7 +4177,7 @@ fn collect_content_stats<F>(
                         }
                     }
                     "resource_name" => {
-                        if let boko::kfx::ion::IonValue::Symbol(s) = field_value {
+                        if let boko::formats::kfx::ion::IonValue::Symbol(s) = field_value {
                             let name = resolve_sym(*s);
                             if !stats.resource_refs.contains(&name) {
                                 stats.resource_refs.push(name);
@@ -4172,11 +4187,12 @@ fn collect_content_stats<F>(
                     "content" => {
                         // Extract sample text if we don't have one yet
                         if stats.first_text.is_none()
-                            && let boko::kfx::ion::IonValue::Struct(content_fields) = field_value
+                            && let boko::formats::kfx::ion::IonValue::Struct(content_fields) =
+                                field_value
                         {
                             for (cid, cval) in content_fields {
                                 if resolve_sym(*cid) == "text"
-                                    && let boko::kfx::ion::IonValue::String(t) = cval
+                                    && let boko::formats::kfx::ion::IonValue::String(t) = cval
                                 {
                                     let sample: String = t.chars().take(60).collect();
                                     if !sample.trim().is_empty() {
@@ -4215,8 +4231,8 @@ struct ContentInfo {
 }
 
 fn report_locations(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
     use std::collections::HashMap;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
@@ -4297,43 +4313,43 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
 
     // Helper to extract content items recursively from content_list
     fn extract_content_items(
-        value: &boko::kfx::ion::IonValue,
+        value: &boko::formats::kfx::ion::IonValue,
         _story_name: &str,
         resolve_sym: &dyn Fn(u64) -> String,
         result: &mut HashMap<i64, ContentInfo>,
     ) {
-        if let boko::kfx::ion::IonValue::Struct(fields) = value {
+        if let boko::formats::kfx::ion::IonValue::Struct(fields) = value {
             let mut item_id: Option<i64> = None;
             let mut item_type = String::new();
             let mut content_ref: Option<String> = None;
             let mut content_index: Option<i64> = None;
-            let mut nested_content: Option<&boko::kfx::ion::IonValue> = None;
+            let mut nested_content: Option<&boko::formats::kfx::ion::IonValue> = None;
 
             for (fid, fval) in fields {
                 let fname = resolve_sym(*fid);
                 match fname.as_str() {
                     "id" => {
-                        if let boko::kfx::ion::IonValue::Int(id) = fval {
+                        if let boko::formats::kfx::ion::IonValue::Int(id) = fval {
                             item_id = Some(*id);
                         }
                     }
                     "type" => {
-                        if let boko::kfx::ion::IonValue::Symbol(s) = fval {
+                        if let boko::formats::kfx::ion::IonValue::Symbol(s) = fval {
                             item_type = resolve_sym(*s);
                         }
                     }
                     "content" => {
-                        if let boko::kfx::ion::IonValue::Struct(cf) = fval {
+                        if let boko::formats::kfx::ion::IonValue::Struct(cf) = fval {
                             for (cid, cval) in cf {
                                 let cname = resolve_sym(*cid);
                                 match cname.as_str() {
                                     "name" => {
-                                        if let boko::kfx::ion::IonValue::Symbol(s) = cval {
+                                        if let boko::formats::kfx::ion::IonValue::Symbol(s) = cval {
                                             content_ref = Some(resolve_sym(*s));
                                         }
                                     }
                                     "index" => {
-                                        if let boko::kfx::ion::IonValue::Int(idx) = cval {
+                                        if let boko::formats::kfx::ion::IonValue::Int(idx) = cval {
                                             content_index = Some(*idx);
                                         }
                                     }
@@ -4365,7 +4381,7 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
             }
 
             // Recurse into nested content_list
-            if let Some(boko::kfx::ion::IonValue::List(items)) = nested_content {
+            if let Some(boko::formats::kfx::ion::IonValue::List(items)) = nested_content {
                 for item in items {
                     extract_content_items(item, _story_name, resolve_sym, result);
                 }
@@ -4412,26 +4428,29 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
         if type_idnum == position_map_type {
             if let Ok(value) = parser.parse() {
                 let inner = match &value {
-                    boko::kfx::ion::IonValue::Annotated(_, inner) => inner.as_ref(),
+                    boko::formats::kfx::ion::IonValue::Annotated(_, inner) => inner.as_ref(),
                     _ => &value,
                 };
-                if let boko::kfx::ion::IonValue::List(sections) = inner {
+                if let boko::formats::kfx::ion::IonValue::List(sections) = inner {
                     for section in sections {
-                        if let boko::kfx::ion::IonValue::Struct(sec_fields) = section {
+                        if let boko::formats::kfx::ion::IonValue::Struct(sec_fields) = section {
                             let mut sec_name = String::new();
                             let mut contains: Vec<i64> = Vec::new();
                             for (sid, sval) in sec_fields {
                                 let fname = resolve_sym(*sid);
                                 match fname.as_str() {
                                     "section_name" => {
-                                        if let boko::kfx::ion::IonValue::Symbol(s) = sval {
+                                        if let boko::formats::kfx::ion::IonValue::Symbol(s) = sval {
                                             sec_name = resolve_sym(*s);
                                         }
                                     }
                                     "contains" => {
-                                        if let boko::kfx::ion::IonValue::List(refs) = sval {
+                                        if let boko::formats::kfx::ion::IonValue::List(refs) = sval
+                                        {
                                             for r in refs {
-                                                if let boko::kfx::ion::IonValue::Int(pid) = r {
+                                                if let boko::formats::kfx::ion::IonValue::Int(pid) =
+                                                    r
+                                                {
                                                     contains.push(*pid);
                                                 }
                                             }
@@ -4449,16 +4468,16 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
             }
         } else if type_idnum == storyline_type
             && let Ok(value) = parser.parse()
-            && let boko::kfx::ion::IonValue::Struct(fields) = &value
+            && let boko::formats::kfx::ion::IonValue::Struct(fields) = &value
         {
             let mut story_name = String::new();
-            let mut content_list: Option<&boko::kfx::ion::IonValue> = None;
+            let mut content_list: Option<&boko::formats::kfx::ion::IonValue> = None;
 
             for (fid, fval) in fields {
                 let fname = resolve_sym(*fid);
                 match fname.as_str() {
                     "story_name" => {
-                        if let boko::kfx::ion::IonValue::Symbol(s) = fval {
+                        if let boko::formats::kfx::ion::IonValue::Symbol(s) = fval {
                             story_name = resolve_sym(*s);
                         }
                     }
@@ -4469,7 +4488,7 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
                 }
             }
 
-            if let Some(boko::kfx::ion::IonValue::List(items)) = content_list {
+            if let Some(boko::formats::kfx::ion::IonValue::List(items)) = content_list {
                 for item in items {
                     extract_content_items(
                         item,
@@ -4481,7 +4500,7 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
             }
         } else if type_idnum == content_type_id
             && let Ok(value) = parser.parse()
-            && let boko::kfx::ion::IonValue::Struct(fields) = &value
+            && let boko::formats::kfx::ion::IonValue::Struct(fields) = &value
         {
             let mut content_name = String::new();
             let mut texts: Vec<String> = Vec::new();
@@ -4490,14 +4509,14 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
                 let fname = resolve_sym(*fid);
                 match fname.as_str() {
                     "name" => {
-                        if let boko::kfx::ion::IonValue::Symbol(s) = fval {
+                        if let boko::formats::kfx::ion::IonValue::Symbol(s) = fval {
                             content_name = resolve_sym(*s);
                         }
                     }
                     "content_list" => {
-                        if let boko::kfx::ion::IonValue::List(items) = fval {
+                        if let boko::formats::kfx::ion::IonValue::List(items) = fval {
                             for item in items {
-                                if let boko::kfx::ion::IonValue::String(s) = item {
+                                if let boko::formats::kfx::ion::IonValue::String(s) = item {
                                     texts.push(s.clone());
                                 }
                             }
@@ -4570,28 +4589,37 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
             let mut all_locations: Vec<LocationEntry> = Vec::new();
             let mut location_index = 0usize;
 
-            if let boko::kfx::ion::IonValue::List(items) = &value {
+            if let boko::formats::kfx::ion::IonValue::List(items) = &value {
                 for item in items {
-                    if let boko::kfx::ion::IonValue::Struct(fields) = item {
+                    if let boko::formats::kfx::ion::IonValue::Struct(fields) = item {
                         for (fid, field_value) in fields {
                             let fname = resolve_sym(*fid);
                             if fname == "locations"
-                                && let boko::kfx::ion::IonValue::List(locations) = field_value
+                                && let boko::formats::kfx::ion::IonValue::List(locations) =
+                                    field_value
                             {
                                 for loc in locations {
-                                    if let boko::kfx::ion::IonValue::Struct(loc_fields) = loc {
+                                    if let boko::formats::kfx::ion::IonValue::Struct(loc_fields) =
+                                        loc
+                                    {
                                         let mut id = 0i64;
                                         let mut offset = 0i64;
                                         for (lid, lval) in loc_fields {
                                             let lname = resolve_sym(*lid);
                                             match lname.as_str() {
                                                 "id" => {
-                                                    if let boko::kfx::ion::IonValue::Int(v) = lval {
+                                                    if let boko::formats::kfx::ion::IonValue::Int(
+                                                        v,
+                                                    ) = lval
+                                                    {
                                                         id = *v;
                                                     }
                                                 }
                                                 "offset" => {
-                                                    if let boko::kfx::ion::IonValue::Int(v) = lval {
+                                                    if let boko::formats::kfx::ion::IonValue::Int(
+                                                        v,
+                                                    ) = lval
+                                                    {
                                                         offset = *v;
                                                     }
                                                 }
@@ -4744,8 +4772,8 @@ fn report_locations(data: &[u8]) -> IonResult<()> {
 
 /// Report position maps from a KFX file
 fn report_positions(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -4860,7 +4888,7 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
 
             // Unwrap annotations
             let inner = match &value {
-                boko::kfx::ion::IonValue::Annotated(_, inner) => inner.as_ref(),
+                boko::formats::kfx::ion::IonValue::Annotated(_, inner) => inner.as_ref(),
                 _ => &value,
             };
 
@@ -4868,10 +4896,10 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
                 println!("--- position_map ---");
                 println!("Maps sections to the EIDs they contain.\n");
                 // position_map is a List of section structs: { section_name: symbol, contains: [eid, ...] }
-                if let boko::kfx::ion::IonValue::List(sections) = inner {
+                if let boko::formats::kfx::ion::IonValue::List(sections) = inner {
                     let mut total_refs = 0usize;
                     for section in sections.iter() {
-                        if let boko::kfx::ion::IonValue::Struct(sec_fields) = section {
+                        if let boko::formats::kfx::ion::IonValue::Struct(sec_fields) = section {
                             let mut section_name = String::new();
                             let mut contains: Vec<i64> = Vec::new();
                             for (sid, sval) in sec_fields {
@@ -4879,14 +4907,19 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
                                 match sname.as_str() {
                                     "section_name" => {
                                         // section_name is a symbol reference
-                                        if let boko::kfx::ion::IonValue::Symbol(sym_id) = sval {
+                                        if let boko::formats::kfx::ion::IonValue::Symbol(sym_id) =
+                                            sval
+                                        {
                                             section_name = resolve_sym_inner(*sym_id);
                                         }
                                     }
                                     "contains" => {
-                                        if let boko::kfx::ion::IonValue::List(refs) = sval {
+                                        if let boko::formats::kfx::ion::IonValue::List(refs) = sval
+                                        {
                                             for r in refs {
-                                                if let boko::kfx::ion::IonValue::Int(eid) = r {
+                                                if let boko::formats::kfx::ion::IonValue::Int(eid) =
+                                                    r
+                                                {
                                                     contains.push(*eid);
                                                 }
                                             }
@@ -4926,10 +4959,10 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
                 println!("--- position_id_map ---");
                 println!("Maps cumulative positions (PIDs) to EID + offset.\n");
                 // position_id_map is a List of {pid, eid, offset} structs
-                if let boko::kfx::ion::IonValue::List(entries) = inner {
+                if let boko::formats::kfx::ion::IonValue::List(entries) = inner {
                     let mut mappings: Vec<(i64, i64, i64)> = Vec::new();
                     for entry in entries {
-                        if let boko::kfx::ion::IonValue::Struct(fields) = entry {
+                        if let boko::formats::kfx::ion::IonValue::Struct(fields) = entry {
                             let mut pid = 0i64;
                             let mut eid = 0i64;
                             let mut offset = 0i64;
@@ -4937,17 +4970,17 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
                                 let fname = resolve_sym_inner(*fid);
                                 match fname.as_str() {
                                     "pid" => {
-                                        if let boko::kfx::ion::IonValue::Int(v) = fval {
+                                        if let boko::formats::kfx::ion::IonValue::Int(v) = fval {
                                             pid = *v;
                                         }
                                     }
                                     "eid" => {
-                                        if let boko::kfx::ion::IonValue::Int(v) = fval {
+                                        if let boko::formats::kfx::ion::IonValue::Int(v) = fval {
                                             eid = *v;
                                         }
                                     }
                                     "offset" => {
-                                        if let boko::kfx::ion::IonValue::Int(v) = fval {
+                                        if let boko::formats::kfx::ion::IonValue::Int(v) = fval {
                                             offset = *v;
                                         }
                                     }
@@ -4993,8 +5026,8 @@ fn report_positions(data: &[u8]) -> IonResult<()> {
 
 /// Report content entities from a KFX file
 fn report_content(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -5130,11 +5163,11 @@ fn report_content(data: &[u8]) -> IonResult<()> {
 
             // Unwrap annotations
             let inner = match &value {
-                boko::kfx::ion::IonValue::Annotated(_, inner) => inner.as_ref(),
+                boko::formats::kfx::ion::IonValue::Annotated(_, inner) => inner.as_ref(),
                 _ => &value,
             };
 
-            if let boko::kfx::ion::IonValue::Struct(fields) = inner {
+            if let boko::formats::kfx::ion::IonValue::Struct(fields) = inner {
                 let mut content_type_str = String::new();
                 let mut content_len = 0usize;
 
@@ -5142,13 +5175,13 @@ fn report_content(data: &[u8]) -> IonResult<()> {
                     let field_name = resolve_sym(*field_id);
                     match field_name.as_str() {
                         "type" => {
-                            if let boko::kfx::ion::IonValue::Symbol(s) = field_value {
+                            if let boko::formats::kfx::ion::IonValue::Symbol(s) = field_value {
                                 content_type_str = resolve_sym(*s);
                             }
                         }
                         "content" => match field_value {
-                            boko::kfx::ion::IonValue::String(s) => content_len = s.len(),
-                            boko::kfx::ion::IonValue::Blob(b) => content_len = b.len(),
+                            boko::formats::kfx::ion::IonValue::String(s) => content_len = s.len(),
+                            boko::formats::kfx::ion::IonValue::Blob(b) => content_len = b.len(),
                             _ => {}
                         },
                         _ => {}
@@ -5178,8 +5211,8 @@ fn report_content(data: &[u8]) -> IonResult<()> {
 
 /// Report entity dependencies from a KFX file
 fn report_dependencies(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -5291,22 +5324,22 @@ fn report_dependencies(data: &[u8]) -> IonResult<()> {
 
             // Unwrap annotations
             let inner = match &value {
-                boko::kfx::ion::IonValue::Annotated(_, inner) => inner.as_ref(),
+                boko::formats::kfx::ion::IonValue::Annotated(_, inner) => inner.as_ref(),
                 _ => &value,
             };
 
             println!("Lists all entities in the KFX container.\n");
 
-            if let boko::kfx::ion::IonValue::Struct(fields) = inner {
+            if let boko::formats::kfx::ion::IonValue::Struct(fields) = inner {
                 for (field_id, field_value) in fields {
                     let field_name = resolve_sym(*field_id);
                     if field_name == "container_list"
-                        && let boko::kfx::ion::IonValue::List(containers) = field_value
+                        && let boko::formats::kfx::ion::IonValue::List(containers) = field_value
                     {
                         let mut total_entities = 0usize;
 
                         for container in containers {
-                            if let boko::kfx::ion::IonValue::Struct(c_fields) = container {
+                            if let boko::formats::kfx::ion::IonValue::Struct(c_fields) = container {
                                 let mut container_name = String::new();
                                 let mut entity_names: Vec<String> = Vec::new();
 
@@ -5314,14 +5347,18 @@ fn report_dependencies(data: &[u8]) -> IonResult<()> {
                                     let cname = resolve_sym(*cid);
                                     match cname.as_str() {
                                         "id" => {
-                                            if let boko::kfx::ion::IonValue::String(s) = cval {
+                                            if let boko::formats::kfx::ion::IonValue::String(s) =
+                                                cval
+                                            {
                                                 container_name = s.clone();
                                             }
                                         }
                                         "contains" => {
-                                            if let boko::kfx::ion::IonValue::List(names) = cval {
+                                            if let boko::formats::kfx::ion::IonValue::List(names) =
+                                                cval
+                                            {
                                                 for name in names {
-                                                    if let boko::kfx::ion::IonValue::Symbol(s) =
+                                                    if let boko::formats::kfx::ion::IonValue::Symbol(s) =
                                                         name
                                                     {
                                                         entity_names.push(resolve_sym(*s));
@@ -5422,14 +5459,14 @@ fn report_dependencies(data: &[u8]) -> IonResult<()> {
 /// Unlike format_ion_value_simple, this does NOT truncate lists or structs —
 /// the whole point is to see the full shape of the fragment.
 fn format_ion_value_full<F>(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     indent: usize,
     resolve_sym: &F,
 ) -> String
 where
     F: Fn(u64) -> String,
 {
-    use boko::kfx::ion::IonValue;
+    use boko::formats::kfx::ion::IonValue;
     let pad = "  ".repeat(indent);
     match value {
         IonValue::Null => "null".to_string(),
@@ -5509,8 +5546,8 @@ where
 /// full Ion structure. Used to reverse-engineer the on-the-wire shape so
 /// boko-kai can emit matching ruby_content fragments.
 fn report_ruby_content(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -5652,8 +5689,8 @@ fn report_ruby_content(data: &[u8]) -> IonResult<()> {
 /// Used to inspect how ruby_id references appear in actual KP3/calibre output
 /// so boko-kai can emit matching style_events.
 fn report_raw_storylines(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::IonParser;
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::IonParser;
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -5775,8 +5812,8 @@ fn report_raw_storylines(data: &[u8]) -> IonResult<()> {
 /// `<ruby>` element from the source EPUB — diff this output against an
 /// EPUB-side extractor to find missing or mispaired rubies.
 fn report_ruby_pairs(data: &[u8]) -> IonResult<()> {
-    use boko::kfx::ion::{IonParser, IonValue};
-    use boko::kfx::symbols::KfxSymbol;
+    use boko::formats::kfx::ion::{IonParser, IonValue};
+    use boko::formats::kfx::symbols::KfxSymbol;
 
     if data.len() < 18 || &data[0..4] != b"CONT" {
         eprintln!("Not a KFX container");
@@ -6011,7 +6048,7 @@ fn report_ruby_pairs(data: &[u8]) -> IonResult<()> {
 /// Recursively walk an Ion value looking for text elements with style_events
 /// that carry ruby_name+ruby_id; emit base<TAB>annotation for each.
 fn walk_for_ruby_pairs<F>(
-    value: &boko::kfx::ion::IonValue,
+    value: &boko::formats::kfx::ion::IonValue,
     content_map: &std::collections::HashMap<String, Vec<String>>,
     ruby_lookup: &std::collections::HashMap<String, Vec<String>>,
     resolve_sym: &F,
@@ -6019,7 +6056,7 @@ fn walk_for_ruby_pairs<F>(
 ) where
     F: Fn(u64) -> String,
 {
-    use boko::kfx::ion::IonValue;
+    use boko::formats::kfx::ion::IonValue;
     match value {
         IonValue::Struct(fields) => {
             // Look for a text element with style_events + content

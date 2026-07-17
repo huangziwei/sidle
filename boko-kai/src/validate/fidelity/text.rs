@@ -17,12 +17,12 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use zip::ZipArchive;
 
-use crate::epub::{parse_container_xml, parse_opf};
-use crate::kfx::container::{
+use crate::formats::epub::{parse_container_xml, parse_opf};
+use crate::formats::kfx::container::{
     SymbolTable, parse_container_header, parse_container_info, parse_index_table, skip_enty_header,
 };
-use crate::kfx::ion::{IonParser, IonValue};
-use crate::kfx::symbols::KfxSymbol;
+use crate::formats::kfx::ion::{IonParser, IonValue};
+use crate::formats::kfx::symbols::KfxSymbol;
 
 /// Comparison report: char counts on each side plus per-character defects.
 /// Direction-neutral: callers interpret `only_in_epub` / `only_in_kfx` based
@@ -290,7 +290,7 @@ pub fn extract_text_from_xhtml(xhtml: &str, out: &mut String) {
             // (e.g. 142 had 7 `&`). Decode and append.
             Ok(Event::GeneralRef(e)) if suppress_depth == 0 => {
                 let entity = String::from_utf8_lossy(e.as_ref());
-                if let Some(resolved) = crate::epub::parser::resolve_entity(&entity) {
+                if let Some(resolved) = crate::formats::epub::parser::resolve_entity(&entity) {
                     out.push_str(&resolved);
                 }
             }

@@ -6,7 +6,7 @@ use cssparser::{
 };
 use selectors::parser::Selector;
 
-use crate::dom::element_ref::BokoSelectors;
+use crate::html::element_ref::BokoSelectors;
 use crate::model::FontFace;
 use crate::style::Declaration;
 

@@ -28,7 +28,7 @@ use crate::library::import::{sha256_of_bytes, write_bytes_atomic};
 pub fn replace_cover(kfx_path: &Path, new_image: &[u8]) -> Result<String> {
     let kfx_bytes =
         std::fs::read(kfx_path).with_context(|| format!("read {}", kfx_path.display()))?;
-    let patched = boko::kfx::cover_replace::replace_cover(&kfx_bytes, new_image)
+    let patched = boko::formats::kfx::cover_replace::replace_cover(&kfx_bytes, new_image)
         .map_err(|e| anyhow::anyhow!("boko kfx cover replace: {e:?}"))?;
     write_bytes_atomic(kfx_path, &patched)?;
     Ok(sha256_of_bytes(&patched))

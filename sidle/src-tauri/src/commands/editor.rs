@@ -40,17 +40,17 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 
-use boko::epub::image_extract as epub_image;
-use boko::epub::metadata_edit::{self as epub_meta, MetadataPatch as EpubMetadataPatch};
-use boko::epub::toc_repair as epub_toc;
+use boko::formats::epub::image_extract as epub_image;
+use boko::formats::epub::metadata_edit::{self as epub_meta, MetadataPatch as EpubMetadataPatch};
+use boko::formats::epub::toc_repair as epub_toc;
 use boko::import::pdf::PdfOutlineItem;
-use boko::kfx::image_extract;
-use boko::kfx::metadata_edit::{self, MetadataPatch as KfxMetadataPatch};
-use boko::kfx::toc_repair::{self, TocEntry as KfxTocEntry};
+use boko::formats::kfx::image_extract;
+use boko::formats::kfx::metadata_edit::{self, MetadataPatch as KfxMetadataPatch};
+use boko::formats::kfx::toc_repair::{self, TocEntry as KfxTocEntry};
 use boko::model::TocEntry as EpubTocEntry;
-use boko::pdf::cover::{self as pdf_cover, CoverMode};
-use boko::pdf::metadata_edit::{self as pdf_meta, MetadataPatch as PdfMetadataPatch};
-use boko::pdf::toc_repair as pdf_toc;
+use boko::formats::pdf::cover::{self as pdf_cover, CoverMode};
+use boko::formats::pdf::metadata_edit::{self as pdf_meta, MetadataPatch as PdfMetadataPatch};
+use boko::formats::pdf::toc_repair as pdf_toc;
 use boko::validate::source::toc as toc_validate;
 
 use crate::commands::library::SetCoverResult;
@@ -307,7 +307,7 @@ pub async fn editor_save_metadata(
             }
             // PDF's `/Info` has no language/publisher/ASIN key, so those reach
             // only the library row (the patch accepts them and ignores them —
-            // see `boko::pdf::metadata_edit`). Title/author/date are durable.
+            // see `boko::formats::pdf::metadata_edit`). Title/author/date are durable.
             SourceKind::Pdf => {
                 let patch = PdfMetadataPatch {
                     title: Some(c_title),
@@ -1502,7 +1502,7 @@ mod tests {
         assert!(outline.is_empty());
         assert_eq!(pages, 1);
 
-        let with_toc = boko::pdf::set_toc(
+        let with_toc = boko::formats::pdf::set_toc(
             &pdf,
             &[PdfOutlineItem {
                 title: "Chapter 1".into(),

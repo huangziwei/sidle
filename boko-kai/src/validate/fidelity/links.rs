@@ -33,12 +33,12 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use zip::ZipArchive;
 
-use crate::epub::{parse_container_xml, parse_opf};
-use crate::kfx::container::{
+use crate::formats::epub::{parse_container_xml, parse_opf};
+use crate::formats::kfx::container::{
     SymbolTable, parse_container_header, parse_container_info, parse_index_table, skip_enty_header,
 };
-use crate::kfx::ion::{IonParser, IonValue};
-use crate::kfx::symbols::KfxSymbol;
+use crate::formats::kfx::ion::{IonParser, IonValue};
+use crate::formats::kfx::symbols::KfxSymbol;
 
 /// Classification of an `<a href>` from the source.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -717,7 +717,7 @@ pub fn extract_anchors_and_link_tos_from_kfx(kfx_bytes: &[u8]) -> Result<KfxLink
     })
 }
 
-fn parse_entity(data: &[u8], ent: &crate::kfx::container::EntityLoc) -> Option<IonValue> {
+fn parse_entity(data: &[u8], ent: &crate::formats::kfx::container::EntityLoc) -> Option<IonValue> {
     if ent.offset + ent.length > data.len() {
         return None;
     }

@@ -670,7 +670,7 @@ fn local_name(name: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aozora::{Document, EpubInput, TocEntry, build_epub};
+    use crate::formats::aozora::{Document, EpubInput, TocEntry, build_epub};
 
     fn tiny_jpeg() -> Vec<u8> {
         // Same 1x1 JPEG used by the epub_builder tests — small, valid header.

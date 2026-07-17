@@ -161,26 +161,30 @@ fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
     let bytes = std::fs::read(input).map_err(|e| format!("read {input}: {e}"))?;
 
     if bytes.starts_with(b"PK") {
-        let proposed = boko::epub::toc_repair::propose_toc(&bytes).map_err(|e| e.to_string())?;
+        let proposed =
+            boko::formats::epub::toc_repair::propose_toc(&bytes).map_err(|e| e.to_string())?;
         println!("proposed {} chapter(s) from the EPUB:", proposed.len());
         for (i, entry) in proposed.iter().enumerate() {
             println!("  {:>3}. {:<44} {}", i + 1, entry.title, entry.href);
         }
         if let Some(out) = output {
-            let repaired = boko::epub::toc_repair::repair_toc(&bytes).map_err(|e| e.to_string())?;
+            let repaired =
+                boko::formats::epub::toc_repair::repair_toc(&bytes).map_err(|e| e.to_string())?;
             std::fs::write(out, &repaired).map_err(|e| format!("write {out}: {e}"))?;
             println!("wrote repaired EPUB → {out} ({} bytes)", repaired.len());
         }
         return Ok(());
     }
 
-    let proposed = boko::kfx::toc_repair::propose_toc(&bytes).map_err(|e| e.to_string())?;
+    let proposed =
+        boko::formats::kfx::toc_repair::propose_toc(&bytes).map_err(|e| e.to_string())?;
     println!("proposed {} chapter(s) from the KFX:", proposed.len());
     for (i, entry) in proposed.iter().enumerate() {
         println!("  {:>3}. eid {:<8} {}", i + 1, entry.eid, entry.label);
     }
     if let Some(out) = output {
-        let repaired = boko::kfx::toc_repair::repair_toc(&bytes).map_err(|e| e.to_string())?;
+        let repaired =
+            boko::formats::kfx::toc_repair::repair_toc(&bytes).map_err(|e| e.to_string())?;
         std::fs::write(out, &repaired).map_err(|e| format!("write {out}: {e}"))?;
         println!("wrote repaired KFX → {out} ({} bytes)", repaired.len());
     }
@@ -1500,7 +1504,7 @@ fn convert(
             .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx"))
     {
         let kfx_bytes = std::fs::read(input).map_err(|e| format!("Failed to read input: {e}"))?;
-        if boko::kfx::pdf_container::kfx_is_pdf_backed(&kfx_bytes) {
+        if boko::formats::kfx::pdf_container::kfx_is_pdf_backed(&kfx_bytes) {
             return Err(
                 "this KFX is a PDF-backed container; extract it with a .pdf output \
                  (e.g. `boko convert in.kfx out.pdf`), not EPUB"
@@ -1563,16 +1567,17 @@ fn convert(
             .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx-zip"))
     {
         let mode = match merge_mode {
-            "fast" => boko::kfx::merge::MergeMode::Fast,
-            "mechanical" | "" => boko::kfx::merge::MergeMode::Mechanical,
+            "fast" => boko::formats::kfx::merge::MergeMode::Fast,
+            "mechanical" | "" => boko::formats::kfx::merge::MergeMode::Mechanical,
             other => {
                 return Err(format!(
                     "--mode must be 'mechanical' or 'fast', got '{other}'"
                 ));
             }
         };
-        let bytes = boko::kfx::merge::merge_kfx_zip_with_mode(std::path::Path::new(input), mode)
-            .map_err(|e| format!("Conversion failed: {e}"))?;
+        let bytes =
+            boko::formats::kfx::merge::merge_kfx_zip_with_mode(std::path::Path::new(input), mode)
+                .map_err(|e| format!("Conversion failed: {e}"))?;
         if to_stdout {
             use std::io::Write;
             std::io::stdout()
@@ -2114,7 +2119,7 @@ fn convert_pdf_to_kfx(
 /// KFX → PDF: extract the verbatim embedded PDF from a PDF-backed container KFX.
 fn convert_kfx_to_pdf(input: &str, output: &str, quiet: bool) -> Result<(), String> {
     let kfx = std::fs::read(input).map_err(|e| format!("Failed to read input: {e}"))?;
-    let pdf = boko::kfx::pdf_container::kfx_extract_pdf(&kfx)
+    let pdf = boko::formats::kfx::pdf_container::kfx_extract_pdf(&kfx)
         .map_err(|e| format!("PDF extraction failed: {e}"))?;
     std::fs::write(output, &pdf).map_err(|e| format!("Failed to write output: {e}"))?;
     if !quiet {
@@ -2202,15 +2207,15 @@ fn aozora_dispatch(
     let Some(txt) = txt_buf else {
         return Ok(None);
     };
-    let text = boko::aozora::parser_txt::decode_bytes(&txt);
+    let text = boko::formats::aozora::parser_txt::decode_bytes(&txt);
     // Sniff: must look like an Aozora source (底本：/［＃ markers).
     if !text.contains("底本") && !text.contains("［＃") {
         return Ok(None);
     }
-    let doc = boko::aozora::parse_txt(&text);
-    let cover = boko::aozora::render_cover_jpeg(&doc.title, &doc.author)
+    let doc = boko::formats::aozora::parse_txt(&text);
+    let cover = boko::formats::aozora::render_cover_jpeg(&doc.title, &doc.author)
         .map_err(|e| format!("cover render: {e}"))?;
-    let epub_bytes = boko::aozora::build_epub(boko::aozora::EpubInput {
+    let epub_bytes = boko::formats::aozora::build_epub(boko::formats::aozora::EpubInput {
         document: &doc,
         images: &images,
         cover_jpeg: &cover,

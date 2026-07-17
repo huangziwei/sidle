@@ -23,12 +23,12 @@ use std::io::Cursor;
 
 use zip::ZipArchive;
 
-use crate::epub::{parse_container_xml, parse_opf};
-use crate::kfx::container::{
+use crate::formats::epub::{parse_container_xml, parse_opf};
+use crate::formats::kfx::container::{
     SymbolTable, parse_container_header, parse_container_info, parse_index_table, skip_enty_header,
 };
-use crate::kfx::ion::{IonParser, IonValue};
-use crate::kfx::symbols::KfxSymbol;
+use crate::formats::kfx::ion::{IonParser, IonValue};
+use crate::formats::kfx::symbols::KfxSymbol;
 
 /// One of `ltr` / `rtl`. `default` (EPUB3 spec) and any omission are normalised
 /// to `Ltr` for comparison — reading systems default to LTR when no PPD is set.

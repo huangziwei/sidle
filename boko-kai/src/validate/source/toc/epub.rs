@@ -14,7 +14,7 @@ use std::io::{Cursor, Read, Seek};
 use zip::ZipArchive;
 
 use super::TocEvidence;
-use crate::epub::{
+use crate::formats::epub::{
     parse_container_xml, parse_nav_landmarks, parse_nav_toc, parse_ncx, parse_opf, parse_opf_guide,
 };
 use crate::model::{Landmark, LandmarkType, TocEntry};
@@ -148,7 +148,7 @@ fn flat_len(entries: &[TocEntry]) -> usize {
 /// preferred, EPUB 2 OPF guide from the already-parsed OPF as fallback).
 fn toc_landmark_href<R: Read + Seek>(
     a: &mut ZipArchive<R>,
-    opf: &crate::epub::OpfData,
+    opf: &crate::formats::epub::OpfData,
     opf_base: &str,
     opf_str: &str,
 ) -> Option<String> {

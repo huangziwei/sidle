@@ -35,12 +35,12 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
-pub mod dom;
 pub mod export;
+pub mod formats;
+pub mod html;
 pub mod image;
 pub mod import;
 pub mod io;
-pub mod markdown;
 pub mod model;
 pub mod style;
 
@@ -48,15 +48,15 @@ pub mod style;
 // Re-exported because `model::Book`'s public API exposes `jxr::ColorMode`.
 pub use jxr;
 
-#[cfg(feature = "aozora")]
-pub mod aozora;
-pub mod epub;
-pub mod kfx;
 pub mod kfx_to_epub;
-pub mod mobi;
-pub mod pdf;
 pub mod render;
 pub mod validate;
+
+// Compat module alias for the frozen mechanical port (`kfx_to_epub`): the
+// port is the production kfx→epub path and may not be edited until the IR
+// route reaches 1:1, so its historical `crate::kfx::` imports keep
+// resolving here. Deleted together with the port.
+pub use formats::kfx;
 
 pub(crate) mod trace;
 pub(crate) mod util;
@@ -70,8 +70,8 @@ pub use model::{
 // Primary exports from style
 pub use style::{ComputedStyle, ListStyleType, Origin, StyleId, StylePool, Stylesheet, ToCss};
 
-// Primary exports from dom
-pub use dom::compile_html;
+// Primary exports from html (the chapter-markup compiler)
+pub use html::compile_html;
 
 // Primary exports from other modules
 pub use export::{EpubExporter, Exporter, MarkdownConfig, MarkdownExporter};

@@ -31,29 +31,29 @@ use std::io::{self, Seek, Write};
 
 use crate::model::Book;
 
-pub mod css;
-mod css_gen;
-mod epub;
-mod epub_dom;
-mod html_synth;
+pub mod epub;
 mod kfx;
-pub mod nav;
-mod normalize;
-pub mod opf;
-mod text;
-pub(crate) mod titlepage;
-pub mod xdom;
+mod markdown;
 
-pub use css_gen::{CssArtifact, generate_css, generate_css_all};
-pub use epub::{EpubConfig, EpubExporter};
-pub use html_synth::{
-    InlineStyleEmit, LinkOutcome, SourceStyles, SynthesisResult, escape_xml, escape_xml_into,
-    synthesize_html, synthesize_html_with_class_list, synthesize_xhtml_document,
+pub use epub::synth::{
+    CssArtifact, InlineStyleEmit, LinkOutcome, SourceStyles, SynthesisResult, escape_xml,
+    escape_xml_into, generate_css, generate_css_all, synthesize_html,
+    synthesize_html_with_class_list, synthesize_xhtml_document,
     synthesize_xhtml_document_with_class_list, synthesize_xhtml_document_with_links,
 };
+pub use epub::{ChapterContent, GlobalStylePool, NormalizedContent, normalize_book};
+pub use epub::{EpubConfig, EpubExporter};
 pub use kfx::{KfxConfig, KfxExporter, PdfKfxMeta, pdf_to_kfx};
-pub use normalize::{ChapterContent, GlobalStylePool, NormalizedContent, normalize_book};
-pub use text::{MarkdownConfig, MarkdownExporter};
+pub use markdown::{MarkdownConfig, MarkdownExporter};
+
+// Compat module aliases for the frozen mechanical port (`kfx_to_epub`): the
+// port is the production kfx→epub path and may not be edited until the IR
+// route reaches 1:1, so its historical import paths keep resolving here.
+// Deleted together with the port.
+pub use epub::dom as xdom;
+pub use epub::dom_synth as css;
+pub(crate) use epub::titlepage;
+pub use epub::{nav, opf};
 
 /// Trait for exporting books to specific formats.
 ///

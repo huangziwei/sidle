@@ -194,7 +194,7 @@ fn import_one(
         SourceKind::Epub | SourceKind::Kfx | SourceKind::Pdf => {
             fs::read(src).with_context(|| format!("read {}", src.display()))?
         }
-        SourceKind::KfxZip => boko::kfx::merge::merge_kfx_zip(src)
+        SourceKind::KfxZip => boko::formats::kfx::merge::merge_kfx_zip(src)
             .with_context(|| format!("merge kfx-zip {}", src.display()))?,
         SourceKind::Azw3 => convert_azw3(src).with_context(|| format!("azw3 {}", src.display()))?,
         SourceKind::Mobi => convert_mobi(src).with_context(|| format!("mobi {}", src.display()))?,
@@ -212,7 +212,7 @@ fn import_one(
     //     time. A no-op (returns the bytes unchanged) for well-formed EPUBs and
     //     for the freshly-built EPUBs the azw3/mobi/aozora paths produce.
     let canonical_bytes = if canonical == Canonical::Epub {
-        boko::epub::neutralize_spurious_zip64(&canonical_bytes).unwrap_or(canonical_bytes)
+        boko::formats::epub::neutralize_spurious_zip64(&canonical_bytes).unwrap_or(canonical_bytes)
     } else {
         canonical_bytes
     };
@@ -239,7 +239,7 @@ fn import_one(
     let partner = match canonical {
         Canonical::Epub | Canonical::Pdf => Canonical::Kfx,
         Canonical::Kfx => {
-            if boko::kfx::pdf_container::kfx_is_pdf_backed(&canonical_bytes) {
+            if boko::formats::kfx::pdf_container::kfx_is_pdf_backed(&canonical_bytes) {
                 Canonical::Pdf
             } else {
                 Canonical::Epub
@@ -372,7 +372,7 @@ fn write_cover_from_kfx_bytes(
 /// [`extract_cover_from_epub`] for the KFX side; the container surgery lives in
 /// boko (`kfx::cover_extract`). A load error or a coverless container → `None`.
 pub fn extract_cover_from_kfx_bytes(kfx_bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
-    boko::kfx::cover_extract::kfx_extract_cover(kfx_bytes)
+    boko::formats::kfx::cover_extract::kfx_extract_cover(kfx_bytes)
         .ok()
         .flatten()
 }
@@ -682,17 +682,17 @@ fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
     let Some(txt) = txt_buf else {
         bail!("zip contains no .txt entry");
     };
-    let text = boko::aozora::parser_txt::decode_bytes(&txt);
+    let text = boko::formats::aozora::parser_txt::decode_bytes(&txt);
 
     // Aozora marker sniff. Bare zips with no aozora content fail here.
     if !text.contains("底本") && !text.contains("［＃") {
         bail!("not an Aozora Bunko archive");
     }
 
-    let doc = boko::aozora::parse_txt(&text);
+    let doc = boko::formats::aozora::parse_txt(&text);
     let cover =
-        boko::aozora::render_cover_jpeg(&doc.title, &doc.author).context("aozora cover render")?;
-    let epub_bytes = boko::aozora::build_epub(boko::aozora::EpubInput {
+        boko::formats::aozora::render_cover_jpeg(&doc.title, &doc.author).context("aozora cover render")?;
+    let epub_bytes = boko::formats::aozora::build_epub(boko::formats::aozora::EpubInput {
         document: &doc,
         images: &images,
         cover_jpeg: &cover,

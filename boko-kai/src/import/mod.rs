@@ -19,7 +19,7 @@ pub use pdf::{PdfDoc, PdfOutlineItem, PdfPage, probe_pdf};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::dom::{Origin, Stylesheet, compile_html_bytes, extract_stylesheets};
+use crate::html::{Origin, Stylesheet, compile_html_bytes, extract_stylesheets};
 use crate::model::{AnchorTarget, Chapter, FontFace, GlobalNodeId, Landmark, Metadata, TocEntry};
 
 /// Unique identifier for a chapter/spine item within a book.

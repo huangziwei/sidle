@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use zip::ZipArchive;
 
-use crate::dom::Stylesheet;
-use crate::epub::{
+use crate::formats::epub::{
     parse_container_xml, parse_nav_landmarks, parse_nav_page_list, parse_nav_toc, parse_ncx,
     parse_opf, parse_opf_guide,
 };
+use crate::html::Stylesheet;
 use crate::import::{
     ChapterId, Importer, SpineEntry, normalize_components, resolve_path_based_href,
 };
@@ -267,7 +267,7 @@ impl EpubImporter {
             Ok((zip_index, assets)) => (zip_index, assets, source),
             Err(first_err) => {
                 let raw = source.read_at(0, source.len() as usize)?;
-                match crate::epub::neutralize_spurious_zip64(&raw) {
+                match crate::formats::epub::neutralize_spurious_zip64(&raw) {
                     Some(repaired) => {
                         let repaired: Arc<dyn ByteSource> = Arc::new(MemorySource::new(repaired));
                         let (zip_index, assets) = Self::scan_zip(&repaired)?;

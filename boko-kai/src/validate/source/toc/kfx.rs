@@ -7,9 +7,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::kfx::container::get_field;
-use crate::kfx::ion::IonValue;
-use crate::kfx::symbols::KfxSymbol;
+use crate::formats::kfx::container::get_field;
+use crate::formats::kfx::ion::IonValue;
+use crate::formats::kfx::symbols::KfxSymbol;
 use crate::kfx_to_epub::content::resolve_content_text;
 use crate::kfx_to_epub::loader::BookData;
 use crate::kfx_to_epub::navigation::{

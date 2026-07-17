@@ -4,7 +4,7 @@
 //! This is the **third concern** in the annotation system: the pen strokes the user
 //! drew *on top of* a book Sidle pushed. It reuses both existing subsystems —
 //! **A** (`yjr`/`anchor`) supplies the host-page anchor + the per-page link, and
-//! **B** (`boko::kfx::nbk`) decodes the strokes to SVG — and adds only the join
+//! **B** (`boko::formats::kfx::nbk`) decodes the strokes to SVG — and adds only the join
 //! and the book-keyed storage.
 //!
 //! The verified mechanism (device truth):
@@ -13,7 +13,7 @@
 //!     `eid → page` map the reader builds), and its inline *body* is the ink
 //!     notebook's page-container `kfx_id` — the explicit per-page link;
 //!   - the ink notebook is `.notebooks/<asin>!!PDOC!!notebook/nbk`, where `asin`
-//!     is the book's baked content_id; `boko::kfx::nbk::open` decodes every page
+//!     is the book's baked content_id; `boko::formats::kfx::nbk::open` decodes every page
 //!     (deltas included), each carrying its `container_id`;
 //!   - so each ink page joins to its host anchor by `page.container_id == note
 //!     body`, and the pages are display-sorted by the note's `linear` (NOT the
@@ -90,7 +90,7 @@ pub fn import_ink(
     std::fs::write(&nbk_path, nbk_bytes)
         .with_context(|| format!("write nbk backup {}", nbk_path.display()))?;
 
-    let nb = boko::kfx::nbk::open(&nbk_path)
+    let nb = boko::formats::kfx::nbk::open(&nbk_path)
         .map_err(|e| anyhow::anyhow!("decode ink notebook for {asin}: {e:?}"))?;
 
     // The host KFX's per-page anchor geometry: the eid → host-page map (the very

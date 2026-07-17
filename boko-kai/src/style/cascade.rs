@@ -13,7 +13,7 @@ use super::parse::{CssRule, Origin, Specificity, Stylesheet, parse_declaration_l
 use super::properties::{Length, ROOT_FONT_SIZE_PX};
 use super::style_pool::StylePool;
 use super::types::ComputedStyle;
-use crate::dom::element_ref::ElementRef;
+use crate::html::element_ref::ElementRef;
 
 /// A matched rule with ordering information for the cascade.
 #[derive(Debug)]
