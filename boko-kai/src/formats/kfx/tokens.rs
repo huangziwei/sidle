@@ -60,7 +60,7 @@ pub struct ElementStart {
     /// nested `type: text` for content. Set during export by checking IR style.
     pub needs_container_wrapper: bool,
     /// Whether this element has block-level children (vs. only inline/text).
-    /// Together with [`needs_container_wrapper`] this decides how a bordered
+    /// Together with [`ElementStart::needs_container_wrapper`] this decides how a bordered
     /// element is emitted: a bordered *leaf* (inline content only) gets the
     /// inner-text wrapper; a bordered element *with block children* (e.g. a
     /// `罫囲み` `<div>` wrapping `<p>` lines) becomes a `type: container` whose

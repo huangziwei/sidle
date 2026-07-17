@@ -6046,7 +6046,7 @@ fn report_ruby_pairs(data: &[u8]) -> IonResult<()> {
 }
 
 /// Recursively walk an Ion value looking for text elements with style_events
-/// that carry ruby_name+ruby_id; emit base<TAB>annotation for each.
+/// that carry ruby_name+ruby_id; emit `base<TAB>annotation` for each.
 fn walk_for_ruby_pairs<F>(
     value: &boko::formats::kfx::ion::IonValue,
     content_map: &std::collections::HashMap<String, Vec<String>>,

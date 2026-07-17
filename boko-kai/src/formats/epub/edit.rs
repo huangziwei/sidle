@@ -56,8 +56,8 @@ impl EpubPackage {
     /// Parse an EPUB's zip directory, decompressing every member into memory.
     ///
     /// Retries once on the spurious-ZIP64 repair (a handful of producers emit
-    /// extra fields the `zip` crate misreads — the same recovery the importer
-    /// applies in [`crate::import::epub`]). Directory entries (names ending in
+    /// extra fields the `zip` crate misreads — the same recovery the
+    /// [`EpubImporter`](crate::import::EpubImporter) applies). Directory entries (names ending in
     /// `/`) are dropped: they carry no data and are implied by member paths, so
     /// readers reconstruct them (calibre and the boko exporter do the same).
     pub fn parse(bytes: &[u8]) -> io::Result<Self> {

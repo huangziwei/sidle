@@ -494,11 +494,11 @@ fn convert_pdf_to_kfx(
         });
     let cover_jpeg = match existing_cover {
         Some(jpeg) => Some(jpeg),
-        None => match boko::render::render_pdf_page_jpeg(
+        None => match boko::formats::pdf::render::render_pdf_page_jpeg(
             &doc.bytes,
             0,
-            boko::render::COVER_TARGET_WIDTH_PX,
-            boko::render::COVER_JPEG_QUALITY,
+            boko::formats::pdf::render::COVER_TARGET_WIDTH_PX,
+            boko::formats::pdf::render::COVER_JPEG_QUALITY,
         ) {
             Ok(jpeg) => Some(jpeg),
             Err(e) => {
@@ -512,7 +512,7 @@ fn convert_pdf_to_kfx(
     // book is converted visual-only. Usually the slowest step, so it gets the
     // widest progress band.
     on_progress("text", 0, 1, "Extracting text");
-    let text = boko::render::extract_pdf_text(&doc.bytes).ok();
+    let text = boko::formats::pdf::render::extract_pdf_text(&doc.bytes).ok();
     match &text {
         Some(pages) => {
             let runs: usize = pages.iter().map(|p| p.runs.len()).sum();

@@ -9,8 +9,8 @@
 //!
 //! This is a validator, so it reads only the one source format it's handed; it
 //! never consults a converted/derived copy (an EPUB derived from a KFX, or vice
-//! versa, gets no say). The KFX extractor lives in [`kfx`], the EPUB extractor in
-//! [`epub`]; both feed the one shared [`classify`] rule.
+//! versa, gets no say). The KFX extractor lives in `kfx`, the EPUB extractor in
+//! `epub`; both feed the one shared [`classify`] rule.
 
 mod epub;
 mod kfx;
@@ -111,7 +111,7 @@ pub fn validate(bytes: &[u8]) -> Result<TocAudit, String> {
 /// Turn format-neutral evidence into a verdict. The one rule both formats share:
 /// a declared TOC with >2 real chapter entries is always OK (footnote / index /
 /// cross-reference links never flag it); SUSPECT only when the TOC is chapterless
-/// AND the book itself carries ≥[`MIN_EVIDENCE`] chapters the TOC omits; else
+/// AND the book itself carries ≥`MIN_EVIDENCE` chapters the TOC omits; else
 /// SPARSE.
 pub fn classify(ev: TocEvidence) -> TocAudit {
     let nav_count = ev.nav_labels.len();
@@ -172,7 +172,8 @@ impl TocAudit {
         }
     }
 
-    /// Lower this TOC audit into the unified [`Finding`] model. A `Suspect`
+    /// Lower this TOC audit into the unified
+    /// [`Finding`](crate::validate::Finding) model. A `Suspect`
     /// verdict — declared TOC chapterless while the book itself lists chapters —
     /// is the one defect this check reports; `Ok` and `Sparse` are clean /
     /// inconclusive and yield nothing. Consumed by

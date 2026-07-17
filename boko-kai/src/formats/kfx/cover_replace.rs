@@ -10,10 +10,11 @@
 //!
 //! Mechanism: byte-passthrough re-serialize. We resolve the cover's
 //! `external_resource` ($164) and its backing `bcRawMedia` ($417) through the
-//! same resolver [`kfx_to_epub::loader`] uses (so the *dynamic* doc-symbol
+//! same resolver [`crate::kfx_to_epub::loader`] uses (so the *dynamic* doc-symbol
 //! `base_len` is correct — a fixed `KFX_SYMBOL_TABLE.len()` mis-resolves), then
 //! emit a fresh container in which only those two entities change and every
-//! other entity is copied through verbatim. [`serialize_container`] recomputes
+//! other entity is copied through verbatim.
+//! [`serialize_container`](crate::formats::kfx::serialization::serialize_container) recomputes
 //! the index-table offsets and `kfxgen_payload_sha1`.
 //!
 //! The replacement is normalized through [`sanitize_for_kfx`] first: it strips

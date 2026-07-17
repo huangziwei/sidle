@@ -6,7 +6,7 @@
 //! Each module exposes an independent EPUB-side extractor (minimal XHTML
 //! tokenization, NOT boko's IR, so a parser bug surfaces here rather than being
 //! mirrored on both sides) and a KFX-side extractor (boko's own KFX parser).
-//! The diff is direction-neutral; the [`Direction`](super::Direction) only
+//! The diff is direction-neutral; the [`Direction`] only
 //! changes how a printed report labels source vs target.
 //!
 //! Boundary note: [`nav`] asks *did the source TOC/headings survive the

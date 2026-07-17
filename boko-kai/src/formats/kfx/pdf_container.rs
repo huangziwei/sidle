@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn text_layer_adds_text_storyline_without_breaking_extraction() {
         use crate::formats::kfx::symbols::KfxSymbol;
-        use crate::render::{PageText, StyleSeg, TextRun};
+        use crate::formats::pdf::render::{PageText, StyleSeg, TextRun};
 
         let bytes = fake_pdf();
         let doc = PdfDoc {
@@ -291,7 +291,7 @@ mod tests {
         use crate::formats::kfx::container::parse_entity;
         use crate::formats::kfx::ion::IonValue;
         use crate::formats::kfx::symbols::KfxSymbol;
-        use crate::render::{PageText, StyleSeg, TextRun};
+        use crate::formats::pdf::render::{PageText, StyleSeg, TextRun};
 
         let bytes = fake_pdf();
         let mk_run = |content: &str| TextRun {

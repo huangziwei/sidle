@@ -56,7 +56,8 @@ impl Report {
         self.violations.iter().any(|v| v.rule == rule)
     }
 
-    /// Lower these EPUB violations into the unified [`Finding`] model the book
+    /// Lower these EPUB violations into the unified
+    /// [`Finding`](crate::validate::Finding) model the book
     /// editor consumes (via [`crate::validate::source::validate`]). The rich
     /// [`Violation`]/[`Rule`] internals stay; this is just the projection.
     pub fn into_findings(self) -> Vec<crate::validate::Finding> {

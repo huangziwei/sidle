@@ -1025,9 +1025,9 @@ fn render_page(
     let index = page - 1;
     match format {
         PageFormat::Jpeg => {
-            boko::render::render_pdf_page_jpeg(pdf, index, width_px, PAGE_EXPORT_JPEG_QUALITY)
+            boko::formats::pdf::render::render_pdf_page_jpeg(pdf, index, width_px, PAGE_EXPORT_JPEG_QUALITY)
         }
-        PageFormat::Png => boko::render::render_pdf_page_png(pdf, index, width_px),
+        PageFormat::Png => boko::formats::pdf::render::render_pdf_page_png(pdf, index, width_px),
     }
     .map_err(|e| format!("render page {page}: {e}"))
 }

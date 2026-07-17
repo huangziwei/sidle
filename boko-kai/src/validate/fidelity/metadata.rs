@@ -19,8 +19,9 @@
 //! - `cover_image` (path) → must produce a non-empty `cover_image` value
 //!   pointing at a resource_name (existence check only; the path
 //!   transformation is intentional)
-//! - `page_progression_direction` → metadata.reading_orders[0].
-//!   page_progression_direction (`$rtl` / `$ltr` / omitted)
+//! - `page_progression_direction` →
+//!   `metadata.reading_orders[0].page_progression_direction`
+//!   (`$rtl` / `$ltr` / omitted)
 
 use std::collections::HashMap;
 use std::io::Cursor;

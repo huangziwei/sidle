@@ -265,7 +265,7 @@ pub trait Importer: Send + Sync {
         &[]
     }
 
-    /// Mutable page-list access, so [`crate::model::Book::resolve_page_list_targets`]
+    /// Mutable page-list access, so `Book::resolve_page_list_targets`
     /// can fill in each entry's resolved `target`. Default empty.
     fn page_list_mut(&mut self) -> &mut [TocEntry] {
         &mut []

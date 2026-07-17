@@ -4199,8 +4199,8 @@ pub struct PdfKfxMeta {
     /// book must set this explicitly (e.g. from edited library metadata) and be
     /// force-reconverted. Applied to every reading order's
     /// `page_progression_direction` ($425) and to `document_data.direction`
-    /// ($192) — see [`build_pdf_metadata_fragment`] /
-    /// [`build_pdf_document_data_fragment`].
+    /// ($192) — see `build_pdf_metadata_fragment` /
+    /// `build_pdf_document_data_fragment`.
     pub page_progression_direction: Option<String>,
 }
 
@@ -4250,12 +4250,12 @@ const COVER_RSRC_NAME: &str = "ecover";
 /// `cover_jpeg`, when present, is embedded as a loose JPEG resource referenced
 /// by `book_metadata.cover_image` — the library tile / PDOC sleep-screen art
 /// (keyed by the synthesized ASIN). It is *not* a reading-order page; the PDF
-/// pages remain the only sections. Render it with [`crate::render`]. When
+/// pages remain the only sections. Render it with [`crate::formats::pdf::render`]. When
 /// `None` (e.g. the PDF engine is unavailable on a non-macOS build), the KFX is
 /// cover-less but otherwise identical — the embedded PDF is unaffected.
 ///
 /// `text`, when present, is the per-page selectable text layer extracted by
-/// [`crate::render::extract_pdf_text`]. Each page with runs gets a second,
+/// [`crate::formats::pdf::render::extract_pdf_text`]. Each page with runs gets a second,
 /// **invisible** "text" storyline (positioned, word-segmented) pulled into the
 /// page container, plus the `auxiliary_data` + capability flags that make the
 /// fixed-layout text live on device (select / search / dictionary / highlight) —
@@ -4265,7 +4265,7 @@ pub fn pdf_to_kfx(
     pdf: &crate::import::pdf::PdfDoc,
     meta: &PdfKfxMeta,
     cover_jpeg: Option<&[u8]>,
-    text: Option<&[crate::render::PageText]>,
+    text: Option<&[crate::formats::pdf::render::PageText]>,
 ) -> Vec<u8> {
     let container_id = generate_container_id();
     let mut ctx = ExportContext::new();
@@ -4282,7 +4282,7 @@ pub fn pdf_to_kfx(
     let cover_location = format!("resource/{COVER_RSRC_NAME}");
 
     // The runs extracted for page `i` (empty when no text layer / scanned page).
-    let page_runs = |i: usize| -> &[crate::render::TextRun] {
+    let page_runs = |i: usize| -> &[crate::formats::pdf::render::TextRun] {
         text.and_then(|t| t.get(i))
             .map_or(&[][..], |pt| pt.runs.as_slice())
     };
@@ -4640,7 +4640,10 @@ fn build_pdf_page_storyline(rec: &PdfPageRec, width_pt: f32, height_pt: f32) -> 
 /// in its `style_events`, word-segmented for the custom word iterator, and
 /// linked to its `text_baseline` aux entry. The page-image storyline pulls this
 /// in by `story_name` (see [`build_pdf_page_storyline`]).
-fn build_pdf_text_storyline(rec: &PdfPageRec, runs: &[crate::render::TextRun]) -> KfxFragment {
+fn build_pdf_text_storyline(
+    rec: &PdfPageRec,
+    runs: &[crate::formats::pdf::render::TextRun],
+) -> KfxFragment {
     let items: Vec<IonValue> = rec
         .runs
         .iter()

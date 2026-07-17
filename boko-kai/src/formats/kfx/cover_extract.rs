@@ -5,7 +5,7 @@
 //! `cover_image` names a `resource_name`, an `external_resource` ($164) with
 //! that name carries the image `format` + `location`, and a `bcRawMedia` ($417)
 //! at that location holds the bytes. So one extractor — resolving through the
-//! same [`kfx_to_epub::loader`] that [`super::cover_replace`] and the EPUB
+//! same [`crate::kfx_to_epub::loader`] that [`super::cover_replace`] and the EPUB
 //! conversion use (which gets the *dynamic* doc-symbol `base_len` right) —
 //! recovers the built-in cover for either kind, including a cover the user set
 //! via "Change cover…".

@@ -10,7 +10,7 @@
 //!
 //! Both shapes are patched when present, so the value a consumer reads is the
 //! same whichever it consults — the loader prefers $490 and falls back to $258
-//! (see [`loader::extract_book_metadata`]). Every value written is an inline Ion
+//! (see the port loader's `extract_book_metadata`). Every value written is an inline Ion
 //! string, so no doc-symbol-table growth is required; and only the metadata
 //! entities are rebuilt — the harness passes everything else through verbatim.
 //!

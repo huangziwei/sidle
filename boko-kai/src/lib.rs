@@ -32,11 +32,11 @@
 //! - [`html`] — the chapter-markup compiler (HTML/XHTML + CSS → IR),
 //!   serving every importer whose chapter content is HTML
 //! - [`formats`] — per-format internals shared by import and export
-//!   (containers, parsers, schemas, source repairs)
+//!   (containers, parsers, schemas, source repairs; PDF page rasterization
+//!   lives at [`formats::pdf::render`])
 //! - [`import`] — the [`Importer`] trait and per-format importers
 //! - [`export`] — the [`export::Exporter`] trait and per-format exporters
 //! - [`image`], [`io`] — image codecs and byte sources
-//! - [`render`] — PDF page rasterization + text extraction via Apple PDFKit
 //! - [`validate`] — book/conversion validation (source structure, fidelity,
 //!   tag coverage)
 //! - [`kfx_to_epub`] — the frozen mechanical KFX→EPUB port: today's
@@ -75,7 +75,6 @@ pub mod style;
 pub use jxr;
 
 pub mod kfx_to_epub;
-pub mod render;
 pub mod validate;
 
 // Compat module alias for the frozen mechanical port (`kfx_to_epub`): the

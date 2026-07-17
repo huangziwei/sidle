@@ -3,10 +3,10 @@
 //! Two paths share the support modules (`symtab`, `node`, `fragment`,
 //! `container`, `structure`, `catalog`, `common`, `trace`):
 //!
-//!  - [`mechanical`]: faithful port of calibre's `convert_to_single_kfx`
+//!  - `mechanical`: faithful port of calibre's `convert_to_single_kfx`
 //!    pipeline. Every entity is parsed → walked → re-encoded. Correctness
 //!    ground truth.
-//!  - [`fast`]: byte-passthrough merge. Skips entity-body parse + re-encode,
+//!  - `fast`: byte-passthrough merge. Skips entity-body parse + re-encode,
 //!    synthesizes only `$270` and `$419`. Produces a different byte stream
 //!    that calibre still accepts (verified to produce identical EPUBs).
 //!

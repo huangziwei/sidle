@@ -3,7 +3,7 @@
 //! The bulk generalization of [`super::cover_extract`]: where that recovers the
 //! one declared cover, this walks every `external_resource` ($164) with a
 //! raster-image `format`, resolves its backing `bcRawMedia` ($417) bytes through
-//! the same [`kfx_to_epub::loader`] (correct dynamic doc-symbol `base_len`), and
+//! the same [`crate::kfx_to_epub::loader`] (correct dynamic doc-symbol `base_len`), and
 //! returns them ready to write. This serves the editor's "extract one or two
 //! images" use case.
 //!

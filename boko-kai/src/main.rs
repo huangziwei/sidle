@@ -2059,11 +2059,11 @@ fn convert_pdf_to_kfx(
     // Render page 1 as the cover (PDOC library tile / sleep-screen art) via the
     // PDF engine (PDFKit). Optional — if it's unavailable, log and ship a
     // cover-less KFX.
-    let cover = boko::render::render_pdf_page_jpeg(
+    let cover = boko::formats::pdf::render::render_pdf_page_jpeg(
         &doc.bytes,
         0,
-        boko::render::COVER_TARGET_WIDTH_PX,
-        boko::render::COVER_JPEG_QUALITY,
+        boko::formats::pdf::render::COVER_TARGET_WIDTH_PX,
+        boko::formats::pdf::render::COVER_JPEG_QUALITY,
     );
     let cover_jpeg = match &cover {
         Ok(jpeg) => {
@@ -2082,7 +2082,7 @@ fn convert_pdf_to_kfx(
 
     // Extract the selectable text layer (PDFKit). Like the cover it's optional —
     // on failure (or a non-macOS build) we ship a visual-only KFX.
-    let text = boko::render::extract_pdf_text(&doc.bytes);
+    let text = boko::formats::pdf::render::extract_pdf_text(&doc.bytes);
     let text_pages = match &text {
         Ok(pages) => {
             if !quiet && !to_stdout {

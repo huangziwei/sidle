@@ -24,8 +24,8 @@
 //!
 //! Fields this cannot express are dropped rather than smuggled into a
 //! non-standard `/Info` key a reader would never look at. The library DB row
-//! remains the source of truth for them ([[project_metadata_precedence]] holds:
-//! this makes the edit durable in the artifact for the fields PDF *has*).
+//! remains the source of truth for those fields; the edit makes the values
+//! durable in the artifact for the fields PDF *has*.
 //!
 //! ## Scope (v1)
 //!

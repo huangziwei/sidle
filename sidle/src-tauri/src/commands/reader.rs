@@ -595,11 +595,11 @@ pub async fn reader_pdf_page(
                     .map_err(|e| format!("extract embedded PDF: {e:?}"))?
             }
         };
-        let jpeg = boko::render::render_pdf_page_jpeg(
+        let jpeg = boko::formats::pdf::render::render_pdf_page_jpeg(
             &bytes,
             page,
             width,
-            boko::render::COVER_JPEG_QUALITY,
+            boko::formats::pdf::render::COVER_JPEG_QUALITY,
         )
         .map_err(|e| format!("render page {page}: {e}"))?;
         Ok::<String, String>(B64.encode(&jpeg))
