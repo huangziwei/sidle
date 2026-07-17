@@ -1,12 +1,14 @@
 //! EPUB format support — parsing plus the surgical source-edit primitives.
 //!
-//! [`parser`] is read-only (OPF/NCX/nav). [`edit`] adds the shared zip
+//! `parser` is read-only (OPF/NCX/nav). [`edit`] adds the shared zip
 //! edit harness ([`EpubPackage`]) that the source editor writes through, and
-//! [`image_extract`] is its first read-only consumer.
+//! [`image_extract`] is its first read-only consumer. `opf_meta` holds
+//! OPF metadata value vocabulary shared by import and export.
 
 pub mod edit;
 pub mod image_extract;
 pub mod metadata_edit;
+pub(crate) mod opf_meta;
 pub(crate) mod parser;
 pub mod toc_repair;
 mod zip_repair;

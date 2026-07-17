@@ -35,10 +35,10 @@ pub mod epub;
 mod kfx;
 mod markdown;
 
+pub use epub::normalize::{InlineStyleEmit, LinkOutcome, SourceStyles};
 pub use epub::synth::{
-    CssArtifact, InlineStyleEmit, LinkOutcome, SourceStyles, SynthesisResult, escape_xml,
-    escape_xml_into, generate_css, generate_css_all, synthesize_html,
-    synthesize_html_with_class_list, synthesize_xhtml_document,
+    CssArtifact, SynthesisResult, escape_xml, escape_xml_into, generate_css, generate_css_all,
+    synthesize_html, synthesize_html_with_class_list, synthesize_xhtml_document,
     synthesize_xhtml_document_with_class_list, synthesize_xhtml_document_with_links,
 };
 pub use epub::{ChapterContent, GlobalStylePool, NormalizedContent, normalize_book};

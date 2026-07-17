@@ -21,7 +21,6 @@
 mod arena;
 pub mod element_ref;
 pub mod optimize;
-pub mod role_map;
 mod transform;
 mod tree_sink;
 

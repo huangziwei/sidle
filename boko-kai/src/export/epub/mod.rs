@@ -2,9 +2,9 @@
 //!
 //! This module (`mod.rs`) is the `EpubExporter` itself — raw passthrough
 //! and normalized routes, zip assembly, package wiring. Its children hold
-//! the pieces: shared document emitters ([`opf`], [`nav`], [`titlepage`]),
-//! the normalization pipeline ([`normalize`]), and the two synthesis
-//! regimes ([`synth`] string-based with pool-derived `.c<N>` classes;
+//! the pieces: shared document emitters ([`opf`], [`nav`], `titlepage`),
+//! the normalization pipeline (`normalize`), and the two synthesis
+//! regimes (`synth` string-based with pool-derived `.c<N>` classes;
 //! [`dom`] + [`dom_synth`] DOM-based for source-declared style programs).
 
 pub mod dom;

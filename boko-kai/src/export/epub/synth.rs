@@ -29,6 +29,8 @@ use std::fmt::Write;
 use crate::model::{Chapter, NodeId, Role};
 use crate::style::{StyleId, StylePool, ToCss};
 
+use super::normalize::{InlineStyleEmit, LinkOutcome, SourceStyles};
+
 /// Result of HTML synthesis.
 #[derive(Debug, Clone)]
 pub struct SynthesisResult {
@@ -124,9 +126,9 @@ pub fn synthesize_xhtml_document_with_class_list(
 ///
 /// When `source_styles` is given (see [`SourceStyles`]), class and style
 /// attributes come from each node's `semantics.class` / `semantics.style`
-/// and the computed-style `class_list` is ignored entirely. Sources with
-/// named stylesheets (KFX) use this so attributes match their emitted
-/// `style.css` rules.
+/// and the computed-style `class_list` is ignored entirely. Sources whose
+/// importer declares a style program use this so attributes match their
+/// emitted `style.css` rules.
 pub fn synthesize_xhtml_document_with_links(
     ir: &Chapter,
     class_list: &[Option<&str>],
@@ -153,40 +155,6 @@ pub fn synthesize_xhtml_document_with_links(
         assets: ctx.assets,
     };
     synthesize_xhtml_from_body(body_result, title, stylesheet_href)
-}
-
-/// What a synthesis-time link resolver decided for one `href` value.
-pub enum LinkOutcome {
-    /// Emit the href unchanged.
-    Keep,
-    /// Emit this replacement href.
-    Rewrite(String),
-    /// Emit the element without any href.
-    DropHref,
-}
-
-/// What to emit for one raw `semantics.style` inline-declaration string.
-pub enum InlineStyleEmit {
-    /// The declaration repeats across the book and was promoted to a
-    /// generated class — emit `class="<name>"`.
-    Class(String),
-    /// Emit as a `style="…"` attribute (already pruned of spec defaults).
-    Style(String),
-    /// Every declaration was a spec default — emit nothing.
-    Drop,
-}
-
-/// Source-style resolution for normalized synthesis of named-stylesheet
-/// sources (KFX): maps each node's `semantics.class` to the emitted class
-/// attribute and its `semantics.style` to a promoted class or an inline
-/// `style` attribute. When present, the computed-style class list is
-/// ignored entirely.
-pub struct SourceStyles<'a> {
-    /// Raw source style name → sanitized class name (`None` = the style
-    /// produced no declarations, so no class attribute).
-    pub named: &'a HashMap<String, Option<String>>,
-    /// Raw inline-declaration string → what to emit for it.
-    pub inline: &'a HashMap<String, InlineStyleEmit>,
 }
 
 fn synthesize_xhtml_from_body(

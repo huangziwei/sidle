@@ -41,8 +41,8 @@ pub use properties::{
 pub use style_pool::StylePool;
 pub use types::{ComputedStyle, StyleId};
 
-// Re-export declaration type (kept minimal)
-pub use declaration::Declaration;
+// Re-export declaration types: the typed enum and its raw string-level sibling
+pub use declaration::{CssDecl, Declaration, parse_inline_decl};
 
 // Re-export stylesheet types from parse module
 pub use parse::{CssRule, Origin, Specificity, Stylesheet, TextDecorationValue};

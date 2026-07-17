@@ -17,7 +17,6 @@
 //! 4. Extract ALL attributes using schema's AttrRules
 //! 5. Apply transformers to convert values
 
-use crate::export::css::{CssDecl, partition_image_style};
 use crate::formats::kfx::anchor_table::AnchorTable;
 use crate::formats::kfx::container::{SymbolTable, get_field};
 use crate::formats::kfx::ion::IonValue;
@@ -25,8 +24,9 @@ use crate::formats::kfx::schema::{SemanticTarget, schema};
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::formats::kfx::tokens::{ContentRef, ElementStart, KfxToken, SpanStart, TokenStream};
 use crate::formats::kfx::transforms::ImportContext;
-use crate::formats::kfx::yj_properties::convert_yj_properties;
+use crate::formats::kfx::yj_properties::{convert_yj_properties, partition_image_style};
 use crate::model::{Chapter, Node, NodeId, Role};
+use crate::style::CssDecl;
 use std::collections::HashMap;
 
 /// Context for tokenization including anchor resolution.

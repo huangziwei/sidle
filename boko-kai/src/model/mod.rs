@@ -14,6 +14,7 @@ mod font;
 mod links;
 mod node;
 mod resolved;
+pub mod role_map;
 pub mod section_tree;
 mod semantic;
 

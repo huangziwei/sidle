@@ -2,8 +2,8 @@
 
 use super::arena::{ArenaDom, ArenaNodeData, ArenaNodeId};
 use super::element_ref::ElementRef;
-use super::role_map::element_to_role;
 use super::{is_html_whitespace, is_html_whitespace_only};
+use crate::model::role_map::element_to_role;
 use crate::model::{Chapter, Node, NodeId, Role};
 use crate::style::{ComputedStyle, Display, Origin, Stylesheet, WhiteSpace, compute_styles};
 

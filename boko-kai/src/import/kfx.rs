@@ -22,7 +22,7 @@ use crate::formats::kfx::resource_index::{self, ImageResource};
 use crate::formats::kfx::schema::schema;
 use crate::formats::kfx::storyline::parse_storyline_to_ir;
 use crate::formats::kfx::symbols::KfxSymbol;
-use crate::import::{ChapterId, Importer, SpineEntry};
+use crate::import::{ChapterId, CssProgram, Importer, SpineEntry};
 use crate::io::{ByteSource, FileSource};
 use crate::model::Chapter;
 use crate::model::{
@@ -279,10 +279,11 @@ impl Importer for KfxImporter {
             Some(anchor_table.as_ref()),
         );
 
-        // No generic `dom::optimize` pass here: the KFX token→IR builder
+        // No generic `html::optimize` pass here: the KFX token→IR builder
         // already produces a tree that mirrors the mechanical route's
-        // pre-consolidation DOM, and the shared `export::xdom::consolidate_part`
-        // (run on both KFX→EPUB routes) does the port-faithful cleanup.
+        // pre-consolidation DOM, and the shared
+        // `export::epub::dom::consolidate_part` (run on both KFX→EPUB
+        // routes) does the port-faithful cleanup.
         // Generic HTML-cleanup passes (list fusion, empty-node prune, span
         // merge) only DIVERGE from the reference — e.g. `fuse_lists` merged
         // two adjacent single-item `<ul>`s the port keeps separate — so they
@@ -488,7 +489,7 @@ impl Importer for KfxImporter {
         Some((frag, stamped))
     }
 
-    fn stylesheet_program(&mut self) -> Option<crate::export::css::CssProgram> {
+    fn stylesheet_program(&mut self) -> Option<CssProgram> {
         self.index_styles().ok()?;
         let named = self
             .styles
@@ -503,7 +504,7 @@ impl Importer for KfxImporter {
                 )
             })
             .collect();
-        Some(crate::export::css::CssProgram {
+        Some(CssProgram {
             named,
             writing_mode: self.css_writing_mode.clone(),
             fixed_layout: self.metadata.fixed_layout,
@@ -1156,7 +1157,7 @@ impl KfxImporter {
         }
 
         self.metadata.primary_writing_mode =
-            crate::export::opf::primary_writing_mode(Some(&writing_mode), Some(&ppd));
+            crate::formats::epub::opf_meta::primary_writing_mode(Some(&writing_mode), Some(&ppd));
         self.metadata.page_progression_direction = Some(ppd);
         self.css_writing_mode = writing_mode;
     }

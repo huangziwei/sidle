@@ -11,12 +11,38 @@
 //!
 //! ## Supported Formats
 //!
-//! | Format | Read | Write |
-//! |--------|------|-------|
-//! | EPUB   | ✓    | ✓     |
-//! | KFX    | ✓    | ✓     |
-//! | AZW3   | ✓    | -     |
-//! | MOBI   | ✓    | -     |
+//! | Format   | Read | Write |
+//! |----------|------|-------|
+//! | EPUB     | ✓    | ✓     |
+//! | KFX      | ✓    | ✓     |
+//! | AZW3     | ✓    | -     |
+//! | MOBI     | ✓    | -     |
+//! | PDF      | ✓    | -     |
+//! | Markdown | -    | ✓     |
+//!
+//! ## Module map
+//!
+//! Layered: vocabulary (`model`, `style`) → markup compiler (`html`) →
+//! format internals (`formats`) → directions (`import`, `export`).
+//!
+//! - [`model`] — the IR and the [`Book`] runtime handle: chapters, nodes,
+//!   roles, semantics, links, metadata
+//! - [`style`] — CSS vocabulary: property types, typed + raw declarations,
+//!   cascade, computed-style pool
+//! - [`html`] — the chapter-markup compiler (HTML/XHTML + CSS → IR),
+//!   serving every importer whose chapter content is HTML
+//! - [`formats`] — per-format internals shared by import and export
+//!   (containers, parsers, schemas, source repairs)
+//! - [`import`] — the [`Importer`] trait and per-format importers
+//! - [`export`] — the [`export::Exporter`] trait and per-format exporters
+//! - [`image`], [`io`] — image codecs and byte sources
+//! - [`render`] — PDF page rasterization + text extraction via Apple PDFKit
+//! - [`validate`] — book/conversion validation (source structure, fidelity,
+//!   tag coverage)
+//! - [`kfx_to_epub`] — the frozen mechanical KFX→EPUB port: today's
+//!   production conversion path and the byte-1:1 reference the IR route
+//!   answers to; deleted when the IR route reaches parity
+//! - `util`, `trace` — crate-internal helpers
 //!
 //! ## Quick Start
 //!

@@ -30,9 +30,8 @@ use std::sync::Arc;
 
 use crate::import::ChapterId;
 use crate::model::{AnchorTarget, Book, Chapter, NodeId, Role};
-use crate::style::{StyleId, StylePool};
+use crate::style::{CssDecl, StyleId, StylePool, parse_inline_decl};
 
-use super::synth::{InlineStyleEmit, LinkOutcome, SourceStyles};
 use super::synth::{generate_css, synthesize_xhtml_document_with_links};
 
 /// Collects styles from all chapters into a unified pool.
@@ -148,6 +147,40 @@ pub struct NormalizedContent {
     pub css: String,
 }
 
+/// What a synthesis-time link resolver decided for one `href` value.
+pub enum LinkOutcome {
+    /// Emit the href unchanged.
+    Keep,
+    /// Emit this replacement href.
+    Rewrite(String),
+    /// Emit the element without any href.
+    DropHref,
+}
+
+/// What to emit for one raw `semantics.style` inline-declaration string.
+pub enum InlineStyleEmit {
+    /// The declaration repeats across the book and was promoted to a
+    /// generated class — emit `class="<name>"`.
+    Class(String),
+    /// Emit as a `style="…"` attribute (already pruned of spec defaults).
+    Style(String),
+    /// Every declaration was a spec default — emit nothing.
+    Drop,
+}
+
+/// Source-style resolution for normalized synthesis when the importer
+/// declares a style program: maps each node's `semantics.class` to the
+/// emitted class attribute and its `semantics.style` to a promoted class
+/// or an inline `style` attribute. When present, the computed-style class
+/// list is ignored entirely.
+pub struct SourceStyles<'a> {
+    /// Raw source style name → sanitized class name (`None` = the style
+    /// produced no declarations, so no class attribute).
+    pub named: &'a HashMap<String, Option<String>>,
+    /// Raw inline-declaration string → what to emit for it.
+    pub inline: &'a HashMap<String, InlineStyleEmit>,
+}
+
 /// Normalize all chapters in a book through the IR pipeline.
 ///
 /// This is the main entry point for normalized export. It:
@@ -193,12 +226,13 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
     // Generate unified CSS
     // =========================================================================
     //
-    // Two regimes. Sources with a named-style program (KFX): the stylesheet
-    // is the source's own styles, converted by the shared `export::css`
-    // machinery — rules keyed by the raw style names each node carries in
-    // `semantics.class`, so both KFX→EPUB routes emit identical CSS. All
-    // other normalized sources: classes are interned computed styles
-    // (`.c<N>`) from the global pool.
+    // Two regimes, keyed on the importer's declared capability. A source
+    // whose importer supplies a style program (today only the KFX importer
+    // does): the stylesheet is the source's own styles, converted by the
+    // `dom_synth` machinery — rules keyed by the raw style names each node
+    // carries in `semantics.class`, so both KFX→EPUB engines emit identical
+    // CSS. All other normalized sources: classes are interned computed
+    // styles (`.c<N>`) from the global pool.
     let css_program = book.stylesheet_program();
     let (css_text, source_style_maps, css_artifact) = match &css_program {
         Some(program) => {
@@ -220,7 +254,7 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
                     }
                     if let Some(raw) = ch.semantics.style(node) {
                         let pruned = pruned_of_raw.entry(raw.to_string()).or_insert_with(|| {
-                            let mut decl = super::dom_synth::parse_inline_decl(raw);
+                            let mut decl = parse_inline_decl(raw);
                             super::dom_synth::prune_default_decls(&mut decl);
                             (!decl.is_empty()).then(|| decl.to_inline())
                         });
@@ -230,7 +264,7 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
                     }
                 }
             }
-            let mut named_rules: Vec<(String, super::dom_synth::CssDecl)> = used
+            let mut named_rules: Vec<(String, CssDecl)> = used
                 .iter()
                 .filter_map(|name| {
                     program
@@ -355,10 +389,10 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
     let language = book.metadata().language.clone();
 
     for (idx, (chapter_id, source_path, ir)) in ir_chapters.iter().enumerate() {
-        // KFX (named-style program): build the chapter through the shared
+        // Declared style program: build the chapter through the shared
         // XHTML DOM + consolidation passes — the same code the mechanical
-        // route serializes with, so both engines' chapter files are
-        // byte-identical by construction. The title is the section name
+        // route serializes with, so both KFX→EPUB engines' chapter files
+        // are byte-identical by construction. The title is the section name
         // (NOT the deduped filename), matching the mechanical
         // `push_book_part`.
         if let Some(src) = &source_styles {
@@ -377,7 +411,7 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
             continue;
         }
 
-        // Computed-style `.c<N>` regime (non-KFX normalized sources):
+        // Computed-style `.c<N>` regime (no declared style program):
         // string synthesis with the interned class list.
         let mut remapped_class_list: Vec<Option<&str>> = Vec::new();
         if let Some(artifact) = &css_artifact {

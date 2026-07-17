@@ -25,8 +25,8 @@ use quick_xml::events::Event;
 use zip::ZipArchive;
 
 use crate::formats::epub::{parse_container_xml, parse_opf};
-use crate::html::role_map::element_to_role_known;
 use crate::model::Role;
+use crate::model::role_map::element_to_role_known;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Bucket {

@@ -688,7 +688,7 @@ impl Book {
 
     /// The source's named-style program for normalized export. See
     /// [`crate::import::Importer::stylesheet_program`].
-    pub(crate) fn stylesheet_program(&mut self) -> Option<crate::export::css::CssProgram> {
+    pub(crate) fn stylesheet_program(&mut self) -> Option<crate::import::CssProgram> {
         self.backend.stylesheet_program()
     }
 

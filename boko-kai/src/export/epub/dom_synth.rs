@@ -3,9 +3,10 @@
 //! machinery for source-declared style programs.
 //!
 //! `normalize_book` selects this regime when the importer supplies a
-//! [`CssProgram`] via [`crate::import::Importer::stylesheet_program`]
+//! [`CssProgram`](crate::import::CssProgram) via
+//! [`crate::import::Importer::stylesheet_program`]
 //! (today only the KFX importer does); books without one go through the
-//! string-synthesis regime in [`super::synth`]. Chapters run the same DOM,
+//! string-synthesis regime in `super::synth`. Chapters run the same DOM,
 //! consolidation passes, and serializer as the mechanical `kfx_to_epub`
 //! route, so both KFX→EPUB engines ship byte-identical files by
 //! construction.
@@ -28,18 +29,26 @@
 //! route does. Roles this regime never receives from its current source
 //! (definition lists, code blocks) keep their natural tags.
 //!
-//! Stylesheet side: the declaration container ([`CssDecl`]), class-name
-//! sanitization ([`safe_class_name`]), spec-default pruning
-//! ([`prune_default_decls`]), repeated-inline-style promotion
-//! ([`promote_repeated_inline_styles`]), block-image partition
-//! ([`partition_image_style`]), and final assembly ([`StylesheetDoc::emit`]).
+//! Stylesheet side: class-name sanitization ([`safe_class_name`]),
+//! spec-default pruning ([`prune_default_decls`]), repeated-inline-style
+//! promotion ([`promote_repeated_inline_styles`]), and final assembly
+//! ([`StylesheetDoc::emit`]) — all over the raw declaration container
+//! [`CssDecl`] from [`crate::style`].
 
 use std::collections::{HashMap, HashSet};
 
 use crate::model::{Chapter, NodeId as IrNodeId, Role};
+use crate::style::parse_inline_decl;
 
 use super::dom::{self, Dom, LayoutHints};
-use super::synth::{InlineStyleEmit, LinkOutcome, SourceStyles};
+use super::normalize::{InlineStyleEmit, LinkOutcome, SourceStyles};
+
+// Port-compat re-exports: the frozen mechanical port reaches these through
+// its historical `export::css::` paths (this module's alias in
+// `export/mod.rs`); their homes are `style::declaration` and
+// `formats::kfx::yj_properties`. Deleted together with the port.
+pub use crate::formats::kfx::yj_properties::partition_image_style;
+pub use crate::style::CssDecl;
 
 /// Per-chapter emission inputs for the DOM-synthesis path.
 pub struct ChapterEmit<'a> {
@@ -55,7 +64,7 @@ pub struct ChapterEmit<'a> {
     pub href_resolver: &'a dyn Fn(&str) -> LinkOutcome,
 }
 
-/// Build, consolidate, and serialize one KFX chapter document. Referenced
+/// Build, consolidate, and serialize one chapter document. Referenced
 /// image paths are added to `assets`.
 pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<String>) -> String {
     let (mut dom, html_id, head_id, body_id) = dom::new_book_part(opts.title);
@@ -345,66 +354,7 @@ impl Builder<'_, '_> {
         }
     }
 }
-/// A small CSS rule body: ordered property/value pairs. Used when emitting
-/// either an inline `style="..."` attribute or a stylesheet rule.
-#[derive(Debug, Default, Clone)]
-pub struct CssDecl {
-    pub items: Vec<(String, String)>,
-}
-
-impl CssDecl {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn set(&mut self, name: impl Into<String>, value: impl Into<String>) {
-        let n = name.into();
-        // Last write wins.
-        if let Some(slot) = self.items.iter_mut().find(|(k, _)| *k == n) {
-            slot.1 = value.into();
-        } else {
-            self.items.push((n, value.into()));
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-
-    pub fn to_inline(&self) -> String {
-        let mut s = String::new();
-        for (i, (k, v)) in self.items.iter().enumerate() {
-            if i > 0 {
-                s.push_str("; ");
-            }
-            s.push_str(k);
-            s.push_str(": ");
-            s.push_str(v);
-        }
-        s
-    }
-}
-
-/// Parse a serialized inline declaration (`"k: v; k2: v2"`) back into a
-/// [`CssDecl`]. Inverse of [`CssDecl::to_inline`]; also tolerant of plain
-/// `style="..."` attribute text.
-pub fn parse_inline_decl(s: &str) -> CssDecl {
-    let mut decl = CssDecl::new();
-    for chunk in s.split(';') {
-        let chunk = chunk.trim();
-        if chunk.is_empty() {
-            continue;
-        }
-        if let Some(colon) = chunk.find(':') {
-            let k = chunk[..colon].trim();
-            let v = chunk[colon + 1..].trim();
-            decl.set(k, v);
-        }
-    }
-    decl
-}
-
-/// Sanitize a KFX style name into a valid CSS class name (and matching HTML
+/// Sanitize a source style name into a valid CSS class name (and matching HTML
 /// `class` attribute). Non-identifier characters become `_`; a leading digit
 /// (or `-digit` / lone `-`) is prefixed with `_`, since a CSS identifier can't
 /// start with a digit — an unescaped `.0HrDijd…` selector is a parse error
@@ -511,7 +461,7 @@ pub struct StylesheetDoc {
     pub fixed_layout: bool,
     /// Doc-level CSS writing mode (`horizontal-tb` emits no body rule).
     pub writing_mode: String,
-    /// Named rules: (raw KFX style name, declarations). Emitted sorted by
+    /// Named rules: (raw source style name, declarations). Emitted sorted by
     /// name, selectors sanitized via [`safe_class_name`]; empty declarations
     /// are skipped (a class attribute may still reference them — the rule is
     /// simply absent, which renders identically).
@@ -569,102 +519,6 @@ impl StylesheetDoc {
         }
         s
     }
-}
-
-/// Merged-style properties that force a block-flow `<img>` into a wrapper
-/// `<div>` carrying them. KFX resolves a percentage `width` against the space
-/// left between the element's own margins — how CSS sizes a block wrapper's
-/// content box, not how it sizes a replaced element — and `float` / `clear` /
-/// `text-align` / the `break-*` family are dead or wrong on a replaced inline
-/// element. The boko-emittable subset of calibre's
-/// `BLOCK_CONTAINER_PROPERTIES` (`yj_to_epub_content.py:49`), plus `clear`
-/// (calibre leaves it dead on the `<img>`; Kindle honors it, the wrapper is
-/// where CSS does too).
-pub fn img_wrapper_trigger(prop: &str) -> bool {
-    matches!(
-        prop,
-        "margin"
-            | "margin-top"
-            | "margin-left"
-            | "margin-bottom"
-            | "margin-right"
-            | "float"
-            | "clear"
-            | "text-indent"
-            | "text-align"
-            | "text-align-last"
-            | "break-before"
-            | "break-after"
-            | "break-inside"
-            | "page-break-before"
-            | "page-break-after"
-            | "page-break-inside"
-            | "overflow"
-            | "transform"
-            | "transform-origin"
-            | "display"
-    )
-}
-
-/// Properties that belong on the wrapper `<div>` once one exists: every
-/// trigger property plus `box-sizing` (meaningless on the replaced element,
-/// meaningful on the box that carries the margins).
-pub fn img_wrapper_prop(prop: &str) -> bool {
-    img_wrapper_trigger(prop) || prop == "box-sizing"
-}
-
-/// Partition a block-flow image's merged style (named `$style` + the content
-/// element's own inline properties) into `(wrapper, img)` halves, or `None`
-/// when nothing triggers a wrapper and the image stays bare.
-///
-/// Includes calibre's `fit_width` hoist: a float is shrink-to-fit, so a
-/// child's percentage width would resolve against the float's own
-/// content-derived width — circular; the author meant % of the column. The
-/// percentage moves onto the float and the image fills it.
-pub fn partition_image_style(merged: CssDecl) -> Option<(CssDecl, CssDecl)> {
-    if !merged.items.iter().any(|(k, _)| img_wrapper_trigger(k)) {
-        return None;
-    }
-    let mut wrapper_decl = CssDecl::new();
-    let mut img_decl = CssDecl::new();
-    for (k, v) in merged.items {
-        if img_wrapper_prop(&k) {
-            wrapper_decl.set(k, v);
-        } else {
-            img_decl.set(k, v);
-        }
-    }
-    if wrapper_decl
-        .items
-        .iter()
-        .any(|(k, v)| k == "float" && v != "none")
-        && let Some(pos) = img_decl
-            .items
-            .iter()
-            .position(|(k, v)| k == "width" && v.ends_with('%'))
-    {
-        let (_, w) = img_decl.items.remove(pos);
-        wrapper_decl.set("width", w);
-        img_decl.set("width", "100%");
-    }
-    Some((wrapper_decl, img_decl))
-}
-
-/// A source format's contribution to the normalized stylesheet: every named
-/// style converted to CSS declarations (unpruned — the export pass prunes its
-/// own working copies), plus the doc-level layout facts the emitter's header
-/// needs. Produced by [`crate::import::Importer::stylesheet_program`]; `None`
-/// from an importer means the format ships its own CSS assets instead.
-#[derive(Debug, Default)]
-pub struct CssProgram {
-    /// Raw source style name → converted declarations. A node whose
-    /// `semantics.class` names an entry with a non-empty declaration gets
-    /// `class="<safe_class_name(name)>"` in synthesized XHTML.
-    pub named: HashMap<String, CssDecl>,
-    /// Doc-level CSS writing mode (`horizontal-tb` emits no body rule).
-    pub writing_mode: String,
-    /// Image-based fixed-layout book (viewport-fit reset header).
-    pub fixed_layout: bool,
 }
 
 #[cfg(test)]
@@ -788,11 +642,5 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(doc.emit(), "@charset \"utf-8\";\n");
-    }
-
-    #[test]
-    fn parse_inline_decl_round_trip() {
-        let decl = parse_inline_decl(" width: 100% ; ; text-align: center ");
-        assert_eq!(decl.to_inline(), "width: 100%; text-align: center");
     }
 }

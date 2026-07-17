@@ -477,29 +477,11 @@ pub fn format_opf_date(date: &str) -> String {
     }
 }
 
-/// Resolve the Kindle `primary-writing-mode` hint from a book's writing mode
-/// and page-progression direction. For a horizontal book the hint encodes
-/// the page-turn direction (`horizontal-rl` for RTL); for a vertical book
-/// it's the writing mode itself. `horizontal-lr` is the reader default and
-/// yields `None` (the meta is omitted).
-pub fn primary_writing_mode(writing_mode: Option<&str>, ppd: Option<&str>) -> Option<String> {
-    let wm = writing_mode.unwrap_or("horizontal-tb");
-    let ppd = ppd.unwrap_or("ltr");
-    let value = if wm == "horizontal-tb" || wm.is_empty() {
-        if ppd == "rtl" {
-            "horizontal-rl"
-        } else {
-            "horizontal-lr"
-        }
-    } else {
-        wm
-    };
-    if value == "horizontal-lr" {
-        None
-    } else {
-        Some(value.to_string())
-    }
-}
+// Port-compat re-export: the frozen mechanical port resolves the Kindle
+// `primary-writing-mode` value through `export::opf::`; the implementation
+// is direction-shared and lives in `formats::epub::opf_meta`. Deleted
+// together with the port.
+pub use crate::formats::epub::opf_meta::primary_writing_mode;
 
 /// Map a [`LandmarkType`] to the EPUB 2.0 `<guide>` reference vocabulary
 /// (`text` is the guide spelling of "start reading"; the rest match their
@@ -747,27 +729,6 @@ mod tests {
             "2012-09-27T12:34:56Z"
         );
         assert_eq!(format_opf_date("2012"), "2012");
-    }
-
-    #[test]
-    fn primary_writing_mode_rules() {
-        assert_eq!(primary_writing_mode(None, None), None);
-        assert_eq!(
-            primary_writing_mode(Some("horizontal-tb"), Some("ltr")),
-            None
-        );
-        assert_eq!(
-            primary_writing_mode(Some("horizontal-tb"), Some("rtl")),
-            Some("horizontal-rl".to_string())
-        );
-        assert_eq!(
-            primary_writing_mode(Some("vertical-rl"), Some("ltr")),
-            Some("vertical-rl".to_string())
-        );
-        assert_eq!(
-            primary_writing_mode(Some("vertical-lr"), None),
-            Some("vertical-lr".to_string())
-        );
     }
 
     #[test]

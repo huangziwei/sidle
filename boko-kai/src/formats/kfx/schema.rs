@@ -482,8 +482,9 @@ impl KfxSchema {
 
         // Line break (<br/>)
         // Note: KFX forced line breaks are primarily encoded as \n within text
-        // content (handled in html_synth.rs), but register the element type too
-        // in case some books use a discrete line_break element.
+        // content (the export-side EOL passes turn those into `<br/>`), but
+        // register the element type too in case some books use a discrete
+        // line_break element.
         self.register_element(
             KfxSymbol::LineBreak,
             Strategy::Structure {

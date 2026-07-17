@@ -16,11 +16,13 @@ pub use kfx::KfxImporter;
 pub use mobi::MobiImporter;
 pub use pdf::{PdfDoc, PdfOutlineItem, PdfPage, probe_pdf};
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::html::{Origin, Stylesheet, compile_html_bytes, extract_stylesheets};
 use crate::model::{AnchorTarget, Chapter, FontFace, GlobalNodeId, Landmark, Metadata, TocEntry};
+use crate::style::CssDecl;
 
 /// Unique identifier for a chapter/spine item within a book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -37,6 +39,23 @@ pub struct SpineEntry {
     /// occupies (source's declared `page-spread-*`). `None` for reflowable
     /// books or FXL pages with no declared side. See [`crate::model::PageSpread`].
     pub page_spread: Option<crate::model::PageSpread>,
+}
+
+/// A source format's contribution to the normalized stylesheet: every named
+/// style converted to CSS declarations (unpruned — the export pass prunes its
+/// own working copies), plus the doc-level layout facts the stylesheet
+/// header needs. Produced by [`Importer::stylesheet_program`]; `None` from
+/// an importer means the format ships its own CSS assets instead.
+#[derive(Debug, Default)]
+pub struct CssProgram {
+    /// Raw source style name → converted declarations. A node whose
+    /// `semantics.class` names an entry with a non-empty declaration gets a
+    /// sanitized class attribute in synthesized XHTML.
+    pub named: HashMap<String, CssDecl>,
+    /// Doc-level CSS writing mode (`horizontal-tb` emits no body rule).
+    pub writing_mode: String,
+    /// Image-based fixed-layout book (viewport-fit reset header).
+    pub fixed_layout: bool,
 }
 
 /// Polymorphic interface for format-specific backends.
@@ -309,11 +328,11 @@ pub trait Importer: Send + Sync {
     ///
     /// When this returns `Some`, normalized export synthesizes `style.css`
     /// from it and class attributes come from each node's `semantics.class`
-    /// (names sanitized via [`crate::export::css::safe_class_name`], gated on
-    /// the named declaration being non-empty) instead of the interned
-    /// computed-style pool. Default `None`: formats that ship their own CSS
-    /// assets, or whose classes carry no stylesheet of their own.
-    fn stylesheet_program(&mut self) -> Option<crate::export::css::CssProgram> {
+    /// (names sanitized to CSS-safe class names, gated on the named
+    /// declaration being non-empty) instead of the interned computed-style
+    /// pool. Default `None`: formats that ship their own CSS assets, or
+    /// whose classes carry no stylesheet of their own.
+    fn stylesheet_program(&mut self) -> Option<CssProgram> {
         None
     }
 }

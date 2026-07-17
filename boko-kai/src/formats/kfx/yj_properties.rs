@@ -1,6 +1,7 @@
 //! KFX style → CSS property translation.
 //!
-//! Port of `yj_to_epub_properties.py`. Covers the property table, value
+//! Port of `yj_to_epub_properties.py`, plus the block-image wrapper
+//! partition from `yj_to_epub_content.py`. Covers the property table, value
 //! translation, and `writing-mode` emission; the long tail (advanced color
 //! transforms, layout-hint synthesis, etc.) is left to a follow-up pass.
 //! Shared by both KFX→EPUB engines: `kfx_to_epub` resolves named `$157`
@@ -8,12 +9,16 @@
 //! routes' stylesheets agree property-for-property.
 //!
 //! Identifiers track calibre as much as Rust syntax allows.
+//!
+//! Transitional home: this is the import-direction (KFX→CSS) half of style
+//! translation, while `style_schema.rs` holds the export-direction table —
+//! the two are slated to merge into one bidirectional table.
 
 #![allow(non_snake_case)]
 
-use crate::export::css::CssDecl;
 use crate::formats::kfx::container::{SymbolTable, get_field};
 use crate::formats::kfx::ion::IonValue;
+use crate::style::CssDecl;
 
 /// One entry in the YJ → CSS property map. Mirrors calibre's `Prop` class.
 #[derive(Debug, Clone)]
@@ -1302,4 +1307,83 @@ pub fn layout_hints_from_element_fields(
         }
     }
     (hints, heading_level)
+}
+
+/// Merged-style properties that force a block-flow `<img>` into a wrapper
+/// `<div>` carrying them. KFX resolves a percentage `width` against the space
+/// left between the element's own margins — how CSS sizes a block wrapper's
+/// content box, not how it sizes a replaced element — and `float` / `clear` /
+/// `text-align` / the `break-*` family are dead or wrong on a replaced inline
+/// element. The boko-emittable subset of calibre's
+/// `BLOCK_CONTAINER_PROPERTIES` (`yj_to_epub_content.py:49`), plus `clear`
+/// (calibre leaves it dead on the `<img>`; Kindle honors it, the wrapper is
+/// where CSS does too).
+pub fn img_wrapper_trigger(prop: &str) -> bool {
+    matches!(
+        prop,
+        "margin"
+            | "margin-top"
+            | "margin-left"
+            | "margin-bottom"
+            | "margin-right"
+            | "float"
+            | "clear"
+            | "text-indent"
+            | "text-align"
+            | "text-align-last"
+            | "break-before"
+            | "break-after"
+            | "break-inside"
+            | "page-break-before"
+            | "page-break-after"
+            | "page-break-inside"
+            | "overflow"
+            | "transform"
+            | "transform-origin"
+            | "display"
+    )
+}
+
+/// Properties that belong on the wrapper `<div>` once one exists: every
+/// trigger property plus `box-sizing` (meaningless on the replaced element,
+/// meaningful on the box that carries the margins).
+pub fn img_wrapper_prop(prop: &str) -> bool {
+    img_wrapper_trigger(prop) || prop == "box-sizing"
+}
+
+/// Partition a block-flow image's merged style (named `$style` + the content
+/// element's own inline properties) into `(wrapper, img)` halves, or `None`
+/// when nothing triggers a wrapper and the image stays bare.
+///
+/// Includes calibre's `fit_width` hoist: a float is shrink-to-fit, so a
+/// child's percentage width would resolve against the float's own
+/// content-derived width — circular; the author meant % of the column. The
+/// percentage moves onto the float and the image fills it.
+pub fn partition_image_style(merged: CssDecl) -> Option<(CssDecl, CssDecl)> {
+    if !merged.items.iter().any(|(k, _)| img_wrapper_trigger(k)) {
+        return None;
+    }
+    let mut wrapper_decl = CssDecl::new();
+    let mut img_decl = CssDecl::new();
+    for (k, v) in merged.items {
+        if img_wrapper_prop(&k) {
+            wrapper_decl.set(k, v);
+        } else {
+            img_decl.set(k, v);
+        }
+    }
+    if wrapper_decl
+        .items
+        .iter()
+        .any(|(k, v)| k == "float" && v != "none")
+        && let Some(pos) = img_decl
+            .items
+            .iter()
+            .position(|(k, v)| k == "width" && v.ends_with('%'))
+    {
+        let (_, w) = img_decl.items.remove(pos);
+        wrapper_decl.set("width", w);
+        img_decl.set("width", "100%");
+    }
+    Some((wrapper_decl, img_decl))
 }

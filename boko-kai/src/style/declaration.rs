@@ -1,7 +1,11 @@
-//! CSS declaration parsing.
+//! CSS declarations, typed and raw.
 //!
-//! This module contains the Declaration enum and its parse dispatch logic.
-//! The actual parsing functions are in the parse/ submodules.
+//! [`Declaration`] is the typed "fat enum" the cascade consumes; its parse
+//! dispatch lives here, with the actual parsing functions in the `parse/`
+//! submodules. [`CssDecl`] is its raw string-level sibling: an ordered
+//! property/value list for code that assembles or rewrites CSS as text
+//! without interpreting it (KFX style conversion, export stylesheet
+//! assembly).
 
 use cssparser::Parser;
 
@@ -438,5 +442,75 @@ impl Declaration {
                 None
             }
         }
+    }
+}
+
+/// A small CSS rule body: ordered property/value pairs. Used when emitting
+/// either an inline `style="..."` attribute or a stylesheet rule.
+#[derive(Debug, Default, Clone)]
+pub struct CssDecl {
+    pub items: Vec<(String, String)>,
+}
+
+impl CssDecl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        let n = name.into();
+        // Last write wins.
+        if let Some(slot) = self.items.iter_mut().find(|(k, _)| *k == n) {
+            slot.1 = value.into();
+        } else {
+            self.items.push((n, value.into()));
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn to_inline(&self) -> String {
+        let mut s = String::new();
+        for (i, (k, v)) in self.items.iter().enumerate() {
+            if i > 0 {
+                s.push_str("; ");
+            }
+            s.push_str(k);
+            s.push_str(": ");
+            s.push_str(v);
+        }
+        s
+    }
+}
+
+/// Parse a serialized inline declaration (`"k: v; k2: v2"`) back into a
+/// [`CssDecl`]. Inverse of [`CssDecl::to_inline`]; also tolerant of plain
+/// `style="..."` attribute text.
+pub fn parse_inline_decl(s: &str) -> CssDecl {
+    let mut decl = CssDecl::new();
+    for chunk in s.split(';') {
+        let chunk = chunk.trim();
+        if chunk.is_empty() {
+            continue;
+        }
+        if let Some(colon) = chunk.find(':') {
+            let k = chunk[..colon].trim();
+            let v = chunk[colon + 1..].trim();
+            decl.set(k, v);
+        }
+    }
+    decl
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_inline_decl_round_trip() {
+        let decl = parse_inline_decl(" width: 100% ; ; text-align: center ");
+        assert_eq!(decl.to_inline(), "width: 100%; text-align: center");
     }
 }

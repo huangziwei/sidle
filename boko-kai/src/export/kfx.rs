@@ -700,7 +700,7 @@ fn register_chapter_link_targets(
         if let Some(target) = resolved.get(source) {
             match target {
                 AnchorTarget::Internal(target_node) => {
-                    // Body-level ids (promoted to NodeId::ROOT by dom::transform)
+                    // Body-level ids (promoted to NodeId::ROOT by html::transform)
                     // have no element to anchor to. Register as a chapter-level
                     // target instead — the chapter's first content fragment IS
                     // where a body-id link should land. Without this, the link
@@ -1723,7 +1723,7 @@ fn resolve_toc_target(
             if let Some((fragment_id, _offset)) = ctx.anchor_registry.get_node_position(*gid) {
                 return Some((fragment_id, 0));
             }
-            // Body-level ids (promoted to NodeId::ROOT by dom::transform) have
+            // Body-level ids (promoted to NodeId::ROOT by html::transform) have
             // no element of their own to anchor to. Fall back to chapter start.
             if gid.node == crate::model::NodeId::ROOT
                 && let Some(fragment_id) = ctx.anchor_registry.get_chapter_position(gid.chapter)
@@ -1798,7 +1798,7 @@ fn resolve_page_target(
             if let Some((fragment_id, offset)) = ctx.anchor_registry.get_node_position(*gid) {
                 return Some((fragment_id, offset));
             }
-            // Body-level ids (promoted to NodeId::ROOT by dom::transform) have no
+            // Body-level ids (promoted to NodeId::ROOT by html::transform) have no
             // element of their own — land on the chapter start.
             if gid.node == crate::model::NodeId::ROOT
                 && let Some(fragment_id) = ctx.anchor_registry.get_chapter_position(gid.chapter)

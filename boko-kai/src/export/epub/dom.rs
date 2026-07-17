@@ -6,6 +6,8 @@
 //! `kfx_to_epub` walk and the IR route's normalized export — so the emitted
 //! XHTML (serialization shape, consolidation, attribute finalization) is
 //! byte-identical by construction rather than by parallel implementation.
+//! Permanent: it stays the DOM-synthesis regime's DOM ([`super::dom_synth`])
+//! after the mechanical route retires.
 //!
 //! Nodes have either text content (mixed text + children, lxml-style) or a
 //! tag with attributes. Attribute order is insertion order; `style` and
@@ -13,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use super::dom_synth::CssDecl;
+use crate::style::CssDecl;
 
 pub type NodeId = usize;
 
