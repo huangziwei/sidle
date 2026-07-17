@@ -204,6 +204,24 @@ fn encode_as_jpeg(img: &DynamicImage) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Composite an image's alpha channel over white, returning an opaque RGB8
+/// image. Shared by the JPEG transcode path here and the JXR plate encoder
+/// (`export/kfx.rs`). JPEG has no alpha at all; JPEG-XR *can* carry it
+/// (T.832 alpha image plane) but the KFX plate formats we emit
+/// (8bppGray/24bppRGB) don't, and KDP's "Image Guidelines — Reflowable"
+/// documents that Kindle renderers don't composite transparent areas
+/// correctly anyway. Dropping the channel without compositing turns
+/// transparent pixels into their (usually black) stored color — a
+/// transparent-background GIF/PNG renders as a black slab. The e-ink page
+/// is white, so flattening over white at encode time yields the same
+/// pixels a correct renderer would draw, deterministically.
+pub(crate) fn flatten_alpha_over_white(img: &DynamicImage) -> DynamicImage {
+    let rgb = flatten_to_rgb(img);
+    let buf = image::RgbImage::from_raw(img.width(), img.height(), rgb)
+        .expect("flatten_to_rgb returns w*h*3 bytes");
+    DynamicImage::ImageRgb8(buf)
+}
+
 fn flatten_to_rgb(img: &DynamicImage) -> Vec<u8> {
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();

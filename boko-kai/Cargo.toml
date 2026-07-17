@@ -17,9 +17,10 @@ crate-type = ["rlib"]
 default = ["cli"]
 # `cli` implies `aozora`: the CLI bin (`main.rs`) calls `boko::aozora::*`.
 cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:ion-rs", "aozora"]
-# Aozora Bunko TXT → EPUB. Pulls the heavy SVG/text stack (resvg + its font /
-# raster deps) plus `regex`; kept behind a feature to shrink builds without it.
-aozora = ["dep:resvg", "dep:regex"]
+# Aozora Bunko TXT → EPUB. Pulls `regex` (the TXT parser is regex-heavy);
+# kept behind a feature to shrink builds without it. (resvg used to live
+# here too, but it's now a hard dep — EPUB→KFX needs it for SVG plates.)
+aozora = ["dep:regex"]
 # Kindle Scribe handwritten-notebook (.nbk) decode → SVG. Pulls `rusqlite`
 # (bundled C SQLite). Off by default; sidle enables it.
 nbk = ["dep:rusqlite"]
@@ -46,12 +47,17 @@ encoding_rs = "0.8"
 # tool we're porting relies on ~40 regex patterns.
 regex = { version = "1.11", optional = true }
 
-# SVG rasterization for Aozora cover generation. We build the cover as
-# pure SVG (port of `buildCoverSvg` from `aozora-epub.html`) and rasterize
-# it to a JPEG for the EPUB. `system-fonts` feature pulls macOS fonts
-# (Hiragino Mincho ProN etc.) into usvg's fontdb at runtime — Aozora is
-# macOS-only personal software, so no bundled fallback font is needed.
-resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"], optional = true }
+# SVG rasterization, two consumers:
+#  - EPUB→KFX: KFX has no vector resource format (Amazon's own converter
+#    rasterizes SVG sources to JPEG/JXR), so SVG assets are rendered to
+#    raster plates before JXR encoding. This is core-product path, hence
+#    resvg is a hard dependency (conversion always runs host-side; the
+#    Kindle picker binary doesn't link boko at all).
+#  - Aozora cover generation: the cover is built as pure SVG (port of
+#    `buildCoverSvg` from `aozora-epub.html`) and rasterized to JPEG.
+# `system-fonts` pulls host fonts (Hiragino Mincho ProN etc.) into usvg's
+# fontdb at runtime for `<text>`-bearing SVGs; no bundled fallback font.
+resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"] }
 
 # Base64 encoding for KFX raw media
 base64 = "0.22"

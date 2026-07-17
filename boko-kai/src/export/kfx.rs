@@ -3,7 +3,7 @@
 //! This module provides the `KfxExporter` which implements the `Exporter` trait
 //! for writing books in Amazon's KFX format.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{self, Seek, Write};
 
 use crate::export::Exporter;
@@ -460,15 +460,14 @@ fn build_kfx_container(
     // 2j. Resource fragments (images, fonts, etc.)
     // Each resource gets two entities: external_resource (metadata) + bcRawMedia (bytes).
     //
-    // Images go through `sanitize_for_kfx` first: non-JPEG rasters
-    // (GIF/PNG/WebP/BMP) are re-encoded as JFIF JPEG, and JPEG inputs
-    // are walked to strip APP1–APP15/COM metadata so the resulting
-    // bytes are a clean `FF D8 FF E0 JFIF` JPEG. See the module doc on
-    // `image_transcode` for the rationale (silent gif/png invisibility
-    // + KOA2 screensaver-thumbnailer rejecting EXIF-tagged covers).
-    // The cover image stays on the JPEG path: the Kindle library-gallery and
-    // sleep-screen thumbnailer don't read a JXR cover (the book opens fine, but
-    // the thumbnail/screensaver go blank). Interior plates still become JXR.
+    // Interior images run through `encode_asset_for_kfx`: rasters (and
+    // rasterized SVGs — KFX has no vector resource format) become grayscale
+    // JXR plates; anything undecodable falls back to the JPEG sanitize path.
+    // The cover image stays on the JPEG path (`sanitize_for_kfx`: JFIF
+    // re-encode / APP-segment strip): the Kindle library-gallery and
+    // sleep-screen thumbnailer don't read a JXR cover (the book opens fine,
+    // but the thumbnail/screensaver go blank), and a KOA2's stricter
+    // screensaver JPEG decoder rejects EXIF-tagged covers.
     let cover_filename = book.metadata().cover_image.as_ref().and_then(|c| {
         std::path::Path::new(c)
             .file_name()
@@ -477,29 +476,51 @@ fn build_kfx_container(
     // Interior plates become JXR in the book's chosen color mode (default
     // grayscale). Captured before the loop so the `book` borrow inside is free.
     let color_mode = book.image_color_mode();
-    let n_media = asset_paths
+    // Bundle only resources something can actually load: images referenced by
+    // a section (`section_resource_deps` is recorded from the IR during the
+    // chapter loop above, and `build_cover_section` records the standalone
+    // cover), the metadata cover, and fonts (matched to @font-face rules in
+    // `build_font_fragments` below). EPUBs routinely ship images nothing
+    // displays — e.g. `display:none` raster fallbacks next to each SVG
+    // figure, which the IR transform already drops — and bundling them
+    // bloats the container with resources no storyline can reach.
+    let referenced_names: HashSet<String> = ctx
+        .section_resource_deps
+        .values()
+        .flat_map(|names| names.iter().cloned())
+        .collect();
+    let bundle_paths: Vec<_> = asset_paths
         .iter()
-        .filter(|p| is_media_asset(p.as_path()))
-        .count();
-    let mut media_i = 0usize;
-    for asset_path in &asset_paths {
-        if is_media_asset(asset_path) {
-            media_i += 1;
-            on_progress("images", media_i, n_media, "Encoding images");
-            if let Ok(data) = book.load_asset(asset_path) {
-                let href = asset_path.to_string_lossy().to_string();
-                let is_cover =
-                    cover_filename.as_deref() == asset_path.file_name().and_then(|s| s.to_str());
-                let bundled = if is_cover {
-                    crate::image::jpeg::sanitize_for_kfx(&data).unwrap_or(data)
-                } else {
-                    encode_asset_for_kfx(&data, color_mode)
-                };
-                // external_resource ($164) - metadata about the resource
-                fragments.push(build_external_resource_fragment(&href, &bundled, &mut ctx));
-                // bcRawMedia ($417) - the actual bytes
-                fragments.push(build_resource_fragment(&href, &bundled, &mut ctx));
+        .filter(|p| {
+            if !is_media_asset(p) {
+                return false;
             }
+            if is_font_asset(p)
+                || cover_filename.as_deref() == p.file_name().and_then(|s| s.to_str())
+            {
+                return true;
+            }
+            ctx.resource_registry
+                .get_name(&p.to_string_lossy())
+                .is_some_and(|n| referenced_names.contains(n))
+        })
+        .collect();
+    let n_media = bundle_paths.len();
+    for (i, asset_path) in bundle_paths.into_iter().enumerate() {
+        on_progress("images", i + 1, n_media, "Encoding images");
+        if let Ok(data) = book.load_asset(asset_path) {
+            let href = asset_path.to_string_lossy().to_string();
+            let is_cover =
+                cover_filename.as_deref() == asset_path.file_name().and_then(|s| s.to_str());
+            let bundled = if is_cover {
+                crate::image::jpeg::sanitize_for_kfx(&data).unwrap_or(data)
+            } else {
+                encode_asset_for_kfx(&data, color_mode)
+            };
+            // external_resource ($164) - metadata about the resource
+            fragments.push(build_external_resource_fragment(&href, &bundled, &mut ctx));
+            // bcRawMedia ($417) - the actual bytes
+            fragments.push(build_resource_fragment(&href, &bundled, &mut ctx));
         }
     }
 
@@ -2234,11 +2255,18 @@ const JXR_DEFAULT_QP: jxr::QpSet = jxr::QpSet {
 /// Prepare a media asset's bytes for KFX bundling. Raster images are re-encoded
 /// as **grayscale JPEG-XR** — the device is B&W e-ink and the source EPUB keeps
 /// the color master, so this matches Amazon's own KFX image codec and shrinks
-/// EPUB-sourced books toward the JXR size class. Vector/undecodable assets
-/// (SVG, fonts) and any encode failure fall back to the JPEG sanitize path,
-/// which itself passes non-image bytes through unchanged.
+/// EPUB-sourced books toward the JXR size class. SVG assets are rasterized
+/// first (KFX has no vector resource format — raw SVG bytes render as nothing
+/// on device) and then take the same JXR path. Undecodable assets (fonts) and
+/// any encode failure fall back to the JPEG sanitize path, which itself passes
+/// non-image bytes through unchanged.
 fn encode_asset_for_kfx(data: &[u8], mode: jxr::ColorMode) -> Vec<u8> {
     if let Some(jxr) = encode_jxr_asset(data, mode) {
+        return jxr;
+    }
+    if let Some(img) = crate::image::svg::rasterize(data)
+        && let Some(jxr) = encode_dynimg_jxr(&img, mode)
+    {
         return jxr;
     }
     crate::image::jpeg::sanitize_for_kfx(data).unwrap_or_else(|| data.to_vec())
@@ -2264,6 +2292,22 @@ fn encode_dynimg_jxr(img: &::image::DynamicImage, mode: jxr::ColorMode) -> Optio
     if w == 0 || h == 0 || w > (1 << 16) || h > (1 << 16) {
         return None;
     }
+    // Flatten alpha over white first, matching the JPEG path's
+    // `flatten_to_rgb`. JPEG-XR itself can carry alpha (T.832 alpha image
+    // plane; the codec crate implements it), but the plate formats emitted
+    // here don't: 8bppGray (the only JXR Amazon ships — real KFX has no
+    // color JXR at all) and 24bppRGB (our own color-mode extension). And
+    // `to_luma8`/`to_rgb8` DROP the channel without compositing — a
+    // transparent-background GIF/PNG would render as a black slab
+    // (transparent pixels store (0,0,0)). See `flatten_alpha_over_white`
+    // for why white is the right flatten color.
+    let flattened;
+    let img = if img.color().has_alpha() {
+        flattened = crate::image::jpeg::flatten_alpha_over_white(img);
+        &flattened
+    } else {
+        img
+    };
     let planes: Vec<Vec<u8>> = match mode {
         ColorMode::Grayscale => vec![img.to_luma8().into_raw()],
         ColorMode::Color => {
@@ -2890,6 +2934,18 @@ fn is_media_asset(path: &std::path::Path) -> bool {
     matches!(
         ext.to_lowercase().as_str(),
         "jpg" | "jpeg" | "png" | "gif" | "svg" | "webp" | "ttf" | "otf" | "woff" | "woff2"
+    )
+}
+
+/// Check if a path is a font asset. Fonts are always bundled — they're
+/// referenced by `@font-face` rules (matched fuzzily in
+/// `build_font_fragments`), not by section image refs, so the
+/// referenced-resource pruning must not drop them.
+fn is_font_asset(path: &std::path::Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    matches!(
+        ext.to_lowercase().as_str(),
+        "ttf" | "otf" | "woff" | "woff2"
     )
 }
 
@@ -6501,6 +6557,76 @@ mod resource_export_tests {
         assert!(
             c_uuid.ends_with("dc90d"),
             "color → 24bppRGB UUID, got {c_uuid}"
+        );
+    }
+
+    /// Decode a grayscale JXR plate into (width, height, luma bytes).
+    fn decode_gray_jxr(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+        let c = jxr::decode::container::parse(bytes).unwrap();
+        let d = jxr::decode::decoder::Decoder::new(c.image_data)
+            .decode()
+            .unwrap();
+        let buf = d.to_pixel_buffer().unwrap();
+        assert_eq!(buf.channels, 1, "expected a single luma plane");
+        (d.width, d.height, buf.data)
+    }
+
+    #[test]
+    fn transparent_raster_flattens_white_in_jxr() {
+        // 32×32 RGBA PNG: an opaque black 8×8 square top-left, everything
+        // else fully-transparent black — the Feynman frontispiece shape.
+        // Without alpha flattening, `to_luma8` maps the transparent region
+        // to luma 0 and the plate renders as a black slab.
+        let rgba: ::image::RgbaImage = ::image::ImageBuffer::from_fn(32, 32, |x, y| {
+            if x < 8 && y < 8 {
+                ::image::Rgba([0, 0, 0, 255])
+            } else {
+                ::image::Rgba([0, 0, 0, 0])
+            }
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        ::image::DynamicImage::ImageRgba8(rgba)
+            .write_to(&mut png, ::image::ImageFormat::Png)
+            .unwrap();
+        let out = encode_jxr_asset(png.get_ref(), jxr::ColorMode::Grayscale).unwrap();
+        let (w, _h, luma) = decode_gray_jxr(&out);
+        let px = |x: u32, y: u32| luma[(y * w + x) as usize];
+        // Sample away from the square's edge (JXR is lossy; avoid ringing).
+        assert!(
+            px(24, 24) >= 240,
+            "transparent background must flatten to white, got {}",
+            px(24, 24)
+        );
+        assert!(
+            px(2, 2) <= 15,
+            "opaque content stays black, got {}",
+            px(2, 2)
+        );
+    }
+
+    #[test]
+    fn svg_asset_rasterizes_to_jxr_plate() {
+        // 20×10 CSS px SVG, left half black on a transparent background.
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10" viewBox="0 0 20 10"><rect x="0" y="0" width="10" height="10" fill="black"/></svg>"#;
+        let out = encode_asset_for_kfx(svg, jxr::ColorMode::Grayscale);
+        assert_eq!(
+            &out[0..3],
+            &[0x49, 0x49, 0xBC],
+            "svg must become a JXR plate, not raw XML labeled jpg"
+        );
+        // 4× supersample of the intrinsic CSS size, dims readable from the IFD.
+        assert_eq!(crate::util::extract_image_dimensions(&out), Some((80, 40)));
+        let (w, _h, luma) = decode_gray_jxr(&out);
+        let px = |x: u32, y: u32| luma[(y * w + x) as usize];
+        assert!(
+            px(20, 20) <= 15,
+            "painted rect is black, got {}",
+            px(20, 20)
+        );
+        assert!(
+            px(60, 20) >= 240,
+            "transparent background flattens to white, got {}",
+            px(60, 20)
         );
     }
 

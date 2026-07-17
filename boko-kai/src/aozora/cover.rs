@@ -13,10 +13,11 @@
 //! resolves at runtime. No bundled fallback.
 
 use std::io;
-use std::sync::{Arc, OnceLock};
 
 use resvg::tiny_skia;
 use resvg::usvg;
+
+use crate::image::svg::cached_fontdb;
 
 const COVER_W: u32 = 1050;
 const COVER_H: u32 = 1500;
@@ -230,24 +231,10 @@ fn escape_xml(s: &str) -> String {
 // Rasterize + JPEG encode
 // =========================================================================
 
-/// Cache the system-font scan. `load_system_fonts()` walks every
-/// `/Library/Fonts`, `~/Library/Fonts`, `/System/Library/Fonts` entry on
-/// macOS — ~150-300 ms per call. We scan once per process and clone the
-/// `Arc<Database>` into each render's `Options`.
-fn cached_fontdb() -> Arc<usvg::fontdb::Database> {
-    static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-    FONTDB
-        .get_or_init(|| {
-            let mut db = usvg::fontdb::Database::new();
-            db.load_system_fonts();
-            Arc::new(db)
-        })
-        .clone()
-}
-
 fn rasterize_to_jpeg(svg: &str) -> io::Result<Vec<u8>> {
     // usvg 0.47's `Options` owns the fontdb (Arc-wrapped). Reuse the
-    // cached one — cloning the Arc is constant-time.
+    // process-wide cached scan (`crate::image::svg::cached_fontdb`) —
+    // cloning the Arc is constant-time.
     let opts = usvg::Options {
         // Default `font-family` if SVG names none. The HTML tool always
         // names a font stack, but set a sane default for robustness.
