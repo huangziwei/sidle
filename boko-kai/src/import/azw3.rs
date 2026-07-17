@@ -499,6 +499,7 @@ impl Azw3Importer {
                 id: ChapterId(i as u32),
                 size_estimate: file.length as usize,
                 page_spread: None,
+                viewport: None,
             });
         }
 

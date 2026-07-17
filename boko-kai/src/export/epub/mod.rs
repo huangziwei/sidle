@@ -213,7 +213,7 @@ impl EpubExporter {
             opf::repoint_cover_guide(&mut guide, "titlepage.xhtml");
         }
         let opf = opf::emit_opf(&OpfPackage {
-            metadata: build_opf_metadata(book.metadata(), false, cover_id),
+            metadata: build_opf_metadata(book.metadata(), false, cover_id, None),
             manifest: manifest_items,
             spine: spine_items,
             guide,
@@ -360,6 +360,24 @@ impl EpubExporter {
         // references, sorted for stable ordering, force-including the cover
         // image (it may be referenced by metadata only).
         let asset_bytes: Vec<(String, Vec<u8>)> = if let Some(asset_list) = book.bundled_assets() {
+            // Fixed-layout books bundle a full page-thumbnail set the
+            // reading order never references; ship only the images the
+            // emitted pages use (plus the cover), pruned BEFORE the bulk
+            // load so thumbnails are never transcoded (the mechanical
+            // route's `retain_referenced_images`).
+            let asset_list: Vec<std::path::PathBuf> = if book.metadata().fixed_layout {
+                let cover = book.metadata().cover_image.clone();
+                asset_list
+                    .into_iter()
+                    .filter(|p| {
+                        let name = p.to_string_lossy();
+                        content.assets.contains(name.as_ref())
+                            || Some(name.as_ref()) == cover.as_deref()
+                    })
+                    .collect()
+            } else {
+                asset_list
+            };
             asset_list
                 .iter()
                 .zip(book.load_assets(&asset_list))
@@ -447,7 +465,11 @@ impl EpubExporter {
         {
             item.properties.push("cover-image".to_string());
         }
-        let titlepage_xhtml = if let Some(ref cid) = cover_id {
+        let titlepage_xhtml = if book.metadata().fixed_layout {
+            // Fixed-layout: the first spine page already IS the cover; a
+            // titlepage would duplicate it and break the spread pairing.
+            None
+        } else if let Some(ref cid) = cover_id {
             let cover_item = manifest_items.iter().find(|i| &i.id == cid);
             cover_item.and_then(|item| {
                 let bytes = asset_bytes
@@ -565,6 +587,26 @@ impl EpubExporter {
         if titlepage_xhtml.is_some() {
             opf::repoint_cover_guide(&mut guide, "titlepage.xhtml");
         }
+        // Fixed-layout `original-resolution` fallback for sources with
+        // per-page viewports only: the most common page size (the cover is
+        // often sized differently from the content pages). Deterministic
+        // tie-break (count, then size) — the mechanical route's HashMap
+        // `max_by_key` is tie-order-unstable; don't copy that.
+        let derived_resolution = {
+            let mut counts: Vec<((u32, u32), usize)> = Vec::new();
+            for entry in &spine {
+                if let Some(vp) = entry.viewport {
+                    match counts.iter_mut().find(|(k, _)| *k == vp) {
+                        Some((_, n)) => *n += 1,
+                        None => counts.push((vp, 1)),
+                    }
+                }
+            }
+            counts
+                .into_iter()
+                .max_by_key(|&(vp, n)| (n, vp))
+                .map(|(vp, _)| vp)
+        };
         // A KFX source's metadata mirrors the mechanical route's curated
         // field set (see `build_opf_metadata`), keeping the two KFX→EPUB
         // engines' package documents identical. The guide is cloned into the
@@ -574,6 +616,7 @@ impl EpubExporter {
                 book.metadata(),
                 book.requires_normalized_export(),
                 cover_id,
+                derived_resolution,
             ),
             manifest: manifest_items,
             spine: spine_items,
@@ -698,6 +741,7 @@ fn build_opf_metadata(
     md: &crate::model::Metadata,
     normalized: bool,
     cover_manifest_id: Option<String>,
+    derived_resolution: Option<(u32, u32)>,
 ) -> OpfMetadata {
     // One sort key for every creator: the author sort key when the source
     // declares one, else the joined author list so EPUB libraries still
@@ -745,12 +789,14 @@ fn build_opf_metadata(
         md.date.clone()
     };
 
-    // Fixed-layout: the source viewport doubles as the EBPAJ viewport meta
-    // and the KF8 `original-resolution` twin.
+    // Fixed-layout: a declared doc-level viewport doubles as the EBPAJ
+    // viewport meta and the KF8 `original-resolution` twin. A source with
+    // per-page viewports only (KFX) declares no EBPAJ viewport and falls
+    // back to the derived modal page size for `original-resolution`.
     let fixed_layout = md.fixed_layout.then(|| OpfFixedLayout {
         rendition_spread: md.rendition_spread.clone(),
         ebpaj_viewport: md.default_viewport,
-        original_resolution: md.default_viewport,
+        original_resolution: md.default_viewport.or(derived_resolution),
         book_type: md.book_type.clone(),
     });
 

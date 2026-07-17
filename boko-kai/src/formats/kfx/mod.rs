@@ -14,6 +14,7 @@
 //! - `transforms` - Attribute value transformers for bidirectional conversion
 //! - `metadata` - Metadata schema for book metadata mapping
 //! - `fragment` - KFX fragment representation
+//! - `fxl` - Fixed-layout signal derivation (content_features, page pixel sizes)
 //! - `serialization` - Binary container format serialization
 //! - `context` - Export context for central state management
 //! - `style_schema` - Declarative style property mapping
@@ -30,6 +31,7 @@ pub mod cover;
 pub mod cover_extract;
 pub mod cover_replace;
 pub mod fragment;
+pub mod fxl;
 pub mod image_extract;
 pub mod ion;
 pub mod merge;

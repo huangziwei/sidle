@@ -462,6 +462,12 @@ impl Book {
         self.backend.source_id(id)
     }
 
+    /// The document `<title>` for a spine chapter (see
+    /// [`crate::import::Importer::chapter_title`]).
+    pub fn chapter_title(&self, id: ChapterId) -> Option<&str> {
+        self.backend.chapter_title(id)
+    }
+
     /// Load raw chapter bytes.
     pub fn load_raw(&mut self, id: ChapterId) -> io::Result<Vec<u8>> {
         self.backend.load_raw(id)

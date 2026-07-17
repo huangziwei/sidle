@@ -1206,21 +1206,81 @@ fn build_text_with_spans(
     symbols: &SymbolTable,
     styles: Option<&HashMap<String, Vec<(u64, IonValue)>>>,
 ) {
-    // Sort spans by offset, then by length (shorter first for same offset)
-    let mut sorted_spans: Vec<_> = spans.iter().collect();
-    sorted_spans.sort_by_key(|s| (s.offset, s.length));
+    // KFX can express a link and a ruby/styled run over the SAME text with
+    // independent, partially overlapping events — e.g. a TOC line whose
+    // per-slice links are pre-cut at ruby-base boundaries while one grouped
+    // ruby spans across them. The mechanical route resolves overlap by
+    // walking links as the outer partition (links never nest) and emitting
+    // other marks only where they fit entirely inside one link's range or
+    // one inter-link gap; a mark crossing a segment boundary is dropped
+    // (`try_emit_ruby_text` / `emit_marks`). Reproduce that resolution up
+    // front; fully nested or disjoint layouts — the common case — pass
+    // through unchanged.
+    let total_chars = text.chars().count();
+    // Links the mechanical walk keeps: offset order (stable → event order
+    // on ties), each skipped when it starts inside the previous kept
+    // link's range; out-of-bounds events are dropped, not clamped.
+    let mut kept_links: Vec<usize> = Vec::new();
+    {
+        let mut idx: Vec<usize> = (0..spans.len())
+            .filter(|&i| {
+                spans[i].role == Role::Link && spans[i].offset + spans[i].length <= total_chars
+            })
+            .collect();
+        idx.sort_by_key(|&i| spans[i].offset);
+        let mut cursor = 0usize;
+        for i in idx {
+            if spans[i].offset < cursor {
+                continue;
+            }
+            cursor = spans[i].offset + spans[i].length;
+            kept_links.push(i);
+        }
+    }
+    let link_bounds: Vec<(usize, usize)> = kept_links
+        .iter()
+        .map(|&i| (spans[i].offset, spans[i].offset + spans[i].length))
+        .collect();
+    let kept_links: std::collections::HashSet<usize> = kept_links.into_iter().collect();
+    let fits_segment = |off: usize, end: usize| -> bool {
+        // Inside one link's range?
+        if link_bounds.iter().any(|&(s, e)| off >= s && end <= e) {
+            return true;
+        }
+        // Inside one inter-link gap?
+        let mut gap_start = 0usize;
+        for &(s, e) in &link_bounds {
+            if off >= gap_start && end <= s {
+                return true;
+            }
+            gap_start = e;
+        }
+        off >= gap_start && end <= total_chars
+    };
+    let spans: Vec<&SpanStart> = spans
+        .iter()
+        .enumerate()
+        .filter(|(i, s)| {
+            if s.role == Role::Link {
+                kept_links.contains(i)
+            } else if link_bounds.is_empty() {
+                true
+            } else {
+                s.offset + s.length <= total_chars && fits_segment(s.offset, s.offset + s.length)
+            }
+        })
+        .map(|(_, s)| s)
+        .collect();
 
-    // Filter out spans that are completely contained within larger spans at the same offset.
-    // This handles the case of nested inlines where both outer and inner emit spans.
-    // We keep the shorter (more specific) spans and discard the longer encompassing ones.
-    // Build a proper nested span tree to handle overlapping/nested spans.
-    // KFX style_events can have nested spans (e.g., Link containing Inline).
-    // Sort by offset, then by length DESCENDING (enclosing spans first).
-    let mut sorted_spans: Vec<_> = spans.iter().collect();
+    // Build a nested span tree: sort by offset, then length DESCENDING
+    // (enclosing spans first) so containment nests below; a link ties ahead
+    // of an equal-range mark (the mark renders inside the `<a>`).
+    let mut sorted_spans: Vec<_> = spans;
     sorted_spans.sort_by(|a, b| {
         a.offset
             .cmp(&b.offset)
             .then_with(|| b.length.cmp(&a.length)) // Larger spans first at same offset
+            .then_with(|| (b.role == Role::Link).cmp(&(a.role == Role::Link)))
     });
 
     // Helper to create a span node with style and semantics applied

@@ -17,6 +17,7 @@ use crate::formats::kfx::container::{
     ContainerError, EntityLoc, SymbolTable, get_field, parse_container_header,
     parse_container_info, parse_index_table, skip_enty_header,
 };
+use crate::formats::kfx::fxl;
 use crate::formats::kfx::ion::{IonParser, IonValue};
 use crate::formats::kfx::resource_index::{self, ImageResource};
 use crate::formats::kfx::schema::schema;
@@ -26,7 +27,8 @@ use crate::import::{ChapterId, CssProgram, Importer, SpineEntry};
 use crate::io::{ByteSource, FileSource};
 use crate::model::Chapter;
 use crate::model::{
-    AnchorTarget, CollectionInfo, Contributor, GlobalNodeId, Landmark, Metadata, TocEntry,
+    AnchorTarget, CollectionInfo, Contributor, GlobalNodeId, Landmark, Metadata, PageSpread,
+    TocEntry,
 };
 
 /// Shorthand for getting a KfxSymbol as u32 for field lookups.
@@ -99,6 +101,30 @@ pub struct KfxImporter {
     /// the same body-level `<div>` the mechanical route emits — and anchors
     /// at `(template_eid, offset)` stamp onto/inside it.
     section_templates: HashMap<String, SectionTemplate>,
+
+    /// Fixed-layout page records, parallel to `spine`/`section_names` when
+    /// the book is image-based fixed layout (empty for reflowable books).
+    /// Each spine entry is one page; `section` names its owning section
+    /// (chapter `<title>`, storyline lookup) and `ordinal` its leaf index in
+    /// the section's spread walk.
+    fxl_pages: Vec<FxlPage>,
+    /// Section name → its FIRST page template (fixed-layout sections split
+    /// this template into per-page documents; reflowable sections use the
+    /// LAST). Cached at spine expansion so per-page loads don't re-scan the
+    /// section entities.
+    fxl_templates: HashMap<String, IonValue>,
+    /// story_name → storyline entity location, for resolving spread pages
+    /// and container story references without a section hop.
+    storylines_by_name: HashMap<String, EntityLoc>,
+    /// Structure ($608) entity name → location, for `page_templates` entries
+    /// that are symbol references rather than inline containers.
+    structures_by_name: HashMap<String, EntityLoc>,
+    /// Content-walk page-progression direction: `document_data.direction`
+    /// plus the vertical-writing-mode → rtl override, WITHOUT the explicit
+    /// reading-order override `derive_writing_direction` applies last to the
+    /// OPF value. The spread pairing (`page-spread-left` first vs `-right`
+    /// first) alternates from this, matching the mechanical route.
+    content_ppd: String,
 
     /// Resources: name -> EntityLoc (lazily populated)
     resources: HashMap<String, EntityLoc>,
@@ -206,11 +232,25 @@ impl Importer for KfxImporter {
         self.section_names.get(id.0 as usize).map(|s| s.as_str())
     }
 
+    fn chapter_title(&self, id: ChapterId) -> Option<&str> {
+        // A fixed-layout page is titled by its owning section — the
+        // mechanical route's `push_book_part(base, section_name)`.
+        if let Some(p) = self.fxl_pages.get(id.0 as usize) {
+            return Some(&p.section);
+        }
+        self.source_id(id)
+    }
+
     fn load_chapter(&mut self, id: ChapterId) -> io::Result<Chapter> {
         // Ensure anchors, styles, and ruby are indexed
         self.index_anchor_entities()?;
         self.index_styles()?;
         self.index_ruby_content()?;
+
+        // Fixed-layout books load per-page chapters.
+        if !self.fxl_pages.is_empty() {
+            return self.load_fxl_page(id);
+        }
 
         let section_name = self
             .section_names
@@ -290,31 +330,22 @@ impl Importer for KfxImporter {
         // must not run on the KFX path. `optimize` still serves the
         // HTML-sourced importers via `compile_html`.
 
-        // Rewrite image references from KFX resource names ("eF") to the
-        // exported asset filenames ("image_rsrc7.jpg" / "cover.jpeg") so the
-        // IR speaks file paths, exactly like an EPUB-sourced book.
-        let node_ids: Vec<_> = chapter.iter_dfs().collect();
-        for node_id in node_ids {
-            let Some(filename) = chapter
-                .semantics
-                .src(node_id)
-                .and_then(|src| self.image_by_name.get(src))
-                .map(|&i| self.images[i].filename.clone())
-            else {
-                continue;
-            };
-            chapter.semantics.set_src(node_id, &filename);
-        }
+        self.rewrite_image_srcs(&mut chapter);
 
         Ok(chapter)
     }
 
     fn load_raw(&mut self, id: ChapterId) -> io::Result<Vec<u8>> {
-        let section_name = self
-            .section_names
-            .get(id.0 as usize)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Chapter not found"))?
-            .clone();
+        // A fixed-layout page's raw form is its owning section's storyline
+        // (spread halves share one).
+        let section_name = if let Some(p) = self.fxl_pages.get(id.0 as usize) {
+            p.section.clone()
+        } else {
+            self.section_names
+                .get(id.0 as usize)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Chapter not found"))?
+                .clone()
+        };
 
         // Find section entity and resolve to storyline
         let storyline_loc = self.resolve_section_to_storyline(&section_name)?;
@@ -588,6 +619,11 @@ impl KfxImporter {
             section_storylines_indexed: false,
             section_eids: HashMap::new(),
             section_templates: HashMap::new(),
+            fxl_pages: Vec::new(),
+            fxl_templates: HashMap::new(),
+            storylines_by_name: HashMap::new(),
+            structures_by_name: HashMap::new(),
+            content_ppd: "ltr".to_string(),
             resources: HashMap::new(),
             resources_indexed: false,
             images: Vec::new(),
@@ -608,6 +644,7 @@ impl KfxImporter {
         };
 
         importer.parse_metadata()?;
+        importer.detect_fxl();
         importer.parse_navigation()?;
         importer.index_section_storylines()?;
         importer.parse_spine()?;
@@ -615,10 +652,16 @@ impl KfxImporter {
         // `parse_spine` (it is the strongest override).
         importer.derive_writing_direction();
         // Image index: needs metadata (declared cover) and the spine /
-        // section→storyline maps (first-section cover fallback). Cheap —
-        // external_resource fragments are tiny and media bytes are only
-        // peeked (≤ 64 bytes each) for format sniffing.
+        // section→storyline maps (first-section cover fallback) — so it runs
+        // while `section_names` still holds sections, before the fixed-layout
+        // expansion renames entries per page. Cheap — external_resource
+        // fragments are tiny and media bytes are only peeked (≤ 64 bytes
+        // each) for format sniffing.
         importer.build_image_index();
+        // Fixed-layout books: split each section into per-page spine entries
+        // (needs `content_ppd` from `derive_writing_direction` for the
+        // spread pairing).
+        importer.expand_fxl_spine()?;
 
         Ok(importer)
     }
@@ -1087,10 +1130,409 @@ impl KfxImporter {
                 id: ChapterId(idx as u32),
                 size_estimate,
                 page_spread: None,
+                viewport: None,
             });
         }
 
         Ok(())
+    }
+
+    /// Read the `content_features` entities for the book-level fixed-layout
+    /// signals: `yj_*fixed_layout` switches spine construction to the
+    /// per-page expansion; `yj_double_page_spread` marks a spread comic
+    /// (`book-type` OPF hint).
+    fn detect_fxl(&mut self) {
+        let locs: Vec<EntityLoc> = self
+            .entities
+            .iter()
+            .filter(|e| e.type_id == KfxSymbol::ContentFeatures as u32)
+            .copied()
+            .collect();
+        let mut acc = fxl::FxlFeatures::default();
+        for loc in locs {
+            if let Ok(elem) = self.parse_entity_ion(loc) {
+                fxl::scan_content_features(&elem, &self.symbols, &mut acc);
+            }
+        }
+        self.metadata.fixed_layout = acc.fixed_layout;
+        if acc.double_page_spread {
+            self.metadata.book_type = Some("comic".to_string());
+        }
+    }
+
+    /// Fixed-layout spine expansion: replace the one-entry-per-section spine
+    /// with one entry per page. Each section's FIRST page template (the
+    /// reflowable path uses the LAST) is either a `page_spread`/`facing_page`
+    /// container — its storyline's content_list holds the per-page
+    /// containers, paired `page-spread-left`/`-right` alternating from
+    /// `content_ppd` (RTL books read the right page first) — or itself a
+    /// single leaf page (e.g. the cover). Page names follow the mechanical
+    /// route: `{section}` for a spreadless page, `{section}-{left|right}`
+    /// for spread halves; export-side filename dedup adds `-N` on collision.
+    fn expand_fxl_spine(&mut self) -> io::Result<()> {
+        if !self.metadata.fixed_layout || self.section_names.is_empty() {
+            return Ok(());
+        }
+
+        // Structure ($608) entity name → location, for `page_templates`
+        // entries that are symbol references rather than inline containers.
+        for e in &self.entities {
+            if e.type_id == KfxSymbol::Structure as u32 {
+                let name = self.symbols.resolve(e.id as u64).to_string();
+                self.structures_by_name.entry(name).or_insert(*e);
+            }
+        }
+
+        // Section name → FIRST page template, one pass over the section
+        // entities. Cached so per-page loads don't re-scan.
+        let sec_locs: Vec<EntityLoc> = self
+            .entities
+            .iter()
+            .filter(|e| e.type_id == KfxSymbol::Section as u32)
+            .copied()
+            .collect();
+        for loc in sec_locs {
+            let Ok(elem) = self.parse_entity_ion(loc) else {
+                continue;
+            };
+            let Some(fields) = elem.as_struct() else {
+                continue;
+            };
+            let Some(name) = get_field(fields, sym!(SectionName))
+                .and_then(|v| self.get_symbol_text(v))
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
+            let Some(t0) = get_field(fields, sym!(PageTemplates))
+                .and_then(|v| v.as_list())
+                .and_then(|l| l.first())
+                .cloned()
+            else {
+                continue;
+            };
+            self.fxl_templates.entry(name).or_insert(t0);
+        }
+
+        let old_sections = std::mem::take(&mut self.section_names);
+        self.spine.clear();
+        let mut names: Vec<String> = Vec::new();
+        let mut fxl_pages: Vec<FxlPage> = Vec::new();
+        let mut spine: Vec<SpineEntry> = Vec::new();
+        for sec in &old_sections {
+            let Some(template) = self.fxl_templates.get(sec).cloned() else {
+                continue;
+            };
+            let size_estimate = self
+                .section_storylines
+                .get(sec)
+                .map(|l| l.length)
+                .unwrap_or(0);
+            for (ordinal, (leaf, prop)) in self
+                .collect_spread_leaves(&template)
+                .into_iter()
+                .enumerate()
+            {
+                let spread_type = prop.rsplit('-').next().unwrap_or("");
+                let name = if spread_type.is_empty() {
+                    sec.clone()
+                } else {
+                    format!("{sec}-{spread_type}")
+                };
+                let viewport = leaf.unwrap_annotated().as_struct().and_then(|f| {
+                    match (
+                        fxl::read_px(f, KfxSymbol::FixedWidth),
+                        fxl::read_px(f, KfxSymbol::FixedHeight),
+                    ) {
+                        (Some(w), Some(h)) => Some((w, h)),
+                        _ => None,
+                    }
+                });
+                let page_spread = match prop.as_str() {
+                    "page-spread-left" => Some(PageSpread::Left),
+                    "page-spread-right" => Some(PageSpread::Right),
+                    _ => None,
+                };
+                spine.push(SpineEntry {
+                    id: ChapterId(names.len() as u32),
+                    size_estimate,
+                    page_spread,
+                    viewport,
+                });
+                names.push(name);
+                fxl_pages.push(FxlPage {
+                    section: sec.clone(),
+                    ordinal,
+                });
+            }
+        }
+        self.section_names = names;
+        self.fxl_pages = fxl_pages;
+        self.spine = spine;
+        Ok(())
+    }
+
+    /// Collect a page template's leaf pages in emission order, each with its
+    /// `page-spread-*` property (empty for a spreadless page). Mirrors the
+    /// mechanical route's `process_spread_template` walk: spread containers
+    /// recurse into their storyline's containers with alternating sides;
+    /// anything else is a leaf.
+    fn collect_spread_leaves(&self, template: &IonValue) -> Vec<(IonValue, String)> {
+        let mut out = Vec::new();
+        self.walk_spread(template, "", &mut out);
+        out
+    }
+
+    fn walk_spread(
+        &self,
+        template: &IonValue,
+        spread_property: &str,
+        out: &mut Vec<(IonValue, String)>,
+    ) {
+        // Resolve a `$608 structure` symbol reference to the real struct.
+        let resolved;
+        let template = match template.unwrap_annotated() {
+            IonValue::Symbol(id) => {
+                let name = self.symbols.resolve(*id).to_string();
+                let Some(loc) = self.structures_by_name.get(&name) else {
+                    return;
+                };
+                let Ok(elem) = self.parse_entity_ion(*loc) else {
+                    return;
+                };
+                resolved = elem;
+                &resolved
+            }
+            _ => template,
+        };
+        let inner = template.unwrap_annotated();
+        let Some(fields) = inner.as_struct() else {
+            return;
+        };
+        let layout = get_field(fields, sym!(Layout))
+            .and_then(|v| self.symbols.text_of(v))
+            .unwrap_or("");
+        if fxl::is_spread_layout(layout) {
+            // The story holds the per-page containers; RTL spreads read the
+            // right-hand page first.
+            let Some(story) = get_field(fields, sym!(StoryName))
+                .and_then(|v| self.symbols.text_of(v))
+                .map(|s| s.to_string())
+            else {
+                return;
+            };
+            let (_, pages) = self.storyline_parts(&story);
+            let mut prop = if self.content_ppd == "ltr" {
+                "page-spread-left"
+            } else {
+                "page-spread-right"
+            };
+            for page in &pages {
+                self.walk_spread(page, prop, out);
+                prop = if prop == "page-spread-left" {
+                    "page-spread-right"
+                } else {
+                    "page-spread-left"
+                };
+            }
+            return;
+        }
+        out.push((template.clone(), spread_property.to_string()));
+    }
+
+    /// Parse a storyline by story name into its root element id (when the
+    /// storyline struct declares one) and its content_list items.
+    fn storyline_parts(&self, story: &str) -> (Option<i64>, Vec<IonValue>) {
+        let Some(loc) = self.storylines_by_name.get(story) else {
+            return (None, Vec::new());
+        };
+        let Ok(elem) = self.parse_entity_ion(*loc) else {
+            return (None, Vec::new());
+        };
+        let inner = elem.unwrap_annotated();
+        let Some(fields) = inner.as_struct() else {
+            return (None, Vec::new());
+        };
+        let root_eid = get_field(fields, sym!(Id)).and_then(|v| v.as_int());
+        let items = get_field(fields, sym!(ContentList))
+            .and_then(|v| v.as_list())
+            .map(|l| l.to_vec())
+            .unwrap_or_default();
+        (root_eid, items)
+    }
+
+    /// Recursively inline `story_name` references: a struct that carries a
+    /// story but no inline content_list gets the story's content_list
+    /// spliced in (the tokenizer does not follow story references itself —
+    /// the mechanical route's `process_content` resolves them at walk time).
+    /// The stack guards against reference cycles; a story legitimately
+    /// referenced from two siblings inlines twice, like the walk would.
+    fn inline_story_refs(&self, value: IonValue, stack: &mut Vec<String>) -> IonValue {
+        match value {
+            IonValue::Annotated(ann, inner) => {
+                IonValue::Annotated(ann, Box::new(self.inline_story_refs(*inner, stack)))
+            }
+            IonValue::List(items) => IonValue::List(
+                items
+                    .into_iter()
+                    .map(|v| self.inline_story_refs(v, stack))
+                    .collect(),
+            ),
+            IonValue::Struct(fields) => {
+                let has_content = fields.iter().any(|(k, _)| *k == sym!(ContentList));
+                let story = if has_content {
+                    None
+                } else {
+                    fields
+                        .iter()
+                        .find(|(k, _)| *k == sym!(StoryName))
+                        .and_then(|(_, v)| self.symbols.text_of(v))
+                        .map(|s| s.to_string())
+                        .filter(|s| !stack.contains(s))
+                };
+                let mut fields: Vec<(u64, IonValue)> = fields
+                    .into_iter()
+                    .map(|(k, v)| (k, self.inline_story_refs(v, stack)))
+                    .collect();
+                if let Some(story) = story {
+                    stack.push(story.clone());
+                    let (_, items) = self.storyline_parts(&story);
+                    let items = items
+                        .into_iter()
+                        .map(|v| self.inline_story_refs(v, stack))
+                        .collect();
+                    stack.pop();
+                    fields.push((sym!(ContentList), IonValue::List(items)));
+                }
+                IonValue::Struct(fields)
+            }
+            other => other,
+        }
+    }
+
+    /// Load one fixed-layout page as a chapter: locate the page's leaf
+    /// container in its section's spread walk, synthesize a storyline from
+    /// the container's children (inline `content_list` wins over its story —
+    /// the mechanical route's `process_content` order), and run the shared
+    /// token→IR build with the container itself as the chapter's root — the
+    /// same body-level `<div>` that route emits per page.
+    fn load_fxl_page(&mut self, id: ChapterId) -> io::Result<Chapter> {
+        let page = self
+            .fxl_pages
+            .get(id.0 as usize)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Chapter not found"))?;
+        let template = self
+            .fxl_templates
+            .get(&page.section)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Section template not found"))?;
+        let (container, _) = self
+            .collect_spread_leaves(&template)
+            .into_iter()
+            .nth(page.ordinal)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "Fixed-layout page not found")
+            })?;
+
+        let inner = container.unwrap_annotated();
+        let Some(cfields) = inner.as_struct() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Fixed-layout page container is not a struct",
+            ));
+        };
+
+        // Children: inline content_list wins; else the container's story.
+        let mut story_eid: Option<i64> = None;
+        let children: Vec<IonValue> =
+            if let Some(list) = get_field(cfields, sym!(ContentList)).and_then(|v| v.as_list()) {
+                list.to_vec()
+            } else if let Some(story) = get_field(cfields, sym!(StoryName))
+                .and_then(|v| self.symbols.text_of(v))
+                .map(|s| s.to_string())
+            {
+                let (root_eid, items) = self.storyline_parts(&story);
+                story_eid = root_eid;
+                items
+            } else {
+                Vec::new()
+            };
+        let children: Vec<IonValue> = children
+            .into_iter()
+            .map(|c| self.inline_story_refs(c, &mut Vec::new()))
+            .collect();
+        let synthetic = IonValue::Struct(vec![(sym!(ContentList), IonValue::List(children))]);
+
+        // Record every eid the page subtree declares — and the container's
+        // own — against this chapter, for nav-target file resolution (the
+        // mechanical route's per-page `collect_element_ids`). First
+        // registration wins across pages, matching its emission order.
+        let container_eid = get_field(cfields, sym!(Id)).and_then(|v| v.as_int());
+        let mut declared = Vec::new();
+        collect_declared_eids(&synthetic, &mut declared);
+        if let Some(eid) = container_eid {
+            declared.push(eid);
+        }
+        for eid in declared {
+            self.eid_chapters.entry(eid).or_insert(id);
+        }
+
+        let style_name = get_field(cfields, sym!(Style))
+            .and_then(|v| self.symbols.text_of(v))
+            .map(|s| s.to_string());
+        let inline_style =
+            crate::formats::kfx::yj_properties::convert_yj_properties(cfields, &self.symbols).items;
+
+        let symbols = Arc::clone(&self.symbols);
+        let anchors = Arc::clone(&self.anchors);
+        let styles = Arc::clone(&self.styles);
+        let ruby_index = Arc::clone(&self.ruby_index);
+        let anchor_table = Arc::clone(&self.anchor_table);
+        let mut chapter = parse_storyline_to_ir(
+            &synthetic,
+            symbols.as_ref(),
+            Some(anchors.as_ref()),
+            Some(styles.as_ref()),
+            Some(ruby_index.as_ref()),
+            Some(anchor_table.as_ref()),
+            |name, index| self.lookup_content_text(name, index),
+        );
+
+        // Root the chapter at the page container — the reflowable
+        // template's role: class from its `$157` style, inline style from
+        // its converted outer fields, `(eid, 0)` anchors stamping onto the
+        // root.
+        crate::formats::kfx::storyline::apply_section_template(
+            &mut chapter,
+            container_eid,
+            style_name.as_deref(),
+            &inline_style,
+            story_eid,
+            Some(styles.as_ref()),
+            Some(anchor_table.as_ref()),
+        );
+
+        self.rewrite_image_srcs(&mut chapter);
+        Ok(chapter)
+    }
+
+    /// Rewrite image references from KFX resource names ("eF") to the
+    /// exported asset filenames ("image_rsrc7.jpg" / "cover.jpeg") so the IR
+    /// speaks file paths, exactly like an EPUB-sourced book.
+    fn rewrite_image_srcs(&self, chapter: &mut Chapter) {
+        let node_ids: Vec<_> = chapter.iter_dfs().collect();
+        for node_id in node_ids {
+            let Some(filename) = chapter
+                .semantics
+                .src(node_id)
+                .and_then(|src| self.image_by_name.get(src))
+                .map(|&i| self.images[i].filename.clone())
+            else {
+                continue;
+            };
+            chapter.semantics.set_src(node_id, &filename);
+        }
     }
 
     /// Derive the book-level writing mode and page-progression direction
@@ -1145,6 +1587,10 @@ impl KfxImporter {
         if writing_mode.ends_with("-rl") {
             ppd = "rtl".to_string();
         }
+        // The content walk (spread pairing) alternates from the value BEFORE
+        // the explicit reading-order override — the mechanical route's
+        // `extract_doc_data` chain ends here.
+        self.content_ppd = ppd.clone();
         // `$default` defers to the reader, i.e. to the heuristics above —
         // only a concrete direction overrides them.
         if let Some(explicit) = self
@@ -1174,7 +1620,13 @@ impl KfxImporter {
             )));
         }
         let section = self.section_eids.get(&eid)?;
-        let idx = self.section_names.iter().position(|s| s == section)?;
+        // Per-page fixed-layout spine: a section-declared eid resolves to
+        // the section's first page.
+        let idx = if self.fxl_pages.is_empty() {
+            self.section_names.iter().position(|s| s == section)?
+        } else {
+            self.fxl_pages.iter().position(|p| &p.section == section)?
+        };
         Some(AnchorTarget::Internal(GlobalNodeId::new(
             ChapterId(idx as u32),
             crate::model::NodeId::ROOT,
@@ -1274,6 +1726,9 @@ impl KfxImporter {
         for (sec_name, template) in section_templates {
             self.section_templates.entry(sec_name).or_insert(template);
         }
+        // Retained for story-name resolution outside the section hop (spread
+        // pages, container story references on the fixed-layout path).
+        self.storylines_by_name = storyline_map;
 
         self.section_storylines_indexed = true;
         Ok(())
@@ -1879,6 +2334,14 @@ struct SectionTemplate {
     eid: Option<i64>,
     style: Option<String>,
     inline_style: Vec<(String, String)>,
+}
+
+/// One fixed-layout page's identity: the owning section and the page's leaf
+/// index in that section's spread walk (see `expand_fxl_spine`).
+#[derive(Debug, Clone)]
+struct FxlPage {
+    section: String,
+    ordinal: usize,
 }
 
 /// Parse a `#eid[:offset]` nav placeholder href into its position. Returns

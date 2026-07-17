@@ -39,6 +39,10 @@ pub struct SpineEntry {
     /// occupies (source's declared `page-spread-*`). `None` for reflowable
     /// books or FXL pages with no declared side. See [`crate::model::PageSpread`].
     pub page_spread: Option<crate::model::PageSpread>,
+    /// For a fixed-layout page, its pixel viewport `(width, height)` — the
+    /// `<meta name="viewport">` box the page is authored to. `None` for
+    /// reflowable documents.
+    pub viewport: Option<(u32, u32)>,
 }
 
 /// A source format's contribution to the normalized stylesheet: every named
@@ -141,6 +145,14 @@ pub trait Importer: Send + Sync {
 
     /// Returns the internal source path for a chapter (e.g., "OEBPS/text/ch01.xhtml").
     fn source_id(&self, id: ChapterId) -> Option<&str>;
+
+    /// The document `<title>` for a spine chapter. Defaults to the source id;
+    /// importers whose spine entries are finer-grained than their source's
+    /// naming unit override it (a fixed-layout page is titled by its owning
+    /// section, not its per-page file stem).
+    fn chapter_title(&self, id: ChapterId) -> Option<&str> {
+        self.source_id(id)
+    }
 
     /// Returns the raw bytes of a chapter.
     fn load_raw(&mut self, id: ChapterId) -> std::io::Result<Vec<u8>>;
@@ -699,11 +711,13 @@ mod tests {
                     id: ChapterId(0),
                     size_estimate: 0,
                     page_spread: None,
+                    viewport: None,
                 },
                 SpineEntry {
                     id: ChapterId(1),
                     size_estimate: 0,
                     page_spread: None,
+                    viewport: None,
                 },
             ],
             source_ids: vec!["text/ch1.xhtml".to_string(), "text/ch2.xhtml".to_string()],

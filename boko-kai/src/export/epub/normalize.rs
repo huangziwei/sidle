@@ -392,15 +392,17 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
         // Declared style program: build the chapter through the shared
         // XHTML DOM + consolidation passes — the same code the mechanical
         // route serializes with, so both KFX→EPUB engines' chapter files
-        // are byte-identical by construction. The title is the section name
-        // (NOT the deduped filename), matching the mechanical
-        // `push_book_part`.
+        // are byte-identical by construction. The title comes from
+        // `chapter_title` (a fixed-layout page is titled by its owning
+        // section, not its per-page name), matching the mechanical
+        // `push_book_part`; the viewport is the FXL page's pixel box.
         if let Some(src) = &source_styles {
             let opts = super::dom_synth::ChapterEmit {
-                title: source_path,
+                title: book.chapter_title(*chapter_id).unwrap_or(source_path),
                 language: &language,
                 source_styles: src,
                 href_resolver: &href_resolver,
+                viewport: spine.get(idx).and_then(|e| e.viewport),
             };
             let document = super::dom_synth::emit_chapter(ir, &opts, &mut all_assets);
             chapters.push(ChapterContent {

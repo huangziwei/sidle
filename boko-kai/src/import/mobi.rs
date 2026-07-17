@@ -315,6 +315,7 @@ impl MobiImporter {
                 id: ChapterId(i as u32),
                 size_estimate: split.chapters[i].len(),
                 page_spread: None,
+                viewport: None,
             })
             .collect();
 

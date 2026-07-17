@@ -62,6 +62,9 @@ pub struct ChapterEmit<'a> {
     pub source_styles: &'a SourceStyles<'a>,
     /// Link resolution for `semantics.href` values.
     pub href_resolver: &'a dyn Fn(&str) -> LinkOutcome,
+    /// Fixed-layout page pixel viewport → `<meta name="viewport">` in the
+    /// head. `None` for reflowable documents.
+    pub viewport: Option<(u32, u32)>,
 }
 
 /// Build, consolidate, and serialize one chapter document. Referenced
@@ -81,6 +84,14 @@ pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<S
     l.set("rel", "stylesheet");
     l.set("type", "text/css");
     l.set("href", "style.css");
+    // Fixed-layout page viewport, after the stylesheet link (mechanical:
+    // `emit_fxl_page` adds it to the already-linked head).
+    if let Some((w, h)) = opts.viewport {
+        let meta = dom.sub_element(head_id, "meta");
+        let m = dom.get_mut(meta);
+        m.set("name", "viewport");
+        m.set("content", format!("width={w}, height={h}"));
+    }
 
     let mut b = Builder {
         ir,
