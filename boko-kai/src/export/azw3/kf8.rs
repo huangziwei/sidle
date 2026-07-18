@@ -186,11 +186,17 @@ impl Kf8Builder {
         }
         self.link_counter = link_counter;
 
-        // Rewrite CSS
+        // Rewrite CSS. `self.css_flows` was collected from `css_hrefs` in the
+        // same sorted order (see `collect_resources`), so zipping the two pairs
+        // each flow's content with its own href — needed to resolve relative
+        // `@import url(styleNNNN.css)` refs against `css_flow_map`.
         let rewritten_css: Vec<Vec<u8>> = self
             .css_flows
             .iter()
-            .map(|css| rewrite_css_references_fast(css.as_bytes(), &self.resource_map))
+            .zip(css_hrefs.iter())
+            .map(|(css, href)| {
+                rewrite_css_references_fast(css.as_bytes(), &self.resource_map, &css_flow_map, href)
+            })
             .collect();
 
         // Process with chunker

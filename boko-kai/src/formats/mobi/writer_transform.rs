@@ -434,13 +434,35 @@ fn resolve_href(base_dir: &str, href: &str) -> String {
     parts.join("/")
 }
 
-/// Single-pass CSS url() rewriting
-pub fn rewrite_css_references_fast(css: &[u8], resource_map: &HashMap<String, usize>) -> Vec<u8> {
+/// Single-pass CSS url() rewriting.
+///
+/// Rewrites two kinds of `url()` reference to Kindle's internal schemes:
+/// - an image/font target (resolved via `resource_map`) → `kindle:embed:XXXX`;
+/// - a stylesheet target (`@import url(styleNNNN.css)`, resolved via
+///   `css_flow_map` relative to `css_href`'s directory) → `kindle:flow:XXXX`.
+///
+/// The `@import` case is why `css_flow_map`/`css_href` are needed: the importer
+/// turns native `@import url(kindle:flow:NNNN)` into a sibling `styleNNNN.css`
+/// literal, but the writer renumbers CSS flows contiguously (and
+/// `prune_svg_flow_assets` may have dropped flows in between), so that literal
+/// is stale. Emitting the target's *current* flow index — which the importer's
+/// `rewrite_kindle_flow_in_css` turns back into the right `styleMMMM.css` — is
+/// what keeps a multi-flow-CSS round-trip from dangling (epubcheck RSC-007).
+/// Targets that resolve to neither map are left verbatim.
+pub fn rewrite_css_references_fast(
+    css: &[u8],
+    resource_map: &HashMap<String, usize>,
+    css_flow_map: &HashMap<String, usize>,
+    css_href: &str,
+) -> Vec<u8> {
     // Strip CSS at-rules that Kindle's parser doesn't support: `@charset`,
     // `@namespace`. Calibre normalises these away in its OEB transform
     // pipeline; leaving them in is correlated with the renderer freezing
     // on otherwise-valid books.
     let css = strip_unsupported_css_at_rules(css);
+
+    // Directory the stylesheet lives in, for resolving relative `@import`s.
+    let base_dir = css_href.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
 
     let mut output = Vec::with_capacity(css.len());
     let mut pos = 0;
@@ -460,13 +482,29 @@ pub fn rewrite_css_references_fast(css: &[u8], resource_map: &HashMap<String, us
 
             // Strip quotes if present
             let url = url_content.trim_with(|c| c == '"' || c == '\'' || c == ' ');
+            let url_str = String::from_utf8_lossy(url);
 
-            // Skip data: and http: URLs
+            // Skip data: and http: URLs (external CSS `@import`s stay external).
             if url.starts_with(b"data:") || url.starts_with(b"http") {
                 output.extend_from_slice(&css[abs_start..content_start + paren_end + 1]);
+            } else if url_str.ends_with(".css") {
+                // Stylesheet cross-reference — resolve to the target flow's
+                // current index. Resolve the (possibly `../`-relative) href
+                // against this sheet's directory and match `css_flow_map`
+                // exactly, so a suffix collision can't make the pick
+                // nondeterministic.
+                let resolved = resolve_href(base_dir, &url_str);
+                if let Some(&flow_idx) = css_flow_map.get(&resolved) {
+                    let mut base32_buf = [0u8; 4];
+                    write_base32_4(flow_idx, &mut base32_buf);
+                    output.extend_from_slice(b"url(kindle:flow:");
+                    output.extend_from_slice(&base32_buf);
+                    output.extend_from_slice(b"?mime=text/css)");
+                } else {
+                    output.extend_from_slice(&css[abs_start..content_start + paren_end + 1]);
+                }
             } else {
-                // Try to find resource
-                let url_str = String::from_utf8_lossy(url);
+                // Image/font target → kindle:embed.
                 let normalized = url_str.trim_start_matches("../").trim_start_matches("./");
 
                 let mut found = false;
@@ -928,6 +966,73 @@ mod tests {
             "images/test.jpg"
         );
         assert_eq!(resolve_href("", "test.html"), "test.html");
+    }
+
+    #[test]
+    fn test_rewrite_css_import_to_flow() {
+        // A stylesheet `@import` referencing a sibling CSS resolves to the
+        // target flow's CURRENT index as a `kindle:flow` ref — not left as the
+        // stale `styleNNNN.css` literal the importer wrote, which dangles
+        // (RSC-007) once the writer renumbers flows. Here `style0002.css` was
+        // flow 3 on the way in but is flow 2 now (a flow was pruned between).
+        let mut css_flow_map = HashMap::new();
+        css_flow_map.insert("styles/style0000.css".to_string(), 1usize);
+        css_flow_map.insert("styles/style0002.css".to_string(), 2usize);
+        let css = b"@import url(style0002.css);\n.x { color: red; }";
+        let out = rewrite_css_references_fast(
+            css,
+            &HashMap::new(),
+            &css_flow_map,
+            "styles/style0000.css",
+        );
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains("@import url(kindle:flow:0002?mime=text/css);"),
+            "css @import rewritten to the current flow index: {s}"
+        );
+        assert!(
+            !s.contains("style0002.css"),
+            "the stale literal must not survive: {s}"
+        );
+
+        // A `../`-relative import from a sheet in a subdirectory still resolves.
+        let quoted = b"@import url(\"../styles/style0000.css\");";
+        let out = rewrite_css_references_fast(
+            quoted,
+            &HashMap::new(),
+            &css_flow_map,
+            "sub/style0002.css",
+        );
+        assert!(
+            String::from_utf8_lossy(&out).contains("url(kindle:flow:0001?mime=text/css)"),
+            "relative import resolves against the sheet's own dir"
+        );
+
+        // An import with no matching flow is left verbatim (dangles no worse
+        // than before) rather than mis-rewritten.
+        let orphan = b"@import url(missing.css);";
+        let out = rewrite_css_references_fast(
+            orphan,
+            &HashMap::new(),
+            &css_flow_map,
+            "styles/style0000.css",
+        );
+        assert_eq!(out, orphan, "unresolved import left verbatim");
+
+        // Non-CSS url() still routes through resource_map to kindle:embed.
+        let mut resource_map = HashMap::new();
+        resource_map.insert("images/image_0001.jpg".to_string(), 5usize);
+        let img = b".bg { background: url(../images/image_0001.jpg); }";
+        let out = rewrite_css_references_fast(
+            img,
+            &resource_map,
+            &HashMap::new(),
+            "styles/style0000.css",
+        );
+        assert!(
+            String::from_utf8_lossy(&out).contains("url(kindle:embed:0005)"),
+            "image ref still becomes kindle:embed"
+        );
     }
 
     #[test]
