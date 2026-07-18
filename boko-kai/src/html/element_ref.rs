@@ -226,7 +226,15 @@ impl<'a> selectors::Element for ElementRef<'a> {
     type Impl = BokoSelectors;
 
     fn opaque(&self) -> OpaqueElement {
-        OpaqueElement::new(self)
+        // Key on the arena node, not on this transient ElementRef: the selector
+        // matching caches are shared across elements (see `CascadeScratch`), and
+        // successive ElementRefs occupy the same stack slot, which would alias
+        // distinct elements to one cache key (the selectors crate's `invalid
+        // cache` debug assertion catches this).
+        match self.dom.get(self.id) {
+            Some(node) => OpaqueElement::new(node),
+            None => OpaqueElement::new(self),
+        }
     }
 
     fn parent_element(&self) -> Option<Self> {

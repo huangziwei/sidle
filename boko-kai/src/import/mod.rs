@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::html::{Origin, Stylesheet, compile_html_bytes, extract_stylesheets};
+use crate::html::{Origin, Stylesheet, compile_dom, extract_stylesheets_from_dom, parse_dom};
 use crate::model::{AnchorTarget, Chapter, FontFace, GlobalNodeId, Landmark, Metadata, TocEntry};
 use crate::style::CssDecl;
 
@@ -104,8 +104,12 @@ pub trait Importer: Send + Sync {
         let hint_encoding = crate::util::extract_xml_encoding(&html_bytes);
         let html_str = crate::util::decode_text(&html_bytes, hint_encoding);
 
-        // Extract stylesheet references
-        let (linked, inline) = extract_stylesheets(&html_str);
+        // Parse the chapter DOM once; it is shared by stylesheet discovery and
+        // IR compilation below (avoids a second decode + full parse).
+        let dom = parse_dom(&html_str);
+
+        // Extract stylesheet references from the parsed DOM
+        let (linked, inline) = extract_stylesheets_from_dom(&dom);
 
         // Build stylesheets list
         let mut stylesheets = Vec::new();
@@ -129,8 +133,8 @@ pub trait Importer: Send + Sync {
             stylesheets.push((Stylesheet::parse(&css), Origin::Author));
         }
 
-        // Compile to IR
-        let mut chapter = compile_html_bytes(&html_bytes, &stylesheets);
+        // Compile the already-parsed DOM to IR
+        let mut chapter = compile_dom(&dom, &stylesheets);
 
         // Post-process: Resolve relative paths in semantic attributes (src, href)
         // This canonicalizes paths like "../images/photo.jpg" to "OEBPS/images/photo.jpg"

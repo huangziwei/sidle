@@ -179,7 +179,7 @@ impl PartialOrd for TocEntry {
 }
 
 /// Type of landmark in a book's navigation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LandmarkType {
     /// Cover page (image)
     Cover,

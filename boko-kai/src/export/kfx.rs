@@ -828,13 +828,15 @@ fn build_book_metadata_fragment(
         let filename = std::path::Path::new(path)
             .file_name()
             .and_then(|n| n.to_str())?;
-        // Search for a resource ending with this filename
-        for (href, _) in ctx.resource_registry.iter() {
-            if href.ends_with(filename) {
-                return ctx.resource_registry.get_name(href);
-            }
-        }
-        None
+        // Search for a resource ending with this filename. Pick the
+        // lexicographically smallest match so a basename shared across
+        // directories resolves deterministically, not in HashMap order.
+        ctx.resource_registry
+            .iter()
+            .map(|(href, _)| href)
+            .filter(|href| href.ends_with(filename))
+            .min()
+            .and_then(|href| ctx.resource_registry.get_name(href))
     });
 
     // book_id: reuse `meta.identifier` if it already has the KFX shape (23-char
@@ -1523,12 +1525,20 @@ fn build_landmarks_entries(book: &Book, ctx: &ExportContext) -> Vec<IonValue> {
 
     let mut entries = Vec::new();
 
-    // Sort landmarks for consistent output (Cover first, then StartReading, then others)
+    // Sort landmarks for consistent output (Cover first, then StartReading, then
+    // others). `landmark_fragments` is a HashMap, so the collected order is
+    // per-process random; the sort key must be TOTAL or same-rank landmarks
+    // (all the "others") leak that random order into the bytes. Tie-break by
+    // reading position, then landmark type (the unique map key) so the order is
+    // fully deterministic.
     let mut landmarks: Vec<_> = ctx.landmark_fragments.iter().collect();
-    landmarks.sort_by_key(|(lt, _)| match lt {
-        LandmarkType::Cover => 0,
-        LandmarkType::StartReading => 1,
-        _ => 2,
+    landmarks.sort_by_key(|(lt, target)| {
+        let rank = match lt {
+            LandmarkType::Cover => 0u8,
+            LandmarkType::StartReading => 1,
+            _ => 2,
+        };
+        (rank, target.fragment_id, target.offset, **lt)
     });
 
     for (landmark_type, target) in landmarks {
@@ -2423,14 +2433,17 @@ fn build_font_fragments(book: &mut Book, ctx: &mut ExportContext) -> Vec<KfxFrag
                     .and_then(|n| n.to_str())
                     .unwrap_or(&font_face.src);
 
-                // Search for matching resource
-                let mut found = None;
-                for (href, _) in ctx.resource_registry.iter() {
-                    if href.ends_with(filename) {
-                        found = ctx.resource_registry.get_name(href).map(|s| s.to_string());
-                        break;
-                    }
-                }
+                // Search for matching resource. Pick the lexicographically
+                // smallest match so a basename shared across directories
+                // resolves deterministically, not in HashMap order.
+                let found = ctx
+                    .resource_registry
+                    .iter()
+                    .map(|(href, _)| href)
+                    .filter(|href| href.ends_with(filename))
+                    .min()
+                    .and_then(|href| ctx.resource_registry.get_name(href))
+                    .map(|s| s.to_string());
                 match found {
                     Some(name) => name,
                     None => continue, // Skip if font file not found

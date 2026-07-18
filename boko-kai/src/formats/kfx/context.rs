@@ -625,6 +625,19 @@ pub struct ExportContext {
     /// Style registry for deduplicating and tracking KFX styles.
     pub style_registry: StyleRegistry,
 
+    /// Memo for the `register_style_id` family: caches the built KFX style so
+    /// repeat lookups within a chapter skip the schema ingest/build. Keyed by
+    /// `(StyleId, class hint, is_link)` because the built style depends on all
+    /// three (the hint feeds the registry's dedup key and the link path forces
+    /// an underline field). The cached style still flows through
+    /// `register_with_hint` on every lookup, so dedup and usage counts are
+    /// unchanged. StyleIds are only meaningful within one chapter's `StylePool`,
+    /// so this is cleared per chapter.
+    ir_style_memo: HashMap<
+        (StyleId, Option<String>, bool),
+        crate::formats::kfx::style_registry::ComputedStyle,
+    >,
+
     /// Anchor registry for link target resolution.
     pub anchor_registry: AnchorRegistry,
 
@@ -828,6 +841,7 @@ impl ExportContext {
             path_to_fragment: HashMap::new(),
             default_style_symbol,
             style_registry: StyleRegistry::new(default_style_symbol),
+            ir_style_memo: HashMap::new(),
             anchor_registry: AnchorRegistry::new(),
             landmark_fragments: HashMap::new(),
             nav_container_symbols: NavContainerSymbols::default(),
@@ -861,12 +875,16 @@ impl ExportContext {
     /// Prepare context for processing a new chapter.
     pub fn begin_chapter(&mut self, content_name: &str) -> u64 {
         self.text_accumulator = TextAccumulator::new();
+        // StyleIds are chapter-local, so the style memo must not survive across
+        // chapters (see `ir_style_memo`).
+        self.ir_style_memo.clear();
         self.current_content_name = self.symbols.get_or_intern(content_name);
         self.current_content_name
     }
 
     /// Begin Pass 2 export for a chapter.
     pub fn begin_chapter_export(&mut self, chapter_id: ChapterId) {
+        self.ir_style_memo.clear();
         self.current_chapter = Some(chapter_id);
 
         // Check if this chapter needs a chapter-start anchor
@@ -996,14 +1014,27 @@ impl ExportContext {
         ir_style: &crate::style::ComputedStyle,
         class_hint: Option<&str>,
     ) -> u64 {
+        let kfx_style = self.build_ir_style(ir_style);
+        self.style_registry
+            .register_with_hint(kfx_style, class_hint, &mut self.symbols)
+    }
+
+    /// Build the KFX computed style for an IR style (schema ingest + finalize) —
+    /// the expensive half of registration. Split out so `register_style_id_with_hint`
+    /// can memoize it across a chapter; `register_with_hint` still owns dedup and
+    /// usage counting, so the built style always flows through it and output is
+    /// unchanged.
+    fn build_ir_style(
+        &self,
+        ir_style: &crate::style::ComputedStyle,
+    ) -> crate::formats::kfx::style_registry::ComputedStyle {
         let schema = crate::formats::kfx::style_schema::StyleSchema::standard();
         let mut builder = crate::formats::kfx::style_registry::StyleBuilder::new(schema);
         let ir_style = self.box_transposed_ir_style(ir_style);
         builder.ingest_ir_style(&ir_style, self.ir_style_baseline_writing_mode());
         let mut kfx_style = builder.build();
         finalize_tatechuyoko(&mut kfx_style);
-        self.style_registry
-            .register_with_hint(kfx_style, class_hint, &mut self.symbols)
+        kfx_style
     }
 
     /// Register a Link-element style. Like `register_ir_style_with_hint`,
@@ -1017,6 +1048,18 @@ impl ExportContext {
         ir_style: &crate::style::ComputedStyle,
         class_hint: Option<&str>,
     ) -> u64 {
+        let kfx_style = self.build_link_ir_style(ir_style);
+        self.style_registry
+            .register_with_hint(kfx_style, class_hint, &mut self.symbols)
+    }
+
+    /// Build the KFX computed style for a Link-element IR style — like
+    /// [`Self::build_ir_style`] but forcing an explicit `underline` field. Split
+    /// out for the same per-chapter memoization (see `register_link_style_id_with_hint`).
+    fn build_link_ir_style(
+        &self,
+        ir_style: &crate::style::ComputedStyle,
+    ) -> crate::formats::kfx::style_registry::ComputedStyle {
         use crate::formats::kfx::style_schema::KfxValue;
         let schema = crate::formats::kfx::style_schema::StyleSchema::standard();
         let mut builder = crate::formats::kfx::style_registry::StyleBuilder::new(schema);
@@ -1034,8 +1077,7 @@ impl ExportContext {
             );
         }
         finalize_tatechuyoko(&mut kfx_style);
-        self.style_registry
-            .register_with_hint(kfx_style, class_hint, &mut self.symbols)
+        kfx_style
     }
 
     /// Register an IR style by StyleId.
@@ -1058,11 +1100,22 @@ impl ExportContext {
             return self.default_style_symbol;
         }
 
-        if let Some(ir_style) = style_pool.get(style_id) {
-            self.register_ir_style_with_hint(ir_style, class_hint)
+        // Memoize the built KFX style per (StyleId, hint, non-link) so repeated
+        // lookups within a chapter skip the schema ingest/build. The style still
+        // flows through `register_with_hint`, so dedup and usage counts (which
+        // drive line-height normalization) are unchanged.
+        let key = (style_id, class_hint.map(str::to_string), false);
+        let kfx_style = if let Some(cached) = self.ir_style_memo.get(&key) {
+            cached.clone()
+        } else if let Some(ir_style) = style_pool.get(style_id) {
+            let built = self.build_ir_style(ir_style);
+            self.ir_style_memo.insert(key, built.clone());
+            built
         } else {
-            self.default_style_symbol
-        }
+            return self.default_style_symbol;
+        };
+        self.style_registry
+            .register_with_hint(kfx_style, class_hint, &mut self.symbols)
     }
 
     /// Register the bare tate-chu-yoko (縦中横) style and return its symbol.
@@ -1095,11 +1148,20 @@ impl ExportContext {
             return self.default_style_symbol;
         }
 
-        if let Some(ir_style) = style_pool.get(style_id) {
-            self.register_link_ir_style_with_hint(ir_style, class_hint)
+        // Same per-chapter memo as `register_style_id_with_hint`, keyed on the
+        // link variant (is_link = true) since the link path forces an underline.
+        let key = (style_id, class_hint.map(str::to_string), true);
+        let kfx_style = if let Some(cached) = self.ir_style_memo.get(&key) {
+            cached.clone()
+        } else if let Some(ir_style) = style_pool.get(style_id) {
+            let built = self.build_link_ir_style(ir_style);
+            self.ir_style_memo.insert(key, built.clone());
+            built
         } else {
-            self.default_style_symbol
-        }
+            return self.default_style_symbol;
+        };
+        self.style_registry
+            .register_with_hint(kfx_style, class_hint, &mut self.symbols)
     }
 
     // =========================================================================

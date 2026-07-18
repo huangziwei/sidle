@@ -5,19 +5,34 @@ use super::element_ref::ElementRef;
 use super::{is_html_whitespace, is_html_whitespace_only};
 use crate::model::role_map::element_to_role;
 use crate::model::{Chapter, Node, NodeId, Role};
-use crate::style::{ComputedStyle, Display, Origin, Stylesheet, WhiteSpace, compute_styles};
+use crate::style::{
+    CascadeIndex, CascadeScratch, ComputedStyle, Display, Origin, Stylesheet, WhiteSpace,
+    compute_styles_indexed,
+};
 
 /// User agent stylesheet (browser defaults).
 const UA_CSS: &str = include_str!("data/styles.css");
 
 pub fn user_agent_stylesheet() -> Stylesheet {
-    Stylesheet::parse(UA_CSS)
+    // The UA stylesheet is a constant, but `compile_html`/`compile_dom` runs
+    // once per chapter, so re-parsing UA_CSS every time is pure redundant work.
+    // Parse it once per thread and hand back a clone (cloning already-parsed
+    // rules is far cheaper than re-tokenizing and re-parsing the CSS). Output is
+    // unchanged — the cached sheet is a clone of the same parse.
+    thread_local! {
+        static UA_STYLESHEET: Stylesheet = Stylesheet::parse(UA_CSS);
+    }
+    UA_STYLESHEET.with(|ua| ua.clone())
 }
 
 /// Context for the transform operation.
 struct TransformContext<'a> {
     dom: &'a ArenaDom,
-    stylesheets: &'a [(Stylesheet, Origin)],
+    /// Rules bucketed by their rightmost selector, built once for the whole
+    /// chapter so each element only tests candidates that could match it.
+    cascade_index: CascadeIndex<'a>,
+    /// Reusable candidate list + selector caches, shared across every element.
+    cascade_scratch: CascadeScratch,
     chapter: Chapter,
     /// Map from ArenaNodeId to Chapter NodeId
     node_map: std::collections::HashMap<ArenaNodeId, NodeId>,
@@ -27,7 +42,8 @@ impl<'a> TransformContext<'a> {
     fn new(dom: &'a ArenaDom, stylesheets: &'a [(Stylesheet, Origin)]) -> Self {
         Self {
             dom,
-            stylesheets,
+            cascade_index: CascadeIndex::build(stylesheets),
+            cascade_scratch: CascadeScratch::default(),
             chapter: Chapter::new(),
             node_map: std::collections::HashMap::new(),
         }
@@ -59,17 +75,24 @@ impl<'a> TransformContext<'a> {
         // without this step body's cascade never sees that class.
         let html_style = html_id_opt.map(|html_id| {
             let elem_ref = ElementRef::new(self.dom, html_id);
-            compute_styles(elem_ref, self.stylesheets, None, &mut self.chapter.styles)
+            compute_styles_indexed(
+                elem_ref,
+                &self.cascade_index,
+                None,
+                &mut self.chapter.styles,
+                &mut self.cascade_scratch,
+            )
         });
 
         // Compute body's style so its properties (like hyphens: auto) are inherited
         let mut body_style = {
             let elem_ref = ElementRef::new(self.dom, body);
-            compute_styles(
+            compute_styles_indexed(
                 elem_ref,
-                self.stylesheets,
+                &self.cascade_index,
                 html_style.as_ref(),
                 &mut self.chapter.styles,
+                &mut self.cascade_scratch,
             )
         };
 
@@ -190,11 +213,12 @@ impl<'a> TransformContext<'a> {
             ArenaNodeData::Element { name, attrs, .. } => {
                 // Compute style for this element
                 let elem_ref = ElementRef::new(self.dom, dom_id);
-                let mut computed = compute_styles(
+                let mut computed = compute_styles_indexed(
                     elem_ref,
-                    self.stylesheets,
+                    &self.cascade_index,
                     parent_style,
                     &mut self.chapter.styles,
+                    &mut self.cascade_scratch,
                 );
 
                 // Merge lang attribute into style (for KFX language property)

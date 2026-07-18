@@ -63,7 +63,11 @@ fn looks_like_xhtml(html: &str) -> bool {
 /// first 500 bytes), falling back to html5ever for plain HTML. This correctly
 /// handles self-closing tags like `<script/>` which are valid in XHTML but
 /// cause content loss with HTML5 parsing.
-fn parse_dom(html: &str) -> ArenaDom {
+///
+/// Exposed to the importer hot path (`Importer::load_chapter`) so a chapter is
+/// parsed exactly once and the DOM shared by stylesheet discovery
+/// ([`extract_stylesheets_from_dom`]) and IR compilation ([`compile_dom`]).
+pub(crate) fn parse_dom(html: &str) -> ArenaDom {
     if looks_like_xhtml(html) {
         let sink = ArenaSink::new();
         let result =
@@ -115,8 +119,15 @@ fn parse_dom(html: &str) -> ArenaDom {
 /// let chapter = compile_html(html, &[(author, Origin::Author)]);
 /// ```
 pub fn compile_html(html: &str, author_stylesheets: &[(Stylesheet, Origin)]) -> Chapter {
-    let dom = parse_dom(html);
+    compile_dom(&parse_dom(html), author_stylesheets)
+}
 
+/// Compile an already-parsed DOM to IR.
+///
+/// The core of [`compile_html`] without the parse step, so the importer hot
+/// path can parse each chapter once and reuse the DOM for both stylesheet
+/// discovery and IR compilation (see [`parse_dom`]).
+pub(crate) fn compile_dom(dom: &ArenaDom, author_stylesheets: &[(Stylesheet, Origin)]) -> Chapter {
     // Build complete stylesheet list with UA defaults
     let ua = transform::user_agent_stylesheet();
     let mut all_stylesheets: Vec<(Stylesheet, Origin)> = vec![(ua, Origin::UserAgent)];
@@ -125,7 +136,7 @@ pub fn compile_html(html: &str, author_stylesheets: &[(Stylesheet, Origin)]) -> 
     }
 
     // Transform to IR
-    let mut chapter = transform::transform(&dom, &all_stylesheets);
+    let mut chapter = transform::transform(dom, &all_stylesheets);
 
     // Optimize: merge adjacent text nodes with identical styles
     optimize::optimize(&mut chapter);
@@ -153,8 +164,15 @@ pub fn compile_html_bytes(html: &[u8], author_stylesheets: &[(Stylesheet, Origin
 /// Returns a list of (href, media) tuples for linked stylesheets,
 /// and a list of inline CSS content.
 pub fn extract_stylesheets(html: &str) -> (Vec<String>, Vec<String>) {
-    let dom = parse_dom(html);
+    extract_stylesheets_from_dom(&parse_dom(html))
+}
 
+/// Extract stylesheet references from an already-parsed DOM.
+///
+/// The core of [`extract_stylesheets`] without the parse step, so the importer
+/// hot path can parse each chapter once and reuse the DOM for both stylesheet
+/// discovery and IR compilation (see [`parse_dom`]).
+pub(crate) fn extract_stylesheets_from_dom(dom: &ArenaDom) -> (Vec<String>, Vec<String>) {
     let mut linked = Vec::new();
     let mut inline = Vec::new();
 
