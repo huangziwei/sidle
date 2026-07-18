@@ -11,7 +11,7 @@
 //! 3. **StyleSchema** - Registry of all rules with fast lookup
 //! 4. **StyleContext** - Whether a property can be inline or requires a block container
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::symbols::KfxSymbol;
@@ -323,8 +323,12 @@ pub struct StylePropertyRule {
 
 /// The master schema for style property mappings.
 pub struct StyleSchema {
-    /// Fast lookup from IR key -> Rules (multiple rules per key supported)
-    rules: HashMap<&'static str, Vec<StylePropertyRule>>,
+    /// Lookup from IR key -> Rules (multiple rules per key supported).
+    /// Ordered map on purpose: `rules()` / `ir_mapped_rules()` walks feed
+    /// last-write-wins property application and the emitted field order of
+    /// every style struct — an unordered walk made the same book export
+    /// differently per process.
+    rules: BTreeMap<&'static str, Vec<StylePropertyRule>>,
 }
 
 impl Default for StyleSchema {
@@ -337,7 +341,7 @@ impl StyleSchema {
     /// Create an empty schema.
     pub fn new() -> Self {
         Self {
-            rules: HashMap::new(),
+            rules: BTreeMap::new(),
         }
     }
 
@@ -357,12 +361,15 @@ impl StyleSchema {
         self.rules.get(ir_key).and_then(|v| v.first())
     }
 
-    /// Get all rules (flattened).
+    /// Get all rules (flattened), in `ir_key` order — several callers scan
+    /// for a first match, so the walk order is part of the contract.
     pub fn rules(&self) -> impl Iterator<Item = &StylePropertyRule> {
         self.rules.values().flatten()
     }
 
-    /// Get rules that have IR field mappings (for schema-driven IR extraction).
+    /// Get rules that have IR field mappings (for schema-driven IR
+    /// extraction), in the same stable `ir_key` order — application is
+    /// last-write-wins per KFX symbol, so the winner must not vary.
     pub fn ir_mapped_rules(&self) -> impl Iterator<Item = &StylePropertyRule> {
         self.rules
             .values()
@@ -2338,18 +2345,14 @@ impl StyleSchema {
     /// Every schema rule carrying this KFX symbol, in stable `ir_key` order.
     ///
     /// A KFX property can back several CSS properties (e.g. `$underline`
-    /// feeds both `text-decoration` and `text-decoration-style`), and the
-    /// rules map is an unordered HashMap — an unsorted walk would pick a
-    /// different winner per process and make conversion output flap.
+    /// feeds both `text-decoration` and `text-decoration-style`); the rules
+    /// map is ordered by `ir_key`, so the walk yields a stable winner.
     pub fn get_all_by_kfx_symbol(&self, kfx_symbol: u64) -> Vec<&StylePropertyRule> {
-        let mut matches: Vec<&StylePropertyRule> = self
-            .rules
+        self.rules
             .values()
             .flatten()
             .filter(|r| r.kfx_symbol as u64 == kfx_symbol)
-            .collect();
-        matches.sort_by_key(|r| r.ir_key);
-        matches
+            .collect()
     }
 
     /// Look up the first schema rule for a KFX symbol (`ir_key` order).

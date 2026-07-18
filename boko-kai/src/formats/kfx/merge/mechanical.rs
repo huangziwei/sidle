@@ -138,7 +138,7 @@ fn decide_merged_container_metadata(fragments: &[YJFragment]) -> (String, String
     } else if let Some(main_id) = lookup_main_container_id(fragments) {
         main_id
     } else {
-        super::common::generate_container_id()
+        super::common::generate_container_id("merge")
     };
 
     if app_version.is_empty() {

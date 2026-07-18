@@ -241,18 +241,22 @@ pub fn serialize_fragment(fragment: &KfxFragment) -> Vec<u8> {
     }
 }
 
-/// Generate a unique container ID.
-pub fn generate_container_id() -> String {
-    // Seed from the system clock.
-    let seed = {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    };
-
-    let mut state = seed;
+/// Generate a container ID (`CR!` + 28 uppercase alphanumerics).
+///
+/// Seeded from the `SOURCE_DATE_EPOCH`-honoring clock plus a caller salt
+/// (the book's title or another stable identity): with the epoch pinned,
+/// the same book converts to the same id — repeat conversions are
+/// byte-comparable, like every other timestamp this converter stamps.
+/// Unset, exports still vary per build second the way Amazon's own
+/// generator varies per build; the salt keeps two different books built
+/// in the same second distinct.
+pub fn generate_container_id(salt: &str) -> String {
+    let mut state: u128 = crate::util::time_now_secs() as u128;
+    for b in salt.bytes() {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(b as u128 + 1);
+    }
     let chars: Vec<char> = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".chars().collect();
     let mut id = String::from("CR!");
 
@@ -277,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_container_id_format() {
-        let id = generate_container_id();
+        let id = generate_container_id("test");
         assert!(id.starts_with("CR!"));
         assert_eq!(id.len(), 31); // CR! + 28 chars
 

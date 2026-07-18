@@ -2651,14 +2651,27 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
                         }
                     }
 
-                    stack.push(IonBuilder::with_fields(fields, container_id));
+                    let mut builder = IonBuilder::with_fields(fields, container_id);
+                    builder.is_image = elem.role == Role::Image;
+                    stack.push(builder);
                 }
             }
             KfxToken::EndElement => {
                 if let Some(completed) = stack.pop() {
                     let is_inner = completed.is_inner_wrapper_text;
+                    let inline_image = completed.is_image;
                     if let Some(parent) = stack.last_mut() {
-                        parent.add_child(completed.build(ctx));
+                        let built = completed.build(ctx);
+                        if inline_image && parent.has_real_text_so_far() {
+                            // An image closing inside a text-bearing element
+                            // is an IN-RUN image (`（河出<img/>文庫）`):
+                            // interleave it into the parent's content_list at
+                            // its true position — Amazon's shape — instead of
+                            // appending it after the text.
+                            parent.absorb_inline_image(built);
+                        } else {
+                            parent.add_child(built);
+                        }
                     }
 
                     // If this was an inner wrapper text element, we need to also
@@ -2734,6 +2747,16 @@ pub fn tokens_to_ion(tokens: &TokenStream, ctx: &mut ExportContext) -> IonValue 
 }
 
 /// Builder for constructing Ion structures from tokens.
+/// True when a built content_list child is an image element struct
+/// (`type: image`). Used to tell in-run images apart from other children
+/// when deciding whether to interleave.
+fn is_image_struct(value: &IonValue) -> bool {
+    matches!(value, IonValue::Struct(fields) if fields.iter().any(|(id, val)| {
+        *id == sym!(Type)
+            && matches!(val, IonValue::Symbol(s) if *s == KfxSymbol::Image as u64)
+    }))
+}
+
 struct IonBuilder {
     fields: Vec<(u64, IonValue)>,
     children: Vec<IonValue>,
@@ -2753,6 +2776,21 @@ struct IonBuilder {
     /// For inner wrapper text elements, stores the outer container's ID.
     /// Anchors inside wrapped elements should use this ID for correct TOC navigation.
     outer_container_id: Option<u64>,
+    /// Completed inline-content runs, in document order: bare text strings
+    /// interleaved with `render: inline` image structs — Amazon's shape for a
+    /// paragraph with in-run images (`（河出<img/>文庫）`). Non-empty only when
+    /// an inline image split this element's text; `accumulated_text` then
+    /// holds the run since the last split, and `build` emits `content_list`
+    /// from these runs instead of externalizing text to the content entity.
+    inline_runs: Vec<IonValue>,
+    /// Count of images absorbed into `inline_runs`. Each occupies ONE
+    /// character position in the style_event offset space (the importer's
+    /// counting rule), but position/location spans track it under the
+    /// image's own eid — `build` subtracts this from the recorded length.
+    inline_image_count: usize,
+    /// True when this element is a plain (non-wrapped) image — lets
+    /// EndElement route it into a text-bearing parent's inline runs.
+    is_image: bool,
 }
 
 impl IonBuilder {
@@ -2766,6 +2804,9 @@ impl IonBuilder {
             container_id: None,
             is_inner_wrapper_text: false,
             outer_container_id: None,
+            inline_runs: Vec::new(),
+            inline_image_count: 0,
+            is_image: false,
         }
     }
 
@@ -2779,6 +2820,9 @@ impl IonBuilder {
             container_id: Some(container_id),
             is_inner_wrapper_text: false,
             outer_container_id: None,
+            inline_runs: Vec::new(),
+            inline_image_count: 0,
+            is_image: false,
         }
     }
 
@@ -2790,10 +2834,52 @@ impl IonBuilder {
     /// Returns the character offset where this text starts (for span tracking).
     /// KFX style events use character offsets, not byte offsets.
     fn append_text(&mut self, text: &str) -> usize {
+        // Real text arriving after image-only children means those images
+        // sit IN-RUN before this text (`<p><img/>text…`): migrate them into
+        // the inline interleave so their position survives. A block image
+        // (image-only element, no surrounding text) never sees this.
+        if !self.children.is_empty()
+            && !text.chars().all(|c| c == '\u{200B}')
+            && self.children.iter().all(is_image_struct)
+        {
+            let migrated: Vec<IonValue> = self.children.drain(..).collect();
+            for img in migrated {
+                self.absorb_inline_image(img);
+            }
+        }
         let offset = self.accumulated_char_count;
         self.accumulated_text.push_str(text);
         self.accumulated_char_count += text.chars().count();
         offset
+    }
+
+    /// True when the element already carries real inline content — the
+    /// trigger for interleaving an in-run image rather than appending it as
+    /// a block child. Zero-width spaces don't count: they are anchor
+    /// carriers, and an anchored standalone image (`<a id><img/></a>`) must
+    /// keep the plain image-child shape.
+    fn has_real_text_so_far(&self) -> bool {
+        !self.inline_runs.is_empty() || self.accumulated_text.chars().any(|c| c != '\u{200B}')
+    }
+
+    /// Absorb an image struct into the inline interleave: flush the pending
+    /// text as a bare content_list string, append the image (stamped
+    /// `render: inline`), and advance the offset space by ONE character —
+    /// the position the importer counts for an in-run image, keeping
+    /// style_event offsets after the image aligned.
+    fn absorb_inline_image(&mut self, mut image: IonValue) {
+        if !self.accumulated_text.is_empty() {
+            let run = std::mem::take(&mut self.accumulated_text);
+            self.inline_runs.push(IonValue::String(run));
+        }
+        if let IonValue::Struct(ref mut fields) = image
+            && !fields.iter().any(|(id, _)| *id == sym!(Render))
+        {
+            fields.push((sym!(Render), IonValue::Symbol(KfxSymbol::Inline as u64)));
+        }
+        self.inline_runs.push(image);
+        self.inline_image_count += 1;
+        self.accumulated_char_count += 1;
     }
 
     /// Get the current accumulated text length in characters.
@@ -2855,9 +2941,36 @@ impl IonBuilder {
         // Each element is a struct with type, content reference, and possibly nested content_list
         if !self.fields.is_empty() {
             // Record text length for this content ID (used by location_map)
-            // Must use char count, not byte count, since location_map divides by characters
+            // Must use char count, not byte count, since location_map divides by characters.
+            // Inline images occupy offset-space slots but carry their own eids in the
+            // position maps, so the element's recorded length covers only its text.
             if let Some(container_id) = self.container_id {
-                ctx.record_content_length(container_id, self.accumulated_char_count);
+                ctx.record_content_length(
+                    container_id,
+                    self.accumulated_char_count - self.inline_image_count,
+                );
+            }
+
+            if !self.inline_runs.is_empty() {
+                // Interleave shape (in-run images): bare strings and
+                // `render: inline` image structs mixed in `content_list`;
+                // the text stays inline instead of externalizing to the
+                // content entity. style_event offsets already count each
+                // image as one character.
+                if !self.accumulated_text.is_empty() {
+                    self.inline_runs
+                        .push(IonValue::String(std::mem::take(&mut self.accumulated_text)));
+                }
+                if !self.style_events.is_empty() {
+                    self.fields
+                        .push((sym!(StyleEvents), IonValue::List(self.style_events)));
+                }
+                let mut list = std::mem::take(&mut self.inline_runs);
+                // Stray block children (none expected in a text run) keep
+                // their old trailing position rather than being dropped.
+                list.append(&mut self.children);
+                self.fields.push((sym!(ContentList), IonValue::List(list)));
+                return IonValue::Struct(self.fields);
             }
 
             // If this element has accumulated text, create ONE content reference
@@ -3205,6 +3318,194 @@ mod tests {
 
         // Should produce some Ion structure
         assert!(!matches!(ion, IonValue::Null));
+    }
+
+    /// Field lookup on an element struct.
+    fn struct_field(ion: &IonValue, id: KfxSymbol) -> Option<&IonValue> {
+        match ion {
+            IonValue::Struct(fields) => fields
+                .iter()
+                .find(|(fid, _)| *fid == id as u64)
+                .map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    fn has_symbol_field(ion: &IonValue, id: KfxSymbol, value: KfxSymbol) -> bool {
+        matches!(
+            struct_field(ion, id),
+            Some(IonValue::Symbol(s)) if *s == value as u64
+        )
+    }
+
+    #[test]
+    fn test_inline_image_interleaves_in_content_list() {
+        // `<p>（河出<img/>文庫）</p>` — the mid-run image must land BETWEEN
+        // the two text runs as a `render: inline` struct (Amazon's shape),
+        // not be appended after externalized text.
+        let mut chapter = Chapter::new();
+
+        let para_id = chapter.alloc_node(Node::new(Role::Paragraph));
+        chapter.append_child(chapter.root(), para_id);
+
+        let before = chapter.append_text("（河出");
+        let mut t1 = Node::new(Role::Text);
+        t1.text = before;
+        let t1_id = chapter.alloc_node(t1);
+        chapter.append_child(para_id, t1_id);
+
+        let img_id = chapter.alloc_node(Node::new(Role::Image));
+        chapter.semantics.set_src(img_id, "images/gaiji.jpg");
+        chapter.append_child(para_id, img_id);
+
+        let after = chapter.append_text("文庫）");
+        let mut t2 = Node::new(Role::Text);
+        t2.text = after;
+        let t2_id = chapter.alloc_node(t2);
+        chapter.append_child(para_id, t2_id);
+
+        let mut ctx = ExportContext::new();
+        let ion = build_storyline_ion(&chapter, &mut ctx);
+
+        let IonValue::List(elements) = ion else {
+            panic!("storyline root must be a list");
+        };
+        let para = &elements[0];
+        assert!(
+            struct_field(para, KfxSymbol::Content).is_none(),
+            "interleaved paragraph must not externalize text to the content entity"
+        );
+        let Some(IonValue::List(content_list)) = struct_field(para, KfxSymbol::ContentList) else {
+            panic!("paragraph must carry a content_list");
+        };
+        assert_eq!(content_list.len(), 3, "string, image, string");
+        assert!(
+            matches!(&content_list[0], IonValue::String(s) if s == "（河出"),
+            "run before the image, got {:?}",
+            content_list[0]
+        );
+        assert!(
+            has_symbol_field(&content_list[1], KfxSymbol::Type, KfxSymbol::Image),
+            "middle entry must be the image"
+        );
+        assert!(
+            has_symbol_field(&content_list[1], KfxSymbol::Render, KfxSymbol::Inline),
+            "in-run image must be stamped render: inline"
+        );
+        assert!(
+            matches!(&content_list[2], IonValue::String(s) if s == "文庫）"),
+            "run after the image, got {:?}",
+            content_list[2]
+        );
+    }
+
+    #[test]
+    fn test_inline_image_counts_one_position_in_style_events() {
+        // `<p>pre<a href>link<img/>tail</a>post</p>` — the image occupies ONE
+        // character in the offset space, so the link span AFTER it starts one
+        // position later ("pre"=3, "link"=4, image=1 → tail at offset 8).
+        let mut chapter = Chapter::new();
+
+        let para_id = chapter.alloc_node(Node::new(Role::Paragraph));
+        chapter.append_child(chapter.root(), para_id);
+
+        let pre = chapter.append_text("pre");
+        let mut t = Node::new(Role::Text);
+        t.text = pre;
+        let t_id = chapter.alloc_node(t);
+        chapter.append_child(para_id, t_id);
+
+        let link_id = chapter.alloc_node(Node::new(Role::Link));
+        chapter.semantics.set_href(link_id, "https://example.com/x");
+        chapter.append_child(para_id, link_id);
+
+        let ltext = chapter.append_text("link");
+        let mut lt = Node::new(Role::Text);
+        lt.text = ltext;
+        let lt_id = chapter.alloc_node(lt);
+        chapter.append_child(link_id, lt_id);
+
+        let img_id = chapter.alloc_node(Node::new(Role::Image));
+        chapter.semantics.set_src(img_id, "images/gaiji.jpg");
+        chapter.append_child(link_id, img_id);
+
+        let ttext = chapter.append_text("tail");
+        let mut tt = Node::new(Role::Text);
+        tt.text = ttext;
+        let tt_id = chapter.alloc_node(tt);
+        chapter.append_child(link_id, tt_id);
+
+        let post = chapter.append_text("post");
+        let mut pt = Node::new(Role::Text);
+        pt.text = post;
+        let pt_id = chapter.alloc_node(pt);
+        chapter.append_child(para_id, pt_id);
+
+        let mut ctx = ExportContext::new();
+        let ion = build_storyline_ion(&chapter, &mut ctx);
+
+        let IonValue::List(elements) = ion else {
+            panic!("storyline root must be a list");
+        };
+        let para = &elements[0];
+        let Some(IonValue::List(events)) = struct_field(para, KfxSymbol::StyleEvents) else {
+            panic!("link spans must produce style_events");
+        };
+        let spans: Vec<(i64, i64)> = events
+            .iter()
+            .map(|e| {
+                let Some(IonValue::Int(off)) = struct_field(e, KfxSymbol::Offset) else {
+                    panic!("event offset");
+                };
+                let Some(IonValue::Int(len)) = struct_field(e, KfxSymbol::Length) else {
+                    panic!("event length");
+                };
+                (*off, *len)
+            })
+            .collect();
+        assert!(
+            spans.contains(&(3, 4)),
+            "link span before the image at offset 3, got {spans:?}"
+        );
+        assert!(
+            spans.contains(&(8, 4)),
+            "link span after the image shifted by the image's slot, got {spans:?}"
+        );
+    }
+
+    #[test]
+    fn test_image_only_paragraph_keeps_block_shape() {
+        // `<p><img/></p>` with no surrounding text keeps the plain
+        // image-child shape — no interleave, no render: inline.
+        let mut chapter = Chapter::new();
+
+        let para_id = chapter.alloc_node(Node::new(Role::Paragraph));
+        chapter.append_child(chapter.root(), para_id);
+
+        let img_id = chapter.alloc_node(Node::new(Role::Image));
+        chapter.semantics.set_src(img_id, "images/plate.jpg");
+        chapter.append_child(para_id, img_id);
+
+        let mut ctx = ExportContext::new();
+        let ion = build_storyline_ion(&chapter, &mut ctx);
+
+        let IonValue::List(elements) = ion else {
+            panic!("storyline root must be a list");
+        };
+        let para = &elements[0];
+        let Some(IonValue::List(content_list)) = struct_field(para, KfxSymbol::ContentList) else {
+            panic!("paragraph must carry the image child");
+        };
+        assert_eq!(content_list.len(), 1);
+        assert!(has_symbol_field(
+            &content_list[0],
+            KfxSymbol::Type,
+            KfxSymbol::Image
+        ));
+        assert!(
+            struct_field(&content_list[0], KfxSymbol::Render).is_none(),
+            "a block image must not be stamped render: inline"
+        );
     }
 
     #[test]

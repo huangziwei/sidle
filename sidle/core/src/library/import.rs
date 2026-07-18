@@ -690,8 +690,8 @@ fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
     }
 
     let doc = boko::formats::aozora::parse_txt(&text);
-    let cover =
-        boko::formats::aozora::render_cover_jpeg(&doc.title, &doc.author).context("aozora cover render")?;
+    let cover = boko::formats::aozora::render_cover_jpeg(&doc.title, &doc.author)
+        .context("aozora cover render")?;
     let epub_bytes = boko::formats::aozora::build_epub(boko::formats::aozora::EpubInput {
         document: &doc,
         images: &images,

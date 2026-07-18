@@ -544,12 +544,12 @@ fn pick_merged_metadata(
         asset
     } else if let Some((_, r)) = largest_container {
         if r.container_id.is_empty() {
-            super::common::generate_container_id()
+            super::common::generate_container_id("merge")
         } else {
             r.container_id.clone()
         }
     } else {
-        super::common::generate_container_id()
+        super::common::generate_container_id("merge")
     };
 
     if app_version.is_empty() {

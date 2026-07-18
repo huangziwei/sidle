@@ -100,7 +100,7 @@ fn build_kfx_container(
         return image_fxl_to_kfx(book, on_progress);
     }
 
-    let container_id = generate_container_id();
+    let container_id = generate_container_id(&book.metadata().title);
     let mut ctx = ExportContext::new();
 
     // ========================================================================
@@ -3176,7 +3176,7 @@ fn image_fxl_to_kfx(
     book: &mut Book,
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> io::Result<Vec<u8>> {
-    let container_id = generate_container_id();
+    let container_id = generate_container_id(&book.metadata().title);
     let mut ctx = ExportContext::new();
 
     // Book-level layout signals. A manga is horizontal_tb text with an rtl page
@@ -4267,7 +4267,7 @@ pub fn pdf_to_kfx(
     cover_jpeg: Option<&[u8]>,
     text: Option<&[crate::formats::pdf::render::PageText]>,
 ) -> Vec<u8> {
-    let container_id = generate_container_id();
+    let container_id = generate_container_id(&meta.title);
     let mut ctx = ExportContext::new();
     let n = pdf.pages.len();
 
@@ -5565,7 +5565,7 @@ mod tests {
         // Load a real book from fixtures
         let book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
         let ctx = ExportContext::new();
-        let container_id = generate_container_id();
+        let container_id = generate_container_id("test");
 
         let frag = build_book_metadata_fragment(&book, &container_id, &ctx);
 
@@ -6244,7 +6244,7 @@ mod entity_structure_tests {
     fn test_entity_order_matches_reference() {
         // Build KFX from EPUB and verify entity order matches Amazon reference
         let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
-        let container_id = generate_container_id();
+        let container_id = generate_container_id("test");
         let mut ctx = ExportContext::new();
 
         // Collect spine info

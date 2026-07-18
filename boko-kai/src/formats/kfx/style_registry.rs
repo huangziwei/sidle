@@ -346,8 +346,14 @@ impl StyleRegistry {
         }
         result.push(("s0".to_string(), IonValue::Struct(default_fields)));
 
-        // Then all registered styles, each stamped with the content language.
-        for (_, (_style_id, name_symbol, name, style, _uses)) in self.styles.drain() {
+        // Then all registered styles, each stamped with the content language,
+        // in REGISTRATION order (style_id = first use in the document walk).
+        // The map's own order is random per process, and these become style
+        // entities in container order — unsorted, the same book exported
+        // twice differs byte-wise.
+        let mut drained: Vec<_> = self.styles.drain().map(|(_, entry)| entry).collect();
+        drained.sort_by_key(|(style_id, _, _, _, _)| *style_id);
+        for (_style_id, name_symbol, name, style, _uses) in drained {
             let mut ion = style.to_ion(name_symbol);
             if !language.is_empty()
                 && let IonValue::Struct(fields) = &mut ion
@@ -401,7 +407,13 @@ impl StyleRegistry {
                 *tally.entry((*value as f32).to_bits()).or_insert(0) += *uses;
             }
         }
-        let dominant_bits = tally.into_iter().max_by_key(|(_, c)| *c).map(|(b, _)| b)?;
+        // Tie-break by bit-pattern so an equal-usage tie picks the same
+        // dominant every run — the map's iteration order must not decide
+        // (it flipped every lh ratio in the book between two exports).
+        let dominant_bits = tally
+            .into_iter()
+            .max_by_key(|(bits, c)| (*c, *bits))
+            .map(|(b, _)| b)?;
         let dominant = f32::from_bits(dominant_bits);
         if dominant <= 0.0 || !dominant.is_finite() {
             return None;

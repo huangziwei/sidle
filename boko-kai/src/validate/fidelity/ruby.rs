@@ -425,6 +425,17 @@ pub fn extract_pairs_from_kfx(kfx_bytes: &[u8]) -> Result<Vec<RubyPair>, String>
     Ok(pairs)
 }
 
+/// True when a content_list member struct is an image element (`type: image`).
+fn is_image_element<F>(fields: &[(u64, IonValue)], resolve_sym: &F) -> bool
+where
+    F: Fn(u64) -> String,
+{
+    fields.iter().any(|(k, v)| {
+        resolve_sym(*k) == "type"
+            && matches!(v.unwrap_annotated(), IonValue::Symbol(s) if resolve_sym(*s) == "image")
+    })
+}
+
 fn parse_entity(data: &[u8], ent: &crate::formats::kfx::container::EntityLoc) -> Option<IonValue> {
     if ent.offset + ent.length > data.len() {
         return None;
@@ -550,15 +561,22 @@ fn collect_pairs_from_ion<F>(
 {
     match value {
         IonValue::Struct(fields) => {
-            // If this struct is a text element with style_events + content,
-            // pull base text out and emit one pair per ruby style_event.
+            // If this struct is a text element with style_events, pull base
+            // text out and emit one pair per ruby style_event. The text can
+            // arrive three ways: an externalized content ref (name + index),
+            // a direct inline string, or the interleave shape — bare-string
+            // runs mixed with `render: inline` image structs in content_list,
+            // where events offset into the JOINED run space and an image
+            // occupies ONE position (U+FFFC placeholder here).
             let mut content_name = String::new();
             let mut content_index: i64 = -1;
+            let mut inline_text: Option<String> = None;
+            let mut interleave: Option<Vec<char>> = None;
             let mut style_events: Option<&Vec<IonValue>> = None;
             for (k, v) in fields {
                 match resolve_sym(*k).as_str() {
-                    "content" => {
-                        if let IonValue::Struct(cfields) = v {
+                    "content" => match v.unwrap_annotated() {
+                        IonValue::Struct(cfields) => {
                             for (ck, cv) in cfields {
                                 match resolve_sym(*ck).as_str() {
                                     "name" => {
@@ -575,6 +593,30 @@ fn collect_pairs_from_ion<F>(
                                 }
                             }
                         }
+                        // Storylines can inline an element's text directly.
+                        IonValue::String(s) => inline_text = Some(s.clone()),
+                        _ => {}
+                    },
+                    "content_list" => {
+                        if let IonValue::List(items) = v {
+                            let mut buf: Vec<char> = Vec::new();
+                            let mut saw_run = false;
+                            for item in items {
+                                match item.unwrap_annotated() {
+                                    IonValue::String(s) => {
+                                        saw_run = true;
+                                        buf.extend(s.chars());
+                                    }
+                                    IonValue::Struct(sf) if is_image_element(sf, resolve_sym) => {
+                                        buf.push('\u{FFFC}');
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if saw_run {
+                                interleave = Some(buf);
+                            }
+                        }
                     }
                     "style_events" => {
                         if let IonValue::List(items) = v {
@@ -585,12 +627,19 @@ fn collect_pairs_from_ion<F>(
                 }
             }
 
-            if let (Some(events), false) = (style_events, content_name.is_empty())
-                && content_index >= 0
-                && let Some(text_vec) = content_map.get(&content_name)
-                && let Some(text) = text_vec.get(content_index as usize)
+            let element_chars: Option<Vec<char>> = if !content_name.is_empty() && content_index >= 0
             {
-                let chars: Vec<char> = text.chars().collect();
+                content_map
+                    .get(&content_name)
+                    .and_then(|v| v.get(content_index as usize))
+                    .map(|t| t.chars().collect())
+            } else if let Some(t) = &inline_text {
+                Some(t.chars().collect())
+            } else {
+                interleave
+            };
+
+            if let (Some(events), Some(chars)) = (style_events, element_chars) {
                 for evt in events {
                     let IonValue::Struct(efields) = evt else {
                         continue;

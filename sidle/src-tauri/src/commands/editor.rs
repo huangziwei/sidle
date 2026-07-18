@@ -43,14 +43,14 @@ use tokio::sync::oneshot;
 use boko::formats::epub::image_extract as epub_image;
 use boko::formats::epub::metadata_edit::{self as epub_meta, MetadataPatch as EpubMetadataPatch};
 use boko::formats::epub::toc_repair as epub_toc;
-use boko::import::pdf::PdfOutlineItem;
 use boko::formats::kfx::image_extract;
 use boko::formats::kfx::metadata_edit::{self, MetadataPatch as KfxMetadataPatch};
 use boko::formats::kfx::toc_repair::{self, TocEntry as KfxTocEntry};
-use boko::model::TocEntry as EpubTocEntry;
 use boko::formats::pdf::cover::{self as pdf_cover, CoverMode};
 use boko::formats::pdf::metadata_edit::{self as pdf_meta, MetadataPatch as PdfMetadataPatch};
 use boko::formats::pdf::toc_repair as pdf_toc;
+use boko::import::pdf::PdfOutlineItem;
+use boko::model::TocEntry as EpubTocEntry;
 use boko::validate::source::toc as toc_validate;
 
 use crate::commands::library::SetCoverResult;
@@ -1024,9 +1024,12 @@ fn render_page(
     let width_px = export_width_px(geom.width, dpi);
     let index = page - 1;
     match format {
-        PageFormat::Jpeg => {
-            boko::formats::pdf::render::render_pdf_page_jpeg(pdf, index, width_px, PAGE_EXPORT_JPEG_QUALITY)
-        }
+        PageFormat::Jpeg => boko::formats::pdf::render::render_pdf_page_jpeg(
+            pdf,
+            index,
+            width_px,
+            PAGE_EXPORT_JPEG_QUALITY,
+        ),
         PageFormat::Png => boko::formats::pdf::render::render_pdf_page_png(pdf, index, width_px),
     }
     .map_err(|e| format!("render page {page}: {e}"))

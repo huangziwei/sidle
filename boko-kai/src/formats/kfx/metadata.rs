@@ -216,9 +216,9 @@ impl MetadataField {
                     Some(&meta.language)
                 }
             }
-            // Single-author convenience; `build_category_entries` joins the full
-            // list with " & " (calibre's `yj_metadata.py:209` convention) — use
-            // that path instead when emitting to KFX.
+            // Single-author convenience; `build_category_entries` emits one
+            // repeated `author` entry per author (Amazon's shape) — use that
+            // path instead when emitting to KFX.
             MetadataField::Author => meta.authors.first().map(|s| s.as_str()),
             MetadataField::Description => meta.description.as_deref(),
             MetadataField::Publisher => meta.publisher.as_deref(),
@@ -583,14 +583,16 @@ pub fn build_category_entries(
                         ctx.content_id.clone().map(MetadataValue::Text)
                     }
                     MetadataField::Author => {
-                        // KFX uses a single `author` value with multiple authors
-                        // joined by " & " (calibre's `yj_metadata.py:209`). The
-                        // import side splits on "&" symmetrically.
-                        if meta.authors.is_empty() {
-                            None
-                        } else {
-                            Some(MetadataValue::Text(meta.authors.join(" & ")))
+                        // One `author` entry PER author — Amazon's own
+                        // kindle_title_metadata repeats the key (calibre's
+                        // writer joins with " & ", but real Amazon files
+                        // don't, and the joined form flattens the author
+                        // list on every round-trip). The importer reads
+                        // each repeated key verbatim.
+                        for a in &meta.authors {
+                            entries.push((rule.key, MetadataValue::Text(a.clone())));
                         }
+                        None
                     }
                     MetadataField::ModifiedDate => {
                         // Always stamp the conversion time, never copy the source value —
