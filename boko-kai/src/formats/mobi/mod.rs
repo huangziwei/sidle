@@ -1,5 +1,6 @@
 //! MOBI/AZW3 format support (read-only).
 
+pub mod fonts;
 mod headers;
 pub mod huffcdic;
 pub(crate) mod index;

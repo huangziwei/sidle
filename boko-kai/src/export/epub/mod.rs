@@ -100,6 +100,13 @@ impl Exporter for EpubExporter {
 impl EpubExporter {
     /// Export with passthrough mode (preserves original HTML/CSS).
     fn export_raw<W: Write + Seek>(&self, book: &mut Book, writer: &mut W) -> io::Result<()> {
+        // Resolve TOC fragments first (AZW3/MOBI backends refine NCX byte
+        // positions into `#id` anchors; a no-op elsewhere). The
+        // materialization path gets this via `resolve_links()`, but the raw
+        // route never materializes — without it every nested nav/NCX entry
+        // lands at its chapter start instead of the in-chapter target.
+        book.resolve_toc();
+
         let mut zip = ZipWriter::new(writer);
 
         let compression_level = self.config.compression_level.unwrap_or(6);

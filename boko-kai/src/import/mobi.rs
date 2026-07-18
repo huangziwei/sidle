@@ -292,13 +292,14 @@ impl MobiImporter {
         // and NCX positions are available, re-transform with NCX anchors and
         // force NCX-based splitting (bypassing the pagebreak check that failed).
         let (split, transformed) = {
-            let initial = split_mobi_html(&transformed, None);
+            let initial = split_mobi_html(&transformed, None, &metadata.title);
             if initial.chapters.len() > 1 || ncx_positions.is_empty() {
                 (initial, transformed)
             } else {
                 // Re-transform with NCX anchors at byte positions, force NCX split
                 let with_ncx = filepos::transform_mobi_html(&wrapped, &assets, &ncx_positions);
-                let ncx_split = split_mobi_html_ncx_only(&with_ncx, &ncx_positions);
+                let ncx_split =
+                    split_mobi_html_ncx_only(&with_ncx, &ncx_positions, &metadata.title);
                 if ncx_split.chapters.len() > 1 {
                     (ncx_split, with_ncx)
                 } else {
@@ -487,11 +488,12 @@ struct ChapterSplit {
 ///
 /// Falls back to NCX position-based splitting if no pagebreaks are found.
 /// Falls back to a single chapter if neither pagebreaks nor NCX positions exist.
-fn split_mobi_html(html: &[u8], ncx_positions: Option<&[u32]>) -> ChapterSplit {
+fn split_mobi_html(html: &[u8], ncx_positions: Option<&[u32]>, title: &str) -> ChapterSplit {
     let html_str = String::from_utf8_lossy(html);
 
     // Extract <head> content and <body> content
     let (head_content, body_content) = extract_head_and_body(&html_str);
+    let head_content = sanitize_mobi_head(&head_content, title);
 
     // Find pagebreak positions in the body content
     let pagebreak_positions = find_pagebreaks(body_content.as_bytes());
@@ -564,9 +566,10 @@ fn split_mobi_html(html: &[u8], ncx_positions: Option<&[u32]>) -> ChapterSplit {
 ///
 /// Used when pagebreak-based splitting fails to produce multiple chapters
 /// but NCX index entries provide valid split points.
-fn split_mobi_html_ncx_only(html: &[u8], ncx_positions: &[u32]) -> ChapterSplit {
+fn split_mobi_html_ncx_only(html: &[u8], ncx_positions: &[u32], title: &str) -> ChapterSplit {
     let html_str = String::from_utf8_lossy(html);
     let (head_content, body_content) = extract_head_and_body(&html_str);
+    let head_content = sanitize_mobi_head(&head_content, title);
 
     let body_chunks = {
         let ncx_chunks = split_at_ncx_anchors(&body_content, ncx_positions);
@@ -618,6 +621,38 @@ fn split_mobi_html_ncx_only(html: &[u8], ncx_positions: &[u32]) -> ChapterSplit 
         chapter_paths,
         filepos_to_chapter,
     }
+}
+
+/// Make a MOBI source head usable as an XHTML chapter head: drop the
+/// MOBI-only `<guide>…</guide>` block (an OPF concept — invalid in XHTML and
+/// already consumed for navigation elsewhere) and ensure a `<title>` child
+/// (required by the XHTML content model; RSC-017 without it).
+fn sanitize_mobi_head(head: &str, title: &str) -> String {
+    let mut out = String::with_capacity(head.len());
+    let lower = head.to_ascii_lowercase();
+    let mut pos = 0;
+    while let Some(rel) = lower[pos..].find("<guide") {
+        let start = pos + rel;
+        out.push_str(&head[pos..start]);
+        match lower[start..].find("</guide>") {
+            Some(end_rel) => pos = start + end_rel + "</guide>".len(),
+            None => {
+                pos = head.len();
+                break;
+            }
+        }
+    }
+    out.push_str(&head[pos..]);
+    if !out.to_ascii_lowercase().contains("<title") {
+        out.push_str(&format!(
+            "<title>{}</title>\n",
+            title
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+        ));
+    }
+    out
 }
 
 /// Extract the content inside `<head>...</head>` and `<body>...</body>`.
@@ -1170,6 +1205,26 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_mobi_head() {
+        // The MOBI `<guide>` block is an OPF concept — stripped; a `<title>`
+        // is injected when the source head lacks one.
+        let head =
+            "<guide><reference type=\"toc\" title=\"目次\" href=\"#filepos418\" /></guide>\n";
+        let out = sanitize_mobi_head(head, "人間<失格>");
+        assert!(!out.contains("guide"), "guide stripped: {out}");
+        assert!(
+            out.contains("<title>人間&lt;失格&gt;</title>"),
+            "title injected + escaped: {out}"
+        );
+
+        // A head that already has a title keeps it, no duplicate.
+        let head2 = "<title>Keep</title>";
+        let out2 = sanitize_mobi_head(head2, "Other");
+        assert_eq!(out2.matches("<title").count(), 1);
+        assert!(out2.contains("Keep"));
+    }
+
+    #[test]
     fn test_split_mobi_html_with_pagebreaks() {
         let html = br#"<html><head><title>T</title></head><body>
 <h1>Chapter 1</h1><p>Text1</p>
@@ -1179,7 +1234,7 @@ mod tests {
 <h1>Chapter 3</h1><p>Text3</p>
 </body></html>"#;
 
-        let split = split_mobi_html(html, None);
+        let split = split_mobi_html(html, None, "T");
 
         assert_eq!(split.chapters.len(), 3);
         assert_eq!(split.chapter_paths.len(), 3);
@@ -1208,7 +1263,7 @@ mod tests {
     #[test]
     fn test_split_mobi_html_no_pagebreaks() {
         let html = b"<html><head></head><body><p>Single chapter</p></body></html>";
-        let split = split_mobi_html(html, None);
+        let split = split_mobi_html(html, None, "T");
 
         assert_eq!(split.chapters.len(), 1);
         assert_eq!(split.chapter_paths[0], "chapter_0.xhtml");
@@ -1221,7 +1276,7 @@ mod tests {
     fn test_split_mobi_html_empty_chunks_filtered() {
         // Pagebreak at very start → first chunk is empty → filtered out
         let html = b"<html><head></head><body><mbp:pagebreak/><p>Only chapter</p></body></html>";
-        let split = split_mobi_html(html, None);
+        let split = split_mobi_html(html, None, "T");
 
         assert_eq!(split.chapters.len(), 1);
         let ch = String::from_utf8_lossy(&split.chapters[0]);
@@ -1287,7 +1342,7 @@ mod tests {
 <p>Ch1</p><mbp:pagebreak/><p>Ch2</p>
 </body></html>"#;
 
-        let split = split_mobi_html(html, None);
+        let split = split_mobi_html(html, None, "T");
 
         assert_eq!(split.chapters.len(), 2);
         for ch in &split.chapters {
@@ -1315,7 +1370,7 @@ mod tests {
 <a id="filepos500" /><p>Ch3</p>
 </body></html>"#;
 
-        let split = split_mobi_html(html, None);
+        let split = split_mobi_html(html, None, "T");
 
         assert_eq!(split.filepos_to_chapter.get("filepos10"), Some(&0));
         assert_eq!(split.filepos_to_chapter.get("filepos200"), Some(&1));
@@ -1331,7 +1386,7 @@ mod tests {
 <a id="filepos100" /><p>Ch2</p>
 </body></html>"#;
 
-        let split = split_mobi_html(html, None);
+        let split = split_mobi_html(html, None, "T");
 
         // Simulate NCX-based TOC construction
         let filepos0_ch = split
@@ -1366,7 +1421,7 @@ mod tests {
 </body></html>"#;
 
         let ncx_positions = vec![0, 100, 500];
-        let split = split_mobi_html(html, Some(&ncx_positions));
+        let split = split_mobi_html(html, Some(&ncx_positions), "T");
 
         // Should split at filepos100 and filepos500 (filepos0 is at body start, skipped)
         assert_eq!(split.chapters.len(), 3);
@@ -1404,7 +1459,7 @@ mod tests {
 
         // Only split at 200 and 800 (skip sub-position 300)
         let ncx_positions = vec![0, 200, 800];
-        let split = split_mobi_html(html, Some(&ncx_positions));
+        let split = split_mobi_html(html, Some(&ncx_positions), "T");
 
         assert_eq!(split.chapters.len(), 3);
 
@@ -1421,7 +1476,7 @@ mod tests {
         let html = b"<html><head></head><body><p>No anchors here</p></body></html>";
 
         let ncx_positions = vec![100, 200, 300];
-        let split = split_mobi_html(html, Some(&ncx_positions));
+        let split = split_mobi_html(html, Some(&ncx_positions), "T");
 
         assert_eq!(split.chapters.len(), 1);
     }
@@ -1431,7 +1486,7 @@ mod tests {
         let html = b"<html><head></head><body><p>Content</p></body></html>";
 
         let ncx_positions: Vec<u32> = vec![];
-        let split = split_mobi_html(html, Some(&ncx_positions));
+        let split = split_mobi_html(html, Some(&ncx_positions), "T");
 
         assert_eq!(split.chapters.len(), 1);
     }
@@ -1449,7 +1504,7 @@ mod tests {
 
         // Pass NCX positions that would create a different split
         let ncx_positions = vec![0, 200];
-        let split = split_mobi_html(html, Some(&ncx_positions));
+        let split = split_mobi_html(html, Some(&ncx_positions), "T");
 
         // Should get 3 chapters from pagebreaks, not 2 from NCX
         assert_eq!(split.chapters.len(), 3);
@@ -1464,7 +1519,7 @@ mod tests {
 </body></html>"##;
 
         let ncx_positions = vec![0, 500];
-        let split = split_mobi_html(html, Some(&ncx_positions));
+        let split = split_mobi_html(html, Some(&ncx_positions), "T");
 
         assert_eq!(split.chapters.len(), 2);
 
@@ -1633,7 +1688,7 @@ mod tests {
 </body></html>"#;
 
         let ncx_positions = vec![0, 500, 1000];
-        let split = split_mobi_html(html, Some(&ncx_positions));
+        let split = split_mobi_html(html, Some(&ncx_positions), "T");
 
         assert_eq!(split.chapters.len(), 3);
 

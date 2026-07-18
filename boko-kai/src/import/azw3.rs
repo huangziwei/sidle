@@ -15,8 +15,8 @@ use crate::formats::mobi::parser::{
 };
 use crate::formats::mobi::{
     Compression, Encoding, HuffCdicReader, MobiFormat, MobiHeader, NULL_INDEX, PdbInfo, TocNode,
-    build_toc_from_ncx, detect_image_type, is_metadata_record, palmdoc, parse_exth, parse_fdst,
-    strip_trailing_data, transform,
+    build_toc_from_ncx, detect_image_type, fonts as mobi_fonts, is_metadata_record, palmdoc,
+    parse_exth, parse_fdst, strip_trailing_data, transform,
 };
 use crate::html::Stylesheet;
 use crate::import::{ChapterId, Importer, SpineEntry, resolve_path_based_href};
@@ -205,11 +205,29 @@ impl Importer for Azw3Importer {
             // resolve the import chain (otherwise the writing-mode / class
             // rules in the imported sheet never load). Calibre-converted
             // AZW3s don't carry such imports — the pass is a no-op for them.
-            // Embedded-font `@font-face` rules are dropped: their
-            // `kindle:embed:` sources point at FONT records the EPUB doesn't
-            // ship, so the rule can only ever dangle.
+            // `kindle:embed:` URLs (embedded fonts, background images) are
+            // rewritten to the extracted assets; any `@font-face` rule whose
+            // ref did NOT resolve is dropped so it can't dangle.
             let css = transform::rewrite_kindle_flow_in_css(&text[start..end]);
+            let css = transform::rewrite_kindle_embed_in_css(&css, &self.embed_asset_paths());
             return Ok(transform::strip_kindle_embed_font_faces(&css));
+        }
+
+        // Embedded font: fonts/font_NNNN.ext → decoded FONT record.
+        if let Some(idx) = key
+            .strip_prefix("fonts/font_")
+            .and_then(|s| s.split('.').next())
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            let rec = self.read_record(self.image_record_base + idx)?;
+            return mobi_fonts::parse_font_record(&rec)
+                .map(|f| f.data)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("FONT record for {} failed to decode", key),
+                    )
+                });
         }
 
         // Image: images/image_NNNN.ext
@@ -825,6 +843,17 @@ impl Azw3Importer {
                     .is_ok()
                 {
                     let header = &header[..read_len];
+                    let idx = i - first_img;
+                    // Embedded font: decode the whole record (fonts are few
+                    // and small) to sniff the face type for the extension.
+                    if header.starts_with(b"FONT") {
+                        if let Ok(rec) = self.read_record(i)
+                            && let Some(font) = mobi_fonts::parse_font_record(&rec)
+                        {
+                            assets.push(PathBuf::from(format!("fonts/font_{idx:04}.{}", font.ext)));
+                        }
+                        continue;
+                    }
                     if is_metadata_record(header) {
                         continue;
                     }
@@ -835,7 +864,6 @@ impl Azw3Importer {
                             "image/gif" => "gif",
                             _ => "bin",
                         };
-                        let idx = i - first_img;
                         assets.push(PathBuf::from(format!("images/image_{idx:04}.{ext}")));
                     }
                 }
@@ -843,6 +871,25 @@ impl Azw3Importer {
         }
 
         assets
+    }
+
+    /// Embed-index → asset-path map for the CSS `kindle:embed:` rewrite:
+    /// every discovered resource asset (`fonts/font_NNNN.*`,
+    /// `images/image_NNNN.*`) keyed by its resource index NNNN.
+    fn embed_asset_paths(&self) -> std::collections::HashMap<usize, String> {
+        let mut map = std::collections::HashMap::new();
+        for path in &self.assets {
+            let key = path.to_string_lossy().replace('\\', "/");
+            let idx = key
+                .strip_prefix("fonts/font_")
+                .or_else(|| key.strip_prefix("images/image_"))
+                .and_then(|s| s.split('.').next())
+                .and_then(|s| s.parse::<usize>().ok());
+            if let Some(idx) = idx {
+                map.insert(idx, key);
+            }
+        }
+        map
     }
 
     /// Load an image record by index.

@@ -5,24 +5,8 @@
 use bstr::ByteSlice;
 use memchr::memmem;
 
+use super::parse_base32;
 use super::parser::DivElement;
-
-/// Parse Kindle base32 encoding (0-9A-V) to number.
-#[inline]
-pub fn parse_base32(s: &[u8]) -> usize {
-    let mut result = 0usize;
-    for &b in s {
-        result = result.wrapping_mul(32);
-        let val = match b {
-            b'0'..=b'9' => (b - b'0') as usize,
-            b'A'..=b'V' => (b - b'A') as usize + 10,
-            b'a'..=b'v' => (b - b'a') as usize + 10,
-            _ => continue,
-        };
-        result = result.wrapping_add(val);
-    }
-    result
-}
 
 /// Result of finding a kindle reference in the input.
 struct KindleRef {
@@ -303,10 +287,20 @@ fn find_nearest_id_kind(
     let aid_finder = memmem::Finder::new(b" aid=\"");
     let aid_finder_single = memmem::Finder::new(b" aid='");
 
-    // Search forward from pos to find the closest anchor (within reasonable distance)
-    let end_pos = (pos + 2000).min(file_end);
-    if pos < end_pos {
-        let search_window = &raw_text[pos..end_pos];
+    // Search forward from pos to find the closest anchor (within reasonable
+    // distance). A KF8 file's raw stream is [skeleton mini-doc][fragments…]:
+    // a section-start position lands in the skeleton's TAIL, where the
+    // nearest forward attribute belongs to an empty skeleton wrapper — an
+    // element that assembles to the section's END, not its start. A match
+    // before the skeleton terminator (`</html>`) is therefore bogus; the
+    // section's content begins after it, so search again from there.
+    let mut search_pos = pos;
+    loop {
+        let end_pos = (search_pos + 2000).min(file_end);
+        if search_pos >= end_pos {
+            break;
+        }
+        let search_window = &raw_text[search_pos..end_pos];
 
         // Find the closest attribute of any type
         let id_match = find_attr_with_pos(search_window, &id_finder, &id_finder_single, 4);
@@ -325,10 +319,18 @@ fn find_nearest_id_kind(
             candidates.push((p, v, true));
         }
 
-        // Pick the closest one
-        if let Some((_, val, is_aid)) = candidates.into_iter().min_by_key(|(p, _, _)| *p) {
-            return Some((val, is_aid));
+        // Pick the closest one — unless the skeleton terminator sits before
+        // it, in which case restart past the terminator.
+        if let Some((m, val, is_aid)) = candidates.into_iter().min_by_key(|(p, _, _)| *p) {
+            match memmem::find(search_window, b"</html>") {
+                Some(b) if m < b => {
+                    search_pos += b + "</html>".len();
+                    continue;
+                }
+                _ => return Some((val, is_aid)),
+            }
         }
+        break;
     }
 
     // Search backwards from pos
@@ -744,6 +746,177 @@ fn attr_spans(attrs: &[u8], name: &[u8]) -> Vec<(usize, usize)> {
     spans
 }
 
+/// Convert legacy MOBI6 block-layout attributes to inline CSS.
+///
+/// Kindlegen's MOBI6 paragraph model puts layout in attributes —
+/// `<p height="1em" width="0pt" align="justify">` — which are invalid in
+/// XHTML5 (epubcheck RSC-005) and silently ignored by EPUB readers, losing
+/// the source's paragraph spacing/indent/justification. Mapping (per the
+/// MOBI periodical format docs and calibre's reader): `height` →
+/// `margin-top`, `width` → `text-indent` (paragraphs only), `align` →
+/// `text-align`, merged into any existing `style` attribute. Applies to
+/// `<p>`, `<div>`, `<blockquote>`; unit-less values get `px`.
+pub fn convert_legacy_block_attrs(html: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(html.len());
+    let mut pos = 0;
+    while let Some(rel) = memchr::memchr(b'<', &html[pos..]) {
+        let start = pos + rel;
+        out.extend_from_slice(&html[pos..start]);
+        let Some(end_rel) = memchr::memchr(b'>', &html[start..]) else {
+            out.extend_from_slice(&html[start..]);
+            return out;
+        };
+        let end = start + end_rel + 1;
+        out.extend_from_slice(&convert_block_tag(&html[start..end]));
+        pos = end;
+    }
+    out.extend_from_slice(&html[pos..]);
+    out
+}
+
+/// [`convert_legacy_block_attrs`] helper: rewrite one
+/// `<p|div|blockquote|img …>` open tag, translating its legacy layout
+/// attributes into a `style` attr.
+fn convert_block_tag(tag: &[u8]) -> Vec<u8> {
+    let name_end = tag[1..]
+        .iter()
+        .position(|b| !b.is_ascii_alphanumeric())
+        .map(|p| p + 1)
+        .unwrap_or(tag.len());
+    let name = &tag[1..name_end];
+    let is_para = name.eq_ignore_ascii_case(b"p");
+    let is_img = name.eq_ignore_ascii_case(b"img");
+    if !(is_para
+        || is_img
+        || name.eq_ignore_ascii_case(b"div")
+        || name.eq_ignore_ascii_case(b"blockquote"))
+    {
+        return tag.to_vec();
+    }
+    // Keep a self-closing tag's `/` out of the attribute slice so the
+    // rebuilt tag can re-append it after any added `style`.
+    let mut attrs_end = tag.len() - 1;
+    let self_closing = attrs_end > name_end && tag[attrs_end - 1] == b'/';
+    if self_closing {
+        attrs_end -= 1;
+    }
+    let attrs = &tag[name_end..attrs_end];
+
+    // CSS length: pass units through, default bare numbers to px.
+    let css_len = |v: &[u8]| -> Option<String> {
+        let s = String::from_utf8_lossy(v).trim().to_string();
+        if s.is_empty() {
+            return None;
+        }
+        Some(if s.bytes().all(|b| b.is_ascii_digit()) {
+            format!("{s}px")
+        } else {
+            s
+        })
+    };
+    let mut decls: Vec<String> = Vec::new();
+    let mut drop_spans: Vec<(usize, usize)> = Vec::new();
+    if is_img {
+        // Only `align` is invalid on `<img>` (width/height as bare integers
+        // are legal HTML). HTML4 image alignment: left/right floated the
+        // image, everything else set the inline vertical alignment.
+        for (s, e) in attr_spans(attrs, b"align") {
+            if let Some(v) = extract_attr_value(&attrs[s..e], b"align") {
+                let v = String::from_utf8_lossy(v).trim().to_ascii_lowercase();
+                match v.as_str() {
+                    "left" | "right" => decls.push(format!("float: {v}")),
+                    "top" | "middle" | "bottom" | "baseline" => {
+                        decls.push(format!("vertical-align: {v}"))
+                    }
+                    _ => {}
+                }
+            }
+            drop_spans.push((s, e));
+        }
+    } else {
+        for (attr, prop, paragraphs_only) in [
+            (&b"height"[..], "margin-top", false),
+            (&b"width"[..], "text-indent", true),
+            (&b"align"[..], "text-align", false),
+        ] {
+            for (s, e) in attr_spans(attrs, attr) {
+                // The attribute is invalid XHTML on any of these tags, so it
+                // is always dropped; the CSS translation is emitted only
+                // where the kindlegen semantics are known (`width` =
+                // paragraph indent).
+                let value = if paragraphs_only && !is_para {
+                    None
+                } else {
+                    extract_attr_value(&attrs[s..e], attr)
+                };
+                if let Some(v) = value {
+                    let css = if attr == b"align" {
+                        let s = String::from_utf8_lossy(v).trim().to_ascii_lowercase();
+                        matches!(s.as_str(), "left" | "right" | "center" | "justify").then_some(s)
+                    } else {
+                        css_len(v)
+                    };
+                    if let Some(css) = css {
+                        decls.push(format!("{prop}: {css}"));
+                    }
+                }
+                drop_spans.push((s, e));
+            }
+        }
+    }
+    if drop_spans.is_empty() {
+        return tag.to_vec();
+    }
+
+    // Rebuild: name + surviving attrs (+ merged style) + '>'.
+    drop_spans.sort_unstable();
+    let mut kept = Vec::with_capacity(attrs.len());
+    let mut cursor = 0;
+    for (s, e) in &drop_spans {
+        let mut s = *s;
+        while s > cursor && attrs[s - 1].is_ascii_whitespace() {
+            s -= 1;
+        }
+        kept.extend_from_slice(&attrs[cursor..s]);
+        cursor = *e;
+    }
+    kept.extend_from_slice(&attrs[cursor..]);
+
+    let mut out = Vec::with_capacity(tag.len());
+    out.extend_from_slice(&tag[..name_end]);
+    if !decls.is_empty() {
+        let new_decls = decls.join("; ");
+        if let Some((s, e)) = attr_spans(&kept, b"style").first().copied() {
+            // Merge into the existing style attribute, before its close quote.
+            let close = kept[..e]
+                .iter()
+                .rposition(|&b| b == b'"' || b == b'\'')
+                .unwrap_or(e - 1);
+            out.extend_from_slice(&kept[..close]);
+            let existing = extract_attr_value(&kept[s..e], b"style").unwrap_or_default();
+            if !existing.is_empty() {
+                if existing.trim_ascii_end().ends_with(b";") {
+                    out.push(b' ');
+                } else {
+                    out.extend_from_slice(b"; ");
+                }
+            }
+            out.extend_from_slice(new_decls.as_bytes());
+            out.extend_from_slice(&kept[close..]);
+        } else {
+            out.extend_from_slice(&kept);
+            out.extend_from_slice(format!(" style=\"{new_decls}\"").as_bytes());
+        }
+    } else {
+        out.extend_from_slice(&kept);
+    }
+    if self_closing {
+        out.push(b'/');
+    }
+    out.push(b'>');
+    out
+}
+
 /// Find `attr="value"` (or `attr='value'`) inside an attribute byte slice and
 /// return the value. Looks for the attribute name preceded by ASCII
 /// whitespace OR appearing at the start of the slice — avoids matching e.g.
@@ -886,10 +1059,67 @@ fn drop_image_href(tag: &[u8]) -> Vec<u8> {
     tag.to_vec()
 }
 
-/// Drop `@font-face` rules whose `src` references a `kindle:embed:` resource.
-///
-/// KF8 embedded fonts live in FONT records boko doesn't extract, so the URL
-/// would dangle in the emitted EPUB (epubcheck RSC-008/OPF-014); dropping the
+/// Rewrite `kindle:embed:XXXX(?mime=…)` URLs in CSS to stylesheet-relative
+/// asset paths via the embed-index → path map the importer built from its
+/// discovered assets (fonts and images alike). Stylesheets live in
+/// `styles/`, so every rewritten path gets a `../` prefix. Refs whose index
+/// isn't in the map are left verbatim — [`strip_kindle_embed_font_faces`]
+/// runs after this pass and drops the `@font-face` rules that still dangle.
+pub fn rewrite_kindle_embed_in_css(
+    css: &[u8],
+    paths: &std::collections::HashMap<usize, String>,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(css.len());
+    let mut pos = 0;
+    let needle = b"kindle:embed:";
+    while let Some(rel) = memmem::find(&css[pos..], needle) {
+        let start = pos + rel;
+        out.extend_from_slice(&css[pos..start]);
+        let after_kw = start + needle.len();
+        // Parse the embed id until the first non-base32 char.
+        let mut num_end = after_kw;
+        while num_end < css.len() {
+            let b = css[num_end];
+            let is_b32 = b.is_ascii_digit() || (b'A'..=b'V').contains(&b);
+            if !is_b32 {
+                break;
+            }
+            num_end += 1;
+        }
+        // `kindle:embed:0001` is resource index 0 (1-based ids, like the
+        // HTML-side `RefKind::Embed` rewrite).
+        let embed_idx = parse_base32(&css[after_kw..num_end]).saturating_sub(1);
+        let Some(path) = (num_end > after_kw)
+            .then(|| paths.get(&embed_idx))
+            .flatten()
+        else {
+            // Unresolvable — emit the literal so the strip pass sees it.
+            out.extend_from_slice(needle);
+            pos = after_kw;
+            continue;
+        };
+        out.extend_from_slice(b"../");
+        out.extend_from_slice(path.as_bytes());
+        // Skip the optional `?mime=...` query up to the URL delimiter.
+        let mut tail = num_end;
+        if tail < css.len() && css[tail] == b'?' {
+            while tail < css.len() {
+                let b = css[tail];
+                if b == b')' || b == b'"' || b == b'\'' {
+                    break;
+                }
+                tail += 1;
+            }
+        }
+        pos = tail;
+    }
+    out.extend_from_slice(&css[pos..]);
+    out
+}
+
+/// Drop `@font-face` rules whose `src` references a `kindle:embed:` resource
+/// that [`rewrite_kindle_embed_in_css`] could not resolve to an extracted
+/// asset. A dangling URL would fail epubcheck (RSC-008/OPF-014); dropping the
 /// whole rule lets the `font-family` fall back down its declared stack.
 pub fn strip_kindle_embed_font_faces(css: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(css.len());
@@ -1292,6 +1522,122 @@ mod tests {
             "local-src font-face kept: {s}"
         );
         assert!(s.contains(".para { margin: 0; }"));
+    }
+
+    #[test]
+    fn test_find_nearest_id_skips_skeleton_tail() {
+        // KF8 raw layout: [skeleton mini-doc …</html>][fragments…]. A
+        // section-start position sits in the skeleton tail; the nearest
+        // forward attribute there is an empty skeleton wrapper that
+        // assembles to the section END — the real target is the first
+        // fragment after the terminator.
+        let raw =
+            b"<html><head></head><body><div class=\"w\" aid=\"SKEL\"></div></body></html>\r\n\
+<div aid=\"FRAG1\"><p>content</p></div>\r\n<div aid=\"FRAG2\"><p>more</p></div>";
+        let file_starts = [(0u32, 0u32)];
+        // Position just before the skeleton wrapper's aid attribute.
+        let pos = raw.iter().position(|&b| b == b'w').unwrap() + 2;
+        assert_eq!(
+            find_nearest_id_fast(raw, pos, 0, &file_starts).as_deref(),
+            Some("aid-FRAG1"),
+            "skeleton-tail match skipped in favor of the first fragment"
+        );
+        // A position already inside the fragments resolves normally.
+        let frag2 = memmem::find(raw, b"FRAG2").unwrap() - 10;
+        assert_eq!(
+            find_nearest_id_fast(raw, frag2, 0, &file_starts).as_deref(),
+            Some("aid-FRAG2")
+        );
+    }
+
+    #[test]
+    fn test_convert_legacy_block_attrs() {
+        // The kindlegen MOBI6 paragraph model: layout as attributes.
+        let html = b"<p height=\"1em\" width=\"0pt\" align=\"justify\">text</p>\
+<div align=\"center\">c</div>\
+<blockquote width=\"2em\" height=\"3\">q</blockquote>\
+<img src=\"i.jpg\" width=\"100\" height=\"50\"/>\
+<p style=\"color: red\" height=\"1em\">styled</p>";
+        let out = convert_legacy_block_attrs(html);
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains(
+                "<p style=\"margin-top: 1em; text-indent: 0pt; text-align: justify\">text</p>"
+            ),
+            "paragraph trio converted: {s}"
+        );
+        assert!(
+            s.contains("<div style=\"text-align: center\">c</div>"),
+            "div align converted: {s}"
+        );
+        // Blockquote: height converts (bare number → px), width is a
+        // paragraph-only mapping and is dropped rather than mistranslated.
+        assert!(
+            s.contains("<blockquote style=\"margin-top: 3px\">q</blockquote>"),
+            "blockquote height only: {s}"
+        );
+        assert!(
+            s.contains("<img src=\"i.jpg\" width=\"100\" height=\"50\"/>"),
+            "img width/height untouched: {s}"
+        );
+        assert!(
+            s.contains("<p style=\"color: red; margin-top: 1em\">styled</p>"),
+            "merged into existing style: {s}"
+        );
+
+        // img align: left/right float, baseline/middle vertical-align;
+        // width/height stay (valid HTML on img).
+        let imgs = b"<img src=\"a.jpg\" align=\"baseline\" width=\"333\" height=\"500\">\
+<img src=\"b.jpg\" align=\"left\"/>";
+        let out = convert_legacy_block_attrs(imgs);
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains(
+                "<img src=\"a.jpg\" width=\"333\" height=\"500\" style=\"vertical-align: baseline\">"
+            ),
+            "img baseline align: {s}"
+        );
+        assert!(
+            s.contains("<img src=\"b.jpg\" style=\"float: left\"/>"),
+            "img left float: {s}"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_kindle_embed_in_css() {
+        // Font and image refs rewrite to stylesheet-relative asset paths
+        // (embed ids are 1-based); an unmapped ref stays verbatim so the
+        // strip pass can drop its rule.
+        let css = b"@font-face { font-family:\"A\"; src:url(kindle:embed:0005?mime=application/x-font-ttf); }\n\
+.bg { background: url('kindle:embed:0002'); }\n\
+@font-face { font-family:\"B\"; src:url(kindle:embed:000A); }\n";
+        let paths: std::collections::HashMap<usize, String> = [
+            (4usize, "fonts/font_0004.ttf".to_string()),
+            (1usize, "images/image_0001.jpg".to_string()),
+        ]
+        .into();
+        let out = rewrite_kindle_embed_in_css(css, &paths);
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains("src:url(../fonts/font_0004.ttf)"),
+            "font ref rewritten, mime query dropped: {s}"
+        );
+        assert!(
+            s.contains("url('../images/image_0001.jpg')"),
+            "image ref rewritten: {s}"
+        );
+        assert!(
+            s.contains("kindle:embed:000A"),
+            "unmapped ref left for the strip pass: {s}"
+        );
+        // The strip pass then drops only the dangling rule.
+        let stripped = strip_kindle_embed_font_faces(&out);
+        let s2 = String::from_utf8_lossy(&stripped);
+        assert!(s2.contains("font-family:\"A\""), "resolved font kept: {s2}");
+        assert!(
+            !s2.contains("font-family:\"B\""),
+            "dangling font dropped: {s2}"
+        );
     }
 
     #[test]

@@ -264,13 +264,20 @@ pub fn detect_font_type(data: &[u8]) -> Option<&'static str> {
         return None;
     }
 
-    // TrueType / OpenType
-    if data.starts_with(&[0x00, 0x01, 0x00, 0x00]) || data.starts_with(b"OTTO") {
+    // TrueType (sfnt version 1.0 or the legacy Apple 'true' tag)
+    if data.starts_with(&[0x00, 0x01, 0x00, 0x00]) || data.starts_with(b"true") {
         return Some("ttf");
     }
-    // WOFF
+    // OpenType with CFF outlines
+    if data.starts_with(b"OTTO") {
+        return Some("otf");
+    }
+    // WOFF / WOFF2
     if data.starts_with(b"wOFF") {
         return Some("woff");
+    }
+    if data.starts_with(b"wOF2") {
+        return Some("woff2");
     }
 
     None
@@ -583,9 +590,11 @@ mod tests {
     fn test_detect_font_type() {
         // TrueType
         assert_eq!(detect_font_type(&[0x00, 0x01, 0x00, 0x00]), Some("ttf"));
+        assert_eq!(detect_font_type(b"true"), Some("ttf"));
 
-        // OpenType
-        assert_eq!(detect_font_type(b"OTTO"), Some("ttf"));
+        // OpenType (CFF)
+        assert_eq!(detect_font_type(b"OTTO"), Some("otf"));
+        assert_eq!(detect_font_type(b"wOF2"), Some("woff2"));
 
         // WOFF
         assert_eq!(detect_font_type(b"wOFF"), Some("woff"));

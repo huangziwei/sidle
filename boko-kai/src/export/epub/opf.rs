@@ -224,7 +224,10 @@ pub fn emit_opf(pkg: &OpfPackage) -> String {
         xml_escape(&m.modified)
     ));
     if let Some(date) = m.date.as_deref() {
-        s.push_str(&format!("    <dc:date>{}</dc:date>\n", xml_escape(date)));
+        s.push_str(&format!(
+            "    <dc:date>{}</dc:date>\n",
+            xml_escape(&w3cdtf_t_separator(date))
+        ));
     }
     if let Some(pub_) = m
         .publisher
@@ -486,6 +489,28 @@ fn contains_element(xml: &str, name: &str) -> bool {
 /// Format a source publication date for `<dc:date>`: a bare `YYYY-MM-DD`
 /// (the KFX `issue_date` form) gains a UTC midnight time to match calibre's
 /// ISO-8601 output; anything else passes through unchanged.
+/// Repair the one W3CDTF syntax defect seen in the wild: a datetime with a
+/// space between date and time (Amazon EXTH 106 ships
+/// `2022-04-27 23:00:00+00:00`, which epubcheck rejects as OPF-053). The
+/// `T` separator is the only change; anything else passes through verbatim.
+fn w3cdtf_t_separator(date: &str) -> String {
+    let b = date.as_bytes();
+    if b.len() > 10
+        && b[10] == b' '
+        && b[..10].iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            _ => c.is_ascii_digit(),
+        })
+        && b[11..].iter().all(|c| !c.is_ascii_whitespace())
+    {
+        let mut fixed = date.to_string();
+        fixed.replace_range(10..11, "T");
+        fixed
+    } else {
+        date.to_string()
+    }
+}
+
 pub fn format_opf_date(date: &str) -> String {
     if date.len() == 10 && date.chars().nth(4) == Some('-') && date.chars().nth(7) == Some('-') {
         format!("{}T00:00:00+00:00", date)
@@ -577,6 +602,24 @@ mod tests {
             primary_writing_mode: None,
             page_progression_direction: None,
             fixed_layout: None,
+        }
+    }
+
+    #[test]
+    fn w3cdtf_space_separator_repaired() {
+        // The Amazon EXTH 106 shape epubcheck flags (OPF-053).
+        assert_eq!(
+            w3cdtf_t_separator("2022-04-27 23:00:00+00:00"),
+            "2022-04-27T23:00:00+00:00"
+        );
+        // Already-valid forms pass through verbatim.
+        for ok in [
+            "2022-04-27T23:00:00+00:00",
+            "2022-04-27",
+            "2022",
+            "April 27, 2022",
+        ] {
+            assert_eq!(w3cdtf_t_separator(ok), ok);
         }
     }
 

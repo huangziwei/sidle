@@ -210,7 +210,10 @@ pub fn transform_mobi_html(
     // Step 6: Remove empty anchors (like KindleUnpack does)
     remove_empty_anchors(&mut output);
 
-    output
+    // Step 7: Legacy layout attributes (`<p height width align>`) → inline
+    // CSS, so the spacing/indent/justification kindlegen encoded as
+    // attributes survives into valid XHTML5.
+    super::transform::convert_legacy_block_attrs(&output)
 }
 
 /// Remove empty anchor tags: `<a />` and `<a></a>`
