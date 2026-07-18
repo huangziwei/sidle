@@ -414,8 +414,8 @@ struct BookMeta {
     /// `opf:file-as` or KFX `title_pronunciation`. Romanized into
     /// `books.title_romaji` at [`insert_row`] when it's phonetic kana.
     title_reading: Option<String>,
-    /// Yomigana for the first author — boko's `Metadata.author_sort`. Only used
-    /// when the book has a single creator (it covers just the first).
+    /// Yomigana for the first author — the first entry of boko's per-author
+    /// `Metadata.author_sorts`. Only used when the book has a single creator.
     author_reading: Option<String>,
 }
 
@@ -443,7 +443,7 @@ fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
         // Yomigana boko already pulled from EPUB `opf:file-as` / KFX
         // `*_pronunciation` — romanized at `insert_row` (yomigana-aware when kana).
         title_reading: m.title_sort.clone(),
-        author_reading: m.author_sort.clone(),
+        author_reading: m.author_sorts.first().cloned(),
     }
 }
 
@@ -525,8 +525,9 @@ fn insert_row(
     // split on `[&、]`, never a comma. See [`authors`].
     let authors_joined = authors::join_display(&meta.authors);
     // Render the editable, searchable romaji yomigana-aware. The author reading
-    // (boko's `author_sort`) covers only the first creator, so it's used only
-    // when there's a single author; otherwise the engine romanizes the join.
+    // (first of boko's `author_sorts`) covers only the first creator, so it's
+    // used only when there's a single author; otherwise the engine romanizes
+    // the join.
     let title_romaji =
         super::romaji::romanize_field(&meta.title, meta.title_reading.as_deref(), &meta.language);
     let author_reading = (meta.authors.len() == 1)

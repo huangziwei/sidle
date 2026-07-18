@@ -488,20 +488,17 @@ impl EpubOutput {
     fn generate_opf(&self, meta: &BookMetadata) -> String {
         use crate::export::opf;
 
-        // Authors — prefer the KFX-supplied `author_pronunciation` (yomigana
-        // sort key); fall back to the joined author list so EPUB libraries
-        // still sort multi-author books.
-        let author_file_as = meta
-            .author_pronunciation
-            .clone()
-            .unwrap_or_else(|| meta.authors.join(" & "));
+        // Authors — positional per-creator `author_pronunciation` sort keys
+        // (yomigana), via the shared helper so both engines emit one shape.
+        let file_as_keys = opf::creator_file_as_keys(&meta.authors, &meta.author_pronunciations);
         let creators = meta
             .authors
             .iter()
-            .map(|author| opf::OpfCreator {
+            .zip(&file_as_keys)
+            .map(|(author, file_as)| opf::OpfCreator {
                 name: author.clone(),
                 role: Some("aut".to_string()),
-                file_as: Some(author_file_as.clone()),
+                file_as: Some(file_as.clone()),
             })
             .collect();
 

@@ -52,6 +52,10 @@ pub struct Report {
     /// Full ordered author list from `<dc:creator>` elements. The first entry
     /// is the primary author per EPUB convention.
     pub epub_authors: Vec<String>,
+    /// Per-creator `file-as` sort keys as declared in the OPF, positional
+    /// with `epub_authors`. An all-fallback set (every entry = the joined
+    /// author list, the emitters' no-data synthesis) is reduced to empty.
+    pub epub_author_file_as: Vec<String>,
     pub epub_identifier: String,
     /// All `<dc:identifier>` (scheme, value) pairs in the OPF (calibre emits
     /// `ASIN`, `MOBI-ASIN`, `uuid` schemes plus a `calibre` scheme).
@@ -87,6 +91,9 @@ pub struct Report {
     /// (repeated `author` keys). Source order — calibre's library output
     /// emits these in the same order via `<dc:creator>`.
     pub kfx_authors: Vec<String>,
+    /// Ordered `author_pronunciation` values (repeated key, positional with
+    /// `kfx_authors` — Amazon emits one per author in the same order).
+    pub kfx_author_pronunciations: Vec<String>,
     pub kfx_cover_image: Option<String>,
     pub kfx_ppd: Option<String>,
     /// `book_id` field if present — derived from EPUB identifier in EPUB→KFX
@@ -129,6 +136,17 @@ impl Report {
             "  KFX  ({}): {:?}",
             self.kfx_authors.len(),
             self.kfx_authors
+        );
+        println!("Author sort keys (per-author, positional):");
+        println!(
+            "  EPUB file-as       ({}): {:?}",
+            self.epub_author_file_as.len(),
+            self.epub_author_file_as
+        );
+        println!(
+            "  KFX pronunciation  ({}): {:?}",
+            self.kfx_author_pronunciations.len(),
+            self.kfx_author_pronunciations
         );
         println!("Cover image:");
         println!("  EPUB has cover:  {}", self.epub_has_cover);
@@ -251,6 +269,37 @@ pub fn validate(
             kfx: format!("{:?}", kfx.authors),
         });
     }
+    // Per-author sort keys: EPUB per-creator `file-as` ↔ KFX repeated
+    // `author_pronunciation`, both positional with the author list. The
+    // EPUB emitters synthesize a joined-author `file-as` on every creator
+    // when the source declares none — `extract_epub_metadata` already
+    // reduced such an all-fallback set to empty, so a non-empty list here
+    // is declared source data.
+    if !epub.author_file_as.is_empty() || !kfx.author_pronunciations.is_empty() {
+        let mismatch = epub
+            .author_file_as
+            .iter()
+            .map(|s| ws_normalized(s))
+            .ne(kfx.author_pronunciations.iter().map(|s| ws_normalized(s)));
+        // One side empty = the conversion output lost the other side's
+        // declared keys (flag only against the output side); both
+        // non-empty = positional list compare.
+        let flag = if epub.author_file_as.is_empty() {
+            !dir.epub_is_source()
+        } else if kfx.author_pronunciations.is_empty() {
+            dir.epub_is_source()
+        } else {
+            mismatch
+        };
+        if flag {
+            diffs.push(FieldDiff {
+                field: "author sort keys (per-author)",
+                epub: format!("{:?}", epub.author_file_as),
+                kfx: format!("{:?}", kfx.author_pronunciations),
+            });
+        }
+    }
+
     // Cover: EPUB declares a cover path → KFX should have a non-empty
     // cover_image pointing at a resource. We don't compare paths; the
     // transformation OPF-path → KFX-resource-name is intentional.
@@ -398,6 +447,7 @@ pub fn validate(
         epub_title: epub.title,
         epub_language: epub.language,
         epub_authors: epub.authors,
+        epub_author_file_as: epub.author_file_as,
         epub_identifier: epub.identifier,
         epub_identifiers: epub.identifiers,
         epub_has_cover: epub.has_cover,
@@ -412,6 +462,7 @@ pub fn validate(
         kfx_title: kfx.title,
         kfx_language: kfx.language,
         kfx_authors: kfx.authors,
+        kfx_author_pronunciations: kfx.author_pronunciations,
         kfx_cover_image: kfx.cover_image,
         kfx_ppd: kfx.ppd,
         kfx_book_id: kfx.book_id,
@@ -440,6 +491,9 @@ struct EpubMetadata {
     title: String,
     language: String,
     authors: Vec<String>,
+    /// Declared per-creator `file-as` keys; empty when the OPF carries only
+    /// the emitters' synthesized joined-author fallback (no source data).
+    author_file_as: Vec<String>,
     identifier: String,
     identifiers: Vec<(String, String)>,
     has_cover: bool,
@@ -522,10 +576,24 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
     let has_nav_item = scan_opf_has_nav_item(&opf_str);
     let epub3_missing_nav = opf_version.starts_with('3') && !has_nav_item;
 
+    // Reduce an all-fallback `file-as` set (every entry = the joined author
+    // list) to empty: that's the EPUB emitters' no-data synthesis, not
+    // declared source data, and comparing it against real pronunciations
+    // would manufacture defects.
+    let joined_authors = opf.metadata.authors.join(" & ");
+    let author_file_as = if !opf.metadata.author_sorts.is_empty()
+        && opf.metadata.author_sorts.iter().all(|s| *s == joined_authors)
+    {
+        Vec::new()
+    } else {
+        opf.metadata.author_sorts.clone()
+    };
+
     Ok(EpubMetadata {
         title: opf.metadata.title.clone(),
         language: opf.metadata.language.clone(),
         authors: opf.metadata.authors.clone(),
+        author_file_as,
         identifier: opf.metadata.identifier.clone(),
         identifiers,
         has_cover: opf.metadata.cover_image.is_some(),
@@ -845,6 +913,8 @@ struct KfxMetadata {
     title: String,
     language: String,
     authors: Vec<String>,
+    /// Repeated `author_pronunciation` values, positional with `authors`.
+    author_pronunciations: Vec<String>,
     cover_image: Option<String>,
     book_id: Option<String>,
     ppd: Option<String>,
@@ -910,6 +980,11 @@ fn extract_kfx_metadata(kfx_bytes: &[u8]) -> Result<KfxMetadata, String> {
     out.authors = kvs
         .iter()
         .filter(|(k, _)| k == "author")
+        .map(|(_, v)| v.clone())
+        .collect();
+    out.author_pronunciations = kvs
+        .iter()
+        .filter(|(k, _)| k == "author_pronunciation")
         .map(|(_, v)| v.clone())
         .collect();
     out.cover_image = first("cover_image");

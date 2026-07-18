@@ -757,30 +757,27 @@ fn find_cover_manifest_id(
 ///
 /// With `normalized` set (KFX sources), the field set and value shapes match
 /// the mechanical `kfx_to_epub` route exactly: `dc:date` gets the
-/// `issue_date` ISO formatting, every creator shares one sort key, and the
-/// fields that route never emits (description, subjects, rights,
-/// contributors, collection) are omitted so both engines produce one package
-/// document. Other sources keep the full field set.
+/// `issue_date` ISO formatting, creators carry positional per-author sort
+/// keys, and the fields that route never emits (description, subjects,
+/// rights, contributors, collection) are omitted so both engines produce one
+/// package document. Other sources keep the full field set.
 fn build_opf_metadata(
     md: &crate::model::Metadata,
     normalized: bool,
     cover_manifest_id: Option<String>,
     derived_resolution: Option<(u32, u32)>,
 ) -> OpfMetadata {
-    // One sort key for every creator: the author sort key when the source
-    // declares one, else the joined author list so EPUB libraries still
-    // sort multi-author books.
-    let author_file_as = md
-        .author_sort
-        .clone()
-        .unwrap_or_else(|| md.authors.join(" & "));
+    // Positional per-creator sort keys (shared with the mechanical route via
+    // `creator_file_as_keys`, so both engines emit one shape).
+    let file_as_keys = opf::creator_file_as_keys(&md.authors, &md.author_sorts);
     let creators = md
         .authors
         .iter()
-        .map(|author| OpfCreator {
+        .zip(&file_as_keys)
+        .map(|(author, file_as)| OpfCreator {
             name: author.clone(),
             role: Some("aut".to_string()),
-            file_as: Some(author_file_as.clone()),
+            file_as: Some(file_as.clone()),
         })
         .collect();
 

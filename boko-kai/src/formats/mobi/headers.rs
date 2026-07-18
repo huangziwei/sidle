@@ -233,6 +233,12 @@ pub struct ExthHeader {
     pub thumbnail_offset: Option<u32>,
     pub language: Option<String>,
     pub kf8_boundary: Option<u32>,
+    /// EXTH 508 — title pronunciation (katakana yomigana on Amazon JP
+    /// books; the sort key the Kindle library uses).
+    pub title_pronunciation: Option<String>,
+    /// EXTH 517 — author pronunciation, one record per EXTH 100 author in
+    /// the same order.
+    pub author_pronunciations: Vec<String>,
     /// EXTH 525 — e.g. "vertical-rl", "vertical-lr", "horizontal-rl",
     /// "horizontal-lr". Calibre's KF8 reader treats this as the writing-mode
     /// hint and emits it as the OPF `<meta name="primary-writing-mode">`.
@@ -335,6 +341,10 @@ impl ExthHeader {
                     }
                 }
                 503 => exth.title = Some(decode(content).trim().to_string()),
+                508 => exth.title_pronunciation = Some(decode(content).trim().to_string()),
+                517 => exth
+                    .author_pronunciations
+                    .push(decode(content).trim().to_string()),
                 524 => exth.language = Some(decode(content).trim().to_string()),
                 525 => exth.primary_writing_mode = Some(decode(content).trim().to_string()),
                 527 => exth.page_progression_direction = Some(decode(content).trim().to_string()),

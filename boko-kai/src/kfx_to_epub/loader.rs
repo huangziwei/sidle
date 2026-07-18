@@ -46,9 +46,10 @@ pub struct BookMetadata {
     /// (yomigana for Japanese books). Surfaces in OPF as
     /// `<dc:title opf:file-as="...">`.
     pub title_pronunciation: Option<String>,
-    /// `kindle_title_metadata/author_pronunciation` — author sort key.
-    /// Surfaces in OPF as `<dc:creator opf:file-as="...">`.
-    pub author_pronunciation: Option<String>,
+    /// `kindle_title_metadata/author_pronunciation` — per-author sort keys,
+    /// one per repeated key in source order (positional with `authors`).
+    /// Surface in OPF as each `<dc:creator>`'s `file-as` refinement.
+    pub author_pronunciations: Vec<String>,
 }
 
 /// Everything we need from a KFX container to drive an EPUB write.
@@ -392,10 +393,9 @@ fn extract_categorised_metadata(
                     meta.title_pronunciation = Some(value.into());
                 }
                 // KFX emits one `author_pronunciation` per `author` in source
-                // order. `import::kfx` keeps the last value; mirror that so the
-                // OPF `opf:file-as` matches what `boko info` reports.
+                // order — collect them all, positional with `authors`.
                 "author_pronunciation" if !value.is_empty() => {
-                    meta.author_pronunciation = Some(value.into());
+                    meta.author_pronunciations.push(value.into());
                 }
                 _ => {}
             }

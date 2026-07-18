@@ -1001,6 +1001,8 @@ fn build_metadata(
 
     if let Some(exth) = exth {
         metadata.authors = exth.authors.clone();
+        metadata.title_sort = exth.title_pronunciation.clone();
+        metadata.author_sorts = exth.author_pronunciations.clone();
         metadata.publisher = exth.publisher.clone();
         metadata.description = exth.description.clone();
         metadata.subjects = exth.subjects.clone();

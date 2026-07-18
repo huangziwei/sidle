@@ -13,7 +13,7 @@
 //!
 //! Why prefer a book's own *kana* reading over the engine: a Japanese book's
 //! `opf:file-as` / KFX `*_pronunciation` (surfaced by boko as
-//! `Metadata.title_sort` / `author_sort`) is the authoritative yomigana when
+//! `Metadata.title_sort` / `author_sorts`) is the authoritative yomigana when
 //! it's actually phonetic. But a `file-as` is *sometimes* a kanji **sort form**
 //! (e.g. `森橋 ビンゴ`), which is no better than the raw text — so we only trust a
 //! reading that is [`is_kana_dominant`] and otherwise fall back to the engine.
@@ -23,7 +23,7 @@ use unicode_normalization::UnicodeNormalization;
 /// Human-readable romaji for one metadata field (a title or an author line).
 ///
 /// `reading` is the book's own yomi for this field when known (boko's
-/// `title_sort` / `author_sort`); it wins when it's phonetic kana. Output is
+/// `title_sort` / `author_sorts`); it wins when it's phonetic kana. Output is
 /// lowercased with single-spaced words — the form stored in `title_romaji` /
 /// `author_romaji` and shown in the editor.
 pub fn romanize_field(text: &str, reading: Option<&str>, language: &str) -> String {

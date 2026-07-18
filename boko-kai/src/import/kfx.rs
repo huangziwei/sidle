@@ -747,8 +747,11 @@ impl KfxImporter {
                                     "title_pronunciation" if !value.is_empty() => {
                                         self.metadata.title_sort = Some(value.to_string())
                                     }
+                                    // One entry per repeated key, positional
+                                    // with `author` (Amazon repeats both in
+                                    // the same order).
                                     "author_pronunciation" if !value.is_empty() => {
-                                        self.metadata.author_sort = Some(value.to_string())
+                                        self.metadata.author_sorts.push(value.to_string())
                                     }
                                     "series_name" => {
                                         if let Some(ref mut coll) = self.metadata.collection {

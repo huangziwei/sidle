@@ -684,7 +684,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // v11: searchable romaji metadata. Two editable columns rendered from the
     // title/author and shown in the editor (see [`super::romaji`]). New imports
     // render them yomigana-aware (`import::extract_meta` from boko's
-    // `title_sort`/`author_sort`); here we backfill existing rows from the raw
+    // `title_sort`/`author_sorts`); here we backfill existing rows from the raw
     // fields via the same engine. Pure CPU (no file I/O) and NULL-guarded, so
     // it's safe to re-run on every `open()` — including sidle-server's
     // per-request open: the first fill does ~1k tiny romanizations, every later

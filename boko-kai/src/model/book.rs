@@ -87,8 +87,12 @@ pub struct Metadata {
     pub contributors: Vec<Contributor>,
     /// file-as for title (sort key)
     pub title_sort: Option<String>,
-    /// file-as for first author (sort key)
-    pub author_sort: Option<String>,
+    /// Per-author sort/pronunciation keys, positionally aligned with
+    /// `authors`. EPUB carries one `file-as` per `<dc:creator>`, KFX repeats
+    /// `author_pronunciation` per `author`, MOBI repeats EXTH 517 per
+    /// EXTH 100 — all positional. A source declaring a single shared key
+    /// yields one entry; empty means the source declared none.
+    pub author_sorts: Vec<String>,
     /// belongs-to-collection (series info)
     pub collection: Option<CollectionInfo>,
     /// OPF spine `page-progression-direction` attribute ("ltr" | "rtl" | "default").

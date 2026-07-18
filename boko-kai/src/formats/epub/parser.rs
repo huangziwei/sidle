@@ -57,7 +57,10 @@ pub fn parse_container_xml(bytes: &[u8]) -> io::Result<String> {
 #[derive(Debug, Clone)]
 enum MetaElement {
     Title,
-    Creator(String),
+    /// Index into `metadata.authors` — refinements address a specific
+    /// creator, and duplicate author names would make a name lookup
+    /// ambiguous.
+    Creator(usize),
     Contributor(String),
     Collection,
 }
@@ -115,6 +118,10 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     // EPUB-2 `opf:file-as` attribute captured on the currently-open
     // `<dc:title>` / `<dc:creator>`, applied on element close.
     let mut current_file_as: Option<String> = None;
+    // Per-creator sort-key slots, parallel to `metadata.authors` (both are
+    // pushed only on `<dc:creator>` close). Compacted into
+    // `metadata.author_sorts` after refinements.
+    let mut author_sort_slots: Vec<Option<String>> = Vec::new();
     let mut buf_text = String::new();
 
     // For meta elements with content (non-empty tags)
@@ -473,20 +480,15 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                             }
                         }
                         "creator" => {
-                            let is_first_author = metadata.authors.is_empty();
-                            metadata.authors.push(text.clone());
+                            let author_index = metadata.authors.len();
+                            metadata.authors.push(text);
                             if let Some(ref id) = current_element_id {
-                                element_ids.insert(id.clone(), MetaElement::Creator(text));
+                                element_ids.insert(id.clone(), MetaElement::Creator(author_index));
                             }
-                            // EPUB-2 sort key sits on each `<dc:creator>`; take the
-                            // first author's value (calibre's convention — the rest
-                            // typically repeat the same joined string).
-                            if let Some(file_as) = current_file_as.take()
-                                && is_first_author
-                                && metadata.author_sort.is_none()
-                            {
-                                metadata.author_sort = Some(file_as);
-                            }
+                            // EPUB-2 sort key sits on each `<dc:creator>` as an
+                            // `opf:file-as` attribute — one slot per creator.
+                            // EPUB-3 refinements overwrite these later.
+                            author_sort_slots.push(current_file_as.take());
                         }
                         "contributor" => {
                             // Store contributor for later refinement processing
@@ -546,7 +548,25 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     }
 
     // Apply refinements to their target elements
-    apply_refinements(&mut metadata, &element_ids, &refinements);
+    apply_refinements(
+        &mut metadata,
+        &mut author_sort_slots,
+        &element_ids,
+        &refinements,
+    );
+
+    // Compact the per-creator slots: trailing creators without a sort key
+    // are simply not covered (a 1-entry vec = the EPUB-2 "first creator
+    // only" convention); an interior gap gets the author's own name so the
+    // remaining entries keep their positional meaning.
+    while author_sort_slots.last().is_some_and(Option::is_none) {
+        author_sort_slots.pop();
+    }
+    metadata.author_sorts = author_sort_slots
+        .into_iter()
+        .enumerate()
+        .map(|(i, slot)| slot.unwrap_or_else(|| metadata.authors[i].clone()))
+        .collect();
 
     // Detect cover image (EPUB3 property takes priority)
     let epub3_cover = manifest.values().find(|item| {
@@ -683,8 +703,12 @@ fn handle_meta_property(
 }
 
 /// Apply collected refinements to their target elements.
+/// `author_sort_slots` is the per-creator sort-key vec parallel to
+/// `metadata.authors`; creator `file-as` refinements land in the refined
+/// creator's slot (winning over an EPUB-2 `opf:file-as` attribute).
 fn apply_refinements(
     metadata: &mut Metadata,
+    author_sort_slots: &mut [Option<String>],
     element_ids: &HashMap<String, MetaElement>,
     refinements: &[Refinement],
 ) {
@@ -712,12 +736,11 @@ fn apply_refinements(
                         metadata.title_sort = Some(refinement.value.clone());
                     }
                 }
-                MetaElement::Creator(name) => {
-                    if prop_local == "file-as" {
-                        // Find first author and set author_sort
-                        if metadata.authors.first().map(|a| a == name).unwrap_or(false) {
-                            metadata.author_sort = Some(refinement.value.clone());
-                        }
+                MetaElement::Creator(index) => {
+                    if prop_local == "file-as"
+                        && let Some(slot) = author_sort_slots.get_mut(*index)
+                    {
+                        *slot = Some(refinement.value.clone());
                     }
                 }
                 MetaElement::Contributor(name) => {
@@ -2068,7 +2091,58 @@ mod tests {
 
         let result = parse_opf(opf).unwrap();
         assert_eq!(result.metadata.authors, vec!["Jane Doe"]);
-        assert_eq!(result.metadata.author_sort, Some("Doe, Jane".to_string()));
+        assert_eq!(result.metadata.author_sorts, vec!["Doe, Jane"]);
+    }
+
+    #[test]
+    fn test_parse_opf_author_file_as_per_creator() {
+        // One file-as per creator (EPUB-3 refinements), positional; the
+        // second creator's key must not clobber the first's.
+        let opf = r##"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Test Book</dc:title>
+    <dc:creator id="a1">サン・テグジュペリ</dc:creator>
+    <meta refines="#a1" property="file-as">サン テグジュペリ</meta>
+    <dc:creator id="a2">管 啓次郎</dc:creator>
+    <meta refines="#a2" property="file-as">スガ ケイジロウ</meta>
+    <dc:language>ja</dc:language>
+  </metadata>
+  <manifest>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"##;
+
+        let result = parse_opf(opf).unwrap();
+        assert_eq!(result.metadata.authors, vec!["サン・テグジュペリ", "管 啓次郎"]);
+        assert_eq!(
+            result.metadata.author_sorts,
+            vec!["サン テグジュペリ", "スガ ケイジロウ"]
+        );
+    }
+
+    #[test]
+    fn test_parse_opf_author_file_as_first_only() {
+        // EPUB-2 attribute on the first creator only — a 1-entry vec, not a
+        // fabricated value for the second creator.
+        let opf = r##"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" xmlns:opf="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Test Book</dc:title>
+    <dc:creator opf:file-as="Doe, Jane">Jane Doe</dc:creator>
+    <dc:creator>John Smith</dc:creator>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"##;
+
+        let result = parse_opf(opf).unwrap();
+        assert_eq!(result.metadata.authors, vec!["Jane Doe", "John Smith"]);
+        assert_eq!(result.metadata.author_sorts, vec!["Doe, Jane"]);
     }
 
     #[test]

@@ -189,7 +189,8 @@ pub enum MetadataField {
     Translator,
     /// file-as for title (sort key)
     TitleSort,
-    /// file-as for first author (sort key)
+    /// Per-author sort keys (`Metadata.author_sorts`); emitted as one
+    /// `author_pronunciation` entry per author, like `Author`.
     AuthorSort,
     /// Series/collection name
     SeriesName,
@@ -240,7 +241,9 @@ impl MetadataField {
                     .map(|c| c.name.as_str())
             }
             MetadataField::TitleSort => meta.title_sort.as_deref(),
-            MetadataField::AuthorSort => meta.author_sort.as_deref(),
+            // Single-value convenience, like `Author`; `build_category_entries`
+            // emits one repeated `author_pronunciation` entry per element.
+            MetadataField::AuthorSort => meta.author_sorts.first().map(|s| s.as_str()),
             MetadataField::SeriesName => meta.collection.as_ref().map(|c| c.name.as_str()),
             // These are context-driven or need special handling
             MetadataField::AssetId
@@ -594,6 +597,15 @@ pub fn build_category_entries(
                         }
                         None
                     }
+                    MetadataField::AuthorSort => {
+                        // Repeated per author like `author` — Amazon emits
+                        // the pronunciations positionally, one key per
+                        // author, in the same order.
+                        for s in &meta.author_sorts {
+                            entries.push((rule.key, MetadataValue::Text(s.clone())));
+                        }
+                        None
+                    }
                     MetadataField::ModifiedDate => {
                         // Always stamp the conversion time, never copy the source value —
                         // modified_date describes *this file*, not the work.
@@ -754,6 +766,37 @@ mod tests {
             entries
                 .iter()
                 .any(|(k, v)| *k == "creator_version" && v == "1.0.0")
+        );
+    }
+
+    #[test]
+    fn test_author_and_pronunciation_repeat_per_author() {
+        // Amazon's shape: one `author` and one `author_pronunciation` entry
+        // per author, positionally aligned.
+        let meta = Metadata {
+            title: "星の王子さま".to_string(),
+            language: "ja".to_string(),
+            authors: vec!["サン・テグジュペリ".to_string(), "管 啓次郎".to_string()],
+            author_sorts: vec!["サン テグジュペリ".to_string(), "スガ ケイジロウ".to_string()],
+            ..Default::default()
+        };
+        let ctx = MetadataContext::default();
+        let entries = build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx);
+
+        let values = |key: &str| -> Vec<&str> {
+            entries
+                .iter()
+                .filter(|(k, _)| *k == key)
+                .filter_map(|(_, v)| match v {
+                    MetadataValue::Text(s) => Some(s.as_str()),
+                    MetadataValue::Bool(_) => None,
+                })
+                .collect()
+        };
+        assert_eq!(values("author"), ["サン・テグジュペリ", "管 啓次郎"]);
+        assert_eq!(
+            values("author_pronunciation"),
+            ["サン テグジュペリ", "スガ ケイジロウ"]
         );
     }
 

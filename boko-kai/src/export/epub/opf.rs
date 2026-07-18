@@ -24,6 +24,18 @@ pub struct OpfCreator {
     pub file_as: Option<String>,
 }
 
+/// Per-creator `file-as` values, one per author. Creator `i` gets the
+/// positional `author_sorts[i]`; a creator past the end of the vec (or every
+/// creator, when the source declared no sort keys) falls back to the joined
+/// author list so EPUB libraries still sort multi-author books. Both EPUB
+/// writers derive their creators through this, so the shape can't drift.
+pub fn creator_file_as_keys(authors: &[String], author_sorts: &[String]) -> Vec<String> {
+    let joined = authors.join(" & ");
+    (0..authors.len())
+        .map(|i| author_sorts.get(i).cloned().unwrap_or_else(|| joined.clone()))
+        .collect()
+}
+
 /// `belongs-to-collection` (series) metadata.
 pub struct OpfCollection {
     pub name: String,

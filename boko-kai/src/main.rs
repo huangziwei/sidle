@@ -487,8 +487,8 @@ struct MetadataInfo {
     contributors: Vec<ContributorInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     title_sort: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    author_sort: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    author_sorts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     collection: Option<CollectionInfoJson>,
 }
@@ -1222,7 +1222,7 @@ fn print_json(book: &mut Book, path: &str) -> Result<(), String> {
                 })
                 .collect(),
             title_sort: meta.title_sort.clone(),
-            author_sort: meta.author_sort.clone(),
+            author_sorts: meta.author_sorts.clone(),
             collection: meta.collection.as_ref().map(|c| CollectionInfoJson {
                 name: c.name.clone(),
                 collection_type: c.collection_type.clone(),
@@ -1306,8 +1306,8 @@ fn print_human(book: &mut Book, path: &str) -> Result<(), String> {
     if let Some(ref title_sort) = meta.title_sort {
         println!("Title Sort: {title_sort}");
     }
-    if let Some(ref author_sort) = meta.author_sort {
-        println!("Author Sort: {author_sort}");
+    if !meta.author_sorts.is_empty() {
+        println!("Author Sort: {}", meta.author_sorts.join(" / "));
     }
     if !meta.contributors.is_empty() {
         println!("Contributors:");
