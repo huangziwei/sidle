@@ -706,6 +706,14 @@ impl Kf8Builder {
             records.push((100, author.as_bytes().to_vec()));
         }
 
+        // Author pronunciation (517) — one per author, positional with the
+        // EXTH 100 authors above (Amazon JP yomigana). The KF8 reader pairs
+        // them by order and re-emits per-creator `file-as`; omitting them
+        // flattens the author sort keys on every round-trip.
+        for sort in &self.ctx.metadata.author_sorts {
+            records.push((517, sort.as_bytes().to_vec()));
+        }
+
         // Publisher
         if let Some(ref publisher) = self.ctx.metadata.publisher {
             records.push((101, publisher.as_bytes().to_vec()));
@@ -781,8 +789,19 @@ impl Kf8Builder {
         // Title (503)
         records.push((503, self.ctx.metadata.title.as_bytes().to_vec()));
 
-        // ASIN placeholder (113)
-        records.push((113, b"EBOK000000".to_vec()));
+        // Title pronunciation (508) — title yomigana (Amazon JP).
+        if let Some(ref title_sort) = self.ctx.metadata.title_sort {
+            records.push((508, title_sort.as_bytes().to_vec()));
+        }
+
+        // ASIN (113) — pass through a real Amazon ASIN, else a deterministic
+        // synthesized id, via the shared `resolve_export_asin` (the same
+        // policy the KFX exporter uses, and sidle's device-delete keys off).
+        // A hardcoded "EBOK000000" placeholder dropped the source ASIN on a
+        // kfx→azw3 round-trip; the importer promotes only real-looking ASINs.
+        let asin = crate::formats::kfx::metadata::resolve_export_asin(&self.ctx.metadata)
+            .unwrap_or_else(|| "EBOK000000".to_string());
+        records.push((113, asin.into_bytes()));
 
         // Document type (501)
         records.push((501, b"EBOK".to_vec()));
@@ -796,6 +815,18 @@ impl Kf8Builder {
         if !self.ctx.metadata.language.is_empty() {
             let primary = self.ctx.metadata.language.split('-').next().unwrap_or("en");
             records.push((524, primary.as_bytes().to_vec()));
+        }
+
+        // Writing-mode hints (525 primary-writing-mode, 527 page-progression-
+        // direction). The KF8 reader emits 525 as the OPF
+        // `<meta name="primary-writing-mode">` and derives page pagination
+        // (rtl for any `-rl` mode) from it; without them a vertical-rl book
+        // round-trips as horizontal ltr. Amazon's own JP AZW3s carry both.
+        if let Some(ref pwm) = self.ctx.metadata.primary_writing_mode {
+            records.push((525, pwm.as_bytes().to_vec()));
+        }
+        if let Some(ref ppd) = self.ctx.metadata.page_progression_direction {
+            records.push((527, ppd.as_bytes().to_vec()));
         }
 
         // KF8 housekeeping fields (calibre emits all of these on every book;

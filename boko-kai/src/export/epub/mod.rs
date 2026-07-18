@@ -525,35 +525,16 @@ impl EpubExporter {
         }
         let chapter_pos: HashMap<crate::import::ChapterId, usize> =
             spine.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
-        let resolve_to_file = |book: &Book, href: &str| -> Option<String> {
-            let AnchorTarget::Internal(target) =
-                book.resolve_toc_href(crate::import::ChapterId(0), href)?
-            else {
-                return None;
-            };
-            chapter_pos
-                .get(&target.chapter)
-                .map(|&idx| chapter_files[idx].clone())
-        };
-        // Fragment rules match the mechanical route: TOC and guide/landmark
-        // entries carry the anchor registered at the target position whenever
-        // one exists; the page list only keeps a fragment that was actually
-        // stamped into content (a page break on an already-anchored chapter
-        // start registers a name content never stamps — the bare chapter link
-        // is where the page starts anyway, and a dangling `#page-…` would
-        // trip epubcheck RSC-012).
-        let resolve_nav_href = |book: &Book, href: &str, require_stamped: bool| -> Option<String> {
-            let file = resolve_to_file(book, href)?;
-            match book.nav_fragment(href) {
-                Some((frag, stamped)) if !require_stamped || stamped => {
-                    Some(format!("{file}#{frag}"))
-                }
-                _ => Some(file),
-            }
-        };
-
-        let mut toc_points =
-            toc_to_navpoints(book.toc(), &|href| resolve_nav_href(book, href, false));
+        // Fragment rules (in `resolve_nav_href`) match the mechanical route:
+        // TOC and guide/landmark entries carry the anchor registered at the
+        // target position whenever one exists; the page list only keeps a
+        // fragment that was actually stamped into content (a page break on an
+        // already-anchored chapter start registers a name content never
+        // stamps — the bare chapter link is where the page starts anyway, and
+        // a dangling `#page-…` would trip epubcheck RSC-012).
+        let mut toc_points = toc_to_navpoints(book.toc(), &|href| {
+            resolve_nav_href(book, href, &chapter_pos, &chapter_files, false)
+        });
         // EPUB 3 requires the toc nav in reading order (epubcheck NAV-011);
         // the mechanical route sorts, so sort identically.
         let file_rank: HashMap<String, usize> = chapter_files
@@ -574,7 +555,7 @@ impl EpubExporter {
             .filter_map(|e| {
                 Some(NavPoint {
                     label: e.title.clone(),
-                    href: resolve_nav_href(book, &e.href, true)?,
+                    href: resolve_nav_href(book, &e.href, &chapter_pos, &chapter_files, true)?,
                     children: Vec::new(),
                 })
             })
@@ -582,7 +563,8 @@ impl EpubExporter {
 
         let mut guide: Vec<OpfGuideRef> = Vec::new();
         for lm in book.landmarks() {
-            let Some(href) = resolve_nav_href(book, &lm.href, false) else {
+            let Some(href) = resolve_nav_href(book, &lm.href, &chapter_pos, &chapter_files, false)
+            else {
                 continue;
             };
             guide.push(OpfGuideRef {
@@ -917,6 +899,39 @@ where
         names.push(candidate);
     }
     names
+}
+
+/// Resolve an IR navigation href (`#eid[:offset]` placeholder) to a
+/// `file#frag` target — or a bare `file` when no fragment applies — against
+/// the spine's chapter files. `chapter_pos` maps each spine chapter's
+/// [`ChapterId`](crate::import::ChapterId) to its index in `chapter_files`.
+/// `require_stamped` drops a fragment content never actually stamped (the
+/// page-list rule); `false` keeps any registered anchor (the TOC / landmark
+/// rule). Returns `None` when the target doesn't resolve to a spine chapter.
+///
+/// `book.index_anchors` must have run over the spine chapters first. Shared by
+/// the EPUB normalized nav/landmark resolution and the AZW3 normalized
+/// exporter so both engines resolve identical targets — a bare `#eid`
+/// otherwise collapses every TOC entry onto its chapter start.
+pub(crate) fn resolve_nav_href(
+    book: &Book,
+    href: &str,
+    chapter_pos: &HashMap<crate::import::ChapterId, usize>,
+    chapter_files: &[String],
+    require_stamped: bool,
+) -> Option<String> {
+    let AnchorTarget::Internal(target) =
+        book.resolve_toc_href(crate::import::ChapterId(0), href)?
+    else {
+        return None;
+    };
+    let file = chapter_files
+        .get(*chapter_pos.get(&target.chapter)?)
+        .cloned()?;
+    match book.nav_fragment(href) {
+        Some((frag, stamped)) if !require_stamped || stamped => Some(format!("{file}#{frag}")),
+        _ => Some(file),
+    }
 }
 
 /// Guess media type from file extension. Shared with the AZW3 exporter, which
