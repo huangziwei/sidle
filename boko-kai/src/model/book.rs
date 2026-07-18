@@ -9,7 +9,7 @@ use std::io::{self, Seek, Write};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use crate::export::{EpubExporter, Exporter, KfxExporter, MarkdownExporter};
+use crate::export::{Azw3Exporter, EpubExporter, Exporter, KfxExporter, MarkdownExporter};
 use crate::import::{
     Azw3Importer, ChapterId, EpubImporter, Importer, KfxImporter, MobiImporter, SpineEntry,
 };
@@ -300,7 +300,10 @@ impl Format {
 
     /// Whether this format can be used for output/export.
     pub fn can_export(&self) -> bool {
-        matches!(self, Format::Epub | Format::Kfx | Format::Markdown)
+        matches!(
+            self,
+            Format::Epub | Format::Kfx | Format::Markdown | Format::Azw3
+        )
     }
 }
 
@@ -825,7 +828,8 @@ impl Book {
             Format::Epub => EpubExporter::new().export(self, writer),
             Format::Kfx => KfxExporter::new().export_with_progress(self, writer, on_progress),
             Format::Markdown => MarkdownExporter::new().export(self, writer),
-            Format::Azw3 | Format::Mobi => Err(io::Error::new(
+            Format::Azw3 => Azw3Exporter::new().export(self, writer),
+            Format::Mobi => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("{:?} export is not supported", format),
             )),

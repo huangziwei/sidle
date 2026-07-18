@@ -31,10 +31,12 @@ use std::io::{self, Seek, Write};
 
 use crate::model::Book;
 
+pub mod azw3;
 pub mod epub;
 mod kfx;
 mod markdown;
 
+pub use azw3::{Azw3Config, Azw3Exporter};
 pub use epub::normalize::{InlineStyleEmit, LinkOutcome, SourceStyles};
 pub use epub::synth::{
     CssArtifact, SynthesisResult, escape_xml, escape_xml_into, generate_css, generate_css_all,

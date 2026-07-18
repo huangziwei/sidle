@@ -918,8 +918,9 @@ where
     names
 }
 
-/// Guess media type from file extension.
-fn guess_media_type(path: &str) -> String {
+/// Guess media type from file extension. Shared with the AZW3 exporter, which
+/// keys images/fonts/CSS resource routing on the same guesses.
+pub(crate) fn guess_media_type(path: &str) -> String {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())

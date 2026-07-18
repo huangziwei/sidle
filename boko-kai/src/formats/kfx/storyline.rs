@@ -3901,6 +3901,70 @@ mod tests {
     }
 
     #[test]
+    fn test_captioned_figure_migrates_image_into_content_list() {
+        // `<div class="pic"><img/>caption</div>` — image FIRST, caption text
+        // AFTER, no text before. A regression guard for the captioned-figure
+        // bug: the pre-interleave exporter externalized the caption to a
+        // `content` entity WHILE leaving the image stranded in `content_list`,
+        // producing a node with BOTH fields. Renderers (Kindle + the KFX→IR
+        // importer) honor `content` and drop `content_list`, so every captioned
+        // figure lost its image. The image must instead migrate into the
+        // interleave: content_list = [image(render: inline), "caption"], and no
+        // `content` field. Real-world hit: Kobo-processed CJK books whose
+        // figures carry an inline caption in the same `<div class="pic">`.
+        let mut chapter = Chapter::new();
+
+        let para_id = chapter.alloc_node(Node::new(Role::Paragraph));
+        chapter.append_child(chapter.root(), para_id);
+
+        // Image child first — no preceding text.
+        let img_id = chapter.alloc_node(Node::new(Role::Image));
+        chapter.semantics.set_src(img_id, "images/figure.jpg");
+        chapter.append_child(para_id, img_id);
+
+        // Caption text after the image.
+        let caption = chapter.append_text("図の説明");
+        let mut cap = Node::new(Role::Text);
+        cap.text = caption;
+        let cap_id = chapter.alloc_node(cap);
+        chapter.append_child(para_id, cap_id);
+
+        let mut ctx = ExportContext::new();
+        let ion = build_storyline_ion(&chapter, &mut ctx);
+
+        let IonValue::List(elements) = ion else {
+            panic!("storyline root must be a list");
+        };
+        let para = &elements[0];
+        assert!(
+            struct_field(para, KfxSymbol::Content).is_none(),
+            "captioned figure must NOT externalize the caption to a content entity \
+             (that strands the image in an ignored content_list)"
+        );
+        let Some(IonValue::List(content_list)) = struct_field(para, KfxSymbol::ContentList) else {
+            panic!("figure must carry a content_list");
+        };
+        assert_eq!(
+            content_list.len(),
+            2,
+            "content_list must interleave [image, caption], got {content_list:?}"
+        );
+        assert!(
+            has_symbol_field(&content_list[0], KfxSymbol::Type, KfxSymbol::Image),
+            "the image must survive as the first content_list entry"
+        );
+        assert!(
+            has_symbol_field(&content_list[0], KfxSymbol::Render, KfxSymbol::Inline),
+            "a migrated in-run image is stamped render: inline (Amazon's shape)"
+        );
+        assert!(
+            matches!(&content_list[1], IonValue::String(s) if s == "図の説明"),
+            "the caption run follows the image, got {:?}",
+            content_list[1]
+        );
+    }
+
+    #[test]
     fn test_tokens_to_ion_empty() {
         let tokens = TokenStream::new();
         let mut ctx = ExportContext::new();

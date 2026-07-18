@@ -6,6 +6,9 @@ pub mod huffcdic;
 pub(crate) mod index;
 pub mod palmdoc;
 pub mod parser;
+pub mod skeleton;
+pub mod tbs;
+pub mod writer_transform;
 
 // Transform for reading MOBI/KF8 files
 pub mod transform;

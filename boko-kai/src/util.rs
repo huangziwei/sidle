@@ -23,6 +23,16 @@ pub fn time_now_secs() -> u32 {
         .unwrap_or(0)
 }
 
+/// Seed for the AZW3 writer's PalmDB unique id and FONT XOR key. Derived from
+/// [`time_now_secs`] so `SOURCE_DATE_EPOCH`, when set, pins it too: repeat
+/// AZW3 conversions of one book are byte-reproducible (the A/B harness and
+/// round-trip tests rely on that). Unpinned, it still varies second-to-second.
+/// The multiply spreads the seconds value across the u64 so the writer's LCG
+/// key derivation stays well-distributed.
+pub fn time_seed_nanos() -> u64 {
+    (time_now_secs() as u64).wrapping_mul(1_000_000_007)
+}
+
 /// RFC 4122 v5 UUID derived from `name` via SHA-1 over the URL namespace.
 /// Deterministic: same input always yields the same UUID. Used for the OPF
 /// `<dc:identifier opf:scheme="uuid">` slot so two converts of the same
