@@ -9,11 +9,20 @@
 //!  - KFX  → library (merging `.kfx-zip` first if needed); pending a
 //!    `kfx_to_epub` job.
 //!
-//! Three formats are converted to EPUB at import time and from there look
-//! identical to a regular EPUB drop:
+//! Three formats are converted at import time rather than stored as-is:
 //!
-//!  - `.azw3` → boko-kai's AZW3 importer + EPUB exporter.
-//!  - `.mobi` → boko-kai's MOBI importer + EPUB exporter.
+//!  - `.azw3` → boko-kai's AZW3 importer feeding BOTH exporters: the EPUB
+//!    and the KFX are each exported directly from the azw3's IR (the azw3
+//!    itself is not persisted, so import is the only moment both can be
+//!    derived without chaining). The book lands with its job already
+//!    `done` — no background hop through the derived EPUB. A later
+//!    metadata-edit *reconvert* re-derives the KFX from the retained EPUB
+//!    (the two-hop path, keyed on the `epub_to_kfx` job kind) since the
+//!    azw3 is gone by then; only the first import gets KFX straight from
+//!    the azw3.
+//!  - `.mobi` → boko-kai's MOBI importer + EPUB exporter; the KFX side is
+//!    filled in later by the `epub_to_kfx` queue job like a regular EPUB
+//!    drop.
 //!  - `.zip`  → Aozora Bunko sniff + parse → cover → build_epub. See
 //!    `convert_aozora_zip` for the sniff details.
 //!
@@ -21,18 +30,20 @@
 //!
 //!  1. Stream-hash the source file and check the dedupe index.
 //!  2. Normalize to canonical bytes (`.kfx-zip` → merged `.kfx`;
-//!     `.azw3`/`.mobi`/`.zip` → freshly built EPUB; other inputs are
-//!     loaded verbatim).
+//!     `.azw3`/`.mobi`/`.zip` → freshly built EPUB, with `.azw3` also
+//!     deriving the KFX sibling here; other inputs are loaded verbatim).
 //!  3. Read metadata from those bytes.
-//!  4. Persist the canonical file into `books/<sha>/<basename>.<ext>`.
+//!  4. Persist the canonical file into `books/<sha>/<basename>.<ext>`,
+//!     plus the direct-derived KFX sibling when step 2 produced one.
 //!  5. Extract the cover sidecar if we already have a readable EPUB on
 //!     hand. EPUB input always does; KFX input only does on an idempotent
 //!     re-import where the EPUB already exists. The fresh KFX path leaves
 //!     `cover_path` empty for the worker to fill once `convert_to_epub`
 //!     produces an EPUB whose JXR cover has been transcoded to JPG.
 //!  6. Insert book + conversion job. If the *other* side is already on
-//!     disk (idempotent re-import) the job is marked `done`; otherwise
-//!     it's `pending` and the caller enqueues it.
+//!     disk (a direct-derived sibling, or an idempotent re-import) the job
+//!     is marked `done`; otherwise it's `pending` and the caller enqueues
+//!     it.
 //!
 //! Each step touches disk; callers should run this inside `spawn_blocking`.
 
@@ -83,11 +94,11 @@ enum SourceKind {
     Epub,
     Kfx,
     KfxZip,
-    /// `.azw3` — Kindle AZW3 (decrypted). Converted to EPUB at import time
-    /// via boko-kai's AZW3 importer + EPUB exporter, so downstream
-    /// everything looks like a regular EPUB drop. Symmetric with the
-    /// aozora `.zip` path, except the format is detected purely by
-    /// extension (no content sniff).
+    /// `.azw3` — Kindle AZW3 (decrypted). Both library sides are exported
+    /// at import time, each directly from the azw3's parsed IR: EPUB (the
+    /// canonical side) and KFX (the sibling normally produced later by the
+    /// `epub_to_kfx` job). Detected purely by extension (no content
+    /// sniff).
     Azw3,
     /// `.mobi` — older Mobipocket/KF8 hybrid (decrypted). Same shape as
     /// AZW3: boko-kai's MOBI importer + EPUB exporter, detected purely by
@@ -189,14 +200,21 @@ fn import_one(
         return Ok(ImportOutcome::Duplicate(existing));
     }
 
-    // 2. Normalize → canonical bytes.
+    // 2. Normalize → canonical bytes. An `.azw3` additionally derives its KFX
+    //    sibling here (both exports come straight from the azw3's IR), carried
+    //    to the persist step below.
+    let mut direct_kfx: Option<DirectKfx> = None;
     let canonical_bytes: Vec<u8> = match src_kind {
         SourceKind::Epub | SourceKind::Kfx | SourceKind::Pdf => {
             fs::read(src).with_context(|| format!("read {}", src.display()))?
         }
         SourceKind::KfxZip => boko::formats::kfx::merge::merge_kfx_zip(src)
             .with_context(|| format!("merge kfx-zip {}", src.display()))?,
-        SourceKind::Azw3 => convert_azw3(src).with_context(|| format!("azw3 {}", src.display()))?,
+        SourceKind::Azw3 => {
+            let derived = convert_azw3(src).with_context(|| format!("azw3 {}", src.display()))?;
+            direct_kfx = Some(derived.kfx);
+            derived.epub
+        }
         SourceKind::Mobi => convert_mobi(src).with_context(|| format!("mobi {}", src.display()))?,
         SourceKind::AozoraZip => {
             convert_aozora_zip(src).with_context(|| format!("aozora zip {}", src.display()))?
@@ -219,7 +237,7 @@ fn import_one(
 
     // 3. Metadata from the canonical bytes (no file re-open). PDF metadata
     //    comes from `/Info` via `probe_pdf`; everything else from boko.
-    let meta = match canonical {
+    let mut meta = match canonical {
         Canonical::Pdf => {
             let doc = boko::import::probe_pdf(canonical_bytes.clone())
                 .with_context(|| format!("probe pdf {}", src.display()))?;
@@ -231,6 +249,14 @@ fn import_one(
             extract_meta(book.metadata(), src.file_stem().and_then(|s| s.to_str()))
         }
     };
+    // The row must carry the ASIN actually stamped inside the produced KFX —
+    // device-delete keys the `.sdr` catalog cleanup on it. For an azw3 whose
+    // EXTH value isn't a real Amazon ASIN, the export fabricates one, so the
+    // stamped value overrides what the metadata extract saw. Same contract as
+    // the worker writing `Produced::asin` back after an `epub_to_kfx` job.
+    if let Some(stamped) = direct_kfx.as_ref().and_then(|k| k.asin.as_deref()) {
+        meta.asin = Some(stamped.to_string());
+    }
     let basename = format_basename(&meta.authors, &meta.title, meta.date.as_deref());
 
     // The non-KFX partner of a KFX is EPUB for a reflowable book, but PDF for a
@@ -264,6 +290,16 @@ fn import_one(
     };
     if !own_dest.exists() {
         write_bytes_atomic(own_dest, &canonical_bytes)?;
+    }
+    // The direct-derived KFX sibling (azw3 import). Written before the
+    // `other_ready` probe below, so the row gets `kfx_path`/`kfx_sha256` and a
+    // `done` job in one pass — the same shape as an idempotent re-import that
+    // found the partner already on disk. An existing file wins (re-import of a
+    // book whose KFX identity is already frozen must not re-stamp it).
+    if let Some(kfx) = &direct_kfx
+        && !dest_kfx.exists()
+    {
+        write_bytes_atomic(&dest_kfx, &kfx.bytes)?;
     }
 
     // 5. Cover sidecar. A KFX always carries its cover built-in (reflowable
@@ -593,19 +629,40 @@ pub fn sha256_of_bytes(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Convert a decrypted `.azw3` to EPUB bytes via boko-kai's AZW3 importer +
-/// EPUB exporter. Caller has already extension-detected `.azw3`; if the
-/// file isn't a real AZW3 (bad PalmDOC header, etc.), boko's `Book::from_bytes`
-/// returns the error and the caller's `?` surfaces it as a normal import
-/// failure.
+/// KFX bytes derived at import time, paired with the ASIN the export stamped
+/// into them (real, or fabricated from the identifier; `None` only when the
+/// source had neither).
+struct DirectKfx {
+    bytes: Vec<u8>,
+    asin: Option<String>,
+}
+
+/// Both library sides derived from one `.azw3`.
+struct Azw3Derived {
+    epub: Vec<u8>,
+    kfx: DirectKfx,
+}
+
+/// Convert a decrypted `.azw3` into BOTH library sides — EPUB and KFX — each
+/// exported directly from the azw3's parsed IR. The azw3 itself is not
+/// persisted, so import is the only moment both derivations can happen
+/// without chaining (the KFX would otherwise be re-derived from the exported
+/// EPUB by the background `epub_to_kfx` job).
 ///
-/// Gated on the standalone EPUB-3 validator for the same reason as the
-/// aozora path: the bytes we're about to persist were freshly synthesized
-/// rather than passed through, so we'd rather fail import than write a
-/// broken book and then fail the downstream `epub_to_kfx` job.
-fn convert_azw3(src: &Path) -> Result<Vec<u8>> {
+/// Caller has already extension-detected `.azw3`; if the file isn't a real
+/// AZW3 (bad PalmDOC header, etc.), boko's `Book::from_bytes` returns the
+/// error and the caller's `?` surfaces it as a normal import failure.
+///
+/// The EPUB side is gated on the standalone EPUB-3 validator for the same
+/// reason as the aozora path: the bytes we're about to persist were freshly
+/// synthesized rather than passed through, so we'd rather fail import than
+/// write a broken book. The KFX side is exported from a fresh parse of the
+/// same bytes — not the handle the EPUB export ran on — keeping it the same
+/// artifact as `boko convert <azw3> <kfx>` produces.
+fn convert_azw3(src: &Path) -> Result<Azw3Derived> {
     use boko::Exporter as _;
     let azw3_bytes = fs::read(src).with_context(|| format!("read {}", src.display()))?;
+
     let mut book = boko::Book::from_bytes(&azw3_bytes, boko::Format::Azw3)
         .with_context(|| format!("parse azw3 {}", src.display()))?;
     let mut buf = Cursor::new(Vec::<u8>::new());
@@ -617,13 +674,27 @@ fn convert_azw3(src: &Path) -> Result<Vec<u8>> {
     if !report.is_clean() {
         bail!("azw3 -> epub failed validation:\n{report}");
     }
-    Ok(epub_bytes)
+
+    let mut book = boko::Book::from_bytes(&azw3_bytes, boko::Format::Azw3)
+        .with_context(|| format!("parse azw3 {}", src.display()))?;
+    let mut kfx_buf = Cursor::new(Vec::<u8>::new());
+    book.export(boko::Format::Kfx, &mut kfx_buf)
+        .context("azw3 -> kfx export")?;
+    let asin = boko::formats::kfx::metadata::resolve_export_asin(book.metadata());
+    Ok(Azw3Derived {
+        epub: epub_bytes,
+        kfx: DirectKfx {
+            bytes: kfx_buf.into_inner(),
+            asin,
+        },
+    })
 }
 
 /// Convert a decrypted `.mobi` to EPUB bytes via boko-kai's MOBI importer +
-/// EPUB exporter. Shape matches `convert_azw3` — the EXTH parsing and
-/// EPUB export are shared infrastructure; only the input format tag and
-/// boko's per-importer wiring differ.
+/// EPUB exporter. EPUB-only, unlike `convert_azw3`: the KFX side of a mobi
+/// import is still filled by the background `epub_to_kfx` job from the
+/// exported EPUB (mobi→kfx direct hasn't been through the fidelity harness
+/// the azw3 pairs have).
 fn convert_mobi(src: &Path) -> Result<Vec<u8>> {
     use boko::Exporter as _;
     let mobi_bytes = fs::read(src).with_context(|| format!("read {}", src.display()))?;
@@ -799,5 +870,45 @@ mod tests {
         assert_eq!(book.author, "A. Tester");
         // The PDF bytes landed in the library slot.
         assert!(Path::new(book.pdf_path.as_ref().unwrap()).exists());
+    }
+
+    #[test]
+    fn import_azw3_derives_both_sides_directly() {
+        use crate::library::db;
+        use crate::library::paths::LibraryPaths;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths {
+            root: tmp.path().to_path_buf(),
+        };
+        paths.ensure().unwrap();
+        let conn = db::open(&paths.db()).unwrap();
+
+        // Public-domain fixture shared with boko-kai's own azw3 tests.
+        let fixture = Path::new("../../boko-kai/tests/fixtures/[太宰 治] 人間失格.azw3");
+        let outcome = import_file(&conn, &paths, fixture).unwrap();
+        let ImportOutcome::Imported {
+            book,
+            needs_enqueue,
+        } = outcome
+        else {
+            panic!("expected a fresh import, got a duplicate");
+        };
+
+        // Both sides were exported straight from the azw3 at import — the job
+        // lands `done` and nothing is enqueued.
+        assert!(!needs_enqueue);
+        assert_eq!(book.status, "done");
+        assert_eq!(book.kind.as_deref(), Some("epub_to_kfx"));
+        let epub = book.epub_path.as_deref().expect("EPUB side persisted");
+        let kfx = book.kfx_path.as_deref().expect("KFX side persisted");
+        assert!(Path::new(epub).exists());
+        assert!(Path::new(kfx).exists());
+        // The on-device filename identity rides with kfx_path…
+        assert!(book.kfx_sha256.is_some());
+        // …and the row carries the ASIN the KFX export stamped (real or
+        // fabricated), so device-delete can wipe the `.sdr` sidecar.
+        assert!(book.asin.is_some());
+        assert_eq!(book.title, "人間失格");
     }
 }
