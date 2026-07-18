@@ -887,8 +887,9 @@ fn sanitize_path(path: &str) -> String {
 /// Chapters without a usable source id fall back to positional names. Takes
 /// the chapters' source paths (also used pre-synthesis by the normalize
 /// pass's link resolver, which must know target filenames before any
-/// document exists).
-pub(super) fn chapter_filenames<'a, I>(source_paths: I) -> Vec<String>
+/// document exists). Shared with the AZW3 exporter, which names its KF8 spine
+/// files identically so `normalize_book`'s resolved links match the spine.
+pub(crate) fn chapter_filenames<'a, I>(source_paths: I) -> Vec<String>
 where
     I: IntoIterator<Item = &'a str>,
 {

@@ -384,6 +384,14 @@ pub struct DivElement {
     pub sequence_number: u32,
     pub start_pos: u32,
     pub length: u32,
+    /// Absolute byte offset of this chunk's content in flow 0's *on-disk*
+    /// layout (`[skeleton][chunks…]` per file). This is the coordinate base
+    /// for `kindle:pos:fid` resolution — the link's `off` is added to it
+    /// (matching KindleUnpack's `getIDTagByPosFid`, which uses `startpos +
+    /// off`). Distinct from `insert_pos`, which is the *reassembled* position
+    /// where the chunk splices into its skeleton. Populated by
+    /// [`assign_ondisk_starts`] once the skeleton table is known.
+    pub ondisk_start: u32,
 }
 
 /// NCX entry for table of contents
@@ -484,10 +492,32 @@ pub fn parse_div_index(entries: &[IndexEntry], cncx: &Cncx) -> Vec<DivElement> {
             sequence_number,
             start_pos,
             length,
+            ondisk_start: 0, // filled by assign_ondisk_starts once files are known
         });
     }
 
     elems
+}
+
+/// Fill each [`DivElement::ondisk_start`] with the chunk's absolute byte
+/// offset in flow 0's on-disk layout. Flow 0 is `[skel₀][chunk₀…][skel₁]
+/// [chunk₁…]…`, so a file's chunks begin at `skel.start_pos + skel.length`
+/// and run contiguously. This is the exact walk [`build_parts`] uses to slice
+/// chunk bytes back out, so pos:fid resolution stays consistent with
+/// reassembly. Must be called after both the skeleton and div indexes parse.
+pub fn assign_ondisk_starts(elems: &mut [DivElement], files: &[SkeletonFile]) {
+    let mut div_ptr = 0usize;
+    for file in files {
+        let mut baseptr = file.start_pos.saturating_add(file.length);
+        for _ in 0..file.div_count {
+            let Some(elem) = elems.get_mut(div_ptr) else {
+                return;
+            };
+            elem.ondisk_start = baseptr;
+            baseptr = baseptr.saturating_add(elem.length);
+            div_ptr += 1;
+        }
+    }
 }
 
 /// Parse NCX index into TOC entries

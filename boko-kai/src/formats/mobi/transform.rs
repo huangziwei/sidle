@@ -165,7 +165,11 @@ fn resolve_pos_fid(
     file_starts: &[(u32, u32)],
 ) -> (usize, Option<(String, bool)>) {
     let (file_num, target_pos) = if let Some(elem) = elems.get(elem_idx) {
-        (elem.file_number as usize, elem.insert_pos + offset as u32)
+        // On-disk chunk start + off (KindleUnpack's `getIDTagByPosFid`), NOT
+        // `insert_pos + off`: `insert_pos` is the *reassembled* splice point,
+        // but `raw_text` is the on-disk `[skeleton][chunk]` flow, where the
+        // chunk sits `skel_tail` bytes later than its reassembled position.
+        (elem.file_number as usize, elem.ondisk_start + offset as u32)
     } else {
         (0, 0)
     };
@@ -233,14 +237,9 @@ pub fn collect_linked_aids(
     linked
 }
 
-/// Find nearest id/name/aid attribute in raw text near the target position.
-///
-/// Matches KindleUnpack's getIDTag behavior:
-/// 1. Search backward from position for id=, name=, or aid= attributes
-/// 2. If aid= is found, return "aid-{value}"
-/// 3. Stop at <body tag (return empty = link to top of file)
-///
-/// This is used to resolve kindle:pos:fid:XXXX:off:YYYY links to anchors.
+/// Resolve a `kindle:pos:fid` byte position to the anchor a `#…` href should
+/// target, `aid-`-prefixing kindlegen `aid` values. See
+/// [`find_nearest_id_kind`] for the resolution rule.
 pub fn find_nearest_id_fast(
     raw_text: &[u8],
     pos: usize,
@@ -251,9 +250,19 @@ pub fn find_nearest_id_fast(
         .map(|(val, is_aid)| format_anchor_name(&val, is_aid))
 }
 
-/// Kind-aware core of [`find_nearest_id_fast`]: returns the raw attribute
-/// value and whether it came from an `aid` attribute (callers decide how to
-/// prefix — and [`collect_linked_aids`] needs the raw value).
+/// Resolve a `kindle:pos:fid` byte position (already on-disk: `ondisk_start +
+/// off`) to the owning element's anchor, returning `(value, came_from_aid)`.
+///
+/// Mirrors KindleUnpack's `getIDTag`: walk backward tag by tag from `pos` to
+/// the opening tag that owns the position, and return its anchor — preferring
+/// a real `id` (then `name`) over the transient kindlegen `aid`. The
+/// preference is what keeps this consistent with
+/// [`strip_kindle_attributes_fast`]: an element that already carries an `id`
+/// keeps it (a second `id` would be malformed XML), so a link into that
+/// element must resolve to the existing `id`, not to an `aid-…` that never
+/// gets injected. Elements with only an `aid` resolve to `aid-{value}` and the
+/// stripper injects the matching `id`. Walking stops at `<body>` (→ `None`,
+/// i.e. link to the top of the file).
 fn find_nearest_id_kind(
     raw_text: &[u8],
     pos: usize,
@@ -274,172 +283,85 @@ fn find_nearest_id_kind(
                 break;
             }
         }
-        (start, end)
+        (start.min(raw_text.len()), end.min(raw_text.len()))
     };
 
     let pos = pos.clamp(file_start, file_end);
 
-    // Finders for id=, name=, aid= patterns (with space prefix to avoid matching aid= when looking for id=)
-    let id_finder = memmem::Finder::new(b" id=\"");
-    let id_finder_single = memmem::Finder::new(b" id='");
-    let name_finder = memmem::Finder::new(b" name=\"");
-    let name_finder_single = memmem::Finder::new(b" name='");
-    let aid_finder = memmem::Finder::new(b" aid=\"");
-    let aid_finder_single = memmem::Finder::new(b" aid='");
-
-    // Search forward from pos to find the closest anchor (within reasonable
-    // distance). A KF8 file's raw stream is [skeleton mini-doc][fragments…]:
-    // a section-start position lands in the skeleton's TAIL, where the
-    // nearest forward attribute belongs to an empty skeleton wrapper — an
-    // element that assembles to the section's END, not its start. A match
-    // before the skeleton terminator (`</html>`) is therefore bogus; the
-    // section's content begins after it, so search again from there.
-    let mut search_pos = pos;
-    loop {
-        let end_pos = (search_pos + 2000).min(file_end);
-        if search_pos >= end_pos {
+    // Upper bound (exclusive) for the `<` search — include the byte at `pos`
+    // so a position sitting on an element's opening `<` resolves to that
+    // element, not the previous one.
+    let mut hi = (pos + 1).min(file_end);
+    while hi > file_start {
+        let Some(rel) = memchr::memrchr(b'<', &raw_text[file_start..hi]) else {
             break;
+        };
+        let lt = file_start + rel;
+        let gt = memchr::memchr(b'>', &raw_text[lt..file_end])
+            .map(|r| lt + r + 1)
+            .unwrap_or(file_end);
+        let tag = &raw_text[lt..gt];
+
+        if tag.starts_with(b"<body") {
+            // Reached the section wrapper: the link targets the file's top.
+            return None;
         }
-        let search_window = &raw_text[search_pos..end_pos];
-
-        // Find the closest attribute of any type
-        let id_match = find_attr_with_pos(search_window, &id_finder, &id_finder_single, 4);
-        let name_match = find_attr_with_pos(search_window, &name_finder, &name_finder_single, 6);
-        let aid_match = find_attr_with_pos(search_window, &aid_finder, &aid_finder_single, 5);
-
-        // Collect all matches with their positions and whether they're aid
-        let mut candidates: Vec<(usize, String, bool)> = Vec::new();
-        if let Some((p, v)) = id_match {
-            candidates.push((p, v, false));
-        }
-        if let Some((p, v)) = name_match {
-            candidates.push((p, v, false));
-        }
-        if let Some((p, v)) = aid_match {
-            candidates.push((p, v, true));
-        }
-
-        // Pick the closest one — unless the skeleton terminator sits before
-        // it, in which case restart past the terminator.
-        if let Some((m, val, is_aid)) = candidates.into_iter().min_by_key(|(p, _, _)| *p) {
-            match memmem::find(search_window, b"</html>") {
-                Some(b) if m < b => {
-                    search_pos += b + "</html>".len();
-                    continue;
-                }
-                _ => return Some((val, is_aid)),
-            }
-        }
-        break;
-    }
-
-    // Search backwards from pos
-    let start_pos = pos.saturating_sub(2000).max(file_start);
-    if start_pos < pos {
-        let back_window = &raw_text[start_pos..pos];
-
-        // Find the last occurrence of each attribute type
-        let last_id = find_last_attr_in_window(back_window, &id_finder, &id_finder_single, 4);
-        let last_name = find_last_attr_in_window(back_window, &name_finder, &name_finder_single, 6);
-        let last_aid = find_last_attr_in_window(back_window, &aid_finder, &aid_finder_single, 5);
-
-        // Check if we hit a <body tag (stop searching)
-        let body_pos = memmem::find(back_window, b"<body ");
-
-        // Find the closest one that's after any <body tag
-        let mut best: Option<(usize, String, bool)> = None;
-
-        for (opt_pos, opt_val, is_aid) in [(last_id, false), (last_name, false), (last_aid, true)]
-            .into_iter()
-            .filter_map(|(opt, is_aid)| opt.map(|(p, v)| (p, v, is_aid)))
+        // Only opening element tags carry an anchor.
+        if !tag.starts_with(b"</")
+            && !tag.starts_with(b"<!")
+            && !tag.starts_with(b"<?")
+            && let Some(anchor) = extract_tag_anchor(tag)
         {
-            // Skip if before <body
-            if let Some(bp) = body_pos
-                && opt_pos < bp
-            {
-                continue;
-            }
-
-            match &best {
-                None => best = Some((opt_pos, opt_val, is_aid)),
-                Some((best_pos, _, _)) if opt_pos > *best_pos => {
-                    best = Some((opt_pos, opt_val, is_aid))
-                }
-                _ => {}
-            }
+            return Some(anchor);
         }
 
-        if let Some((_, val, is_aid)) = best {
-            return Some((val, is_aid));
-        }
+        // No anchor here (close tag / comment / anchorless open) — step
+        // strictly before this `<` and keep walking back.
+        hi = lt;
     }
 
     None
 }
 
-/// Find attribute value in a search window (forward search), returning position and value.
-fn find_attr_with_pos(
-    window: &[u8],
-    finder_double: &memmem::Finder,
-    finder_single: &memmem::Finder,
-    attr_len: usize, // length of " id=" or " name=" etc
-) -> Option<(usize, String)> {
-    let pos = finder_double
-        .find(window)
-        .or_else(|| finder_single.find(window))?;
+/// Extract an opening tag's anchor, preferring a real `id` (then `name`) over
+/// the kindlegen `aid`. Returns `(value, came_from_aid)`.
+fn extract_tag_anchor(tag: &[u8]) -> Option<(String, bool)> {
+    if let Some(v) = attr_value_in_tag(tag, b"id") {
+        Some((v, false))
+    } else if let Some(v) = attr_value_in_tag(tag, b"name") {
+        Some((v, false))
+    } else {
+        attr_value_in_tag(tag, b"aid").map(|v| (v, true))
+    }
+}
 
-    let quote_char = window[pos + attr_len];
-    let value_start = pos + attr_len + 1;
+/// Read a single-/double-quoted attribute value from a tag's bytes. The
+/// leading space in the needle (` name=`) prevents matching a longer
+/// attribute name (`data-name=`). Returns `None` for a missing, unquoted,
+/// empty, or non-id-charset value.
+fn attr_value_in_tag(tag: &[u8], attr_name: &[u8]) -> Option<String> {
+    let mut needle = Vec::with_capacity(attr_name.len() + 2);
+    needle.push(b' ');
+    needle.extend_from_slice(attr_name);
+    needle.push(b'=');
 
-    if let Some(value_end) = window[value_start..].iter().position(|&b| b == quote_char) {
-        let id_bytes = &window[value_start..value_start + value_end];
-        if id_bytes
+    let start = memmem::find(tag, &needle)?;
+    let after = start + needle.len();
+    let quote = *tag.get(after)?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let value_start = after + 1;
+    let rel_end = tag[value_start..].iter().position(|&b| b == quote)?;
+    let value = &tag[value_start..value_start + rel_end];
+    if value.is_empty()
+        || !value
             .iter()
             .all(|&b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b':' || b == b'.')
-        {
-            return Some((pos, String::from_utf8_lossy(id_bytes).into_owned()));
-        }
+    {
+        return None;
     }
-
-    None
-}
-
-/// Find the last occurrence of an attribute in a window (backward search).
-/// Returns (position, value) if found.
-fn find_last_attr_in_window(
-    window: &[u8],
-    finder_double: &memmem::Finder,
-    finder_single: &memmem::Finder,
-    attr_len: usize,
-) -> Option<(usize, String)> {
-    let mut last: Option<(usize, String)> = None;
-    let mut search_pos = 0;
-
-    while search_pos < window.len() {
-        let next = finder_double
-            .find(&window[search_pos..])
-            .or_else(|| finder_single.find(&window[search_pos..]));
-
-        if let Some(rel_pos) = next {
-            let abs_pos = search_pos + rel_pos;
-            let quote_char = window.get(abs_pos + attr_len).copied().unwrap_or(b'"');
-            let value_start = abs_pos + attr_len + 1;
-
-            if let Some(value_end) = window[value_start..].iter().position(|&b| b == quote_char) {
-                let id_bytes = &window[value_start..value_start + value_end];
-                if id_bytes.iter().all(|&b| {
-                    b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b':' || b == b'.'
-                }) {
-                    last = Some((abs_pos, String::from_utf8_lossy(id_bytes).into_owned()));
-                }
-            }
-            search_pos = abs_pos + 1;
-        } else {
-            break;
-        }
-    }
-
-    last
+    Some(String::from_utf8_lossy(value).into_owned())
 }
 
 /// Inline SVG flow content into `<img src="kindle:flow:NNNN..."/>` references.
@@ -1525,29 +1447,39 @@ mod tests {
     }
 
     #[test]
-    fn test_find_nearest_id_skips_skeleton_tail() {
-        // KF8 raw layout: [skeleton mini-doc …</html>][fragments…]. A
-        // section-start position sits in the skeleton tail; the nearest
-        // forward attribute there is an empty skeleton wrapper that
-        // assembles to the section END — the real target is the first
-        // fragment after the terminator.
-        let raw =
-            b"<html><head></head><body><div class=\"w\" aid=\"SKEL\"></div></body></html>\r\n\
-<div aid=\"FRAG1\"><p>content</p></div>\r\n<div aid=\"FRAG2\"><p>more</p></div>";
+    fn test_find_nearest_id_prefers_enclosing_id() {
+        // pos:fid resolution walks back to the element owning the (on-disk)
+        // position and returns its anchor, preferring a real id/name over the
+        // transient kindlegen aid — so a link into an already-id'd element
+        // resolves to the surviving id, not an aid-… the stripper won't
+        // re-inject onto an id'd tag.
+        let raw = b"<html><head></head><body ><div class=\"main\" aid=\"AA\">\
+<p id=\"para\" aid=\"BB\">text</p><h1 aid=\"CC\">head</h1></div></body></html>";
         let file_starts = [(0u32, 0u32)];
-        // Position just before the skeleton wrapper's aid attribute.
-        let pos = raw.iter().position(|&b| b == b'w').unwrap() + 2;
+
+        // A position on the <p> that carries both id and aid → the id wins.
+        let p_at = memmem::find(raw, b"<p id=").unwrap() + 3;
         assert_eq!(
-            find_nearest_id_fast(raw, pos, 0, &file_starts).as_deref(),
-            Some("aid-FRAG1"),
-            "skeleton-tail match skipped in favor of the first fragment"
+            find_nearest_id_fast(raw, p_at, 0, &file_starts).as_deref(),
+            Some("para"),
+            "an existing id is preferred over the aid"
         );
-        // A position already inside the fragments resolves normally.
-        let frag2 = memmem::find(raw, b"FRAG2").unwrap() - 10;
+        // A position on the aid-only <h1> → its aid, prefixed.
+        let h1_at = memmem::find(raw, b"<h1 aid=").unwrap() + 3;
         assert_eq!(
-            find_nearest_id_fast(raw, frag2, 0, &file_starts).as_deref(),
-            Some("aid-FRAG2")
+            find_nearest_id_fast(raw, h1_at, 0, &file_starts).as_deref(),
+            Some("aid-CC"),
         );
+        // A position on the aid-only wrapper div → its aid.
+        let div_at = memmem::find(raw, b"<div class").unwrap() + 3;
+        assert_eq!(
+            find_nearest_id_fast(raw, div_at, 0, &file_starts).as_deref(),
+            Some("aid-AA"),
+        );
+        // A body-level position (before any content element) → None: the link
+        // targets the top of the file, with no fragment.
+        let body_at = memmem::find(raw, b"<body ").unwrap() + 3;
+        assert_eq!(find_nearest_id_fast(raw, body_at, 0, &file_starts), None);
     }
 
     #[test]
@@ -1663,20 +1595,24 @@ mod tests {
     #[test]
     fn test_collect_linked_aids() {
         // One skeleton file (file 0 starting at 0). The body has two aid
-        // elements; a pos:fid link targets the second one's byte position.
+        // elements; a pos:fid link (elem 1, off 0) targets the second one's
+        // on-disk byte position.
         let html = b"<body ><a href=\"kindle:pos:fid:0001:off:0000000000\">go</a>\
 <p aid=\"AA\">first</p><p aid=\"BB\">second</p></body>";
-        // elems[1].insert_pos points at the second <p>.
-        let elem = |insert_pos: u32| DivElement {
-            insert_pos,
+        let first_p = memmem::find(html, b"<p aid=\"AA\"").unwrap() as u32;
+        let second_p = memmem::find(html, b"<p aid=\"BB\"").unwrap() as u32;
+        // An element's `ondisk_start` is where its chunk begins in flow 0; an
+        // `off` of 0 lands on the opening tag.
+        let elem = |ondisk_start: u32| DivElement {
+            insert_pos: ondisk_start,
             toc_text: None,
             file_number: 0,
             sequence_number: 0,
             start_pos: 0,
             length: 0,
+            ondisk_start,
         };
-        let second_p = memmem::find(html, b"<p aid=\"BB\"").unwrap() as u32;
-        let elems = vec![elem(7), elem(second_p)];
+        let elems = vec![elem(first_p), elem(second_p)];
         let file_starts = [(0u32, 0u32)];
         let linked = collect_linked_aids(html, html, &elems, &file_starts, &[]);
         assert!(
@@ -1688,8 +1624,15 @@ mod tests {
             "AA is not a link target, got {linked:?}"
         );
 
-        // NCX positions count as link sources too.
-        let linked = collect_linked_aids(html, html, &elems, &file_starts, &[(7usize, 0usize)]);
+        // NCX positions count as link sources too: a position on the first
+        // <p> marks AA linked.
+        let linked = collect_linked_aids(
+            html,
+            html,
+            &elems,
+            &file_starts,
+            &[(first_p as usize, 0usize)],
+        );
         assert!(
             linked.contains("AA"),
             "NCX position at the first <p> must mark AA linked, got {linked:?}"

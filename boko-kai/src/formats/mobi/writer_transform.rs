@@ -717,9 +717,13 @@ pub fn strip_xml_namespaces(html: &[u8]) -> Vec<u8> {
 }
 
 fn should_drop_attr(name: &[u8]) -> bool {
-    // Drop `xmlns:NAME` (but keep bare `xmlns`).
+    // Drop `xmlns:NAME` (but keep bare `xmlns`, and `xmlns:xlink` — it binds
+    // the `xlink:href` that inlined full-page SVG illustrations depend on;
+    // dropping it leaves those `<image xlink:href>` refs unbound, which is a
+    // fatal XML parse error [epubcheck RSC-016] on re-import. Amazon's own KF8
+    // SVG carries `xmlns:xlink`, so keeping it matches retail output.)
     if name.len() > 6 && name[..6].eq_ignore_ascii_case(b"xmlns:") {
-        return true;
+        return !name[6..].eq_ignore_ascii_case(b"xlink");
     }
     // Drop attributes with these prefixes.
     const DROP_PREFIXES: &[&[u8]] = &[

@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::formats::mobi::parser::{
-    DivElement, SkeletonFile, parse_div_index, parse_ncx_index, parse_skel_index, read_index,
+    DivElement, SkeletonFile, assign_ondisk_starts, parse_div_index, parse_ncx_index,
+    parse_skel_index, read_index,
 };
 use crate::formats::mobi::{
     Compression, Encoding, HuffCdicReader, MobiFormat, MobiHeader, NULL_INDEX, PdbInfo, TocNode,
@@ -490,13 +491,16 @@ impl Azw3Importer {
         };
 
         // Parse div index
-        let elems = if mobi.div_index != NULL_INDEX {
+        let mut elems = if mobi.div_index != NULL_INDEX {
             let (entries, cncx) =
                 read_index(&mut read_record_offset, mobi.div_index as usize, codec)?;
             parse_div_index(&entries, &cncx)
         } else {
             Vec::new()
         };
+        // Resolve each chunk's absolute on-disk offset (the pos:fid coordinate
+        // base) now that both the skeleton and div tables are known.
+        assign_ondisk_starts(&mut elems, &files);
 
         // Parse NCX for TOC
         let ncx = if mobi.ncx_index != NULL_INDEX {
@@ -530,8 +534,9 @@ impl Azw3Importer {
                 let (file_num, byte_pos) = if let Some((frag_idx, offset)) = entry.pos_fid
                     && let Some(elem) = elems.get(frag_idx as usize)
                 {
-                    // Position is elem's insert_pos + offset (like KindleUnpack)
-                    (elem.file_number as usize, elem.insert_pos + offset)
+                    // On-disk chunk start + offset (KindleUnpack's
+                    // getIDTagByPosFid), matching `resolve_pos_fid`.
+                    (elem.file_number as usize, elem.ondisk_start + offset)
                 } else {
                     // Fall back to absolute position
                     let file_num = find_file_for_position(&files, entry.pos)

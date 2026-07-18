@@ -195,10 +195,18 @@ impl BookContext {
             );
         }
 
-        // Build spine from normalized chapters; bytes stored once in `resources`.
+        // Build spine from normalized chapters; bytes stored once in
+        // `resources`. Name files from source ids via the shared
+        // `chapter_filenames` — the SAME scheme `normalize_book` resolved the
+        // chapters' internal links against (and the EPUB exporter emits), so
+        // `<a href="{source}.xhtml">` targets match the spine hrefs and become
+        // real pos:fid links instead of dangling `chapter_N.xhtml` names that
+        // no file answers to (epubcheck RSC-007 on re-import).
+        let filenames = crate::export::epub::chapter_filenames(
+            normalized.chapters.iter().map(|c| c.source_path.as_str()),
+        );
         let mut spine = Vec::with_capacity(normalized.chapters.len());
-        for (i, chapter) in normalized.chapters.iter().enumerate() {
-            let href = format!("chapter_{}.xhtml", i);
+        for (chapter, href) in normalized.chapters.iter().zip(filenames) {
             resources.insert(
                 href.clone(),
                 Resource {
