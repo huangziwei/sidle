@@ -32,7 +32,12 @@ pub struct OpfCreator {
 pub fn creator_file_as_keys(authors: &[String], author_sorts: &[String]) -> Vec<String> {
     let joined = authors.join(" & ");
     (0..authors.len())
-        .map(|i| author_sorts.get(i).cloned().unwrap_or_else(|| joined.clone()))
+        .map(|i| {
+            author_sorts
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| joined.clone())
+        })
         .collect()
 }
 

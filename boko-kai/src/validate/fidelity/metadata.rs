@@ -582,7 +582,11 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
     // would manufacture defects.
     let joined_authors = opf.metadata.authors.join(" & ");
     let author_file_as = if !opf.metadata.author_sorts.is_empty()
-        && opf.metadata.author_sorts.iter().all(|s| *s == joined_authors)
+        && opf
+            .metadata
+            .author_sorts
+            .iter()
+            .all(|s| *s == joined_authors)
     {
         Vec::new()
     } else {

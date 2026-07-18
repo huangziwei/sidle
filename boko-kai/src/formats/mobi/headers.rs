@@ -459,6 +459,38 @@ mod tests {
     }
 
     #[test]
+    fn test_exth_header_pronunciations() {
+        // Amazon JP shape: EXTH 100 repeated per author, EXTH 517 repeated
+        // per author in the same order, EXTH 508 for the title reading.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"EXTH");
+        data.extend_from_slice(&0u32.to_be_bytes()); // header length (unused)
+        data.extend_from_slice(&5u32.to_be_bytes()); // 5 records
+
+        let mut push = |rtype: u32, content: &[u8]| {
+            data.extend_from_slice(&rtype.to_be_bytes());
+            data.extend_from_slice(&(8 + content.len() as u32).to_be_bytes());
+            data.extend_from_slice(content);
+        };
+        push(100, "サン・テグジュペリ".as_bytes());
+        push(100, "管 啓次郎".as_bytes());
+        push(508, "ホシノオウジサマ".as_bytes());
+        push(517, "サン テグジュペリ".as_bytes());
+        push(517, "スガ ケイジロウ".as_bytes());
+
+        let exth = ExthHeader::parse(&data, Encoding::Utf8).unwrap();
+        assert_eq!(exth.authors, vec!["サン・テグジュペリ", "管 啓次郎"]);
+        assert_eq!(
+            exth.title_pronunciation,
+            Some("ホシノオウジサマ".to_string())
+        );
+        assert_eq!(
+            exth.author_pronunciations,
+            vec!["サン テグジュペリ", "スガ ケイジロウ"]
+        );
+    }
+
+    #[test]
     fn test_exth_header_cover_offset() {
         let mut data = Vec::new();
         data.extend_from_slice(b"EXTH");

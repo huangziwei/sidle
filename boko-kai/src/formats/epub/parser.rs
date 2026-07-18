@@ -2115,7 +2115,10 @@ mod tests {
 </package>"##;
 
         let result = parse_opf(opf).unwrap();
-        assert_eq!(result.metadata.authors, vec!["サン・テグジュペリ", "管 啓次郎"]);
+        assert_eq!(
+            result.metadata.authors,
+            vec!["サン・テグジュペリ", "管 啓次郎"]
+        );
         assert_eq!(
             result.metadata.author_sorts,
             vec!["サン テグジュペリ", "スガ ケイジロウ"]

@@ -777,7 +777,10 @@ mod tests {
             title: "星の王子さま".to_string(),
             language: "ja".to_string(),
             authors: vec!["サン・テグジュペリ".to_string(), "管 啓次郎".to_string()],
-            author_sorts: vec!["サン テグジュペリ".to_string(), "スガ ケイジロウ".to_string()],
+            author_sorts: vec![
+                "サン テグジュペリ".to_string(),
+                "スガ ケイジロウ".to_string(),
+            ],
             ..Default::default()
         };
         let ctx = MetadataContext::default();
