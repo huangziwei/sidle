@@ -5,8 +5,8 @@ use std::io;
 pub use super::headers::{Compression, Encoding, ExthHeader, MobiHeader, NULL_INDEX};
 pub use super::huffcdic::HuffCdicReader;
 pub use super::index::{
-    Cncx, DivElement, IndexEntry, NcxEntry, SkeletonFile, assign_ondisk_starts, parse_div_index,
-    parse_ncx_index, parse_skel_index, read_index,
+    Cncx, DivElement, IndexEntry, NcxEntry, SkeletonFile, parse_div_index, parse_ncx_index,
+    parse_skel_index, read_index,
 };
 
 /// PDB (Palm Database) header info extracted from bytes.

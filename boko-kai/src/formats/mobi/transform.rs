@@ -164,15 +164,21 @@ fn resolve_pos_fid(
     raw_text: &[u8],
     file_starts: &[(u32, u32)],
 ) -> (usize, Option<(String, bool)>) {
-    let (file_num, target_pos) = if let Some(elem) = elems.get(elem_idx) {
-        // On-disk chunk start + off (KindleUnpack's `getIDTagByPosFid`), NOT
-        // `insert_pos + off`: `insert_pos` is the *reassembled* splice point,
-        // but `raw_text` is the on-disk `[skeleton][chunk]` flow, where the
-        // chunk sits `skel_tail` bytes later than its reassembled position.
-        (elem.file_number as usize, elem.ondisk_start + offset as u32)
-    } else {
-        (0, 0)
+    let Some(elem) = elems.get(elem_idx) else {
+        return (0, None);
     };
+    // A chunk dropped during reassembly (out of bounds / bad insert) has no
+    // reassembled position — the link is unresolvable.
+    if elem.reassembled_pos == u32::MAX {
+        return (elem.file_number as usize, None);
+    }
+    // Reassembled chunk start + off (KindleUnpack's `getIDTag`): `raw_text`
+    // is the reassembled flow (chunks spliced into their skeletons), and
+    // `reassembled_pos` is where this chunk's content lands there. Resolving
+    // against the on-disk `[skeleton][chunk]` flow instead makes the backward
+    // walk from a chunk-start land on the skeleton's tail element.
+    let file_num = elem.file_number as usize;
+    let target_pos = elem.reassembled_pos + offset as u32;
     let anchor = find_nearest_id_kind(raw_text, target_pos as usize, file_num, file_starts);
     (file_num, anchor)
 }
@@ -250,8 +256,9 @@ pub fn find_nearest_id_fast(
         .map(|(val, is_aid)| format_anchor_name(&val, is_aid))
 }
 
-/// Resolve a `kindle:pos:fid` byte position (already on-disk: `ondisk_start +
-/// off`) to the owning element's anchor, returning `(value, came_from_aid)`.
+/// Resolve a `kindle:pos:fid` byte position (in the reassembled flow:
+/// `reassembled_pos + off`) to the owning element's anchor, returning
+/// `(value, came_from_aid)`.
 ///
 /// Mirrors KindleUnpack's `getIDTag`: walk backward tag by tag from `pos` to
 /// the opening tag that owns the position, and return its anchor — preferring
@@ -1601,16 +1608,18 @@ mod tests {
 <p aid=\"AA\">first</p><p aid=\"BB\">second</p></body>";
         let first_p = memmem::find(html, b"<p aid=\"AA\"").unwrap() as u32;
         let second_p = memmem::find(html, b"<p aid=\"BB\"").unwrap() as u32;
-        // An element's `ondisk_start` is where its chunk begins in flow 0; an
-        // `off` of 0 lands on the opening tag.
-        let elem = |ondisk_start: u32| DivElement {
-            insert_pos: ondisk_start,
+        // `reassembled_pos` is where the chunk's content lands in the
+        // reassembled flow; here the body is a single flat block (no skeleton/
+        // chunk split), so it equals the byte position. An `off` of 0 lands on
+        // the opening tag.
+        let elem = |reassembled_pos: u32| DivElement {
+            insert_pos: reassembled_pos,
             toc_text: None,
             file_number: 0,
             sequence_number: 0,
             start_pos: 0,
             length: 0,
-            ondisk_start,
+            reassembled_pos,
         };
         let elems = vec![elem(first_p), elem(second_p)];
         let file_starts = [(0u32, 0u32)];

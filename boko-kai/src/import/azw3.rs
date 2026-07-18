@@ -11,8 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::formats::mobi::parser::{
-    DivElement, SkeletonFile, assign_ondisk_starts, parse_div_index, parse_ncx_index,
-    parse_skel_index, read_index,
+    DivElement, SkeletonFile, parse_div_index, parse_ncx_index, parse_skel_index, read_index,
 };
 use crate::formats::mobi::{
     Compression, Encoding, HuffCdicReader, MobiFormat, MobiHeader, NULL_INDEX, PdbInfo, TocNode,
@@ -70,6 +69,11 @@ pub struct Azw3Importer {
     /// Cached decompressed text (loaded on first chapter request).
     text_cache: Option<Vec<u8>>,
 
+    /// Reassembled flow 0 + anchor coordinate map (built with the text on first
+    /// chapter/TOC request). Chapters are sliced from here and every pos:fid /
+    /// TOC anchor resolves against its concatenated bytes.
+    reassembled: Option<ReassembledFlow>,
+
     /// `aid` attribute values that are link targets (some `kindle:pos:fid`
     /// link or NCX position resolves to them). Computed once from the full
     /// text; `build_chapter` keeps these as `id="aid-{value}"` instead of
@@ -94,12 +98,14 @@ pub struct Azw3Importer {
     toc_positions: HashMap<(String, String), TocPosition>,
 }
 
-/// Position metadata for a TOC entry (from NCX).
+/// Position metadata for a TOC entry (from NCX). The byte position resolves
+/// against the reassembled flow (built lazily), so we keep the pos:fid here and
+/// resolve it in `resolve_toc` rather than storing an eager on-disk offset.
 #[derive(Debug, Clone, Copy)]
 struct TocPosition {
-    /// Byte position in the text stream.
-    byte_pos: u32,
-    /// File number (skeleton file).
+    /// pos:fid `(elem_idx, offset)` when the NCX entry carries one.
+    frag: Option<(u32, u32)>,
+    /// File number (skeleton file) the entry resolves into.
     file_num: u32,
 }
 
@@ -150,16 +156,13 @@ impl Importer for Azw3Importer {
             return Ok(content.clone());
         }
 
-        // Ensure text is loaded
-        if self.text_cache.is_none() {
-            self.text_cache = Some(self.extract_text()?);
-        }
+        // Reassemble flow 0 (loads the text) and resolve link targets against
+        // it before slicing the requested chapter out.
+        self.ensure_reassembled()?;
         self.ensure_linked_aids();
 
-        // Build the requested chapter
-        let text = self.text_cache.as_ref().unwrap();
         let linked_aids = self.linked_aids.as_ref().unwrap();
-        let content = self.build_chapter(id.0, text, linked_aids)?;
+        let content = self.build_chapter(id.0, linked_aids)?;
 
         self.chapter_cache.insert(id.0, content.clone());
         Ok(content)
@@ -288,45 +291,31 @@ impl Importer for Azw3Importer {
     }
 
     fn resolve_toc(&mut self) {
-        // Load text if not cached
-        if self.text_cache.is_none() {
-            if let Ok(text) = self.extract_text() {
-                self.text_cache = Some(text);
-            } else {
-                return;
-            }
+        if self.ensure_reassembled().is_err() {
+            return;
         }
-
-        let text = self.text_cache.as_ref().unwrap();
-
-        // Get HTML flow (flow 0)
-        let (html_start, html_end) = self
-            .kf8
-            .flow_table
-            .first()
-            .copied()
-            .unwrap_or((0, text.len()));
-        let html_text = &text[html_start..html_end.min(text.len())];
-
-        // Build file_starts for find_nearest_id_fast
-        let file_starts: Vec<(u32, u32)> = self
-            .kf8
-            .files
-            .iter()
-            .map(|f| (f.start_pos, f.file_number as u32))
-            .collect();
-
-        // Resolve TOC entries using stored positions
-        resolve_toc_with_positions(&mut self.toc, &self.toc_positions, html_text, &file_starts);
+        // Disjoint field borrows: `toc` mutably, the rest shared.
+        let Self {
+            toc,
+            toc_positions,
+            kf8,
+            reassembled,
+            ..
+        } = self;
+        let Some(flow) = reassembled.as_ref() else {
+            return;
+        };
+        resolve_toc_with_positions(toc, toc_positions, &kf8.elems, flow);
     }
 }
 
-/// Recursively resolve TOC entry hrefs with fragment IDs using position map.
+/// Recursively resolve TOC entry hrefs with fragment IDs, resolving each
+/// entry's pos:fid against the reassembled flow (`elem.reassembled_pos + off`).
 fn resolve_toc_with_positions(
     entries: &mut [TocEntry],
     positions: &HashMap<(String, String), TocPosition>,
-    html_text: &[u8],
-    file_starts: &[(u32, u32)],
+    elems: &[DivElement],
+    flow: &ReassembledFlow,
 ) {
     for entry in entries {
         // Look up position by (title, chapter_path)
@@ -334,22 +323,35 @@ fn resolve_toc_with_positions(
         let key = (entry.title.clone(), chapter_path.to_string());
 
         if let Some(pos) = positions.get(&key) {
-            // Find nearest ID at this position
-            if let Some(id) = transform::find_nearest_id_fast(
-                html_text,
-                pos.byte_pos as usize,
-                pos.file_num as usize,
-                file_starts,
-            ) {
-                // Update href with fragment
-                if !entry.href.contains('#') {
-                    entry.href = format!("{}#{}", entry.href, id);
-                }
+            // Reassembled byte position: the pos:fid element's content start +
+            // offset. An entry with no pos:fid resolves to the chapter-file
+            // start (its bare href already points there).
+            let byte_pos = match pos.frag {
+                Some((fi, off)) => elems
+                    .get(fi as usize)
+                    .filter(|e| e.reassembled_pos != u32::MAX)
+                    .map(|e| e.reassembled_pos + off),
+                None => flow
+                    .file_starts
+                    .iter()
+                    .find(|(_, f)| *f == pos.file_num)
+                    .map(|(base, _)| *base),
+            };
+            if let Some(byte_pos) = byte_pos
+                && let Some(id) = transform::find_nearest_id_fast(
+                    &flow.concat,
+                    byte_pos as usize,
+                    pos.file_num as usize,
+                    &flow.file_starts,
+                )
+                && !entry.href.contains('#')
+            {
+                entry.href = format!("{}#{}", entry.href, id);
             }
         }
 
         // Recurse into children
-        resolve_toc_with_positions(&mut entry.children, positions, html_text, file_starts);
+        resolve_toc_with_positions(&mut entry.children, positions, elems, flow);
     }
 }
 
@@ -491,16 +493,16 @@ impl Azw3Importer {
         };
 
         // Parse div index
-        let mut elems = if mobi.div_index != NULL_INDEX {
+        let elems = if mobi.div_index != NULL_INDEX {
             let (entries, cncx) =
                 read_index(&mut read_record_offset, mobi.div_index as usize, codec)?;
             parse_div_index(&entries, &cncx)
         } else {
             Vec::new()
         };
-        // Resolve each chunk's absolute on-disk offset (the pos:fid coordinate
-        // base) now that both the skeleton and div tables are known.
-        assign_ondisk_starts(&mut elems, &files);
+        // `DivElement::reassembled_pos` (the pos:fid coordinate base) is filled
+        // lazily by `ensure_reassembled` once flow 0 is decompressed — it needs
+        // the actual chunk bytes to reproduce the reassembled layout.
 
         // Parse NCX for TOC
         let ncx = if mobi.ncx_index != NULL_INDEX {
@@ -529,26 +531,32 @@ impl Azw3Importer {
         let mut toc_positions = HashMap::new();
         let toc = {
             let nodes = build_toc_from_ncx(&ncx, |entry| {
-                // KF8 uses pos_fid (frag_idx, offset) - calculate actual byte position
-                // frag_idx is index into fragment/div table, offset is added to insert_pos
-                let (file_num, byte_pos) = if let Some((frag_idx, offset)) = entry.pos_fid
-                    && let Some(elem) = elems.get(frag_idx as usize)
-                {
-                    // On-disk chunk start + offset (KindleUnpack's
-                    // getIDTagByPosFid), matching `resolve_pos_fid`.
-                    (elem.file_number as usize, elem.ondisk_start + offset)
+                // KF8 entries carry a pos_fid (frag_idx, offset). The absolute
+                // byte position resolves against the *reassembled* flow, which
+                // isn't materialized until the text is decompressed, so store
+                // the pos_fid here and resolve lazily in `resolve_toc` /
+                // `ensure_linked_aids`. The file number is known now (from the
+                // pos_fid element, else `find_file_for_position`).
+                let (file_num, frag) = if let Some((frag_idx, offset)) = entry.pos_fid {
+                    let fnum = elems
+                        .get(frag_idx as usize)
+                        .map(|e| e.file_number as usize)
+                        .or_else(|| {
+                            find_file_for_position(&files, entry.pos).map(|f| f.file_number)
+                        })
+                        .unwrap_or(0);
+                    (fnum, Some((frag_idx, offset)))
                 } else {
-                    // Fall back to absolute position
-                    let file_num = find_file_for_position(&files, entry.pos)
+                    let fnum = find_file_for_position(&files, entry.pos)
                         .map(|f| f.file_number)
                         .unwrap_or(0);
-                    (file_num, entry.pos)
+                    (fnum, None)
                 };
 
                 let chapter_path = format!("part{:04}.html", file_num);
 
-                // Store position keyed by (title, chapter_path)
-                // Use unescaped title to match TocEntry.title
+                // Store position keyed by (title, chapter_path).
+                // Use unescaped title to match TocEntry.title.
                 let title = quick_xml::escape::unescape(&entry.text)
                     .map(|s| s.into_owned())
                     .unwrap_or_else(|_| entry.text.clone());
@@ -556,7 +564,7 @@ impl Azw3Importer {
                 toc_positions.insert(
                     key,
                     TocPosition {
-                        byte_pos,
+                        frag,
                         file_num: file_num as u32,
                     },
                 );
@@ -591,6 +599,7 @@ impl Azw3Importer {
                 elems,
             },
             text_cache: None,
+            reassembled: None,
             linked_aids: None,
             chapter_cache: HashMap::new(),
             assets: Vec::new(),
@@ -674,66 +683,92 @@ impl Azw3Importer {
         Ok(text)
     }
 
+    /// Reassemble flow 0 (materialize each chapter, chunks spliced into their
+    /// skeletons) and record every element's offset in the concatenated result,
+    /// writing it onto `DivElement::reassembled_pos` so anchor resolution walks
+    /// the reassembled coordinate space. Loads the text if needed; idempotent.
+    fn ensure_reassembled(&mut self) -> io::Result<()> {
+        if self.reassembled.is_some() {
+            return Ok(());
+        }
+        if self.text_cache.is_none() {
+            self.text_cache = Some(self.extract_text()?);
+        }
+        let flow = {
+            let text = self.text_cache.as_ref().unwrap();
+            let (html_start, html_end) = self
+                .kf8
+                .flow_table
+                .first()
+                .copied()
+                .unwrap_or((0, text.len()));
+            let html_text = &text[html_start..html_end.min(text.len())];
+            reassemble_flow(html_text, &self.kf8.files, &self.kf8.elems)
+        };
+        for (elem, &pos) in self.kf8.elems.iter_mut().zip(&flow.elem_pos) {
+            elem.reassembled_pos = pos;
+        }
+        self.reassembled = Some(flow);
+        Ok(())
+    }
+
     /// Compute the link-target `aid` set once (see the `linked_aids` field).
-    /// Requires `text_cache` to be populated; sets `Some` even on a missing
-    /// cache (empty set) so callers can unwrap after a successful text load.
+    /// Requires the reassembled flow; sets `Some` even when it is missing
+    /// (empty set) so callers can unwrap after a successful load.
     fn ensure_linked_aids(&mut self) {
         if self.linked_aids.is_some() {
             return;
         }
-        let Some(text) = self.text_cache.as_ref() else {
-            self.linked_aids = Some(HashSet::new());
-            return;
+        let set = {
+            let (Some(flow), Some(text)) = (self.reassembled.as_ref(), self.text_cache.as_ref())
+            else {
+                self.linked_aids = Some(HashSet::new());
+                return;
+            };
+            // NCX TOC entries resolve through the same nearest-attribute lookup
+            // (`resolve_toc`), so their positions are link sources too — in the
+            // reassembled coordinate space (`elem.reassembled_pos + off`).
+            let toc_targets: Vec<(usize, usize)> = self
+                .toc_positions
+                .values()
+                .filter_map(|p| {
+                    let (fi, off) = p.frag?;
+                    let elem = self.kf8.elems.get(fi as usize)?;
+                    (elem.reassembled_pos != u32::MAX).then(|| {
+                        (
+                            (elem.reassembled_pos + off) as usize,
+                            elem.file_number as usize,
+                        )
+                    })
+                })
+                .collect();
+            // Scan the full text for `kindle:pos:fid:` links (auxiliary flows
+            // included); resolve them against the reassembled flow.
+            transform::collect_linked_aids(
+                text,
+                &flow.concat,
+                &self.kf8.elems,
+                &flow.file_starts,
+                &toc_targets,
+            )
         };
-        let (html_start, html_end) = self
-            .kf8
-            .flow_table
-            .first()
-            .copied()
-            .unwrap_or((0, text.len()));
-        let html_text = &text[html_start..html_end.min(text.len())];
-        let file_starts: Vec<(u32, u32)> = self
-            .kf8
-            .files
-            .iter()
-            .map(|f| (f.start_pos, f.file_number as u32))
-            .collect();
-        // NCX TOC entries resolve through the same nearest-attribute lookup
-        // (`resolve_toc`), so their positions are link sources too.
-        let toc_targets: Vec<(usize, usize)> = self
-            .toc_positions
-            .values()
-            .map(|p| (p.byte_pos as usize, p.file_num as usize))
-            .collect();
-        self.linked_aids = Some(transform::collect_linked_aids(
-            text,
-            html_text,
-            &self.kf8.elems,
-            &file_starts,
-            &toc_targets,
-        ));
+        self.linked_aids = Some(set);
     }
 
-    /// Build a specific chapter from cached text.
-    fn build_chapter(
-        &self,
-        chapter_id: u32,
-        text: &[u8],
-        linked_aids: &HashSet<String>,
-    ) -> io::Result<Vec<u8>> {
-        // Get HTML content (flow 0)
-        let (html_start, html_end) = self
-            .kf8
-            .flow_table
-            .first()
-            .copied()
-            .unwrap_or((0, text.len()));
-        let html_text = &text[html_start..html_end.min(text.len())];
+    /// Build a specific chapter from the reassembled flow. `ensure_reassembled`
+    /// must have run.
+    fn build_chapter(&self, chapter_id: u32, linked_aids: &HashSet<String>) -> io::Result<Vec<u8>> {
+        let text = self
+            .text_cache
+            .as_ref()
+            .expect("text loaded by ensure_reassembled");
+        let flow = self
+            .reassembled
+            .as_ref()
+            .expect("flow built by ensure_reassembled");
 
-        // Build all parts and return the requested one
-        let parts = build_parts(html_text, &self.kf8.files, &self.kf8.elems);
-
-        let content = parts
+        let content = flow
+            .parts
             .get(chapter_id as usize)
             .map(|(_, content)| content.clone())
             .ok_or_else(|| {
@@ -751,16 +786,14 @@ impl Azw3Importer {
         let inlined = transform::inline_svg_flows(&content, &self.kf8.flow_table, text);
 
         // Transform kindle: references to standard EPUB-style paths
-        // This converts kindle:pos:fid:XXXX:off:YYYY to partNNNN.html#id
-        let file_starts: Vec<(u32, u32)> = self
-            .kf8
-            .files
-            .iter()
-            .map(|f| (f.start_pos, f.file_number as u32))
-            .collect();
-
-        let transformed =
-            transform::transform_kindle_refs(&inlined, &self.kf8.elems, html_text, &file_starts);
+        // (kindle:pos:fid:XXXX:off:YYYY → partNNNN.html#id), resolving each
+        // target against the reassembled flow (`concat` + its element offsets).
+        let transformed = transform::transform_kindle_refs(
+            &inlined,
+            &self.kf8.elems,
+            &flow.concat,
+            &flow.file_starts,
+        );
 
         // kindlegen's in-book TOC "Cover" rows can link straight at the
         // cover image — an EPUB 3 violation (RSC-010). Keep the label only.
@@ -1047,25 +1080,60 @@ fn looks_like_svg_flow(bytes: &[u8]) -> bool {
     bstr::ByteSlice::find(head, b"<svg").is_some()
 }
 
-/// Build chapter parts by combining skeletons with div content.
-fn build_parts(
-    text: &[u8],
-    files: &[SkeletonFile],
-    elems: &[DivElement],
-) -> Vec<(String, Vec<u8>)> {
+/// The reassembled flow 0: chapters materialized (chunks spliced into their
+/// skeletons) plus the coordinate map anchor resolution needs.
+///
+/// KF8 stores flow 0 on disk as `[skel₀][chunk₀…][skel₁][chunk₁…]` — every
+/// chunk sits after its file's whole skeleton — but the frag/chunk position
+/// tables (`insert_pos`) and KindleUnpack's `getIDTag` address the *reassembled*
+/// text, where each chunk is spliced back into its skeleton. Resolving anchors
+/// against the on-disk flow makes a backward walk from a chunk-start land on the
+/// skeleton's tail element (the wrong div). So we reassemble once and resolve
+/// against [`concat`](Self::concat).
+struct ReassembledFlow {
+    /// Per-file `(filename, reassembled bytes)`, in spine order — the chapter
+    /// content the importer emits.
+    parts: Vec<(String, Vec<u8>)>,
+    /// All parts concatenated — the coordinate space anchor resolution walks.
+    concat: Vec<u8>,
+    /// `(offset_in_concat, file_number)` per part, ascending — the file bounds
+    /// `find_nearest_id_*` needs.
+    file_starts: Vec<(u32, u32)>,
+    /// Absolute offset in `concat` where each `elems[i]` chunk's content begins,
+    /// or `u32::MAX` when the chunk was dropped (out of bounds / bad insert).
+    elem_pos: Vec<u32>,
+}
+
+/// Reassemble flow 0 from its `[skel][chunks]` on-disk layout, tracking where
+/// each chunk's content lands. Mirrors the historical `build_parts` splice
+/// (insert each chunk at `insert_pos - skel_start` into the growing skeleton)
+/// exactly, so the produced chapter bytes are unchanged; it additionally
+/// concatenates the parts and records each element's final offset (shifting
+/// earlier placements when a later chunk splices before them) for pos:fid /
+/// TOC anchor resolution.
+fn reassemble_flow(text: &[u8], files: &[SkeletonFile], elems: &[DivElement]) -> ReassembledFlow {
     let mut parts = Vec::new();
+    let mut concat: Vec<u8> = Vec::new();
+    let mut file_starts = Vec::new();
+    let mut elem_pos = vec![u32::MAX; elems.len()];
     let mut div_ptr = 0;
 
     for file in files {
         let skel_start = file.start_pos as usize;
         let skel_end = skel_start + file.length as usize;
 
+        // Skip a file whose skeleton runs past the text, exactly as the
+        // historical `build_parts` did (without advancing `div_ptr`), so the
+        // emitted chapter set stays byte-identical.
         if skel_end > text.len() {
             continue;
         }
 
+        let file_base = concat.len() as u32;
         let mut skeleton = text[skel_start..skel_end].to_vec();
         let mut baseptr = skel_end;
+        // (div_ptr, content offset within this file's reassembled bytes).
+        let mut placed: Vec<(usize, usize)> = Vec::new();
 
         for _i in 0..file.div_count {
             if div_ptr >= elems.len() {
@@ -1084,6 +1152,14 @@ fn build_parts(
             let insert_pos = (elem.insert_pos as usize).saturating_sub(skel_start);
 
             if insert_pos <= skeleton.len() {
+                // A splice at `insert_pos` shifts every earlier placement at or
+                // after it by the inserted length — keep their final offsets.
+                for p in placed.iter_mut() {
+                    if p.1 >= insert_pos {
+                        p.1 += part_len;
+                    }
+                }
+                placed.push((div_ptr, insert_pos));
                 let mut new_skeleton = Vec::with_capacity(skeleton.len() + part.len());
                 new_skeleton.extend_from_slice(&skeleton[..insert_pos]);
                 new_skeleton.extend_from_slice(part);
@@ -1095,15 +1171,27 @@ fn build_parts(
             div_ptr += 1;
         }
 
+        for (dp, off) in placed {
+            elem_pos[dp] = file_base + off as u32;
+        }
         let filename = format!("part{:04}.html", file.file_number);
+        file_starts.push((file_base, file.file_number as u32));
+        concat.extend_from_slice(&skeleton);
         parts.push((filename, skeleton));
     }
 
     if parts.is_empty() && !text.is_empty() {
         parts.push(("part0000.html".to_string(), text.to_vec()));
+        file_starts.push((0, 0));
+        concat = text.to_vec();
     }
 
-    parts
+    ReassembledFlow {
+        parts,
+        concat,
+        file_starts,
+        elem_pos,
+    }
 }
 
 fn find_file_for_position(files: &[SkeletonFile], pos: u32) -> Option<&SkeletonFile> {
