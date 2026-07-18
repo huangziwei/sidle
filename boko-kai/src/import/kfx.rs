@@ -700,16 +700,14 @@ impl KfxImporter {
                                     "title" if self.metadata.title.is_empty() => {
                                         self.metadata.title = value.to_string()
                                     }
-                                    "author" => {
-                                        // calibre joins multiple authors with " & " in a
-                                        // single `author` field (yj_metadata.py:209) and
-                                        // splits on "&" when reading back. Mirror that.
-                                        for part in value.split('&') {
-                                            let trimmed = part.trim();
-                                            if !trimmed.is_empty() {
-                                                self.metadata.authors.push(trimmed.to_string());
-                                            }
-                                        }
+                                    // One entry per repeated `author` key,
+                                    // VERBATIM — no trim, no `&` split (a
+                                    // multi-author book repeats the key;
+                                    // `kfx_to_epub::loader` pushes each
+                                    // value untouched, trailing spaces and
+                                    // all, and the OPF mirrors the source).
+                                    "author" if !value.is_empty() => {
+                                        self.metadata.authors.push(value.to_string())
                                     }
                                     "publisher" => {
                                         self.metadata.publisher = Some(value.trim().to_string())

@@ -1272,6 +1272,29 @@ fn build_text_with_spans(
         .map(|(_, s)| s)
         .collect();
 
+    // A ruby's interior is opaque in that walk: its `<rb>` slices come
+    // straight from the text, so a mark starting inside a ruby's range is
+    // skipped (`emit_marks` consumes the ruby and jumps the cursor past
+    // it) — while a mark CONTAINING the ruby nests it instead. Drop
+    // interior marks up front; the tree build below would otherwise nest
+    // them inside the `<rb>`.
+    let ruby_bounds: Vec<(usize, usize)> = spans
+        .iter()
+        .filter(|s| s.role == Role::Ruby)
+        .map(|s| (s.offset, s.length))
+        .collect();
+    let spans: Vec<&SpanStart> = spans
+        .into_iter()
+        .filter(|s| {
+            !ruby_bounds.iter().any(|&(ro, rl)| {
+                let interior = s.offset >= ro && s.offset < ro + rl;
+                let is_self = s.role == Role::Ruby && s.offset == ro && s.length == rl;
+                let contains_ruby = s.offset == ro && s.length > rl;
+                interior && !is_self && !contains_ruby
+            })
+        })
+        .collect();
+
     // Build a nested span tree: sort by offset, then length DESCENDING
     // (enclosing spans first) so containment nests below; a link ties ahead
     // of an equal-range mark (the mark renders inside the `<a>`).
