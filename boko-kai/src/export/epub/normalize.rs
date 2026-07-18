@@ -208,14 +208,16 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
     let mut global_styles = GlobalStylePool::new();
     let mut ir_chapters: Vec<(ChapterId, String, Arc<Chapter>)> = Vec::with_capacity(spine.len());
 
-    for (idx, entry) in spine.iter().enumerate() {
+    // One bulk load: importers with thread-safe internals build the
+    // chapters across cores (`Book::load_chapters_cached`). Style merging
+    // is order-dependent, so it stays a serial pass over the results.
+    let ids: Vec<ChapterId> = spine.iter().map(|e| e.id).collect();
+    let loaded = book.load_chapters_cached(&ids)?;
+    for (idx, (entry, chapter)) in spine.iter().zip(loaded).enumerate() {
         let source_path = book
             .source_id(entry.id)
             .unwrap_or("unknown.xhtml")
             .to_string();
-
-        // Load chapter as IR (using cache for efficiency)
-        let chapter = book.load_chapter_cached(entry.id)?;
 
         // Merge styles into global pool
         global_styles.merge(idx, &chapter);

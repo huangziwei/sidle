@@ -144,8 +144,15 @@ pub struct KfxImporter {
     /// bcRawMedia location key (resolved entity symbol name) → payload location.
     image_media: HashMap<String, EntityLoc>,
 
-    /// Content cache: name -> list of strings (lazily populated)
-    content_cache: HashMap<String, Vec<String>>,
+    /// Content (`$145`) entity name → location, built once in `from_source`
+    /// so text lookups resolve by direct index instead of a scan-and-parse
+    /// over every content entity (first entity wins on duplicate names,
+    /// like the scan did).
+    content_by_name: HashMap<String, EntityLoc>,
+    /// Content cache: name -> list of strings (lazily populated). Behind a
+    /// lock so `lookup_content_text` works from `&self` — chapter builds
+    /// run in parallel across a shared importer reference.
+    content_cache: std::sync::RwLock<HashMap<String, Vec<String>>>,
 
     /// Anchor map: anchor_name -> uri (for external link resolution)
     anchors: Arc<HashMap<String, String>>,
@@ -249,92 +256,41 @@ impl Importer for KfxImporter {
         self.index_styles()?;
         self.index_ruby_content()?;
 
-        // Fixed-layout books load per-page chapters.
-        if !self.fxl_pages.is_empty() {
-            return self.load_fxl_page(id);
-        }
-
-        let section_name = self
-            .section_names
-            .get(id.0 as usize)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Chapter not found"))?
-            .clone();
-
-        // Get storyline location
-        let storyline_loc = self.resolve_section_to_storyline(&section_name)?;
-
-        // Parse storyline entity
-        let storyline_ion = self.parse_entity_ion(storyline_loc)?;
-
-        // Record every eid the storyline declares against this chapter —
-        // whether or not the element survives into the IR — so nav targets
-        // resolve to the right file (the mechanical route's structural
-        // `element_id_to_filename`). First registration wins: the exporter
-        // loads chapters in spine order, matching that route's walk.
-        let mut declared_eids = Vec::new();
-        collect_declared_eids(&storyline_ion, &mut declared_eids);
-        for eid in declared_eids {
-            self.eid_chapters.entry(eid).or_insert(id);
-        }
-
-        // Clone Arc handles to avoid borrow conflict with content lookup closure
-        let symbols = Arc::clone(&self.symbols);
-        let anchors = Arc::clone(&self.anchors);
-        let styles = Arc::clone(&self.styles);
-        let ruby_index = Arc::clone(&self.ruby_index);
-        let anchor_table = Arc::clone(&self.anchor_table);
-
-        // Parse storyline and build IR using schema-driven tokenization
-        let mut chapter = parse_storyline_to_ir(
-            &storyline_ion,
-            symbols.as_ref(),
-            Some(anchors.as_ref()),
-            Some(styles.as_ref()),
-            Some(ruby_index.as_ref()),
-            Some(anchor_table.as_ref()),
-            |name, index| self.lookup_content_text(name, index),
-        );
-
-        // Re-root under the section's main page-template container — the
-        // mechanical route's body-level `<div>` — so anchors targeting the
-        // template or the storyline root (a common page-list/TOC shape)
-        // stamp onto a real element.
-        let template = self
-            .section_templates
-            .get(&section_name)
-            .cloned()
-            .unwrap_or_default();
-        if let Some(eid) = template.eid {
-            self.eid_chapters.entry(eid).or_insert(id);
-        }
-        let story_eid = storyline_ion
-            .as_struct()
-            .and_then(|f| get_field(f, sym!(Id)))
-            .and_then(|v| v.as_int());
-        crate::formats::kfx::storyline::apply_section_template(
-            &mut chapter,
-            template.eid,
-            template.style.as_deref(),
-            &template.inline_style,
-            story_eid,
-            Some(styles.as_ref()),
-            Some(anchor_table.as_ref()),
-        );
-
-        // No generic `html::optimize` pass here: the KFX token→IR builder
-        // already produces a tree that mirrors the mechanical route's
-        // pre-consolidation DOM, and the shared
-        // `export::epub::dom::consolidate_part` (run on both KFX→EPUB
-        // routes) does the port-faithful cleanup.
-        // Generic HTML-cleanup passes (list fusion, empty-node prune, span
-        // merge) only DIVERGE from the reference — e.g. `fuse_lists` merged
-        // two adjacent single-item `<ul>`s the port keeps separate — so they
-        // must not run on the KFX path. `optimize` still serves the
-        // HTML-sourced importers via `compile_html`.
-
-        self.rewrite_image_srcs(&mut chapter);
-
+        let (chapter, eids) = self.build_chapter(id)?;
+        self.register_eids(id, &eids);
         Ok(chapter)
+    }
+
+    fn load_chapters(&mut self, ids: &[ChapterId]) -> Vec<io::Result<Chapter>> {
+        // One-time indexes first — the parallel builds below share `&self`.
+        for index in [
+            Self::index_anchor_entities,
+            Self::index_styles,
+            Self::index_ruby_content,
+        ] {
+            if let Err(e) = index(self) {
+                return ids
+                    .iter()
+                    .map(|_| Err(io::Error::new(e.kind(), e.to_string())))
+                    .collect();
+            }
+        }
+
+        // Chapter builds are pure per chapter; eid registration is
+        // order-sensitive (first-wins in spine order), so it stays serial,
+        // applied in `ids` order after the parallel phase — the same map
+        // the one-at-a-time loads produce.
+        let built = crate::util::parallel_map(ids, |id| self.build_chapter(*id));
+        built
+            .into_iter()
+            .zip(ids)
+            .map(|(res, id)| {
+                res.map(|(chapter, eids)| {
+                    self.register_eids(*id, &eids);
+                    chapter
+                })
+            })
+            .collect()
     }
 
     fn load_raw(&mut self, id: ChapterId) -> io::Result<Vec<u8>> {
@@ -632,7 +588,8 @@ impl KfxImporter {
             image_by_name: HashMap::new(),
             image_by_filename: HashMap::new(),
             image_media: HashMap::new(),
-            content_cache: HashMap::new(),
+            content_by_name: HashMap::new(),
+            content_cache: std::sync::RwLock::new(HashMap::new()),
             anchors: Arc::new(HashMap::new()),
             anchors_indexed: false,
             styles: Arc::new(HashMap::new()),
@@ -664,6 +621,9 @@ impl KfxImporter {
         // (needs `content_ppd` from `derive_writing_direction` for the
         // spread pairing).
         importer.expand_fxl_spine()?;
+        // Content name → location, so per-token text lookups during chapter
+        // builds are direct reads.
+        importer.index_content_entities();
 
         Ok(importer)
     }
@@ -1411,13 +1371,110 @@ impl KfxImporter {
         }
     }
 
-    /// Load one fixed-layout page as a chapter: take the page's leaf
+    /// Build one chapter's IR without touching importer state — with the
+    /// one-time indexes in place, safe to call across threads over a shared
+    /// `&self`. Returns the chapter and every element id it declares, in
+    /// registration order; the caller stamps those into `eid_chapters`
+    /// (first-wins, spine order — the mechanical route's structural
+    /// `element_id_to_filename` walk).
+    fn build_chapter(&self, id: ChapterId) -> io::Result<(Chapter, Vec<i64>)> {
+        // Fixed-layout books build per-page chapters.
+        if !self.fxl_pages.is_empty() {
+            return self.build_fxl_page(id);
+        }
+
+        let section_name = self
+            .section_names
+            .get(id.0 as usize)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Chapter not found"))?
+            .clone();
+
+        // Get storyline location
+        let storyline_loc = self.resolve_section_to_storyline(&section_name)?;
+
+        // Parse storyline entity
+        let storyline_ion = self.parse_entity_ion(storyline_loc)?;
+
+        // Every eid the storyline declares counts — whether or not the
+        // element survives into the IR — so nav targets resolve to the
+        // right file.
+        let mut declared_eids = Vec::new();
+        collect_declared_eids(&storyline_ion, &mut declared_eids);
+
+        let symbols = Arc::clone(&self.symbols);
+        let anchors = Arc::clone(&self.anchors);
+        let styles = Arc::clone(&self.styles);
+        let ruby_index = Arc::clone(&self.ruby_index);
+        let anchor_table = Arc::clone(&self.anchor_table);
+
+        // Parse storyline and build IR using schema-driven tokenization
+        let mut chapter = parse_storyline_to_ir(
+            &storyline_ion,
+            symbols.as_ref(),
+            Some(anchors.as_ref()),
+            Some(styles.as_ref()),
+            Some(ruby_index.as_ref()),
+            Some(anchor_table.as_ref()),
+            |name, index| self.lookup_content_text(name, index),
+        );
+
+        // Re-root under the section's main page-template container — the
+        // mechanical route's body-level `<div>` — so anchors targeting the
+        // template or the storyline root (a common page-list/TOC shape)
+        // stamp onto a real element.
+        let template = self
+            .section_templates
+            .get(&section_name)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(eid) = template.eid {
+            declared_eids.push(eid);
+        }
+        let story_eid = storyline_ion
+            .as_struct()
+            .and_then(|f| get_field(f, sym!(Id)))
+            .and_then(|v| v.as_int());
+        crate::formats::kfx::storyline::apply_section_template(
+            &mut chapter,
+            template.eid,
+            template.style.as_deref(),
+            &template.inline_style,
+            story_eid,
+            Some(styles.as_ref()),
+            Some(anchor_table.as_ref()),
+        );
+
+        // No generic `html::optimize` pass here: the KFX token→IR builder
+        // already produces a tree that mirrors the mechanical route's
+        // pre-consolidation DOM, and the shared
+        // `export::epub::dom::consolidate_part` (run on both KFX→EPUB
+        // routes) does the port-faithful cleanup.
+        // Generic HTML-cleanup passes (list fusion, empty-node prune, span
+        // merge) only DIVERGE from the reference — e.g. `fuse_lists` merged
+        // two adjacent single-item `<ul>`s the port keeps separate — so they
+        // must not run on the KFX path. `optimize` still serves the
+        // HTML-sourced importers via `compile_html`.
+
+        self.rewrite_image_srcs(&mut chapter);
+
+        Ok((chapter, declared_eids))
+    }
+
+    /// Stamp a chapter's declared element ids into `eid_chapters`,
+    /// first-registration-wins.
+    fn register_eids(&mut self, id: ChapterId, eids: &[i64]) {
+        for &eid in eids {
+            self.eid_chapters.entry(eid).or_insert(id);
+        }
+    }
+
+    /// Build one fixed-layout page as a chapter: take the page's leaf
     /// container from the cached spread walk, synthesize a storyline from
     /// the container's children (inline `content_list` wins over its story —
     /// the mechanical route's `process_content` order), and run the shared
     /// token→IR build with the container itself as the chapter's root — the
     /// same body-level `<div>` that route emits per page.
-    fn load_fxl_page(&mut self, id: ChapterId) -> io::Result<Chapter> {
+    fn build_fxl_page(&self, id: ChapterId) -> io::Result<(Chapter, Vec<i64>)> {
         let page = self
             .fxl_pages
             .get(id.0 as usize)
@@ -1461,18 +1518,15 @@ impl KfxImporter {
             .collect();
         let synthetic = IonValue::Struct(vec![(sym!(ContentList), IonValue::List(children))]);
 
-        // Record every eid the page subtree declares — and the container's
-        // own — against this chapter, for nav-target file resolution (the
-        // mechanical route's per-page `collect_element_ids`). First
-        // registration wins across pages, matching its emission order.
+        // Every eid the page subtree declares — and the container's own —
+        // counts for nav-target file resolution (the mechanical route's
+        // per-page `collect_element_ids`); the caller registers them
+        // first-wins across pages, matching its emission order.
         let container_eid = get_field(cfields, sym!(Id)).and_then(|v| v.as_int());
         let mut declared = Vec::new();
         collect_declared_eids(&synthetic, &mut declared);
         if let Some(eid) = container_eid {
             declared.push(eid);
-        }
-        for eid in declared {
-            self.eid_chapters.entry(eid).or_insert(id);
         }
 
         let style_name = get_field(cfields, sym!(Style))
@@ -1511,7 +1565,7 @@ impl KfxImporter {
         );
 
         self.rewrite_image_srcs(&mut chapter);
-        Ok(chapter)
+        Ok((chapter, declared))
     }
 
     /// Rewrite image references from KFX resource names ("eF") to the
@@ -1842,17 +1896,25 @@ impl KfxImporter {
 
     /// Look up text content by name and index.
     ///
-    /// Lazily loads and caches content entities as needed.
-    fn lookup_content_text(&mut self, name: &str, index: usize) -> Option<String> {
+    /// Lazily loads and caches content entities as needed. `&self` so
+    /// parallel chapter builds can share the importer; a race on the same
+    /// name parses the entity twice and caches identical lists — harmless.
+    fn lookup_content_text(&self, name: &str, index: usize) -> Option<String> {
         // Check cache first
-        if let Some(content_list) = self.content_cache.get(name) {
-            return content_list.get(index).cloned();
+        {
+            let cache = self.content_cache.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(content_list) = cache.get(name) {
+                return content_list.get(index).cloned();
+            }
         }
 
         // Load and cache the content entity
         if let Some(content_list) = self.load_content_entity(name) {
             let result = content_list.get(index).cloned();
-            self.content_cache.insert(name.to_string(), content_list);
+            self.content_cache
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(name.to_string(), content_list);
             return result;
         }
 
@@ -1861,29 +1923,40 @@ impl KfxImporter {
 
     /// Load a content entity by name and return its string list.
     fn load_content_entity(&self, name: &str) -> Option<Vec<String>> {
-        // Find content entity with matching name
-        for loc in &self.entities {
-            if loc.type_id == KfxSymbol::Content as u32
-                && let Ok(elem) = self.parse_entity_ion(*loc)
-                && let Some(fields) = elem.as_struct()
-            {
-                // Check if name matches
-                let entity_name =
-                    get_field(fields, sym!(Name)).and_then(|v| self.get_symbol_text(v));
+        let loc = self.content_by_name.get(name)?;
+        let elem = self.parse_entity_ion(*loc).ok()?;
+        let fields = elem.as_struct()?;
+        let list = get_field(fields, sym!(ContentList)).and_then(|v| v.as_list())?;
+        Some(
+            list.iter()
+                .filter_map(|v| v.as_string().map(|s| s.to_string()))
+                .collect(),
+        )
+    }
 
-                if entity_name == Some(name)
-                    && let Some(list) =
-                        get_field(fields, sym!(ContentList)).and_then(|v| v.as_list())
-                {
-                    return Some(
-                        list.iter()
-                            .filter_map(|v| v.as_string().map(|s| s.to_string()))
-                            .collect(),
-                    );
-                }
+    /// Build the content (`$145`) name → location index: one pass, parsing
+    /// each content entity once. The old lookup scanned and parsed every
+    /// content entity per cache miss — O(entities) per distinct story name.
+    fn index_content_entities(&mut self) {
+        let locs: Vec<EntityLoc> = self
+            .entities
+            .iter()
+            .filter(|e| e.type_id == KfxSymbol::Content as u32)
+            .copied()
+            .collect();
+        for loc in locs {
+            if let Ok(elem) = self.parse_entity_ion(loc)
+                && let Some(fields) = elem.as_struct()
+                // The scan this replaces skipped a name-matching entity
+                // with no content_list; only list-bearing entities index.
+                && get_field(fields, sym!(ContentList)).is_some_and(|v| v.as_list().is_some())
+                && let Some(name) = get_field(fields, sym!(Name))
+                    .and_then(|v| self.get_symbol_text(v))
+                    .map(|s| s.to_string())
+            {
+                self.content_by_name.entry(name).or_insert(loc);
             }
         }
-        None
     }
 
     /// Index external resources.

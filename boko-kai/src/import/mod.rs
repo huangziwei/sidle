@@ -141,6 +141,14 @@ pub trait Importer: Send + Sync {
         Ok(chapter)
     }
 
+    /// Load several chapters, one result per input id. Implementations
+    /// whose per-chapter builds are independent may parallelize (KFX builds
+    /// storyline IR across all cores here); the default is a serial
+    /// `load_chapter` map.
+    fn load_chapters(&mut self, ids: &[ChapterId]) -> Vec<std::io::Result<Chapter>> {
+        ids.iter().map(|id| self.load_chapter(*id)).collect()
+    }
+
     // --- Track 2: Raw Access (The Converter) ---
 
     /// Returns the internal source path for a chapter (e.g., "OEBPS/text/ch01.xhtml").

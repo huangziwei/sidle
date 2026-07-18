@@ -550,6 +550,48 @@ impl Book {
         Ok(chapter_arc)
     }
 
+    /// Load several chapters as IR with caching, one bulk backend call for
+    /// the misses — importers with thread-safe internals build those in
+    /// parallel (`Importer::load_chapters`). Results come back in input
+    /// order; the first backend error aborts (matching a serial `?` loop).
+    pub fn load_chapters_cached(&mut self, ids: &[ChapterId]) -> io::Result<Vec<Arc<Chapter>>> {
+        let misses: Vec<ChapterId> = {
+            let cache = self
+                .ir_cache
+                .read()
+                .map_err(|_| io::Error::other("IR cache lock poisoned"))?;
+            let mut seen = std::collections::HashSet::new();
+            ids.iter()
+                .filter(|id| !cache.contains_key(id) && seen.insert(**id))
+                .copied()
+                .collect()
+        };
+
+        if !misses.is_empty() {
+            let loaded = self.backend.load_chapters(&misses);
+            let mut cache = self
+                .ir_cache
+                .write()
+                .map_err(|_| io::Error::other("IR cache lock poisoned"))?;
+            for (id, chapter) in misses.iter().zip(loaded) {
+                cache.insert(*id, Arc::new(chapter?));
+            }
+        }
+
+        let cache = self
+            .ir_cache
+            .read()
+            .map_err(|_| io::Error::other("IR cache lock poisoned"))?;
+        ids.iter()
+            .map(|id| {
+                cache
+                    .get(id)
+                    .map(Arc::clone)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Chapter not found"))
+            })
+            .collect()
+    }
+
     /// Clear the IR cache.
     ///
     /// Call this to free memory after normalized export is complete.
