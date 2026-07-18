@@ -148,6 +148,7 @@ pub struct NormalizedContent {
 }
 
 /// What a synthesis-time link resolver decided for one `href` value.
+#[derive(Clone)]
 pub enum LinkOutcome {
     /// Emit the href unchanged.
     Keep,
@@ -388,68 +389,101 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
     let mut all_assets = HashSet::new();
     let language = book.metadata().language.clone();
 
-    for (idx, (chapter_id, source_path, ir)) in ir_chapters.iter().enumerate() {
-        // Declared style program: build the chapter through the shared
-        // XHTML DOM + consolidation passes — the same code the mechanical
-        // route serializes with, so both KFX→EPUB engines' chapter files
-        // are byte-identical by construction. The title comes from
-        // `chapter_title` (a fixed-layout page is titled by its owning
-        // section, not its per-page name), matching the mechanical
-        // `push_book_part`; the viewport is the FXL page's pixel box.
-        if let Some(src) = &source_styles {
+    // Declared style program: build each chapter through the shared XHTML
+    // DOM + consolidation passes — the same code the mechanical route
+    // serializes with, so both KFX→EPUB engines' chapter files are
+    // byte-identical by construction. The title comes from `chapter_title`
+    // (a fixed-layout page is titled by its owning section, not its
+    // per-page name), matching the mechanical `push_book_part`; the
+    // viewport is the FXL page's pixel box.
+    //
+    // Link resolution reads the importer through `book`, which cannot
+    // cross threads — so every href the emit walk will consult is resolved
+    // up front into a plain map, and the per-chapter synthesis (a pure
+    // function of the IR) runs across cores. `parallel_map` preserves
+    // input order and the asset set is order-insensitive, so the output
+    // bytes are exactly the serial loop's.
+    if let Some(src) = &source_styles {
+        let mut link_map: HashMap<String, LinkOutcome> = HashMap::new();
+        for (_, _, ch) in &ir_chapters {
+            for node in ch.iter_dfs() {
+                if let Some(href) = ch.semantics.href(node)
+                    && !link_map.contains_key(href)
+                {
+                    link_map.insert(href.to_string(), href_resolver(href));
+                }
+            }
+        }
+        let titles: Vec<String> = ir_chapters
+            .iter()
+            .map(|(id, sp, _)| book.chapter_title(*id).unwrap_or(sp).to_string())
+            .collect();
+        let jobs: Vec<usize> = (0..ir_chapters.len()).collect();
+        let emitted = crate::util::parallel_map(&jobs, |&idx| {
+            let (_, _, ir) = &ir_chapters[idx];
+            let resolver = |href: &str| -> LinkOutcome {
+                link_map.get(href).cloned().unwrap_or(LinkOutcome::DropHref)
+            };
             let opts = super::dom_synth::ChapterEmit {
-                title: book.chapter_title(*chapter_id).unwrap_or(source_path),
+                title: &titles[idx],
                 language: &language,
                 source_styles: src,
-                href_resolver: &href_resolver,
+                href_resolver: &resolver,
                 viewport: spine.get(idx).and_then(|e| e.viewport),
             };
-            let document = super::dom_synth::emit_chapter(ir, &opts, &mut all_assets);
+            let mut assets = HashSet::new();
+            let document = super::dom_synth::emit_chapter(ir, &opts, &mut assets);
+            (document, assets)
+        });
+        for (idx, (document, assets)) in emitted.into_iter().enumerate() {
+            let (chapter_id, source_path, _) = &ir_chapters[idx];
+            all_assets.extend(assets);
             chapters.push(ChapterContent {
                 id: *chapter_id,
                 source_path: source_path.clone(),
                 document,
             });
-            continue;
         }
-
-        // Computed-style `.c<N>` regime (no declared style program):
-        // string synthesis with the interned class list.
-        let mut remapped_class_list: Vec<Option<&str>> = Vec::new();
-        if let Some(artifact) = &css_artifact {
-            remapped_class_list = vec![None; ir.styles.len()];
-            for (local_id, _) in ir.styles.iter() {
-                let global_id = global_styles.remap(idx, local_id);
-                if let Some(class_name) = artifact.class_name_fast(global_id) {
-                    let slot = remapped_class_list
-                        .get_mut(local_id.0 as usize)
-                        .expect("style id out of bounds");
-                    *slot = Some(class_name);
+    } else {
+        for (idx, (chapter_id, source_path, ir)) in ir_chapters.iter().enumerate() {
+            // Computed-style `.c<N>` regime (no declared style program):
+            // string synthesis with the interned class list.
+            let mut remapped_class_list: Vec<Option<&str>> = Vec::new();
+            if let Some(artifact) = &css_artifact {
+                remapped_class_list = vec![None; ir.styles.len()];
+                for (local_id, _) in ir.styles.iter() {
+                    let global_id = global_styles.remap(idx, local_id);
+                    if let Some(class_name) = artifact.class_name_fast(global_id) {
+                        let slot = remapped_class_list
+                            .get_mut(local_id.0 as usize)
+                            .expect("style id out of bounds");
+                        *slot = Some(class_name);
+                    }
                 }
             }
+
+            // Extract title from first heading or use source path
+            let title = extract_chapter_title(ir).unwrap_or_else(|| source_path.clone());
+
+            // Synthesize XHTML document
+            let result = synthesize_xhtml_document_with_links(
+                ir,
+                &remapped_class_list,
+                &title,
+                Some("style.css"),
+                resolve_links.then_some(&href_resolver as &dyn Fn(&str) -> LinkOutcome),
+                None,
+            );
+
+            // Collect assets
+            all_assets.extend(result.assets);
+
+            chapters.push(ChapterContent {
+                id: *chapter_id,
+                source_path: source_path.clone(),
+                document: result.body,
+            });
         }
-
-        // Extract title from first heading or use source path
-        let title = extract_chapter_title(ir).unwrap_or_else(|| source_path.clone());
-
-        // Synthesize XHTML document
-        let result = synthesize_xhtml_document_with_links(
-            ir,
-            &remapped_class_list,
-            &title,
-            Some("style.css"),
-            resolve_links.then_some(&href_resolver as &dyn Fn(&str) -> LinkOutcome),
-            None,
-        );
-
-        // Collect assets
-        all_assets.extend(result.assets);
-
-        chapters.push(ChapterContent {
-            id: *chapter_id,
-            source_path: source_path.clone(),
-            document: result.body,
-        });
     }
 
     Ok(NormalizedContent {

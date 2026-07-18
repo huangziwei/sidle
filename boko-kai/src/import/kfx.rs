@@ -108,11 +108,13 @@ pub struct KfxImporter {
     /// (chapter `<title>`, storyline lookup) and `ordinal` its leaf index in
     /// the section's spread walk.
     fxl_pages: Vec<FxlPage>,
-    /// Section name → its FIRST page template (fixed-layout sections split
-    /// this template into per-page documents; reflowable sections use the
-    /// LAST). Cached at spine expansion so per-page loads don't re-scan the
-    /// section entities.
-    fxl_templates: HashMap<String, IonValue>,
+    /// Section name → its spread-walked leaf pages (container +
+    /// `page-spread-*` property), from the section's FIRST page template
+    /// (fixed-layout sections split that template into per-page documents;
+    /// reflowable sections use the LAST). Walked once at spine expansion;
+    /// per-page loads index it by ordinal instead of re-walking the
+    /// template.
+    fxl_leaves: HashMap<String, Vec<(IonValue, String)>>,
     /// story_name → storyline entity location, for resolving spread pages
     /// and container story references without a section hop.
     storylines_by_name: HashMap<String, EntityLoc>,
@@ -620,7 +622,7 @@ impl KfxImporter {
             section_eids: HashMap::new(),
             section_templates: HashMap::new(),
             fxl_pages: Vec::new(),
-            fxl_templates: HashMap::new(),
+            fxl_leaves: HashMap::new(),
             storylines_by_name: HashMap::new(),
             structures_by_name: HashMap::new(),
             content_ppd: "ltr".to_string(),
@@ -1184,7 +1186,8 @@ impl KfxImporter {
         }
 
         // Section name → FIRST page template, one pass over the section
-        // entities. Cached so per-page loads don't re-scan.
+        // entities. Only needed for the leaf walk below.
+        let mut templates: HashMap<String, IonValue> = HashMap::new();
         let sec_locs: Vec<EntityLoc> = self
             .entities
             .iter()
@@ -1211,7 +1214,7 @@ impl KfxImporter {
             else {
                 continue;
             };
-            self.fxl_templates.entry(name).or_insert(t0);
+            templates.entry(name).or_insert(t0);
         }
 
         let old_sections = std::mem::take(&mut self.section_names);
@@ -1220,7 +1223,7 @@ impl KfxImporter {
         let mut fxl_pages: Vec<FxlPage> = Vec::new();
         let mut spine: Vec<SpineEntry> = Vec::new();
         for sec in &old_sections {
-            let Some(template) = self.fxl_templates.get(sec).cloned() else {
+            let Some(template) = templates.get(sec) else {
                 continue;
             };
             let size_estimate = self
@@ -1228,11 +1231,8 @@ impl KfxImporter {
                 .get(sec)
                 .map(|l| l.length)
                 .unwrap_or(0);
-            for (ordinal, (leaf, prop)) in self
-                .collect_spread_leaves(&template)
-                .into_iter()
-                .enumerate()
-            {
+            let leaves = self.collect_spread_leaves(template);
+            for (ordinal, (leaf, prop)) in leaves.iter().enumerate() {
                 let spread_type = prop.rsplit('-').next().unwrap_or("");
                 let name = if spread_type.is_empty() {
                     sec.clone()
@@ -1265,6 +1265,7 @@ impl KfxImporter {
                     ordinal,
                 });
             }
+            self.fxl_leaves.insert(sec.clone(), leaves);
         }
         self.section_names = names;
         self.fxl_pages = fxl_pages;
@@ -1410,8 +1411,8 @@ impl KfxImporter {
         }
     }
 
-    /// Load one fixed-layout page as a chapter: locate the page's leaf
-    /// container in its section's spread walk, synthesize a storyline from
+    /// Load one fixed-layout page as a chapter: take the page's leaf
+    /// container from the cached spread walk, synthesize a storyline from
     /// the container's children (inline `content_list` wins over its story —
     /// the mechanical route's `process_content` order), and run the shared
     /// token→IR build with the container itself as the chapter's root — the
@@ -1422,15 +1423,11 @@ impl KfxImporter {
             .get(id.0 as usize)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Chapter not found"))?;
-        let template = self
-            .fxl_templates
-            .get(&page.section)
-            .cloned()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Section template not found"))?;
         let (container, _) = self
-            .collect_spread_leaves(&template)
-            .into_iter()
-            .nth(page.ordinal)
+            .fxl_leaves
+            .get(&page.section)
+            .and_then(|leaves| leaves.get(page.ordinal))
+            .cloned()
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "Fixed-layout page not found")
             })?;

@@ -657,40 +657,64 @@ impl EpubExporter {
             .map_err(io_error)?;
         zip.write_all(ncx.as_bytes())?;
 
-        // 6c. Write titlepage.xhtml when a cover was found.
-        if let Some(ref xhtml) = titlepage_xhtml {
-            zip.start_file("OEBPS/titlepage.xhtml", deflated)
-                .map_err(io_error)?;
-            zip.write_all(xhtml.as_bytes())?;
+        // 7. Write the OEBPS payload in manifest registration order — assets,
+        // stylesheet, chapters, titlepage last — the same file order the
+        // mechanical route's `finalize` walks, so the two engines' containers
+        // are byte-identical, not merely entry-identical. Already-compressed
+        // image types are `Stored`: deflate over them gains <5% at
+        // ~10-15 ms per MB, most of an image-heavy book's export cost.
+        for (asset_path, bytes) in &asset_bytes {
+            if bytes.is_empty() {
+                continue;
+            }
+            let media_type = sniff_image_media_type(bytes)
+                .map(str::to_string)
+                .unwrap_or_else(|| guess_media_type(asset_path));
+            let opts = if is_precompressed_mime(&media_type) {
+                stored
+            } else {
+                deflated
+            };
+            let zip_path = format!("OEBPS/{}", sanitize_path(asset_path));
+            zip.start_file(&zip_path, opts).map_err(io_error)?;
+            zip.write_all(bytes)?;
         }
 
-        // 7. Write unified stylesheet
         if !content.css.is_empty() {
             zip.start_file("OEBPS/style.css", deflated)
                 .map_err(io_error)?;
             zip.write_all(content.css.as_bytes())?;
         }
 
-        // 8. Write synthesized chapters
         for (i, chapter) in content.chapters.iter().enumerate() {
             let zip_path = format!("OEBPS/{}", chapter_files[i]);
             zip.start_file(&zip_path, deflated).map_err(io_error)?;
             zip.write_all(chapter.document.as_bytes())?;
         }
 
-        // 9. Write assets (reuse the bytes we already loaded for MIME sniffing).
-        for (asset_path, bytes) in &asset_bytes {
-            if bytes.is_empty() {
-                continue;
-            }
-            let zip_path = format!("OEBPS/{}", sanitize_path(asset_path));
-            zip.start_file(&zip_path, deflated).map_err(io_error)?;
-            zip.write_all(bytes)?;
+        if let Some(ref xhtml) = titlepage_xhtml {
+            zip.start_file("OEBPS/titlepage.xhtml", deflated)
+                .map_err(io_error)?;
+            zip.write_all(xhtml.as_bytes())?;
         }
 
         zip.finish().map_err(io_error)?;
         Ok(())
     }
+}
+
+/// Media types whose bytes are already compressed; running deflate over them
+/// gains <5% while consuming ~10-15 ms per MB.
+fn is_precompressed_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/jpeg"
+            | "image/png"
+            | "image/webp"
+            | "image/gif"
+            | "image/jxr"
+            | "image/vnd.ms-photo"
+    )
 }
 
 /// Convert zip error to io error.
