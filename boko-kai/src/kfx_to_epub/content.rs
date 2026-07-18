@@ -232,6 +232,17 @@ pub struct BookPart {
     /// (`"page-spread-left"` / `"page-spread-right"`), or `None` for a single
     /// (non-spread) page or a reflowable document.
     pub spread_property: Option<String>,
+    /// Elements whose text arrived as interleave runs (bare strings in
+    /// `content_list` mixed with child elements) AND that carry style_events.
+    /// Their offset anchors resolve in the element's KFX event offset space
+    /// (`locate_offset_event_in`) instead of the plain DOM walk.
+    pub interleave_parents: std::collections::HashSet<NodeId>,
+    /// Roots emitted for the child-element structs inside an interleave
+    /// element. Each occupies exactly ONE position in the parent's event
+    /// offset space regardless of its own content — the marker distinguishes
+    /// a demoted child (a `<span>` after render:inline demotion) from the
+    /// mark-generated spans around it.
+    pub interleave_child_roots: std::collections::HashSet<NodeId>,
 }
 
 impl<'a> ContentState<'a> {
@@ -438,6 +449,8 @@ impl<'a> ContentState<'a> {
             element_layout_hints: HashMap::new(),
             viewport: None,
             spread_property: None,
+            interleave_parents: std::collections::HashSet::new(),
+            interleave_child_roots: std::collections::HashSet::new(),
         });
         self.link_stylesheet(part_index);
         part_index
@@ -881,7 +894,19 @@ impl<'a> ContentState<'a> {
         split_after: bool,
         zero_len: bool,
     ) -> Option<NodeId> {
-        match self.locate_offset_in(part_index, root, offset_query, split_after, zero_len) {
+        // Interleave elements' offsets live in the KFX event offset space —
+        // every content_list child element is ONE position and restored ruby
+        // BASE text counts — not in the plain span-text walk (which treats
+        // ruby as opaque and would stop short once marks are restored).
+        let result = if self.book_parts[part_index]
+            .interleave_parents
+            .contains(&root)
+        {
+            self.locate_offset_event_in(part_index, root, offset_query, true)
+        } else {
+            self.locate_offset_in(part_index, root, offset_query, split_after, zero_len)
+        };
+        match result {
             LocateResult::Found(n) => Some(n),
             // calibre: `if result == 0 and not split_after: return SubElement(root, "span")`
             LocateResult::Remaining(0) if !split_after => {
@@ -889,6 +914,133 @@ impl<'a> ContentState<'a> {
             }
             LocateResult::Remaining(_) => None,
         }
+    }
+
+    /// [`locate_offset_in`] for interleave elements, counting in the
+    /// element's KFX event offset space: run text counts per code point
+    /// (`\n` included — a run's `<br>` split counts the newline it stands
+    /// for), each content_list child element counts exactly ONE position,
+    /// ruby BASE text counts while `<rt>` is invisible, and mark-generated
+    /// wrappers (`<a>`, styled spans, `<ruby>`) are transparent. `is_root`
+    /// exempts the interleave element itself from the child-element rule.
+    fn locate_offset_event_in(
+        &mut self,
+        part_index: usize,
+        elem: NodeId,
+        mut offset_query: i64,
+        is_root: bool,
+    ) -> LocateResult {
+        if offset_query < 0 {
+            return LocateResult::Remaining(offset_query);
+        }
+        // A child element from the content_list: one opaque position.
+        if !is_root
+            && self.book_parts[part_index]
+                .interleave_child_roots
+                .contains(&elem)
+        {
+            if offset_query == 0 {
+                return LocateResult::Found(elem);
+            }
+            return LocateResult::Remaining(offset_query - 1);
+        }
+        let tag = self.book_parts[part_index].dom.get(elem).tag.clone();
+        match tag.as_str() {
+            // Text carriers: spans (runs and mark slices) and ruby base
+            // slices. Mid-text offsets split like the plain walk. An offset
+            // at the very START of a base slice wraps the text in a fresh
+            // inner span (the IR route's `wrap_text_run_in_span` shape —
+            // an id lands INSIDE the `<rb>`, not on it); a span carries the
+            // id itself, exactly like the plain walk.
+            "span" | "rb" | "ruby" => {
+                let text_len = self.book_parts[part_index]
+                    .dom
+                    .get(elem)
+                    .text
+                    .as_deref()
+                    .map(|t| t.chars().count() as i64)
+                    .unwrap_or(0);
+                if text_len > 0 {
+                    if offset_query == 0 {
+                        if tag == "span" {
+                            return LocateResult::Found(elem);
+                        }
+                        let part = &mut self.book_parts[part_index];
+                        let text = part.dom.get_mut(elem).text.take();
+                        let inner = part.dom.sub_element(elem, "span");
+                        part.dom.get_mut(inner).text = text;
+                        // The wrap must come FIRST — any existing children
+                        // (rt siblings never nest here, but nested spans
+                        // from earlier splits do) follow the whole text.
+                        let idx = part.dom.get(elem).children.len() - 1;
+                        let moved = part.dom.get_mut(elem).children.remove(idx);
+                        part.dom.get_mut(elem).children.insert(0, moved);
+                        return LocateResult::Found(inner);
+                    }
+                    if offset_query < text_len {
+                        return LocateResult::Found(self.nest_anchor_split(
+                            part_index,
+                            elem,
+                            offset_query,
+                        ));
+                    }
+                    offset_query -= text_len;
+                }
+                self.locate_offset_event_children(part_index, elem, offset_query)
+            }
+            // The newline a `<br>` stands for is one code point in event
+            // space, and its tail text follows. An offset INTO the tail has
+            // no split machinery yet — no corpus book anchors inside a
+            // newline-bearing marked run; revisit if one appears.
+            "br" => {
+                let tail_len = self.book_parts[part_index]
+                    .dom
+                    .get(elem)
+                    .tail
+                    .as_deref()
+                    .map(|t| t.chars().count() as i64)
+                    .unwrap_or(0);
+                LocateResult::Remaining(offset_query - 1 - tail_len)
+            }
+            // Annotation text is invisible in event space.
+            "rt" => LocateResult::Remaining(offset_query),
+            // Mark-generated link wrappers are transparent.
+            "a" => self.locate_offset_event_children(part_index, elem, offset_query),
+            // Inline replaced elements: one position (normally already
+            // caught by the child-roots rule).
+            "img" | "svg" | "math" => {
+                if offset_query == 0 {
+                    return LocateResult::Found(elem);
+                }
+                LocateResult::Remaining(offset_query - 1)
+            }
+            // The interleave element itself (any block tag) walks its
+            // children; anything else unmarked is a child element shape.
+            _ if is_root => self.locate_offset_event_children(part_index, elem, offset_query),
+            _ => {
+                if offset_query == 0 {
+                    return LocateResult::Found(elem);
+                }
+                LocateResult::Remaining(offset_query - 1)
+            }
+        }
+    }
+
+    /// Walk `elem`'s children in document order in event space.
+    fn locate_offset_event_children(
+        &mut self,
+        part_index: usize,
+        elem: NodeId,
+        mut offset_query: i64,
+    ) -> LocateResult {
+        let children = self.book_parts[part_index].dom.get(elem).children.clone();
+        for child in children {
+            match self.locate_offset_event_in(part_index, child, offset_query, false) {
+                LocateResult::Found(n) => return LocateResult::Found(n),
+                LocateResult::Remaining(r) => offset_query = r,
+            }
+        }
+        LocateResult::Remaining(offset_query)
     }
 
     /// Port of calibre `locate_offset_in` (`yj_to_epub_content.py:1557`). Returns
@@ -1411,6 +1563,54 @@ impl<'a> ContentState<'a> {
         if let Some(list) =
             get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list())
         {
+            // Interleave shape: bare-string runs mixed with child elements
+            // (inline images, tate-chu-yoko runs), with the element's own
+            // style_events offsetting into the JOINED space where every
+            // child element occupies exactly ONE position. Elements with a
+            // `$145 content` never reach here (handled above), so events on
+            // a content_list element always mean this shape.
+            let events = get_field(fields, KfxSymbol::StyleEvents as u64)
+                .and_then(|v| v.as_list())
+                .filter(|l| !l.is_empty());
+            if let Some(events) = events {
+                self.book_parts[part_index]
+                    .interleave_parents
+                    .insert(parent_id);
+                let mut cursor: usize = 0;
+                for child in list {
+                    if let IonValue::String(s) = child.unwrap_annotated() {
+                        let run_len = s.chars().count();
+                        let emitted = self.emit_text_with_events(
+                            events,
+                            part_index,
+                            parent_id,
+                            s,
+                            Some((cursor, cursor + run_len)),
+                        )?;
+                        if !emitted {
+                            // No event overlaps this run — plain span, same
+                            // as process_content's bare-string arm.
+                            let dom = &mut self.book_parts[part_index].dom;
+                            let span = dom.sub_element(parent_id, "span");
+                            dom.get_mut(span).text = Some(s.clone());
+                        }
+                        cursor += run_len;
+                    } else {
+                        let before = self.book_parts[part_index]
+                            .dom
+                            .get(parent_id)
+                            .children
+                            .len();
+                        self.process_content(child, part_index, parent_id, writing_mode, false)?;
+                        let part = &mut self.book_parts[part_index];
+                        let new_roots: Vec<NodeId> =
+                            part.dom.get(parent_id).children[before..].to_vec();
+                        part.interleave_child_roots.extend(new_roots);
+                        cursor += 1;
+                    }
+                }
+                return Ok(());
+            }
             for child in list {
                 self.process_content(child, part_index, parent_id, writing_mode, false)?;
             }
@@ -1443,6 +1643,24 @@ impl<'a> ContentState<'a> {
         else {
             return Ok(false);
         };
+        self.emit_text_with_events(events, part_index, parent_id, text, None)
+    }
+
+    /// [`try_emit_ruby_text`]'s engine. With `clamp = Some((start, end))`,
+    /// only the events overlapping that window of the element's event offset
+    /// space apply, rebased run-local (a ruby id_list keeps the sub-pairs
+    /// that fit inside the kept slice) — the interleave path feeds each
+    /// bare content_list run through here, where every child element between
+    /// runs counts ONE position. `None` applies all events to the whole
+    /// ref-resolved text.
+    fn emit_text_with_events(
+        &mut self,
+        events: &[IonValue],
+        part_index: usize,
+        parent_id: NodeId,
+        text: &str,
+        clamp: Option<(usize, usize)>,
+    ) -> Result<bool, ConvertError> {
         // RubyId can be Int (most common) or Symbol; we normalise both
         // to a string for lookup. Defined once here, used in both event
         // collection paths.
@@ -1490,6 +1708,26 @@ impl<'a> ContentState<'a> {
                 continue;
             };
 
+            // Clamp to the run window (interleave path only): drop events
+            // with no overlap, cut crossing ones at the window edge, rebase
+            // run-local. The unclamped path passes raw values through
+            // untouched. `win` keeps the kept slice in ELEMENT space for the
+            // ruby id_list rebase below.
+            let (ev_offset, ev_length, win) = match clamp {
+                Some((start, end)) => {
+                    if offset < 0 || length <= 0 {
+                        continue;
+                    }
+                    let s = (offset as usize).max(start);
+                    let e = ((offset + length) as usize).min(end);
+                    if s >= e {
+                        continue;
+                    }
+                    ((s - start) as i64, (e - s) as i64, Some((s, e)))
+                }
+                None => (offset, length, None),
+            };
+
             // Ruby event takes precedence (a single style_event in horror
             // never carries both ruby_name and link_to, but we'd render the
             // ruby annotation rather than the link if it did).
@@ -1501,11 +1739,15 @@ impl<'a> ContentState<'a> {
                     get_field(ef, KfxSymbol::RubyId as u64)
                     && let Some(id_str) = id_to_string(id_val, &self.book.symbols)
                 {
-                    vec![(0, length, id_str)]
+                    // A single id annotates the whole (possibly clamped)
+                    // event range — the annotation survives a boundary cut
+                    // on whatever base slice was kept.
+                    vec![(0, ev_length, id_str)]
                 } else if let Some(list) =
                     get_field(ef, KfxSymbol::RubyIdList as u64).and_then(|v| v.as_list())
                 {
-                    list.iter()
+                    let raw: Vec<(i64, i64, String)> = list
+                        .iter()
                         .filter_map(|entry| {
                             let f = entry.unwrap_annotated().as_struct()?;
                             let o = get_field(f, KfxSymbol::Offset as u64)?.as_int()?;
@@ -1516,7 +1758,20 @@ impl<'a> ContentState<'a> {
                             )?;
                             Some((o, l, id_str))
                         })
-                        .collect()
+                        .collect();
+                    match win {
+                        // Keep only the sub-pairs that fit inside the kept
+                        // window, rebased to the clamped event's start.
+                        Some((win_s, win_e)) => raw
+                            .into_iter()
+                            .filter_map(|(o, l, id)| {
+                                let abs = offset + o;
+                                (abs >= win_s as i64 && abs + l <= win_e as i64)
+                                    .then(|| (abs - win_s as i64, l, id))
+                            })
+                            .collect(),
+                        None => raw,
+                    }
                 } else {
                     continue;
                 };
@@ -1524,7 +1779,7 @@ impl<'a> ContentState<'a> {
                     .and_then(|v| self.book.symbols.text_of(v))
                     .map(str::to_string)
                     .filter(|s| self.style_has_decl(s));
-                collected.push(Ev::Ruby(offset, length, ruby_name, id_list, style));
+                collected.push(Ev::Ruby(ev_offset, ev_length, ruby_name, id_list, style));
             } else if let Some(link_sym) = get_field(ef, KfxSymbol::LinkTo as u64)
                 && let Some(name) = self.book.symbols.text_of(link_sym)
             {
@@ -1533,7 +1788,7 @@ impl<'a> ContentState<'a> {
                     .and_then(|v| self.book.symbols.text_of(v))
                     .map(str::to_string)
                     .filter(|s| self.style_has_decl(s));
-                collected.push(Ev::Link(offset, length, name, style));
+                collected.push(Ev::Link(ev_offset, ev_length, name, style));
             } else if let Some(style_sym) = get_field(ef, KfxSymbol::Style as u64)
                 && let Some(name) = self.book.symbols.text_of(style_sym)
                 && self.style_has_decl(name)
@@ -1541,7 +1796,7 @@ impl<'a> ContentState<'a> {
                 // A `$style`-only event (no ruby/link) carrying renderable CSS
                 // (e.g. text-emphasis). Skip styles that produce no declaration
                 // (the default `s0`) — they'd just be redundant plain spans.
-                collected.push(Ev::Styled(offset, length, name.to_string()));
+                collected.push(Ev::Styled(ev_offset, ev_length, name.to_string()));
             }
         }
 
@@ -1679,14 +1934,23 @@ impl<'a> ContentState<'a> {
                 self.emit_span(part_index, parent, &chars[cursor..off]);
             }
             match &marks[i] {
-                Mark::Ruby(off, _len, ruby_name, id_list, style) => {
-                    let off = *off;
+                Mark::Ruby(off, len, ruby_name, id_list, style) => {
+                    let (off, len) = (*off, *len);
                     let ruby_name = ruby_name.clone();
                     let id_list = id_list.clone();
                     let style = style.clone();
                     let ruby_el = self.book_parts[part_index].dom.sub_element(parent, "ruby");
                     if let Some(style_name) = &style {
                         self.attach_inline_style(part_index, ruby_el, style_name);
+                    }
+                    // A clamped grouped ruby can lose every sub-pair to the
+                    // window cut; keep the base slice inside the `<ruby>`
+                    // (no `<rt>`) rather than dropping the text with it.
+                    // Unreachable on the unclamped path — collection never
+                    // yields an empty id_list there.
+                    if id_list.is_empty() && off + len <= chars.len() {
+                        let base: String = chars[off..off + len].iter().collect();
+                        self.book_parts[part_index].dom.get_mut(ruby_el).text = Some(base);
                     }
                     for (sub_off, sub_len, ruby_id_str) in &id_list {
                         let sub_off = *sub_off as usize;

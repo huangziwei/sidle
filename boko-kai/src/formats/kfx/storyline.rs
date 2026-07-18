@@ -1143,6 +1143,18 @@ fn locate_offset_in_event_space(chapter: &mut Chapter, node: NodeId, offset: i64
                     return Located::Found(node);
                 }
                 Located::Remaining(offset - 1)
+            } else if offset == 0
+                && chapter.children(node).next().is_some_and(|first| {
+                    chapter
+                        .node(first)
+                        .is_some_and(|f| f.role == Role::Text && !chapter.text(f.text).is_empty())
+                })
+            {
+                // An event span whose text starts exactly at the offset
+                // carries the id itself — same rule as the mechanical-walk
+                // arm above, minus its `\n` invisibility (event space counts
+                // every code point).
+                Located::Found(node)
             } else {
                 descend_event_space(chapter, node, offset)
             }
