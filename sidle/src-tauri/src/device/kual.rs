@@ -60,11 +60,14 @@ impl KualSource {
     pub fn from_workspace_root(repo: &Path) -> Self {
         Self {
             bundle_dir: repo.join("kual").join("sidle"),
+            // The bin target is `sidle-native` (the desktop app already owns
+            // the `sidle` name in target/release); it ships on-device as
+            // plain `sidle` via build.sh's copy rename.
             binary_path: repo
                 .join("target")
                 .join(NATIVE_TARGET_TRIPLE)
                 .join("release")
-                .join("sidle"),
+                .join("sidle-native"),
             scriptlet_path: repo.join("kual").join("Sidle.sh"),
         }
     }
@@ -771,7 +774,8 @@ mod tests {
 
     /// Build a minimal source layout under `repo_root`:
     /// `<repo>/kual/sidle/{config.xml,menu.json,bin/sidle.sh}`,
-    /// `<repo>/kual/Sidle.sh`, and optionally `<repo>/target/.../release/sidle`.
+    /// `<repo>/kual/Sidle.sh`, and optionally
+    /// `<repo>/target/.../release/sidle-native`.
     fn make_source(repo: &Path, include_binary: bool) -> KualSource {
         let bundle = repo.join("kual/sidle");
         write_file(&bundle.join("config.xml"), b"<config/>");
@@ -786,7 +790,7 @@ mod tests {
                 &repo
                     .join("target")
                     .join(NATIVE_TARGET_TRIPLE)
-                    .join("release/sidle"),
+                    .join("release/sidle-native"),
                 b"\x7fELF...fake-binary",
             );
         }

@@ -90,6 +90,10 @@ pub struct Report {
     pub epub_unresolved_toc_hrefs: Vec<String>,
 
     // --- KFX side ---
+    /// Whether the KFX carries a headings nav container at all (official
+    /// Amazon KFX regularly ships none; heading-level comparison is skipped
+    /// then).
+    pub kfx_has_headings_nav: bool,
     /// Count of nav_units under the KFX headings container, keyed by level.
     /// Only counts leaf entries (the inner ones with offsets), not the level
     /// group entry which `build_headings_entries` emits as a wrapper.
@@ -143,14 +147,18 @@ impl Report {
             }
         }
         println!("  total: {}", epub_total);
-        println!("KFX headings nav (h1 intentionally not navigated):");
-        for level in 2..=6u8 {
-            let n = self.kfx_headings_by_level.get(&level).copied().unwrap_or(0);
-            if n > 0 {
-                println!("  h{}:  {}", level, n);
+        if self.kfx_has_headings_nav {
+            println!("KFX headings nav (h1 intentionally not navigated):");
+            for level in 2..=6u8 {
+                let n = self.kfx_headings_by_level.get(&level).copied().unwrap_or(0);
+                if n > 0 {
+                    println!("  h{}:  {}", level, n);
+                }
             }
+            println!("  total: {}", kfx_total);
+        } else {
+            println!("KFX headings nav: (no headings container — comparison skipped)");
         }
-        println!("  total: {}", kfx_total);
         println!("TOC entries:");
         if self.epub_has_toc {
             if self.epub_non_spine_toc_entries > 0 {
@@ -239,16 +247,21 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 
     // h1 is intentionally NOT navigated by Kindle (h1 → None in
     // export::kfx::level_to_symbol). When comparing levels we skip h1.
+    // The comparison only applies when the KFX carries a headings container
+    // at all: official Amazon KFX regularly ships none, and demanding one
+    // there would fail every ground-truth pair whose EPUB side has h2+.
     let mut heading_count_diffs: Vec<(u8, i64)> = Vec::new();
-    for level in 2..=6u8 {
-        let ep = epub_side
-            .headings_by_level
-            .get(&level)
-            .copied()
-            .unwrap_or(0) as i64;
-        let kfx_c = kfx.headings_by_level.get(&level).copied().unwrap_or(0) as i64;
-        if ep != kfx_c {
-            heading_count_diffs.push((level, ep - kfx_c));
+    if kfx.has_headings_container {
+        for level in 2..=6u8 {
+            let ep = epub_side
+                .headings_by_level
+                .get(&level)
+                .copied()
+                .unwrap_or(0) as i64;
+            let kfx_c = kfx.headings_by_level.get(&level).copied().unwrap_or(0) as i64;
+            if ep != kfx_c {
+                heading_count_diffs.push((level, ep - kfx_c));
+            }
         }
     }
 
@@ -296,6 +309,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
         epub_has_toc: epub_side.has_toc,
         epub_distinct_toc_hrefs: epub_side.distinct_toc_hrefs,
         epub_unresolved_toc_hrefs: epub_side.unresolved_toc_hrefs,
+        kfx_has_headings_nav: kfx.has_headings_container,
         kfx_headings_by_level: kfx.headings_by_level,
         kfx_heading_targets: kfx.heading_targets,
         kfx_toc_entry_count: kfx.toc_targets.len(),
@@ -555,6 +569,11 @@ struct KfxNav {
     /// heading count and false-fail every book that decorates chapter titles
     /// with a heading-level image.
     headings_by_level: HashMap<u8, usize>,
+    /// Whether the KFX carries a headings nav container at all. Official
+    /// Amazon KFX regularly ships none — heading-level comparison is only
+    /// meaningful when the container exists (boko's exporter always emits
+    /// one for books with h2+ headings).
+    has_headings_container: bool,
     /// Every nav_unit target_position inside the headings container.
     heading_targets: Vec<NavTarget>,
     /// Heading level (2..=6) parallel to `heading_targets`, in the same order.
@@ -755,6 +774,7 @@ fn extract_from_nav_container<F>(
             // Per-level entries: each top-level nav_unit has a `landmark_type`
             // ($h2..$h6) and nested `entries` for individual headings of that
             // level. We count the nested entries (the actual headings).
+            out.has_headings_container = true;
             for level_unit in entries {
                 walk_heading_level_unit(level_unit, resolve_sym, out);
             }

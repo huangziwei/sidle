@@ -10,7 +10,12 @@ name = "sidle_native"
 path = "src/lib.rs"
 
 [[bin]]
-name = "sidle"
+# Named after the package, not plain `sidle`: the desktop app's bin target is
+# already `sidle`, and two same-named bins in one workspace share
+# target/release/<name> — a host build would clobber one with the other.
+# On-device the picker still ships as `native/sidle` (build.sh renames at
+# copy time).
+name = "sidle-native"
 path = "src/main.rs"
 
 [dependencies]

@@ -425,15 +425,15 @@ pub fn extract_pairs_from_kfx(kfx_bytes: &[u8]) -> Result<Vec<RubyPair>, String>
     Ok(pairs)
 }
 
-/// True when a content_list member struct is an image element (`type: image`).
-fn is_image_element<F>(fields: &[(u64, IonValue)], resolve_sym: &F) -> bool
+/// True when a content_list member struct is a child element (it carries a
+/// `type` field — image, text, …). In the parent's style_event offset space
+/// every child element occupies exactly ONE position regardless of its own
+/// content length; only the parent's bare-string runs contribute per-char.
+fn is_child_element<F>(fields: &[(u64, IonValue)], resolve_sym: &F) -> bool
 where
     F: Fn(u64) -> String,
 {
-    fields.iter().any(|(k, v)| {
-        resolve_sym(*k) == "type"
-            && matches!(v.unwrap_annotated(), IonValue::Symbol(s) if resolve_sym(*s) == "image")
-    })
+    fields.iter().any(|(k, _)| resolve_sym(*k) == "type")
 }
 
 fn parse_entity(data: &[u8], ent: &crate::formats::kfx::container::EntityLoc) -> Option<IonValue> {
@@ -565,9 +565,10 @@ fn collect_pairs_from_ion<F>(
             // text out and emit one pair per ruby style_event. The text can
             // arrive three ways: an externalized content ref (name + index),
             // a direct inline string, or the interleave shape — bare-string
-            // runs mixed with `render: inline` image structs in content_list,
-            // where events offset into the JOINED run space and an image
-            // occupies ONE position (U+FFFC placeholder here).
+            // runs mixed with child element structs (inline images, nested
+            // text runs) in content_list, where events offset into the JOINED
+            // run space and every child element occupies ONE position
+            // (U+FFFC placeholder here) no matter how long its own text is.
             let mut content_name = String::new();
             let mut content_index: i64 = -1;
             let mut inline_text: Option<String> = None;
@@ -607,7 +608,7 @@ fn collect_pairs_from_ion<F>(
                                         saw_run = true;
                                         buf.extend(s.chars());
                                     }
-                                    IonValue::Struct(sf) if is_image_element(sf, resolve_sym) => {
+                                    IonValue::Struct(sf) if is_child_element(sf, resolve_sym) => {
                                         buf.push('\u{FFFC}');
                                     }
                                     _ => {}

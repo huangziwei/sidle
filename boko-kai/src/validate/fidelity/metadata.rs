@@ -205,7 +205,16 @@ pub fn validate(
 
     let mut diffs: Vec<FieldDiff> = Vec::new();
 
-    if !epub.title.is_empty() && epub.title != kfx.title {
+    // Space-flavor differences (U+0020 vs U+3000 ideographic space) are not
+    // fidelity defects: Amazon's own AZW3 and KFX editions of one book
+    // disagree on them, so an exact compare would flag ground-truth pairs.
+    // Raw values still print in the diff when anything else differs.
+    let ws_normalized = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_whitespace() { ' ' } else { c })
+            .collect()
+    };
+    if !epub.title.is_empty() && ws_normalized(&epub.title) != ws_normalized(&kfx.title) {
         diffs.push(FieldDiff {
             field: "title",
             epub: epub.title.clone(),
@@ -229,7 +238,13 @@ pub fn validate(
     // (mirrors `yj_metadata.py:get_yj_metadata_from_book` which uses
     // `authors.append(val)`). EPUB side reads `<dc:creator>` elements in
     // OPF source order.
-    if !kfx.authors.is_empty() && epub.authors != kfx.authors {
+    if !kfx.authors.is_empty()
+        && epub
+            .authors
+            .iter()
+            .map(|a| ws_normalized(a))
+            .ne(kfx.authors.iter().map(|a| ws_normalized(a)))
+    {
         diffs.push(FieldDiff {
             field: "authors (ordered)",
             epub: format!("{:?}", epub.authors),

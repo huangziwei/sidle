@@ -459,6 +459,50 @@ where
 // Token Stream → IR (Stack-based builder)
 // ============================================================================
 
+/// Pending style_events of an open interleave element — one whose text
+/// arrives as bare-string runs in `content_list` (mixed with child elements)
+/// instead of a content ref. `cursor` tracks the position in the element's
+/// event offset space: runs advance it by their char count, each direct
+/// child element by exactly ONE position regardless of its own length
+/// (Amazon's counting — same rule the fidelity extractor and the epub→kfx
+/// emitter use for in-run images).
+struct InterleaveEvents {
+    events: Vec<SpanStart>,
+    cursor: usize,
+}
+
+/// Clamp `events` to the run occupying `[start, end)` of the parent's event
+/// offset space, rebasing offsets to be run-local. Events without overlap
+/// drop; an event crossing the run boundary (its range covers a child
+/// element) is cut at the boundary, keeping only the ruby sub-pairs that fit
+/// inside the kept slice.
+fn clamp_events_to_run(events: &[SpanStart], start: usize, end: usize) -> Vec<SpanStart> {
+    let mut out = Vec::new();
+    for e in events {
+        let e_start = e.offset;
+        let e_end = e.offset + e.length;
+        let o_start = e_start.max(start);
+        let o_end = e_end.min(end);
+        if o_start >= o_end {
+            continue;
+        }
+        let mut clamped = e.clone();
+        clamped.offset = o_start - start;
+        clamped.length = o_end - o_start;
+        clamped.ruby_pairs = e
+            .ruby_pairs
+            .iter()
+            .filter(|(sub_off, sub_len, _)| {
+                let abs = e_start + sub_off;
+                abs >= o_start && abs + sub_len <= o_end
+            })
+            .map(|(sub_off, sub_len, ann)| (e_start + sub_off - o_start, *sub_len, ann.clone()))
+            .collect();
+        out.push(clamped);
+    }
+    out
+}
+
 /// Build an IR chapter from a token stream.
 ///
 /// Uses a stack-based approach to handle nested elements.
@@ -494,19 +538,31 @@ where
     F: FnMut(&str, usize) -> Option<String>,
 {
     let mut chapter = Chapter::new();
-    // (node, pending render-inline demotion) — the demotion check runs when
-    // the element closes and its subtree is complete.
-    let mut stack: Vec<(NodeId, bool)> = vec![(chapter.root(), false)];
+    // (node, pending render-inline demotion, pending interleave events) —
+    // the demotion check runs when the element closes and its subtree is
+    // complete; interleave events apply to each bare-string run as it
+    // arrives (see `InterleaveEvents`).
+    let mut stack: Vec<(NodeId, bool, Option<InterleaveEvents>)> =
+        vec![(chapter.root(), false, None)];
     // Every element's declared eid, in document order — the offset-anchor
     // pass below locates offsets inside these elements' finished subtrees.
     let mut eid_nodes: Vec<(i64, NodeId)> = Vec::new();
+    // Elements whose text arrived as interleave runs: their offset anchors
+    // resolve in event space (see `locate_offset_event_space`).
+    let mut interleave_roots: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
 
     for token in tokens {
         match token {
             KfxToken::StartElement(elem) => {
+                // A child element occupies exactly ONE position in an
+                // enclosing interleave element's event offset space,
+                // regardless of its own content length.
+                if let Some((_, _, Some(iv))) = stack.last_mut() {
+                    iv.cursor += 1;
+                }
                 let parent = stack
                     .last()
-                    .map(|(n, _)| *n)
+                    .map(|(n, _, _)| *n)
                     .unwrap_or_else(|| chapter.root());
 
                 // Create the node. Image-typed elements always emit an
@@ -656,11 +712,25 @@ where
                     }
                 }
 
-                stack.push((node_id, elem.render_inline && !elem.is_image));
+                // No content ref: the element's text arrives as bare-string
+                // runs in content_list (interleaved with child elements —
+                // inline images, tate-chu-yoko runs). Its style_events offset
+                // into that joined space, so hold them here and apply to each
+                // run as it arrives.
+                let interleave = (elem.content_ref.is_none() && !elem.style_events.is_empty())
+                    .then(|| InterleaveEvents {
+                        events: elem.style_events.clone(),
+                        cursor: 0,
+                    });
+                if interleave.is_some() {
+                    interleave_roots.insert(node_id);
+                }
+
+                stack.push((node_id, elem.render_inline && !elem.is_image, interleave));
             }
 
             KfxToken::EndElement => {
-                if let Some((node_id, demote)) = stack.pop()
+                if let Some((node_id, demote, _)) = stack.pop()
                     && demote
                 {
                     // `render: inline` block containers demote to a span when
@@ -688,13 +758,35 @@ where
             }
 
             KfxToken::Text(text) => {
-                let parent = stack
-                    .last()
-                    .map(|(n, _)| *n)
-                    .unwrap_or_else(|| chapter.root());
-                let range = chapter.append_text(text);
-                let text_node = chapter.alloc_node(Node::text(range));
-                chapter.append_child(parent, text_node);
+                // A bare run inside an interleave element: apply the slice
+                // of the parent's style_events that overlaps this run (ruby,
+                // links, styled spans), then advance the cursor. Plain
+                // append otherwise.
+                let mut run_events: Option<Vec<SpanStart>> = None;
+                let parent = match stack.last_mut() {
+                    Some((n, _, Some(iv))) => {
+                        let run_len = text.chars().count();
+                        run_events = Some(clamp_events_to_run(
+                            &iv.events,
+                            iv.cursor,
+                            iv.cursor + run_len,
+                        ));
+                        iv.cursor += run_len;
+                        *n
+                    }
+                    Some((n, _, None)) => *n,
+                    None => chapter.root(),
+                };
+                match run_events {
+                    Some(events) if !events.is_empty() => {
+                        build_text_with_spans(&mut chapter, parent, text, &events, symbols, styles);
+                    }
+                    _ => {
+                        let range = chapter.append_text(text);
+                        let text_node = chapter.alloc_node(Node::text(range));
+                        chapter.append_child(parent, text_node);
+                    }
+                }
             }
 
             KfxToken::StartSpan(_) | KfxToken::EndSpan => {
@@ -707,7 +799,7 @@ where
     // element's finished subtree and stamp a zero-length span there, so
     // mid-paragraph nav targets (`…#page-911-2`) land on the exact position.
     if let Some(table) = anchor_table {
-        stamp_offset_anchors(&mut chapter, &eid_nodes, table);
+        stamp_offset_anchors(&mut chapter, &eid_nodes, table, &interleave_roots);
     }
 
     chapter
@@ -924,20 +1016,33 @@ pub fn apply_section_template(
         }
     }
     if let Some(eid) = template_eid {
-        stamp_offset_anchors(chapter, &[(eid, wrapper)], table);
+        // The template wrapper is a container, never an interleave element —
+        // its offsets walk the mechanical-route space.
+        stamp_offset_anchors(chapter, &[(eid, wrapper)], table, &Default::default());
     }
 }
 
 /// Stamp every registered `(eid, offset > 0)` anchor into the built chapter.
 /// Offsets ascend per element; earlier stamps insert only zero-length nodes,
 /// so later locates count the same character stream.
-fn stamp_offset_anchors(chapter: &mut Chapter, eid_nodes: &[(i64, NodeId)], table: &AnchorTable) {
+fn stamp_offset_anchors(
+    chapter: &mut Chapter,
+    eid_nodes: &[(i64, NodeId)],
+    table: &AnchorTable,
+    interleave_roots: &std::collections::HashSet<NodeId>,
+) {
     for &(eid, elem) in eid_nodes {
+        let event_space = interleave_roots.contains(&elem);
         for off in table.offsets_beyond_zero(eid) {
             let Some(anchor_id) = table.id_at(eid, off) else {
                 continue;
             };
-            if let Some(target) = locate_offset_ir(chapter, elem, off)
+            let target = if event_space {
+                locate_offset_event_space(chapter, elem, off)
+            } else {
+                locate_offset_ir(chapter, elem, off)
+            };
+            if let Some(target) = target
                 && chapter.semantics.id(target).is_none()
             {
                 chapter.semantics.set_id(target, &anchor_id);
@@ -976,6 +1081,93 @@ fn locate_offset_ir(chapter: &mut Chapter, root: NodeId, offset: i64) -> Option<
         return Some(span);
     }
     None
+}
+
+/// [`locate_offset_ir`] for interleave-built elements, counting in the
+/// element's own KFX event offset space instead of the mechanical route's
+/// DOM-walk space. The two differ because the mechanical route never
+/// reconstructs marks over interleave content: in event space every bare-run
+/// code point counts (`\n` included), each content_list child element counts
+/// exactly ONE position, ruby BASE text counts while annotation text does
+/// not, and event-span wrappers are transparent.
+fn locate_offset_event_space(chapter: &mut Chapter, root: NodeId, offset: i64) -> Option<NodeId> {
+    let children: Vec<NodeId> = chapter.children(root).collect();
+    let mut remaining = offset;
+    for child in children {
+        match locate_offset_in_event_space(chapter, child, remaining) {
+            Located::Found(n) => return Some(n),
+            Located::Remaining(r) => remaining = r,
+        }
+    }
+    if remaining == 0 {
+        let span = chapter.alloc_node(Node::new(Role::Inline));
+        chapter.append_child(root, span);
+        return Some(span);
+    }
+    None
+}
+
+/// One node's contribution to the event-space walk (see
+/// [`locate_offset_event_space`]).
+fn locate_offset_in_event_space(chapter: &mut Chapter, node: NodeId, offset: i64) -> Located {
+    if offset < 0 {
+        return Located::Remaining(offset);
+    }
+    let Some(n) = chapter.node(node) else {
+        return Located::Remaining(offset);
+    };
+    match n.role {
+        Role::Text => {
+            let countable = chapter.text(n.text).chars().count() as i64;
+            if countable > 0 {
+                if offset == 0 {
+                    return Located::Found(wrap_text_run_in_span(chapter, node));
+                }
+                if offset < countable {
+                    return Located::Found(split_text_run(chapter, node, offset));
+                }
+            }
+            Located::Remaining(offset - countable)
+        }
+        // Annotation text is invisible in event space — events offset over
+        // the base text the annotations decorate.
+        Role::RubyText => Located::Remaining(offset),
+        // Ruby wrappers and event spans are decoration over the parent's own
+        // runs: descend, their text counts through.
+        Role::Ruby | Role::Link => descend_event_space(chapter, node, offset),
+        Role::Inline => {
+            if chapter.semantics.render_inline(node) {
+                // A demoted content_list child element (tate-chu-yoko run):
+                // one opaque position.
+                if offset == 0 {
+                    return Located::Found(node);
+                }
+                Located::Remaining(offset - 1)
+            } else {
+                descend_event_space(chapter, node, offset)
+            }
+        }
+        // Any other role is a content_list child element (image, nested
+        // container): one opaque position.
+        _ => {
+            if offset == 0 {
+                return Located::Found(node);
+            }
+            Located::Remaining(offset - 1)
+        }
+    }
+}
+
+/// Walk `node`'s children in document order in event space.
+fn descend_event_space(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> Located {
+    let children: Vec<NodeId> = chapter.children(node).collect();
+    for child in children {
+        match locate_offset_in_event_space(chapter, child, offset) {
+            Located::Found(n) => return Located::Found(n),
+            Located::Remaining(r) => offset = r,
+        }
+    }
+    Located::Remaining(offset)
 }
 
 /// One node's contribution to the offset walk. Counting mirrors the
@@ -3236,6 +3428,194 @@ mod tests {
         let last = chapter.node(children[2]).unwrap();
         assert_eq!(last.role, Role::Text);
         assert_eq!(chapter.text(last.text), "!");
+    }
+
+    /// A paragraph whose text arrives as interleave runs (no content ref):
+    /// its style_events offset into the joined run space where the nested
+    /// child element counts ONE position, and apply to the runs they overlap.
+    #[test]
+    fn test_interleave_style_events_apply_to_runs() {
+        let mut stream = TokenStream::new();
+        stream.push(KfxToken::StartElement(ElementStart {
+            role: Role::Paragraph,
+            node_id: None,
+            id: Some(50),
+            semantics: HashMap::new(),
+            content_ref: None,
+            // 「いや(3) + child(1) + 　お(2) → 互 sits at offset 6.
+            style_events: vec![SpanStart {
+                role: Role::Ruby,
+                node_id: None,
+                semantics: HashMap::new(),
+                offset: 6,
+                length: 1,
+                style_symbol: None,
+                ruby_annotation: Some("たが".to_string()),
+                ruby_pairs: Vec::new(),
+                kfx_attrs: Vec::new(),
+            }],
+            kfx_attrs: Vec::new(),
+            style_symbol: None,
+            style_name: None,
+            needs_container_wrapper: false,
+            has_block_children: false,
+            container_layout: None,
+            inline_style: Vec::new(),
+            render_inline: false,
+            is_image: false,
+            layout_hints: Vec::new(),
+            heading_level: None,
+        }));
+        stream.push(KfxToken::Text("「いや".to_string()));
+        // Nested tate-chu-yoko run — its own text is 2 chars long but it
+        // occupies one position in the parent's event space.
+        stream.push(KfxToken::StartElement(ElementStart {
+            role: Role::Paragraph,
+            node_id: None,
+            id: Some(51),
+            semantics: HashMap::new(),
+            content_ref: Some(ContentRef {
+                name: "content_1".to_string(),
+                index: 0,
+            }),
+            style_events: Vec::new(),
+            kfx_attrs: Vec::new(),
+            style_symbol: None,
+            style_name: None,
+            needs_container_wrapper: false,
+            has_block_children: false,
+            container_layout: None,
+            inline_style: Vec::new(),
+            render_inline: true,
+            is_image: false,
+            layout_hints: Vec::new(),
+            heading_level: None,
+        }));
+        stream.end_element();
+        stream.push(KfxToken::Text("　お互いです".to_string()));
+        stream.end_element();
+
+        let chapter =
+            build_ir_from_tokens(&stream, &no_symbols(), None, |_, _| Some("!!".to_string()));
+
+        let para_id = chapter.children(chapter.root()).next().unwrap();
+        let children: Vec<_> = chapter.children(para_id).collect();
+        let roles: Vec<Role> = children
+            .iter()
+            .map(|c| chapter.node(*c).unwrap().role)
+            .collect();
+        // [「いや][!! run][　お][ruby 互][です]
+        assert_eq!(
+            roles,
+            vec![Role::Text, Role::Inline, Role::Text, Role::Ruby, Role::Text]
+        );
+        let ruby = children[3];
+        let base = chapter.children(ruby).next().unwrap();
+        let base_node = chapter.node(base).unwrap();
+        assert_eq!(base_node.role, Role::Text);
+        assert_eq!(chapter.text(base_node.text), "互");
+        let rt = chapter.children(ruby).nth(1).unwrap();
+        assert_eq!(chapter.node(rt).unwrap().role, Role::RubyText);
+        let tail = chapter.node(children[4]).unwrap();
+        assert_eq!(chapter.text(tail.text), "いです");
+    }
+
+    /// Offset anchors into an interleave element resolve in event space:
+    /// nested child elements count one position and restored ruby BASE text
+    /// counts (annotation text does not).
+    #[test]
+    fn test_interleave_offset_anchor_stamps_in_event_space() {
+        let mut table = AnchorTable::default();
+        // Anchor at (eid 50, offset 8): 「いや(3) + child(1) + 　お(2) +
+        // 互 base(1) + い(1) → lands before "です".
+        let pos = IonValue::Struct(vec![(
+            KfxSymbol::Position as u64,
+            IonValue::Struct(vec![
+                (KfxSymbol::Id as u64, IonValue::Int(50)),
+                (KfxSymbol::Offset as u64, IonValue::Int(8)),
+            ]),
+        )]);
+        table.register_anchor_fields("mid", pos.as_struct().unwrap());
+
+        let mut stream = TokenStream::new();
+        stream.push(KfxToken::StartElement(ElementStart {
+            role: Role::Paragraph,
+            node_id: None,
+            id: Some(50),
+            semantics: HashMap::new(),
+            content_ref: None,
+            style_events: vec![SpanStart {
+                role: Role::Ruby,
+                node_id: None,
+                semantics: HashMap::new(),
+                offset: 6,
+                length: 1,
+                style_symbol: None,
+                ruby_annotation: Some("たが".to_string()),
+                ruby_pairs: Vec::new(),
+                kfx_attrs: Vec::new(),
+            }],
+            kfx_attrs: Vec::new(),
+            style_symbol: None,
+            style_name: None,
+            needs_container_wrapper: false,
+            has_block_children: false,
+            container_layout: None,
+            inline_style: Vec::new(),
+            render_inline: false,
+            is_image: false,
+            layout_hints: Vec::new(),
+            heading_level: None,
+        }));
+        stream.push(KfxToken::Text("「いや".to_string()));
+        stream.push(KfxToken::StartElement(ElementStart {
+            role: Role::Paragraph,
+            node_id: None,
+            id: Some(51),
+            semantics: HashMap::new(),
+            content_ref: Some(ContentRef {
+                name: "content_1".to_string(),
+                index: 0,
+            }),
+            style_events: Vec::new(),
+            kfx_attrs: Vec::new(),
+            style_symbol: None,
+            style_name: None,
+            needs_container_wrapper: false,
+            has_block_children: false,
+            container_layout: None,
+            inline_style: Vec::new(),
+            render_inline: true,
+            is_image: false,
+            layout_hints: Vec::new(),
+            heading_level: None,
+        }));
+        stream.end_element();
+        stream.push(KfxToken::Text("　お互いです".to_string()));
+        stream.end_element();
+
+        let chapter =
+            build_ir_from_tokens_anchored(&stream, &no_symbols(), None, Some(&table), |_, _| {
+                Some("!!".to_string())
+            });
+
+        // The anchor must split the tail run between "い" and "です" —
+        // NOT fail to locate (the mechanical-route walk would stop at the
+        // ruby and never reach offset 8).
+        let stamped = table.id_at(50, 8).unwrap();
+        let para_id = chapter.children(chapter.root()).next().unwrap();
+        let mut found_between = false;
+        for c in chapter.children(para_id).collect::<Vec<_>>() {
+            if chapter.semantics.id(c) == Some(stamped.as_str()) {
+                let next = chapter.node(c).unwrap().next_sibling;
+                let next_text = next
+                    .and_then(|n| chapter.node(n))
+                    .map(|n| chapter.text(n.text));
+                assert_eq!(next_text, Some("です"));
+                found_between = true;
+            }
+        }
+        assert!(found_between, "anchor did not stamp in event space");
     }
 
     #[test]

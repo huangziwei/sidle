@@ -52,7 +52,7 @@ echo "==> Cross-compiling sidle-native for Kindle ($KUAL_TARGET)  [build_ts=$BUI
 SIDLE_BUILD_TS="$BUILD_TS" cargo build --release --target "$KUAL_TARGET" -p sidle-native
 # Stamp the build time next to the binary KualSource points at (dev path);
 # build.rs baked the same value into the binary itself.
-printf '%s' "$BUILD_TS" > "target/$KUAL_TARGET/release/sidle.build-ts"
+printf '%s' "$BUILD_TS" > "target/$KUAL_TARGET/release/sidle-native.build-ts"
 
 echo "==> Building sidle-server (LAN daemon: app spawns it; sakabar + Kindle reach it)"
 cargo build --release -p sidle-server
@@ -80,8 +80,8 @@ cp kual/sidle/config.xml    "$RES_KUAL/sidle/config.xml"
 cp kual/sidle/menu.json     "$RES_KUAL/sidle/menu.json"
 cp kual/sidle/bin/sidle.sh  "$RES_KUAL/sidle/bin/sidle.sh"
 cp kual/Sidle.sh            "$RES_KUAL/Sidle.sh"
-cp "target/$KUAL_TARGET/release/sidle" "$RES_KUAL/native/sidle"
-cp "target/$KUAL_TARGET/release/sidle.build-ts" "$RES_KUAL/native/sidle.build-ts"
+cp "target/$KUAL_TARGET/release/sidle-native" "$RES_KUAL/native/sidle"
+cp "target/$KUAL_TARGET/release/sidle-native.build-ts" "$RES_KUAL/native/sidle.build-ts"
 
 echo "==> Building sidle desktop app"
 cargo tauri build
