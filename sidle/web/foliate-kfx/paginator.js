@@ -354,16 +354,27 @@ class View {
             'position': 'static', 'border': '0', 'margin': '0',
             'max-height': 'none', 'max-width': 'none',
             'min-height': 'none', 'min-width': 'none',
-            // fix glyph clipping in WebKit — horizontal text only. Computing
-            // per-glyph ink bounds makes WebKit lay out a ruby-annotated
-            // vertical-rl section ~13× slower (measured ~870ms → ~66ms on a
-            // 100KB chapter), and for CJK vertical text it buys nothing: the
-            // rendered geometry is identical with and without (every element
-            // rect byte-equal, same page count), because CJK glyph ink stays
-            // inside the em box. Keep it for horizontal scripts, whose
-            // descenders/diacritics genuinely overflow line boxes and clip at
-            // column breaks without it.
-            ...(vertical ? {} : { '-webkit-line-box-contain': 'block glyphs replaced' }),
+            // Line-box sizing at the column's overflow-hidden block edges.
+            // Upstream foliate uses `block glyphs replaced`, containing each
+            // line to its per-glyph INK — but that makes WebKit measure every
+            // glyph's bounds (it's the `glyphs` keyword that turns on the
+            // glyph-overflow pass), an O(glyphs) layout that stalls a large
+            // section: ~13× slower on a ruby-annotated vertical chapter
+            // (measured ~870ms → ~66ms at 100KB), seconds on a ~500KB
+            // horizontal one.
+            //   - Vertical CJK: drop it entirely. Ink stays inside the em box,
+            //     so the default (`block inline replaced`) is byte-identical
+            //     (every element rect equal, same page count) and fast.
+            //   - Horizontal: contain to the font's em box (`font`, from cached
+            //     ascent/descent) instead of per-glyph ink. At a book's default
+            //     line-height — often a tight 1.2 with no column block-padding —
+            //     that still keeps ascenders/descenders/diacritics, which live
+            //     within the font's own metrics, clear of the clip edge, but
+            //     prices it at font metrics rather than a per-glyph scan. Line
+            //     geometry is unchanged wherever the block line-height strut
+            //     already covers the em box (all normal body text); only
+            //     oversized inline runs shift, and by less than `glyphs` did.
+            ...(vertical ? {} : { '-webkit-line-box-contain': 'block font replaced' }),
         })
         setStylesImportant(doc.body, {
             'max-height': 'none',
