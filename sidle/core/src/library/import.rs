@@ -38,8 +38,8 @@
 //!  5. Extract the cover sidecar if we already have a readable EPUB on
 //!     hand. EPUB input always does; KFX input only does on an idempotent
 //!     re-import where the EPUB already exists. The fresh KFX path leaves
-//!     `cover_path` empty for the worker to fill once `convert_to_epub`
-//!     produces an EPUB whose JXR cover has been transcoded to JPG.
+//!     `cover_path` empty for the worker to fill once the KFX→EPUB
+//!     conversion produces an EPUB whose JXR cover has been transcoded to JPG.
 //!  6. Insert book + conversion job. If the *other* side is already on
 //!     disk (a direct-derived sibling, or an idempotent re-import) the job
 //!     is marked `done`; otherwise it's `pending` and the caller enqueues

@@ -315,15 +315,18 @@ fn progress_fraction(kind: &str, phase: &str, cur: usize, total: usize) -> f32 {
         ("epub_to_kfx", "images") => (0.40, 0.92),
         ("epub_to_kfx", "finalize") => (0.92, 1.00),
 
-        // Emission order changed with the deferred-image pipeline: images are
-        // now transcoded AFTER content/nav (post-prune), with real per-chunk
-        // counts — so `resources` sits late and gets the widest band (it's
-        // 95%+ of the wall time on image-heavy books).
+        // IR route emission order: `load` (Book::from_bytes container parse) →
+        // `content` (per-chapter storyline→IR) → `resources` (image transcode,
+        // real per-chunk counts) → `nav` → `finalize`. `resources` gets the
+        // widest band (it's 95%+ of the wall time on image-heavy books). Note
+        // this differs from the mechanical route's `nav → resources`: the IR
+        // route transcodes inline before the manifest needs each image's MIME,
+        // so `resources` sits before the (cheap) `nav` resolution.
         ("kfx_to_epub", "load") => (0.00, 0.08),
-        ("kfx_to_epub", "content") => (0.08, 0.20),
-        ("kfx_to_epub", "nav") => (0.20, 0.24),
-        ("kfx_to_epub", "resources") => (0.24, 0.94),
-        ("kfx_to_epub", "finalize") => (0.94, 1.00),
+        ("kfx_to_epub", "content") => (0.08, 0.24),
+        ("kfx_to_epub", "resources") => (0.24, 0.92),
+        ("kfx_to_epub", "nav") => (0.92, 0.96),
+        ("kfx_to_epub", "finalize") => (0.96, 1.00),
 
         ("pdf_to_kfx", "probe") => (0.00, 0.05),
         ("pdf_to_kfx", "cover") => (0.05, 0.15),
@@ -409,16 +412,26 @@ fn convert_kfx_to_epub(
     let base = derived_basename(book, source_path);
     let out_path = dir.join(format!("{base}.epub"));
 
-    // Mechanical port: KFX bytes → EPUB bytes. The intermediate `.kfx` is
-    // already persisted (import wrote it before enqueueing), so we read it
-    // back here rather than threading the bytes through the queue.
+    // IR route: KFX bytes → Book → EPUB. The intermediate `.kfx` is already
+    // persisted (import wrote it before enqueueing), so we read it back here
+    // rather than threading the bytes through the queue. `from_bytes` is the
+    // container parse (the `load` phase); `export_with_progress` emits
+    // content/resources/nav/finalize. Output is byte-identical to the
+    // mechanical `kfx_to_epub` port (verified 1:1 corpus-wide, plan M3), which
+    // survives as the `boko convert --route mechanical` oracle.
     let kfx_bytes = std::fs::read(source_path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
-    let epub_bytes = boko::kfx_to_epub::convert_to_epub_with_progress(&kfx_bytes, on_progress)
+    on_progress("load", 0, 1, "Reading KFX");
+    let mut handle = boko::Book::from_bytes(&kfx_bytes, boko::Format::Kfx)
+        .map_err(|e| anyhow::anyhow!("boko kfx→epub (load): {e}"))?;
+    let mut buf = std::io::Cursor::new(Vec::new());
+    handle
+        .export_with_progress(boko::Format::Epub, &mut buf, on_progress)
         .map_err(|e| anyhow::anyhow!("boko kfx→epub: {e}"))?;
+    let epub_bytes = buf.into_inner();
     write_bytes_atomic(&out_path, &epub_bytes)?;
 
-    // Cover sidecar — `kfx_to_epub` already transcoded any JXR to JPG and
+    // Cover sidecar — the exporter already transcoded any JXR to JPG and
     // marked the manifest entry as `cover-image`, so this is a plain copy
     // out of the produced zip.
     let cover_path = extract_cover_from_epub(&epub_bytes).and_then(|(bytes, ext)| {

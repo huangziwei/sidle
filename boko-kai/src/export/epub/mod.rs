@@ -87,17 +87,32 @@ impl Default for EpubExporter {
 
 impl Exporter for EpubExporter {
     fn export<W: Write + Seek>(&self, book: &mut Book, writer: &mut W) -> io::Result<()> {
-        // Use normalized mode if explicitly requested OR if the source format requires it
-        // (e.g., KFX raw content is binary Ion, not HTML)
-        if self.config.normalize || book.requires_normalized_export() {
-            self.export_normalized(book, writer)
-        } else {
-            self.export_raw(book, writer)
-        }
+        self.export_with_progress(book, writer, &|_, _, _, _| {})
     }
 }
 
 impl EpubExporter {
+    /// Like [`Exporter::export`], but reports coarse phase progress to
+    /// `on_progress` as `(phase_key, current, total, human_label)` — see
+    /// [`crate::Book::export_with_progress`]. Only the normalized path (KFX→EPUB)
+    /// emits phases (`content → resources → nav → finalize`, with real per-chunk
+    /// counts on the image-transcode `resources` phase); the raw passthrough
+    /// (epub/azw3→epub) is fast and ignores the callback.
+    pub fn export_with_progress<W: Write + Seek>(
+        &self,
+        book: &mut Book,
+        writer: &mut W,
+        on_progress: &dyn Fn(&str, usize, usize, &str),
+    ) -> io::Result<()> {
+        // Use normalized mode if explicitly requested OR if the source format requires it
+        // (e.g., KFX raw content is binary Ion, not HTML)
+        if self.config.normalize || book.requires_normalized_export() {
+            self.export_normalized(book, writer, on_progress)
+        } else {
+            self.export_raw(book, writer)
+        }
+    }
+
     /// Export with passthrough mode (preserves original HTML/CSS).
     fn export_raw<W: Write + Seek>(&self, book: &mut Book, writer: &mut W) -> io::Result<()> {
         // Resolve TOC fragments first (AZW3/MOBI backends refine NCX byte
@@ -306,15 +321,23 @@ impl EpubExporter {
         Ok(())
     }
 
-    /// Export with normalized content (IR pipeline produces clean, consistent output).
+    /// Export with normalized content (IR pipeline produces clean, consistent
+    /// output). Reports coarse phase progress to `on_progress`; the emission
+    /// order is `content → resources → nav → finalize` (unlike the mechanical
+    /// `kfx_to_epub` route's `nav → resources`: that route defers image bytes
+    /// past nav, whereas here `load_assets` transcodes inline before the
+    /// manifest needs each image's post-transcode MIME).
     fn export_normalized<W: Write + Seek>(
         &self,
         book: &mut Book,
         writer: &mut W,
+        on_progress: &dyn Fn(&str, usize, usize, &str),
     ) -> io::Result<()> {
         use self::normalize::normalize_book;
 
-        // Normalize the book content
+        // Normalize the book content — for KFX this triggers the lazy per-chapter
+        // storyline→IR parse (the heaviest step after image transcode).
+        on_progress("content", 0, 1, "Building chapters");
         let content = normalize_book(book)?;
         let spine: Vec<_> = book.spine().to_vec();
 
@@ -361,11 +384,11 @@ impl EpubExporter {
         // Assets first. When the importer declares an authoritative bundle
         // (KFX: the canonical image index shared with the mechanical route —
         // deterministic order, exported filenames, cover included even when
-        // no chapter references it inline), use it verbatim; bytes load in
-        // one bulk call so the KFX JPEG-XR→JPEG transcode runs across cores.
-        // Otherwise fall back to the assets the normalized content
-        // references, sorted for stable ordering, force-including the cover
-        // image (it may be referenced by metadata only).
+        // no chapter references it inline), use it verbatim; the KFX
+        // JPEG-XR→JPEG transcode runs across cores (`load_assets` →
+        // `parallel_map`). Otherwise fall back to the assets the normalized
+        // content references, sorted for stable ordering, force-including the
+        // cover image (it may be referenced by metadata only).
         let asset_bytes: Vec<(String, Vec<u8>)> = if let Some(asset_list) = book.bundled_assets() {
             // Fixed-layout books bundle a full page-thumbnail set the
             // reading order never references; ship only the images the
@@ -385,16 +408,34 @@ impl EpubExporter {
             } else {
                 asset_list
             };
-            asset_list
-                .iter()
-                .zip(book.load_assets(&asset_list))
-                .map(|(path, bytes)| {
-                    (
+            // Transcode in chunks so the progress bar moves through the long
+            // pole (image decode) instead of sitting on one opaque step; each
+            // chunk still transcodes across cores. ~2 items per worker keeps
+            // straggler idle time negligible — the mechanical route's
+            // `resources` chunking. Byte output is identical to a single bulk
+            // load (`parallel_map` preserves input order within each chunk and
+            // chunks concatenate in order).
+            let total = asset_list.len();
+            if total > 0 {
+                on_progress("resources", 0, total, "Decoding images");
+            }
+            let workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
+            let chunk_size = (workers * 2).max(1);
+            let mut loaded: Vec<(String, Vec<u8>)> = Vec::with_capacity(total);
+            let mut done = 0usize;
+            for chunk in asset_list.chunks(chunk_size) {
+                for (path, bytes) in chunk.iter().zip(book.load_assets(chunk)) {
+                    loaded.push((
                         path.to_string_lossy().to_string(),
                         bytes.unwrap_or_default(),
-                    )
-                })
-                .collect()
+                    ));
+                }
+                done += chunk.len();
+                on_progress("resources", done, total, "Decoding images");
+            }
+            loaded
         } else {
             let mut asset_paths: Vec<String> = content.assets.iter().cloned().collect();
             asset_paths.sort();
@@ -516,6 +557,7 @@ impl EpubExporter {
         // not a re-parse. Unresolvable landmarks and page-list entries are
         // dropped (never emit a dangling reference); TOC entries keep their
         // label with an empty href, like the mechanical route.
+        on_progress("nav", 0, 1, "Writing navigation");
         if !book.toc().is_empty() || !book.page_list().is_empty() || !book.landmarks().is_empty() {
             let mut anchor_chapters = Vec::with_capacity(spine.len());
             for entry in &spine {
@@ -596,6 +638,9 @@ impl EpubExporter {
                 .max_by_key(|&(vp, n)| (n, vp))
                 .map(|(vp, _)| vp)
         };
+        // Packaging: OPF + nav/ncx + zip writes (image bytes are already
+        // transcoded, so this is serialize-and-deflate, not the long pole).
+        on_progress("finalize", 1, 1, "Packaging");
         // A KFX source's metadata mirrors the mechanical route's curated
         // field set (see `build_opf_metadata`), keeping the two KFX→EPUB
         // engines' package documents identical. The guide is cloned into the
@@ -1032,5 +1077,44 @@ mod tests {
         assert_eq!(guess_media_type("style.css"), "text/css");
         assert_eq!(guess_media_type("image.jpg"), "image/jpeg");
         assert_eq!(guess_media_type("font.woff2"), "font/woff2");
+    }
+
+    #[test]
+    fn kfx_export_with_progress_emits_phases_in_order() {
+        use std::cell::RefCell;
+        // KFX → EPUB (the normalized path). The IR route transcodes images
+        // inline before nav, so the emission order is
+        // content → resources → nav → finalize (the mechanical route's is
+        // nav → resources — it defers image bytes). The fixture ships a cover
+        // image, so all four phases fire.
+        let mut book = crate::Book::open("tests/fixtures/[太宰 治] 人間失格.kfx").unwrap();
+        let phases = RefCell::new(Vec::<String>::new());
+        let mut sink = Vec::new();
+        book.export_with_progress(
+            crate::Format::Epub,
+            &mut std::io::Cursor::new(&mut sink),
+            &|phase, cur, total, _label| {
+                assert!(cur <= total, "{phase}: {cur}/{total}");
+                let mut p = phases.borrow_mut();
+                if p.last().map(String::as_str) != Some(phase) {
+                    p.push(phase.to_string());
+                }
+            },
+        )
+        .unwrap();
+        let seen = phases.into_inner();
+        let order = ["content", "resources", "nav", "finalize"];
+        let idxs: Vec<usize> = order
+            .iter()
+            .map(|p| {
+                seen.iter()
+                    .position(|s| s == p)
+                    .unwrap_or_else(|| panic!("missing phase {p}; saw {seen:?}"))
+            })
+            .collect();
+        assert!(
+            idxs.windows(2).all(|w| w[0] < w[1]),
+            "phases out of order: {seen:?}"
+        );
     }
 }

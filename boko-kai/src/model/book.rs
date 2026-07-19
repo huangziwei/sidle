@@ -815,9 +815,9 @@ impl Book {
 
     /// Like [`Book::export`], but reports coarse conversion progress to
     /// `on_progress` as `(phase_key, current, total, human_label)` — sidle's
-    /// conversion queue uses this to drive a determinate progress bar. Only KFX
-    /// export (the slow direction) emits phases today; EPUB export ignores the
-    /// callback.
+    /// conversion queue uses this to drive a determinate progress bar. KFX
+    /// export and the normalized EPUB export (the two slow directions) emit
+    /// phases; the raw EPUB passthrough (epub/azw3→epub) ignores the callback.
     pub fn export_with_progress<W: Write + Seek>(
         &mut self,
         format: Format,
@@ -825,7 +825,7 @@ impl Book {
         on_progress: &dyn Fn(&str, usize, usize, &str),
     ) -> io::Result<()> {
         match format {
-            Format::Epub => EpubExporter::new().export(self, writer),
+            Format::Epub => EpubExporter::new().export_with_progress(self, writer, on_progress),
             Format::Kfx => KfxExporter::new().export_with_progress(self, writer, on_progress),
             Format::Markdown => MarkdownExporter::new().export(self, writer),
             Format::Azw3 => Azw3Exporter::new().export(self, writer),

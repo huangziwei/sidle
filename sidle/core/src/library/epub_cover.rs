@@ -101,8 +101,13 @@ pub fn ensure_cover(
     if epub_is_derived && let Some(kfx) = kfx_path {
         let kfx_bytes = std::fs::read(kfx).with_context(|| format!("read {}", kfx.display()))?;
         if kfx_declares_cover(&kfx_bytes) {
-            let epub_bytes = boko::kfx_to_epub::convert_to_epub(&kfx_bytes)
-                .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap: {e:?}"))?;
+            // IR route (byte-identical to the mechanical port, plan M3).
+            let mut book = boko::Book::from_bytes(&kfx_bytes, boko::Format::Kfx)
+                .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap (load): {e}"))?;
+            let mut buf = std::io::Cursor::new(Vec::new());
+            book.export(boko::Format::Epub, &mut buf)
+                .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap: {e}"))?;
+            let epub_bytes = buf.into_inner();
             write_bytes_atomic(epub_path, &epub_bytes)?;
             replace_cover(epub_path, new_bytes, new_ext)?;
             return Ok(());
@@ -117,8 +122,8 @@ pub fn ensure_cover(
 /// decide between regenerating the EPUB from the KFX (cover present) and
 /// inserting one directly (cover absent).
 fn kfx_declares_cover(kfx_bytes: &[u8]) -> bool {
-    boko::kfx_to_epub::loader::load(kfx_bytes)
-        .map(|b| b.metadata.cover_resource_name.is_some())
+    boko::Book::from_bytes(kfx_bytes, boko::Format::Kfx)
+        .map(|b| b.metadata().cover_image.is_some())
         .unwrap_or(false)
 }
 

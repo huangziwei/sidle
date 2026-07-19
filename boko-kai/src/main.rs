@@ -68,11 +68,11 @@ enum Command {
         #[arg(long = "writing-mode")]
         writing_mode: Option<String>,
 
-        /// KFX → EPUB engine: `mechanical` (default — the `kfx_to_epub`
-        /// calibre port) or `ir` (the generic `KfxImporter` → IR →
-        /// `EpubExporter` pipeline). The two must converge to byte-identical
-        /// output; until then `ir` is the side under test.
-        #[arg(long = "route", default_value = "mechanical")]
+        /// KFX → EPUB engine: `ir` (default — the generic `KfxImporter` → IR →
+        /// `EpubExporter` pipeline, byte-identical to the port corpus-wide per
+        /// plan M3) or `mechanical` (the `kfx_to_epub` calibre port, kept as
+        /// the 1:1 oracle / escape hatch and what the AB harness pins).
+        #[arg(long = "route", default_value = "ir")]
         route: String,
     },
 
@@ -1494,9 +1494,10 @@ fn convert(
         );
     }
 
-    // KFX -> EPUB. Two engines: the mechanical `kfx_to_epub` calibre port
-    // (default) and the generic IR pipeline (`--route ir`). Both refuse a
-    // PDF-backed container — that must round-trip through PDF, not EPUB.
+    // KFX -> EPUB. Two engines: the generic IR pipeline (default) and the
+    // mechanical `kfx_to_epub` calibre port (`--route mechanical`, the 1:1
+    // oracle). Both refuse a PDF-backed container — that must round-trip
+    // through PDF, not EPUB.
     if !from_stdin
         && output_format == Format::Epub
         && std::path::Path::new(input)
