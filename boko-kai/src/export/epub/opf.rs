@@ -806,8 +806,8 @@ mod tests {
                 href: "c0.xhtml".to_string(),
             },
         ];
-        repoint_cover_guide(&mut guide, "titlepage.xhtml");
-        assert_eq!(guide[0].href, "titlepage.xhtml");
+        repoint_cover_guide(&mut guide, "cover.xhtml");
+        assert_eq!(guide[0].href, "cover.xhtml");
         assert_eq!(guide[0].title, "Cover");
         assert_eq!(guide[1].href, "c0.xhtml");
 
@@ -817,9 +817,9 @@ mod tests {
             title: "TOC".to_string(),
             href: "c0.xhtml".to_string(),
         }];
-        repoint_cover_guide(&mut guide, "titlepage.xhtml");
+        repoint_cover_guide(&mut guide, "cover.xhtml");
         assert_eq!(guide[0].guide_type, "cover");
-        assert_eq!(guide[0].href, "titlepage.xhtml");
+        assert_eq!(guide[0].href, "cover.xhtml");
         assert_eq!(guide.len(), 2);
     }
 }

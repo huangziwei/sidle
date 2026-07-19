@@ -211,7 +211,7 @@ impl EpubExporter {
                 0,
                 OpfItem {
                     id: "titlepage".to_string(),
-                    href: "titlepage.xhtml".to_string(),
+                    href: "cover.xhtml".to_string(),
                     media_type: "application/xhtml+xml".to_string(),
                     properties: opf::xhtml_content_properties(xhtml)
                         .into_iter()
@@ -232,7 +232,7 @@ impl EpubExporter {
         // (readers use it to open on the cover page).
         let mut guide: Vec<OpfGuideRef> = Vec::new();
         if titlepage_xhtml.is_some() {
-            opf::repoint_cover_guide(&mut guide, "titlepage.xhtml");
+            opf::repoint_cover_guide(&mut guide, "cover.xhtml");
         }
         let opf = opf::emit_opf(&OpfPackage {
             metadata: build_opf_metadata(book.metadata(), false, cover_id, None),
@@ -259,7 +259,7 @@ impl EpubExporter {
             })
             .collect();
         let toc_fallback = if titlepage_xhtml.is_some() {
-            Some("titlepage.xhtml".to_string())
+            Some("cover.xhtml".to_string())
         } else {
             book.spine()
                 .first()
@@ -289,9 +289,9 @@ impl EpubExporter {
             .map_err(io_error)?;
         zip.write_all(ncx.as_bytes())?;
 
-        // 6c. Write titlepage.xhtml when a cover was found.
+        // 6c. Write cover.xhtml when a cover was found.
         if let Some(ref xhtml) = titlepage_xhtml {
-            zip.start_file("OEBPS/titlepage.xhtml", deflated)
+            zip.start_file("OEBPS/cover.xhtml", deflated)
                 .map_err(io_error)?;
             zip.write_all(xhtml.as_bytes())?;
         }
@@ -346,8 +346,34 @@ impl EpubExporter {
         // `kfx_to_epub` route byte-for-byte — same `{section}.xhtml` shape,
         // same `-N` collision suffix (`content::push_book_part`) — so the
         // two routes' trees can converge to identical.
-        let chapter_files =
+        let mut chapter_files =
             chapter_filenames(content.chapters.iter().map(|c| c.source_path.as_str()));
+
+        // The KFX ships its cover as an image-only section; the SVG `cover.xhtml`
+        // page emitted below duplicates it, so drop that section from the
+        // shippable EPUB (publisher shape — ONE cover). Gated to when a cover
+        // page is actually emitted (non-FXL + a cover image, which is always in
+        // the manifest when set). This index is skipped in the manifest/spine/
+        // anchor/zip passes; the mechanical route drops the same section on the
+        // identical bytes (1:1).
+        let cover_section_idx: Option<usize> = if !book.metadata().fixed_layout {
+            book.metadata().cover_image.as_deref().and_then(|cover| {
+                content
+                    .chapters
+                    .iter()
+                    .position(|c| is_redundant_cover_section(&c.document, cover))
+            })
+        } else {
+            None
+        };
+        // Nav/landmark targets that resolved to the dropped section (the KFX's
+        // toc/text landmarks can point at the cover) now resolve to the SVG
+        // cover page in its place — so `resolve_nav_href` maps its id to
+        // `cover.xhtml`, not a file that no longer exists. Same remap on the
+        // mechanical route (via `element_id_to_filename`), so nav/ncx stay 1:1.
+        if let Some(idx) = cover_section_idx {
+            chapter_files[idx] = "cover.xhtml".to_string();
+        }
 
         let mut zip = ZipWriter::new(writer);
 
@@ -484,6 +510,9 @@ impl EpubExporter {
         // Chapters. Spine `properties` carry the FXL page-spread pairing
         // when the importer set one.
         for (i, chapter) in content.chapters.iter().enumerate() {
+            if Some(i) == cover_section_idx {
+                continue;
+            }
             let id = next_id(&mut taken_ids, &chapter_files[i]);
             manifest_items.push(OpfItem {
                 id: id.clone(),
@@ -518,23 +547,26 @@ impl EpubExporter {
             // titlepage would duplicate it and break the spread pairing.
             None
         } else if let Some(ref cid) = cover_id {
-            let cover_item = manifest_items.iter().find(|i| &i.id == cid);
-            cover_item.and_then(|item| {
-                let bytes = asset_bytes
+            manifest_items.iter().find(|i| &i.id == cid).map(|item| {
+                // Dims are optional — the shared builder falls back to a bare
+                // <img> when the cover's pixel size can't be probed. Emit the
+                // page whenever a cover exists (matching the mechanical route),
+                // so suppressing the KFX cover section below never leaves the
+                // book coverless.
+                let dims = asset_bytes
                     .iter()
                     .find(|(p, _)| sanitize_path(p) == item.href)
-                    .map(|(_, b)| b.as_slice())?;
-                let (w, h) = crate::util::extract_image_dimensions(bytes)?;
-                Some(build_titlepage(&item.href, Some((w, h))))
+                    .and_then(|(_, b)| crate::util::extract_image_dimensions(b));
+                build_titlepage(&item.href, dims)
             })
         } else {
             None
         };
         if let Some(xhtml) = &titlepage_xhtml {
-            let id = next_id(&mut taken_ids, "titlepage.xhtml");
+            let id = next_id(&mut taken_ids, "cover.xhtml");
             manifest_items.push(OpfItem {
                 id: id.clone(),
-                href: "titlepage.xhtml".to_string(),
+                href: "cover.xhtml".to_string(),
                 media_type: "application/xhtml+xml".to_string(),
                 properties: opf::xhtml_content_properties(xhtml)
                     .into_iter()
@@ -560,7 +592,10 @@ impl EpubExporter {
         on_progress("nav", 0, 1, "Writing navigation");
         if !book.toc().is_empty() || !book.page_list().is_empty() || !book.landmarks().is_empty() {
             let mut anchor_chapters = Vec::with_capacity(spine.len());
-            for entry in &spine {
+            for (i, entry) in spine.iter().enumerate() {
+                if Some(i) == cover_section_idx {
+                    continue;
+                }
                 anchor_chapters.push((entry.id, book.load_chapter_cached(entry.id)?));
             }
             book.index_anchors(&anchor_chapters);
@@ -616,7 +651,7 @@ impl EpubExporter {
             });
         }
         if titlepage_xhtml.is_some() {
-            opf::repoint_cover_guide(&mut guide, "titlepage.xhtml");
+            opf::repoint_cover_guide(&mut guide, "cover.xhtml");
         }
         // Fixed-layout `original-resolution` fallback for sources with
         // per-page viewports only: the most common page size (the cover is
@@ -664,7 +699,7 @@ impl EpubExporter {
         // fallback points at the first spine document — the titlepage when
         // one was synthesized, like the mechanical route.
         let toc_fallback = if titlepage_xhtml.is_some() {
-            Some("titlepage.xhtml")
+            Some("cover.xhtml")
         } else {
             chapter_files.first().map(String::as_str)
         };
@@ -721,13 +756,16 @@ impl EpubExporter {
         }
 
         for (i, chapter) in content.chapters.iter().enumerate() {
+            if Some(i) == cover_section_idx {
+                continue;
+            }
             let zip_path = format!("OEBPS/{}", chapter_files[i]);
             zip.start_file(&zip_path, deflated).map_err(io_error)?;
             zip.write_all(chapter.document.as_bytes())?;
         }
 
         if let Some(ref xhtml) = titlepage_xhtml {
-            zip.start_file("OEBPS/titlepage.xhtml", deflated)
+            zip.start_file("OEBPS/cover.xhtml", deflated)
                 .map_err(io_error)?;
             zip.write_all(xhtml.as_bytes())?;
         }
@@ -785,6 +823,56 @@ fn find_cover_manifest_id(
         .iter()
         .find(|item| item.href == cover_trim || item.href.ends_with(cover_trim))
         .map(|item| item.id.clone())
+}
+
+/// True when `html` is an image-only section whose sole `<img>` renders the
+/// cover image `cover_href` — i.e. the KFX's own cover section, which the SVG
+/// `cover.xhtml` page duplicates. Both KFX→EPUB routes feed this the identical
+/// section bytes, so they drop the same section and stay byte-for-byte 1:1.
+///
+/// A publisher EPUB (Kobo-verified) ships ONE cover page; the calibre lineage
+/// emitted both the SVG cover page and the KFX's bare-`<img>` cover section,
+/// which read as a duplicate cover. Dropping the redundant section (keeping the
+/// full-page SVG) matches the publisher shape. The reader keeps this section
+/// instead (it renders the KFX natively and sizes the image itself) and drops
+/// the SVG page — the opposite dedup, correct for its renderer.
+pub(crate) fn is_redundant_cover_section(html: &str, cover_href: &str) -> bool {
+    // Body only — the <head><title> text must not count against "no visible
+    // text", and the SVG cover page (which carries `<image>`, not `<img>`) must
+    // never match: we only inspect KFX content sections here.
+    let body = match (html.find("<body"), html.rfind("</body>")) {
+        (Some(s), Some(e)) if e > s => {
+            let open_end = html[s..e].find('>').map(|i| s + i + 1).unwrap_or(s);
+            &html[open_end..e]
+        }
+        _ => html,
+    };
+    // Exactly one raster image.
+    if body.matches("<img").count() != 1 {
+        return false;
+    }
+    // Its src basename must be the cover image.
+    let src = body
+        .split_once("<img")
+        .and_then(|(_, rest)| rest.split_once("src=\""))
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(src, _)| src);
+    let Some(src) = src else { return false };
+    let base = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+    if base(src) != base(cover_href) {
+        return false;
+    }
+    // No visible text: with all tags stripped, nothing but whitespace remains.
+    let mut depth = 0i32;
+    for c in body.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = (depth - 1).max(0),
+            c if depth == 0 && !c.is_whitespace() => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 /// Build the OPF `<metadata>` block from the book's metadata.
@@ -896,7 +984,7 @@ fn toc_to_navpoints(
         .collect()
 }
 
-// `titlepage.xhtml` comes from the shared calibre-shaped builder
+// `cover.xhtml` comes from the shared calibre-shaped builder
 // (`export::titlepage`), the same one the mechanical KFX→EPUB route ships.
 use self::titlepage::build_titlepage;
 

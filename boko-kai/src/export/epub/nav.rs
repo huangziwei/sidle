@@ -384,7 +384,7 @@ mod tests {
             OpfGuideRef {
                 guide_type: "cover".to_string(),
                 title: String::new(),
-                href: "titlepage.xhtml".to_string(),
+                href: "cover.xhtml".to_string(),
             },
             OpfGuideRef {
                 guide_type: "text".to_string(),
@@ -412,7 +412,7 @@ mod tests {
         assert!(s.contains("<nav epub:type=\"page-list\" id=\"page-list\" hidden=\"\">"));
         assert!(s.contains("<li><a href=\"c0.xhtml#page-1-0\">1</a></li>"));
         // Empty labels fall back; the duplicated bodymatter target is deduped.
-        assert!(s.contains("<a epub:type=\"cover\" href=\"titlepage.xhtml\">Cover</a>"));
+        assert!(s.contains("<a epub:type=\"cover\" href=\"cover.xhtml\">Cover</a>"));
         assert!(s.contains("<a epub:type=\"bodymatter\" href=\"c0.xhtml\">Start of Content</a>"));
         assert!(!s.contains(">Start</a>"));
     }

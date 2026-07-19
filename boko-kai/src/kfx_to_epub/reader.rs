@@ -211,7 +211,7 @@ pub fn kfx_to_reader_book_lazy(
     let sections: Vec<ReaderSection> = out
         .spine_documents_with_props()
         .into_iter()
-        .filter(|(href, _, _)| href != "titlepage.xhtml")
+        .filter(|(href, _, _)| href != "cover.xhtml")
         .map(|(href, html, spread)| {
             let viewport = parse_viewport(&html);
             let (chars, image_only, image_hrefs) = scan_section_meta(&html);

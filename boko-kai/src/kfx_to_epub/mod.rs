@@ -208,7 +208,25 @@ pub(crate) fn build_output(
     // Collect every `<img src>` the emitted pages reference, so fixed-layout
     // books can prune the unreferenced page-thumbnail set below.
     let mut referenced_images: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let cover_href = out.cover_image_info().map(|(h, _, _)| h.to_string());
+    let mut dropped_cover_file: Option<String> = None;
     for part in &content_state.book_parts {
+        let xhtml = crate::export::xdom::chapter_document(&part.dom);
+        // Shippable EPUB (not the reader): the SVG `cover.xhtml` page prepended
+        // below IS the cover; the KFX's own image-only cover section duplicates
+        // it, so drop it (publisher shape — ONE cover; Kobo-verified). The
+        // reader (`stamp_eids`) keeps this section and drops the SVG page
+        // instead — the opposite dedup, correct for its native KFX renderer.
+        // Same detector + identical section bytes as the IR route, so both
+        // routes drop the same section and stay byte-for-byte 1:1.
+        if !stamp_eids
+            && !content_state.is_fixed_layout
+            && let Some(ref cover) = cover_href
+            && crate::export::epub::is_redundant_cover_section(&xhtml, cover)
+        {
+            dropped_cover_file = Some(part.filename.clone());
+            continue;
+        }
         for id in 0..part.dom.len() {
             let el = part.dom.get(id);
             if el.tag == "img"
@@ -217,10 +235,21 @@ pub(crate) fn build_output(
                 referenced_images.insert(src.to_string());
             }
         }
-        let xhtml = crate::export::xdom::chapter_document(&part.dom);
         out.add_spine_chapter_with_props(&part.filename, xhtml, part.spread_property.clone());
     }
     trace.mark("dom serialize + add spine chapters");
+
+    // Repoint any nav/landmark target that resolved to the dropped cover
+    // section at the SVG `cover.xhtml` page in its place (the KFX's toc/text
+    // landmarks can point at the cover section). Mirrors the IR route's
+    // `chapter_files` remap so nav/ncx stay byte-for-byte 1:1.
+    if let Some(ref dropped) = dropped_cover_file {
+        for v in content_state.element_id_to_filename.values_mut() {
+            if v.as_str() == dropped.as_str() {
+                *v = "cover.xhtml".to_string();
+            }
+        }
+    }
 
     // Propagate fixed-layout (manga / comic) metadata to the OPF generator.
     out.fixed_layout = content_state.is_fixed_layout;
@@ -274,7 +303,7 @@ pub(crate) fn build_output(
     if !content_state.is_fixed_layout
         && let Some(titlepage) = build_titlepage(&out)
     {
-        out.prepend_spine_chapter("titlepage.xhtml", titlepage);
+        out.prepend_spine_chapter("cover.xhtml", titlepage);
     }
 
     // Navigation. Build the TOC tree from book_navigation, using the
@@ -326,8 +355,8 @@ pub(crate) fn build_output(
     // `type="cover"` href to render the cover page; without this rewrite
     // it ends up rendering c0.xhtml's first paragraph instead of the
     // cover image.
-    if out.has_file("titlepage.xhtml") {
-        crate::export::opf::repoint_cover_guide(&mut out.guide, "titlepage.xhtml");
+    if out.has_file("cover.xhtml") {
+        crate::export::opf::repoint_cover_guide(&mut out.guide, "cover.xhtml");
     }
     trace.mark("navigation::extract_landmarks");
 
