@@ -44,6 +44,63 @@ pub struct EpubConfig {
     pub normalize: bool,
 }
 
+/// One spine document of a built package.
+#[derive(Debug, Clone)]
+pub struct PackageDocument {
+    /// Filename within `OEBPS/`.
+    pub href: String,
+    /// The complete XHTML document.
+    pub xhtml: String,
+    /// Spine `properties` — the fixed-layout page-spread pairing, when the
+    /// importer declared one.
+    pub spread: Option<String>,
+    /// Fixed-layout page pixel box, when the source declared one.
+    pub viewport: Option<(u32, u32)>,
+}
+
+/// A normalized book built into EPUB shape but not yet written to a container:
+/// every document, stylesheet, and asset byte the zip would hold, in the order
+/// it would hold them.
+///
+/// [`build_package`] produces it and [`EpubExporter`] zips it. Consumers that
+/// render a book instead of shipping one take the same documents without the
+/// container — which is what keeps a rendered book and an exported one from
+/// drifting apart.
+#[derive(Debug)]
+pub struct EpubPackage {
+    /// Every spine document the source produced, in reading order.
+    pub documents: Vec<PackageDocument>,
+    /// The synthesized SVG cover page, which occupies spine position 0 when
+    /// present. Written last in the container (manifest registration order).
+    pub titlepage: Option<String>,
+    /// Index into [`Self::documents`] of the source's own cover page, when a
+    /// [`Self::titlepage`] renders the same image.
+    ///
+    /// A publisher EPUB ships ONE cover, so a container must drop one of the
+    /// two — and the package reports the overlap rather than resolving it,
+    /// because the right one to keep depends on who is rendering:
+    ///
+    /// - A container drops this one. The source's page is a bare `<img>` that
+    ///   inherits body margins in a foreign reader; the titlepage's SVG
+    ///   `viewBox` is what makes a cover fill the page.
+    /// - A renderer that resolves `(element, offset)` handles keeps this one
+    ///   and ignores the titlepage, which carries no source elements and so
+    ///   has no reading position at all.
+    pub redundant_cover: Option<usize>,
+    /// `content.opf`.
+    pub opf: String,
+    /// `nav.xhtml`.
+    pub nav: String,
+    /// `toc.ncx`.
+    pub ncx: String,
+    /// The unified stylesheet; empty when the book contributed no styles.
+    pub css: String,
+    /// Asset bytes in manifest registration order, post-transcode.
+    pub assets: Vec<(String, Vec<u8>)>,
+    /// The resolved TOC tree, hrefs pointing into [`Self::documents`].
+    pub toc: Vec<NavPoint>,
+}
+
 /// EPUB format exporter.
 ///
 /// Creates standard EPUB files compatible with most e-readers.
@@ -363,6 +420,111 @@ impl EpubExporter {
         writer: &mut W,
         on_progress: &dyn Fn(&str, usize, usize, &str),
     ) -> io::Result<()> {
+        let package = build_package(book, on_progress)?;
+        self.write_package(&package, writer)
+    }
+
+    /// Write a built package into an EPUB container.
+    ///
+    /// The OEBPS payload goes in manifest registration order — assets,
+    /// stylesheet, chapters, titlepage last — the same file order the
+    /// mechanical route's `finalize` walks, so the two engines' containers are
+    /// byte-identical, not merely entry-identical. Already-compressed image
+    /// types are `Stored`: deflate over them gains <5% at ~10-15 ms per MB,
+    /// most of an image-heavy book's export cost.
+    fn write_package<W: Write + Seek>(
+        &self,
+        package: &EpubPackage,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let mut zip = ZipWriter::new(writer);
+
+        let compression_level = self.config.compression_level.unwrap_or(6);
+        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        let deflated = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .compression_level(Some(compression_level as i64));
+
+        // mimetype must be first and uncompressed.
+        zip.start_file("mimetype", stored).map_err(io_error)?;
+        zip.write_all(b"application/epub+zip")?;
+
+        zip.start_file("META-INF/container.xml", deflated)
+            .map_err(io_error)?;
+        zip.write_all(CONTAINER_XML)?;
+
+        zip.start_file("OEBPS/content.opf", deflated)
+            .map_err(io_error)?;
+        zip.write_all(package.opf.as_bytes())?;
+
+        zip.start_file("OEBPS/nav.xhtml", deflated)
+            .map_err(io_error)?;
+        zip.write_all(package.nav.as_bytes())?;
+
+        zip.start_file("OEBPS/toc.ncx", deflated)
+            .map_err(io_error)?;
+        zip.write_all(package.ncx.as_bytes())?;
+
+        for (asset_path, bytes) in &package.assets {
+            if bytes.is_empty() {
+                continue;
+            }
+            // Sniff first: post-transcode bytes are the truth (a JPEG-XR that
+            // failed to decode passes through as image/jxr despite its .jpg
+            // name). Extension guess covers unsniffable formats (SVG).
+            let media_type = sniff_image_media_type(bytes)
+                .map(str::to_string)
+                .unwrap_or_else(|| guess_media_type(asset_path));
+            let opts = if is_precompressed_mime(&media_type) {
+                stored
+            } else {
+                deflated
+            };
+            let zip_path = format!("OEBPS/{}", sanitize_path(asset_path));
+            zip.start_file(&zip_path, opts).map_err(io_error)?;
+            zip.write_all(bytes)?;
+        }
+
+        if !package.css.is_empty() {
+            zip.start_file("OEBPS/style.css", deflated)
+                .map_err(io_error)?;
+            zip.write_all(package.css.as_bytes())?;
+        }
+
+        for (i, doc) in package.documents.iter().enumerate() {
+            // ONE cover in the shipped container: the titlepage below is the
+            // page that fills a foreign reader's viewport, so the source's own
+            // cover page goes (see `EpubPackage::redundant_cover`).
+            if Some(i) == package.redundant_cover {
+                continue;
+            }
+            let zip_path = format!("OEBPS/{}", doc.href);
+            zip.start_file(&zip_path, deflated).map_err(io_error)?;
+            zip.write_all(doc.xhtml.as_bytes())?;
+        }
+
+        if let Some(xhtml) = &package.titlepage {
+            zip.start_file("OEBPS/cover.xhtml", deflated)
+                .map_err(io_error)?;
+            zip.write_all(xhtml.as_bytes())?;
+        }
+
+        zip.finish().map_err(io_error)?;
+        Ok(())
+    }
+}
+
+/// Build a normalized book into EPUB shape without writing a container.
+///
+/// This is the whole normalized pipeline — chapter synthesis, style
+/// unification, asset transcode, package document, navigation — stopping
+/// short of the zip. Reports coarse phase progress to `on_progress` as
+/// `(phase_key, current, total, human_label)`.
+pub fn build_package(
+    book: &mut Book,
+    on_progress: &dyn Fn(&str, usize, usize, &str),
+) -> io::Result<EpubPackage> {
+    {
         use self::normalize::normalize_book;
 
         // Normalize the book content — for KFX this triggers the lazy per-chapter
@@ -379,13 +541,14 @@ impl EpubExporter {
         let mut chapter_files =
             chapter_filenames(content.chapters.iter().map(|c| c.source_path.as_str()));
 
-        // The KFX ships its cover as an image-only section; the SVG `cover.xhtml`
-        // page emitted below duplicates it, so drop that section from the
-        // shippable EPUB (publisher shape — ONE cover). Gated to when a cover
-        // page is actually emitted (non-FXL + a cover image, which is always in
-        // the manifest when set). This index is skipped in the manifest/spine/
-        // anchor/zip passes; the mechanical route drops the same section on the
-        // identical bytes (1:1).
+        // The KFX ships its cover as an image-only section that the SVG
+        // `cover.xhtml` page emitted below renders a second time. Report the
+        // overlap (`EpubPackage::redundant_cover`) rather than resolving it —
+        // but the OPF and the navigation this builds describe a *container*,
+        // which ships one cover, so those passes skip the index. Gated to when
+        // a cover page is actually emitted (non-FXL + a cover image, which is
+        // always in the manifest when set). The mechanical route drops the
+        // same section on the identical bytes (1:1).
         let cover_section_idx: Option<usize> = if !book.metadata().fixed_layout {
             book.metadata().cover_image.as_deref().and_then(|cover| {
                 content
@@ -396,33 +559,19 @@ impl EpubExporter {
         } else {
             None
         };
-        // Nav/landmark targets that resolved to the dropped section (the KFX's
-        // toc/text landmarks can point at the cover) now resolve to the SVG
-        // cover page in its place — so `resolve_nav_href` maps its id to
-        // `cover.xhtml`, not a file that no longer exists. Same remap on the
-        // mechanical route (via `element_id_to_filename`), so nav/ncx stay 1:1.
+        // Each document keeps its own name; `chapter_files` is the *navigation*
+        // view of the same list. Nav/landmark targets that resolved to the
+        // suppressed section (the KFX's toc/text landmarks can point at the
+        // cover) resolve to the SVG cover page in its place — so
+        // `resolve_nav_href` maps its id to `cover.xhtml`, not a file the
+        // container doesn't hold. Same remap on the mechanical route (via
+        // `element_id_to_filename`), so nav/ncx stay 1:1.
+        let document_files = chapter_files.clone();
         if let Some(idx) = cover_section_idx {
             chapter_files[idx] = "cover.xhtml".to_string();
         }
 
-        let mut zip = ZipWriter::new(writer);
-
-        let compression_level = self.config.compression_level.unwrap_or(6);
-        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-        let deflated = SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Deflated)
-            .compression_level(Some(compression_level as i64));
-
-        // 1. Write mimetype (must be first, uncompressed)
-        zip.start_file("mimetype", stored).map_err(io_error)?;
-        zip.write_all(b"application/epub+zip")?;
-
-        // 2. Write container.xml
-        zip.start_file("META-INF/container.xml", deflated)
-            .map_err(io_error)?;
-        zip.write_all(CONTAINER_XML)?;
-
-        // 3. Build manifest, in the mechanical route's registration order —
+        // Build manifest, in the mechanical route's registration order —
         // images (canonical index order), stylesheet, chapters, titlepage
         // last — with ids derived from filenames (`opf::make_manifest_id`),
         // so a KFX conversion produces the same package document on both
@@ -727,8 +876,8 @@ impl EpubExporter {
                 .max_by_key(|&(vp, n)| (n, vp))
                 .map(|(vp, _)| vp)
         };
-        // Packaging: OPF + nav/ncx + zip writes (image bytes are already
-        // transcoded, so this is serialize-and-deflate, not the long pole).
+        // Packaging: OPF + nav/ncx (image bytes are already transcoded, so
+        // this is serialization, not the long pole).
         on_progress("finalize", 1, 1, "Packaging");
         // A KFX source's metadata mirrors the mechanical route's curated
         // field set (see `build_opf_metadata`), keeping the two KFX→EPUB
@@ -745,13 +894,10 @@ impl EpubExporter {
             spine: spine_items,
             guide: guide.clone(),
         });
-        zip.start_file("OEBPS/content.opf", deflated)
-            .map_err(io_error)?;
-        zip.write_all(opf.as_bytes())?;
 
-        // 6a. Write nav.xhtml (EPUB 3 navigation document). The empty-TOC
-        // fallback points at the first spine document — the titlepage when
-        // one was synthesized, like the mechanical route.
+        // nav.xhtml (EPUB 3 navigation document). The empty-TOC fallback
+        // points at the first spine document — the titlepage when one was
+        // synthesized, like the mechanical route.
         let toc_fallback = if titlepage_xhtml.is_some() {
             Some("cover.xhtml")
         } else {
@@ -765,67 +911,43 @@ impl EpubExporter {
             page_list: &page_points,
             landmarks: &guide,
         });
-        zip.start_file("OEBPS/nav.xhtml", deflated)
-            .map_err(io_error)?;
-        zip.write_all(nav.as_bytes())?;
 
-        // 6b. Write toc.ncx (legacy fallback for EPUB 2 readers)
+        // toc.ncx (legacy fallback for EPUB 2 readers).
         let ncx = nav::emit_ncx(&nav::NcxDoc {
             title: &book.metadata().title,
             identifier: &book.metadata().identifier,
             toc: &toc_points,
             toc_fallback_href: toc_fallback,
         });
-        zip.start_file("OEBPS/toc.ncx", deflated)
-            .map_err(io_error)?;
-        zip.write_all(ncx.as_bytes())?;
 
-        // 7. Write the OEBPS payload in manifest registration order — assets,
-        // stylesheet, chapters, titlepage last — the same file order the
-        // mechanical route's `finalize` walks, so the two engines' containers
-        // are byte-identical, not merely entry-identical. Already-compressed
-        // image types are `Stored`: deflate over them gains <5% at
-        // ~10-15 ms per MB, most of an image-heavy book's export cost.
-        for (asset_path, bytes) in &asset_bytes {
-            if bytes.is_empty() {
-                continue;
-            }
-            let media_type = sniff_image_media_type(bytes)
-                .map(str::to_string)
-                .unwrap_or_else(|| guess_media_type(asset_path));
-            let opts = if is_precompressed_mime(&media_type) {
-                stored
-            } else {
-                deflated
-            };
-            let zip_path = format!("OEBPS/{}", sanitize_path(asset_path));
-            zip.start_file(&zip_path, opts).map_err(io_error)?;
-            zip.write_all(bytes)?;
-        }
+        // Every spine document the source produced, under its own name. The
+        // titlepage stays separate (spine position 0, but written last).
+        let documents = content
+            .chapters
+            .into_iter()
+            .enumerate()
+            .map(|(i, chapter)| PackageDocument {
+                href: document_files[i].clone(),
+                xhtml: chapter.document,
+                spread: spine
+                    .get(i)
+                    .and_then(|e| e.page_spread)
+                    .map(|p| p.opf_property().to_string()),
+                viewport: spine.get(i).and_then(|e| e.viewport),
+            })
+            .collect();
 
-        if !content.css.is_empty() {
-            zip.start_file("OEBPS/style.css", deflated)
-                .map_err(io_error)?;
-            zip.write_all(content.css.as_bytes())?;
-        }
-
-        for (i, chapter) in content.chapters.iter().enumerate() {
-            if Some(i) == cover_section_idx {
-                continue;
-            }
-            let zip_path = format!("OEBPS/{}", chapter_files[i]);
-            zip.start_file(&zip_path, deflated).map_err(io_error)?;
-            zip.write_all(chapter.document.as_bytes())?;
-        }
-
-        if let Some(ref xhtml) = titlepage_xhtml {
-            zip.start_file("OEBPS/cover.xhtml", deflated)
-                .map_err(io_error)?;
-            zip.write_all(xhtml.as_bytes())?;
-        }
-
-        zip.finish().map_err(io_error)?;
-        Ok(())
+        Ok(EpubPackage {
+            documents,
+            titlepage: titlepage_xhtml,
+            redundant_cover: cover_section_idx,
+            opf,
+            nav,
+            ncx,
+            css: content.css,
+            assets: asset_bytes,
+            toc: toc_points,
+        })
     }
 }
 
