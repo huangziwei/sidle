@@ -123,6 +123,20 @@ impl GlobalStylePool {
     }
 }
 
+/// Whether emitted documents carry the source element ids their nodes came
+/// from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceElements {
+    /// Omit them — the shape a container ships. A reading device's element
+    /// ids are an addressing scheme for the source, not content, and an EPUB
+    /// that carried them would leak a foreign format's internals into a
+    /// published file.
+    Omit,
+    /// Stamp `data-eid="<id>"` on the element each source id maps to, so a
+    /// renderer can resolve an `(element, offset)` handle to a DOM range.
+    Mark,
+}
+
 /// Content for a single normalized chapter.
 #[derive(Debug, Clone)]
 pub struct ChapterContent {
@@ -199,6 +213,15 @@ pub struct SourceStyles<'a> {
 ///
 /// A `NormalizedContent` containing all normalized data ready for export.
 pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
+    normalize_book_with(book, SourceElements::Omit)
+}
+
+/// [`normalize_book`], choosing whether emitted documents carry their source
+/// element ids (see [`SourceElements`]).
+pub fn normalize_book_with(
+    book: &mut Book,
+    source_elements: SourceElements,
+) -> io::Result<NormalizedContent> {
     let spine: Vec<_> = book.spine().to_vec();
 
     // =========================================================================
@@ -432,6 +455,7 @@ pub fn normalize_book(book: &mut Book) -> io::Result<NormalizedContent> {
                 source_styles: src,
                 href_resolver: &resolver,
                 viewport: spine.get(idx).and_then(|e| e.viewport),
+                source_elements,
             };
             let mut assets = HashSet::new();
             let document = super::dom_synth::emit_chapter(ir, &opts, &mut assets);

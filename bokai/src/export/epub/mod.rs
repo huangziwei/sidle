@@ -15,7 +15,10 @@ pub mod opf;
 pub(crate) mod synth;
 pub(crate) mod titlepage;
 
-pub use normalize::{ChapterContent, GlobalStylePool, NormalizedContent, normalize_book};
+pub use normalize::{
+    ChapterContent, GlobalStylePool, NormalizedContent, SourceElements, normalize_book,
+    normalize_book_with,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Seek, Write};
@@ -420,7 +423,8 @@ impl EpubExporter {
         writer: &mut W,
         on_progress: &dyn Fn(&str, usize, usize, &str),
     ) -> io::Result<()> {
-        let package = build_package(book, on_progress)?;
+        // A shipped container never carries source element ids.
+        let package = build_package(book, SourceElements::Omit, on_progress)?;
         self.write_package(&package, writer)
     }
 
@@ -522,15 +526,16 @@ impl EpubExporter {
 /// `(phase_key, current, total, human_label)`.
 pub fn build_package(
     book: &mut Book,
+    source_elements: SourceElements,
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> io::Result<EpubPackage> {
     {
-        use self::normalize::normalize_book;
+        use self::normalize::normalize_book_with;
 
         // Normalize the book content — for KFX this triggers the lazy per-chapter
         // storyline→IR parse (the heaviest step after image transcode).
         on_progress("content", 0, 1, "Building chapters");
-        let content = normalize_book(book)?;
+        let content = normalize_book_with(book, source_elements)?;
         let spine: Vec<_> = book.spine().to_vec();
 
         // Output filename per chapter, derived from the chapter's source id

@@ -43,7 +43,10 @@ pub use epub::synth::{
     synthesize_html, synthesize_html_with_class_list, synthesize_xhtml_document,
     synthesize_xhtml_document_with_class_list, synthesize_xhtml_document_with_links,
 };
-pub use epub::{ChapterContent, GlobalStylePool, NormalizedContent, normalize_book};
+pub use epub::{
+    ChapterContent, GlobalStylePool, NormalizedContent, SourceElements, normalize_book,
+    normalize_book_with,
+};
 pub use epub::{EpubConfig, EpubExporter, EpubPackage, PackageDocument, build_package};
 pub use kfx::{KfxConfig, KfxExporter, PdfKfxMeta, pdf_to_kfx};
 pub use markdown::{MarkdownConfig, MarkdownExporter};

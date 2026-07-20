@@ -41,7 +41,7 @@ use crate::model::{Chapter, NodeId as IrNodeId, Role};
 use crate::style::parse_inline_decl;
 
 use super::dom::{self, Dom, LayoutHints};
-use super::normalize::{InlineStyleEmit, LinkOutcome, SourceStyles};
+use super::normalize::{InlineStyleEmit, LinkOutcome, SourceElements, SourceStyles};
 
 // Port-compat re-exports: the frozen mechanical port reaches these through
 // its historical `export::css::` paths (this module's alias in
@@ -65,6 +65,8 @@ pub struct ChapterEmit<'a> {
     /// Fixed-layout page pixel viewport → `<meta name="viewport">` in the
     /// head. `None` for reflowable documents.
     pub viewport: Option<(u32, u32)>,
+    /// Whether to stamp `data-eid` from `semantics.source_element`.
+    pub source_elements: SourceElements,
 }
 
 /// Build, consolidate, and serialize one chapter document. Referenced
@@ -206,6 +208,20 @@ impl Builder<'_, '_> {
         }
     }
 
+    /// Carry the node's source element id onto its DOM element, so a renderer
+    /// can resolve an `(element, offset)` handle by querying `[data-eid]` and
+    /// walking text from there. Precedes [`Self::stamp_id`] at every call site
+    /// — the mechanical route stamps the eid before the position anchor, and
+    /// matching attribute order keeps the two routes' documents comparable.
+    fn stamp_source_element(&mut self, id: IrNodeId, el: dom::NodeId) {
+        if self.opts.source_elements == SourceElements::Omit {
+            return;
+        }
+        if let Some(eid) = self.ir.semantics.source_element(id) {
+            self.dom.get_mut(el).set("data-eid", eid.to_string());
+        }
+    }
+
     fn walk(&mut self, id: IrNodeId, parent: dom::NodeId) {
         let Some(node) = self.ir.node(id) else {
             return;
@@ -223,6 +239,7 @@ impl Builder<'_, '_> {
             Role::Ruby => {
                 let ruby = self.dom.sub_element(parent, "ruby");
                 self.attach_inline_class(id, ruby);
+                self.stamp_source_element(id, ruby);
                 self.stamp_id(id, ruby);
                 // Base content wraps in `<rb>`; the annotation children
                 // (`RubyText`) follow as `<rt>` — calibre's rb/rt shape.
@@ -271,6 +288,7 @@ impl Builder<'_, '_> {
                     }
                 }
                 self.attach_inline_class(id, a);
+                self.stamp_source_element(id, a);
                 self.stamp_id(id, a);
                 for child in self.ir.children(id).collect::<Vec<_>>() {
                     self.walk(child, a);
@@ -283,10 +301,12 @@ impl Builder<'_, '_> {
                     // attribute channels (id at walk time, class/style via
                     // the pending maps) — the mechanical demotion retags the
                     // div but leaves its attribute plumbing alone.
+                    self.stamp_source_element(id, span);
                     self.stamp_id(id, span);
                     self.attach_block_style(id, span);
                 } else {
                     self.attach_inline_class(id, span);
+                    self.stamp_source_element(id, span);
                     self.stamp_id(id, span);
                 }
                 for child in self.ir.children(id).collect::<Vec<_>>() {
@@ -302,6 +322,7 @@ impl Builder<'_, '_> {
                 // `alt` is always present (mechanical: calibre defaults "").
                 let alt = self.ir.semantics.alt(id).unwrap_or("");
                 self.dom.get_mut(img).set("alt", alt);
+                self.stamp_source_element(id, img);
                 self.stamp_id(id, img);
                 self.attach_block_style(id, img);
             }
@@ -316,6 +337,7 @@ impl Builder<'_, '_> {
                     tag = "td";
                 }
                 let el = self.dom.sub_element(parent, tag);
+                self.stamp_source_element(id, el);
                 self.stamp_id(id, el);
                 self.attach_block_style(id, el);
                 match role {

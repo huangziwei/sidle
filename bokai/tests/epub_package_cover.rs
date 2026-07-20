@@ -14,7 +14,7 @@
 use std::io::Cursor;
 
 use bokai::Book;
-use bokai::export::{Exporter, build_package};
+use bokai::export::{Exporter, SourceElements, build_package};
 use bokai::model::Format;
 
 const REFLOWABLE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
@@ -33,7 +33,8 @@ fn the_container_drops_the_cover_page_the_package_keeps() {
     };
 
     let mut book = Book::from_bytes(&kfx, Format::Kfx).expect("import the fixture");
-    let package = build_package(&mut book, &|_, _, _, _| {}).expect("build the package");
+    let package = build_package(&mut book, SourceElements::Omit, &|_, _, _, _| {})
+        .expect("build the package");
 
     let idx = package
         .redundant_cover
