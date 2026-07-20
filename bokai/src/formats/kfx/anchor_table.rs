@@ -79,6 +79,18 @@ impl AnchorTable {
         Some(self.anchor_id(name))
     }
 
+    /// Forget every anchor registered on `eid`, so [`Self::id_at`] reports
+    /// none there.
+    ///
+    /// For elements whose chapter is dropped from the package rather than
+    /// written: the ids went with the chapter, so a nav or guide entry still
+    /// carrying `#…` would point at a fragment nothing defines (epubcheck
+    /// RSC-012). Call only after content emission — during emission the table
+    /// is what tells the DOM which ids to stamp.
+    pub fn forget_element(&mut self, eid: i64) {
+        self.position_anchors.remove(&eid);
+    }
+
     /// Heading level (1..=6) registered at `(eid, offset)` by the `$798`
     /// headings nav, or `None`.
     pub fn heading_level_at(&self, eid: i64, offset: i64) -> Option<u8> {

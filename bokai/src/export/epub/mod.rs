@@ -644,7 +644,14 @@ impl EpubExporter {
         // stamps — the bare chapter link is where the page starts anyway, and
         // a dangling `#page-…` would trip epubcheck RSC-012).
         let mut toc_points = toc_to_navpoints(book.toc(), &|href| {
-            resolve_nav_href(book, href, &chapter_pos, &chapter_files, false)
+            resolve_nav_href(
+                book,
+                href,
+                &chapter_pos,
+                &chapter_files,
+                false,
+                cover_section_idx,
+            )
         });
         // EPUB 3 requires the toc nav in reading order (epubcheck NAV-011);
         // the mechanical route sorts, so sort identically.
@@ -666,7 +673,14 @@ impl EpubExporter {
             .filter_map(|e| {
                 Some(NavPoint {
                     label: e.title.clone(),
-                    href: resolve_nav_href(book, &e.href, &chapter_pos, &chapter_files, true)?,
+                    href: resolve_nav_href(
+                        book,
+                        &e.href,
+                        &chapter_pos,
+                        &chapter_files,
+                        true,
+                        cover_section_idx,
+                    )?,
                     children: Vec::new(),
                 })
             })
@@ -674,8 +688,14 @@ impl EpubExporter {
 
         let mut guide: Vec<OpfGuideRef> = Vec::new();
         for lm in book.landmarks() {
-            let Some(href) = resolve_nav_href(book, &lm.href, &chapter_pos, &chapter_files, false)
-            else {
+            let Some(href) = resolve_nav_href(
+                book,
+                &lm.href,
+                &chapter_pos,
+                &chapter_files,
+                false,
+                cover_section_idx,
+            ) else {
                 continue;
             };
             guide.push(OpfGuideRef {
@@ -1108,15 +1128,24 @@ pub(crate) fn resolve_nav_href(
     chapter_pos: &HashMap<crate::import::ChapterId, usize>,
     chapter_files: &[String],
     require_stamped: bool,
+    dropped_idx: Option<usize>,
 ) -> Option<String> {
     let AnchorTarget::Internal(target) =
         book.resolve_toc_href(crate::import::ChapterId(0), href)?
     else {
         return None;
     };
-    let file = chapter_files
-        .get(*chapter_pos.get(&target.chapter)?)
-        .cloned()?;
+    let pos = *chapter_pos.get(&target.chapter)?;
+    let file = chapter_files.get(pos).cloned()?;
+    // A target inside the dropped cover section keeps its file (remapped to the
+    // synthesized cover page) but loses its fragment: that page is a bare SVG
+    // wrapper carrying no ids, so any `#…` on it dangles (epubcheck RSC-012).
+    // This is a second route to a dangling fragment, independent of the
+    // `stamped` test below — there the anchor was never written into content;
+    // here the content it was written into is gone.
+    if Some(pos) == dropped_idx {
+        return Some(file);
+    }
     match book.nav_fragment(href) {
         Some((frag, stamped)) if !require_stamped || stamped => Some(format!("{file}#{frag}")),
         _ => Some(file),

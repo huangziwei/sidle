@@ -212,12 +212,15 @@ impl BookContext {
                 .collect();
             resolve_toc_hrefs(&mut toc, book, &chapter_pos, &filenames);
             for lm in &mut landmarks {
+                // No dropped chapter: AZW3 export keeps every spine document,
+                // so no target can be left pointing at a page without ids.
                 if let Some(h) = crate::export::epub::resolve_nav_href(
                     book,
                     &lm.href,
                     &chapter_pos,
                     &filenames,
                     false,
+                    None,
                 ) {
                     lm.href = h;
                 }
@@ -294,6 +297,7 @@ fn resolve_toc_hrefs(
             chapter_pos,
             chapter_files,
             false,
+            None,
         ) {
             entry.href = href;
         }

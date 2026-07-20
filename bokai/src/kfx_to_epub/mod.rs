@@ -243,11 +243,23 @@ pub(crate) fn build_output(
     // section at the SVG `cover.xhtml` page in its place (the KFX's toc/text
     // landmarks can point at the cover section). Mirrors the IR route's
     // `chapter_files` remap so nav/ncx stay byte-for-byte 1:1.
+    //
+    // The anchors registered on those elements are forgotten at the same time:
+    // the page they now point at is a bare SVG wrapper carrying no ids, so a
+    // surviving `#…` would dangle (epubcheck RSC-012). Safe here — content is
+    // already serialized above, so the table's remaining job is navigation.
     if let Some(ref dropped) = dropped_cover_file {
-        for v in content_state.element_id_to_filename.values_mut() {
-            if v.as_str() == dropped.as_str() {
-                *v = "cover.xhtml".to_string();
-            }
+        let remapped: Vec<i64> = content_state
+            .element_id_to_filename
+            .iter()
+            .filter(|(_, v)| v.as_str() == dropped.as_str())
+            .map(|(k, _)| *k)
+            .collect();
+        for eid in remapped {
+            content_state.anchors.forget_element(eid);
+            content_state
+                .element_id_to_filename
+                .insert(eid, "cover.xhtml".to_string());
         }
     }
 
