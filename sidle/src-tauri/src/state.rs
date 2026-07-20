@@ -36,15 +36,15 @@ pub type SharedTransport = Arc<Mutex<Option<Arc<dyn Transport>>>>;
 /// holds at most one — switching books rebuilds. First search per book pays
 /// the parse cost (same as `reader_open`); subsequent are HashMap walks. Lives
 /// for the app session; the keyed-by-`book_id` replacement is the eviction.
-pub type ReaderSearchCache = Arc<Mutex<Option<(i64, Arc<boko::kfx_to_epub::TextIndex>)>>>;
+pub type ReaderSearchCache = Arc<Mutex<Option<(i64, Arc<bokai::kfx_to_epub::TextIndex>)>>>;
 
-/// Everything the open book's deferred fetches are served from: the boko
+/// Everything the open book's deferred fetches are served from: the bokai
 /// image store (raw KFX media + transcode work list + deferred-location
 /// synthesis), the full built section HTML (source for windowed section
 /// streaming on large text books), and the eid→section index (jumps into
 /// sections the webview hasn't streamed yet).
 pub struct ReaderStoreEntry {
-    pub images: boko::kfx_to_epub::ReaderImageStore,
+    pub images: bokai::kfx_to_epub::ReaderImageStore,
     /// Every section's `(href, html)` in spine order — already built by the
     /// open; `reader_fetch_sections` hands them out without recompute.
     pub sections: Vec<(String, String)>,
@@ -158,15 +158,15 @@ impl AppState {
         }
         // Backfill `asin` for any row that has a KFX but the value never made
         // it to the row (rows converted before the worker started capturing
-        // boko's stamped ASIN). One-time `Book::open` on each KFX is heavier
+        // bokai's stamped ASIN). One-time `Book::open` on each KFX is heavier
         // than the sha256 backfill above, but the work happens at most once
         // per row and only for the rare pre-fix subset. Without it,
         // device-delete can't clean the on-device `<title>_<ASIN>.sdr/`
         // catalog sidecar Kindle invents.
         for (book_id, kfx_path) in db::books_missing_asin(&conn).unwrap_or_default() {
-            match boko::Book::open(std::path::Path::new(&kfx_path)) {
+            match bokai::Book::open(std::path::Path::new(&kfx_path)) {
                 Ok(book) => {
-                    // The content_id boko BAKED into this KFX — the device's
+                    // The content_id bokai BAKED into this KFX — the device's
                     // `.sdr` / `.notebooks` key. Read it back rather than
                     // recomputing via `resolve_export_asin` (which used a
                     // different input and produced a value that never matched the

@@ -99,11 +99,55 @@ pub fn rename_book_files(
 mod tests {
     use std::path::Path;
 
-    use crate::library::db::{self, MetadataPatch};
-    use crate::library::import::import_file;
+    use crate::library::db::{self, MetadataPatch, NewBook};
     use crate::library::paths::LibraryPaths;
 
     use super::rename_book_files;
+
+    /// A book row with both sides on disk, built directly rather than through
+    /// `import_file`: renaming cares about names and hashes, not about what the
+    /// bytes decode to, so there is nothing to gain from parsing a real book
+    /// here. Returns `(book_id, sha, pdf_path, kfx_path)`.
+    fn seed_book(
+        conn: &rusqlite::Connection,
+        paths: &LibraryPaths,
+        stem: &str,
+    ) -> (i64, String, std::path::PathBuf, std::path::PathBuf) {
+        let sha = "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0";
+        let dir = paths.book_dir(sha);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join(format!("{stem}.pdf"));
+        let kfx = dir.join(format!("{stem}.kfx"));
+        std::fs::write(&pdf, b"not-really-a-pdf").unwrap();
+        std::fs::write(&kfx, b"fake-kfx-bytes").unwrap();
+        let id = db::insert_book(
+            conn,
+            &NewBook {
+                sha256: sha,
+                title: "Old Title",
+                author: "Old Author",
+                language: "en",
+                pdf_path: Some(&pdf.to_string_lossy()),
+                kfx_path: Some(&kfx.to_string_lossy()),
+                kfx_sha256: Some("cafef00d"),
+                file_size: 16,
+                imported_at: &db::now_iso(),
+                ppd: None,
+                epub_path: None,
+                cover_path: None,
+                asin: None,
+                publisher: None,
+                published_at: None,
+                series_name: None,
+                series_index: None,
+                tags: &[],
+                title_romaji: "",
+                author_romaji: "",
+            },
+        )
+        .unwrap();
+        (id, sha.to_string(), pdf, kfx)
+    }
 
     /// Editing title/author/year renames every on-disk side to the new
     /// `[Author] Title (Year)` and repoints the DB — while preserving the KFX
@@ -117,25 +161,7 @@ mod tests {
         paths.ensure().unwrap();
         let conn = db::open(&paths.db()).unwrap();
 
-        // A real PDF import gives us a book row + a persisted PDF side.
-        let outcome = import_file(&conn, &paths, Path::new("tests/fixtures/minimal.pdf")).unwrap();
-        let crate::library::import::ImportOutcome::Imported { book, .. } = outcome else {
-            panic!("expected fresh import");
-        };
-        let id = book.id;
-
-        // Fabricate the KFX side the worker would have produced, so the rename
-        // exercises the hash-preserving KFX branch too.
-        let dir = paths.book_dir(&book.sha256);
-        let old_stem = Path::new(book.pdf_path.as_ref().unwrap())
-            .file_stem()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        let old_kfx = dir.join(format!("{old_stem}.kfx"));
-        std::fs::write(&old_kfx, b"fake-kfx-bytes").unwrap();
-        db::set_kfx_path_and_sha(&conn, id, &old_kfx.to_string_lossy(), "cafef00d").unwrap();
+        let (id, _sha, _pdf, old_kfx) = seed_book(&conn, &paths, "[Old Author] Old Title");
 
         // Edit the metadata (full-replacement patch, mirroring the command).
         db::update_metadata(
@@ -175,13 +201,14 @@ mod tests {
         paths.ensure().unwrap();
         let conn = db::open(&paths.db()).unwrap();
 
-        let outcome = import_file(&conn, &paths, Path::new("tests/fixtures/minimal.pdf")).unwrap();
-        let crate::library::import::ImportOutcome::Imported { book, .. } = outcome else {
-            panic!("expected fresh import");
-        };
-        let before = book.pdf_path.clone().unwrap();
+        // Seeded with the basename its metadata already implies, so the rename
+        // has nothing to change. Read the path back out of the row rather than
+        // reusing the local one: storage round-trips it through the library
+        // root, which resolves symlinks (`/var` → `/private/var` on macOS).
+        let (id, _sha, _pdf, _kfx) = seed_book(&conn, &paths, "[Old Author] Old Title");
+        let before = db::get_book(&conn, id).unwrap().unwrap().pdf_path.unwrap();
 
-        let after = rename_book_files(&conn, &paths, book.id)
+        let after = rename_book_files(&conn, &paths, id)
             .unwrap()
             .unwrap()
             .pdf_path

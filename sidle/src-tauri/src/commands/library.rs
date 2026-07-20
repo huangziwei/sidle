@@ -262,7 +262,7 @@ pub fn library_romanize(text: String, language: String) -> String {
 /// Deliberately separate from `library_update_metadata` (the full-replacement
 /// patch). That command sends every field on every save, so validating ASIN
 /// there would reject saves on books that still carry their fabricated 32-char
-/// boko id. A dedicated command validates only when the user actually changes
+/// bokai id. A dedicated command validates only when the user actually changes
 /// the ASIN, and keeps the edit a distinct action — it has device-side
 /// consequences (the `_<ASIN>.sdr` cleanup scan in `device::push`).
 ///
@@ -667,12 +667,12 @@ pub async fn library_export_books(
 
 /// Convert a book file (EPUB or KFX, auto-detected by extension) to Markdown and
 /// write it to `target`. Backs the `txt` export, which — unlike the copy formats
-/// — has no stored file. Call on a blocking thread: boko's KFX decode and IR
+/// — has no stored file. Call on a blocking thread: bokai's KFX decode and IR
 /// walk are CPU-bound.
 fn export_book_as_txt(src: &Path, target: &Path) -> Result<(), String> {
-    let mut book = boko::Book::open(src).map_err(|e| format!("open: {e}"))?;
+    let mut book = bokai::Book::open(src).map_err(|e| format!("open: {e}"))?;
     let mut file = std::fs::File::create(target).map_err(|e| format!("create: {e}"))?;
-    book.export(boko::Format::Markdown, &mut file)
+    book.export(bokai::Format::Markdown, &mut file)
         .map_err(|e| format!("convert: {e}"))?;
     Ok(())
 }
@@ -766,7 +766,7 @@ async fn recrawl_one(state: &AppState, book: &BookRow) -> RecrawlOutcome {
     let Some(asin) = book.asin.as_deref() else {
         return RecrawlOutcome::NoAsin;
     };
-    // Treat fabricated boko ASINs the same as missing — neither can resolve
+    // Treat fabricated bokai ASINs the same as missing — neither can resolve
     // to a real `/images/P/` cover, so "no ASIN" is more honest than "failed".
     if !cover_fetch::looks_like_real_amazon_asin(asin) {
         return RecrawlOutcome::NoAsin;
@@ -1015,7 +1015,7 @@ pub async fn library_set_cover(
         eprintln!("[sidle/set-cover] book {book_id} epub cover swap failed: {e:#}");
     }
 
-    // And into the imported KFX (boko normalizes png/webp → jpeg). This is the
+    // And into the imported KFX (bokai normalizes png/webp → jpeg). This is the
     // copy pushed to the Kindle; the rewrite changes the bytes but the frozen
     // `kfx_sha256` identity is preserved by `set_kfx_path_and_sha`, so the
     // on-device filename is unchanged. A cover-less KFX (EPUB import with no

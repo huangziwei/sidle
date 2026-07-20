@@ -1,4 +1,4 @@
-//! Conversion worker: runs boko-kai on a blocking thread.
+//! Conversion worker: runs bokai on a blocking thread.
 //!
 //! Both directions share the worker shape — claim job → mark `converting` →
 //! do the heavy work → write the output to disk → record paths on the book
@@ -25,7 +25,7 @@ use crate::library::pdf_geom;
 use crate::queue::{emit_progress, emit_status};
 use crate::state::DbHandle;
 
-/// Run a single conversion job: mark `converting`, run boko, write file,
+/// Run a single conversion job: mark `converting`, run bokai, write file,
 /// update `done` or `error`. Errors are recorded in the DB; never propagated
 /// to the caller (this is a fire-and-forget worker).
 ///
@@ -61,7 +61,7 @@ pub async fn run_job(
     let app_owned = app.clone();
     let started = std::time::Instant::now();
     let result = tokio::task::spawn_blocking(move || {
-        // Map boko's per-phase reports → a monotonic 0–1 fraction (weighted per
+        // Map bokai's per-phase reports → a monotonic 0–1 fraction (weighted per
         // direction) and emit a throttled `conversion:progress` event. `last`
         // suppresses sub-1% churn so an image-heavy EPUB doesn't fire hundreds
         // of events; the 100% tick always gets through. `Cell` gives the `Fn`
@@ -98,7 +98,7 @@ pub async fn run_job(
     // re-convert): if the KFX came from Amazon's monochrome-device build (KOA2 +
     // friends), its embedded cover is grayscale-baked and there's no way to
     // recover color from the file itself — refetch from the product page by
-    // ASIN. KFXes boko-kai produced from a color EPUB already have the original
+    // ASIN. KFXes bokai produced from a color EPUB already have the original
     // color cover; the ASIN is fabricated there, so cover_fetch skips and we
     // just keep what's in the KFX. Skipped on `reconvert` because it rewrites
     // the source KFX (re-stamping `kfx_sha256`), which a force re-convert must
@@ -281,7 +281,7 @@ struct Produced {
     kfx_path: Option<PathBuf>,
     pdf_path: Option<PathBuf>,
     cover_path: Option<PathBuf>,
-    /// ASIN boko stamped into the produced KFX. For EPUB→KFX this is the
+    /// ASIN bokai stamped into the produced KFX. For EPUB→KFX this is the
     /// fabricated 32-char value (unless the source EPUB carried a real
     /// one); the device-delete path keys catalog-style `.sdr/` cleanup on
     /// it. None for the kfx→epub direction (no KFX produced).
@@ -303,7 +303,7 @@ fn run_direction(
     }
 }
 
-/// Map a boko/worker phase report to a monotonic 0.0–1.0 progress-bar fraction.
+/// Map a bokai/worker phase report to a monotonic 0.0–1.0 progress-bar fraction.
 /// Bands are per-direction heuristics (the slow phase gets the widest span);
 /// within a band we interpolate by `cur/total`. Not wall-clock-exact — the live
 /// label names the precise step — but always forward-moving, so the bar never
@@ -365,7 +365,7 @@ fn convert_epub_to_kfx(
     let out_path = dir.join(format!("{base}.kfx"));
     let tmp_path = dir.join(format!("{base}.kfx.partial"));
 
-    let mut handle = boko::Book::open(source_path)?;
+    let mut handle = bokai::Book::open(source_path)?;
     // Bake the library's (possibly user-edited) metadata into the KFX without
     // rewriting the source EPUB: clone the parsed metadata, overlay the DB
     // fields, and install it as an override the KFX exporter reads. A first
@@ -374,10 +374,10 @@ fn convert_epub_to_kfx(
     handle.set_metadata_override(book_metadata_override(handle.metadata(), book));
     // Interior plates: always full-color JXR (grayscale is retired). Genuinely
     // grayscale source pages auto-collapse to `8bppGray` in the encoder, so this
-    // costs nothing on B&W books. Cover stays JPEG either way (boko handles that).
+    // costs nothing on B&W books. Cover stays JPEG either way (bokai handles that).
     handle.set_image_color_mode(jxr::ColorMode::Color);
     let mut writer = File::create(&tmp_path)?;
-    handle.export_with_progress(boko::Format::Kfx, &mut writer, on_progress)?;
+    handle.export_with_progress(bokai::Format::Kfx, &mut writer, on_progress)?;
     writer.sync_all().ok();
     drop(writer);
     std::fs::rename(&tmp_path, &out_path)?;
@@ -387,7 +387,7 @@ fn convert_epub_to_kfx(
     // The DB row started life from the EPUB metadata which usually has no
     // ASIN at all; we need the stamped value on the row so device-delete
     // can wipe Kindle's `<title>_<ASIN>.sdr/` catalog sidecar.
-    let asin = boko::formats::kfx::metadata::resolve_export_asin(handle.metadata());
+    let asin = bokai::formats::kfx::metadata::resolve_export_asin(handle.metadata());
 
     Ok(Produced {
         kfx_path: Some(out_path),
@@ -418,16 +418,16 @@ fn convert_kfx_to_epub(
     // container parse (the `load` phase); `export_with_progress` emits
     // content/resources/nav/finalize. Output is byte-identical to the
     // mechanical `kfx_to_epub` port (verified 1:1 corpus-wide, plan M3), which
-    // survives as the `boko convert --route mechanical` oracle.
+    // survives as the `bokai convert --route mechanical` oracle.
     let kfx_bytes = std::fs::read(source_path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
     on_progress("load", 0, 1, "Reading KFX");
-    let mut handle = boko::Book::from_bytes(&kfx_bytes, boko::Format::Kfx)
-        .map_err(|e| anyhow::anyhow!("boko kfx→epub (load): {e}"))?;
+    let mut handle = bokai::Book::from_bytes(&kfx_bytes, bokai::Format::Kfx)
+        .map_err(|e| anyhow::anyhow!("bokai kfx→epub (load): {e}"))?;
     let mut buf = std::io::Cursor::new(Vec::new());
     handle
-        .export_with_progress(boko::Format::Epub, &mut buf, on_progress)
-        .map_err(|e| anyhow::anyhow!("boko kfx→epub: {e}"))?;
+        .export_with_progress(bokai::Format::Epub, &mut buf, on_progress)
+        .map_err(|e| anyhow::anyhow!("bokai kfx→epub: {e}"))?;
     let epub_bytes = buf.into_inner();
     write_bytes_atomic(&out_path, &epub_bytes)?;
 
@@ -468,8 +468,8 @@ fn convert_pdf_to_kfx(
     on_progress("probe", 0, 1, "Reading PDF");
     let bytes = std::fs::read(source_path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
-    let doc = boko::import::probe_pdf(bytes).map_err(|e| anyhow::anyhow!("probe pdf: {e}"))?;
-    let meta = boko::export::PdfKfxMeta {
+    let doc = bokai::import::probe_pdf(bytes).map_err(|e| anyhow::anyhow!("probe pdf: {e}"))?;
+    let meta = bokai::export::PdfKfxMeta {
         title: book.title.clone(),
         author: (!book.author.trim().is_empty()).then(|| book.author.clone()),
         language: if book.language.is_empty() {
@@ -502,16 +502,16 @@ fn convert_pdf_to_kfx(
         .filter(|p| p.exists())
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|raw| {
-            let jpeg = boko::image::jpeg::sanitize_for_kfx(&raw).unwrap_or(raw);
+            let jpeg = bokai::image::jpeg::sanitize_for_kfx(&raw).unwrap_or(raw);
             is_jpeg(&jpeg).then_some(jpeg)
         });
     let cover_jpeg = match existing_cover {
         Some(jpeg) => Some(jpeg),
-        None => match boko::formats::pdf::render::render_pdf_page_jpeg(
+        None => match bokai::formats::pdf::render::render_pdf_page_jpeg(
             &doc.bytes,
             0,
-            boko::formats::pdf::render::COVER_TARGET_WIDTH_PX,
-            boko::formats::pdf::render::COVER_JPEG_QUALITY,
+            bokai::formats::pdf::render::COVER_TARGET_WIDTH_PX,
+            bokai::formats::pdf::render::COVER_JPEG_QUALITY,
         ) {
             Ok(jpeg) => Some(jpeg),
             Err(e) => {
@@ -525,7 +525,7 @@ fn convert_pdf_to_kfx(
     // book is converted visual-only. Usually the slowest step, so it gets the
     // widest progress band.
     on_progress("text", 0, 1, "Extracting text");
-    let text = boko::formats::pdf::render::extract_pdf_text(&doc.bytes).ok();
+    let text = bokai::formats::pdf::render::extract_pdf_text(&doc.bytes).ok();
     match &text {
         Some(pages) => {
             let runs: usize = pages.iter().map(|p| p.runs.len()).sum();
@@ -539,7 +539,7 @@ fn convert_pdf_to_kfx(
     }
 
     on_progress("build", 0, 1, "Building KFX");
-    let kfx = boko::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref(), text.as_deref());
+    let kfx = bokai::export::pdf_to_kfx(&doc, &meta, cover_jpeg.as_deref(), text.as_deref());
     write_bytes_atomic(&out_path, &kfx)?;
 
     // Warm the ink-anchor geometry cache (eid→page map + page boxes) for this
@@ -564,14 +564,14 @@ fn convert_pdf_to_kfx(
         );
     }
 
-    // Capture the content_id boko baked into the KFX — the device names its
+    // Capture the content_id bokai baked into the KFX — the device names its
     // per-book `.sdr` / `.notebooks/<id>!!PDOC!!` dir after it, so `books.asin`
     // MUST equal it (annotation + ink sync and device-delete all match on it).
     // Read it back from the produced file rather than recomputing, so the row
     // always reflects what's actually in the KFX (a recompute via
     // `resolve_export_asin` used a different input and never matched). `None` on a
     // read failure just defers to the bootstrap backfill.
-    let asin = boko::Book::open(&out_path)
+    let asin = bokai::Book::open(&out_path)
         .ok()
         .and_then(|b| b.metadata().asin.clone());
 
@@ -628,7 +628,7 @@ fn convert_kfx_to_pdf(
     let kfx_bytes = std::fs::read(source_path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
     on_progress("extract", 0, 1, "Extracting PDF");
-    let pdf = boko::formats::kfx::pdf_container::kfx_extract_pdf(&kfx_bytes)
+    let pdf = bokai::formats::kfx::pdf_container::kfx_extract_pdf(&kfx_bytes)
         .map_err(|e| anyhow::anyhow!("kfx→pdf extract: {e}"))?;
     write_bytes_atomic(&out_path, &pdf)?;
 
@@ -669,12 +669,12 @@ fn is_jpeg(bytes: &[u8]) -> bool {
 }
 
 /// Overlay the library row's metadata onto the source's parsed metadata,
-/// producing the [`boko::Metadata`] the KFX export should write. Cloned from
+/// producing the [`bokai::Metadata`] the KFX export should write. Cloned from
 /// `source` so fields the DB doesn't track (identifier, ASIN, cover_image,
 /// description, writing-mode…) survive untouched; the tracked fields take the
 /// edited DB value. For an unedited book the DB still equals what import read
 /// from the source, so this is a no-op.
-pub(crate) fn book_metadata_override(source: &boko::Metadata, book: &BookRow) -> boko::Metadata {
+pub(crate) fn book_metadata_override(source: &bokai::Metadata, book: &BookRow) -> bokai::Metadata {
     let mut m = source.clone();
     m.title = book.title.clone();
     m.authors = crate::library::authors::split_display(&book.author);
@@ -698,7 +698,7 @@ pub(crate) fn book_metadata_override(source: &boko::Metadata, book: &BookRow) ->
     m.collection = book
         .series_name
         .clone()
-        .map(|name| boko::model::CollectionInfo {
+        .map(|name| bokai::model::CollectionInfo {
             name,
             collection_type: Some("series".to_string()),
             position: book.series_index,
@@ -759,7 +759,7 @@ mod tests {
 
     #[test]
     fn override_applies_db_fields_but_preserves_untracked() {
-        let mut src = boko::Metadata {
+        let mut src = bokai::Metadata {
             title: "Old Title".into(),
             authors: vec!["Old Author".into()],
             language: "ja".into(),
@@ -797,7 +797,7 @@ mod tests {
 
     #[test]
     fn override_keeps_source_language_when_db_blank() {
-        let src = boko::Metadata {
+        let src = bokai::Metadata {
             language: "ja".into(),
             ..Default::default()
         };

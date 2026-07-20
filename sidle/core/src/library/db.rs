@@ -683,7 +683,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     // v11: searchable romaji metadata. Two editable columns rendered from the
     // title/author and shown in the editor (see [`super::romaji`]). New imports
-    // render them yomigana-aware (`import::extract_meta` from boko's
+    // render them yomigana-aware (`import::extract_meta` from bokai's
     // `title_sort`/`author_sorts`); here we backfill existing rows from the raw
     // fields via the same engine. Pure CPU (no file I/O) and NULL-guarded, so
     // it's safe to re-run on every `open()` — including sidle-server's
@@ -997,7 +997,7 @@ pub fn books_missing_kfx_sha(conn: &Connection) -> rusqlite::Result<Vec<(i64, St
 }
 
 /// Find rows with a `kfx_path` but no `asin`. Bootstrap reads each KFX's
-/// metadata to recover the value boko-kai stamped at export time — the
+/// metadata to recover the value bokai stamped at export time — the
 /// device-delete path needs it to wipe Kindle's `<title>_<ASIN>.sdr/`
 /// catalog sidecar. Exists purely for rows converted before the worker
 /// started capturing ASIN; new rows always land with `asin` populated.
@@ -1045,7 +1045,7 @@ pub fn set_cover_path(conn: &Connection, book_id: i64, cover_path: &str) -> rusq
     Ok(())
 }
 
-/// Stamp the ASIN that boko-kai's KFX export wrote into the produced file.
+/// Stamp the ASIN that bokai's KFX export wrote into the produced file.
 /// For PDOC sideloads the value is fabricated from the publication
 /// identifier (32-char Crockford-Base32), so the row holds it only after
 /// EPUB→KFX completes — the import-time value is whatever the source

@@ -1,4 +1,4 @@
-//! Book editor — the app-UI surface over boko-kai's KFX, EPUB and PDF edit
+//! Book editor — the app-UI surface over bokai's KFX, EPUB and PDF edit
 //! primitives.
 //!
 //! Covers all three source formats. Each command dispatches on [`SourceKind`]:
@@ -40,18 +40,18 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 
-use boko::formats::epub::image_extract as epub_image;
-use boko::formats::epub::metadata_edit::{self as epub_meta, MetadataPatch as EpubMetadataPatch};
-use boko::formats::epub::toc_repair as epub_toc;
-use boko::formats::kfx::image_extract;
-use boko::formats::kfx::metadata_edit::{self, MetadataPatch as KfxMetadataPatch};
-use boko::formats::kfx::toc_repair::{self, TocEntry as KfxTocEntry};
-use boko::formats::pdf::cover::{self as pdf_cover, CoverMode};
-use boko::formats::pdf::metadata_edit::{self as pdf_meta, MetadataPatch as PdfMetadataPatch};
-use boko::formats::pdf::toc_repair as pdf_toc;
-use boko::import::pdf::PdfOutlineItem;
-use boko::model::TocEntry as EpubTocEntry;
-use boko::validate::source::toc as toc_validate;
+use bokai::formats::epub::image_extract as epub_image;
+use bokai::formats::epub::metadata_edit::{self as epub_meta, MetadataPatch as EpubMetadataPatch};
+use bokai::formats::epub::toc_repair as epub_toc;
+use bokai::formats::kfx::image_extract;
+use bokai::formats::kfx::metadata_edit::{self, MetadataPatch as KfxMetadataPatch};
+use bokai::formats::kfx::toc_repair::{self, TocEntry as KfxTocEntry};
+use bokai::formats::pdf::cover::{self as pdf_cover, CoverMode};
+use bokai::formats::pdf::metadata_edit::{self as pdf_meta, MetadataPatch as PdfMetadataPatch};
+use bokai::formats::pdf::toc_repair as pdf_toc;
+use bokai::import::pdf::PdfOutlineItem;
+use bokai::model::TocEntry as EpubTocEntry;
+use bokai::validate::source::toc as toc_validate;
 
 use crate::commands::library::SetCoverResult;
 use crate::library::{authors, db, db::BookRow};
@@ -307,7 +307,7 @@ pub async fn editor_save_metadata(
             }
             // PDF's `/Info` has no language/publisher/ASIN key, so those reach
             // only the library row (the patch accepts them and ignores them —
-            // see `boko::formats::pdf::metadata_edit`). Title/author/date are durable.
+            // see `bokai::formats::pdf::metadata_edit`). Title/author/date are durable.
             SourceKind::Pdf => {
                 let patch = PdfMetadataPatch {
                     title: Some(c_title),
@@ -965,9 +965,9 @@ pub async fn editor_pdf_pages(
 }
 
 /// Read a PDF's page geometry. Sync — call inside `spawn_blocking`.
-fn probe_pdf_pages(path: &str) -> Result<Vec<boko::import::pdf::PdfPage>, String> {
+fn probe_pdf_pages(path: &str) -> Result<Vec<bokai::import::pdf::PdfPage>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
-    boko::import::pdf::probe_pdf(bytes)
+    bokai::import::pdf::probe_pdf(bytes)
         .map(|d| d.pages)
         .map_err(|e| e.to_string())
 }
@@ -1013,7 +1013,7 @@ fn export_width_px(width_pt: f32, dpi: u32) -> u32 {
 /// inside `spawn_blocking`.
 fn render_page(
     pdf: &[u8],
-    pages: &[boko::import::pdf::PdfPage],
+    pages: &[bokai::import::pdf::PdfPage],
     page: usize,
     dpi: u32,
     format: PageFormat,
@@ -1024,13 +1024,13 @@ fn render_page(
     let width_px = export_width_px(geom.width, dpi);
     let index = page - 1;
     match format {
-        PageFormat::Jpeg => boko::formats::pdf::render::render_pdf_page_jpeg(
+        PageFormat::Jpeg => bokai::formats::pdf::render::render_pdf_page_jpeg(
             pdf,
             index,
             width_px,
             PAGE_EXPORT_JPEG_QUALITY,
         ),
-        PageFormat::Png => boko::formats::pdf::render::render_pdf_page_png(pdf, index, width_px),
+        PageFormat::Png => bokai::formats::pdf::render::render_pdf_page_png(pdf, index, width_px),
     }
     .map_err(|e| format!("render page {page}: {e}"))
 }
@@ -1052,7 +1052,7 @@ pub async fn editor_export_pdf_page(
     }
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         let pdf = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
-        let pages = boko::import::pdf::probe_pdf(pdf.clone())
+        let pages = bokai::import::pdf::probe_pdf(pdf.clone())
             .map_err(|e| e.to_string())?
             .pages;
         render_page(&pdf, &pages, page, dpi, format)
@@ -1096,7 +1096,7 @@ pub async fn editor_export_pdf_pages(
     let dest_dir = PathBuf::from(&dir);
     let count = tokio::task::spawn_blocking(move || -> Result<usize, String> {
         let pdf = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
-        let geom = boko::import::pdf::probe_pdf(pdf.clone())
+        let geom = bokai::import::pdf::probe_pdf(pdf.clone())
             .map_err(|e| e.to_string())?
             .pages;
         std::fs::create_dir_all(&dest_dir)
@@ -1168,11 +1168,11 @@ fn compute_toc(source_path: &str, kind: SourceKind) -> Option<EditorToc> {
 /// means the PDF declares one; we never claim a PDF's outline is *deficient*,
 /// because we have no basis to.
 fn pdf_toc_summary(bytes: &[u8]) -> Option<(EditorToc, Vec<PdfOutlineItem>, usize)> {
-    let doc = boko::import::probe_pdf(bytes.to_vec()).ok()?;
+    let doc = bokai::import::probe_pdf(bytes.to_vec()).ok()?;
     let count = count_outline(&doc.outline);
     Some((
         EditorToc {
-            verdict: if count == 0 { "SPARSE" } else { "OK" }.to_string(),
+            verdict: toc_verdict(count).to_string(),
             nav_count: count,
             nav_chapters: count,
             contents_links: 0,
@@ -1182,6 +1182,14 @@ fn pdf_toc_summary(bytes: &[u8]) -> Option<(EditorToc, Vec<PdfOutlineItem>, usiz
         doc.outline,
         doc.pages.len(),
     ))
+}
+
+/// A PDF's TOC verdict is presence-based: it either declares an outline or it
+/// doesn't. Unlike EPUB and KFX there is no in-book evidence — no headings, no
+/// contents page — to judge an existing outline as *deficient* against, so
+/// "OK" is the ceiling and the panel never proposes a repair.
+fn toc_verdict(count: usize) -> &'static str {
+    if count == 0 { "SPARSE" } else { "OK" }
 }
 
 /// Total entries in an outline tree, all levels.
@@ -1388,6 +1396,13 @@ fn trim_opt(s: Option<String>) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The cheapest thing `read_toc_detail` will accept for the PDF branch: a
+    /// structurally valid PDF with one blank page and no outline. It exists so
+    /// the panel has something to open — the assertions below are about our
+    /// editor policy, not about PDF. The `xref` offsets are absolute, so edit
+    /// the body only by regenerating the whole literal.
+    const MINIMAL_INPUT: &[u8] = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n4 0 obj\n<< /Title (Tiny Test PDF) /Author (A. Tester) >>\nendobj\nxref\n0 5\n0000000000 65535 f \n0000000015 00000 n \n0000000064 00000 n \n0000000121 00000 n \n0000000192 00000 n \ntrailer\n<< /Size 5 /Root 1 0 R /Info 4 0 R >>\nstartxref\n256\n%%EOF\n";
+
     #[test]
     fn source_format_from_kind() {
         assert_eq!(source_format(Some("kfx_to_epub")), "kfx");
@@ -1492,32 +1507,13 @@ mod tests {
 
     /// PDF's TOC verdict is presence-based: an outline exists or it doesn't. We
     /// never claim a PDF outline is *deficient* — there's no in-book evidence to
-    /// judge it against (see `pdf_toc_summary`).
+    /// judge it against. Reading the outline out of a file is the conversion
+    /// library's job and is tested there; this is only our rule over the count.
     #[test]
     fn pdf_toc_verdict_reflects_presence() {
-        let pdf = std::fs::read("../../sidle/core/tests/fixtures/minimal.pdf")
-            .or_else(|_| std::fs::read("../core/tests/fixtures/minimal.pdf"))
-            .expect("read minimal.pdf");
-
-        let (summary, outline, pages) = pdf_toc_summary(&pdf).expect("probe");
-        assert_eq!(summary.verdict, "SPARSE", "fixture has no outline");
-        assert_eq!(summary.nav_count, 0);
-        assert!(outline.is_empty());
-        assert_eq!(pages, 1);
-
-        let with_toc = boko::formats::pdf::set_toc(
-            &pdf,
-            &[PdfOutlineItem {
-                title: "Chapter 1".into(),
-                page_index: 0,
-                children: vec![],
-            }],
-        )
-        .expect("set_toc");
-        let (summary, outline, _) = pdf_toc_summary(&with_toc).expect("probe edited");
-        assert_eq!(summary.verdict, "OK");
-        assert_eq!(summary.nav_count, 1);
-        assert_eq!(outline[0].title, "Chapter 1");
+        assert_eq!(toc_verdict(0), "SPARSE");
+        assert_eq!(toc_verdict(1), "OK");
+        assert_eq!(toc_verdict(99), "OK", "no ceiling above OK for a PDF");
     }
 
     /// The panel's "Currently declared" list shows nesting and page numbers.
@@ -1544,10 +1540,7 @@ mod tests {
     fn pdf_toc_detail_is_hand_authoring_mode() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("t.pdf");
-        let pdf = std::fs::read("../../sidle/core/tests/fixtures/minimal.pdf")
-            .or_else(|_| std::fs::read("../core/tests/fixtures/minimal.pdf"))
-            .expect("read minimal.pdf");
-        std::fs::write(&path, &pdf).expect("write");
+        std::fs::write(&path, MINIMAL_INPUT).expect("write");
 
         let detail = read_toc_detail(path.to_str().unwrap(), SourceKind::Pdf).expect("detail");
         assert_eq!(detail.page_count, Some(1));

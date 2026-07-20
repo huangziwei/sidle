@@ -4,7 +4,7 @@
 //! there are stripped of DRM but still in Amazon's native container (`.kfx`
 //! single-container, or `.kfx-zip` multi-container bundle). We hash each,
 //! skip what's already in the local library by sha256, and run the rest
-//! through the standard import pipeline — which synthesizes an EPUB via boko
+//! through the standard import pipeline — which synthesizes an EPUB via bokai
 //! and enqueues the canonical EPUB→KFX conversion just like a drag-drop.
 //!
 //! Mass-storage only. Non-jailbroken devices (every MTP-class Kindle) have no

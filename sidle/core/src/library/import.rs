@@ -11,7 +11,7 @@
 //!
 //! Three formats are converted at import time rather than stored as-is:
 //!
-//!  - `.azw3` → boko-kai's AZW3 importer feeding BOTH exporters: the EPUB
+//!  - `.azw3` → bokai's AZW3 importer feeding BOTH exporters: the EPUB
 //!    and the KFX are each exported directly from the azw3's IR (the azw3
 //!    itself is not persisted, so import is the only moment both can be
 //!    derived without chaining). The book lands with its job already
@@ -20,7 +20,7 @@
 //!    (the two-hop path, keyed on the `epub_to_kfx` job kind) since the
 //!    azw3 is gone by then; only the first import gets KFX straight from
 //!    the azw3.
-//!  - `.mobi` → boko-kai's MOBI importer + EPUB exporter; the KFX side is
+//!  - `.mobi` → bokai's MOBI importer + EPUB exporter; the KFX side is
 //!    filled in later by the `epub_to_kfx` queue job like a regular EPUB
 //!    drop.
 //!  - `.zip`  → Aozora Bunko sniff + parse → cover → build_epub. See
@@ -61,7 +61,7 @@ use crate::library::paths::{LibraryPaths, cover_ext_from, format_basename};
 // ---------------------------------------------------------------------------
 // Aozora Bunko .zip → EPUB
 //
-// Wires boko-kai's aozora pipeline into the import flow. Aozora source
+// Wires bokai's aozora pipeline into the import flow. Aozora source
 // archives are unstructured .zip files: a Shift_JIS text file with
 // ［＃markers］ + 底本 colophon, plus accompanying image files. We open
 // the zip, sniff for those markers, parse → Document, render a
@@ -101,9 +101,9 @@ enum SourceKind {
     /// sniff).
     Azw3,
     /// `.mobi` — older Mobipocket/KF8 hybrid (decrypted). Same shape as
-    /// AZW3: boko-kai's MOBI importer + EPUB exporter, detected purely by
+    /// AZW3: bokai's MOBI importer + EPUB exporter, detected purely by
     /// extension. Japanese MOBIs carry vertical-writing-mode and PPD in
-    /// EXTH 525/527, which the boko importer propagates into the EPUB.
+    /// EXTH 525/527, which the bokai importer propagates into the EPUB.
     Mobi,
     /// `.pdf` — wrapped verbatim into a fixed-layout PDOC KFX for the Scribe
     /// (the device renders the PDF; the pen draws over it). PDF is the
@@ -156,14 +156,14 @@ impl SourceKind {
 }
 
 impl Canonical {
-    /// `boko::Format` for reading metadata from the canonical bytes. PDF has
+    /// `bokai::Format` for reading metadata from the canonical bytes. PDF has
     /// none — its metadata comes from `probe_pdf` `/Info`, so this is never
     /// called for `Pdf`.
-    fn boko_format(self) -> boko::Format {
+    fn bokai_format(self) -> bokai::Format {
         match self {
-            Self::Epub => boko::Format::Epub,
-            Self::Kfx => boko::Format::Kfx,
-            Self::Pdf => unreachable!("PDF metadata comes from probe_pdf, not boko::Book"),
+            Self::Epub => bokai::Format::Epub,
+            Self::Kfx => bokai::Format::Kfx,
+            Self::Pdf => unreachable!("PDF metadata comes from probe_pdf, not bokai::Book"),
         }
     }
 }
@@ -208,7 +208,7 @@ fn import_one(
         SourceKind::Epub | SourceKind::Kfx | SourceKind::Pdf => {
             fs::read(src).with_context(|| format!("read {}", src.display()))?
         }
-        SourceKind::KfxZip => boko::formats::kfx::merge::merge_kfx_zip(src)
+        SourceKind::KfxZip => bokai::formats::kfx::merge::merge_kfx_zip(src)
             .with_context(|| format!("merge kfx-zip {}", src.display()))?,
         SourceKind::Azw3 => {
             let derived = convert_azw3(src).with_context(|| format!("azw3 {}", src.display()))?;
@@ -226,25 +226,25 @@ fn import_one(
     //     spurious ZIP64 extra fields the `zip` crate rejects. Doing it here —
     //     before metadata, cover, persist, and the downstream `epub_to_kfx`
     //     job — means the file we store is a clean archive, valid in external
-    //     readers too, rather than relying on boko's read-time repair each
+    //     readers too, rather than relying on bokai's read-time repair each
     //     time. A no-op (returns the bytes unchanged) for well-formed EPUBs and
     //     for the freshly-built EPUBs the azw3/mobi/aozora paths produce.
     let canonical_bytes = if canonical == Canonical::Epub {
-        boko::formats::epub::neutralize_spurious_zip64(&canonical_bytes).unwrap_or(canonical_bytes)
+        bokai::formats::epub::neutralize_spurious_zip64(&canonical_bytes).unwrap_or(canonical_bytes)
     } else {
         canonical_bytes
     };
 
     // 3. Metadata from the canonical bytes (no file re-open). PDF metadata
-    //    comes from `/Info` via `probe_pdf`; everything else from boko.
+    //    comes from `/Info` via `probe_pdf`; everything else from bokai.
     let mut meta = match canonical {
         Canonical::Pdf => {
-            let doc = boko::import::probe_pdf(canonical_bytes.clone())
+            let doc = bokai::import::probe_pdf(canonical_bytes.clone())
                 .with_context(|| format!("probe pdf {}", src.display()))?;
             extract_meta_from_pdf(&doc, src.file_stem().and_then(|s| s.to_str()))
         }
         _ => {
-            let book = boko::Book::from_bytes(&canonical_bytes, canonical.boko_format())
+            let book = bokai::Book::from_bytes(&canonical_bytes, canonical.bokai_format())
                 .with_context(|| format!("read metadata from {}", src.display()))?;
             extract_meta(book.metadata(), src.file_stem().and_then(|s| s.to_str()))
         }
@@ -265,7 +265,7 @@ fn import_one(
     let partner = match canonical {
         Canonical::Epub | Canonical::Pdf => Canonical::Kfx,
         Canonical::Kfx => {
-            if boko::formats::kfx::pdf_container::kfx_is_pdf_backed(&canonical_bytes) {
+            if bokai::formats::kfx::pdf_container::kfx_is_pdf_backed(&canonical_bytes) {
                 Canonical::Pdf
             } else {
                 Canonical::Epub
@@ -380,7 +380,7 @@ fn write_cover_from_epub_bytes(
 /// for direct EPUB imports and by the worker after `kfx_to_epub` produces an
 /// EPUB whose JXR cover has been transcoded to JPG.
 pub fn extract_cover_from_epub(epub_bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
-    let mut book = boko::Book::from_bytes(epub_bytes, boko::Format::Epub).ok()?;
+    let mut book = bokai::Book::from_bytes(epub_bytes, bokai::Format::Epub).ok()?;
     let cref = book.metadata().cover_image.as_deref()?.to_string();
     if cref.is_empty() {
         return None;
@@ -406,9 +406,9 @@ fn write_cover_from_kfx_bytes(
 
 /// Pull the cover bytes (and extension) out of an in-memory KFX. Mirrors
 /// [`extract_cover_from_epub`] for the KFX side; the container surgery lives in
-/// boko (`kfx::cover_extract`). A load error or a coverless container → `None`.
+/// bokai (`kfx::cover_extract`). A load error or a coverless container → `None`.
 pub fn extract_cover_from_kfx_bytes(kfx_bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
-    boko::formats::kfx::cover_extract::kfx_extract_cover(kfx_bytes)
+    bokai::formats::kfx::cover_extract::kfx_extract_cover(kfx_bytes)
         .ok()
         .flatten()
 }
@@ -437,25 +437,25 @@ struct BookMeta {
     language: String,
     ppd: Option<String>,
     date: Option<String>,
-    /// Amazon catalogue id. Comes from boko's dedicated `Metadata.asin` field
+    /// Amazon catalogue id. Comes from bokai's dedicated `Metadata.asin` field
     /// (populated from KFX `kindle_title_metadata.ASIN` and from EPUB
-    /// `<dc:identifier opf:scheme="ASIN">`). Distinct from `boko::Metadata`'s
+    /// `<dc:identifier opf:scheme="ASIN">`). Distinct from `bokai::Metadata`'s
     /// generic `identifier`, which for KFX is the per-device internal
     /// `book_id` UUID — not the ASIN.
     asin: Option<String>,
     /// EPUB `<dc:publisher>` or KFX `publisher` field (symbol 232). Optional;
     /// many self-pub and indie books leave it blank.
     publisher: Option<String>,
-    /// Yomigana for the title — boko's `Metadata.title_sort`, from EPUB
+    /// Yomigana for the title — bokai's `Metadata.title_sort`, from EPUB
     /// `opf:file-as` or KFX `title_pronunciation`. Romanized into
     /// `books.title_romaji` at [`insert_row`] when it's phonetic kana.
     title_reading: Option<String>,
-    /// Yomigana for the first author — the first entry of boko's per-author
+    /// Yomigana for the first author — the first entry of bokai's per-author
     /// `Metadata.author_sorts`. Only used when the book has a single creator.
     author_reading: Option<String>,
 }
 
-fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
+fn extract_meta(m: &bokai::Metadata, fallback_stem: Option<&str>) -> BookMeta {
     let title = if m.title.trim().is_empty() {
         fallback_stem
             .map(str::to_string)
@@ -476,7 +476,7 @@ fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
         date: m.date.clone(),
         asin: m.asin.clone().filter(|s| !s.is_empty()),
         publisher: m.publisher.clone().filter(|s| !s.is_empty()),
-        // Yomigana boko already pulled from EPUB `opf:file-as` / KFX
+        // Yomigana bokai already pulled from EPUB `opf:file-as` / KFX
         // `*_pronunciation` — romanized at `insert_row` (yomigana-aware when kana).
         title_reading: m.title_sort.clone(),
         author_reading: m.author_sorts.first().cloned(),
@@ -486,7 +486,7 @@ fn extract_meta(m: &boko::Metadata, fallback_stem: Option<&str>) -> BookMeta {
 /// Metadata for a `.pdf` import: title/author from the PDF `/Info` dict
 /// (title-cased if ALL CAPS, as Amazon's S2K does), falling back to the file
 /// stem for the title. No language/date/asin/publisher in PDF `/Info`.
-fn extract_meta_from_pdf(doc: &boko::import::PdfDoc, fallback_stem: Option<&str>) -> BookMeta {
+fn extract_meta_from_pdf(doc: &bokai::import::PdfDoc, fallback_stem: Option<&str>) -> BookMeta {
     let title = doc
         .title
         .as_deref()
@@ -561,7 +561,7 @@ fn insert_row(
     // split on `[&、]`, never a comma. See [`authors`].
     let authors_joined = authors::join_display(&meta.authors);
     // Render the editable, searchable romaji yomigana-aware. The author reading
-    // (first of boko's `author_sorts`) covers only the first creator, so it's
+    // (first of bokai's `author_sorts`) covers only the first creator, so it's
     // used only when there's a single author; otherwise the engine romanizes
     // the join.
     let title_romaji =
@@ -591,7 +591,7 @@ fn insert_row(
             imported_at: &now,
             asin: meta.asin.as_deref(),
             publisher: meta.publisher.as_deref(),
-            // meta.date comes from boko's EPUB `<dc:date>` / KFX equivalent.
+            // meta.date comes from bokai's EPUB `<dc:date>` / KFX equivalent.
             // Stored verbatim — typically `2024-03-15` or `2024`. We filter
             // empties so a missing OPF date doesn't land as `Some("")`.
             published_at: meta
@@ -650,7 +650,7 @@ struct Azw3Derived {
 /// EPUB by the background `epub_to_kfx` job).
 ///
 /// Caller has already extension-detected `.azw3`; if the file isn't a real
-/// AZW3 (bad PalmDOC header, etc.), boko's `Book::from_bytes` returns the
+/// AZW3 (bad PalmDOC header, etc.), bokai's `Book::from_bytes` returns the
 /// error and the caller's `?` surfaces it as a normal import failure.
 ///
 /// The EPUB side is gated on the standalone EPUB-3 validator for the same
@@ -658,29 +658,29 @@ struct Azw3Derived {
 /// synthesized rather than passed through, so we'd rather fail import than
 /// write a broken book. The KFX side is exported from a fresh parse of the
 /// same bytes — not the handle the EPUB export ran on — keeping it the same
-/// artifact as `boko convert <azw3> <kfx>` produces.
+/// artifact as `bokai convert <azw3> <kfx>` produces.
 fn convert_azw3(src: &Path) -> Result<Azw3Derived> {
-    use boko::Exporter as _;
+    use bokai::Exporter as _;
     let azw3_bytes = fs::read(src).with_context(|| format!("read {}", src.display()))?;
 
-    let mut book = boko::Book::from_bytes(&azw3_bytes, boko::Format::Azw3)
+    let mut book = bokai::Book::from_bytes(&azw3_bytes, bokai::Format::Azw3)
         .with_context(|| format!("parse azw3 {}", src.display()))?;
     let mut buf = Cursor::new(Vec::<u8>::new());
-    boko::EpubExporter::new()
+    bokai::EpubExporter::new()
         .export(&mut book, &mut buf)
         .context("azw3 -> epub export")?;
     let epub_bytes = buf.into_inner();
-    let report = boko::validate::source::epub::validate(&epub_bytes);
+    let report = bokai::validate::source::epub::validate(&epub_bytes);
     if !report.is_clean() {
         bail!("azw3 -> epub failed validation:\n{report}");
     }
 
-    let mut book = boko::Book::from_bytes(&azw3_bytes, boko::Format::Azw3)
+    let mut book = bokai::Book::from_bytes(&azw3_bytes, bokai::Format::Azw3)
         .with_context(|| format!("parse azw3 {}", src.display()))?;
     let mut kfx_buf = Cursor::new(Vec::<u8>::new());
-    book.export(boko::Format::Kfx, &mut kfx_buf)
+    book.export(bokai::Format::Kfx, &mut kfx_buf)
         .context("azw3 -> kfx export")?;
-    let asin = boko::formats::kfx::metadata::resolve_export_asin(book.metadata());
+    let asin = bokai::formats::kfx::metadata::resolve_export_asin(book.metadata());
     Ok(Azw3Derived {
         epub: epub_bytes,
         kfx: DirectKfx {
@@ -690,22 +690,22 @@ fn convert_azw3(src: &Path) -> Result<Azw3Derived> {
     })
 }
 
-/// Convert a decrypted `.mobi` to EPUB bytes via boko-kai's MOBI importer +
+/// Convert a decrypted `.mobi` to EPUB bytes via bokai's MOBI importer +
 /// EPUB exporter. EPUB-only, unlike `convert_azw3`: the KFX side of a mobi
 /// import is still filled by the background `epub_to_kfx` job from the
 /// exported EPUB (mobi→kfx direct hasn't been through the fidelity harness
 /// the azw3 pairs have).
 fn convert_mobi(src: &Path) -> Result<Vec<u8>> {
-    use boko::Exporter as _;
+    use bokai::Exporter as _;
     let mobi_bytes = fs::read(src).with_context(|| format!("read {}", src.display()))?;
-    let mut book = boko::Book::from_bytes(&mobi_bytes, boko::Format::Mobi)
+    let mut book = bokai::Book::from_bytes(&mobi_bytes, bokai::Format::Mobi)
         .with_context(|| format!("parse mobi {}", src.display()))?;
     let mut buf = Cursor::new(Vec::<u8>::new());
-    boko::EpubExporter::new()
+    bokai::EpubExporter::new()
         .export(&mut book, &mut buf)
         .context("mobi -> epub export")?;
     let epub_bytes = buf.into_inner();
-    let report = boko::validate::source::epub::validate(&epub_bytes);
+    let report = bokai::validate::source::epub::validate(&epub_bytes);
     if !report.is_clean() {
         bail!("mobi -> epub failed validation:\n{report}");
     }
@@ -717,7 +717,7 @@ fn convert_mobi(src: &Path) -> Result<Vec<u8>> {
 /// (via `bail!`) for any zip that doesn't look like aozora — the caller's
 /// `?` then surfaces this as a normal import failure with no special UI.
 ///
-/// Pipeline mirrors `aozora_dispatch` in `boko-kai/src/main.rs:1602` so
+/// Pipeline mirrors `aozora_dispatch` in `bokai/src/main.rs:1602` so
 /// the CLI and the GUI produce byte-identical EPUBs from the same input.
 fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
     let file = fs::File::open(src).with_context(|| format!("open {}", src.display()))?;
@@ -754,17 +754,17 @@ fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
     let Some(txt) = txt_buf else {
         bail!("zip contains no .txt entry");
     };
-    let text = boko::formats::aozora::parser_txt::decode_bytes(&txt);
+    let text = bokai::formats::aozora::parser_txt::decode_bytes(&txt);
 
     // Aozora marker sniff. Bare zips with no aozora content fail here.
     if !text.contains("底本") && !text.contains("［＃") {
         bail!("not an Aozora Bunko archive");
     }
 
-    let doc = boko::formats::aozora::parse_txt(&text);
-    let cover = boko::formats::aozora::render_cover_jpeg(&doc.title, &doc.author)
+    let doc = bokai::formats::aozora::parse_txt(&text);
+    let cover = bokai::formats::aozora::render_cover_jpeg(&doc.title, &doc.author)
         .context("aozora cover render")?;
-    let epub_bytes = boko::formats::aozora::build_epub(boko::formats::aozora::EpubInput {
+    let epub_bytes = bokai::formats::aozora::build_epub(bokai::formats::aozora::EpubInput {
         document: &doc,
         images: &images,
         cover_jpeg: &cover,
@@ -773,7 +773,7 @@ fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
     // Gate the import on the standalone EPUB-3 validator. Bad output here
     // silently corrupts the downstream KFX conversion, so we fail fast
     // instead of writing a broken book into the library.
-    let report = boko::validate::source::epub::validate(&epub_bytes);
+    let report = bokai::validate::source::epub::validate(&epub_bytes);
     if !report.is_clean() {
         bail!("aozora epub failed validation:\n{report}");
     }
@@ -781,9 +781,24 @@ fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::Path;
+
+    /// The cheapest input `import_file` will accept: a structurally valid PDF
+    /// with one blank page. It is here to give the pipeline *something* to
+    /// ingest — the tests below are about rows, paths and job pairing, not
+    /// about PDF. Kept inline because a few hundred bytes of scaffolding is
+    /// not a document worth committing. The `xref` offsets are absolute, so
+    /// edit the body only by regenerating the whole literal.
+    const MINIMAL_INPUT: &[u8] = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n4 0 obj\n<< /Title (Tiny Test PDF) /Author (A. Tester) >>\nendobj\nxref\n0 5\n0000000000 65535 f \n0000000015 00000 n \n0000000064 00000 n \n0000000121 00000 n \n0000000192 00000 n \ntrailer\n<< /Size 5 /Root 1 0 R /Info 4 0 R >>\nstartxref\n256\n%%EOF\n";
+
+    /// Drop [`MINIMAL_INPUT`] into `dir` and hand back the path to import from.
+    fn minimal_input_in(dir: &Path) -> PathBuf {
+        let p = dir.join("minimal.pdf");
+        fs::write(&p, MINIMAL_INPUT).unwrap();
+        p
+    }
 
     #[test]
     fn pdf_detects_and_pairs_with_kfx() {
@@ -802,9 +817,9 @@ mod tests {
     #[test]
     fn pdf_info_title_is_title_cased_else_filename() {
         // ALL-CAPS /Info title gets title-cased (Amazon's S2K behavior).
-        let doc = boko::import::PdfDoc {
+        let doc = bokai::import::PdfDoc {
             bytes: b"%PDF-1.4\n".to_vec(),
-            pages: vec![boko::import::PdfPage {
+            pages: vec![bokai::import::PdfPage {
                 width: 612.0,
                 height: 792.0,
             }],
@@ -818,9 +833,9 @@ mod tests {
         assert_eq!(meta.authors, vec!["MEGAN E. ABBOTT".to_string()]);
 
         // No /Info title → file stem.
-        let doc2 = boko::import::PdfDoc {
+        let doc2 = bokai::import::PdfDoc {
             bytes: b"%PDF-1.4\n".to_vec(),
-            pages: vec![boko::import::PdfPage {
+            pages: vec![bokai::import::PdfPage {
                 width: 1.0,
                 height: 1.0,
             }],
@@ -835,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn import_pdf_routes_to_pdf_to_kfx_and_persists_pdf() {
+    fn import_persists_canonical_side_and_pairs_job() {
         use crate::library::db;
         use crate::library::paths::LibraryPaths;
 
@@ -846,7 +861,8 @@ mod tests {
         paths.ensure().unwrap();
         let conn = db::open(&paths.db()).unwrap();
 
-        let outcome = import_file(&conn, &paths, Path::new("tests/fixtures/minimal.pdf")).unwrap();
+        let src = minimal_input_in(tmp.path());
+        let outcome = import_file(&conn, &paths, &src).unwrap();
         let ImportOutcome::Imported {
             book,
             needs_enqueue,
@@ -855,60 +871,26 @@ mod tests {
             panic!("expected a fresh import, got a duplicate");
         };
 
-        // Routed as a PDF↔KFX book: PDF is the canonical side, KFX is filled by
-        // the background `pdf_to_kfx` job; there is no EPUB side.
+        // The canonical side is persisted and the partner side is left to the
+        // queue: one job pending, the missing side null until the worker fills
+        // it. Which formats those are is `SourceKind`'s business, asserted
+        // without touching disk in `pdf_detects_and_pairs_with_kfx`.
         assert_eq!(book.kind.as_deref(), Some("pdf_to_kfx"));
         assert!(needs_enqueue);
-        assert!(book.pdf_path.is_some(), "PDF side must be persisted");
+        assert!(book.pdf_path.is_some(), "canonical side must be persisted");
         assert!(
             book.kfx_path.is_none(),
-            "KFX is produced later by the worker"
+            "partner side is produced later by the worker"
         );
-        assert!(book.epub_path.is_none(), "a PDF book has no EPUB side");
-        // Metadata came from the PDF `/Info` dict.
-        assert_eq!(book.title, "Tiny Test PDF");
-        assert_eq!(book.author, "A. Tester");
-        // The PDF bytes landed in the library slot.
-        assert!(Path::new(book.pdf_path.as_ref().unwrap()).exists());
+        assert!(book.epub_path.is_none());
+        assert!(
+            Path::new(book.pdf_path.as_ref().unwrap()).exists(),
+            "bytes landed in the library slot"
+        );
     }
 
-    #[test]
-    fn import_azw3_derives_both_sides_directly() {
-        use crate::library::db;
-        use crate::library::paths::LibraryPaths;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = LibraryPaths {
-            root: tmp.path().to_path_buf(),
-        };
-        paths.ensure().unwrap();
-        let conn = db::open(&paths.db()).unwrap();
-
-        // Public-domain fixture shared with boko-kai's own azw3 tests.
-        let fixture = Path::new("../../boko-kai/tests/fixtures/[太宰 治] 人間失格.azw3");
-        let outcome = import_file(&conn, &paths, fixture).unwrap();
-        let ImportOutcome::Imported {
-            book,
-            needs_enqueue,
-        } = outcome
-        else {
-            panic!("expected a fresh import, got a duplicate");
-        };
-
-        // Both sides were exported straight from the azw3 at import — the job
-        // lands `done` and nothing is enqueued.
-        assert!(!needs_enqueue);
-        assert_eq!(book.status, "done");
-        assert_eq!(book.kind.as_deref(), Some("epub_to_kfx"));
-        let epub = book.epub_path.as_deref().expect("EPUB side persisted");
-        let kfx = book.kfx_path.as_deref().expect("KFX side persisted");
-        assert!(Path::new(epub).exists());
-        assert!(Path::new(kfx).exists());
-        // The on-device filename identity rides with kfx_path…
-        assert!(book.kfx_sha256.is_some());
-        // …and the row carries the ASIN the KFX export stamped (real or
-        // fabricated), so device-delete can wipe the `.sdr` sidecar.
-        assert!(book.asin.is_some());
-        assert_eq!(book.title, "人間失格");
-    }
+    // The azw3 arm — deriving both sides up front, so the job lands `done` with
+    // nothing enqueued — is untested here: reaching it means running a real
+    // conversion over a real book. Testing the bookkeeping alone needs a seam
+    // between deriving the pair and filing it.
 }

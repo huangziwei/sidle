@@ -1,0 +1,155 @@
+[package]
+name = "bokai"
+version = "0.1.0"
+edition = "2024"
+description = "Ebook conversion engine (EPUB/KFX/AZW3/MOBI/PDF) with CJK typography support; a modified (改 kai) fork of boko"
+license = "GPL-3.0-or-later"
+publish = false
+readme = "README.md"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = ["cli"]
+# `cli` implies `aozora`: the CLI bin (`main.rs`) calls `bokai::aozora::*`.
+cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:ion-rs", "aozora"]
+# Aozora Bunko TXT → EPUB. Pulls `regex` (the TXT parser is regex-heavy);
+# kept behind a feature to shrink builds without it. (resvg used to live
+# here too, but it's now a hard dep — EPUB→KFX needs it for SVG plates.)
+aozora = ["dep:regex"]
+# Kindle Scribe handwritten-notebook (.nbk) decode → SVG. Pulls `rusqlite`
+# (bundled C SQLite), so it is off by default; enable it to read notebooks.
+nbk = ["dep:rusqlite"]
+
+[dependencies]
+quick-xml = "0.39"
+zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
+percent-encoding = "2.3"
+
+# High-performance byte operations (SIMD-accelerated)
+memchr = "2.7"
+bstr = { version = "1.11", default-features = false, features = ["alloc"] }
+
+html5ever = "0.39"
+cssparser = "0.36"
+selectors = "0.35"
+precomputed-hash = "0.1"
+
+# Encoding detection and conversion (UTF-8, CP1252, etc.)
+encoding_rs = "0.8"
+
+# Regex engine. Used by the Aozora Bunko TXT parser (annotations.rs and
+# parser_txt.rs) — the source format is markup-heavy and the JS reference
+# tool we're porting relies on ~40 regex patterns.
+regex = { version = "1.11", optional = true }
+
+# SVG rasterization, two consumers:
+#  - EPUB→KFX: KFX has no vector resource format (Amazon's own converter
+#    rasterizes SVG sources to JPEG/JXR), so SVG assets are rendered to
+#    raster plates before JXR encoding. This is core-product path, hence
+#    resvg is a hard dependency (conversion always runs host-side; the
+#    Kindle picker binary doesn't link bokai at all).
+#  - Aozora cover generation: the cover is built as pure SVG (port of
+#    `buildCoverSvg` from `aozora-epub.html`) and rasterized to JPEG.
+#  - PDF page assembly (`formats::pdf::assemble`): fixed-layout sources ship
+#    one SVG per page, rasterized here before being written into the PDF.
+# `system-fonts` pulls host fonts (Hiragino Mincho ProN etc.) into usvg's
+# fontdb at runtime for `<text>`-bearing SVGs; no bundled fallback font.
+# `raster-images` renders `<image>` elements embedding PNG/JPEG — Scribe
+# pencil strokes arrive that way, so a notebook page loses them without it.
+resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts", "raster-images"] }
+
+# Base64 encoding for KFX raw media
+base64 = "0.22"
+
+# Pure-Rust JPEG encoder. Used by the kfx_to_epub mechanical port to
+# re-encode JPEG-XR images decoded from KFX into something EPUB readers
+# can render. Small, focused, no C deps.
+jpeg-encoder = { version = "0.6", default-features = false }
+
+# Pure-Rust JPEG-XR codec (top-level workspace crate; zero deps). Decodes KFX
+# raw media (KFX→EPUB + reader) and encodes EPUB→KFX interior plates.
+# Re-exported as `bokai::jxr` since `model::Book`'s API exposes its types.
+jxr = { path = "../jxr" }
+
+# Pure-Rust multi-format image decoder. Used by the EPUB→KFX path to
+# transcode every non-JPEG image (GIF, PNG, WebP, BMP) to JPEG before
+# bundling. KDP's "Image Guidelines — Reflowable" warns that Kindle
+# can't render multi-frame GIFs and that transparent areas don't
+# composite, and Amazon's authoritative KFX pipeline transcodes every
+# input image to JPEG-XR. Matching that here means embedded images
+# actually render on device instead of silently going missing. We pull
+# only decoders here; JPEG encode stays on `jpeg-encoder` so existing
+# call sites (Aozora cover, JXR re-encode) don't double up.
+image = { version = "0.25", default-features = false, features = [
+    "gif",
+    "png",
+    "webp",
+    "bmp",
+    "jpeg",
+] }
+
+# Ion binary format parsing for KFX dump tool
+ion-rs = { version = "1.0.0-rc.11", features = ["experimental-reader-writer"], optional = true }
+
+# SHA1 hashing for KFX content hashes (minimal, pure-Rust).
+# Used by the kfx-zip → kfx fast path. RustCrypto's `sha1 = "0.10"` with
+# `features=["asm"]` was tried for speed but produced wrong digests on
+# Apple Silicon — calibre rejected the output with "Incorrect
+# kfxgen_payload_sha1". `sha1_smol` matches OpenSSL/hashlib on every
+# platform we test, so we keep it as the single SHA1 implementation.
+sha1_smol = { version = "1.0", features = ["std"] }
+
+# CLI argument parsing (only for binary)
+clap = { version = "4", features = ["derive"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+xml5ever = "0.39.0"
+
+# Pure-Rust PDF parser. Used by the PDF→KFX path to read page count, per-page
+# MediaBox dimensions, and /Info title+author. We only parse structure (the
+# PDF is embedded verbatim and the device renders it), so the datetime/rayon
+# default features are dropped; nom parser + flate2/crypto stay (hard deps).
+lopdf = { version = "0.40", default-features = false }
+
+# Fast pure-Rust deflate backend.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+
+# KDF/KPF SQLite reader for the `nbk` feature (Scribe notebooks). `bundled`
+# compiles SQLite from source, so no host libsqlite3 is required.
+# Optional: only pulled in when `nbk` is enabled.
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+
+# macOS PDF engine (PDF→KFX page-1 cover + the selectable text layer) = Apple
+# PDFKit / Core Graphics, the system engine Preview uses — NO bundled libpdfium.
+# PDFKit gives page rendering (`PDFPage.draw(with:to:)`) and text-with-positions
+# (`PDFPage.string` + `characterBounds(at:)`); Core Graphics provides the bitmap
+# context we render the cover into. macOS-only by design: the Kindle build
+# doesn't rasterize (the Kindle never converts — conversion is always Mac-side),
+# and a future Linux build would slot Poppler behind the same `render.rs`
+# interface.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSGeometry"] }
+objc2-core-graphics = { version = "0.3", features = ["CGContext", "CGColorSpace", "CGImage", "CGPDFDocument", "CGPDFPage", "CGAffineTransform", "CGGeometry"] }
+objc2-pdf-kit = { version = "0.3", features = ["PDFDocument", "PDFPage"] }
+
+[dev-dependencies]
+tempfile = "3.14"
+proptest = "1.6"
+criterion = "0.8"
+
+[[bin]]
+name = "bokai"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "kfx-dump"
+path = "src/bin/kfx-dump.rs"
+required-features = ["cli"]
+
+[[bench]]
+name = "conversion"
+harness = false

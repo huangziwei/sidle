@@ -1,6 +1,6 @@
 //! Tauri command for the built-in reader: KFX → renderable DOM.
 //!
-//! `reader_open` looks up a book's KFX path, runs boko's KFX→DOM front half
+//! `reader_open` looks up a book's KFX path, runs bokai's KFX→DOM front half
 //! (with `data-eid` stamping so annotations can anchor), and returns the
 //! sections + resources + TOC + metadata the webview reader needs. Resources
 //! (images, `style.css`) are base64-encoded for the JSON IPC boundary; the
@@ -137,7 +137,7 @@ pub struct ReaderPdfTocDto {
     pub children: Vec<ReaderPdfTocDto>,
 }
 
-fn map_pdf_toc(items: &[boko::import::PdfOutlineItem]) -> Vec<ReaderPdfTocDto> {
+fn map_pdf_toc(items: &[bokai::import::PdfOutlineItem]) -> Vec<ReaderPdfTocDto> {
     items
         .iter()
         .map(|it| ReaderPdfTocDto {
@@ -180,7 +180,7 @@ pub struct ReaderBookDto {
     pub fixed_layout: bool,
 }
 
-fn map_toc(points: Vec<boko::kfx_to_epub::navigation::NavPoint>) -> Vec<ReaderTocDto> {
+fn map_toc(points: Vec<bokai::kfx_to_epub::navigation::NavPoint>) -> Vec<ReaderTocDto> {
     points
         .into_iter()
         .map(|p| ReaderTocDto {
@@ -213,7 +213,10 @@ struct BuiltReaderOpen {
 /// resume position (`resume_eid` = the saved Sidle spot, resolved to its
 /// section; window matches the frontend's fetch priority: back 1 section,
 /// forward 2).
-fn build_reader_open(b: boko::kfx_to_epub::ReaderBook, resume_eid: Option<i64>) -> BuiltReaderOpen {
+fn build_reader_open(
+    b: bokai::kfx_to_epub::ReaderBook,
+    resume_eid: Option<i64>,
+) -> BuiltReaderOpen {
     let total_html: usize = b.sections.iter().map(|s| s.html.len()).sum();
     let windowed = !b.fixed_layout && total_html > SECTION_WINDOW_THRESHOLD;
     let n = b.sections.len();
@@ -343,8 +346,8 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
         // touched only later, one page at a time, by `reader_pdf_page`. (Verified
         // offline: this reproduces probe's outline/labels/sizes for every library
         // PDF.)
-        if pdf_path.is_some() || boko::formats::kfx::pdf_container::kfx_is_pdf_backed(&kfx) {
-            let rd = boko::kfx_to_epub::pdf_reader_data(&kfx)
+        if pdf_path.is_some() || bokai::formats::kfx::pdf_container::kfx_is_pdf_backed(&kfx) {
+            let rd = bokai::kfx_to_epub::pdf_reader_data(&kfx)
                 .map_err(|e| format!("read PDF KFX for reader: {e}"))?;
             let authors = crate::library::authors::split_display(&author);
             let dto = ReaderPdfDto {
@@ -384,7 +387,7 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
 
         // Reflowable / fixed-layout KFX → DOM: image bytes deferred, large
         // text books windowed, unmapped locations deferred.
-        let (book, images) = boko::kfx_to_epub::kfx_to_reader_book_lazy(&kfx)
+        let (book, images) = bokai::kfx_to_epub::kfx_to_reader_book_lazy(&kfx)
             .map_err(|e| format!("KFX→DOM render failed: {e}"))?;
         let built = build_reader_open(book, resume_eid);
         // Cache the store only when something is left to serve: deferred
@@ -591,15 +594,15 @@ pub async fn reader_pdf_page(
             _ => {
                 let kfx_path = kfx_path.ok_or("book has no KFX or PDF to render")?;
                 let kfx = std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
-                boko::formats::kfx::pdf_container::kfx_extract_pdf(&kfx)
+                bokai::formats::kfx::pdf_container::kfx_extract_pdf(&kfx)
                     .map_err(|e| format!("extract embedded PDF: {e:?}"))?
             }
         };
-        let jpeg = boko::formats::pdf::render::render_pdf_page_jpeg(
+        let jpeg = bokai::formats::pdf::render::render_pdf_page_jpeg(
             &bytes,
             page,
             width,
-            boko::formats::pdf::render::COVER_JPEG_QUALITY,
+            bokai::formats::pdf::render::COVER_JPEG_QUALITY,
         )
         .map_err(|e| format!("render page {page}: {e}"))?;
         Ok::<String, String>(B64.encode(&jpeg))
@@ -852,8 +855,8 @@ pub struct SearchMatchDto {
     pub preview_after: String,
 }
 
-impl From<boko::kfx_to_epub::SearchMatch> for SearchMatchDto {
-    fn from(m: boko::kfx_to_epub::SearchMatch) -> Self {
+impl From<bokai::kfx_to_epub::SearchMatch> for SearchMatchDto {
+    fn from(m: bokai::kfx_to_epub::SearchMatch) -> Self {
         SearchMatchDto {
             eid: m.eid,
             off_start: m.off_start as i64,
@@ -882,7 +885,7 @@ pub async fn book_search(
     use std::sync::Arc;
 
     // Fast path: TextIndex for this book already built this session?
-    let cached: Option<Arc<boko::kfx_to_epub::TextIndex>> = {
+    let cached: Option<Arc<bokai::kfx_to_epub::TextIndex>> = {
         let guard = state.reader_search_cache.lock().await;
         match &*guard {
             Some((id, idx)) if *id == book_id => Some(idx.clone()),
@@ -906,7 +909,7 @@ pub async fn book_search(
             let built = tokio::task::spawn_blocking(move || {
                 let bytes =
                     std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
-                boko::kfx_to_epub::TextIndex::from_kfx(&bytes)
+                bokai::kfx_to_epub::TextIndex::from_kfx(&bytes)
                     .map_err(|e| format!("TextIndex build: {e}"))
             })
             .await

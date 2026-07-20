@@ -224,7 +224,7 @@ pub fn delete_one(
     // server-side, even for PDOC sideloads). The title segment is
     // Kindle-normalized — different from our `<basename>` — so we can't
     // predict the exact name, but the `_<ASIN>.sdr` suffix is unique
-    // per book (the ASIN is boko-kai's content-derived fabricated value,
+    // per book (the ASIN is bokai's content-derived fabricated value,
     // or a real catalog one if it came from kfxlib). Scan `Sidle/` and
     // wipe any `.sdr` whose name ends with `_<ASIN>.sdr`.
     let catalog_sdr_existed = match asin {

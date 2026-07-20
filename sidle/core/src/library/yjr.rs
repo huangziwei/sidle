@@ -19,7 +19,7 @@
 //!
 //! **Highlight/bookmark text is NOT in the `.yjr`** (the placeholder is
 //! `U+FFFC`) — it is recovered as the book substring between the anchors via the
-//! boko KFX→DOM `eid→text` map (see `anchor.rs`). Note *bodies* ARE inline here.
+//! bokai KFX→DOM `eid→text` map (see `anchor.rs`). Note *bodies* ARE inline here.
 //!
 //! Scope: annotation records (`.yjr`) plus the `.yjf` sidecar's last-read
 //! **position**. The `.yjf` is the same container, and its `lpr` (last page

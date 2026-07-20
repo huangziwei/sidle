@@ -2,12 +2,12 @@
 //!
 //! Each [`yjr::Annotation`](super::yjr::Annotation) carries `(eid, offset)`
 //! handles into KFX elements; this module turns those handles into the *text*
-//! the annotation covers plus its linear positions, using boko's
-//! [`TextIndex`](boko::kfx_to_epub::TextIndex) (the eid→text entry point).
+//! the annotation covers plus its linear positions, using bokai's
+//! [`TextIndex`](bokai::kfx_to_epub::TextIndex) (the eid→text entry point).
 //!
 //! Division of labour:
 //!   - `yjr.rs` decodes the device file into handles + note bodies;
-//!   - `boko::kfx_to_epub::TextIndex` maps `eid → base text` + reading order;
+//!   - `bokai::kfx_to_epub::TextIndex` maps `eid → base text` + reading order;
 //!   - **this module** joins them into a [`Resolved`] record;
 //!   - `ingest.rs` folds in book identity + a dedup hash and writes the DB.
 //!
@@ -16,7 +16,7 @@
 //! half-open. A bookmark anchors a point, not a span, so its "text" is the
 //! containing element's text — a location preview for the bookmark list.
 
-use boko::kfx_to_epub::TextIndex;
+use bokai::kfx_to_epub::TextIndex;
 
 use super::yjr::{Annotation, Kind};
 

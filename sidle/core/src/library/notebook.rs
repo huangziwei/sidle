@@ -5,7 +5,7 @@
 //! thumbnail), and `pages/page-<n>.svg` — the page renders cached at import
 //! time, so the viewer never
 //! re-parses the SQLite. Metadata (title, page count, content hash) lives in
-//! the `notebooks` DB table. Decode + render come from `boko::formats::kfx::nbk`.
+//! the `notebooks` DB table. Decode + render come from `bokai::formats::nbk`.
 
 use std::path::Path;
 
@@ -70,7 +70,7 @@ pub fn import_notebook(
     }
 
     // Decode + render every page up front — this is the cached derived asset.
-    let notebook = boko::formats::kfx::nbk::open(src_nbk)
+    let notebook = bokai::formats::nbk::open(src_nbk)
         .map_err(|e| anyhow::anyhow!("decode notebook {uuid}: {e:?}"))?;
     let svgs = notebook.page_svgs();
 
@@ -102,8 +102,9 @@ pub fn import_notebook(
 
 /// Render a stored notebook to a single multi-page PDF — one page per cached
 /// page SVG, read from the import-time render cache so we never re-parse the
-/// `nbk`. `page_count` is the notebook row's count. See
-/// [`crate::library::pdf_render`] for the SVG→PDF rasterization.
+/// `nbk`. `page_count` is the notebook row's count. Page assembly and SVG
+/// rasterization are bokai's ([`bokai::formats::pdf::svgs_to_pdf`]); what belongs
+/// here is only the library-storage half — which pages exist and where.
 pub fn export_notebook_pdf(paths: &LibraryPaths, uuid: &str, page_count: usize) -> Result<Vec<u8>> {
     if page_count == 0 {
         anyhow::bail!("notebook has no pages");
@@ -115,7 +116,7 @@ pub fn export_notebook_pdf(paths: &LibraryPaths, uuid: &str, page_count: usize) 
             .with_context(|| format!("read page {} svg: {}", i + 1, p.display()))?;
         svgs.push(svg);
     }
-    crate::library::pdf_render::svgs_to_pdf(&svgs)
+    bokai::formats::pdf::svgs_to_pdf(&svgs).context("assemble notebook PDF")
 }
 
 /// SHA-256 hex of a byte buffer (same digest shape as `import::sha256_of_file`).

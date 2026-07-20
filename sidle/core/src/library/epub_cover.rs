@@ -36,10 +36,10 @@ pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Resul
     let epub_bytes =
         std::fs::read(epub_path).with_context(|| format!("read {}", epub_path.display()))?;
 
-    // boko's EPUB importer resolves cover_image to the zip-absolute path,
+    // bokai's EPUB importer resolves cover_image to the zip-absolute path,
     // which is exactly what we need to look up the entry below.
     let cover_href: String = {
-        let book = boko::Book::from_bytes(&epub_bytes, boko::Format::Epub)
+        let book = bokai::Book::from_bytes(&epub_bytes, bokai::Format::Epub)
             .with_context(|| "open epub for cover swap")?;
         match book.metadata().cover_image.as_deref() {
             Some(s) if !s.is_empty() => s.to_string(),
@@ -102,10 +102,10 @@ pub fn ensure_cover(
         let kfx_bytes = std::fs::read(kfx).with_context(|| format!("read {}", kfx.display()))?;
         if kfx_declares_cover(&kfx_bytes) {
             // IR route (byte-identical to the mechanical port, plan M3).
-            let mut book = boko::Book::from_bytes(&kfx_bytes, boko::Format::Kfx)
+            let mut book = bokai::Book::from_bytes(&kfx_bytes, bokai::Format::Kfx)
                 .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap (load): {e}"))?;
             let mut buf = std::io::Cursor::new(Vec::new());
-            book.export(boko::Format::Epub, &mut buf)
+            book.export(bokai::Format::Epub, &mut buf)
                 .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap: {e}"))?;
             let epub_bytes = buf.into_inner();
             write_bytes_atomic(epub_path, &epub_bytes)?;
@@ -122,18 +122,18 @@ pub fn ensure_cover(
 /// decide between regenerating the EPUB from the KFX (cover present) and
 /// inserting one directly (cover absent).
 fn kfx_declares_cover(kfx_bytes: &[u8]) -> bool {
-    boko::Book::from_bytes(kfx_bytes, boko::Format::Kfx)
+    bokai::Book::from_bytes(kfx_bytes, bokai::Format::Kfx)
         .map(|b| b.metadata().cover_image.is_some())
         .unwrap_or(false)
 }
 
 /// Insert a cover into an EPUB that declares none: write the image next to the
-/// OPF and add a `properties="cover-image"` manifest item (boko's top-priority
+/// OPF and add a `properties="cover-image"` manifest item (bokai's top-priority
 /// cover signal) plus a legacy `<meta name="cover">` for EPUB-2 readers. Unlike
 /// [`replace_cover`], this *adds* the designation rather than overwriting an
 /// existing one — used by [`ensure_cover`] for books whose source had no cover.
 ///
-/// The designation is enough for readers to show the cover and for boko's
+/// The designation is enough for readers to show the cover and for bokai's
 /// EPUB→KFX exporter to build a real cover section, so a subsequent reconvert
 /// carries the cover into the KFX too.
 pub fn insert_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result<()> {
@@ -191,7 +191,7 @@ pub fn insert_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result
 /// to an OPF that declares no cover. `cover_basename` is the cover file's name
 /// relative to the OPF. If the expected `</manifest>`/`</metadata>` closers are
 /// missing the corresponding insert is skipped; the manifest item alone is
-/// enough for boko to resolve the cover.
+/// enough for bokai to resolve the cover.
 fn inject_cover_into_opf(opf: &str, cover_basename: &str, media_type: &str) -> String {
     let item = format!(
         "<item id=\"sidle-cover\" href=\"{cover_basename}\" media-type=\"{media_type}\" properties=\"cover-image\"/>"
@@ -381,7 +381,7 @@ mod tests {
     fn inject_cover_adds_cover_image_item_and_meta() {
         let opf = "<package>\n  <metadata>\n    <dc:title>T</dc:title>\n  </metadata>\n  <manifest>\n    <item id=\"toc\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n  </manifest>\n</package>\n";
         let out = inject_cover_into_opf(opf, "sidle_cover.jpg", "image/jpeg");
-        // A properties="cover-image" manifest item (boko's top-priority signal).
+        // A properties="cover-image" manifest item (bokai's top-priority signal).
         assert!(out.contains(r#"href="sidle_cover.jpg""#));
         assert!(out.contains(r#"properties="cover-image""#));
         assert!(out.contains(r#"media-type="image/jpeg""#));

@@ -47,7 +47,7 @@ pub async fn fetch_color_cover(asin: &str, language: &str) -> Option<Vec<u8>> {
         return None;
     }
     if !looks_like_real_amazon_asin(asin) {
-        // boko-kai stamps a 32-char Crockford-Base32 identifier on
+        // bokai stamps a 32-char Crockford-Base32 identifier on
         // EPUB→KFX conversions to satisfy the Kindle ingestion path. That
         // value isn't a catalogue ASIN, so hitting `/images/P/<it>` always
         // 404s or returns the placeholder; the request itself burns a
@@ -118,12 +118,12 @@ async fn fetch_variant(client: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
     Some(bytes.to_vec())
 }
 
-/// Real Amazon catalogue ASINs are 10 chars, uppercase alphanumeric. boko-
+/// Real Amazon catalogue ASINs are 10 chars, uppercase alphanumeric. bokai-
 /// kai's fabricated fallback (stamped on EPUB→KFX so Kindle's ingestion is
 /// happy) is 32-char Crockford-Base32. Length alone distinguishes them.
-/// Re-exported from boko-kai so the fabrication source-of-truth is in one
-/// place (`boko::formats::kfx::metadata::resolve_export_asin` uses the same gate).
-pub use boko::formats::kfx::metadata::looks_like_real_amazon_asin;
+/// Re-exported from bokai so the fabrication source-of-truth is in one
+/// place (`bokai::formats::kfx::metadata::resolve_export_asin` uses the same gate).
+pub use bokai::formats::kfx::metadata::looks_like_real_amazon_asin;
 
 /// Map a book language (BCP-47 — "ja", "ja-JP", "en-US", …) to Amazon's
 /// numeric locale segment in the `/images/P/` URL.
@@ -184,7 +184,7 @@ mod tests {
         // Real catalogue ASINs (KDP "B0..." + older digit-leading).
         assert!(looks_like_real_amazon_asin("B07PXGQC1Q"));
         assert!(looks_like_real_amazon_asin("4087718654"));
-        // Fabricated 32-char Crockford-Base32 from boko EPUB→KFX (the
+        // Fabricated 32-char Crockford-Base32 from bokai EPUB→KFX (the
         // exact shape from the bug report).
         assert!(!looks_like_real_amazon_asin(
             "J3AHLRDVFTGEMNBWMPPYB6CCANPXNWH6"

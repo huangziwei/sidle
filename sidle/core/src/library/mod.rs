@@ -13,7 +13,6 @@ pub mod merge;
 pub mod notebook;
 pub mod paths;
 pub mod pdf_geom;
-pub mod pdf_render;
 pub mod relocate;
 pub mod rename;
 pub mod romaji;

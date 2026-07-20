@@ -22,7 +22,7 @@ use anyhow::Context;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-use boko::kfx_to_epub::TextIndex;
+use bokai::kfx_to_epub::TextIndex;
 
 use super::anchor::{self, Resolved};
 use super::db::{self, NewAnnotation};
@@ -595,7 +595,7 @@ fn sdr_stem(sdr_name: &str) -> String {
 
 /// The `.sdr` filename's `kfx_sha256` infix: the hex segment before `.sdr`. Only
 /// returns it when it looks like a hash prefix (≥8 hex chars), so non-hash
-/// schemes (`_<ASIN>.sdr`, `.boko.sdr`) fall through to "unmatched".
+/// schemes (`_<ASIN>.sdr`, `.bokai.sdr`) fall through to "unmatched".
 fn sdr_infix(sdr_name: &str) -> Option<&str> {
     let stem = sdr_name.strip_suffix(".sdr")?;
     let infix = stem.rsplit('.').next()?;
@@ -992,7 +992,7 @@ mod tests {
             Some("205b82bc")
         );
         assert_eq!(sdr_infix("Title_KPN6H7BZB6B5HTAHKMDZ.sdr"), None); // underscore ASIN scheme
-        assert_eq!(sdr_infix("サクラダリセット5.boko.sdr"), None); // not hex
+        assert_eq!(sdr_infix("サクラダリセット5.bokai.sdr"), None); // not hex
         assert_eq!(sdr_infix("nope"), None);
     }
 
@@ -1194,7 +1194,7 @@ mod tests {
         std::fs::create_dir_all(&sdr).unwrap();
         std::fs::write(sdr.join("x.yjf"), &yjf).unwrap();
 
-        // The library book was reconverted since (boko fix), so its `kfx_sha256`
+        // The library book was reconverted since (bokai fix), so its `kfx_sha256`
         // has drifted away from the device's frozen `faf30ffb`. Only the stem
         // (`[Homer] The Iliad (2023)`, unchanged by the reconvert) still links them.
         let conn = mem_db();

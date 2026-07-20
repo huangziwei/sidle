@@ -6,7 +6,7 @@
 //!
 //! 1. **Western catalogue names arrive surname-first.** KFX's lone `author`
 //!    field — and many EPUB `opf:file-as` forms — carry `"Kafka, Franz"`, where
-//!    the comma separates surname from given name. boko passes these through
+//!    the comma separates surname from given name. bokai passes these through
 //!    verbatim, so the comma is part of a *single* author's name.
 //! 2. **CJK OPFs pack multiple authors into one `<dc:creator>`** with the
 //!    ideographic comma `「、」` (`"村上春樹、夏目漱石"`).
@@ -19,7 +19,7 @@
 //! `「、」` for all-CJK lists. The ASCII comma is then never a separator, so every
 //! reader splits on `[&、]` only — never `,`.
 //!
-//! boko's EPUB parser emits one entry per `<dc:creator>`, and its KFX importer
+//! bokai's EPUB parser emits one entry per `<dc:creator>`, and its KFX importer
 //! splits the `author` field on `&` (calibre's join), so the author *count* is
 //! already structurally encoded before we get here; the only in-field separator
 //! left to unpack is `「、」`.
@@ -75,7 +75,7 @@ fn canonicalize<'a>(parts: impl Iterator<Item = &'a str>) -> Vec<String> {
         .collect()
 }
 
-/// Canonical author list from boko's parsed metadata. Each `<dc:creator>` (EPUB)
+/// Canonical author list from bokai's parsed metadata. Each `<dc:creator>` (EPUB)
 /// or `&`-split entry (KFX) is already one element; we additionally unpack the
 /// CJK `「、」` multiple-authors-in-one-creator case and flip Western names.
 pub fn from_metadata(authors: &[String]) -> Vec<String> {
@@ -147,7 +147,7 @@ mod tests {
     fn from_metadata_flips_and_unpacks() {
         // KFX lone surname-first author.
         assert_eq!(from_metadata(&["Kafka, Franz".into()]), vec!["Franz Kafka"]);
-        // EPUB: one entry per <dc:creator>, already split by boko.
+        // EPUB: one entry per <dc:creator>, already split by bokai.
         assert_eq!(
             from_metadata(&["Doe, John".into(), "Roe, Jane".into()]),
             vec!["John Doe", "Jane Roe"]

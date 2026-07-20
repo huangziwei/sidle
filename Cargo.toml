@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-    "boko-kai",
+    "bokai",
     "jxr",
     "sidle/core",
     "sidle/native",
@@ -17,11 +17,11 @@ exclude = ["jxr/fuzz"]
 # product in lockstep: the desktop app (+ tauri.conf.json, which falls back to
 # the crate version), the LAN server, and the on-device picker binary (whose
 # `CARGO_PKG_VERSION` is what `--update` logs). build.sh stamps the same value
-# into the KUAL config.xml. boko-kai is deliberately NOT here — it tracks its
-# upstream fork lineage (0.3.0+kai.N) on its own.
+# into the KUAL config.xml. bokai is deliberately NOT here — it is an
+# independent crate and versions on its own line.
 [workspace.package]
 version = "0.1.6"
-# sidle's own crates are AGPL-3.0-or-later. boko-kai is deliberately excluded
+# sidle's own crates are AGPL-3.0-or-later. bokai is deliberately excluded
 # (it sets its own GPL-3.0-or-later directly, matching its upstream fork), so
 # adding this here does not touch it. The two are link-compatible: GPLv3 §13
 # permits combining a GPLv3 work with AGPLv3 code into a single conveyed work.
