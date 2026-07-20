@@ -245,7 +245,7 @@ pub fn collect_linked_aids(
 
 /// Resolve a `kindle:pos:fid` byte position to the anchor a `#…` href should
 /// target, `aid-`-prefixing kindlegen `aid` values. See
-/// [`find_nearest_id_kind`] for the resolution rule.
+/// `find_nearest_id_kind` for the resolution rule.
 pub fn find_nearest_id_fast(
     raw_text: &[u8],
     pos: usize,

@@ -4786,7 +4786,7 @@ mod tests {
         // Test that anchors inside container-wrapped elements (like headings with borders)
         // use the outer container's ID, not the inner text element's ID.
         // This is critical for TOC navigation to work correctly.
-        use crate::import::ChapterId;
+        use crate::model::ChapterId;
         use crate::style::{BorderStyle, ComputedStyle, Length};
 
         let mut chapter = Chapter::new();

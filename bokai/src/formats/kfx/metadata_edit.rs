@@ -21,10 +21,10 @@
 
 use crate::formats::kfx::container::get_field;
 use crate::formats::kfx::container_edit::{EntityEdit, edit_container};
+use crate::formats::kfx::error::KfxError;
 use crate::formats::kfx::ion::IonValue;
+use crate::formats::kfx::loader::{self, SymbolTable};
 use crate::formats::kfx::symbols::KfxSymbol;
-use crate::kfx_to_epub::ConvertError;
-use crate::kfx_to_epub::loader::{self, SymbolTable};
 
 /// The `kindle_title_metadata` key names used in Amazon's $490 shape.
 const KEY_TITLE: &str = "title";
@@ -91,9 +91,9 @@ impl MetadataPatch {
 /// every other entity through byte-for-byte.
 ///
 /// Returns the input unchanged when `patch` is empty. Errors (via
-/// [`ConvertError::InvalidKfx`]) if the bytes aren't a KFX container, or if the
+/// [`KfxError::InvalidKfx`]) if the bytes aren't a KFX container, or if the
 /// container carries neither metadata shape to edit.
-pub fn edit_metadata(kfx_bytes: &[u8], patch: &MetadataPatch) -> Result<Vec<u8>, ConvertError> {
+pub fn edit_metadata(kfx_bytes: &[u8], patch: &MetadataPatch) -> Result<Vec<u8>, KfxError> {
     if patch.is_empty() {
         return Ok(kfx_bytes.to_vec());
     }
@@ -104,7 +104,7 @@ pub fn edit_metadata(kfx_bytes: &[u8], patch: &MetadataPatch) -> Result<Vec<u8>,
     let has_490 = book.by_type.contains_key(&(KfxSymbol::BookMetadata as u64));
     let has_258 = book.by_type.contains_key(&(KfxSymbol::Metadata as u64));
     if !has_490 && !has_258 {
-        return Err(ConvertError::InvalidKfx(
+        return Err(KfxError::InvalidKfx(
             "KFX has no metadata fragment to edit".into(),
         ));
     }

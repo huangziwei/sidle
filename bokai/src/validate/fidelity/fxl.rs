@@ -199,7 +199,7 @@ pub fn validate(epub_bytes: &[u8], kfx_bytes: &[u8]) -> Result<Report, String> {
 
 /// KFX `content_features` ($585) → `(fixed_layout, double_page_spread)`.
 fn kfx_fxl_signals(kfx_bytes: &[u8]) -> Result<(bool, bool), String> {
-    let book = crate::kfx_to_epub::loader::load(kfx_bytes).map_err(|e| e.to_string())?;
+    let book = crate::formats::kfx::loader::load(kfx_bytes).map_err(|e| e.to_string())?;
     let mut fixed = false;
     let mut dps = false;
     if let Some(map) = book.by_type.get(&(KfxSymbol::ContentFeatures as u64)) {

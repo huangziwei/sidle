@@ -139,7 +139,7 @@ pub fn kfx_extract_pdf(kfx: &[u8]) -> Result<Vec<u8>, PdfExtractError> {
 mod tests {
     use super::*;
     use crate::export::{PdfKfxMeta, pdf_to_kfx};
-    use crate::import::pdf::{PdfDoc, PdfOutlineItem, PdfPage};
+    use crate::formats::pdf::doc::{PdfDoc, PdfOutlineItem, PdfPage};
 
     /// A byte string that passes the `%PDF-` magic check. The round-trip gate
     /// is about *embedding fidelity*, so we embed these bytes directly via a

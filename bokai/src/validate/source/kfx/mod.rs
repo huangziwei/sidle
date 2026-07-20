@@ -53,8 +53,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::formats::kfx::container::get_field;
 use crate::formats::kfx::ion::IonValue;
+use crate::formats::kfx::loader::{self, BookData};
 use crate::formats::kfx::symbols::KfxSymbol;
-use crate::kfx_to_epub::loader::{self, BookData};
 
 use crate::validate::{Finding, FixHint, Severity};
 

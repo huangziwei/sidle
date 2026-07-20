@@ -7,15 +7,15 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::formats::kfx::anchor_table::AnchorTable;
 use crate::formats::kfx::container::get_field;
 use crate::formats::kfx::ion::IonValue;
+use crate::formats::kfx::loader::BookData;
+use crate::formats::kfx::navigation::{extract_anchors, extract_toc, resolve_nav_container};
+use crate::formats::kfx::structure::{resolve_content_text, style_layout_hints_for};
 use crate::formats::kfx::symbols::KfxSymbol;
-use crate::kfx_to_epub::content::resolve_content_text;
-use crate::kfx_to_epub::loader::BookData;
-use crate::kfx_to_epub::navigation::{
-    AnchorTable, NavPoint, extract_anchors, extract_toc, resolve_nav_container,
-};
-use crate::kfx_to_epub::properties;
+use crate::formats::kfx::yj_properties as properties;
+use crate::model::TocEntry;
 
 use super::{MIN_EVIDENCE, TocEvidence, is_chapter_marker};
 
@@ -38,9 +38,9 @@ pub(super) fn evidence(book: &BookData) -> TocEvidence {
     }
 }
 
-fn flatten_labels(points: &[NavPoint], out: &mut Vec<String>) {
+fn flatten_labels(points: &[TocEntry], out: &mut Vec<String>) {
     for p in points {
-        out.push(p.label.clone());
+        out.push(p.title.clone());
         flatten_labels(&p.children, out);
     }
 }
@@ -118,7 +118,7 @@ fn count_headings_in(
                 get_field(fields, KfxSymbol::Style as u64).and_then(|v| book.symbols.text_of(v))
             {
                 is_heading = *memo.entry(name.to_string()).or_insert_with(|| {
-                    properties::style_layout_hints_for(name, book)
+                    style_layout_hints_for(name, book)
                         .0
                         .iter()
                         .any(|h| h == "heading")

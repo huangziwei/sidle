@@ -5,7 +5,7 @@
 //! `cover_image` names a `resource_name`, an `external_resource` ($164) with
 //! that name carries the image `format` + `location`, and a `bcRawMedia` ($417)
 //! at that location holds the bytes. So one extractor — resolving through the
-//! same [`crate::kfx_to_epub::loader`] that [`super::cover_replace`] and the EPUB
+//! same [`crate::formats::kfx::loader`] that [`super::cover_replace`] and the EPUB
 //! conversion use (which gets the *dynamic* doc-symbol `base_len` right) —
 //! recovers the built-in cover for either kind, including a cover the user set
 //! via "Change cover…".
@@ -19,11 +19,11 @@
 //! every other image format passes through verbatim.
 
 use crate::formats::kfx::container::get_field;
+use crate::formats::kfx::error::KfxError;
 use crate::formats::kfx::ion::IonValue;
+use crate::formats::kfx::loader;
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::image::jxr_transcode as transcode;
-use crate::kfx_to_epub::ConvertError;
-use crate::kfx_to_epub::loader;
 
 /// Extract the declared cover's `(bytes, extension)` from an in-memory KFX.
 ///
@@ -31,9 +31,7 @@ use crate::kfx_to_epub::loader;
 /// its cover resource can't be matched to backing bytes, or a JPEG-XR cover
 /// fails to decode — a cover-less outcome, not an error. Returns `Err` only when
 /// the bytes don't parse as a KFX container at all.
-pub fn kfx_extract_cover(
-    kfx_bytes: &[u8],
-) -> Result<Option<(Vec<u8>, &'static str)>, ConvertError> {
+pub fn kfx_extract_cover(kfx_bytes: &[u8]) -> Result<Option<(Vec<u8>, &'static str)>, KfxError> {
     let book = loader::load(kfx_bytes)?;
     let Some(cover_name) = book.metadata.cover_resource_name.clone() else {
         return Ok(None); // no cover declared — coverless book
@@ -76,7 +74,8 @@ pub fn kfx_extract_cover(
     // formats pass through. Detect JXR by the declared format or the II-BC magic.
     let is_jxr = format.as_deref() == Some("jxr") || raw.starts_with(&[0x49, 0x49, 0xBC]);
     if is_jxr {
-        let (bytes, final_format, _timing) = transcode::transcode(raw, &cover_name)?;
+        let (bytes, final_format, _timing) = transcode::transcode(raw, &cover_name)
+            .map_err(|e| KfxError::JxrDecode(e.to_string()))?;
         // `transcode` passes the original bytes through with format "jxr" on a
         // decode failure; an undisplayable JXR sidecar is no better than none.
         if final_format == "jxr" {
@@ -194,7 +193,7 @@ mod tests {
         // reflowable path does (book_metadata.cover_image → external_resource →
         // bcRawMedia), so the extractor must return that embedded JPEG verbatim.
         use crate::export::{PdfKfxMeta, pdf_to_kfx};
-        use crate::import::pdf::{PdfDoc, PdfPage};
+        use crate::formats::pdf::doc::{PdfDoc, PdfPage};
 
         let pdf_bytes = b"%PDF-1.4\n% fixture\n%%EOF\n".to_vec();
         let doc = PdfDoc {
@@ -240,7 +239,7 @@ mod tests {
         // A PDF-backed KFX built with no cover declares no cover_image; the
         // extractor returns Ok(None), not an error.
         use crate::export::{PdfKfxMeta, pdf_to_kfx};
-        use crate::import::pdf::{PdfDoc, PdfPage};
+        use crate::formats::pdf::doc::{PdfDoc, PdfPage};
 
         let doc = PdfDoc {
             bytes: b"%PDF-1.4\n%%EOF\n".to_vec(),

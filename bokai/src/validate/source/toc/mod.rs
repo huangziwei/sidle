@@ -103,7 +103,7 @@ pub fn validate(bytes: &[u8]) -> Result<TocAudit, String> {
     if bytes.starts_with(b"PK") {
         Ok(classify(epub::evidence(bytes)?))
     } else {
-        let book = crate::kfx_to_epub::loader::load(bytes).map_err(|e| e.to_string())?;
+        let book = crate::formats::kfx::loader::load(bytes).map_err(|e| e.to_string())?;
         Ok(classify(kfx::evidence(&book)))
     }
 }

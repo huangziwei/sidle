@@ -30,14 +30,15 @@
 
 use std::collections::HashSet;
 
+use crate::formats::kfx::anchor_table::AnchorTable;
 use crate::formats::kfx::container::get_field;
 use crate::formats::kfx::container_edit::{EntityEdit, edit_container};
+use crate::formats::kfx::error::KfxError;
 use crate::formats::kfx::ion::IonValue;
+use crate::formats::kfx::loader::{self, BookData};
+use crate::formats::kfx::navigation::{extract_anchors, resolve_nav_container};
+use crate::formats::kfx::structure::resolve_content_text;
 use crate::formats::kfx::symbols::KfxSymbol;
-use crate::kfx_to_epub::ConvertError;
-use crate::kfx_to_epub::content::resolve_content_text;
-use crate::kfx_to_epub::loader::{self, BookData};
-use crate::kfx_to_epub::navigation::{AnchorTable, extract_anchors, resolve_nav_container};
 
 /// One chapter in an edited TOC. `eid` is the target element's `$155 id`; the
 /// target offset is always written as 0 — the Kindle TOC convention (a jump
@@ -65,12 +66,12 @@ impl TocEntry {
 /// book declares no toc container, synthesize a fresh inline one in its
 /// `book_navigation`. In place.
 ///
-/// Errors (via [`ConvertError::InvalidKfx`]) if `entries` is empty, if the bytes
+/// Errors (via [`KfxError::InvalidKfx`]) if `entries` is empty, if the bytes
 /// aren't a KFX container, or if the book has no `book_navigation` at all to
 /// attach a toc to (creating one from scratch is not yet supported).
-pub fn set_toc(kfx_bytes: &[u8], entries: &[TocEntry]) -> Result<Vec<u8>, ConvertError> {
+pub fn set_toc(kfx_bytes: &[u8], entries: &[TocEntry]) -> Result<Vec<u8>, KfxError> {
     if entries.is_empty() {
-        return Err(ConvertError::InvalidKfx(
+        return Err(KfxError::InvalidKfx(
             "refusing to write an empty TOC".into(),
         ));
     }
@@ -113,13 +114,13 @@ fn synthesize_toc(
     kfx_bytes: &[u8],
     book: &BookData,
     new_entries: &[IonValue],
-) -> Result<Vec<u8>, ConvertError> {
+) -> Result<Vec<u8>, KfxError> {
     let has_nav = book
         .by_type
         .get(&(KfxSymbol::BookNavigation as u64))
         .is_some_and(|m| !m.is_empty());
     if !has_nav {
-        return Err(ConvertError::InvalidKfx(
+        return Err(KfxError::InvalidKfx(
             "KFX has no book_navigation to add a TOC to (creating one is not yet supported)".into(),
         ));
     }
@@ -426,7 +427,7 @@ const MIN_CONTENTS_LINKS: usize = 5;
 /// [`TocEntry`] label and its resolved anchor's element id the target eid;
 /// entries come back in document order, deduped by target. Empty when no page
 /// carries enough links to trust (the caller then has nothing to write).
-pub fn propose_toc(kfx_bytes: &[u8]) -> Result<Vec<TocEntry>, ConvertError> {
+pub fn propose_toc(kfx_bytes: &[u8]) -> Result<Vec<TocEntry>, KfxError> {
     let book = loader::load(kfx_bytes)?;
     Ok(propose_from_book(&book))
 }
@@ -435,11 +436,11 @@ pub fn propose_toc(kfx_bytes: &[u8]) -> Result<Vec<TocEntry>, ConvertError> {
 /// ([`propose_toc`]) and write it with [`set_toc`] (overwriting a deficient toc
 /// container, or synthesizing one when the book has none). Errors if no usable
 /// Contents page is found, or if the book has no `book_navigation` to attach to.
-pub fn repair_toc(kfx_bytes: &[u8]) -> Result<Vec<u8>, ConvertError> {
+pub fn repair_toc(kfx_bytes: &[u8]) -> Result<Vec<u8>, KfxError> {
     let book = loader::load(kfx_bytes)?;
     let entries = propose_from_book(&book);
     if entries.is_empty() {
-        return Err(ConvertError::InvalidKfx(
+        return Err(KfxError::InvalidKfx(
             "no in-book Contents page found to rebuild the TOC from".into(),
         ));
     }
@@ -713,7 +714,7 @@ fn collect_ids(value: &IonValue, out: &mut HashSet<i64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kfx_to_epub::navigation::extract_toc;
+    use crate::formats::kfx::navigation::extract_toc;
     use std::collections::HashMap;
 
     const FIXTURE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
@@ -781,7 +782,7 @@ mod tests {
         // Re-loads, and the reader's toc extractor sees exactly our labels.
         let after = loader::load(&out).expect("rewritten container must re-load");
         let toc = extract_toc(&after, &HashMap::new(), &AnchorTable::default());
-        let labels: Vec<&str> = toc.iter().map(|p| p.label.as_str()).collect();
+        let labels: Vec<&str> = toc.iter().map(|p| p.title.as_str()).collect();
         assert_eq!(labels, ["第一章", "第二章", "第三章"]);
 
         // The TOC validator now passes (3 real chapter entries > the gate).
@@ -811,8 +812,8 @@ mod tests {
         let toc = extract_toc(&after, &HashMap::new(), &AnchorTable::default());
 
         assert_eq!(toc.len(), 1);
-        assert_eq!(toc[0].label, "第一部");
-        let kids: Vec<&str> = toc[0].children.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(toc[0].title, "第一部");
+        let kids: Vec<&str> = toc[0].children.iter().map(|p| p.title.as_str()).collect();
         assert_eq!(kids, ["第一章", "第二章"]);
     }
 
@@ -976,7 +977,7 @@ mod tests {
 
         let after = loader::load(&out).expect("synthesized container must re-load");
         let toc = extract_toc(&after, &HashMap::new(), &AnchorTable::default());
-        let labels: Vec<&str> = toc.iter().map(|p| p.label.as_str()).collect();
+        let labels: Vec<&str> = toc.iter().map(|p| p.title.as_str()).collect();
         assert_eq!(labels, ["第一章", "第二章"]);
         assert!(
             crate::kfx_to_epub::convert_to_epub(&out).is_ok(),
@@ -987,7 +988,7 @@ mod tests {
     /// Test helper: drop every inline toc `nav_container` from a KFX's
     /// `book_navigation`, yielding a book with no declared toc (to drive the
     /// synthesize path against real bytes).
-    fn strip_toc_containers(kfx: &[u8], book: &BookData) -> Result<Vec<u8>, ConvertError> {
+    fn strip_toc_containers(kfx: &[u8], book: &BookData) -> Result<Vec<u8>, KfxError> {
         edit_container(kfx, |e| {
             if e.is_type(KfxSymbol::BookNavigation) {
                 Ok(EntityEdit::Ion(drop_toc(book, &e.parse_ion()?)))

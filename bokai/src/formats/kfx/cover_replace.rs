@@ -10,7 +10,7 @@
 //!
 //! Mechanism: byte-passthrough re-serialize. We resolve the cover's
 //! `external_resource` ($164) and its backing `bcRawMedia` ($417) through the
-//! same resolver [`crate::kfx_to_epub::loader`] uses (so the *dynamic* doc-symbol
+//! same resolver [`crate::formats::kfx::loader`] uses (so the *dynamic* doc-symbol
 //! `base_len` is correct — a fixed `KFX_SYMBOL_TABLE.len()` mis-resolves), then
 //! emit a fresh container in which only those two entities change and every
 //! other entity is copied through verbatim.
@@ -36,20 +36,20 @@
 
 use crate::formats::kfx::container::{self, get_field, symbol_id_for_name};
 use crate::formats::kfx::container_edit::{EntityEdit, edit_container};
+use crate::formats::kfx::error::KfxError;
 use crate::formats::kfx::ion::{IonParser, IonValue};
+use crate::formats::kfx::loader;
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::image::jpeg::sanitize_for_kfx;
-use crate::kfx_to_epub::ConvertError;
-use crate::kfx_to_epub::loader;
 
 /// Replace the cover image inside `kfx_bytes` with `new_image`, returning the
 /// rewritten container. `new_image` may be JPEG, PNG, or WebP; it's normalized
 /// to a sleep-screen-safe JFIF JPEG before embedding.
 ///
-/// Errors (via [`ConvertError::InvalidKfx`]) if the KFX declares no
+/// Errors (via [`KfxError::InvalidKfx`]) if the KFX declares no
 /// `cover_image`, if the declared cover can't be matched to a backing
 /// `bcRawMedia`, or if the replacement image's dimensions can't be read.
-pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, ConvertError> {
+pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, KfxError> {
     // 1. Resolve cover identity via the proven loader: correct dynamic
     //    base_len, cover_image extraction, and bcRawMedia keying all in one.
     let book = loader::load(kfx_bytes)?;
@@ -57,7 +57,7 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
         .metadata
         .cover_resource_name
         .clone()
-        .ok_or_else(|| ConvertError::InvalidKfx("KFX declares no cover_image".into()))?;
+        .ok_or_else(|| KfxError::InvalidKfx("KFX declares no cover_image".into()))?;
 
     // The cover external_resource → its `location` (the bcRawMedia key) and its
     // current `format`. `by_type[164]` is keyed by resolved fid; match on the
@@ -65,7 +65,7 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
     let resources = book
         .by_type
         .get(&(KfxSymbol::ExternalResource as u64))
-        .ok_or_else(|| ConvertError::InvalidKfx("KFX has no external_resource entities".into()))?;
+        .ok_or_else(|| KfxError::InvalidKfx("KFX has no external_resource entities".into()))?;
     let mut cover_location: Option<String> = None;
     let mut original_format: Option<String> = None;
     // The `resource_name` field's symbol id, for keying a `$258` cover_image
@@ -92,7 +92,7 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
         break;
     }
     let cover_location = cover_location.ok_or_else(|| {
-        ConvertError::InvalidKfx(format!(
+        KfxError::InvalidKfx(format!(
             "cover_image {cover_name:?} matches no external_resource location"
         ))
     })?;
@@ -102,7 +102,7 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
     //    already-clean JPEG (use as-is) and Some(jpeg) for stripped/transcoded.
     let clean = sanitize_for_kfx(new_image).unwrap_or_else(|| new_image.to_vec());
     let (new_w, new_h) = jpeg_dimensions(&clean).ok_or_else(|| {
-        ConvertError::InvalidKfx("could not read dimensions of replacement cover".into())
+        KfxError::InvalidKfx("could not read dimensions of replacement cover".into())
     })?;
     let flip_format = original_format.as_deref() != Some("jpg");
 
@@ -159,7 +159,7 @@ pub fn replace_cover(kfx_bytes: &[u8], new_image: &[u8]) -> Result<Vec<u8>, Conv
         // is image-less (its image data lives in a companion resource container
         // that was never imported). There's nothing to swap; surface it so the
         // caller can skip rather than emit a cover-onto-an-image-less-book.
-        return Err(ConvertError::InvalidKfx(format!(
+        return Err(KfxError::InvalidKfx(format!(
             "cover bcRawMedia for {cover_location:?} not found (image-less container)"
         )));
     }
@@ -638,7 +638,7 @@ mod tests {
             IonValue::List(vec![title_cat, audit_cat]),
         )]);
 
-        let book = crate::kfx_to_epub::loader::empty_book_for_test();
+        let book = crate::formats::kfx::loader::empty_book_for_test();
         let out = add_cover_image_to_book_metadata(&bm, "e6", &book.symbols);
 
         // The title category's metadata list gained a cover_image=e6 item; the

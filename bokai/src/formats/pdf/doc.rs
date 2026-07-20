@@ -14,6 +14,41 @@ use std::io;
 use lopdf::xref::XrefEntry;
 use lopdf::{Dictionary, Document, Object, ObjectId, ObjectStream, Stream, StringFormat};
 
+/// One PDF page's display size, in PDF points (1/72 inch).
+#[derive(Debug, Clone, Copy)]
+pub struct PdfPage {
+    pub width: f32,
+    pub height: f32,
+}
+
+/// One entry in the PDF document outline (bookmarks), resolved to a page. The
+/// tree shape (`children`) mirrors the PDF's nesting so a TOC built from it
+/// nests too.
+#[derive(Debug, Clone)]
+pub struct PdfOutlineItem {
+    pub title: String,
+    /// 0-based index of the page this bookmark jumps to.
+    pub page_index: usize,
+    pub children: Vec<PdfOutlineItem>,
+}
+
+/// A probed PDF: the verbatim bytes plus the structural facts a writer needs.
+/// `bytes` is the unmodified input — embed it as-is.
+#[derive(Debug, Clone)]
+pub struct PdfDoc {
+    pub bytes: Vec<u8>,
+    pub pages: Vec<PdfPage>,
+    pub title: Option<String>,
+    pub author: Option<String>,
+    /// Document outline (bookmarks). Empty if the PDF has none.
+    pub outline: Vec<PdfOutlineItem>,
+    /// Per-page display label (`page_labels[i]` for page `i`), from the catalog
+    /// `/PageLabels` number tree. Always one per page: honors the PDF's labels
+    /// (roman front-matter, prefixes like `Cover`) and falls back to sequential
+    /// `"1".."N"` when the PDF declares none.
+    pub page_labels: Vec<String>,
+}
+
 /// Load a PDF from memory, repairing the object streams lopdf drops.
 ///
 /// Always prefer this over `Document::load_mem`: on a PDF whose object-stream

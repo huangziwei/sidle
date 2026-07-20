@@ -7,7 +7,7 @@
 //! this module factors that mechanism out so cover / image / metadata / nav
 //! edits all share one audited core instead of re-deriving the container walk.
 //!
-//! Usage: [`crate::kfx_to_epub::loader::load`] the container first to resolve
+//! Usage: [`crate::formats::kfx::loader::load`] the container first to resolve
 //! whatever identity the edit needs (symbol table, `by_type`, `raw_media`,
 //! metadata), then call [`edit_container`] with a callback that returns an
 //! [`EntityEdit`] per entity. The callback captures the resolved identity; the
@@ -22,12 +22,12 @@
 use crate::formats::kfx::container::{
     self, EntityLoc, get_field, parse_container_header, parse_index_table,
 };
+use crate::formats::kfx::error::KfxError;
 use crate::formats::kfx::ion::{IonParser, IonValue};
 use crate::formats::kfx::serialization::{
     SerializedEntity, create_entity_data, create_raw_media_data, serialize_container,
 };
 use crate::formats::kfx::symbols::KfxSymbol;
-use crate::kfx_to_epub::ConvertError;
 
 /// One entity as presented to an [`edit_container`] callback: its index-table
 /// entry plus the verbatim ENTY-wrapped bytes currently backing it.
@@ -79,10 +79,10 @@ impl<'a> EntityView<'a> {
     /// not call this on a raw-media entity (an image/font); use [`media`] there.
     ///
     /// [`media`]: Self::media
-    pub fn parse_ion(&self) -> Result<IonValue, ConvertError> {
+    pub fn parse_ion(&self) -> Result<IonValue, KfxError> {
         IonParser::new(self.media())
             .parse()
-            .map_err(|e| ConvertError::InvalidKfx(format!("parse entity {}: {e}", self.loc.id)))
+            .map_err(|e| KfxError::InvalidKfx(format!("parse entity {}: {e}", self.loc.id)))
     }
 }
 
@@ -114,8 +114,8 @@ pub enum EntityEdit {
 /// the edited source" seam for KFX-source books.
 pub fn edit_container(
     kfx_bytes: &[u8],
-    mut edit: impl FnMut(&EntityView) -> Result<EntityEdit, ConvertError>,
-) -> Result<Vec<u8>, ConvertError> {
+    mut edit: impl FnMut(&EntityView) -> Result<EntityEdit, KfxError>,
+) -> Result<Vec<u8>, KfxError> {
     let layout = parse_layout(kfx_bytes)?;
 
     // Passthrough sections. Out-of-range offsets collapse to empty, matching the
@@ -132,9 +132,7 @@ pub fn edit_container(
     let mut out_entities: Vec<SerializedEntity> = Vec::with_capacity(layout.entities.len());
     for e in &layout.entities {
         if e.offset + e.length > kfx_bytes.len() {
-            return Err(ConvertError::InvalidKfx(
-                "entity payload out of bounds".into(),
-            ));
+            return Err(KfxError::InvalidKfx("entity payload out of bounds".into()));
         }
         let view = EntityView {
             loc: *e,
@@ -174,21 +172,19 @@ struct ContainerLayout {
 
 /// Walk the container header + container-info to recover the passthrough section
 /// ranges, the container id, and the entity index table.
-fn parse_layout(kfx_bytes: &[u8]) -> Result<ContainerLayout, ConvertError> {
+fn parse_layout(kfx_bytes: &[u8]) -> Result<ContainerLayout, KfxError> {
     let header =
-        parse_container_header(kfx_bytes).map_err(|e| ConvertError::InvalidKfx(e.to_string()))?;
+        parse_container_header(kfx_bytes).map_err(|e| KfxError::InvalidKfx(e.to_string()))?;
     let ci_end = header.container_info_offset + header.container_info_length;
     if ci_end > kfx_bytes.len() {
-        return Err(ConvertError::InvalidKfx(
-            "container info out of bounds".into(),
-        ));
+        return Err(KfxError::InvalidKfx("container info out of bounds".into()));
     }
     let ci_fields = {
         let mut p = IonParser::new(&kfx_bytes[header.container_info_offset..ci_end]);
         p.parse()
             .ok()
             .and_then(|v| v.as_struct().map(<[_]>::to_vec))
-            .ok_or_else(|| ConvertError::InvalidKfx("container info is not a struct".into()))?
+            .ok_or_else(|| KfxError::InvalidKfx("container info is not a struct".into()))?
     };
     let geti = |sym: KfxSymbol| {
         get_field(&ci_fields, sym as u64)
@@ -198,9 +194,9 @@ fn parse_layout(kfx_bytes: &[u8]) -> Result<ContainerLayout, ConvertError> {
     let section = |off: KfxSymbol, len: KfxSymbol| geti(off).zip(geti(len));
 
     let idx_off = geti(KfxSymbol::Bcindextaboffset)
-        .ok_or_else(|| ConvertError::InvalidKfx("no index table offset".into()))?;
+        .ok_or_else(|| KfxError::InvalidKfx("no index table offset".into()))?;
     let idx_len = geti(KfxSymbol::Bcindextablength)
-        .ok_or_else(|| ConvertError::InvalidKfx("no index table length".into()))?;
+        .ok_or_else(|| KfxError::InvalidKfx("no index table length".into()))?;
     let container_id = get_field(&ci_fields, KfxSymbol::Bccontid as u64)
         .and_then(IonValue::as_string)
         .unwrap_or("")
@@ -212,7 +208,7 @@ fn parse_layout(kfx_bytes: &[u8]) -> Result<ContainerLayout, ConvertError> {
     );
 
     if idx_off + idx_len > kfx_bytes.len() {
-        return Err(ConvertError::InvalidKfx("index table out of bounds".into()));
+        return Err(KfxError::InvalidKfx("index table out of bounds".into()));
     }
     let entities = parse_index_table(&kfx_bytes[idx_off..idx_off + idx_len], header.header_len);
 
@@ -227,7 +223,7 @@ fn parse_layout(kfx_bytes: &[u8]) -> Result<ContainerLayout, ConvertError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kfx_to_epub::loader;
+    use crate::formats::kfx::loader;
 
     const FIXTURE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
 

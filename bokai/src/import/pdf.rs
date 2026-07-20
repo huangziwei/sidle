@@ -19,40 +19,9 @@ use lopdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::formats::pdf::doc::{decode_pdf_string, deref, load_pdf, page_dimensions};
 
-/// One PDF page's display size, in PDF points (1/72 inch).
-#[derive(Debug, Clone, Copy)]
-pub struct PdfPage {
-    pub width: f32,
-    pub height: f32,
-}
-
-/// One entry in the PDF document outline (bookmarks), resolved to a page. The
-/// tree shape (`children`) mirrors the PDF's nesting so the KFX TOC nests too.
-#[derive(Debug, Clone)]
-pub struct PdfOutlineItem {
-    pub title: String,
-    /// 0-based index of the page this bookmark jumps to.
-    pub page_index: usize,
-    pub children: Vec<PdfOutlineItem>,
-}
-
-/// A probed PDF: the verbatim bytes plus the structural facts the KFX writer
-/// needs. `bytes` is the unmodified input — embed it as-is.
-#[derive(Debug, Clone)]
-pub struct PdfDoc {
-    pub bytes: Vec<u8>,
-    pub pages: Vec<PdfPage>,
-    pub title: Option<String>,
-    pub author: Option<String>,
-    /// Document outline (bookmarks) → KFX table of contents. Empty if the PDF
-    /// has none.
-    pub outline: Vec<PdfOutlineItem>,
-    /// Per-page display label (`page_labels[i]` for page `i`), from the catalog
-    /// `/PageLabels` number tree → KFX `page_list` navigation. Always one per
-    /// page: honors the PDF's labels (roman front-matter, prefixes like `Cover`)
-    /// and falls back to sequential `"1".."N"` when the PDF declares none.
-    pub page_labels: Vec<String>,
-}
+// The probed-document vocabulary lives in the format layer so both directions
+// and the format-internal repairs can name it without reaching up into `import`.
+pub use crate::formats::pdf::doc::{PdfDoc, PdfOutlineItem, PdfPage};
 
 /// Probe a PDF's structure without altering its bytes.
 pub fn probe_pdf(bytes: Vec<u8>) -> io::Result<PdfDoc> {

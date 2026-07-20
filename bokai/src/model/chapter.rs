@@ -12,6 +12,10 @@ use super::node::{Node, NodeId, Role, TextRange};
 use super::semantic::SemanticMap;
 use crate::style::StylePool;
 
+/// Unique identifier for a chapter/spine item within a book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ChapterId(pub u32);
+
 /// A chapter's content in normalized IR form.
 ///
 /// The IR tree uses a parent-pointer / first-child / next-sibling representation

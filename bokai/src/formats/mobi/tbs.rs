@@ -324,7 +324,7 @@ fn sequences_to_bytes(seqs: &[(u64, Extras)]) -> Vec<u8> {
     out
 }
 
-/// Compute TBS bytes for each text record. Output is a Vec<Vec<u8>> with one
+/// Compute TBS bytes for each text record. Output is a `Vec<Vec<u8>>` with one
 /// entry per text record (already wrapped via `encode_trailing_data` so it can
 /// be appended directly to the record before the multibyte indicator byte).
 pub fn build_tbs_for_records(entries: &[TbsEntry], record_lengths: &[u64]) -> Vec<Vec<u8>> {

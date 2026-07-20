@@ -3,7 +3,7 @@
 //! The bulk generalization of [`super::cover_extract`]: where that recovers the
 //! one declared cover, this walks every `external_resource` ($164) with a
 //! raster-image `format`, resolves its backing `bcRawMedia` ($417) bytes through
-//! the same [`crate::kfx_to_epub::loader`] (correct dynamic doc-symbol `base_len`), and
+//! the same [`crate::formats::kfx::loader`] (correct dynamic doc-symbol `base_len`), and
 //! returns them ready to write. This serves the editor's "extract one or two
 //! images" use case.
 //!
@@ -15,11 +15,11 @@
 use std::collections::HashSet;
 
 use crate::formats::kfx::container::get_field;
+use crate::formats::kfx::error::KfxError;
 use crate::formats::kfx::ion::IonValue;
+use crate::formats::kfx::loader;
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::image::jxr_transcode as transcode;
-use crate::kfx_to_epub::ConvertError;
-use crate::kfx_to_epub::loader;
 
 /// One image recovered from a KFX container.
 #[derive(Debug)]
@@ -48,9 +48,9 @@ pub struct ExtractedImage {
 ///
 /// Returns the images sorted by `resource_name` (then location) for a stable
 /// order. Deduplicates by backing location, so a resource referenced twice
-/// yields one image. Errors (via [`ConvertError`]) only when the bytes aren't a
+/// yields one image. Errors (via [`KfxError`]) only when the bytes aren't a
 /// KFX container at all.
-pub fn kfx_extract_images(kfx_bytes: &[u8]) -> Result<Vec<ExtractedImage>, ConvertError> {
+pub fn kfx_extract_images(kfx_bytes: &[u8]) -> Result<Vec<ExtractedImage>, KfxError> {
     let book = loader::load(kfx_bytes)?;
     let Some(resources) = book.by_type.get(&(KfxSymbol::ExternalResource as u64)) else {
         return Ok(Vec::new());
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn pdf_backed_extracts_cover_skips_pdf_resource() {
         use crate::export::{PdfKfxMeta, pdf_to_kfx};
-        use crate::import::pdf::{PdfDoc, PdfPage};
+        use crate::formats::pdf::doc::{PdfDoc, PdfPage};
 
         let doc = PdfDoc {
             bytes: b"%PDF-1.4\n% fixture\n%%EOF\n".to_vec(),

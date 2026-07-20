@@ -84,7 +84,7 @@ pub struct Chunk {
     pub raw: Vec<u8>,
     /// Insert position in the skeleton (absolute byte offset)
     pub insert_pos: usize,
-    /// Selector for this chunk (e.g., "P-//*[@aid='xxx']")
+    /// Selector for this chunk (e.g., `P-//*[@aid='xxx']`)
     pub selector: String,
     /// File number this chunk belongs to
     pub file_number: usize,

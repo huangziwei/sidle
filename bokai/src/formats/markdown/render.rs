@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::import::ChapterId;
+use crate::model::ChapterId;
 use crate::model::{AnchorTarget, Chapter, GlobalNodeId, NodeId, ResolvedLinks, Role};
 use crate::style::Display;
 use crate::util::strip_ebook_chars;

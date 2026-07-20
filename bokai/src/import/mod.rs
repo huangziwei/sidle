@@ -24,9 +24,10 @@ use crate::html::{Origin, Stylesheet, compile_dom, extract_stylesheets_from_dom,
 use crate::model::{AnchorTarget, Chapter, FontFace, GlobalNodeId, Landmark, Metadata, TocEntry};
 use crate::style::CssDecl;
 
-/// Unique identifier for a chapter/spine item within a book.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ChapterId(pub u32);
+// Chapter identity is IR vocabulary, not an import-side concept: the format
+// layer and the exporters name it too, so it lives in `model` and is re-exported
+// here for the importer-facing paths.
+pub use crate::model::ChapterId;
 
 /// Entry in the reading order (spine).
 #[derive(Debug, Clone)]

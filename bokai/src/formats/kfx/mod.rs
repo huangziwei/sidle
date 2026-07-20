@@ -21,6 +21,10 @@
 //! - `style_registry` - Style deduplication and ID assignment
 //! - `cover` - Cover section detection and generation
 //! - `auxiliary` - Auxiliary data generation for navigation targets
+//! - `loader` - Container → `BookData`: every fragment parsed and grouped by type
+//! - `structure` - Queries over a loaded `BookData`
+//! - `navigation` - `book_navigation` walks: nav containers, anchors, TOC
+//! - `error` - `KfxError`, the format-side failure type
 
 pub mod anchor_table;
 pub mod auxiliary;
@@ -30,18 +34,22 @@ pub mod context;
 pub mod cover;
 pub mod cover_extract;
 pub mod cover_replace;
+pub mod error;
 pub mod fragment;
 pub mod fxl;
 pub mod image_extract;
 pub mod ion;
+pub mod loader;
 pub mod merge;
 pub mod metadata;
 pub mod metadata_edit;
+pub mod navigation;
 pub mod pdf_container;
 pub mod resource_index;
 pub mod schema;
 pub mod serialization;
 pub mod storyline;
+pub mod structure;
 pub mod style_registry;
 pub mod style_schema;
 pub mod symbols;

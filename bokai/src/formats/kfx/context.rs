@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::import::ChapterId;
+use crate::model::ChapterId;
 use crate::model::{GlobalNodeId, LandmarkType, NodeId, TocEntry};
 use crate::style::StyleId;
 
