@@ -22,7 +22,7 @@
 //! - `cover` - Cover section detection and generation
 //! - `auxiliary` - Auxiliary data generation for navigation targets
 //! - `loader` - Container → `BookData`: every fragment parsed and grouped by type
-//! - `structure` - Queries over a loaded `BookData`
+//! - `structure` - Queries over the fragment graph, incl. `eid → base text`
 //! - `navigation` - `book_navigation` walks: nav containers, anchors, TOC
 //! - `error` - `KfxError`, the format-side failure type
 //! - `position` - `eid → pid → device Location` maps ($265, $550/$621)

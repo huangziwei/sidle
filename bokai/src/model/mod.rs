@@ -13,10 +13,12 @@ mod chapter;
 mod font;
 mod links;
 mod node;
+mod position;
 mod resolved;
 pub mod role_map;
 pub mod section_tree;
 mod semantic;
+mod text;
 
 // Re-export book types
 pub use book::{
@@ -35,6 +37,10 @@ pub use semantic::SemanticMap;
 
 // Re-export link types
 pub use links::{AnchorTarget, GlobalNodeId, InternalLocation, Link, LinkTarget};
+
+// Re-export reading positions and the source's own text
+pub use position::PositionMap;
+pub use text::SourceText;
 
 // Re-export resolved links
 pub use resolved::ResolvedLinks;

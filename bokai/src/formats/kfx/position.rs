@@ -5,12 +5,15 @@
 //!
 //! - `position_id_map` ($265) — `eid → pid`, a fine-grained monotonic position.
 //!   Reflowable books list `{eid, pid}` pairs directly; fixed-layout (PDF-backed)
-//!   books instead describe per-section runs, so those are replayed to rebuild
-//!   the same mapping.
+//!   books instead describe per-section runs, so those are replayed from
+//!   `section_position_id_map` ($609) to rebuild the same mapping.
 //! - `location_map` ($550) / `yj.location_pid_map` ($621) — the pid boundaries
 //!   dividing the book into the human "Location" numbers a Kindle displays. A
 //!   book with a position map but no location map falls back to the device's
 //!   own even spacing, so its Locations stay on the same scale.
+//!
+//! The assembled result is a [`PositionMap`], the format-agnostic scale; the
+//! pid is its coordinate axis.
 
 use std::collections::HashMap;
 
@@ -18,13 +21,81 @@ use crate::formats::kfx::container::get_field;
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::loader::BookData;
 use crate::formats::kfx::symbols::KfxSymbol;
+use crate::model::PositionMap;
 
-/// The `eid → pid` map from `position_id_map` ($265). Empty when the container
-/// carries no position map at all (e.g. a KFX generated from an EPUB).
-pub fn pid_map(book: &BookData) -> HashMap<i64, i64> {
-    let mut pid_of = HashMap::new();
-    if let Some(maps) = book.by_type.get(&(KfxSymbol::PositionIdMap as u64)) {
-        for frag in maps.values() {
+/// One location boundary per this many raw pids — Amazon's own spacing when it
+/// generates an approximate `location_map` (kfxlib `KFX_POSITIONS_PER_LOCATION`).
+/// Used as the fallback spacing for a book that ships a position map but no
+/// location map, so its Location numbers stay on the device's scale. A
+/// displayed Location is ~1/110 of the raw pid; reporting the pid directly
+/// inflates the number ~50× and breaks position matching against the device.
+const KFX_POSITIONS_PER_LOCATION: i64 = 110;
+
+/// The container fragments the position chain is built from, gathered by type.
+///
+/// Collecting them up front lets the chain be assembled either from a fully
+/// loaded [`BookData`] or from a handful of entities read straight out of the
+/// container — the same rules, no whole-book parse required for a caller that
+/// only wants positions.
+#[derive(Default)]
+pub struct PositionFragments<'a> {
+    position_id_maps: Vec<&'a IonValue>,
+    section_position_id_maps: Vec<&'a IonValue>,
+    location_maps: Vec<&'a IonValue>,
+    location_pid_maps: Vec<&'a IonValue>,
+}
+
+impl<'a> PositionFragments<'a> {
+    /// The fragment types the chain reads. A caller scanning a container's
+    /// entity index only needs to parse entities of these types.
+    pub const TYPES: [KfxSymbol; 4] = [
+        KfxSymbol::PositionIdMap,
+        KfxSymbol::SectionPositionIdMap,
+        KfxSymbol::LocationMap,
+        KfxSymbol::YjLocationPidMap,
+    ];
+
+    /// Whether a fragment type belongs to the chain.
+    pub fn wants(type_id: u32) -> bool {
+        Self::TYPES.iter().any(|t| *t as u32 == type_id)
+    }
+
+    /// File a parsed fragment under its type. Types outside [`Self::TYPES`]
+    /// are ignored, so a caller may hand over whatever it has.
+    pub fn push(&mut self, type_id: u32, fragment: &'a IonValue) {
+        let bucket = if type_id == KfxSymbol::PositionIdMap as u32 {
+            &mut self.position_id_maps
+        } else if type_id == KfxSymbol::SectionPositionIdMap as u32 {
+            &mut self.section_position_id_maps
+        } else if type_id == KfxSymbol::LocationMap as u32 {
+            &mut self.location_maps
+        } else if type_id == KfxSymbol::YjLocationPidMap as u32 {
+            &mut self.location_pid_maps
+        } else {
+            return;
+        };
+        bucket.push(fragment);
+    }
+
+    /// Every fragment of a loaded book, filed by type.
+    pub fn from_book(book: &'a BookData) -> Self {
+        let mut out = Self::default();
+        for symbol in Self::TYPES {
+            if let Some(frags) = book.by_type.get(&(symbol as u64)) {
+                for frag in frags.values() {
+                    out.push(symbol as u32, frag);
+                }
+            }
+        }
+        out
+    }
+
+    /// The `eid → pid` map from `position_id_map` ($265). Empty when the
+    /// container carries no position map at all (e.g. a KFX generated from an
+    /// EPUB).
+    pub fn pid_map(&self) -> HashMap<i64, i64> {
+        let mut pid_of = HashMap::new();
+        for frag in &self.position_id_maps {
             let Some(entries) = frag.unwrap_annotated().as_list() else {
                 continue;
             };
@@ -40,31 +111,104 @@ pub fn pid_map(book: &BookData) -> HashMap<i64, i64> {
                 }
             }
         }
-    }
-    // Fixed-layout (PDF-backed) KFX: `position_id_map` is
-    // `{contains:[{section_name,pid,length}]}`, not the reflowable
-    // `{eid,pid}` list, so the loop above finds nothing. Rebuild `eid→pid`
-    // by replaying each `section_position_id_map` walk.
-    if pid_of.is_empty() {
-        pid_of = fixed_layout_pid_map(&book.by_type);
-    }
-    pid_of
-}
-
-fn fixed_layout_pid_map(
-    by_type: &std::collections::HashMap<u64, HashMap<String, IonValue>>,
-) -> HashMap<i64, i64> {
-    fn sym_id(v: &IonValue) -> Option<u64> {
-        match v.unwrap_annotated() {
-            IonValue::Symbol(s) => Some(*s),
-            _ => None,
+        // Fixed-layout (PDF-backed) KFX: `position_id_map` is
+        // `{contains:[{section_name,pid,length}]}`, not the reflowable
+        // `{eid,pid}` list, so the loop above finds nothing. Rebuild `eid→pid`
+        // by replaying each `section_position_id_map` walk.
+        if pid_of.is_empty() {
+            pid_of = self.fixed_layout_pid_map();
         }
+        pid_of
     }
 
-    // section-name symbol → base (absolute) pid, from `position_id_map`.
-    let mut base_pid: HashMap<u64, i64> = HashMap::new();
-    if let Some(maps) = by_type.get(&(KfxSymbol::PositionIdMap as u64)) {
-        for frag in maps.values() {
+    /// Location boundary pids, in source order. Empty when the book ships
+    /// neither map, or when none of `location_map`'s anchors resolve against
+    /// `pid_of`.
+    fn location_boundaries(&self, pid_of: &HashMap<i64, i64>) -> Vec<i64> {
+        let mut boundaries = Vec::new();
+
+        // $550 location_map: [{ $182: [{ $155: eid, $143: offset }, ...] }].
+        for frag in &self.location_maps {
+            let Some(locs) = location_entry_list(frag) else {
+                continue;
+            };
+            for e in locs {
+                let Some(ef) = e.unwrap_annotated().as_struct() else {
+                    continue;
+                };
+                let Some(eid) = get_field(ef, KfxSymbol::Id as u64).and_then(|v| v.as_int()) else {
+                    continue;
+                };
+                let off = get_field(ef, KfxSymbol::Offset as u64)
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0);
+                if let Some(&pid) = pid_of.get(&eid) {
+                    boundaries.push(pid + off);
+                }
+            }
+        }
+
+        // $621 yj.location_pid_map: [{ $182: [pid, pid, ...] }] — boundary pids
+        // directly, no eid resolution needed. Only consulted when $550 is absent.
+        if boundaries.is_empty() {
+            for frag in &self.location_pid_maps {
+                let Some(pids) = location_entry_list(frag) else {
+                    continue;
+                };
+                for p in pids {
+                    if let Some(pid) = p.unwrap_annotated().as_int() {
+                        boundaries.push(pid);
+                    }
+                }
+            }
+        }
+
+        boundaries
+    }
+
+    /// Assemble the whole chain into the format-agnostic scale, or `None` when
+    /// the container carries no position map — the book has no addressable
+    /// reading positions to report.
+    ///
+    /// A book with positions but no location map gets evenly spaced boundaries
+    /// at the device's own [`KFX_POSITIONS_PER_LOCATION`] interval, so its
+    /// Location numbers land on the same scale as a book that ships them.
+    pub fn build(&self) -> Option<PositionMap> {
+        let pid_of = self.pid_map();
+        if pid_of.is_empty() {
+            return None;
+        }
+        let mut boundaries = self.location_boundaries(&pid_of);
+        if boundaries.is_empty() {
+            let max_pid = pid_of.values().copied().max().unwrap_or(0);
+            let mut p = 0;
+            while p <= max_pid {
+                boundaries.push(p);
+                p += KFX_POSITIONS_PER_LOCATION;
+            }
+            if boundaries.is_empty() {
+                boundaries.push(0);
+            }
+        }
+        Some(PositionMap::new(pid_of, boundaries))
+    }
+
+    /// `eid → pid` for a FIXED-LAYOUT (PDF-backed) KFX. There `position_id_map`
+    /// ($265) is `{contains:[{section_name, pid, length}]}` (one span per
+    /// section) and every section carries a `section_position_id_map` ($609)
+    /// with the compact position→eid walk. Map each section to its base pid,
+    /// then replay the walk.
+    fn fixed_layout_pid_map(&self) -> HashMap<i64, i64> {
+        fn sym_id(v: &IonValue) -> Option<u64> {
+            match v.unwrap_annotated() {
+                IonValue::Symbol(s) => Some(*s),
+                _ => None,
+            }
+        }
+
+        // section-name symbol → base (absolute) pid, from `position_id_map`.
+        let mut base_pid: HashMap<u64, i64> = HashMap::new();
+        for frag in &self.position_id_maps {
             let Some(fields) = frag.unwrap_annotated().as_struct() else {
                 continue;
             };
@@ -84,165 +228,64 @@ fn fixed_layout_pid_map(
                 }
             }
         }
-    }
 
-    let mut pid_of: HashMap<i64, i64> = HashMap::new();
-    let Some(maps) = by_type.get(&(KfxSymbol::SectionPositionIdMap as u64)) else {
-        return pid_of;
-    };
-    for frag in maps.values() {
-        let Some(fields) = frag.unwrap_annotated().as_struct() else {
-            continue;
-        };
-        let start = get_field(fields, KfxSymbol::SectionName as u64)
-            .and_then(sym_id)
-            .and_then(|s| base_pid.get(&s).copied())
-            .unwrap_or(0);
-        let Some(contains) =
-            get_field(fields, KfxSymbol::Contains as u64).and_then(|v| v.as_list())
-        else {
-            continue;
-        };
-        let mut pid = start;
-        let mut prev_eid: Option<i64> = None;
-        for elem in contains {
-            let inner = elem.unwrap_annotated();
-            if let Some(pair) = inner.as_list() {
-                // `[advance, eid]` — explicit eid (`[advance, 0]` = terminator).
-                let (Some(advance), Some(eid)) = (
-                    pair.first().and_then(|v| v.as_int()),
-                    pair.get(1).and_then(|v| v.as_int()),
-                ) else {
-                    continue;
-                };
-                pid += advance;
-                if eid == 0 {
-                    break; // terminator: pid now == section length
-                }
-                pid_of.insert(eid, pid);
-                prev_eid = Some(eid);
-            } else if let Some(advance) = inner.as_int() {
-                // bare int — consecutive: the previous eid + 1.
-                let Some(eid) = prev_eid.map(|e| e + 1) else {
-                    continue;
-                };
-                pid += advance;
-                pid_of.insert(eid, pid);
-                prev_eid = Some(eid);
-            }
-        }
-    }
-    pid_of
-}
-
-/// One location boundary per this many raw pids — Amazon's own spacing when it
-/// generates an approximate `location_map` (kfxlib `KFX_POSITIONS_PER_LOCATION`).
-/// Used as the fallback spacing for a book that ships a position map but no
-/// location map, so its Location numbers stay on the device's scale.
-const KFX_POSITIONS_PER_LOCATION: i64 = 110;
-
-/// Kindle "Location" numbering for a book — the map the device uses to turn a
-/// raw reading position (a `pid` from [`pid_map`]) into the
-/// human "Location N" shown on screen. A location boundary sits roughly every
-/// `KFX_POSITIONS_PER_LOCATION` pids, so a displayed Location is ~1/110 of the
-/// raw pid; reporting the pid directly inflates the number ~50× and breaks
-/// position matching against the device (the bug this fixes).
-///
-/// Built from the KFX `location_map` ($550) — each location is an `(eid, offset)`
-/// anchor, resolved to a pid through the caller's `pid_of` — or the rarer
-/// `yj.location_pid_map` ($621), which lists boundary pids directly. Both reduce
-/// to the same ascending `boundaries` vector.
-pub struct LocationMap {
-    /// Location boundary pids, ascending. `boundaries[k]` is the pid at the
-    /// start of the `(k+1)`-th location.
-    boundaries: Vec<i64>,
-}
-
-impl LocationMap {
-    /// Parse `$550`/`$621` into sorted boundary pids. `None` when the book ships
-    /// neither map (or none of its entries resolve to a pid) — e.g.
-    /// a KFX generated from an EPUB, which carries no position/location maps at all.
-    pub fn from_book(book: &BookData, pid_of: &HashMap<i64, i64>) -> Option<Self> {
-        let mut boundaries = Vec::new();
-
-        // $550 location_map: [{ $182: [{ $155: eid, $143: offset }, ...] }].
-        if let Some(maps) = book.by_type.get(&(KfxSymbol::LocationMap as u64)) {
-            for frag in maps.values() {
-                let Some(locs) = location_entry_list(frag) else {
-                    continue;
-                };
-                for e in locs {
-                    let Some(ef) = e.unwrap_annotated().as_struct() else {
+        let mut pid_of: HashMap<i64, i64> = HashMap::new();
+        for frag in &self.section_position_id_maps {
+            let Some(fields) = frag.unwrap_annotated().as_struct() else {
+                continue;
+            };
+            let start = get_field(fields, KfxSymbol::SectionName as u64)
+                .and_then(sym_id)
+                .and_then(|s| base_pid.get(&s).copied())
+                .unwrap_or(0);
+            let Some(contains) =
+                get_field(fields, KfxSymbol::Contains as u64).and_then(|v| v.as_list())
+            else {
+                continue;
+            };
+            let mut pid = start;
+            let mut prev_eid: Option<i64> = None;
+            for elem in contains {
+                let inner = elem.unwrap_annotated();
+                if let Some(pair) = inner.as_list() {
+                    // `[advance, eid]` — explicit eid (`[advance, 0]` = terminator).
+                    let (Some(advance), Some(eid)) = (
+                        pair.first().and_then(|v| v.as_int()),
+                        pair.get(1).and_then(|v| v.as_int()),
+                    ) else {
                         continue;
                     };
-                    let Some(eid) = get_field(ef, KfxSymbol::Id as u64).and_then(|v| v.as_int())
-                    else {
+                    pid += advance;
+                    if eid == 0 {
+                        break; // terminator: pid now == section length
+                    }
+                    pid_of.insert(eid, pid);
+                    prev_eid = Some(eid);
+                } else if let Some(advance) = inner.as_int() {
+                    // bare int — consecutive: the previous eid + 1.
+                    let Some(eid) = prev_eid.map(|e| e + 1) else {
                         continue;
                     };
-                    let off = get_field(ef, KfxSymbol::Offset as u64)
-                        .and_then(|v| v.as_int())
-                        .unwrap_or(0);
-                    if let Some(&pid) = pid_of.get(&eid) {
-                        boundaries.push(pid + off);
-                    }
+                    pid += advance;
+                    pid_of.insert(eid, pid);
+                    prev_eid = Some(eid);
                 }
             }
         }
-
-        // $621 yj.location_pid_map: [{ $182: [pid, pid, ...] }] — boundary pids
-        // directly, no eid resolution needed. Only consulted when $550 is absent.
-        if boundaries.is_empty()
-            && let Some(maps) = book.by_type.get(&(KfxSymbol::YjLocationPidMap as u64))
-        {
-            for frag in maps.values() {
-                let Some(pids) = location_entry_list(frag) else {
-                    continue;
-                };
-                for p in pids {
-                    if let Some(pid) = p.unwrap_annotated().as_int() {
-                        boundaries.push(pid);
-                    }
-                }
-            }
-        }
-
-        if boundaries.is_empty() {
-            return None;
-        }
-        boundaries.sort_unstable();
-        Some(Self { boundaries })
+        pid_of
     }
+}
 
-    /// Synthesize an evenly-spaced map for a book that has a real position map
-    /// but no `location_map`: one boundary every `KFX_POSITIONS_PER_LOCATION`
-    /// pids, matching the device's own approximate-location fallback. Keeps such
-    /// books on the device's Location scale instead of showing raw pids.
-    pub fn approximate(max_pid: i64) -> Self {
-        let mut boundaries = Vec::new();
-        let mut p = 0;
-        while p <= max_pid {
-            boundaries.push(p);
-            p += KFX_POSITIONS_PER_LOCATION;
-        }
-        if boundaries.is_empty() {
-            boundaries.push(0);
-        }
-        Self { boundaries }
-    }
+/// The `eid → pid` map of a loaded book. Shorthand for
+/// [`PositionFragments::from_book`] + [`PositionFragments::pid_map`].
+pub fn pid_map(book: &BookData) -> HashMap<i64, i64> {
+    PositionFragments::from_book(book).pid_map()
+}
 
-    /// The Kindle "Location" for a raw pid: the count of location boundaries
-    /// strictly before it. A position exactly on a boundary reads as the
-    /// location it *completes*, not the one it starts — the device's convention
-    /// (verified: pid 128880, sitting exactly on boundary #2378, reads as
-    /// "Location 2378"). Floored at 1 so the cover never shows "Loc 0".
-    pub fn location_for_pid(&self, pid: i64) -> i64 {
-        self.boundaries.partition_point(|&b| b < pid).max(1) as i64
-    }
-
-    /// Total number of locations — the "Loc N of M" denominator.
-    pub fn count(&self) -> i64 {
-        self.boundaries.len() as i64
-    }
+/// The reading-position scale of a loaded book. Shorthand for
+/// [`PositionFragments::from_book`] + [`PositionFragments::build`].
+pub fn position_map(book: &BookData) -> Option<PositionMap> {
+    PositionFragments::from_book(book).build()
 }
 
 /// The `$182` entry list inside a `location_map`/`yj.location_pid_map` fragment,
@@ -272,23 +315,28 @@ mod tests {
             return; // fixture not present in this checkout
         };
         let book = loader::load(&kfx).expect("load fixture");
-        let mine = pid_map(&book);
+        let mine = position_map(&book).expect("fixture should carry a position map");
 
         let port_book = crate::kfx_to_epub::loader::load(&kfx).expect("load via port");
         let theirs = crate::kfx_to_epub::TextIndex::pid_map_from_book(&port_book);
 
-        assert!(!mine.is_empty(), "fixture should carry a position map");
-        assert_eq!(mine, theirs, "eid → pid map diverged from the port");
+        assert_eq!(
+            mine.positions(),
+            &theirs,
+            "eid → pid map diverged from the port"
+        );
 
-        let max_pid = mine.values().copied().max().unwrap_or(0);
-        let lm = LocationMap::from_book(&book, &mine)
-            .unwrap_or_else(|| LocationMap::approximate(max_pid));
+        let max_pid = theirs.values().copied().max().unwrap_or(0);
         let port_lm = crate::kfx_to_epub::text_index::LocationMap::from_book(&port_book, &theirs)
             .unwrap_or_else(|| crate::kfx_to_epub::text_index::LocationMap::approximate(max_pid));
-        assert_eq!(lm.count(), port_lm.count(), "location count diverged");
-        for (&eid, &pid) in &mine {
+        assert_eq!(
+            mine.location_count(),
+            port_lm.count(),
+            "location count diverged"
+        );
+        for (&eid, &pid) in &theirs {
             assert_eq!(
-                lm.location_for_pid(pid),
+                mine.location_for(pid),
                 port_lm.location_for_pid(pid),
                 "Location diverged for eid {eid} (pid {pid})"
             );

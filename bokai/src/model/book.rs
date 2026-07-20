@@ -786,6 +786,20 @@ impl Book {
         self.backend.requires_normalized_export()
     }
 
+    /// The book's reading-position scale, or `None` when the source defines
+    /// none. See [`crate::model::PositionMap`] and
+    /// [`crate::import::Importer::position_map`].
+    pub fn position_map(&mut self) -> Option<crate::model::PositionMap> {
+        self.backend.position_map()
+    }
+
+    /// The source's own base text, keyed by the element ids
+    /// [`Self::position_map`] places. See [`crate::model::SourceText`] and
+    /// [`crate::import::Importer::source_text`].
+    pub fn source_text(&mut self) -> Option<crate::model::SourceText> {
+        self.backend.source_text()
+    }
+
     /// Export the book to a different format.
     ///
     /// # Supported Export Formats

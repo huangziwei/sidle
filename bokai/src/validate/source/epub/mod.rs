@@ -671,102 +671,6 @@ fn local_name(name: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::formats::aozora::{Document, EpubInput, TocEntry, build_epub};
-
-    fn tiny_jpeg() -> Vec<u8> {
-        // Same 1x1 JPEG used by the epub_builder tests — small, valid header.
-        vec![
-            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00,
-            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
-        ]
-    }
-
-    fn sample_aozora_epub() -> Vec<u8> {
-        let doc = Document {
-            title: "テスト".to_string(),
-            author: "著者".to_string(),
-            body_xhtml: r#"<p>序文</p><h2 id="h1">第一章</h2><p>本文</p>"#.to_string(),
-            toc: vec![TocEntry {
-                id: "h1".to_string(),
-                level: 2,
-                text: "第一章".to_string(),
-            }],
-            colophon: String::new(),
-            referenced_images: vec![],
-        };
-        build_epub(EpubInput {
-            document: &doc,
-            images: &[],
-            cover_jpeg: &tiny_jpeg(),
-        })
-        .unwrap()
-    }
-
-    #[test]
-    fn aozora_output_passes_after_fix() {
-        let bytes = sample_aozora_epub();
-        let report = validate(&bytes);
-        assert!(
-            report.is_clean(),
-            "aozora epub should validate clean; got:\n{}",
-            report
-        );
-    }
-
-    #[test]
-    fn detects_non_linear_cover_without_hyperlink() {
-        // Re-introduce the bug locally: take a valid aozora epub and rewrite
-        // the OPF to set `linear="no"` on the cover. Validator must catch it.
-        let bytes = sample_aozora_epub();
-        let mutated = rewrite_zip_entry(&bytes, "OEBPS/content.opf", |opf| {
-            opf.replace(
-                r#"<itemref idref="cover"/>"#,
-                r#"<itemref idref="cover" linear="no"/>"#,
-            )
-        });
-        let report = validate(&mutated);
-        assert!(
-            report.has_rule(Rule::NonLinearUnreachable),
-            "expected NonLinearUnreachable, got:\n{}",
-            report
-        );
-    }
-
-    #[test]
-    fn detects_missing_manifest_file() {
-        // Rewrite OPF to reference a nonexistent file.
-        let bytes = sample_aozora_epub();
-        let mutated = rewrite_zip_entry(&bytes, "OEBPS/content.opf", |opf| {
-            opf.replace(
-                r#"<item id="style" href="style.css" media-type="text/css"/>"#,
-                r#"<item id="style" href="nope.css" media-type="text/css"/>"#,
-            )
-        });
-        let report = validate(&mutated);
-        assert!(
-            report.has_rule(Rule::ManifestFileMissing),
-            "expected ManifestFileMissing, got:\n{}",
-            report
-        );
-    }
-
-    #[test]
-    fn detects_href_escaping_opf_root() {
-        // OPF root is `OEBPS/`. Insert a `../../escape.xhtml` from a chapter:
-        // resolves to `escape.xhtml` (zip root, outside OEBPS) — must flag.
-        // (A plain `../style.css` would resolve to `OEBPS/style.css` and is
-        // therefore fine — verified by `aozora_output_passes_after_fix`.)
-        let bytes = sample_aozora_epub();
-        let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |xhtml| {
-            xhtml.replace("</body>", r#"<a href="../../escape.xhtml">link</a></body>"#)
-        });
-        let report = validate(&mutated);
-        assert!(
-            report.has_rule(Rule::HrefEscapesOpfRoot),
-            "expected HrefEscapesOpfRoot, got:\n{}",
-            report
-        );
-    }
 
     #[test]
     fn into_findings_maps_severity_check_and_fix() {
@@ -796,63 +700,171 @@ mod tests {
         assert!(findings[2].fix.is_none());
     }
 
-    #[test]
-    fn source_validate_is_clean_for_aozora_epub() {
-        let bytes = sample_aozora_epub();
-        let report = crate::validate::source::validate(&bytes);
-        assert!(
-            report.is_clean(),
-            "aozora epub should be clean through source::validate; got:\n{report}"
-        );
-    }
+    /// Everything below validates a real EPUB, and the only EPUB *writer* in
+    /// the crate is the Aozora builder — so these tests exist only in a build
+    /// that has it.
+    #[cfg(feature = "aozora")]
+    mod on_a_generated_epub {
+        use super::super::*;
+        use crate::formats::aozora::{Document, EpubInput, TocEntry, build_epub};
 
-    #[test]
-    fn source_validate_surfaces_epub_defect() {
-        // A manifest-file-missing epub must surface as an `epub` Finding via the
-        // source aggregator — proving it wires the epub check's lowering.
-        let bytes = sample_aozora_epub();
-        let mutated = rewrite_zip_entry(&bytes, "OEBPS/content.opf", |opf| {
-            opf.replace(
-                r#"<item id="style" href="style.css" media-type="text/css"/>"#,
-                r#"<item id="style" href="nope.css" media-type="text/css"/>"#,
-            )
-        });
-        let report = crate::validate::source::validate(&mutated);
-        assert!(!report.is_clean());
-        assert!(
-            report.findings.iter().any(|f| f.check == "epub"
-                && f.rule == "manifest-file-missing"
-                && f.severity == crate::validate::Severity::Error),
-            "expected an epub/manifest-file-missing error, got:\n{report}"
-        );
-    }
-
-    /// Rebuild `epub_bytes` with `entry`'s content rewritten by `f`. Uses the
-    /// `zip` crate to iterate entries and emit a new archive with the same
-    /// per-entry compression methods. Preserves mimetype-first ordering.
-    fn rewrite_zip_entry(epub_bytes: &[u8], target: &str, f: impl Fn(String) -> String) -> Vec<u8> {
-        use zip::write::{SimpleFileOptions, ZipWriter};
-        let cursor = Cursor::new(epub_bytes);
-        let mut zin = ZipArchive::new(cursor).unwrap();
-        let mut out = Vec::with_capacity(epub_bytes.len());
-        let mut zout = ZipWriter::new(Cursor::new(&mut out));
-        for i in 0..zin.len() {
-            let mut e = zin.by_index(i).unwrap();
-            let name = e.name().to_string();
-            let comp = e.compression();
-            let opts: SimpleFileOptions = SimpleFileOptions::default().compression_method(comp);
-            let mut buf = Vec::new();
-            e.read_to_end(&mut buf).unwrap();
-            zout.start_file(&name, opts).unwrap();
-            if name == target {
-                let s = String::from_utf8(buf).unwrap();
-                let rewritten = f(s);
-                std::io::Write::write_all(&mut zout, rewritten.as_bytes()).unwrap();
-            } else {
-                std::io::Write::write_all(&mut zout, &buf).unwrap();
-            }
+        fn tiny_jpeg() -> Vec<u8> {
+            // Same 1x1 JPEG used by the epub_builder tests — small, valid header.
+            vec![
+                0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00,
+                0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
+            ]
         }
-        zout.finish().unwrap();
-        out
+
+        fn sample_aozora_epub() -> Vec<u8> {
+            let doc = Document {
+                title: "テスト".to_string(),
+                author: "著者".to_string(),
+                body_xhtml: r#"<p>序文</p><h2 id="h1">第一章</h2><p>本文</p>"#.to_string(),
+                toc: vec![TocEntry {
+                    id: "h1".to_string(),
+                    level: 2,
+                    text: "第一章".to_string(),
+                }],
+                colophon: String::new(),
+                referenced_images: vec![],
+            };
+            build_epub(EpubInput {
+                document: &doc,
+                images: &[],
+                cover_jpeg: &tiny_jpeg(),
+            })
+            .unwrap()
+        }
+
+        #[test]
+        fn aozora_output_passes_after_fix() {
+            let bytes = sample_aozora_epub();
+            let report = validate(&bytes);
+            assert!(
+                report.is_clean(),
+                "aozora epub should validate clean; got:\n{}",
+                report
+            );
+        }
+
+        #[test]
+        fn detects_non_linear_cover_without_hyperlink() {
+            // Re-introduce the bug locally: take a valid aozora epub and rewrite
+            // the OPF to set `linear="no"` on the cover. Validator must catch it.
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/content.opf", |opf| {
+                opf.replace(
+                    r#"<itemref idref="cover"/>"#,
+                    r#"<itemref idref="cover" linear="no"/>"#,
+                )
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::NonLinearUnreachable),
+                "expected NonLinearUnreachable, got:\n{}",
+                report
+            );
+        }
+
+        #[test]
+        fn detects_missing_manifest_file() {
+            // Rewrite OPF to reference a nonexistent file.
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/content.opf", |opf| {
+                opf.replace(
+                    r#"<item id="style" href="style.css" media-type="text/css"/>"#,
+                    r#"<item id="style" href="nope.css" media-type="text/css"/>"#,
+                )
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::ManifestFileMissing),
+                "expected ManifestFileMissing, got:\n{}",
+                report
+            );
+        }
+
+        #[test]
+        fn detects_href_escaping_opf_root() {
+            // OPF root is `OEBPS/`. Insert a `../../escape.xhtml` from a chapter:
+            // resolves to `escape.xhtml` (zip root, outside OEBPS) — must flag.
+            // (A plain `../style.css` would resolve to `OEBPS/style.css` and is
+            // therefore fine — verified by `aozora_output_passes_after_fix`.)
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |xhtml| {
+                xhtml.replace("</body>", r#"<a href="../../escape.xhtml">link</a></body>"#)
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::HrefEscapesOpfRoot),
+                "expected HrefEscapesOpfRoot, got:\n{}",
+                report
+            );
+        }
+
+        #[test]
+        fn source_validate_is_clean_for_aozora_epub() {
+            let bytes = sample_aozora_epub();
+            let report = crate::validate::source::validate(&bytes);
+            assert!(
+                report.is_clean(),
+                "aozora epub should be clean through source::validate; got:\n{report}"
+            );
+        }
+
+        #[test]
+        fn source_validate_surfaces_epub_defect() {
+            // A manifest-file-missing epub must surface as an `epub` Finding via the
+            // source aggregator — proving it wires the epub check's lowering.
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/content.opf", |opf| {
+                opf.replace(
+                    r#"<item id="style" href="style.css" media-type="text/css"/>"#,
+                    r#"<item id="style" href="nope.css" media-type="text/css"/>"#,
+                )
+            });
+            let report = crate::validate::source::validate(&mutated);
+            assert!(!report.is_clean());
+            assert!(
+                report.findings.iter().any(|f| f.check == "epub"
+                    && f.rule == "manifest-file-missing"
+                    && f.severity == crate::validate::Severity::Error),
+                "expected an epub/manifest-file-missing error, got:\n{report}"
+            );
+        }
+
+        /// Rebuild `epub_bytes` with `entry`'s content rewritten by `f`. Uses the
+        /// `zip` crate to iterate entries and emit a new archive with the same
+        /// per-entry compression methods. Preserves mimetype-first ordering.
+        fn rewrite_zip_entry(
+            epub_bytes: &[u8],
+            target: &str,
+            f: impl Fn(String) -> String,
+        ) -> Vec<u8> {
+            use zip::write::{SimpleFileOptions, ZipWriter};
+            let cursor = Cursor::new(epub_bytes);
+            let mut zin = ZipArchive::new(cursor).unwrap();
+            let mut out = Vec::with_capacity(epub_bytes.len());
+            let mut zout = ZipWriter::new(Cursor::new(&mut out));
+            for i in 0..zin.len() {
+                let mut e = zin.by_index(i).unwrap();
+                let name = e.name().to_string();
+                let comp = e.compression();
+                let opts: SimpleFileOptions = SimpleFileOptions::default().compression_method(comp);
+                let mut buf = Vec::new();
+                e.read_to_end(&mut buf).unwrap();
+                zout.start_file(&name, opts).unwrap();
+                if name == target {
+                    let s = String::from_utf8(buf).unwrap();
+                    let rewritten = f(s);
+                    std::io::Write::write_all(&mut zout, rewritten.as_bytes()).unwrap();
+                } else {
+                    std::io::Write::write_all(&mut zout, &buf).unwrap();
+                }
+            }
+            zout.finish().unwrap();
+            out
+        }
     }
 }

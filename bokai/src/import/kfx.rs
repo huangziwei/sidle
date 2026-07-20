@@ -19,16 +19,18 @@ use crate::formats::kfx::container::{
 };
 use crate::formats::kfx::fxl;
 use crate::formats::kfx::ion::{IonParser, IonValue};
+use crate::formats::kfx::position::PositionFragments;
 use crate::formats::kfx::resource_index::{self, ImageResource};
 use crate::formats::kfx::schema::schema;
 use crate::formats::kfx::storyline::parse_storyline_to_ir;
+use crate::formats::kfx::structure::{self, ContentSource};
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::import::{ChapterId, CssProgram, Importer, SpineEntry};
 use crate::io::{ByteSource, FileSource};
 use crate::model::Chapter;
 use crate::model::{
     AnchorTarget, CollectionInfo, Contributor, GlobalNodeId, Landmark, Metadata, PageSpread,
-    TocEntry,
+    PositionMap, SourceText, TocEntry,
 };
 
 /// Shorthand for getting a KfxSymbol as u32 for field lookups.
@@ -199,6 +201,19 @@ pub struct KfxImporter {
 impl From<ContainerError> for io::Error {
     fn from(e: ContainerError) -> Self {
         io::Error::new(io::ErrorKind::InvalidData, e.to_string())
+    }
+}
+
+/// Content references resolve through the entity index, parsing one content
+/// entity per distinct name (and caching it) rather than holding the book's
+/// whole fragment graph in memory.
+impl ContentSource for KfxImporter {
+    fn symbols(&self) -> &SymbolTable {
+        &self.symbols
+    }
+
+    fn content_string(&self, name: &str, index: usize) -> Option<String> {
+        self.lookup_content_text(name, index)
     }
 }
 
@@ -394,6 +409,49 @@ impl Importer for KfxImporter {
     fn requires_normalized_export(&self) -> bool {
         // KFX load_raw returns binary Ion data, not HTML
         true
+    }
+
+    /// The `eid → pid → Location` chain, read straight out of the container's
+    /// four position fragments. Amazon ships these on books it produced; a KFX
+    /// converted from an EPUB carries none, and reports no scale.
+    fn position_map(&mut self) -> Option<PositionMap> {
+        let locs: Vec<EntityLoc> = self
+            .entities
+            .iter()
+            .filter(|e| PositionFragments::wants(e.type_id))
+            .copied()
+            .collect();
+        let parsed: Vec<(u32, IonValue)> = locs
+            .into_iter()
+            .filter_map(|loc| Some((loc.type_id, self.parse_entity_ion(loc).ok()?)))
+            .collect();
+        let mut fragments = PositionFragments::default();
+        for (type_id, value) in &parsed {
+            fragments.push(*type_id, value);
+        }
+        fragments.build()
+    }
+
+    /// Every storyline's `eid → base text`, indexed against the position scale
+    /// so a highlight spanning several elements walks them in reading order.
+    fn source_text(&mut self) -> Option<SourceText> {
+        let positions = self.position_map().unwrap_or_default();
+        let locs: Vec<EntityLoc> = self
+            .entities
+            .iter()
+            .filter(|e| e.type_id == KfxSymbol::Storyline as u32)
+            .copied()
+            .collect();
+        let mut text_of = HashMap::new();
+        for loc in locs {
+            if let Ok(story) = self.parse_entity_ion(loc) {
+                structure::collect_eid_text(&story, self, &mut text_of);
+            }
+        }
+        if text_of.is_empty() {
+            return None;
+        }
+        Some(SourceText::new(text_of, &positions))
     }
 
     fn index_anchors(&mut self, chapters: &[(ChapterId, Arc<Chapter>)]) {

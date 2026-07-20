@@ -21,7 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::html::{Origin, Stylesheet, compile_dom, extract_stylesheets_from_dom, parse_dom};
-use crate::model::{AnchorTarget, Chapter, FontFace, GlobalNodeId, Landmark, Metadata, TocEntry};
+use crate::model::{
+    AnchorTarget, Chapter, FontFace, GlobalNodeId, Landmark, Metadata, PositionMap, SourceText,
+    TocEntry,
+};
 use crate::style::CssDecl;
 
 // Chapter identity is IR vocabulary, not an import-side concept: the format
@@ -245,6 +248,29 @@ pub trait Importer: Send + Sync {
         }
 
         font_faces
+    }
+
+    /// The book's reading-position scale, when the source defines one.
+    ///
+    /// Physically-addressed formats ship an element→coordinate map and the
+    /// location boundaries a device counts to display "Loc N of M"; see
+    /// [`PositionMap`]. Structurally-addressed formats (EPUB) define no such
+    /// scale — their readers synthesize progress from the spine, which is the
+    /// consumer's policy, not a fact in the file — so the default is `None`.
+    fn position_map(&mut self) -> Option<PositionMap> {
+        None
+    }
+
+    /// The source's own base text, keyed by the same element ids
+    /// [`Self::position_map`] places — the substrate a physically-addressed
+    /// annotation slices to recover the words it covers. See [`SourceText`].
+    ///
+    /// Costs a walk of the book's whole text, so it is separate from the
+    /// position scale: a reader that only needs "Loc N of M" never pays for
+    /// it. `None` for formats that address text structurally, which have no
+    /// such element namespace.
+    fn source_text(&mut self) -> Option<SourceText> {
+        None
     }
 
     /// Whether this importer requires normalized export for HTML-based formats.
