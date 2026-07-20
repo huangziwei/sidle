@@ -138,7 +138,6 @@ objc2-pdf-kit = { version = "0.3", features = ["PDFDocument", "PDFPage"] }
 [dev-dependencies]
 tempfile = "3.14"
 proptest = "1.6"
-criterion = "0.8"
 
 [[bin]]
 name = "bokai"
@@ -149,7 +148,3 @@ required-features = ["cli"]
 name = "kfx-dump"
 path = "src/bin/kfx-dump.rs"
 required-features = ["cli"]
-
-[[bench]]
-name = "conversion"
-harness = false

@@ -196,16 +196,48 @@ impl EpubExporter {
         {
             item.properties.push("cover-image".to_string());
         }
-        let titlepage_xhtml = if let Some(ref cid) = cover_id {
-            let cover_item = manifest_items.iter().find(|i| &i.id == cid);
-            cover_item.and_then(|item| {
-                let bytes = book.load_asset(std::path::Path::new(&item.href)).ok()?;
-                let (w, h) = crate::util::extract_image_dimensions(&bytes)?;
-                Some(build_titlepage(&item.href, Some((w, h))))
+        // The source may already ship a cover page in the spine — a
+        // calibre-lineage EPUB's `titlepage.xhtml` is the same SVG wrapper
+        // `build_titlepage` emits. Synthesizing on top of it puts two cover
+        // pages in the reading flow, both `calibre:cover`, both rendering the
+        // same image. Reuse the source's page and skip synthesis: passthrough
+        // keeps the source's own bytes, and dropping a spine document instead
+        // would orphan every link into it.
+        let source_cover_page: Option<String> = book
+            .metadata()
+            .cover_image
+            .as_deref()
+            .and_then(|cover| {
+                chapter_bytes
+                    .iter()
+                    .position(|b| is_cover_only_document(&String::from_utf8_lossy(b), cover))
             })
-        } else {
-            None
+            .and_then(|i| {
+                let id = format!("chapter_{}", i);
+                manifest_items
+                    .iter()
+                    .find(|item| item.id == id)
+                    .map(|item| item.href.clone())
+            });
+
+        let titlepage_xhtml = match (&source_cover_page, &cover_id) {
+            (Some(_), _) => None,
+            (None, Some(cid)) => {
+                let cover_item = manifest_items.iter().find(|i| &i.id == cid);
+                cover_item.and_then(|item| {
+                    let bytes = book.load_asset(std::path::Path::new(&item.href)).ok()?;
+                    let (w, h) = crate::util::extract_image_dimensions(&bytes)?;
+                    Some(build_titlepage(&item.href, Some((w, h))))
+                })
+            }
+            (None, None) => None,
         };
+
+        // Where the package's cover references point: the source's own page
+        // when it has one, else the page synthesized just above.
+        let cover_page_href: Option<String> = source_cover_page
+            .clone()
+            .or_else(|| titlepage_xhtml.as_ref().map(|_| "cover.xhtml".to_string()));
         if let Some(xhtml) = &titlepage_xhtml {
             manifest_items.insert(
                 0,
@@ -231,8 +263,8 @@ impl EpubExporter {
         // 5. Write content.opf. The guide keeps its single cover reference
         // (readers use it to open on the cover page).
         let mut guide: Vec<OpfGuideRef> = Vec::new();
-        if titlepage_xhtml.is_some() {
-            opf::repoint_cover_guide(&mut guide, "cover.xhtml");
+        if let Some(href) = &cover_page_href {
+            opf::repoint_cover_guide(&mut guide, href);
         }
         let opf = opf::emit_opf(&OpfPackage {
             metadata: build_opf_metadata(book.metadata(), false, cover_id, None),
@@ -258,14 +290,12 @@ impl EpubExporter {
                 href: lm.href.clone(),
             })
             .collect();
-        let toc_fallback = if titlepage_xhtml.is_some() {
-            Some("cover.xhtml".to_string())
-        } else {
+        let toc_fallback = cover_page_href.clone().or_else(|| {
             book.spine()
                 .first()
                 .and_then(|e| book.source_id(e.id))
                 .map(sanitize_path)
-        };
+        });
         let nav = nav::emit_nav(&nav::NavDoc {
             title: &book.metadata().title,
             language: &book.metadata().language,
@@ -361,7 +391,7 @@ impl EpubExporter {
                 content
                     .chapters
                     .iter()
-                    .position(|c| is_redundant_cover_section(&c.document, cover))
+                    .position(|c| is_cover_only_document(&c.document, cover))
             })
         } else {
             None
@@ -829,21 +859,34 @@ fn find_cover_manifest_id(
         .map(|item| item.id.clone())
 }
 
-/// True when `html` is an image-only section whose sole `<img>` renders the
-/// cover image `cover_href` — i.e. the KFX's own cover section, which the SVG
-/// `cover.xhtml` page duplicates. Both KFX→EPUB routes feed this the identical
-/// section bytes, so they drop the same section and stay byte-for-byte 1:1.
+/// True when `html` is an image-only document whose sole image renders
+/// `cover_href` and which carries no visible text of its own — i.e. a cover
+/// page, in either of the two shapes one ships in: a bare `<img>` (how KFX
+/// ships its cover section) or an SVG `<image>` wrapper (how a calibre-lineage
+/// EPUB ships its `titlepage.xhtml`).
 ///
-/// A publisher EPUB (Kobo-verified) ships ONE cover page; the calibre lineage
-/// emitted both the SVG cover page and the KFX's bare-`<img>` cover section,
-/// which read as a duplicate cover. Dropping the redundant section (keeping the
-/// full-page SVG) matches the publisher shape. The reader keeps this section
-/// instead (it renders the KFX natively and sizes the image itself) and drops
-/// the SVG page — the opposite dedup, correct for its renderer.
-pub(crate) fn is_redundant_cover_section(html: &str, cover_href: &str) -> bool {
+/// A publisher EPUB (Kobo-verified) ships ONE cover page, so both export routes
+/// use this to avoid emitting two — but they resolve the duplicate in opposite
+/// directions, because the surviving page differs:
+///
+/// - Normalized: the source section is a bare `<img>` that inherits the
+///   reader's body margins, so it is dropped and the synthesized full-page SVG
+///   survives. Both KFX→EPUB routes feed this the identical section bytes, so
+///   they drop the same section and stay byte-for-byte 1:1.
+/// - Raw: the source's page is already the SVG shape, so it survives and
+///   synthesis is skipped — passthrough keeps the source's bytes rather than
+///   substituting an equivalent page and orphaning links into it.
+///
+/// The reader drops the SVG page and keeps the section instead (it renders the
+/// KFX natively and sizes the image itself) — a third resolution, correct for
+/// its renderer.
+/// Compat alias for the frozen mechanical port (`kfx_to_epub`), which may not
+/// be edited until the IR route reaches 1:1. Deleted together with the port.
+pub(crate) use is_cover_only_document as is_redundant_cover_section;
+
+pub(crate) fn is_cover_only_document(html: &str, cover_href: &str) -> bool {
     // Body only — the <head><title> text must not count against "no visible
-    // text", and the SVG cover page (which carries `<image>`, not `<img>`) must
-    // never match: we only inspect KFX content sections here.
+    // text".
     let body = match (html.find("<body"), html.rfind("</body>")) {
         (Some(s), Some(e)) if e > s => {
             let open_end = html[s..e].find('>').map(|i| s + i + 1).unwrap_or(s);
@@ -851,14 +894,23 @@ pub(crate) fn is_redundant_cover_section(html: &str, cover_href: &str) -> bool {
         }
         _ => html,
     };
-    // Exactly one raster image.
-    if body.matches("<img").count() != 1 {
+    // Exactly one image, counting both shapes. `<img` is not a prefix of
+    // `<image`, so the two counts never overlap.
+    let raster = body.matches("<img").count();
+    let vector = body.matches("<image").count();
+    if raster + vector != 1 {
         return false;
     }
-    // Its src basename must be the cover image.
+    // Its href basename must be the cover image. Searching bare `href="`
+    // also finds the `xlink:href="` an SVG wrapper uses.
+    let (tag, attr) = if raster == 1 {
+        ("<img", "src=\"")
+    } else {
+        ("<image", "href=\"")
+    };
     let src = body
-        .split_once("<img")
-        .and_then(|(_, rest)| rest.split_once("src=\""))
+        .split_once(tag)
+        .and_then(|(_, rest)| rest.split_once(attr))
         .and_then(|(_, rest)| rest.split_once('"'))
         .map(|(src, _)| src);
     let Some(src) = src else { return false };
@@ -1155,6 +1207,34 @@ mod tests {
                 "secB.xhtml"
             ]
         );
+    }
+
+    #[test]
+    fn cover_only_document_matches_both_page_shapes() {
+        // The bare-`<img>` shape (a KFX cover section) and the SVG-wrapper
+        // shape (a calibre-lineage EPUB's `titlepage.xhtml`) both count: each
+        // is a cover page, and emitting one alongside a synthesized page gives
+        // the reader two covers.
+        let raster = r#"<html><body><div><img src="cover.jpeg" alt=""/></div></body></html>"#;
+        let vector = r#"<html><body><div><svg viewBox="0 0 60 90">
+            <image width="60" height="90" xlink:href="images/cover.jpeg"/>
+            </svg></div></body></html>"#;
+        assert!(is_cover_only_document(raster, "cover.jpeg"));
+        assert!(is_cover_only_document(vector, "cover.jpeg"));
+
+        // A different image is not the cover page.
+        assert!(!is_cover_only_document(raster, "other.jpeg"));
+        // Visible text means it is a content page that happens to open with
+        // the cover art, not a cover page.
+        let with_text = r#"<html><body><img src="cover.jpeg"/><p>Chapter One</p></body></html>"#;
+        assert!(!is_cover_only_document(with_text, "cover.jpeg"));
+        // Two images is a gallery, not a cover.
+        let two = r#"<html><body><img src="cover.jpeg"/><img src="cover.jpeg"/></body></html>"#;
+        assert!(!is_cover_only_document(two, "cover.jpeg"));
+        // <title> text sits outside the body and must not count as visible.
+        let titled =
+            r#"<html><head><title>Cover</title></head><body><img src="cover.jpeg"/></body></html>"#;
+        assert!(is_cover_only_document(titled, "cover.jpeg"));
     }
 
     #[test]
