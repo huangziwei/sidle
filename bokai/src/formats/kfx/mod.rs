@@ -25,6 +25,7 @@
 //! - `structure` - Queries over a loaded `BookData`
 //! - `navigation` - `book_navigation` walks: nav containers, anchors, TOC
 //! - `error` - `KfxError`, the format-side failure type
+//! - `position` - `eid → pid → device Location` maps ($265, $550/$621)
 
 pub mod anchor_table;
 pub mod auxiliary;
@@ -45,6 +46,7 @@ pub mod metadata;
 pub mod metadata_edit;
 pub mod navigation;
 pub mod pdf_container;
+pub mod position;
 pub mod resource_index;
 pub mod schema;
 pub mod serialization;

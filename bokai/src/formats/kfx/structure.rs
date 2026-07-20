@@ -3,6 +3,8 @@
 //! Small readers for facts that live in the fragment graph rather than in any
 //! one entity, usable without standing up a whole conversion pipeline.
 
+use std::collections::HashMap;
+
 use crate::formats::kfx::container::get_field;
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::loader::BookData;
@@ -55,4 +57,49 @@ pub fn resolve_content_text(value: &IonValue, book: &BookData) -> String {
         }
     }
     String::new()
+}
+
+/// Recursively walk a storyline fragment. Every struct that carries a
+/// `$155 id` and a `$145 content` reference contributes `eid → base text`;
+/// `$146 content_list` children are recursed into. `$176 story_name`
+/// references are *not* followed — each referenced story is its own
+/// `by_type[$259]` fragment and is walked at the top level instead.
+fn collect_eid_text(value: &IonValue, book: &BookData, out: &mut HashMap<i64, String>) {
+    let inner = value.unwrap_annotated();
+    if let Some(fields) = inner.as_struct() {
+        if let Some(eid) = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int())
+            && let Some(content) = get_field(fields, KfxSymbol::Content as u64)
+        {
+            let text = resolve_content_text(content, book);
+            if !text.is_empty() {
+                out.insert(eid, text);
+            }
+        }
+        if let Some(list) =
+            get_field(fields, KfxSymbol::ContentList as u64).and_then(|v| v.as_list())
+        {
+            for child in list {
+                collect_eid_text(child, book, out);
+            }
+        }
+    } else if let Some(list) = inner.as_list() {
+        for item in list {
+            collect_eid_text(item, book, out);
+        }
+    }
+}
+
+/// The book's whole `eid → base text` map, walked from every storyline.
+///
+/// "Base text" is the element's own `$145 content`, with nothing added: this is
+/// the substrate device anchors address, so a `(eid, offset)` pair indexes into
+/// exactly this string.
+pub fn eid_text_map(book: &BookData) -> std::collections::HashMap<i64, String> {
+    let mut out = std::collections::HashMap::new();
+    if let Some(storylines) = book.by_type.get(&(KfxSymbol::Storyline as u64)) {
+        for story in storylines.values() {
+            collect_eid_text(story, book, &mut out);
+        }
+    }
+    out
 }

@@ -193,7 +193,7 @@ fn resolve_fid(ent: &EntityLoc, _value: &IonValue, symbols: &SymbolTable) -> Str
 /// KFX has at least two metadata shapes:
 /// - Amazon's own KFX wraps as `book_metadata::{ categorised_metadata: [{
 ///   category: kindle_title_metadata, metadata: [{key, value}, ...] }] }`.
-/// - boko's own KFX exporter emits a plain struct (no annotation).
+/// - bokai's own KFX exporter emits a plain struct (no annotation).
 ///
 /// We accept both. Cover image is `cover_image` or first occurrence of a
 /// `Value` that names an external_resource.
@@ -308,7 +308,7 @@ fn cover_candidate_is_image(
 }
 
 /// Fill `meta` from Amazon's categorised `book_metadata` ($490) wrapper —
-/// `categorised_metadata / kindle_title_metadata` key/value pairs. boko's own
+/// `categorised_metadata / kindle_title_metadata` key/value pairs. bokai's own
 /// KFX exporter emits this shape too (see `extract_book_metadata` doc).
 fn extract_categorised_metadata(
     meta: &mut BookMetadata,
