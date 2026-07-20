@@ -316,10 +316,16 @@ pub fn kfx_to_reader_book_lazy(
         let max_pid = pid_of.values().copied().max().unwrap_or(0);
         let lm = LocationMap::from_book(&book, &pid_of)
             .unwrap_or_else(|| LocationMap::approximate(max_pid));
-        let locations = pid_of
+        let mut locations: Vec<(i64, i64)> = pid_of
             .iter()
             .map(|(&eid, &pid)| (eid, lm.location_for_pid(pid)))
             .collect();
+        // `pid_of` is a HashMap, so collecting straight out of it ordered the
+        // pairs by hash — different on every run, since Rust seeds each
+        // process differently. Consumers key by eid so the order carries no
+        // meaning, but an API that returns a different Vec each call cannot be
+        // cached, diffed, or tested. Sort by eid to make it reproducible.
+        locations.sort_unstable();
         (locations, lm.count(), false)
     } else if fixed_layout {
         let (l, m) = synth_locations(&book, &eid_order);
