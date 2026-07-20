@@ -1,5 +1,4 @@
-//! Regression: EPUB 3 nav TOC handling in EPUB→KFX and in the KFX→DOM read
-//! path a host-side reader renders from.
+//! Regression: EPUB 3 nav TOC handling across EPUB→KFX and back.
 //!
 //! Two failure modes seen on real retail EPUBs:
 //!
@@ -10,7 +9,7 @@
 //!
 //!  2. A nested nav points at intra-chapter headings, but the content carries no
 //!     `<a href>` cross-references to those positions — so bokai's e2k KFX emits
-//!     no internal `$266` anchor for them. The KFX→DOM read path must still
+//!     no internal `$266` anchor for them. Reading that KFX back must still
 //!     produce one distinct, resolvable `#fragment` per entry; otherwise every
 //!     nested entry collapses to the top of its chapter file.
 
@@ -143,11 +142,11 @@ fn nav_doc_wins_over_degenerate_ncx() {
 }
 
 #[test]
-fn reader_toc_resolves_intra_chapter_anchors_without_kfx_anchor_table() {
+fn nested_nav_anchors_survive_the_epub_kfx_epub_round_trip() {
     // A single chapter with three scene headings, and a nested nav that targets
     // each. No content `<a href>` points at the scenes, so bokai's e2k KFX emits
-    // no internal `$266` anchor for them — the exact case where the reader used
-    // to drop the fragment and collapse all three onto the chapter top.
+    // no internal `$266` anchor for them — the exact case where reading the KFX
+    // back dropped the fragment and collapsed all three onto the chapter top.
     let opf = br#"<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -205,42 +204,52 @@ fn reader_toc_resolves_intra_chapter_anchors_without_kfx_anchor_table() {
     book.export(Format::Kfx, &mut kfx).expect("export kfx");
     let kfx = kfx.into_inner();
 
-    // KFX → reader.
-    let reader = bokai::kfx_to_epub::kfx_to_reader_book(&kfx).expect("reader book");
+    // KFX → EPUB, and read the round-tripped nav back out.
+    let mut out = Cursor::new(Vec::new());
+    Book::from_bytes(&kfx, Format::Kfx)
+        .expect("import the exported kfx")
+        .export(Format::Epub, &mut out)
+        .expect("export epub");
+    let files = unzip(&out.into_inner());
+
+    let nav_doc = files
+        .iter()
+        .find(|(name, body)| name.ends_with(".xhtml") && body.contains("epub:type=\"toc\""))
+        .map(|(_, body)| body.clone())
+        .expect("round-tripped epub has a nav document");
 
     // Collect the three scene entries (skip any synthesized cover).
-    let mut flat = Vec::new();
-    fn walk(pts: &[bokai::kfx_to_epub::navigation::NavPoint], out: &mut Vec<(String, String)>) {
-        for p in pts {
-            out.push((p.label.clone(), p.href.clone()));
-            walk(&p.children, out);
-        }
-    }
-    walk(&reader.toc, &mut flat);
-    let scenes: Vec<&(String, String)> = flat
-        .iter()
-        .filter(|(l, _)| l.starts_with("Scene"))
+    let scenes: Vec<(String, String)> = nav_doc
+        .match_indices("<a href=\"")
+        .filter_map(|(at, _)| {
+            let rest = &nav_doc[at + "<a href=\"".len()..];
+            let (href, rest) = rest.split_once('"')?;
+            let label = rest.split_once('>')?.1.split_once('<')?.0;
+            label
+                .starts_with("Scene")
+                .then(|| (label.to_string(), href.to_string()))
+        })
         .collect();
     assert_eq!(
         scenes.len(),
         3,
-        "three scene entries expected, got {flat:?}"
+        "three scene entries expected in the nav, got {scenes:?}"
     );
 
-    // Each entry: a fragment that resolves via getElementById in its section.
+    // Each entry: a fragment that resolves via getElementById in its document.
     let mut frags = Vec::new();
     for (label, href) in &scenes {
-        let (sec, frag) = href
+        let (doc, frag) = href
             .split_once('#')
             .unwrap_or_else(|| panic!("{label} lost its #fragment: {href}"));
-        let html = reader
-            .sections
+        let (_, body) = files
             .iter()
-            .find(|s| s.href == sec)
-            .unwrap_or_else(|| panic!("{label} section {sec} missing"));
+            .find(|(name, _)| name.ends_with(doc))
+            .unwrap_or_else(|| panic!("{label} target document {doc} missing"));
+        assert!(!frag.is_empty(), "{label} has an empty fragment: {href}");
         assert!(
-            html.html.contains(&format!("id=\"{frag}\"")),
-            "{label} fragment #{frag} has no matching id in {sec} (would not scroll)"
+            body.contains(&format!("id=\"{frag}\"")),
+            "{label} fragment #{frag} has no matching id in {doc} (would not scroll)"
         );
         frags.push(frag.to_string());
     }
@@ -253,4 +262,19 @@ fn reader_toc_resolves_intra_chapter_anchors_without_kfx_anchor_table() {
         3,
         "the three scenes must map to distinct anchors"
     );
+}
+
+/// Every text entry of an EPUB, as `(name, contents)`. Binary entries decode
+/// lossily — nothing here inspects them.
+fn unzip(epub: &[u8]) -> Vec<(String, String)> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(epub)).expect("read epub zip");
+    let mut out = Vec::new();
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).expect("zip entry");
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut buf).expect("read entry");
+        out.push((name, String::from_utf8_lossy(&buf).into_owned()));
+    }
+    out
 }

@@ -146,6 +146,22 @@ impl Chapter {
             stack: vec![NodeId::ROOT],
         }
     }
+
+    /// The source element ids this chapter's nodes carry, in **document
+    /// order** — the order a rendered page presents them, which is what a
+    /// consumer needs to answer "which chapter holds element N" and to walk a
+    /// selection back to a `(element, offset)` handle. Empty for formats with
+    /// no element-id namespace. See
+    /// [`SemanticMap::source_element`](crate::model::SemanticMap::source_element).
+    pub fn source_elements(&self) -> Vec<i64> {
+        let mut out = Vec::new();
+        for node in self.iter_dfs() {
+            if let Some(element) = self.semantics.source_element(node) {
+                out.push(element);
+            }
+        }
+        out
+    }
 }
 
 /// Iterator over children of a node.

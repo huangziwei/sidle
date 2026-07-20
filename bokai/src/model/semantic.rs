@@ -59,6 +59,12 @@ pub struct SemanticMap {
     /// round-trip. The cascade resolves styling independently; this field is
     /// purely a name hint for the KFX style symbol and the output `class`.
     class: HashMap<NodeId, TextRange>,
+    /// The source's own element id for this node, when the format has such a
+    /// namespace (a KFX `eid`). This is the identifier a reading device
+    /// persists in an annotation — the same key [`crate::model::PositionMap`]
+    /// and [`crate::model::SourceText`] are indexed by — so carrying it on the
+    /// node is what lets a renderer mark up the element a stored handle names.
+    source_element: HashMap<NodeId, i64>,
     /// Per-node inline style declarations (`"k: v; k2: v2"` — the
     /// `style="…"` attribute form). Carries source styling that has no named
     /// rule: a KFX content element's own properties, and the partitioned
@@ -235,6 +241,18 @@ impl SemanticMap {
     /// Returns None if not set (defaults to 1).
     pub fn list_start(&self, node: NodeId) -> Option<u32> {
         self.list_start.get(&node).copied()
+    }
+
+    // --- source_element ---
+
+    /// Record the source's own element id for a node (a KFX `eid`).
+    pub fn set_source_element(&mut self, node: NodeId, element: i64) {
+        self.source_element.insert(node, element);
+    }
+
+    /// The source's own element id for a node, if the format has one.
+    pub fn source_element(&self, node: NodeId) -> Option<i64> {
+        self.source_element.get(&node).copied()
     }
 
     // --- row_span ---
@@ -459,6 +477,7 @@ impl SemanticMap {
             + self.language.len()
             + self.class.len()
             + self.style.len()
+            + self.source_element.len()
     }
 
     /// Check if the map is empty.

@@ -682,6 +682,10 @@ where
                 // no element ids beyond anchor stamps, and neither do we).
                 if let Some(eid) = elem.id {
                     eid_nodes.push((eid, anchor_node));
+                    // The eid itself rides on the node as source identity,
+                    // separate from any emitted html id. A renderer needs it to
+                    // mark up the element a stored `(eid, offset)` handle names.
+                    chapter.semantics.set_source_element(anchor_node, eid);
                     if let Some(table) = anchor_table
                         && chapter.semantics.id(anchor_node).is_none()
                         && let Some(anchor_id) = table.id_at(eid, 0)
@@ -1004,6 +1008,13 @@ pub fn apply_section_template(
         r.first_child = None;
     }
     chapter.append_child(root, wrapper);
+
+    // The template container is itself an addressable element: it carries a
+    // `$155 id`, so device handles and the position map can name it, and it
+    // leads the chapter's element order.
+    if let Some(eid) = template_eid {
+        chapter.semantics.set_source_element(wrapper, eid);
+    }
 
     let Some(table) = anchor_table else {
         return;
