@@ -32,11 +32,11 @@ pub type DbHandle = Arc<Mutex<Connection>>;
 /// coordinate here.
 pub type SharedTransport = Arc<Mutex<Option<Arc<dyn Transport>>>>;
 
-/// Single-entry cache for the reader's search `TextIndex`. Keyed by `book_id`,
+/// Single-entry cache for the reader's search index. Keyed by `book_id`,
 /// holds at most one — switching books rebuilds. First search per book pays
 /// the parse cost (same as `reader_open`); subsequent are HashMap walks. Lives
 /// for the app session; the keyed-by-`book_id` replacement is the eviction.
-pub type ReaderSearchCache = Arc<Mutex<Option<(i64, Arc<bokai::kfx_to_epub::TextIndex>)>>>;
+pub type ReaderSearchCache = Arc<Mutex<Option<(i64, Arc<sidle_core::library::anchor::BookIndex>)>>>;
 
 /// Everything the open book's deferred fetches are served from: the bokai
 /// image store (raw KFX media + transcode work list + deferred-location

@@ -855,8 +855,8 @@ pub struct SearchMatchDto {
     pub preview_after: String,
 }
 
-impl From<bokai::kfx_to_epub::SearchMatch> for SearchMatchDto {
-    fn from(m: bokai::kfx_to_epub::SearchMatch) -> Self {
+impl From<sidle_core::library::anchor::SearchMatch> for SearchMatchDto {
+    fn from(m: sidle_core::library::anchor::SearchMatch) -> Self {
         SearchMatchDto {
             eid: m.eid,
             off_start: m.off_start as i64,
@@ -870,9 +870,9 @@ impl From<bokai::kfx_to_epub::SearchMatch> for SearchMatchDto {
 }
 
 /// In-book full-text search. v1 = strict char match, ASCII case-insensitive,
-/// intra-eid only — see `TextIndex::search`.
+/// intra-eid only — see [`BookIndex::search`](sidle_core::library::anchor::BookIndex::search).
 ///
-/// Reuses a per-session `TextIndex` cache (one entry, keyed by `book_id`):
+/// Reuses a per-session index cache (one entry, keyed by `book_id`):
 /// the first search per book parses the KFX once on the blocking pool (same
 /// cost as `reader_open`); subsequent searches are pure `HashMap` walks.
 /// Switching to a different `book_id` rebuilds.
@@ -884,8 +884,8 @@ pub async fn book_search(
 ) -> Result<Vec<SearchMatchDto>, String> {
     use std::sync::Arc;
 
-    // Fast path: TextIndex for this book already built this session?
-    let cached: Option<Arc<bokai::kfx_to_epub::TextIndex>> = {
+    // Fast path: an index for this book already built this session?
+    let cached: Option<Arc<sidle_core::library::anchor::BookIndex>> = {
         let guard = state.reader_search_cache.lock().await;
         match &*guard {
             Some((id, idx)) if *id == book_id => Some(idx.clone()),
@@ -909,8 +909,8 @@ pub async fn book_search(
             let built = tokio::task::spawn_blocking(move || {
                 let bytes =
                     std::fs::read(&kfx_path).map_err(|e| format!("read {kfx_path}: {e}"))?;
-                bokai::kfx_to_epub::TextIndex::from_kfx(&bytes)
-                    .map_err(|e| format!("TextIndex build: {e}"))
+                sidle_core::library::anchor::BookIndex::from_kfx(&bytes)
+                    .ok_or_else(|| format!("could not read {kfx_path} as KFX"))
             })
             .await
             .map_err(|e| format!("search task join error: {e}"))??;

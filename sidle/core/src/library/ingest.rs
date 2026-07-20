@@ -15,16 +15,13 @@
 //! Sidle books with Amazon-store ones (the file is a single global log on the
 //! device) and its locations are coarser than the `.yjr` anchors anyway.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-use bokai::kfx_to_epub::TextIndex;
-
-use super::anchor::{self, Resolved};
+use super::anchor::{self, BookIndex, Resolved};
 use super::db::{self, NewAnnotation};
 use super::yjr::{Annotation, Kind};
 
@@ -196,7 +193,7 @@ fn dedup_hash(book_key: &str, kind: &str, r: &Resolved) -> String {
 pub fn import_yjr(
     conn: &Connection,
     annotations: &[Annotation],
-    idx: &TextIndex,
+    idx: &BookIndex,
     book_id: Option<i64>,
     clip_title: Option<&str>,
     clip_author: Option<&str>,
@@ -351,7 +348,7 @@ pub struct DeviceImportReport {
     /// library row was removed without its on-device counterpart.
     pub unmatched: Vec<String>,
     /// Matched books whose `.yjr` was byte-identical to the last import, so the
-    /// (expensive) TextIndex rebuild + re-parse was skipped entirely.
+    /// (expensive) text-index rebuild + re-parse was skipped entirely.
     pub unchanged: usize,
     /// Counts from `.yjr` imports, summed across matched books.
     pub annotations: ImportStats,
@@ -449,7 +446,7 @@ pub fn import_collected_with_progress(
                 .with_context(|| format!("stem lookup for {sdr_name}"))?,
         };
 
-        // Name what's syncing now — before the costly TextIndex build below.
+        // Name what's syncing now — before the costly text-index build below.
         let label = book
             .as_ref()
             .map(|b| b.title.clone())
@@ -460,7 +457,7 @@ pub fn import_collected_with_progress(
         // EVERY sync, before the unchanged-`.yjr` skip below: position moves
         // independently of highlights (you can read on without highlighting), so
         // gating it on the `.yjr` would freeze it. Cheap and idempotent — a handle
-        // decode + single-row upsert, no TextIndex. Lands in the `(book_id,
+        // decode + single-row upsert, no text index. Lands in the `(book_id,
         // 'device')` row; never auto-applied (it's a Resume jump target).
         if let (Some(book), Some(yjf)) = (book.as_ref(), yjf_bytes.as_ref())
             && let Some(h) = super::yjr::decode_position(yjf, "lpr")
@@ -533,7 +530,7 @@ pub fn import_collected_with_progress(
 ///
 /// Only `documents/Sidle/` is scanned: those `.sdr` dirs are named
 /// `<stem>.<8hex>.sdr` where `<8hex>` is the library `kfx_sha256` prefix, so each
-/// matches its library book exactly — and the `TextIndex` is built from the
+/// matches its library book exactly — and the text index is built from the
 /// library's own readable KFX, not the device file. `documents/Downloads/Items01/`
 /// is deliberately ignored (DRM'd Amazon KFX can't be read), as is the global
 /// `My Clippings.txt` (would conflate Amazon-store books with Sidle's).
@@ -617,14 +614,14 @@ fn find_sidecar(sdr_dir: &Path, suffix: &str) -> Option<PathBuf> {
         })
 }
 
-/// A `TextIndex` from the library's readable KFX, or an empty one when the path
-/// is missing/unreadable — annotations still import with their anchors (text
-/// backfillable once the KFX exists).
-fn build_index(kfx_path: Option<&str>) -> TextIndex {
+/// A [`BookIndex`] over the library's readable KFX, or an empty one when the
+/// path is missing/unreadable — annotations still import with their anchors
+/// (text backfillable once the KFX exists).
+fn build_index(kfx_path: Option<&str>) -> BookIndex {
     kfx_path
         .and_then(|p| std::fs::read(p).ok())
-        .and_then(|bytes| TextIndex::from_kfx(&bytes).ok())
-        .unwrap_or_else(|| TextIndex::from_parts(HashMap::new(), HashMap::new()))
+        .and_then(|bytes| BookIndex::from_kfx(&bytes))
+        .unwrap_or_else(BookIndex::empty)
 }
 
 #[cfg(test)]
@@ -668,10 +665,10 @@ mod tests {
         .unwrap()
     }
 
-    fn idx() -> TextIndex {
+    fn idx() -> BookIndex {
         let text_of: HashMap<i64, String> = [(10, "Hello world".to_string())].into_iter().collect();
         let pid_of: HashMap<i64, i64> = [(10, 100)].into_iter().collect();
-        TextIndex::from_parts(text_of, pid_of)
+        BookIndex::from_parts(text_of, pid_of)
     }
 
     fn highlight(eid: u32, os: u32, oe: u32) -> Annotation {
@@ -999,7 +996,7 @@ mod tests {
     /// A second connect with an unchanged `.yjr` is skipped wholesale — no
     /// re-parse, no re-insert — by the per-book content-hash checkpoint. (The
     /// `dedup_hash` already made re-import a no-op at the DB layer; this avoids
-    /// the expensive TextIndex rebuild that precedes it.)
+    /// the expensive text-index rebuild that precedes it.)
     #[test]
     fn device_import_skips_unchanged_yjr() {
         use base64::Engine as _;
@@ -1041,7 +1038,7 @@ mod tests {
                 ppd: None,
                 epub_path: None,
                 cover_path: None,
-                kfx_path: None, // empty TextIndex; a bookmark imports on anchor alone
+                kfx_path: None, // empty index; a bookmark imports on anchor alone
                 kfx_sha256: Some(
                     "deadbeef00000000000000000000000000000000000000000000000000000000",
                 ),
