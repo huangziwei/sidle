@@ -38,13 +38,12 @@ pub type SharedTransport = Arc<Mutex<Option<Arc<dyn Transport>>>>;
 /// for the app session; the keyed-by-`book_id` replacement is the eviction.
 pub type ReaderSearchCache = Arc<Mutex<Option<(i64, Arc<sidle_core::library::anchor::BookIndex>)>>>;
 
-/// Everything the open book's deferred fetches are served from: the bokai
-/// image store (raw KFX media + transcode work list + deferred-location
-/// synthesis), the full built section HTML (source for windowed section
-/// streaming on large text books), and the eid→section index (jumps into
-/// sections the webview hasn't streamed yet).
+/// Everything the open book's deferred fetches are served from: the parsed
+/// book that produces image bytes on request, the full built section HTML
+/// (source for windowed section streaming on large text books), and the
+/// eid→section index (jumps into sections the webview hasn't streamed yet).
 pub struct ReaderStoreEntry {
-    pub images: bokai::kfx_to_epub::ReaderImageStore,
+    pub images: sidle_core::reader::ImageStore,
     /// Every section's `(href, html)` in spine order — already built by the
     /// open; `reader_fetch_sections` hands them out without recompute.
     pub sections: Vec<(String, String)>,
@@ -52,12 +51,11 @@ pub struct ReaderStoreEntry {
 }
 
 /// Single-entry store backing the open book's on-demand fetches
-/// (`reader_fetch_resources` / `reader_fetch_sections` / `reader_locations` /
-/// `reader_eid_section`). Populated by `reader_open` (lazy KFX→DOM), dropped
-/// by `reader_release` — the frontend releases it on reader close and once
-/// everything deferred has been delivered (the webview keeps the data; the
-/// store is then dead weight). Keyed by `book_id`; opening another book
-/// replaces it.
+/// (`reader_fetch_resources` / `reader_fetch_sections` / `reader_eid_section`).
+/// Populated by `reader_open`, dropped by `reader_release` — the frontend
+/// releases it on reader close and once everything deferred has been delivered
+/// (the webview keeps the data; the store is then dead weight). Keyed by
+/// `book_id`; opening another book replaces it.
 pub type ReaderStoreCache = Arc<Mutex<Option<(i64, Arc<ReaderStoreEntry>)>>>;
 
 /// Default to all available cores. Conversion is CPU-bound; the OS scheduler

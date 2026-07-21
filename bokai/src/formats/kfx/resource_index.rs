@@ -219,28 +219,11 @@ pub fn is_image_format_symbol(format: &str, mime: Option<&str>) -> bool {
 }
 
 /// Detect image format from leading bytes (≥ 12 bytes decide every case).
-/// Used as a sanity check and as a fallback when `format` is missing.
+/// Used as a sanity check and as a fallback when `format` is missing. The
+/// KFX `format` vocabulary happens to be the bare extension, so this is the
+/// shared sniffer named in KFX's terms.
 pub fn sniff_format(bytes: &[u8]) -> Option<String> {
-    if bytes.len() >= 3 && bytes[..3] == [0xFF, 0xD8, 0xFF] {
-        return Some(FORMAT_JPG.into());
-    }
-    if bytes.len() >= 8 && bytes[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
-        return Some(FORMAT_PNG.into());
-    }
-    if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
-        return Some(FORMAT_GIF.into());
-    }
-    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return Some(FORMAT_WEBP.into());
-    }
-    if bytes.len() >= 2 && &bytes[..2] == b"BM" {
-        return Some(FORMAT_BMP.into());
-    }
-    // JPEG-XR / WMP container: II-BC magic.
-    if bytes.len() >= 3 && bytes[..3] == [0x49, 0x49, 0xBC] {
-        return Some(FORMAT_JXR.into());
-    }
-    None
+    crate::image::ImageFormat::sniff(bytes).map(|f| f.extension().to_string())
 }
 
 pub fn format_to_mime(format: &str) -> String {

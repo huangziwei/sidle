@@ -8,10 +8,14 @@
 //! - [`jxr_transcode`] — KFX→EPUB glue: JXR decode → JPEG re-encode. This is
 //!   pipeline glue (it depends on `ConvertError` / `jpeg_encoder`), not part
 //!   of the codec.
+//! - [`media_type`] — what a payload's leading bytes say it is.
 //!
 //! The JPEG-XR codec itself lives in the standalone, zero-dependency
 //! top-level [`jxr`] crate (re-exported as `bokai::jxr`).
 
 pub mod jpeg;
 pub mod jxr_transcode;
+pub mod media_type;
 pub mod svg;
+
+pub use media_type::{ImageFormat, media_type_of};

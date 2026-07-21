@@ -101,7 +101,7 @@ pub fn ensure_cover(
     if epub_is_derived && let Some(kfx) = kfx_path {
         let kfx_bytes = std::fs::read(kfx).with_context(|| format!("read {}", kfx.display()))?;
         if kfx_declares_cover(&kfx_bytes) {
-            // IR route (byte-identical to the mechanical port, plan M3).
+            // IR route (byte-identical to the mechanical port).
             let mut book = bokai::Book::from_bytes(&kfx_bytes, bokai::Format::Kfx)
                 .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap (load): {e}"))?;
             let mut buf = std::io::Cursor::new(Vec::new());

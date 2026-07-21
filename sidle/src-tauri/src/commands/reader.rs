@@ -166,21 +166,16 @@ pub struct ReaderBookDto {
     pub page_progression_direction: String,
     /// `[eid, location]` pairs for the Location/% readout — `location` is the
     /// device's human Loc number (position-map pid mapped through the book's
-    /// location_map), so it matches the Kindle; e2k books without a map fall back
-    /// to char counts. See `ReaderBook::locations`.
+    /// location_map), so it matches the Kindle. See `ReaderBook::locations`.
     pub locations: Vec<(i64, i64)>,
     /// Location count — the denominator for whole-book % and "Loc N of M".
     pub max_location: i64,
-    /// True when `locations` is empty because synthesis was deferred off the
-    /// open path (reflowable book without a position map): the reader fetches
-    /// them in the background via [`reader_locations`]. Display-only data.
-    pub locations_pending: bool,
     /// Image-based fixed-layout book (manga / comic): the reader renders
     /// pre-paginated pages (viewport-sized, two-up spreads) instead of reflowing.
     pub fixed_layout: bool,
 }
 
-fn map_toc(points: Vec<bokai::kfx_to_epub::navigation::NavPoint>) -> Vec<ReaderTocDto> {
+fn map_toc(points: Vec<sidle_core::reader::ReaderTocEntry>) -> Vec<ReaderTocDto> {
     points
         .into_iter()
         .map(|p| ReaderTocDto {
@@ -204,8 +199,8 @@ struct BuiltReaderOpen {
     /// All sections `(href, html)` for `reader_fetch_sections`.
     sections: Vec<(String, String)>,
     eid_to_section: std::collections::HashMap<i64, usize>,
-    /// True when the DTO withheld anything (windowed html / pending
-    /// locations) — i.e. the store must be cached even if there are no images.
+    /// True when the DTO withheld section HTML — i.e. the store must be cached
+    /// even if there are no images.
     withheld: bool,
 }
 
@@ -214,7 +209,7 @@ struct BuiltReaderOpen {
 /// section; window matches the frontend's fetch priority: back 1 section,
 /// forward 2).
 fn build_reader_open(
-    b: bokai::kfx_to_epub::ReaderBook,
+    b: sidle_core::reader::ReaderBook,
     resume_eid: Option<i64>,
 ) -> BuiltReaderOpen {
     let total_html: usize = b.sections.iter().map(|s| s.html.len()).sum();
@@ -222,19 +217,14 @@ fn build_reader_open(
     let n = b.sections.len();
     let (lo, hi) = if windowed {
         let idx = resume_eid
-            .and_then(|e| b.sections.iter().position(|s| s.eids.contains(&e)))
+            .and_then(|e| b.sections.iter().position(|s| s.elements.contains(&e)))
             .unwrap_or(0);
         (idx.saturating_sub(1), (idx + 2).min(n.saturating_sub(1)))
     } else {
         (0, n.saturating_sub(1))
     };
 
-    let mut eid_to_section = std::collections::HashMap::new();
-    for (i, s) in b.sections.iter().enumerate() {
-        for &e in &s.eids {
-            eid_to_section.entry(e).or_insert(i);
-        }
-    }
+    let eid_to_section = b.section_of_element();
 
     let sections_dto = b
         .sections
@@ -256,7 +246,6 @@ fn build_reader_open(
         })
         .collect();
 
-    let locations_pending = b.locations_deferred;
     let dto = ReaderBookDto {
         sections: sections_dto,
         resources: b
@@ -279,21 +268,20 @@ fn build_reader_open(
             })
             .collect(),
         toc: map_toc(b.toc),
-        title: b.metadata.title,
-        authors: b.metadata.authors,
-        language: b.metadata.language,
+        title: b.title,
+        authors: b.authors,
+        language: b.language,
         writing_mode: b.writing_mode,
         page_progression_direction: b.page_progression_direction,
         locations: b.locations,
         max_location: b.max_location,
-        locations_pending,
         fixed_layout: b.fixed_layout,
     };
     BuiltReaderOpen {
         dto,
         sections: b.sections.into_iter().map(|s| (s.href, s.html)).collect(),
         eid_to_section,
-        withheld: windowed || locations_pending,
+        withheld: windowed,
     }
 }
 
@@ -386,18 +374,18 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
         }
 
         // Reflowable / fixed-layout KFX → DOM: image bytes deferred, large
-        // text books windowed, unmapped locations deferred.
-        let (book, images) = bokai::kfx_to_epub::kfx_to_reader_book_lazy(&kfx)
+        // text books windowed.
+        let (book, images) = sidle_core::reader::ReaderBook::open(&kfx)
             .map_err(|e| format!("KFX→DOM render failed: {e}"))?;
         let built = build_reader_open(book, resume_eid);
-        // Cache the store only when something is left to serve: deferred
-        // images, withheld sections, or pending locations.
-        let entry =
-            (!images.is_empty() || built.withheld).then_some(crate::state::ReaderStoreEntry {
-                images,
-                sections: built.sections,
-                eid_to_section: built.eid_to_section,
-            });
+        // Cache the store only when something is left to serve: images the
+        // manifest promises, or sections the window withheld.
+        let has_images = !built.dto.images.is_empty();
+        let entry = (has_images || built.withheld).then_some(crate::state::ReaderStoreEntry {
+            images,
+            sections: built.sections,
+            eid_to_section: built.eid_to_section,
+        });
         Ok::<(ReaderOpen, Option<crate::state::ReaderStoreEntry>), String>((
             ReaderOpen::Reflowable(built.dto),
             entry,
@@ -434,16 +422,10 @@ pub async fn reader_fetch_resources(
             .images
             .fetch_many(&hrefs)
             .into_iter()
-            .filter_map(|(href, result)| match result {
-                Ok((mime, data)) => Some(ReaderResourceDto {
-                    href,
-                    mime,
-                    data_base64: B64.encode(&data),
-                }),
-                Err(e) => {
-                    eprintln!("[reader] fetch {href}: {e}");
-                    None
-                }
+            .map(|img| ReaderResourceDto {
+                href: img.href,
+                mime: img.mime,
+                data_base64: B64.encode(&img.bytes),
             })
             .collect::<Vec<_>>()
     })
@@ -492,33 +474,6 @@ pub async fn reader_eid_section(
 ) -> Result<Option<i64>, String> {
     let entry = reader_store_entry(&state, book_id).await?;
     Ok(entry.eid_to_section.get(&eid).map(|&i| i as i64))
-}
-
-/// The deferred Location/% map for the open book (see
-/// `ReaderBookDto::locations_pending`).
-#[derive(Debug, Serialize)]
-pub struct ReaderLocationsDto {
-    pub locations: Vec<(i64, i64)>,
-    pub max_location: i64,
-}
-
-/// Synthesize the reader's location map in the background — the full-book
-/// text walk that a lazy open deferred. Fetched once, right after open.
-#[tauri::command]
-pub async fn reader_locations(
-    state: State<'_, AppState>,
-    book_id: i64,
-) -> Result<ReaderLocationsDto, String> {
-    let entry = reader_store_entry(&state, book_id).await?;
-    tokio::task::spawn_blocking(move || {
-        let (locations, max_location) = entry.images.synth_locations();
-        ReaderLocationsDto {
-            locations,
-            max_location,
-        }
-    })
-    .await
-    .map_err(|e| format!("reader locations task join error: {e}"))
 }
 
 /// Drop the open book's fetch store. Called by the frontend on reader close

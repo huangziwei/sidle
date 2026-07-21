@@ -99,10 +99,42 @@ fn images_are_described_but_not_loaded_until_asked() {
 
     // The manifest names them; the bytes arrive only on request.
     let href = book.images[0].href.clone();
-    let bytes = store.fetch(&href).expect("fetch the first image");
-    assert!(!bytes.is_empty(), "{href} fetched as empty");
+    let got = store.fetch(&href).expect("fetch the first image");
+    assert!(!got.bytes.is_empty(), "{href} fetched as empty");
 
     let batch = store.fetch_many(std::slice::from_ref(&href));
     assert_eq!(batch.len(), 1, "batch fetch dropped a known href");
-    assert_eq!(batch[0].1, bytes, "batch and single fetch disagree");
+    assert_eq!(batch[0].bytes, got.bytes, "batch and single fetch disagree");
+    assert_eq!(batch[0].mime, got.mime, "batch and single fetch mime");
+}
+
+#[test]
+fn a_delivered_image_is_labelled_with_what_it_actually_is() {
+    let Some(kfx) = fixture() else { return };
+
+    let (book, store) = ReaderBook::open(&kfx).expect("open the fixture");
+    if book.images.is_empty() {
+        return; // this fixture ships no images
+    }
+
+    // The manifest's media type is a prediction made before the bytes exist;
+    // the delivered one is read off the bytes. A reader that trusted the
+    // prediction would hand a webview a payload it can't decode under a type
+    // it can.
+    let hrefs: Vec<String> = book.images.iter().map(|i| i.href.clone()).collect();
+    for got in store.fetch_many(&hrefs) {
+        assert_eq!(
+            got.mime,
+            bokai::image::media_type_of(&got.bytes),
+            "{} delivered as {} but its bytes are not",
+            got.href,
+            got.mime
+        );
+        assert!(
+            got.mime.starts_with("image/"),
+            "{} delivered as {}",
+            got.href,
+            got.mime
+        );
+    }
 }

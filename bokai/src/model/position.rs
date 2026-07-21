@@ -28,6 +28,10 @@ pub struct PositionMap {
     /// Location boundaries, ascending. `boundaries[k]` is the coordinate at
     /// which the `(k+1)`-th location starts.
     boundaries: Vec<i64>,
+    /// Where the axis ends. The last element's coordinate is where it *starts*,
+    /// so the extent is past it by that element's own length — a distinction
+    /// that only matters to a consumer measuring progress in coordinates.
+    extent: i64,
 }
 
 impl PositionMap {
@@ -36,9 +40,51 @@ impl PositionMap {
     /// hand over whatever order the source listed them in.
     pub fn new(position_of: HashMap<i64, i64>, mut boundaries: Vec<i64>) -> Self {
         boundaries.sort_unstable();
+        // Nothing here knows the last element's length, so the axis is taken to
+        // end at the furthest coordinate named. Sources that ship boundaries
+        // carry the real extent in those instead.
+        let extent = position_of
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .max(boundaries.last().copied().unwrap_or(0));
         Self {
             position_of,
             boundaries,
+            extent,
+        }
+    }
+
+    /// Synthesize a coordinate axis for a source that ships none, measuring it
+    /// in characters of the book's own text: each element sits at the running
+    /// character total of everything ahead of it in reading order.
+    ///
+    /// No location boundaries come out of this, and
+    /// [`has_locations`](Self::has_locations) stays false. Dividing an axis
+    /// into numbered locations is a device convention, and a source that never
+    /// defined one has no numbering to reproduce — inventing boundaries would
+    /// produce a "Location 407" that looks like a device's and matches
+    /// nothing. Progress against [`max_position`](Self::max_position) is
+    /// faithful, which is what a progress readout actually needs.
+    ///
+    /// `reading_order` is every addressable element in presentation order;
+    /// repeats keep their first position. `text_len` gives an element's own
+    /// base-text length — elements it doesn't know occupy no space.
+    pub fn synthesized(reading_order: &[i64], text_len: impl Fn(i64) -> i64) -> Self {
+        let mut position_of = HashMap::with_capacity(reading_order.len());
+        let mut cursor: i64 = 0;
+        for &element in reading_order {
+            if position_of.contains_key(&element) {
+                continue;
+            }
+            position_of.insert(element, cursor);
+            cursor += text_len(element).max(0);
+        }
+        Self {
+            position_of,
+            boundaries: Vec::new(),
+            extent: cursor,
         }
     }
 
@@ -47,6 +93,35 @@ impl PositionMap {
     /// addressable text).
     pub fn position(&self, element: i64, offset: i64) -> Option<i64> {
         self.position_of.get(&element).map(|p| p + offset)
+    }
+
+    /// Whether the source defined the numbered location scale on top of the
+    /// coordinate axis. False for a [`synthesized`](Self::synthesized) map,
+    /// whose coordinates are real but whose locations would be invented — a
+    /// consumer showing progress should read
+    /// [`element_positions`](Self::element_positions) against
+    /// [`max_position`](Self::max_position) instead.
+    pub fn has_locations(&self) -> bool {
+        !self.boundaries.is_empty()
+    }
+
+    /// Every positioned element paired with its raw coordinate, ordered by
+    /// element id. The axis beneath [`element_locations`](Self::element_locations),
+    /// for a consumer that has no location scale to map through.
+    pub fn element_positions(&self) -> Vec<(i64, i64)> {
+        let mut out: Vec<(i64, i64)> = self
+            .position_of
+            .iter()
+            .map(|(&element, &pos)| (element, pos))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// The far end of the coordinate axis — the denominator for progress
+    /// measured in coordinates rather than locations.
+    pub fn max_position(&self) -> i64 {
+        self.extent
     }
 
     /// The location number a coordinate falls in: the count of boundaries
@@ -127,5 +202,54 @@ mod tests {
     fn element_locations_are_ordered_by_element() {
         let m = sample();
         assert_eq!(m.element_locations(), vec![(4, 3), (7, 1), (9, 1)]);
+    }
+
+    #[test]
+    fn a_source_supplied_map_has_locations() {
+        assert!(sample().has_locations());
+        assert_eq!(
+            sample().element_positions(),
+            vec![(4, 300), (7, 0), (9, 50)]
+        );
+    }
+
+    #[test]
+    fn a_synthesized_axis_stacks_elements_by_their_text_length() {
+        let lengths = HashMap::from([(10, 40), (11, 0), (12, 7)]);
+        let m = PositionMap::synthesized(&[10, 11, 12], |e| lengths.get(&e).copied().unwrap_or(0));
+        assert_eq!(m.element_positions(), vec![(10, 0), (11, 40), (12, 40)]);
+        // Past the last element's start by its own length: the axis ends where
+        // the text does.
+        assert_eq!(m.max_position(), 47);
+    }
+
+    #[test]
+    fn a_synthesized_axis_claims_no_locations() {
+        let m = PositionMap::synthesized(&[1, 2], |_| 10);
+        assert!(
+            !m.has_locations(),
+            "synthesized coordinates must not pose as a device's location scale"
+        );
+        assert_eq!(m.location_count(), 0);
+    }
+
+    #[test]
+    fn a_repeated_element_keeps_its_first_position() {
+        // A reading order can name an element twice (it spans a boundary, or a
+        // walk revisits it). The second sighting must not move it or advance
+        // the axis, or everything after it drifts.
+        let m = PositionMap::synthesized(&[1, 2, 1, 3], |_| 10);
+        assert_eq!(m.element_positions(), vec![(1, 0), (2, 10), (3, 20)]);
+        assert_eq!(m.max_position(), 30);
+    }
+
+    #[test]
+    fn an_element_with_no_known_text_takes_no_space() {
+        let m = PositionMap::synthesized(&[1, 2, 3], |e| if e == 2 { -5 } else { 10 });
+        assert_eq!(
+            m.element_positions(),
+            vec![(1, 0), (2, 10), (3, 10)],
+            "a negative length must not walk the axis backwards"
+        );
     }
 }

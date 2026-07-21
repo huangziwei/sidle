@@ -117,7 +117,6 @@ pub fn run() {
             commands::reader::reader_fetch_resources,
             commands::reader::reader_fetch_sections,
             commands::reader::reader_eid_section,
-            commands::reader::reader_locations,
             commands::reader::reader_release,
             commands::reader::reader_pdf_page,
             commands::reader::reader_pdf_ink,

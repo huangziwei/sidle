@@ -71,9 +71,9 @@ enum Command {
         writing_mode: Option<String>,
 
         /// KFX → EPUB engine: `ir` (default — the generic `KfxImporter` → IR →
-        /// `EpubExporter` pipeline, byte-identical to the port corpus-wide per
-        /// plan M3) or `mechanical` (the `kfx_to_epub` calibre port, kept as
-        /// the 1:1 oracle / escape hatch and what the AB harness pins).
+        /// `EpubExporter` pipeline, byte-identical to the port corpus-wide) or
+        /// `mechanical` (the `kfx_to_epub` calibre port, kept as the 1:1
+        /// oracle / escape hatch and what the AB harness pins).
         #[arg(long = "route", default_value = "ir")]
         route: String,
     },

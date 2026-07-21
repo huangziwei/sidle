@@ -2,6 +2,17 @@
 
 use bokai::model::{Book, Format};
 
+/// One image, delivered.
+pub struct FetchedImage {
+    pub href: String,
+    /// Media type of `bytes` as they actually are, sniffed on delivery rather
+    /// than taken from the manifest. The two agree almost always, and the
+    /// exception matters: a JPEG-XR page the decoder can't read passes through
+    /// as JPEG-XR, though every declaration ahead of it predicted JPEG.
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
 /// Produces a book's image bytes when the reader asks for them.
 ///
 /// Holds the parsed book so a fetch is a decode of one image rather than a
@@ -26,17 +37,18 @@ impl ImageStore {
         Ok(Self::new(book))
     }
 
-    /// One image's bytes. `None` for an href this book doesn't hold.
-    pub fn fetch(&self, href: &str) -> Option<Vec<u8>> {
+    /// One image. `None` for an href this book doesn't hold.
+    pub fn fetch(&self, href: &str) -> Option<FetchedImage> {
         let mut book = self.book.lock().ok()?;
-        book.load_asset(std::path::Path::new(href)).ok()
+        let bytes = book.load_asset(std::path::Path::new(href)).ok()?;
+        Some(delivered(href.to_string(), bytes))
     }
 
     /// Fetch several at once. The importer decodes across cores where the
     /// format makes that worthwhile (KFX transcodes JPEG-XR in parallel).
-    /// Unknown hrefs are dropped from the result rather than failing the
-    /// batch.
-    pub fn fetch_many(&self, hrefs: &[String]) -> Vec<(String, Vec<u8>)> {
+    /// Unknown or unreadable hrefs are dropped from the result rather than
+    /// failing the batch.
+    pub fn fetch_many(&self, hrefs: &[String]) -> Vec<FetchedImage> {
         let Ok(mut book) = self.book.lock() else {
             return Vec::new();
         };
@@ -44,7 +56,21 @@ impl ImageStore {
         book.load_assets(&paths)
             .into_iter()
             .zip(hrefs)
-            .filter_map(|(bytes, href)| Some((href.clone(), bytes.ok()?)))
+            .filter_map(|(bytes, href)| match bytes {
+                Ok(bytes) => Some(delivered(href.clone(), bytes)),
+                Err(e) => {
+                    eprintln!("[reader] fetch {href}: {e}");
+                    None
+                }
+            })
             .collect()
+    }
+}
+
+fn delivered(href: String, bytes: Vec<u8>) -> FetchedImage {
+    FetchedImage {
+        mime: bokai::image::media_type_of(&bytes).to_string(),
+        href,
+        bytes,
     }
 }

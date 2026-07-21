@@ -417,8 +417,8 @@ fn convert_kfx_to_epub(
     // rather than threading the bytes through the queue. `from_bytes` is the
     // container parse (the `load` phase); `export_with_progress` emits
     // content/resources/nav/finalize. Output is byte-identical to the
-    // mechanical `kfx_to_epub` port (verified 1:1 corpus-wide, plan M3), which
-    // survives as the `bokai convert --route mechanical` oracle.
+    // mechanical `kfx_to_epub` port (verified 1:1 corpus-wide), which survives
+    // as the `bokai convert --route mechanical` oracle.
     let kfx_bytes = std::fs::read(source_path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
     on_progress("load", 0, 1, "Reading KFX");

@@ -178,7 +178,6 @@ function stopResLoader(st) {
 // section loaders read.
 
 let secLoader = null; // per-open section-stream state (large reflowable books)
-let locationsPending = false; // deferred Loc/% map still being synthesized
 
 const SEC_CHUNK = 4; // sections per fetch (~150 KB avg each on a windowed book)
 
@@ -264,13 +263,13 @@ function stopSecLoader(st) {
 }
 
 // Free the backend store once everything deferred has been delivered — the
-// webview owns all of it from then on (image blobs, section HTML, the
-// location map). Safe to call often; the backend release is idempotent.
+// webview owns all of it from then on (image blobs, section HTML). Safe to
+// call often; the backend release is idempotent.
 function maybeReleaseStore() {
   if (bookId == null) return;
   const imgsDone = !resLoader || resLoader.cancelled || resLoader.attempted.size >= resLoader.total;
   const secsDone = !secLoader || secLoader.cancelled || secLoader.fetched >= secLoader.total;
-  if (imgsDone && secsDone && !locationsPending) {
+  if (imgsDone && secsDone) {
     window.api.invoke("reader_release", { bookId }).catch(() => {});
   }
 }
@@ -2804,7 +2803,6 @@ async function closePdf() {
   resLoader = null;
   stopSecLoader(secLoader);
   secLoader = null;
-  locationsPending = false;
   updateBufferedIndicator();
   pdf = null;
   pdfTocRows = [];
@@ -3945,35 +3943,6 @@ async function open(id) {
     eidToSection = null;
     updateBufferedIndicator();
   });
-  // Deferred Loc/% map (reflowable book without a position map): fetch in the
-  // background; the statusbar and annotation Locs fill in when it lands. The
-  // page anchor (eid) works from first paint regardless — see positionedFor.
-  locationsPending = !!dto.locations_pending;
-  if (locationsPending) {
-    const forBook = id;
-    window.api
-      .invoke("reader_locations", { bookId: id })
-      .then((r) => {
-        if (bookId !== forBook || readerMode !== "reflowable") return;
-        locByEid = new Map(r?.locations || []);
-        maxLoc = r?.max_location || 0;
-        locationsPending = false;
-        positionedByDoc = new WeakMap(); // per-doc caches were built loc-less
-        if (livePosition?.eid != null) {
-          const loc = locByEid.get(livePosition.eid) ?? null;
-          livePosition.linear_pos = loc;
-          if (lastPos) lastPos.loc = loc;
-        }
-        renderProgress();
-        renderAnnotationsPanel(); // rows can show their Loc now
-        maybeReleaseStore();
-      })
-      .catch(() => {
-        if (bookId !== forBook) return;
-        locationsPending = false;
-        maybeReleaseStore();
-      });
-  }
   updateBufferedIndicator();
   book = makeKfxBook(dto, {
     resolve: (h) => resLoader?.resolve(h) ?? null,
@@ -4105,7 +4074,6 @@ async function close() {
   resLoader = null;
   stopSecLoader(secLoader);
   secLoader = null;
-  locationsPending = false;
   updateBufferedIndicator();
   dto = null;
   bookId = null;

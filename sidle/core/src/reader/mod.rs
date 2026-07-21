@@ -16,12 +16,12 @@
 
 mod images;
 
-pub use images::ImageStore;
+pub use images::{FetchedImage, ImageStore};
 
 use std::collections::HashMap;
 
 use bokai::export::{PackageOptions, build_package};
-use bokai::model::{Book, Format};
+use bokai::model::{Book, Format, PositionMap};
 
 /// One document in reading order, plus what a paginator needs to place it.
 pub struct ReaderSection {
@@ -88,16 +88,19 @@ pub struct ReaderBook {
     pub writing_mode: String,
     /// e.g. `"rtl"` / `"ltr"`.
     pub page_progression_direction: String,
-    /// `(element, location)` for positioned elements — the "Location" readout.
-    /// This is the device's human Loc number, not a raw position: the source's
-    /// position map mapped through its location map. Cosmetic; the
-    /// `(element, offset)` anchors annotations use are independent of it.
+    /// `(element, position)` for every placed element — the progress readout.
+    /// Read it against [`Self::max_location`]; see [`Self::real_locations`] for
+    /// whether the numbers are a device's Loc or a synthesized axis. Cosmetic
+    /// either way: the `(element, offset)` anchors annotations use are
+    /// independent of it.
     pub locations: Vec<(i64, i64)>,
-    /// Denominator for whole-book percentage and "Loc N of M".
+    /// Denominator for whole-book percentage and "N of M".
     pub max_location: i64,
-    /// True when `locations` could not be computed because the source ships no
-    /// position map. Display-only data, so the reader opens without it.
-    pub locations_missing: bool,
+    /// Whether [`Self::locations`] are the device's own Location numbers (the
+    /// source shipped a location scale) or characters along a synthesized axis
+    /// (it didn't). The percentage is faithful either way; only a label reading
+    /// "Loc 407" would be a lie in the second case.
+    pub real_locations: bool,
     /// Image-based fixed layout (manga / comic): pre-paginated rendering, one
     /// page per section, two-up spreads.
     pub fixed_layout: bool,
@@ -182,15 +185,31 @@ impl ReaderBook {
         }
 
         let writing_mode = package.writing_mode.clone();
-        let (locations, max_location, locations_missing) = if positions.is_empty() {
-            (Vec::new(), 0, true)
+        // A source that ships a position scale is measured on it. One that
+        // doesn't (a KFX converted from an EPUB carries none) gets an axis
+        // synthesized from its own text, so the reader still has a progress
+        // readout — built from the element order and per-element text the walk
+        // above already collected, not from a second pass over the book.
+        let positions = if positions.is_empty() {
+            let text = book.source_text();
+            let order: Vec<i64> = sections
+                .iter()
+                .flat_map(|s| s.elements.iter().copied())
+                .collect();
+            PositionMap::synthesized(&order, |e| {
+                text.as_ref()
+                    .and_then(|t| t.text_of(e))
+                    .map_or(0, |s| s.chars().count() as i64)
+            })
         } else {
-            (
-                positions.element_locations(),
-                positions.location_count(),
-                false,
-            )
+            positions
         };
+        let (locations, max_location) = if positions.has_locations() {
+            (positions.element_locations(), positions.location_count())
+        } else {
+            (positions.element_positions(), positions.max_position())
+        };
+        let real_locations = positions.has_locations();
 
         let metadata = book.metadata();
         let reader = ReaderBook {
@@ -208,7 +227,7 @@ impl ReaderBook {
                 .unwrap_or_else(|| "ltr".to_string()),
             locations,
             max_location,
-            locations_missing,
+            real_locations,
             fixed_layout: metadata.fixed_layout,
         };
         Ok((reader, ImageStore::new(book)))
