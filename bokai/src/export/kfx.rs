@@ -1234,19 +1234,6 @@ fn book_writing_mode(book: &mut Book) -> KfxSymbol {
     dominant_writing_mode_from_ir(book)
 }
 
-/// Recover the book-level writing mode from the content when the OPF declares
-/// no `primary-writing-mode` (see [`book_writing_mode`]), by scanning every
-/// chapter's IR style pool.
-///
-/// This runs *before* Pass 2 so the answer is available while IR styles are
-/// being ingested. The ingest side then compares each style's `writing_mode`
-/// against this — emitting `writing_mode: horizontal_tb` on overrides in
-/// vertical books, which the previous KFX-side scan couldn't recover
-/// because `extract_ir_field` had already filtered horizontal-tb out as
-/// the CSS-spec default.
-///
-/// Distinct styles in the pool are counted. Only the vertical axes are
-/// tallied; [`pick_document_writing_mode`] then decides the book-level mode.
 /// The font family in effect at `id` — the nearest self-or-ancestor style that
 /// names one, mirroring how `font-family` inherits.
 fn inherited_font_family(chapter: &Chapter, id: NodeId) -> Option<&str> {
@@ -1265,7 +1252,24 @@ fn inherited_font_family(chapter: &Chapter, id: NodeId) -> Option<&str> {
     None
 }
 
-/// The font-family stack carrying the book's body text — the one a reader's
+/// Share of a book's text the leading `font-family` stack must carry before it
+/// counts as the body font.
+///
+/// Fitted to Amazon's own decisions, not chosen: a KFX records the verdict
+/// directly, since a stack written with `default` at its head defers to the
+/// reader and a bare one pins the device font. Scored over 917 stacks in 435
+/// Amazon books, "the leading stack, when it carries at least this share"
+/// agrees on 903 — and every threshold from 40% up is free of *false* deferrals,
+/// while higher ones start missing books Amazon hands over (one is deferred at
+/// 44.5%, its book set in three faces with no majority among them). So this
+/// sits at the bottom of the range that never over-defers.
+///
+/// The 14 remaining disagreements are all books where Amazon additionally
+/// deferred a second stack carrying under 1% of the text — no reader can tell,
+/// and matching it would mean deferring near-empty stacks by rule.
+const BODY_TEXT_SHARE_PERCENT: usize = 40;
+
+/// The `font-family` stack carrying the book's body text — the one a reader's
 /// font setting exists to restyle.
 ///
 /// **Why this exists.** A KFX style that names a family pins the device font;
@@ -1273,25 +1277,31 @@ fn inherited_font_family(chapter: &Chapter, id: NodeId) -> Option<&str> {
 /// family on body text — `font-family: serif-ja, serif`, `font-family:
 /// booksming, serif` — disables the Kindle's font control once carried through
 /// literally: the setting has nothing left to override. Amazon's own converter
-/// never leaves the body font named. It writes `default` at the head of the
+/// never leaves running text named. It writes `default` at the head of the
 /// stack, and keeps a family unqualified only where the publisher asked for a
 /// *contrast*.
 ///
-/// **Coverage decides which stack is the body, not style count.** The body font
-/// is whichever stack most of the book's *text* is set in, and that is rarely
-/// the stack named by the most styles: a handful of decorative styles naming a
-/// typeface routinely outnumber the one style carrying the body, and those
-/// decorative ones are exactly what has to survive. Nor does the *name* decide
-/// it — a category (`serif-ja`) and a typeface (`booksming`) pin the device
-/// font equally hard. A stack under half the book's text is a contrast whatever
-/// it names, and a book that styles no majority of its text has no body font to
-/// hand over.
+/// **Coverage decides, not style count.** A stack qualifies on the share of the
+/// book's *text* it sets, which is rarely the stack named by the most styles: a
+/// handful of decorative styles naming a typeface routinely outnumber the one
+/// style carrying the body, and those decorative ones are exactly what has to
+/// survive. Nor does the *name* decide it — a category (`serif-ja`) and a
+/// typeface (`booksming`) pin the device font equally hard.
+///
+/// **Exactly one stack hands over, even when a book reads in several faces.**
+/// An anthology whose quoted stories use a second face keeps that face pinned,
+/// so the font control does nothing while the reader is inside one — a real
+/// limitation, and Amazon's: across the reference corpus it defers a single
+/// stack per book without exception. Widening this to every face that owns a
+/// chapter would fix such books at the cost of flattening the contrasts Amazon
+/// deliberately keeps (a classic's kai annotation, a gothic inset). Matching
+/// the platform wins; the divergence is not ours to introduce.
 ///
 /// **Embedding the face changes nothing.** A book that ships its own typefaces
-/// still hands the body over: the shipped faces stay named on the cover and
-/// display styles that asked for them, and the reader's setting governs the
-/// running text. Keeping an embedded family on the body instead is what leaves
-/// the font control inert, and it is not what the publisher's own build does.
+/// still hands its running text over: the shipped faces stay named on the cover
+/// and display styles that asked for them, and the reader's setting governs the
+/// reading. Keeping an embedded family on the body instead is what leaves the
+/// font control inert, and it is not what the publisher's own build does.
 /// Offering that face as a *choice* is a separate switch — see
 /// [`MetadataContext::has_publisher_fonts`](crate::formats::kfx::metadata::MetadataContext::has_publisher_fonts).
 fn body_font_stack(book: &mut Book) -> Option<String> {
@@ -1326,10 +1336,22 @@ fn body_font_stack(book: &mut Book) -> Option<String> {
     let (body, len) = covered
         .into_iter()
         .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))?;
-    // Under half the book's text this is a contrast, not the body font.
-    (len * 2 > total).then_some(body)
+    (len * 100 >= total * BODY_TEXT_SHARE_PERCENT).then_some(body)
 }
 
+/// Recover the book-level writing mode from the content when the OPF declares
+/// no `primary-writing-mode` (see [`book_writing_mode`]), by scanning every
+/// chapter's IR style pool.
+///
+/// This runs *before* Pass 2 so the answer is available while IR styles are
+/// being ingested. The ingest side then compares each style's `writing_mode`
+/// against this — emitting `writing_mode: horizontal_tb` on overrides in
+/// vertical books, which the previous KFX-side scan couldn't recover
+/// because `extract_ir_field` had already filtered horizontal-tb out as
+/// the CSS-spec default.
+///
+/// Distinct styles in the pool are counted. Only the vertical axes are
+/// tallied; [`pick_document_writing_mode`] then decides the book-level mode.
 fn dominant_writing_mode_from_ir(book: &mut Book) -> KfxSymbol {
     use crate::style::WritingMode;
     let mut vrl = 0usize;
