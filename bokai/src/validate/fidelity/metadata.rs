@@ -242,9 +242,9 @@ pub fn validate(
     // Flag only when the KFX *has* a language that bokai didn't carry faithfully
     // (dropped, or changed). When the KFX language is empty, bokai supplying a
     // default `dc:language` is required by EPUB and isn't a fidelity defect —
-    // there's nothing in the source to be unfaithful to. (bokai's hard-coded "en"
-    // fallback is a poor default for a CJK-heavy library, but no corpus book hits
-    // it wrongly; revisit if a non-English empty-language book appears.)
+    // there's nothing in the source to be unfaithful to. (The hard-coded "en"
+    // fallback is a poor default for CJK content; it only misfires on a book
+    // whose KFX language is empty and whose text is not English.)
     if !kfx.language.is_empty() && epub.language != kfx.language {
         diffs.push(FieldDiff {
             field: "language",
@@ -535,9 +535,9 @@ fn extract_epub_metadata(epub_bytes: &[u8]) -> Result<EpubMetadata, String> {
     let opf_str = crate::util::decode_text(&opf_bytes, enc);
     let opf = parse_opf(&opf_str).map_err(|e| format!("opf parse: {:?}", e))?;
 
-    // The shared epub::parse_opf strips a lot of fields we now need for
-    // round-trip; rescan the raw OPF source for `<dc:identifier>` schemes,
-    // `<dc:date>`, and `<meta name="primary-writing-mode">`. The lossy
+    // The shared epub::parse_opf strips fields that round-trip checking needs,
+    // so rescan the raw OPF source for `<dc:identifier>` schemes, `<dc:date>`,
+    // and `<meta name="primary-writing-mode">`. The lossy
     // representation in `Metadata` is fine for the existing extractors but
     // can't tell us "0 identifiers" vs "1 unique" reliably across schemes.
     let identifiers = scan_opf_identifiers(&opf_str);

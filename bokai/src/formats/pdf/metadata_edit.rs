@@ -10,9 +10,9 @@
 //!
 //! ## Field mapping
 //!
-//! The editor's fields are format-neutral (they mirror the library's metadata
-//! form), and `/Info` (PDF 32000-1 §14.3.3) is a much thinner schema than an
-//! OPF's Dublin Core, so three fields map with a caveat:
+//! The editor's fields are format-neutral, and `/Info` (PDF 32000-1 §14.3.3)
+//! is a much thinner schema than an OPF's Dublin Core, so three fields map with
+//! a caveat:
 //!
 //! | patch field | `/Info` key | note |
 //! |---|---|---|
@@ -101,7 +101,7 @@ pub fn edit_metadata(pdf_bytes: &[u8], patch: &MetadataPatch) -> std::io::Result
 /// Convert an ISO-ish `YYYY-MM-DD` (optionally with a trailing time we ignore)
 /// into a PDF date string `D:YYYYMMDD000000Z` (PDF 32000-1 §7.9.4).
 ///
-/// `None` for anything that isn't a plausible date — the library stores dates as
+/// `None` for anything that isn't a plausible date. Callers hand dates in as
 /// free text, and writing an unparseable value into `/CreationDate` would
 /// produce a date field readers silently drop. Leaving the original is better
 /// than corrupting it.

@@ -458,9 +458,9 @@ mod tests {
     #[test]
     fn outline_becomes_nested_toc_in_kfx() {
         // A 2-page book with a one-level-nested outline → a book_navigation TOC
-        // whose labels are embedded verbatim. Targets are exercised structurally
-        // by the on-corpus harness; here we assert the labels land and that the
-        // TOC doesn't disturb the byte-identical PDF round-trip.
+        // whose labels are embedded verbatim. This case covers the labels
+        // landing and the TOC not disturbing the byte-identical PDF round-trip;
+        // target resolution is covered separately.
         let bytes = fake_pdf();
         let doc = PdfDoc {
             bytes: bytes.clone(),
@@ -512,9 +512,9 @@ mod tests {
 
     #[test]
     fn edited_date_and_publisher_land_in_book_metadata() {
-        // The library's edited year/publisher must reach the PDOC book_metadata
-        // (as `issue_date`/`publisher`), not only the renamed filename. The date
-        // is truncated to YYYY-MM-DD.
+        // An edited year/publisher must reach the PDOC book_metadata (as
+        // `issue_date`/`publisher`), not only the renamed filename. The date is
+        // truncated to YYYY-MM-DD.
         let bytes = fake_pdf();
         let doc = PdfDoc {
             bytes,

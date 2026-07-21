@@ -330,8 +330,8 @@ mod tests {
 
     #[test]
     fn decode_pdfdoc_typographic_bytes() {
-        // The bug this fixes: 0x8F/0x90 are curly single quotes in
-        // PDFDocEncoding, not C1 control codes. 0x97=Scaron, 0x96=OE.
+        // 0x8F/0x90 are curly single quotes in PDFDocEncoding, not C1 control
+        // codes. 0x97=Scaron, 0x96=OE.
         let s = decode_pdf_string(b"\x8fHello\x90 \x97 \x96 \x84dash");
         assert_eq!(s, "\u{2018}Hello\u{2019} \u{0160} \u{0152} \u{2014}dash");
     }

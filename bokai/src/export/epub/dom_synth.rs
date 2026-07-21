@@ -266,11 +266,10 @@ impl Builder<'_, '_> {
 
     /// Emit an image, or the degradation for one whose bytes aren't there.
     ///
-    /// A source can reference an image it does not ship. Real publisher EPUBs
-    /// in this corpus do it both ways: one names `image_0018.png` while the
-    /// manifest declares `image_0018.jpg`, another references sixteen images
-    /// and contains two. Amazon KFX does it too, where resource extraction
-    /// logs a missing `bcRawMedia`.
+    /// A source can reference an image it does not ship: an `<img src>` whose
+    /// extension disagrees with the manifest entry, or a spine that cites more
+    /// images than the container holds. KFX does it too, where the cited
+    /// `bcRawMedia` is absent.
     ///
     /// Carrying the reference through would put an `<img src>` in the output
     /// naming a file the container has no entry for — epubcheck RSC-007, and a

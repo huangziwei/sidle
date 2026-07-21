@@ -327,8 +327,8 @@ fn build_kfx_container(
     ctx.reader_font_family = body_font_stack(book);
     // Stamp a device-recognized content language on every reflowable style so the
     // Kindle selects CJK fonts + upright vertical orientation. Without it a
-    // Chinese/Japanese book renders in Latin fonts with sideways glyphs — Amazon
-    // stamps this on its own styles (e.g. `zh-tw`); bokai previously did not.
+    // Chinese/Japanese book renders in Latin fonts with sideways glyphs. Amazon
+    // stamps this on its own styles (e.g. `zh-tw`).
     ctx.content_language =
         crate::formats::kfx::metadata::kfx_content_language(&book.metadata().language);
 
@@ -351,6 +351,11 @@ fn build_kfx_container(
 
     // 2a. Content features fragment ($585)
     fragments.push(build_content_features_fragment(&ctx));
+
+    // Offering the publisher's typefaces is a metadata claim, so it has to be
+    // settled before the metadata fragment is written — ahead of the font
+    // entities themselves, which are built further down.
+    ctx.has_publisher_fonts = has_publisher_fonts(book);
 
     // 2b. Book metadata fragment ($490) - contains categorised_metadata
     fragments.push(build_book_metadata_fragment(book, &container_id, &ctx));
@@ -814,6 +819,18 @@ fn build_metadata_fragment(meta: &crate::model::Metadata, ctx: &ExportContext) -
 ///
 /// Uses the metadata schema to map IR metadata to KFX categories.
 /// To add new metadata fields, update the schema in `kfx/metadata.rs`.
+/// Does the book ship a typeface of its own, and ask for it?
+///
+/// Both halves matter. Font files nothing references are dead weight rather
+/// than a publisher font, and an `@font-face` naming a file the container lacks
+/// cannot be honored — neither buys the reader a choice.
+fn has_publisher_fonts(book: &mut Book) -> bool {
+    if book.font_faces().is_empty() {
+        return false;
+    }
+    book.list_assets().iter().any(|p| is_font_asset(p))
+}
+
 fn build_book_metadata_fragment(
     book: &Book,
     container_id: &str,
@@ -884,6 +901,7 @@ fn build_book_metadata_fragment(
         book_id,
         asin,
         content_id,
+        has_publisher_fonts: ctx.has_publisher_fonts,
     };
 
     // Build each category using the schema. Order matches calibre's KFX:
@@ -1269,16 +1287,14 @@ fn inherited_font_family(chapter: &Chapter, id: NodeId) -> Option<&str> {
 /// it names, and a book that styles no majority of its text has no body font to
 /// hand over.
 ///
-/// A face the book embeds is never deferred: the publisher shipped that file,
-/// so the name resolves to something real rather than pinning a font the device
-/// does not have.
+/// **Embedding the face changes nothing.** A book that ships its own typefaces
+/// still hands the body over: the shipped faces stay named on the cover and
+/// display styles that asked for them, and the reader's setting governs the
+/// running text. Keeping an embedded family on the body instead is what leaves
+/// the font control inert, and it is not what the publisher's own build does.
+/// Offering that face as a *choice* is a separate switch — see
+/// [`MetadataContext::has_publisher_fonts`](crate::formats::kfx::metadata::MetadataContext::has_publisher_fonts).
 fn body_font_stack(book: &mut Book) -> Option<String> {
-    let embedded: HashSet<String> = book
-        .font_faces()
-        .iter()
-        .map(|f| f.font_family.trim().trim_matches('"').to_ascii_lowercase())
-        .collect();
-
     let mut covered: HashMap<String, usize> = HashMap::new();
     let mut total = 0usize;
     let chapter_ids: Vec<_> = book.spine().iter().map(|e| e.id).collect();
@@ -1311,11 +1327,7 @@ fn body_font_stack(book: &mut Book) -> Option<String> {
         .into_iter()
         .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))?;
     // Under half the book's text this is a contrast, not the body font.
-    if len * 2 <= total {
-        return None;
-    }
-    let preferred = crate::style::preferred_font_face(&body).to_ascii_lowercase();
-    (!embedded.contains(&preferred)).then_some(body)
+    (len * 2 > total).then_some(body)
 }
 
 fn dominant_writing_mode_from_ir(book: &mut Book) -> KfxSymbol {
@@ -3491,6 +3503,7 @@ fn image_fxl_to_kfx(
     // 1. content_features ($585)
     fragments.push(build_manga_content_features_fragment(any_spread, any_thumb));
     // 2. book_metadata ($490) — reuse the reflowable builder (reads Book metadata)
+    ctx.has_publisher_fonts = has_publisher_fonts(book);
     fragments.push(build_book_metadata_fragment(book, &container_id, &ctx));
     // 3. metadata ($258) — reading order + page-progression-direction
     fragments.push(build_pdf_metadata_fragment(&ctx, ppd_sym));

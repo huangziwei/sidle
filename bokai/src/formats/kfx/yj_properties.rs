@@ -156,17 +156,17 @@ fn is_default_font_name(s: &str) -> bool {
 /// and plain ASCII-identifier names stay unquoted (e.g. `times new roman`,
 /// `serif`); everything else is quoted.
 ///
-/// KFX's `default` — "whatever font the reader has chosen" — is dropped. CSS
-/// has no such name, so carrying it through would ask for a typeface called
-/// "default" and silently fall through to the next entry. CSS spells the same
-/// intent by leaving `font-family` unset, which is what a stack of nothing but
-/// `default` becomes: an empty value the caller skips.
+/// The KFX families standing for "whatever font the reader has chosen" are
+/// dropped. CSS has no such name, so carrying one through would ask for a
+/// typeface called `default` and silently fall through to the next entry. CSS
+/// spells the same intent by leaving `font-family` unset, which is what a stack
+/// of nothing but those becomes: an empty value the caller skips.
 fn normalize_font_family(value: &str) -> String {
     value
         .split(',')
         .filter_map(|fam| {
             let f = fam.trim();
-            if f.is_empty() || f.eq_ignore_ascii_case(KFX_READER_FONT) {
+            if f.is_empty() || is_kfx_reader_font(f) {
                 None
             } else if is_generic_font_keyword(f) || is_safe_unquoted_font(f) {
                 Some(f.to_string())
@@ -181,8 +181,14 @@ fn normalize_font_family(value: &str) -> String {
         .join(", ")
 }
 
-/// The KFX font family standing for the reader's own font choice.
-const KFX_READER_FONT: &str = "default";
+/// Does this family name stand for the reader's own font choice rather than a
+/// typeface? `default` is the ordinary spelling; `$amzn_fixup_default_font$`
+/// appears where a source stylesheet named no family at all and the producer
+/// substituted one.
+fn is_kfx_reader_font(name: &str) -> bool {
+    const READER_FONTS: &[&str] = &["default", "$amzn_fixup_default_font$"];
+    READER_FONTS.iter().any(|f| name.eq_ignore_ascii_case(f))
+}
 
 fn is_generic_font_keyword(f: &str) -> bool {
     matches!(
@@ -612,8 +618,7 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
     // `-kfx-attrib-xml-lang` is a sentinel for "set xml:lang attribute",
     // not real CSS, and is stripped by simplify_styles before serialization.
     // Book-level `xml:lang` on every spine `<html>` (set in `process_section`)
-    // covers the same intent; per-element lang overrides are rare and not
-    // present in our corpus.
+    // covers the same intent; per-element lang overrides are rare.
 
     // ---- writing-mode (THE big one for this port) ----
     (

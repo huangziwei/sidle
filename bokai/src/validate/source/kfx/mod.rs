@@ -30,7 +30,7 @@
 //!   that text is otherwise silently dropped). Mirrors `resolve_content_text`.
 //! - **Rule 5, nav reachability** — every navigation entry targets an element a
 //!   storyline contains; a dangling target tap-jumps to nowhere (a warning).
-//!   Delegates to `fidelity::nav`'s corpus-tested extraction (cover / section-
+//!   Delegates to `fidelity::nav`'s shared extraction (cover / section-
 //!   root positions exempt via `cover_target`).
 //! - **Rule 6, style refs resolve** — every `style` ($157) an element cites
 //!   names a real `style` entity. A dangling style renders unstyled (a warning —
@@ -465,7 +465,7 @@ fn cover_resource_resolves(book: &BookData, cover_name: &str) -> bool {
 
 /// Rule 5. Every navigation entry (chapter list / headings) must jump to an
 /// element some storyline actually contains; a dangling target tap-jumps to
-/// nowhere on device. Delegates to `fidelity::nav`'s corpus-tested KFX
+/// nowhere on device. Delegates to `fidelity::nav`'s shared KFX
 /// extraction so this checker and the conversion-fidelity `nav` diff apply the
 /// exact same reachability rule (cover / section-root positions exempt). A
 /// warning, not an error: the book still reads, only the broken entry misbehaves.

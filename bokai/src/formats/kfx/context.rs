@@ -752,6 +752,13 @@ pub struct ExportContext {
     /// `HorizontalTb`.
     pub style_writing_mode_baseline: KfxSymbol,
 
+    /// Whether the book ships typefaces of its own, which the device is told
+    /// through `override_kindle_font`. See
+    /// [`MetadataContext::has_publisher_fonts`](super::metadata::MetadataContext::has_publisher_fonts)
+    /// — it is what puts **Publisher Font** in the font picker and keeps the
+    /// device fonts selectable alongside it.
+    pub has_publisher_fonts: bool,
+
     /// The `font-family` stack carrying the book's body text, which is written
     /// with `default` at its head so the reader's font setting still applies.
     ///
@@ -898,6 +905,7 @@ impl ExportContext {
             ruby_registry: RubyContentRegistry::new(),
             document_writing_mode: KfxSymbol::HorizontalTb,
             style_writing_mode_baseline: KfxSymbol::HorizontalTb,
+            has_publisher_fonts: false,
             reader_font_family: None,
             document_direction: KfxSymbol::Ltr,
             content_language: String::new(),

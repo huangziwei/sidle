@@ -36,10 +36,9 @@ use lopdf::{Dictionary, Object, ObjectId, Stream};
 use super::doc::{deref, encode_pdf_string, page_dimensions};
 use super::edit::PdfPackage;
 
-/// JPEG quality for the embedded cover. 88 sits above the 85 the library's own
-/// cover renderer uses (`render::COVER_JPEG_QUALITY`) — this image is the
-/// archival copy inside the book, and the render downstream of it is lossy
-/// again, so it's worth a couple of points.
+/// JPEG quality for the embedded cover. Deliberately a few points above what a
+/// display-time cover render would use: this image is the archival copy inside
+/// the book, and anything rendered from it is lossy again.
 const COVER_JPEG_QUALITY: u8 = 88;
 
 /// How to give the PDF a cover page.

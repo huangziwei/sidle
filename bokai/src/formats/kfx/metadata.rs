@@ -196,6 +196,9 @@ pub enum MetadataField {
     SeriesName,
     /// Series position (group-position)
     SeriesPosition,
+    /// Whether the book ships typefaces of its own — from context, not
+    /// Metadata. Emitted as `override_kindle_font`.
+    PublisherFonts,
 }
 
 impl MetadataField {
@@ -250,6 +253,7 @@ impl MetadataField {
             | MetadataField::BookId
             | MetadataField::Asin
             | MetadataField::ContentId
+            | MetadataField::PublisherFonts
             | MetadataField::SeriesPosition => None,
         }
     }
@@ -334,7 +338,7 @@ pub fn metadata_schema() -> Vec<MetadataRule> {
         MetadataRule {
             key: "override_kindle_font",
             category: MetadataCategory::KindleTitle,
-            source: MetadataSource::StaticBool(false),
+            source: MetadataSource::Dynamic(MetadataField::PublisherFonts),
         },
         // Extended metadata for better round-trip fidelity
         MetadataRule {
@@ -411,6 +415,17 @@ pub struct MetadataContext<'a> {
     /// Amazon's catalogue by ASIN (cover fetch, store lookup) gets nothing
     /// back for a synthesized value.
     pub asin: Option<String>,
+    /// Whether the book ships typefaces of its own, written out as
+    /// `override_kindle_font`.
+    ///
+    /// The name reads backwards: `true` does not force the publisher's font, it
+    /// *offers* it. The device adds a **Publisher Font** entry to the font
+    /// picker, selects it, and lets the reader switch away to a device font.
+    /// Left `false`, a book whose styles name an embedded face renders in that
+    /// face with no way to change it — the font picker lists only device fonts,
+    /// and none of them takes effect.
+    pub has_publisher_fonts: bool,
+
     /// `content_id` — device-internal identifier Kindle uses to key the
     /// per-book `.sdr` state directory (bookmarks, reading position,
     /// navigation overlay). Distinct from ASIN: it never leaves the device
@@ -578,6 +593,9 @@ pub fn build_category_entries(
                         // Passthrough only — never fabricated. Empty when the
                         // source EPUB carries no ASIN.
                         ctx.asin.clone().map(MetadataValue::Text)
+                    }
+                    MetadataField::PublisherFonts => {
+                        Some(MetadataValue::Bool(ctx.has_publisher_fonts))
                     }
                     MetadataField::ContentId => {
                         // Device-internal `.sdr` key. Always synthesized from
@@ -919,18 +937,39 @@ mod tests {
     }
 
     #[test]
-    fn test_is_sample_and_override_kindle_font_are_static_false_bools() {
+    fn test_is_sample_and_override_kindle_font_are_ion_bools() {
         let meta = Metadata {
             title: "Test".to_string(),
             language: "en".to_string(),
             ..Default::default()
         };
-        let ctx = MetadataContext::default();
-        let entries = build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx);
-        let is_sample = entries.iter().find(|(k, _)| *k == "is_sample");
-        let override_kf = entries.iter().find(|(k, _)| *k == "override_kindle_font");
-        assert!(matches!(is_sample, Some((_, MetadataValue::Bool(false)))));
-        assert!(matches!(override_kf, Some((_, MetadataValue::Bool(false)))));
+        let entry = |ctx: &MetadataContext, key: &str| {
+            build_category_entries(MetadataCategory::KindleTitle, &meta, ctx)
+                .into_iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v)
+        };
+
+        let plain = MetadataContext::default();
+        assert!(matches!(
+            entry(&plain, "is_sample"),
+            Some(MetadataValue::Bool(false))
+        ));
+        // No typefaces of its own: the device's own fonts are the only choice,
+        // so there is no Publisher Font entry to offer.
+        assert!(matches!(
+            entry(&plain, "override_kindle_font"),
+            Some(MetadataValue::Bool(false))
+        ));
+
+        let with_fonts = MetadataContext {
+            has_publisher_fonts: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            entry(&with_fonts, "override_kindle_font"),
+            Some(MetadataValue::Bool(true))
+        ));
     }
 
     #[test]

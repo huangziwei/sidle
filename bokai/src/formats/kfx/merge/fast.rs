@@ -120,10 +120,9 @@ pub fn merge_kfx_zip(path: &Path) -> io::Result<Vec<u8>> {
     // We also experimented with *per-container pipelined* SHA1 (hash each
     // container the moment it decompresses, in alphabetical/output order).
     // That variant did shave ~1 ms off the hot trace, but its OnceLock +
-    // mpsc machinery cost more on average across the 30-book corpus
-    // (50-run-avg median went from 28 → 30 ms — process startup dominates
-    // and the channel overhead pushes the warm work up). The batch-join
-    // variant below is the corpus sweet spot.
+    // mpsc machinery costs more on average than it saves: process startup
+    // dominates the run, so the channel overhead lands on the warm work
+    // without shortening the cold part. The batch-join variant below wins.
     let raws = decompress_containers_parallel(path, &kfx_names)?;
     let raws_refs: Vec<&RawContainer> = raws.iter().collect();
     trace.mark("unzip + shallow parse");
