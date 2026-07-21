@@ -1078,6 +1078,30 @@ pub fn build_package(
             toc_fallback_href: toc_fallback,
         });
 
+        // The TOC the package carries names `documents`; the one just emitted
+        // into nav/ncx names container files, and the two differ exactly where
+        // the source's cover section was remapped onto the synthesized
+        // `cover.xhtml`. A renderer keeps that section (see `redundant_cover`)
+        // and never holds a `cover.xhtml`, so the container's view would give
+        // it a TOC row that navigates nowhere. Fragments come back here too:
+        // they were dropped because the SVG wrapper carries no ids, which is
+        // not true of the page the renderer actually shows.
+        let package_toc = match cover_section_idx {
+            None => toc_points.clone(),
+            Some(_) => {
+                let mut points = toc_to_navpoints(book.toc(), &|href| {
+                    resolve_nav_href(book, href, &chapter_pos, &document_files, false, None)
+                });
+                let rank: HashMap<String, usize> = document_files
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (f.clone(), i))
+                    .collect();
+                nav::sort_toc_reading_order(&mut points, &rank);
+                points
+            }
+        };
+
         // Every spine document the source produced, under its own name. The
         // titlepage stays separate (spine position 0, but written last).
         let documents = content
@@ -1104,7 +1128,7 @@ pub fn build_package(
             ncx,
             css: content.css,
             assets: asset_bytes,
-            toc: toc_points,
+            toc: package_toc,
             writing_mode: content.writing_mode,
         })
     }

@@ -84,3 +84,47 @@ fn the_container_drops_the_cover_page_the_package_keeps() {
         "the shipped container has no cover page at all: {entries:?}"
     );
 }
+
+/// Every TOC entry must name a document the package holds.
+///
+/// The container's navigation remaps the suppressed cover section onto the
+/// synthesized `cover.xhtml`, which exists only inside the zip. A renderer
+/// consumes `EpubPackage.toc` alongside `documents` and holds no such file, so
+/// a remapped entry would be a TOC row that navigates nowhere — which is what
+/// the reader's 表紙/Cover row became when it moved onto the package.
+#[test]
+fn every_toc_entry_names_a_document_the_package_holds() {
+    let Ok(kfx) = std::fs::read(REFLOWABLE) else {
+        return; // fixture not present in this checkout
+    };
+
+    let mut book = Book::from_bytes(&kfx, Format::Kfx).expect("import the fixture");
+    let package = build_package(&mut book, PackageOptions::rendered(), &|_, _, _, _| {})
+        .expect("build the package");
+
+    // Non-vacuity: this fixture is one of the books whose cover section the
+    // container suppresses, so it exercises the remap the bug lived in.
+    assert!(
+        package.redundant_cover.is_some(),
+        "fixture no longer has a cover overlap — the assertion below is vacuous"
+    );
+
+    let rendered: Vec<&str> = package.documents.iter().map(|d| d.href.as_str()).collect();
+    let mut entries = Vec::new();
+    fn walk(points: &[bokai::export::nav::NavPoint], out: &mut Vec<(String, String)>) {
+        for p in points {
+            out.push((p.label.clone(), p.href.clone()));
+            walk(&p.children, out);
+        }
+    }
+    walk(&package.toc, &mut entries);
+    assert!(!entries.is_empty(), "fixture has no TOC to check");
+
+    for (label, href) in &entries {
+        let file = href.split('#').next().unwrap_or("");
+        assert!(
+            file.is_empty() || rendered.contains(&file),
+            "TOC entry {label:?} targets {href}, which is not one of {rendered:?}"
+        );
+    }
+}

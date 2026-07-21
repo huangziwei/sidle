@@ -1447,8 +1447,12 @@ function hideSearchPanel() {
 // ---- TOC panel + jump -------------------------------------------------------
 
 // Resolve a TOC href ("c5.xhtml#frag") to a section index + optional fragment.
-// boko emits TOC hrefs in the same OEBPS-relative form as the spine section
-// hrefs (both from one `build_output`), so `book.hrefs.indexOf` matches.
+// The TOC and the sections come out of one `EpubPackage`, whose `toc` hrefs name
+// its `documents` — the same list `book.hrefs` mirrors — so `indexOf` matches.
+// That is a contract, not a coincidence: the package also carries a *container*
+// view of the same navigation (inside nav.xhtml/toc.ncx) where the cover section
+// is remapped onto a synthesized `cover.xhtml` that exists only in a zip. An
+// href from that view lands here as index -1.
 function tocTarget(href) {
   const [path, frag] = String(href || "").split("#");
   const index = book?.hrefs?.indexOf(path) ?? -1;
