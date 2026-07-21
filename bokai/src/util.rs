@@ -456,6 +456,31 @@ pub fn strip_ebook_chars(s: &str) -> String {
     out
 }
 
+/// Trim the whitespace markup layout introduces, keeping the whitespace that
+/// is typographic content.
+///
+/// A label read out of XML arrives padded by however the file was indented:
+///
+/// ```xml
+/// <li><a href="c1.xhtml">
+///     プロローグ
+/// </a></li>
+/// ```
+///
+/// so it has to be trimmed. But `str::trim` uses [`char::is_whitespace`], which
+/// includes U+3000 IDEOGRAPHIC SPACE and U+00A0 NO-BREAK SPACE — and neither of
+/// those is ever produced by pretty-printing. A serializer emits ASCII spaces,
+/// tabs and newlines; an author who typed U+3000 meant it. In Japanese
+/// typography a leading ideographic space is deliberate indentation, so
+/// `str::trim` silently rewrites `　プロローグ　潜入` to `プロローグ　潜入` —
+/// changing the label a reader sees while leaving the interior one alone.
+///
+/// Trimming the ASCII set only keeps the markup artifact removal and leaves the
+/// content untouched.
+pub fn trim_markup_space(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_ascii_whitespace())
+}
+
 /// Detect MIME type from file extension or magic bytes.
 ///
 /// Returns a static string like "image/jpeg", "image/png", etc.
@@ -729,5 +754,29 @@ mod tests {
         assert_eq!(percent_decode("bad%2"), "bad%2");
         // Invalid hex digits are left untouched.
         assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn trim_markup_space_keeps_typographic_spaces() {
+        // What a pretty-printed nav.xhtml wraps a label in.
+        assert_eq!(
+            trim_markup_space("\n      Chapter One\n    "),
+            "Chapter One"
+        );
+        assert_eq!(trim_markup_space("\tA\r\n"), "A");
+
+        // What a Japanese publisher typed. `str::trim` drops both of these.
+        assert_eq!(
+            trim_markup_space("\u{3000}プロローグ\u{3000}潜入"),
+            "\u{3000}プロローグ\u{3000}潜入"
+        );
+        assert_eq!(trim_markup_space("\u{00A0}A"), "\u{00A0}A");
+
+        // Markup padding around content that starts with a typographic space:
+        // the padding goes, the content stays.
+        assert_eq!(
+            trim_markup_space("  \u{3000}１\u{3000}序論 \n"),
+            "\u{3000}１\u{3000}序論"
+        );
     }
 }

@@ -513,7 +513,19 @@ impl Azw3Importer {
             Vec::new()
         };
 
-        // Build spine from skeleton files
+        // Build spine from skeleton files.
+        //
+        // A KF8 skeleton is only the `<html><head>…<body>` shell; the chapter's
+        // actual content lives in the div-index chunks that get spliced into
+        // it. So the skeleton's own `length` is roughly constant (~700 bytes)
+        // no matter how long the chapter is, and using it as the size estimate
+        // makes every chapter look the same weight — useless for the progress
+        // indication the field exists for. The reassembled size is the shell
+        // plus the chunks that belong to it.
+        let mut chunk_bytes: HashMap<u32, usize> = HashMap::new();
+        for e in &elems {
+            *chunk_bytes.entry(e.file_number).or_default() += e.length as usize;
+        }
         let mut spine = Vec::new();
         let mut chapter_paths = Vec::new();
         for (i, file) in files.iter().enumerate() {
@@ -521,7 +533,11 @@ impl Azw3Importer {
             chapter_paths.push(filename);
             spine.push(SpineEntry {
                 id: ChapterId(i as u32),
-                size_estimate: file.length as usize,
+                size_estimate: file.length as usize
+                    + chunk_bytes
+                        .get(&(file.file_number as u32))
+                        .copied()
+                        .unwrap_or(0),
                 page_spread: None,
                 viewport: None,
             });

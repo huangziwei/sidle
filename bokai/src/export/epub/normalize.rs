@@ -537,7 +537,7 @@ fn extract_chapter_title(ir: &Chapter) -> Option<String> {
             let mut title = String::new();
             collect_text_recursive(ir, node_id, &mut title);
             if !title.is_empty() {
-                return Some(title.trim().to_string());
+                return Some(crate::util::trim_markup_space(&title).to_string());
             }
         }
     }

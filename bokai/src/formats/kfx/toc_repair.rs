@@ -622,7 +622,10 @@ fn clean_label(raw: &str) -> String {
             prev_space = false;
         }
     }
-    s.trim().to_string()
+    // Trim the same ASCII set the collapse above uses. `str::trim` would drop a
+    // leading or trailing U+3000, contradicting the preservation this function
+    // exists to provide.
+    crate::util::trim_markup_space(&s).to_string()
 }
 
 /// Collapse `(label, eid)` pairs to one [`TocEntry`] per distinct target eid,
@@ -867,7 +870,14 @@ mod tests {
         let mut seen = HashSet::new();
         for e in &proposed {
             assert!(!e.label.is_empty(), "empty label proposed");
-            assert_eq!(e.label, e.label.trim(), "untrimmed label: {:?}", e.label);
+            // ASCII-only, matching `clean_label`: a leading U+3000 is content a
+            // JP publisher typed, not markup padding, and must survive.
+            assert_eq!(
+                e.label,
+                crate::util::trim_markup_space(&e.label),
+                "untrimmed label: {:?}",
+                e.label
+            );
             assert!(seen.insert(e.eid), "duplicate target eid {}", e.eid);
         }
     }

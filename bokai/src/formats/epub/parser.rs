@@ -436,7 +436,7 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                 if local == b"meta" && in_meta {
                     // Handle EPUB3 meta element with text content
                     if let Some(ref prop) = meta_property {
-                        let value = buf_text.trim().to_string();
+                        let value = crate::util::trim_markup_space(&buf_text).to_string();
                         if !value.is_empty() {
                             if let Some(ref r) = meta_refines {
                                 let refines_id = r.strip_prefix('#').unwrap_or(r).to_string();
@@ -889,7 +889,8 @@ pub fn parse_ncx(content: &str) -> io::Result<Vec<TocEntry>> {
                         if let Some(state) = stack.pop()
                             && let (Some(text), Some(src)) = (state.text, state.src)
                         {
-                            let mut entry = TocEntry::new(text, src);
+                            let mut entry =
+                                TocEntry::new(crate::util::trim_markup_space(&text), src);
                             entry.children = state.children;
                             entry.play_order = state.play_order;
 
@@ -1045,7 +1046,8 @@ fn parse_nav_ol(content: &str, wanted_type: &str) -> io::Result<Vec<TocEntry>> {
                             && let Some(href) = item.href
                         {
                             play_order += 1;
-                            let mut entry = TocEntry::new(item.label.trim(), href);
+                            let mut entry =
+                                TocEntry::new(crate::util::trim_markup_space(&item.label), href);
                             entry.children = item.children;
                             entry.play_order = Some(play_order);
                             // Attach to parent <li>'s children, or to root

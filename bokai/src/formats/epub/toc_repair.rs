@@ -422,7 +422,7 @@ fn render_ol(entries: &[TocEntry], base_dir: &str, out: &mut String) {
         out.push_str(&format!(
             "<li><a href=\"{}\">{}</a>",
             escape_attr(&href),
-            escape_text(e.title.trim())
+            escape_text(crate::util::trim_markup_space(&e.title))
         ));
         if e.children.is_empty() {
             out.push_str("</li>\n");
@@ -466,7 +466,7 @@ fn render_navpoints(entries: &[TocEntry], base_dir: &str, order: &mut usize, out
             "<navPoint id=\"navPoint-{n}\" playOrder=\"{n}\">\n\
 <navLabel><text>{}</text></navLabel>\n\
 <content src=\"{}\"/>\n",
-            escape_text(e.title.trim()),
+            escape_text(crate::util::trim_markup_space(&e.title)),
             escape_attr(&src)
         ));
         if !e.children.is_empty() {
@@ -720,7 +720,10 @@ fn clean_label(raw: &str) -> String {
             prev_space = false;
         }
     }
-    s.trim().to_string()
+    // Trim the same ASCII set the collapse above uses. `str::trim` would drop a
+    // leading or trailing U+3000, contradicting the preservation this function
+    // exists to provide.
+    crate::util::trim_markup_space(&s).to_string()
 }
 
 /// First `<h1>`..`<h6>`'s `(text, id)` — the heading's stripped text and its
