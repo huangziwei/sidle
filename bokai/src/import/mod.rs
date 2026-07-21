@@ -49,6 +49,26 @@ pub struct SpineEntry {
     pub viewport: Option<(u32, u32)>,
 }
 
+/// One asset described without loading it.
+///
+/// A renderer that streams a book needs to reserve layout space and choose a
+/// fetch order before any bytes arrive — and for a format whose images need
+/// decoding (KFX ships JPEG-XR), loading the whole set up front is the
+/// difference between opening a large book instantly and waiting out a
+/// full-book transcode. Sources that declare dimensions answer this for free.
+#[derive(Debug, Clone)]
+pub struct AssetInfo {
+    /// Path as [`Importer::load_asset`] takes it.
+    pub path: PathBuf,
+    /// *Predicted* media type. The loaded bytes are the authority — a
+    /// transcode that fails passes the source type through instead.
+    pub media_type: String,
+    /// Declared pixel size, when the source states one. `None` means unknown,
+    /// not absent: the bytes may still decode to an image.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
 /// A source format's contribution to the normalized stylesheet: every named
 /// style converted to CSS declarations (unpruned — the export pass prunes its
 /// own working copies), plus the doc-level layout facts the stylesheet
@@ -196,6 +216,15 @@ pub trait Importer: Send + Sync {
     /// included; fonts stay out of the package until the CSS pass emits the
     /// `@font-face` rules that would reference them).
     fn bundled_assets(&self) -> Option<Vec<PathBuf>> {
+        None
+    }
+
+    /// [`Self::bundled_assets`] with each entry's predicted media type and
+    /// declared pixel size, for a consumer that wants to describe the assets
+    /// before paying to load them (see [`AssetInfo`]). `None` when the
+    /// importer has no authoritative bundle; the order matches
+    /// `bundled_assets`.
+    fn asset_manifest(&mut self) -> Option<Vec<AssetInfo>> {
         None
     }
 

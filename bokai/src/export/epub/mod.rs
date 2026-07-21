@@ -47,6 +47,69 @@ pub struct EpubConfig {
     pub normalize: bool,
 }
 
+/// Whether a build produces asset bytes or only describes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Assets {
+    /// Load and transcode every asset. A container has to hold the bytes.
+    Load,
+    /// Describe them only — path, media type, declared pixel size. A renderer
+    /// that streams a book fetches each asset when it needs it, which is the
+    /// difference between opening a large illustrated book instantly and
+    /// waiting out a full-book image decode.
+    Describe,
+}
+
+/// How to build a package. Prefer the two named intents,
+/// [`Self::container`] and [`Self::rendered`], over assembling one by hand:
+/// the combinations that matter are the two that have a consumer.
+#[derive(Debug, Clone, Copy)]
+pub struct PackageOptions {
+    /// Whether documents carry their source element ids.
+    pub source_elements: SourceElements,
+    /// Whether asset bytes are produced.
+    pub assets: Assets,
+}
+
+impl PackageOptions {
+    /// A package that can be written to an EPUB container: asset bytes
+    /// produced, no source element ids in the documents.
+    pub fn container() -> Self {
+        Self {
+            source_elements: SourceElements::Omit,
+            assets: Assets::Load,
+        }
+    }
+
+    /// A package for rendering rather than shipping: documents carry their
+    /// source element ids so a stored `(element, offset)` handle can be
+    /// resolved, and assets are described rather than loaded.
+    /// [`EpubExporter::write_package`] rejects it.
+    pub fn rendered() -> Self {
+        Self {
+            source_elements: SourceElements::Mark,
+            assets: Assets::Describe,
+        }
+    }
+}
+
+/// One asset of a built package.
+#[derive(Debug, Clone)]
+pub struct PackageAsset {
+    /// Path within `OEBPS/`.
+    pub href: String,
+    /// Media type. Sniffed from the bytes when they were loaded (a JPEG-XR
+    /// that failed to decode passes through as `image/jxr` despite its name);
+    /// the source's declared type otherwise.
+    pub media_type: String,
+    /// Declared pixel size, when the source states one and the build did not
+    /// load the bytes. A consumer reserves layout space from this.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// `None` when the build only described the assets — see [`Assets`]. An
+    /// empty vector means a load was attempted and failed.
+    pub bytes: Option<Vec<u8>>,
+}
+
 /// One spine document of a built package.
 #[derive(Debug, Clone)]
 pub struct PackageDocument {
@@ -98,10 +161,18 @@ pub struct EpubPackage {
     pub ncx: String,
     /// The unified stylesheet; empty when the book contributed no styles.
     pub css: String,
-    /// Asset bytes in manifest registration order, post-transcode.
-    pub assets: Vec<(String, Vec<u8>)>,
+    /// Assets in manifest registration order, post-transcode.
+    pub assets: Vec<PackageAsset>,
     /// The resolved TOC tree, hrefs pointing into [`Self::documents`].
     pub toc: Vec<NavPoint>,
+    /// The document's CSS writing mode (`horizontal-tb`, `vertical-rl`,
+    /// `vertical-lr`) — the value [`Self::css`] writes into its body rule.
+    ///
+    /// Not to be confused with the OPF `primary-writing-mode` metadatum in
+    /// [`Self::opf`], which uses a different vocabulary that folds in page
+    /// progression: an RTL manga is `horizontal-rl` there and `horizontal-tb`
+    /// here. A renderer wants this one.
+    pub writing_mode: String,
 }
 
 /// EPUB format exporter.
@@ -424,7 +495,7 @@ impl EpubExporter {
         on_progress: &dyn Fn(&str, usize, usize, &str),
     ) -> io::Result<()> {
         // A shipped container never carries source element ids.
-        let package = build_package(book, SourceElements::Omit, on_progress)?;
+        let package = build_package(book, PackageOptions::container(), on_progress)?;
         self.write_package(&package, writer)
     }
 
@@ -436,7 +507,7 @@ impl EpubExporter {
     /// byte-identical, not merely entry-identical. Already-compressed image
     /// types are `Stored`: deflate over them gains <5% at ~10-15 ms per MB,
     /// most of an image-heavy book's export cost.
-    fn write_package<W: Write + Seek>(
+    pub fn write_package<W: Write + Seek>(
         &self,
         package: &EpubPackage,
         writer: &mut W,
@@ -469,22 +540,26 @@ impl EpubExporter {
             .map_err(io_error)?;
         zip.write_all(package.ncx.as_bytes())?;
 
-        for (asset_path, bytes) in &package.assets {
+        for asset in &package.assets {
+            // A described-only package names assets it never loaded. Writing
+            // it would produce a container whose manifest promises files it
+            // does not hold, so refuse rather than ship one.
+            let Some(bytes) = &asset.bytes else {
+                return Err(io::Error::other(format!(
+                    "cannot write a container from a package built to describe assets: \
+                     {} has no bytes",
+                    asset.href
+                )));
+            };
             if bytes.is_empty() {
                 continue;
             }
-            // Sniff first: post-transcode bytes are the truth (a JPEG-XR that
-            // failed to decode passes through as image/jxr despite its .jpg
-            // name). Extension guess covers unsniffable formats (SVG).
-            let media_type = sniff_image_media_type(bytes)
-                .map(str::to_string)
-                .unwrap_or_else(|| guess_media_type(asset_path));
-            let opts = if is_precompressed_mime(&media_type) {
+            let opts = if is_precompressed_mime(&asset.media_type) {
                 stored
             } else {
                 deflated
             };
-            let zip_path = format!("OEBPS/{}", sanitize_path(asset_path));
+            let zip_path = format!("OEBPS/{}", sanitize_path(&asset.href));
             zip.start_file(&zip_path, opts).map_err(io_error)?;
             zip.write_all(bytes)?;
         }
@@ -526,11 +601,44 @@ impl EpubExporter {
 /// `(phase_key, current, total, human_label)`.
 pub fn build_package(
     book: &mut Book,
-    source_elements: SourceElements,
+    opts: PackageOptions,
     on_progress: &dyn Fn(&str, usize, usize, &str),
 ) -> io::Result<EpubPackage> {
+    /// Assets described from the importer's declared manifest, in the given
+    /// order. An entry the manifest doesn't mention still appears — with the
+    /// media type guessed from its name — so the list stays a faithful
+    /// account of what the documents reference.
+    fn return_described(
+        paths: Vec<std::path::PathBuf>,
+        declared: &HashMap<String, crate::import::AssetInfo>,
+    ) -> Vec<PackageAsset> {
+        paths
+            .into_iter()
+            .map(|p| {
+                let href = p.to_string_lossy().to_string();
+                match declared.get(&href) {
+                    Some(info) => PackageAsset {
+                        href,
+                        media_type: info.media_type.clone(),
+                        width: info.width,
+                        height: info.height,
+                        bytes: None,
+                    },
+                    None => PackageAsset {
+                        media_type: guess_media_type(&href),
+                        href,
+                        width: None,
+                        height: None,
+                        bytes: None,
+                    },
+                }
+            })
+            .collect()
+    }
+
     {
         use self::normalize::normalize_book_with;
+        let source_elements = opts.source_elements;
 
         // Normalize the book content — for KFX this triggers the lazy per-chapter
         // storyline→IR parse (the heaviest step after image transcode).
@@ -599,7 +707,7 @@ pub fn build_package(
         // `parallel_map`). Otherwise fall back to the assets the normalized
         // content references, sorted for stable ordering, force-including the
         // cover image (it may be referenced by metadata only).
-        let asset_bytes: Vec<(String, Vec<u8>)> = if let Some(asset_list) = book.bundled_assets() {
+        let asset_bytes: Vec<PackageAsset> = if let Some(asset_list) = book.bundled_assets() {
             // Fixed-layout books bundle a full page-thumbnail set the
             // reading order never references; ship only the images the
             // emitted pages use (plus the cover), pruned BEFORE the bulk
@@ -633,23 +741,64 @@ pub fn build_package(
             if total > 0 {
                 on_progress("resources", 0, total, "Decoding images");
             }
-            let workers = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4);
-            let chunk_size = (workers * 2).max(1);
-            let mut loaded: Vec<(String, Vec<u8>)> = Vec::with_capacity(total);
-            let mut done = 0usize;
-            for chunk in asset_list.chunks(chunk_size) {
-                for (path, bytes) in chunk.iter().zip(book.load_assets(chunk)) {
-                    loaded.push((
-                        path.to_string_lossy().to_string(),
-                        bytes.unwrap_or_default(),
-                    ));
+            if opts.assets == Assets::Describe {
+                // Describe without reading: the declared manifest carries the
+                // media type and pixel size, so this costs nothing even for a
+                // book whose images would take seconds to decode.
+                let declared: HashMap<String, crate::import::AssetInfo> = book
+                    .asset_manifest()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|a| (a.path.to_string_lossy().to_string(), a))
+                    .collect();
+                return_described(asset_list, &declared)
+            } else {
+                let workers = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4);
+                let chunk_size = (workers * 2).max(1);
+                let mut loaded: Vec<PackageAsset> = Vec::with_capacity(total);
+                let mut done = 0usize;
+                for chunk in asset_list.chunks(chunk_size) {
+                    for (path, bytes) in chunk.iter().zip(book.load_assets(chunk)) {
+                        let bytes = bytes.unwrap_or_default();
+                        let href = path.to_string_lossy().to_string();
+                        // Sniff first: post-transcode bytes are the truth (a
+                        // JPEG-XR that failed to decode passes through as
+                        // image/jxr despite its .jpg name). Extension guess
+                        // covers unsniffable formats (SVG).
+                        let media_type = sniff_image_media_type(&bytes)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| guess_media_type(&href));
+                        loaded.push(PackageAsset {
+                            href,
+                            media_type,
+                            width: None,
+                            height: None,
+                            bytes: Some(bytes),
+                        });
+                    }
+                    done += chunk.len();
+                    on_progress("resources", done, total, "Decoding images");
                 }
-                done += chunk.len();
-                on_progress("resources", done, total, "Decoding images");
+                loaded
             }
-            loaded
+        } else if opts.assets == Assets::Describe {
+            let mut asset_paths: Vec<String> = content.assets.iter().cloned().collect();
+            asset_paths.sort();
+            let declared: HashMap<String, crate::import::AssetInfo> = book
+                .asset_manifest()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| (a.path.to_string_lossy().to_string(), a))
+                .collect();
+            return_described(
+                asset_paths
+                    .into_iter()
+                    .map(std::path::PathBuf::from)
+                    .collect(),
+                &declared,
+            )
         } else {
             let mut asset_paths: Vec<String> = content.assets.iter().cloned().collect();
             asset_paths.sort();
@@ -665,22 +814,25 @@ pub fn build_package(
                     let bytes = book
                         .load_asset(std::path::Path::new(&path))
                         .unwrap_or_default();
-                    (path, bytes)
+                    let media_type = sniff_image_media_type(&bytes)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| guess_media_type(&path));
+                    PackageAsset {
+                        href: path,
+                        media_type,
+                        width: None,
+                        height: None,
+                        bytes: Some(bytes),
+                    }
                 })
                 .collect()
         };
-        for (asset_path, bytes) in &asset_bytes {
-            // Sniff first: post-transcode bytes are the truth (a JPEG-XR that
-            // failed to decode passes through as image/jxr despite its .jpg
-            // name). Extension guess covers unsniffable formats (SVG).
-            let media_type = sniff_image_media_type(bytes)
-                .map(str::to_string)
-                .unwrap_or_else(|| guess_media_type(asset_path));
-            let href = sanitize_path(asset_path);
+        for asset in &asset_bytes {
+            let href = sanitize_path(&asset.href);
             manifest_items.push(OpfItem {
                 id: next_id(&mut taken_ids, &href),
                 href,
-                media_type,
+                media_type: asset.media_type.clone(),
                 properties: Vec::new(),
             });
         }
@@ -743,8 +895,9 @@ pub fn build_package(
                 // book coverless.
                 let dims = asset_bytes
                     .iter()
-                    .find(|(p, _)| sanitize_path(p) == item.href)
-                    .and_then(|(_, b)| crate::util::extract_image_dimensions(b));
+                    .find(|a| sanitize_path(&a.href) == item.href)
+                    .and_then(|a| a.bytes.as_deref())
+                    .and_then(crate::util::extract_image_dimensions);
                 build_titlepage(&item.href, dims)
             })
         } else {
@@ -952,6 +1105,7 @@ pub fn build_package(
             css: content.css,
             assets: asset_bytes,
             toc: toc_points,
+            writing_mode: content.writing_mode,
         })
     }
 }

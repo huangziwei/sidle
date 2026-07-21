@@ -7,3 +7,4 @@
 //! dependency — callers bring their own.
 
 pub mod library;
+pub mod reader;

@@ -769,6 +769,13 @@ impl Book {
         self.backend.bundled_assets()
     }
 
+    /// [`Self::bundled_assets`] with each entry's predicted media type and
+    /// declared pixel size, without loading any of them — see
+    /// [`AssetInfo`](crate::import::AssetInfo).
+    pub fn asset_manifest(&mut self) -> Option<Vec<crate::import::AssetInfo>> {
+        self.backend.asset_manifest()
+    }
+
     /// Collect all @font-face definitions from CSS files.
     ///
     /// Returns font-face rules that map font family names to font files.

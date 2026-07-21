@@ -162,6 +162,95 @@ impl Chapter {
         }
         out
     }
+
+    /// What this chapter holds, without rendering it — see [`ChapterSummary`].
+    pub fn summary(&self) -> ChapterSummary {
+        let mut out = ChapterSummary::default();
+        // Whitespace collapsing spans text nodes: two adjacent runs separated
+        // only by markup are one word boundary, not two, and neither leading
+        // nor trailing space counts. So the walk carries the "a space is owed"
+        // state across nodes and only pays for it when real text follows.
+        let mut text_seen = false;
+        let mut pending_space = false;
+        self.summarize(NodeId::ROOT, &mut out, &mut text_seen, &mut pending_space);
+        out.image_only = !text_seen && out.has_image;
+        out
+    }
+
+    fn summarize(
+        &self,
+        node: NodeId,
+        out: &mut ChapterSummary,
+        text_seen: &mut bool,
+        pending_space: &mut bool,
+    ) {
+        for child in self.children(node) {
+            let Some(n) = self.node(child) else { continue };
+            match n.role {
+                // A ruby annotation is a pronunciation gloss above the base
+                // text, not part of it: counting it would inflate the reading
+                // measure of every CJK book.
+                Role::RubyText => continue,
+                Role::Text => {
+                    for c in self.text(n.text).chars() {
+                        // A line break renders as a break element, which
+                        // contributes nothing to text content — so it is
+                        // neither a character nor a word boundary here.
+                        if EOL.contains(&c) {
+                            continue;
+                        }
+                        if c.is_whitespace() {
+                            if *text_seen {
+                                *pending_space = true;
+                            }
+                        } else {
+                            if *pending_space {
+                                out.text_chars += 1;
+                                *pending_space = false;
+                            }
+                            out.text_chars += 1;
+                            *text_seen = true;
+                        }
+                    }
+                }
+                Role::Image => {
+                    out.has_image = true;
+                    if let Some(src) = self.semantics.src(child)
+                        && !out.images.iter().any(|h| h == src)
+                    {
+                        out.images.push(src.to_string());
+                    }
+                }
+                _ => {}
+            }
+            self.summarize(child, out, text_seen, pending_space);
+        }
+    }
+}
+
+/// Characters that render as a line break rather than as text.
+const EOL: &[char] = &['\n', '\r', '\u{2028}', '\u{2029}'];
+
+/// What a chapter holds, answerable without rendering it.
+///
+/// A renderer needs these before it paints anything: how much reading it
+/// represents, whether it is a full-page image rather than prose, and which
+/// images to fetch first. Deriving them from the IR keeps a consumer from
+/// re-parsing markup it just produced.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChapterSummary {
+    /// Base-text character count: ruby annotations excluded, whitespace runs
+    /// counted as one, leading and trailing whitespace not counted. Unicode
+    /// scalars, so this differs from a UTF-16 count on astral characters.
+    pub text_chars: u64,
+    /// No base text at all and at least one image — a cover or full-bleed
+    /// illustration, which a reader paginates differently from prose.
+    pub image_only: bool,
+    /// Image paths referenced, in document order, deduplicated. A reader
+    /// fetches them in this order.
+    pub images: Vec<String>,
+    /// Whether any image was seen at all (`image_only` needs both halves).
+    has_image: bool,
 }
 
 /// Iterator over children of a node.

@@ -159,6 +159,9 @@ pub struct NormalizedContent {
     pub assets: HashSet<String>,
     /// The unified CSS stylesheet.
     pub css: String,
+    /// The document CSS writing mode the stylesheet was built for
+    /// (`horizontal-tb` when the source declared none).
+    pub writing_mode: String,
 }
 
 /// What a synthesis-time link resolver decided for one `href` value.
@@ -517,6 +520,10 @@ pub fn normalize_book_with(
         chapters,
         assets: all_assets,
         css: css_text,
+        writing_mode: css_program
+            .as_ref()
+            .map(|p| p.writing_mode.clone())
+            .unwrap_or_else(|| "horizontal-tb".to_string()),
     })
 }
 

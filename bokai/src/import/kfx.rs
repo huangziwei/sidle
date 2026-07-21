@@ -376,6 +376,22 @@ impl Importer for KfxImporter {
         )
     }
 
+    fn asset_manifest(&mut self) -> Option<Vec<crate::import::AssetInfo>> {
+        // Dimensions come off the `external_resource` fragment, so describing
+        // the set costs nothing — no image is read, let alone transcoded.
+        Some(
+            self.images
+                .iter()
+                .map(|img| crate::import::AssetInfo {
+                    path: PathBuf::from(&img.filename),
+                    media_type: img.mime.clone(),
+                    width: img.width,
+                    height: img.height,
+                })
+                .collect(),
+        )
+    }
+
     fn load_assets(&mut self, paths: &[PathBuf]) -> Vec<io::Result<Vec<u8>>> {
         // Resolve raw bytes serially (cheap reads), then run the CPU-bound
         // JPEG-XR→JPEG transcodes in parallel across cores — the mechanical

@@ -27,7 +27,7 @@ pub use book::{
 };
 
 // Re-export chapter and iteration
-pub use chapter::{Chapter, ChapterId, ChildIter, DfsIter};
+pub use chapter::{Chapter, ChapterId, ChapterSummary, ChildIter, DfsIter};
 
 // Re-export node types
 pub use node::{Node, NodeId, Role, TextRange};
