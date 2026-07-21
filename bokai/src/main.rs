@@ -1789,8 +1789,10 @@ fn dump_node_json(chapter: &Chapter, id: NodeId, opts: &DumpOptions, depth: usiz
     let node = chapter.node(id).unwrap();
 
     let text = if !opts.structure && node.role == Role::Text && !node.text.is_empty() {
+        // JSON output stays verbatim — the serializer does its own escaping,
+        // and escaping first would double-encode every newline.
         let content = chapter.text(node.text);
-        Some(truncate_text(content, 100))
+        Some(clip_text(content, 100))
     } else {
         None
     };
@@ -1990,18 +1992,39 @@ fn role_to_string(role: Role) -> String {
     }
 }
 
-fn truncate_text(text: &str, max_chars: usize) -> String {
-    // Normalize whitespace
-    let normalized: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    // Count characters (not bytes) to handle multi-byte UTF-8 correctly
-    let char_count = normalized.chars().count();
-    if char_count <= max_chars {
-        normalized
-    } else {
-        let truncated: String = normalized.chars().take(max_chars).collect();
-        format!("{}...", truncated)
+/// Clip a string to `max_chars` characters, appending `...` when it was cut.
+///
+/// Character-counted, not byte-counted, so multi-byte text clips cleanly.
+fn clip_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
     }
+    let clipped: String = text.chars().take(max_chars).collect();
+    format!("{clipped}...")
+}
+
+/// Render a string for one line of tree output: control characters escaped,
+/// everything else verbatim, clipped to `max_chars` source characters.
+///
+/// Whitespace is escaped rather than collapsed. Collapsing keeps the line tidy
+/// but erases the differences a dump is most often reaching for — a forced
+/// break carried as a lone `\n`, a tab, leading U+3000 indentation
+/// (`char::is_whitespace`, so `split_whitespace` drops it). A node holding
+/// `"\n"` printed as `""`, which reads as "the content is gone".
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for c in clip_text(text, max_chars).chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 // =========================================================================

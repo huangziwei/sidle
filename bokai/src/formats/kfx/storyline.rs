@@ -1897,12 +1897,20 @@ fn walk_node_for_export(
     elem.style_symbol = Some(style_symbol);
 
     // Check if this element needs container wrapping for borders to render
-    // KFX requires type: container with nested type: text for borders
-    elem.needs_container_wrapper = chapter
-        .styles
-        .get(node.style)
-        .map(needs_container_wrapper)
-        .unwrap_or(false);
+    // KFX requires type: container with nested type: text for borders.
+    //
+    // A horizontal rule is exempt: the border *is* the rule, and KFX draws it
+    // from the dedicated `type: horizontal_rule` element. Taking the wrapper
+    // path here turned every `<hr>` into a bordered container holding an empty
+    // text block — the line still drew, but the element type was gone, so the
+    // rule came back as a `Container` + empty `Paragraph` instead of a `Rule`.
+    // Amazon emits the bare element (`{style: linear, type: horizontal_rule}`).
+    elem.needs_container_wrapper = node.role != Role::Rule
+        && chapter
+            .styles
+            .get(node.style)
+            .map(needs_container_wrapper)
+            .unwrap_or(false);
 
     // Does this element have block-level children (vs. only inline/text)? A
     // bordered `<div>` of `<p>` lines (Aozora 罫囲み) becomes one bordered
@@ -4357,6 +4365,58 @@ mod tests {
             inner_type.unwrap(),
             KfxSymbol::Text as u64,
             "Inner element should have type: text"
+        );
+    }
+
+    #[test]
+    fn test_horizontal_rule_keeps_its_element_type() {
+        // An `<hr>` is drawn from a border, so the bordered-box path used to
+        // claim it: the rule came out as `type: container` holding an empty
+        // `type: text`, and re-importing gave back a `Container` + empty
+        // `Paragraph` instead of a `Rule`. Amazon emits the bare element
+        // (`{style: linear, type: horizontal_rule}`), which is also the shape
+        // this crate's own importer reads back as `Role::Rule`.
+        use crate::style::{BorderStyle, ComputedStyle, Length};
+
+        let mut chapter = Chapter::new();
+
+        let mut style = ComputedStyle::default();
+        style.border_style_top = BorderStyle::Solid;
+        style.border_width_top = Length::Px(1.0);
+        let style_id = chapter.styles.intern(style);
+
+        let mut rule = Node::new(Role::Rule);
+        rule.style = style_id;
+        let rule_id = chapter.alloc_node(rule);
+        chapter.append_child(chapter.root(), rule_id);
+
+        let mut ctx = crate::formats::kfx::context::ExportContext::new();
+        let ion = build_storyline_ion(&chapter, &mut ctx);
+
+        fn collect_types(ion: &IonValue, out: &mut Vec<u64>) {
+            match ion {
+                IonValue::Struct(fields) => {
+                    for (k, v) in fields {
+                        if *k == KfxSymbol::Type as u64
+                            && let IonValue::Symbol(s) = v
+                        {
+                            out.push(*s);
+                        }
+                        collect_types(v, out);
+                    }
+                }
+                IonValue::List(items) => items.iter().for_each(|i| collect_types(i, out)),
+                _ => {}
+            }
+        }
+
+        let mut types = Vec::new();
+        collect_types(&ion, &mut types);
+        assert_eq!(
+            types,
+            vec![KfxSymbol::HorizontalRule as u64],
+            "a bordered <hr> must export as one horizontal_rule element, \
+             not a container wrapping an empty text block"
         );
     }
 
