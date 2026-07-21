@@ -405,8 +405,41 @@ impl<'a> ContentState<'a> {
         // (calibre's main path; conditional templates are prepended).
         let writing_mode = self.writing_mode.clone();
         let main_template = page_templates.last().unwrap();
+        // The main page_template IS this document's page, so a writing mode on
+        // it belongs on `<body>`. Left on the wrapper element instead, it makes
+        // a box whose mode runs across the book's — an orthogonal flow, which
+        // shrink-wraps to its content and sits at one page edge rather than
+        // filling the page (`content_writing_mode`, applied below, still gives
+        // the wrapper its own value so the cascade underneath is unchanged).
+        if let Some(page_mode) = main_template
+            .unwrap_annotated()
+            .as_struct()
+            .and_then(|f| self.content_writing_mode(f))
+        {
+            let part = &mut self.book_parts[part_index];
+            part.dom.get_mut(body_id).set(
+                "style",
+                format!(
+                    "writing-mode: {page_mode}; -webkit-writing-mode: {page_mode}; \
+                     -epub-writing-mode: {page_mode}"
+                ),
+            );
+        }
         self.process_content(main_template, part_index, body_id, &writing_mode, true)?;
         Ok(())
+    }
+
+    /// The CSS writing mode a content struct declares, if any. `None` when it
+    /// leaves the inherited mode alone.
+    fn content_writing_mode(&self, fields: &[(u64, IonValue)]) -> Option<String> {
+        get_field(fields, KfxSymbol::WritingMode as u64)
+            .and_then(|v| self.book.symbols.text_of(v))
+            .map(|s| match s {
+                "horizontal_tb" => "horizontal-tb".to_string(),
+                "vertical_rl" => "vertical-rl".to_string(),
+                "vertical_lr" => "vertical-lr".to_string(),
+                other => other.to_string(),
+            })
     }
 
     /// Create a new empty book_part (`<html><head><body>`), set its `xml:lang`

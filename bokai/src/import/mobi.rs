@@ -317,6 +317,7 @@ impl MobiImporter {
                 size_estimate: split.chapters[i].len(),
                 page_spread: None,
                 viewport: None,
+                writing_mode: None,
             })
             .collect();
 

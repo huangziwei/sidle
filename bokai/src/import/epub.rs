@@ -313,6 +313,7 @@ impl EpubImporter {
                         .get(spine_id)
                         .and_then(|p| crate::model::PageSpread::from_opf_properties(p)),
                     viewport: None,
+                    writing_mode: None,
                 });
                 spine_paths.push(full_path);
             }

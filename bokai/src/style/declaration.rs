@@ -471,6 +471,21 @@ impl CssDecl {
         self.items.is_empty()
     }
 
+    /// The value set for `name`, if any.
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.items
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Remove `name`, returning what it was set to. For a marker property
+    /// that resolves into other declarations rather than surviving into CSS.
+    pub fn take(&mut self, name: &str) -> Option<String> {
+        let i = self.items.iter().position(|(k, _)| k == name)?;
+        Some(self.items.remove(i).1)
+    }
+
     pub fn to_inline(&self) -> String {
         let mut s = String::new();
         for (i, (k, v)) in self.items.iter().enumerate() {

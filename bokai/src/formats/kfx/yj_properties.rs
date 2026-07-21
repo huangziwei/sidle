@@ -91,7 +91,50 @@ pub fn convert_yj_properties(fields: &[(u64, IonValue)], symbols: &SymbolTable) 
         }
     }
 
+    resolve_box_align(&mut out);
     out
+}
+
+/// Marker for KFX `box_align` between the property table and
+/// [`resolve_box_align`]. Never reaches a stylesheet.
+const BOX_ALIGN: &str = "-kfx-box-align";
+
+/// Turn a `box_align` marker into the margins that position the box.
+///
+/// `box_align` says where the box sits inside its container; the KFX
+/// container's own `text_alignment` says where text sits inside the box.
+/// They are separate properties and a style may carry either, both, or
+/// neither. Emitting `box_align` as `text-align` — as this once did — got
+/// both wrong at once: the box stopped being centered, and text that the
+/// source never aligned started being centered. It shows up on the pages
+/// built out of a centered box, which is most Japanese front matter and
+/// chapter openers.
+///
+/// The margins are the same pair bokai's EPUB→KFX direction reads back as
+/// `box_align` (`formats::kfx::style_schema`), so a book that round-trips
+/// keeps the property instead of losing it to `text-align`.
+///
+/// Unlike calibre — which sets the margins only when the style also carries
+/// a `width` — this sets them whichever way the box is sized. Auto margins
+/// on an auto-width block in normal flow compute to zero, so the gate buys
+/// nothing there; but a box in an orthogonal flow (a `vertical-rl` block on
+/// a `horizontal-tb` page, i.e. exactly the vertical chapter opener this
+/// property is used for) is shrink-to-fit sized and *does* center, with no
+/// `width` anywhere in the style.
+fn resolve_box_align(decl: &mut CssDecl) {
+    let Some(align) = decl.take(BOX_ALIGN) else {
+        return;
+    };
+    // A box the source positioned explicitly keeps its own margins.
+    if decl.get("margin-left").is_some() || decl.get("margin-right").is_some() {
+        return;
+    }
+    if align != "right" {
+        decl.set("margin-right", "auto");
+    }
+    if align != "left" {
+        decl.set("margin-left", "auto");
+    }
 }
 
 /// Translate a single KFX property value to a CSS string. Handles the four
@@ -1009,12 +1052,13 @@ static YJ_PROPERTY_INFO: &[(&str, Prop)] = &[
         },
     ),
     // ---- alignment / decoration / variant / yj breaks ----
-    // `box_align` is the container's content alignment (calibre maps $580 →
-    // text-align). Values left/center/right.
+    // `box_align` positions the BOX within its container — it is not the
+    // text alignment inside the box. Kept as a marker here and resolved to
+    // margins by [`resolve_box_align`]; see there for why.
     (
         "box_align",
         Prop {
-            name: "text-align",
+            name: BOX_ALIGN,
             values: Some(&[
                 ("center", Some("center")),
                 ("left", Some("left")),

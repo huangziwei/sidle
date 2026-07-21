@@ -65,6 +65,12 @@ pub struct ChapterEmit<'a> {
     /// Fixed-layout page pixel viewport → `<meta name="viewport">` in the
     /// head. `None` for reflowable documents.
     pub viewport: Option<(u32, u32)>,
+    /// This document's own CSS writing mode, when the source gives it one
+    /// (see [`SpineEntry::writing_mode`](crate::import::SpineEntry::writing_mode)).
+    /// Emitted on `<body>`, where it re-orients the page; on a box inside the
+    /// page it would instead create an orthogonal flow. `None` leaves the
+    /// stylesheet's book-wide `body` rule in force.
+    pub writing_mode: Option<&'a str>,
     /// Whether to stamp `data-eid` from `semantics.source_element`.
     pub source_elements: SourceElements,
 }
@@ -93,6 +99,18 @@ pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<S
         let m = dom.get_mut(meta);
         m.set("name", "viewport");
         m.set("content", format!("width={w}, height={h}"));
+    }
+    // This page's own writing mode. Inline rather than a class so it beats
+    // the stylesheet's book-wide `body` rule without depending on selector
+    // specificity, and so a document carries its own orientation even if the
+    // stylesheet is replaced.
+    if let Some(wm) = opts.writing_mode.map(str::trim).filter(|w| !w.is_empty()) {
+        dom.get_mut(body_id).set(
+            "style",
+            format!(
+                "writing-mode: {wm}; -webkit-writing-mode: {wm}; -epub-writing-mode: {wm}"
+            ),
+        );
     }
 
     let mut b = Builder {
