@@ -32,6 +32,54 @@ pub fn resolve_nav_container(book: &BookData, container: &IonValue) -> Option<Io
         .cloned()
 }
 
+/// Visit every nav container in the book's `$389 book_navigation`, resolved to
+/// its `nav_type` and `$247 entries`.
+///
+/// `book_navigation` holds one entry per reading order (or a bare struct when
+/// there is only one), each listing its containers; the containers themselves
+/// come in both the inline and the referenced form (see
+/// [`resolve_nav_container`]). This is the walk down to the entry lists —
+/// what a caller does with `toc` / `page_list` / anything else is its own.
+pub fn for_each_nav_container(book: &BookData, mut visit: impl FnMut(&str, &[IonValue])) {
+    let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
+        return;
+    };
+    for value in nav.values() {
+        let unwrapped = value.unwrap_annotated();
+        let reading_orders: Vec<IonValue> = match unwrapped {
+            IonValue::List(items) => items.clone(),
+            IonValue::Struct(_) => vec![unwrapped.clone()],
+            _ => Vec::new(),
+        };
+        for reading_order in reading_orders {
+            let Some(ro_fields) = reading_order.as_struct() else {
+                continue;
+            };
+            let Some(containers) =
+                get_field(ro_fields, KfxSymbol::NavContainers as u64).and_then(|v| v.as_list())
+            else {
+                continue;
+            };
+            for container in containers {
+                let Some(resolved) = resolve_nav_container(book, container) else {
+                    continue;
+                };
+                let Some(cfields) = resolved.as_struct() else {
+                    continue;
+                };
+                let nav_type = get_field(cfields, KfxSymbol::NavType as u64)
+                    .and_then(|v| book.symbols.text_of(v))
+                    .unwrap_or("");
+                let entries: Vec<IonValue> = get_field(cfields, KfxSymbol::Entries as u64)
+                    .and_then(|v| v.as_list())
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default();
+                visit(nav_type, &entries);
+            }
+        }
+    }
+}
+
 /// Build the anchor table by iterating every `$266 anchor` entity, in
 /// sorted-name order (the backing map is unordered; a hash walk would pick a
 /// different co-located first anchor run to run).
@@ -62,55 +110,18 @@ pub fn extract_toc(
     element_id_to_filename: &std::collections::HashMap<i64, String>,
     anchors: &AnchorTable,
 ) -> Vec<TocEntry> {
-    let Some(nav) = book.by_type.get(&(KfxSymbol::BookNavigation as u64)) else {
-        return Vec::new();
-    };
+    // The container with nav_type=$214 (= "toc") holds the TOC entries.
     let mut toc: Vec<TocEntry> = Vec::new();
-
-    // book_navigation is typically a list of reading orders, each with
-    // nav_containers. The container with nav_type=$214 (= "toc") holds the
-    // TOC entries.
-    for value in nav.values() {
-        let unwrapped = value.unwrap_annotated();
-        let candidates: Vec<IonValue> = match unwrapped {
-            IonValue::List(items) => items.clone(),
-            IonValue::Struct(_) => vec![unwrapped.clone()],
-            _ => Vec::new(),
-        };
-        for reading_order in candidates {
-            let Some(ro_fields) = reading_order.as_struct() else {
-                continue;
-            };
-            let Some(containers) =
-                get_field(ro_fields, KfxSymbol::NavContainers as u64).and_then(|v| v.as_list())
-            else {
-                continue;
-            };
-            for container in containers {
-                let Some(resolved) = resolve_nav_container(book, container) else {
-                    continue;
-                };
-                let Some(cfields) = resolved.as_struct() else {
-                    continue;
-                };
-                let nav_type = get_field(cfields, KfxSymbol::NavType as u64)
-                    .and_then(|v| book.symbols.text_of(v))
-                    .unwrap_or("");
-                if nav_type != "toc" {
-                    continue;
-                }
-                let entries: Vec<IonValue> = get_field(cfields, KfxSymbol::Entries as u64)
-                    .and_then(|v| v.as_list())
-                    .map(|s| s.to_vec())
-                    .unwrap_or_default();
-                for entry in &entries {
-                    if let Some(e) = nav_unit_to_entry(entry, element_id_to_filename, anchors) {
-                        toc.push(e);
-                    }
-                }
+    for_each_nav_container(book, |nav_type, entries| {
+        if nav_type != "toc" {
+            return;
+        }
+        for entry in entries {
+            if let Some(e) = nav_unit_to_entry(entry, element_id_to_filename, anchors) {
+                toc.push(e);
             }
         }
-    }
+    });
     toc
 }
 

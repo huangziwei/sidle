@@ -3,7 +3,8 @@
 //! from the host KFX (to place a `handwritten_note` anchor on a page and crop
 //! the overlay to the page box).
 //!
-//! Deriving this means a full [`bokai::kfx_to_epub::pdf_text_layer`] parse: for a
+//! Deriving this means a full [`bokai::formats::kfx::pdf_pages::page_text_layer`]
+//! parse: for a
 //! ~15 MB PDF KFX that's ~0.5 s (release) / ~1.4 s (debug) — the same
 //! heavyweight Ion container parse the reader pays on open and caches per
 //! session. Ink sync used to run it for *every* drawn book on *every* connect,
@@ -45,15 +46,15 @@ struct GeomCache {
 }
 
 /// Compute the per-page geometry from raw KFX bytes (the slow path: a full
-/// `pdf_text_layer` parse). Empty for a reflowable / unreadable KFX.
+/// `page_text_layer` parse). Empty for a reflowable / unreadable KFX.
 pub fn compute(kfx_bytes: &[u8]) -> Vec<PageGeom> {
-    let Ok(layer) = bokai::kfx_to_epub::pdf_text_layer(kfx_bytes) else {
+    let Ok(layer) = bokai::formats::kfx::pdf_pages::page_text_layer(kfx_bytes) else {
         return Vec::new();
     };
     layer
         .into_iter()
         .map(|pt| {
-            let mut eids: Vec<i64> = pt.words.iter().map(|w| w.eid).chain(pt.eids).collect();
+            let mut eids: Vec<i64> = pt.runs.iter().map(|r| r.eid).chain(pt.eids).collect();
             eids.sort_unstable();
             eids.dedup();
             PageGeom {

@@ -12,6 +12,103 @@ use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::loader::BookData;
 use crate::formats::kfx::symbols::KfxSymbol;
 
+/// One fragment of the given type, by name. Returns a reference into `book`, so
+/// a caller walking a storyline never clones the tree it is reading.
+pub fn lookup_fragment<'b>(
+    book: &'b BookData,
+    ftype: KfxSymbol,
+    name: &str,
+) -> Option<&'b IonValue> {
+    book.by_type.get(&(ftype as u64)).and_then(|m| m.get(name))
+}
+
+/// The book's reading orders, each as its list of section names.
+///
+/// `$538 document_data` is consulted first and `$258 metadata` second, since a
+/// container may carry the orders in either; the first fragment type that
+/// yields any order wins.
+pub fn reading_orders(book: &BookData) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    for type_id in [KfxSymbol::DocumentData as u64, KfxSymbol::Metadata as u64] {
+        let Some(map) = book.by_type.get(&type_id) else {
+            continue;
+        };
+        for value in map.values() {
+            let Some(fields) = value.unwrap_annotated().as_struct() else {
+                continue;
+            };
+            let Some(orders) =
+                get_field(fields, KfxSymbol::ReadingOrders as u64).and_then(|v| v.as_list())
+            else {
+                continue;
+            };
+            for order in orders {
+                let Some(order_fields) = order.as_struct() else {
+                    continue;
+                };
+                let Some(sections) =
+                    get_field(order_fields, KfxSymbol::Sections as u64).and_then(|v| v.as_list())
+                else {
+                    continue;
+                };
+                let names: Vec<String> = sections
+                    .iter()
+                    .filter_map(|s| book.symbols.text_of(s).map(|n| n.to_string()))
+                    .collect();
+                if !names.is_empty() {
+                    out.push(names);
+                }
+            }
+            if !out.is_empty() {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// Every `$155 id` reachable from a page_template, in walk order.
+///
+/// `$176 story_name` references are followed into their `$259 storyline`
+/// fragment (cycle-guarded), which is how a page's template reaches the
+/// elements its storyline actually holds.
+pub fn collect_element_ids(template: &IonValue, book: &BookData, out: &mut Vec<i64>) {
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    walk_element_ids(template, book, &mut visited, out);
+}
+
+fn walk_element_ids(
+    value: &IonValue,
+    book: &BookData,
+    visited: &mut std::collections::HashSet<String>,
+    out: &mut Vec<i64>,
+) {
+    let inner = value.unwrap_annotated();
+    match inner {
+        IonValue::Struct(fields) => {
+            if let Some(id) = get_field(fields, KfxSymbol::Id as u64).and_then(|v| v.as_int()) {
+                out.push(id);
+            }
+            if let Some(story) = get_field(fields, KfxSymbol::StoryName as u64)
+                && let Some(name) = book.symbols.text_of(story)
+                && visited.insert(name.to_string())
+                && let Some(storyline) = lookup_fragment(book, KfxSymbol::Storyline, name)
+            {
+                walk_element_ids(storyline, book, visited, out);
+            }
+            for (_, v) in fields {
+                walk_element_ids(v, book, visited, out);
+            }
+        }
+        IonValue::List(items) => {
+            for item in items {
+                walk_element_ids(item, book, visited, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Layout hints + heading level from a named `$157 style` entity, resolved out
 /// of `book.by_type[$157]` (see
 /// [`style_fields_layout_hints`](super::yj_properties::style_fields_layout_hints)

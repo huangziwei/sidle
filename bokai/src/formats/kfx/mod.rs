@@ -26,6 +26,8 @@
 //! - `navigation` - `book_navigation` walks: nav containers, anchors, TOC
 //! - `error` - `KfxError`, the format-side failure type
 //! - `position` - `eid → pid → device Location` maps ($265, $550/$621)
+//! - `pdf_container` - PDF-backed KFX: detecting one, extracting its PDF
+//! - `pdf_pages` - PDF-backed KFX: page text geometry, eids, outline, labels
 
 pub mod anchor_table;
 pub mod auxiliary;
@@ -46,6 +48,7 @@ pub mod metadata;
 pub mod metadata_edit;
 pub mod navigation;
 pub mod pdf_container;
+pub mod pdf_pages;
 pub mod position;
 pub mod resource_index;
 pub mod schema;

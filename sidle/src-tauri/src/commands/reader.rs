@@ -137,7 +137,7 @@ pub struct ReaderPdfTocDto {
     pub children: Vec<ReaderPdfTocDto>,
 }
 
-fn map_pdf_toc(items: &[bokai::import::PdfOutlineItem]) -> Vec<ReaderPdfTocDto> {
+fn map_pdf_toc(items: &[bokai::formats::pdf::PdfOutlineItem]) -> Vec<ReaderPdfTocDto> {
     items
         .iter()
         .map(|it| ReaderPdfTocDto {
@@ -335,7 +335,7 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
         // offline: this reproduces probe's outline/labels/sizes for every library
         // PDF.)
         if pdf_path.is_some() || bokai::formats::kfx::pdf_container::kfx_is_pdf_backed(&kfx) {
-            let rd = bokai::kfx_to_epub::pdf_reader_data(&kfx)
+            let rd = bokai::formats::kfx::pdf_pages::read_pages(&kfx)
                 .map_err(|e| format!("read PDF KFX for reader: {e}"))?;
             let authors = crate::library::authors::split_display(&author);
             let dto = ReaderPdfDto {
@@ -350,15 +350,15 @@ pub async fn reader_open(state: State<'_, AppState>, book_id: i64) -> Result<Rea
                         width: p.box_w,
                         height: p.box_h,
                         words: p
-                            .words
+                            .runs
                             .iter()
-                            .map(|w| ReaderPdfWordDto {
-                                eid: w.eid,
-                                left: w.left,
-                                top: w.top,
-                                width: w.width,
-                                height: w.height,
-                                text: w.text.clone(),
+                            .map(|r| ReaderPdfWordDto {
+                                eid: r.eid,
+                                left: r.left,
+                                top: r.top,
+                                width: r.width,
+                                height: r.height,
+                                text: r.text.clone(),
                             })
                             .collect(),
                         eids: p.eids.clone(),

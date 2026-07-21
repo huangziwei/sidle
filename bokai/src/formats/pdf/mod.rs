@@ -22,7 +22,7 @@
 
 pub mod assemble;
 pub mod cover;
-pub(crate) mod doc;
+pub mod doc;
 pub mod edit;
 pub mod metadata_edit;
 pub mod render;
@@ -30,7 +30,7 @@ pub mod toc_repair;
 
 pub use assemble::svgs_to_pdf;
 pub use cover::{CoverMode, set_cover_page};
-pub use doc::load_pdf;
+pub use doc::{PdfDoc, PdfOutlineItem, PdfPage, load_pdf};
 pub use edit::PdfPackage;
 pub use metadata_edit::{MetadataPatch, edit_metadata};
 pub use toc_repair::set_toc;
