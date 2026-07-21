@@ -47,16 +47,6 @@ pub struct SpineEntry {
     /// `<meta name="viewport">` box the page is authored to. `None` for
     /// reflowable documents.
     pub viewport: Option<(u32, u32)>,
-    /// CSS `writing-mode` for **this document's page**, when the source sets
-    /// one per document rather than only book-wide. `None` means the book's
-    /// mode applies.
-    ///
-    /// A page's writing mode is a property of the page, not of a box on it: a
-    /// document laid out across the book's grain has to *be* that way, not
-    /// contain a block that is. Rendered as a box inside a page of the other
-    /// mode it becomes an orthogonal flow, which shrink-wraps to its content
-    /// and sits at one edge instead of filling the page.
-    pub writing_mode: Option<String>,
 }
 
 /// One asset described without loading it.
@@ -790,14 +780,12 @@ mod tests {
                     size_estimate: 0,
                     page_spread: None,
                     viewport: None,
-                    writing_mode: None,
                 },
                 SpineEntry {
                     id: ChapterId(1),
                     size_estimate: 0,
                     page_spread: None,
                     viewport: None,
-                    writing_mode: None,
                 },
             ],
             source_ids: vec!["text/ch1.xhtml".to_string(), "text/ch2.xhtml".to_string()],

@@ -65,12 +65,6 @@ pub struct ChapterEmit<'a> {
     /// Fixed-layout page pixel viewport → `<meta name="viewport">` in the
     /// head. `None` for reflowable documents.
     pub viewport: Option<(u32, u32)>,
-    /// This document's own CSS writing mode, when the source gives it one
-    /// (see [`SpineEntry::writing_mode`](crate::import::SpineEntry::writing_mode)).
-    /// Emitted on `<body>`, where it re-orients the page; on a box inside the
-    /// page it would instead create an orthogonal flow. `None` leaves the
-    /// stylesheet's book-wide `body` rule in force.
-    pub writing_mode: Option<&'a str>,
     /// Whether to stamp `data-eid` from `semantics.source_element`.
     pub source_elements: SourceElements,
 }
@@ -100,18 +94,6 @@ pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<S
         m.set("name", "viewport");
         m.set("content", format!("width={w}, height={h}"));
     }
-    // This page's own writing mode. Inline rather than a class so it beats
-    // the stylesheet's book-wide `body` rule without depending on selector
-    // specificity, and so a document carries its own orientation even if the
-    // stylesheet is replaced.
-    if let Some(wm) = opts.writing_mode.map(str::trim).filter(|w| !w.is_empty()) {
-        dom.get_mut(body_id).set(
-            "style",
-            format!(
-                "writing-mode: {wm}; -webkit-writing-mode: {wm}; -epub-writing-mode: {wm}"
-            ),
-        );
-    }
 
     let mut b = Builder {
         ir,
@@ -128,11 +110,16 @@ pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<S
 
     let Builder {
         mut dom,
-        classes,
-        styles,
-        hints,
+        mut classes,
+        mut styles,
+        mut hints,
         ..
     } = b;
+
+    // A document whose whole content is one container: that container IS the
+    // page, so it becomes `<body>` rather than a box inside it. See
+    // [`merge_sole_container_into_body`].
+    merge_sole_container_into_body(&mut dom, body_id, &mut classes, &mut styles, &mut hints);
 
     // Same pass order as the mechanical pipeline (`build_output`): links are
     // already resolved (walk-time), then consolidate → list normalization →
@@ -143,6 +130,50 @@ pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<S
     dom::replace_eol_with_br_dom(&mut dom);
     dom::finalize_attrs(&mut dom, &classes, &styles);
     dom::chapter_document(&dom)
+}
+
+/// Adopt a document's sole top-level container as its `<body>`.
+///
+/// A source that frames each document in one container (KFX gives every
+/// section a page template) is describing the page, not a box on it. Emitting
+/// it as a child of `<body>` puts its padding inside the page margin instead
+/// of being it, and — where the container names a writing mode running across
+/// the book's — makes an orthogonal flow, which shrink-wraps to its content
+/// and sits at one page edge rather than filling the page.
+///
+/// The container's style channels move with it, so the emitted document is
+/// the same one with a level removed.
+fn merge_sole_container_into_body(
+    dom: &mut Dom,
+    body_id: dom::NodeId,
+    classes: &mut HashMap<dom::NodeId, Vec<String>>,
+    styles: &mut HashMap<dom::NodeId, CssDecl>,
+    hints: &mut LayoutHints,
+) {
+    let [only] = dom.get(body_id).children[..] else {
+        return;
+    };
+    // Only a plain container is the page; anything else keeps its own tag.
+    if !matches!(dom.get(only).tag.as_str(), "div" | "aside" | "figure") {
+        return;
+    }
+    // Text directly on `<body>` would have nowhere to go.
+    if dom.get(body_id).text.is_some() || dom.get(only).tail.is_some() {
+        return;
+    }
+    dom.move_into(only, body_id);
+    if let Some(c) = classes.remove(&only) {
+        classes.entry(body_id).or_default().extend(c);
+    }
+    if let Some(s) = styles.remove(&only) {
+        let slot = styles.entry(body_id).or_default();
+        for (k, v) in s.items {
+            slot.set(k, v);
+        }
+    }
+    if let Some(h) = hints.remove(&only) {
+        hints.entry(body_id).or_insert(h);
+    }
 }
 
 struct Builder<'a, 'b> {

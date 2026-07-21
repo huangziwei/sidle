@@ -458,7 +458,6 @@ pub fn normalize_book_with(
                 source_styles: src,
                 href_resolver: &resolver,
                 viewport: spine.get(idx).and_then(|e| e.viewport),
-                writing_mode: spine.get(idx).and_then(|e| e.writing_mode.as_deref()),
                 source_elements,
             };
             let mut assets = HashSet::new();

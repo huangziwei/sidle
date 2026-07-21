@@ -524,7 +524,6 @@ impl Azw3Importer {
                 size_estimate: file.length as usize,
                 page_spread: None,
                 viewport: None,
-                writing_mode: None,
             });
         }
 

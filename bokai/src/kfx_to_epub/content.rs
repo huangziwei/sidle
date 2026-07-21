@@ -405,41 +405,8 @@ impl<'a> ContentState<'a> {
         // (calibre's main path; conditional templates are prepended).
         let writing_mode = self.writing_mode.clone();
         let main_template = page_templates.last().unwrap();
-        // The main page_template IS this document's page, so a writing mode on
-        // it belongs on `<body>`. Left on the wrapper element instead, it makes
-        // a box whose mode runs across the book's — an orthogonal flow, which
-        // shrink-wraps to its content and sits at one page edge rather than
-        // filling the page (`content_writing_mode`, applied below, still gives
-        // the wrapper its own value so the cascade underneath is unchanged).
-        if let Some(page_mode) = main_template
-            .unwrap_annotated()
-            .as_struct()
-            .and_then(|f| self.content_writing_mode(f))
-        {
-            let part = &mut self.book_parts[part_index];
-            part.dom.get_mut(body_id).set(
-                "style",
-                format!(
-                    "writing-mode: {page_mode}; -webkit-writing-mode: {page_mode}; \
-                     -epub-writing-mode: {page_mode}"
-                ),
-            );
-        }
         self.process_content(main_template, part_index, body_id, &writing_mode, true)?;
         Ok(())
-    }
-
-    /// The CSS writing mode a content struct declares, if any. `None` when it
-    /// leaves the inherited mode alone.
-    fn content_writing_mode(&self, fields: &[(u64, IonValue)]) -> Option<String> {
-        get_field(fields, KfxSymbol::WritingMode as u64)
-            .and_then(|v| self.book.symbols.text_of(v))
-            .map(|s| match s {
-                "horizontal_tb" => "horizontal-tb".to_string(),
-                "vertical_rl" => "vertical-rl".to_string(),
-                "vertical_lr" => "vertical-lr".to_string(),
-                other => other.to_string(),
-            })
     }
 
     /// Create a new empty book_part (`<html><head><body>`), set its `xml:lang`
@@ -866,14 +833,70 @@ impl<'a> ContentState<'a> {
             elem_id
         };
 
-        // Always append into parent. For the top-level call, parent is the
-        // existing body element; we don't retag (the body already exists).
+        // A section's top-level container IS the document body — calibre
+        // retags it (`yj_to_epub_content.py:1437 content_elem.tag = "body"`)
+        // rather than nesting it in one. Appending it as a child instead put
+        // the page template's own style on a box *inside* the page: its
+        // padding stopped being the page margin, and a `writing_mode` running
+        // across the book's grain became an orthogonal flow, which shrink-wraps
+        // to its content and sits at one page edge instead of filling the page.
+        // `set_html_defaults` only fills in a book-level `writing-mode` when
+        // the body has none, which is exactly this case.
+        if is_top_level && wrapped_id == elem_id {
+            self.merge_into_body(part_index, elem_id);
+            return Ok(());
+        }
         let dom = &mut self.book_parts[part_index].dom;
         if dom.get(wrapped_id).parent.is_none() {
             dom.append(parent_id, wrapped_id);
         }
-        let _ = is_top_level;
         Ok(())
+    }
+
+    /// Make `elem_id` the document body: move its attributes, pending style
+    /// channels, and children onto the part's existing `<body>`, then drop it.
+    ///
+    /// Retagging in place the way calibre does would strand the part's
+    /// `body_id`, which later passes hold; merging keeps that node identity
+    /// while producing the same document.
+    fn merge_into_body(&mut self, part_index: usize, elem_id: NodeId) {
+        let part = &mut self.book_parts[part_index];
+        let body_id = part.body_id;
+        if elem_id == body_id {
+            return;
+        }
+        // A top-level element that is not a plain container keeps its own tag
+        // inside the body (calibre wraps it and reports the same case).
+        let tag = part.dom.get(elem_id).tag.clone();
+        if !matches!(tag.as_str(), "div" | "aside" | "figure") {
+            if part.dom.get(elem_id).parent.is_none() {
+                part.dom.append(body_id, elem_id);
+            }
+            return;
+        }
+        part.dom.move_into(elem_id, body_id);
+        // The style channels are keyed by node, so they move with it.
+        if let Some(classes) = part.element_classes.remove(&elem_id) {
+            part.element_classes
+                .entry(body_id)
+                .or_default()
+                .extend(classes);
+        }
+        if let Some(styles) = part.element_styles.remove(&elem_id) {
+            let slot = part.element_styles.entry(body_id).or_default();
+            for (k, v) in styles.items {
+                slot.set(k, v);
+            }
+        }
+        // `element_ids` is anchor-name → node, so re-point rather than move.
+        for node in part.element_ids.values_mut() {
+            if *node == elem_id {
+                *node = body_id;
+            }
+        }
+        if let Some(hint) = part.element_layout_hints.remove(&elem_id) {
+            part.element_layout_hints.entry(body_id).or_insert(hint);
+        }
     }
 
     /// Port of calibre's `process_position` (`yj_to_epub_navigation.py:375`).

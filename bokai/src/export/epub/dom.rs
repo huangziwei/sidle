@@ -116,6 +116,36 @@ impl Dom {
         self.nodes[parent].children.insert(idx, child);
     }
 
+    /// Move `src`'s attributes, text, and children onto `dst`, leaving `src`
+    /// empty and detached. `dst` keeps its own tag and node id — for adopting
+    /// a built element into a node other code already holds a reference to.
+    /// Attributes `dst` already sets win; text is appended.
+    pub fn move_into(&mut self, src: NodeId, dst: NodeId) {
+        if src == dst {
+            return;
+        }
+        let attrs = std::mem::take(&mut self.nodes[src].attrs);
+        for (k, v) in attrs {
+            if !self.nodes[dst].attrs.iter().any(|(n, _)| *n == k) {
+                self.nodes[dst].attrs.push((k, v));
+            }
+        }
+        if let Some(text) = self.nodes[src].text.take() {
+            let slot = self.nodes[dst].text.get_or_insert_with(String::new);
+            slot.push_str(&text);
+        }
+        let children = std::mem::take(&mut self.nodes[src].children);
+        for child in children {
+            self.append(dst, child);
+        }
+        // Detach `src` from whatever held it.
+        if let Some(parent) = self.nodes[src].parent.take()
+            && let Some(pos) = self.nodes[parent].children.iter().position(|&c| c == src)
+        {
+            self.nodes[parent].children.remove(pos);
+        }
+    }
+
     /// Convenience: create + append.
     pub fn sub_element(&mut self, parent: NodeId, tag: impl Into<String>) -> NodeId {
         let n = self.create_element(tag);

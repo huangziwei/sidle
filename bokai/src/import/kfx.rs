@@ -1162,22 +1162,12 @@ impl KfxImporter {
                 .map(|loc| loc.length)
                 .unwrap_or(0);
 
-            // A section's page template is the page. Where it names a writing
-            // mode, that is this document's mode — not the book's, and not a
-            // box's on it.
-            let writing_mode = self
-                .section_templates
-                .get(&name)
-                .and_then(|t| t.inline_style.iter().find(|(k, _)| k == "writing-mode"))
-                .map(|(_, v)| v.clone());
-
             self.section_names.push(name);
             self.spine.push(SpineEntry {
                 id: ChapterId(idx as u32),
                 size_estimate,
                 page_spread: None,
                 viewport: None,
-                writing_mode,
             });
         }
 
@@ -1303,9 +1293,6 @@ impl KfxImporter {
                     size_estimate,
                     page_spread,
                     viewport,
-                    // Fixed-layout pages are laid out by the viewport box,
-                    // not by a page-template writing mode.
-                    writing_mode: None,
                 });
                 names.push(name);
                 fxl_pages.push(FxlPage {
