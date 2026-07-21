@@ -67,6 +67,13 @@ pub struct ChapterEmit<'a> {
     pub viewport: Option<(u32, u32)>,
     /// Whether to stamp `data-eid` from `semantics.source_element`.
     pub source_elements: SourceElements,
+    /// The assets the source actually holds, when the importer can enumerate
+    /// them. An `<img>` whose `src` is not in this set degrades to a `<span>`
+    /// carrying its alt text — see [`Builder::emit_image`].
+    ///
+    /// `None` disables the check, which is what a caller that cannot name the
+    /// container's contents should pass; guessing would drop real images.
+    pub available_assets: Option<&'a HashSet<String>>,
 }
 
 /// Build, consolidate, and serialize one chapter document. Referenced
@@ -257,6 +264,51 @@ impl Builder<'_, '_> {
         }
     }
 
+    /// Emit an image, or the degradation for one whose bytes aren't there.
+    ///
+    /// A source can reference an image it does not ship. Real publisher EPUBs
+    /// in this corpus do it both ways: one names `image_0018.png` while the
+    /// manifest declares `image_0018.jpg`, another references sixteen images
+    /// and contains two. Amazon KFX does it too, where resource extraction
+    /// logs a missing `bcRawMedia`.
+    ///
+    /// Carrying the reference through would put an `<img src>` in the output
+    /// naming a file the container has no entry for — epubcheck RSC-007, and a
+    /// broken-image box where content should be. Emitting a `<span>` with the
+    /// alt text keeps whatever semantic content the source gave and references
+    /// nothing. This matches the mechanical route's long-standing behavior for
+    /// KFX; it applies here to every source because the rule is about what a
+    /// container may contain, not about where the book came from.
+    fn emit_image(&mut self, id: IrNodeId, parent: dom::NodeId) {
+        let src = self.ir.semantics.src(id);
+        // `alt` is always present (mechanical: calibre defaults "").
+        let alt = self.ir.semantics.alt(id).unwrap_or("").to_string();
+        let missing = match (src, self.opts.available_assets) {
+            (Some(s), Some(have)) => !have.contains(s),
+            // No `src` at all is equally unrenderable as an `<img>`.
+            (None, _) => true,
+            _ => false,
+        };
+        if missing {
+            let span = self.dom.sub_element(parent, "span");
+            if !alt.is_empty() {
+                self.dom.get_mut(span).text = Some(alt);
+            }
+            self.stamp_source_element(id, span);
+            self.stamp_id(id, span);
+            return;
+        }
+        let img = self.dom.sub_element(parent, "img");
+        if let Some(src) = src {
+            self.dom.get_mut(img).set("src", src);
+            self.assets.insert(src.to_string());
+        }
+        self.dom.get_mut(img).set("alt", &alt);
+        self.stamp_source_element(id, img);
+        self.stamp_id(id, img);
+        self.attach_block_style(id, img);
+    }
+
     /// Carry the node's source element id onto its DOM element, so a renderer
     /// can resolve an `(element, offset)` handle by querying `[data-eid]` and
     /// walking text from there. Precedes [`Self::stamp_id`] at every call site
@@ -362,19 +414,7 @@ impl Builder<'_, '_> {
                     self.walk(child, span);
                 }
             }
-            Role::Image => {
-                let img = self.dom.sub_element(parent, "img");
-                if let Some(src) = self.ir.semantics.src(id) {
-                    self.dom.get_mut(img).set("src", src);
-                    self.assets.insert(src.to_string());
-                }
-                // `alt` is always present (mechanical: calibre defaults "").
-                let alt = self.ir.semantics.alt(id).unwrap_or("");
-                self.dom.get_mut(img).set("alt", alt);
-                self.stamp_source_element(id, img);
-                self.stamp_id(id, img);
-                self.attach_block_style(id, img);
-            }
+            Role::Image => self.emit_image(id, parent),
             Role::Break => {
                 self.dom.sub_element(parent, "br");
             }

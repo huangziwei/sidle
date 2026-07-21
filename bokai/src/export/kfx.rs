@@ -321,6 +321,10 @@ fn build_kfx_container(
     // every style and cancels the vertical document default — the device rotates
     // each glyph, the webview falls back to horizontal. Unforced, these coincide.
     ctx.style_writing_mode_baseline = dominant_writing_mode_from_ir(book);
+    // The body font defers to the reader's choice — see `reader_font_family`.
+    // Without this the content pins the device font and the Kindle's font
+    // control has nothing left to override.
+    ctx.reader_font_family = dominant_generic_font_family(book);
     // Stamp a device-recognized content language on every reflowable style so the
     // Kindle selects CJK fonts + upright vertical orientation. Without it a
     // Chinese/Japanese book renders in Latin fonts with sideways glyphs — Amazon
@@ -1219,6 +1223,69 @@ fn book_writing_mode(book: &mut Book) -> KfxSymbol {
 ///
 /// Distinct styles in the pool are counted. Only the vertical axes are
 /// tallied; [`pick_document_writing_mode`] then decides the book-level mode.
+/// Is this font family a *category* rather than a typeface?
+///
+/// CSS generics (`serif`, `sans-serif`, …) name a category and let the renderer
+/// pick the face. Kindle extends that with locale-specific generics —
+/// `serif-ja`, `sans-serif-ja`, and their `-v` vertical variants — which are
+/// still categories, not typefaces. `標楷體` or `MS Mincho` are typefaces.
+///
+/// The distinction matters because KFX resolves the two differently: a named
+/// family pins the device font, while `default` defers to the reader's own
+/// choice. Deferring is the faithful reading of a category.
+fn is_generic_font_family(name: &str) -> bool {
+    const GENERICS: &[&str] = &[
+        "serif",
+        "sans-serif",
+        "monospace",
+        "cursive",
+        "fantasy",
+        "system-ui",
+    ];
+    let n = name.trim().trim_matches('"').to_ascii_lowercase();
+    // `serif-ja-v` is the vertical cut of the `serif-ja` category.
+    let n = n.strip_suffix("-v").unwrap_or(&n);
+    GENERICS
+        .iter()
+        .any(|g| n == *g || n.strip_prefix(g).is_some_and(|rest| rest.starts_with('-')))
+}
+
+/// The font family the book uses for most of its text, when that family is a
+/// generic category — the one a reader's font setting is meant to replace.
+///
+/// **Why this exists.** A source stylesheet says `font-family: serif-ja, serif`
+/// on its body text, meaning "set this in a serif face". Carried through
+/// literally, every KFX style names `serif-ja`, the content pins the device
+/// font, and the Kindle's font control stops doing anything — the setting has
+/// nothing left to override. Amazon's own converter emits `default` for the
+/// bulk of a book's styles for exactly this reason, keeping a specific family
+/// only where the publisher asked for a *contrast*.
+///
+/// So only the dominant generic defers. A heading set in `sans-serif-ja`
+/// against `serif-ja` body text is a deliberate distinction and survives; a
+/// typeface the publisher actually named (`標楷體`) is never touched, since
+/// naming one is a choice a category-level rule has no business overriding.
+fn dominant_generic_font_family(book: &mut Book) -> Option<String> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let chapter_ids: Vec<_> = book.spine().iter().map(|e| e.id).collect();
+    for chapter_id in chapter_ids {
+        let Ok(chapter) = book.load_chapter(chapter_id) else {
+            continue;
+        };
+        for (_, style) in chapter.styles.iter() {
+            if let Some(f) = &style.font_family {
+                *counts.entry(f.clone()).or_default() += 1;
+            }
+        }
+    }
+    // Ties break by name so the choice is reproducible across runs rather than
+    // riding HashMap order.
+    let (family, _) = counts
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))?;
+    is_generic_font_family(&family).then_some(family)
+}
+
 fn dominant_writing_mode_from_ir(book: &mut Book) -> KfxSymbol {
     use crate::style::WritingMode;
     let mut vrl = 0usize;

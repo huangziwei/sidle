@@ -417,6 +417,22 @@ pub fn normalize_book_with(
     let mut all_assets = HashSet::new();
     let language = book.metadata().language.clone();
 
+    // What the source actually holds, so an `<img>` naming something absent
+    // degrades instead of shipping a dangling reference (see
+    // `dom_synth::Builder::emit_image`). `bundled_assets` is the importer's
+    // authoritative list where it has one; otherwise the container inventory.
+    let available_assets: HashSet<String> = match book.bundled_assets() {
+        Some(paths) => paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
+        None => book
+            .list_assets()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
+    };
+
     // Declared style program: build each chapter through the shared XHTML
     // DOM + consolidation passes — the same code the mechanical route
     // serializes with, so both KFX→EPUB engines' chapter files are
@@ -459,6 +475,7 @@ pub fn normalize_book_with(
                 href_resolver: &resolver,
                 viewport: spine.get(idx).and_then(|e| e.viewport),
                 source_elements,
+                available_assets: Some(&available_assets),
             };
             let mut assets = HashSet::new();
             let document = super::dom_synth::emit_chapter(ir, &opts, &mut assets);

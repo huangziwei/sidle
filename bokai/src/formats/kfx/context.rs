@@ -14,6 +14,13 @@ use super::style_registry::StyleRegistry;
 use super::symbols::{KFX_SYMBOL_TABLE_SIZE, KfxSymbol};
 use super::transforms::encode_base32;
 
+/// KFX font family meaning "whatever font the reader has chosen".
+///
+/// Amazon's own converter emits this for the bulk of a book's styles; any other
+/// value pins a specific device font. See
+/// [`ExportContext::reader_font_family`].
+const READER_DEFAULT_FONT: &str = "default";
+
 /// Symbol table for KFX export.
 ///
 /// Maintains a mapping between strings and symbol IDs for the exported file.
@@ -725,6 +732,18 @@ pub struct ExportContext {
     /// `HorizontalTb`.
     pub style_writing_mode_baseline: KfxSymbol,
 
+    /// The book's dominant *generic* font family, which is emitted as
+    /// `default` instead of by name so the reader's font setting still applies.
+    ///
+    /// A KFX style that names a family pins the device font; `default` defers
+    /// to the reader. A source that sets `font-family: serif-ja` on its body
+    /// text is asking for a serif face, not for that exact face, so carrying
+    /// the name through would silently disable the Kindle's font control.
+    /// Only the dominant generic defers — a deliberate contrast
+    /// (`sans-serif-ja` headings) and any real typeface (`標楷體`) keep their
+    /// name. `None` leaves every family untouched.
+    pub reader_font_family: Option<String>,
+
     /// Device-recognized content language stamped on every reflowable `$style`.
     /// Amazon puts e.g. `zh-tw` on each style so the Kindle selects CJK fonts and
     /// upright vertical orientation; without it a Chinese book gets Latin fonts
@@ -859,6 +878,7 @@ impl ExportContext {
             ruby_registry: RubyContentRegistry::new(),
             document_writing_mode: KfxSymbol::HorizontalTb,
             style_writing_mode_baseline: KfxSymbol::HorizontalTb,
+            reader_font_family: None,
             document_direction: KfxSymbol::Ltr,
             content_language: String::new(),
         }
@@ -988,6 +1008,25 @@ impl ExportContext {
         std::borrow::Cow::Owned(s)
     }
 
+    /// The IR style as the KFX writer should see it: box model transposed for
+    /// the document's axis, and the body font handed back to the reader.
+    ///
+    /// See [`Self::reader_font_family`] for why the dominant generic family
+    /// becomes `default` — in short, a KFX style that names a family pins the
+    /// device font, and a source asking for `serif-ja` asked for a category.
+    fn prepared_ir_style<'a>(
+        &self,
+        ir_style: &'a crate::style::ComputedStyle,
+    ) -> std::borrow::Cow<'a, crate::style::ComputedStyle> {
+        let mut out = self.box_transposed_ir_style(ir_style);
+        if let Some(base) = &self.reader_font_family
+            && out.font_family.as_deref() == Some(base.as_str())
+        {
+            out.to_mut().font_family = Some(READER_DEFAULT_FONT.to_string());
+        }
+        out
+    }
+
     /// The `layout` symbol to stamp on a `type: container`. A KFX container
     /// stacks its children along the block-progression axis, so the axis is
     /// governed by the document's writing mode: block flow runs *horizontally*
@@ -1030,7 +1069,7 @@ impl ExportContext {
     ) -> crate::formats::kfx::style_registry::ComputedStyle {
         let schema = crate::formats::kfx::style_schema::StyleSchema::standard();
         let mut builder = crate::formats::kfx::style_registry::StyleBuilder::new(schema);
-        let ir_style = self.box_transposed_ir_style(ir_style);
+        let ir_style = self.prepared_ir_style(ir_style);
         builder.ingest_ir_style(&ir_style, self.ir_style_baseline_writing_mode());
         let mut kfx_style = builder.build();
         finalize_tatechuyoko(&mut kfx_style);
@@ -1063,7 +1102,7 @@ impl ExportContext {
         use crate::formats::kfx::style_schema::KfxValue;
         let schema = crate::formats::kfx::style_schema::StyleSchema::standard();
         let mut builder = crate::formats::kfx::style_registry::StyleBuilder::new(schema);
-        let ir_style = self.box_transposed_ir_style(ir_style);
+        let ir_style = self.prepared_ir_style(ir_style);
         builder.ingest_ir_style(&ir_style, self.ir_style_baseline_writing_mode());
         let mut kfx_style = builder.build();
         if kfx_style.get(KfxSymbol::Underline).is_none() {
