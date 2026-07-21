@@ -8,6 +8,7 @@
 
 mod cascade;
 mod declaration;
+mod font_family;
 pub(crate) mod parse;
 mod properties;
 mod style_pool;
@@ -26,6 +27,10 @@ pub trait ToCss {
         buf
     }
 }
+
+pub use font_family::{
+    compact_font_stack, font_stack_category, is_generic_font_keyword, preferred_font_face,
+};
 
 // Re-export property types
 pub use properties::ROOT_FONT_SIZE_PX;

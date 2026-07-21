@@ -155,12 +155,18 @@ fn is_default_font_name(s: &str) -> bool {
 /// rejected (epubcheck CSS-008 "Token … not allowed here"). Generic keywords
 /// and plain ASCII-identifier names stay unquoted (e.g. `times new roman`,
 /// `serif`); everything else is quoted.
+///
+/// KFX's `default` — "whatever font the reader has chosen" — is dropped. CSS
+/// has no such name, so carrying it through would ask for a typeface called
+/// "default" and silently fall through to the next entry. CSS spells the same
+/// intent by leaving `font-family` unset, which is what a stack of nothing but
+/// `default` becomes: an empty value the caller skips.
 fn normalize_font_family(value: &str) -> String {
     value
         .split(',')
         .filter_map(|fam| {
             let f = fam.trim();
-            if f.is_empty() {
+            if f.is_empty() || f.eq_ignore_ascii_case(KFX_READER_FONT) {
                 None
             } else if is_generic_font_keyword(f) || is_safe_unquoted_font(f) {
                 Some(f.to_string())
@@ -174,6 +180,9 @@ fn normalize_font_family(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+
+/// The KFX font family standing for the reader's own font choice.
+const KFX_READER_FONT: &str = "default";
 
 fn is_generic_font_keyword(f: &str) -> bool {
     matches!(

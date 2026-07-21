@@ -335,7 +335,10 @@ pub fn format_to_kfx_symbol(format: MediaFormat) -> u64 {
         MediaFormat::Png => KfxSymbol::Png as u64,
         MediaFormat::Gif => KfxSymbol::Gif as u64,
         MediaFormat::Jxr => KfxSymbol::Jxr as u64,
-        // SVG, WebP, and fonts use Jpg as fallback (KFX limitation)
+        // SVG and WebP are rasterized to JPEG before bundling, so the symbol is
+        // accurate by the time it is written. KFX's format enum has no font
+        // member; fonts never reach here, since they are written as `bcRawFont`
+        // with no `external_resource` to carry a format at all.
         MediaFormat::Svg => KfxSymbol::Jpg as u64,
         MediaFormat::WebP => KfxSymbol::Jpg as u64,
         MediaFormat::Ttf => KfxSymbol::Jpg as u64,

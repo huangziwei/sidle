@@ -18,8 +18,28 @@ use super::transforms::encode_base32;
 ///
 /// Amazon's own converter emits this for the bulk of a book's styles; any other
 /// value pins a specific device font. See
-/// [`ExportContext::reader_font_family`].
+/// [`ExportContext::reader_font_families`].
 const READER_DEFAULT_FONT: &str = "default";
+
+/// Put the reader's font at the head of a stack, keeping the source's own faces
+/// behind it as fallback: `booksming, serif` becomes `default,booksming,serif`.
+///
+/// Amazon writes exactly this shape — `default,serif`, `default,georgia,serif`,
+/// `default,hiraminpron-w3,serif-ja-v,serif-ja,serif` — rather than dropping
+/// what the source asked for. The fallback still earns its place after the
+/// substitution: a reader font that lacks the glyphs (a Latin face in a CJK
+/// book) falls through to faces that have them, which a bare `default` could
+/// not do.
+///
+/// A stack already headed by `default` is returned unchanged, so a book that
+/// came from KFX and goes back to it keeps one `default`, not one per trip.
+fn with_reader_font_first(stack: &str) -> String {
+    let compact = crate::style::compact_font_stack(stack);
+    if crate::style::preferred_font_face(&compact).eq_ignore_ascii_case(READER_DEFAULT_FONT) {
+        return compact;
+    }
+    format!("{READER_DEFAULT_FONT},{compact}")
+}
 
 /// Symbol table for KFX export.
 ///
@@ -732,16 +752,16 @@ pub struct ExportContext {
     /// `HorizontalTb`.
     pub style_writing_mode_baseline: KfxSymbol,
 
-    /// The book's dominant *generic* font family, which is emitted as
-    /// `default` instead of by name so the reader's font setting still applies.
+    /// The `font-family` stack carrying the book's body text, which is written
+    /// with `default` at its head so the reader's font setting still applies.
     ///
     /// A KFX style that names a family pins the device font; `default` defers
-    /// to the reader. A source that sets `font-family: serif-ja` on its body
-    /// text is asking for a serif face, not for that exact face, so carrying
-    /// the name through would silently disable the Kindle's font control.
-    /// Only the dominant generic defers — a deliberate contrast
-    /// (`sans-serif-ja` headings) and any real typeface (`標楷體`) keep their
-    /// name. `None` leaves every family untouched.
+    /// to the reader. So a source that puts `font-family` on its body text
+    /// would silently disable the Kindle's font control if the stack were
+    /// carried through as-is — the setting has nothing left to override. Only
+    /// the body defers; a deliberate contrast (`sans-serif-ja` headings, a
+    /// decorative `標楷體`) keeps its name, as does any face the book embeds.
+    /// `None` leaves every family untouched.
     pub reader_font_family: Option<String>,
 
     /// Device-recognized content language stamped on every reflowable `$style`.
@@ -1011,18 +1031,19 @@ impl ExportContext {
     /// The IR style as the KFX writer should see it: box model transposed for
     /// the document's axis, and the body font handed back to the reader.
     ///
-    /// See [`Self::reader_font_family`] for why the dominant generic family
-    /// becomes `default` — in short, a KFX style that names a family pins the
-    /// device font, and a source asking for `serif-ja` asked for a category.
+    /// See [`Self::reader_font_family`] for why the body family becomes
+    /// `default` — in short, a KFX style that names a family pins the device
+    /// font, leaving the reader's font setting nothing to override.
     fn prepared_ir_style<'a>(
         &self,
         ir_style: &'a crate::style::ComputedStyle,
     ) -> std::borrow::Cow<'a, crate::style::ComputedStyle> {
         let mut out = self.box_transposed_ir_style(ir_style);
-        if let Some(base) = &self.reader_font_family
-            && out.font_family.as_deref() == Some(base.as_str())
+        if let Some(stack) = out.font_family.as_deref()
+            && self.reader_font_family.as_deref() == Some(stack)
         {
-            out.to_mut().font_family = Some(READER_DEFAULT_FONT.to_string());
+            let deferred = with_reader_font_first(stack);
+            out.to_mut().font_family = Some(deferred);
         }
         out
     }

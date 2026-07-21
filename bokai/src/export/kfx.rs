@@ -324,7 +324,7 @@ fn build_kfx_container(
     // The body font defers to the reader's choice — see `reader_font_family`.
     // Without this the content pins the device font and the Kindle's font
     // control has nothing left to override.
-    ctx.reader_font_family = dominant_generic_font_family(book);
+    ctx.reader_font_family = body_font_stack(book);
     // Stamp a device-recognized content language on every reflowable style so the
     // Kindle selects CJK fonts + upright vertical orientation. Without it a
     // Chinese/Japanese book renders in Latin fonts with sideways glyphs — Amazon
@@ -515,6 +515,12 @@ fn build_kfx_container(
         on_progress("images", i + 1, n_media, "Encoding images");
         if let Ok(data) = book.load_asset(asset_path) {
             let href = asset_path.to_string_lossy().to_string();
+            // A typeface is not a picture: it skips the image transcode and the
+            // external_resource description, and lands in bcRawFont ($418).
+            if is_font_asset(asset_path) {
+                fragments.push(build_font_resource_fragment(&href, &data, &mut ctx));
+                continue;
+            }
             let is_cover =
                 cover_filename.as_deref() == asset_path.file_name().and_then(|s| s.to_str());
             let bundled = if is_cover {
@@ -1223,67 +1229,93 @@ fn book_writing_mode(book: &mut Book) -> KfxSymbol {
 ///
 /// Distinct styles in the pool are counted. Only the vertical axes are
 /// tallied; [`pick_document_writing_mode`] then decides the book-level mode.
-/// Is this font family a *category* rather than a typeface?
-///
-/// CSS generics (`serif`, `sans-serif`, …) name a category and let the renderer
-/// pick the face. Kindle extends that with locale-specific generics —
-/// `serif-ja`, `sans-serif-ja`, and their `-v` vertical variants — which are
-/// still categories, not typefaces. `標楷體` or `MS Mincho` are typefaces.
-///
-/// The distinction matters because KFX resolves the two differently: a named
-/// family pins the device font, while `default` defers to the reader's own
-/// choice. Deferring is the faithful reading of a category.
-fn is_generic_font_family(name: &str) -> bool {
-    const GENERICS: &[&str] = &[
-        "serif",
-        "sans-serif",
-        "monospace",
-        "cursive",
-        "fantasy",
-        "system-ui",
-    ];
-    let n = name.trim().trim_matches('"').to_ascii_lowercase();
-    // `serif-ja-v` is the vertical cut of the `serif-ja` category.
-    let n = n.strip_suffix("-v").unwrap_or(&n);
-    GENERICS
-        .iter()
-        .any(|g| n == *g || n.strip_prefix(g).is_some_and(|rest| rest.starts_with('-')))
+/// The font family in effect at `id` — the nearest self-or-ancestor style that
+/// names one, mirroring how `font-family` inherits.
+fn inherited_font_family(chapter: &Chapter, id: NodeId) -> Option<&str> {
+    let mut cur = Some(id);
+    while let Some(node_id) = cur {
+        let node = chapter.node(node_id)?;
+        if let Some(family) = chapter
+            .styles
+            .get(node.style)
+            .and_then(|s| s.font_family.as_deref())
+        {
+            return Some(family);
+        }
+        cur = node.parent;
+    }
+    None
 }
 
-/// The font family the book uses for most of its text, when that family is a
-/// generic category — the one a reader's font setting is meant to replace.
+/// The font-family stack carrying the book's body text — the one a reader's
+/// font setting exists to restyle.
 ///
-/// **Why this exists.** A source stylesheet says `font-family: serif-ja, serif`
-/// on its body text, meaning "set this in a serif face". Carried through
-/// literally, every KFX style names `serif-ja`, the content pins the device
-/// font, and the Kindle's font control stops doing anything — the setting has
-/// nothing left to override. Amazon's own converter emits `default` for the
-/// bulk of a book's styles for exactly this reason, keeping a specific family
-/// only where the publisher asked for a *contrast*.
+/// **Why this exists.** A KFX style that names a family pins the device font;
+/// only `default` defers to the reader's choice. So a stylesheet that puts a
+/// family on body text — `font-family: serif-ja, serif`, `font-family:
+/// booksming, serif` — disables the Kindle's font control once carried through
+/// literally: the setting has nothing left to override. Amazon's own converter
+/// never leaves the body font named. It writes `default` at the head of the
+/// stack, and keeps a family unqualified only where the publisher asked for a
+/// *contrast*.
 ///
-/// So only the dominant generic defers. A heading set in `sans-serif-ja`
-/// against `serif-ja` body text is a deliberate distinction and survives; a
-/// typeface the publisher actually named (`標楷體`) is never touched, since
-/// naming one is a choice a category-level rule has no business overriding.
-fn dominant_generic_font_family(book: &mut Book) -> Option<String> {
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+/// **Coverage decides which stack is the body, not style count.** The body font
+/// is whichever stack most of the book's *text* is set in, and that is rarely
+/// the stack named by the most styles: a handful of decorative styles naming a
+/// typeface routinely outnumber the one style carrying the body, and those
+/// decorative ones are exactly what has to survive. Nor does the *name* decide
+/// it — a category (`serif-ja`) and a typeface (`booksming`) pin the device
+/// font equally hard. A stack under half the book's text is a contrast whatever
+/// it names, and a book that styles no majority of its text has no body font to
+/// hand over.
+///
+/// A face the book embeds is never deferred: the publisher shipped that file,
+/// so the name resolves to something real rather than pinning a font the device
+/// does not have.
+fn body_font_stack(book: &mut Book) -> Option<String> {
+    let embedded: HashSet<String> = book
+        .font_faces()
+        .iter()
+        .map(|f| f.font_family.trim().trim_matches('"').to_ascii_lowercase())
+        .collect();
+
+    let mut covered: HashMap<String, usize> = HashMap::new();
+    let mut total = 0usize;
     let chapter_ids: Vec<_> = book.spine().iter().map(|e| e.id).collect();
     for chapter_id in chapter_ids {
         let Ok(chapter) = book.load_chapter(chapter_id) else {
             continue;
         };
-        for (_, style) in chapter.styles.iter() {
-            if let Some(f) = &style.font_family {
-                *counts.entry(f.clone()).or_default() += 1;
+        for i in 0..chapter.node_count() {
+            let id = NodeId(i as u32);
+            let Some(node) = chapter.node(id) else {
+                continue;
+            };
+            if node.role != Role::Text {
+                continue;
+            }
+            let len = chapter.text(node.text).chars().count();
+            if len == 0 {
+                continue;
+            }
+            total += len;
+            if let Some(family) = inherited_font_family(&chapter, id) {
+                *covered.entry(family.to_string()).or_default() += len;
             }
         }
     }
+
     // Ties break by name so the choice is reproducible across runs rather than
     // riding HashMap order.
-    let (family, _) = counts
+    let (body, len) = covered
         .into_iter()
         .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))?;
-    is_generic_font_family(&family).then_some(family)
+    // Under half the book's text this is a contrast, not the body font.
+    if len * 2 <= total {
+        return None;
+    }
+    let preferred = crate::style::preferred_font_face(&body).to_ascii_lowercase();
+    (!embedded.contains(&preferred)).then_some(body)
 }
 
 fn dominant_writing_mode_from_ir(book: &mut Book) -> KfxSymbol {
@@ -2477,6 +2509,21 @@ fn build_resource_fragment(href: &str, data: &[u8], ctx: &mut ExportContext) -> 
 
     // Create raw fragment for binary resources
     KfxFragment::raw(KfxSymbol::Bcrawmedia as u64, &raw_name, data.to_vec())
+}
+
+/// Build a font resource fragment (bcRawFont $418) — a typeface's raw bytes.
+///
+/// Fonts get their own fragment type, and no `external_resource` alongside it:
+/// that fragment describes a *picture* (it carries `format`, `resource_width`,
+/// `resource_height`), and KFX's format enum has no font member, so declaring
+/// one would mean labelling a typeface `jpg`. Amazon writes a `bcRawFont` plus
+/// the `font` ($262) entity that names it, and nothing else — the entity's
+/// `location` is the only reference the device needs.
+fn build_font_resource_fragment(href: &str, data: &[u8], ctx: &mut ExportContext) -> KfxFragment {
+    let resource_name = generate_resource_name(href, ctx);
+    let raw_name = format!("resource/{}", resource_name);
+    ctx.symbols.get_or_intern(&raw_name);
+    KfxFragment::raw(KfxSymbol::Bcrawfont as u64, &raw_name, data.to_vec())
 }
 
 /// Build font entity fragments ($262) from @font-face rules.

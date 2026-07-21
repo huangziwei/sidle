@@ -2205,7 +2205,10 @@ pub fn extract_ir_field(
             }
         }
         // Phase 7: Font family
-        IrField::FontFamily => ir_style.font_family.clone(),
+        IrField::FontFamily => ir_style
+            .font_family
+            .as_deref()
+            .map(crate::style::compact_font_stack),
         // Phase 8: Amazon properties
         IrField::Language => ir_style.language.clone(),
         IrField::Visibility => {
