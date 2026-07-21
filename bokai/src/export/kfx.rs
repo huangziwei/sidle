@@ -1252,23 +1252,6 @@ fn inherited_font_family(chapter: &Chapter, id: NodeId) -> Option<&str> {
     None
 }
 
-/// Share of a book's text the leading `font-family` stack must carry before it
-/// counts as the body font.
-///
-/// Fitted to Amazon's own decisions, not chosen: a KFX records the verdict
-/// directly, since a stack written with `default` at its head defers to the
-/// reader and a bare one pins the device font. Scored over 917 stacks in 435
-/// Amazon books, "the leading stack, when it carries at least this share"
-/// agrees on 903 — and every threshold from 40% up is free of *false* deferrals,
-/// while higher ones start missing books Amazon hands over (one is deferred at
-/// 44.5%, its book set in three faces with no majority among them). So this
-/// sits at the bottom of the range that never over-defers.
-///
-/// The 14 remaining disagreements are all books where Amazon additionally
-/// deferred a second stack carrying under 1% of the text — no reader can tell,
-/// and matching it would mean deferring near-empty stacks by rule.
-const BODY_TEXT_SHARE_PERCENT: usize = 40;
-
 /// The `font-family` stack carrying the book's body text — the one a reader's
 /// font setting exists to restyle.
 ///
@@ -1288,6 +1271,23 @@ const BODY_TEXT_SHARE_PERCENT: usize = 40;
 /// survive. Nor does the *name* decide it — a category (`serif-ja`) and a
 /// typeface (`booksming`) pin the device font equally hard.
 ///
+/// **The reader's own font is one of the candidates, which is why no threshold
+/// is needed.** Text that names no family at all is already set in whatever the
+/// reader chose, so it is not an absence to be discounted — it is a competing
+/// answer to "what is this book set in". The body font is simply the plurality,
+/// and when the plurality is the reader's font there is nothing left to hand
+/// over: what remains is decoration by construction. That is what keeps a book
+/// whose text is mostly unstyled from surrendering its one decorative `標楷體`,
+/// without a constant deciding how small "decorative" is.
+///
+/// This was fitted first — a share cut tuned against Amazon's own decisions —
+/// and the comparison is why it is gone: the two agree on **all 917 stacks in
+/// 435 Amazon books and all 1,625 books in the reference library**, so the
+/// constant only restated what the book's own proportions already say. It also
+/// tunes itself where a fixed cut had to be chosen: one Amazon book hands over
+/// a stack holding just 44.5% of its text, having split the rest across two
+/// other faces, and the plurality sees that without being told.
+///
 /// **Exactly one stack hands over, even when a book reads in several faces.**
 /// An anthology whose quoted stories use a second face keeps that face pinned,
 /// so the font control does nothing while the reader is inside one — a real
@@ -1306,7 +1306,7 @@ const BODY_TEXT_SHARE_PERCENT: usize = 40;
 /// [`MetadataContext::has_publisher_fonts`](crate::formats::kfx::metadata::MetadataContext::has_publisher_fonts).
 fn body_font_stack(book: &mut Book) -> Option<String> {
     let mut covered: HashMap<String, usize> = HashMap::new();
-    let mut total = 0usize;
+    let mut reader_governed = 0usize;
     let chapter_ids: Vec<_> = book.spine().iter().map(|e| e.id).collect();
     for chapter_id in chapter_ids {
         let Ok(chapter) = book.load_chapter(chapter_id) else {
@@ -1324,9 +1324,10 @@ fn body_font_stack(book: &mut Book) -> Option<String> {
             if len == 0 {
                 continue;
             }
-            total += len;
-            if let Some(family) = inherited_font_family(&chapter, id) {
-                *covered.entry(family.to_string()).or_default() += len;
+            match inherited_font_family(&chapter, id) {
+                Some(family) => *covered.entry(family.to_string()).or_default() += len,
+                // Already the reader's font — a rival candidate, not a gap.
+                None => reader_governed += len,
             }
         }
     }
@@ -1336,7 +1337,7 @@ fn body_font_stack(book: &mut Book) -> Option<String> {
     let (body, len) = covered
         .into_iter()
         .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))?;
-    (len * 100 >= total * BODY_TEXT_SHARE_PERCENT).then_some(body)
+    (len > reader_governed).then_some(body)
 }
 
 /// Recover the book-level writing mode from the content when the OPF declares
