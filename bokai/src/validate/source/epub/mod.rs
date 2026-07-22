@@ -196,6 +196,7 @@ pub enum Rule {
     IdentifierInvalidUuid,
     DateSyntaxNotRecommended,
     DateNotValid,
+    LanguageTagNotWellFormed,
 }
 
 impl Rule {
@@ -259,6 +260,7 @@ impl Rule {
         Rule::IdentifierInvalidUuid,
         Rule::DateSyntaxNotRecommended,
         Rule::DateNotValid,
+        Rule::LanguageTagNotWellFormed,
     ];
 
     /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
@@ -328,6 +330,7 @@ impl Rule {
             Rule::IdentifierInvalidUuid => "OPF-085",
             Rule::DateSyntaxNotRecommended => "OPF-053",
             Rule::DateNotValid => "OPF-054",
+            Rule::LanguageTagNotWellFormed => "OPF-092",
         }
     }
 
@@ -960,6 +963,20 @@ fn check_metadata(pkg: &opf::Package, epub2: bool, opf_path: &str, report: &mut 
 
     for m in &pkg.metadata {
         match m.name.as_str() {
+            "language" => {
+                // epubcheck checks only non-empty (trimmed) language tags; an
+                // absent/empty dc:language is the schema's job (handled above).
+                let tag = m.value.trim();
+                if !tag.is_empty()
+                    && let Err(detail) = language_tag_wellformed(tag)
+                {
+                    report.push(Violation::new(
+                        Rule::LanguageTagNotWellFormed,
+                        opf_path.to_string(),
+                        format!("language tag {tag:?} is not well-formed: {detail}"),
+                    ));
+                }
+            }
             "date" => {
                 if let Err(detail) = parse_w3c_date(m.value.trim()) {
                     let rule = if epub2 {
@@ -1010,6 +1027,137 @@ fn is_valid_uuid(s: &str) -> bool {
             .iter()
             .zip(lengths)
             .all(|(g, n)| g.len() == n && g.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// BCP-47 (RFC 5646) *well-formedness*, a faithful port of Java's
+/// `sun.util.locale.LanguageTag.parse` — the oracle epubcheck's OPF-092 uses via
+/// `new Locale.Builder().setLanguageTag(tag)`. This checks syntax only, never
+/// registry validity: `english` and `zz` are well-formed (accepted), while
+/// `en_US`, `en-`, and `toolongsubtag` are not. `Ok(())` when well-formed; the
+/// `Err` mirrors Java's `IllformedLocaleException` message.
+///
+/// Java collapses the RFC subtag productions to length+charclass tests and, like
+/// Java, we split on `-` only (so `_` is never a separator) keeping empty tokens
+/// (so a leading/trailing/doubled `-` surfaces as an "Empty subtag"). Grandfathered
+/// tags are mapped to well-formed replacements before parsing, so they pass.
+fn language_tag_wellformed(tag: &str) -> Result<(), String> {
+    if is_grandfathered_langtag(tag) {
+        return Ok(());
+    }
+    let alpha = |s: &str, lo: usize, hi: usize| {
+        let n = s.len();
+        n >= lo && n <= hi && s.bytes().all(|b| b.is_ascii_alphabetic())
+    };
+    let digit = |s: &str, lo: usize, hi: usize| {
+        let n = s.len();
+        n >= lo && n <= hi && s.bytes().all(|b| b.is_ascii_digit())
+    };
+    let alnum = |s: &str, lo: usize, hi: usize| {
+        let n = s.len();
+        n >= lo && n <= hi && s.bytes().all(|b| b.is_ascii_alphanumeric())
+    };
+    // variant = 5*8alphanum / (DIGIT 3alphanum)
+    let is_variant = |s: &str| {
+        alnum(s, 5, 8)
+            || (s.len() == 4
+                && s.as_bytes()[0].is_ascii_digit()
+                && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+    };
+    // singleton = one ALPHA that is not 'x'/'X' (Java excludes digit singletons).
+    let is_singleton = |s: &str| alpha(s, 1, 1) && !s.eq_ignore_ascii_case("x");
+    let is_privateuse_prefix = |s: &str| alpha(s, 1, 1) && s.eq_ignore_ascii_case("x");
+
+    let toks: Vec<&str> = tag.split('-').collect();
+    let n = toks.len();
+    let mut i = 0usize;
+
+    // langtag = language ["-" script] ["-" region] *variant *extension [privateuse]
+    if i < n && alpha(toks[i], 2, 8) {
+        i += 1; // language (Java: 2*8ALPHA)
+        // extlang: up to 3 of 3ALPHA
+        let mut extlangs = 0;
+        while i < n && extlangs < 3 && alpha(toks[i], 3, 3) {
+            i += 1;
+            extlangs += 1;
+        }
+        if i < n && alpha(toks[i], 4, 4) {
+            i += 1; // script = 4ALPHA
+        }
+        if i < n && (alpha(toks[i], 2, 2) || digit(toks[i], 3, 3)) {
+            i += 1; // region = 2ALPHA / 3DIGIT
+        }
+        while i < n && is_variant(toks[i]) {
+            i += 1;
+        }
+        // extension = singleton 1*("-" 2*8alphanum)
+        while i < n && is_singleton(toks[i]) {
+            let singleton = toks[i];
+            i += 1;
+            let sub_start = i;
+            while i < n && alnum(toks[i], 2, 8) {
+                i += 1;
+            }
+            if i == sub_start {
+                return Err(format!("Incomplete extension '{singleton}'"));
+            }
+        }
+    }
+    // privateuse = ("x" / "X") 1*("-" 1*8alphanum)
+    if i < n && is_privateuse_prefix(toks[i]) {
+        i += 1;
+        let sub_start = i;
+        while i < n && alnum(toks[i], 1, 8) {
+            i += 1;
+        }
+        if i == sub_start {
+            return Err("Incomplete privateuse".into());
+        }
+    }
+
+    if i < n {
+        return Err(if toks[i].is_empty() {
+            "Empty subtag".into()
+        } else {
+            format!("Invalid subtag: {}", toks[i])
+        });
+    }
+    Ok(())
+}
+
+/// The RFC 5646 grandfathered tags (irregular + regular). Java's parser maps each
+/// to a well-formed replacement before parsing, so all are well-formed; several
+/// irregular ones (`i-klingon`, `en-GB-oed`, `sgn-*`) would otherwise fail the
+/// `langtag` production. Matched case-insensitively, like Java's lookup.
+fn is_grandfathered_langtag(tag: &str) -> bool {
+    const GRANDFATHERED: &[&str] = &[
+        "art-lojban",
+        "cel-gaulish",
+        "en-GB-oed",
+        "i-ami",
+        "i-bnn",
+        "i-default",
+        "i-enochian",
+        "i-hak",
+        "i-klingon",
+        "i-lux",
+        "i-mingo",
+        "i-navajo",
+        "i-pwn",
+        "i-tao",
+        "i-tay",
+        "i-tsu",
+        "no-bok",
+        "no-nyn",
+        "sgn-BE-FR",
+        "sgn-BE-NL",
+        "sgn-CH-DE",
+        "zh-guoyu",
+        "zh-hakka",
+        "zh-min",
+        "zh-min-nan",
+        "zh-xiang",
+    ];
+    GRANDFATHERED.iter().any(|g| g.eq_ignore_ascii_case(tag))
 }
 
 /// Validate a W3C-DTF (ISO-8601 profile) date, a faithful port of epubcheck's
@@ -2138,7 +2286,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 56, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 57, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -2168,9 +2316,9 @@ mod tests {
         // RSC-028 + HTM-058 (RSC-027 is a warning, not counted here); fallback/
         // rootfile batch OPF-016/017/043/044/045; metadata batch OPF-054 (the
         // date's EPUB-2 error id — OPF-053/085 are warnings, RSC-005 for missing
-        // title/language was already counted).
+        // title/language was already counted); language batch OPF-092.
         assert_eq!(
-            covered, 46,
+            covered, 47,
             "epubcheck error coverage changed: {covered}/{total}"
         );
     }
@@ -2773,6 +2921,74 @@ mod tests {
         assert!(!is_valid_uuid("f47ac10b58cc4372a5670e02b2c3d479")); // no groups
         assert!(!is_valid_uuid("f47ac10b-58cc-4372-a567-0e02b2c3d47")); // group too short
         assert!(!is_valid_uuid("g47ac10b-58cc-4372-a567-0e02b2c3d479")); // non-hex
+    }
+
+    #[test]
+    fn language_tag_wellformedness_matches_java_locale_builder() {
+        // Well-formed (Java's Locale.Builder().setLanguageTag accepts): syntax
+        // only, so unregistered-but-syntactic tags pass too.
+        for ok in [
+            "en",
+            "zh",
+            "ja",
+            "en-US",
+            "zh-Hans",
+            "zh-Hans-CN",
+            "de-CH-1901",         // variant
+            "sl-rozaj-biske",     // two variants
+            "de-DE-u-co-phonebk", // BCP-47 'u' extension
+            "en-a-bbb-x-a-ccc",   // extension + private use
+            "x-klingon",          // private-use only
+            "english",            // 7 ALPHA: well-formed, though not a real code
+            "zz",                 // syntactically fine, not registered
+            "i-klingon",          // grandfathered (irregular)
+            "en-GB-oed",          // grandfathered (irregular)
+            "art-lojban",         // grandfathered (regular)
+            "zh-min-nan",         // grandfathered (regular)
+        ] {
+            assert!(
+                language_tag_wellformed(ok).is_ok(),
+                "should accept {ok:?}: {:?}",
+                language_tag_wellformed(ok)
+            );
+        }
+        // Ill-formed: Java throws IllformedLocaleException.
+        for bad in [
+            "en_US",         // underscore is not a BCP-47 separator
+            "en-",           // trailing separator → empty subtag
+            "-en",           // leading separator → empty subtag
+            "en--US",        // doubled separator → empty subtag
+            "toolongsubtag", // 13 ALPHA: no production accepts it
+            "a",             // single char: not language, not private-use prefix
+            "en-a",          // singleton with no extension subtag
+            "en-a-x-y",      // singleton 'a' unfollowed by a 2*8 subtag
+            "x",             // private-use prefix with no subtag
+            "de-419-DE-1a",  // '1a' is neither variant nor anything downstream
+        ] {
+            assert!(
+                language_tag_wellformed(bad).is_err(),
+                "should reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_check_flags_an_illformed_language_tag() {
+        let opf = r##"<package version="3.0" unique-identifier="uid">
+          <metadata xmlns:opf="http://www.idpf.org/2007/opf">
+            <dc:title>Title</dc:title>
+            <dc:identifier id="uid">urn:uuid:f47ac10b-58cc-4372-a567-0e02b2c3d479</dc:identifier>
+            <dc:language>en_US</dc:language>
+          </metadata>
+          <manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest>
+          <spine><itemref idref="a"/></spine>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut r = Report::default();
+        check_metadata(&pkg, false, "content.opf", &mut r);
+        assert!(r.has_rule(Rule::LanguageTagNotWellFormed));
+        // The tag is present, so the missing-language rule must NOT also fire.
+        assert!(!r.has_rule(Rule::MissingLanguage));
     }
 
     #[test]
