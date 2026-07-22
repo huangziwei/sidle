@@ -197,6 +197,9 @@ pub enum Rule {
     DateSyntaxNotRecommended,
     DateNotValid,
     LanguageTagNotWellFormed,
+    // Remote / data URLs in the manifest (epubcheck RSC-006 / RSC-029).
+    RemoteResourceInSpine,
+    ManifestItemDataUrl,
 }
 
 impl Rule {
@@ -261,6 +264,8 @@ impl Rule {
         Rule::DateSyntaxNotRecommended,
         Rule::DateNotValid,
         Rule::LanguageTagNotWellFormed,
+        Rule::RemoteResourceInSpine,
+        Rule::ManifestItemDataUrl,
     ];
 
     /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
@@ -331,6 +336,8 @@ impl Rule {
             Rule::DateSyntaxNotRecommended => "OPF-053",
             Rule::DateNotValid => "OPF-054",
             Rule::LanguageTagNotWellFormed => "OPF-092",
+            Rule::RemoteResourceInSpine => "RSC-006",
+            Rule::ManifestItemDataUrl => "RSC-029",
         }
     }
 
@@ -464,6 +471,10 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
     check_opf_structure(&pkg, &opf_dir, &opf_path, epub2, &mut report);
     check_fallback_chain_and_spine(&pkg, epub2, &opf_path, &mut report);
     check_metadata(&pkg, epub2, &opf_path, &mut report);
+    // RSC-006/029 are EPUB 3 manifest rules (epubcheck's OPFChecker30).
+    if !epub2 {
+        check_remote_and_data_urls(&pkg, &opf_path, &mut report);
+    }
     check_xhtml_hrefs_and_reachability(
         &pkg,
         &opf_dir,
@@ -1158,6 +1169,88 @@ fn is_grandfathered_langtag(tag: &str) -> bool {
         "zh-xiang",
     ];
     GRANDFATHERED.iter().any(|g| g.eq_ignore_ascii_case(tag))
+}
+
+/// EPUB 3 remote/data-URL manifest rules (epubcheck's `OPFChecker30`). **RSC-029**:
+/// a manifest `<item href>` that is a `data:` URL is not allowed. **RSC-006**: a
+/// spine item may never be a remote resource — spine content is always a content
+/// document, so the audio/video/font remote exemption never applies to it, and the
+/// rule fires regardless of scripts (unlike the non-spine cases).
+///
+/// The broader RSC-006 surface — a remote reference *from* content, or an
+/// unreferenced remote manifest item — needs the content-document reference graph
+/// and script detection, so it stays deferred. Under-reporting here is safe;
+/// over-reporting (flagging a script-retrieved remote resource epubcheck rates
+/// USAGE) is not.
+fn check_remote_and_data_urls(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
+    let spine_ids: HashSet<&str> = pkg.spine.iter().map(|s| s.idref.as_str()).collect();
+    for item in &pkg.manifest {
+        if is_data_url(&item.href) {
+            report.push(Violation::new(
+                Rule::ManifestItemDataUrl,
+                opf_path.to_string(),
+                format!(
+                    "manifest item {:?} uses a data: URL, which is not allowed",
+                    item.id
+                ),
+            ));
+        } else if is_remote_href(&item.href)
+            && spine_ids.contains(item.id.as_str())
+            && !is_remote_exempt_type(&item.media_type)
+        {
+            report.push(Violation::new(
+                Rule::RemoteResourceInSpine,
+                opf_path.to_string(),
+                format!(
+                    "spine item {:?} is a remote resource ({}); spine items must be in the container",
+                    item.id, item.href
+                ),
+            ));
+        }
+    }
+}
+
+/// The lowercased scheme of an absolute URL reference (`"http"`, `"data"`,
+/// `"file"`, …), or `None` for a relative reference. RFC 3986: a scheme is an
+/// ALPHA followed by ALPHA/DIGIT/`+`/`-`/`.`, then `:`. A relative reference's
+/// first path segment cannot form a scheme (a `:` there is preceded by a
+/// non-scheme char or a `/`), so `../a`, `text/ch.xhtml`, and `#frag` yield `None`.
+fn url_scheme(href: &str) -> Option<String> {
+    let colon = href.find(':')?;
+    let scheme = &href[..colon];
+    let mut bytes = scheme.bytes();
+    if !bytes.next()?.is_ascii_alphabetic() {
+        return None;
+    }
+    bytes
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        .then(|| scheme.to_ascii_lowercase())
+}
+
+/// A `data:` URL (inline resource) — disallowed for manifest items (RSC-029).
+fn is_data_url(href: &str) -> bool {
+    url_scheme(href).as_deref() == Some("data")
+}
+
+/// A remote reference: an absolute URL to another origin. `data:` is inline (its
+/// own rule) and `file:` is disallowed separately (RSC-030); every other scheme
+/// (http, https, ftp, …) denotes a remote origin outside the container.
+fn is_remote_href(href: &str) -> bool {
+    !matches!(
+        url_scheme(href).as_deref(),
+        None | Some("data") | Some("file")
+    )
+}
+
+/// Media types epubcheck permits as remote resources in EPUB 3: audio, video,
+/// fonts, and legacy Shockwave Flash.
+fn is_remote_exempt_type(mt: &str) -> bool {
+    mt.starts_with("audio/")
+        || mt.starts_with("video/")
+        || mt.starts_with("font/")
+        || mt.starts_with("application/font-")
+        || mt == "application/vnd.ms-opentype"
+        || mt == "application/x-shockwave-flash"
 }
 
 /// Validate a W3C-DTF (ISO-8601 profile) date, a faithful port of epubcheck's
@@ -2286,7 +2379,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 57, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 59, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -2316,9 +2409,10 @@ mod tests {
         // RSC-028 + HTM-058 (RSC-027 is a warning, not counted here); fallback/
         // rootfile batch OPF-016/017/043/044/045; metadata batch OPF-054 (the
         // date's EPUB-2 error id — OPF-053/085 are warnings, RSC-005 for missing
-        // title/language was already counted); language batch OPF-092.
+        // title/language was already counted); language batch OPF-092; remote/data
+        // batch RSC-006 (remote spine item) + RSC-029 (manifest data: URL).
         assert_eq!(
-            covered, 47,
+            covered, 49,
             "epubcheck error coverage changed: {covered}/{total}"
         );
     }
@@ -3031,6 +3125,64 @@ mod tests {
             r.is_clean(),
             "well-formed metadata should be clean, got:\n{r}"
         );
+    }
+
+    #[test]
+    fn url_scheme_classification() {
+        assert_eq!(
+            url_scheme("https://example.com/a").as_deref(),
+            Some("https")
+        );
+        assert_eq!(
+            url_scheme("DATA:image/png;base64,AA").as_deref(),
+            Some("data")
+        );
+        assert_eq!(url_scheme("file:///etc/x").as_deref(), Some("file"));
+        // Relative references have no scheme.
+        assert_eq!(url_scheme("text/ch1.xhtml"), None);
+        assert_eq!(url_scheme("../images/p.jpg"), None);
+        assert_eq!(url_scheme("#frag"), None);
+        assert_eq!(url_scheme("a/b:c.xhtml"), None); // ':' after a path '/'
+
+        assert!(is_data_url("data:text/plain,hi"));
+        assert!(!is_data_url("https://x/y"));
+        assert!(is_remote_href("https://x/y"));
+        assert!(is_remote_href("http://x/y"));
+        assert!(!is_remote_href("data:text/plain,hi")); // inline, not remote
+        assert!(!is_remote_href("file:///x")); // handled by RSC-030
+        assert!(!is_remote_href("text/ch1.xhtml")); // local
+    }
+
+    #[test]
+    fn remote_and_data_url_manifest_checks() {
+        // local spine item (clean); data-URL item (RSC-029); remote spine item
+        // (RSC-006); remote audio NOT in spine (exempt → clean); remote image NOT
+        // in spine (the deferred non-spine case → clean under the spine-only port).
+        let opf = r##"<package version="3.0" unique-identifier="uid">
+          <metadata><dc:identifier id="uid">x</dc:identifier></metadata>
+          <manifest>
+            <item id="local" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>
+            <item id="dataimg" href="data:image/png;base64,AAAA" media-type="image/png"/>
+            <item id="remotespine" href="https://ex.com/ch2.xhtml" media-type="application/xhtml+xml"/>
+            <item id="remoteaudio" href="https://ex.com/a.mp3" media-type="audio/mpeg"/>
+            <item id="remoteimg" href="https://ex.com/p.png" media-type="image/png"/>
+          </manifest>
+          <spine>
+            <itemref idref="local"/>
+            <itemref idref="remotespine"/>
+          </spine>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut r = Report::default();
+        check_remote_and_data_urls(&pkg, "content.opf", &mut r);
+        assert!(r.has_rule(Rule::ManifestItemDataUrl), "data: URL → RSC-029");
+        assert!(
+            r.has_rule(Rule::RemoteResourceInSpine),
+            "remote spine item → RSC-006"
+        );
+        // Exactly those two: remote audio (exempt) and remote non-spine image
+        // (deferred) must NOT fire.
+        assert_eq!(r.violations.len(), 2, "unexpected extra findings:\n{r}");
     }
 
     /// Everything below validates a real EPUB, and the only EPUB *writer* in
