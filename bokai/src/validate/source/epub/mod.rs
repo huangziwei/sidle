@@ -151,6 +151,30 @@ pub enum Rule {
     HrefEscapesOpfRoot,
     IrregularDoctype,
     EmptyTitle,
+    // OPF package/manifest/spine structure (epubcheck OPF-*).
+    SpineNoLinear,
+    SpineDuplicateIdref,
+    DuplicateManifestResource,
+    ManifestListsPackageDoc,
+    ItemHrefHasFragment,
+    UniqueIdentifierMissing,
+    UniqueIdentifierNotFound,
+    SpineTocNotNcx,
+    FallbackNotFound,
+    GuideReferenceNotInManifest,
+    DuplicateZipEntry,
+    // OCF container / package integrity (epubcheck PKG-* / RSC-*).
+    MimetypeExtraField,
+    FilenameForbiddenChar,
+    FilenameTrailingDot,
+    ResourceInMetaInf,
+    FileUrlNotAllowed,
+    // XML content conformance (epubcheck HTM-* / RSC-*).
+    XmlVersionNot10,
+    ExternalEntity,
+    StylesheetFragment,
+    NoOpsRootfile,
+    RelativeUrlWithQuery,
 }
 
 impl Rule {
@@ -176,15 +200,36 @@ impl Rule {
         Rule::HrefEscapesOpfRoot,
         Rule::IrregularDoctype,
         Rule::EmptyTitle,
+        Rule::SpineNoLinear,
+        Rule::SpineDuplicateIdref,
+        Rule::DuplicateManifestResource,
+        Rule::ManifestListsPackageDoc,
+        Rule::ItemHrefHasFragment,
+        Rule::UniqueIdentifierMissing,
+        Rule::UniqueIdentifierNotFound,
+        Rule::SpineTocNotNcx,
+        Rule::FallbackNotFound,
+        Rule::GuideReferenceNotInManifest,
+        Rule::DuplicateZipEntry,
+        Rule::MimetypeExtraField,
+        Rule::FilenameForbiddenChar,
+        Rule::FilenameTrailingDot,
+        Rule::ResourceInMetaInf,
+        Rule::FileUrlNotAllowed,
+        Rule::XmlVersionNot10,
+        Rule::ExternalEntity,
+        Rule::StylesheetFragment,
+        Rule::NoOpsRootfile,
+        Rule::RelativeUrlWithQuery,
     ];
 
     /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
     /// [`crate::validate::Finding`] carries, so bokai's output is directly
     /// comparable with W3C epubcheck. Ids in `XXX-NNN` form are real epubcheck
-    /// messages present in [`messages::CATALOG`] (enforced by a test); the three
-    /// kebab ids are bokai-native structural checks epubcheck has no dedicated
-    /// code for (it enforces nav shape via its OPF schema; `linear="no"`
-    /// reachability, EPUB 3.3 §5.8.2, it does not flag at all).
+    /// messages present in [`messages::CATALOG`] (enforced by a test); the two
+    /// kebab ids are bokai-native — epubcheck enforces the single-nav-document
+    /// requirement through its OPF schema (RSC-005 channel) rather than a
+    /// dedicated code.
     pub fn message_id(self) -> &'static str {
         match self {
             Rule::ZipMalformed => "PKG-004",
@@ -199,12 +244,33 @@ impl Rule {
             Rule::SpineIdrefUnknown => "OPF-049",
             Rule::NavMissing => "nav-missing",
             Rule::NavDuplicated => "nav-duplicated",
-            Rule::NonLinearUnreachable => "non-linear-unreachable",
+            Rule::NonLinearUnreachable => "OPF-096",
             Rule::BrokenHref => "RSC-007",
             Rule::FragmentNotDefined => "RSC-012",
             Rule::HrefEscapesOpfRoot => "RSC-026",
             Rule::IrregularDoctype => "HTM-004",
             Rule::EmptyTitle => "RSC-005",
+            Rule::SpineNoLinear => "OPF-033",
+            Rule::SpineDuplicateIdref => "OPF-034",
+            Rule::DuplicateManifestResource => "OPF-074",
+            Rule::ManifestListsPackageDoc => "OPF-099",
+            Rule::ItemHrefHasFragment => "OPF-091",
+            Rule::UniqueIdentifierMissing => "OPF-048",
+            Rule::UniqueIdentifierNotFound => "OPF-030",
+            Rule::SpineTocNotNcx => "OPF-050",
+            Rule::FallbackNotFound => "OPF-040",
+            Rule::GuideReferenceNotInManifest => "OPF-031",
+            Rule::DuplicateZipEntry => "OPF-060",
+            Rule::MimetypeExtraField => "PKG-005",
+            Rule::FilenameForbiddenChar => "PKG-009",
+            Rule::FilenameTrailingDot => "PKG-011",
+            Rule::ResourceInMetaInf => "PKG-025",
+            Rule::FileUrlNotAllowed => "RSC-030",
+            Rule::XmlVersionNot10 => "HTM-001",
+            Rule::ExternalEntity => "HTM-003",
+            Rule::StylesheetFragment => "RSC-013",
+            Rule::NoOpsRootfile => "RSC-003",
+            Rule::RelativeUrlWithQuery => "RSC-033",
         }
     }
 
@@ -279,7 +345,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         }
     };
 
-    let opf_path = match read_container_opf_path(&mut zip) {
+    let opf_path = match read_container_opf_path(&mut zip, &mut report) {
         Ok(p) => p,
         Err(v) => {
             report.push(v);
@@ -311,9 +377,12 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         }
     };
 
-    let zip_paths: HashSet<String> = (0..zip.len())
+    let zip_names: Vec<String> = (0..zip.len())
         .filter_map(|i| zip.by_index(i).ok().map(|f| f.name().to_string()))
         .collect();
+    check_duplicate_zip_entries(&zip_names, &mut report);
+    check_ocf_filenames(&zip_names, &mut report);
+    let zip_paths: HashSet<String> = zip_names.into_iter().collect();
     let opf_dir = opf_path
         .rsplit_once('/')
         .map(|(d, _)| d.to_string())
@@ -324,6 +393,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
     check_spine_idrefs(&pkg, &opf_path, &mut report);
     check_nav_present(&pkg, &opf_path, &mut report);
     check_parent_paths_in_opf(&pkg, &opf_dir, &opf_path, &mut report);
+    check_opf_structure(&pkg, &opf_dir, &opf_path, &mut report);
     check_xhtml_hrefs_and_reachability(
         &pkg,
         &opf_dir,
@@ -333,8 +403,274 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         &mut report,
     );
     check_content_conformance(&pkg, &opf_dir, &mut zip, &mut report);
+    check_xml_conformance(&opf_text, &opf_path, &mut report);
+    check_xml_resources(&pkg, &opf_dir, &mut zip, &mut report);
 
     report
+}
+
+/// HTM-001 (XML version must be 1.0) and HTM-003 (external entity declarations
+/// are forbidden in EPUB 3) over every XML-based publication resource.
+fn check_xml_resources(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    report: &mut Report,
+) {
+    for item in &pkg.manifest {
+        if !is_xml_based(&item.media_type) {
+            continue;
+        }
+        let path = join_opf(opf_dir, &item.href);
+        let Ok(text) = read_text(zip, &path) else {
+            continue;
+        };
+        check_xml_conformance(&text, &path, report);
+    }
+}
+
+/// HTM-001 / HTM-003 for one XML document's text.
+fn check_xml_conformance(text: &str, path: &str, report: &mut Report) {
+    if let Some(ver) = xml_declaration_version(text)
+        && ver != "1.0"
+    {
+        report.push(Violation::new(
+            Rule::XmlVersionNot10,
+            path.to_string(),
+            format!("XML declaration version {ver:?}; EPUB requires XML 1.0"),
+        ));
+    }
+    if has_external_entity(text) {
+        report.push(Violation::new(
+            Rule::ExternalEntity,
+            path.to_string(),
+            "external entity declaration is not allowed in EPUB 3 documents",
+        ));
+    }
+}
+
+/// `version="…"` from the leading `<?xml …?>` declaration, if any. Find-based
+/// (never slices at a non-char-boundary).
+fn xml_declaration_version(s: &str) -> Option<&str> {
+    let start = s.find("<?xml")?;
+    let end = start + s[start..].find("?>")?;
+    let decl = &s[start..end];
+    let after = &decl[decl.find("version")?..];
+    let q = after.find(['"', '\''])?;
+    let quote = &after[q..q + 1];
+    let val_start = q + 1;
+    let val_end = val_start + after[val_start..].find(quote)?;
+    Some(&after[val_start..val_end])
+}
+
+/// True if the document declares an external entity (`<!ENTITY … SYSTEM/PUBLIC
+/// …>`). Scans each `<!ENTITY` declaration up to its `>`; UTF-8 safe.
+fn has_external_entity(s: &str) -> bool {
+    let mut from = 0;
+    while let Some(rel) = s[from..].find("<!ENTITY") {
+        let start = from + rel;
+        let end = s[start..].find('>').map(|e| start + e).unwrap_or(s.len());
+        let decl = &s[start..end];
+        if decl.contains("SYSTEM") || decl.contains("PUBLIC") {
+            return true;
+        }
+        from = (start + "<!ENTITY".len()).min(s.len());
+    }
+    false
+}
+
+/// XML-based media type: `application/xml`, `text/xml`, or any `…+xml`.
+fn is_xml_based(media_type: &str) -> bool {
+    let mt = media_type.trim();
+    mt.eq_ignore_ascii_case("application/xml")
+        || mt.eq_ignore_ascii_case("text/xml")
+        || mt
+            .rsplit_once('+')
+            .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("xml"))
+}
+
+/// OPF package/manifest/spine structural rules that need no zip access beyond
+/// the parsed [`opf::Package`] (epubcheck OPF-030/031/033/034/040/048/050/074/
+/// 091/096/099). Resource *existence* is covered separately by
+/// [`check_manifest_files`]; these check the package's internal consistency.
+fn check_opf_structure(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report: &mut Report) {
+    let manifest_ids: HashSet<&str> = pkg.manifest.iter().map(|m| m.id.as_str()).collect();
+
+    // OPF-048 / OPF-030: the package must declare a unique-identifier that
+    // resolves to a <dc:identifier id="…">.
+    match pkg.unique_identifier.as_deref() {
+        None | Some("") => report.push(Violation::new(
+            Rule::UniqueIdentifierMissing,
+            opf_path,
+            "package element is missing its required unique-identifier attribute",
+        )),
+        Some(uid) if !pkg.identifier_ids.iter().any(|id| id == uid) => {
+            report.push(Violation::new(
+                Rule::UniqueIdentifierNotFound,
+                opf_path,
+                format!("unique-identifier {uid:?} matches no <dc:identifier id=…>"),
+            ));
+        }
+        _ => {}
+    }
+
+    // OPF-033: at least one spine item must be linear.
+    if !pkg.spine.is_empty() && pkg.spine.iter().all(|s| s.linear == Some(false)) {
+        report.push(Violation::new(
+            Rule::SpineNoLinear,
+            opf_path,
+            "the spine contains no linear resources (every itemref is linear=\"no\")",
+        ));
+    }
+
+    // OPF-034: no manifest id may be referenced more than once by the spine.
+    let mut seen_idref: HashSet<&str> = HashSet::new();
+    for s in &pkg.spine {
+        if !seen_idref.insert(s.idref.as_str()) {
+            report.push(Violation::new(
+                Rule::SpineDuplicateIdref,
+                opf_path,
+                format!("spine references manifest id {:?} more than once", s.idref),
+            ));
+        }
+    }
+
+    // OPF-074 / OPF-099 / OPF-091: manifest resource hygiene.
+    let mut seen_href: HashSet<String> = HashSet::new();
+    for item in &pkg.manifest {
+        if item.href.contains('#') {
+            report.push(Violation::new(
+                Rule::ItemHrefHasFragment,
+                opf_path,
+                format!(
+                    "manifest item href {:?} must not carry a fragment identifier",
+                    item.href
+                ),
+            ));
+        }
+        let resolved = join_opf(opf_dir, &item.href);
+        if resolved == opf_path {
+            report.push(Violation::new(
+                Rule::ManifestListsPackageDoc,
+                opf_path,
+                "the manifest must not list the package document itself",
+            ));
+        }
+        if resolved.starts_with("META-INF/") {
+            report.push(Violation::new(
+                Rule::ResourceInMetaInf,
+                opf_path,
+                format!("publication resource {resolved:?} must not be located in META-INF/"),
+            ));
+        }
+        if !seen_href.insert(resolved.clone()) {
+            report.push(Violation::new(
+                Rule::DuplicateManifestResource,
+                opf_path,
+                format!("resource {resolved:?} is declared by more than one manifest item"),
+            ));
+        }
+    }
+
+    // OPF-040: every fallback attribute must point at an existing manifest id.
+    for item in &pkg.manifest {
+        if let Some(fb) = &item.fallback
+            && !manifest_ids.contains(fb.as_str())
+        {
+            report.push(Violation::new(
+                Rule::FallbackNotFound,
+                opf_path,
+                format!(
+                    "manifest item id={:?} has fallback={fb:?}, which is not a manifest id",
+                    item.id
+                ),
+            ));
+        }
+    }
+
+    // OPF-050: the spine `toc` attribute must reference an NCX manifest item.
+    if let Some(toc_id) = &pkg.spine_toc
+        && let Some(item) = pkg.manifest_by_id(toc_id)
+        && !item
+            .media_type
+            .eq_ignore_ascii_case("application/x-dtbncx+xml")
+    {
+        report.push(Violation::new(
+            Rule::SpineTocNotNcx,
+            opf_path,
+            format!(
+                "spine toc={toc_id:?} points at media-type {:?}; NCX (application/x-dtbncx+xml) is required",
+                item.media_type
+            ),
+        ));
+    }
+
+    // OPF-031: every <guide><reference href> must be a declared manifest item.
+    let manifest_hrefs: HashSet<String> = pkg
+        .manifest
+        .iter()
+        .map(|m| join_opf(opf_dir, &m.href))
+        .collect();
+    for href in &pkg.guide_hrefs {
+        let file = href.split('#').next().unwrap_or(href);
+        if file.is_empty() || file.contains("://") {
+            continue;
+        }
+        let resolved = join_opf(opf_dir, file);
+        if !manifest_hrefs.contains(&resolved) {
+            report.push(Violation::new(
+                Rule::GuideReferenceNotInManifest,
+                opf_path,
+                format!("guide reference {href:?} is not declared in the manifest"),
+            ));
+        }
+    }
+}
+
+/// OPF-060: zip entry names must be unique (after the fact that a reader keys
+/// resources by name). A duplicate name shadows a resource unpredictably.
+fn check_duplicate_zip_entries(zip_names: &[String], report: &mut Report) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut reported: HashSet<&str> = HashSet::new();
+    for name in zip_names {
+        if name.ends_with('/') {
+            continue; // directory entries
+        }
+        if !seen.insert(name.as_str()) && reported.insert(name.as_str()) {
+            report.push(Violation::new(
+                Rule::DuplicateZipEntry,
+                name.clone(),
+                format!("duplicate entry {name:?} in the container (names must be unique)"),
+            ));
+        }
+    }
+}
+
+/// OCF file-name constraints (EPUB OCF §4.2). PKG-009: a name must not contain
+/// the OCF-restricted characters `" * : < > ? \ |` or any control character
+/// (C0/C1/DEL). PKG-011: no path segment may end with `.`. `/` is the path
+/// separator and is allowed.
+fn check_ocf_filenames(zip_names: &[String], report: &mut Report) {
+    const FORBIDDEN: &[char] = &['"', '*', ':', '<', '>', '?', '\\', '|'];
+    for name in zip_names {
+        if let Some(bad) = name
+            .chars()
+            .find(|c| FORBIDDEN.contains(c) || c.is_control() || ('\u{80}'..='\u{9F}').contains(c))
+        {
+            report.push(Violation::new(
+                Rule::FilenameForbiddenChar,
+                name.clone(),
+                format!("file name {name:?} contains the OCF-disallowed character {bad:?}"),
+            ));
+        }
+        if name.split('/').any(|seg| seg.ends_with('.')) {
+            report.push(Violation::new(
+                Rule::FilenameTrailingDot,
+                name.clone(),
+                format!("file name {name:?} has a path segment ending with '.'"),
+            ));
+        }
+    }
 }
 
 // =========================================================================
@@ -465,6 +801,13 @@ fn check_mimetype_header(bytes: &[u8], report: &mut Report) {
             format!("compression method must be 0 (STORED), found {compression}"),
         ));
     }
+    if extra_len != 0 {
+        report.push(Violation::new(
+            Rule::MimetypeExtraField,
+            "mimetype",
+            format!("mimetype entry has a {extra_len}-byte extra field; none is permitted"),
+        ));
+    }
     let content_start = 30 + name_len + extra_len;
     let content = &bytes[content_start..content_start + REQUIRED.len()];
     if content != REQUIRED {
@@ -484,7 +827,10 @@ fn check_mimetype_header(bytes: &[u8], report: &mut Report) {
 // Container.xml → OPF path
 // =========================================================================
 
-fn read_container_opf_path(zip: &mut ZipArchive<Cursor<&[u8]>>) -> Result<String, Violation> {
+fn read_container_opf_path(
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    report: &mut Report,
+) -> Result<String, Violation> {
     let text = read_text(zip, "META-INF/container.xml").map_err(|_| {
         Violation::new(
             Rule::MissingContainerXml,
@@ -492,15 +838,27 @@ fn read_container_opf_path(zip: &mut ZipArchive<Cursor<&[u8]>>) -> Result<String
             "container.xml is missing from the zip",
         )
     })?;
+    // Collect every <rootfile>: (full-path, media-type).
+    let mut rootfiles: Vec<(String, String)> = Vec::new();
     let mut reader = Reader::from_str(&text);
     reader.config_mut().trim_text(true);
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"rootfile" => {
+                let (mut full_path, mut media_type) = (None, String::new());
                 for attr in e.attributes().flatten() {
-                    if attr.key.as_ref() == b"full-path" {
-                        return Ok(String::from_utf8_lossy(&attr.value).to_string());
+                    match attr.key.as_ref() {
+                        b"full-path" => {
+                            full_path = Some(String::from_utf8_lossy(&attr.value).to_string())
+                        }
+                        b"media-type" => {
+                            media_type = String::from_utf8_lossy(&attr.value).to_string()
+                        }
+                        _ => {}
                     }
+                }
+                if let Some(fp) = full_path {
+                    rootfiles.push((fp, media_type));
                 }
             }
             Ok(Event::Eof) => break,
@@ -514,10 +872,29 @@ fn read_container_opf_path(zip: &mut ZipArchive<Cursor<&[u8]>>) -> Result<String
             _ => {}
         }
     }
+
+    // RSC-003: a rootfile with the OPS package media-type is required.
+    const OPS: &str = "application/oebps-package+xml";
+    if let Some((fp, _)) = rootfiles
+        .iter()
+        .find(|(_, mt)| mt.eq_ignore_ascii_case(OPS))
+    {
+        return Ok(fp.clone());
+    }
+    if let Some((fp, _)) = rootfiles.first() {
+        // A rootfile exists but none declares the OPS media-type: flag RSC-003
+        // and proceed with the first so the remaining checks still run.
+        report.push(Violation::new(
+            Rule::NoOpsRootfile,
+            "META-INF/container.xml",
+            format!("no <rootfile> declares media-type {OPS:?}"),
+        ));
+        return Ok(fp.clone());
+    }
     Err(Violation::new(
-        Rule::MissingContainerXml,
+        Rule::NoOpsRootfile,
         "META-INF/container.xml",
-        "no <rootfile full-path=...> entry",
+        "container.xml has no <rootfile full-path=…> element",
     ))
 }
 
@@ -652,8 +1029,44 @@ fn check_xhtml_hrefs_and_reachability(
         for (kind, href) in collect_references(&text) {
             if href.contains('#') {
                 fragment_refs.push((path.clone(), href.clone()));
+                // RSC-013: a stylesheet reference must not carry a fragment.
+                if let Some((file, frag)) = href.split_once('#')
+                    && !frag.is_empty()
+                    && file
+                        .rsplit_once('.')
+                        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("css"))
+                {
+                    report.push(Violation::new(
+                        Rule::StylesheetFragment,
+                        path.clone(),
+                        format!("stylesheet reference {href:?} must not include a fragment"),
+                    ));
+                }
+            }
+            // RSC-030: file: URLs are never allowed. `get(..5)` is char-boundary
+            // safe (returns None rather than slicing a multi-byte char).
+            if href
+                .get(..5)
+                .is_some_and(|p| p.eq_ignore_ascii_case("file:"))
+            {
+                report.push(Violation::new(
+                    Rule::FileUrlNotAllowed,
+                    path.clone(),
+                    format!("reference {href:?} uses a file: URL, not allowed in EPUB"),
+                ));
             }
             if let Some(resolved) = resolve_href(&path, &href) {
+                // RSC-033: a relative URL must not carry a query component. The
+                // '?' would otherwise be swallowed into the resolved path and
+                // misfire as a broken href, so handle it first and skip the rest.
+                if href.split('#').next().unwrap_or(&href).contains('?') {
+                    report.push(Violation::new(
+                        Rule::RelativeUrlWithQuery,
+                        path.clone(),
+                        format!("relative reference {href:?} must not have a query component"),
+                    ));
+                    continue;
+                }
                 if kind == RefKind::Hyperlink {
                     hyperlink_targets.insert(resolved.clone());
                 }
@@ -941,7 +1354,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 18, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 39, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -963,11 +1376,12 @@ mod tests {
     fn epubcheck_error_coverage_is_tracked() {
         let (covered, total) = epubcheck_error_coverage();
         assert_eq!(total, 138, "error-level catalog total drifted");
-        // 12 distinct epubcheck error-level ids implemented so far (PKG-004/006/
-        // 007/020, RSC-001/002/005/007/012/026, OPF-049, HTM-004). Bump as the
-        // port lands more; this is the port's progress ratchet.
+        // Distinct epubcheck error-level ids implemented so far; the port's
+        // progress ratchet. OPF batch added OPF-030/031/033/034/040/048/050/060/
+        // 074/091/096/099; OCF batch PKG-005/009/011/025 + RSC-030; XML batch
+        // HTM-001/003 + RSC-013; container/URL batch RSC-003 + RSC-033.
         assert_eq!(
-            covered, 12,
+            covered, 34,
             "epubcheck error coverage changed: {covered}/{total}"
         );
     }
@@ -1138,6 +1552,145 @@ mod tests {
         }
     }
 
+    #[test]
+    fn opf_structure_flags_the_batch() {
+        // One OPF that trips nine structural rules at once.
+        let opf = r##"<package unique-identifier="bad-ref">
+          <metadata><dc:identifier id="pub-id">x</dc:identifier></metadata>
+          <manifest>
+            <item id="c" href="c.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c2" href="c.xhtml" media-type="application/xhtml+xml"/>
+            <item id="frag" href="d.xhtml#x" media-type="application/xhtml+xml"/>
+            <item id="self" href="content.opf" media-type="application/oebps-package+xml"/>
+            <item id="img" href="i.svg" media-type="image/svg+xml" fallback="nope"/>
+            <item id="ncx" href="t.ncx" media-type="application/xhtml+xml"/>
+          </manifest>
+          <spine toc="ncx">
+            <itemref idref="c" linear="no"/>
+            <itemref idref="c" linear="no"/>
+          </spine>
+          <guide><reference type="x" href="missing.xhtml"/></guide>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut report = Report::default();
+        check_opf_structure(&pkg, "", "content.opf", &mut report);
+        for rule in [
+            Rule::UniqueIdentifierNotFound,    // OPF-030
+            Rule::SpineNoLinear,               // OPF-033
+            Rule::SpineDuplicateIdref,         // OPF-034
+            Rule::DuplicateManifestResource,   // OPF-074
+            Rule::ManifestListsPackageDoc,     // OPF-099
+            Rule::ItemHrefHasFragment,         // OPF-091
+            Rule::FallbackNotFound,            // OPF-040
+            Rule::SpineTocNotNcx,              // OPF-050
+            Rule::GuideReferenceNotInManifest, // OPF-031
+        ] {
+            assert!(report.has_rule(rule), "expected {rule:?}, got:\n{report}");
+        }
+    }
+
+    #[test]
+    fn opf_structure_flags_missing_unique_identifier() {
+        let pkg = opf::parse(
+            r#"<package><manifest>
+                 <item id="a" href="a.xhtml" media-type="application/xhtml+xml"/>
+               </manifest><spine><itemref idref="a"/></spine></package>"#,
+        )
+        .unwrap();
+        let mut report = Report::default();
+        check_opf_structure(&pkg, "", "content.opf", &mut report);
+        assert!(report.has_rule(Rule::UniqueIdentifierMissing));
+        // A well-formed spine (default-linear) must NOT trip OPF-033.
+        assert!(!report.has_rule(Rule::SpineNoLinear));
+    }
+
+    #[test]
+    fn duplicate_zip_entries_are_flagged_once_each() {
+        let mut report = Report::default();
+        check_duplicate_zip_entries(
+            &[
+                "a.xhtml".into(),
+                "b.xhtml".into(),
+                "a.xhtml".into(),
+                "a.xhtml".into(),
+            ],
+            &mut report,
+        );
+        assert_eq!(
+            report
+                .violations
+                .iter()
+                .filter(|v| v.rule == Rule::DuplicateZipEntry)
+                .count(),
+            1,
+            "one finding per duplicated name"
+        );
+    }
+
+    #[test]
+    fn ocf_filename_rules_flag_bad_names_only() {
+        let mut report = Report::default();
+        check_ocf_filenames(
+            &[
+                "OEBPS/text/ch1.xhtml".into(), // fine
+                "OEBPS/图片/封面.jpg".into(),  // CJK is fine (not control/restricted)
+                "OEBPS/a<b>.xhtml".into(),     // PKG-009: '<' and '>'
+                "OEBPS/dir./x.xhtml".into(),   // PKG-011: segment "dir." ends with '.'
+            ],
+            &mut report,
+        );
+        assert!(report.has_rule(Rule::FilenameForbiddenChar));
+        assert!(report.has_rule(Rule::FilenameTrailingDot));
+        // The two clean names produced no findings.
+        assert_eq!(report.violations.len(), 2, "unexpected extras:\n{report}");
+    }
+
+    #[test]
+    fn xml_declaration_version_parsing() {
+        assert_eq!(
+            xml_declaration_version(r#"<?xml version="1.0" encoding="utf-8"?><html/>"#),
+            Some("1.0")
+        );
+        assert_eq!(
+            xml_declaration_version("<?xml version='1.1'?>\n<html/>"),
+            Some("1.1")
+        );
+        assert_eq!(xml_declaration_version("<html/>"), None);
+        // Must not slice a multi-byte char that precedes a later `<?xml`.
+        assert_eq!(xml_declaration_version("字字字<html/>"), None);
+    }
+
+    #[test]
+    fn xml_conformance_flags_bad_version_and_external_entity() {
+        let mut report = Report::default();
+        check_xml_conformance(
+            r#"<?xml version="1.1"?><!DOCTYPE x [ <!ENTITY ext SYSTEM "http://evil/x"> ]><x/>"#,
+            "OEBPS/x.xhtml",
+            &mut report,
+        );
+        assert!(report.has_rule(Rule::XmlVersionNot10)); // HTM-001
+        assert!(report.has_rule(Rule::ExternalEntity)); // HTM-003
+    }
+
+    #[test]
+    fn external_entity_detection_is_scoped() {
+        assert!(has_external_entity(r#"<!ENTITY x SYSTEM "a.dtd">"#));
+        assert!(has_external_entity(r#"<!ENTITY x PUBLIC "id" "a.dtd">"#));
+        // Internal (value) entity is fine; the word SYSTEM elsewhere is fine.
+        assert!(!has_external_entity(r#"<!ENTITY copy "&#169;">"#));
+        assert!(!has_external_entity("<p>SYSTEM shutdown</p>"));
+    }
+
+    #[test]
+    fn is_xml_based_matches_plus_xml_family() {
+        assert!(is_xml_based("application/xhtml+xml"));
+        assert!(is_xml_based("image/svg+xml"));
+        assert!(is_xml_based("application/x-dtbncx+xml"));
+        assert!(is_xml_based("APPLICATION/XML"));
+        assert!(!is_xml_based("text/css"));
+        assert!(!is_xml_based("image/jpeg"));
+    }
+
     /// Everything below validates a real EPUB, and the only EPUB *writer* in
     /// the crate is the Aozora builder — so these tests exist only in a build
     /// that has it.
@@ -1237,6 +1790,32 @@ mod tests {
                 report.has_rule(Rule::BrokenHref),
                 "expected BrokenHref for missing image, got:\n{}",
                 report
+            );
+        }
+
+        #[test]
+        fn detects_relative_url_with_query() {
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |x| {
+                x.replace("</body>", r##"<a href="body.xhtml?x=1">q</a></body>"##)
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::RelativeUrlWithQuery),
+                "expected RSC-033, got:\n{report}"
+            );
+        }
+
+        #[test]
+        fn detects_rootfile_without_ops_media_type() {
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "META-INF/container.xml", |c| {
+                c.replace("application/oebps-package+xml", "application/xml")
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::NoOpsRootfile),
+                "expected RSC-003, got:\n{report}"
             );
         }
 
