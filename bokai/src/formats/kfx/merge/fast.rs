@@ -28,8 +28,12 @@
 //!  - the source `$419` (if any) entity-table row uses `id_idnum == $348`
 //!    (singleton form) so its body can be unwrapped cleanly.
 //!
-//! Both hold for every Amazon `.kfx-zip` we've seen. When they don't, the
-//! caller should fall back to [`crate::formats::kfx::merge::mechanical`].
+//! Both hold for every Amazon `.kfx-zip` we've seen. When they don't, the merge
+//! returns an `io::ErrorKind::Unsupported` error rather than rerouting — the
+//! mechanical path is never chosen implicitly. A caller that wants the
+//! full-roundtrip path selects `MergeMode::Mechanical` explicitly; the
+//! `mechanical` module stays the correctness reference this path is validated
+//! against.
 
 use std::io::{self, Read};
 use std::path::Path;

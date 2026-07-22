@@ -56,22 +56,15 @@ pub fn merge_kfx_zip_bytes(data: &[u8]) -> io::Result<Vec<u8>> {
     mechanical::merge_kfx_zip_reader(io::Cursor::new(data))
 }
 
-/// Merge using the specified mode. Falls back from [`MergeMode::Fast`] to
-/// [`MergeMode::Mechanical`] if the fast path's preconditions don't hold
-/// (e.g. multiple sources carry `doc_symbols`).
+/// Merge using the specified mode. Each mode is terminal: [`MergeMode::Fast`]
+/// does **not** fall back to [`MergeMode::Mechanical`]. A bundle whose
+/// preconditions the fast path can't meet (e.g. multiple sources carry
+/// `doc_symbols`) surfaces as an `io::ErrorKind::Unsupported` error rather than
+/// silently rerouting. Select [`MergeMode::Mechanical`] explicitly to run the
+/// full-roundtrip path.
 pub fn merge_kfx_zip_with_mode(path: &Path, mode: MergeMode) -> io::Result<Vec<u8>> {
     match mode {
         MergeMode::Mechanical => mechanical::merge_kfx_zip(path),
-        MergeMode::Fast => match fast::merge_kfx_zip(path) {
-            Ok(out) => Ok(out),
-            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
-                eprintln!(
-                    "[merge] fast path unsupported for this bundle ({}); falling back to mechanical",
-                    e
-                );
-                mechanical::merge_kfx_zip(path)
-            }
-            Err(e) => Err(e),
-        },
+        MergeMode::Fast => fast::merge_kfx_zip(path),
     }
 }
