@@ -15,11 +15,19 @@ use quick_xml::events::{BytesStart, Event};
 
 #[derive(Debug, Default)]
 pub struct Package {
+    /// The package element's `version` attribute (`"3.0"`, `"2.0"`, …). `None`
+    /// if absent. Version-gated rules (DOCTYPE conformance) key on this.
+    pub version: Option<String>,
     /// The package element's `unique-identifier` attribute (the id it says
     /// points at the publication's `<dc:identifier>`). `None` if absent.
     pub unique_identifier: Option<String>,
     /// The `id` of every `<dc:identifier>` in the metadata.
     pub identifier_ids: Vec<String>,
+    /// The trimmed text of the `<dc:identifier>` whose `id` matches
+    /// [`Self::unique_identifier`] — the publication's unique identifier
+    /// *value* (what NCX-001 compares the NCX `dtb:uid` against). `None` if the
+    /// package declares no unique-identifier or no matching identifier element.
+    pub unique_identifier_value: Option<String>,
     /// The `<spine toc>` attribute (a manifest id for the NCX), if present.
     pub spine_toc: Option<String>,
     /// Every `<reference href>` inside `<guide>` (raw, fragment kept).
@@ -64,14 +72,39 @@ pub fn parse(content: &str) -> io::Result<Package> {
     let mut in_spine = false;
     let mut in_metadata = false;
     let mut in_guide = false;
+    // Capture of the unique-identifier's `<dc:identifier>` text content. Set on
+    // the matching element's `Start`, accumulated over `Text`, stored on `End`.
+    let mut capturing_uid = false;
+    let mut uid_buf = String::new();
 
     loop {
         match reader.read_event() {
+            // The `<dc:identifier>` whose id is the package unique-identifier:
+            // begin capturing its text (a `Start`, not a self-closed `Empty` —
+            // an empty identifier has no value). Handled ahead of the shared
+            // start arm, which still records the id for every identifier.
+            Ok(Event::Start(e))
+                if in_metadata
+                    && local_name(e.name().as_ref()) == b"identifier"
+                    && attr(&e, b"id").is_some() =>
+            {
+                let id = attr(&e, b"id").unwrap_or_default();
+                let is_uid = pkg.unique_identifier.as_deref() == Some(id.as_str());
+                pkg.identifier_ids.push(id);
+                capturing_uid = is_uid;
+                uid_buf.clear();
+            }
+            Ok(Event::Text(t)) if capturing_uid => {
+                uid_buf.push_str(&String::from_utf8_lossy(t.as_ref()));
+            }
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 let name = e.name();
                 let local = local_name(name.as_ref());
                 match local {
-                    b"package" => pkg.unique_identifier = attr(&e, b"unique-identifier"),
+                    b"package" => {
+                        pkg.unique_identifier = attr(&e, b"unique-identifier");
+                        pkg.version = attr(&e, b"version");
+                    }
                     b"manifest" => in_manifest = true,
                     b"spine" => {
                         in_spine = true;
@@ -143,6 +176,10 @@ pub fn parse(content: &str) -> io::Result<Package> {
                 b"spine" => in_spine = false,
                 b"metadata" => in_metadata = false,
                 b"guide" => in_guide = false,
+                b"identifier" if capturing_uid => {
+                    pkg.unique_identifier_value = Some(uid_buf.trim().to_string());
+                    capturing_uid = false;
+                }
                 _ => {}
             },
             Ok(Event::Eof) => break,
@@ -204,8 +241,34 @@ mod tests {
         // Extended captures.
         assert_eq!(pkg.unique_identifier.as_deref(), Some("pub-id"));
         assert_eq!(pkg.identifier_ids, vec!["pub-id"]);
+        assert_eq!(
+            pkg.unique_identifier_value.as_deref(),
+            Some("urn:uuid:1234")
+        );
         assert_eq!(pkg.spine_toc.as_deref(), Some("ncx"));
         assert_eq!(pkg.guide_hrefs, vec!["text/cover.xhtml"]);
+    }
+
+    #[test]
+    fn captures_version_and_only_the_unique_identifier_value() {
+        // Two identifiers; only the one matching unique-identifier is captured
+        // as the value. A leading/trailing-whitespace value is trimmed.
+        let opf = r#"<?xml version="1.0"?>
+<package version="3.0" unique-identifier="uid">
+  <metadata>
+    <dc:identifier id="other">urn:isbn:0000</dc:identifier>
+    <dc:identifier id="uid">  urn:uuid:abcd  </dc:identifier>
+  </metadata>
+  <manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="a"/></spine>
+</package>"#;
+        let pkg = parse(opf).unwrap();
+        assert_eq!(pkg.version.as_deref(), Some("3.0"));
+        assert_eq!(pkg.identifier_ids, vec!["other", "uid"]);
+        assert_eq!(
+            pkg.unique_identifier_value.as_deref(),
+            Some("urn:uuid:abcd")
+        );
     }
 
     #[test]

@@ -175,6 +175,21 @@ pub enum Rule {
     StylesheetFragment,
     NoOpsRootfile,
     RelativeUrlWithQuery,
+    // Cross-document identity & reference integrity.
+    NcxUidMismatch,
+    ReferenceNotInManifest,
+    DoctypeExternalIdentifier,
+    GuideReferenceNotContentDoc,
+    // Character encoding (epubcheck RSC-028 / HTM-058 / RSC-027).
+    XmlEncodingNotUtf8,
+    XhtmlEncodingUtf16,
+    XmlEncodingUtf16,
+    // Container rootfile & manifest fallback integrity (epubcheck OPF-*).
+    RootfileMissingFullPath,
+    RootfileEmptyFullPath,
+    SpineItemNoFallback,
+    SpineItemFallbackNotContentDoc,
+    FallbackChainCircular,
 }
 
 impl Rule {
@@ -221,6 +236,18 @@ impl Rule {
         Rule::StylesheetFragment,
         Rule::NoOpsRootfile,
         Rule::RelativeUrlWithQuery,
+        Rule::NcxUidMismatch,
+        Rule::ReferenceNotInManifest,
+        Rule::DoctypeExternalIdentifier,
+        Rule::GuideReferenceNotContentDoc,
+        Rule::XmlEncodingNotUtf8,
+        Rule::XhtmlEncodingUtf16,
+        Rule::XmlEncodingUtf16,
+        Rule::RootfileMissingFullPath,
+        Rule::RootfileEmptyFullPath,
+        Rule::SpineItemNoFallback,
+        Rule::SpineItemFallbackNotContentDoc,
+        Rule::FallbackChainCircular,
     ];
 
     /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
@@ -271,6 +298,18 @@ impl Rule {
             Rule::StylesheetFragment => "RSC-013",
             Rule::NoOpsRootfile => "RSC-003",
             Rule::RelativeUrlWithQuery => "RSC-033",
+            Rule::NcxUidMismatch => "NCX-001",
+            Rule::ReferenceNotInManifest => "RSC-008",
+            Rule::DoctypeExternalIdentifier => "OPF-073",
+            Rule::GuideReferenceNotContentDoc => "OPF-032",
+            Rule::XmlEncodingNotUtf8 => "RSC-028",
+            Rule::XhtmlEncodingUtf16 => "HTM-058",
+            Rule::XmlEncodingUtf16 => "RSC-027",
+            Rule::RootfileMissingFullPath => "OPF-016",
+            Rule::RootfileEmptyFullPath => "OPF-017",
+            Rule::SpineItemNoFallback => "OPF-043",
+            Rule::SpineItemFallbackNotContentDoc => "OPF-044",
+            Rule::FallbackChainCircular => "OPF-045",
         }
     }
 
@@ -280,7 +319,9 @@ impl Rule {
     fn severity(self) -> crate::validate::Severity {
         use crate::validate::Severity;
         match self {
-            Rule::FileNotInManifest => Severity::Warning,
+            // Undeclared extra resources (OPF-003) and UTF-16 in a non-XHTML XML
+            // resource (RSC-027) are the two rules epubcheck rates below Error.
+            Rule::FileNotInManifest | Rule::XmlEncodingUtf16 => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -388,12 +429,14 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         .map(|(d, _)| d.to_string())
         .unwrap_or_default();
 
+    let epub2 = is_epub2(&pkg);
     check_manifest_files(&pkg, &opf_dir, &zip_paths, &opf_path, &mut report);
     check_files_in_manifest(&pkg, &opf_dir, &zip_paths, &opf_path, &mut report);
     check_spine_idrefs(&pkg, &opf_path, &mut report);
     check_nav_present(&pkg, &opf_path, &mut report);
     check_parent_paths_in_opf(&pkg, &opf_dir, &opf_path, &mut report);
-    check_opf_structure(&pkg, &opf_dir, &opf_path, &mut report);
+    check_opf_structure(&pkg, &opf_dir, &opf_path, epub2, &mut report);
+    check_fallback_chain_and_spine(&pkg, epub2, &opf_path, &mut report);
     check_xhtml_hrefs_and_reachability(
         &pkg,
         &opf_dir,
@@ -404,16 +447,38 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
     );
     check_content_conformance(&pkg, &opf_dir, &mut zip, &mut report);
     check_xml_conformance(&opf_text, &opf_path, &mut report);
-    check_xml_resources(&pkg, &opf_dir, &mut zip, &mut report);
+    // RSC-028 for the package document (its bytes already decoded as UTF-8, so
+    // this catches a spurious non-UTF-8 `encoding=` declaration on ASCII bytes).
+    check_xml_encoding(
+        opf_text.as_bytes(),
+        &opf_path,
+        "application/oebps-package+xml",
+        &mut report,
+    );
+    // OPF-073: the package document's own DOCTYPE (external identifiers are
+    // forbidden in EPUB 3). Other XML resources are covered by check_xml_resources.
+    check_doctype_rules(
+        &opf_text,
+        &opf_path,
+        "application/oebps-package+xml",
+        epub2,
+        &mut report,
+    );
+    check_xml_resources(&pkg, &opf_dir, epub2, &mut zip, &mut report);
+    check_ncx_identifier(&pkg, &opf_dir, &mut zip, &mut report);
 
     report
 }
 
-/// HTM-001 (XML version must be 1.0) and HTM-003 (external entity declarations
-/// are forbidden in EPUB 3) over every XML-based publication resource.
+/// The XML-resource checks that read a resource's bytes: character encoding
+/// (RSC-028 / HTM-058 / RSC-027), then — for the resources that decode as UTF-8
+/// — XML version (HTM-001), external entities (HTM-003), and the DOCTYPE rules
+/// (HTM-004 / OPF-073). A non-UTF-8 resource still gets its encoding finding;
+/// the text-based checks simply skip it (its real content is unreadable here).
 fn check_xml_resources(
     pkg: &opf::Package,
     opf_dir: &str,
+    epub2: bool,
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     report: &mut Report,
 ) {
@@ -422,11 +487,99 @@ fn check_xml_resources(
             continue;
         }
         let path = join_opf(opf_dir, &item.href);
-        let Ok(text) = read_text(zip, &path) else {
+        let Ok(bytes) = read_bytes(zip, &path) else {
+            continue;
+        };
+        check_xml_encoding(&bytes, &path, &item.media_type, report);
+        let Ok(text) = String::from_utf8(bytes) else {
             continue;
         };
         check_xml_conformance(&text, &path, report);
+        check_doctype_rules(&text, &path, &item.media_type, epub2, report);
     }
+}
+
+/// RSC-028 / HTM-058 / RSC-027: an XML resource must be UTF-8. UTF-16 is an
+/// error in XHTML (HTM-058) and a warning elsewhere (RSC-027); any other
+/// non-UTF-8 encoding (UCS-4, EBCDIC, a declared legacy charset, …) is RSC-028.
+fn check_xml_encoding(buf: &[u8], path: &str, media_type: &str, report: &mut Report) {
+    let Some(enc) = sniff_xml_encoding(buf) else {
+        return; // no declaration / BOM → treated as UTF-8
+    };
+    if enc == "UTF-8" {
+        return;
+    }
+    if enc == "UTF-16" {
+        if is_xhtml(media_type) {
+            report.push(Violation::new(
+                Rule::XhtmlEncodingUtf16,
+                path.to_string(),
+                "XHTML documents must be encoded in UTF-8, but UTF-16 was detected",
+            ));
+        } else {
+            report.push(Violation::new(
+                Rule::XmlEncodingUtf16,
+                path.to_string(),
+                "XML document is encoded in UTF-16; it should be UTF-8",
+            ));
+        }
+    } else {
+        report.push(Violation::new(
+            Rule::XmlEncodingNotUtf8,
+            path.to_string(),
+            format!("XML documents must be encoded in UTF-8, but {enc} was detected"),
+        ));
+    }
+}
+
+/// The declared/detected character encoding of an XML document (uppercased), or
+/// `None` when none is declared — which the XML spec treats as UTF-8. A faithful
+/// port of epubcheck's `XMLEncodingSniffer`: byte-order marks first, then the
+/// `encoding="…"` pseudo-attribute in the document's leading ASCII run.
+fn sniff_xml_encoding(buf: &[u8]) -> Option<String> {
+    let buf = &buf[..buf.len().min(256)];
+    if buf.len() < 4 {
+        return None;
+    }
+    // UTF-16: BOM, or `<?` encoded big/little-endian.
+    if buf.starts_with(&[0xFE, 0xFF])
+        || buf.starts_with(&[0xFF, 0xFE])
+        || buf.starts_with(&[0x00, 0x3C, 0x00, 0x3F])
+        || buf.starts_with(&[0x3C, 0x00, 0x3F, 0x00])
+    {
+        return Some("UTF-16".to_string());
+    }
+    // UCS-4 (all byte orders, with/without BOM).
+    const UCS4: [[u8; 4]; 8] = [
+        [0, 0, 0xFE, 0xFF],
+        [0xFF, 0xFE, 0, 0],
+        [0, 0, 0xFF, 0xFE],
+        [0xFE, 0xFF, 0, 0],
+        [0, 0, 0, 0x3C],
+        [0, 0, 0x3C, 0],
+        [0, 0x3C, 0, 0],
+        [0x3C, 0, 0, 0],
+    ];
+    if UCS4.iter().any(|m| buf.starts_with(m)) {
+        return Some("UCS-4".to_string());
+    }
+    if buf.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return Some("UTF-8".to_string());
+    }
+    if buf.starts_with(&[0x4C, 0x6F, 0xA7, 0x94]) {
+        return Some("EBCDIC".to_string());
+    }
+    // ASCII-compatible: scan the leading ASCII run for `encoding="…"`.
+    let ascii_len = buf.iter().take_while(|&&c| c != 0 && c <= 0x7F).count();
+    let header = std::str::from_utf8(&buf[..ascii_len]).ok()?;
+    let rest = header.get(header.find("encoding=")? + "encoding=".len()..)?;
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let after = &rest[1..]; // quote is one ASCII byte
+    let end = after.find(quote)?;
+    Some(after[..end].to_ascii_uppercase())
 }
 
 /// HTM-001 / HTM-003 for one XML document's text.
@@ -493,7 +646,13 @@ fn is_xml_based(media_type: &str) -> bool {
 /// the parsed [`opf::Package`] (epubcheck OPF-030/031/033/034/040/048/050/074/
 /// 091/096/099). Resource *existence* is covered separately by
 /// [`check_manifest_files`]; these check the package's internal consistency.
-fn check_opf_structure(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report: &mut Report) {
+fn check_opf_structure(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    opf_path: &str,
+    epub2: bool,
+    report: &mut Report,
+) {
     let manifest_ids: HashSet<&str> = pkg.manifest.iter().map(|m| m.id.as_str()).collect();
 
     // OPF-048 / OPF-030: the package must declare a unique-identifier that
@@ -605,11 +764,13 @@ fn check_opf_structure(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report
         ));
     }
 
-    // OPF-031: every <guide><reference href> must be a declared manifest item.
-    let manifest_hrefs: HashSet<String> = pkg
+    // OPF-031 / OPF-032: every <guide><reference href> must be a declared
+    // manifest item (OPF-031) *and* that item must be a content document
+    // (OPF-032 — a guide reference to an image, stylesheet, … is invalid).
+    let manifest_by_path: HashMap<String, &str> = pkg
         .manifest
         .iter()
-        .map(|m| join_opf(opf_dir, &m.href))
+        .map(|m| (join_opf(opf_dir, &m.href), m.media_type.as_str()))
         .collect();
     for href in &pkg.guide_hrefs {
         let file = href.split('#').next().unwrap_or(href);
@@ -617,14 +778,130 @@ fn check_opf_structure(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report
             continue;
         }
         let resolved = join_opf(opf_dir, file);
-        if !manifest_hrefs.contains(&resolved) {
-            report.push(Violation::new(
+        match manifest_by_path.get(resolved.as_str()) {
+            None => report.push(Violation::new(
                 Rule::GuideReferenceNotInManifest,
                 opf_path,
                 format!("guide reference {href:?} is not declared in the manifest"),
+            )),
+            Some(mt) if !is_content_document(mt, epub2) => report.push(Violation::new(
+                Rule::GuideReferenceNotContentDoc,
+                opf_path,
+                format!(
+                    "guide reference {href:?} points at media-type {mt:?}, not a content document"
+                ),
+            )),
+            _ => {}
+        }
+    }
+}
+
+/// Manifest fallback-chain integrity and spine-item fallback requirements:
+///
+/// - **OPF-045** — a cycle in the `fallback` graph (reported once).
+/// - **OPF-043** — a spine item whose media type is not a spine-blessed content
+///   type and which has no `fallback` at all.
+/// - **OPF-044** — a spine item whose media type is not spine-blessed and whose
+///   fallback chain never reaches a content document.
+///
+/// (Missing-target fallbacks are OPF-040, handled in [`check_opf_structure`].)
+fn check_fallback_chain_and_spine(
+    pkg: &opf::Package,
+    epub2: bool,
+    opf_path: &str,
+    report: &mut Report,
+) {
+    let by_id: HashMap<&str, &opf::ManifestItem> =
+        pkg.manifest.iter().map(|m| (m.id.as_str(), m)).collect();
+
+    // OPF-045: first cycle in the fallback graph (edges to existing ids only —
+    // a dangling fallback is OPF-040). Reported once, like epubcheck.
+    'outer: for item in &pkg.manifest {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut cur = item.id.as_str();
+        loop {
+            if !seen.insert(cur) {
+                report.push(Violation::new(
+                    Rule::FallbackChainCircular,
+                    opf_path,
+                    format!("circular reference in the fallback chain at manifest id {cur:?}"),
+                ));
+                break 'outer;
+            }
+            match by_id.get(cur).and_then(|it| it.fallback.as_deref()) {
+                Some(fb) if by_id.contains_key(fb) => cur = fb,
+                _ => break,
+            }
+        }
+    }
+
+    // OPF-043 / OPF-044: a spine item with a non-blessed media type needs a
+    // fallback (chain) that reaches a content document.
+    for s in &pkg.spine {
+        let Some(item) = by_id.get(s.idref.as_str()) else {
+            continue; // unknown idref is OPF-049
+        };
+        if is_blessed_spine_type(&item.media_type, epub2) {
+            continue;
+        }
+        if item.fallback.is_none() {
+            report.push(Violation::new(
+                Rule::SpineItemNoFallback,
+                opf_path,
+                format!(
+                    "spine item id={:?} has non-standard media-type {:?} and no fallback",
+                    item.id, item.media_type
+                ),
+            ));
+        } else if !reaches_content_document(item, &by_id, epub2) {
+            report.push(Violation::new(
+                Rule::SpineItemFallbackNotContentDoc,
+                opf_path,
+                format!(
+                    "spine item id={:?} (media-type {:?}) has no content-document fallback",
+                    item.id, item.media_type
+                ),
             ));
         }
     }
+}
+
+/// A media type permitted directly in the spine (epubcheck `isBlessedItemType`):
+/// XHTML in either version, plus SVG (EPUB 3) or DTBook (EPUB 2). Deliberately
+/// excludes the deprecated `text/html` / `text/x-oeb1-document` — those are
+/// content documents for the guide (OPF-032) but not blessed spine items.
+fn is_blessed_spine_type(media_type: &str, epub2: bool) -> bool {
+    let mt = media_type.trim();
+    mt.eq_ignore_ascii_case("application/xhtml+xml")
+        || if epub2 {
+            mt.eq_ignore_ascii_case("application/x-dtbook+xml")
+        } else {
+            mt.eq_ignore_ascii_case("image/svg+xml")
+        }
+}
+
+/// True when `start`'s fallback chain reaches a spine-blessed content document
+/// (cycle-guarded). Mirrors epubcheck's `hasContentDocumentFallback`.
+fn reaches_content_document(
+    start: &opf::ManifestItem,
+    by_id: &HashMap<&str, &opf::ManifestItem>,
+    epub2: bool,
+) -> bool {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut cur = start.fallback.as_deref();
+    while let Some(fb) = cur {
+        if !seen.insert(fb) {
+            break; // cycle → no content-document fallback found
+        }
+        let Some(item) = by_id.get(fb) else {
+            break;
+        };
+        if is_blessed_spine_type(&item.media_type, epub2) {
+            return true;
+        }
+        cur = item.fallback.as_deref();
+    }
+    false
 }
 
 /// OPF-060: zip entry names must be unique (after the fact that a reader keys
@@ -695,15 +972,9 @@ fn check_content_conformance(
         let Ok(text) = read_text(zip, &path) else {
             continue;
         };
-        if let Some(dt) = find_doctype(&text)
-            && !dt.eq_ignore_ascii_case("<!DOCTYPE html>")
-        {
-            report.push(Violation::new(
-                Rule::IrregularDoctype,
-                path.clone(),
-                format!("irregular DOCTYPE {dt:?}; EPUB 3 requires `<!DOCTYPE html>`"),
-            ));
-        }
+        // The DOCTYPE rule (HTM-004) is applied to every XML resource by
+        // [`check_doctype_rules`] (via [`check_xml_resources`]); here we only
+        // check the non-empty-<title> requirement (RSC-005).
         if has_empty_title(&text) {
             report.push(Violation::new(
                 Rule::EmptyTitle,
@@ -714,6 +985,51 @@ fn check_content_conformance(
     }
 }
 
+/// DOCTYPE-declaration conformance, keyed on the resource's media type and the
+/// publication version (epubcheck `DeclarationHandler`):
+///
+/// - **XHTML** (any version, per bokai's EPUB-3 target): only `<!DOCTYPE html>`
+///   or `<!DOCTYPE html SYSTEM "about:legacy-compat">` is allowed. A public
+///   identifier, or any other system identifier, is **HTM-004**.
+/// - **Other XML** (EPUB 3 only): an external identifier (`PUBLIC`/`SYSTEM`) is
+///   forbidden — **OPF-073** — except the three fixed DTDs epubcheck sanctions
+///   for SVG, MathML, and NCX. EPUB 2 permits legacy DTDs, so the rule is
+///   version-gated to avoid false positives on 2.0 content.
+fn check_doctype_rules(text: &str, path: &str, media_type: &str, epub2: bool, report: &mut Report) {
+    let Some(dt) = parse_doctype(text) else {
+        return;
+    };
+    if is_xhtml(media_type) {
+        let legacy_ok = dt.public_id.is_none()
+            && dt
+                .system_id
+                .as_deref()
+                .is_none_or(|s| s == "about:legacy-compat");
+        if !legacy_ok {
+            report.push(Violation::new(
+                Rule::IrregularDoctype,
+                path.to_string(),
+                format!(
+                    "irregular DOCTYPE {:?}; EPUB 3 requires `<!DOCTYPE html>`",
+                    dt.raw
+                ),
+            ));
+        }
+    } else if !epub2
+        && (dt.public_id.is_some() || dt.system_id.is_some())
+        && !dt.is_allowed_dtd(media_type)
+    {
+        report.push(Violation::new(
+            Rule::DoctypeExternalIdentifier,
+            path.to_string(),
+            format!(
+                "DOCTYPE {:?} declares an external identifier, not allowed in EPUB 3",
+                dt.raw
+            ),
+        ));
+    }
+}
+
 /// The document's `<!DOCTYPE …>` declaration text, matched at the two casings
 /// real content uses. Uses byte-boundary-safe `find` (never slices at an
 /// arbitrary offset that could split a multi-byte char).
@@ -721,6 +1037,175 @@ fn find_doctype(s: &str) -> Option<&str> {
     let start = s.find("<!DOCTYPE").or_else(|| s.find("<!doctype"))?;
     let end = start + s[start..].find('>')? + 1;
     Some(&s[start..end])
+}
+
+/// A parsed DOCTYPE declaration: the root name and its external identifiers.
+struct Doctype {
+    /// The full `<!DOCTYPE …>` text, for diagnostics.
+    raw: String,
+    public_id: Option<String>,
+    system_id: Option<String>,
+}
+
+impl Doctype {
+    /// True when this DOCTYPE's `(public_id, system_id)` is exactly the DTD
+    /// epubcheck sanctions for `media_type` (SVG 1.1, MathML 3.0, or NCX
+    /// 2005-1). Both identifiers must match. Any other media type → false.
+    fn is_allowed_dtd(&self, media_type: &str) -> bool {
+        let mt = media_type.trim();
+        let (pub_id, sys_id) = if mt.eq_ignore_ascii_case("image/svg+xml") {
+            (
+                "-//W3C//DTD SVG 1.1//EN",
+                "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd",
+            )
+        } else if mt.eq_ignore_ascii_case("application/mathml+xml")
+            || mt.eq_ignore_ascii_case("application/mathml-content+xml")
+            || mt.eq_ignore_ascii_case("application/mathml-presentation+xml")
+        {
+            (
+                "-//W3C//DTD MathML 3.0//EN",
+                "http://www.w3.org/Math/DTD/mathml3/mathml3.dtd",
+            )
+        } else if mt.eq_ignore_ascii_case("application/x-dtbncx+xml") {
+            (
+                "-//NISO//DTD ncx 2005-1//EN",
+                "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd",
+            )
+        } else {
+            return false;
+        };
+        self.public_id.as_deref() == Some(pub_id) && self.system_id.as_deref() == Some(sys_id)
+    }
+}
+
+/// Parse the leading DOCTYPE into its external identifiers. Recognizes
+/// `<!DOCTYPE root>`, `… SYSTEM "sys"`, and `… PUBLIC "pub" "sys"` (either
+/// quote style). Returns `None` when the document has no DOCTYPE.
+fn parse_doctype(s: &str) -> Option<Doctype> {
+    let raw = find_doctype(s)?;
+    // Inner text, between `<!DOCTYPE` (9 ASCII bytes) and the trailing `>`.
+    let inner = raw.get(9..raw.len().saturating_sub(1)).unwrap_or("").trim();
+    // `to_ascii_uppercase` preserves byte length, so keyword offsets map 1:1
+    // back onto `inner` (the keyword itself is ASCII → a char boundary).
+    let upper = inner.to_ascii_uppercase();
+    let (mut public_id, mut system_id) = (None, None);
+    if let Some(pos) = upper.find("PUBLIC") {
+        let (first, rest) = take_quoted(&inner[pos + "PUBLIC".len()..]);
+        public_id = first;
+        system_id = take_quoted(rest).0;
+    } else if let Some(pos) = upper.find("SYSTEM") {
+        system_id = take_quoted(&inner[pos + "SYSTEM".len()..]).0;
+    }
+    Some(Doctype {
+        raw: raw.to_string(),
+        public_id,
+        system_id,
+    })
+}
+
+/// Take the first `"…"`/`'…'`-quoted string from `s` (after any leading
+/// whitespace). Returns `(value, remainder_after_closing_quote)`.
+fn take_quoted(s: &str) -> (Option<String>, &str) {
+    let s = s.trim_start();
+    let quote = match s.chars().next() {
+        Some(c @ ('"' | '\'')) => c,
+        _ => return (None, s),
+    };
+    let rest = &s[1..]; // the quote is one ASCII byte
+    match rest.find(quote) {
+        Some(end) => (Some(rest[..end].to_string()), &rest[end + 1..]),
+        None => (None, ""),
+    }
+}
+
+/// True when the package declares an EPUB 2 `version` (`"2.0"`, `"2"`, …).
+/// Absent or 3.x versions are treated as EPUB 3 (bokai's target), so
+/// version-gated rules default to the stricter EPUB-3 behavior.
+fn is_epub2(pkg: &opf::Package) -> bool {
+    pkg.version
+        .as_deref()
+        .is_some_and(|v| v.trim().starts_with('2'))
+}
+
+/// A "content document" media type — epubcheck's blessed + deprecated-blessed
+/// item types. Both versions accept XHTML and the legacy `text/x-oeb1-document`
+/// / `text/html`; EPUB 3 adds SVG, EPUB 2 adds DTBook.
+fn is_content_document(media_type: &str, epub2: bool) -> bool {
+    let mt = media_type.trim();
+    mt.eq_ignore_ascii_case("application/xhtml+xml")
+        || mt.eq_ignore_ascii_case("text/x-oeb1-document")
+        || mt.eq_ignore_ascii_case("text/html")
+        || if epub2 {
+            mt.eq_ignore_ascii_case("application/x-dtbook+xml")
+        } else {
+            mt.eq_ignore_ascii_case("image/svg+xml")
+        }
+}
+
+/// NCX-001: when the publication carries both an NCX `dtb:uid` and an OPF
+/// unique-identifier value, the two must be equal (the NCX uid is trimmed
+/// before comparison, matching epubcheck's `NCXChecker`). Fires only when both
+/// are present, so a book without an NCX — or without a resolvable
+/// unique-identifier — is never flagged.
+fn check_ncx_identifier(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    report: &mut Report,
+) {
+    let Some(opf_uid) = pkg.unique_identifier_value.as_deref() else {
+        return;
+    };
+    let Some(ncx) = pkg.manifest.iter().find(|m| {
+        m.media_type
+            .eq_ignore_ascii_case("application/x-dtbncx+xml")
+    }) else {
+        return;
+    };
+    let path = join_opf(opf_dir, &ncx.href);
+    let Ok(text) = read_text(zip, &path) else {
+        return;
+    };
+    let Some(ncx_uid) = ncx_dtb_uid(&text) else {
+        return;
+    };
+    if ncx_uid.trim() != opf_uid {
+        report.push(Violation::new(
+            Rule::NcxUidMismatch,
+            path,
+            format!(
+                "NCX dtb:uid {:?} does not match the OPF unique identifier {opf_uid:?}",
+                ncx_uid.trim()
+            ),
+        ));
+    }
+}
+
+/// The `content` of the NCX's `<meta name="dtb:uid">`, if present.
+fn ncx_dtb_uid(text: &str) -> Option<String> {
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e))
+                if local_name(e.name().as_ref()) == b"meta" =>
+            {
+                let (mut name, mut content) = (None, None);
+                for a in e.attributes().flatten() {
+                    match a.key.as_ref() {
+                        b"name" => name = Some(String::from_utf8_lossy(&a.value).to_string()),
+                        b"content" => content = Some(String::from_utf8_lossy(&a.value).to_string()),
+                        _ => {}
+                    }
+                }
+                if name.as_deref() == Some("dtb:uid") {
+                    return content;
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+    }
 }
 
 /// True when the first `<title>` element is empty or self-closing.
@@ -857,8 +1342,20 @@ fn read_container_opf_path(
                         _ => {}
                     }
                 }
-                if let Some(fp) = full_path {
-                    rootfiles.push((fp, media_type));
+                match full_path {
+                    // OPF-016: <rootfile> is missing its required full-path.
+                    None => report.push(Violation::new(
+                        Rule::RootfileMissingFullPath,
+                        "META-INF/container.xml",
+                        "<rootfile> element is missing its required full-path attribute",
+                    )),
+                    // OPF-017: full-path must not be empty.
+                    Some(fp) if fp.is_empty() => report.push(Violation::new(
+                        Rule::RootfileEmptyFullPath,
+                        "META-INF/container.xml",
+                        "<rootfile> full-path attribute must not be empty",
+                    )),
+                    Some(fp) => rootfiles.push((fp, media_type)),
                 }
             }
             Ok(Event::Eof) => break,
@@ -1016,6 +1513,14 @@ fn check_xhtml_hrefs_and_reachability(
     let mut doc_ids: HashMap<String, HashSet<String>> = HashMap::new();
     // (source_path, raw_href) for every reference carrying a `#fragment`.
     let mut fragment_refs: Vec<(String, String)> = Vec::new();
+    // Manifest-declared resource paths, for RSC-008 (a reference resolving to a
+    // file that is in the container but undeclared). Reported once per target.
+    let manifest_paths: HashSet<String> = pkg
+        .manifest
+        .iter()
+        .map(|m| join_opf(opf_dir, &m.href))
+        .collect();
+    let mut undeclared_reported: HashSet<String> = HashSet::new();
 
     for item in &pkg.manifest {
         if !is_xhtml(&item.media_type) {
@@ -1075,6 +1580,19 @@ fn check_xhtml_hrefs_and_reachability(
                         Rule::BrokenHref,
                         path.clone(),
                         format!("reference {href:?} -> {resolved:?} not present in the zip"),
+                    ));
+                } else if resolved != opf_path
+                    && !manifest_paths.contains(&resolved)
+                    && undeclared_reported.insert(resolved.clone())
+                {
+                    // RSC-008: present in the container, but not a declared
+                    // publication resource.
+                    report.push(Violation::new(
+                        Rule::ReferenceNotInManifest,
+                        path.clone(),
+                        format!(
+                            "reference {href:?} -> {resolved:?} is in the container but not declared in the manifest"
+                        ),
                     ));
                 }
                 if escapes_opf_root(opf_dir, &resolved) {
@@ -1331,6 +1849,13 @@ fn read_text(zip: &mut ZipArchive<Cursor<&[u8]>>, name: &str) -> io::Result<Stri
     Ok(s)
 }
 
+fn read_bytes(zip: &mut ZipArchive<Cursor<&[u8]>>, name: &str) -> io::Result<Vec<u8>> {
+    let mut entry = zip.by_name(name)?;
+    let mut b = Vec::new();
+    entry.read_to_end(&mut b)?;
+    Ok(b)
+}
+
 fn local_name(name: &[u8]) -> &[u8] {
     name.rsplit(|b| *b == b':').next().unwrap_or(name)
 }
@@ -1354,7 +1879,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 39, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 51, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -1379,9 +1904,12 @@ mod tests {
         // Distinct epubcheck error-level ids implemented so far; the port's
         // progress ratchet. OPF batch added OPF-030/031/033/034/040/048/050/060/
         // 074/091/096/099; OCF batch PKG-005/009/011/025 + RSC-030; XML batch
-        // HTM-001/003 + RSC-013; container/URL batch RSC-003 + RSC-033.
+        // HTM-001/003 + RSC-013; container/URL batch RSC-003 + RSC-033;
+        // cross-doc batch NCX-001 + RSC-008 + OPF-073 + OPF-032; encoding batch
+        // RSC-028 + HTM-058 (RSC-027 is a warning, not counted here); fallback/
+        // rootfile batch OPF-016/017/043/044/045.
         assert_eq!(
-            covered, 34,
+            covered, 45,
             "epubcheck error coverage changed: {covered}/{total}"
         );
     }
@@ -1573,7 +2101,7 @@ mod tests {
         </package>"##;
         let pkg = opf::parse(opf).unwrap();
         let mut report = Report::default();
-        check_opf_structure(&pkg, "", "content.opf", &mut report);
+        check_opf_structure(&pkg, "", "content.opf", false, &mut report);
         for rule in [
             Rule::UniqueIdentifierNotFound,    // OPF-030
             Rule::SpineNoLinear,               // OPF-033
@@ -1598,7 +2126,7 @@ mod tests {
         )
         .unwrap();
         let mut report = Report::default();
-        check_opf_structure(&pkg, "", "content.opf", &mut report);
+        check_opf_structure(&pkg, "", "content.opf", false, &mut report);
         assert!(report.has_rule(Rule::UniqueIdentifierMissing));
         // A well-formed spine (default-linear) must NOT trip OPF-033.
         assert!(!report.has_rule(Rule::SpineNoLinear));
@@ -1689,6 +2217,260 @@ mod tests {
         assert!(is_xml_based("APPLICATION/XML"));
         assert!(!is_xml_based("text/css"));
         assert!(!is_xml_based("image/jpeg"));
+    }
+
+    #[test]
+    fn parse_doctype_extracts_external_identifiers() {
+        let d =
+            parse_doctype(r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "x.dtd">"#).unwrap();
+        assert_eq!(d.public_id.as_deref(), Some("-//W3C//DTD XHTML 1.1//EN"));
+        assert_eq!(d.system_id.as_deref(), Some("x.dtd"));
+        let s = parse_doctype("<!DOCTYPE html SYSTEM 'about:legacy-compat'>").unwrap();
+        assert_eq!(s.public_id, None);
+        assert_eq!(s.system_id.as_deref(), Some("about:legacy-compat"));
+        let plain = parse_doctype("<!DOCTYPE html>").unwrap();
+        assert_eq!(plain.public_id, None);
+        assert_eq!(plain.system_id, None);
+        assert!(parse_doctype("<html/>").is_none());
+    }
+
+    #[test]
+    fn doctype_rules_html_fires_public_but_allows_legacy_compat() {
+        // HTM-004: XHTML with a public identifier is irregular.
+        let mut r = Report::default();
+        check_doctype_rules(
+            r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "x.dtd"><html/>"#,
+            "c.xhtml",
+            "application/xhtml+xml",
+            false,
+            &mut r,
+        );
+        assert!(r.has_rule(Rule::IrregularDoctype));
+        // The EPUB-3 `about:legacy-compat` form must NOT fire (regression guard).
+        let mut r2 = Report::default();
+        check_doctype_rules(
+            r#"<!DOCTYPE html SYSTEM "about:legacy-compat"><html/>"#,
+            "c.xhtml",
+            "application/xhtml+xml",
+            false,
+            &mut r2,
+        );
+        assert!(
+            !r2.has_rule(Rule::IrregularDoctype),
+            "legacy-compat is allowed"
+        );
+        // Plain `<!DOCTYPE html>` is allowed.
+        let mut r3 = Report::default();
+        check_doctype_rules(
+            "<!DOCTYPE html><html/>",
+            "c.xhtml",
+            "application/xhtml+xml",
+            false,
+            &mut r3,
+        );
+        assert!(!r3.has_rule(Rule::IrregularDoctype));
+    }
+
+    #[test]
+    fn doctype_rules_opf073_is_dtd_and_version_gated() {
+        // The sanctioned NCX DTD is allowed on an NCX resource.
+        let mut r = Report::default();
+        check_doctype_rules(
+            r#"<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd"><ncx/>"#,
+            "toc.ncx",
+            "application/x-dtbncx+xml",
+            false,
+            &mut r,
+        );
+        assert!(!r.has_rule(Rule::DoctypeExternalIdentifier));
+        // An arbitrary external id on the OPF is OPF-073 in EPUB 3.
+        let mut r2 = Report::default();
+        check_doctype_rules(
+            r#"<!DOCTYPE package SYSTEM "oeb.dtd"><package/>"#,
+            "content.opf",
+            "application/oebps-package+xml",
+            false,
+            &mut r2,
+        );
+        assert!(r2.has_rule(Rule::DoctypeExternalIdentifier));
+        // ...but gated off for EPUB 2 (legacy DTDs are permitted there).
+        let mut r3 = Report::default();
+        check_doctype_rules(
+            r#"<!DOCTYPE package SYSTEM "oeb.dtd"><package/>"#,
+            "content.opf",
+            "application/oebps-package+xml",
+            true,
+            &mut r3,
+        );
+        assert!(!r3.has_rule(Rule::DoctypeExternalIdentifier));
+    }
+
+    #[test]
+    fn content_document_classification_is_version_aware() {
+        assert!(is_content_document("application/xhtml+xml", false));
+        assert!(is_content_document("image/svg+xml", false)); // EPUB3 blessed
+        assert!(!is_content_document("image/svg+xml", true)); // not in EPUB2
+        assert!(is_content_document("application/x-dtbook+xml", true)); // EPUB2 blessed
+        assert!(!is_content_document("image/jpeg", false));
+        assert!(!is_content_document("text/css", false));
+    }
+
+    #[test]
+    fn sniff_xml_encoding_reads_declaration_and_boms() {
+        assert_eq!(
+            sniff_xml_encoding(br#"<?xml version="1.0" encoding="UTF-8"?>xx"#).as_deref(),
+            Some("UTF-8")
+        );
+        assert_eq!(
+            sniff_xml_encoding(br#"<?xml version="1.0" encoding="iso-8859-1"?>xx"#).as_deref(),
+            Some("ISO-8859-1")
+        );
+        // No declaration → None (assumed UTF-8).
+        assert_eq!(sniff_xml_encoding(b"<html>hello there</html>"), None);
+        // UTF-8 BOM.
+        assert_eq!(
+            sniff_xml_encoding(&[0xEF, 0xBB, 0xBF, b'<', b'x', b'/', b'>']).as_deref(),
+            Some("UTF-8")
+        );
+        // UTF-16 LE BOM.
+        assert_eq!(
+            sniff_xml_encoding(&[0xFF, 0xFE, 0x3C, 0x00]).as_deref(),
+            Some("UTF-16")
+        );
+        // Fewer than 4 bytes → None.
+        assert_eq!(sniff_xml_encoding(b"<?"), None);
+    }
+
+    #[test]
+    fn xml_encoding_check_flags_non_utf8_and_utf16() {
+        // RSC-028: a declared legacy charset (error).
+        let mut r = Report::default();
+        check_xml_encoding(
+            br#"<?xml version="1.0" encoding="Shift_JIS"?><x/>"#,
+            "x.xhtml",
+            "application/xhtml+xml",
+            &mut r,
+        );
+        assert!(r.has_rule(Rule::XmlEncodingNotUtf8));
+        // HTM-058: UTF-16 in XHTML is an error.
+        let mut r2 = Report::default();
+        check_xml_encoding(
+            &[0xFF, 0xFE, 0x3C, 0x00],
+            "x.xhtml",
+            "application/xhtml+xml",
+            &mut r2,
+        );
+        assert!(r2.has_rule(Rule::XhtmlEncodingUtf16));
+        // RSC-027: UTF-16 in a non-XHTML XML resource is a warning.
+        let mut r3 = Report::default();
+        check_xml_encoding(
+            &[0xFF, 0xFE, 0x3C, 0x00],
+            "toc.ncx",
+            "application/x-dtbncx+xml",
+            &mut r3,
+        );
+        assert!(r3.has_rule(Rule::XmlEncodingUtf16));
+        assert_eq!(
+            r3.violations[0].rule.severity(),
+            crate::validate::Severity::Warning
+        );
+        // A UTF-8 declaration (any case) produces no finding.
+        let mut r4 = Report::default();
+        check_xml_encoding(
+            br#"<?xml version="1.0" encoding="utf-8"?><x/>"#,
+            "x.xhtml",
+            "application/xhtml+xml",
+            &mut r4,
+        );
+        assert!(r4.is_clean());
+    }
+
+    #[test]
+    fn ncx_dtb_uid_reads_meta_content() {
+        let ncx = r#"<ncx><head><meta name="dtb:uid" content="urn:uuid:42"/></head></ncx>"#;
+        assert_eq!(ncx_dtb_uid(ncx).as_deref(), Some("urn:uuid:42"));
+        assert_eq!(ncx_dtb_uid("<ncx><head/></ncx>"), None);
+    }
+
+    #[test]
+    fn guide_reference_to_non_content_doc_flags_opf032() {
+        // A guide reference that IS in the manifest but points at an image is
+        // OPF-032 (not OPF-031 — it is declared).
+        let opf = r##"<package version="3.0" unique-identifier="id">
+          <metadata><dc:identifier id="id">x</dc:identifier></metadata>
+          <manifest>
+            <item id="c" href="c.xhtml" media-type="application/xhtml+xml"/>
+            <item id="img" href="cover.jpg" media-type="image/jpeg"/>
+          </manifest>
+          <spine><itemref idref="c"/></spine>
+          <guide><reference type="cover" href="cover.jpg"/></guide>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut report = Report::default();
+        check_opf_structure(&pkg, "", "content.opf", false, &mut report);
+        assert!(report.has_rule(Rule::GuideReferenceNotContentDoc)); // OPF-032
+        assert!(!report.has_rule(Rule::GuideReferenceNotInManifest)); // it is declared
+    }
+
+    #[test]
+    fn spine_item_fallback_rules_flag_opf043_and_opf044() {
+        let opf = r##"<package version="3.0" unique-identifier="id">
+          <metadata><dc:identifier id="id">x</dc:identifier></metadata>
+          <manifest>
+            <item id="a" href="a.xml" media-type="application/x-weird+xml"/>
+            <item id="b" href="b.bin" media-type="application/octet-stream" fallback="c"/>
+            <item id="c" href="c.png" media-type="image/png"/>
+            <item id="d" href="d.bin" media-type="application/octet-stream" fallback="x"/>
+            <item id="x" href="x.xhtml" media-type="application/xhtml+xml"/>
+          </manifest>
+          <spine>
+            <itemref idref="a"/>
+            <itemref idref="b"/>
+            <itemref idref="d"/>
+          </spine>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut r = Report::default();
+        check_fallback_chain_and_spine(&pkg, false, "content.opf", &mut r);
+        // a: non-blessed, no fallback → OPF-043. b: fallback→png (not content)
+        // → OPF-044. d: fallback→xhtml reaches a content document → clean.
+        let n43 = r
+            .violations
+            .iter()
+            .filter(|v| v.rule == Rule::SpineItemNoFallback)
+            .count();
+        let n44 = r
+            .violations
+            .iter()
+            .filter(|v| v.rule == Rule::SpineItemFallbackNotContentDoc)
+            .count();
+        assert_eq!((n43, n44), (1, 1), "got:\n{r}");
+    }
+
+    #[test]
+    fn fallback_cycle_flags_opf045_once() {
+        // `main` (the spine item) is blessed; a↔b form a fallback cycle that is
+        // not in the spine, so only OPF-045 fires — exactly once.
+        let opf = r##"<package version="3.0" unique-identifier="id">
+          <metadata><dc:identifier id="id">x</dc:identifier></metadata>
+          <manifest>
+            <item id="main" href="m.xhtml" media-type="application/xhtml+xml"/>
+            <item id="a" href="a.xml" media-type="application/x-a+xml" fallback="b"/>
+            <item id="b" href="b.xml" media-type="application/x-b+xml" fallback="a"/>
+          </manifest>
+          <spine><itemref idref="main"/></spine>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut r = Report::default();
+        check_fallback_chain_and_spine(&pkg, false, "content.opf", &mut r);
+        assert_eq!(
+            r.violations
+                .iter()
+                .filter(|v| v.rule == Rule::FallbackChainCircular)
+                .count(),
+            1,
+            "OPF-045 reported once, got:\n{r}"
+        );
     }
 
     /// Everything below validates a real EPUB, and the only EPUB *writer* in
@@ -1833,6 +2615,98 @@ mod tests {
                 report.has_rule(Rule::FragmentNotDefined),
                 "expected FragmentNotDefined, got:\n{}",
                 report
+            );
+        }
+
+        #[test]
+        fn detects_ncx_uid_mismatch() {
+            // NCX-001: change only the NCX `dtb:uid` so it diverges from the OPF
+            // unique identifier. (The untouched epub validating clean is the
+            // paired proof a matching uid does not fire.)
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/toc.ncx", |ncx| {
+                ncx.replace("urn:uuid:", "urn:mismatch:")
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::NcxUidMismatch),
+                "expected NCX-001, got:\n{report}"
+            );
+        }
+
+        #[test]
+        fn detects_reference_to_undeclared_container_file() {
+            // RSC-008: a reference resolving to a file present in the container
+            // but absent from the manifest (`mimetype`) must be caught.
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |x| {
+                x.replace("</body>", r#"<a href="../../mimetype">x</a></body>"#)
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::ReferenceNotInManifest),
+                "expected RSC-008, got:\n{report}"
+            );
+        }
+
+        #[test]
+        fn detects_rootfile_missing_full_path() {
+            // OPF-016: a <rootfile> with no full-path attribute.
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "META-INF/container.xml", |c| {
+                c.replace(r#"full-path="OEBPS/content.opf" "#, "")
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::RootfileMissingFullPath),
+                "expected OPF-016, got:\n{report}"
+            );
+        }
+
+        #[test]
+        fn detects_rootfile_empty_full_path() {
+            // OPF-017: a <rootfile> whose full-path is empty.
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "META-INF/container.xml", |c| {
+                c.replace(r#"full-path="OEBPS/content.opf""#, r#"full-path="""#)
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::RootfileEmptyFullPath),
+                "expected OPF-017, got:\n{report}"
+            );
+        }
+
+        #[test]
+        fn detects_non_utf8_xml_declaration() {
+            // RSC-028: a content document declaring a non-UTF-8 charset. The
+            // bytes stay UTF-8 (only the declaration changes), so the sniffer —
+            // not the decoder — is what must catch it.
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |x| {
+                x.replace(r#"encoding="UTF-8""#, r#"encoding="Shift_JIS""#)
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::XmlEncodingNotUtf8),
+                "expected RSC-028, got:\n{report}"
+            );
+        }
+
+        #[test]
+        fn detects_opf_doctype_external_identifier() {
+            // OPF-073: an external identifier in the package document's DOCTYPE.
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/content.opf", |opf| {
+                opf.replace(
+                    "<package",
+                    "<!DOCTYPE package PUBLIC \"-//X//DTD//EN\" \"x.dtd\">\n<package",
+                )
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::DoctypeExternalIdentifier),
+                "expected OPF-073, got:\n{report}"
             );
         }
 
