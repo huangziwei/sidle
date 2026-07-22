@@ -17,8 +17,13 @@
 //! - Every spine item with `linear="no"` is the target of an `<a href>`
 //!   from another doc in the publication (EPUB 3.3 §5.8.2 reachability —
 //!   the rule that fails downstream KFX conversion silently).
-//! - Every `<a href>` in spine XHTML resolves to a file in the zip
-//!   (fragments aren't checked yet — file-level only).
+//! - Every internal reference in XHTML resolves to a file in the zip
+//!   (epubcheck RSC-007): hyperlinks (`<a>`/`<area>`) and resource loads
+//!   (`<img>`, `<link>`, SVG `<image>`/`<use>`, `<object>`, and the media
+//!   elements). Any `#fragment` a reference carries resolves to an element
+//!   `id` in the (local, XHTML) target document — same-document `#frag`
+//!   included (epubcheck RSC-012). Fragments into SVG/other targets, `srcset`,
+//!   and CSS `url()` are not yet indexed.
 //! - No href in OPF or XHTML resolves to a path outside the OPF root
 //!   directory. `..` parent segments inside the OPF tree are fine (e.g.
 //!   `../style.css` from a chapter is legal); escapes above the OPF root
@@ -27,13 +32,21 @@
 //!   and carries a non-empty `<title>` — the two content-conformance rules
 //!   (epubcheck HTM-004 / RSC-005) real books trip most often.
 //!
-//! Out of scope (deferred): full XSD/RNG/Schematron validation, fragment
-//! resolution within XHTML, CSS validation, content document
-//! well-formedness. Shell out to W3C's `epubcheck` Java tool for those.
+//! Each rule is keyed to its **epubcheck message id** ([`Rule::message_id`] —
+//! `RSC-007`, `HTM-004`, …), drawn from the full [`messages::CATALOG`] (every
+//! id epubcheck defines, with its default severity), so a [`Finding`] is
+//! directly comparable with W3C epubcheck output. Three checks are bokai-native
+//! (kebab ids) where epubcheck has no dedicated code. Port coverage is tracked
+//! by [`epubcheck_error_coverage`].
+//!
+//! Out of scope (deferred): full XSD/RNG/Schematron validation, CSS
+//! validation, content document well-formedness, and fragments into SVG
+//! targets. Shell out to W3C's `epubcheck` Java tool for those.
 
+pub mod messages;
 pub mod opf;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Cursor, Read};
 
@@ -78,7 +91,13 @@ impl fmt::Display for Report {
         }
         writeln!(f, "epub3 validate: {} violation(s)", self.violations.len())?;
         for v in &self.violations {
-            writeln!(f, "  [{}] {}: {}", v.rule.as_str(), v.location, v.message)?;
+            writeln!(
+                f,
+                "  [{}] {}: {}",
+                v.rule.message_id(),
+                v.location,
+                v.message
+            )?;
         }
         Ok(())
     }
@@ -103,7 +122,7 @@ impl Violation {
     fn into_finding(self) -> crate::validate::Finding {
         crate::validate::Finding {
             check: "epub",
-            rule: self.rule.as_str().to_string(),
+            rule: self.rule.message_id().to_string(),
             severity: self.rule.severity(),
             location: self.location,
             message: self.message,
@@ -128,33 +147,64 @@ pub enum Rule {
     NavDuplicated,
     NonLinearUnreachable,
     BrokenHref,
+    FragmentNotDefined,
     HrefEscapesOpfRoot,
     IrregularDoctype,
     EmptyTitle,
 }
 
 impl Rule {
-    pub fn as_str(self) -> &'static str {
+    /// Every variant, so callers (coverage reporting, the mapping-invariant
+    /// tests) can iterate the rule set. `message_id`'s match is
+    /// compiler-exhaustive; keep this in sync (a test asserts the length).
+    pub const ALL: &'static [Rule] = &[
+        Rule::ZipMalformed,
+        Rule::MimetypeNotFirst,
+        Rule::MimetypeNotStored,
+        Rule::MimetypeBadContent,
+        Rule::MissingContainerXml,
+        Rule::OpfMissing,
+        Rule::OpfParseError,
+        Rule::ManifestFileMissing,
+        Rule::FileNotInManifest,
+        Rule::SpineIdrefUnknown,
+        Rule::NavMissing,
+        Rule::NavDuplicated,
+        Rule::NonLinearUnreachable,
+        Rule::BrokenHref,
+        Rule::FragmentNotDefined,
+        Rule::HrefEscapesOpfRoot,
+        Rule::IrregularDoctype,
+        Rule::EmptyTitle,
+    ];
+
+    /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
+    /// [`crate::validate::Finding`] carries, so bokai's output is directly
+    /// comparable with W3C epubcheck. Ids in `XXX-NNN` form are real epubcheck
+    /// messages present in [`messages::CATALOG`] (enforced by a test); the three
+    /// kebab ids are bokai-native structural checks epubcheck has no dedicated
+    /// code for (it enforces nav shape via its OPF schema; `linear="no"`
+    /// reachability, EPUB 3.3 §5.8.2, it does not flag at all).
+    pub fn message_id(self) -> &'static str {
         match self {
-            Rule::ZipMalformed => "zip-malformed",
-            Rule::MimetypeNotFirst => "mimetype-not-first",
-            Rule::MimetypeNotStored => "mimetype-not-stored",
-            Rule::MimetypeBadContent => "mimetype-bad-content",
-            Rule::MissingContainerXml => "missing-container-xml",
-            Rule::OpfMissing => "opf-missing",
-            Rule::OpfParseError => "opf-parse-error",
-            Rule::ManifestFileMissing => "manifest-file-missing",
-            Rule::FileNotInManifest => "file-not-in-manifest",
-            Rule::SpineIdrefUnknown => "spine-idref-unknown",
+            Rule::ZipMalformed => "PKG-004",
+            Rule::MimetypeNotFirst => "PKG-006",
+            Rule::MimetypeNotStored => "PKG-007",
+            Rule::MimetypeBadContent => "PKG-007",
+            Rule::MissingContainerXml => "RSC-002",
+            Rule::OpfMissing => "PKG-020",
+            Rule::OpfParseError => "RSC-005",
+            Rule::ManifestFileMissing => "RSC-001",
+            Rule::FileNotInManifest => "OPF-003",
+            Rule::SpineIdrefUnknown => "OPF-049",
             Rule::NavMissing => "nav-missing",
             Rule::NavDuplicated => "nav-duplicated",
             Rule::NonLinearUnreachable => "non-linear-unreachable",
-            Rule::BrokenHref => "broken-href",
-            Rule::HrefEscapesOpfRoot => "href-escapes-opf-root",
-            // epubcheck HTM-004 / RSC-005 — pre-EPUB-3 source content that the
-            // passthrough export used to copy verbatim tripped both.
-            Rule::IrregularDoctype => "irregular-doctype",
-            Rule::EmptyTitle => "empty-title",
+            Rule::BrokenHref => "RSC-007",
+            Rule::FragmentNotDefined => "RSC-012",
+            Rule::HrefEscapesOpfRoot => "RSC-026",
+            Rule::IrregularDoctype => "HTM-004",
+            Rule::EmptyTitle => "RSC-005",
         }
     }
 
@@ -193,6 +243,20 @@ impl Rule {
             _ => None,
         }
     }
+}
+
+/// Port progress against the epubcheck catalog: `(implemented, total)`
+/// error-level messages. `implemented` is the count of distinct epubcheck
+/// error-level ids some [`Rule`] emits; `total` is [`messages::error_level_count`].
+/// Bokai-native rule ids (kebab) match no catalog id, so they don't inflate it.
+pub fn epubcheck_error_coverage() -> (usize, usize) {
+    let implemented: HashSet<&str> = Rule::ALL.iter().map(|r| r.message_id()).collect();
+    let covered = messages::CATALOG
+        .iter()
+        .filter(|m| m.severity == Some(crate::validate::Severity::Error))
+        .filter(|m| implemented.contains(m.id))
+        .count();
+    (covered, messages::error_level_count())
 }
 
 /// Validate `epub_bytes` against the rules listed in the module docs.
@@ -563,10 +627,18 @@ fn check_xhtml_hrefs_and_reachability(
     opf_path: &str,
     report: &mut Report,
 ) {
-    // Collect every internal target referenced by an `<a href>` (or
-    // `<link href>`) inside any XHTML in the manifest. Paths are resolved
-    // relative to the XHTML they appear in and stripped of fragment.
+    // Collect every internal target referenced from any XHTML in the manifest:
+    // hyperlinks (`<a>`/`<area>`) plus resource references (`<img>`, `<link>`,
+    // SVG `<image>`/`<use>`, `<object>`, media elements, …). Paths are resolved
+    // relative to the XHTML they appear in. Only hyperlink targets feed the
+    // reachability check; every reference feeds RSC-007 (present in the zip) and
+    // the OPF-root-escape check.
     let mut hyperlink_targets: HashSet<String> = HashSet::new();
+    // Element `id` set per XHTML document, for fragment (RSC-012) resolution.
+    // Built across all docs first: a link may target a document not yet visited.
+    let mut doc_ids: HashMap<String, HashSet<String>> = HashMap::new();
+    // (source_path, raw_href) for every reference carrying a `#fragment`.
+    let mut fragment_refs: Vec<(String, String)> = Vec::new();
 
     for item in &pkg.manifest {
         if !is_xhtml(&item.media_type) {
@@ -576,18 +648,20 @@ fn check_xhtml_hrefs_and_reachability(
         let Ok(text) = read_text(zip, &path) else {
             continue;
         };
-        let hrefs = collect_xhtml_hrefs(&text);
-        for href in hrefs {
+        doc_ids.insert(path.clone(), collect_element_ids(&text));
+        for (kind, href) in collect_references(&text) {
+            if href.contains('#') {
+                fragment_refs.push((path.clone(), href.clone()));
+            }
             if let Some(resolved) = resolve_href(&path, &href) {
-                hyperlink_targets.insert(resolved.clone());
+                if kind == RefKind::Hyperlink {
+                    hyperlink_targets.insert(resolved.clone());
+                }
                 if !zip_paths.contains(&resolved) {
                     report.push(Violation::new(
                         Rule::BrokenHref,
                         path.clone(),
-                        format!(
-                            "<a href={:?}> -> {:?} not present in the zip",
-                            href, resolved
-                        ),
+                        format!("reference {href:?} -> {resolved:?} not present in the zip"),
                     ));
                 }
                 if escapes_opf_root(opf_dir, &resolved) {
@@ -595,14 +669,15 @@ fn check_xhtml_hrefs_and_reachability(
                         Rule::HrefEscapesOpfRoot,
                         path.clone(),
                         format!(
-                            "href={:?} resolves to {:?}, which is outside the OPF root {:?}",
-                            href, resolved, opf_dir
+                            "reference {href:?} resolves to {resolved:?}, outside the OPF root {opf_dir:?}"
                         ),
                     ));
                 }
             }
         }
     }
+
+    check_fragments(&doc_ids, &fragment_refs, report);
 
     // Reachability: every spine item with `linear="no"` must be the target of
     // some hyperlink elsewhere in the publication.
@@ -648,7 +723,23 @@ fn check_parent_paths_in_opf(
     }
 }
 
-fn collect_xhtml_hrefs(content: &str) -> Vec<String> {
+/// A reference is a hyperlink (feeds reachability) or a resource load. The
+/// distinction matters only for reachability (EPUB 3.3 §5.8.2, which is about
+/// *hyperlinks*); RSC-007 resolution and the escape check treat both alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefKind {
+    Hyperlink,
+    Resource,
+}
+
+/// Every internal reference in the document, paired with its kind. Covers the
+/// reference-bearing element/attribute pairs epubcheck resolves (RSC-007):
+/// hyperlinks `<a|area href>`; resources `<link href>`, `<img src>`, SVG
+/// `<image|use href>` (incl. `xlink:href`, via attribute local-name),
+/// `<object data>`, `<embed|iframe|source|audio|video|track|script src>`, and
+/// `<video poster>`. External URLs and data: URIs are filtered later by
+/// [`resolve_href`]. `srcset` (multi-URL) and CSS `url()` are out of scope here.
+fn collect_references(content: &str) -> Vec<(RefKind, String)> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(false);
     let mut out = Vec::new();
@@ -657,10 +748,24 @@ fn collect_xhtml_hrefs(content: &str) -> Vec<String> {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 let name = e.name();
                 let local = local_name(name.as_ref());
-                if local == b"a" || local == b"link" {
-                    for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"href" {
-                            out.push(String::from_utf8_lossy(&attr.value).to_string());
+                let kind = match local {
+                    b"a" | b"area" => RefKind::Hyperlink,
+                    b"link" | b"img" | b"image" | b"use" | b"object" | b"embed" | b"iframe"
+                    | b"source" | b"audio" | b"video" | b"track" | b"script" => RefKind::Resource,
+                    _ => continue,
+                };
+                for attr in e.attributes().flatten() {
+                    let akey = local_name(attr.key.as_ref());
+                    let is_ref = match local {
+                        b"a" | b"area" | b"link" | b"image" | b"use" => akey == b"href",
+                        b"object" => akey == b"data",
+                        b"video" => akey == b"src" || akey == b"poster",
+                        _ => akey == b"src",
+                    };
+                    if is_ref {
+                        let val = String::from_utf8_lossy(&attr.value).to_string();
+                        if !val.is_empty() {
+                            out.push((kind, val));
                         }
                     }
                 }
@@ -671,6 +776,73 @@ fn collect_xhtml_hrefs(content: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Every `id` attribute value in the document — the fragment-target namespace.
+/// Per HTML5 (and epubcheck's ID registry, which reads `getAttribute("id")`),
+/// legacy `name=` anchors are *not* counted.
+fn collect_element_ids(content: &str) -> HashSet<String> {
+    let mut reader = Reader::from_str(content);
+    reader.config_mut().trim_text(false);
+    let mut out = HashSet::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                for attr in e.attributes().flatten() {
+                    if attr.key.as_ref() == b"id" {
+                        out.insert(String::from_utf8_lossy(&attr.value).to_string());
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break, // well-formedness is out of scope here
+            _ => {}
+        }
+    }
+    out
+}
+
+/// RSC-012: every `#fragment` must name an element `id` in its target
+/// document. Scoped to the local XHTML documents we index; a fragment into an
+/// image, stylesheet, SVG, or an entirely missing file (already reported as a
+/// broken href / RSC-007) is left alone. A same-document `#frag` resolves
+/// against the source document itself.
+fn check_fragments(
+    doc_ids: &HashMap<String, HashSet<String>>,
+    fragment_refs: &[(String, String)],
+    report: &mut Report,
+) {
+    for (source_path, href) in fragment_refs {
+        let Some((file, frag)) = href.split_once('#') else {
+            continue;
+        };
+        // An empty fragment (`foo.xhtml#`) is not an id reference; `epubcfi(…)`
+        // is a different scheme epubcheck doesn't resolve by id; a
+        // percent-encoded fragment we can't compare byte-for-byte without
+        // decoding, so we leave it rather than risk a false positive.
+        if frag.is_empty() || frag.starts_with("epubcfi(") || frag.contains('%') {
+            continue;
+        }
+        let target = if file.is_empty() {
+            source_path.clone() // same-document reference
+        } else {
+            match resolve_href(source_path, href) {
+                Some(t) => t,
+                None => continue, // external URL — not ours to resolve
+            }
+        };
+        // Only a document we actually indexed (a local XHTML) can be judged.
+        let Some(ids) = doc_ids.get(&target) else {
+            continue;
+        };
+        if !ids.contains(frag) {
+            report.push(Violation::new(
+                Rule::FragmentNotDefined,
+                source_path.clone(),
+                format!("href={href:?} points at fragment #{frag}, not defined in {target:?}"),
+            ));
+        }
+    }
 }
 
 // =========================================================================
@@ -758,6 +930,70 @@ fn local_name(name: &[u8]) -> &[u8] {
 mod tests {
     use super::*;
 
+    fn severity_rank(s: crate::validate::Severity) -> u8 {
+        use crate::validate::Severity::*;
+        match s {
+            Error => 2,
+            Warning => 1,
+            Info => 0,
+        }
+    }
+
+    #[test]
+    fn all_rules_list_is_complete() {
+        assert_eq!(Rule::ALL.len(), 18, "update Rule::ALL when adding a Rule");
+    }
+
+    #[test]
+    fn every_epubcheck_message_id_exists_in_the_catalog() {
+        // An epubcheck id starts uppercase (`RSC-007`); bokai-native ids are
+        // lowercase kebab (`nav-missing`). Only the former must be catalogued.
+        for &rule in Rule::ALL {
+            let id = rule.message_id();
+            if id.starts_with(|c: char| c.is_ascii_uppercase()) {
+                assert!(
+                    messages::lookup(id).is_some(),
+                    "rule {rule:?} maps to {id:?}, absent from the epubcheck catalog"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn epubcheck_error_coverage_is_tracked() {
+        let (covered, total) = epubcheck_error_coverage();
+        assert_eq!(total, 138, "error-level catalog total drifted");
+        // 12 distinct epubcheck error-level ids implemented so far (PKG-004/006/
+        // 007/020, RSC-001/002/005/007/012/026, OPF-049, HTM-004). Bump as the
+        // port lands more; this is the port's progress ratchet.
+        assert_eq!(
+            covered, 12,
+            "epubcheck error coverage changed: {covered}/{total}"
+        );
+    }
+
+    #[test]
+    fn bokai_never_rates_a_rule_below_epubcheck() {
+        // The parity invariant: for a rule keyed to an epubcheck id, bokai's
+        // severity is at least epubcheck's — so an epubcheck ERROR is never
+        // downgraded (bokai may be stricter, e.g. OPF-003 USAGE surfaced as
+        // Warning).
+        for &rule in Rule::ALL {
+            let Some(known) = messages::lookup(rule.message_id()) else {
+                continue; // bokai-native rule
+            };
+            if let Some(epub_sev) = known.severity {
+                assert!(
+                    severity_rank(rule.severity()) >= severity_rank(epub_sev),
+                    "{}: bokai {:?} < epubcheck {:?}",
+                    rule.message_id(),
+                    rule.severity(),
+                    epub_sev,
+                );
+            }
+        }
+    }
+
     #[test]
     fn into_findings_maps_severity_check_and_fix() {
         use crate::validate::Severity;
@@ -773,15 +1009,15 @@ mod tests {
         assert_eq!(findings.len(), 3);
         assert!(findings.iter().all(|f| f.check == "epub"));
 
-        assert_eq!(findings[0].rule, "file-not-in-manifest");
+        assert_eq!(findings[0].rule, "OPF-003"); // FileNotInManifest
         assert_eq!(findings[0].severity, Severity::Warning);
         assert!(findings[0].fix.is_none());
 
-        assert_eq!(findings[1].rule, "nav-missing");
+        assert_eq!(findings[1].rule, "nav-missing"); // bokai-native
         assert_eq!(findings[1].severity, Severity::Error);
         assert_eq!(findings[1].fix.as_ref().unwrap().action, "add-nav-doc");
 
-        assert_eq!(findings[2].rule, "broken-href");
+        assert_eq!(findings[2].rule, "RSC-007"); // BrokenHref
         assert_eq!(findings[2].severity, Severity::Error);
         assert!(findings[2].fix.is_none());
     }
@@ -795,9 +1031,9 @@ mod tests {
             ],
         };
         let f = report.into_findings();
-        assert_eq!(f[0].rule, "irregular-doctype");
+        assert_eq!(f[0].rule, "HTM-004"); // IrregularDoctype
         assert_eq!(f[0].fix.as_ref().unwrap().action, "use-html5-doctype");
-        assert_eq!(f[1].rule, "empty-title");
+        assert_eq!(f[1].rule, "RSC-005"); // EmptyTitle (schema-error channel)
         assert_eq!(f[1].fix.as_ref().unwrap().action, "fill-title");
     }
 
@@ -824,6 +1060,82 @@ mod tests {
         assert!(has_empty_title("<head><title>   </title></head>"));
         assert!(!has_empty_title("<head><title>第一章</title></head>"));
         assert!(!has_empty_title("<head></head>")); // absent title is a different rule
+    }
+
+    #[test]
+    fn collect_element_ids_reads_id_not_name() {
+        let ids = collect_element_ids(
+            r#"<html><body><h1 id="top">t</h1><a name="legacy">x</a><p id="第一"/></body></html>"#,
+        );
+        assert!(ids.contains("top"));
+        assert!(ids.contains("第一")); // multi-byte id round-trips
+        assert!(!ids.contains("legacy")); // name= is not a fragment target (HTML5)
+    }
+
+    #[test]
+    fn check_fragments_flags_dangling_only() {
+        let mut doc_ids: HashMap<String, HashSet<String>> = HashMap::new();
+        doc_ids.insert("OEBPS/a.xhtml".into(), HashSet::from(["sec1".to_string()]));
+        doc_ids.insert("OEBPS/b.xhtml".into(), HashSet::from(["real".to_string()]));
+        let refs = vec![
+            ("OEBPS/a.xhtml".to_string(), "b.xhtml#real".to_string()), // ok — cross-doc
+            ("OEBPS/a.xhtml".to_string(), "#sec1".to_string()),        // ok — same-doc
+            ("OEBPS/a.xhtml".to_string(), "b.xhtml#ghost".to_string()), // RSC-012
+            ("OEBPS/a.xhtml".to_string(), "#missing".to_string()),     // RSC-012 (same-doc)
+            ("OEBPS/a.xhtml".to_string(), "img.svg#x".to_string()),    // target unindexed → skip
+            ("OEBPS/a.xhtml".to_string(), "b.xhtml#".to_string()),     // empty fragment → skip
+            ("OEBPS/a.xhtml".to_string(), "http://x/y#z".to_string()), // external → skip
+            ("OEBPS/a.xhtml".to_string(), "b.xhtml#foo%20bar".to_string()), // percent → skip
+            (
+                "OEBPS/a.xhtml".to_string(),
+                "b.xhtml#epubcfi(/6)".to_string(),
+            ), // cfi → skip
+        ];
+        let mut report = Report::default();
+        check_fragments(&doc_ids, &refs, &mut report);
+        let n = report
+            .violations
+            .iter()
+            .filter(|v| v.rule == Rule::FragmentNotDefined)
+            .count();
+        assert_eq!(n, 2, "expected 2 dangling fragments, got:\n{report}");
+    }
+
+    #[test]
+    fn collect_references_marks_hyperlinks_and_covers_resources() {
+        let refs = collect_references(
+            r##"<html><body>
+                <a href="ch2.xhtml">next</a>
+                <area href="map.xhtml"/>
+                <img src="pic.png"/>
+                <link href="style.css"/>
+                <object data="widget.xml"></object>
+                <video src="v.mp4" poster="p.png"></video>
+                <svg><image xlink:href="s.png"/><use href="#g"/></svg>
+                <p>plain</p>
+            </body></html>"##,
+        );
+        // Only <a>/<area> are hyperlinks (the reachability signal).
+        let hyper: Vec<&str> = refs
+            .iter()
+            .filter(|(k, _)| *k == RefKind::Hyperlink)
+            .map(|(_, h)| h.as_str())
+            .collect();
+        assert_eq!(hyper, vec!["ch2.xhtml", "map.xhtml"]);
+        // Resource references from every covered element/attribute are present,
+        // including SVG `xlink:href` (matched by attribute local-name).
+        let all: Vec<&str> = refs.iter().map(|(_, h)| h.as_str()).collect();
+        for expect in [
+            "pic.png",
+            "style.css",
+            "widget.xml",
+            "v.mp4",
+            "p.png",
+            "s.png",
+            "#g",
+        ] {
+            assert!(all.contains(&expect), "missing {expect:?} in {all:?}");
+        }
     }
 
     /// Everything below validates a real EPUB, and the only EPUB *writer* in
@@ -912,6 +1224,40 @@ mod tests {
         }
 
         #[test]
+        fn detects_broken_image_reference() {
+            // Broadened RSC-007: a missing `<img src>` (not just `<a href>`)
+            // must be caught. The clean epub validating (aozora_output_passes…)
+            // is the paired proof the cover image / stylesheet don't false-fire.
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |xhtml| {
+                xhtml.replace("</body>", r#"<img src="missing.png"/></body>"#)
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::BrokenHref),
+                "expected BrokenHref for missing image, got:\n{}",
+                report
+            );
+        }
+
+        #[test]
+        fn detects_dangling_fragment() {
+            // A same-document `#frag` naming no element id must trip RSC-012.
+            // (The untouched epub validating clean — `aozora_output_passes_after_fix`
+            // — is the paired proof that resolved fragments do *not* fire.)
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |xhtml| {
+                xhtml.replace("</body>", r##"<a href="#does-not-exist">x</a></body>"##)
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::FragmentNotDefined),
+                "expected FragmentNotDefined, got:\n{}",
+                report
+            );
+        }
+
+        #[test]
         fn detects_href_escaping_opf_root() {
             // OPF root is `OEBPS/`. Insert a `../../escape.xhtml` from a chapter:
             // resolves to `escape.xhtml` (zip root, outside OEBPS) — must flag.
@@ -954,9 +1300,9 @@ mod tests {
             assert!(!report.is_clean());
             assert!(
                 report.findings.iter().any(|f| f.check == "epub"
-                    && f.rule == "manifest-file-missing"
+                    && f.rule == "RSC-001"
                     && f.severity == crate::validate::Severity::Error),
-                "expected an epub/manifest-file-missing error, got:\n{report}"
+                "expected an epub/RSC-001 (manifest file missing) error, got:\n{report}"
             );
         }
 
