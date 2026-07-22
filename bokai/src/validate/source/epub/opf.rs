@@ -28,12 +28,30 @@ pub struct Package {
     /// *value* (what NCX-001 compares the NCX `dtb:uid` against). `None` if the
     /// package declares no unique-identifier or no matching identifier element.
     pub unique_identifier_value: Option<String>,
+    /// Every Dublin Core metadata element (`<dc:*>`) under `<metadata>`, in
+    /// document order. Drives the metadata-value checks (date, identifier UUID,
+    /// empty element, required title/language). [`Self::identifier_ids`] and
+    /// [`Self::unique_identifier_value`] are derived from this.
+    pub metadata: Vec<DcMeta>,
     /// The `<spine toc>` attribute (a manifest id for the NCX), if present.
     pub spine_toc: Option<String>,
     /// Every `<reference href>` inside `<guide>` (raw, fragment kept).
     pub guide_hrefs: Vec<String>,
     pub manifest: Vec<ManifestItem>,
     pub spine: Vec<SpineItem>,
+}
+
+/// A Dublin Core metadata element (`<dc:title>`, `<dc:identifier>`, …).
+#[derive(Debug, Clone)]
+pub struct DcMeta {
+    /// The DC element's local name (`"title"`, `"date"`, `"language"`, `"identifier"`, …).
+    pub name: String,
+    /// The element's trimmed text value (empty if the element had no text).
+    pub value: String,
+    /// The `id` attribute, if present.
+    pub id: Option<String>,
+    /// The `opf:scheme` / `scheme` attribute, if present.
+    pub scheme: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,34 +90,40 @@ pub fn parse(content: &str) -> io::Result<Package> {
     let mut in_spine = false;
     let mut in_metadata = false;
     let mut in_guide = false;
-    // Capture of the unique-identifier's `<dc:identifier>` text content. Set on
-    // the matching element's `Start`, accumulated over `Text`, stored on `End`.
-    let mut capturing_uid = false;
-    let mut uid_buf = String::new();
+    // In-progress Dublin Core element: opened on a `<dc:*>` Start, its text
+    // accumulated over `Text` events, finalized into `pkg.metadata` on `End`.
+    let mut dc: Option<DcMeta> = None;
 
     loop {
         match reader.read_event() {
-            // The `<dc:identifier>` whose id is the package unique-identifier:
-            // begin capturing its text (a `Start`, not a self-closed `Empty` —
-            // an empty identifier has no value). Handled ahead of the shared
-            // start arm, which still records the id for every identifier.
-            Ok(Event::Start(e))
-                if in_metadata
-                    && local_name(e.name().as_ref()) == b"identifier"
-                    && attr(&e, b"id").is_some() =>
-            {
-                let id = attr(&e, b"id").unwrap_or_default();
-                let is_uid = pkg.unique_identifier.as_deref() == Some(id.as_str());
-                pkg.identifier_ids.push(id);
-                capturing_uid = is_uid;
-                uid_buf.clear();
+            // A `<dc:*>` element with text content: start accumulating. (A
+            // self-closed `<dc:*/>` has no text and is recorded in the shared
+            // start arm below.)
+            Ok(Event::Start(e)) if in_metadata && e.name().as_ref().starts_with(b"dc:") => {
+                dc = Some(DcMeta {
+                    name: String::from_utf8_lossy(local_name(e.name().as_ref())).into_owned(),
+                    id: attr(&e, b"id"),
+                    scheme: scheme_attr(&e),
+                    value: String::new(),
+                });
             }
-            Ok(Event::Text(t)) if capturing_uid => {
-                uid_buf.push_str(&String::from_utf8_lossy(t.as_ref()));
+            Ok(Event::Text(t)) if dc.is_some() => {
+                if let Some(m) = dc.as_mut() {
+                    m.value.push_str(&String::from_utf8_lossy(t.as_ref()));
+                }
             }
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 let name = e.name();
                 let local = local_name(name.as_ref());
+                // A self-closed `<dc:*/>` metadata element (Empty): no text.
+                if in_metadata && name.as_ref().starts_with(b"dc:") {
+                    pkg.metadata.push(DcMeta {
+                        name: String::from_utf8_lossy(local).into_owned(),
+                        id: attr(&e, b"id"),
+                        scheme: scheme_attr(&e),
+                        value: String::new(),
+                    });
+                }
                 match local {
                     b"package" => {
                         pkg.unique_identifier = attr(&e, b"unique-identifier");
@@ -112,11 +136,6 @@ pub fn parse(content: &str) -> io::Result<Package> {
                     }
                     b"metadata" => in_metadata = true,
                     b"guide" => in_guide = true,
-                    b"identifier" if in_metadata => {
-                        if let Some(id) = attr(&e, b"id") {
-                            pkg.identifier_ids.push(id);
-                        }
-                    }
                     b"reference" if in_guide => {
                         if let Some(href) = attr(&e, b"href") {
                             pkg.guide_hrefs.push(href);
@@ -171,22 +190,41 @@ pub fn parse(content: &str) -> io::Result<Package> {
                     _ => {}
                 }
             }
-            Ok(Event::End(e)) => match local_name(e.name().as_ref()) {
-                b"manifest" => in_manifest = false,
-                b"spine" => in_spine = false,
-                b"metadata" => in_metadata = false,
-                b"guide" => in_guide = false,
-                b"identifier" if capturing_uid => {
-                    pkg.unique_identifier_value = Some(uid_buf.trim().to_string());
-                    capturing_uid = false;
+            Ok(Event::End(e)) => {
+                // Finalize an in-progress `<dc:*>` element.
+                if e.name().as_ref().starts_with(b"dc:")
+                    && let Some(mut m) = dc.take()
+                {
+                    m.value = m.value.trim().to_string();
+                    pkg.metadata.push(m);
                 }
-                _ => {}
-            },
+                match local_name(e.name().as_ref()) {
+                    b"manifest" => in_manifest = false,
+                    b"spine" => in_spine = false,
+                    b"metadata" => in_metadata = false,
+                    b"guide" => in_guide = false,
+                    _ => {}
+                }
+            }
             Ok(Event::Eof) => break,
             Err(e) => return Err(io::Error::other(e)),
             _ => {}
         }
     }
+
+    // Derive the identifier views used by OPF-030 / NCX-001 from the metadata.
+    pkg.identifier_ids = pkg
+        .metadata
+        .iter()
+        .filter(|m| m.name == "identifier")
+        .filter_map(|m| m.id.clone())
+        .collect();
+    pkg.unique_identifier_value = pkg.unique_identifier.as_deref().and_then(|uid| {
+        pkg.metadata
+            .iter()
+            .find(|m| m.name == "identifier" && m.id.as_deref() == Some(uid))
+            .map(|m| m.value.clone())
+    });
 
     Ok(pkg)
 }
@@ -196,6 +234,15 @@ fn attr(e: &BytesStart, key: &[u8]) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| a.key.as_ref() == key)
+        .map(|a| String::from_utf8_lossy(&a.value).to_string())
+}
+
+/// The `opf:scheme` (or bare `scheme`) attribute value, matched by attribute
+/// local name so either the prefixed or unprefixed form is found.
+fn scheme_attr(e: &BytesStart) -> Option<String> {
+    e.attributes()
+        .flatten()
+        .find(|a| local_name(a.key.as_ref()) == b"scheme")
         .map(|a| String::from_utf8_lossy(&a.value).to_string())
 }
 
@@ -247,6 +294,48 @@ mod tests {
         );
         assert_eq!(pkg.spine_toc.as_deref(), Some("ncx"));
         assert_eq!(pkg.guide_hrefs, vec!["text/cover.xhtml"]);
+    }
+
+    #[test]
+    fn captures_dc_metadata_elements() {
+        let opf = r#"<?xml version="1.0"?>
+<package version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>The Title</dc:title>
+    <dc:language>en</dc:language>
+    <dc:date>2015-08-05</dc:date>
+    <dc:identifier id="uid" opf:scheme="uuid">urn:uuid:abcd</dc:identifier>
+    <dc:subject/>
+    <meta property="dcterms:modified">2020-01-01T00:00:00Z</meta>
+  </metadata>
+  <manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="a"/></spine>
+</package>"#;
+        let pkg = parse(opf).unwrap();
+        // <meta> is not a Dublin Core element, so it is not captured.
+        let names: Vec<&str> = pkg.metadata.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["title", "language", "date", "identifier", "subject"]
+        );
+        let date = pkg.metadata.iter().find(|m| m.name == "date").unwrap();
+        assert_eq!(date.value, "2015-08-05");
+        let ident = pkg
+            .metadata
+            .iter()
+            .find(|m| m.name == "identifier")
+            .unwrap();
+        assert_eq!(ident.scheme.as_deref(), Some("uuid"));
+        assert_eq!(ident.value, "urn:uuid:abcd");
+        // A self-closed <dc:subject/> is captured with an empty value.
+        let subject = pkg.metadata.iter().find(|m| m.name == "subject").unwrap();
+        assert!(subject.value.is_empty());
+        // Derived views still hold after the refactor.
+        assert_eq!(pkg.identifier_ids, vec!["uid"]);
+        assert_eq!(
+            pkg.unique_identifier_value.as_deref(),
+            Some("urn:uuid:abcd")
+        );
     }
 
     #[test]

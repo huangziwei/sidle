@@ -190,6 +190,12 @@ pub enum Rule {
     SpineItemNoFallback,
     SpineItemFallbackNotContentDoc,
     FallbackChainCircular,
+    // Dublin Core metadata values (epubcheck OPF-* / RSC-005 schema channel).
+    MissingTitle,
+    MissingLanguage,
+    IdentifierInvalidUuid,
+    DateSyntaxNotRecommended,
+    DateNotValid,
 }
 
 impl Rule {
@@ -248,6 +254,11 @@ impl Rule {
         Rule::SpineItemNoFallback,
         Rule::SpineItemFallbackNotContentDoc,
         Rule::FallbackChainCircular,
+        Rule::MissingTitle,
+        Rule::MissingLanguage,
+        Rule::IdentifierInvalidUuid,
+        Rule::DateSyntaxNotRecommended,
+        Rule::DateNotValid,
     ];
 
     /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
@@ -310,6 +321,13 @@ impl Rule {
             Rule::SpineItemNoFallback => "OPF-043",
             Rule::SpineItemFallbackNotContentDoc => "OPF-044",
             Rule::FallbackChainCircular => "OPF-045",
+            // Missing required Dublin Core metadata is enforced by epubcheck's
+            // package schema, which reports through the RSC-005 channel.
+            Rule::MissingTitle => "RSC-005",
+            Rule::MissingLanguage => "RSC-005",
+            Rule::IdentifierInvalidUuid => "OPF-085",
+            Rule::DateSyntaxNotRecommended => "OPF-053",
+            Rule::DateNotValid => "OPF-054",
         }
     }
 
@@ -319,9 +337,14 @@ impl Rule {
     fn severity(self) -> crate::validate::Severity {
         use crate::validate::Severity;
         match self {
-            // Undeclared extra resources (OPF-003) and UTF-16 in a non-XHTML XML
-            // resource (RSC-027) are the two rules epubcheck rates below Error.
-            Rule::FileNotInManifest | Rule::XmlEncodingUtf16 => Severity::Warning,
+            // The rules epubcheck rates below Error: undeclared extra resources
+            // (OPF-003), UTF-16 in a non-XHTML resource (RSC-027), an invalid
+            // UUID identifier (OPF-085), and a non-recommended date syntax in
+            // EPUB 3 (OPF-053).
+            Rule::FileNotInManifest
+            | Rule::XmlEncodingUtf16
+            | Rule::IdentifierInvalidUuid
+            | Rule::DateSyntaxNotRecommended => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -437,6 +460,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
     check_parent_paths_in_opf(&pkg, &opf_dir, &opf_path, &mut report);
     check_opf_structure(&pkg, &opf_dir, &opf_path, epub2, &mut report);
     check_fallback_chain_and_spine(&pkg, epub2, &opf_path, &mut report);
+    check_metadata(&pkg, epub2, &opf_path, &mut report);
     check_xhtml_hrefs_and_reachability(
         &pkg,
         &opf_dir,
@@ -902,6 +926,241 @@ fn reaches_content_document(
         cur = item.fallback.as_deref();
     }
     false
+}
+
+/// Dublin Core metadata-value checks:
+///
+/// - **RSC-005** — the publication must declare at least one non-empty
+///   `<dc:title>` and one `<dc:language>` (epubcheck enforces these through the
+///   package schema; missing-required is version-independent).
+/// - **OPF-053 / OPF-054** — every `<dc:date>` must be a valid W3C-DTF date
+///   (warning in EPUB 3, error in EPUB 2).
+/// - **OPF-085** — a `<dc:identifier>` marked as a UUID (a `urn:uuid:` value or
+///   `opf:scheme="uuid"`) must be a syntactically valid UUID.
+fn check_metadata(pkg: &opf::Package, epub2: bool, opf_path: &str, report: &mut Report) {
+    let has = |name: &str| {
+        pkg.metadata
+            .iter()
+            .any(|m| m.name == name && !m.value.is_empty())
+    };
+    if !has("title") {
+        report.push(Violation::new(
+            Rule::MissingTitle,
+            opf_path.to_string(),
+            "the package metadata must declare at least one non-empty <dc:title>",
+        ));
+    }
+    if !has("language") {
+        report.push(Violation::new(
+            Rule::MissingLanguage,
+            opf_path.to_string(),
+            "the package metadata must declare at least one <dc:language>",
+        ));
+    }
+
+    for m in &pkg.metadata {
+        match m.name.as_str() {
+            "date" => {
+                if let Err(detail) = parse_w3c_date(m.value.trim()) {
+                    let rule = if epub2 {
+                        Rule::DateNotValid
+                    } else {
+                        Rule::DateSyntaxNotRecommended
+                    };
+                    report.push(Violation::new(
+                        rule,
+                        opf_path.to_string(),
+                        format!("date value {:?} is not valid W3C-DTF: {detail}", m.value),
+                    ));
+                }
+            }
+            "identifier" => {
+                // Only identifiers that *claim* to be UUIDs are UUID-checked.
+                let marked_uuid = m.value.starts_with("urn:uuid:")
+                    || m.scheme
+                        .as_deref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case("uuid"));
+                if marked_uuid {
+                    let bare = m.value.replace("urn:uuid:", "");
+                    if !is_valid_uuid(&bare) {
+                        report.push(Violation::new(
+                            Rule::IdentifierInvalidUuid,
+                            opf_path.to_string(),
+                            format!(
+                                "dc:identifier value {:?} is marked as a UUID but is not one",
+                                m.value
+                            ),
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Canonical UUID syntax: `8-4-4-4-12` hex groups (case-insensitive). Mirrors
+/// what `java.util.UUID.fromString` accepts for epubcheck's OPF-085 check,
+/// after `urn:uuid:` has been stripped.
+fn is_valid_uuid(s: &str) -> bool {
+    let groups: Vec<&str> = s.split('-').collect();
+    let lengths = [8, 4, 4, 4, 12];
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip(lengths)
+            .all(|(g, n)| g.len() == n && g.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Validate a W3C-DTF (ISO-8601 profile) date, a faithful port of epubcheck's
+/// `DateParser` plus its four-digit-year guard. `Ok(())` when valid; `Err`
+/// carries a short reason. Accepts `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, and the full
+/// `YYYY-MM-DDThh:mm:ss(.s)?(Z|±hh:mm)` forms; rejects out-of-range fields.
+fn parse_w3c_date(s: &str) -> Result<(), String> {
+    if s.is_empty() {
+        return Err("zero-length string".into());
+    }
+    let toks = tokenize_keeping_delims(s, "-T:.+Z");
+    let mut i = 0;
+    let next = |i: &mut usize| -> Option<&str> {
+        let t = toks.get(*i).map(String::as_str);
+        *i += 1;
+        t
+    };
+    // Consume an expected delimiter and require more tokens after it. Returns
+    // Ok(false) when the input ended cleanly (no more tokens).
+    let expect = |i: &mut usize, delim: &str| -> Result<bool, String> {
+        let Some(t) = toks.get(*i) else {
+            return Ok(false);
+        };
+        *i += 1;
+        if t != delim {
+            return Err(format!("unexpected {t:?}"));
+        }
+        if *i >= toks.len() {
+            return Err("incomplete date".into());
+        }
+        Ok(true)
+    };
+    let int = |t: &str| -> Result<i64, String> {
+        t.parse().map_err(|_| format!("{t:?} is not an integer"))
+    };
+
+    // Year (required, and — per epubcheck's guard — at most four digits).
+    let year_tok = next(&mut i).ok_or("empty date")?;
+    let year = int(year_tok)?;
+    if year_tok.len() > 4 || year < 0 {
+        return Err(format!("{year_tok:?} is not a four-digit year"));
+    }
+    // Month.
+    if !expect(&mut i, "-")? {
+        return Ok(());
+    }
+    let month = int(next(&mut i).unwrap_or(""))?;
+    if !(1..=12).contains(&month) {
+        return Err(format!("month {month} out of range"));
+    }
+    // Day.
+    if !expect(&mut i, "-")? {
+        return Ok(());
+    }
+    let day = int(next(&mut i).unwrap_or(""))?;
+    if day < 1 || day > days_in_month(year, month as u32) {
+        return Err(format!("day {day} out of range"));
+    }
+    // Time.
+    if !expect(&mut i, "T")? {
+        return Ok(());
+    }
+    let hour = int(next(&mut i).unwrap_or(""))?;
+    if !(0..=23).contains(&hour) {
+        return Err(format!("hour {hour} out of range"));
+    }
+    if !expect(&mut i, ":")? {
+        return Ok(());
+    }
+    let minute = int(next(&mut i).unwrap_or(""))?;
+    if !(0..=59).contains(&minute) {
+        return Err(format!("minute {minute} out of range"));
+    }
+    if i >= toks.len() {
+        return Ok(());
+    }
+    // Seconds are optional; the next token is either ":" (seconds) or a zone.
+    let mut tok = next(&mut i).unwrap_or("").to_string();
+    if tok == ":" {
+        let second = int(next(&mut i).ok_or("no seconds specified")?)?;
+        if !(0..=59).contains(&second) {
+            return Err(format!("second {second} out of range"));
+        }
+        if i >= toks.len() {
+            return Ok(());
+        }
+        tok = next(&mut i).unwrap_or("").to_string();
+        if tok == "." {
+            // Fractional seconds: digits only.
+            let frac = next(&mut i).ok_or("missing fraction")?;
+            int(frac)?;
+            if i >= toks.len() {
+                return Ok(());
+            }
+            tok = next(&mut i).unwrap_or("").to_string();
+        }
+    }
+    // Time zone: `Z`, or `±hh:mm`.
+    if tok == "Z" {
+        return if i >= toks.len() {
+            Ok(())
+        } else {
+            Err("unexpected field after Z".into())
+        };
+    }
+    if tok != "+" && tok != "-" {
+        return Err(format!("expected Z, + or -, found {tok:?}"));
+    }
+    int(next(&mut i).ok_or("missing zone hour")?)?; // zone hour (not range-checked, per epubcheck)
+    if !expect(&mut i, ":")? {
+        return Err("missing zone minute".into());
+    }
+    int(next(&mut i).ok_or("missing zone minute")?)?;
+    Ok(())
+}
+
+/// Split `s` into maximal non-delimiter runs and single-character delimiter
+/// tokens, in order — the equivalent of Java's `StringTokenizer(s, delims, true)`.
+fn tokenize_keeping_delims(s: &str, delims: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in s.chars() {
+        if delims.contains(c) {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            out.push(c.to_string());
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Days in `month` (1–12) of `year`, with the proleptic Gregorian leap rule.
+fn days_in_month(year: i64, month: u32) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
 }
 
 /// OPF-060: zip entry names must be unique (after the fact that a reader keys
@@ -1879,7 +2138,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 51, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 56, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -1907,9 +2166,11 @@ mod tests {
         // HTM-001/003 + RSC-013; container/URL batch RSC-003 + RSC-033;
         // cross-doc batch NCX-001 + RSC-008 + OPF-073 + OPF-032; encoding batch
         // RSC-028 + HTM-058 (RSC-027 is a warning, not counted here); fallback/
-        // rootfile batch OPF-016/017/043/044/045.
+        // rootfile batch OPF-016/017/043/044/045; metadata batch OPF-054 (the
+        // date's EPUB-2 error id — OPF-053/085 are warnings, RSC-005 for missing
+        // title/language was already counted).
         assert_eq!(
-            covered, 45,
+            covered, 46,
             "epubcheck error coverage changed: {covered}/{total}"
         );
     }
@@ -2470,6 +2731,89 @@ mod tests {
                 .count(),
             1,
             "OPF-045 reported once, got:\n{r}"
+        );
+    }
+
+    #[test]
+    fn w3c_date_parser_accepts_valid_and_rejects_malformed() {
+        // Every W3C-DTF granularity the spec permits — all must parse.
+        for ok in [
+            "2015",
+            "2015-08",
+            "2015-08-05",
+            "2015-08-05T22:00:00Z",
+            "2015-08-05T22:00:00+00:00",
+            "2015-08-05T22:00:00-05:30",
+            "2015-08-05T22:00:00.5Z",
+            "2016-02-29", // leap day
+        ] {
+            assert!(parse_w3c_date(ok).is_ok(), "should accept {ok:?}");
+        }
+        // Clearly malformed / out-of-range — all must be rejected.
+        for bad in [
+            "",
+            "2015-",
+            "2015-13-01",           // month 13
+            "2015-08-32",           // day 32
+            "2015-02-30",           // Feb 30
+            "2015/08/05",           // wrong delimiter
+            "20150805",             // 8-digit "year"
+            "2015-08-05T25:00:00Z", // hour 25
+            "2015-08-05 22:00",     // space is not a delimiter
+        ] {
+            assert!(parse_w3c_date(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn uuid_syntax_validation() {
+        assert!(is_valid_uuid("f47ac10b-58cc-4372-a567-0e02b2c3d479"));
+        assert!(is_valid_uuid("F47AC10B-58CC-4372-A567-0E02B2C3D479")); // case-insensitive
+        assert!(!is_valid_uuid("not-a-uuid"));
+        assert!(!is_valid_uuid("f47ac10b58cc4372a5670e02b2c3d479")); // no groups
+        assert!(!is_valid_uuid("f47ac10b-58cc-4372-a567-0e02b2c3d47")); // group too short
+        assert!(!is_valid_uuid("g47ac10b-58cc-4372-a567-0e02b2c3d479")); // non-hex
+    }
+
+    #[test]
+    fn metadata_check_flags_missing_title_language_and_bad_values() {
+        // Missing dc:title and dc:language, an invalid date, and a bogus UUID.
+        let opf = r##"<package version="3.0" unique-identifier="uid">
+          <metadata xmlns:opf="http://www.idpf.org/2007/opf">
+            <dc:identifier id="uid" opf:scheme="uuid">urn:uuid:not-a-uuid</dc:identifier>
+            <dc:date>2015-13-99</dc:date>
+          </metadata>
+          <manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest>
+          <spine><itemref idref="a"/></spine>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut r = Report::default();
+        check_metadata(&pkg, false, "content.opf", &mut r);
+        assert!(r.has_rule(Rule::MissingTitle));
+        assert!(r.has_rule(Rule::MissingLanguage));
+        assert!(r.has_rule(Rule::IdentifierInvalidUuid));
+        assert!(r.has_rule(Rule::DateSyntaxNotRecommended)); // EPUB 3 → OPF-053 warning
+    }
+
+    #[test]
+    fn metadata_check_is_clean_for_a_well_formed_package() {
+        // Present title/language, a valid ISO date, and a valid UUID: no findings.
+        let opf = r##"<package version="3.0" unique-identifier="uid">
+          <metadata xmlns:opf="http://www.idpf.org/2007/opf">
+            <dc:title>Title</dc:title>
+            <dc:language>en</dc:language>
+            <dc:date>2015-08-05T22:00:00+00:00</dc:date>
+            <dc:identifier id="uid">urn:uuid:f47ac10b-58cc-4372-a567-0e02b2c3d479</dc:identifier>
+          </metadata>
+          <manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest>
+          <spine><itemref idref="a"/></spine>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut r = Report::default();
+        check_metadata(&pkg, false, "content.opf", &mut r);
+        assert!(
+            r.is_clean(),
+            "well-formed metadata should be clean, got:\n{r}"
         );
     }
 
