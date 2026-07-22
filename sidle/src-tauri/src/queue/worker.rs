@@ -318,10 +318,9 @@ fn progress_fraction(kind: &str, phase: &str, cur: usize, total: usize) -> f32 {
         // IR route emission order: `load` (Book::from_bytes container parse) →
         // `content` (per-chapter storyline→IR) → `resources` (image transcode,
         // real per-chunk counts) → `nav` → `finalize`. `resources` gets the
-        // widest band (it's 95%+ of the wall time on image-heavy books). Note
-        // this differs from the mechanical route's `nav → resources`: the IR
-        // route transcodes inline before the manifest needs each image's MIME,
-        // so `resources` sits before the (cheap) `nav` resolution.
+        // widest band (it's 95%+ of the wall time on image-heavy books).
+        // `resources` sits before the (cheap) `nav` resolution because images
+        // transcode inline, before the manifest needs each image's MIME.
         ("kfx_to_epub", "load") => (0.00, 0.08),
         ("kfx_to_epub", "content") => (0.08, 0.24),
         ("kfx_to_epub", "resources") => (0.24, 0.92),
@@ -416,9 +415,7 @@ fn convert_kfx_to_epub(
     // persisted (import wrote it before enqueueing), so we read it back here
     // rather than threading the bytes through the queue. `from_bytes` is the
     // container parse (the `load` phase); `export_with_progress` emits
-    // content/resources/nav/finalize. Output is byte-identical to the
-    // mechanical `kfx_to_epub` port (verified 1:1 corpus-wide), which survives
-    // as the `bokai convert --route mechanical` oracle.
+    // content/resources/nav/finalize.
     let kfx_bytes = std::fs::read(source_path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", source_path.display()))?;
     on_progress("load", 0, 1, "Reading KFX");

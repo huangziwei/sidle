@@ -264,7 +264,7 @@ mod tests {
             "metadata survives passthrough"
         );
         assert!(
-            crate::kfx_to_epub::convert_to_epub(&out).is_ok(),
+            crate::formats::kfx::converts_to_epub(&out),
             "passthrough container must still convert to EPUB"
         );
     }

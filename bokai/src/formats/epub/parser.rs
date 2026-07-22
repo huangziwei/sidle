@@ -1193,8 +1193,8 @@ pub fn parse_nav_landmarks(content: &str) -> io::Result<Vec<Landmark>> {
 /// href="..." title="..."/>` entries that map directly to EPUB 3
 /// landmarks. We read this as a fallback when the OPF doesn't list an
 /// EPUB 3 nav doc (or when the nav doc has no `<nav epub:type="landmarks">`
-/// section). Calibre's kfx_to_epub path emits `<guide>` instead of a nav
-/// doc, so without this, the round-trip drops every landmark.
+/// section). Calibre's KFX plugin emits `<guide>` instead of a nav doc, so
+/// without this, the round-trip drops every landmark.
 pub fn parse_opf_guide(content: &str) -> io::Result<Vec<Landmark>> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(true);

@@ -4,9 +4,8 @@
 //! partition from `yj_to_epub_content.py`. Covers the property table, value
 //! translation, and `writing-mode` emission; the long tail (advanced color
 //! transforms, layout-hint synthesis, etc.) is left to a follow-up pass.
-//! Shared by both KFX→EPUB engines: `kfx_to_epub` resolves named `$157`
-//! styles through it, and `KfxImporter` uses the same conversion so the two
-//! routes' stylesheets agree property-for-property.
+//! `KfxImporter` resolves named `$157` styles through it, so a KFX's own
+//! stylesheet and the IR's computed styles agree property-for-property.
 //!
 //! Identifiers track calibre as much as Rust syntax allows.
 //!
@@ -1270,8 +1269,7 @@ pub fn all_property_names() -> impl Iterator<Item = &'static str> {
     YJ_PROPERTY_INFO.iter().map(|(k, _)| *k)
 }
 
-/// KFX layout-hint values used by the tag-promotion pass in
-/// `kfx_to_epub::content::consolidate_html`. Returns
+/// KFX layout-hint values used by the tag-promotion pass. Returns
 /// `(layout_hints, heading_level)` — both from a named `$style` entity's
 /// fields, not the content element itself. Calibre's
 /// `LAYOUT_HINT_ELEMENT_NAMES` maps the KFX symbols:

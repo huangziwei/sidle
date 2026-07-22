@@ -4,8 +4,8 @@
 //! `yj_*fixed_layout` / `yj_double_page_spread` flags that switch a book onto
 //! the image-based fixed-layout path (manga / comic / picture book), plus the
 //! pixel-dimension reader used for per-page `fixed_width`/`fixed_height`
-//! viewports. Mirrors calibre's `yj_to_epub` derivations so both KFX→EPUB
-//! engines classify a book identically.
+//! viewports. Mirrors calibre's `yj_to_epub` derivations so a book is
+//! classified the way calibre classifies it.
 
 use crate::formats::kfx::container::{SymbolTable, get_field};
 use crate::formats::kfx::ion::IonValue;

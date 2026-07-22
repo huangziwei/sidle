@@ -125,8 +125,8 @@ impl Report {
     }
 
     /// Heuristic: if the TOC has multiple entries but every entry points at the
-    /// same file (distinct hrefs == 1 while total > 1), the port has stamped a
-    /// placeholder href on every entry. Real TOCs have at least one distinct
+    /// same file (distinct hrefs == 1 while total > 1), a placeholder href
+    /// has been stamped on every entry. Real TOCs have at least one distinct
     /// path per chapter.
     pub fn toc_collapsed_to_placeholder(&self) -> bool {
         self.epub_has_toc && self.epub_toc_entry_count > 1 && self.epub_distinct_toc_hrefs <= 1

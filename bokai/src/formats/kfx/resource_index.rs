@@ -5,8 +5,8 @@
 //! OEBPS filename (calibre's `resource_location_filename` convention),
 //! predicted post-transcode MIME type, declared pixel dimensions, and whether
 //! the bytes are JPEG-XR (transcoded to JPEG on export). Keeping the naming
-//! and format-prediction rules in one place is what makes the mechanical
-//! converter and the IR route emit byte-identical image trees.
+//! and format-prediction rules in one place is what keeps the exported image
+//! tree calibre-shaped.
 
 use crate::formats::kfx::container::{SymbolTable, get_field};
 use crate::formats::kfx::ion::IonValue;
@@ -38,7 +38,7 @@ pub struct ImageResource {
     pub location: String,
     /// File path under `OEBPS/` (e.g. "image_rsrc562.jpg"). Cover renaming
     /// to `cover.<ext>` is a separate step (see [`cover_filename`]) so the
-    /// mechanical route can keep its register-then-rename manifest order.
+    /// calibre can keep its register-then-rename manifest order.
     pub filename: String,
     /// Predicted final MIME type (JXR predicts `image/jpeg`; a JXR that
     /// fails to decode passes through as `image/jxr` at transcode time).

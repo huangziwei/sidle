@@ -1,10 +1,8 @@
-//! `formats::kfx::pdf_pages` must read a PDF-backed KFX exactly as the frozen
-//! `kfx_to_epub` port does.
+//! What `formats::kfx::pdf_pages` recovers from a PDF-backed KFX.
 //!
-//! The port is the shipping reference for the fixed-layout reader's text
-//! overlay and for the ink-anchor page geometry, so the copy that replaced it
-//! has to agree field for field. This test exists to prove that equality and
-//! retires with the port.
+//! This feeds the fixed-layout reader's text overlay and the ink-anchor page
+//! geometry, so a page box or an eid set that drifts moves annotations on the
+//! page.
 //!
 //! What a generated fixture can cover is page boxes, the eid sets a bookmark
 //! resolves through, the outline, and the page labels: `pdf_to_kfx` embeds the
@@ -88,56 +86,64 @@ fn pdf_backed_kfx() -> Vec<u8> {
     pdf_to_kfx(&doc, &meta, None, None)
 }
 
+/// The fixture declares its own page boxes, so they are asserted literally
+/// rather than against another reader: these are the numbers a viewer sizes
+/// each page to.
 #[test]
-fn page_reader_matches_the_port_field_for_field() {
+fn the_page_reader_recovers_what_the_fixture_declares() {
     let kfx = pdf_backed_kfx();
-    let port = bokai::kfx_to_epub::pdf_reader_data(&kfx).expect("port pdf_reader_data");
-    let copy = pdf_pages::read_pages(&kfx).expect("pdf_pages::read_pages");
+    let read = pdf_pages::read_pages(&kfx).expect("pdf_pages::read_pages");
 
-    assert_eq!(copy.pages.len(), port.pages.len(), "page count");
-    // Non-vacuity: an equality assertion over empty pages proves nothing.
-    assert!(!copy.pages.is_empty(), "fixture produced no pages");
+    let boxes: Vec<(f32, f32)> = read.pages.iter().map(|p| (p.box_w, p.box_h)).collect();
+    assert_eq!(
+        boxes,
+        vec![
+            (612.0, 792.0),
+            (595.0, 842.0),
+            (612.0, 792.0),
+            (421.0, 595.0)
+        ],
+        "page boxes, in order, including the mixed sizes"
+    );
     assert!(
-        copy.pages.iter().any(|p| !p.eids.is_empty()),
-        "fixture registered no eids, so the eid comparison is vacuous"
+        read.pages.iter().any(|p| !p.eids.is_empty()),
+        "fixture registered no eids"
     );
 
-    for (i, (p, c)) in port.pages.iter().zip(copy.pages.iter()).enumerate() {
-        assert_eq!((c.box_w, c.box_h), (p.box_w, p.box_h), "page {i} box");
-        assert_eq!(c.eids, p.eids, "page {i} registered eids");
-        assert_eq!(c.runs.len(), p.words.len(), "page {i} run count");
-        for (j, (w, r)) in p.words.iter().zip(c.runs.iter()).enumerate() {
-            assert_eq!(
-                (r.eid, r.left, r.top, r.width, r.height, r.text.as_str()),
-                (w.eid, w.left, w.top, w.width, w.height, w.text.as_str()),
-                "page {i} run {j}"
-            );
-        }
-    }
+    assert_eq!(
+        read.page_labels,
+        vec!["Cover", "i", "1", "2"],
+        "non-sequential page labels survive"
+    );
 
-    assert_eq!(copy.page_labels, port.page_labels, "page labels");
-
-    let (mut want, mut got) = (Vec::new(), Vec::new());
-    flat(&port.outline, 0, &mut want);
-    flat(&copy.outline, 0, &mut got);
-    assert_eq!(got, want, "outline tree");
+    let mut outline = Vec::new();
+    flat(&read.outline, 0, &mut outline);
+    assert_eq!(
+        outline,
+        vec![
+            (0, "Front".to_string(), 0),
+            (1, "Preface".to_string(), 1),
+            (0, "Body".to_string(), 2),
+        ],
+        "outline nesting and page targets"
+    );
 }
 
-/// The layer-only entry must agree with the port's too — it is what the ink
-/// anchor cache calls, and it takes a different path into the same walk.
+/// The layer-only entry takes a different path into the same walk — it is what
+/// the ink anchor cache calls, so it has to agree with the full read.
 #[test]
-fn text_layer_matches_the_port() {
+fn the_text_layer_agrees_with_the_full_page_read() {
     let kfx = pdf_backed_kfx();
-    let port = bokai::kfx_to_epub::pdf_text_layer(&kfx).expect("port pdf_text_layer");
-    let copy = pdf_pages::page_text_layer(&kfx).expect("pdf_pages::page_text_layer");
+    let full = pdf_pages::read_pages(&kfx).expect("pdf_pages::read_pages");
+    let layer = pdf_pages::page_text_layer(&kfx).expect("pdf_pages::page_text_layer");
 
-    assert_eq!(copy.len(), port.len(), "page count");
-    for (i, (p, c)) in port.iter().zip(copy.iter()).enumerate() {
-        assert_eq!((c.box_w, c.box_h), (p.box_w, p.box_h), "page {i} box");
-        assert_eq!(c.eids, p.eids, "page {i} eids");
+    assert_eq!(layer.len(), full.pages.len(), "page count");
+    for (i, (a, b)) in full.pages.iter().zip(layer.iter()).enumerate() {
+        assert_eq!((b.box_w, b.box_h), (a.box_w, a.box_h), "page {i} box");
+        assert_eq!(b.eids, a.eids, "page {i} eids");
         assert_eq!(
-            c.runs.iter().map(|r| r.eid).collect::<Vec<_>>(),
-            p.words.iter().map(|w| w.eid).collect::<Vec<_>>(),
+            b.runs.iter().map(|r| r.eid).collect::<Vec<_>>(),
+            a.runs.iter().map(|r| r.eid).collect::<Vec<_>>(),
             "page {i} run eids"
         );
     }

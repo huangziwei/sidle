@@ -101,7 +101,7 @@ pub fn ensure_cover(
     if epub_is_derived && let Some(kfx) = kfx_path {
         let kfx_bytes = std::fs::read(kfx).with_context(|| format!("read {}", kfx.display()))?;
         if kfx_declares_cover(&kfx_bytes) {
-            // IR route (byte-identical to the mechanical port).
+            // IR route (byte-identical to calibre).
             let mut book = bokai::Book::from_bytes(&kfx_bytes, bokai::Format::Kfx)
                 .map_err(|e| anyhow::anyhow!("regenerate epub for coverless swap (load): {e}"))?;
             let mut buf = std::io::Cursor::new(Vec::new());
@@ -307,8 +307,8 @@ fn media_type_for_ext(ext: &str) -> &'static str {
 /// references like `<image xlink:href="cover.jpeg"/>` inside
 /// `titlepage.xhtml`). The OPF references files relative to its own
 /// directory, so a basename match is correct for the same-directory case
-/// (which is what `kfx_to_epub` emits — `OEBPS/content.opf` plus
-/// `OEBPS/cover.<ext>` next to it).
+/// (which is what bokai's KFX→EPUB conversion emits — `OEBPS/content.opf`
+/// plus `OEBPS/cover.<ext>` next to it).
 fn rewrite_opf_for_cover(opf: &str, cover_basename: &str, new_media_type: &str) -> String {
     let mut out = String::with_capacity(opf.len() + 16);
     let href_needle = format!("href=\"{cover_basename}\"");

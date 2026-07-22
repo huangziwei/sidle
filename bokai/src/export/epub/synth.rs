@@ -255,7 +255,7 @@ fn walk_node<R: StyleResolver>(id: NodeId, ctx: &mut SynthesisContext<'_, R>) {
     // Class/style attributes: with source-style resolution, the node's
     // source class name and inline declarations decide (named class first,
     // then a promoted inline class; unpromoted declarations stay a `style`
-    // attribute — the same shape the mechanical route finalizes). Otherwise
+    // attribute — the same shape calibre finalizes). Otherwise
     // the computed style supplies the class.
     if let Some(src) = ctx.source_styles {
         let mut classes: Vec<&str> = Vec::new();

@@ -42,6 +42,7 @@ pub mod fragment;
 pub mod fxl;
 pub mod image_extract;
 pub mod ion;
+pub mod jxr;
 pub mod loader;
 pub mod merge;
 pub mod metadata;
@@ -63,3 +64,22 @@ pub mod tokens;
 pub mod transforms;
 pub mod writing_mode;
 pub mod yj_properties;
+
+/// Does this KFX still open and convert to EPUB?
+///
+/// The editing passes here rewrite a container in place — a metadata field, a
+/// TOC, a cover resource, one spliced entity — and the failure they all risk
+/// is the same: bytes that parse well enough for the edit's own assertions
+/// while no longer loading as a book. Converting is the cheapest end-to-end
+/// statement that the container survived.
+///
+/// Test-only. The format layer does not depend on `import`/`export` in
+/// shipping code; test modules are exempt from that rule.
+#[cfg(test)]
+pub(crate) fn converts_to_epub(kfx: &[u8]) -> bool {
+    let Ok(mut book) = crate::model::Book::from_bytes(kfx, crate::model::Format::Kfx) else {
+        return false;
+    };
+    let mut sink = std::io::Cursor::new(Vec::new());
+    book.export(crate::model::Format::Epub, &mut sink).is_ok()
+}

@@ -2,10 +2,12 @@
 //!
 //! A renderer resolves a stored `(element, offset)` handle by querying
 //! `[data-eid="N"]` and walking text from the element it finds. Agreeing on the
-//! *set* of ids is not enough — the two routes have to stamp them on the same
-//! element, enclosing the same text, or a highlight lands on the wrong words.
+//! *set* of ids is not enough — a stamp has to land on the same element,
+//! enclosing the same text, or a highlight lands on the wrong words.
 //!
 //! `kfx_source_elements.rs` pins the id lists; this pins their placement.
+
+mod common;
 
 use std::collections::BTreeMap;
 
@@ -69,66 +71,49 @@ fn strip_markup(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn assert_placement_matches_port(path: &str) {
-    let Ok(kfx) = std::fs::read(path) else {
-        return; // fixture not present in this checkout
-    };
-
-    let mut book = Book::from_bytes(&kfx, Format::Kfx).expect("import the fixture");
+/// Where every stamp landed: section, id, the tag it marked, and the text that
+/// element encloses. A renderer paints a highlight by finding the stamped
+/// element, so a stamp that moves to a different tag — or to one enclosing
+/// different words — repaints the highlight somewhere else.
+fn placements(kfx: &[u8]) -> (usize, usize, u64) {
+    let mut book = Book::from_bytes(kfx, Format::Kfx).expect("import the fixture");
     let content = bokai::export::normalize_book_with(&mut book, SourceElements::Mark)
         .expect("normalize with source elements");
-    let mine: Vec<_> = content
+    let all: Vec<_> = content
         .chapters
         .iter()
         .map(|c| stamps(&c.document))
         .collect();
-
-    let (port, _store) =
-        bokai::kfx_to_epub::kfx_to_reader_book_lazy(&kfx).expect("port reader book");
-    let theirs: Vec<_> = port.sections.iter().map(|s| stamps(&s.html)).collect();
-
-    assert_eq!(
-        mine.len(),
-        theirs.len(),
-        "{path}: document count {} vs port {}",
-        mine.len(),
-        theirs.len()
-    );
     assert!(
-        mine.iter().any(|m| !m.is_empty()),
-        "{path}: nothing was stamped — the comparison would pass vacuously"
+        all.iter().any(|m| !m.is_empty()),
+        "nothing was stamped — the digest would pin nothing"
     );
-
-    for (i, (m, t)) in mine.iter().zip(&theirs).enumerate() {
-        for (eid, (port_tag, port_text)) in t {
-            let (my_tag, my_text) = m
-                .get(eid)
-                .unwrap_or_else(|| panic!("{path}: section {i} eid {eid} not stamped"));
-            assert_eq!(
-                my_tag, port_tag,
-                "{path}: section {i} eid {eid} landed on <{my_tag}>, port used <{port_tag}>"
-            );
-            assert_eq!(
-                my_text, port_text,
-                "{path}: section {i} eid {eid} encloses different text"
-            );
-        }
-        let extra: Vec<_> = m.keys().filter(|e| !t.contains_key(e)).collect();
-        assert!(
-            extra.is_empty(),
-            "{path}: section {i} stamped ids the port does not: {extra:?}"
-        );
-    }
+    let total: usize = all.iter().map(|m| m.len()).sum();
+    let lines = all.iter().enumerate().flat_map(|(i, m)| {
+        m.iter()
+            .map(move |(eid, (tag, text))| format!("{i}\t{eid}\t{tag}\t{text}"))
+    });
+    (all.len(), total, common::digest_lines(lines))
 }
 
 #[test]
-fn reflowable_kfx_stamps_land_where_the_mechanical_route_stamps() {
-    assert_placement_matches_port(REFLOWABLE);
+fn reflowable_kfx_stamp_placement_is_pinned() {
+    let Ok(kfx) = std::fs::read(REFLOWABLE) else {
+        return; // fixture not present in this checkout
+    };
+    let (sections, stamped, digest) = placements(&kfx);
+    assert_eq!((sections, stamped), (22, 1918), "stamp shape");
+    assert_eq!(digest, 0x9106_9e05_f7da_8f7c, "stamp placement moved");
 }
 
 #[test]
-fn short_kfx_stamps_land_where_the_mechanical_route_stamps() {
-    assert_placement_matches_port(SHORT);
+fn short_kfx_stamp_placement_is_pinned() {
+    let Ok(kfx) = std::fs::read(SHORT) else {
+        return;
+    };
+    let (sections, stamped, digest) = placements(&kfx);
+    assert_eq!((sections, stamped), (9, 881), "stamp shape");
+    assert_eq!(digest, 0xbb35_524d_3ca9_9676, "stamp placement moved");
 }
 
 #[test]

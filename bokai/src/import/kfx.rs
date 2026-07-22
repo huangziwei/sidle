@@ -100,7 +100,7 @@ pub struct KfxImporter {
 
     /// Section name → the main (last) page template's own element id and
     /// `$style` name. The template becomes the chapter's root container —
-    /// the same body-level `<div>` the mechanical route emits — and anchors
+    /// the same body-level `<div>` calibre emits — and anchors
     /// at `(template_eid, offset)` stamp onto/inside it.
     section_templates: HashMap<String, SectionTemplate>,
 
@@ -127,7 +127,7 @@ pub struct KfxImporter {
     /// plus the vertical-writing-mode → rtl override, WITHOUT the explicit
     /// reading-order override `derive_writing_direction` applies last to the
     /// OPF value. The spread pairing (`page-spread-left` first vs `-right`
-    /// first) alternates from this, matching the mechanical route.
+    /// first) alternates from this, matching calibre.
     content_ppd: String,
 
     /// Resources: name -> EntityLoc (lazily populated)
@@ -174,10 +174,9 @@ pub struct KfxImporter {
 
     // --- Link resolution ---
     /// The shared KFX anchor table (real `$266` anchors + synthetic toc/page
-    /// anchors at nav target positions) — the same rule set the mechanical
-    /// route stamps ids from, so both engines name content anchors
-    /// identically. Built by `index_anchor_entities`; `load_chapter` stamps
-    /// `semantics.id` from it.
+    /// anchors at nav target positions) — the rule set that stamps ids, so
+    /// content anchors are named the way calibre names them. Built by
+    /// `index_anchor_entities`; `load_chapter` stamps `semantics.id` from it.
     anchor_table: Arc<AnchorTable>,
 
     /// Maps element string ID -> GlobalNodeId (built during index_anchors).
@@ -188,7 +187,7 @@ pub struct KfxImporter {
     /// Element id (`$155`) → owning chapter, accumulated as chapters load
     /// (every eid in the parsed storyline counts, whether or not its element
     /// survives into the IR). The structural file-resolution map for nav
-    /// targets — the mechanical route's `element_id_to_filename` analog.
+    /// targets — calibre's `element_id_to_filename` analog.
     eid_chapters: HashMap<i64, ChapterId>,
 
     /// Doc-level CSS writing mode (`horizontal-tb` / `vertical-rl` / …),
@@ -258,7 +257,7 @@ impl Importer for KfxImporter {
 
     fn chapter_title(&self, id: ChapterId) -> Option<&str> {
         // A fixed-layout page is titled by its owning section — the
-        // mechanical route's `push_book_part(base, section_name)`.
+        // calibre's `push_book_part(base, section_name)`.
         if let Some(p) = self.fxl_pages.get(id.0 as usize) {
             return Some(&p.section);
         }
@@ -394,8 +393,8 @@ impl Importer for KfxImporter {
 
     fn load_assets(&mut self, paths: &[PathBuf]) -> Vec<io::Result<Vec<u8>>> {
         // Resolve raw bytes serially (cheap reads), then run the CPU-bound
-        // JPEG-XR→JPEG transcodes in parallel across cores — the mechanical
-        // route parallelizes the same stage the same way.
+        // JPEG-XR→JPEG transcodes in parallel across cores, the same stage
+        // calibre parallelizes the same way.
         let mut results: Vec<Option<io::Result<Vec<u8>>>> = Vec::with_capacity(paths.len());
         let mut jxr_jobs: Vec<(usize, usize, Vec<u8>)> = Vec::new(); // (slot, image idx, raw)
         for (slot, path) in paths.iter().enumerate() {
@@ -412,7 +411,7 @@ impl Importer for KfxImporter {
             }
         }
         let transcoded = crate::util::parallel_map(&jxr_jobs, |(_, idx, raw)| {
-            crate::image::jxr_transcode::transcode(raw, &self.images[*idx].resource_name)
+            crate::formats::kfx::jxr::transcode(raw, &self.images[*idx].resource_name)
                 .map(|(bytes, _format, _timing)| bytes)
                 .map_err(|e| io::Error::other(e.to_string()))
         });
@@ -767,19 +766,18 @@ impl KfxImporter {
                                     .unwrap_or("");
 
                                 match key {
-                                    // First-wins / skip-empty guards match
-                                    // `kfx_to_epub::loader`'s duplicate-key
-                                    // handling so both KFX readers agree on
-                                    // containers that repeat a key.
+                                    // First-wins / skip-empty guards, so a
+                                    // container that repeats a key resolves
+                                    // the way calibre resolves it.
                                     "title" if self.metadata.title.is_empty() => {
                                         self.metadata.title = value.to_string()
                                     }
                                     // One entry per repeated `author` key,
                                     // VERBATIM — no trim, no `&` split (a
-                                    // multi-author book repeats the key;
-                                    // `kfx_to_epub::loader` pushes each
-                                    // value untouched, trailing spaces and
-                                    // all, and the OPF mirrors the source).
+                                    // multi-author book repeats the key, and
+                                    // each value is pushed untouched, trailing
+                                    // spaces and all, so the OPF mirrors the
+                                    // source).
                                     "author" if !value.is_empty() => {
                                         self.metadata.authors.push(value.to_string())
                                     }
@@ -863,17 +861,16 @@ impl KfxImporter {
         // Fallback: the flat `$258 metadata` entity carries the same fields as
         // direct symbol keys (`title`, `language`, `publisher`, `author`,
         // `ASIN`, `cover_image`). Amazon KFX often ships `language` (and
-        // sometimes others) ONLY here, not in `kindle_title_metadata`; the
-        // port's loader reads both and fills empties from this struct, so
-        // mirror it — else the `<html lang>` and other fields silently drop
-        // on the IR route.
+        // sometimes others) ONLY here, not in `kindle_title_metadata`.
+        // Calibre's loader reads both and fills empties from this struct, so
+        // mirror it — else the `<html lang>` and other fields silently drop.
         self.parse_flat_metadata_fallback()?;
 
         Ok(())
     }
 
     /// Fill still-empty metadata from the flat `$258 metadata` entity's direct
-    /// fields (the mechanical `loader.rs::parse_metadata_struct` fallback).
+    /// fields (calibre's `loader.rs::parse_metadata_struct` fallback).
     /// Every write is empty-guarded so `kindle_title_metadata` wins.
     fn parse_flat_metadata_fallback(&mut self) -> io::Result<()> {
         let loc = self
@@ -993,7 +990,7 @@ impl KfxImporter {
                                     // Append: a book can carry several
                                     // containers of one nav_type (one per
                                     // reading order) — calibre and the
-                                    // mechanical route collect them all;
+                                    // calibre collect them all;
                                     // last-wins would drop entries.
                                     match nav_type {
                                         Some("toc") => {
@@ -1093,7 +1090,7 @@ impl KfxImporter {
                     // Get label (try representation.label first, then direct label).
                     // A MISSING label falls back to "Untitled" and the entry is
                     // kept — Amazon ships unlabeled nav_units (e.g. the page-list
-                    // book-start sentinel) and the mechanical route keeps them in
+                    // book-start sentinel) and calibre keeps them in
                     // the TOC; page-list consumers drop the sentinel at emission.
                     // A PRESENT-but-empty label and the "heading-nav-unit"
                     // placeholder are dropped, matching calibre.
@@ -1203,7 +1200,7 @@ impl KfxImporter {
     /// container — its storyline's content_list holds the per-page
     /// containers, paired `page-spread-left`/`-right` alternating from
     /// `content_ppd` (RTL books read the right page first) — or itself a
-    /// single leaf page (e.g. the cover). Page names follow the mechanical
+    /// single leaf page (e.g. the cover). Page names follow calibre's
     /// route: `{section}` for a spreadless page, `{section}-{left|right}`
     /// for spread halves; export-side filename dedup adds `-N` on collision.
     fn expand_fxl_spine(&mut self) -> io::Result<()> {
@@ -1310,7 +1307,7 @@ impl KfxImporter {
 
     /// Collect a page template's leaf pages in emission order, each with its
     /// `page-spread-*` property (empty for a spreadless page). Mirrors the
-    /// mechanical route's `process_spread_template` walk: spread containers
+    /// calibre's `process_spread_template` walk: spread containers
     /// recurse into their storyline's containers with alternating sides;
     /// anything else is a leaf.
     fn collect_spread_leaves(&self, template: &IonValue) -> Vec<(IonValue, String)> {
@@ -1400,7 +1397,7 @@ impl KfxImporter {
     /// Recursively inline `story_name` references: a struct that carries a
     /// story but no inline content_list gets the story's content_list
     /// spliced in (the tokenizer does not follow story references itself —
-    /// the mechanical route's `process_content` resolves them at walk time).
+    /// calibre's `process_content` resolves them at walk time).
     /// The stack guards against reference cycles; a story legitimately
     /// referenced from two siblings inlines twice, like the walk would.
     fn inline_story_refs(&self, value: IonValue, stack: &mut Vec<String>) -> IonValue {
@@ -1450,7 +1447,7 @@ impl KfxImporter {
     /// one-time indexes in place, safe to call across threads over a shared
     /// `&self`. Returns the chapter and every element id it declares, in
     /// registration order; the caller stamps those into `eid_chapters`
-    /// (first-wins, spine order — the mechanical route's structural
+    /// (first-wins, spine order — calibre's structural
     /// `element_id_to_filename` walk).
     fn build_chapter(&self, id: ChapterId) -> io::Result<(Chapter, Vec<i64>)> {
         // Fixed-layout books build per-page chapters.
@@ -1494,7 +1491,7 @@ impl KfxImporter {
         );
 
         // Re-root under the section's main page-template container — the
-        // mechanical route's body-level `<div>` — so anchors targeting the
+        // calibre's body-level `<div>` — so anchors targeting the
         // template or the storyline root (a common page-list/TOC shape)
         // stamp onto a real element.
         let template = self
@@ -1520,13 +1517,12 @@ impl KfxImporter {
         );
 
         // No generic `html::optimize` pass here: the KFX token→IR builder
-        // already produces a tree that mirrors the mechanical route's
-        // pre-consolidation DOM, and the shared
-        // `export::epub::dom::consolidate_part` (run on both KFX→EPUB
-        // routes) does the port-faithful cleanup.
+        // already produces a tree that mirrors calibre's pre-consolidation
+        // DOM, and `export::epub::dom::consolidate_part` does the
+        // calibre-faithful cleanup.
         // Generic HTML-cleanup passes (list fusion, empty-node prune, span
         // merge) only DIVERGE from the reference — e.g. `fuse_lists` merged
-        // two adjacent single-item `<ul>`s the port keeps separate — so they
+        // two adjacent single-item `<ul>`s calibre keeps separate — so they
         // must not run on the KFX path. `optimize` still serves the
         // HTML-sourced importers via `compile_html`.
 
@@ -1546,7 +1542,7 @@ impl KfxImporter {
     /// Build one fixed-layout page as a chapter: take the page's leaf
     /// container from the cached spread walk, synthesize a storyline from
     /// the container's children (inline `content_list` wins over its story —
-    /// the mechanical route's `process_content` order), and run the shared
+    /// calibre's `process_content` order), and run the shared
     /// token→IR build with the container itself as the chapter's root — the
     /// same body-level `<div>` that route emits per page.
     fn build_fxl_page(&self, id: ChapterId) -> io::Result<(Chapter, Vec<i64>)> {
@@ -1594,7 +1590,7 @@ impl KfxImporter {
         let synthetic = IonValue::Struct(vec![(sym!(ContentList), IonValue::List(children))]);
 
         // Every eid the page subtree declares — and the container's own —
-        // counts for nav-target file resolution (the mechanical route's
+        // counts for nav-target file resolution (calibre's
         // per-page `collect_element_ids`); the caller registers them
         // first-wins across pages, matching its emission order.
         let container_eid = get_field(cfields, sym!(Id)).and_then(|v| v.as_int());
@@ -1714,7 +1710,7 @@ impl KfxImporter {
             ppd = "rtl".to_string();
         }
         // The content walk (spread pairing) alternates from the value BEFORE
-        // the explicit reading-order override — the mechanical route's
+        // the explicit reading-order override — calibre's
         // `extract_doc_data` chain ends here.
         self.content_ppd = ppd.clone();
         // `$default` defers to the reader, i.e. to the heuristics above —
@@ -2109,7 +2105,7 @@ impl KfxImporter {
     }
 
     /// Build the canonical image list via the shared external_resource walk
-    /// (`kfx::resource_index`) — the same code the mechanical converter runs,
+    /// (`kfx::resource_index`) — the same code calibre runs,
     /// so filenames, order, and format predictions match it byte-for-byte.
     /// Resolves the cover (declared metadata name, falling back to the first
     /// reading-order section's full-page image), renames it to `cover.<ext>`,
@@ -2214,12 +2210,12 @@ impl KfxImporter {
 
     /// Bytes for `images[idx]` as exported: JPEG-XR sources are transcoded to
     /// JPEG (decode failures pass through unchanged, same policy as the
-    /// mechanical route); every other format is copied verbatim.
+    /// calibre); every other format is copied verbatim.
     fn load_image_bytes(&self, idx: usize) -> io::Result<Vec<u8>> {
         let img = &self.images[idx];
         let raw = self.read_image_raw(idx)?;
         if img.is_jxr {
-            crate::image::jxr_transcode::transcode(&raw, &img.resource_name)
+            crate::formats::kfx::jxr::transcode(&raw, &img.resource_name)
                 .map(|(bytes, _format, _timing)| bytes)
                 .map_err(|e| io::Error::other(e.to_string()))
         } else {
@@ -2249,7 +2245,7 @@ impl KfxImporter {
         }
 
         // Real `$266` anchors, registered in sorted-name order — the same
-        // deterministic rule the mechanical route uses, so a position carrying
+        // deterministic rule calibre uses, so a position carrying
         // several anchors picks the same first (= stamped) name on both
         // engines.
         let locs: Vec<_> = self

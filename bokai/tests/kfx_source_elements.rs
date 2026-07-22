@@ -1,11 +1,12 @@
 //! Source element ids carried on IR nodes, per chapter.
 //!
 //! A reading device addresses text by element id, and a renderer has to mark up
-//! the element a stored `(element, offset)` handle names. The mechanical port
-//! recovers those ids by re-scanning `data-eid` out of markup it just
-//! serialized; the IR carries them structurally instead. This pins the two
-//! against each other, per chapter, so the structural list can replace the
-//! scan.
+//! the element a stored `(element, offset)` handle names. The IR carries those
+//! ids structurally. If a chapter's list changes — different ids, different
+//! order, a different chapter holding an id — then "which page is this
+//! highlight on" changes with it, so the per-chapter lists are pinned.
+
+mod common;
 
 use bokai::Book;
 use bokai::model::Format;
@@ -13,50 +14,47 @@ use bokai::model::Format;
 const REFLOWABLE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事件 (2012).kfx";
 const SHORT: &str = "tests/fixtures/[太宰 治] 人間失格.kfx";
 
-fn assert_matches_port(path: &str) {
-    let Ok(kfx) = std::fs::read(path) else {
-        return; // fixture not present in this checkout
-    };
-
-    let mut book = Book::from_bytes(&kfx, Format::Kfx).expect("import the fixture");
+/// One line per chapter: index, id count, and the ids themselves.
+fn elements_digest(kfx: &[u8]) -> (usize, u64) {
+    let mut book = Book::from_bytes(kfx, Format::Kfx).expect("import the fixture");
     let ids: Vec<_> = book.spine().iter().map(|s| s.id).collect();
-    let mine: Vec<Vec<i64>> = ids
+    let lines: Vec<String> = ids
         .iter()
-        .map(|&id| {
-            book.load_chapter_cached(id)
+        .enumerate()
+        .map(|(i, &id)| {
+            let eids = book
+                .load_chapter_cached(id)
                 .expect("load chapter")
-                .source_elements()
+                .source_elements();
+            let joined: Vec<String> = eids.iter().map(|e| e.to_string()).collect();
+            format!("{i}\t{}\t{}", eids.len(), joined.join(","))
         })
         .collect();
+    (lines.len(), common::digest_lines(lines))
+}
 
-    let port = bokai::kfx_to_epub::kfx_to_reader_book(&kfx).expect("port reader book");
-    let theirs: Vec<Vec<i64>> = port.sections.iter().map(|s| s.eids.clone()).collect();
-
+#[test]
+fn reflowable_kfx_chapter_elements_are_pinned() {
+    let Ok(kfx) = std::fs::read(REFLOWABLE) else {
+        return; // fixture not present in this checkout
+    };
+    let (chapters, digest) = elements_digest(&kfx);
+    assert_eq!(chapters, 22, "chapter count");
     assert_eq!(
-        mine.len(),
-        theirs.len(),
-        "{path}: chapter count {} vs port section count {}",
-        mine.len(),
-        theirs.len()
+        digest, 0xe636_88f5_dc1c_155f,
+        "per-chapter source element ids moved"
     );
-    for (i, (m, t)) in mine.iter().zip(&theirs).enumerate() {
-        assert_eq!(
-            m,
-            t,
-            "{path}: chapter {i} ({}) element ids diverged — {} vs {} ids",
-            port.sections[i].href,
-            m.len(),
-            t.len()
-        );
-    }
 }
 
 #[test]
-fn reflowable_kfx_chapter_elements_match_the_mechanical_scan() {
-    assert_matches_port(REFLOWABLE);
-}
-
-#[test]
-fn short_kfx_chapter_elements_match_the_mechanical_scan() {
-    assert_matches_port(SHORT);
+fn short_kfx_chapter_elements_are_pinned() {
+    let Ok(kfx) = std::fs::read(SHORT) else {
+        return;
+    };
+    let (chapters, digest) = elements_digest(&kfx);
+    assert_eq!(chapters, 9, "chapter count");
+    assert_eq!(
+        digest, 0x31bf_28e0_9fd4_e00b,
+        "per-chapter source element ids moved"
+    );
 }

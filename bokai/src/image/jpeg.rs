@@ -25,7 +25,7 @@
 //!
 //! SVG is not transcoded here: it's already vector, and the export path
 //! already has a `MediaFormat::Svg` arm. JXR is handled separately in
-//! `kfx_to_epub/jxr/mod.rs` for the reverse direction.
+//! [`crate::formats::kfx::jxr`] for the reverse direction.
 
 use image::{DynamicImage, ImageReader};
 
@@ -193,7 +193,7 @@ fn encode_as_jpeg(img: &DynamicImage) -> Option<Vec<u8>> {
     let mut out: Vec<u8> = Vec::new();
     // Quality 90: high enough that line-art (gaiji, diagrams) stays
     // crisp, low enough that ebook payloads stay tight. Matches the
-    // JXR→JPEG re-encode quality used by `kfx_to_epub/jxr/mod.rs`
+    // JXR→JPEG re-encode quality used by `formats::kfx::jxr`
     // (which uses 95) within a hair — we drop 5 points because source
     // GIF/PNG content is often already palette-quantised or downsampled,
     // making the extra precision wasted.

@@ -1,12 +1,11 @@
-//! KFX → EPUB glue: decode a JPEG-XR file with the pure-Rust [`jxr`] codec
-//! crate, then re-encode it as JPEG for EPUB readers (which don't support
-//! JXR).
+//! Bundled JPEG-XR images: decode with the pure-Rust [`jxr`] codec crate, then
+//! re-encode as JPEG, which is what every downstream reader can display.
 //!
-//! This is bokai pipeline glue, **not** part of the codec: it depends on
-//! `ConvertError`, `jpeg_encoder`, and the `BOKO_KFX2EPUB_TRACE` timing, none
-//! of which belong in the standalone `jxr` crate.
+//! This is KFX-side glue, **not** part of the codec — it speaks
+//! [`KfxError`], resource names and the `FORMAT_*` symbols, none of which
+//! belong in the standalone zero-dependency `jxr` crate.
 
-use crate::kfx_to_epub::ConvertError;
+use crate::formats::kfx::error::KfxError;
 use jxr::decode::{container, decoder};
 
 /// Per-stage timing for one transcode call. Always collected — `Instant`'s
@@ -29,7 +28,7 @@ pub struct TranscodeTiming {
 pub fn transcode(
     jxr_bytes: &[u8],
     resource_name: &str,
-) -> Result<(Vec<u8>, String, TranscodeTiming), ConvertError> {
+) -> Result<(Vec<u8>, String, TranscodeTiming), KfxError> {
     use crate::trace::Stopwatch;
     let mut t = TranscodeTiming::default();
 
@@ -37,9 +36,7 @@ pub fn transcode(
     let container = match container::parse(jxr_bytes) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
-                "kfx_to_epub jxr: container parse failed for {resource_name}: {e}; passing through"
-            );
+            eprintln!("kfx jxr: container parse failed for {resource_name}: {e}; passing through");
             return Ok((jxr_bytes.to_vec(), "jxr".into(), t));
         }
     };
@@ -49,7 +46,7 @@ pub fn transcode(
     let decoded = match decoder::Decoder::new(container.image_data).decode() {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("kfx_to_epub jxr: decode failed for {resource_name}: {e}; passing through");
+            eprintln!("kfx jxr: decode failed for {resource_name}: {e}; passing through");
             return Ok((jxr_bytes.to_vec(), "jxr".into(), t));
         }
     };
@@ -62,18 +59,18 @@ pub fn transcode(
     Ok((bytes, "jpg".into(), t))
 }
 
-fn encode_jpeg(img: &decoder::DecodedImage) -> Result<Vec<u8>, ConvertError> {
+fn encode_jpeg(img: &decoder::DecodedImage) -> Result<Vec<u8>, KfxError> {
     use jpeg_encoder::{ColorType, Encoder};
     use jxr::decode::pixels::{ColorModel, SampleType};
 
     let buf = img
         .to_pixel_buffer()
-        .map_err(|e| ConvertError::JpegEncode(e.to_string()))?;
+        .map_err(|e| KfxError::JpegEncode(e.to_string()))?;
 
     // We only emit JPEG for 8-bit gray / RGB-shaped layouts. Higher bit
     // depths, packed, CMYK, RGBE etc. pass through (caller bundles as-is).
     if buf.sample != SampleType::U8 {
-        return Err(ConvertError::JpegEncode(format!(
+        return Err(KfxError::JpegEncode(format!(
             "unsupported sample type {:?} for JPEG re-encode",
             buf.sample
         )));
@@ -85,7 +82,7 @@ fn encode_jpeg(img: &decoder::DecodedImage) -> Result<Vec<u8>, ConvertError> {
         ColorModel::NChannel(k) if k >= 3 => 3,
         ColorModel::NChannel(1) => 1,
         other => {
-            return Err(ConvertError::JpegEncode(format!(
+            return Err(KfxError::JpegEncode(format!(
                 "unsupported color layout {other:?} for JPEG re-encode"
             )));
         }
@@ -110,6 +107,6 @@ fn encode_jpeg(img: &decoder::DecodedImage) -> Result<Vec<u8>, ConvertError> {
     let encoder = Encoder::new(&mut out, 95);
     encoder
         .encode(&bytes, img.width as u16, img.height as u16, color)
-        .map_err(|e| ConvertError::JpegEncode(format!("{:?}", e)))?;
+        .map_err(|e| KfxError::JpegEncode(format!("{:?}", e)))?;
     Ok(out)
 }

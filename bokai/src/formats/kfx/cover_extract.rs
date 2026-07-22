@@ -21,9 +21,9 @@
 use crate::formats::kfx::container::get_field;
 use crate::formats::kfx::error::KfxError;
 use crate::formats::kfx::ion::IonValue;
+use crate::formats::kfx::jxr as transcode;
 use crate::formats::kfx::loader;
 use crate::formats::kfx::symbols::KfxSymbol;
-use crate::image::jxr_transcode as transcode;
 
 /// Extract the declared cover's `(bytes, extension)` from an in-memory KFX.
 ///

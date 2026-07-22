@@ -324,8 +324,8 @@ pub fn parse_imports_max_id(doc_bytes: &[u8]) -> Option<u64> {
 /// looks every one of them up ~12 positions off — doc-local names silently
 /// resolve to static-tail names like `character_width`.
 ///
-/// This is THE symbol resolver: every KFX reader (importer, mechanical
-/// converter, validators, kfx-dump) must resolve through it.
+/// This is THE symbol resolver: every KFX reader (importer, validators,
+/// kfx-dump) must resolve through it.
 pub struct SymbolTable {
     base_len: u64,
     doc_symbols: Vec<String>,
@@ -547,8 +547,8 @@ mod tests {
         // A container built against an older YJ_symbols table declares a
         // smaller import max_id; its doc symbols start BELOW our static
         // table's length. Resolving them at a hardcoded
-        // KFX_SYMBOL_TABLE.len() base was the bug that made the IR route
-        // name sections `character_width` etc.
+        // KFX_SYMBOL_TABLE.len() base was the bug that made section names
+        // come out as `character_width` etc.
         let base = KFX_SYMBOL_TABLE.len() as u64 - 13;
         let table = SymbolTable::new(base, vec!["jZK3Kk0dQPOTMEngNHyfig1".to_string()]);
         assert_eq!(table.resolve_opt(base), Some("jZK3Kk0dQPOTMEngNHyfig1"));

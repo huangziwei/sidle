@@ -54,13 +54,6 @@ pub use epub::{
 pub use kfx::{KfxConfig, KfxExporter, PdfKfxMeta, pdf_to_kfx};
 pub use markdown::{MarkdownConfig, MarkdownExporter};
 
-// Compat module aliases for the frozen mechanical port (`kfx_to_epub`): the
-// port is the production kfx→epub path and may not be edited until the IR
-// route reaches 1:1, so its historical import paths keep resolving here.
-// Deleted together with the port.
-pub use epub::dom as xdom;
-pub use epub::dom_synth as css;
-pub(crate) use epub::titlepage;
 pub use epub::{nav, opf};
 
 /// Trait for exporting books to specific formats.

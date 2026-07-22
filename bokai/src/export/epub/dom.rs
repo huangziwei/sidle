@@ -1,13 +1,10 @@
 //! Shared mutable XHTML DOM + chapter-document passes for the KFX→EPUB
 //! engines.
 //!
-//! Port of just enough lxml.etree to host the calibre content.py logic. Both
-//! KFX→EPUB routes build chapters through this one module — the mechanical
-//! `kfx_to_epub` walk and the IR route's normalized export — so the emitted
-//! XHTML (serialization shape, consolidation, attribute finalization) is
-//! byte-identical by construction rather than by parallel implementation.
-//! Permanent: it stays the DOM-synthesis regime's DOM ([`super::dom_synth`])
-//! after the mechanical route retires.
+//! Port of just enough lxml.etree to host the calibre content.py logic. The
+//! normalized export builds every chapter through it, so serialization shape,
+//! consolidation and attribute finalization live in one place — it is the
+//! DOM-synthesis regime's DOM ([`super::dom_synth`]).
 //!
 //! Nodes have either text content (mixed text + children, lxml-style) or a
 //! tag with attributes. Attribute order is insertion order; `style` and
@@ -306,7 +303,7 @@ pub struct ClassMap {
 }
 
 /// Assemble the final chapter file: XML declaration + HTML5 doctype + the
-/// serialized tree, exactly the byte shape both KFX→EPUB routes ship.
+/// serialized tree, exactly the byte shape calibre ships.
 pub fn chapter_document(dom: &Dom) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE html>\n{}",
@@ -804,7 +801,7 @@ pub fn replace_eol_with_br_dom(dom: &mut Dom) {
 /// Fold pending per-element classes + inline styles onto the DOM as actual
 /// `class=` / `style=` attributes. Runs last, so both land after any
 /// walk-time attributes (`src` / `href` / `id` / …) in insertion order —
-/// the class-then-style tail both routes ship.
+/// the class-then-style tail calibre ships.
 pub fn finalize_attrs(
     dom: &mut Dom,
     element_classes: &HashMap<NodeId, Vec<String>>,

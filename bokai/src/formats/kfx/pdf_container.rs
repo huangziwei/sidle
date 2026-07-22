@@ -4,7 +4,7 @@
 //! A PDF-backed KFX (Amazon "Send to Kindle" PDF, or bokai's `pdf_to_kfx`
 //! output) embeds the source PDF verbatim as a single `bcRawMedia` and points
 //! at it from per-page `external_resource` fragments with `format: pdf`. Such a
-//! KFX must round-trip through **PDF**, not EPUB — running `kfx_to_epub` on one
+//! KFX must round-trip through **PDF**, not EPUB — converting one to EPUB
 //! would mangle a PDF into reflowed text. Because the bytes are embedded
 //! verbatim, extraction is exact: `pdf → kfx → pdf` reproduces the original.
 

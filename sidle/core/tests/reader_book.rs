@@ -1,9 +1,9 @@
-//! The reader's view of a book, checked against the route it replaces.
+//! The reader's view of a book, assembled from the IR.
 //!
-//! `ReaderBook::open` assembles from the IR what the frozen `kfx_to_epub`
-//! reader recovers by re-scanning its own serialized XHTML. Every field a
-//! paginator or an annotation handle depends on has to survive that swap, so
-//! this compares them field by field on a real book.
+//! Every field here is one a paginator or an annotation handle depends on, so
+//! the whole shape is pinned: a section list that gains an entry, a character
+//! count that drifts, a location map that renumbers, all move where a stored
+//! highlight lands.
 //!
 //! The fixture is bokai's — this test reads it through a path relative to that
 //! crate and skips when it isn't there, so sidle-core still builds and tests
@@ -19,51 +19,60 @@ fn fixture() -> Option<Vec<u8>> {
     std::fs::read(FIXTURE).ok()
 }
 
+/// FNV-1a, 64-bit — stable across toolchains, unlike `DefaultHasher`, which
+/// matters because the value is checked in.
+fn digest(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
+}
+
 #[test]
-fn the_reader_book_matches_the_route_it_replaces() {
+fn the_reader_books_shape_is_pinned() {
     let Some(kfx) = fixture() else { return };
 
-    let (mine, _store) = ReaderBook::open(&kfx).expect("open the fixture");
-    let (port, _port_store) =
-        bokai::kfx_to_epub::kfx_to_reader_book_lazy(&kfx).expect("port reader book");
+    let (book, _store) = ReaderBook::open(&kfx).expect("open the fixture");
+    assert!(!book.sections.is_empty(), "no sections — a vacuous pass");
 
-    assert_eq!(
-        mine.sections.len(),
-        port.sections.len(),
-        "section count: {} vs port {}",
-        mine.sections.len(),
-        port.sections.len()
-    );
-    assert!(!mine.sections.is_empty(), "no sections — a vacuous pass");
-
-    for (i, (m, p)) in mine.sections.iter().zip(&port.sections).enumerate() {
-        assert_eq!(m.href, p.href, "section {i} href");
-        assert_eq!(m.chars, p.chars, "section {i} ({}) base-text count", p.href);
-        assert_eq!(
-            m.image_only, p.image_only,
-            "section {i} ({}) image-only flag",
-            p.href
-        );
-        assert_eq!(
-            m.image_hrefs, p.image_hrefs,
-            "section {i} ({}) image list",
-            p.href
-        );
-        assert_eq!(m.elements, p.eids, "section {i} ({}) element ids", p.href);
-        assert_eq!(m.viewport, p.viewport, "section {i} ({}) viewport", p.href);
-        assert_eq!(m.spread, p.spread, "section {i} ({}) spread", p.href);
+    let mut lines = Vec::new();
+    for (i, s) in book.sections.iter().enumerate() {
+        let elements: Vec<String> = s.elements.iter().map(|e| e.to_string()).collect();
+        lines.push(format!(
+            "{i}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}",
+            s.href,
+            s.chars,
+            s.image_only,
+            s.image_hrefs.join(","),
+            elements.join(","),
+            s.viewport,
+            s.spread,
+        ));
     }
+    let locations: Vec<String> = book
+        .locations
+        .iter()
+        .map(|(a, b)| format!("{a}:{b}"))
+        .collect();
+    lines.push(format!(
+        "BOOK\t{}\t{}\t{}\t{:?}\t{:?}\t{}\t{}",
+        book.max_location,
+        book.fixed_layout,
+        locations.join(","),
+        book.writing_mode,
+        book.page_progression_direction,
+        book.title,
+        book.language,
+    ));
 
-    assert_eq!(mine.locations, port.locations, "location map");
-    assert_eq!(mine.max_location, port.max_location, "location count");
-    assert_eq!(mine.fixed_layout, port.fixed_layout, "fixed-layout flag");
-    assert_eq!(mine.writing_mode, port.writing_mode, "writing mode");
+    assert_eq!(book.sections.len(), 9, "section count");
     assert_eq!(
-        mine.page_progression_direction, port.page_progression_direction,
-        "page progression direction"
+        digest(&lines.join("\n")),
+        0xb77c_ffc6_bed2_b123,
+        "the reader book's shape moved"
     );
-    assert_eq!(mine.title, port.metadata.title, "title");
-    assert_eq!(mine.language, port.metadata.language, "language");
 }
 
 #[test]

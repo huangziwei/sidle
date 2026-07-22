@@ -1,10 +1,9 @@
 //! Shared `content.opf` (OPF package document) emitter.
 //!
-//! Every EPUB writer in the crate — the IR exporter's raw and normalized
-//! paths and the mechanical `kfx_to_epub` port — builds an [`OpfPackage`]
-//! and serializes it through [`emit_opf`], so the package document's shape
-//! (element order, refinement style, attribute forms) is identical by
-//! construction rather than by parallel maintenance.
+//! Every EPUB writer in the crate — the exporter's raw and normalized paths
+//! alike — builds an [`OpfPackage`] and serializes it through [`emit_opf`], so
+//! the package document's shape (element order, refinement style, attribute
+//! forms) is identical by construction rather than by parallel maintenance.
 //!
 //! The emitted package is EPUB 3 throughout: creator roles and sort keys
 //! ride `<meta refines>` (the EPUB-2 `opf:role`/`opf:file-as`/`opf:scheme`
@@ -518,12 +517,6 @@ pub fn format_opf_date(date: &str) -> String {
         date.to_string()
     }
 }
-
-// Port-compat re-export: the frozen mechanical port resolves the Kindle
-// `primary-writing-mode` value through `export::opf::`; the implementation
-// is direction-shared and lives in `formats::epub::opf_meta`. Deleted
-// together with the port.
-pub use crate::formats::epub::opf_meta::primary_writing_mode;
 
 /// Map a [`LandmarkType`] to the EPUB 2.0 `<guide>` reference vocabulary
 /// (`text` is the guide spelling of "start reading"; the rest match their

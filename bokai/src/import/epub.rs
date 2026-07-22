@@ -426,8 +426,8 @@ impl EpubImporter {
 
         // 6b. Fall back to EPUB 2.0 `<guide>` entries when the nav doc had
         // none (or didn't exist). EPUB 2.0 books and calibre-style 3.0
-        // OPFs both ship landmarks via `<guide>`, and the kfx_to_epub path
-        // emits guide-only OPFs by design (so Apple Books renders them).
+        // OPFs both ship landmarks via `<guide>`, and this crate's own KFX→EPUB
+        // output is guide-only by design (so Apple Books renders them).
         // We merge missing types rather than wholesale replace, so a nav
         // doc that omitted some EPUB-2-only landmarks (or vice versa)
         // still gets the union.

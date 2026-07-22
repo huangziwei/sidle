@@ -7,7 +7,7 @@
 //! cosmetic: a highlight made on hardware only lands on the right words if the
 //! scale read here matches the one the device used.
 
-use std::collections::HashMap;
+mod common;
 
 use bokai::Book;
 use bokai::model::Format;
@@ -16,64 +16,41 @@ const REFLOWABLE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事�
 const SHORT: &str = "tests/fixtures/[太宰 治] 人間失格.kfx";
 const EPUB: &str = "tests/fixtures/[太宰 治] 人間失格.epub";
 
-/// The chain the mechanical port derives from a fully loaded book, for the
-/// same KFX: `eid → pid` plus the Location number each pid falls in.
-fn port_chain(kfx: &[u8]) -> (HashMap<i64, i64>, Vec<(i64, i64)>, i64) {
-    use bokai::kfx_to_epub::text_index::LocationMap;
-    use bokai::kfx_to_epub::{TextIndex, loader};
-
-    let book = loader::load(kfx).expect("port loads the fixture");
-    let pid_of = TextIndex::pid_map_from_book(&book);
-    let max_pid = pid_of.values().copied().max().unwrap_or(0);
-    let lm =
-        LocationMap::from_book(&book, &pid_of).unwrap_or_else(|| LocationMap::approximate(max_pid));
-    let mut locations: Vec<(i64, i64)> = pid_of
-        .iter()
-        .map(|(&eid, &pid)| (eid, lm.location_for_pid(pid)))
-        .collect();
-    locations.sort_unstable();
-    (pid_of, locations, lm.count())
+/// The whole chain as one line per positioned element: `eid → pid → Location`.
+fn chain(kfx: &[u8]) -> (usize, i64, u64) {
+    let mut book = Book::from_bytes(kfx, Format::Kfx).expect("import the fixture");
+    let positions = book.position_map().expect("fixture carries a position map");
+    let locations = positions.element_locations();
+    assert!(!locations.is_empty(), "fixture carries positioned elements");
+    let lines = locations.iter().map(|(eid, loc)| {
+        let pid = positions.positions().get(eid).copied().unwrap_or(-1);
+        format!("{eid}\t{pid}\t{loc}")
+    });
+    (
+        locations.len(),
+        positions.location_count(),
+        common::digest_lines(lines),
+    )
 }
 
-/// The importer reads only the four position fragments out of the container's
-/// entity index; the port parses every fragment in the book. Those two paths
-/// must produce the same scale, or a stored `(eid, offset)` annotation resolves
-/// to a different place than it did before.
-fn assert_matches_port(path: &str) {
-    let Ok(kfx) = std::fs::read(path) else {
+#[test]
+fn reflowable_kfx_positions_are_pinned() {
+    let Ok(kfx) = std::fs::read(REFLOWABLE) else {
         return; // fixture not present in this checkout
     };
-    let mut book = Book::from_bytes(&kfx, Format::Kfx).expect("import the fixture");
-    let positions = book
-        .position_map()
-        .unwrap_or_else(|| panic!("{path} should carry a position map"));
-
-    let (pid_of, locations, count) = port_chain(&kfx);
-    assert!(
-        !pid_of.is_empty(),
-        "{path} should carry positioned elements"
-    );
-    assert_eq!(positions.positions(), &pid_of, "{path}: eid → pid diverged");
-    assert_eq!(
-        positions.location_count(),
-        count,
-        "{path}: location count diverged"
-    );
-    assert_eq!(
-        positions.element_locations(),
-        locations,
-        "{path}: per-element Location diverged"
-    );
+    let (elements, locations, digest) = chain(&kfx);
+    assert_eq!((elements, locations), (1918, 8117), "scale shape");
+    assert_eq!(digest, 0xc9a7_9b52_4a0d_b8e0, "eid → pid → Location moved");
 }
 
 #[test]
-fn reflowable_kfx_positions_match_the_mechanical_chain() {
-    assert_matches_port(REFLOWABLE);
-}
-
-#[test]
-fn short_kfx_positions_match_the_mechanical_chain() {
-    assert_matches_port(SHORT);
+fn short_kfx_positions_are_pinned() {
+    let Ok(kfx) = std::fs::read(SHORT) else {
+        return;
+    };
+    let (elements, locations, digest) = chain(&kfx);
+    assert_eq!((elements, locations), (881, 1703), "scale shape");
+    assert_eq!(digest, 0x8e79_38a3_8a9e_e15f, "eid → pid → Location moved");
 }
 
 /// Offsets ride on top of an element's coordinate — this is what turns an

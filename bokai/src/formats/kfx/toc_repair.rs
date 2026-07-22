@@ -793,7 +793,7 @@ mod tests {
         assert_eq!(audit.verdict, crate::validate::source::toc::Verdict::Ok);
 
         assert!(
-            crate::kfx_to_epub::convert_to_epub(&out).is_ok(),
+            crate::formats::kfx::converts_to_epub(&out),
             "repaired KFX must still convert to EPUB"
         );
     }
@@ -900,7 +900,7 @@ mod tests {
             "repaired TOC must not remain SUSPECT"
         );
         assert!(
-            crate::kfx_to_epub::convert_to_epub(&out).is_ok(),
+            crate::formats::kfx::converts_to_epub(&out),
             "repaired KFX must still convert to EPUB"
         );
     }
@@ -990,7 +990,7 @@ mod tests {
         let labels: Vec<&str> = toc.iter().map(|p| p.title.as_str()).collect();
         assert_eq!(labels, ["第一章", "第二章"]);
         assert!(
-            crate::kfx_to_epub::convert_to_epub(&out).is_ok(),
+            crate::formats::kfx::converts_to_epub(&out),
             "synthesized KFX must still convert to EPUB"
         );
     }

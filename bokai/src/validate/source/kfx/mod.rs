@@ -5,7 +5,7 @@
 //! book editor to repair.
 //!
 //! Every rule is a check over structures bokai already parses (`kfx/container.rs`,
-//! `kfx_to_epub/loader.rs` → [`BookData`]), so the checker just re-asks the
+//! `kfx/loader.rs` → [`BookData`]), so the checker just re-asks the
 //! resolution questions the converter answers — and flags the cases the
 //! converter silently tolerates (a dropped image, a chapterless nav).
 //!
@@ -360,8 +360,7 @@ fn style_exists(book: &BookData, name: &str) -> bool {
         .is_some_and(|styles| styles.contains_key(name))
 }
 
-/// Look up a fragment by type and name. A local mirror of the converter's
-/// `lookup_fragment` (which is `pub(super)` to `kfx_to_epub`).
+/// Look up a fragment by type and name.
 fn lookup<'b>(book: &'b BookData, ftype: KfxSymbol, fid: &str) -> Option<&'b IonValue> {
     book.by_type.get(&(ftype as u64)).and_then(|m| m.get(fid))
 }

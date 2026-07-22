@@ -1,11 +1,10 @@
 //! KFX anchor table — the one rule set for turning `$266 anchor` entities and
 //! `book_navigation` target positions into HTML ids.
 //!
-//! Both KFX→EPUB engines (the mechanical `kfx_to_epub` port and the IR route)
-//! stamp `id="…"` attributes at anchored `(eid, offset)` positions and emit
-//! nav/NCX/guide fragments from the same names, so the table and every
-//! registration rule live here and are shared — byte-equal output by
-//! construction, not by parallel maintenance.
+//! The importer stamps `id="…"` attributes at anchored `(eid, offset)`
+//! positions and emits nav/NCX/guide fragments from the same names, so the
+//! table and every registration rule live together here rather than being
+//! rederived at each site.
 //!
 //! Registration order is part of the contract: real `$266` anchors first (in
 //! sorted-name order — the source container gives no meaningful order and a
@@ -260,7 +259,7 @@ impl AnchorTable {
 /// `wanted_type` to `f`, in source order. `nav_values` must iterate the
 /// `book_navigation` entities deterministically (sort by name when they come
 /// from a map); `resolve_container` handles the inline-struct vs referenced
-/// `$391` entity forms, which differ between the two engines' data models.
+/// `$391` entity forms, both of which KFX uses.
 pub fn for_each_nav_container<'a, I, R, F>(
     nav_values: I,
     resolve_container: R,

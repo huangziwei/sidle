@@ -1,16 +1,15 @@
-//! Strict A/B tree diff between two EPUBs — the 1:1 gate for converging the
-//! two KFX→EPUB routes.
+//! Strict A/B tree diff between two EPUBs.
 //!
 //! Unlike the sibling fidelity checks, both inputs are EPUBs: `a` is the
-//! oracle (today: the mechanical `kfx_to_epub` output) and `b` the candidate
-//! (the IR route). The comparison is deliberately byte-exact per zip entry —
-//! no canonicalization, no "semantically equivalent" tolerance — because the
-//! two routes are being converged onto shared emitters where equality is
-//! structural. Zip-level details (entry order, compression, timestamps) are
-//! out of scope: the tree is compared by entry name.
+//! reference and `b` the candidate. The comparison is deliberately byte-exact
+//! per zip entry — no canonicalization, no "semantically equivalent"
+//! tolerance — because the question it usually answers is whether a change
+//! moved any bytes at all, and a tolerant diff cannot answer that. Zip-level
+//! details (entry order, compression, timestamps) are out of scope: the tree
+//! is compared by entry name.
 //!
 //! Differences are classified by artifact kind so a corpus sweep can rank
-//! convergence work by diff-class frequency.
+//! them by diff-class frequency.
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read};

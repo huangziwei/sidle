@@ -1,6 +1,5 @@
-//! Calibre-shaped `titlepage.xhtml` — one builder for both KFX→EPUB routes
-//! (and the raw EPUB export), so the cover page is byte-identical across
-//! engines.
+//! Calibre-shaped `titlepage.xhtml` — one builder for the normalized and raw
+//! EPUB exports alike, so every cover page has the same shape.
 //!
 //! An SVG `viewBox` sized to the cover image's pixel dimensions, with the
 //! image referenced via `xlink:href`. Renders full-bleed in Apple Books /

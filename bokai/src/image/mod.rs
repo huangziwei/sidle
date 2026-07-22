@@ -5,16 +5,14 @@
 //! - [`svg`] — SVG → white-flattened raster for KFX bundling (EPUB→KFX);
 //!   KFX has no vector resource format. Also hosts the process-wide
 //!   system-font database shared with the Aozora cover generator.
-//! - [`jxr_transcode`] — KFX→EPUB glue: JXR decode → JPEG re-encode. This is
-//!   pipeline glue (it depends on `ConvertError` / `jpeg_encoder`), not part
-//!   of the codec.
 //! - [`media_type`] — what a payload's leading bytes say it is.
 //!
-//! The JPEG-XR codec itself lives in the standalone, zero-dependency
-//! top-level [`jxr`] crate (re-exported as `bokai::jxr`).
+//! The JPEG-XR codec lives in the standalone, zero-dependency top-level
+//! [`jxr`] crate (re-exported as `bokai::jxr`); the glue that decodes a KFX's
+//! bundled JXR images and re-encodes them as JPEG is KFX-side, in
+//! [`crate::formats::kfx::jxr`].
 
 pub mod jpeg;
-pub mod jxr_transcode;
 pub mod media_type;
 pub mod svg;
 

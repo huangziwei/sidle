@@ -39,9 +39,6 @@
 //! - [`image`], [`io`] — image codecs and byte sources
 //! - [`validate`] — book/conversion validation (source structure, fidelity,
 //!   tag coverage)
-//! - [`kfx_to_epub`] — the frozen mechanical KFX→EPUB port: today's
-//!   production conversion path and the byte-1:1 reference the IR route
-//!   answers to; deleted when the IR route reaches parity
 //! - `util`, `trace` — crate-internal helpers
 //!
 //! ## Quick Start
@@ -74,14 +71,7 @@ pub mod style;
 // Re-exported because `model::Book`'s public API exposes `jxr::ColorMode`.
 pub use jxr;
 
-pub mod kfx_to_epub;
 pub mod validate;
-
-// Compat module alias for the frozen mechanical port (`kfx_to_epub`): the
-// port is the production kfx→epub path and may not be edited until the IR
-// route reaches 1:1, so its historical `crate::kfx::` imports keep
-// resolving here. Deleted together with the port.
-pub use formats::kfx;
 
 pub(crate) mod trace;
 pub(crate) mod util;

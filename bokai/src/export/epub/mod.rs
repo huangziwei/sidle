@@ -484,10 +484,9 @@ impl EpubExporter {
 
     /// Export with normalized content (IR pipeline produces clean, consistent
     /// output). Reports coarse phase progress to `on_progress`; the emission
-    /// order is `content → resources → nav → finalize` (unlike the mechanical
-    /// `kfx_to_epub` route's `nav → resources`: that route defers image bytes
-    /// past nav, whereas here `load_assets` transcodes inline before the
-    /// manifest needs each image's post-transcode MIME).
+    /// order is `content → resources → nav → finalize`: `load_assets`
+    /// transcodes inline, so the manifest already knows each image's
+    /// post-transcode MIME by the time it is written.
     fn export_normalized<W: Write + Seek>(
         &self,
         book: &mut Book,
@@ -503,8 +502,8 @@ impl EpubExporter {
     ///
     /// The OEBPS payload goes in manifest registration order — assets,
     /// stylesheet, chapters, titlepage last — the same file order the
-    /// mechanical route's `finalize` walks, so the two engines' containers are
-    /// byte-identical, not merely entry-identical. Already-compressed image
+    /// calibre's `finalize` walks, so the container is byte-identical to
+    /// calibre's, not merely entry-identical. Already-compressed image
     /// types are `Stored`: deflate over them gains <5% at ~10-15 ms per MB,
     /// most of an image-heavy book's export cost.
     pub fn write_package<W: Write + Seek>(
@@ -647,10 +646,9 @@ pub fn build_package(
         let spine: Vec<_> = book.spine().to_vec();
 
         // Output filename per chapter, derived from the chapter's source id
-        // (for KFX: the section name). Must match the mechanical
-        // `kfx_to_epub` route byte-for-byte — same `{section}.xhtml` shape,
-        // same `-N` collision suffix (`content::push_book_part`) — so the
-        // two routes' trees can converge to identical.
+        // (for KFX: the section name). The `{section}.xhtml` shape and the
+        // `-N` collision suffix are calibre's, kept because a reader's stored
+        // links and bookmarks are written against these names.
         let mut chapter_files =
             chapter_filenames(content.chapters.iter().map(|c| c.source_path.as_str()));
 
@@ -660,7 +658,7 @@ pub fn build_package(
         // but the OPF and the navigation this builds describe a *container*,
         // which ships one cover, so those passes skip the index. Gated to when
         // a cover page is actually emitted (non-FXL + a cover image, which is
-        // always in the manifest when set). The mechanical route drops the
+        // always in the manifest when set). Calibre drops the
         // same section on the identical bytes (1:1).
         let cover_section_idx: Option<usize> = if !book.metadata().fixed_layout {
             book.metadata().cover_image.as_deref().and_then(|cover| {
@@ -677,14 +675,14 @@ pub fn build_package(
         // suppressed section (the KFX's toc/text landmarks can point at the
         // cover) resolve to the SVG cover page in its place — so
         // `resolve_nav_href` maps its id to `cover.xhtml`, not a file the
-        // container doesn't hold. Same remap on the mechanical route (via
+        // container doesn't hold. Same remap on calibre (via
         // `element_id_to_filename`), so nav/ncx stay 1:1.
         let document_files = chapter_files.clone();
         if let Some(idx) = cover_section_idx {
             chapter_files[idx] = "cover.xhtml".to_string();
         }
 
-        // Build manifest, in the mechanical route's registration order —
+        // Build manifest, in calibre's registration order —
         // images (canonical index order), stylesheet, chapters, titlepage
         // last — with ids derived from filenames (`opf::make_manifest_id`),
         // so a KFX conversion produces the same package document on both
@@ -700,7 +698,7 @@ pub fn build_package(
         let mut spine_items: Vec<OpfItemref> = Vec::new();
 
         // Assets first. When the importer declares an authoritative bundle
-        // (KFX: the canonical image index shared with the mechanical route —
+        // (KFX: the canonical image index shared with calibre —
         // deterministic order, exported filenames, cover included even when
         // no chapter references it inline), use it verbatim; the KFX
         // JPEG-XR→JPEG transcode runs across cores (`load_assets` →
@@ -711,7 +709,7 @@ pub fn build_package(
             // Fixed-layout books bundle a full page-thumbnail set the
             // reading order never references; ship only the images the
             // emitted pages use (plus the cover), pruned BEFORE the bulk
-            // load so thumbnails are never transcoded (the mechanical
+            // load so thumbnails are never transcoded (calibre's
             // route's `retain_referenced_images`).
             let asset_list: Vec<std::path::PathBuf> = if book.metadata().fixed_layout {
                 let cover = book.metadata().cover_image.clone();
@@ -733,7 +731,7 @@ pub fn build_package(
             // Transcode in chunks so the progress bar moves through the long
             // pole (image decode) instead of sitting on one opaque step; each
             // chunk still transcodes across cores. ~2 items per worker keeps
-            // straggler idle time negligible — the mechanical route's
+            // straggler idle time negligible — calibre's
             // `resources` chunking. Byte output is identical to a single bulk
             // load (`parallel_map` preserves input order within each chunk and
             // chunks concatenate in order).
@@ -890,7 +888,7 @@ pub fn build_package(
             manifest_items.iter().find(|i| &i.id == cid).map(|item| {
                 // Dims are optional — the shared builder falls back to a bare
                 // <img> when the cover's pixel size can't be probed. Emit the
-                // page whenever a cover exists (matching the mechanical route),
+                // page whenever a cover exists (matching calibre),
                 // so suppressing the KFX cover section below never leaves the
                 // book coverless.
                 let dims = asset_bytes
@@ -929,7 +927,7 @@ pub fn build_package(
         // normalize pass already cached, so this costs one DFS per chapter,
         // not a re-parse. Unresolvable landmarks and page-list entries are
         // dropped (never emit a dangling reference); TOC entries keep their
-        // label with an empty href, like the mechanical route.
+        // label with an empty href, like calibre.
         on_progress("nav", 0, 1, "Writing navigation");
         if !book.toc().is_empty() || !book.page_list().is_empty() || !book.landmarks().is_empty() {
             let mut anchor_chapters = Vec::with_capacity(spine.len());
@@ -943,7 +941,7 @@ pub fn build_package(
         }
         let chapter_pos: HashMap<crate::import::ChapterId, usize> =
             spine.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
-        // Fragment rules (in `resolve_nav_href`) match the mechanical route:
+        // Fragment rules (in `resolve_nav_href`) match calibre:
         // TOC and guide/landmark entries carry the anchor registered at the
         // target position whenever one exists; the page list only keeps a
         // fragment that was actually stamped into content (a page break on an
@@ -961,7 +959,7 @@ pub fn build_package(
             )
         });
         // EPUB 3 requires the toc nav in reading order (epubcheck NAV-011);
-        // the mechanical route sorts, so sort identically.
+        // calibre sorts, so sort identically.
         let file_rank: HashMap<String, usize> = chapter_files
             .iter()
             .enumerate()
@@ -972,7 +970,7 @@ pub fn build_package(
         // Page list: flat, kept in page order. The unlabelled book-start
         // sentinel Amazon ships ("Untitled" after the importer's label
         // fallback) and entries whose target never resolves are dropped —
-        // the mechanical route's `extract_page_list` rules.
+        // calibre's `extract_page_list` rules.
         let page_points: Vec<NavPoint> = book
             .page_list()
             .iter()
@@ -1017,7 +1015,7 @@ pub fn build_package(
         // Fixed-layout `original-resolution` fallback for sources with
         // per-page viewports only: the most common page size (the cover is
         // often sized differently from the content pages). Deterministic
-        // tie-break (count, then size) — the mechanical route's HashMap
+        // tie-break (count, then size) — calibre's HashMap
         // `max_by_key` is tie-order-unstable; don't copy that.
         let derived_resolution = {
             let mut counts: Vec<((u32, u32), usize)> = Vec::new();
@@ -1037,10 +1035,10 @@ pub fn build_package(
         // Packaging: OPF + nav/ncx (image bytes are already transcoded, so
         // this is serialization, not the long pole).
         on_progress("finalize", 1, 1, "Packaging");
-        // A KFX source's metadata mirrors the mechanical route's curated
-        // field set (see `build_opf_metadata`), keeping the two KFX→EPUB
-        // engines' package documents identical. The guide is cloned into the
-        // package — the nav doc's landmarks render from the same entries.
+        // A KFX source's metadata mirrors calibre's curated field set (see
+        // `build_opf_metadata`), so the package document keeps calibre's
+        // shape. The guide is cloned into the package — the nav doc's
+        // landmarks render from the same entries.
         let opf = opf::emit_opf(&OpfPackage {
             metadata: build_opf_metadata(
                 book.metadata(),
@@ -1055,7 +1053,7 @@ pub fn build_package(
 
         // nav.xhtml (EPUB 3 navigation document). The empty-TOC fallback
         // points at the first spine document — the titlepage when one was
-        // synthesized, like the mechanical route.
+        // synthesized, like calibre.
         let toc_fallback = if titlepage_xhtml.is_some() {
             Some("cover.xhtml")
         } else {
@@ -1205,10 +1203,6 @@ fn find_cover_manifest_id(
 /// The reader drops the SVG page and keeps the section instead (it renders the
 /// KFX natively and sizes the image itself) — a third resolution, correct for
 /// its renderer.
-/// Compat alias for the frozen mechanical port (`kfx_to_epub`), which may not
-/// be edited until the IR route reaches 1:1. Deleted together with the port.
-pub(crate) use is_cover_only_document as is_redundant_cover_section;
-
 pub(crate) fn is_cover_only_document(html: &str, cover_href: &str) -> bool {
     // Body only — the <head><title> text must not count against "no visible
     // text".
@@ -1258,20 +1252,19 @@ pub(crate) fn is_cover_only_document(html: &str, cover_href: &str) -> bool {
 
 /// Build the OPF `<metadata>` block from the book's metadata.
 ///
-/// With `normalized` set (KFX sources), the field set and value shapes match
-/// the mechanical `kfx_to_epub` route exactly: `dc:date` gets the
-/// `issue_date` ISO formatting, creators carry positional per-author sort
-/// keys, and the fields that route never emits (description, subjects,
-/// rights, contributors, collection) are omitted so both engines produce one
-/// package document. Other sources keep the full field set.
+/// With `normalized` set (KFX sources), the field set follows calibre's:
+/// `dc:date` gets the `issue_date` ISO formatting, creators carry positional
+/// per-author sort keys, and the fields calibre never emits (description,
+/// subjects, rights, contributors, collection) are omitted. Other sources keep
+/// the full field set.
 fn build_opf_metadata(
     md: &crate::model::Metadata,
     normalized: bool,
     cover_manifest_id: Option<String>,
     derived_resolution: Option<(u32, u32)>,
 ) -> OpfMetadata {
-    // Positional per-creator sort keys (shared with the mechanical route via
-    // `creator_file_as_keys`, so both engines emit one shape).
+    // Positional per-creator sort keys (shared with calibre via
+    // `creator_file_as_keys`).
     let file_as_keys = opf::creator_file_as_keys(&md.authors, &md.author_sorts);
     let creators = md
         .authors
@@ -1350,7 +1343,7 @@ fn build_opf_metadata(
 /// `resolve` maps a model href to the emitted document href — identity for
 /// the passthrough path (source hrefs are file paths), anchor-index
 /// resolution for the normalized path. Entries whose target doesn't resolve
-/// keep their label with an empty href, matching the mechanical route.
+/// keep their label with an empty href, matching calibre.
 fn toc_to_navpoints(
     entries: &[TocEntry],
     resolve: &dyn Fn(&str) -> Option<String>,
@@ -1366,7 +1359,7 @@ fn toc_to_navpoints(
 }
 
 // `cover.xhtml` comes from the shared calibre-shaped builder
-// (`export::titlepage`), the same one the mechanical KFX→EPUB route ships.
+// (`export::titlepage`), the same one calibre ships.
 use self::titlepage::build_titlepage;
 
 /// Sanitize a path for use in ZIP (remove leading slashes, normalize).
@@ -1377,9 +1370,9 @@ fn sanitize_path(path: &str) -> String {
 }
 
 /// Output filename for each normalized chapter: `{source_id}.xhtml` (for KFX,
-/// the section name), unique via a `-N` suffix on collision. Both rules match
-/// the mechanical route's `kfx_to_epub::content::push_book_part` exactly —
-/// the two kfx→epub engines must name spine files identically to converge.
+/// the section name), unique via a `-N` suffix on collision. Both rules are
+/// calibre's (`push_book_part`), kept so spine filenames stay stable for
+/// anything already linking to them.
 /// Chapters without a usable source id fall back to positional names. Takes
 /// the chapters' source paths (also used pre-synthesis by the normalize
 /// pass's link resolver, which must know target filenames before any
@@ -1425,8 +1418,8 @@ where
 ///
 /// `book.index_anchors` must have run over the spine chapters first. Shared by
 /// the EPUB normalized nav/landmark resolution and the AZW3 normalized
-/// exporter so both engines resolve identical targets — a bare `#eid`
-/// otherwise collapses every TOC entry onto its chapter start.
+/// exporter so both resolve identical targets — a bare `#eid` otherwise
+/// collapses every TOC entry onto its chapter start.
 pub(crate) fn resolve_nav_href(
     book: &Book,
     href: &str,
@@ -1590,7 +1583,7 @@ mod tests {
         use std::cell::RefCell;
         // KFX → EPUB (the normalized path). The IR route transcodes images
         // inline before nav, so the emission order is
-        // content → resources → nav → finalize (the mechanical route's is
+        // content → resources → nav → finalize (calibre's is
         // nav → resources — it defers image bytes). The fixture ships a cover
         // image, so all four phases fire.
         let mut book = crate::Book::open("tests/fixtures/[太宰 治] 人間失格.kfx").unwrap();

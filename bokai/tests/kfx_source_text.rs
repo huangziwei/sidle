@@ -6,6 +6,8 @@
 //! an element contributes changes, or the elements fall in a different reading
 //! order, then the same highlight covers different words.
 
+mod common;
+
 use bokai::Book;
 use bokai::model::Format;
 
@@ -13,80 +15,61 @@ const REFLOWABLE: &str = "tests/fixtures/[小栗 虫太郎] 黒死館殺人事�
 const SHORT: &str = "tests/fixtures/[太宰 治] 人間失格.kfx";
 const EPUB: &str = "tests/fixtures/[太宰 治] 人間失格.epub";
 
-/// The IR path walks storyline entities out of the container's index and
-/// resolves content references one entity at a time; the mechanical port
-/// parses the book's entire fragment graph first. Both must recover the same
-/// characters for the same element, and place those elements in the same
-/// reading order — the two inputs a highlight's text is sliced from.
-fn assert_matches_port(path: &str) {
-    let Ok(kfx) = std::fs::read(path) else {
+/// Every element's text in reading order, plus the whole book as one
+/// extraction.
+///
+/// Two facts ride on this digest and neither is cosmetic: the characters an
+/// element contributes, and the order elements are visited in. Change either
+/// and the same stored `(element, offset)` pair slices different words.
+fn base_text(kfx: &[u8]) -> (usize, usize, u64) {
+    let mut book = Book::from_bytes(kfx, Format::Kfx).expect("import the fixture");
+    let text = book.source_text().expect("source text");
+    let order = text.reading_order().to_vec();
+    assert!(!order.is_empty(), "nothing indexed");
+
+    let mut lines: Vec<String> = order
+        .iter()
+        .map(|&e| format!("{e}\t{}", text.text_of(e).unwrap_or_default()))
+        .collect();
+    // The whole book as one range — this is what pins the reading-order walk
+    // itself rather than just per-element text.
+    let (first, last) = (order[0], order[order.len() - 1]);
+    let whole = text
+        .extract(first, 0, last, usize::MAX)
+        .expect("the whole book is a valid range");
+    lines.push(format!("WHOLE\t{whole}"));
+
+    (
+        text.len(),
+        whole.chars().count(),
+        common::digest_lines(lines),
+    )
+}
+
+#[test]
+fn reflowable_kfx_base_text_is_pinned() {
+    let Ok(kfx) = std::fs::read(REFLOWABLE) else {
         return; // fixture not present in this checkout
     };
-    let mut book = Book::from_bytes(&kfx, Format::Kfx).expect("import the fixture");
-    let positions = book.position_map().expect("position map");
-    let text = book.source_text().expect("source text");
-    let port = bokai::kfx_to_epub::TextIndex::from_kfx(&kfx).expect("port index");
-
-    assert_eq!(text.len(), port.len(), "{path}: indexed element count");
-
-    // Both directions across the positioned set: an element the IR path
-    // *omits* would silently blank a highlight, which one direction misses.
-    for &element in text.reading_order() {
-        assert_eq!(
-            text.text_of(element),
-            port.text_of(element),
-            "{path}: base text diverged for element {element}"
-        );
-    }
-    for &element in positions.positions().keys() {
-        assert_eq!(
-            text.text_of(element),
-            port.text_of(element),
-            "{path}: base text diverged for positioned element {element}"
-        );
-    }
-
-    // Ranges exercise the reading-order walk itself, not just per-element
-    // text: a divergent order shows up here and nowhere above.
-    let order = text.reading_order();
-    assert!(!order.is_empty(), "{path}: nothing indexed");
-    let mut ranges = 0usize;
-    for pair in order.windows(2).step_by(97) {
-        let (a, b) = (pair[0], pair[1]);
-        assert_eq!(
-            text.extract(a, 0, b, 3),
-            port.extract(a, 0, b, 3),
-            "{path}: adjacent range {a}..{b} diverged"
-        );
-        ranges += 1;
-    }
-    for i in (0..order.len().saturating_sub(50)).step_by(211) {
-        let (a, b) = (order[i], order[i + 50]);
-        assert_eq!(
-            text.extract(a, 2, b, 4),
-            port.extract(a, 2, b, 4),
-            "{path}: 50-element range {a}..{b} diverged"
-        );
-        ranges += 1;
-    }
-    // The whole book as one range — the strongest single comparison there is.
-    let (first, last) = (order[0], order[order.len() - 1]);
+    let (elements, chars, digest) = base_text(&kfx);
+    assert_eq!((elements, chars), (1600, 288763), "index shape");
     assert_eq!(
-        text.extract(first, 0, last, usize::MAX),
-        port.extract(first, 0, last, usize::MAX),
-        "{path}: whole-book extraction diverged"
+        digest, 0x135e_f222_c849_e2a8,
+        "base text or reading order moved"
     );
-    assert!(ranges > 0, "{path}: no ranges compared");
 }
 
 #[test]
-fn reflowable_kfx_base_text_matches_the_mechanical_index() {
-    assert_matches_port(REFLOWABLE);
-}
-
-#[test]
-fn short_kfx_base_text_matches_the_mechanical_index() {
-    assert_matches_port(SHORT);
+fn short_kfx_base_text_is_pinned() {
+    let Ok(kfx) = std::fs::read(SHORT) else {
+        return;
+    };
+    let (elements, chars, digest) = base_text(&kfx);
+    assert_eq!((elements, chars), (839, 74025), "index shape");
+    assert_eq!(
+        digest, 0x9fc5_2943_437e_ddee,
+        "base text or reading order moved"
+    );
 }
 
 /// An out-of-range handle is best-effort, never a panic: a device can sync an

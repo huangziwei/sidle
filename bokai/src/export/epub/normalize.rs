@@ -259,8 +259,8 @@ pub fn normalize_book_with(
     // whose importer supplies a style program (today only the KFX importer
     // does): the stylesheet is the source's own styles, converted by the
     // `dom_synth` machinery — rules keyed by the raw style names each node
-    // carries in `semantics.class`, so both KFX→EPUB engines emit identical
-    // CSS. All other normalized sources: classes are interned computed
+    // carries in `semantics.class`, matching calibre's CSS. All other
+    // normalized sources: classes are interned computed
     // styles (`.c<N>`) from the global pool.
     let css_program = book.stylesheet_program();
     let (css_text, source_style_maps, css_artifact) = match &css_program {
@@ -359,9 +359,9 @@ pub fn normalize_book_with(
     // resolve each to the chapter file its stamped id actually landed in
     // (`chapter.xhtml#id`), sanitize external URLs, and drop the href — the
     // `<a>` stays as a non-linking element — when the target was never
-    // stamped. The same rules the mechanical route applies in
-    // `resolve_link_placeholders`, so both engines emit (or drop) the same
-    // links. Passthrough-capable sources keep their hrefs verbatim.
+    // stamped. The same rules calibre applies in
+    // `resolve_link_placeholders`. Passthrough-capable sources keep their
+    // hrefs verbatim.
     let resolve_links = book.requires_normalized_export();
     if resolve_links {
         let anchor_chapters: Vec<(ChapterId, Arc<Chapter>)> = ir_chapters
@@ -390,7 +390,7 @@ pub fn normalize_book_with(
             Some(AnchorTarget::Internal(target)) => {
                 // Only a target whose id was actually stamped resolves; the
                 // chapter-start fallback (ROOT) has no id and drops, exactly
-                // like the mechanical route's unstamped-anchor rule.
+                // like calibre's unstamped-anchor rule.
                 let frag = chapters_by_id
                     .get(&target.chapter)
                     .and_then(|ch| ch.semantics.id(target.node));
@@ -434,11 +434,10 @@ pub fn normalize_book_with(
     };
 
     // Declared style program: build each chapter through the shared XHTML
-    // DOM + consolidation passes — the same code the mechanical route
-    // serializes with, so both KFX→EPUB engines' chapter files are
-    // byte-identical by construction. The title comes from `chapter_title`
-    // (a fixed-layout page is titled by its owning section, not its
-    // per-page name), matching the mechanical `push_book_part`; the
+    // DOM + consolidation passes — the same code calibre serializes with, so
+    // chapter files keep calibre's byte shape. The title comes from
+    // `chapter_title` (a fixed-layout page is titled by its owning section, not
+    // its per-page name), matching calibre's `push_book_part`; the
     // viewport is the FXL page's pixel box.
     //
     // Link resolution reads the importer through `book`, which cannot

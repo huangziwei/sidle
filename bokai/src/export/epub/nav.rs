@@ -1,9 +1,9 @@
 //! Shared `nav.xhtml` (EPUB 3 navigation document) and `toc.ncx` emitters.
 //!
-//! Like [`super::opf`], every EPUB writer in the crate — the IR exporter's
-//! raw and normalized paths and the mechanical `kfx_to_epub` port — feeds a
-//! [`NavDoc`] / [`NcxDoc`] through [`emit_nav`] / [`emit_ncx`], so the two
-//! navigation artifacts are byte-identical across routes by construction.
+//! Like [`super::opf`], every EPUB writer in the crate — the exporter's raw
+//! and normalized paths alike — feeds a [`NavDoc`] / [`NcxDoc`] through
+//! [`emit_nav`] / [`emit_ncx`], so the two navigation artifacts have one
+//! shape by construction.
 //!
 //! Escaping is deliberately two-tiered to stay byte-stable with the emitter
 //! this code was extracted from: the TOC/page-list `<ol>` bodies and the NCX

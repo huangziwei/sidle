@@ -581,7 +581,7 @@ mod tests {
 
         // The patched container is still a usable KFX.
         assert!(
-            crate::kfx_to_epub::convert_to_epub(&patched).is_ok(),
+            crate::formats::kfx::converts_to_epub(&patched),
             "patched KFX must still convert to EPUB"
         );
     }

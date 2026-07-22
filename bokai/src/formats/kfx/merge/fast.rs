@@ -8,8 +8,8 @@
 //! are authored against that same symtab — every symbol ID inside their
 //! entity bodies resolves through `metadata.kfx`'s locals.
 //!
-//! The mechanical port treats each entity body as opaque Ion that must be
-//! parsed → walked → re-encoded. That parse + serialize is ~75% of the merge
+//! The mechanical merge path treats each entity body as opaque Ion that must
+//! be parsed → walked → re-encoded. That parse + serialize is ~75% of the merge
 //! time on a typical book. Once we know we can preserve the source symtab
 //! intact, none of that work is required: every entity body's bytes are
 //! **already valid** in the merged container with the same symtab attached.

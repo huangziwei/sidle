@@ -69,12 +69,6 @@ enum Command {
         /// to keep the source's own mode.
         #[arg(long = "writing-mode")]
         writing_mode: Option<String>,
-
-        /// KFX → EPUB engine: `ir` (default — the generic `KfxImporter` → IR →
-        /// `EpubExporter` pipeline) or `mechanical` (the `kfx_to_epub` calibre
-        /// port, kept as a 1:1 reference and escape hatch).
-        #[arg(long = "route", default_value = "ir")]
-        route: String,
     },
 
     /// Extract hierarchical section tree (JSON)
@@ -318,11 +312,11 @@ enum ValidateCheck {
     },
 
     /// Strict A/B tree diff of two EPUBs (byte-exact per zip entry) — the
-    /// 1:1 convergence gate for the mechanical-vs-IR kfx→epub routes
+    /// before/after gate for any change to the EPUB output
     EpubDiff {
-        /// Oracle EPUB (A — today: the mechanical route's output)
+        /// Reference EPUB (A — the before)
         a: String,
-        /// Candidate EPUB (B — the IR route's output)
+        /// Candidate EPUB (B — the after)
         b: String,
         /// Output as JSON
         #[arg(long)]
@@ -356,7 +350,6 @@ fn main() -> ExitCode {
             merge_mode,
             ppd,
             writing_mode,
-            route,
         } => convert(
             &input,
             output.as_deref(),
@@ -366,7 +359,6 @@ fn main() -> ExitCode {
             &merge_mode,
             ppd.as_deref(),
             writing_mode.as_deref(),
-            &route,
         ),
         Command::Dump {
             file,
@@ -1415,7 +1407,6 @@ fn convert(
     merge_mode: &str,
     ppd: Option<&str>,
     writing_mode: Option<&str>,
-    route: &str,
 ) -> Result<(), String> {
     // Check if reading from stdin
     let from_stdin = input == "-";
@@ -1495,10 +1486,8 @@ fn convert(
         );
     }
 
-    // KFX -> EPUB. Two engines: the generic IR pipeline (default) and the
-    // mechanical `kfx_to_epub` calibre port (`--route mechanical`, the 1:1
-    // oracle). Both refuse a PDF-backed container — that must round-trip
-    // through PDF, not EPUB.
+    // KFX -> EPUB, through the IR. Refuses a PDF-backed container — that must
+    // round-trip through PDF, not EPUB.
     if !from_stdin
         && output_format == Format::Epub
         && std::path::Path::new(input)
@@ -1513,22 +1502,13 @@ fn convert(
                     .to_string(),
             );
         }
-        let bytes = match route {
-            "mechanical" | "" => bokai::kfx_to_epub::convert_to_epub(&kfx_bytes)
-                .map_err(|e| format!("Conversion failed: {e}"))?,
-            "ir" => {
-                let mut book = Book::from_bytes(&kfx_bytes, Format::Kfx)
-                    .map_err(|e| format!("Failed to open input: {e}"))?;
-                let mut cursor = std::io::Cursor::new(Vec::new());
-                book.export(Format::Epub, &mut cursor)
-                    .map_err(|e| format!("Conversion failed: {e}"))?;
-                cursor.into_inner()
-            }
-            other => {
-                return Err(format!(
-                    "--route must be 'mechanical' or 'ir', got '{other}'"
-                ));
-            }
+        let bytes = {
+            let mut book = Book::from_bytes(&kfx_bytes, Format::Kfx)
+                .map_err(|e| format!("Failed to open input: {e}"))?;
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            book.export(Format::Epub, &mut cursor)
+                .map_err(|e| format!("Conversion failed: {e}"))?;
+            cursor.into_inner()
         };
         if to_stdout {
             use std::io::Write;

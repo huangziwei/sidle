@@ -7,7 +7,6 @@
 //!
 //! Existing gates:
 //!  - `BOKO_MERGE_TRACE=1` — `.kfx-zip` → `.kfx` merge (mechanical + fast)
-//!  - `BOKO_KFX2EPUB_TRACE=1` — `.kfx` → `.epub` mechanical port
 
 /// Monotonic stopwatch wrapping `std::time::Instant`.
 #[derive(Debug, Clone, Copy)]

@@ -6658,7 +6658,7 @@ mod resource_export_tests {
         // library-gallery / sleep-screen thumbnailer can read.
         let mut book = Book::open("tests/fixtures/[太宰 治] 人間失格.epub").unwrap();
         let kfx = build_kfx_container(&mut book, &|_, _, _, _| {}).unwrap();
-        let loaded = crate::kfx_to_epub::loader::load(&kfx).expect("load own kfx");
+        let loaded = crate::formats::kfx::loader::load(&kfx).expect("load own kfx");
         let is_jxr = |v: &Vec<u8>| v.len() >= 3 && v[0] == 0x49 && v[1] == 0x49 && v[2] == 0xBC;
         let is_jpeg = |v: &Vec<u8>| v.len() >= 3 && v[0] == 0xFF && v[1] == 0xD8 && v[2] == 0xFF;
         // 人間失格 is a text novel — its one image is the cover, which stays JPEG.

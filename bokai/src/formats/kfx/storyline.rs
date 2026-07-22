@@ -162,7 +162,7 @@ fn tokenize_content_item(item: &IonValue, ctx: &TokenizeContext, stream: &mut To
         role = override_role;
     }
 
-    // List tag parity with the mechanical route (calibre's LIST_STYLE_TYPES):
+    // List tag parity with calibre's LIST_STYLE_TYPES:
     // only the five alpha/roman/decimal styles make an `<ol>`; everything
     // else — including KFX's own `numeric`, whose numbering rides the CSS
     // `list-style-type` instead — stays a `<ul>`.
@@ -353,7 +353,7 @@ fn parse_style_events(events: &[IonValue], ctx: &TokenizeContext) -> Vec<SpanSta
                     .map(|n| n as usize)
                     .unwrap_or(0);
                 // Annotation lookups always resolve to `Some`: a miss still
-                // emits an empty `<rt>` (the mechanical route's
+                // emits an empty `<rt>` (calibre's
                 // `lookup_ruby_annotation` returns "" and appends the rt
                 // unconditionally).
                 let annotation_for = |id_1: usize| -> String {
@@ -523,7 +523,7 @@ where
 
 /// [`build_ir_from_tokens`] with anchor stamping: elements at anchored
 /// `(eid, 0)` positions get their `semantics.id` from the anchor table (the
-/// same `a85J` / `toc-148-0` names the mechanical route stamps), and
+/// same `a85J` / `toc-148-0` names calibre stamps), and
 /// registered offsets > 0 are located inside the element's text and marked
 /// with a zero-length anchor span. Elements' raw eids are never emitted —
 /// shipped EPUBs carry only anchor-backed ids.
@@ -576,7 +576,7 @@ where
                 let node_id = chapter.alloc_node(Node::new(node_role));
 
                 // An image element's `link_to` becomes an `<a>` wrapping the
-                // whole emitted structure (the mechanical route wraps the
+                // whole emitted structure (calibre wraps the
                 // returned element the same way).
                 let linked_image_href = elem
                     .is_image
@@ -678,7 +678,7 @@ where
                 }
 
                 // Anchored element: stamp the html id registered at
-                // `(eid, 0)`, never the raw eid (the mechanical route ships
+                // `(eid, 0)`, never the raw eid (calibre ships
                 // no element ids beyond anchor stamps, and neither do we).
                 if let Some(eid) = elem.id {
                     eid_nodes.push((eid, anchor_node));
@@ -738,9 +738,9 @@ where
                     && demote
                 {
                     // `render: inline` block containers demote to a span when
-                    // every descendant is inline-only (the mechanical route's
+                    // every descendant is inline-only (calibre's
                     // calibre `$601 = $283` demotion). A block child — or a
-                    // forced line break, which the mechanical DOM materializes
+                    // forced line break, which calibre's DOM materializes
                     // as a `<br>` — keeps the block box.
                     let all_inline = chapter
                         .children(node_id)
@@ -809,11 +809,11 @@ where
     chapter
 }
 
-/// The IR analog of the mechanical route's `is_inline_only` (calibre
+/// The IR analog of calibre's `is_inline_only` (calibre
 /// `yj_to_epub_content.py:1900`): inline elements with every descendant
-/// inline-only. A text run containing `\n` counts as NOT inline — the
-/// mechanical DOM materializes the break as a `<br>` child, which is
-/// outside calibre's inline tag set and blocks the demotion there.
+/// inline-only. A text run containing `\n` counts as NOT inline — calibre's
+/// DOM materializes the break as a `<br>` child, which is outside calibre's
+/// inline tag set and blocks the demotion there.
 fn is_inline_only_ir(chapter: &Chapter, node: NodeId) -> bool {
     let Some(n) = chapter.node(node) else {
         return false;
@@ -830,7 +830,7 @@ fn is_inline_only_ir(chapter: &Chapter, node: NodeId) -> bool {
 }
 
 /// Settle a block element's role from the merged `$761 layout_hints` /
-/// `$790 heading_level` channels — the mechanical route's
+/// `$790 heading_level` channels — calibre's
 /// `attach_layout_hints` precedence: the named style's hints/level first,
 /// the element's own fields merged after (level fills only when unset),
 /// then the anchor table's nav-registered heading level as the last level
@@ -838,8 +838,8 @@ fn is_inline_only_ir(chapter: &Chapter, node: NodeId) -> bool {
 ///
 /// Promotion to a heading requires the "heading" hint — a bare `$790`
 /// level never promotes (so a schema-assigned `Heading` role without any
-/// heading hint demotes back to `Paragraph`, exactly like the mechanical
-/// route, whose `<hN>` rename fires only off the hint). Figure / caption
+/// heading hint demotes back to `Paragraph`, exactly like calibre,
+/// whose `<hN>` rename fires only off the hint). Figure / caption
 /// hints settle the role the same way; the EPUB emitter keeps them as
 /// `<div>` (EPUB-2.0 gate) but their presence blocks the bare-div collapse.
 fn resolve_hinted_role(
@@ -863,7 +863,7 @@ fn resolve_hinted_role(
         return role;
     }
     if let Role::Heading(_) = role {
-        // `$790` without a "heading" hint anywhere: the mechanical route
+        // `$790` without a "heading" hint anywhere: calibre
         // never promotes these.
         return Role::Paragraph;
     }
@@ -880,7 +880,7 @@ fn resolve_hinted_role(
 
 /// Merge the element's layout hints / heading level: the named style's
 /// hints/level first (calibre inserts these), the element's own fields
-/// after (level fills only when unset) — the mechanical route's
+/// after (level fills only when unset) — calibre's
 /// `attach_layout_hints` precedence.
 fn merged_layout_hints(
     elem: &ElementStart,
@@ -927,7 +927,7 @@ fn resolve_heading_level(
 }
 
 /// The block role a wrapped block image's `<div>` wrapper should take from
-/// the image element's merged layout hints — the mechanical route attaches
+/// the image element's merged layout hints — calibre attaches
 /// the hints to the wrapper (`wrap_block_image` → `attach_layout_hints`),
 /// which `consolidate_html` then promotes (a heading whose content is a
 /// single block image becomes `<hN>`; an `<img>` is not a block descendant,
@@ -955,7 +955,7 @@ fn hinted_wrapper_role(
 }
 
 /// Re-root the chapter under the section's main page-template container —
-/// the body-level `<div>` the mechanical route emits for every reflowable
+/// the body-level `<div>` calibre emits for every reflowable
 /// section — carrying the template's style, then stamp the anchors reaching
 /// this level: the template's `(eid, 0)` first, then the storyline root's
 /// (calibre's `process_section` → `process_story` order; first id wins). The
@@ -1028,7 +1028,7 @@ pub fn apply_section_template(
     }
     if let Some(eid) = template_eid {
         // The template wrapper is a container, never an interleave element —
-        // its offsets walk the mechanical-route space.
+        // its offsets walk calibre's DOM space.
         stamp_offset_anchors(chapter, &[(eid, wrapper)], table, &Default::default());
     }
 }
@@ -1070,7 +1070,7 @@ enum Located {
 }
 
 /// Locate `offset` code points into `root`'s text and return the node to
-/// stamp — the IR analog of the mechanical route's `locate_offset` (calibre
+/// stamp — the IR analog of calibre's `locate_offset` (calibre
 /// `yj_to_epub_content.py:1540`, `split_after=false, zero_len=true`): a
 /// mid-text offset splits the text run around a fresh zero-length span, an
 /// offset at the very end appends one to the element, an offset past the text
@@ -1086,7 +1086,7 @@ fn locate_offset_ir(chapter: &mut Chapter, root: NodeId, offset: i64) -> Option<
     }
     if remaining == 0 {
         // End-of-text position: fresh zero-length span as the element's last
-        // child (the port's `SubElement(root, "span")`).
+        // child (calibre's `SubElement(root, "span")`).
         let span = chapter.alloc_node(Node::new(Role::Inline));
         chapter.append_child(root, span);
         return Some(span);
@@ -1095,8 +1095,8 @@ fn locate_offset_ir(chapter: &mut Chapter, root: NodeId, offset: i64) -> Option<
 }
 
 /// [`locate_offset_ir`] for interleave-built elements, counting in the
-/// element's own KFX event offset space instead of the mechanical route's
-/// DOM-walk space. The two differ because the mechanical route never
+/// element's own KFX event offset space instead of calibre's
+/// DOM-walk space. The two differ because calibre never
 /// reconstructs marks over interleave content: in event space every bare-run
 /// code point counts (`\n` included), each content_list child element counts
 /// exactly ONE position, ruby BASE text counts while annotation text does
@@ -1162,7 +1162,7 @@ fn locate_offset_in_event_space(chapter: &mut Chapter, node: NodeId, offset: i64
                 })
             {
                 // An event span whose text starts exactly at the offset
-                // carries the id itself — same rule as the mechanical-walk
+                // carries the id itself — same rule as calibre's walk
                 // arm above, minus its `\n` invisibility (event space counts
                 // every code point).
                 Located::Found(node)
@@ -1194,7 +1194,7 @@ fn descend_event_space(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
 }
 
 /// One node's contribution to the offset walk. Counting mirrors the
-/// mechanical route's `locate_offset_in`: text runs count code points,
+/// calibre's `locate_offset_in`: text runs count code points,
 /// replaced elements (images) count one position, ruby annotation text and
 /// table/list containers are opaque, other containers descend in document
 /// order.
@@ -1208,7 +1208,7 @@ fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
     let role = n.role;
     match role {
         Role::Text => {
-            // The mechanical route splits a text run at `\n` into span text
+            // Calibre splits a text run at `\n` into span text
             // plus `<br>` tail text at emission, and its offset walk counts
             // only span text — the newline and everything after it in the
             // run are invisible to anchor location (the br contributes
@@ -1221,8 +1221,8 @@ fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
                 .count() as i64;
             if countable > 0 {
                 if offset == 0 {
-                    // The run starts exactly at the offset: the mechanical
-                    // route stamps the id on the run's own `<span>` (which
+                    // The run starts exactly at the offset: calibre
+                    // stamps the id on the run's own `<span>` (which
                     // then survives `strip_empty_spans` with its full text).
                     // Mirror that shape by wrapping the run in a span that
                     // carries the id — NOT a zero-length span before it.
@@ -1245,10 +1245,10 @@ fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
         // `<br>` contributes nothing (see the text-run rule above).
         Role::Break => Located::Remaining(offset),
         // A styled/event span whose own text starts exactly at the offset
-        // carries the id itself — the mechanical route's `locate_offset`
+        // carries the id itself — calibre's `locate_offset`
         // returns the span (its `text` attribute is the run) rather than
         // wrapping or nesting. Only real event spans qualify: a demoted
-        // `render: inline` block has no own text in the mechanical DOM
+        // `render: inline` block has no own text in calibre's DOM
         // (children spans hold it), so it descends like any container.
         Role::Inline
             if offset == 0
@@ -1267,13 +1267,12 @@ fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
         {
             Located::Found(node)
         }
-        // Opaque subtrees. Ruby contributes NOTHING: the mechanical route
-        // (like calibre) emits `<ruby><rb>base</rb><rt>anno</rt></ruby>` and
-        // its offset walk counts only `<span>` direct text — rb text is
-        // skipped, rt never descended — so an offset past a ruby run fails to
-        // locate there; mirroring that keeps the two engines' stamped-id sets
-        // (and page-list fragments) identical. Table and list containers are
-        // likewise never descended.
+        // Opaque subtrees. Ruby contributes NOTHING: calibre emits
+        // `<ruby><rb>base</rb><rt>anno</rt></ruby>` and its offset walk counts
+        // only `<span>` direct text — rb text is skipped, rt never descended —
+        // so an offset past a ruby run fails to locate there; mirroring that
+        // keeps the stamped-id sets (and page-list fragments) matched to
+        // calibre's. Table and list containers are likewise never descended.
         Role::Ruby
         | Role::RubyText
         | Role::Table
@@ -1297,7 +1296,7 @@ fn locate_offset_in_ir(chapter: &mut Chapter, node: NodeId, mut offset: i64) -> 
 
 /// Wrap the text run `node` in a fresh anchor span: the span takes `node`'s
 /// place in the sibling chain and `node` becomes its only child. The stamped
-/// id then wraps the run's full text, matching the mechanical route's
+/// id then wraps the run's full text, matching calibre's
 /// run-boundary stamp (`locate_offset` returning the existing `<span>`).
 fn wrap_text_run_in_span(chapter: &mut Chapter, node: NodeId) -> NodeId {
     let parent = chapter.node(node).and_then(|n| n.parent);
@@ -1424,7 +1423,7 @@ fn build_text_with_spans(
     // KFX can express a link and a ruby/styled run over the SAME text with
     // independent, partially overlapping events — e.g. a TOC line whose
     // per-slice links are pre-cut at ruby-base boundaries while one grouped
-    // ruby spans across them. The mechanical route resolves overlap by
+    // ruby spans across them. Calibre resolves overlap by
     // walking links as the outer partition (links never nest) and emitting
     // other marks only where they fit entirely inside one link's range or
     // one inter-link gap; a mark crossing a segment boundary is dropped
@@ -1432,7 +1431,7 @@ fn build_text_with_spans(
     // front; fully nested or disjoint layouts — the common case — pass
     // through unchanged.
     let total_chars = text.chars().count();
-    // Links the mechanical walk keeps: offset order (stable → event order
+    // Links calibre's walk keeps: offset order (stable → event order
     // on ties), each skipped when it starts inside the previous kept
     // link's range; out-of-bounds events are dropped, not clamped.
     let mut kept_links: Vec<usize> = Vec::new();
@@ -1596,7 +1595,7 @@ fn build_text_with_spans(
 
         // A span starting inside an already-consumed range (only a grouped
         // ruby consumes ahead) is malformed nesting — skip it, like the
-        // mechanical route's covered-mark skip.
+        // calibre's covered-mark skip.
         if span_start < char_pos {
             continue;
         }
@@ -1617,7 +1616,7 @@ fn build_text_with_spans(
 
         // Grouped ruby (`ruby_id_list`): one `<ruby>` holding interleaved
         // base-slice / `<rt>` pairs. Built whole here — nothing nests inside
-        // a ruby (the mechanical route slices rb text straight off the
+        // a ruby (calibre slices rb text straight off the
         // id_list too) — and the cursor jumps past the event's range.
         if span.role == Role::Ruby && !span.ruby_pairs.is_empty() && span_end > span_start {
             let ruby_node = create_span_node(chapter, span);
@@ -3379,7 +3378,7 @@ mod tests {
             inline_style: Vec::new(),
             render_inline: false,
             is_image: false,
-            // A `$790` level alone never promotes (mechanical-route rule);
+            // A `$790` level alone never promotes (calibre's rule);
             // the "heading" hint must accompany it.
             layout_hints: vec!["heading".to_string()],
             heading_level: Some("2".to_string()),
@@ -3631,7 +3630,7 @@ mod tests {
             });
 
         // The anchor must split the tail run between "い" and "です" —
-        // NOT fail to locate (the mechanical-route walk would stop at the
+        // NOT fail to locate (calibre's walk would stop at the
         // ruby and never reach offset 8).
         let stamped = table.id_at(50, 8).unwrap();
         let para_id = chapter.children(chapter.root()).next().unwrap();

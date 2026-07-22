@@ -6,27 +6,25 @@
 //! [`CssProgram`](crate::import::CssProgram) via
 //! [`crate::import::Importer::stylesheet_program`]
 //! (today only the KFX importer does); books without one go through the
-//! string-synthesis regime in `super::synth`. Chapters run the same DOM,
-//! consolidation passes, and serializer as the mechanical `kfx_to_epub`
-//! route, so both KFX→EPUB engines ship byte-identical files by
-//! construction.
+//! string-synthesis regime in `super::synth`. Chapters run calibre's DOM,
+//! consolidation passes, and serializer, which is what keeps the emitted
+//! XHTML the shape existing readers and stored links expect.
 //!
-//! The chapter build mirrors the mechanical walk's attribute channels
-//! exactly:
+//! The chapter build keeps calibre's attribute channels:
 //!
 //! - **Walk-time attributes** (`href`, `src`, `alt`, `id`) go directly onto
-//!   the element in the mechanical route's insertion order.
+//!   the element, in calibre's insertion order.
 //! - **Block classes / inline styles** accumulate in pending maps and land
 //!   *after* the walk via [`dom::finalize_attrs`] — so a stamped `id`
 //!   precedes `class` on block elements.
-//! - **Inline-run classes** (styled spans, ruby, links — the mechanical
-//!   route's `attach_inline_style` sites) are set at creation, so a
+//! - **Inline-run classes** (styled spans, ruby, links — calibre's
+//!   `attach_inline_style` sites) are set at creation, so a
 //!   later-stamped `id` follows `class` on those.
 //!
 //! Block containers all emit as `<div>`; the shared
 //! [`dom::consolidate_part`] performs the div→p leaf-text rename and the
-//! `<h<N>>` promotion off the layout-hint map, exactly as the mechanical
-//! route does. Roles this regime never receives from its current source
+//! `<h<N>>` promotion off the layout-hint map, exactly as calibre does.
+//! Roles this regime never receives from its current source
 //! (definition lists, code blocks) keep their natural tags.
 //!
 //! Stylesheet side: class-name sanitization ([`safe_class_name`]),
@@ -38,21 +36,14 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::model::{Chapter, NodeId as IrNodeId, Role};
-use crate::style::parse_inline_decl;
+use crate::style::{CssDecl, parse_inline_decl};
 
 use super::dom::{self, Dom, LayoutHints};
 use super::normalize::{InlineStyleEmit, LinkOutcome, SourceElements, SourceStyles};
 
-// Port-compat re-exports: the frozen mechanical port reaches these through
-// its historical `export::css::` paths (this module's alias in
-// `export/mod.rs`); their homes are `style::declaration` and
-// `formats::kfx::yj_properties`. Deleted together with the port.
-pub use crate::formats::kfx::yj_properties::partition_image_style;
-pub use crate::style::CssDecl;
-
 /// Per-chapter emission inputs for the DOM-synthesis path.
 pub struct ChapterEmit<'a> {
-    /// `<title>` text — the section name (mechanical: `push_book_part`'s
+    /// `<title>` text — the section name (calibre: `push_book_part`'s
     /// `title` argument), NOT the deduped filename.
     pub title: &'a str,
     /// Book language for `<html xml:lang lang>` (skipped when empty).
@@ -80,20 +71,20 @@ pub struct ChapterEmit<'a> {
 /// image paths are added to `assets`.
 pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<String>) -> String {
     let (mut dom, html_id, head_id, body_id) = dom::new_book_part(opts.title);
-    // `xml:lang` + `lang` on `<html>` from the book language (mechanical:
+    // `xml:lang` + `lang` on `<html>` from the book language (calibre:
     // `push_book_part`; calibre `set_doc_lang`).
     let lang = opts.language.trim();
     if !lang.is_empty() {
         dom.get_mut(html_id).set("xml:lang", lang);
         dom.get_mut(html_id).set("lang", lang);
     }
-    // Stylesheet link — sibling filename, matching the mechanical route.
+    // Stylesheet link — sibling filename, matching calibre.
     let link = dom.sub_element(head_id, "link");
     let l = dom.get_mut(link);
     l.set("rel", "stylesheet");
     l.set("type", "text/css");
     l.set("href", "style.css");
-    // Fixed-layout page viewport, after the stylesheet link (mechanical:
+    // Fixed-layout page viewport, after the stylesheet link (calibre:
     // `emit_fxl_page` adds it to the already-linked head).
     if let Some((w, h)) = opts.viewport {
         let meta = dom.sub_element(head_id, "meta");
@@ -128,7 +119,7 @@ pub fn emit_chapter(ir: &Chapter, opts: &ChapterEmit<'_>, assets: &mut HashSet<S
     // [`merge_sole_container_into_body`].
     merge_sole_container_into_body(&mut dom, body_id, &mut classes, &mut styles, &mut hints);
 
-    // Same pass order as the mechanical pipeline (`build_output`): links are
+    // Same pass order as calibre's pipeline (`build_output`): links are
     // already resolved (walk-time), then consolidate → list normalization →
     // EOL → (styles were pruned/promoted book-wide upstream) → attribute
     // finalization → document assembly.
@@ -196,7 +187,7 @@ struct Builder<'a, 'b> {
 impl Builder<'_, '_> {
     /// Append IR text lxml-style: onto the parent's leading text when it has
     /// no element children yet, else onto the last child's tail. This is the
-    /// post-`strip_empty_spans` shape the mechanical route reaches — plain
+    /// post-`strip_empty_spans` shape calibre reaches — plain
     /// runs merge into the surrounding text slots.
     fn append_text(&mut self, parent: dom::NodeId, text: &str) {
         if text.is_empty() {
@@ -248,7 +239,7 @@ impl Builder<'_, '_> {
     }
 
     /// Inline-channel class: a real `class` attribute at creation time
-    /// (mechanical `attach_inline_style`), so `strip_empty_spans` keeps the
+    /// (calibre `attach_inline_style`), so `strip_empty_spans` keeps the
     /// element and a later `id` lands after it.
     fn attach_inline_class(&mut self, id: IrNodeId, el: dom::NodeId) {
         if let Some(class) = self.named_class(id) {
@@ -275,12 +266,12 @@ impl Builder<'_, '_> {
     /// naming a file the container has no entry for — epubcheck RSC-007, and a
     /// broken-image box where content should be. Emitting a `<span>` with the
     /// alt text keeps whatever semantic content the source gave and references
-    /// nothing. This matches the mechanical route's long-standing behavior for
+    /// nothing. This matches calibre's long-standing behavior for
     /// KFX; it applies here to every source because the rule is about what a
     /// container may contain, not about where the book came from.
     fn emit_image(&mut self, id: IrNodeId, parent: dom::NodeId) {
         let src = self.ir.semantics.src(id);
-        // `alt` is always present (mechanical: calibre defaults "").
+        // `alt` is always present (calibre: calibre defaults "").
         let alt = self.ir.semantics.alt(id).unwrap_or("").to_string();
         let missing = match (src, self.opts.available_assets) {
             (Some(s), Some(have)) => !have.contains(s),
@@ -311,8 +302,8 @@ impl Builder<'_, '_> {
     /// Carry the node's source element id onto its DOM element, so a renderer
     /// can resolve an `(element, offset)` handle by querying `[data-eid]` and
     /// walking text from there. Precedes [`Self::stamp_id`] at every call site
-    /// — the mechanical route stamps the eid before the position anchor, and
-    /// matching attribute order keeps the two routes' documents comparable.
+    /// — calibre stamps the eid before the position anchor, and matching
+    /// that attribute order keeps the documents calibre-shaped.
     fn stamp_source_element(&mut self, id: IrNodeId, el: dom::NodeId) {
         if self.opts.source_elements == SourceElements::Omit {
             return;
@@ -354,7 +345,7 @@ impl Builder<'_, '_> {
                         rb = None;
                         let rt = self.dom.sub_element(ruby, "rt");
                         // `<rt>` always exists, even with an empty
-                        // annotation (mechanical: lookup miss → "").
+                        // annotation (calibre: lookup miss → "").
                         if self.dom.get(rt).text.is_none() {
                             self.dom.get_mut(rt).text = Some(String::new());
                         }
@@ -399,7 +390,7 @@ impl Builder<'_, '_> {
                 if self.ir.semantics.render_inline(id) {
                     // A demoted `render: inline` block keeps the block
                     // attribute channels (id at walk time, class/style via
-                    // the pending maps) — the mechanical demotion retags the
+                    // the pending maps) — calibre's demotion retags the
                     // div but leaves its attribute plumbing alone.
                     self.stamp_source_element(id, span);
                     self.stamp_id(id, span);
@@ -420,7 +411,7 @@ impl Builder<'_, '_> {
             _ => {
                 let mut tag = self.block_tag(role);
                 // Row children that would emit as `<div>` become `<td>` —
-                // the mechanical route's calibre rule (`emit_table_row`).
+                // calibre's rule (`emit_table_row`).
                 if tag == "div" && self.dom.get(parent).tag == "tr" {
                     tag = "td";
                 }
@@ -450,7 +441,7 @@ impl Builder<'_, '_> {
 
     /// Tag for a block-level role, pre-consolidation. KFX block containers
     /// (including headings, figures, captions, quotes, and note asides — the
-    /// mechanical route's EPUB-2.0-gated promotions) all emit `<div>`;
+    /// calibre's EPUB-2.0-gated promotions) all emit `<div>`;
     /// [`dom::consolidate_part`] renames leaf-text divs to `<p>` and
     /// promotes hinted headings to `<h<N>>`.
     fn block_tag(&self, role: Role) -> &'static str {
@@ -462,7 +453,7 @@ impl Builder<'_, '_> {
             Role::TableHead => "thead",
             Role::TableBody => "tbody",
             Role::TableRow => "tr",
-            // The mechanical route never emits `<th>` (calibre converts row
+            // Calibre never emits `<th>` (it converts row
             // children to `<td>`).
             Role::TableCell => "td",
             Role::Rule => "hr",
