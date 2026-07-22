@@ -458,16 +458,22 @@ impl EpubExporter {
             zip.write_all(xhtml.as_bytes())?;
         }
 
-        // 7. Write chapters (bytes already loaded for the manifest scan).
+        // 7. Write chapters (bytes already loaded for the manifest scan),
+        // normalized to EPUB 3 conformance — passthrough preserves source bytes,
+        // and pre-EPUB-3 source content (e.g. a Sigil-authored book carried
+        // through AZW3: XHTML 1.1 DOCTYPE, empty <title>) is otherwise emitted
+        // verbatim and fails epubcheck. Rendered content is untouched.
+        let book_title = book.metadata().title.clone();
         for (entry, content) in spine.iter().zip(&chapter_bytes) {
             let source_path = book
                 .source_id(entry.id)
                 .unwrap_or("unknown.xhtml")
                 .to_string();
             let zip_path = format!("OEBPS/{}", sanitize_path(&source_path));
+            let doc = normalize_passthrough_xhtml(content, &book_title);
 
             zip.start_file(&zip_path, deflated).map_err(io_error)?;
-            zip.write_all(content)?;
+            zip.write_all(&doc)?;
         }
 
         // 8. Write assets
@@ -1251,6 +1257,66 @@ pub(crate) fn is_cover_only_document(html: &str, cover_href: &str) -> bool {
     true
 }
 
+/// Normalize a passthrough content document to EPUB 3 conformance without
+/// touching rendered content: replace a non-`<!DOCTYPE html>` DOCTYPE (pre-EPUB-3
+/// source keeps its old one → epubcheck `HTM-004`) and fill an empty `<title>`
+/// (`RSC-005`). Returns the input unchanged when it is already conformant or is
+/// not UTF-8 text.
+fn normalize_passthrough_xhtml(content: &[u8], fallback_title: &str) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(content) else {
+        return content.to_vec();
+    };
+    let mut owned: Option<String> = None;
+    if let Some((start, end)) = doctype_span(text)
+        && !text[start..end].eq_ignore_ascii_case("<!DOCTYPE html>")
+    {
+        let mut s = text.to_string();
+        s.replace_range(start..end, "<!DOCTYPE html>");
+        owned = Some(s);
+    }
+    if let Some(fixed) = fill_empty_title(owned.as_deref().unwrap_or(text), fallback_title) {
+        owned = Some(fixed);
+    }
+    owned
+        .map(String::into_bytes)
+        .unwrap_or_else(|| content.to_vec())
+}
+
+/// Byte span of the document's `<!DOCTYPE …>` declaration, or `None` if it has
+/// none. A DOCTYPE sits at the top of the document; match the two casings real
+/// content uses (`<!DOCTYPE` / `<!doctype`) directly, without slicing at a byte
+/// offset that could split a multi-byte character.
+fn doctype_span(s: &str) -> Option<(usize, usize)> {
+    let start = s.find("<!DOCTYPE").or_else(|| s.find("<!doctype"))?;
+    let end = start + s[start..].find('>')? + 1;
+    Some((start, end))
+}
+
+/// If the first `<title>` is empty (or self-closing), return the document with it
+/// filled by `fallback`; `None` when the title is already non-empty or absent.
+fn fill_empty_title(s: &str, fallback: &str) -> Option<String> {
+    let open = s.find("<title")?;
+    let gt = open + s[open..].find('>')?;
+    let self_closing = s.as_bytes()[gt - 1] == b'/';
+    let elem_end = if self_closing {
+        gt + 1
+    } else {
+        let cs = gt + 1;
+        let ce = cs + s[cs..].find("</title>")?;
+        if !s[cs..ce].trim().is_empty() {
+            return None; // already non-empty
+        }
+        ce + "</title>".len()
+    };
+    let mut out = String::with_capacity(s.len() + fallback.len() + 16);
+    out.push_str(&s[..open]);
+    out.push_str("<title>");
+    out.push_str(&crate::formats::epub::edit::escape_text(fallback));
+    out.push_str("</title>");
+    out.push_str(&s[elem_end..]);
+    Some(out)
+}
+
 /// Build the OPF `<metadata>` block from the book's metadata.
 ///
 /// With `normalized` set (KFX sources), the field set follows calibre's:
@@ -1534,6 +1600,54 @@ mod tests {
                 "chapter_3.xhtml",
                 "secB.xhtml"
             ]
+        );
+    }
+
+    #[test]
+    fn passthrough_normalize_rewrites_doctype_and_fills_title() {
+        let doc = "<?xml version=\"1.0\"?>\n\
+            <!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"x.dtd\">\n\
+            <html><head><title></title></head><body><p>hi</p></body></html>";
+        let out =
+            String::from_utf8(normalize_passthrough_xhtml(doc.as_bytes(), "My Book")).unwrap();
+        assert!(out.contains("<!DOCTYPE html>") && !out.contains("XHTML 1.1"));
+        assert!(
+            out.contains("<title>My Book</title>"),
+            "empty title filled: {out}"
+        );
+    }
+
+    #[test]
+    fn passthrough_normalize_is_a_noop_for_conformant_docs() {
+        let doc = "<!DOCTYPE html>\n<html><head><title>Ch. 1</title></head><body>x</body></html>";
+        assert_eq!(
+            normalize_passthrough_xhtml(doc.as_bytes(), "Book"),
+            doc.as_bytes(),
+            "already-valid doc is byte-identical"
+        );
+    }
+
+    #[test]
+    fn passthrough_normalize_handles_multibyte_content_without_panicking() {
+        // Regression: an earlier version sliced at byte 1024 to find the DOCTYPE,
+        // which splits a multi-byte char in CJK content and panics.
+        let filler = "字".repeat(2000); // ~6 KB of 3-byte chars, crosses byte 1024
+        let doc = format!(
+            "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"x.dtd\">\n\
+             <html><head><title></title></head><body><p>{filler}</p></body></html>"
+        );
+        let out = String::from_utf8(normalize_passthrough_xhtml(doc.as_bytes(), "书")).unwrap();
+        assert!(out.contains("<!DOCTYPE html>") && !out.contains("XHTML 1.1"));
+        assert!(out.contains("<title>书</title>") && out.contains(&filler));
+    }
+
+    #[test]
+    fn passthrough_normalize_fills_self_closing_title_and_escapes() {
+        let doc = "<!DOCTYPE html>\n<html><head><title/></head><body>x</body></html>";
+        let out = String::from_utf8(normalize_passthrough_xhtml(doc.as_bytes(), "A & B")).unwrap();
+        assert!(
+            out.contains("<title>A &amp; B</title>"),
+            "filled + escaped: {out}"
         );
     }
 

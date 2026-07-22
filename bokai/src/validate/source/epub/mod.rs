@@ -23,6 +23,9 @@
 //!   directory. `..` parent segments inside the OPF tree are fine (e.g.
 //!   `../style.css` from a chapter is legal); escapes above the OPF root
 //!   are not — Apple Books rejects them silently.
+//! - Every content document declares `<!DOCTYPE html>` (not a legacy XHTML DTD)
+//!   and carries a non-empty `<title>` — the two content-conformance rules
+//!   (epubcheck HTM-004 / RSC-005) real books trip most often.
 //!
 //! Out of scope (deferred): full XSD/RNG/Schematron validation, fragment
 //! resolution within XHTML, CSS validation, content document
@@ -126,6 +129,8 @@ pub enum Rule {
     NonLinearUnreachable,
     BrokenHref,
     HrefEscapesOpfRoot,
+    IrregularDoctype,
+    EmptyTitle,
 }
 
 impl Rule {
@@ -146,6 +151,10 @@ impl Rule {
             Rule::NonLinearUnreachable => "non-linear-unreachable",
             Rule::BrokenHref => "broken-href",
             Rule::HrefEscapesOpfRoot => "href-escapes-opf-root",
+            // epubcheck HTM-004 / RSC-005 — pre-EPUB-3 source content that the
+            // passthrough export used to copy verbatim tripped both.
+            Rule::IrregularDoctype => "irregular-doctype",
+            Rule::EmptyTitle => "empty-title",
         }
     }
 
@@ -172,6 +181,14 @@ impl Rule {
             Rule::NonLinearUnreachable => Some(FixHint::new(
                 "make-linear-or-link",
                 "make this spine item linear, or add an <a href> to it from another document",
+            )),
+            Rule::IrregularDoctype => Some(FixHint::new(
+                "use-html5-doctype",
+                "replace the document type declaration with `<!DOCTYPE html>`",
+            )),
+            Rule::EmptyTitle => Some(FixHint::new(
+                "fill-title",
+                "give the content document's <title> element non-empty text",
             )),
             _ => None,
         }
@@ -251,8 +268,77 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         &opf_path,
         &mut report,
     );
+    check_content_conformance(&pkg, &opf_dir, &mut zip, &mut report);
 
     report
+}
+
+// =========================================================================
+// Content-document conformance: EPUB 3 content docs need `<!DOCTYPE html>`
+// and a non-empty <title> (epubcheck HTM-004 / RSC-005). Pre-EPUB-3 source
+// (a Sigil-authored book carried through AZW3: XHTML 1.1 DOCTYPE, empty
+// <title>) tripped both — passthrough export emitted it verbatim and neither
+// this validator nor the pair harness noticed.
+// =========================================================================
+
+fn check_content_conformance(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    report: &mut Report,
+) {
+    for item in &pkg.manifest {
+        if !is_xhtml(&item.media_type) {
+            continue;
+        }
+        let path = join_opf(opf_dir, &item.href);
+        let Ok(text) = read_text(zip, &path) else {
+            continue;
+        };
+        if let Some(dt) = find_doctype(&text)
+            && !dt.eq_ignore_ascii_case("<!DOCTYPE html>")
+        {
+            report.push(Violation::new(
+                Rule::IrregularDoctype,
+                path.clone(),
+                format!("irregular DOCTYPE {dt:?}; EPUB 3 requires `<!DOCTYPE html>`"),
+            ));
+        }
+        if has_empty_title(&text) {
+            report.push(Violation::new(
+                Rule::EmptyTitle,
+                path,
+                "content document has an empty <title>; EPUB 3 requires non-empty title text",
+            ));
+        }
+    }
+}
+
+/// The document's `<!DOCTYPE …>` declaration text, matched at the two casings
+/// real content uses. Uses byte-boundary-safe `find` (never slices at an
+/// arbitrary offset that could split a multi-byte char).
+fn find_doctype(s: &str) -> Option<&str> {
+    let start = s.find("<!DOCTYPE").or_else(|| s.find("<!doctype"))?;
+    let end = start + s[start..].find('>')? + 1;
+    Some(&s[start..end])
+}
+
+/// True when the first `<title>` element is empty or self-closing.
+fn has_empty_title(s: &str) -> bool {
+    let Some(open) = s.find("<title") else {
+        return false;
+    };
+    let Some(rel) = s[open..].find('>') else {
+        return false;
+    };
+    let gt = open + rel;
+    if s.as_bytes()[gt - 1] == b'/' {
+        return true; // <title/>
+    }
+    match s[gt + 1..].find("</title>") {
+        Some(r) => s[gt + 1..gt + 1 + r].trim().is_empty(),
+        None => false,
+    }
 }
 
 // =========================================================================
@@ -698,6 +784,46 @@ mod tests {
         assert_eq!(findings[2].rule, "broken-href");
         assert_eq!(findings[2].severity, Severity::Error);
         assert!(findings[2].fix.is_none());
+    }
+
+    #[test]
+    fn content_conformance_rules_lower_to_findings() {
+        let report = Report {
+            violations: vec![
+                Violation::new(Rule::IrregularDoctype, "OEBPS/c1.xhtml", "xhtml 1.1"),
+                Violation::new(Rule::EmptyTitle, "OEBPS/c1.xhtml", "empty"),
+            ],
+        };
+        let f = report.into_findings();
+        assert_eq!(f[0].rule, "irregular-doctype");
+        assert_eq!(f[0].fix.as_ref().unwrap().action, "use-html5-doctype");
+        assert_eq!(f[1].rule, "empty-title");
+        assert_eq!(f[1].fix.as_ref().unwrap().action, "fill-title");
+    }
+
+    #[test]
+    fn find_doctype_matches_casings_and_is_utf8_safe() {
+        assert_eq!(
+            find_doctype("<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"x\">\n<html>"),
+            Some("<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"x\">")
+        );
+        assert_eq!(
+            find_doctype("<!doctype html>\n<html>"),
+            Some("<!doctype html>")
+        );
+        assert_eq!(find_doctype("<html>字字字</html>"), None);
+        // A DOCTYPE past a run of multi-byte chars must be found, not panic.
+        let s = format!("{}\n<!DOCTYPE html>", "字".repeat(1000));
+        assert_eq!(find_doctype(&s), Some("<!DOCTYPE html>"));
+    }
+
+    #[test]
+    fn has_empty_title_detects_empty_and_self_closing() {
+        assert!(has_empty_title("<head><title></title></head>"));
+        assert!(has_empty_title("<head><title/></head>"));
+        assert!(has_empty_title("<head><title>   </title></head>"));
+        assert!(!has_empty_title("<head><title>第一章</title></head>"));
+        assert!(!has_empty_title("<head></head>")); // absent title is a different rule
     }
 
     /// Everything below validates a real EPUB, and the only EPUB *writer* in
