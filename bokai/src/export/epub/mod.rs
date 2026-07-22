@@ -330,10 +330,11 @@ impl EpubExporter {
         // The source may already ship a cover page in the spine — a
         // calibre-lineage EPUB's `titlepage.xhtml` is the same SVG wrapper
         // `build_titlepage` emits. Synthesizing on top of it puts two cover
-        // pages in the reading flow, both `calibre:cover`, both rendering the
-        // same image. Reuse the source's page and skip synthesis: passthrough
-        // keeps the source's own bytes, and dropping a spine document instead
-        // would orphan every link into it.
+        // pages in the reading flow, both rendering the same image. Reuse the
+        // source's page and skip synthesis (detected structurally by
+        // `is_cover_only_document`, not any in-page marker): passthrough keeps
+        // the source's own bytes, and dropping a spine document instead would
+        // orphan every link into it.
         let source_cover_page: Option<String> = book
             .metadata()
             .cover_image

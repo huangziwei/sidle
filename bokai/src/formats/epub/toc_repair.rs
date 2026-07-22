@@ -21,7 +21,7 @@
 use std::collections::HashSet;
 use std::io;
 
-use crate::formats::epub::edit::{EpubPackage, escape_attr, escape_text};
+use crate::formats::epub::edit::{EpubPackage, attr_value, escape_attr, escape_text};
 use crate::formats::epub::{OpfData, parse_nav_landmarks, parse_opf, parse_opf_guide};
 use crate::model::{LandmarkType, TocEntry};
 use crate::util::{decode_text, extract_xml_encoding, percent_decode};
@@ -754,27 +754,6 @@ fn first_heading(xhtml: &str) -> Option<(String, Option<String>)> {
             }
         }
         i += 1;
-    }
-    None
-}
-
-/// The value of `name="…"`/`name='…'` in a start tag, respecting attribute
-/// boundaries (so `type` doesn't match inside `epub:type`).
-fn attr_value(tag: &str, name: &str) -> Option<String> {
-    let needle = format!("{name}=");
-    let mut from = 0;
-    while let Some(rel) = tag[from..].find(&needle) {
-        let pos = from + rel;
-        let boundary = pos == 0 || tag.as_bytes()[pos - 1].is_ascii_whitespace();
-        if boundary {
-            let after = &tag[pos + needle.len()..];
-            let q = after.chars().next()?;
-            if q == '"' || q == '\'' {
-                let end = after[1..].find(q)?;
-                return Some(after[1..1 + end].to_string());
-            }
-        }
-        from = pos + needle.len();
     }
     None
 }

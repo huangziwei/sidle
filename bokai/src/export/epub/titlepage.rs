@@ -1,13 +1,13 @@
-//! Calibre-shaped `titlepage.xhtml` — one builder for the normalized and raw
-//! EPUB exports alike, so every cover page has the same shape.
+//! SVG cover wrapper for the EPUB titlepage — one builder for the normalized and
+//! raw exports alike, so every synthesized cover page has the same shape.
 //!
-//! An SVG `viewBox` sized to the cover image's pixel dimensions, with the
-//! image referenced via `xlink:href`. Renders full-bleed in Apple Books /
-//! Kindle because the `viewBox` is self-contained CSS-wise (bypasses the
-//! reader's body margin defaults a plain `<img>` would inherit).
-//! `<meta name="calibre:cover">` flags this as the title page rather than
-//! the first content page. Without dimensions the `viewBox` would collapse,
-//! so a bare `<img>` wrapper ships instead.
+//! An SVG `viewBox` sized to the cover image's pixel dimensions, with the image
+//! referenced via `xlink:href`, renders full-bleed in Apple Books / Kindle: the
+//! `viewBox` is self-contained CSS-wise, bypassing the body-margin defaults a
+//! plain `<img>` would inherit. Without dimensions the `viewBox` would collapse,
+//! so a bare `<img>` wrapper ships instead. The cover page is identified through
+//! the OPF (`<meta name="cover">` / `properties="cover-image"` and the guide
+//! reference), not an in-page marker.
 
 /// Build the titlepage document. `dims` is the cover's pixel size
 /// (`None` / zero → the `<img>` fallback variant).
@@ -20,9 +20,8 @@ pub(crate) fn build_titlepage(cover_href: &str, dims: Option<(u32, u32)>) -> Str
              <html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\">\n\
              <head>\n\
              <meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\"/>\n\
-             <meta name=\"calibre:cover\" content=\"true\"/>\n\
              <title>Cover</title>\n\
-             <style type=\"text/css\" title=\"override_css\">\n\
+             <style type=\"text/css\">\n\
              @page {{padding: 0pt; margin:0pt}}\n\
              body {{ text-align: center; padding:0pt; margin: 0pt; }}\n\
              </style>\n\
@@ -42,7 +41,6 @@ pub(crate) fn build_titlepage(cover_href: &str, dims: Option<(u32, u32)>) -> Str
              <html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\">\n\
              <head>\n\
              <meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\"/>\n\
-             <meta name=\"calibre:cover\" content=\"true\"/>\n\
              <title>Cover</title>\n\
              </head>\n\
              <body><div><img src=\"{href}\" alt=\"\"/></div></body>\n\

@@ -14,11 +14,15 @@
 //! untouched (matching the KFX primitive — v1 sets, it does not clear).
 //!
 //! Scope (v1): targets the near-universal `dc:`-prefixed Dublin Core form real
-//! EPUBs use. It sets values; it does not prune stale `<meta refines>` sort-key
-//! refinements left pointing at replaced creators (the importer ignores a
-//! dangling refinement, so this is harmless).
+//! EPUBs use. Replacing the author list also prunes any `<meta refines="#…">`
+//! refinement that pointed at a replaced creator — leaving it would dangle the
+//! `refines` fragment (epubcheck flags it, and it undoes the validity the
+//! exporter's `id="creatorN"` scheme guarantees). A single-valued field's edit
+//! replaces only the element's text, keeping its `id`, so a refinement on it
+//! still resolves; the refinement's own value (e.g. a title `file-as` sort key)
+//! is left as-is rather than re-derived.
 
-use crate::formats::epub::edit::{EpubPackage, escape_text};
+use crate::formats::epub::edit::{EpubPackage, attr_value, escape_text};
 
 /// Which OPF metadata fields to set. `None` leaves a field untouched.
 #[derive(Debug, Clone, Default)]
@@ -128,10 +132,24 @@ fn dc_content_span(opf: &str, tag: &str) -> Option<(usize, usize)> {
 
 /// Replace the run of `<dc:creator>` elements with `authors`, one element each,
 /// at the position of the first existing creator (or appended to `<metadata>`).
+///
+/// New creators carry the exporter's `id="creatorN"` scheme, and any
+/// `<meta refines="#…">` refinement (sort-key `file-as`, `role`, …) that pointed
+/// at a *replaced* creator is pruned: it described the old creator, and leaving
+/// it would dangle the `refines` fragment. New creators carry no refinement (a
+/// bare `<dc:creator>` is authorship by default, and this primitive has no
+/// sort-key input to synthesize one from).
 fn set_creators(opf: &str, authors: &[String]) -> String {
     let creators = authors
         .iter()
-        .map(|a| format!("<dc:creator>{}</dc:creator>", escape_text(a)))
+        .enumerate()
+        .map(|(i, a)| {
+            format!(
+                "<dc:creator id=\"creator{}\">{}</dc:creator>",
+                i + 1,
+                escape_text(a)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n    ");
 
@@ -140,6 +158,7 @@ fn set_creators(opf: &str, authors: &[String]) -> String {
     let mut out = String::with_capacity(opf.len() + creators.len());
     let mut copied = 0;
     let mut first_pos: Option<usize> = None;
+    let mut old_ids: Vec<String> = Vec::new();
     let mut scan = 0;
     while let Some(rel) = opf[scan..].find(open) {
         let cstart = scan + rel;
@@ -156,6 +175,9 @@ fn set_creators(opf: &str, authors: &[String]) -> String {
             break;
         };
         let gt = cstart + gtrel;
+        if let Some(id) = attr_value(&opf[cstart..gt], "id") {
+            old_ids.push(id);
+        }
         let elem_end = if opf.as_bytes()[gt.saturating_sub(1)] == b'/' {
             gt + 1 // self-closing creator
         } else {
@@ -171,13 +193,73 @@ fn set_creators(opf: &str, authors: &[String]) -> String {
     }
     out.push_str(&opf[copied..]);
 
-    match first_pos {
+    let out = match first_pos {
         Some(pos) => {
             out.insert_str(pos, &creators);
             out
         }
         None => inject_into_metadata(&out, &creators),
+    };
+    strip_meta_refines(&out, &old_ids)
+}
+
+/// Remove every `<meta … refines="#<id>" …>…</meta>` (and self-closing form)
+/// whose `refines` fragment names one of `ids`, taking the element's whole
+/// indented line with it. Used to drop refinements orphaned when their
+/// `<dc:creator>` target is replaced. No-op when `ids` is empty.
+fn strip_meta_refines(opf: &str, ids: &[String]) -> String {
+    if ids.is_empty() {
+        return opf.to_string();
     }
+    let targets: Vec<String> = ids.iter().map(|id| format!("#{id}")).collect();
+    let mut out = String::with_capacity(opf.len());
+    let mut copied = 0;
+    let mut scan = 0;
+    while let Some(rel) = opf[scan..].find("<meta") {
+        let mstart = scan + rel;
+        // Tag-boundary guard: skip `<metadata`, match only the `<meta` element.
+        let after = opf.as_bytes().get(mstart + 5).copied().unwrap_or(b'>');
+        if !(after == b'>' || after == b'/' || after.is_ascii_whitespace()) {
+            scan = mstart + 5;
+            continue;
+        }
+        let Some(gtrel) = opf[mstart..].find('>') else {
+            break;
+        };
+        let gt = mstart + gtrel;
+        let elem_end = if opf.as_bytes()[gt.saturating_sub(1)] == b'/' {
+            gt + 1 // self-closing <meta …/>
+        } else {
+            match opf[gt + 1..].find("</meta>") {
+                Some(c) => gt + 1 + c + "</meta>".len(),
+                None => gt + 1,
+            }
+        };
+        let refines_match =
+            attr_value(&opf[mstart..=gt], "refines").is_some_and(|v| targets.contains(&v));
+        if refines_match {
+            // Take the whole line: leading indentation back to the previous
+            // newline (only when that gap is blank) and the trailing newline.
+            let prev_nl = opf[..mstart].rfind('\n').map_or(0, |p| p + 1);
+            let line_start = if opf[prev_nl..mstart].trim().is_empty() {
+                prev_nl
+            } else {
+                mstart
+            };
+            let line_end = if opf[elem_end..].starts_with('\n') {
+                elem_end + 1
+            } else {
+                elem_end
+            };
+            out.push_str(&opf[copied..line_start]);
+            copied = line_end;
+            scan = line_end;
+        } else {
+            scan = elem_end;
+        }
+    }
+    out.push_str(&opf[copied..]);
+    out
 }
 
 /// Set the ASIN identifier's text: replace the `scheme="ASIN"` (or `id="asin"`)
@@ -344,17 +426,47 @@ mod tests {
         assert!(out.contains("<dc:title>T</dc:title>"), "existing kept");
     }
 
-    /// Replacing authors drops every old creator and injects the new run.
+    /// Replacing authors drops every old creator and injects the new run, each
+    /// element carrying the exporter's `id="creatorN"` scheme.
     #[test]
     fn set_creators_replaces_the_whole_run() {
         let opf = "<metadata>\n<dc:creator id=\"a\">Old One</dc:creator>\n<dc:creator>Old Two</dc:creator>\n<dc:title>T</dc:title>\n</metadata>";
         let out = set_creators(opf, &["New".to_string()]);
-        assert!(out.contains("<dc:creator>New</dc:creator>"));
+        assert!(out.contains("<dc:creator id=\"creator1\">New</dc:creator>"));
         assert!(
             !out.contains("Old One") && !out.contains("Old Two"),
             "old creators gone"
         );
         assert!(out.contains("<dc:title>T</dc:title>"), "title preserved");
         assert_eq!(out.matches("<dc:creator").count(), 1, "exactly one creator");
+    }
+
+    /// Replacing authors prunes the `<meta refines="#creatorN">` refinements that
+    /// pointed at the old creators, so no `refines` fragment is left dangling —
+    /// the defect that silently made an author-edited book epubcheck-dirty. This
+    /// is the exact shape the exporter emits.
+    #[test]
+    fn set_creators_prunes_orphaned_refines() {
+        let opf = "<metadata>\n    \
+            <dc:creator id=\"creator1\">Old</dc:creator>\n    \
+            <meta refines=\"#creator1\" property=\"role\" scheme=\"marc:relators\">aut</meta>\n    \
+            <meta refines=\"#creator1\" property=\"file-as\">Old, The</meta>\n    \
+            <dc:language>en</dc:language>\n</metadata>";
+        let out = set_creators(opf, &["New".to_string()]);
+        assert!(
+            out.contains("<dc:creator id=\"creator1\">New</dc:creator>"),
+            "new creator carries the id"
+        );
+        assert!(
+            !out.contains("refines=\"#creator1\""),
+            "orphaned refines pruned: {out}"
+        );
+        assert!(!out.contains("Old, The"), "stale file-as gone");
+        assert!(
+            out.contains("<dc:language>en</dc:language>"),
+            "unrelated element untouched"
+        );
+        // No blank line left where the two meta lines were removed.
+        assert!(!out.contains("\n\n"), "no doubled newline: {out:?}");
     }
 }

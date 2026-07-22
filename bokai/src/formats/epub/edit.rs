@@ -215,6 +215,28 @@ pub(crate) fn escape_attr(s: &str) -> String {
     escape_text(s).replace('"', "&quot;")
 }
 
+/// The value of `name="…"`/`name='…'` in a start tag, respecting attribute
+/// boundaries (so `type` doesn't match inside `epub:type`). Shared by the EPUB
+/// surgical-write primitives ([`super::toc_repair`], [`super::metadata_edit`]).
+pub(crate) fn attr_value(tag: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=");
+    let mut from = 0;
+    while let Some(rel) = tag[from..].find(&needle) {
+        let pos = from + rel;
+        let boundary = pos == 0 || tag.as_bytes()[pos - 1].is_ascii_whitespace();
+        if boundary {
+            let after = &tag[pos + needle.len()..];
+            let q = after.chars().next()?;
+            if q == '"' || q == '\'' {
+                let end = after[1..].find(q)?;
+                return Some(after[1..1 + end].to_string());
+            }
+        }
+        from = pos + needle.len();
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

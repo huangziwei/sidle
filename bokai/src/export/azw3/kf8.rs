@@ -744,13 +744,13 @@ impl Kf8Builder {
             records.push((109, rights.as_bytes().to_vec()));
         }
 
-        // Source identifier (112). Kindle expects a calibre-style URN-ish
-        // string here; if the book has an identifier use it, otherwise fall
-        // back to a synthesized one. Calibre's own files always emit this.
+        // Source identifier (112). Kindle wants a `scheme:value` URN-ish string
+        // here (the scheme is opaque to it); emit our own `bokai:` scheme over
+        // the book's identifier, or a synthesized one when it has none.
         let source_id = if self.ctx.metadata.identifier.is_empty() {
             format!("bokai:{}", self.ctx.metadata.title)
         } else {
-            format!("calibre:{}", self.ctx.metadata.identifier)
+            format!("bokai:{}", self.ctx.metadata.identifier)
         };
         records.push((112, source_id.into_bytes()));
 
