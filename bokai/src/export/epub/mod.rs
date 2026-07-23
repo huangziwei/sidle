@@ -1108,19 +1108,32 @@ pub fn build_package(
         };
 
         // Every spine document the source produced, under its own name. The
-        // titlepage stays separate (spine position 0, but written last).
+        // titlepage stays separate (spine position 0, but written last). When a
+        // cover section was dropped for the synthesized `cover.xhtml`, remap the
+        // in-content links that still point at it (baked by normalize before the
+        // drop was known) — the nav did this via `resolve_nav_href`; the content
+        // docs need it too, or the link dangles (RSC-007).
+        let dropped_cover_href = cover_section_idx.map(|idx| document_files[idx].clone());
         let documents = content
             .chapters
             .into_iter()
             .enumerate()
-            .map(|(i, chapter)| PackageDocument {
-                href: document_files[i].clone(),
-                xhtml: chapter.document,
-                spread: spine
-                    .get(i)
-                    .and_then(|e| e.page_spread)
-                    .map(|p| p.opf_property().to_string()),
-                viewport: spine.get(i).and_then(|e| e.viewport),
+            .map(|(i, chapter)| {
+                let xhtml = match &dropped_cover_href {
+                    Some(dropped) if Some(i) != cover_section_idx => {
+                        remap_dropped_cover_links(&chapter.document, dropped)
+                    }
+                    _ => chapter.document,
+                };
+                PackageDocument {
+                    href: document_files[i].clone(),
+                    xhtml,
+                    spread: spine
+                        .get(i)
+                        .and_then(|e| e.page_spread)
+                        .map(|p| p.opf_property().to_string()),
+                    viewport: spine.get(i).and_then(|e| e.viewport),
+                }
             })
             .collect();
 
@@ -1517,6 +1530,43 @@ pub(crate) fn resolve_nav_href(
     }
 }
 
+/// Rewrite in-content `<a href>` links that point at the dropped cover section
+/// (`dropped_href`, e.g. `c0.xhtml`) to the synthesized `cover.xhtml`, dropping
+/// any fragment — that page is a bare SVG wrapper with no ids. The nav path does
+/// the same remap in [`resolve_nav_href`] via `dropped_idx`; this covers the
+/// links the normalize pass baked into content *before* the cover section was
+/// known to be dropped, which would otherwise resolve to a file the container
+/// never emits (epubcheck RSC-007). Matches only when the href value is exactly
+/// the dropped file or that file plus a `#fragment`, so a longer name sharing the
+/// prefix (`c0.xhtml2`) is left untouched.
+fn remap_dropped_cover_links(html: &str, dropped_href: &str) -> String {
+    let needle = format!("href=\"{dropped_href}");
+    if !html.contains(&needle) {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(pos) = rest.find(&needle) {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + needle.len()..];
+        match after.find('"') {
+            // The href value is `after[..close]`; remap only a bare match or a
+            // pure `#fragment` tail.
+            Some(close) if after[..close].is_empty() || after[..close].starts_with('#') => {
+                out.push_str("href=\"cover.xhtml\"");
+                rest = &after[close + 1..];
+            }
+            // A different file sharing the prefix — keep the matched text verbatim.
+            _ => {
+                out.push_str(&rest[pos..pos + needle.len()]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Guess media type from file extension. Shared with the AZW3 exporter, which
 /// keys images/fonts/CSS resource routing on the same guesses.
 pub(crate) fn guess_media_type(path: &str) -> String {
@@ -1600,6 +1650,41 @@ mod tests {
                 "chapter_3.xhtml",
                 "secB.xhtml"
             ]
+        );
+    }
+
+    #[test]
+    fn remap_dropped_cover_links_remaps_only_exact_matches() {
+        // A link into the dropped cover section (bare or `#frag`) becomes a bare
+        // `cover.xhtml`; a file that merely shares the prefix, or a different
+        // file, is untouched.
+        let html = concat!(
+            r#"<a href="c0.xhtml#aYS">Cover</a> "#,
+            r#"<a href="c0.xhtml">C</a> "#,
+            r#"<a href="c0.xhtml2#x">Other</a> "#,
+            r#"<a href="c1F.xhtml#y">Ch</a>"#,
+        );
+        let out = remap_dropped_cover_links(html, "c0.xhtml");
+        assert!(
+            out.contains(r#"<a href="cover.xhtml">Cover</a>"#),
+            "frag dropped: {out}"
+        );
+        assert!(
+            out.contains(r#"<a href="cover.xhtml">C</a>"#),
+            "bare remapped: {out}"
+        );
+        assert!(
+            out.contains(r#"<a href="c0.xhtml2#x">Other</a>"#),
+            "prefix-share kept: {out}"
+        );
+        assert!(
+            out.contains(r#"<a href="c1F.xhtml#y">Ch</a>"#),
+            "other file kept: {out}"
+        );
+        // No-op when the dropped file is absent.
+        assert_eq!(
+            remap_dropped_cover_links("<p>x</p>", "c0.xhtml"),
+            "<p>x</p>"
         );
     }
 
