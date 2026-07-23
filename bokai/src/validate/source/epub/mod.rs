@@ -3689,7 +3689,11 @@ mod tests {
 
         // Add an error → the predicate flips and the error view shows only the
         // error line (the warning is filtered out).
-        report.push(Violation::new(Rule::EmptyTitle, "ch1.xhtml", "empty <title>"));
+        report.push(Violation::new(
+            Rule::EmptyTitle,
+            "ch1.xhtml",
+            "empty <title>",
+        ));
         assert!(report.has_errors());
         assert_eq!(report.count(Severity::Error), 1);
         let shown = report.errors_display().to_string();

@@ -239,6 +239,15 @@ impl EpubImporter {
 
         for i in 0..archive.len() {
             let file = archive.by_index(i)?;
+
+            // Skip ZIP directory entries (names ending in `/`): a directory is
+            // not a resource. Some producers store them explicitly; enumerating
+            // one as an asset lands a bogus `href="OEBPS/"` manifest item that
+            // resolves to a missing file (epubcheck RSC-001) and writes a
+            // directory-named entry on re-export.
+            if file.is_dir() {
+                continue;
+            }
             let name = file.name().to_string();
 
             zip_index.insert(
@@ -805,6 +814,62 @@ fn prepend_base_to_toc(entries: &[TocEntry], base: &str) -> Vec<TocEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a minimal EPUB (mimetype, container, OPF, one spine doc) plus an
+    /// explicit `OEBPS/` directory entry, so a test can assert the importer
+    /// does not treat that directory as a resource.
+    fn epub_with_directory_entry() -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opt = SimpleFileOptions::default();
+            zip.start_file("mimetype", opt).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            zip.start_file("META-INF/container.xml", opt).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            )
+            .unwrap();
+            // The explicit directory entry that used to leak into `assets`.
+            zip.add_directory("OEBPS", opt).unwrap();
+            zip.start_file("OEBPS/content.opf", opt).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="uid">x</dc:identifier><dc:title>t</dc:title><dc:language>en</dc:language></metadata><manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/ch1.xhtml", opt).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>c1</title></head><body><p>x</p></body></html>"#,
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    #[test]
+    fn directory_entries_are_not_treated_as_assets() {
+        let bytes = epub_with_directory_entry();
+        let importer = EpubImporter::from_source(Arc::new(MemorySource::new(bytes))).unwrap();
+        // The bare `OEBPS/` directory must not appear as an asset — enumerating
+        // it produced a bogus `href="OEBPS/"` manifest item (RSC-001) on export.
+        for asset in importer.list_assets() {
+            let name = asset.to_string_lossy();
+            assert!(
+                !name.ends_with('/'),
+                "directory entry leaked into assets: {name:?}"
+            );
+        }
+        // The one real content doc is the spine chapter (not an asset), so the
+        // asset list is empty here — the directory was the only other entry.
+        assert!(
+            importer.list_assets().is_empty(),
+            "only entries were the spine doc + a directory; got assets: {:?}",
+            importer.list_assets()
+        );
+    }
 
     #[test]
     fn test_archive_dir_base() {
