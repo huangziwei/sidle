@@ -188,7 +188,6 @@ impl Violation {
 pub enum Rule {
     ZipMalformed,
     MimetypeNotFirst,
-    MimetypeNotStored,
     MimetypeBadContent,
     MissingContainerXml,
     OpfMissing,
@@ -281,7 +280,6 @@ impl Rule {
     pub const ALL: &'static [Rule] = &[
         Rule::ZipMalformed,
         Rule::MimetypeNotFirst,
-        Rule::MimetypeNotStored,
         Rule::MimetypeBadContent,
         Rule::MissingContainerXml,
         Rule::OpfMissing,
@@ -364,7 +362,6 @@ impl Rule {
         match self {
             Rule::ZipMalformed => "PKG-004",
             Rule::MimetypeNotFirst => "PKG-006",
-            Rule::MimetypeNotStored => "PKG-007",
             Rule::MimetypeBadContent => "PKG-007",
             Rule::MissingContainerXml => "RSC-002",
             Rule::OpfMissing => "OPF-002",
@@ -603,12 +600,13 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         &pkg,
         &opf_dir,
         epub2,
+        epub3,
         &mut zip,
         &zip_paths,
         &opf_path,
         &mut report,
     );
-    check_content_conformance(&pkg, &opf_dir, &mut zip, &mut report);
+    check_content_conformance(&pkg, &opf_dir, epub3, &mut zip, &mut report);
     check_xml_conformance(&opf_text, &opf_path, &mut report);
     // RSC-028 for the package document (its bytes already decoded as UTF-8, so
     // this catches a spurious non-UTF-8 `encoding=` declaration on ASCII bytes).
@@ -2167,9 +2165,17 @@ fn check_ocf_filenames(zip_names: &[String], report: &mut Report) {
 fn check_content_conformance(
     pkg: &opf::Package,
     opf_dir: &str,
+    epub3: bool,
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     report: &mut Report,
 ) {
+    // The non-empty-<title> requirement is EPUB 3 only — epubcheck enforces it
+    // through the EPUB 3 XHTML content-document schema. An EPUB 2 book (XHTML 1.1,
+    // DTD-validated, which can't require element text) is not held to it, so
+    // firing there is a false positive.
+    if !epub3 {
+        return;
+    }
     for item in &pkg.manifest {
         if !is_xhtml(&item.media_type) {
             continue;
@@ -2500,13 +2506,6 @@ fn check_mimetype_header(bytes: &[u8], report: &mut Report) {
         ));
         return;
     }
-    if compression != 0 {
-        report.push(Violation::new(
-            Rule::MimetypeNotStored,
-            "mimetype",
-            format!("compression method must be 0 (STORED), found {compression}"),
-        ));
-    }
     if extra_len != 0 {
         report.push(Violation::new(
             Rule::MimetypeExtraField,
@@ -2514,28 +2513,39 @@ fn check_mimetype_header(bytes: &[u8], report: &mut Report) {
             format!("mimetype entry has a {extra_len}-byte extra field; none is permitted"),
         ));
     }
-    // The mimetype content must equal `application/epub+zip` *exactly* — epubcheck
-    // compares the whole file, so any trailing byte (a newline or spaces) is
-    // PKG-007. Use the STORED entry's uncompressed size as the content length; for
-    // a non-STORED entry (already flagged MimetypeNotStored) the raw bytes are
-    // compressed and can't be compared, so fall back to the leading 20-byte check.
-    let content_start = 30 + name_len + extra_len;
-    let uncomp_size = u32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]) as usize;
-    let content: &[u8] = if compression == 0 && content_start + uncomp_size <= bytes.len() {
-        &bytes[content_start..content_start + uncomp_size]
-    } else {
-        &bytes[content_start..content_start + REQUIRED.len()]
-    };
-    if content != REQUIRED {
-        report.push(Violation::new(
-            Rule::MimetypeBadContent,
-            "mimetype",
-            format!(
-                "expected {:?}, found {:?}",
-                String::from_utf8_lossy(REQUIRED),
-                String::from_utf8_lossy(content),
-            ),
-        ));
+    // Content must equal `application/epub+zip`. epubcheck reads the mimetype
+    // entry *decompressed*, through the zip, and compares the whole string — it
+    // does NOT flag the compression method (a Deflated mimetype with the right
+    // content is not an epubcheck error, and real books ship them). So the
+    // content compare applies only to a STORED entry, whose bytes ARE the content
+    // verbatim; a compressed mimetype's raw bytes can't be compared here, so it's
+    // left alone rather than misread (which would be a false PKG-007).
+    if compression == 0 {
+        // A data descriptor (general-purpose bit 3) zeroes the local-header size
+        // fields — the real size lives in the trailing descriptor / central
+        // directory epubcheck reads. When it's set, `uncomp_size` is 0/unreliable,
+        // so fall back to a leading-bytes compare: it can't see trailing garbage,
+        // but never misfires on a correct mimetype stored with a data descriptor.
+        let flags = u16::from_le_bytes([bytes[6], bytes[7]]);
+        let has_data_descriptor = flags & 0x08 != 0;
+        let content_start = 30 + name_len + extra_len;
+        let uncomp_size = u32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]) as usize;
+        let content: &[u8] = if !has_data_descriptor && content_start + uncomp_size <= bytes.len() {
+            &bytes[content_start..content_start + uncomp_size]
+        } else {
+            &bytes[content_start..content_start + REQUIRED.len()]
+        };
+        if content != REQUIRED {
+            report.push(Violation::new(
+                Rule::MimetypeBadContent,
+                "mimetype",
+                format!(
+                    "expected {:?}, found {:?}",
+                    String::from_utf8_lossy(REQUIRED),
+                    String::from_utf8_lossy(content),
+                ),
+            ));
+        }
     }
 }
 
@@ -2974,10 +2984,12 @@ fn check_nav_present(pkg: &opf::Package, epub3: bool, opf_path: &str, report: &m
 // XHTML href scan: reachability for non-linear spine + broken href + parent paths
 // =========================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn check_xhtml_hrefs_and_reachability(
     pkg: &opf::Package,
     opf_dir: &str,
     epub2: bool,
+    epub3: bool,
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     zip_paths: &HashSet<String>,
     opf_path: &str,
@@ -3082,10 +3094,16 @@ fn check_xhtml_hrefs_and_reachability(
                 continue;
             }
             if let Some(resolved) = resolve_href(&path, &href) {
-                // RSC-033: a relative URL must not carry a query component. The
+                // RSC-033: a *relative* URL must not carry a query component. The
                 // '?' would otherwise be swallowed into the resolved path and
                 // misfire as a broken href, so handle it first and skip the rest.
-                if href.split('#').next().unwrap_or(&href).contains('?') {
+                // A scheme'd URL (e.g. `kindle:embed:0007?mime=…`) is not a relative
+                // reference — its '?' is part of an opaque path — so it's left to
+                // the resolution/existence checks below (epubcheck resolves it and
+                // reports RSC-007, not RSC-033).
+                if url_scheme(&href).is_none()
+                    && href.split('#').next().unwrap_or(&href).contains('?')
+                {
                     report.push(Violation::new(
                         Rule::RelativeUrlWithQuery,
                         path.clone(),
@@ -3148,15 +3166,21 @@ fn check_xhtml_hrefs_and_reachability(
     // `<content src="…#frag">` targets were not scanned in the loop above — but
     // epubcheck resolves those fragments too, firing RSC-012 on the NCX exactly
     // as it does on a nav.xhtml href. Feed them through the same check (source =
-    // the NCX path; targets resolve against the already-built `doc_ids`).
-    if let Some(ncx) = pkg
-        .manifest
-        .iter()
-        .find(|m| m.media_type.eq_ignore_ascii_case("application/x-dtbncx+xml"))
-    {
+    // the NCX path; targets resolve against the already-built `doc_ids`). Each
+    // NCX target is ALSO a hyperlink for reachability: epubcheck's NCXHandler
+    // registers `<content src>` as `Reference.Type.HYPERLINK`, so it satisfies
+    // OPF-096 (non-linear reachable) just like an `<a href>` — a cover reached
+    // only from the NCX toc is reachable, not an error.
+    if let Some(ncx) = pkg.manifest.iter().find(|m| {
+        m.media_type
+            .eq_ignore_ascii_case("application/x-dtbncx+xml")
+    }) {
         let ncx_path = join_opf(opf_dir, &ncx.href);
         if let Ok(text) = read_text(zip, &ncx_path) {
             for src in collect_ncx_content_srcs(&text) {
+                if let Some(target) = resolve_href(&ncx_path, &src) {
+                    hyperlink_targets.insert(target);
+                }
                 if src.contains('#') {
                     fragment_refs.push((ncx_path.clone(), src));
                 }
@@ -3169,7 +3193,9 @@ fn check_xhtml_hrefs_and_reachability(
     // Reachability: every spine item with `linear="no"` must be the target of
     // some hyperlink elsewhere in the publication — unless the publication has
     // scripts, which may navigate to it (epubcheck's OPF-096b USAGE case).
-    for s in pkg.spine.iter().filter(|_| !has_scripts) {
+    // OPF-096 is an EPUB 3 rule (epubcheck emits it only from `OPFChecker30`);
+    // EPUB 2 has no non-linear-reachability requirement, so it never fires there.
+    for s in pkg.spine.iter().filter(|_| epub3 && !has_scripts) {
         if s.linear != Some(false) {
             continue;
         }
@@ -3420,14 +3446,14 @@ fn collect_ncx_content_srcs(content: &str) -> Vec<String> {
     let mut out = Vec::new();
     loop {
         match reader.read_event() {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                if local_name(e.name().as_ref()) == b"content" {
-                    for attr in e.attributes().flatten() {
-                        if local_name(attr.key.as_ref()) == b"src" {
-                            let val = String::from_utf8_lossy(&attr.value).to_string();
-                            if !val.is_empty() {
-                                out.push(val);
-                            }
+            Ok(Event::Start(e)) | Ok(Event::Empty(e))
+                if local_name(e.name().as_ref()) == b"content" =>
+            {
+                for attr in e.attributes().flatten() {
+                    if local_name(attr.key.as_ref()) == b"src" {
+                        let val = String::from_utf8_lossy(&attr.value).to_string();
+                        if !val.is_empty() {
+                            out.push(val);
                         }
                     }
                 }
@@ -3711,7 +3737,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 72, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 71, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -3907,6 +3933,47 @@ mod tests {
             collect_ncx_content_srcs(ncx),
             vec!["a.xhtml#f1".to_string(), "b.xhtml".to_string()],
         );
+    }
+
+    #[test]
+    fn mimetype_content_check_matches_epubcheck() {
+        // epubcheck's PKG-007 is content-only, read through the zip (decompressed,
+        // central-directory size). So: (1) a correct STORED mimetype is clean;
+        // (2) a correct mimetype STORED with a data descriptor (GP bit 3 → zeroed
+        // local-header size) is clean, not a false PKG-007; (3) a Deflated
+        // mimetype is left alone (compression is not an epubcheck error); (4) a
+        // STORED mimetype with wrong content still fires.
+        fn hdr(flags: u16, comp: u16, uncomp: u32, data: &[u8]) -> Vec<u8> {
+            let name = b"mimetype";
+            let mut v = Vec::new();
+            v.extend_from_slice(b"PK\x03\x04");
+            v.extend_from_slice(&0u16.to_le_bytes()); // version needed
+            v.extend_from_slice(&flags.to_le_bytes());
+            v.extend_from_slice(&comp.to_le_bytes());
+            v.extend_from_slice(&0u32.to_le_bytes()); // mod time/date
+            v.extend_from_slice(&0u32.to_le_bytes()); // crc32
+            v.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp size
+            v.extend_from_slice(&uncomp.to_le_bytes()); // uncomp size
+            v.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            v.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            v.extend_from_slice(name);
+            v.extend_from_slice(data);
+            v.extend_from_slice(&[0u8; 40]); // pad past the min-size guard
+            v
+        }
+        const REQ: &[u8] = b"application/epub+zip";
+        let fires = |bytes: &[u8]| {
+            let mut r = Report::default();
+            check_mimetype_header(bytes, &mut r);
+            r.has_rule(Rule::MimetypeBadContent)
+        };
+        assert!(!fires(&hdr(0, 0, REQ.len() as u32, REQ)), "stored+correct");
+        assert!(
+            !fires(&hdr(0x08, 0, 0, REQ)),
+            "stored+data-descriptor+correct"
+        );
+        assert!(!fires(&hdr(0, 8, 5, b"\x00\x01\x02\x03\x04")), "deflated");
+        assert!(fires(&hdr(0, 0, 14, b"application/xxx")), "stored+wrong");
     }
 
     #[test]
@@ -4967,6 +5034,37 @@ mod tests {
         }
 
         #[test]
+        fn non_linear_item_reachable_via_ncx_is_not_flagged() {
+            // OPF-096 must NOT fire when the only inbound reference to a
+            // linear="no" item is an NCX `<content src>`: epubcheck's NCXHandler
+            // registers those as HYPERLINK references, so the item is reachable.
+            // (Paired with `detects_non_linear_cover_without_hyperlink`, where
+            // nothing — NCX included — points at the non-linear cover.) This is
+            // the fix for a systematic false positive: real books whose only path
+            // to a non-linear cover is the NCX toc.
+            let bytes = sample_aozora_epub();
+            // Cover becomes non-linear...
+            let m1 = rewrite_zip_entry(&bytes, "OEBPS/content.opf", |opf| {
+                opf.replace(
+                    r#"<itemref idref="cover"/>"#,
+                    r#"<itemref idref="cover" linear="no"/>"#,
+                )
+            });
+            // ...but reachable: point an NCX navPoint at the cover.
+            let m2 = rewrite_zip_entry(&m1, "OEBPS/toc.ncx", |ncx| {
+                ncx.replace(
+                    r#"<content src="text/title.xhtml"/>"#,
+                    r#"<content src="text/cover.xhtml"/>"#,
+                )
+            });
+            let report = validate(&m2);
+            assert!(
+                !report.has_rule(Rule::NonLinearUnreachable),
+                "an NCX-referenced non-linear item must not trip OPF-096, got:\n{report}"
+            );
+        }
+
+        #[test]
         fn detects_missing_manifest_file() {
             // Rewrite OPF to reference a nonexistent file.
             let bytes = sample_aozora_epub();
@@ -5011,6 +5109,28 @@ mod tests {
             assert!(
                 report.has_rule(Rule::RelativeUrlWithQuery),
                 "expected RSC-033, got:\n{report}"
+            );
+        }
+
+        #[test]
+        fn scheme_url_with_query_is_not_rsc033() {
+            // A scheme'd URL (`kindle:embed:…?mime=…`, common in Kindle-origin
+            // EPUBs) is not a relative reference — its '?' is part of an opaque
+            // path, not a query — so it must not trip RSC-033. epubcheck resolves
+            // it and reports RSC-007 (broken href) instead; the paired
+            // `detects_relative_url_with_query` proves a real relative '?' still
+            // fires.
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |x| {
+                x.replace(
+                    "</body>",
+                    r#"<img src="kindle:embed:0007?mime=image/jpg"/></body>"#,
+                )
+            });
+            let report = validate(&mutated);
+            assert!(
+                !report.has_rule(Rule::RelativeUrlWithQuery),
+                "a scheme URL must not trip RSC-033, got:\n{report}"
             );
         }
 
