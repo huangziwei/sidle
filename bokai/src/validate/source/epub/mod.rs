@@ -3144,6 +3144,26 @@ fn check_xhtml_hrefs_and_reachability(
         }
     }
 
+    // The NCX (EPUB 2 nav) is not an XHTML content document, so its
+    // `<content src="…#frag">` targets were not scanned in the loop above — but
+    // epubcheck resolves those fragments too, firing RSC-012 on the NCX exactly
+    // as it does on a nav.xhtml href. Feed them through the same check (source =
+    // the NCX path; targets resolve against the already-built `doc_ids`).
+    if let Some(ncx) = pkg
+        .manifest
+        .iter()
+        .find(|m| m.media_type.eq_ignore_ascii_case("application/x-dtbncx+xml"))
+    {
+        let ncx_path = join_opf(opf_dir, &ncx.href);
+        if let Ok(text) = read_text(zip, &ncx_path) {
+            for src in collect_ncx_content_srcs(&text) {
+                if src.contains('#') {
+                    fragment_refs.push((ncx_path.clone(), src));
+                }
+            }
+        }
+    }
+
     check_fragments(&doc_ids, &fragment_refs, report);
 
     // Reachability: every spine item with `linear="no"` must be the target of
@@ -3380,6 +3400,35 @@ fn collect_element_ids(content: &str) -> HashSet<String> {
                 for attr in e.attributes().flatten() {
                     if attr.key.as_ref() == b"id" {
                         out.insert(String::from_utf8_lossy(&attr.value).to_string());
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break, // well-formedness is out of scope here
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Every `<content src>` value in an NCX — the navigation targets epubcheck
+/// resolves for RSC-012, the same way it resolves nav.xhtml hrefs. `local_name`
+/// tolerates a namespace prefix on either the element or the attribute.
+fn collect_ncx_content_srcs(content: &str) -> Vec<String> {
+    let mut reader = Reader::from_str(content);
+    reader.config_mut().trim_text(false);
+    let mut out = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) == b"content" {
+                    for attr in e.attributes().flatten() {
+                        if local_name(attr.key.as_ref()) == b"src" {
+                            let val = String::from_utf8_lossy(&attr.value).to_string();
+                            if !val.is_empty() {
+                                out.push(val);
+                            }
+                        }
                     }
                 }
             }
@@ -3846,6 +3895,18 @@ mod tests {
         assert!(ids.contains("top"));
         assert!(ids.contains("第一")); // multi-byte id round-trips
         assert!(!ids.contains("legacy")); // name= is not a fragment target (HTML5)
+    }
+
+    #[test]
+    fn collect_ncx_content_srcs_reads_src_values() {
+        let ncx = r#"<ncx><navMap>
+            <navPoint><content src="a.xhtml#f1"/></navPoint>
+            <navPoint><content src="b.xhtml"/></navPoint>
+        </navMap></ncx>"#;
+        assert_eq!(
+            collect_ncx_content_srcs(ncx),
+            vec!["a.xhtml#f1".to_string(), "b.xhtml".to_string()],
+        );
     }
 
     #[test]
@@ -4980,6 +5041,28 @@ mod tests {
                 report.has_rule(Rule::FragmentNotDefined),
                 "expected FragmentNotDefined, got:\n{}",
                 report
+            );
+        }
+
+        #[test]
+        fn detects_dangling_fragment_in_ncx() {
+            // RSC-012 must also fire on an NCX `<content src="…#frag">` whose
+            // fragment names no id in the target — epubcheck resolves NCX
+            // navigation targets exactly as it does nav.xhtml hrefs. The clean
+            // sample's NCX carries a *resolvable* `#h1` (the chapter navPoint),
+            // so `aozora_output_passes_after_fix` is the paired proof this does
+            // not false-fire on a valid NCX fragment.
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/toc.ncx", |ncx| {
+                ncx.replace(
+                    r#"<content src="text/title.xhtml"/>"#,
+                    r#"<content src="text/title.xhtml#nope-frag"/>"#,
+                )
+            });
+            let report = validate(&mutated);
+            assert!(
+                report.has_rule(Rule::FragmentNotDefined),
+                "expected RSC-012 from the NCX, got:\n{report}"
             );
         }
 
