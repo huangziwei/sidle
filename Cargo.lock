@@ -471,6 +471,7 @@ dependencies = [
  "serde_json",
  "sha1_smol",
  "tempfile",
+ "unicode-normalization",
  "xml5ever",
  "zip",
 ]

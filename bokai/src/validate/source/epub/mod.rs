@@ -140,6 +140,7 @@ pub enum Rule {
     MissingContainerXml,
     OpfMissing,
     OpfParseError,
+    PackageVersionMissing,
     ManifestFileMissing,
     FileNotInManifest,
     SpineIdrefUnknown,
@@ -199,7 +200,25 @@ pub enum Rule {
     LanguageTagNotWellFormed,
     // Remote / data URLs in the manifest (epubcheck RSC-006 / RSC-029).
     RemoteResourceInSpine,
-    ManifestItemDataUrl,
+    RemoteResourceNotAllowed,
+    DataUrlNotAllowed,
+    // Foreign-resource fallback rules (epubcheck RSC-032 / MED-003).
+    ForeignResourceNoFallback,
+    PictureImgNotCoreType,
+    // Package `<link>` element rules (epubcheck OPF-089/095/098/067).
+    LinkAlternatePaired,
+    VoicingLinkNotAudio,
+    LinkIntoPackageDocument,
+    LinkToNonSpineManifestItem,
+    // Hyperlink target integrity (epubcheck RSC-010 / RSC-011).
+    HyperlinkToNonContentDocument,
+    HyperlinkToNonSpineItem,
+    // Navigation document (epubcheck NAV-010).
+    NavRemoteLink,
+    // OCF font obfuscation (epubcheck PKG-026).
+    ObfuscatedResourceNotFont,
+    // Bitmap header vs declared media-type (epubcheck OPF-029).
+    ResourceMediaTypeMismatch,
 }
 
 impl Rule {
@@ -214,6 +233,7 @@ impl Rule {
         Rule::MissingContainerXml,
         Rule::OpfMissing,
         Rule::OpfParseError,
+        Rule::PackageVersionMissing,
         Rule::ManifestFileMissing,
         Rule::FileNotInManifest,
         Rule::SpineIdrefUnknown,
@@ -265,7 +285,19 @@ impl Rule {
         Rule::DateNotValid,
         Rule::LanguageTagNotWellFormed,
         Rule::RemoteResourceInSpine,
-        Rule::ManifestItemDataUrl,
+        Rule::RemoteResourceNotAllowed,
+        Rule::DataUrlNotAllowed,
+        Rule::ForeignResourceNoFallback,
+        Rule::PictureImgNotCoreType,
+        Rule::LinkAlternatePaired,
+        Rule::VoicingLinkNotAudio,
+        Rule::LinkIntoPackageDocument,
+        Rule::LinkToNonSpineManifestItem,
+        Rule::HyperlinkToNonContentDocument,
+        Rule::HyperlinkToNonSpineItem,
+        Rule::NavRemoteLink,
+        Rule::ObfuscatedResourceNotFont,
+        Rule::ResourceMediaTypeMismatch,
     ];
 
     /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
@@ -282,8 +314,9 @@ impl Rule {
             Rule::MimetypeNotStored => "PKG-007",
             Rule::MimetypeBadContent => "PKG-007",
             Rule::MissingContainerXml => "RSC-002",
-            Rule::OpfMissing => "PKG-020",
+            Rule::OpfMissing => "OPF-002",
             Rule::OpfParseError => "RSC-005",
+            Rule::PackageVersionMissing => "OPF-001",
             Rule::ManifestFileMissing => "RSC-001",
             Rule::FileNotInManifest => "OPF-003",
             Rule::SpineIdrefUnknown => "OPF-049",
@@ -337,7 +370,19 @@ impl Rule {
             Rule::DateNotValid => "OPF-054",
             Rule::LanguageTagNotWellFormed => "OPF-092",
             Rule::RemoteResourceInSpine => "RSC-006",
-            Rule::ManifestItemDataUrl => "RSC-029",
+            Rule::RemoteResourceNotAllowed => "RSC-006",
+            Rule::DataUrlNotAllowed => "RSC-029",
+            Rule::ForeignResourceNoFallback => "RSC-032",
+            Rule::PictureImgNotCoreType => "MED-003",
+            Rule::LinkAlternatePaired => "OPF-089",
+            Rule::VoicingLinkNotAudio => "OPF-095",
+            Rule::LinkIntoPackageDocument => "OPF-098",
+            Rule::LinkToNonSpineManifestItem => "OPF-067",
+            Rule::HyperlinkToNonContentDocument => "RSC-010",
+            Rule::HyperlinkToNonSpineItem => "RSC-011",
+            Rule::NavRemoteLink => "NAV-010",
+            Rule::ObfuscatedResourceNotFont => "PKG-026",
+            Rule::ResourceMediaTypeMismatch => "OPF-029",
         }
     }
 
@@ -451,8 +496,16 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         }
     };
 
+    // OCF entry names are always UTF-8 (EPUB spec); decode the raw name bytes as
+    // UTF-8 rather than trusting the zip crate's `name()`, which falls back to
+    // CP437 for entries lacking the language-encoding (EFS) flag — a common way
+    // real tools store UTF-8 names, which epubcheck reads as UTF-8 regardless.
     let zip_names: Vec<String> = (0..zip.len())
-        .filter_map(|i| zip.by_index(i).ok().map(|f| f.name().to_string()))
+        .filter_map(|i| {
+            zip.by_index(i)
+                .ok()
+                .map(|f| nfc(&String::from_utf8_lossy(f.name_raw())))
+        })
         .collect();
     check_duplicate_zip_entries(&zip_names, &mut report);
     check_ocf_filenames(&zip_names, &mut report);
@@ -462,22 +515,41 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         .map(|(d, _)| d.to_string())
         .unwrap_or_default();
 
+    // OPF-001: the package element must declare a version. Without it epubcheck
+    // cannot determine EPUB 2 vs 3, so the version-gated checks below stay off.
+    if pkg.version.is_none() {
+        report.push(Violation::new(
+            Rule::PackageVersionMissing,
+            opf_path.clone(),
+            "package version attribute not found",
+        ));
+    }
+
     let epub2 = is_epub2(&pkg);
+    let epub3 = is_epub3(&pkg);
     check_manifest_files(&pkg, &opf_dir, &zip_paths, &opf_path, &mut report);
     check_files_in_manifest(&pkg, &opf_dir, &zip_paths, &opf_path, &mut report);
     check_spine_idrefs(&pkg, &opf_path, &mut report);
-    check_nav_present(&pkg, &opf_path, &mut report);
+    check_nav_present(&pkg, epub3, &opf_path, &mut report);
     check_parent_paths_in_opf(&pkg, &opf_dir, &opf_path, &mut report);
-    check_opf_structure(&pkg, &opf_dir, &opf_path, epub2, &mut report);
-    check_fallback_chain_and_spine(&pkg, epub2, &opf_path, &mut report);
-    check_metadata(&pkg, epub2, &opf_path, &mut report);
-    // RSC-006/029 are EPUB 3 manifest rules (epubcheck's OPFChecker30).
-    if !epub2 {
+    check_opf_structure(&pkg, &opf_dir, &opf_path, epub2, epub3, &mut report);
+    check_fallback_chain_and_spine(&pkg, epub2, epub3, &opf_path, &mut report);
+    // Dublin Core metadata value rules key on bokai's EPUB 3 understanding of
+    // `<dc:*>`; a version-less/legacy package (OEB 1.x) uses a different
+    // structure epubcheck rejects with OPF-001, so gate to EPUB 3.
+    if epub3 {
+        check_metadata(&pkg, epub2, &opf_path, &mut report);
+        // RSC-006/029 and the package <link> rules are EPUB 3 (epubcheck's
+        // OPFChecker30 / OPFHandler30).
         check_remote_and_data_urls(&pkg, &opf_path, &mut report);
+        check_remote_references(&pkg, &opf_dir, &mut zip, &mut report);
+        check_foreign_resources(&pkg, &opf_dir, &mut zip, &mut report);
+        check_opf_links(&pkg, &opf_dir, &opf_path, &mut report);
     }
     check_xhtml_hrefs_and_reachability(
         &pkg,
         &opf_dir,
+        epub2,
         &mut zip,
         &zip_paths,
         &opf_path,
@@ -499,11 +571,16 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         &opf_text,
         &opf_path,
         "application/oebps-package+xml",
-        epub2,
+        epub3,
         &mut report,
     );
-    check_xml_resources(&pkg, &opf_dir, epub2, &mut zip, &mut report);
+    check_xml_resources(&pkg, &opf_dir, epub3, &mut zip, &mut report);
     check_ncx_identifier(&pkg, &opf_dir, &mut zip, &mut report);
+    check_obfuscated_fonts(&pkg, &opf_dir, &mut zip, &mut report);
+    check_image_headers(&pkg, &opf_dir, &mut zip, &mut report);
+    if epub3 {
+        check_nav_remote_links(&pkg, &opf_dir, &mut zip, &mut report);
+    }
 
     report
 }
@@ -516,7 +593,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
 fn check_xml_resources(
     pkg: &opf::Package,
     opf_dir: &str,
-    epub2: bool,
+    epub3: bool,
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     report: &mut Report,
 ) {
@@ -533,7 +610,7 @@ fn check_xml_resources(
             continue;
         };
         check_xml_conformance(&text, &path, report);
-        check_doctype_rules(&text, &path, &item.media_type, epub2, report);
+        check_doctype_rules(&text, &path, &item.media_type, epub3, report);
     }
 }
 
@@ -689,19 +766,25 @@ fn check_opf_structure(
     opf_dir: &str,
     opf_path: &str,
     epub2: bool,
+    epub3: bool,
     report: &mut Report,
 ) {
     let manifest_ids: HashSet<&str> = pkg.manifest.iter().map(|m| m.id.as_str()).collect();
 
     // OPF-048 / OPF-030: the package must declare a unique-identifier that
-    // resolves to a <dc:identifier id="…">.
+    // resolves to a <dc:identifier id="…">. The identifier-resolution half
+    // (OPF-030) keys on bokai's modern `<dc:identifier id=…>` capture, which both
+    // EPUB 2.0.1 and EPUB 3 use — so it fires for either, but not for a
+    // version-less/OEB-1.x package (rejected via OPF-001; its legacy
+    // `<dc-metadata>` structure would otherwise false-fire). The missing-attribute
+    // half (OPF-048) is universal.
     match pkg.unique_identifier.as_deref() {
         None | Some("") => report.push(Violation::new(
             Rule::UniqueIdentifierMissing,
             opf_path,
             "package element is missing its required unique-identifier attribute",
         )),
-        Some(uid) if !pkg.identifier_ids.iter().any(|id| id == uid) => {
+        Some(uid) if (epub2 || epub3) && !pkg.identifier_ids.iter().any(|id| id == uid) => {
             report.push(Violation::new(
                 Rule::UniqueIdentifierNotFound,
                 opf_path,
@@ -846,6 +929,7 @@ fn check_opf_structure(
 fn check_fallback_chain_and_spine(
     pkg: &opf::Package,
     epub2: bool,
+    epub3: bool,
     opf_path: &str,
     report: &mut Report,
 ) {
@@ -874,8 +958,10 @@ fn check_fallback_chain_and_spine(
     }
 
     // OPF-043 / OPF-044: a spine item with a non-blessed media type needs a
-    // fallback (chain) that reaches a content document.
-    for s in &pkg.spine {
+    // fallback (chain) that reaches a content document. EPUB 3-specific (the
+    // spine content-model + fallback machinery is EPUB 3's; legacy packages use
+    // a different model epubcheck rejects with OPF-001), so gate to EPUB 3.
+    for s in pkg.spine.iter().filter(|_| epub3) {
         let Some(item) = by_id.get(s.idref.as_str()) else {
             continue; // unknown idref is OPF-049
         };
@@ -916,6 +1002,101 @@ fn is_blessed_spine_type(media_type: &str, epub2: bool) -> bool {
         } else {
             mt.eq_ignore_ascii_case("image/svg+xml")
         }
+}
+
+/// epubcheck's `isDeprecatedBlessedItemType`: legacy content-document types that
+/// still count as content documents for the hyperlink-target check (RSC-010).
+fn is_deprecated_blessed_item_type(media_type: &str) -> bool {
+    let mt = media_type.trim();
+    mt.eq_ignore_ascii_case("text/html") || mt.eq_ignore_ascii_case("text/x-oeb1-document")
+}
+
+/// The blessed EPUB 3 image types (`OPFChecker.isBlessedImageType`) — the only
+/// media types an `<img>`/`<source>` child of a `<picture>` may reference (MED-003
+/// / MED-007).
+fn is_blessed_image_type(media_type: &str) -> bool {
+    matches!(
+        media_type.trim(),
+        "image/gif" | "image/png" | "image/jpeg" | "image/svg+xml" | "image/webp"
+    )
+}
+
+/// The blessed EPUB 3 audio types (`OPFChecker30.isBlessedAudioType`).
+fn is_blessed_audio_type(media_type: &str) -> bool {
+    let mt = media_type.trim();
+    mt == "audio/mpeg" || mt == "audio/mp4" || {
+        // audio/ogg ; codecs=opus (optional whitespace around the `;`)
+        let compact: String = mt.chars().filter(|c| !c.is_whitespace()).collect();
+        compact == "audio/ogg;codecs=opus"
+    }
+}
+
+/// An EPUB 3 core media type (`OPFChecker30.isCoreMediaType`) — a resource a
+/// content document may reference directly, without a fallback.
+fn is_core_media_type(media_type: &str) -> bool {
+    let mt = media_type.trim();
+    is_blessed_audio_type(mt)
+        || mt.starts_with("video/")
+        || is_blessed_font_type(mt)
+        || mt == "application/xhtml+xml"
+        || mt == "image/svg+xml"
+        || is_blessed_image_type(mt)
+        || matches!(
+            mt,
+            "text/javascript" | "application/javascript" | "application/ecmascript"
+        )
+        || mt == "text/css"
+        || mt == "application/pls+xml"
+        || mt == "application/smil+xml"
+}
+
+/// True when following `start`'s manifest `fallback` chain reaches a core-media-
+/// type item (`Resource.hasCoreMediaTypeFallback`) — a foreign resource with such
+/// a chain needs no intrinsic fallback (RSC-032).
+fn reaches_core_media_type(
+    start: &opf::ManifestItem,
+    by_id: &HashMap<&str, &opf::ManifestItem>,
+) -> bool {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut cur = start.fallback.as_deref();
+    while let Some(fb) = cur {
+        if !seen.insert(fb) {
+            break; // cycle
+        }
+        let Some(item) = by_id.get(fb) else {
+            break;
+        };
+        if is_core_media_type(&item.media_type) {
+            return true;
+        }
+        cur = item.fallback.as_deref();
+    }
+    false
+}
+
+/// The RSC-010/011 verdict for a hyperlink whose target is the declared, present,
+/// non-CFI manifest item `target` — a direct port of epubcheck's `HYPERLINK` case
+/// in `ResourceReferencesChecker::checkReferenceType`:
+/// - **RSC-010** if the target is not a content document (blessed or deprecated-
+///   blessed) and its fallback chain reaches none either.
+/// - else **RSC-011** if the target is not a spine item.
+///
+/// `None` when the hyperlink is conformant.
+fn hyperlink_target_rule(
+    target: &opf::ManifestItem,
+    by_id: &HashMap<&str, &opf::ManifestItem>,
+    spine_ids: &HashSet<&str>,
+    epub2: bool,
+) -> Option<Rule> {
+    let mt = target.media_type.as_str();
+    let blessed = is_blessed_spine_type(mt, epub2) || is_deprecated_blessed_item_type(mt);
+    if !blessed && !reaches_content_document(target, by_id, epub2) {
+        Some(Rule::HyperlinkToNonContentDocument)
+    } else if !spine_ids.contains(target.id.as_str()) {
+        Some(Rule::HyperlinkToNonSpineItem)
+    } else {
+        None
+    }
 }
 
 /// True when `start`'s fallback chain reaches a spine-blessed content document
@@ -1187,7 +1368,7 @@ fn check_remote_and_data_urls(pkg: &opf::Package, opf_path: &str, report: &mut R
     for item in &pkg.manifest {
         if is_data_url(&item.href) {
             report.push(Violation::new(
-                Rule::ManifestItemDataUrl,
+                Rule::DataUrlNotAllowed,
                 opf_path.to_string(),
                 format!(
                     "manifest item {:?} uses a data: URL, which is not allowed",
@@ -1208,6 +1389,387 @@ fn check_remote_and_data_urls(pkg: &opf::Package, opf_path: &str, report: &mut R
             ));
         }
     }
+}
+
+/// RSC-006: a remote reference from a content document is not allowed in EPUB 3
+/// unless the context permits it. A hyperlink or non-stylesheet `<link>` may
+/// always be remote; an audio, video, or font reference may be remote — either by
+/// element type (`<audio>`/`<video>`/`<source>` in one) or because the declared
+/// target's media type is audio/video/font; a spine item's own remoteness is
+/// reported in the package document (`RemoteResourceInSpine`), so it's exempt
+/// here. Every other remote reference — a remote image, stylesheet, object,
+/// iframe, script, embed, track — is RSC-006. Direct port of
+/// `ResourceReferencesChecker.checkRemoteReference`.
+fn check_remote_references(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    report: &mut Report,
+) {
+    let spine_ids: HashSet<&str> = pkg.spine.iter().map(|s| s.idref.as_str()).collect();
+    // Declared resources keyed by their href (remote URLs are absolute, so the
+    // content reference and the manifest href are the same string): media type +
+    // spine membership, for the audio/video/font and spine-item exemptions.
+    let by_href: HashMap<&str, (&str, bool)> = pkg
+        .manifest
+        .iter()
+        .map(|m| {
+            (
+                m.href.as_str(),
+                (m.media_type.as_str(), spine_ids.contains(m.id.as_str())),
+            )
+        })
+        .collect();
+    for item in &pkg.manifest {
+        if !is_xhtml(&item.media_type) {
+            continue;
+        }
+        let path = join_opf(opf_dir, &item.href);
+        let Ok(text) = read_text(zip, &path) else {
+            continue;
+        };
+        for (ty, href) in typed_content_refs(&text) {
+            if !is_remote_href(&href) {
+                continue;
+            }
+            let key = href.split('#').next().unwrap_or(&href);
+            let exempt = matches!(ty, RefType::LinkLike | RefType::Audio | RefType::Video)
+                || by_href
+                    .get(key)
+                    .is_some_and(|(mt, in_spine)| *in_spine || is_remote_exempt_type(mt));
+            if !exempt {
+                report.push(Violation::new(
+                    Rule::RemoteResourceNotAllowed,
+                    path.clone(),
+                    format!(
+                        "remote resource {href:?} is not allowed in this context; it must be located in the container"
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+/// One open element in the foreign-resource walk. Every non-void element pushes a
+/// frame (so the stack stays balanced regardless of which elements bear
+/// references), carrying its name, `hidden` flag, and accumulated palpable-content
+/// state; `role` distinguishes the elements whose *end* triggers a check.
+struct ForeignFrame {
+    name: Vec<u8>,
+    hidden: bool,
+    palpable: bool,
+    role: ForeignRole,
+}
+
+/// The reference-bearing role of a [`ForeignFrame`]. `Object` (`<object>`/
+/// `<embed>`) resolves its fallback from palpable content at its end; `Media`
+/// (`<audio>`/`<video>`) gathers `<source>` children (`href`, `type`) to decide
+/// whether it has a core-type source; `Picture` marks the `<picture>` context.
+enum ForeignRole {
+    Object {
+        href: Option<String>,
+    },
+    Media {
+        sources: Vec<(String, Option<String>)>,
+    },
+    Picture,
+    Plain,
+}
+
+/// epubcheck's `OPSHandler30.isPalpable`: whether an element counts as palpable
+/// (fallback) content. A `hidden` element never does; embedded content always
+/// does; document/metadata elements never do; every other element counts iff it
+/// accumulated palpable content. (SVG/MathML are approximated by local name.)
+fn is_palpable_elem(name: &[u8], hidden: bool, own_palpable: bool) -> bool {
+    if hidden {
+        return false;
+    }
+    match name {
+        b"audio" | b"canvas" | b"embed" | b"iframe" | b"img" | b"object" | b"picture"
+        | b"video" | b"svg" | b"math" => true,
+        b"html" | b"head" | b"script" | b"link" | b"meta" | b"title" | b"style" => false,
+        _ => own_palpable,
+    }
+}
+
+/// RSC-032 / MED-003 / MED-007: fallback rules for foreign (non-core-media-type)
+/// resources referenced from a content document — a port of
+/// `ResourceReferencesChecker.checkFallbacks` and `OPSHandler30`'s media/image
+/// handling.
+///
+/// - **RSC-032** — an `<img>`/`<object>`/`<embed>`/`<input>`/media reference whose
+///   *declared* target is not a core media type must have a fallback: intrinsic (an
+///   `<img>` in a `<picture>`, an `<object>`/`<embed>` with fallback content, a
+///   media element with a core `<source>`) or a manifest `fallback` chain reaching
+///   a core media type.
+/// - **MED-003** — an `<img>` child of `<picture>` must reference a core image type.
+/// - **MED-007** — a `<source>` child of `<picture>` with no `type` attribute must
+///   reference a core image type.
+///
+/// Undeclared/missing targets are out of scope here (RSC-007/008 handle them).
+fn check_foreign_resources(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    report: &mut Report,
+) {
+    let by_path: HashMap<String, &opf::ManifestItem> = pkg
+        .manifest
+        .iter()
+        .map(|m| (join_opf(opf_dir, &m.href), m))
+        .collect();
+    let by_id: HashMap<&str, &opf::ManifestItem> =
+        pkg.manifest.iter().map(|m| (m.id.as_str(), m)).collect();
+    for item in &pkg.manifest {
+        if !is_xhtml(&item.media_type) {
+            continue;
+        }
+        let path = join_opf(opf_dir, &item.href);
+        let Ok(text) = read_text(zip, &path) else {
+            continue;
+        };
+        walk_foreign_resources(&text, &path, &by_path, &by_id, report);
+    }
+}
+
+/// Resolve a document-relative `href` to its declared manifest item.
+fn foreign_target<'a>(
+    path: &str,
+    href: &str,
+    by_path: &HashMap<String, &'a opf::ManifestItem>,
+) -> Option<&'a opf::ManifestItem> {
+    let resolved = resolve_href(path, href)?;
+    by_path.get(&resolved).copied()
+}
+
+/// RSC-032 for one reference: a declared, non-core-media-type target with no
+/// intrinsic and no manifest-chain fallback.
+fn check_foreign_ref(
+    path: &str,
+    href: &str,
+    intrinsic_fallback: bool,
+    by_path: &HashMap<String, &opf::ManifestItem>,
+    by_id: &HashMap<&str, &opf::ManifestItem>,
+    report: &mut Report,
+) {
+    if intrinsic_fallback || is_remote_href(href) {
+        return;
+    }
+    // A data: URL carries its own media type inline and has no manifest fallback.
+    if is_data_url(href) {
+        if let Some(mt) = data_url_media_type(href)
+            && !is_core_media_type(mt)
+        {
+            report.push(Violation::new(
+                Rule::ForeignResourceNoFallback,
+                path.to_string(),
+                format!(
+                    "foreign data: resource (media-type {mt}) has no fallback to a core media type"
+                ),
+            ));
+        }
+        return;
+    }
+    if let Some(item) = foreign_target(path, href, by_path)
+        && !is_core_media_type(&item.media_type)
+        && !reaches_core_media_type(item, by_id)
+    {
+        report.push(Violation::new(
+            Rule::ForeignResourceNoFallback,
+            path.to_string(),
+            format!(
+                "foreign resource {href:?} (media-type {}) has no fallback to a core media type",
+                item.media_type
+            ),
+        ));
+    }
+}
+
+/// The media type of a `data:` URL — the text between `data:` and the first `;`
+/// or `,` (`data:image/x-foo;base64,…` → `image/x-foo`). `None` when omitted.
+fn data_url_media_type(href: &str) -> Option<&str> {
+    let after = &href[href.find(':')? + 1..];
+    let end = after.find([';', ',']).unwrap_or(after.len());
+    let mt = after[..end].trim();
+    (!mt.is_empty()).then_some(mt)
+}
+
+fn walk_foreign_resources(
+    content: &str,
+    path: &str,
+    by_path: &HashMap<String, &opf::ManifestItem>,
+    by_id: &HashMap<&str, &opf::ManifestItem>,
+    report: &mut Report,
+) {
+    let mut reader = Reader::from_str(content);
+    reader.config_mut().trim_text(false);
+    let mut stack: Vec<ForeignFrame> = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(ev @ (Event::Start(_) | Event::Empty(_))) => {
+                let is_empty = matches!(ev, Event::Empty(_));
+                let e = match &ev {
+                    Event::Start(e) | Event::Empty(e) => e.clone(),
+                    _ => unreachable!(),
+                };
+                let in_picture = stack.iter().any(|f| matches!(f.role, ForeignRole::Picture));
+                // A media `<source>`'s parent is the immediately enclosing frame.
+                let in_media = matches!(
+                    stack.last().map(|f| &f.role),
+                    Some(ForeignRole::Media { .. })
+                );
+                let name = e.name();
+                let local = local_name(name.as_ref()).to_vec();
+                let attr = |k: &[u8]| attr_by_local(&e, k);
+                let hidden = attr(b"hidden").is_some();
+                // Emit this element's own references / picture checks.
+                let mut role = ForeignRole::Plain;
+                match local.as_slice() {
+                    b"picture" => role = ForeignRole::Picture,
+                    b"img" => {
+                        if let Some(src) = attr(b"src") {
+                            if in_picture {
+                                // MED-003: a picture <img> must be a core image type.
+                                if let Some(t) = foreign_target(path, &src, by_path)
+                                    && !is_blessed_image_type(&t.media_type)
+                                {
+                                    report.push(Violation::new(
+                                        Rule::PictureImgNotCoreType,
+                                        path.to_string(),
+                                        format!(
+                                            "<picture> <img> {src:?} is media-type {}, not a core image type",
+                                            t.media_type
+                                        ),
+                                    ));
+                                }
+                            } else {
+                                check_foreign_ref(path, &src, false, by_path, by_id, report);
+                            }
+                        }
+                    }
+                    b"image" => {
+                        // SVG <image> (href or xlink:href).
+                        if let Some(src) = attr(b"href").or_else(|| attr(b"src")) {
+                            check_foreign_ref(path, &src, in_picture, by_path, by_id, report);
+                        }
+                    }
+                    b"math" => {
+                        if let Some(alt) = attr(b"altimg") {
+                            check_foreign_ref(path, &alt, false, by_path, by_id, report);
+                        }
+                    }
+                    b"source" => {
+                        // A media source is collected on its parent for the
+                        // end-of-media fallback decision; a picture source is not
+                        // subject to RSC-032 (an <img> sibling carries MED-003).
+                        if in_media
+                            && let Some(src) = attr(b"src")
+                            && let Some(ForeignFrame {
+                                role: ForeignRole::Media { sources },
+                                ..
+                            }) = stack.last_mut()
+                        {
+                            sources.push((src, attr(b"type")));
+                        }
+                    }
+                    b"audio" | b"video" => {
+                        // The media element's own `src` is registered with no
+                        // intrinsic fallback; a <video> `poster` is an image.
+                        if let Some(src) = attr(b"src") {
+                            check_foreign_ref(path, &src, false, by_path, by_id, report);
+                        }
+                        if local.as_slice() == b"video"
+                            && let Some(poster) = attr(b"poster")
+                        {
+                            check_foreign_ref(path, &poster, false, by_path, by_id, report);
+                        }
+                        role = ForeignRole::Media {
+                            sources: Vec::new(),
+                        };
+                    }
+                    b"object" | b"embed" => {
+                        let href = if local.as_slice() == b"object" {
+                            attr(b"data")
+                        } else {
+                            attr(b"src")
+                        };
+                        if is_empty {
+                            // A void element can carry no fallback content.
+                            if let Some(h) = href {
+                                check_foreign_ref(path, &h, false, by_path, by_id, report);
+                            }
+                        } else {
+                            role = ForeignRole::Object { href };
+                        }
+                    }
+                    b"input" | b"iframe" => {
+                        if let Some(src) = attr(b"src") {
+                            check_foreign_ref(path, &src, false, by_path, by_id, report);
+                        }
+                    }
+                    _ => {}
+                }
+                // Every non-void element pushes a frame so the stack stays
+                // balanced; a void element bubbles its palpability to its parent.
+                if is_empty {
+                    if let Some(top) = stack.last_mut() {
+                        top.palpable |= is_palpable_elem(&local, hidden, false);
+                    }
+                } else {
+                    stack.push(ForeignFrame {
+                        name: local,
+                        hidden,
+                        palpable: false,
+                        role,
+                    });
+                }
+            }
+            Ok(Event::Text(t)) => {
+                let bytes: &[u8] = t.as_ref();
+                if !bytes.iter().all(|b| b.is_ascii_whitespace())
+                    && let Some(top) = stack.last_mut()
+                {
+                    top.palpable = true;
+                }
+            }
+            Ok(Event::End(_)) => {
+                if let Some(f) = stack.pop() {
+                    match &f.role {
+                        ForeignRole::Object { href: Some(h) } => {
+                            check_foreign_ref(path, h, f.palpable, by_path, by_id, report);
+                        }
+                        ForeignRole::Media { sources } => {
+                            // Intrinsic fallback iff any source is a core media type
+                            // (its `type` attribute if present, else the declared
+                            // manifest media type).
+                            let has_fallback = sources.iter().any(|(src, ty)| match ty {
+                                Some(t) => is_core_media_type(remove_media_params(t)),
+                                None => foreign_target(path, src, by_path)
+                                    .is_some_and(|it| is_core_media_type(&it.media_type)),
+                            });
+                            for (src, _) in sources {
+                                check_foreign_ref(path, src, has_fallback, by_path, by_id, report);
+                            }
+                        }
+                        _ => {}
+                    }
+                    // Propagate this element's palpability to its parent.
+                    let palpable = is_palpable_elem(&f.name, f.hidden, f.palpable);
+                    if let Some(parent) = stack.last_mut() {
+                        parent.palpable |= palpable;
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+}
+
+/// Strip the parameters from a media type (`audio/mpeg; codecs=…` → `audio/mpeg`).
+fn remove_media_params(mt: &str) -> &str {
+    mt.split(';').next().unwrap_or(mt).trim()
 }
 
 /// The lowercased scheme of an absolute URL reference (`"http"`, `"data"`,
@@ -1251,6 +1813,97 @@ fn is_remote_exempt_type(mt: &str) -> bool {
         || mt.starts_with("application/font-")
         || mt == "application/vnd.ms-opentype"
         || mt == "application/x-shockwave-flash"
+}
+
+/// EPUB 3 package `<link>` element rules (epubcheck's `OPFHandler30::processLink`
+/// and `OPFChecker30::checkLinkedResources`):
+/// - **RSC-029** — a `data:` URL on a `<link>` is not allowed.
+/// - **OPF-098** — the `href` must not reference an element *inside the package
+///   document itself* (a fragment resolving back to the OPF).
+/// - **OPF-089** — the `alternate` rel keyword must not be paired with others.
+/// - **OPF-095** — a `voicing` link must have an audio media type.
+/// - **OPF-067** — a link must not resolve to a manifest item that is not a spine
+///   item (a publication resource is referenced twice, once outside the spine).
+///
+/// Faithful to epubcheck's control flow: RSC-029 and OPF-098 short-circuit the
+/// link (matching its `return`, which also skips registration, so OPF-067 cannot
+/// then apply); OPF-089/095 do not.
+fn check_opf_links(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report: &mut Report) {
+    let spine_ids: HashSet<&str> = pkg.spine.iter().map(|s| s.idref.as_str()).collect();
+    for link in &pkg.links {
+        let href = &link.href;
+        // RSC-029: data: URL on a <link>.
+        if is_data_url(href) {
+            report.push(Violation::new(
+                Rule::DataUrlNotAllowed,
+                opf_path.to_string(),
+                "a <link> element uses a data: URL, which is not allowed".to_string(),
+            ));
+            continue;
+        }
+        // OPF-098: a fragment referencing the package document itself.
+        if let Some((file, frag)) = href.split_once('#')
+            && !frag.is_empty()
+        {
+            let doc = if file.is_empty() {
+                Some(opf_path.to_string()) // same-document "#frag"
+            } else {
+                resolve_href(opf_path, href) // resolves file part, strips fragment
+            };
+            if doc.as_deref() == Some(opf_path) {
+                report.push(Violation::new(
+                    Rule::LinkIntoPackageDocument,
+                    opf_path.to_string(),
+                    format!("<link href={href:?}> references an element in the package document"),
+                ));
+                continue;
+            }
+        }
+        // OPF-089: 'alternate' paired with other rel keywords.
+        if link.rel.iter().any(|r| r == "alternate") && link.rel.len() > 1 {
+            report.push(Violation::new(
+                Rule::LinkAlternatePaired,
+                opf_path.to_string(),
+                format!(
+                    "<link rel> pairs \"alternate\" with other keywords: {:?}",
+                    link.rel
+                ),
+            ));
+        }
+        // OPF-095: 'voicing' links require an audio media type.
+        if link.rel.iter().any(|r| r == "voicing")
+            && let Some(mt) = &link.media_type
+            && !mt.starts_with("audio/")
+        {
+            report.push(Violation::new(
+                Rule::VoicingLinkNotAudio,
+                opf_path.to_string(),
+                format!("<link rel=\"voicing\"> has media-type {mt:?}, not an audio type"),
+            ));
+        }
+        // OPF-067: a *metadata* link resolving to a manifest item that is not in
+        // the spine. Only metadata `<link>`s populate epubcheck's linked-resources
+        // set; collection `<link>`s (preview/dictionary) are governed by the
+        // collection rules instead, so they must not trigger OPF-067.
+        if link.in_metadata
+            && let Some(target) = resolve_href(opf_path, href)
+        {
+            for item in &pkg.manifest {
+                if join_opf(opf_dir, &item.href) == target && !spine_ids.contains(item.id.as_str())
+                {
+                    report.push(Violation::new(
+                        Rule::LinkToNonSpineManifestItem,
+                        opf_path.to_string(),
+                        format!(
+                            "<link href={href:?}> points at manifest item {:?}, which is not in the spine",
+                            item.id
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Validate a W3C-DTF (ISO-8601 profile) date, a faithful port of epubcheck's
@@ -1488,24 +2141,29 @@ fn check_content_conformance(
 /// DOCTYPE-declaration conformance, keyed on the resource's media type and the
 /// publication version (epubcheck `DeclarationHandler`):
 ///
-/// - **XHTML** (any version, per bokai's EPUB-3 target): only `<!DOCTYPE html>`
-///   or `<!DOCTYPE html SYSTEM "about:legacy-compat">` is allowed. A public
-///   identifier, or any other system identifier, is **HTM-004**.
+/// - **XHTML** (EPUB 3 only): only `<!DOCTYPE html>` or `<!DOCTYPE html SYSTEM
+///   "about:legacy-compat">` is allowed. A public identifier, or any other system
+///   identifier, is **HTM-004**. EPUB 2 XHTML permits the XHTML 1.1 public DTD, so
+///   the rule is version-gated to avoid false positives on 2.0 content.
 /// - **Other XML** (EPUB 3 only): an external identifier (`PUBLIC`/`SYSTEM`) is
 ///   forbidden — **OPF-073** — except the three fixed DTDs epubcheck sanctions
 ///   for SVG, MathML, and NCX. EPUB 2 permits legacy DTDs, so the rule is
 ///   version-gated to avoid false positives on 2.0 content.
-fn check_doctype_rules(text: &str, path: &str, media_type: &str, epub2: bool, report: &mut Report) {
+fn check_doctype_rules(text: &str, path: &str, media_type: &str, epub3: bool, report: &mut Report) {
     let Some(dt) = parse_doctype(text) else {
         return;
     };
     if is_xhtml(media_type) {
+        // HTM-004 (only `<!DOCTYPE html>` / `about:legacy-compat` allowed) is
+        // EPUB 3-specific. EPUB 2 XHTML legitimately declares the XHTML 1.1 public
+        // DTD, and a version-less package is rejected via OPF-001 rather than held
+        // to the EPUB 3 DOCTYPE rule — so this gates on a positive EPUB 3 version.
         let legacy_ok = dt.public_id.is_none()
             && dt
                 .system_id
                 .as_deref()
                 .is_none_or(|s| s == "about:legacy-compat");
-        if !legacy_ok {
+        if epub3 && !legacy_ok {
             report.push(Violation::new(
                 Rule::IrregularDoctype,
                 path.to_string(),
@@ -1515,7 +2173,7 @@ fn check_doctype_rules(text: &str, path: &str, media_type: &str, epub2: bool, re
                 ),
             ));
         }
-    } else if !epub2
+    } else if epub3
         && (dt.public_id.is_some() || dt.system_id.is_some())
         && !dt.is_allowed_dtd(media_type)
     {
@@ -1625,6 +2283,16 @@ fn is_epub2(pkg: &opf::Package) -> bool {
     pkg.version
         .as_deref()
         .is_some_and(|v| v.trim().starts_with('2'))
+}
+
+/// True only when the package explicitly declares an EPUB 3 version. EPUB-3-
+/// specific rules gate on *this* (not `!is_epub2`), so a version-less or legacy
+/// (OEB 1.x / unparseable-version) package — which epubcheck rejects with OPF-001
+/// rather than validating as EPUB 3 — is not falsely held to EPUB 3 requirements.
+fn is_epub3(pkg: &opf::Package) -> bool {
+    pkg.version
+        .as_deref()
+        .is_some_and(|v| v.trim().starts_with('3'))
 }
 
 /// A "content document" media type — epubcheck's blessed + deprecated-blessed
@@ -1793,8 +2461,18 @@ fn check_mimetype_header(bytes: &[u8], report: &mut Report) {
             format!("mimetype entry has a {extra_len}-byte extra field; none is permitted"),
         ));
     }
+    // The mimetype content must equal `application/epub+zip` *exactly* — epubcheck
+    // compares the whole file, so any trailing byte (a newline or spaces) is
+    // PKG-007. Use the STORED entry's uncompressed size as the content length; for
+    // a non-STORED entry (already flagged MimetypeNotStored) the raw bytes are
+    // compressed and can't be compared, so fall back to the leading 20-byte check.
     let content_start = 30 + name_len + extra_len;
-    let content = &bytes[content_start..content_start + REQUIRED.len()];
+    let uncomp_size = u32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]) as usize;
+    let content: &[u8] = if compression == 0 && content_start + uncomp_size <= bytes.len() {
+        &bytes[content_start..content_start + uncomp_size]
+    } else {
+        &bytes[content_start..content_start + REQUIRED.len()]
+    };
     if content != REQUIRED {
         report.push(Violation::new(
             Rule::MimetypeBadContent,
@@ -1834,7 +2512,10 @@ fn read_container_opf_path(
                 for attr in e.attributes().flatten() {
                     match attr.key.as_ref() {
                         b"full-path" => {
-                            full_path = Some(String::from_utf8_lossy(&attr.value).to_string())
+                            // The rootfile path is an OCF URL: percent-decode and
+                            // NFC-normalize so it matches the zip entry names.
+                            let raw = String::from_utf8_lossy(&attr.value);
+                            full_path = Some(nfc(&percent_decode(&raw)))
                         }
                         b"media-type" => {
                             media_type = String::from_utf8_lossy(&attr.value).to_string()
@@ -1907,6 +2588,20 @@ fn check_manifest_files(
     report: &mut Report,
 ) {
     for item in &pkg.manifest {
+        // Remote (http[s]:, …) and data: resources are not expected in the
+        // container, so their absence is never RSC-001 (epubcheck checks remote
+        // items via the remote-resource rules instead). file: URLs (RSC-030) and
+        // hrefs that leak outside the container (RSC-026, path-absolute or too
+        // many `..`) are not container paths either — reported by
+        // check_parent_paths_in_opf, not as a missing file here.
+        if is_remote_href(&item.href)
+            || is_data_url(&item.href)
+            || url_scheme(&item.href).as_deref() == Some("file")
+            || item.href.starts_with('/')
+            || opf_href_leaks(opf_dir, &item.href)
+        {
+            continue;
+        }
         let resolved = join_opf(opf_dir, &item.href);
         if !zip_paths.contains(&resolved) {
             report.push(Violation::new(
@@ -1968,7 +2663,240 @@ fn check_spine_idrefs(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
 // Nav doc
 // =========================================================================
 
-fn check_nav_present(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
+/// NAV-010: within the EPUB 3 navigation document, a hyperlink inside a `toc`,
+/// `page-list`, or `landmarks` nav must not point at a remote resource — those
+/// navs must reference in-container content documents. (Links to out-of-spine
+/// container items are RSC-011; per epubcheck's `NavHandler`, NAV-010 covers only
+/// the remote case.) The nav type is the nearest enclosing `<nav epub:type>`.
+fn check_nav_remote_links(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    report: &mut Report,
+) {
+    let Some(nav) = pkg
+        .manifest
+        .iter()
+        .find(|m| m.properties.iter().any(|p| p == "nav"))
+    else {
+        return;
+    };
+    let path = join_opf(opf_dir, &nav.href);
+    let Ok(text) = read_text(zip, &path) else {
+        return;
+    };
+    for (kind, href) in nav_remote_links(&text) {
+        report.push(Violation::new(
+            Rule::NavRemoteLink,
+            path.clone(),
+            format!("{kind} nav links to remote resource {href:?}"),
+        ));
+    }
+}
+
+/// The `(nav-type, href)` of every remote hyperlink inside a `toc`, `page-list`,
+/// or `landmarks` nav in the navigation document `text`. The governing nav type
+/// is the nearest enclosing `<nav epub:type>`.
+fn nav_remote_links(text: &str) -> Vec<(String, String)> {
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(false);
+    let mut nav_stack: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    let mut check_anchor = |e: &quick_xml::events::BytesStart, stack: &[String]| {
+        let Some(kind) = stack.last().and_then(|t| {
+            t.split_whitespace()
+                .find(|t| matches!(*t, "toc" | "page-list" | "landmarks"))
+        }) else {
+            return;
+        };
+        for attr in e.attributes().flatten() {
+            if local_name(attr.key.as_ref()) == b"href" {
+                let href = String::from_utf8_lossy(&attr.value);
+                if is_remote_href(&href) {
+                    out.push((kind.to_string(), href.into_owned()));
+                }
+            }
+        }
+    };
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
+                b"nav" => nav_stack.push(epub_type_attr(&e)),
+                b"a" => check_anchor(&e, &nav_stack),
+                _ => {}
+            },
+            Ok(Event::Empty(e)) if local_name(e.name().as_ref()) == b"a" => {
+                check_anchor(&e, &nav_stack);
+            }
+            Ok(Event::End(e)) if local_name(e.name().as_ref()) == b"nav" => {
+                nav_stack.pop();
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break, // nav well-formedness is out of scope here
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The `epub:type` attribute value of an element (raw, trimmed), or empty. Matches
+/// the prefixed `epub:type` or any attribute whose local name is `type`.
+fn epub_type_attr(e: &quick_xml::events::BytesStart) -> String {
+    for attr in e.attributes().flatten() {
+        let key = attr.key.as_ref();
+        if key == b"epub:type" || local_name(key) == b"type" {
+            return String::from_utf8_lossy(&attr.value).trim().to_string();
+        }
+    }
+    String::new()
+}
+
+/// An element attribute's value, selected by its local name (namespace prefix
+/// ignored). `None` if absent.
+fn attr_by_local(e: &quick_xml::events::BytesStart, local: &[u8]) -> Option<String> {
+    e.attributes()
+        .flatten()
+        .find(|a| local_name(a.key.as_ref()) == local)
+        .map(|a| String::from_utf8_lossy(&a.value).into_owned())
+}
+
+/// PKG-026: a resource obfuscated with the IDPF Font Obfuscation algorithm must be
+/// a font. Reads `META-INF/encryption.xml`, finds every resource encrypted with
+/// the IDPF embedding algorithm (the only algorithm epubcheck marks "obfuscated"),
+/// and flags any whose manifest media-type is not a font core media type.
+fn check_obfuscated_fonts(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    report: &mut Report,
+) {
+    let Ok(text) = read_text(zip, "META-INF/encryption.xml") else {
+        return; // no encryption.xml → nothing obfuscated
+    };
+    for uri in idpf_obfuscated_uris(&text) {
+        // encryption.xml URIs are container-root-relative, as is join_opf(...).
+        if let Some(item) = pkg
+            .manifest
+            .iter()
+            .find(|m| join_opf(opf_dir, &m.href) == uri)
+            && !is_blessed_font_type(&item.media_type)
+        {
+            report.push(Violation::new(
+                Rule::ObfuscatedResourceNotFont,
+                "META-INF/encryption.xml".to_string(),
+                format!(
+                    "obfuscated resource {uri:?} has media-type {:?}, not a font core media type",
+                    item.media_type
+                ),
+            ));
+        }
+    }
+}
+
+/// The container-root-relative URIs obfuscated with the IDPF Font Obfuscation
+/// algorithm (`http://www.idpf.org/2008/embedding`) in an `encryption.xml`. The
+/// governing algorithm is the `<EncryptionMethod>` of the enclosing
+/// `<EncryptedData>`, which precedes the `<CipherReference URI>`.
+fn idpf_obfuscated_uris(text: &str) -> Vec<String> {
+    const IDPF: &str = "http://www.idpf.org/2008/embedding";
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(false);
+    let mut out = Vec::new();
+    let mut algorithm = String::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
+                b"EncryptedData" => algorithm.clear(),
+                b"EncryptionMethod" => {
+                    if let Some(a) = attr_by_local(&e, b"Algorithm") {
+                        algorithm = a;
+                    }
+                }
+                b"CipherReference" => {
+                    if algorithm == IDPF
+                        && let Some(uri) = attr_by_local(&e, b"URI")
+                    {
+                        out.push(uri);
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(_) => break, // encryption.xml well-formedness is out of scope here
+            _ => {}
+        }
+    }
+    out
+}
+
+/// OPF-029: a resource declared as `image/jpeg`, `image/gif`, or `image/png` whose
+/// leading bytes don't match that format's signature — a port of epubcheck's
+/// `BitmapChecker::checkHeader`. Conservative: only these three types are checked,
+/// against their unambiguous magic numbers, and only when the file has enough
+/// bytes to judge (a truncated file is a separate corruption concern).
+fn check_image_headers(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    report: &mut Report,
+) {
+    for item in &pkg.manifest {
+        if !is_checked_bitmap_type(&item.media_type) {
+            continue;
+        }
+        let path = join_opf(opf_dir, &item.href);
+        let Ok(bytes) = read_bytes(zip, &path) else {
+            continue; // remote/data/missing — handled by RSC-006/007 elsewhere
+        };
+        if image_header_mismatches(&item.media_type, &bytes) {
+            report.push(Violation::new(
+                Rule::ResourceMediaTypeMismatch,
+                path.clone(),
+                format!(
+                    "resource {path:?} does not match its declared media-type {:?}",
+                    item.media_type
+                ),
+            ));
+        }
+    }
+}
+
+fn is_checked_bitmap_type(media_type: &str) -> bool {
+    matches!(media_type.trim(), "image/jpeg" | "image/gif" | "image/png")
+}
+
+/// True when `bytes` fail the signature for `media_type`. Only the three checked
+/// bitmap types are judged, and only with enough bytes; anything else is `false`
+/// (not a mismatch).
+fn image_header_mismatches(media_type: &str, bytes: &[u8]) -> bool {
+    let expect: &[u8] = match media_type.trim() {
+        "image/jpeg" => &[0xFF, 0xD8],
+        "image/gif" => b"GIF8",
+        "image/png" => &[0x89, b'P', b'N', b'G'],
+        _ => return false,
+    };
+    bytes.len() >= expect.len() && !bytes.starts_with(expect)
+}
+
+/// epubcheck's `isBlessedFontType`: the font core media types.
+fn is_blessed_font_type(media_type: &str) -> bool {
+    matches!(
+        media_type.trim(),
+        "font/otf"
+            | "font/ttf"
+            | "font/woff"
+            | "font/woff2"
+            | "application/font-sfnt"
+            | "application/font-woff"
+            | "application/vnd.ms-opentype"
+            | "application/x-font-ttf"
+    )
+}
+
+fn check_nav_present(pkg: &opf::Package, epub3: bool, opf_path: &str, report: &mut Report) {
+    if !epub3 {
+        return; // the EPUB 3 nav document is defined only for EPUB 3
+    }
     let nav_items: Vec<&opf::ManifestItem> = pkg
         .manifest
         .iter()
@@ -1996,6 +2924,7 @@ fn check_nav_present(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
 fn check_xhtml_hrefs_and_reachability(
     pkg: &opf::Package,
     opf_dir: &str,
+    epub2: bool,
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     zip_paths: &HashSet<String>,
     opf_path: &str,
@@ -2021,6 +2950,25 @@ fn check_xhtml_hrefs_and_reachability(
         .map(|m| join_opf(opf_dir, &m.href))
         .collect();
     let mut undeclared_reported: HashSet<String> = HashSet::new();
+    // For RSC-010/011: resolve a hyperlink target back to its manifest item, its
+    // fallback chain (by id), and spine membership.
+    let manifest_by_path: HashMap<String, &opf::ManifestItem> = pkg
+        .manifest
+        .iter()
+        .map(|m| (join_opf(opf_dir, &m.href), m))
+        .collect();
+    let by_id: HashMap<&str, &opf::ManifestItem> =
+        pkg.manifest.iter().map(|m| (m.id.as_str(), m)).collect();
+    let spine_ids: HashSet<&str> = pkg.spine.iter().map(|s| s.idref.as_str()).collect();
+    // OPF-096's script exemption: a non-linear spine item that no hyperlink
+    // reaches is only an error when the publication has no scripts (epubcheck
+    // downgrades it to OPF-096b USAGE otherwise, because a script may navigate to
+    // it). Seed from the declared `scripted` manifest property; also set below if
+    // any content document actually contains a `<script>` element.
+    let mut has_scripts = pkg
+        .manifest
+        .iter()
+        .any(|m| m.properties.iter().any(|p| p == "scripted"));
 
     for item in &pkg.manifest {
         if !is_xhtml(&item.media_type) {
@@ -2030,6 +2978,9 @@ fn check_xhtml_hrefs_and_reachability(
         let Ok(text) = read_text(zip, &path) else {
             continue;
         };
+        if text.contains("<script") {
+            has_scripts = true;
+        }
         doc_ids.insert(path.clone(), collect_element_ids(&text));
         for (kind, href) in collect_references(&text) {
             if href.contains('#') {
@@ -2060,6 +3011,23 @@ fn check_xhtml_hrefs_and_reachability(
                     format!("reference {href:?} uses a file: URL, not allowed in EPUB"),
                 ));
             }
+            // RSC-026: a reference that is not a valid relative OCF URL leaks
+            // outside the container — either path-absolute ("/foo") / scheme-
+            // relative ("//host/foo"), or rising above the container root via too
+            // many `..`. A leaking URL cannot be resolved to a container path, so
+            // skip the existence/escape checks below (epubcheck reports only
+            // RSC-026, never also RSC-007). Fully-absolute URLs with a scheme are
+            // external and filtered by resolve_href returning None.
+            if href.split('#').next().unwrap_or(&href).starts_with('/')
+                || href_leaks_container(&path, &href)
+            {
+                report.push(Violation::new(
+                    Rule::HrefEscapesOpfRoot,
+                    path.clone(),
+                    format!("reference {href:?} leaks outside the container"),
+                ));
+                continue;
+            }
             if let Some(resolved) = resolve_href(&path, &href) {
                 // RSC-033: a relative URL must not carry a query component. The
                 // '?' would otherwise be swallowed into the resolved path and
@@ -2074,6 +3042,30 @@ fn check_xhtml_hrefs_and_reachability(
                 }
                 if kind == RefKind::Hyperlink {
                     hyperlink_targets.insert(resolved.clone());
+                    // RSC-010/011: a hyperlink to a *declared, present* resource
+                    // must point at an EPUB content document (or a type with a
+                    // content-document fallback) that is a spine item. Undeclared
+                    // or missing targets are RSC-007/008, handled below; epubcheck
+                    // runs this only for a resolved manifest item. EPUB CFI
+                    // fragments are out of scope (epubcheck skips them too).
+                    let frag = href.split_once('#').map(|(_, f)| f).unwrap_or("");
+                    if zip_paths.contains(&resolved)
+                        && !frag.starts_with("epubcfi(")
+                        && let Some(target) = manifest_by_path.get(&resolved)
+                        && let Some(rule) = hyperlink_target_rule(target, &by_id, &spine_ids, epub2)
+                    {
+                        let mt = &target.media_type;
+                        let detail = if rule == Rule::HyperlinkToNonContentDocument {
+                            format!(
+                                "hyperlink {href:?} -> {resolved:?} targets media-type {mt:?}, not an EPUB content document"
+                            )
+                        } else {
+                            format!(
+                                "hyperlink {href:?} -> {resolved:?} targets a resource that is not a spine item"
+                            )
+                        };
+                        report.push(Violation::new(rule, path.clone(), detail));
+                    }
                 }
                 if !zip_paths.contains(&resolved) {
                     report.push(Violation::new(
@@ -2095,15 +3087,6 @@ fn check_xhtml_hrefs_and_reachability(
                         ),
                     ));
                 }
-                if escapes_opf_root(opf_dir, &resolved) {
-                    report.push(Violation::new(
-                        Rule::HrefEscapesOpfRoot,
-                        path.clone(),
-                        format!(
-                            "reference {href:?} resolves to {resolved:?}, outside the OPF root {opf_dir:?}"
-                        ),
-                    ));
-                }
             }
         }
     }
@@ -2111,8 +3094,9 @@ fn check_xhtml_hrefs_and_reachability(
     check_fragments(&doc_ids, &fragment_refs, report);
 
     // Reachability: every spine item with `linear="no"` must be the target of
-    // some hyperlink elsewhere in the publication.
-    for s in &pkg.spine {
+    // some hyperlink elsewhere in the publication — unless the publication has
+    // scripts, which may navigate to it (epubcheck's OPF-096b USAGE case).
+    for s in pkg.spine.iter().filter(|_| !has_scripts) {
         if s.linear != Some(false) {
             continue;
         }
@@ -2140,14 +3124,33 @@ fn check_parent_paths_in_opf(
     report: &mut Report,
 ) {
     for item in &pkg.manifest {
-        let resolved = join_opf(opf_dir, &item.href);
-        if escapes_opf_root(opf_dir, &resolved) {
+        // Remote/data hrefs don't resolve to a container path.
+        if is_remote_href(&item.href) || is_data_url(&item.href) {
+            continue;
+        }
+        // RSC-030: a file: URL is never allowed in an EPUB.
+        if url_scheme(&item.href).as_deref() == Some("file") {
+            report.push(Violation::new(
+                Rule::FileUrlNotAllowed,
+                opf_path,
+                format!(
+                    "manifest item href={:?} uses a file: URL, not allowed in EPUB",
+                    item.href
+                ),
+            ));
+            continue;
+        }
+        // RSC-026: a path-absolute manifest href ("/EPUB/x") or one that rises
+        // above the container root (too many `..`) is not a valid relative OCF
+        // URL — it leaks outside the container. (join_opf still clamps it to a
+        // container path so it isn't double-reported as missing/undeclared.)
+        if item.href.starts_with('/') || opf_href_leaks(opf_dir, &item.href) {
             report.push(Violation::new(
                 Rule::HrefEscapesOpfRoot,
                 opf_path,
                 format!(
-                    "manifest item href={:?} resolves to {:?}, outside the OPF root {:?}",
-                    item.href, resolved, opf_dir
+                    "manifest item href={:?} leaks outside the container",
+                    item.href
                 ),
             ));
         }
@@ -2161,6 +3164,108 @@ fn check_parent_paths_in_opf(
 enum RefKind {
     Hyperlink,
     Resource,
+}
+
+/// Fine-grained reference type for the remote-resource rule (RSC-006), a reduced
+/// form of epubcheck's `Reference.Type` keeping only the distinctions RSC-006
+/// keys on: `LinkLike` (`<a>`/`<area>`/non-stylesheet `<link>` — always allowed
+/// remote), `Audio`/`Video` (allowed remote in EPUB 3 by element type), and
+/// `Other` (`<img>`, stylesheet `<link>`, `<object>`, `<iframe>`, `<script>`, … —
+/// not allowed remote unless the *declared* target is itself an audio/video/font
+/// media type). A remote font is exempted through that target-media-type path (a
+/// font reference is only ever declared, via `@font-face` or the manifest).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefType {
+    LinkLike,
+    Audio,
+    Video,
+    Other,
+}
+
+/// Every reference in `content` paired with its [`RefType`], tracking the nearest
+/// `<audio>`/`<video>`/`<picture>` ancestor so a `<source>` is typed by its
+/// parent (audio source → `Audio`, video source → `Video`, picture source →
+/// `Other`/image). Used by the remote-resource check; the fragment/existence
+/// checks use the coarser [`collect_references`].
+fn typed_content_refs(content: &str) -> Vec<(RefType, String)> {
+    let mut reader = Reader::from_str(content);
+    reader.config_mut().trim_text(false);
+    let mut out = Vec::new();
+    // Media context of each open ancestor: "audio" / "video" / "picture" / "".
+    let mut stack: Vec<&'static str> = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                classify_element_refs(&e, stack.last().copied().unwrap_or(""), &mut out);
+                let name = e.name();
+                stack.push(match local_name(name.as_ref()) {
+                    b"audio" => "audio",
+                    b"video" => "video",
+                    b"picture" => "picture",
+                    _ => "",
+                });
+            }
+            Ok(Event::Empty(e)) => {
+                classify_element_refs(&e, stack.last().copied().unwrap_or(""), &mut out);
+            }
+            Ok(Event::End(_)) => {
+                stack.pop();
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Emit `(RefType, href)` for each reference-bearing attribute of one element,
+/// given the media context (`parent`) for a `<source>`.
+fn classify_element_refs(
+    e: &quick_xml::events::BytesStart<'_>,
+    parent: &str,
+    out: &mut Vec<(RefType, String)>,
+) {
+    let name = e.name();
+    let local = local_name(name.as_ref());
+    let mut rel = String::new();
+    if local == b"link" {
+        for attr in e.attributes().flatten() {
+            if local_name(attr.key.as_ref()) == b"rel" {
+                rel = String::from_utf8_lossy(&attr.value).to_ascii_lowercase();
+            }
+        }
+    }
+    for attr in e.attributes().flatten() {
+        let akey = local_name(attr.key.as_ref());
+        let ty = match (local, akey) {
+            (b"a" | b"area", b"href") => RefType::LinkLike,
+            (b"link", b"href") => {
+                if rel.split_whitespace().any(|k| k == "stylesheet") {
+                    RefType::Other
+                } else {
+                    RefType::LinkLike
+                }
+            }
+            (b"audio", b"src") => RefType::Audio,
+            (b"video", b"src") => RefType::Video,
+            (b"video", b"poster") => RefType::Other,
+            (b"track", b"src") => RefType::Other,
+            (b"source", b"src") => match parent {
+                "audio" => RefType::Audio,
+                "video" => RefType::Video,
+                _ => RefType::Other,
+            },
+            (b"object", b"data") => RefType::Other,
+            (b"img" | b"image" | b"use", b"href" | b"src") => RefType::Other,
+            (b"embed" | b"iframe" | b"script", b"src") => RefType::Other,
+            _ => continue,
+        };
+        let val = String::from_utf8_lossy(&attr.value).to_string();
+        if !val.is_empty() {
+            out.push((ty, val));
+        }
+    }
 }
 
 /// Every internal reference in the document, paired with its kind. Covers the
@@ -2250,8 +3355,14 @@ fn check_fragments(
         // An empty fragment (`foo.xhtml#`) is not an id reference; `epubcfi(…)`
         // is a different scheme epubcheck doesn't resolve by id; a
         // percent-encoded fragment we can't compare byte-for-byte without
-        // decoding, so we leave it rather than risk a false positive.
-        if frag.is_empty() || frag.starts_with("epubcfi(") || frag.contains('%') {
+        // decoding, so we leave it rather than risk a false positive. A media
+        // fragment (`#xywh=…`, `#t=…` — used by region-based navigation) contains
+        // `=`, which no XML id does, so it is not an id reference either.
+        if frag.is_empty()
+            || frag.starts_with("epubcfi(")
+            || frag.contains('%')
+            || frag.contains('=')
+        {
             continue;
         }
         let target = if file.is_empty() {
@@ -2281,11 +3392,90 @@ fn check_fragments(
 // =========================================================================
 
 fn join_opf(opf_dir: &str, href: &str) -> String {
-    if opf_dir.is_empty() {
-        href.to_string()
+    resolve_container(opf_dir, href).0
+}
+
+/// True when resolving a manifest/OPF `href` against `opf_dir` would rise above
+/// the container root (a `..` with nothing left to pop) — RSC-026: the href is
+/// not a valid relative OCF URL and leaks outside the container.
+fn opf_href_leaks(opf_dir: &str, href: &str) -> bool {
+    resolve_container(opf_dir, href).1
+}
+
+/// Resolve an OCF `href` (a URL) against the OPF directory into a zip-relative
+/// container path, returning `(path, leaked)`. `.`/`..` segments are collapsed
+/// (RFC 3986 style) and each remaining segment is percent-decoded to match the
+/// literal zip entry names. A `..` that would rise above the container root is
+/// clamped (the path stays in-container) and reported via `leaked`. A
+/// path-absolute href (`/x`) resolves against the container root.
+fn resolve_container(opf_dir: &str, href: &str) -> (String, bool) {
+    let (mut parts, rest): (Vec<String>, &str) = if let Some(rooted) = href.strip_prefix('/') {
+        (Vec::new(), rooted)
+    } else if opf_dir.is_empty() {
+        (Vec::new(), href)
     } else {
-        format!("{}/{}", opf_dir, href)
+        (opf_dir.split('/').map(String::from).collect(), href)
+    };
+    let mut leaked = false;
+    for seg in rest.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => {
+                if parts.pop().is_none() {
+                    leaked = true;
+                }
+            }
+            other => parts.push(percent_decode(other)),
+        }
     }
+    (nfc(&parts.join("/")), leaked)
+}
+
+/// Percent-decode a URL path (`%20` → space, UTF-8 aware). A manifest/reference
+/// `href` is a URL, but zip entry names are literal — so decode the href before
+/// matching (a file named `a b.xhtml` referenced as `a%20b.xhtml` must resolve).
+/// Invalid/truncated escapes are left literal.
+fn percent_decode(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (hex_digit(b[i + 1]), hex_digit(b[i + 2]))
+        {
+            out.push((h << 4) | l);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Normalize an OCF path to Unicode NFC. A filename may be stored decomposed (NFD,
+/// e.g. macOS-authored content: `u`+combining-diaeresis) yet referenced composed
+/// (NFC: precomposed `ü`) or vice versa. epubcheck compares OCF paths in NFC, so
+/// bokai normalizes every container path to NFC before matching.
+fn nfc(s: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    if s.is_ascii() {
+        return s.to_string();
+    }
+    s.nfc().collect()
 }
 
 /// Resolve `href` against the directory of `source_path`. Returns `None`
@@ -2293,6 +3483,10 @@ fn join_opf(opf_dir: &str, href: &str) -> String {
 /// hrefs. The result is the zip-relative path of the link target with the
 /// fragment stripped.
 fn resolve_href(source_path: &str, href: &str) -> Option<String> {
+    // Leading/trailing ASCII whitespace is stripped from a URL before parsing
+    // (WHATWG URL); a whitespace-only href (`href=" "`) is an empty same-document
+    // reference, never a broken link.
+    let href = href.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0C'));
     if href.is_empty() || href.starts_with('#') {
         return None;
     }
@@ -2308,34 +3502,51 @@ fn resolve_href(source_path: &str, href: &str) -> Option<String> {
         return None;
     }
     let source_dir = source_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-    let mut parts: Vec<&str> = if source_dir.is_empty() {
+    let mut parts: Vec<String> = if source_dir.is_empty() {
         Vec::new()
     } else {
-        source_dir.split('/').collect()
+        source_dir.split('/').map(String::from).collect()
     };
+    // href segments are URL-encoded; decode each to match the literal zip names.
     for seg in no_frag.split('/') {
         match seg {
             "" | "." => continue,
             ".." => {
                 parts.pop();
             }
-            other => parts.push(other),
+            other => parts.push(percent_decode(other)),
         }
     }
-    Some(parts.join("/"))
+    Some(nfc(&parts.join("/")))
 }
 
-/// True when `resolved` (a zip-relative path produced by [`resolve_href`] or
-/// [`join_opf`]) is outside the OPF root directory. `OEBPS/text/foo.xhtml`
-/// with `<a href="../style.css">` resolves to `OEBPS/style.css` (inside
-/// `OEBPS/` — fine); the same chapter with `<a href="../../escape.xhtml">`
-/// resolves to `escape.xhtml` at zip root (outside `OEBPS/` — flagged).
-fn escapes_opf_root(opf_dir: &str, resolved: &str) -> bool {
-    if opf_dir.is_empty() {
-        return false;
+/// True when resolving `href` against `source_path`'s directory would rise above
+/// the container root — more leading `..` than the source file's depth — which is
+/// RSC-026 (leaks outside the container). Resolving to a *sibling* directory
+/// inside the container (`../images/x.png`, or a resource at the zip root) is
+/// legal and not flagged; only escaping the container root is.
+fn href_leaks_container(source_path: &str, href: &str) -> bool {
+    let no_frag = href.split('#').next().unwrap_or(href);
+    let path = no_frag.split('?').next().unwrap_or(no_frag);
+    let source_dir = source_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let mut depth = if source_dir.is_empty() {
+        0
+    } else {
+        source_dir.split('/').count()
+    };
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if depth == 0 {
+                    return true;
+                }
+                depth -= 1;
+            }
+            _ => depth += 1,
+        }
     }
-    let prefix = format!("{}/", opf_dir);
-    !resolved.starts_with(&prefix) && resolved != opf_dir
+    false
 }
 
 fn is_xhtml(media_type: &str) -> bool {
@@ -2343,17 +3554,36 @@ fn is_xhtml(media_type: &str) -> bool {
 }
 
 fn read_text(zip: &mut ZipArchive<Cursor<&[u8]>>, name: &str) -> io::Result<String> {
-    let mut entry = zip.by_name(name)?;
+    let idx = resolve_entry_index(zip, name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, name.to_owned()))?;
+    let mut entry = zip.by_index(idx)?;
     let mut s = String::new();
     entry.read_to_string(&mut s)?;
     Ok(s)
 }
 
 fn read_bytes(zip: &mut ZipArchive<Cursor<&[u8]>>, name: &str) -> io::Result<Vec<u8>> {
-    let mut entry = zip.by_name(name)?;
+    let idx = resolve_entry_index(zip, name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, name.to_owned()))?;
+    let mut entry = zip.by_index(idx)?;
     let mut b = Vec::new();
     entry.read_to_end(&mut b)?;
     Ok(b)
+}
+
+/// The archive index of the entry whose OCF (UTF-8) path is `name`. The zip crate
+/// keys `by_name`/`index_for_name` on the CP437-decoded name when an entry lacks
+/// the language-encoding flag, so a non-ASCII OCF path (always UTF-8 per the spec)
+/// can miss; fall back to matching the raw name bytes decoded as UTF-8, matching
+/// how epubcheck reads OCF names.
+fn resolve_entry_index(zip: &mut ZipArchive<Cursor<&[u8]>>, name: &str) -> Option<usize> {
+    if let Some(i) = zip.index_for_name(name) {
+        return Some(i);
+    }
+    (0..zip.len()).find(|&i| {
+        zip.by_index(i)
+            .is_ok_and(|f| nfc(&String::from_utf8_lossy(f.name_raw())) == name)
+    })
 }
 
 fn local_name(name: &[u8]) -> &[u8] {
@@ -2379,7 +3609,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 59, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 72, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -2410,9 +3640,15 @@ mod tests {
         // rootfile batch OPF-016/017/043/044/045; metadata batch OPF-054 (the
         // date's EPUB-2 error id — OPF-053/085 are warnings, RSC-005 for missing
         // title/language was already counted); language batch OPF-092; remote/data
-        // batch RSC-006 (remote spine item) + RSC-029 (manifest data: URL).
+        // batch RSC-006 (remote spine item) + RSC-029 (manifest data: URL); OPF
+        // <link> batch OPF-089 (alternate+other) + OPF-095 (voicing not audio) +
+        // OPF-098 (link into package doc) + OPF-067 (link to non-spine item);
+        // hyperlink-target batch RSC-010 (target not a content doc) + RSC-011
+        // (target not a spine item); nav batch NAV-010 (nav links remote);
+        // obfuscation batch PKG-026 (obfuscated resource not a font); bitmap batch
+        // OPF-029 (image header vs declared media-type).
         assert_eq!(
-            covered, 49,
+            covered, 61,
             "epubcheck error coverage changed: {covered}/{total}"
         );
     }
@@ -2584,6 +3820,100 @@ mod tests {
     }
 
     #[test]
+    fn typed_content_refs_classify_for_remote_rule() {
+        let refs = typed_content_refs(
+            r##"<html><body>
+                <a href="a.xhtml">x</a>
+                <link rel="stylesheet" href="s.css"/>
+                <link rel="prefetch" href="p.xhtml"/>
+                <img src="i.jpg"/>
+                <audio src="au.mp3"></audio>
+                <video src="v.mp4" poster="po.jpg"></video>
+                <picture><source src="ps.webp"/><img src="pi.jpg"/></picture>
+                <audio><source src="as.mp3"/></audio>
+                <video><source src="vs.mp4"/></video>
+            </body></html>"##,
+        );
+        let ty = |h: &str| refs.iter().find(|(_, x)| x == h).map(|(t, _)| *t);
+        // <a> and non-stylesheet <link> are link-like (always allowed remote).
+        assert_eq!(ty("a.xhtml"), Some(RefType::LinkLike));
+        assert_eq!(ty("p.xhtml"), Some(RefType::LinkLike));
+        // A stylesheet <link> is not link-like.
+        assert_eq!(ty("s.css"), Some(RefType::Other));
+        // Media elements type by their own tag; a <source> types by its parent.
+        assert_eq!(ty("au.mp3"), Some(RefType::Audio));
+        assert_eq!(ty("as.mp3"), Some(RefType::Audio));
+        assert_eq!(ty("v.mp4"), Some(RefType::Video));
+        assert_eq!(ty("vs.mp4"), Some(RefType::Video));
+        // A <video poster> and a <source> inside <picture> are images (Other).
+        assert_eq!(ty("po.jpg"), Some(RefType::Other));
+        assert_eq!(ty("ps.webp"), Some(RefType::Other));
+        assert_eq!(ty("i.jpg"), Some(RefType::Other));
+        assert_eq!(ty("pi.jpg"), Some(RefType::Other));
+    }
+
+    #[test]
+    fn core_media_type_set_matches_epubcheck() {
+        for core in [
+            "audio/mpeg",
+            "audio/mp4",
+            "audio/ogg; codecs=opus",
+            "video/anything",
+            "font/woff2",
+            "application/vnd.ms-opentype",
+            "application/xhtml+xml",
+            "image/svg+xml",
+            "image/gif",
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "text/javascript",
+            "text/css",
+            "application/pls+xml",
+            "application/smil+xml",
+        ] {
+            assert!(is_core_media_type(core), "{core} should be core");
+        }
+        for foreign in [
+            "image/vnd.xyz",
+            "application/x-demo-slideshow2",
+            "audio/foreign",
+            "application/vnd.epubcheck",
+        ] {
+            assert!(!is_core_media_type(foreign), "{foreign} should be foreign");
+        }
+        // Only gif/png/jpeg/svg/webp are blessed *image* types (MED-003).
+        assert!(is_blessed_image_type("image/png"));
+        assert!(!is_blessed_image_type("image/vnd.xyz"));
+    }
+
+    #[test]
+    fn palpable_content_excludes_hidden_and_metadata() {
+        // Embedded content is always palpable; a hidden element never is; a
+        // generic element counts iff it accumulated palpable content.
+        assert!(is_palpable_elem(b"img", false, false));
+        assert!(is_palpable_elem(b"object", false, false));
+        assert!(!is_palpable_elem(b"p", true, true)); // hidden overrides content
+        assert!(!is_palpable_elem(b"script", false, true));
+        assert!(!is_palpable_elem(b"head", false, true));
+        assert!(is_palpable_elem(b"p", false, true));
+        assert!(!is_palpable_elem(b"p", false, false));
+    }
+
+    #[test]
+    fn data_url_media_type_is_extracted() {
+        assert_eq!(
+            data_url_media_type("data:image/x-foreign;base64,AAAA"),
+            Some("image/x-foreign")
+        );
+        assert_eq!(
+            data_url_media_type("data:image/png,AAAA"),
+            Some("image/png")
+        );
+        assert_eq!(data_url_media_type("data:,hello"), None);
+    }
+
+    #[test]
     fn opf_structure_flags_the_batch() {
         // One OPF that trips nine structural rules at once.
         let opf = r##"<package unique-identifier="bad-ref">
@@ -2604,7 +3934,7 @@ mod tests {
         </package>"##;
         let pkg = opf::parse(opf).unwrap();
         let mut report = Report::default();
-        check_opf_structure(&pkg, "", "content.opf", false, &mut report);
+        check_opf_structure(&pkg, "", "content.opf", false, true, &mut report);
         for rule in [
             Rule::UniqueIdentifierNotFound,    // OPF-030
             Rule::SpineNoLinear,               // OPF-033
@@ -2629,7 +3959,7 @@ mod tests {
         )
         .unwrap();
         let mut report = Report::default();
-        check_opf_structure(&pkg, "", "content.opf", false, &mut report);
+        check_opf_structure(&pkg, "", "content.opf", false, true, &mut report);
         assert!(report.has_rule(Rule::UniqueIdentifierMissing));
         // A well-formed spine (default-linear) must NOT trip OPF-033.
         assert!(!report.has_rule(Rule::SpineNoLinear));
@@ -2745,7 +4075,7 @@ mod tests {
             r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "x.dtd"><html/>"#,
             "c.xhtml",
             "application/xhtml+xml",
-            false,
+            true,
             &mut r,
         );
         assert!(r.has_rule(Rule::IrregularDoctype));
@@ -2755,7 +4085,7 @@ mod tests {
             r#"<!DOCTYPE html SYSTEM "about:legacy-compat"><html/>"#,
             "c.xhtml",
             "application/xhtml+xml",
-            false,
+            true,
             &mut r2,
         );
         assert!(
@@ -2768,7 +4098,7 @@ mod tests {
             "<!DOCTYPE html><html/>",
             "c.xhtml",
             "application/xhtml+xml",
-            false,
+            true,
             &mut r3,
         );
         assert!(!r3.has_rule(Rule::IrregularDoctype));
@@ -2782,7 +4112,7 @@ mod tests {
             r#"<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd"><ncx/>"#,
             "toc.ncx",
             "application/x-dtbncx+xml",
-            false,
+            true,
             &mut r,
         );
         assert!(!r.has_rule(Rule::DoctypeExternalIdentifier));
@@ -2792,17 +4122,18 @@ mod tests {
             r#"<!DOCTYPE package SYSTEM "oeb.dtd"><package/>"#,
             "content.opf",
             "application/oebps-package+xml",
-            false,
+            true,
             &mut r2,
         );
         assert!(r2.has_rule(Rule::DoctypeExternalIdentifier));
-        // ...but gated off for EPUB 2 (legacy DTDs are permitted there).
+        // ...but gated off for EPUB 2 / version-less (legacy DTDs permitted there;
+        // a version-less package is rejected via OPF-001 instead).
         let mut r3 = Report::default();
         check_doctype_rules(
             r#"<!DOCTYPE package SYSTEM "oeb.dtd"><package/>"#,
             "content.opf",
             "application/oebps-package+xml",
-            true,
+            false,
             &mut r3,
         );
         assert!(!r3.has_rule(Rule::DoctypeExternalIdentifier));
@@ -2910,7 +4241,7 @@ mod tests {
         </package>"##;
         let pkg = opf::parse(opf).unwrap();
         let mut report = Report::default();
-        check_opf_structure(&pkg, "", "content.opf", false, &mut report);
+        check_opf_structure(&pkg, "", "content.opf", false, true, &mut report);
         assert!(report.has_rule(Rule::GuideReferenceNotContentDoc)); // OPF-032
         assert!(!report.has_rule(Rule::GuideReferenceNotInManifest)); // it is declared
     }
@@ -2934,7 +4265,7 @@ mod tests {
         </package>"##;
         let pkg = opf::parse(opf).unwrap();
         let mut r = Report::default();
-        check_fallback_chain_and_spine(&pkg, false, "content.opf", &mut r);
+        check_fallback_chain_and_spine(&pkg, false, true, "content.opf", &mut r);
         // a: non-blessed, no fallback → OPF-043. b: fallback→png (not content)
         // → OPF-044. d: fallback→xhtml reaches a content document → clean.
         let n43 = r
@@ -2965,7 +4296,7 @@ mod tests {
         </package>"##;
         let pkg = opf::parse(opf).unwrap();
         let mut r = Report::default();
-        check_fallback_chain_and_spine(&pkg, false, "content.opf", &mut r);
+        check_fallback_chain_and_spine(&pkg, false, true, "content.opf", &mut r);
         assert_eq!(
             r.violations
                 .iter()
@@ -3175,7 +4506,7 @@ mod tests {
         let pkg = opf::parse(opf).unwrap();
         let mut r = Report::default();
         check_remote_and_data_urls(&pkg, "content.opf", &mut r);
-        assert!(r.has_rule(Rule::ManifestItemDataUrl), "data: URL → RSC-029");
+        assert!(r.has_rule(Rule::DataUrlNotAllowed), "data: URL → RSC-029");
         assert!(
             r.has_rule(Rule::RemoteResourceInSpine),
             "remote spine item → RSC-006"
@@ -3183,6 +4514,233 @@ mod tests {
         // Exactly those two: remote audio (exempt) and remote non-spine image
         // (deferred) must NOT fire.
         assert_eq!(r.violations.len(), 2, "unexpected extra findings:\n{r}");
+    }
+
+    #[test]
+    fn opf_link_cluster_checks() {
+        let opf = r##"<package version="3.0" unique-identifier="uid">
+          <metadata>
+            <dc:identifier id="uid">x</dc:identifier>
+            <link rel="alternate mapping" href="m.xml" media-type="application/xml"/>
+            <link rel="voicing" href="say.txt" media-type="text/plain"/>
+            <link rel="record" href="#meta"/>
+            <link href="data:text/plain,hi"/>
+            <link rel="record" href="extra.xhtml"/>
+          </metadata>
+          <manifest>
+            <item id="c" href="ch.xhtml" media-type="application/xhtml+xml"/>
+            <item id="extra" href="extra.xhtml" media-type="application/xhtml+xml"/>
+            <item id="map" href="m.xml" media-type="application/xml"/>
+          </manifest>
+          <spine><itemref idref="c"/></spine>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut r = Report::default();
+        check_opf_links(&pkg, "", "content.opf", &mut r);
+        assert!(
+            r.has_rule(Rule::LinkAlternatePaired),
+            "alternate+mapping → OPF-089"
+        );
+        assert!(
+            r.has_rule(Rule::VoicingLinkNotAudio),
+            "voicing text/plain → OPF-095"
+        );
+        assert!(
+            r.has_rule(Rule::LinkIntoPackageDocument),
+            "href=#meta → OPF-098"
+        );
+        assert!(r.has_rule(Rule::DataUrlNotAllowed), "data: link → RSC-029");
+        assert!(
+            r.has_rule(Rule::LinkToNonSpineManifestItem),
+            "link to non-spine extra.xhtml → OPF-067"
+        );
+    }
+
+    #[test]
+    fn opf_links_clean_for_a_well_formed_package() {
+        // A voicing link with an audio type, and a metadata record link to a
+        // resource that is *not* a manifest item (so no OPF-067): all clean.
+        let opf = r##"<package version="3.0" unique-identifier="uid">
+          <metadata>
+            <dc:identifier id="uid">x</dc:identifier>
+            <link rel="voicing" href="v.mp3" media-type="audio/mpeg"/>
+            <link rel="record" href="onix.xml" media-type="application/xml"/>
+          </metadata>
+          <manifest><item id="c" href="ch.xhtml" media-type="application/xhtml+xml"/></manifest>
+          <spine><itemref idref="c"/></spine>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut r = Report::default();
+        check_opf_links(&pkg, "", "content.opf", &mut r);
+        assert!(r.is_clean(), "well-formed links should be clean, got:\n{r}");
+    }
+
+    #[test]
+    fn hyperlink_target_rule_matches_epubcheck() {
+        let mk = |id: &str, mt: &str, fb: Option<&str>| opf::ManifestItem {
+            id: id.to_string(),
+            href: format!("{id}.x"),
+            media_type: mt.to_string(),
+            properties: vec![],
+            fallback: fb.map(str::to_string),
+        };
+        let xhtml_spine = mk("c", "application/xhtml+xml", None);
+        let xhtml_aside = mk("aside", "application/xhtml+xml", None);
+        let svg_spine = mk("s", "image/svg+xml", None);
+        let image = mk("img", "image/jpeg", None);
+        let image_fb = mk("imgfb", "image/jpeg", Some("c")); // fallback → content doc
+        let items = [&xhtml_spine, &xhtml_aside, &svg_spine, &image, &image_fb];
+        let by_id: HashMap<&str, &opf::ManifestItem> =
+            items.iter().map(|m| (m.id.as_str(), *m)).collect();
+        let spine: HashSet<&str> = ["c", "s"].into_iter().collect();
+
+        // Content doc in spine → clean (XHTML and SVG).
+        assert_eq!(
+            hyperlink_target_rule(&xhtml_spine, &by_id, &spine, false),
+            None
+        );
+        assert_eq!(
+            hyperlink_target_rule(&svg_spine, &by_id, &spine, false),
+            None
+        );
+        // Content doc not in spine → RSC-011.
+        assert_eq!(
+            hyperlink_target_rule(&xhtml_aside, &by_id, &spine, false),
+            Some(Rule::HyperlinkToNonSpineItem)
+        );
+        // Non-content type, no fallback → RSC-010.
+        assert_eq!(
+            hyperlink_target_rule(&image, &by_id, &spine, false),
+            Some(Rule::HyperlinkToNonContentDocument)
+        );
+        // Non-content type but with a content-doc fallback, not in spine → RSC-011.
+        assert_eq!(
+            hyperlink_target_rule(&image_fb, &by_id, &spine, false),
+            Some(Rule::HyperlinkToNonSpineItem)
+        );
+    }
+
+    #[test]
+    fn nav_remote_links_flags_only_remote_in_governed_navs() {
+        let nav = r##"<html xmlns:epub="http://www.idpf.org/2007/ops">
+          <body>
+            <nav epub:type="toc">
+              <ol>
+                <li><a href="ch1.xhtml">Local</a></li>
+                <li><a href="https://ex.com/ch2.xhtml">Remote</a></li>
+              </ol>
+            </nav>
+            <nav epub:type="landmarks">
+              <ol><li><a href="http://ex.com/cover.xhtml">Remote cover</a></li></ol>
+            </nav>
+            <nav epub:type="foo">
+              <ol><li><a href="https://ex.com/other.xhtml">Remote, ungoverned nav</a></li></ol>
+            </nav>
+          </body>
+        </html>"##;
+        let hits = nav_remote_links(nav);
+        // The toc and landmarks remote links fire; the local one and the
+        // ungoverned "foo" nav do not.
+        assert_eq!(hits.len(), 2, "got {hits:?}");
+        assert!(hits.iter().any(|(k, h)| k == "toc" && h.contains("ch2")));
+        assert!(
+            hits.iter()
+                .any(|(k, h)| k == "landmarks" && h.contains("cover"))
+        );
+    }
+
+    #[test]
+    fn idpf_obfuscated_uris_selects_only_the_idpf_algorithm() {
+        let enc = r#"<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container"
+            xmlns:enc="http://www.w3.org/2001/04/xmlenc#">
+          <enc:EncryptedData>
+            <enc:EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/>
+            <enc:CipherData><enc:CipherReference URI="OEBPS/fonts/obf.otf"/></enc:CipherData>
+          </enc:EncryptedData>
+          <enc:EncryptedData>
+            <enc:EncryptionMethod Algorithm="http://ns.adobe.com/pdf/enc#RC"/>
+            <enc:CipherData><enc:CipherReference URI="OEBPS/fonts/adobe.otf"/></enc:CipherData>
+          </enc:EncryptedData>
+          <enc:EncryptedData>
+            <enc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes256-cbc"/>
+            <enc:CipherData><enc:CipherReference URI="OEBPS/secret.bin"/></enc:CipherData>
+          </enc:EncryptedData>
+        </encryption>"#;
+        // Only the IDPF-obfuscated resource is returned (Adobe/real-encryption skipped).
+        assert_eq!(idpf_obfuscated_uris(enc), vec!["OEBPS/fonts/obf.otf"]);
+    }
+
+    #[test]
+    fn obfuscated_fonts_flag_non_font_only() {
+        let enc = r#"<encryption xmlns:enc="http://www.w3.org/2001/04/xmlenc#">
+          <enc:EncryptedData><enc:EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/>
+            <enc:CipherData><enc:CipherReference URI="OEBPS/f.otf"/></enc:CipherData></enc:EncryptedData>
+          <enc:EncryptedData><enc:EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/>
+            <enc:CipherData><enc:CipherReference URI="OEBPS/pic.png"/></enc:CipherData></enc:EncryptedData>
+        </encryption>"#;
+        let opf = r#"<package version="3.0" unique-identifier="u">
+          <metadata><dc:identifier id="u">x</dc:identifier></metadata>
+          <manifest>
+            <item id="f" href="f.otf" media-type="font/otf"/>
+            <item id="p" href="pic.png" media-type="image/png"/>
+          </manifest><spine/></package>"#;
+        let pkg = opf::parse(opf).unwrap();
+        // Mirror check_obfuscated_fonts: the font is exempt, the image is PKG-026.
+        let flagged: Vec<&str> = idpf_obfuscated_uris(enc)
+            .iter()
+            .filter_map(|u| {
+                pkg.manifest
+                    .iter()
+                    .find(|m| join_opf("OEBPS", &m.href) == *u)
+            })
+            .filter(|m| !is_blessed_font_type(&m.media_type))
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(flagged, vec!["p"], "only the obfuscated image is PKG-026");
+    }
+
+    #[test]
+    fn image_header_magic_matches_epubcheck() {
+        // Correct signatures → no mismatch.
+        assert!(!image_header_mismatches(
+            "image/jpeg",
+            &[0xFF, 0xD8, 0xFF, 0xE0]
+        ));
+        assert!(!image_header_mismatches(
+            "image/png",
+            &[0x89, b'P', b'N', b'G', 0x0D]
+        ));
+        assert!(!image_header_mismatches("image/gif", b"GIF89a"));
+        // Wrong signatures → mismatch (e.g. a PNG mislabeled as JPEG).
+        assert!(image_header_mismatches(
+            "image/jpeg",
+            &[0x89, b'P', b'N', b'G']
+        ));
+        assert!(image_header_mismatches("image/png", b"GIF89a"));
+        assert!(image_header_mismatches(
+            "image/gif",
+            &[0xFF, 0xD8, 0xFF, 0xE0]
+        ));
+        // Unchecked types are never a mismatch, whatever the bytes.
+        assert!(!image_header_mismatches("image/svg+xml", b"<svg"));
+        assert!(!image_header_mismatches("image/webp", &[0, 1, 2, 3]));
+        // Too few bytes to judge → not flagged (corruption is a separate concern).
+        assert!(!image_header_mismatches("image/png", &[0x89]));
+    }
+
+    #[test]
+    fn percent_decoding_and_path_resolution() {
+        assert_eq!(percent_decode("a%20b.xhtml"), "a b.xhtml");
+        assert_eq!(percent_decode("no-escapes"), "no-escapes");
+        assert_eq!(percent_decode("%E2%9C%93"), "✓"); // UTF-8 multi-byte
+        assert_eq!(percent_decode("bad%2"), "bad%2"); // truncated → literal
+        assert_eq!(percent_decode("%zz"), "%zz"); // non-hex → literal
+        // A percent-encoded reference resolves to the literal (decoded) zip name.
+        assert_eq!(
+            resolve_href("OEBPS/text/ch.xhtml", "../images/a%20b.png").as_deref(),
+            Some("OEBPS/images/a b.png")
+        );
+        assert_eq!(join_opf("OEBPS", "a%20b.xhtml"), "OEBPS/a b.xhtml");
     }
 
     /// Everything below validates a real EPUB, and the only EPUB *writer* in
@@ -3424,18 +4982,28 @@ mod tests {
 
         #[test]
         fn detects_href_escaping_opf_root() {
-            // OPF root is `OEBPS/`. Insert a `../../escape.xhtml` from a chapter:
-            // resolves to `escape.xhtml` (zip root, outside OEBPS) — must flag.
-            // (A plain `../style.css` would resolve to `OEBPS/style.css` and is
-            // therefore fine — verified by `aozora_output_passes_after_fix`.)
+            // RSC-026 is a *container-root* escape, not an OPF-dir escape. From
+            // `OEBPS/text/title.xhtml`, `../../../escape.xhtml` rises above the zip
+            // root (three `..` from a depth-2 directory) — must flag. A reference
+            // resolving to a sibling in-container path (e.g. `../../escape.xhtml`
+            // → `escape.xhtml` at the zip root) is legal and reported, if missing,
+            // as RSC-007 instead — never RSC-026.
             let bytes = sample_aozora_epub();
             let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |xhtml| {
-                xhtml.replace("</body>", r#"<a href="../../escape.xhtml">link</a></body>"#)
+                xhtml.replace(
+                    "</body>",
+                    r#"<a href="../../../escape.xhtml">link</a></body>"#,
+                )
             });
             let report = validate(&mutated);
             assert!(
                 report.has_rule(Rule::HrefEscapesOpfRoot),
                 "expected HrefEscapesOpfRoot, got:\n{}",
+                report
+            );
+            assert!(
+                !report.has_rule(Rule::BrokenHref),
+                "a leaking URL is RSC-026 only, not also RSC-007:\n{}",
                 report
             );
         }

@@ -24,6 +24,7 @@ nbk = ["dep:rusqlite"]
 
 [dependencies]
 quick-xml = "0.39"
+unicode-normalization = "0.1"
 zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 percent-encoding = "2.3"
 

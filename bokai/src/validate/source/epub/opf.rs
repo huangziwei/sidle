@@ -37,8 +37,25 @@ pub struct Package {
     pub spine_toc: Option<String>,
     /// Every `<reference href>` inside `<guide>` (raw, fragment kept).
     pub guide_hrefs: Vec<String>,
+    /// Every `<link>` element in the package document (EPUB 3 metadata/collection
+    /// links). Drives the OPF link rules (OPF-089/093/094/095/098/067, RSC-029).
+    pub links: Vec<OpfLink>,
     pub manifest: Vec<ManifestItem>,
     pub spine: Vec<SpineItem>,
+}
+
+/// An EPUB 3 `<link>` element in the package document.
+#[derive(Debug, Clone)]
+pub struct OpfLink {
+    /// The `href` attribute (raw, fragment kept). Empty if absent.
+    pub href: String,
+    /// Whitespace-separated `rel` keywords (deduped, order lost — matches how
+    /// epubcheck's vocab parser treats them as a set). Empty if absent.
+    pub rel: Vec<String>,
+    /// The `media-type` attribute, if present.
+    pub media_type: Option<String>,
+    /// True if this `<link>` is a child of `<metadata>` (vs a collection link).
+    pub in_metadata: bool,
 }
 
 /// A Dublin Core metadata element (`<dc:title>`, `<dc:identifier>`, …).
@@ -141,6 +158,24 @@ pub fn parse(content: &str) -> io::Result<Package> {
                             pkg.guide_hrefs.push(href);
                         }
                     }
+                    b"link" => {
+                        // Dedup rel keywords into a set-like Vec (epubcheck's
+                        // vocab parser treats `rel` as a Set).
+                        let mut rel: Vec<String> = Vec::new();
+                        if let Some(raw) = attr(&e, b"rel") {
+                            for tok in raw.split_whitespace() {
+                                if !rel.iter().any(|r| r == tok) {
+                                    rel.push(tok.to_string());
+                                }
+                            }
+                        }
+                        pkg.links.push(OpfLink {
+                            href: attr(&e, b"href").unwrap_or_default(),
+                            rel,
+                            media_type: attr(&e, b"media-type"),
+                            in_metadata,
+                        });
+                    }
                     b"item" if in_manifest => {
                         let (mut id, mut href, mut mt, mut props, mut fallback) = (
                             String::new(),
@@ -152,13 +187,16 @@ pub fn parse(content: &str) -> io::Result<Package> {
                         for a in e.attributes().flatten() {
                             let val = String::from_utf8_lossy(&a.value).to_string();
                             match a.key.as_ref() {
-                                b"id" => id = val,
+                                // id / fallback are XML ID/IDREF-typed: normalize
+                                // by trimming (epubcheck matches on the normalized
+                                // value, so a padded id="… x …" still resolves).
+                                b"id" => id = val.trim().to_string(),
                                 b"href" => href = val,
                                 b"media-type" => mt = val,
                                 b"properties" => {
                                     props = val.split_whitespace().map(str::to_string).collect()
                                 }
-                                b"fallback" => fallback = Some(val),
+                                b"fallback" => fallback = Some(val.trim().to_string()),
                                 _ => {}
                             }
                         }
@@ -178,7 +216,8 @@ pub fn parse(content: &str) -> io::Result<Package> {
                         for a in e.attributes().flatten() {
                             let val = String::from_utf8_lossy(&a.value).to_string();
                             match a.key.as_ref() {
-                                b"idref" => idref = val,
+                                // idref is IDREF-typed — normalize like id above.
+                                b"idref" => idref = val.trim().to_string(),
                                 b"linear" => linear = Some(val.eq_ignore_ascii_case("yes")),
                                 _ => {}
                             }
@@ -336,6 +375,26 @@ mod tests {
             pkg.unique_identifier_value.as_deref(),
             Some("urn:uuid:abcd")
         );
+    }
+
+    #[test]
+    fn captures_package_link_elements() {
+        let opf = r#"<package version="3.0">
+  <metadata>
+    <link rel="alternate  mapping alternate" href="m.xml" media-type="application/xml"/>
+  </metadata>
+  <link rel="record" href="onix.xml"/>
+</package>"#;
+        let pkg = parse(opf).unwrap();
+        assert_eq!(pkg.links.len(), 2);
+        let m = &pkg.links[0];
+        assert_eq!(m.href, "m.xml");
+        // rel is deduped and whitespace-collapsed.
+        assert_eq!(m.rel, vec!["alternate", "mapping"]);
+        assert_eq!(m.media_type.as_deref(), Some("application/xml"));
+        assert!(m.in_metadata);
+        // The package-level <link> is captured but not flagged in_metadata.
+        assert!(!pkg.links[1].in_metadata);
     }
 
     #[test]
