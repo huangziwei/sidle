@@ -35,6 +35,21 @@ pub struct Package {
     pub metadata: Vec<DcMeta>,
     /// The `<spine toc>` attribute (a manifest id for the NCX), if present.
     pub spine_toc: Option<String>,
+    /// The package element's `prefix` attribute (EPUB 3 vocabulary prefix
+    /// declarations), raw. Drives the undeclared-prefix check (OPF-028): a
+    /// property token whose prefix is neither reserved nor declared here is
+    /// undeclared.
+    pub prefix_decl: Option<String>,
+    /// The value of the publication-level (non-`refines`) `<meta
+    /// property="rendition:layout">`, if declared — `"pre-paginated"` means the
+    /// publication default is fixed-layout. Drives the fixed-layout resolution
+    /// that gates the FXL viewport check (HTM-046).
+    pub rendition_layout: Option<String>,
+    /// Every property token used by any package-document property attribute
+    /// (`<meta property>`/`scheme`, `<item properties>`, `<itemref properties>`,
+    /// `<link rel>`/`properties`), in document order. Drives the undeclared-prefix
+    /// check (OPF-028); a set-membership signal, so duplicates are harmless.
+    pub property_tokens: Vec<String>,
     /// Every `<reference href>` inside `<guide>` (raw, fragment kept).
     pub guide_hrefs: Vec<String>,
     /// Every `<link>` element in the package document (EPUB 3 metadata/collection
@@ -52,6 +67,9 @@ pub struct OpfLink {
     /// Whitespace-separated `rel` keywords (deduped, order lost — matches how
     /// epubcheck's vocab parser treats them as a set). Empty if absent.
     pub rel: Vec<String>,
+    /// Whitespace-separated `properties` keywords (order lost, like `rel`). Empty
+    /// if absent. Feeds the undeclared-prefix check (OPF-028).
+    pub properties: Vec<String>,
     /// The `media-type` attribute, if present.
     pub media_type: Option<String>,
     /// True if this `<link>` is a child of `<metadata>` (vs a collection link).
@@ -90,6 +108,10 @@ pub struct SpineItem {
     /// preserve the distinction so the reachability rule only flags
     /// explicitly-non-linear entries.
     pub linear: Option<bool>,
+    /// Space-separated tokens from `properties=`. Empty if absent. Carries the
+    /// per-spine-item `rendition:layout-*` override (fixed-layout resolution for
+    /// HTM-046) and feeds the undeclared-prefix check (OPF-028).
+    pub properties: Vec<String>,
 }
 
 impl Package {
@@ -110,6 +132,9 @@ pub fn parse(content: &str) -> io::Result<Package> {
     // In-progress Dublin Core element: opened on a `<dc:*>` Start, its text
     // accumulated over `Text` events, finalized into `pkg.metadata` on `End`.
     let mut dc: Option<DcMeta> = None;
+    // In-progress publication-level `<meta property="rendition:layout">` value,
+    // accumulated the same way, finalized into `pkg.rendition_layout` on `End`.
+    let mut pending_layout: Option<String> = None;
 
     loop {
         match reader.read_event() {
@@ -129,6 +154,25 @@ pub fn parse(content: &str) -> io::Result<Package> {
                     m.value.push_str(&String::from_utf8_lossy(t.as_ref()));
                 }
             }
+            Ok(Event::Text(t)) if pending_layout.is_some() => {
+                if let Some(v) = pending_layout.as_mut() {
+                    v.push_str(&String::from_utf8_lossy(t.as_ref()));
+                }
+            }
+            // Publication-level (non-`refines`) `<meta property="rendition:layout">`:
+            // start accumulating its element text (finalized on `End`). Its
+            // property token is captured here too (the shared arm below is skipped
+            // for this event). A `refines`-scoped layout meta is a per-item
+            // override epubcheck does not use for the FXL viewport gate, so ignore it.
+            Ok(Event::Start(e))
+                if in_metadata
+                    && local_name(e.name().as_ref()) == b"meta"
+                    && attr(&e, b"property").as_deref() == Some("rendition:layout")
+                    && attr(&e, b"refines").is_none() =>
+            {
+                pkg.property_tokens.push("rendition:layout".to_string());
+                pending_layout = Some(String::new());
+            }
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 let name = e.name();
                 let local = local_name(name.as_ref());
@@ -145,6 +189,7 @@ pub fn parse(content: &str) -> io::Result<Package> {
                     b"package" => {
                         pkg.unique_identifier = attr(&e, b"unique-identifier");
                         pkg.version = attr(&e, b"version");
+                        pkg.prefix_decl = attr(&e, b"prefix");
                     }
                     b"manifest" => in_manifest = true,
                     b"spine" => {
@@ -152,6 +197,18 @@ pub fn parse(content: &str) -> io::Result<Package> {
                         pkg.spine_toc = attr(&e, b"toc");
                     }
                     b"metadata" => in_metadata = true,
+                    // Capture `<meta>` property/scheme tokens for the undeclared-
+                    // prefix check (OPF-028). The publication-level rendition:layout
+                    // meta is consumed by its own Start arm above; every other meta
+                    // (including a `refines`-scoped one) lands here.
+                    b"meta" if in_metadata => {
+                        for key in [b"property".as_slice(), b"scheme".as_slice()] {
+                            if let Some(val) = attr(&e, key) {
+                                pkg.property_tokens
+                                    .extend(val.split_whitespace().map(str::to_string));
+                            }
+                        }
+                    }
                     b"guide" => in_guide = true,
                     b"reference" if in_guide => {
                         if let Some(href) = attr(&e, b"href") {
@@ -169,9 +226,17 @@ pub fn parse(content: &str) -> io::Result<Package> {
                                 }
                             }
                         }
+                        let properties: Vec<String> = attr(&e, b"properties")
+                            .map(|raw| raw.split_whitespace().map(str::to_string).collect())
+                            .unwrap_or_default();
+                        // `rel` and `properties` are both property lists → feed the
+                        // undeclared-prefix check (OPF-028).
+                        pkg.property_tokens.extend(rel.iter().cloned());
+                        pkg.property_tokens.extend(properties.iter().cloned());
                         pkg.links.push(OpfLink {
                             href: attr(&e, b"href").unwrap_or_default(),
                             rel,
+                            properties,
                             media_type: attr(&e, b"media-type"),
                             in_metadata,
                         });
@@ -201,6 +266,7 @@ pub fn parse(content: &str) -> io::Result<Package> {
                             }
                         }
                         if !id.is_empty() {
+                            pkg.property_tokens.extend(props.iter().cloned());
                             pkg.manifest.push(ManifestItem {
                                 id,
                                 href,
@@ -213,17 +279,27 @@ pub fn parse(content: &str) -> io::Result<Package> {
                     b"itemref" if in_spine => {
                         let mut idref = String::new();
                         let mut linear: Option<bool> = None;
+                        let mut properties: Vec<String> = Vec::new();
                         for a in e.attributes().flatten() {
                             let val = String::from_utf8_lossy(&a.value).to_string();
                             match a.key.as_ref() {
                                 // idref is IDREF-typed — normalize like id above.
                                 b"idref" => idref = val.trim().to_string(),
                                 b"linear" => linear = Some(val.eq_ignore_ascii_case("yes")),
+                                b"properties" => {
+                                    properties =
+                                        val.split_whitespace().map(str::to_string).collect()
+                                }
                                 _ => {}
                             }
                         }
                         if !idref.is_empty() {
-                            pkg.spine.push(SpineItem { idref, linear });
+                            pkg.property_tokens.extend(properties.iter().cloned());
+                            pkg.spine.push(SpineItem {
+                                idref,
+                                linear,
+                                properties,
+                            });
                         }
                     }
                     _ => {}
@@ -236,6 +312,11 @@ pub fn parse(content: &str) -> io::Result<Package> {
                 {
                     m.value = m.value.trim().to_string();
                     pkg.metadata.push(m);
+                }
+                // Finalize the publication-level rendition:layout meta (only this
+                // element opens `pending_layout`, and its `End` is the next one).
+                if let Some(v) = pending_layout.take() {
+                    pkg.rendition_layout = Some(v.trim().to_string());
                 }
                 match local_name(e.name().as_ref()) {
                     b"manifest" => in_manifest = false,
@@ -431,6 +512,55 @@ mod tests {
         let pkg = parse(opf).unwrap();
         assert_eq!(pkg.manifest[0].fallback.as_deref(), Some("b"));
         assert_eq!(pkg.manifest[1].fallback, None);
+    }
+
+    #[test]
+    fn captures_prefix_layout_and_property_tokens() {
+        // The itemref carries a per-item fixed-layout override plus an undeclared
+        // `access:` prefix; the package declares `foaf:`; the publication default
+        // is reflowable via a primary rendition:layout meta.
+        let opf = r##"<package version="3.0" unique-identifier="uid"
+              prefix="foaf: http://xmlns.com/foaf/spec/">
+          <metadata>
+            <dc:title>T</dc:title>
+            <dc:identifier id="uid">urn:uuid:1</dc:identifier>
+            <meta property="rendition:layout">reflowable</meta>
+            <meta property="schema:accessMode">textual</meta>
+          </metadata>
+          <manifest>
+            <item id="c" href="c.xhtml" media-type="application/xhtml+xml" properties="svg"/>
+            <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+          </manifest>
+          <spine>
+            <itemref idref="c" properties="rendition:layout-pre-paginated access:scroll-both"/>
+            <itemref idref="nav" linear="no"/>
+          </spine>
+        </package>"##;
+        let pkg = parse(opf).unwrap();
+        assert_eq!(
+            pkg.prefix_decl.as_deref(),
+            Some("foaf: http://xmlns.com/foaf/spec/")
+        );
+        assert_eq!(pkg.rendition_layout.as_deref(), Some("reflowable"));
+        assert_eq!(
+            pkg.spine[0].properties,
+            vec!["rendition:layout-pre-paginated", "access:scroll-both"]
+        );
+        // Every property token, across meta/item/itemref, is pooled for OPF-028.
+        for tok in [
+            "rendition:layout",
+            "schema:accessMode",
+            "svg",
+            "nav",
+            "rendition:layout-pre-paginated",
+            "access:scroll-both",
+        ] {
+            assert!(
+                pkg.property_tokens.iter().any(|t| t == tok),
+                "property_tokens missing {tok:?}: {:?}",
+                pkg.property_tokens
+            );
+        }
     }
 
     #[test]

@@ -271,6 +271,12 @@ pub enum Rule {
     ObfuscatedResourceNotFont,
     // Bitmap header vs declared media-type (epubcheck OPF-029).
     ResourceMediaTypeMismatch,
+    // Manifest property declaration vs content (epubcheck OPF-014).
+    PropertyNotDeclared,
+    // EPUB 3 vocabulary prefix declaration (epubcheck OPF-028).
+    UndeclaredPrefix,
+    // Fixed-layout content document viewport (epubcheck HTM-046).
+    FixedLayoutNoViewport,
 }
 
 impl Rule {
@@ -349,6 +355,9 @@ impl Rule {
         Rule::NavRemoteLink,
         Rule::ObfuscatedResourceNotFont,
         Rule::ResourceMediaTypeMismatch,
+        Rule::PropertyNotDeclared,
+        Rule::UndeclaredPrefix,
+        Rule::FixedLayoutNoViewport,
     ];
 
     /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
@@ -433,6 +442,9 @@ impl Rule {
             Rule::NavRemoteLink => "NAV-010",
             Rule::ObfuscatedResourceNotFont => "PKG-026",
             Rule::ResourceMediaTypeMismatch => "OPF-029",
+            Rule::PropertyNotDeclared => "OPF-014",
+            Rule::UndeclaredPrefix => "OPF-028",
+            Rule::FixedLayoutNoViewport => "HTM-046",
         }
     }
 
@@ -589,6 +601,9 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
     // structure epubcheck rejects with OPF-001, so gate to EPUB 3.
     if epub3 {
         check_metadata(&pkg, epub2, &opf_path, &mut report);
+        // OPF-028: EPUB 3 vocabulary-prefix declarations (the prefix mechanism is
+        // EPUB 3's; a version-less/legacy package is rejected via OPF-001).
+        check_prefix_declarations(&pkg, &opf_path, &mut report);
         // RSC-006/029 and the package <link> rules are EPUB 3 (epubcheck's
         // OPFChecker30 / OPFHandler30).
         check_remote_and_data_urls(&pkg, &opf_path, &mut report);
@@ -1172,6 +1187,72 @@ fn reaches_content_document(
         cur = item.fallback.as_deref();
     }
     false
+}
+
+/// The EPUB 3 reserved vocabulary prefixes — declared implicitly, so a property
+/// token using one is never OPF-028. This is the **union** of every package
+/// property context's reserved set (meta / item / itemref / link / link-rel);
+/// epubcheck reserves a prefix per-context (e.g. `a11y` is reserved for `meta`
+/// but not for `item`), so the union is a superset — using it means the port
+/// never fires OPF-028 where epubcheck would stay silent (zero false positives),
+/// at the cost of missing the rare cross-context case (a recall gap, not an FP).
+const RESERVED_PREFIXES: &[&str] = &[
+    "a11y", "dcterms", "marc", "media", "onix", "rendition", "schema", "xsd",
+];
+
+/// The prefixes declared in a package `prefix` attribute value (e.g.
+/// `"foaf: http://xmlns.com/foaf/spec/ ex: http://example.org/"`). Deliberately
+/// lenient — any whitespace token's leading `NCName:` segment counts as declared.
+/// Over-capturing (e.g. reading a bare URI's `http:` scheme as a prefix) only
+/// *suppresses* OPF-028, never introduces a false positive; the faithful state
+/// machine's job here is just "which prefixes must not be flagged".
+fn parse_declared_prefixes(decl: &str) -> HashSet<String> {
+    let is_ncname_byte = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.');
+    decl.split_whitespace()
+        .filter_map(|tok| tok.split_once(':'))
+        .map(|(prefix, _)| prefix)
+        .filter(|prefix| !prefix.is_empty() && prefix.bytes().all(is_ncname_byte))
+        .map(str::to_string)
+        .collect()
+}
+
+/// OPF-028: every prefix used in a package-document property token
+/// (`<meta property>`/`scheme`, `<item>`/`<itemref properties>`, `<link>`
+/// `rel`/`properties`) must be reserved or declared in the package `prefix`
+/// attribute. A token like `access:scroll-both` whose `access:` prefix is
+/// neither is undeclared. EPUB 3 only — the prefix mechanism is EPUB 3's
+/// (epubcheck runs it from `OPFHandler30`).
+///
+/// A bare/unprefixed token uses the default vocabulary (never OPF-028); a
+/// malformed `:name`/`prefix:` token is OPF-026 (not ported); a token whose
+/// prefix *is* known but whose local name is undefined is OPF-027 (not ported —
+/// it needs the per-vocab name tables). Reported once per distinct prefix.
+fn check_prefix_declarations(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
+    let declared = parse_declared_prefixes(pkg.prefix_decl.as_deref().unwrap_or(""));
+    let mut reported: HashSet<String> = HashSet::new();
+    for token in &pkg.property_tokens {
+        // Split at the first colon (epubcheck's `([^:]*):(.*)`): a non-empty
+        // prefix with a non-empty name is a prefixed property. `prefix:`/`:name`
+        // are malformed (OPF-026); an unprefixed token has no colon.
+        let Some((prefix, name)) = token.split_once(':') else {
+            continue;
+        };
+        if prefix.is_empty() || name.is_empty() {
+            continue;
+        }
+        if RESERVED_PREFIXES.contains(&prefix) || declared.contains(prefix) {
+            continue;
+        }
+        if reported.insert(prefix.to_string()) {
+            report.push(Violation::new(
+                Rule::UndeclaredPrefix,
+                opf_path.to_string(),
+                format!(
+                    "property prefix {prefix:?} is used but not declared; add it to the package `prefix` attribute"
+                ),
+            ));
+        }
+    }
 }
 
 /// Dublin Core metadata-value checks:
@@ -2176,6 +2257,7 @@ fn check_content_conformance(
     if !epub3 {
         return;
     }
+    let fxl_ids = fixed_layout_spine_ids(pkg);
     for item in &pkg.manifest {
         if !is_xhtml(&item.media_type) {
             continue;
@@ -2190,11 +2272,61 @@ fn check_content_conformance(
         if has_empty_title(&text) {
             report.push(Violation::new(
                 Rule::EmptyTitle,
-                path,
+                path.clone(),
                 "content document has an empty <title>; EPUB 3 requires non-empty title text",
             ));
         }
+
+        let features = detect_content_features(&text);
+        // OPF-014: a manifest property the content *requires* (inline SVG /
+        // MathML / scripting / a remote resource) must be declared on the item.
+        // Detection is a subset of epubcheck's, so a missed feature is a recall
+        // gap, never a false positive (see [`detect_content_features`]).
+        for (required, property) in [
+            (features.inline_svg, "svg"),
+            (features.mathml, "mathml"),
+            (features.scripted, "scripted"),
+            (features.remote_resources, "remote-resources"),
+        ] {
+            if required && !item.properties.iter().any(|p| p == property) {
+                report.push(Violation::new(
+                    Rule::PropertyNotDeclared,
+                    path.clone(),
+                    format!(
+                        "content document requires the {property:?} manifest property, not declared on its <item>"
+                    ),
+                ));
+            }
+        }
+        // HTM-046: a fixed-layout content document must carry a viewport meta.
+        if fxl_ids.contains(item.id.as_str()) && !features.has_viewport {
+            report.push(Violation::new(
+                Rule::FixedLayoutNoViewport,
+                path.clone(),
+                "fixed-layout content document has no <meta name=\"viewport\"> element",
+            ));
+        }
     }
+}
+
+/// The manifest ids of the spine items that are Fixed-Layout Documents, resolved
+/// exactly as epubcheck's `OPFHandler30::processItemrefProperties`: an itemref
+/// with `rendition:layout-pre-paginated` is fixed; one with
+/// `rendition:layout-reflowable` is reflowable; otherwise it inherits the
+/// publication default (`<meta property="rendition:layout">pre-paginated`).
+/// Only spine items can be fixed-layout (a manifest item outside the spine has
+/// no itemref to carry the override, and the global default does not reach it).
+fn fixed_layout_spine_ids(pkg: &opf::Package) -> HashSet<&str> {
+    let global_fxl = pkg.rendition_layout.as_deref() == Some("pre-paginated");
+    pkg.spine
+        .iter()
+        .filter(|s| {
+            let has = |name: &str| s.properties.iter().any(|p| p == name);
+            has("rendition:layout-pre-paginated")
+                || (!has("rendition:layout-reflowable") && global_fxl)
+        })
+        .map(|s| s.idref.as_str())
+        .collect()
 }
 
 /// DOCTYPE-declaration conformance, keyed on the resource's media type and the
@@ -3437,6 +3569,119 @@ fn collect_element_ids(content: &str) -> HashSet<String> {
     out
 }
 
+/// Content-document features epubcheck's `OPSHandler30` derives to decide the
+/// *required* manifest properties (OPF-014) and the fixed-layout viewport
+/// requirement (HTM-046). Every signal here is one epubcheck also raises, and
+/// detection is deliberately a **subset** of epubcheck's: under-detecting only
+/// misses a finding (a recall gap), while over-detecting would fire OPF-014
+/// where epubcheck stays silent (a false positive) — so the port errs toward
+/// silence (e.g. it does not scan CSS `url()` or inline event-handler attributes
+/// for scripting/remote resources).
+#[derive(Default)]
+struct ContentFeatures {
+    /// An inline `<svg>` element → the `svg` property is required.
+    inline_svg: bool,
+    /// A MathML `<math>` element → the `mathml` property is required.
+    mathml: bool,
+    /// A `<script>` with a JavaScript type (or none) or a `<form>` element → the
+    /// `scripted` property is required.
+    scripted: bool,
+    /// A resource load from a remote (absolute-URL) origin → the
+    /// `remote-resources` property is required.
+    remote_resources: bool,
+    /// A `<meta name="viewport">` element is present (satisfies HTM-046).
+    has_viewport: bool,
+}
+
+fn detect_content_features(content: &str) -> ContentFeatures {
+    let mut f = ContentFeatures::default();
+    let mut reader = Reader::from_str(content);
+    reader.config_mut().trim_text(false);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let name = e.name();
+                let local = local_name(name.as_ref());
+                match local {
+                    b"svg" => f.inline_svg = true,
+                    b"math" => f.mathml = true,
+                    b"form" => f.scripted = true,
+                    b"script" if script_element_is_javascript(&e) => f.scripted = true,
+                    b"meta" if attr_local_eq(&e, b"name", "viewport") => f.has_viewport = true,
+                    _ => {}
+                }
+                if !f.remote_resources && element_loads_remote_resource(local, &e) {
+                    f.remote_resources = true;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break, // XHTML well-formedness is out of scope here.
+            _ => {}
+        }
+    }
+    f
+}
+
+/// True if a `<script>` element's `type` makes it executable JavaScript — a
+/// faithful port of epubcheck's `OPFChecker.isScriptType` (a missing `type`
+/// defaults to JavaScript). A non-JS type (e.g. `application/ld+json`) is a data
+/// block, not scripting, so it does not require the `scripted` property.
+fn script_element_is_javascript(e: &quick_xml::events::BytesStart<'_>) -> bool {
+    let Some(ty) = e
+        .attributes()
+        .flatten()
+        .find(|a| local_name(a.key.as_ref()) == b"type")
+    else {
+        return true; // no type → JavaScript
+    };
+    matches!(
+        String::from_utf8_lossy(&ty.value).trim().to_ascii_lowercase().as_str(),
+        "application/javascript"
+            | "text/javascript"
+            | "application/ecmascript"
+            | "application/x-ecmascript"
+            | "application/x-javascript"
+            | "text/ecmascript"
+            | "text/javascript1.0"
+            | "text/javascript1.1"
+            | "text/javascript1.2"
+            | "text/javascript1.3"
+            | "text/javascript1.4"
+            | "text/javascript1.5"
+            | "text/jscript"
+            | "text/livescript"
+            | "text/x-ecmascript"
+            | "text/x-javascript"
+    )
+}
+
+/// True if any attribute of `e` with local name `key` has the trimmed value `val`.
+fn attr_local_eq(e: &quick_xml::events::BytesStart<'_>, key: &[u8], val: &str) -> bool {
+    e.attributes().flatten().any(|a| {
+        local_name(a.key.as_ref()) == key && String::from_utf8_lossy(&a.value).trim() == val
+    })
+}
+
+/// True when `e` loads a resource from a remote origin through one of the
+/// resource-URL attributes epubcheck routes to its remote-resources check.
+/// Hyperlinks (`<a>`/`<area>`) and `<link>` are excluded: a hyperlink is not a
+/// resource load, and `<link>` remote handling differs — excluding them keeps
+/// OPF-014 free of false positives at the cost of missing the rare remote
+/// stylesheet (a recall gap).
+fn element_loads_remote_resource(local: &[u8], e: &quick_xml::events::BytesStart<'_>) -> bool {
+    let attrs: &[&[u8]] = match local {
+        b"img" | b"image" | b"use" | b"embed" | b"iframe" | b"script" | b"audio" | b"source"
+        | b"track" => &[b"src", b"href"],
+        b"object" => &[b"data"],
+        b"video" => &[b"src", b"poster"],
+        _ => return false,
+    };
+    e.attributes().flatten().any(|a| {
+        attrs.contains(&local_name(a.key.as_ref()))
+            && is_remote_href(String::from_utf8_lossy(&a.value).trim())
+    })
+}
+
 /// Every `<content src>` value in an NCX — the navigation targets epubcheck
 /// resolves for RSC-012, the same way it resolves nav.xhtml hrefs. `local_name`
 /// tolerates a namespace prefix on either the element or the attribute.
@@ -3737,7 +3982,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 71, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 74, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -3816,9 +4061,11 @@ mod tests {
         // hyperlink-target batch RSC-010 (target not a content doc) + RSC-011
         // (target not a spine item); nav batch NAV-010 (nav links remote);
         // obfuscation batch PKG-026 (obfuscated resource not a font); bitmap batch
-        // OPF-029 (image header vs declared media-type).
+        // OPF-029 (image header vs declared media-type); recall-gap batch OPF-014
+        // (undeclared manifest property) + OPF-028 (undeclared vocab prefix) +
+        // HTM-046 (fixed-layout doc without a viewport meta).
         assert_eq!(
-            covered, 61,
+            covered, 64,
             "epubcheck error coverage changed: {covered}/{total}"
         );
     }
@@ -4679,6 +4926,209 @@ mod tests {
             r.is_clean(),
             "well-formed metadata should be clean, got:\n{r}"
         );
+    }
+
+    #[test]
+    fn undeclared_prefix_flags_only_unreserved_undeclared() {
+        // `access:` (itemref) and `kadokawa:` (meta) are undeclared; reserved
+        // (`dcterms`, `schema`, `rendition`) and declared (`foaf`) prefixes, and
+        // unprefixed tokens (`svg`, `page-spread-right`), must never fire.
+        let opf = r##"<package version="3.0" unique-identifier="uid"
+              prefix="foaf: http://xmlns.com/foaf/spec/">
+          <metadata>
+            <dc:title>T</dc:title>
+            <dc:identifier id="uid">urn:uuid:1</dc:identifier>
+            <meta property="dcterms:modified">2020-01-01T00:00:00Z</meta>
+            <meta property="schema:accessMode">textual</meta>
+            <meta property="foaf:name">X</meta>
+            <meta property="kadokawa:version">1.0</meta>
+          </metadata>
+          <manifest>
+            <item id="a" href="a.xhtml" media-type="application/xhtml+xml" properties="svg"/>
+          </manifest>
+          <spine>
+            <itemref idref="a" properties="page-spread-right access:scroll-both"/>
+          </spine>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut r = Report::default();
+        check_prefix_declarations(&pkg, "content.opf", &mut r);
+        assert!(r.violations.iter().all(|v| v.rule == Rule::UndeclaredPrefix));
+        let msgs: Vec<&str> = r.violations.iter().map(|v| v.message.as_str()).collect();
+        assert_eq!(
+            r.violations.len(),
+            2,
+            "one per distinct undeclared prefix, got {msgs:?}"
+        );
+        assert!(msgs.iter().any(|m| m.contains("\"access\"")));
+        assert!(msgs.iter().any(|m| m.contains("\"kadokawa\"")));
+    }
+
+    #[test]
+    fn undeclared_prefix_clean_when_all_reserved_or_declared() {
+        let opf = r##"<package version="3.0" unique-identifier="uid"
+              prefix="ex: http://example.org/">
+          <metadata>
+            <dc:title>T</dc:title>
+            <dc:identifier id="uid">urn:uuid:1</dc:identifier>
+            <meta property="dcterms:modified">2020-01-01T00:00:00Z</meta>
+            <meta property="ex:foo">y</meta>
+          </metadata>
+          <manifest>
+            <item id="a" href="a.xhtml" media-type="application/xhtml+xml" properties="svg nav"/>
+          </manifest>
+          <spine><itemref idref="a" properties="page-spread-right rendition:layout-reflowable"/></spine>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut r = Report::default();
+        check_prefix_declarations(&pkg, "content.opf", &mut r);
+        assert!(r.is_clean(), "no undeclared prefixes; got:\n{r}");
+    }
+
+    #[test]
+    fn detect_content_features_covers_the_required_property_signals() {
+        // Inline SVG + a viewport meta; no math/script/form/remote.
+        let svg = r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title>
+          <meta name="viewport" content="width=1200,height=1600"/></head>
+          <body><div><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect/></svg></div></body></html>"#;
+        let f = detect_content_features(svg);
+        assert!(f.inline_svg && f.has_viewport);
+        assert!(!f.mathml && !f.scripted && !f.remote_resources);
+
+        // A form (→ scripted), MathML, and a remote <img>. No inline svg/viewport.
+        let mixed = r#"<html><head><title>t</title></head><body>
+          <form action="x"></form>
+          <math xmlns="http://www.w3.org/1998/Math/MathML"><mn>1</mn></math>
+          <img src="https://cdn.example.com/a.png"/>
+        </body></html>"#;
+        let f = detect_content_features(mixed);
+        assert!(f.scripted && f.mathml && f.remote_resources);
+        assert!(!f.inline_svg && !f.has_viewport);
+
+        // A JSON data block is not scripting; a typeless <script> is.
+        assert!(
+            !detect_content_features(r#"<html><body><script type="application/ld+json">{}</script></body></html>"#)
+                .scripted
+        );
+        assert!(
+            detect_content_features(r#"<html><body><script>var x=1;</script></body></html>"#).scripted
+        );
+        // A *local* resource is not a remote resource.
+        assert!(
+            !detect_content_features(r#"<html><body><img src="../i/x.png"/></body></html>"#)
+                .remote_resources
+        );
+    }
+
+    #[test]
+    fn fixed_layout_resolution_matches_epubcheck() {
+        let build = |global: &str| {
+            format!(
+                r##"<package version="3.0" unique-identifier="u">
+              <metadata><dc:title>t</dc:title><dc:identifier id="u">urn:uuid:1</dc:identifier>
+                <meta property="rendition:layout">{global}</meta></metadata>
+              <manifest>
+                <item id="f" href="f.xhtml" media-type="application/xhtml+xml"/>
+                <item id="r" href="r.xhtml" media-type="application/xhtml+xml"/>
+                <item id="d" href="d.xhtml" media-type="application/xhtml+xml"/>
+              </manifest>
+              <spine>
+                <itemref idref="f" properties="rendition:layout-pre-paginated"/>
+                <itemref idref="r" properties="rendition:layout-reflowable"/>
+                <itemref idref="d"/>
+              </spine>
+            </package>"##
+            )
+        };
+        // Global reflowable: only the explicit pre-paginated override is fixed.
+        let pkg = opf::parse(&build("reflowable")).unwrap();
+        let ids = fixed_layout_spine_ids(&pkg);
+        assert!(ids.contains("f") && !ids.contains("r") && !ids.contains("d"));
+        // Global pre-paginated: the un-annotated item inherits fixed; the explicit
+        // reflowable override stays reflowable.
+        let pkg = opf::parse(&build("pre-paginated")).unwrap();
+        let ids = fixed_layout_spine_ids(&pkg);
+        assert!(ids.contains("f") && ids.contains("d") && !ids.contains("r"));
+    }
+
+    #[test]
+    fn fixed_layout_svg_epub_flags_opf014_and_htm046_end_to_end() {
+        // Publication default is fixed-layout. p1: inline SVG, no viewport → OPF-014
+        // (svg) + HTM-046. p2: viewport present, no svg → clean. nav: viewport.
+        let opf = r##"<package version="3.0" unique-identifier="u">
+          <metadata><dc:title>t</dc:title><dc:language>en</dc:language>
+            <dc:identifier id="u">urn:uuid:f47ac10b-58cc-4372-a567-0e02b2c3d479</dc:identifier>
+            <meta property="dcterms:modified">2020-01-01T00:00:00Z</meta>
+            <meta property="rendition:layout">pre-paginated</meta></metadata>
+          <manifest>
+            <item id="p1" href="p1.xhtml" media-type="application/xhtml+xml"/>
+            <item id="p2" href="p2.xhtml" media-type="application/xhtml+xml"/>
+            <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+          </manifest>
+          <spine><itemref idref="p1"/><itemref idref="p2"/><itemref idref="nav"/></spine>
+        </package>"##;
+        let vp = r#"<meta name="viewport" content="width=1200, height=1600"/>"#;
+        let p1 = r#"<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html>
+          <html xmlns="http://www.w3.org/1999/xhtml"><head><title>p1</title></head>
+          <body><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100"/></svg></body></html>"#;
+        let p2 = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html>
+          <html xmlns="http://www.w3.org/1999/xhtml"><head><title>p2</title>{vp}</head>
+          <body><p>text</p></body></html>"#
+        );
+        let nav = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html>
+          <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+          <head><title>nav</title>{vp}</head>
+          <body><nav epub:type="toc"><ol><li><a href="p1.xhtml">p1</a></li></ol></nav></body></html>"#
+        );
+        let bytes = zip_epub(
+            opf,
+            &[("p1.xhtml", p1), ("p2.xhtml", &p2), ("nav.xhtml", &nav)],
+        );
+        let report = validate(&bytes);
+        let opf014 = report
+            .violations
+            .iter()
+            .filter(|v| v.rule == Rule::PropertyNotDeclared)
+            .count();
+        let htm046 = report
+            .violations
+            .iter()
+            .filter(|v| v.rule == Rule::FixedLayoutNoViewport)
+            .count();
+        assert_eq!(opf014, 1, "exactly p1 needs an undeclared svg; got:\n{report}");
+        assert_eq!(htm046, 1, "exactly p1 lacks a viewport; got:\n{report}");
+    }
+
+    /// Assemble a minimal EPUB zip: `mimetype` (stored), `container.xml`, an OPF
+    /// at `OEBPS/content.opf`, and the given `OEBPS/<name>` documents. For the
+    /// content-conformance / property checks that read content documents.
+    fn zip_epub(opf: &str, docs: &[(&str, &str)]) -> Vec<u8> {
+        use zip::write::{SimpleFileOptions, ZipWriter};
+        let mut out = Vec::new();
+        {
+            let mut z = ZipWriter::new(Cursor::new(&mut out));
+            let stored =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            z.start_file("mimetype", stored).unwrap();
+            std::io::Write::write_all(&mut z, b"application/epub+zip").unwrap();
+            let deflated = SimpleFileOptions::default();
+            z.start_file("META-INF/container.xml", deflated).unwrap();
+            std::io::Write::write_all(
+                &mut z,
+                br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            )
+            .unwrap();
+            z.start_file("OEBPS/content.opf", deflated).unwrap();
+            std::io::Write::write_all(&mut z, opf.as_bytes()).unwrap();
+            for (name, body) in docs {
+                z.start_file(format!("OEBPS/{name}"), deflated).unwrap();
+                std::io::Write::write_all(&mut z, body.as_bytes()).unwrap();
+            }
+            z.finish().unwrap();
+        }
+        out
     }
 
     #[test]
