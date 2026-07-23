@@ -653,12 +653,14 @@ struct Azw3Derived {
 /// AZW3 (bad PalmDOC header, etc.), bokai's `Book::from_bytes` returns the
 /// error and the caller's `?` surfaces it as a normal import failure.
 ///
-/// The EPUB side is gated on the standalone EPUB-3 validator for the same
-/// reason as the aozora path: the bytes we're about to persist were freshly
-/// synthesized rather than passed through, so we'd rather fail import than
-/// write a broken book. The KFX side is exported from a fresh parse of the
-/// same bytes — not the handle the EPUB export ran on — keeping it the same
-/// artifact as `bokai convert <azw3> <kfx>` produces.
+/// EPUB validity is NOT gated here: an import always produces a book, even an
+/// imperfect one, so the user gets a usable result and a reconvert/edit target
+/// rather than a failed import. Invalid output is a bokai converter bug to fix
+/// (surfaced by the CLI validator and the A/B harness) or a source defect for
+/// the book editor to repair — never a reason to drop the import. The KFX side
+/// is exported from a fresh parse of the same bytes — not the handle the EPUB
+/// export ran on — keeping it the same artifact as `bokai convert <azw3> <kfx>`
+/// produces.
 fn convert_azw3(src: &Path) -> Result<Azw3Derived> {
     use bokai::Exporter as _;
     let azw3_bytes = fs::read(src).with_context(|| format!("read {}", src.display()))?;
@@ -670,10 +672,6 @@ fn convert_azw3(src: &Path) -> Result<Azw3Derived> {
         .export(&mut book, &mut buf)
         .context("azw3 -> epub export")?;
     let epub_bytes = buf.into_inner();
-    let report = bokai::validate::source::epub::validate(&epub_bytes);
-    if !report.is_clean() {
-        bail!("azw3 -> epub failed validation:\n{report}");
-    }
 
     let mut book = bokai::Book::from_bytes(&azw3_bytes, bokai::Format::Azw3)
         .with_context(|| format!("parse azw3 {}", src.display()))?;
@@ -704,12 +702,7 @@ fn convert_mobi(src: &Path) -> Result<Vec<u8>> {
     bokai::EpubExporter::new()
         .export(&mut book, &mut buf)
         .context("mobi -> epub export")?;
-    let epub_bytes = buf.into_inner();
-    let report = bokai::validate::source::epub::validate(&epub_bytes);
-    if !report.is_clean() {
-        bail!("mobi -> epub failed validation:\n{report}");
-    }
-    Ok(epub_bytes)
+    Ok(buf.into_inner())
 }
 
 /// Open an Aozora Bunko `.zip`, sniff for the markers, run the
@@ -764,19 +757,15 @@ fn convert_aozora_zip(src: &Path) -> Result<Vec<u8>> {
     let doc = bokai::formats::aozora::parse_txt(&text);
     let cover = bokai::formats::aozora::render_cover_jpeg(&doc.title, &doc.author)
         .context("aozora cover render")?;
+    // EPUB validity is not gated here (see `convert_azw3`): the import always
+    // produces a book; an invalid one is a converter bug or a source defect to
+    // repair, not a reason to drop the import.
     let epub_bytes = bokai::formats::aozora::build_epub(bokai::formats::aozora::EpubInput {
         document: &doc,
         images: &images,
         cover_jpeg: &cover,
     })
     .context("aozora build_epub")?;
-    // Gate the import on the standalone EPUB-3 validator. Bad output here
-    // silently corrupts the downstream KFX conversion, so we fail fast
-    // instead of writing a broken book into the library.
-    let report = bokai::validate::source::epub::validate(&epub_bytes);
-    if !report.is_clean() {
-        bail!("aozora epub failed validation:\n{report}");
-    }
     Ok(epub_bytes)
 }
 

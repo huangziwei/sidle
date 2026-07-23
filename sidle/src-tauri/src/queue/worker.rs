@@ -426,6 +426,23 @@ fn convert_kfx_to_epub(
         .export_with_progress(bokai::Format::Epub, &mut buf, on_progress)
         .map_err(|e| anyhow::anyhow!("bokai kfx→epub: {e}"))?;
     let epub_bytes = buf.into_inner();
+
+    // Validate the produced EPUB, but NEVER withhold it: the book is always
+    // written so the user gets a usable (if imperfect) result and a
+    // reconvert/edit target. Error-level findings mean bokai emitted an
+    // epubcheck-invalid book — flag them (dev fixes the converter and
+    // reconverts; the book editor can repair the source) rather than fail the
+    // job. Warnings never matter here (epubcheck exits 0 on them).
+    let report = bokai::validate::source::epub::validate(&epub_bytes);
+    if report.has_errors() {
+        eprintln!(
+            "[sidle/queue] book {} kfx→epub produced {} EPUB validation error(s) \
+             (written anyway):\n{}",
+            book.id,
+            report.count(bokai::validate::Severity::Error),
+            report.errors_display()
+        );
+    }
     write_bytes_atomic(&out_path, &epub_bytes)?;
 
     // Cover sidecar — the exporter already transcoded any JXR to JPG and

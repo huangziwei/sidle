@@ -64,6 +64,35 @@ impl Report {
         self.violations.is_empty()
     }
 
+    /// Any error-level violation. This — not [`is_clean`](Self::is_clean), which
+    /// is true only with zero violations of *any* severity — is the predicate
+    /// that stands in for "would epubcheck reject this?": epubcheck exits 0 on
+    /// warnings, so an EPUB with only warning violations is still
+    /// epubcheck-valid. The conversion/repair flags key on this; warnings are
+    /// surfaced but never treated as invalidity.
+    pub fn has_errors(&self) -> bool {
+        self.violations
+            .iter()
+            .any(|v| v.rule.severity() == crate::validate::Severity::Error)
+    }
+
+    /// How many violations sit at the given unified severity.
+    pub fn count(&self, severity: crate::validate::Severity) -> usize {
+        self.violations
+            .iter()
+            .filter(|v| v.rule.severity() == severity)
+            .count()
+    }
+
+    /// A [`Display`] view of only the error-level violations, for the
+    /// conversion/repair flags (which key on errors, not warnings — see
+    /// [`has_errors`](Self::has_errors)). Renders the same per-violation lines
+    /// as the full report, so a diagnostic shows exactly what makes the EPUB
+    /// invalid without the surrounding warning noise.
+    pub fn errors_display(&self) -> ErrorsDisplay<'_> {
+        ErrorsDisplay(self)
+    }
+
     pub fn push(&mut self, v: Violation) {
         self.violations.push(v);
     }
@@ -91,6 +120,30 @@ impl fmt::Display for Report {
         }
         writeln!(f, "epub3 validate: {} violation(s)", self.violations.len())?;
         for v in &self.violations {
+            writeln!(
+                f,
+                "  [{}] {}: {}",
+                v.rule.message_id(),
+                v.location,
+                v.message
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// A [`Display`] wrapper over a [`Report`] that prints only its error-level
+/// violations. Built by [`Report::errors_display`].
+pub struct ErrorsDisplay<'a>(&'a Report);
+
+impl fmt::Display for ErrorsDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for v in self
+            .0
+            .violations
+            .iter()
+            .filter(|v| v.rule.severity() == crate::validate::Severity::Error)
+        {
             writeln!(
                 f,
                 "  [{}] {}: {}",
@@ -3610,6 +3663,44 @@ mod tests {
     #[test]
     fn all_rules_list_is_complete() {
         assert_eq!(Rule::ALL.len(), 72, "update Rule::ALL when adding a Rule");
+    }
+
+    #[test]
+    fn has_errors_and_errors_display_key_on_error_severity() {
+        use crate::validate::Severity;
+
+        // A warning-only report is NOT `has_errors` — epubcheck exits 0 on
+        // warnings, so this is the "would epubcheck reject it?" predicate the
+        // conversion/repair flags depend on. `is_clean` (any violation) differs.
+        let mut report = Report::default();
+        report.push(Violation::new(
+            Rule::DateSyntaxNotRecommended,
+            "OPF",
+            "date not W3C-DTF",
+        ));
+        assert!(!report.is_clean(), "a warning is still a violation");
+        assert!(!report.has_errors(), "a warning must not read as an error");
+        assert_eq!(report.count(Severity::Warning), 1);
+        assert_eq!(report.count(Severity::Error), 0);
+        assert!(
+            report.errors_display().to_string().is_empty(),
+            "no errors → empty error view"
+        );
+
+        // Add an error → the predicate flips and the error view shows only the
+        // error line (the warning is filtered out).
+        report.push(Violation::new(Rule::EmptyTitle, "ch1.xhtml", "empty <title>"));
+        assert!(report.has_errors());
+        assert_eq!(report.count(Severity::Error), 1);
+        let shown = report.errors_display().to_string();
+        assert!(
+            shown.contains(Rule::EmptyTitle.message_id()),
+            "error line present: {shown:?}"
+        );
+        assert!(
+            !shown.contains(Rule::DateSyntaxNotRecommended.message_id()),
+            "warning line filtered out: {shown:?}"
+        );
     }
 
     #[test]

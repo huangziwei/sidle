@@ -69,6 +69,13 @@ enum Command {
         /// to keep the source's own mode.
         #[arg(long = "writing-mode")]
         writing_mode: Option<String>,
+
+        /// Skip the native EPUB validator gate on EPUB output. By default any
+        /// `→ epub` conversion validates its output and exits non-zero on
+        /// error-level findings (so a broken EPUB never leaves the tool
+        /// unnoticed); pass this to emit the bytes regardless.
+        #[arg(long = "no-validate")]
+        no_validate: bool,
     },
 
     /// Extract hierarchical section tree (JSON)
@@ -350,6 +357,7 @@ fn main() -> ExitCode {
             merge_mode,
             ppd,
             writing_mode,
+            no_validate,
         } => convert(
             &input,
             output.as_deref(),
@@ -359,6 +367,7 @@ fn main() -> ExitCode {
             &merge_mode,
             ppd.as_deref(),
             writing_mode.as_deref(),
+            !no_validate,
         ),
         Command::Dump {
             file,
@@ -1395,6 +1404,36 @@ fn parse_format(fmt: &str) -> Result<Format, String> {
     }
 }
 
+/// Post-conversion EPUB validation *diagnostic*. Never withholds output — the
+/// EPUB has already been produced and written by the time this runs. When
+/// `validate` is on, runs the native validator over the produced bytes and
+/// prints any findings so an invalid conversion is visible: a dev fixes the
+/// bokai converter and reconverts, or the book editor repairs the source.
+/// Off (`--no-validate`) skips the pass entirely. Error findings always print
+/// (an invalid EPUB is worth surfacing even under `--quiet`); warnings print
+/// only when not `quiet`. Advisory by policy — it prints, it never fails, so
+/// the conversion always succeeds.
+fn report_epub_validation(bytes: &[u8], validate: bool, quiet: bool) {
+    if !validate {
+        return;
+    }
+    let report = bokai::validate::source::epub::validate(bytes);
+    if report.has_errors() {
+        eprintln!(
+            "EPUB validation: {} error finding(s) — output written but NOT \
+             epubcheck-valid (fix the converter and reconvert, or repair in the \
+             book editor):\n{}",
+            report.count(bokai::validate::Severity::Error),
+            report.errors_display()
+        );
+    } else if !quiet {
+        let warnings = report.count(bokai::validate::Severity::Warning);
+        if warnings > 0 {
+            eprintln!("EPUB validation: {warnings} warning(s) (non-blocking).");
+        }
+    }
+}
+
 // A CLI command entry point: each argument mirrors a distinct flag, so bundling
 // them into a struct would just add indirection over the parsed options.
 #[allow(clippy::too_many_arguments)]
@@ -1407,6 +1446,7 @@ fn convert(
     merge_mode: &str,
     ppd: Option<&str>,
     writing_mode: Option<&str>,
+    validate: bool,
 ) -> Result<(), String> {
     // Check if reading from stdin
     let from_stdin = input == "-";
@@ -1519,6 +1559,7 @@ fn convert(
             std::fs::write(output.unwrap(), &bytes)
                 .map_err(|e| format!("Failed to write output: {e}"))?;
         }
+        report_epub_validation(&bytes, validate, quiet);
         if !quiet && !to_stdout {
             eprintln!("Done.");
         }
@@ -1534,7 +1575,7 @@ fn convert(
         && std::path::Path::new(input)
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
-        && let Some(()) = aozora_dispatch(input, output, to_stdout, quiet)?
+        && let Some(()) = aozora_dispatch(input, output, to_stdout, quiet, validate)?
     {
         return Ok(());
     }
@@ -1616,8 +1657,13 @@ fn convert(
         book.set_metadata_override(meta);
     }
 
+    // Validate only EPUB output; a `→ kfx`/`→ md`/`→ txt` conversion is out of
+    // this validator's scope. When validating an EPUB to a file we must buffer
+    // the output to run the check, so only take that path when it applies —
+    // other formats keep streaming straight to disk.
+    let validate_epub = validate && output_format == Format::Epub;
     if to_stdout {
-        // Write to stdout
+        // Write to stdout (already buffered so stdout gets one write).
         let mut stdout = std::io::stdout();
         let mut cursor = std::io::Cursor::new(Vec::new());
         book.export(output_format, &mut cursor)
@@ -1626,6 +1672,16 @@ fn convert(
         stdout
             .write_all(cursor.get_ref())
             .map_err(|e| format!("Write failed: {e}"))?;
+        report_epub_validation(cursor.get_ref(), validate_epub, quiet);
+    } else if validate_epub {
+        // Buffer so the produced EPUB can be validated after it is written.
+        let output_path = output.unwrap();
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        book.export(output_format, &mut cursor)
+            .map_err(|e| format!("Conversion failed: {e}"))?;
+        let bytes = cursor.into_inner();
+        std::fs::write(output_path, &bytes).map_err(|e| format!("Write failed: {e}"))?;
+        report_epub_validation(&bytes, validate_epub, quiet);
     } else {
         let output_path = output.unwrap();
         let mut file = std::fs::File::create(output_path)
@@ -2172,6 +2228,7 @@ fn aozora_dispatch(
     output: Option<&str>,
     to_stdout: bool,
     quiet: bool,
+    validate: bool,
 ) -> Result<Option<()>, String> {
     use std::io::Read;
 
@@ -2226,10 +2283,6 @@ fn aozora_dispatch(
         cover_jpeg: &cover,
     })
     .map_err(|e| format!("build epub: {e}"))?;
-    let report = bokai::validate::source::epub::validate(&epub_bytes);
-    if !report.is_clean() {
-        return Err(format!("aozora epub failed validation:\n{report}"));
-    }
 
     if to_stdout {
         use std::io::Write;
@@ -2240,6 +2293,7 @@ fn aozora_dispatch(
         std::fs::write(output.unwrap(), &epub_bytes)
             .map_err(|e| format!("Failed to write output: {e}"))?;
     }
+    report_epub_validation(&epub_bytes, validate, quiet);
     if !quiet && !to_stdout {
         eprintln!("Done.");
     }

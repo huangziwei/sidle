@@ -132,6 +132,15 @@ impl Report {
             .any(|f| matches!(f.severity, Severity::Error | Severity::Warning))
     }
 
+    /// Any error-level finding. This — not [`is_clean`](Self::is_clean) — is the
+    /// gate for "would epubcheck reject this?": epubcheck exits 0 on warnings,
+    /// so an EPUB with only warning findings is still epubcheck-valid. Every
+    /// conversion/repair gate that stands in for "epubcheck-clean" tests this;
+    /// warnings surface in the report and UI but never block.
+    pub fn has_errors(&self) -> bool {
+        self.findings.iter().any(|f| f.severity == Severity::Error)
+    }
+
     /// Findings at exactly `severity`, in report order.
     pub fn by_severity(&self, severity: Severity) -> impl Iterator<Item = &Finding> {
         self.findings.iter().filter(move |f| f.severity == severity)
