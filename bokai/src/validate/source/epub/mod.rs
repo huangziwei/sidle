@@ -638,7 +638,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         &mut report,
     );
     check_content_conformance(&pkg, &opf_dir, epub3, &mut zip, &mut report);
-    check_css_references(&pkg, &opf_dir, &mut zip, &zip_paths, &mut report);
+    check_css_references(&pkg, &opf_dir, epub3, &mut zip, &zip_paths, &mut report);
     check_xml_conformance(&opf_text, &opf_path, &mut report);
     // RSC-028 for the package document (its bytes already decoded as UTF-8, so
     // this catches a spurious non-UTF-8 `encoding=` declaration on ASCII bytes).
@@ -654,11 +654,12 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         &opf_text,
         &opf_path,
         "application/oebps-package+xml",
+        epub2,
         epub3,
         &mut report,
     );
     check_xml_well_formedness(&opf_text, &opf_path, &mut report);
-    check_xml_resources(&pkg, &opf_dir, epub3, &mut zip, &mut report);
+    check_xml_resources(&pkg, &opf_dir, epub2, epub3, &mut zip, &mut report);
     check_ncx_identifier(&pkg, &opf_dir, &mut zip, &mut report);
     check_obfuscated_fonts(&pkg, &opf_dir, &mut zip, &mut report);
     check_image_headers(&pkg, &opf_dir, &mut zip, &mut report);
@@ -677,6 +678,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
 fn check_xml_resources(
     pkg: &opf::Package,
     opf_dir: &str,
+    epub2: bool,
     epub3: bool,
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     report: &mut Report,
@@ -694,7 +696,7 @@ fn check_xml_resources(
         // (they simply skip a resource that isn't UTF-8).
         if let Ok(text) = std::str::from_utf8(&bytes) {
             check_xml_conformance(text, &path, report);
-            check_doctype_rules(text, &path, &item.media_type, epub3, report);
+            check_doctype_rules(text, &path, &item.media_type, epub2, epub3, report);
         }
         // Well-formedness runs on the lossy decode when the resource is (or
         // defaults to) UTF-8: a UTF-8-declared resource with invalid bytes is a
@@ -2585,42 +2587,83 @@ fn fixed_layout_spine_ids(pkg: &opf::Package) -> HashSet<&str> {
 ///   forbidden — **OPF-073** — except the three fixed DTDs epubcheck sanctions
 ///   for SVG, MathML, and NCX. EPUB 2 permits legacy DTDs, so the rule is
 ///   version-gated to avoid false positives on 2.0 content.
-fn check_doctype_rules(text: &str, path: &str, media_type: &str, epub3: bool, report: &mut Report) {
+fn check_doctype_rules(
+    text: &str,
+    path: &str,
+    media_type: &str,
+    epub2: bool,
+    epub3: bool,
+    report: &mut Report,
+) {
     let Some(dt) = parse_doctype(text) else {
-        return;
+        return; // no declaration → nothing to check (epubcheck only inspects one present)
     };
-    if is_xhtml(media_type) {
-        // HTM-004 (only `<!DOCTYPE html>` / `about:legacy-compat` allowed) is
-        // EPUB 3-specific. EPUB 2 XHTML legitimately declares the XHTML 1.1 public
-        // DTD, and a version-less package is rejected via OPF-001 rather than held
-        // to the EPUB 3 DOCTYPE rule — so this gates on a positive EPUB 3 version.
-        let legacy_ok = dt.public_id.is_none()
-            && dt
-                .system_id
-                .as_deref()
-                .is_none_or(|s| s == "about:legacy-compat");
-        if epub3 && !legacy_ok {
+    if epub3 {
+        if is_xhtml(media_type) {
+            // EPUB 3 XHTML: only `<!DOCTYPE html>` / `about:legacy-compat`.
+            let legacy_ok = dt.public_id.is_none()
+                && dt
+                    .system_id
+                    .as_deref()
+                    .is_none_or(|s| s == "about:legacy-compat");
+            if !legacy_ok {
+                report.push(Violation::new(
+                    Rule::IrregularDoctype,
+                    path.to_string(),
+                    format!(
+                        "irregular DOCTYPE {:?}; EPUB 3 requires `<!DOCTYPE html>`",
+                        dt.raw
+                    ),
+                ));
+            }
+        } else if (dt.public_id.is_some() || dt.system_id.is_some())
+            && !dt.is_allowed_dtd(media_type)
+        {
             report.push(Violation::new(
-                Rule::IrregularDoctype,
+                Rule::DoctypeExternalIdentifier,
                 path.to_string(),
                 format!(
-                    "irregular DOCTYPE {:?}; EPUB 3 requires `<!DOCTYPE html>`",
+                    "DOCTYPE {:?} declares an external identifier, not allowed in EPUB 3",
                     dt.raw
                 ),
             ));
         }
-    } else if epub3
-        && (dt.public_id.is_some() || dt.system_id.is_some())
-        && !dt.is_allowed_dtd(media_type)
-    {
-        report.push(Violation::new(
-            Rule::DoctypeExternalIdentifier,
-            path.to_string(),
-            format!(
-                "DOCTYPE {:?} declares an external identifier, not allowed in EPUB 3",
-                dt.raw
-            ),
-        ));
+    } else if epub2 {
+        // EPUB 2 (OPS 2.0): the content DTD must be *exactly* the sanctioned one
+        // — XHTML 1.1 for XHTML content documents, NCX 2005-1 for the NCX. Any
+        // other declaration (an HTML5 `<!DOCTYPE html>`, XHTML 1.0, a bare/empty
+        // public id, a mismatched system id, …) is HTM-004. Faithful port of
+        // epubcheck's `DeclarationHandler` version-2 branch. A version-less/legacy
+        // package is not EPUB 2 (it is rejected via OPF-001), so this needs a
+        // positive EPUB 2 version.
+        let expected: Option<(&str, &str)> = if is_xhtml(media_type) && dt.root == "html" {
+            Some((
+                "-//W3C//DTD XHTML 1.1//EN",
+                "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd",
+            ))
+        } else if media_type
+            .trim()
+            .eq_ignore_ascii_case("application/x-dtbncx+xml")
+        {
+            Some((
+                "-//NISO//DTD ncx 2005-1//EN",
+                "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd",
+            ))
+        } else {
+            None
+        };
+        if let Some((pub_id, sys_id)) = expected
+            && (dt.public_id.as_deref() != Some(pub_id) || dt.system_id.as_deref() != Some(sys_id))
+        {
+            report.push(Violation::new(
+                Rule::IrregularDoctype,
+                path.to_string(),
+                format!(
+                    "irregular DOCTYPE {:?}; EPUB 2 requires the {pub_id:?} DTD",
+                    dt.raw
+                ),
+            ));
+        }
     }
 }
 
@@ -2637,6 +2680,8 @@ fn find_doctype(s: &str) -> Option<&str> {
 struct Doctype {
     /// The full `<!DOCTYPE …>` text, for diagnostics.
     raw: String,
+    /// The declared root element name (e.g. `html`, `ncx`, `package`).
+    root: String,
     public_id: Option<String>,
     system_id: Option<String>,
 }
@@ -2690,8 +2735,14 @@ fn parse_doctype(s: &str) -> Option<Doctype> {
     } else if let Some(pos) = upper.find("SYSTEM") {
         system_id = take_quoted(&inner[pos + "SYSTEM".len()..]).0;
     }
+    let root = inner
+        .split(|c: char| c.is_whitespace() || c == '[' || c == '>')
+        .next()
+        .unwrap_or("")
+        .to_string();
     Some(Doctype {
         raw: raw.to_string(),
+        root,
         public_id,
         system_id,
     })
@@ -3327,6 +3378,7 @@ fn check_image_headers(
 fn check_css_references(
     pkg: &opf::Package,
     opf_dir: &str,
+    epub3: bool,
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     zip_paths: &HashSet<String>,
     report: &mut Report,
@@ -3387,6 +3439,42 @@ fn check_css_references(
                         format!("CSS reference {href:?} -> {resolved:?} not present in the zip"),
                     ));
                 }
+            }
+        }
+        // A `url()`/`@import` target with an opaque scheme (`kindle:embed:…`, …)
+        // that no manifest item declares. epubcheck treats any non-`data`,
+        // non-same-origin URL as remote; its verdict then depends on the CSS
+        // context (a direct port of `ResourceReferencesChecker`):
+        //   * inside `@font-face` (a FONT reference, remote-exempt in EPUB 3) it
+        //     falls through to the undeclared check → **RSC-008**;
+        //   * anywhere else (image/other, or EPUB 2) a remote reference is not
+        //     allowed → **RSC-006**.
+        // `http`/`https` (declared remote resources are a real EPUB 3 feature —
+        // FP-risky), `data:` (inline), and `file:` (RSC-030) are left alone.
+        let font_face_targets = css_font_face_url_tokens(&text);
+        for tok in css_url_tokens(&text) {
+            let Some(scheme) = url_scheme(&tok) else {
+                continue;
+            };
+            if matches!(scheme.as_str(), "http" | "https" | "data" | "file")
+                || pkg.manifest.iter().any(|m| m.href == tok)
+            {
+                continue;
+            }
+            if epub3 && font_face_targets.contains(&tok) {
+                report.push(Violation::new(
+                    Rule::ReferenceNotInManifest,
+                    css_path.clone(),
+                    format!("CSS reference {tok:?} is not declared in the OPF manifest"),
+                ));
+            } else {
+                report.push(Violation::new(
+                    Rule::RemoteResourceNotAllowed,
+                    css_path.clone(),
+                    format!(
+                        "CSS reference {tok:?} is a remote resource, not allowed in this context"
+                    ),
+                ));
             }
         }
     }
@@ -3684,6 +3772,28 @@ fn check_xhtml_hrefs_and_reachability(
                             ),
                         ));
                     }
+                    // RSC-010/011: an NCX `<content src>` is a HYPERLINK reference
+                    // (epubcheck's NCXHandler), so a present, manifest-declared
+                    // target must be a content document that is a spine item — the
+                    // same verdict [`hyperlink_target_rule`] applies to an `<a href>`.
+                    let frag = src.split_once('#').map(|(_, f)| f).unwrap_or("");
+                    if zip_paths.contains(&target)
+                        && !frag.starts_with("epubcfi(")
+                        && let Some(item) = manifest_by_path.get(&target)
+                        && let Some(rule) = hyperlink_target_rule(item, &by_id, &spine_ids, epub2)
+                    {
+                        let detail = if rule == Rule::HyperlinkToNonContentDocument {
+                            format!(
+                                "NCX navigation target {src:?} -> {target:?} targets media-type {:?}, not an EPUB content document",
+                                item.media_type
+                            )
+                        } else {
+                            format!(
+                                "NCX navigation target {src:?} -> {target:?} targets a resource that is not a spine item"
+                            )
+                        };
+                        report.push(Violation::new(rule, ncx_path.clone(), detail));
+                    }
                     hyperlink_targets.insert(target);
                 }
                 if src.contains('#') {
@@ -3952,6 +4062,17 @@ fn find_ascii_ci(hay: &str, kw: &[u8]) -> Option<usize> {
 /// targets are dropped — only references that resolve to a container path feed
 /// the existence/leak checks (a remote CSS resource is a separate concern).
 fn extract_css_urls(css_raw: &str) -> Vec<String> {
+    css_url_tokens(css_raw)
+        .iter()
+        .filter_map(|t| css_url_target(t))
+        .collect()
+}
+
+/// Every raw `url(...)` / `@import` target in a CSS resource (comments stripped,
+/// one layer of quotes removed, empties dropped) — *unclassified*. Callers filter
+/// by kind: [`css_url_target`] keeps the container-relative ones (existence/leak
+/// checks), while the RSC-008 pass keeps the opaque-scheme ones.
+fn css_url_tokens(css_raw: &str) -> Vec<String> {
     let css = strip_css_comments(css_raw);
     let mut out = Vec::new();
     // url( … ) — also covers `@import url(…)`.
@@ -3961,8 +4082,9 @@ fn extract_css_urls(css_raw: &str) -> Vec<String> {
         let Some(close_rel) = css[open..].find(')') else {
             break;
         };
-        if let Some(target) = css_url_target(unquote(css[open..open + close_rel].trim())) {
-            out.push(target);
+        let tok = unquote(css[open..open + close_rel].trim()).trim();
+        if !tok.is_empty() {
+            out.push(tok.to_string());
         }
         from = open + close_rel + 1;
     }
@@ -3973,11 +4095,36 @@ fn extract_css_urls(css_raw: &str) -> Vec<String> {
         let seg = after.trim_start();
         if let Some(quote @ ('"' | '\'')) = seg.chars().next()
             && let Some(end) = seg[1..].find(quote)
-            && let Some(target) = css_url_target(&seg[1..1 + end])
         {
-            out.push(target);
+            let tok = seg[1..1 + end].trim();
+            if !tok.is_empty() {
+                out.push(tok.to_string());
+            }
         }
         from = from + rel + 7;
+    }
+    out
+}
+
+/// The `url(...)` targets that appear inside `@font-face` rules — the CSS
+/// contexts epubcheck types as FONT references (remote-exempt in EPUB 3, so an
+/// undeclared remote font there is RSC-008 rather than RSC-006). `@font-face`
+/// rules do not nest, so each is the run from its `{` to the next `}`.
+fn css_font_face_url_tokens(css_raw: &str) -> HashSet<String> {
+    let css = strip_css_comments(css_raw);
+    let mut out = HashSet::new();
+    let mut from = 0;
+    while let Some(rel) = find_ascii_ci(&css[from..], b"@font-face") {
+        let after = from + rel + "@font-face".len();
+        let Some(open_rel) = css[after..].find('{') else {
+            break;
+        };
+        let open = after + open_rel + 1;
+        let close = css[open..].find('}').map_or(css.len(), |c| open + c);
+        for tok in css_url_tokens(&css[open..close]) {
+            out.insert(tok);
+        }
+        from = close;
     }
     out
 }
@@ -5001,12 +5148,13 @@ mod tests {
 
     #[test]
     fn doctype_rules_html_fires_public_but_allows_legacy_compat() {
-        // HTM-004: XHTML with a public identifier is irregular.
+        // EPUB 3 HTM-004: XHTML with a public identifier is irregular.
         let mut r = Report::default();
         check_doctype_rules(
             r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "x.dtd"><html/>"#,
             "c.xhtml",
             "application/xhtml+xml",
+            false,
             true,
             &mut r,
         );
@@ -5017,6 +5165,7 @@ mod tests {
             r#"<!DOCTYPE html SYSTEM "about:legacy-compat"><html/>"#,
             "c.xhtml",
             "application/xhtml+xml",
+            false,
             true,
             &mut r2,
         );
@@ -5024,12 +5173,13 @@ mod tests {
             !r2.has_rule(Rule::IrregularDoctype),
             "legacy-compat is allowed"
         );
-        // Plain `<!DOCTYPE html>` is allowed.
+        // Plain `<!DOCTYPE html>` is allowed in EPUB 3.
         let mut r3 = Report::default();
         check_doctype_rules(
             "<!DOCTYPE html><html/>",
             "c.xhtml",
             "application/xhtml+xml",
+            false,
             true,
             &mut r3,
         );
@@ -5037,13 +5187,62 @@ mod tests {
     }
 
     #[test]
-    fn doctype_rules_opf073_is_dtd_and_version_gated() {
-        // The sanctioned NCX DTD is allowed on an NCX resource.
+    fn doctype_rules_epub2_requires_exact_content_dtd() {
+        // EPUB 2 (OPS 2.0) XHTML must declare exactly the XHTML 1.1 DTD.
+        let ok = r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html/>"#;
+        let mut r = Report::default();
+        check_doctype_rules(ok, "c.xhtml", "application/xhtml+xml", true, false, &mut r);
+        assert!(
+            !r.has_rule(Rule::IrregularDoctype),
+            "XHTML 1.1 is legal in EPUB 2"
+        );
+        // An HTML5 doctype, XHTML 1.0, and a mismatched system id all fire HTM-004
+        // (these are the corpus's 16 gap books: empty/HTML5/XHTML-1.0 doctypes).
+        for bad in [
+            "<!DOCTYPE html><html/>",
+            r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html/>"#,
+            r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "wrong.dtd"><html/>"#,
+        ] {
+            let mut r = Report::default();
+            check_doctype_rules(bad, "c.xhtml", "application/xhtml+xml", true, false, &mut r);
+            assert!(
+                r.has_rule(Rule::IrregularDoctype),
+                "EPUB 2 irregular DOCTYPE {bad:?}"
+            );
+        }
+        // No DOCTYPE at all → nothing to check (epubcheck inspects only a present one).
+        let mut r = Report::default();
+        check_doctype_rules(
+            "<html/>",
+            "c.xhtml",
+            "application/xhtml+xml",
+            true,
+            false,
+            &mut r,
+        );
+        assert!(r.is_clean());
+        // The EPUB 2 NCX must be exactly NCX 2005-1 (clean form).
         let mut r = Report::default();
         check_doctype_rules(
             r#"<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd"><ncx/>"#,
             "toc.ncx",
             "application/x-dtbncx+xml",
+            true,
+            false,
+            &mut r,
+        );
+        assert!(!r.has_rule(Rule::IrregularDoctype));
+    }
+
+    #[test]
+    fn doctype_rules_opf073_is_dtd_and_version_gated() {
+        // The sanctioned NCX DTD is allowed on an NCX resource in EPUB 3.
+        let mut r = Report::default();
+        check_doctype_rules(
+            r#"<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd"><ncx/>"#,
+            "toc.ncx",
+            "application/x-dtbncx+xml",
+            false,
             true,
             &mut r,
         );
@@ -5054,17 +5253,19 @@ mod tests {
             r#"<!DOCTYPE package SYSTEM "oeb.dtd"><package/>"#,
             "content.opf",
             "application/oebps-package+xml",
+            false,
             true,
             &mut r2,
         );
         assert!(r2.has_rule(Rule::DoctypeExternalIdentifier));
-        // ...but gated off for EPUB 2 / version-less (legacy DTDs permitted there;
-        // a version-less package is rejected via OPF-001 instead).
+        // ...but not for a version-less package (rejected via OPF-001 instead);
+        // an OPF DTD in EPUB 2 is HTM-009, which is not ported (so also silent).
         let mut r3 = Report::default();
         check_doctype_rules(
             r#"<!DOCTYPE package SYSTEM "oeb.dtd"><package/>"#,
             "content.opf",
             "application/oebps-package+xml",
+            false,
             false,
             &mut r3,
         );
@@ -5803,6 +6004,78 @@ mod tests {
                 .iter()
                 .any(|v| v.message.contains("present.woff2")),
             "present font wrongly flagged:\n{report}"
+        );
+    }
+
+    #[test]
+    fn css_opaque_scheme_reference_flags_rsc008() {
+        // `css_url_tokens` surfaces every raw target; the relative-only extractor
+        // drops scheme'd ones, so they route through the RSC-008 pass instead.
+        let src = "@font-face{src:url(kindle:embed:0001);} .x{background:url(bg.png)}";
+        let toks = css_url_tokens(src);
+        assert!(toks.iter().any(|t| t == "kindle:embed:0001"));
+        assert!(toks.iter().any(|t| t == "bg.png"));
+        let rel = extract_css_urls(src);
+        assert!(rel.iter().any(|t| t == "bg.png"));
+        assert!(!rel.iter().any(|t| t.starts_with("kindle:")));
+
+        // End-to-end: an undeclared `kindle:embed:…` CSS reference is RSC-008.
+        let opf = r##"<package version="3.0" unique-identifier="u">
+          <metadata><dc:title>t</dc:title><dc:language>en</dc:language>
+            <dc:identifier id="u">urn:uuid:f47ac10b-58cc-4372-a567-0e02b2c3d479</dc:identifier>
+            <meta property="dcterms:modified">2020-01-01T00:00:00Z</meta></metadata>
+          <manifest>
+            <item id="c" href="c.xhtml" media-type="application/xhtml+xml"/>
+            <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+            <item id="css" href="style.css" media-type="text/css"/>
+          </manifest>
+          <spine><itemref idref="c"/><itemref idref="nav"/></spine>
+        </package>"##;
+        let doc = r#"<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html>
+          <html xmlns="http://www.w3.org/1999/xhtml"><head><title>c</title></head><body>c</body></html>"#;
+        let nav = r#"<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html>
+          <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+          <head><title>nav</title></head><body><nav epub:type="toc"><ol><li><a href="c.xhtml">c</a></li></ol></nav></body></html>"#;
+        // In `@font-face` (a FONT reference, remote-exempt in EPUB 3) → RSC-008.
+        let font_css = "@font-face { src: url(kindle:embed:0001); }";
+        let bytes = zip_epub(
+            opf,
+            &[
+                ("c.xhtml", doc),
+                ("nav.xhtml", nav),
+                ("style.css", font_css),
+            ],
+        );
+        let report = validate(&bytes);
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.rule == Rule::ReferenceNotInManifest
+                    && v.message.contains("kindle:embed:0001")),
+            "kindle:embed @font-face reference should be RSC-008, got:\n{report}"
+        );
+        // Outside `@font-face` (an image reference) the same remote target is not
+        // allowed → RSC-006, and must NOT be RSC-008.
+        let img_css = ".x { background: url(kindle:embed:000A?mime=image/jpeg); }";
+        let bytes = zip_epub(
+            opf,
+            &[("c.xhtml", doc), ("nav.xhtml", nav), ("style.css", img_css)],
+        );
+        let report = validate(&bytes);
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.rule == Rule::RemoteResourceNotAllowed),
+            "kindle:embed image reference should be RSC-006, got:\n{report}"
+        );
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.rule == Rule::ReferenceNotInManifest),
+            "an image-context remote reference must not be RSC-008, got:\n{report}"
         );
     }
 
