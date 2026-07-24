@@ -1,0 +1,12 @@
+
+# #####################################################################
+##  RELAX NG Schema for EPUB: EPUB XHTML (+ SVG, + MathML)            #
+# #####################################################################
+
+include "./epub-xhtml-inc.rnc"
+include "./epub-svg-forgiving-inc.rnc"
+include "./epub-mathml3-inc.rnc"
+include "./epub-shared-inc.rnc"
+
+common.elem.phrasing |= svg
+common.elem.phrasing |= math

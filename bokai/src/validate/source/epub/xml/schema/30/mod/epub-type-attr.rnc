@@ -1,0 +1,14 @@
+
+  namespace epub = "http://www.idpf.org/2007/ops"
+
+# #####################################################################
+##  RELAX NG Schema for EPUB: `epub:type` attribute                   #
+# #####################################################################
+
+
+## `epub:type` attribute
+
+  epub.type.attr = 
+    attribute epub:type {
+      datatype.properties
+    }

@@ -127,7 +127,7 @@ impl Document {
     }
 
     /// `(namespace-uri, local-name)` of a name, for matching against a schema.
-    pub fn expanded(&self, name: &Name) -> (Option<&str>, &str) {
+    pub fn expanded<'a>(&'a self, name: &'a Name) -> (Option<&'a str>, &'a str) {
         (name.ns.map(|n| self.namespace(n)), name.local.as_str())
     }
 
@@ -292,8 +292,11 @@ impl Parser {
                         });
                     }
                 }
-                Ok(Event::Text(t)) | Ok(Event::CData(_) if false) => {
-                    let text = t.decode().map_err(|e| ParseError {
+                Ok(Event::Text(t)) => {
+                    // Entity references expand here, so the tree holds character
+                    // data — which is what a datatype check or a Schematron
+                    // string comparison is written against.
+                    let text = t.xml_content().map_err(|e| ParseError {
                         message: e.to_string(),
                         offset,
                     })?;
@@ -302,6 +305,12 @@ impl Parser {
                 Ok(Event::CData(c)) => {
                     // CDATA is character data verbatim — no entity expansion.
                     pending.push_str(&String::from_utf8_lossy(c.as_ref()));
+                }
+                Ok(Event::GeneralRef(r)) => {
+                    // quick-xml surfaces every `&name;` as its own event, so a
+                    // text run containing one arrives split around it.
+                    let name = String::from_utf8_lossy(r.as_ref()).into_owned();
+                    pending.push_str(&expand_entity(&name));
                 }
                 Ok(Event::Eof) => break,
                 Err(e) => {
@@ -385,7 +394,22 @@ impl Parser {
         }
         self.scopes.push(frame);
 
-        let (prefix, local) = split_qname(e.name().as_ref());
+        // Exactly one element may be the child of the document node; a second is
+        // content after the root, which is not well-formed.
+        if parent == NodeId(0)
+            && self.nodes[0]
+                .children
+                .iter()
+                .any(|c| matches!(self.nodes[c.0 as usize].kind, NodeKind::Element(_)))
+        {
+            return Err(ParseError {
+                message: "content after the root element".into(),
+                offset,
+            });
+        }
+
+        let qname = e.name();
+        let (prefix, local) = split_qname(qname.as_ref());
         let prefix = String::from_utf8_lossy(prefix).into_owned();
         let local = String::from_utf8_lossy(local).into_owned();
         let ns = match self.resolve(&prefix) {
@@ -439,10 +463,10 @@ impl Parser {
                     offset,
                 });
             }
-            let value = attr.decode_and_unescape_value(reader_decoder()).map_or_else(
-                |_| String::from_utf8_lossy(&attr.value).into_owned(),
-                |v| v.into_owned(),
-            );
+            // The source is already `str`, so the bytes are UTF-8; only entity
+            // expansion is left to do, under the same rules as text content.
+            let raw = String::from_utf8_lossy(&attr.value);
+            let value = expand_entities_in(&raw);
             attrs.push(Attr { name, value });
         }
 
@@ -457,10 +481,62 @@ impl Parser {
     }
 }
 
-/// quick-xml wants a decoder to unescape against; documents reach us already
-/// decoded to `str`, so UTF-8 is the only correct answer.
-fn reader_decoder() -> quick_xml::Decoder {
-    quick_xml::Decoder::utf8()
+/// Resolve one entity reference (the text between `&` and `;`).
+///
+/// XML predefines exactly five entities and always resolves numeric character
+/// references. Anything else is *declared* — by the internal subset or, for the
+/// XHTML entity sets, by the DTD the DOCTYPE names. epubcheck resolves those
+/// through its catalogue, so a document using `&nbsp;` under an XHTML DOCTYPE is
+/// valid and must not be rejected here; until that catalogue is modelled (the
+/// parked HTM-011 / RSC-016 entity work) an unknown name is kept literally,
+/// which preserves the character data's length and never fails.
+fn expand_entity(name: &str) -> String {
+    match name {
+        "amp" => return "&".to_string(),
+        "lt" => return "<".to_string(),
+        "gt" => return ">".to_string(),
+        "quot" => return "\"".to_string(),
+        "apos" => return "'".to_string(),
+        _ => {}
+    }
+    if let Some(digits) = name.strip_prefix('#') {
+        let code = match digits.strip_prefix(['x', 'X']) {
+            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+            None => digits.parse::<u32>().ok(),
+        };
+        if let Some(c) = code.and_then(char::from_u32) {
+            return c.to_string();
+        }
+    }
+    format!("&{name};")
+}
+
+/// Expand every `&…;` in a string, for the contexts quick-xml hands over raw
+/// (attribute values). Text content arrives pre-split into `GeneralRef` events
+/// and goes through [`expand_entity`] directly.
+fn expand_entities_in(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        match after.find(';') {
+            // A `&` with no `;` is not a reference; keep it verbatim.
+            None => {
+                out.push_str(&rest[amp..]);
+                return out;
+            }
+            Some(end) => {
+                out.push_str(&expand_entity(&after[..end]));
+                rest = &after[end + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Split a qualified name into `(prefix, local)`; the prefix is empty when the
@@ -502,7 +578,10 @@ mod tests {
         );
         // …and an unprefixed one is in no namespace, never the element's default.
         assert_eq!(doc.attr(body, None, "id"), Some("b"));
-        assert_eq!(doc.attr(body, Some("http://www.w3.org/1999/xhtml"), "id"), None);
+        assert_eq!(
+            doc.attr(body, Some("http://www.w3.org/1999/xhtml"), "id"),
+            None
+        );
     }
 
     #[test]
@@ -542,10 +621,8 @@ mod tests {
     #[test]
     fn scopes_pop_with_their_element() {
         // `p` is bound only inside <b>; using it after must not resolve.
-        let doc = Document::parse(
-            r#"<a xmlns:q="urn:q"><b xmlns:p="urn:p"><p:c/></b><q:d/></a>"#,
-        )
-        .unwrap();
+        let doc = Document::parse(r#"<a xmlns:q="urn:q"><b xmlns:p="urn:p"><p:c/></b><q:d/></a>"#)
+            .unwrap();
         assert!(doc.ns_id("urn:p").is_some());
         let err = Document::parse(r#"<a><b xmlns:p="urn:p"/><p:c/></a>"#).unwrap_err();
         assert!(err.message.contains("unbound namespace prefix"), "{err}");
@@ -562,10 +639,10 @@ mod tests {
     #[test]
     fn rejects_documents_a_schema_could_not_validate() {
         for (xml, expect) in [
-            ("<a><b></a>", "mismatch"),
+            ("<a><b></a>", "expected `</b>`"),
             ("<a>", "left open"),
             ("<a/><b/>", ""), // content after the root element
-            ("<a x='1' x='2'/>", "duplicate attribute"),
+            ("<a x='1' x='2'/>", "duplicated attribute"),
             ("<p:a/>", "unbound namespace prefix"),
             ("", "no root element"),
         ] {

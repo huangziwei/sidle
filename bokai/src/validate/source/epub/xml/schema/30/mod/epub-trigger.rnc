@@ -1,0 +1,54 @@
+
+  namespace epub = "http://www.idpf.org/2007/ops"
+  namespace ev = "http://www.w3.org/2001/xml-events"
+
+
+# #####################################################################
+##  RELAX NG Schema for EPUB: EPUB trigger element                    #
+# #####################################################################
+
+## `epub:trigger` element
+
+  epub.trigger =
+    element epub:trigger { epub.trigger.attrs & epub.trigger.inner }
+  epub.trigger.attrs = 
+    ( common.attrs.id?
+    & epub.trigger.attrs.action
+    & epub.trigger.attrs.ref 
+   	& xml.events.attrs.event
+   	& xml.events.attrs.observer
+   	& xml.events.attrs.defaultAction? 
+   	& xml.events.attrs.phase?
+   	& xml.events.attrs.propagate?
+   	)
+   
+   epub.trigger.attrs.action =
+     attribute action {
+       'show' | 'hide' | 'play' | 'pause' | 'resume' | 'mute' | 'unmute' 
+     }
+   epub.trigger.attrs.ref =
+     attribute ref {
+       datatype.IDREF 
+     }
+   xml.events.attrs.event =
+     attribute ev:event {
+       datatype.NMTOKEN 
+     }
+   xml.events.attrs.observer =
+     attribute ev:observer {
+       datatype.IDREF 
+     }
+   xml.events.attrs.defaultAction =
+     attribute ev:defaultAction {
+       'cancel' | 'perform' 
+     }
+   xml.events.attrs.phase =
+     attribute ev:phase {
+       'capture' | 'default' 
+     }
+   xml.events.attrs.propagate =
+     attribute ev:propagate {
+       'stop' | 'continue' 
+     }
+   
+   epub.trigger.inner = empty

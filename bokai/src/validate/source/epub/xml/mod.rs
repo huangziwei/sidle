@@ -21,7 +21,11 @@
 //! its own tree ([`tree`]), with the opposite contract.
 //!
 //! - [`tree`] — the namespace-aware document tree both engines walk.
+//! - [`relaxng`] — the grammar half: a derivative-based RELAX NG validator.
+//! - [`schema`] — epubcheck's own schemas, vendored and compiled in.
 
+pub mod relaxng;
+pub mod schema;
 pub mod tree;
 
 pub use tree::{Attr, Document, Element, Name, NodeId, NodeKind, ParseError};
