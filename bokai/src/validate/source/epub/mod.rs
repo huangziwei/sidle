@@ -286,6 +286,10 @@ pub enum Rule {
     InvalidUrl,
     // XML document is not well-formed / namespace-well-formed (epubcheck RSC-016).
     MalformedXml,
+    // An attribute the package RelaxNG grammar forbids (epubcheck RSC-005 schema
+    // channel): an OPF-namespaced attribute in EPUB 3, or a non-`id`/`toc`
+    // attribute on `<spine>` in EPUB 2.
+    DisallowedOpfAttribute,
 }
 
 impl Rule {
@@ -370,6 +374,7 @@ impl Rule {
         Rule::CorruptImage,
         Rule::InvalidUrl,
         Rule::MalformedXml,
+        Rule::DisallowedOpfAttribute,
     ];
 
     /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
@@ -460,6 +465,7 @@ impl Rule {
             Rule::CorruptImage => "PKG-021",
             Rule::InvalidUrl => "RSC-020",
             Rule::MalformedXml => "RSC-016",
+            Rule::DisallowedOpfAttribute => "RSC-005",
         }
     }
 
@@ -659,6 +665,9 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         &mut report,
     );
     check_xml_well_formedness(&opf_text, &opf_path, &mut report);
+    // RSC-005 schema channel: OPF attribute-grammar violations (opf:-namespaced
+    // attributes in EPUB 3; non-id/toc spine attributes in EPUB 2).
+    check_opf_schema_attrs(&opf_text, &opf_path, epub2, epub3, &mut report);
     check_xml_resources(&pkg, &opf_dir, epub2, epub3, &mut zip, &mut report);
     check_ncx_identifier(&pkg, &opf_dir, &mut zip, &mut report);
     check_obfuscated_fonts(&pkg, &opf_dir, &mut zip, &mut report);
@@ -1008,6 +1017,135 @@ fn is_xml_based(media_type: &str) -> bool {
         || mt
             .rsplit_once('+')
             .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("xml"))
+}
+
+/// The OPF (package) namespace. Attributes bound to it are never permitted in an
+/// EPUB 3 package document — `package-30.rnc` declares every attribute in no
+/// namespace (only `xml:lang` is namespaced) — whereas in EPUB 2 they are the
+/// legacy `opf:role`/`opf:file-as`/`opf:scheme`/… metadata refinements.
+const OPF_NS: &[u8] = b"http://www.idpf.org/2007/opf";
+
+/// **RSC-005** (schema channel) — OPF attribute grammar. A namespace-resolved,
+/// faithful *subset* of the package RelaxNG grammars (`package-30.rnc` /
+/// `opf20.rng`), covering the two attribute-grammar violations that dominate the
+/// RSC-005 recall gap on the corpus, each keyed to the version where it applies:
+///
+/// - **EPUB 3** — any attribute resolving to the OPF namespace. The EPUB 3
+///   package grammar permits no OPF-namespaced attribute anywhere, so
+///   `opf:role`/`opf:file-as`/`opf:scheme` on `<dc:*>` (and any other
+///   OPF-namespaced attribute) is a schema violation. Legal in EPUB 2, hence the
+///   gate.
+/// - **EPUB 2** — an attribute other than (no-namespace) `id`/`toc` on
+///   `<spine>`. The EPUB 2 spine attlist is exactly `{id?, toc}`, so the EPUB-3
+///   `page-progression-direction` and the Adobe `page-map` extension (both legal
+///   or ignorable in EPUB 3) are schema violations here.
+///
+/// Namespaces are resolved through an explicit prefix→URI scope stack (an
+/// unprefixed attribute has *no* namespace, per XML — the element's default
+/// namespace never applies to its attributes). Under-detection is a recall gap,
+/// never a false positive: every attribute flagged is one the corresponding
+/// vendored grammar rejects. Reported once per offending attribute (the
+/// granularity epubcheck's RelaxNG channel uses). Well-formedness is checked
+/// separately, so a parse error here just ends the scan.
+fn check_opf_schema_attrs(text: &str, path: &str, epub2: bool, epub3: bool, report: &mut Report) {
+    if !epub2 && !epub3 {
+        return; // version-less/legacy packages are OPF-001, not schema-validated
+    }
+    let mut reader = Reader::from_str(text);
+    // In-scope namespace bindings: a frame of (prefix, uri) per open element.
+    // The default namespace binds the empty prefix; `xml` is implicitly bound.
+    let mut scopes: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
+    loop {
+        match reader.read_event() {
+            Err(_) | Ok(Event::Eof) => return,
+            Ok(Event::Start(e)) => {
+                scopes.push(xmlns_frame(&e));
+                report_disallowed_opf_attrs(&e, &scopes, epub2, epub3, path, report);
+            }
+            Ok(Event::Empty(e)) => {
+                scopes.push(xmlns_frame(&e));
+                report_disallowed_opf_attrs(&e, &scopes, epub2, epub3, path, report);
+                scopes.pop();
+            }
+            Ok(Event::End(_)) => {
+                scopes.pop();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The (prefix, uri) namespace declarations on one element: `xmlns="…"` binds the
+/// empty prefix, `xmlns:p="…"` binds `p`.
+fn xmlns_frame(e: &quick_xml::events::BytesStart) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut frame = Vec::new();
+    for attr in e.attributes().flatten() {
+        let key = attr.key.as_ref();
+        if key == b"xmlns" {
+            frame.push((Vec::new(), attr.value.as_ref().to_vec()));
+        } else if let Some(p) = key.strip_prefix(b"xmlns:") {
+            frame.push((p.to_vec(), attr.value.as_ref().to_vec()));
+        }
+    }
+    frame
+}
+
+/// Resolve an attribute name's namespace URI. An unprefixed attribute has no
+/// namespace (the default namespace never applies to attributes); `xml:` is
+/// always the XML namespace; any other prefix is looked up innermost-first in the
+/// scope stack (unbound → `None`, which the well-formedness pass reports as
+/// RSC-016).
+fn attr_namespace(key: &[u8], scopes: &[Vec<(Vec<u8>, Vec<u8>)>]) -> Option<Vec<u8>> {
+    let colon = key.iter().position(|&c| c == b':')?;
+    let prefix = &key[..colon];
+    if prefix == b"xml" {
+        return Some(b"http://www.w3.org/XML/1998/namespace".to_vec());
+    }
+    scopes
+        .iter()
+        .rev()
+        .flatten()
+        .find(|(p, _)| p.as_slice() == prefix)
+        .map(|(_, uri)| uri.clone())
+}
+
+fn report_disallowed_opf_attrs(
+    e: &quick_xml::events::BytesStart,
+    scopes: &[Vec<(Vec<u8>, Vec<u8>)>],
+    epub2: bool,
+    epub3: bool,
+    path: &str,
+    report: &mut Report,
+) {
+    let is_spine = local_name(e.name().as_ref()) == b"spine";
+    for attr in e.attributes().flatten() {
+        let key = attr.key.as_ref();
+        if key == b"xmlns" || key.starts_with(b"xmlns:") {
+            continue; // namespace declarations are not schema attributes
+        }
+        let ns = attr_namespace(key, scopes);
+        if epub3 {
+            if ns.as_deref() == Some(OPF_NS) {
+                report.push(Violation::new(
+                    Rule::DisallowedOpfAttribute,
+                    path.to_string(),
+                    format!(
+                        "attribute {:?} is not permitted by the EPUB 3 package grammar",
+                        String::from_utf8_lossy(key)
+                    ),
+                ));
+            }
+        } else if epub2 && is_spine && !(ns.is_none() && (key == b"id" || key == b"toc")) {
+            report.push(Violation::new(
+                Rule::DisallowedOpfAttribute,
+                path.to_string(),
+                format!(
+                    "attribute {:?} is not permitted on <spine> in an EPUB 2 package",
+                    String::from_utf8_lossy(key)
+                ),
+            ));
+        }
+    }
 }
 
 /// OPF package/manifest/spine structural rules that need no zip access beyond
@@ -4590,7 +4728,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 77, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 78, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -5856,6 +5994,78 @@ mod tests {
                 "{label}: expected RSC-016 on {xml:?}, got:\n{r}"
             );
         }
+    }
+
+    #[test]
+    fn opf_schema_attrs_flag_disallowed_attributes_by_version() {
+        // Helper: run the check under an explicit (epub2, epub3) pair.
+        let run = |xml: &str, epub2: bool, epub3: bool| {
+            let mut r = Report::default();
+            check_opf_schema_attrs(xml, "content.opf", epub2, epub3, &mut r);
+            r
+        };
+
+        // EPUB 3: an OPF-namespaced attribute (`opf:role`/`opf:file-as`/
+        // `opf:scheme`) on a `<dc:*>` element is a schema violation (RSC-005) —
+        // whatever prefix the OPF namespace is bound to.
+        let e3_role = r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:opf="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata><dc:creator opf:role="aut" opf:file-as="Doe, J">J. Doe</dc:creator><dc:identifier opf:scheme="uuid">u</dc:identifier></metadata></package>"#;
+        assert!(
+            run(e3_role, false, true).has_rule(Rule::DisallowedOpfAttribute),
+            "EPUB 3 opf: metadata attribute must fire RSC-005"
+        );
+        // The same OPF namespace bound to a non-`opf` prefix is still caught
+        // (resolution is by namespace URI, not prefix spelling).
+        let e3_ns1 = r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:ns1="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata><dc:creator ns1:role="aut">x</dc:creator></metadata></package>"#;
+        assert!(
+            run(e3_ns1, false, true).has_rule(Rule::DisallowedOpfAttribute),
+            "OPF namespace under a foreign prefix must still fire"
+        );
+
+        // EPUB 3 clean: no OPF-namespaced attributes. `xml:lang`, unprefixed
+        // `id`, and `page-progression-direction` on the spine are all legal.
+        let e3_clean = r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata><dc:creator id="c" xml:lang="en">x</dc:creator></metadata><spine toc="ncx" page-progression-direction="rtl"><itemref idref="a"/></spine></package>"#;
+        assert!(
+            run(e3_clean, false, true).is_clean(),
+            "clean EPUB 3 OPF must not fire, got:\n{}",
+            run(e3_clean, false, true)
+        );
+
+        // EPUB 2: the very same `opf:role`/`opf:file-as` are LEGAL — no finding.
+        let e2_role = r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:opf="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0"><metadata><dc:creator opf:role="aut" opf:file-as="Doe, J">J. Doe</dc:creator></metadata></package>"#;
+        assert!(
+            run(e2_role, true, false).is_clean(),
+            "EPUB 2 opf: metadata attributes are legal, got:\n{}",
+            run(e2_role, true, false)
+        );
+
+        // EPUB 2: `page-progression-direction` and `page-map` on `<spine>` are
+        // EPUB-3/Adobe attributes the EPUB 2 spine attlist (`id`/`toc`) forbids.
+        for spine in [
+            r#"<spine toc="ncx" page-progression-direction="rtl"><itemref idref="a"/></spine>"#,
+            r#"<spine toc="ncx" page-map="pm"><itemref idref="a"/></spine>"#,
+        ] {
+            let xml = format!(
+                r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata/>{spine}</package>"#
+            );
+            assert!(
+                run(&xml, true, false).has_rule(Rule::DisallowedOpfAttribute),
+                "EPUB 2 disallowed spine attribute must fire on {spine:?}"
+            );
+        }
+        // EPUB 2 clean spine (only id/toc).
+        let e2_spine_ok = r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata/><spine id="s" toc="ncx"><itemref idref="a"/></spine></package>"#;
+        assert!(
+            run(e2_spine_ok, true, false).is_clean(),
+            "EPUB 2 spine with only id/toc is clean, got:\n{}",
+            run(e2_spine_ok, true, false)
+        );
+
+        // Version-less/legacy package: not schema-validated here (OPF-001 covers
+        // it), so even an opf: attribute produces nothing.
+        assert!(
+            run(e3_role, false, false).is_clean(),
+            "version-less package must not be schema-attr-checked"
+        );
     }
 
     #[test]
