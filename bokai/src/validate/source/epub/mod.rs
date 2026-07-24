@@ -22,8 +22,11 @@
 //!   (`<img>`, `<link>`, SVG `<image>`/`<use>`, `<object>`, and the media
 //!   elements). Any `#fragment` a reference carries resolves to an element
 //!   `id` in the (local, XHTML) target document — same-document `#frag`
-//!   included (epubcheck RSC-012). Fragments into SVG/other targets, `srcset`,
-//!   and CSS `url()` are not yet indexed.
+//!   included (epubcheck RSC-012). Fragments into SVG/other targets and `srcset`
+//!   are not yet indexed.
+//! - Every `url()`/`@import` reference in a CSS resource resolves to a file in
+//!   the zip (RSC-007) and stays inside the container (RSC-026), resolved
+//!   relative to the stylesheet. Inline `<style>`/`style=` CSS is not yet scanned.
 //! - No href in OPF or XHTML resolves to a path outside the OPF root
 //!   directory. `..` parent segments inside the OPF tree are fine (e.g.
 //!   `../style.css` from a chapter is legal); escapes above the OPF root
@@ -277,6 +280,10 @@ pub enum Rule {
     UndeclaredPrefix,
     // Fixed-layout content document viewport (epubcheck HTM-046).
     FixedLayoutNoViewport,
+    // Undecodable raster image (epubcheck PKG-021).
+    CorruptImage,
+    // Reference URL not valid per the WHATWG URL standard (epubcheck RSC-020).
+    InvalidUrl,
 }
 
 impl Rule {
@@ -358,6 +365,8 @@ impl Rule {
         Rule::PropertyNotDeclared,
         Rule::UndeclaredPrefix,
         Rule::FixedLayoutNoViewport,
+        Rule::CorruptImage,
+        Rule::InvalidUrl,
     ];
 
     /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
@@ -445,6 +454,8 @@ impl Rule {
             Rule::PropertyNotDeclared => "OPF-014",
             Rule::UndeclaredPrefix => "OPF-028",
             Rule::FixedLayoutNoViewport => "HTM-046",
+            Rule::CorruptImage => "PKG-021",
+            Rule::InvalidUrl => "RSC-020",
         }
     }
 
@@ -594,6 +605,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
     check_spine_idrefs(&pkg, &opf_path, &mut report);
     check_nav_present(&pkg, epub3, &opf_path, &mut report);
     check_parent_paths_in_opf(&pkg, &opf_dir, &opf_path, &mut report);
+    check_opf_url_validity(&pkg, &opf_path, &mut report);
     check_opf_structure(&pkg, &opf_dir, &opf_path, epub2, epub3, &mut report);
     check_fallback_chain_and_spine(&pkg, epub2, epub3, &opf_path, &mut report);
     // Dublin Core metadata value rules key on bokai's EPUB 3 understanding of
@@ -622,6 +634,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         &mut report,
     );
     check_content_conformance(&pkg, &opf_dir, epub3, &mut zip, &mut report);
+    check_css_references(&pkg, &opf_dir, &mut zip, &zip_paths, &mut report);
     check_xml_conformance(&opf_text, &opf_path, &mut report);
     // RSC-028 for the package document (its bytes already decoded as UTF-8, so
     // this catches a spurious non-UTF-8 `encoding=` declaration on ASCII bytes).
@@ -1197,7 +1210,14 @@ fn reaches_content_document(
 /// never fires OPF-028 where epubcheck would stay silent (zero false positives),
 /// at the cost of missing the rare cross-context case (a recall gap, not an FP).
 const RESERVED_PREFIXES: &[&str] = &[
-    "a11y", "dcterms", "marc", "media", "onix", "rendition", "schema", "xsd",
+    "a11y",
+    "dcterms",
+    "marc",
+    "media",
+    "onix",
+    "rendition",
+    "schema",
+    "xsd",
 ];
 
 /// The prefixes declared in a package `prefix` attribute value (e.g.
@@ -1250,6 +1270,28 @@ fn check_prefix_declarations(pkg: &opf::Package, opf_path: &str, report: &mut Re
                 format!(
                     "property prefix {prefix:?} is used but not declared; add it to the package `prefix` attribute"
                 ),
+            ));
+        }
+    }
+}
+
+/// RSC-020 for the URLs declared in the package document itself — manifest item
+/// `href`s, `<guide>` references, and package `<link>` `href`s. (Content-document
+/// references are checked in [`check_xhtml_hrefs_and_reachability`], where each is
+/// already in hand.) See [`url_has_illegal_space`] for the ported class.
+fn check_opf_url_validity(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
+    let hrefs = pkg
+        .manifest
+        .iter()
+        .map(|m| m.href.as_str())
+        .chain(pkg.guide_hrefs.iter().map(String::as_str))
+        .chain(pkg.links.iter().map(|l| l.href.as_str()));
+    for href in hrefs {
+        if url_has_illegal_space(href) {
+            report.push(Violation::new(
+                Rule::InvalidUrl,
+                opf_path.to_string(),
+                format!("{href:?} is not a valid URL (a space must be percent-encoded as %20)"),
             ));
         }
     }
@@ -1924,6 +1966,37 @@ fn url_scheme(href: &str) -> Option<String> {
 /// A `data:` URL (inline resource) — disallowed for manifest items (RSC-029).
 fn is_data_url(href: &str) -> bool {
     url_scheme(href).as_deref() == Some("data")
+}
+
+/// RSC-020: a referenced URL that is not valid per the WHATWG URL standard.
+/// Ported for the class the corpus exhibits — a raw *interior* space (U+0020) in
+/// a URL's path or host, which galimatias (epubcheck's strict URL parser) always
+/// rejects ("space is not allowed"); such a URL must percent-encode the space
+/// (`%20`).
+///
+/// Faithful to the URL parser's preprocessing: leading/trailing C0-control-or-
+/// space is stripped and all tab/newline removed *before* parsing, so those are
+/// never errors (a trailing space like `"http://x "` is stripped, and epubcheck
+/// stays silent — so we must too). Only the hierarchical part (before any
+/// `?`/`#`) is judged, and `data:` URLs (whose whitespace epubcheck collapses)
+/// are exempt. Other illegal-character classes are a recall gap here, not an FP.
+fn url_has_illegal_space(href: &str) -> bool {
+    if is_data_url(href) {
+        return false;
+    }
+    // Strip leading/trailing C0-control-or-space, then drop interior tab/newline
+    // (both removed by the URL parser without error), leaving only true interior
+    // spaces to judge.
+    let trimmed = href.trim_matches(|c: char| c <= ' ');
+    let cleaned: String = trimmed
+        .chars()
+        .filter(|&c| c != '\t' && c != '\n' && c != '\r')
+        .collect();
+    cleaned
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(&cleaned)
+        .contains(' ')
 }
 
 /// A remote reference: an absolute URL to another origin. `data:` is inline (its
@@ -3024,11 +3097,17 @@ fn idpf_obfuscated_uris(text: &str) -> Vec<String> {
     out
 }
 
-/// OPF-029: a resource declared as `image/jpeg`, `image/gif`, or `image/png` whose
-/// leading bytes don't match that format's signature — a port of epubcheck's
-/// `BitmapChecker::checkHeader`. Conservative: only these three types are checked,
-/// against their unambiguous magic numbers, and only when the file has enough
-/// bytes to judge (a truncated file is a separate corruption concern).
+/// Raster-image resource conformance (epubcheck's `BitmapChecker`), for the three
+/// checked bitmap types (`image/jpeg`, `image/gif`, `image/png`):
+///
+/// - **OPF-029** — the leading bytes don't match the declared format's signature
+///   (`checkHeader`). Conservative: only the unambiguous magic numbers, and only
+///   when the file has enough bytes to judge.
+/// - **PKG-021** — the bytes cannot be decoded to obtain the image's dimensions
+///   (`getImageSizes`, "Corrupted image file"). Independent of OPF-029: a
+///   wrong-magic-but-decodable file is OPF-029 + PKG-022 (not PKG-021), while a
+///   truly garbage or truncated file is both OPF-029 and PKG-021 — matching
+///   epubcheck, which can raise the two together.
 fn check_image_headers(
     pkg: &opf::Package,
     opf_dir: &str,
@@ -3053,6 +3132,104 @@ fn check_image_headers(
                 ),
             ));
         }
+        if image_fails_to_decode(&bytes) {
+            report.push(Violation::new(
+                Rule::CorruptImage,
+                path.clone(),
+                format!(
+                    "resource {path:?} (declared {:?}) could not be decoded; the image file is corrupt",
+                    item.media_type
+                ),
+            ));
+        }
+    }
+}
+
+/// RSC-007 / RSC-026 for the references *inside* CSS resources — `url(...)` and
+/// `@import` targets, which epubcheck resolves the same way it resolves document
+/// references. Each target is resolved relative to the CSS file it appears in: a
+/// target that leaks the container is RSC-026, one that resolves to no zip entry
+/// is RSC-007; the URL-integrity siblings (RSC-020 space, RSC-030 file:, RSC-033
+/// relative-query) are applied too, matching the content-reference pass. (Inline
+/// `<style>` / `style=` CSS is not yet scanned — a recall gap, not an FP.)
+fn check_css_references(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    zip_paths: &HashSet<String>,
+    report: &mut Report,
+) {
+    for item in &pkg.manifest {
+        if !item.media_type.trim().eq_ignore_ascii_case("text/css") {
+            continue;
+        }
+        let css_path = join_opf(opf_dir, &item.href);
+        let Ok(text) = read_text(zip, &css_path) else {
+            continue;
+        };
+        for href in extract_css_urls(&text) {
+            if url_has_illegal_space(&href) {
+                report.push(Violation::new(
+                    Rule::InvalidUrl,
+                    css_path.clone(),
+                    format!(
+                        "CSS reference {href:?} is not a valid URL (a space must be percent-encoded as %20)"
+                    ),
+                ));
+            }
+            if href
+                .get(..5)
+                .is_some_and(|p| p.eq_ignore_ascii_case("file:"))
+            {
+                report.push(Violation::new(
+                    Rule::FileUrlNotAllowed,
+                    css_path.clone(),
+                    format!("CSS reference {href:?} uses a file: URL, not allowed in EPUB"),
+                ));
+            }
+            if href.split('#').next().unwrap_or(&href).starts_with('/')
+                || href_leaks_container(&css_path, &href)
+            {
+                report.push(Violation::new(
+                    Rule::HrefEscapesOpfRoot,
+                    css_path.clone(),
+                    format!("CSS reference {href:?} leaks outside the container"),
+                ));
+                continue;
+            }
+            if let Some(resolved) = resolve_href(&css_path, &href) {
+                if url_scheme(&href).is_none()
+                    && href.split('#').next().unwrap_or(&href).contains('?')
+                {
+                    report.push(Violation::new(
+                        Rule::RelativeUrlWithQuery,
+                        css_path.clone(),
+                        format!("relative CSS reference {href:?} must not have a query component"),
+                    ));
+                    continue;
+                }
+                if !zip_paths.contains(&resolved) {
+                    report.push(Violation::new(
+                        Rule::BrokenHref,
+                        css_path.clone(),
+                        format!("CSS reference {href:?} -> {resolved:?} not present in the zip"),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// True when `bytes` cannot be decoded to image dimensions — the signal behind
+/// PKG-021. A valid raster image always yields its dimensions from the header
+/// (`into_dimensions` reads only that, not the full pixel data), so a failure
+/// means the format is unrecognized (garbage bytes) or the header is truncated.
+/// Mirrors epubcheck raising "Corrupted image file" when Java ImageIO cannot
+/// read the image.
+fn image_fails_to_decode(bytes: &[u8]) -> bool {
+    match image::ImageReader::new(Cursor::new(bytes)).with_guessed_format() {
+        Ok(reader) => reader.into_dimensions().is_err(),
+        Err(_) => true,
     }
 }
 
@@ -3180,6 +3357,16 @@ fn check_xhtml_hrefs_and_reachability(
         }
         doc_ids.insert(path.clone(), collect_element_ids(&text));
         for (kind, href) in collect_references(&text) {
+            // RSC-020: a raw space in the URL's path/host is invalid (see
+            // [`url_has_illegal_space`]). Reported alongside the other checks; it
+            // does not stop resolution (epubcheck also continues via lenient parse).
+            if url_has_illegal_space(&href) {
+                report.push(Violation::new(
+                    Rule::InvalidUrl,
+                    path.clone(),
+                    format!("reference {href:?} is not a valid URL (a space must be percent-encoded as %20)"),
+                ));
+            }
             if href.contains('#') {
                 fragment_refs.push((path.clone(), href.clone()));
                 // RSC-013: a stylesheet reference must not carry a fragment.
@@ -3309,8 +3496,22 @@ fn check_xhtml_hrefs_and_reachability(
     }) {
         let ncx_path = join_opf(opf_dir, &ncx.href);
         if let Ok(text) = read_text(zip, &ncx_path) {
+            let mut ncx_broken_reported: HashSet<String> = HashSet::new();
             for src in collect_ncx_content_srcs(&text) {
                 if let Some(target) = resolve_href(&ncx_path, &src) {
+                    // RSC-007: an NCX `<content src>` target must exist in the
+                    // container, exactly as a nav.xhtml `<a href>` target must
+                    // (epubcheck resolves both the same way). Reported once per
+                    // missing target.
+                    if !zip_paths.contains(&target) && ncx_broken_reported.insert(target.clone()) {
+                        report.push(Violation::new(
+                            Rule::BrokenHref,
+                            ncx_path.clone(),
+                            format!(
+                                "NCX navigation target {src:?} -> {target:?} not present in the zip"
+                            ),
+                        ));
+                    }
                     hyperlink_targets.insert(target);
                 }
                 if src.contains('#') {
@@ -3545,6 +3746,91 @@ fn collect_references(content: &str) -> Vec<(RefKind, String)> {
     out
 }
 
+/// Remove CSS `/* … */` comments so a commented-out `url()`/`@import` never
+/// counts as a reference (an unterminated comment swallows the rest, as a CSS
+/// parser would). Comments do not nest in CSS.
+fn strip_css_comments(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        match rest[start + 2..].find("*/") {
+            Some(end) => rest = &rest[start + 2 + end + 2..],
+            None => return out, // unterminated comment → rest is all comment
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Case-insensitive byte search for the ASCII keyword `kw` in `hay`, returning
+/// its byte offset. `kw` is ASCII, so the returned offset is a char boundary.
+fn find_ascii_ci(hay: &str, kw: &[u8]) -> Option<usize> {
+    let hb = hay.as_bytes();
+    if kw.is_empty() || hb.len() < kw.len() {
+        return None;
+    }
+    (0..=hb.len() - kw.len()).find(|&i| hb[i..i + kw.len()].eq_ignore_ascii_case(kw))
+}
+
+/// The container-relative resource targets referenced from a CSS resource, via
+/// `url(...)` functions and `@import` rules (comments stripped first). Quotes
+/// are removed and the `url`/`@import` keywords matched case-insensitively (CSS
+/// is ASCII-case-insensitive there). Absolute-URL, `data:`, and pure-`#fragment`
+/// targets are dropped — only references that resolve to a container path feed
+/// the existence/leak checks (a remote CSS resource is a separate concern).
+fn extract_css_urls(css_raw: &str) -> Vec<String> {
+    let css = strip_css_comments(css_raw);
+    let mut out = Vec::new();
+    // url( … ) — also covers `@import url(…)`.
+    let mut from = 0;
+    while let Some(rel) = find_ascii_ci(&css[from..], b"url(") {
+        let open = from + rel + 4;
+        let Some(close_rel) = css[open..].find(')') else {
+            break;
+        };
+        if let Some(target) = css_url_target(unquote(css[open..open + close_rel].trim())) {
+            out.push(target);
+        }
+        from = open + close_rel + 1;
+    }
+    // @import "…" (the string form; the `@import url(…)` form is caught above).
+    let mut from = 0;
+    while let Some(rel) = find_ascii_ci(&css[from..], b"@import") {
+        let after = &css[from + rel + 7..];
+        let seg = after.trim_start();
+        if let Some(quote @ ('"' | '\'')) = seg.chars().next()
+            && let Some(end) = seg[1..].find(quote)
+            && let Some(target) = css_url_target(&seg[1..1 + end])
+        {
+            out.push(target);
+        }
+        from = from + rel + 7;
+    }
+    out
+}
+
+/// Strip one layer of matching `"`/`'` quotes from a CSS token, if present.
+fn unquote(s: &str) -> &str {
+    let b = s.as_bytes();
+    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// Normalize a raw CSS `url()`/`@import` value into a container-relative target,
+/// or `None` if it is not one (empty, a pure `#fragment`, a `data:` URL, or an
+/// absolute URL with a scheme).
+fn css_url_target(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.starts_with('#') || is_data_url(raw) || url_scheme(raw).is_some() {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
 /// Every `id` attribute value in the document — the fragment-target namespace.
 /// Per HTML5 (and epubcheck's ID registry, which reads `getAttribute("id")`),
 /// legacy `name=` anchors are *not* counted.
@@ -3635,7 +3921,10 @@ fn script_element_is_javascript(e: &quick_xml::events::BytesStart<'_>) -> bool {
         return true; // no type → JavaScript
     };
     matches!(
-        String::from_utf8_lossy(&ty.value).trim().to_ascii_lowercase().as_str(),
+        String::from_utf8_lossy(&ty.value)
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
         "application/javascript"
             | "text/javascript"
             | "application/ecmascript"
@@ -3982,7 +4271,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 74, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 76, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -4063,9 +4352,10 @@ mod tests {
         // obfuscation batch PKG-026 (obfuscated resource not a font); bitmap batch
         // OPF-029 (image header vs declared media-type); recall-gap batch OPF-014
         // (undeclared manifest property) + OPF-028 (undeclared vocab prefix) +
-        // HTM-046 (fixed-layout doc without a viewport meta).
+        // HTM-046 (fixed-layout doc without a viewport meta) + PKG-021 (undecodable
+        // raster image) + RSC-020 (invalid reference URL).
         assert_eq!(
-            covered, 64,
+            covered, 66,
             "epubcheck error coverage changed: {covered}/{total}"
         );
     }
@@ -4953,7 +5243,11 @@ mod tests {
         let pkg = opf::parse(opf).unwrap();
         let mut r = Report::default();
         check_prefix_declarations(&pkg, "content.opf", &mut r);
-        assert!(r.violations.iter().all(|v| v.rule == Rule::UndeclaredPrefix));
+        assert!(
+            r.violations
+                .iter()
+                .all(|v| v.rule == Rule::UndeclaredPrefix)
+        );
         let msgs: Vec<&str> = r.violations.iter().map(|v| v.message.as_str()).collect();
         assert_eq!(
             r.violations.len(),
@@ -5007,11 +5301,14 @@ mod tests {
 
         // A JSON data block is not scripting; a typeless <script> is.
         assert!(
-            !detect_content_features(r#"<html><body><script type="application/ld+json">{}</script></body></html>"#)
-                .scripted
+            !detect_content_features(
+                r#"<html><body><script type="application/ld+json">{}</script></body></html>"#
+            )
+            .scripted
         );
         assert!(
-            detect_content_features(r#"<html><body><script>var x=1;</script></body></html>"#).scripted
+            detect_content_features(r#"<html><body><script>var x=1;</script></body></html>"#)
+                .scripted
         );
         // A *local* resource is not a remote resource.
         assert!(
@@ -5097,8 +5394,162 @@ mod tests {
             .iter()
             .filter(|v| v.rule == Rule::FixedLayoutNoViewport)
             .count();
-        assert_eq!(opf014, 1, "exactly p1 needs an undeclared svg; got:\n{report}");
+        assert_eq!(
+            opf014, 1,
+            "exactly p1 needs an undeclared svg; got:\n{report}"
+        );
         assert_eq!(htm046, 1, "exactly p1 lacks a viewport; got:\n{report}");
+    }
+
+    #[test]
+    fn invalid_url_flags_raw_space_in_opf_hrefs() {
+        // A manifest item href with a raw space is RSC-020; a %20-encoded one and
+        // a data: URL (whitespace stripped by epubcheck) are not.
+        let opf = r##"<package version="3.0" unique-identifier="u">
+          <metadata><dc:title>t</dc:title><dc:identifier id="u">urn:uuid:1</dc:identifier></metadata>
+          <manifest>
+            <item id="a" href="Text/Philip K Dick.html" media-type="application/xhtml+xml"/>
+            <item id="b" href="Text/ok%20name.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c" href="c.xhtml" media-type="application/xhtml+xml"/>
+          </manifest>
+          <spine><itemref idref="c"/></spine>
+        </package>"##;
+        let pkg = opf::parse(opf).unwrap();
+        let mut r = Report::default();
+        check_opf_url_validity(&pkg, "content.opf", &mut r);
+        assert!(r.violations.iter().all(|v| v.rule == Rule::InvalidUrl));
+        assert_eq!(r.violations.len(), 1, "only the raw-space href; got:\n{r}");
+        assert!(r.violations[0].message.contains("Philip K Dick"));
+
+        // Position matters: a space only in the query/fragment is not judged
+        // (epubcheck's path/host reasons), and data: URLs are exempt.
+        assert!(url_has_illegal_space("a b.xhtml"));
+        assert!(url_has_illegal_space("http://ex ample.org/x"));
+        assert!(!url_has_illegal_space("ok.xhtml?q=a b"));
+        assert!(!url_has_illegal_space("ok.xhtml#a b"));
+        assert!(!url_has_illegal_space("data:text/plain, a b"));
+        // The URL parser strips leading/trailing space and removes tab/newline
+        // before parsing, so those are never RSC-020 (regression: a trailing space
+        // on `http://www.ylib.com ` was a real corpus false positive).
+        assert!(!url_has_illegal_space("http://www.ylib.com "));
+        assert!(!url_has_illegal_space("  ../style.css\n"));
+        assert!(!url_has_illegal_space("a\tb.xhtml"));
+    }
+
+    #[test]
+    fn css_url_extraction_handles_quotes_imports_comments_and_skips() {
+        let css = r#"
+            /* url(commented-out.png) must be ignored */
+            @import "base.css";
+            @import url(theme.css);
+            body { background: URL('img/bg.png'); }
+            @font-face { src: url("../fonts/x.woff2") format("woff2"), url(fallback.ttf); }
+            .a { background: url( data:image/png;base64,AAAA ); }
+            .b { background: url(https://cdn.example.com/x.png); }
+            .c { filter: url(#local-frag); }
+        "#;
+        let urls = extract_css_urls(css);
+        for want in [
+            "base.css",
+            "theme.css",
+            "img/bg.png",
+            "../fonts/x.woff2",
+            "fallback.ttf",
+        ] {
+            assert!(
+                urls.iter().any(|u| u == want),
+                "missing {want:?} in {urls:?}"
+            );
+        }
+        // Commented-out, data:, remote, and pure-fragment targets are excluded.
+        assert!(!urls.iter().any(|u| u.contains("commented-out")));
+        assert!(!urls.iter().any(|u| u.starts_with("data:")));
+        assert!(!urls.iter().any(|u| u.contains("cdn.example.com")));
+        assert!(!urls.iter().any(|u| u.starts_with('#')));
+    }
+
+    #[test]
+    fn css_references_flag_missing_and_leaking_targets() {
+        let opf = r##"<package version="3.0" unique-identifier="u">
+          <metadata><dc:title>t</dc:title><dc:language>en</dc:language>
+            <dc:identifier id="u">urn:uuid:f47ac10b-58cc-4372-a567-0e02b2c3d479</dc:identifier>
+            <meta property="dcterms:modified">2020-01-01T00:00:00Z</meta></metadata>
+          <manifest>
+            <item id="c" href="c.xhtml" media-type="application/xhtml+xml"/>
+            <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+            <item id="css" href="style.css" media-type="text/css"/>
+            <item id="font" href="fonts/present.woff2" media-type="font/woff2"/>
+          </manifest>
+          <spine><itemref idref="c"/><itemref idref="nav"/></spine>
+        </package>"##;
+        // One url() resolves to a present font (clean); one to a missing file
+        // (RSC-007); one escapes the container from OEBPS depth (RSC-026).
+        let css = r#"@font-face { src: url("fonts/present.woff2"); }
+                     @font-face { src: url("fonts/missing.woff2"); }
+                     @font-face { src: url("../../escape.ttf"); }"#;
+        let doc = |t: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html>
+              <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+              <head><title>{t}</title></head><body>{t}</body></html>"#
+            )
+        };
+        let nav = r#"<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html>
+          <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+          <head><title>nav</title></head>
+          <body><nav epub:type="toc"><ol><li><a href="c.xhtml">c</a></li></ol></nav></body></html>"#;
+        let bytes = zip_epub(
+            opf,
+            &[
+                ("c.xhtml", &doc("c")),
+                ("nav.xhtml", nav),
+                ("style.css", css),
+                ("fonts/present.woff2", "woff-bytes"),
+            ],
+        );
+        let report = validate(&bytes);
+        let broken = report
+            .violations
+            .iter()
+            .filter(|v| v.rule == Rule::BrokenHref && v.message.contains("missing.woff2"))
+            .count();
+        let leak = report
+            .violations
+            .iter()
+            .filter(|v| v.rule == Rule::HrefEscapesOpfRoot && v.message.contains("escape.ttf"))
+            .count();
+        assert_eq!(broken, 1, "RSC-007 for the missing font; got:\n{report}");
+        assert_eq!(leak, 1, "RSC-026 for the escaping font; got:\n{report}");
+        // The present font must not be flagged.
+        assert!(
+            !report
+                .violations
+                .iter()
+                .any(|v| v.message.contains("present.woff2")),
+            "present font wrongly flagged:\n{report}"
+        );
+    }
+
+    #[test]
+    fn corrupt_image_detected_but_valid_image_passes() {
+        // A genuine 2x2 PNG decodes to its dimensions → not corrupt.
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(2, 2))
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assert!(!image_fails_to_decode(&png));
+
+        // Garbage bytes with no recognizable image signature → corrupt (the
+        // real-corpus case: a `.png` whose content is not a PNG at all).
+        assert!(image_fails_to_decode(&[
+            0xB5, 0xDF, 0xCB, 0xA1, 0x2F, 0x36, 0xB9, 0x00, 0x90, 0x07, 0x5D, 0x7C
+        ]));
+
+        // A valid PNG signature but a truncated IHDR → dimensions unreadable →
+        // corrupt (a truncated file, epubcheck's other PKG-021 path).
+        assert!(image_fails_to_decode(&[
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00
+        ]));
     }
 
     /// Assemble a minimal EPUB zip: `mimetype` (stored), `container.xml`, an OPF
@@ -5425,11 +5876,14 @@ mod tests {
         use crate::formats::aozora::{Document, EpubInput, TocEntry, build_epub};
 
         fn tiny_jpeg() -> Vec<u8> {
-            // Same 1x1 JPEG used by the epub_builder tests — small, valid header.
-            vec![
-                0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00,
-                0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
-            ]
+            // A genuine, decodable 2x2 JPEG — like a real cover. (A bare JFIF
+            // header with no Start-of-Frame is not decodable; epubcheck and bokai
+            // both flag that as a corrupt image, PKG-021.)
+            let mut out = Vec::new();
+            image::DynamicImage::ImageRgb8(image::RgbImage::new(2, 2))
+                .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Jpeg)
+                .unwrap();
+            out
         }
 
         fn sample_aozora_epub() -> Vec<u8> {
@@ -5633,6 +6087,28 @@ mod tests {
             assert!(
                 report.has_rule(Rule::FragmentNotDefined),
                 "expected RSC-012 from the NCX, got:\n{report}"
+            );
+        }
+
+        #[test]
+        fn detects_missing_ncx_target() {
+            // RSC-007: an NCX `<content src>` pointing at a file absent from the
+            // container is a broken navigation target (the clean sample's NCX
+            // points at a real file, so this does not false-fire otherwise).
+            let bytes = sample_aozora_epub();
+            let mutated = rewrite_zip_entry(&bytes, "OEBPS/toc.ncx", |ncx| {
+                ncx.replace(
+                    r#"<content src="text/title.xhtml"/>"#,
+                    r#"<content src="text/nonexistent.xhtml"/>"#,
+                )
+            });
+            let report = validate(&mutated);
+            assert!(
+                report
+                    .violations
+                    .iter()
+                    .any(|v| v.rule == Rule::BrokenHref && v.message.contains("NCX")),
+                "expected an NCX RSC-007, got:\n{report}"
             );
         }
 
