@@ -23,6 +23,7 @@
 //! [`PatternId`] before any body is compiled and is filled once its body is
 //! known — see [`Arena::reserve`](super::pattern::Arena::reserve).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use super::pattern::{Arena, DatatypeName, NameClass, NameClassId, Pattern, PatternId};
@@ -50,6 +51,19 @@ impl Resolver for MapResolver<'_> {
     fn resolve(&self, base: &str, href: &str) -> Option<(String, String)> {
         let path = join_relative(base, href);
         self.0.get(&path).map(|c| (path, c.clone()))
+    }
+}
+
+/// The XML syntax of a grammar file, translating it from the compact syntax
+/// first when its path says that is what it is.
+///
+/// Doing the dispatch here — rather than at each call site — is what lets a
+/// grammar in either syntax `include` one written in the other, which the
+/// vendored schemas do freely.
+fn xml_syntax<'a>(path: &str, source: &'a str) -> Result<Cow<'a, str>, CompileError> {
+    match path.ends_with(".rnc") {
+        true => Ok(Cow::Owned(super::rnc::translate(path, source)?)),
+        false => Ok(Cow::Borrowed(source)),
     }
 }
 
@@ -129,9 +143,10 @@ impl<'a, R: Resolver> Compiler<'a, R> {
     }
 
     /// Compile the grammar in `source` (whose path is `base`) and return its
-    /// start pattern.
+    /// start pattern. A compact-syntax file is translated first.
     pub fn compile(&mut self, base: &str, source: &str) -> Result<PatternId, CompileError> {
-        let doc = Document::parse(source)
+        let source = xml_syntax(base, source)?;
+        let doc = Document::parse(&source)
             .map_err(|e| CompileError(format!("{base}: not well-formed: {e}")))?;
         let root = doc
             .root_element()
@@ -298,6 +313,7 @@ impl<'a, R: Resolver> Compiler<'a, R> {
             .collect();
         self.grammar_body(doc, node, ctx)?;
 
+        let source = xml_syntax(&path, &source)?;
         let included = Document::parse(&source)
             .map_err(|e| CompileError(format!("{path}: not well-formed: {e}")))?;
         let root = included
@@ -436,7 +452,17 @@ impl<'a, R: Resolver> Compiler<'a, R> {
                 self.reference(&target, true)
             }
             "value" => {
-                let datatype = self.datatype(doc, node, ctx, "token");
+                // §4.12: a `<value>` with no `type` is `token` in the *built-in*
+                // library, whatever `datatypeLibrary` is in scope — inheriting
+                // the surrounding XSD library here would compare the literal in
+                // the wrong value space.
+                let datatype = match attr(doc, node, "type") {
+                    None => DatatypeName {
+                        library: String::new(),
+                        name: "token".into(),
+                    },
+                    Some(_) => self.datatype(doc, node, ctx, "token"),
+                };
                 let value = doc.string_value(node);
                 Ok(self.arena.intern(Pattern::Value { datatype, value }))
             }
@@ -497,11 +523,16 @@ impl<'a, R: Resolver> Compiler<'a, R> {
         is_element: bool,
     ) -> Result<PatternId, CompileError> {
         let nc = self.name_class(doc, node, ctx)?;
-        // The content is every child except the leading name class (§4.7 turned
-        // a `name` attribute into one, in which case *all* children are content).
-        let kids: Vec<NodeId> = children(doc, node)
-            .filter(|k| !is_name_class(doc, *k) || attr(doc, node, "name").is_some())
-            .collect();
+        // The content is every child except the leading name class — which §4.7
+        // says is the *first* child, and only when there is no `name` attribute.
+        // Dropping every name-class-looking child instead would swallow content:
+        // `choice` is both a name class and a pattern, so an element written
+        // `<element><name>a</name><choice>…</choice></element>` would lose its
+        // content and silently accept only the empty sequence.
+        let mut kids: Vec<NodeId> = children(doc, node).collect();
+        if attr(doc, node, "name").is_none() && !kids.is_empty() {
+            kids.remove(0);
+        }
         let content = if is_element {
             self.fold(doc, &kids, ctx, |a, x, y| a.group(x, y))?
         } else {
@@ -530,7 +561,8 @@ impl<'a, R: Resolver> Compiler<'a, R> {
             return Ok(self.qname(&name, ctx, is_attribute(doc, node)));
         }
         let child = children(doc, node)
-            .find(|c| is_name_class(doc, *c))
+            .next()
+            .filter(|c| is_name_class(doc, *c))
             .ok_or_else(|| CompileError("<element>/<attribute> has no name class".into()))?;
         self.name_class_element(doc, child, ctx)
     }
@@ -558,7 +590,10 @@ impl<'a, R: Resolver> Compiler<'a, R> {
                 }
             }
             Some("nsName") => {
-                let ns = ctx.ns.clone();
+                // `ns=""` is how "no namespace" is written; the pattern model
+                // spells that `None`, and an unnormalised `Some("")` would match
+                // nothing at all.
+                let ns = ctx.ns.clone().filter(|u| !u.is_empty());
                 let except = children(doc, node).find(|c| local_name(doc, *c) == Some("except"));
                 match except {
                     None => Ok(self.arena.intern_name(NameClass::NsName(ns))),

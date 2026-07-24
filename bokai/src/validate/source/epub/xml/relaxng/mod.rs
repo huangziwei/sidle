@@ -10,10 +10,12 @@
 //! - [`datatype`] — the built-in and XSD datatype libraries the grammars use.
 //! - [`derive`] — validation itself, by pattern derivative.
 //! - [`rng`] — compiling a grammar written in the XML syntax (`.rng`).
+//! - [`rnc`] — translating the compact syntax (`.rnc`) into the XML one.
 
 pub mod datatype;
 pub mod derive;
 pub mod pattern;
+pub mod rnc;
 pub mod rng;
 
 #[cfg(test)]
@@ -21,6 +23,7 @@ mod tests {
     use super::derive::Validator;
     use super::pattern::Arena;
     use super::rng::{Compiler, MapResolver};
+    use crate::validate::source::epub::xml::preprocess::{DocumentKind, preprocess};
     use crate::validate::source::epub::xml::schema;
     use crate::validate::source::epub::xml::tree::Document;
 
@@ -200,6 +203,176 @@ mod tests {
             let found = errors(&mut arena, start, &doc(body));
             assert!(found.is_empty(), "{label}: {body} is legal, got {found:?}");
         }
+    }
+
+    /// Every grammar `XMLValidators` names as an entry point has to compile —
+    /// a grammar that does not is a defect here, and would disable a whole
+    /// document type's worth of checking without any finding to show for it.
+    ///
+    /// `20/rng/content.rng` is deliberately absent: it aggregates the XHTML and
+    /// SVG modules and has no `<start>` of its own, so it is only ever reached
+    /// through `content-xhtml.rng` or `content-svg.rng`.
+    #[test]
+    fn every_entry_point_grammar_compiles() {
+        for path in [
+            "20/rng/opf.rng",
+            "20/rng/content-xhtml.rng",
+            "20/rng/content-svg.rng",
+            "20/rng/ncx.rng",
+            "20/rng/container.rng",
+            "20/rng/encryption.rng",
+            "20/rng/dtbook-2005-2.rng",
+            "30/package-30.rnc",
+            "30/epub-xhtml-30.rnc",
+            "30/epub-nav-30.rnc",
+            "30/epub-svg-30.rnc",
+            "30/media-overlay-30.rnc",
+            "30/ocf-container-30.rnc",
+            "30/ocf-encryption-30.rnc",
+            "30/ocf-signatures-30.rnc",
+            "30/ocf-metadata-30.rnc",
+            "30/dict/search-key-map.rnc",
+            "30/multiple-renditions/mapping.rnc",
+        ] {
+            let (arena, _) = grammar(path);
+            assert!(arena.len() > 1, "{path} compiled to nothing");
+        }
+    }
+
+    const OCF3: &str = r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+        <rootfiles><rootfile full-path="EPUB/package.opf"
+          media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+
+    const OPF3: &str = r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+        <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+          <dc:identifier id="uid">u</dc:identifier>
+          <dc:title>T</dc:title>
+          <dc:language>en</dc:language>
+          <meta property="dcterms:modified">2020-01-01T00:00:00Z</meta>
+        </metadata>
+        <manifest>
+          <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+        </manifest>
+        <spine><itemref idref="nav"/></spine></package>"#;
+
+    #[test]
+    fn the_real_epub3_package_grammar_compiles_and_judges() {
+        let (mut arena, start) = grammar("30/package-30.rnc");
+        let found = errors(&mut arena, start, OPF3);
+        assert!(found.is_empty(), "a valid EPUB 3 package: {found:?}");
+
+        for (label, xml) in [
+            (
+                "version must be 3.0",
+                OPF3.replace(r#"version="3.0""#, r#"version="2.0""#),
+            ),
+            (
+                "unique-identifier is required",
+                OPF3.replace(r#" unique-identifier="uid""#, ""),
+            ),
+            (
+                "dc:language is required",
+                OPF3.replace("<dc:language>en</dc:language>", ""),
+            ),
+            (
+                "an item needs a media-type",
+                OPF3.replace(r#" media-type="application/xhtml+xml""#, ""),
+            ),
+            (
+                "the spine needs an itemref",
+                OPF3.replace(r#"<itemref idref="nav"/>"#, ""),
+            ),
+            (
+                "guide comes before bindings, not after the spine's end tag",
+                OPF3.replace("</package>", "<metadata/></package>"),
+            ),
+        ] {
+            assert!(
+                !errors(&mut arena, start, &xml).is_empty(),
+                "{label} must be rejected"
+            );
+        }
+    }
+
+    /// The EPUB 3 content-document grammar: XHTML5 assembled from epubcheck's
+    /// html5 module set, plus SVG, MathML, `epub:type` and the SSML attributes.
+    #[test]
+    fn the_real_epub3_content_grammar_compiles_and_judges() {
+        let (mut arena, start) = grammar("30/epub-xhtml-30.rnc");
+        let doc = |body: &str| {
+            format!(
+                r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>t</title></head><body>{body}</body></html>"#
+            )
+        };
+        // Everything EPUB 2 forbids and EPUB 3 allows — the same constructs the
+        // EPUB 2 grammar rejects a few tests above.
+        for (label, body) in [
+            ("html5 sectioning", "<section><p>x</p></section>"),
+            ("epub:type", r#"<p epub:type="pagebreak">x</p>"#),
+            ("aria", r#"<p role="doc-footnote">x</p>"#),
+            ("figure", "<figure><figcaption>c</figcaption></figure>"),
+            (
+                "svg",
+                r#"<p><svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg></p>"#,
+            ),
+        ] {
+            let found = errors(&mut arena, start, &doc(body));
+            assert!(found.is_empty(), "{label}: {body} is legal, got {found:?}");
+        }
+        // Where EPUB 2 puts `alt` in the grammar, EPUB 3 makes it optional there
+        // and requires it from `30/mod/html5/assertions.sch` instead — a
+        // reminder that a grammar-only port would lose rules moving to
+        // Schematron between versions, not just gain them.
+        assert!(
+            errors(&mut arena, start, &doc(r#"<p><img src="i.png"/></p>"#)).is_empty(),
+            "in EPUB 3 a missing alt is a Schematron rule, not a grammar one"
+        );
+        for (label, body) in [
+            ("no such element", "<blink>x</blink>"),
+            ("no such attribute", r#"<p nosuch="1">x</p>"#),
+            ("XHTML 1.1 presentation is gone", "<p><tt>x</tt></p>"),
+            ("frames are gone", "<frameset><frame/></frameset>"),
+            // `data-*` belongs to this list, not to the legal one above: the
+            // grammar declares no such attribute anywhere, because epubcheck
+            // deletes them before validating. See `super::super::preprocess`.
+            ("the grammar itself has no data-*", r#"<p data-x="1">x</p>"#),
+        ] {
+            assert!(
+                !errors(&mut arena, start, &doc(body)).is_empty(),
+                "{label}: {body} must be rejected"
+            );
+        }
+
+        // …and with the preprocessing epubcheck applies, it validates.
+        let mut preprocessed =
+            Document::parse(&doc(r#"<p data-x="1" data-Bad="2">x</p>"#)).expect("well-formed");
+        let notes = preprocess(&mut preprocessed, DocumentKind::Xhtml);
+        let found: Vec<String> = Validator::new(&mut arena)
+            .validate(&preprocessed, start)
+            .into_iter()
+            .map(|v| v.message)
+            .collect();
+        assert!(
+            found.is_empty(),
+            "data-* is stripped, not rejected: {found:?}"
+        );
+        assert_eq!(notes.len(), 1, "the malformed one is still reported");
+    }
+
+    #[test]
+    fn the_real_ocf_container_grammar_compiles_and_judges() {
+        let (mut arena, start) = grammar("30/ocf-container-30.rnc");
+        let found = errors(&mut arena, start, OCF3);
+        assert!(found.is_empty(), "a valid OCF container: {found:?}");
+        assert!(
+            !errors(
+                &mut arena,
+                start,
+                &OCF3.replace(r#"version="1.0""#, r#"version="2.0""#)
+            )
+            .is_empty(),
+            "the container version is fixed at 1.0"
+        );
     }
 
     #[test]

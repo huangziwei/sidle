@@ -14,10 +14,10 @@ crate-type = ["rlib"]
 default = ["cli"]
 # `cli` implies `aozora`: the CLI bin (`main.rs`) calls `bokai::aozora::*`.
 cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:ion-rs", "aozora"]
-# Aozora Bunko TXT → EPUB. Pulls `regex` (the TXT parser is regex-heavy);
-# kept behind a feature to shrink builds without it. (resvg used to live
-# here too, but it's now a hard dep — EPUB→KFX needs it for SVG plates.)
-aozora = ["dep:regex"]
+# Aozora Bunko TXT → EPUB. The source format is markup-heavy and the parser
+# is regex-heavy in turn. (resvg used to live here too, but it's now a hard
+# dep — EPUB→KFX needs it for SVG plates.)
+aozora = []
 # Kindle Scribe handwritten-notebook (.nbk) decode → SVG. Pulls `rusqlite`
 # (bundled C SQLite), so it is off by default; enable it to read notebooks.
 nbk = ["dep:rusqlite"]
@@ -40,10 +40,12 @@ precomputed-hash = "0.1"
 # Encoding detection and conversion (UTF-8, CP1252, etc.)
 encoding_rs = "0.8"
 
-# Regex engine. Used by the Aozora Bunko TXT parser (annotations.rs and
-# parser_txt.rs) — the source format is markup-heavy and the JS reference
-# tool we're porting relies on ~40 regex patterns.
-regex = { version = "1.11", optional = true }
+# Regex engine. Two consumers, both unavoidable:
+#  - the Aozora Bunko TXT parser (annotations.rs, parser_txt.rs), porting a
+#    JS reference tool that relies on ~40 patterns;
+#  - the Schematron half of the EPUB validator, whose assertions call XPath's
+#    `matches`, `replace` and `tokenize` on patterns written in the schemas.
+regex = "1.11"
 
 # SVG rasterization, two consumers:
 #  - EPUB→KFX: KFX has no vector resource format (Amazon's own converter

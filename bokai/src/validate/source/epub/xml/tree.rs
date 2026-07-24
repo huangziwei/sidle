@@ -77,6 +77,9 @@ pub struct Node {
     pub kind: NodeKind,
     pub parent: Option<NodeId>,
     pub children: Vec<NodeId>,
+    /// Byte offset of the node's start in the source, so a finding about it can
+    /// name a line. See [`Document::line`].
+    pub offset: usize,
 }
 
 /// A parsed XML document.
@@ -85,6 +88,9 @@ pub struct Document {
     nodes: Vec<Node>,
     /// Interned namespace URIs; [`NsId`] indexes this.
     namespaces: Vec<String>,
+    /// Byte offset of each line's first character, so [`Document::line`] is a
+    /// binary search rather than a scan of the whole source per finding.
+    line_starts: Vec<usize>,
 }
 
 impl Document {
@@ -119,6 +125,25 @@ impl Document {
             NodeKind::Element(e) => Some(e),
             _ => None,
         }
+    }
+
+    /// The element data of `id` for modification — what [`super::preprocess`]
+    /// needs to reproduce the transformations epubcheck applies to a document
+    /// before its schemas ever see it.
+    pub fn element_mut(&mut self, id: NodeId) -> Option<&mut Element> {
+        match &mut self.nodes[id.0 as usize].kind {
+            NodeKind::Element(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Intern a namespace URI, adding it if the document does not use it yet.
+    pub fn intern_namespace(&mut self, uri: &str) -> NsId {
+        if let Some(id) = self.ns_id(uri) {
+            return id;
+        }
+        self.namespaces.push(uri.to_string());
+        NsId(self.namespaces.len() as u32 - 1)
     }
 
     /// The namespace URI behind an [`NsId`].
@@ -184,6 +209,21 @@ impl Document {
             .map(|a| a.value.as_str())
     }
 
+    /// This document's line map, to hand to a [`Builder`] so a section built
+    /// from it reports lines in the original source rather than in itself.
+    pub fn line_map(&self) -> Vec<usize> {
+        self.line_starts.clone()
+    }
+
+    /// The 1-based source line a node starts on.
+    pub fn line(&self, id: NodeId) -> u32 {
+        let offset = self.node(id).offset;
+        match self.line_starts.binary_search(&offset) {
+            Ok(i) => i as u32 + 1,
+            Err(i) => i as u32,
+        }
+    }
+
     /// How many nodes the tree holds, for sizing and tests.
     pub fn len(&self) -> usize {
         self.nodes.len()
@@ -191,6 +231,114 @@ impl Document {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.len() <= 1
+    }
+}
+
+/// Builds a [`Document`] node by node.
+///
+/// NVDL decomposes one document into *sections*, each validated against its own
+/// schema — an SVG island inside XHTML becomes a document in its own right, with
+/// the foreign-namespace content its mode does not attach simply absent. A
+/// section is therefore a new tree assembled from parts of an existing one,
+/// which is what this builds. Byte offsets are carried over from the source
+/// nodes, so a finding in a section still names its line in the original file.
+pub struct Builder {
+    nodes: Vec<Node>,
+    namespaces: Vec<String>,
+    intern: HashMap<String, NsId>,
+    line_starts: Vec<usize>,
+}
+
+impl Builder {
+    /// Start an empty document that reports lines against `source`'s line map —
+    /// see [`Document::line_map`].
+    pub fn new(line_starts: Vec<usize>) -> Self {
+        Builder {
+            nodes: vec![Node {
+                kind: NodeKind::Document,
+                parent: None,
+                children: Vec::new(),
+                offset: 0,
+            }],
+            namespaces: Vec::new(),
+            intern: HashMap::new(),
+            line_starts,
+        }
+    }
+
+    /// The document node, the parent of the root element to come.
+    pub fn root(&self) -> NodeId {
+        NodeId(0)
+    }
+
+    fn intern_ns(&mut self, uri: &str) -> NsId {
+        if let Some(id) = self.intern.get(uri) {
+            return *id;
+        }
+        let id = NsId(self.namespaces.len() as u32);
+        self.namespaces.push(uri.to_string());
+        self.intern.insert(uri.to_string(), id);
+        id
+    }
+
+    fn name(&mut self, ns: Option<&str>, local: &str) -> Name {
+        Name {
+            ns: ns.map(|u| self.intern_ns(u)),
+            local: local.to_string(),
+        }
+    }
+
+    /// Append an element, with its attributes as `(namespace, local, value)`.
+    pub fn push_element(
+        &mut self,
+        parent: NodeId,
+        ns: Option<&str>,
+        local: &str,
+        attrs: &[(Option<String>, String, String)],
+        prefix: Option<String>,
+        offset: usize,
+    ) -> NodeId {
+        let name = self.name(ns, local);
+        let attrs = attrs
+            .iter()
+            .map(|(ns, local, value)| Attr {
+                name: self.name(ns.as_deref(), local),
+                value: value.clone(),
+            })
+            .collect();
+        self.push(
+            NodeKind::Element(Element {
+                name,
+                attrs,
+                prefix,
+            }),
+            parent,
+            offset,
+        )
+    }
+
+    pub fn push_text(&mut self, parent: NodeId, text: String, offset: usize) -> NodeId {
+        self.push(NodeKind::Text(text), parent, offset)
+    }
+
+    fn push(&mut self, kind: NodeKind, parent: NodeId, offset: usize) -> NodeId {
+        let id = NodeId(self.nodes.len() as u32);
+        self.nodes.push(Node {
+            kind,
+            parent: Some(parent),
+            children: Vec::new(),
+            offset,
+        });
+        self.nodes[parent.0 as usize].children.push(id);
+        id
+    }
+
+    pub fn finish(self) -> Document {
+        Document {
+            nodes: self.nodes,
+            namespaces: self.namespaces,
+            line_starts: self.line_starts,
+        }
     }
 }
 
@@ -226,6 +374,7 @@ impl Parser {
                 kind: NodeKind::Document,
                 parent: None,
                 children: Vec::new(),
+                offset: 0,
             }],
             namespaces: Vec::new(),
             intern: HashMap::new(),
@@ -265,24 +414,27 @@ impl Parser {
         reader.config_mut().check_end_names = true;
         // Character data is accumulated and flushed as one text node, so that
         // `<p>a<![CDATA[b]]>c</p>` has a single child, as the data model says.
+        // `pending_at` is where the run began, which is the position a finding
+        // about the text should name.
         let mut pending = String::new();
+        let mut pending_at = 0usize;
         let mut open: Vec<NodeId> = vec![NodeId(0)];
 
         loop {
             let offset = reader.buffer_position() as usize;
             match reader.read_event() {
                 Ok(Event::Start(e)) => {
-                    self.flush_text(&mut pending, *open.last().expect("root frame"));
+                    self.flush_text(&mut pending, *open.last().expect("root frame"), pending_at);
                     let id = self.open_element(&e, *open.last().unwrap(), offset)?;
                     open.push(id);
                 }
                 Ok(Event::Empty(e)) => {
-                    self.flush_text(&mut pending, *open.last().expect("root frame"));
+                    self.flush_text(&mut pending, *open.last().expect("root frame"), pending_at);
                     self.open_element(&e, *open.last().unwrap(), offset)?;
                     self.scopes.pop();
                 }
                 Ok(Event::End(_)) => {
-                    self.flush_text(&mut pending, *open.last().expect("root frame"));
+                    self.flush_text(&mut pending, *open.last().expect("root frame"), pending_at);
                     self.scopes.pop();
                     open.pop();
                     if open.is_empty() {
@@ -300,15 +452,24 @@ impl Parser {
                         message: e.to_string(),
                         offset,
                     })?;
+                    if pending.is_empty() {
+                        pending_at = offset;
+                    }
                     pending.push_str(&text);
                 }
                 Ok(Event::CData(c)) => {
                     // CDATA is character data verbatim — no entity expansion.
+                    if pending.is_empty() {
+                        pending_at = offset;
+                    }
                     pending.push_str(&String::from_utf8_lossy(c.as_ref()));
                 }
                 Ok(Event::GeneralRef(r)) => {
                     // quick-xml surfaces every `&name;` as its own event, so a
                     // text run containing one arrives split around it.
+                    if pending.is_empty() {
+                        pending_at = offset;
+                    }
                     let name = String::from_utf8_lossy(r.as_ref()).into_owned();
                     pending.push_str(&expand_entity(&name));
                 }
@@ -333,6 +494,9 @@ impl Parser {
         let root = Document {
             nodes: self.nodes,
             namespaces: self.namespaces,
+            line_starts: std::iter::once(0)
+                .chain(xml.match_indices('\n').map(|(i, _)| i + 1))
+                .collect(),
         };
         if root.root_element().is_none() {
             return Err(ParseError {
@@ -344,7 +508,7 @@ impl Parser {
     }
 
     /// Append the accumulated character data, if any, as one text node.
-    fn flush_text(&mut self, pending: &mut String, parent: NodeId) {
+    fn flush_text(&mut self, pending: &mut String, parent: NodeId, offset: usize) {
         if pending.is_empty() {
             return;
         }
@@ -354,15 +518,16 @@ impl Parser {
         if parent == NodeId(0) {
             return;
         }
-        self.push(NodeKind::Text(text), parent);
+        self.push(NodeKind::Text(text), parent, offset);
     }
 
-    fn push(&mut self, kind: NodeKind, parent: NodeId) -> NodeId {
+    fn push(&mut self, kind: NodeKind, parent: NodeId, offset: usize) -> NodeId {
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(Node {
             kind,
             parent: Some(parent),
             children: Vec::new(),
+            offset,
         });
         self.nodes[parent.0 as usize].children.push(id);
         id
@@ -477,6 +642,7 @@ impl Parser {
                 prefix: (!prefix.is_empty()).then_some(prefix),
             }),
             parent,
+            offset,
         ))
     }
 }

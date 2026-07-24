@@ -21,11 +21,19 @@
 //! its own tree ([`tree`]), with the opposite contract.
 //!
 //! - [`tree`] — the namespace-aware document tree both engines walk.
+//! - [`preprocess`] — the rewrites epubcheck applies before a schema runs.
+//! - [`nvdl`] — which schema validates which part of a document.
 //! - [`relaxng`] — the grammar half: a derivative-based RELAX NG validator.
+//! - [`schematron`] — the assertion half, and the XPath it is written in.
 //! - [`schema`] — epubcheck's own schemas, vendored and compiled in.
+//! - [`engine`] — the map from a resource to the schemas that judge it.
 
+pub mod engine;
+pub mod nvdl;
+pub mod preprocess;
 pub mod relaxng;
 pub mod schema;
+pub mod schematron;
 pub mod tree;
 
 pub use tree::{Attr, Document, Element, Name, NodeId, NodeKind, ParseError};
