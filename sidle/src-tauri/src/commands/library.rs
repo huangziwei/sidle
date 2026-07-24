@@ -805,19 +805,20 @@ async fn recrawl_one(state: &AppState, book: &BookRow) -> RecrawlOutcome {
     // derived side and has no cover slot, else inserts one. Best-effort: log to
     // stderr and continue on failure — the sidecar is what the sidle gallery
     // uses, so a failed EPUB swap doesn't invalidate the user's action.
-    if let Some(epub) = book.epub_path.as_deref()
-        && let Err(e) = epub_cover::ensure_cover(
+    if let Some(epub) = book.epub_path.as_deref() {
+        match epub_cover::ensure_cover(
             std::path::Path::new(epub),
             book.kfx_path.as_deref().map(std::path::Path::new),
             &bytes,
             "jpg",
             book.kind.as_deref() == Some("kfx_to_epub"),
-        )
-    {
-        eprintln!(
-            "[sidle/recrawl] book {} epub cover swap failed: {e:#}",
-            book.id
-        );
+        ) {
+            Ok(added) => report_cover_regressions(book.id, "recrawl", &added),
+            Err(e) => eprintln!(
+                "[sidle/recrawl] book {} epub cover swap failed: {e:#}",
+                book.id
+            ),
+        }
     }
     // And into the imported KFX — that's the copy we push to the Kindle, and
     // its embedded cover drives the home tile / sleep-screen art. Rewriting it
@@ -1003,16 +1004,19 @@ pub async fn library_set_cover(
     // `ensure_cover` regenerates from the KFX only when the EPUB is derived,
     // else inserts. Best-effort: failure logs and doesn't fail the command (the
     // gallery reads from the sidecar, not the EPUB).
-    if let Some(epub) = book.epub_path.as_deref()
-        && let Err(e) = epub_cover::ensure_cover(
+    if let Some(epub) = book.epub_path.as_deref() {
+        match epub_cover::ensure_cover(
             std::path::Path::new(epub),
             book.kfx_path.as_deref().map(std::path::Path::new),
             &bytes,
             ext,
             book.kind.as_deref() == Some("kfx_to_epub"),
-        )
-    {
-        eprintln!("[sidle/set-cover] book {book_id} epub cover swap failed: {e:#}");
+        ) {
+            Ok(added) => report_cover_regressions(book_id, "set-cover", &added),
+            Err(e) => {
+                eprintln!("[sidle/set-cover] book {book_id} epub cover swap failed: {e:#}")
+            }
+        }
     }
 
     // And into the imported KFX (bokai normalizes png/webp → jpeg). This is the
@@ -1484,6 +1488,31 @@ fn dir_has_entries(dir: &Path) -> bool {
     std::fs::read_dir(dir)
         .map(|mut it| it.next().is_some())
         .unwrap_or(false)
+}
+
+/// Surface the error-level findings a cover edit introduced into a stored EPUB.
+/// The differential gate is diagnostic only — the cover is already written — but
+/// a non-empty list means the edit made a book *less* valid than it was, which
+/// is always a bug in the editing code (an EPUB-3-only manifest property
+/// injected into an EPUB 2 package was the first one this caught).
+fn report_cover_regressions(book_id: i64, what: &str, added: &[bokai::validate::Finding]) {
+    if added.is_empty() {
+        return;
+    }
+    eprintln!(
+        "[sidle/{what}] book {book_id} epub cover edit introduced {} new error finding(s):",
+        added.len()
+    );
+    for finding in added {
+        eprintln!(
+            "  [{}] {}/{} @ {}: {}",
+            finding.severity.as_str(),
+            finding.check,
+            finding.rule,
+            finding.location,
+            finding.message
+        );
+    }
 }
 
 #[cfg(test)]

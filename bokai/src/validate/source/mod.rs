@@ -84,6 +84,51 @@ fn validate_kfx(bytes: &[u8]) -> Vec<Finding> {
     findings
 }
 
+/// The error-level findings an edit **introduced** — everything [`validate`]
+/// reports on `after` that it did not already report on `before`.
+///
+/// This is the bar for a book-mutating edit (a metadata rewrite, a TOC repair,
+/// a cover insertion). "Clean" is the wrong bar there: a wild book is usually
+/// invalid before the edit and no single edit can fix it, so the obligation is
+/// narrower and checkable — **an edit must not add a defect**. A repair that
+/// removes findings is exactly what should happen; only additions are reported.
+///
+/// Comparison is a multiset over `(check, rule, location, message)`, so three
+/// identical broken hrefs before and four after yields one added finding. Like
+/// every other validation seam this is diagnostic only: it never withholds the
+/// edited book, and the caller decides what to do with a non-empty result.
+pub fn added_errors(before: &[u8], after: &[u8]) -> Vec<Finding> {
+    use std::collections::HashMap;
+    let key = |f: &Finding| {
+        (
+            f.check,
+            f.rule.clone(),
+            f.location.clone(),
+            f.message.clone(),
+        )
+    };
+    let mut budget: HashMap<_, usize> = HashMap::new();
+    for finding in validate(before)
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Error)
+    {
+        *budget.entry(key(finding)).or_default() += 1;
+    }
+    validate(after)
+        .findings
+        .into_iter()
+        .filter(|f| f.severity == Severity::Error)
+        .filter(|f| match budget.get_mut(&key(f)) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                false // already present before the edit
+            }
+            _ => true,
+        })
+        .collect()
+}
+
 /// Does this `PK` zip bundle `.kfx` containers (an Amazon `.kfx-zip`) rather
 /// than being an EPUB? Peeks the entry names — a `.kfx-zip` carries `.kfx`
 /// entries and no EPUB `mimetype`, so one `.kfx` entry is a reliable tell.

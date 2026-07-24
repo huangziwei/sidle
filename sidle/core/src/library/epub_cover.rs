@@ -86,15 +86,30 @@ pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Resul
 /// source and must never be overwritten by a regeneration — those fall to the
 /// non-destructive insert of case 3. `kfx_path` is the KFX to regenerate from.
 /// Best-effort by contract: callers treat any `Err` as a non-fatal, logged skip.
+///
+/// Returns the error-level validator findings the edit **introduced** (the
+/// differential gate — a directly-imported EPUB is usually invalid before we
+/// touch it, so the checkable obligation is that editing it must not *add* a
+/// defect; injecting an EPUB-3-only `properties="cover-image"` into an EPUB 2
+/// package was exactly this bug). Empty is the expected result. This crate has
+/// no logging, so the findings are returned for the caller to surface; they are
+/// never a reason to fail — the cover is written either way.
 pub fn ensure_cover(
     epub_path: &Path,
     kfx_path: Option<&Path>,
     new_bytes: &[u8],
     new_ext: &str,
     epub_is_derived: bool,
-) -> Result<()> {
+) -> Result<Vec<bokai::validate::Finding>> {
+    let before = std::fs::read(epub_path).ok();
+    let added = |epub_path: &Path| -> Vec<bokai::validate::Finding> {
+        let (Some(before), Ok(after)) = (before.as_deref(), std::fs::read(epub_path)) else {
+            return Vec::new();
+        };
+        bokai::validate::source::added_errors(before, &after)
+    };
     if replace_cover(epub_path, new_bytes, new_ext)? {
-        return Ok(());
+        return Ok(added(epub_path));
     }
     // Case 2: regenerate — but only from a KFX that is the source (EPUB derived)
     // and actually has a cover to carry over.
@@ -110,12 +125,13 @@ pub fn ensure_cover(
             let epub_bytes = buf.into_inner();
             write_bytes_atomic(epub_path, &epub_bytes)?;
             replace_cover(epub_path, new_bytes, new_ext)?;
-            return Ok(());
+            return Ok(added(epub_path));
         }
     }
     // Case 3: the EPUB is the source (or has no covered KFX to derive from) —
     // insert a cover in place rather than regenerating it.
-    insert_cover(epub_path, new_bytes, new_ext)
+    insert_cover(epub_path, new_bytes, new_ext)?;
+    Ok(added(epub_path))
 }
 
 /// True if the KFX declares a resolvable cover. Used by [`ensure_cover`] to

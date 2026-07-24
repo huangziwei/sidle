@@ -293,15 +293,36 @@ pub enum Rule {
     // The rest of the RSC-005 schema channel that needs no grammar engine:
     // `id` lexical form and uniqueness, the EPUB 2 content-document grammar,
     // the NCX schematron, the nav schematron, and package metadata content.
+    /// Fixed-layout viewport metadata (`HTM-047/056/057/059`) and the SVG
+    /// fixed-layout `viewBox` (`HTM-048`).
+    ViewportSyntax,
+    ViewportDimensionMissing,
+    ViewportValueInvalid,
+    ViewportPropertyRepeated,
+    SvgFixedLayoutNoViewBox,
+    /// Stylesheet-facing content rules: an untitled alternate stylesheet
+    /// (`CSS-015`) and an empty CSS `url()` (`CSS-002`).
+    AlternateStylesheetNoTitle,
+    EmptyCssReference,
+    /// An SVG `<use>`/paint/clip-path reference without the fragment it needs
+    /// to name a target (`RSC-015`).
+    SvgReferenceNoFragment,
+    /// A manifest `fallback-style` that names no declared item (`OPF-041`).
+    FallbackStyleNotFound,
     IdNotNcName,
     DuplicateId,
-    ImgMissingAttribute,
+    MissingRequiredAttribute,
     DisallowedContentAttribute,
+    UndeclaredContentElement,
+    UriAttributeInvalid,
+    MetaEncodingDeclaration,
+    BodyRoleNotAllowed,
     NestedHyperlink,
     NcxPlayOrder,
     NavTocOccurrence,
     EmptyDcContent,
     MissingIdentifier,
+    UnresolvedUniqueIdentifier,
     SpineTocMissing,
     PackageIncomplete,
 }
@@ -389,15 +410,29 @@ impl Rule {
         Rule::InvalidUrl,
         Rule::MalformedXml,
         Rule::DisallowedOpfAttribute,
+        Rule::ViewportSyntax,
+        Rule::ViewportDimensionMissing,
+        Rule::ViewportValueInvalid,
+        Rule::ViewportPropertyRepeated,
+        Rule::SvgFixedLayoutNoViewBox,
+        Rule::AlternateStylesheetNoTitle,
+        Rule::EmptyCssReference,
+        Rule::SvgReferenceNoFragment,
+        Rule::FallbackStyleNotFound,
         Rule::IdNotNcName,
         Rule::DuplicateId,
-        Rule::ImgMissingAttribute,
+        Rule::MissingRequiredAttribute,
         Rule::DisallowedContentAttribute,
+        Rule::UndeclaredContentElement,
+        Rule::UriAttributeInvalid,
+        Rule::MetaEncodingDeclaration,
+        Rule::BodyRoleNotAllowed,
         Rule::NestedHyperlink,
         Rule::NcxPlayOrder,
         Rule::NavTocOccurrence,
         Rule::EmptyDcContent,
         Rule::MissingIdentifier,
+        Rule::UnresolvedUniqueIdentifier,
         Rule::SpineTocMissing,
         Rule::PackageIncomplete,
     ];
@@ -491,15 +526,29 @@ impl Rule {
             Rule::InvalidUrl => "RSC-020",
             Rule::MalformedXml => "RSC-016",
             Rule::DisallowedOpfAttribute => "RSC-005",
+            Rule::ViewportSyntax => "HTM-047",
+            Rule::ViewportDimensionMissing => "HTM-056",
+            Rule::ViewportValueInvalid => "HTM-057",
+            Rule::ViewportPropertyRepeated => "HTM-059",
+            Rule::SvgFixedLayoutNoViewBox => "HTM-048",
+            Rule::AlternateStylesheetNoTitle => "CSS-015",
+            Rule::EmptyCssReference => "CSS-002",
+            Rule::SvgReferenceNoFragment => "RSC-015",
+            Rule::FallbackStyleNotFound => "OPF-041",
             Rule::IdNotNcName => "RSC-005",
             Rule::DuplicateId => "RSC-005",
-            Rule::ImgMissingAttribute => "RSC-005",
+            Rule::MissingRequiredAttribute => "RSC-005",
             Rule::DisallowedContentAttribute => "RSC-005",
+            Rule::UndeclaredContentElement => "RSC-005",
+            Rule::UriAttributeInvalid => "RSC-005",
+            Rule::MetaEncodingDeclaration => "RSC-005",
+            Rule::BodyRoleNotAllowed => "RSC-005",
             Rule::NestedHyperlink => "RSC-005",
             Rule::NcxPlayOrder => "RSC-005",
             Rule::NavTocOccurrence => "RSC-005",
             Rule::EmptyDcContent => "RSC-005",
             Rule::MissingIdentifier => "RSC-005",
+            Rule::UnresolvedUniqueIdentifier => "RSC-005",
             Rule::SpineTocMissing => "RSC-005",
             Rule::PackageIncomplete => "RSC-005",
         }
@@ -1121,6 +1170,9 @@ const XHTML_NS: &[u8] = b"http://www.w3.org/1999/xhtml";
 /// precisely the defect [`check_nav_occurrence`] reports.
 const OPS_NS: &[u8] = b"http://www.idpf.org/2007/ops";
 
+/// The SVG namespace, for the SVG-specific content rules.
+const SVG_NS: &[u8] = b"http://www.w3.org/2000/svg";
+
 /// **RSC-005** (schema channel) — OPF attribute grammar. A namespace-resolved,
 /// faithful *subset* of the package RelaxNG grammars (`package-30.rnc` /
 /// `opf20.rng`), covering the two attribute-grammar violations that dominate the
@@ -1156,6 +1208,29 @@ fn check_opf_schema(text: &str, path: &str, epub2: bool, epub3: bool, report: &m
     // The default namespace binds the empty prefix; `xml` is implicitly bound.
     let mut scopes: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
     let mut ids = IdScan::default();
+    // One frame per open element that requires children: (element, child it
+    // requires, seen). Both grammars spell these as `element X { Y+ }`, so an
+    // `<X>` that closes without a `<Y>` is a schema error.
+    let mut required_children: Vec<(Vec<u8>, &'static [u8], bool)> = Vec::new();
+    let requires = |local: &[u8]| -> Option<&'static [u8]> {
+        match local {
+            b"guide" => Some(b"reference"),
+            b"tours" => Some(b"tour"),
+            b"tour" => Some(b"site"),
+            _ => None,
+        }
+    };
+    let open = |e: &quick_xml::events::BytesStart,
+                required_children: &mut Vec<(Vec<u8>, &'static [u8], bool)>| {
+        let name = e.name();
+        let local = local_name(name.as_ref()).to_vec();
+        if let Some((_, child, seen)) = required_children.last_mut()
+            && *child == local
+        {
+            *seen = true;
+        }
+        requires(&local).map(|child| (local, child))
+    };
     loop {
         match reader.read_event() {
             Err(_) | Ok(Event::Eof) => return,
@@ -1163,19 +1238,47 @@ fn check_opf_schema(text: &str, path: &str, epub2: bool, epub3: bool, report: &m
                 scopes.push(xmlns_frame(&e));
                 report_disallowed_opf_attrs(&e, &scopes, epub2, epub3, path, report);
                 ids.visit(&e, true, path, report);
+                let entered = open(&e, &mut required_children);
+                required_children.push(match entered {
+                    Some((local, child)) => (local, child, false),
+                    None => (Vec::new(), b"", true),
+                });
             }
             Ok(Event::Empty(e)) => {
                 scopes.push(xmlns_frame(&e));
                 report_disallowed_opf_attrs(&e, &scopes, epub2, epub3, path, report);
                 ids.visit(&e, true, path, report);
+                if let Some((local, child)) = open(&e, &mut required_children) {
+                    report_incomplete_element(&local, child, path, report);
+                }
                 scopes.pop();
             }
             Ok(Event::End(_)) => {
                 scopes.pop();
+                if let Some((local, child, seen)) = required_children.pop()
+                    && !seen
+                {
+                    report_incomplete_element(&local, child, path, report);
+                }
             }
             _ => {}
         }
     }
+}
+
+/// `element X { Y+ }` violated — an OPF element that closed without the child
+/// its grammar requires (`<guide>` without a `<reference>`, `<tours>` without a
+/// `<tour>`, `<tour>` without a `<site>`).
+fn report_incomplete_element(local: &[u8], child: &[u8], path: &str, report: &mut Report) {
+    report.push(Violation::new(
+        Rule::PackageIncomplete,
+        path.to_string(),
+        format!(
+            "element {:?} incomplete; missing required element {:?}",
+            String::from_utf8_lossy(local),
+            String::from_utf8_lossy(child)
+        ),
+    ));
 }
 
 /// The (prefix, uri) namespace declarations on one element: `xmlns="…"` binds the
@@ -1357,7 +1460,13 @@ fn report_disallowed_opf_attrs(
         }
         let ns = attr_namespace(key, scopes);
         if epub3 {
-            if ns.as_deref() == Some(OPF_NS) {
+            // `package-30.rnc`: `opf.spine.attlist &= opf.id.attr? &
+            // opf.spine.toc.attr? & opf.ppd.attr?` — nothing else, so the Adobe
+            // `page-map` extension is a violation here as it is in EPUB 2.
+            let bad_spine = local == b"spine"
+                && ns.is_none()
+                && !matches!(key, b"id" | b"toc" | b"page-progression-direction");
+            if ns.as_deref() == Some(OPF_NS) || bad_spine {
                 report.push(Violation::new(
                     Rule::DisallowedOpfAttribute,
                     path.to_string(),
@@ -1453,21 +1562,296 @@ fn check_content_schema(text: &str, path: &str, epub2: bool, epub3: bool, report
     }
 }
 
-/// The attributes XHTML 1.1's `meta.attlist` permits (`I18n.attrib` plus the four
-/// optional ones). Notably `id` is *not* among them, and neither is the HTML5
-/// `charset`.
-const EPUB2_META_ATTRS: &[&[u8]] = &[
-    b"content",
+/// `Common.attrib` of the vendored `20/rng/xhtml/attribs.rng` — `Core.attrib`
+/// (`id`, `class`, `title`, `style`) plus `I18n.attrib` (`lang`, `xml:lang`,
+/// `dir`). Almost every XHTML 1.1 element's attlist is this set plus a few of
+/// its own. The event-handler module is not among `content.rng`'s includes, so
+/// `onclick` and friends are declared nowhere.
+const XHTML11_COMMON_ATTRS: &[&[u8]] = &[
+    b"class",
     b"dir",
-    b"http-equiv",
+    b"id",
     b"lang",
-    b"name",
-    b"scheme",
+    b"style",
+    b"title",
+    b"xml:lang",
 ];
 
-/// The attributes XHTML 1.1's `html.attlist` permits (`version` plus the i18n
-/// attributes) — no `id`, `class` or `style`.
-const EPUB2_HTML_ATTRS: &[&[u8]] = &[b"version", b"dir", b"lang"];
+/// The element and attribute grammar of an EPUB 2 XHTML content document,
+/// derived from the vendored `20/rng/content-xhtml.rng` and the XHTML 1.1
+/// modules it includes. Each entry is `(element, inherits_common, own)`:
+/// `true` means the attlist is [`XHTML11_COMMON_ATTRS`] plus `own`, `false`
+/// that `own` *is* the whole attlist (a dozen elements take only part of
+/// `Common`).
+///
+/// The element list is exhaustive, which makes it two checks in one: an
+/// XHTML-namespace element absent from it is declared nowhere in the schema.
+/// The forms, ruby, frames, legacy and name-identification modules are not
+/// included, so `<u>`, `<font>`, `<center>`, `<input>`, `<name>` and every
+/// HTML5 element are errors in an EPUB 2 content document.
+const XHTML11_ELEMENTS: &[Xhtml11Attlist] = &[
+    (
+        b"a",
+        true,
+        &[
+            b"accesskey",
+            b"charset",
+            b"coords",
+            b"href",
+            b"hreflang",
+            b"rel",
+            b"rev",
+            b"shape",
+            b"tabindex",
+            b"target",
+            b"type",
+        ],
+    ),
+    (b"abbr", true, &[]),
+    (b"acronym", true, &[]),
+    (b"address", true, &[]),
+    (
+        b"area",
+        true,
+        &[
+            b"accesskey",
+            b"alt",
+            b"coords",
+            b"href",
+            b"nohref",
+            b"shape",
+            b"tabindex",
+            b"target",
+        ],
+    ),
+    (b"b", true, &[]),
+    (b"bdo", true, &[]),
+    (b"big", true, &[]),
+    (b"blockquote", true, &[b"cite"]),
+    (b"body", true, &[]),
+    (b"caption", true, &[]),
+    (b"cite", true, &[]),
+    (b"code", true, &[]),
+    (
+        b"col",
+        true,
+        &[b"align", b"char", b"charoff", b"span", b"valign", b"width"],
+    ),
+    (
+        b"colgroup",
+        true,
+        &[b"align", b"char", b"charoff", b"span", b"valign", b"width"],
+    ),
+    (b"dd", true, &[]),
+    (b"del", true, &[b"cite", b"datetime"]),
+    (b"dfn", true, &[]),
+    (b"div", true, &[]),
+    (b"dl", true, &[]),
+    (b"dt", true, &[]),
+    (b"em", true, &[]),
+    (b"h1", true, &[]),
+    (b"h2", true, &[]),
+    (b"h3", true, &[]),
+    (b"h4", true, &[]),
+    (b"h5", true, &[]),
+    (b"h6", true, &[]),
+    (b"hr", true, &[]),
+    (b"i", true, &[]),
+    (
+        b"img",
+        true,
+        &[
+            b"alt",
+            b"height",
+            b"ismap",
+            b"longdesc",
+            b"src",
+            b"usemap",
+            b"width",
+        ],
+    ),
+    (b"ins", true, &[b"cite", b"datetime"]),
+    (b"kbd", true, &[]),
+    (b"li", true, &[]),
+    (
+        b"link",
+        true,
+        &[
+            b"charset",
+            b"href",
+            b"hreflang",
+            b"media",
+            b"rel",
+            b"rev",
+            b"type",
+        ],
+    ),
+    (b"noscript", true, &[]),
+    (
+        b"object",
+        true,
+        &[
+            b"archive",
+            b"classid",
+            b"codebase",
+            b"codetype",
+            b"data",
+            b"declare",
+            b"height",
+            b"name",
+            b"standby",
+            b"tabindex",
+            b"type",
+            b"usemap",
+            b"width",
+        ],
+    ),
+    (b"ol", true, &[]),
+    (b"p", true, &[]),
+    (b"pre", true, &[b"xml:space"]),
+    (b"q", true, &[b"cite"]),
+    (b"samp", true, &[]),
+    (b"small", true, &[]),
+    (b"span", true, &[]),
+    (b"strong", true, &[]),
+    (b"sub", true, &[]),
+    (b"sup", true, &[]),
+    (
+        b"table",
+        true,
+        &[
+            b"border",
+            b"cellpadding",
+            b"cellspacing",
+            b"frame",
+            b"rules",
+            b"summary",
+            b"width",
+        ],
+    ),
+    (b"tbody", true, &[b"align", b"char", b"charoff", b"valign"]),
+    (
+        b"td",
+        true,
+        &[
+            b"abbr", b"align", b"axis", b"char", b"charoff", b"colspan", b"headers", b"rowspan",
+            b"scope", b"valign",
+        ],
+    ),
+    (b"tfoot", true, &[b"align", b"char", b"charoff", b"valign"]),
+    (
+        b"th",
+        true,
+        &[
+            b"abbr", b"align", b"axis", b"char", b"charoff", b"colspan", b"headers", b"rowspan",
+            b"scope", b"valign",
+        ],
+    ),
+    (b"thead", true, &[b"align", b"char", b"charoff", b"valign"]),
+    (b"tr", true, &[b"align", b"char", b"charoff", b"valign"]),
+    (b"tt", true, &[]),
+    (b"ul", true, &[]),
+    (b"var", true, &[]),
+    (
+        b"applet",
+        false,
+        &[
+            b"alt",
+            b"archive",
+            b"class",
+            b"code",
+            b"codebase",
+            b"height",
+            b"id",
+            b"object",
+            b"style",
+            b"title",
+            b"width",
+        ],
+    ),
+    (b"base", false, &[b"href", b"target"]),
+    (b"br", false, &[b"class", b"id", b"style", b"title"]),
+    (b"head", false, &[b"dir", b"lang", b"profile", b"xml:lang"]),
+    (b"html", false, &[b"dir", b"lang", b"version", b"xml:lang"]),
+    (
+        b"iframe",
+        false,
+        &[
+            b"class",
+            b"frameborder",
+            b"height",
+            b"id",
+            b"longdesc",
+            b"marginheight",
+            b"marginwidth",
+            b"scrolling",
+            b"src",
+            b"style",
+            b"title",
+            b"width",
+        ],
+    ),
+    (
+        b"map",
+        false,
+        &[b"class", b"dir", b"id", b"lang", b"title", b"xml:lang"],
+    ),
+    (
+        b"meta",
+        false,
+        &[
+            b"content",
+            b"dir",
+            b"http-equiv",
+            b"lang",
+            b"name",
+            b"scheme",
+            b"xml:lang",
+        ],
+    ),
+    (
+        b"param",
+        false,
+        &[b"id", b"name", b"type", b"value", b"valuetype"],
+    ),
+    (
+        b"script",
+        false,
+        &[b"charset", b"defer", b"src", b"type", b"xml:space"],
+    ),
+    (
+        b"style",
+        false,
+        &[
+            b"dir",
+            b"lang",
+            b"media",
+            b"title",
+            b"type",
+            b"xml:lang",
+            b"xml:space",
+        ],
+    ),
+    (b"title", false, &[b"dir", b"lang", b"xml:lang"]),
+];
+
+/// One row of [`XHTML11_ELEMENTS`]: `(element, inherits_common, own_attributes)`.
+type Xhtml11Attlist = (&'static [u8], bool, &'static [&'static [u8]]);
+
+/// The XHTML 1.1 attlist of one element: `(inherits_common, own_attributes)`,
+/// or `None` when the schema declares no such element.
+fn xhtml11_attlist(local: &[u8]) -> Option<(bool, &'static [&'static [u8]])> {
+    XHTML11_ELEMENTS
+        .iter()
+        .find(|(name, _, _)| *name == local)
+        .map(|(_, common, own)| (*common, *own))
+}
+
+/// True when `attr` is permitted on an element with this attlist.
+fn xhtml11_allows(attlist: (bool, &[&[u8]]), attr: &[u8]) -> bool {
+    let (inherits_common, own) = attlist;
+    own.contains(&attr) || (inherits_common && XHTML11_COMMON_ATTRS.contains(&attr))
+}
 
 /// One element of [`check_content_schema`]'s walk. Returns whether the element is
 /// an XHTML `<a>`, which the caller stacks to detect nested hyperlinks.
@@ -1480,22 +1864,45 @@ fn content_element_rules(
     path: &str,
     report: &mut Report,
 ) -> bool {
-    if elem_namespace(e.name().as_ref(), scopes).as_deref() != Some(XHTML_NS) {
+    let ns = elem_namespace(e.name().as_ref(), scopes);
+    if ns.as_deref() == Some(SVG_NS) {
+        check_svg_element(e, path, report);
+        return false;
+    }
+    if ns.as_deref() != Some(XHTML_NS) {
         return false;
     }
     ids.visit(e, epub2, path, report);
     let name = e.name();
     let local = local_name(name.as_ref());
     if !epub2 {
+        check_epub3_content_element(e, local, path, report);
         return local == b"a";
     }
     report_disallowed_content_attrs(e, scopes, local, path, report);
+    // XHTML 1.1 types `href`/`src` as `xsd:anyURI`, whose lexical space Jing
+    // rejects for the same empty-host URLs the WHATWG parser does (RSC-020's
+    // second class). EPUB 3's HTML5 grammar types them as plain strings.
+    for attr in e.attributes().flatten() {
+        if matches!(local_name(attr.key.as_ref()), b"href" | b"src")
+            && url_has_empty_host(&String::from_utf8_lossy(&attr.value))
+        {
+            report.push(Violation::new(
+                Rule::UriAttributeInvalid,
+                path.to_string(),
+                format!(
+                    "value of attribute {:?} is invalid; must be a URI",
+                    String::from_utf8_lossy(attr.key.as_ref())
+                ),
+            ));
+        }
+    }
     match local {
         b"img" => {
             for required in [b"alt".as_slice(), b"src".as_slice()] {
                 if !e.attributes().flatten().any(|a| a.key.as_ref() == required) {
                     report.push(Violation::new(
-                        Rule::ImgMissingAttribute,
+                        Rule::MissingRequiredAttribute,
                         path.to_string(),
                         format!(
                             "element img missing required attribute {:?}",
@@ -1517,19 +1924,120 @@ fn content_element_rules(
     local == b"a"
 }
 
-/// The EPUB 2 content-document attribute grammar, for one XHTML element:
+/// **RSC-015** — an SVG `<use>` instantiates the element its fragment names, so
+/// a reference without one names nothing (epubcheck types it `SVG_SYMBOL` and
+/// reports RSC-015 when the fragment is absent). Restricted to `<use>`, whose
+/// href is meaningless without a fragment in every SVG version; the paint and
+/// clip-path reference types epubcheck also covers need the SVG reference-typing
+/// model that RSC-014 waits on, so missing them is a recall gap, not an FP.
+fn check_svg_element(e: &quick_xml::events::BytesStart, path: &str, report: &mut Report) {
+    if local_name(e.name().as_ref()) != b"use" {
+        return;
+    }
+    // `href` (SVG 2) or `xlink:href` (SVG 1.1), by local name.
+    let Some(href) = attr_by_local(e, b"href") else {
+        return;
+    };
+    let href = href.trim();
+    if !href.is_empty() && !href.contains('#') && !is_remote_href(href) {
+        report.push(Violation::new(
+            Rule::SvgReferenceNoFragment,
+            path.to_string(),
+            format!("a fragment identifier is required for the svg use reference {href:?}"),
+        ));
+    }
+}
+
+/// The two EPUB 3 content-document rules that are one element wide:
 ///
-/// - Attributes XHTML 1.1 declares **nowhere** — the HTML5 `data-*` and
-///   `hidden`, ARIA's `role`/`aria-*`, and any attribute in the EPUB 3
-///   structural-semantics namespace (`epub:type`). None of them appears in any
-///   attlist of the vendored `content.rng`, so they are rejected on every
-///   element (verified against the corpus, where epubcheck reports each).
-/// - The two elements whose attlist is short enough to state exactly:
-///   `<html>` ([`EPUB2_HTML_ATTRS`]) and `<meta>` ([`EPUB2_META_ATTRS`]), plus
-///   `xml:lang` on either.
+/// - `epub-xhtml-30.sch`'s `encoding.decl.state` — a `<meta>` whose `http-equiv`
+///   is (case-insensitively) `content-type` must carry a `content` matching
+///   `text/html;\s*charset=utf-8`. The Schematron uses an unanchored `matches()`
+///   over `normalize-space(@content)`, and XSD's `\s` is ASCII-only, so a book
+///   separating the parameters with an ideographic space fails it.
+/// - `body.attrs` of the vendored `mod/html5/meta.rnc` — `<body>` accepts only
+///   the four ARIA roles `application`, `document`, `none` and `presentation`
+///   (a DPUB role such as `doc-cover` belongs on a descendant, not the body).
+fn check_epub3_content_element(
+    e: &quick_xml::events::BytesStart,
+    local: &[u8],
+    path: &str,
+    report: &mut Report,
+) {
+    match local {
+        b"meta" => {
+            let Some(equiv) = attr_by_local(e, b"http-equiv") else {
+                return;
+            };
+            if !equiv.trim().eq_ignore_ascii_case("content-type") {
+                return;
+            }
+            let content = attr_by_local(e, b"content").unwrap_or_default();
+            if !content_type_declares_utf8_html(&content) {
+                report.push(Violation::new(
+                    Rule::MetaEncodingDeclaration,
+                    path.to_string(),
+                    format!(
+                        "the meta element in encoding declaration state (http-equiv=\"content-type\") must have the value \"text/html; charset=utf-8\", not {content:?}"
+                    ),
+                ));
+            }
+        }
+        b"body" => {
+            let Some(role) = attr_by_local(e, b"role") else {
+                return;
+            };
+            const BODY_ROLES: [&str; 4] = ["application", "document", "none", "presentation"];
+            if !BODY_ROLES.contains(&role.trim()) {
+                report.push(Violation::new(
+                    Rule::BodyRoleNotAllowed,
+                    path.to_string(),
+                    format!(
+                        "value of attribute \"role\" is invalid on <body>; must be equal to \"application\", \"document\", \"none\" or \"presentation\", not {role:?}"
+                    ),
+                ));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The Schematron's `matches(normalize-space(@content),'text/html;\s*charset=utf-8','i')`
+/// — an unanchored, ASCII-case-insensitive search whose only flexible part is a
+/// run of ASCII whitespace after the semicolon.
+fn content_type_declares_utf8_html(content: &str) -> bool {
+    // `normalize-space` collapses only the four XML whitespace characters — an
+    // ideographic space stays put and breaks the match, which is exactly the
+    // corpus case.
+    const XML_WS: [char; 4] = [' ', '\t', '\r', '\n'];
+    let collapsed: String = content
+        .split(XML_WS)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let hay = collapsed.to_ascii_lowercase();
+    let Some(head) = hay.find("text/html;") else {
+        return false;
+    };
+    let rest = hay[head + "text/html;".len()..].trim_start_matches([' ', '\t', '\n', '\r']);
+    rest.starts_with("charset=utf-8")
+}
+
+/// The EPUB 2 content-document element and attribute grammar for one XHTML
+/// element, read off [`XHTML11_ELEMENTS`]:
 ///
-/// Everything else is left alone: this is a subset of what the grammar rejects,
-/// so under-detection is a recall gap and never a false positive.
+/// - An element the schema declares nowhere (`<u>`, `<center>`, `<input>`, any
+///   HTML5 element) is an error in its own right, and its attributes are not
+///   judged — epubcheck reports the element, not each attribute.
+/// - Otherwise every no-namespace attribute must appear in the element's
+///   attlist, as must `xml:lang` and `xml:space` (the only two the grammar
+///   names in the XML namespace).
+/// - An attribute in the EPUB 3 structural-semantics namespace (`epub:type`) is
+///   declared nowhere, on any element.
+///
+/// Attributes in any *other* namespace are left alone, so this stays a subset of
+/// what the grammar rejects: under-detection is a recall gap, never a false
+/// positive.
 fn report_disallowed_content_attrs(
     e: &quick_xml::events::BytesStart,
     scopes: &[Vec<(Vec<u8>, Vec<u8>)>],
@@ -1537,10 +2045,16 @@ fn report_disallowed_content_attrs(
     path: &str,
     report: &mut Report,
 ) {
-    let allowed: Option<&[&[u8]]> = match local {
-        b"html" => Some(EPUB2_HTML_ATTRS),
-        b"meta" => Some(EPUB2_META_ATTRS),
-        _ => None,
+    let Some(attlist) = xhtml11_attlist(local) else {
+        report.push(Violation::new(
+            Rule::UndeclaredContentElement,
+            path.to_string(),
+            format!(
+                "element {:?} is not allowed anywhere in an EPUB 2 content document",
+                String::from_utf8_lossy(local)
+            ),
+        ));
+        return;
     };
     for attr in e.attributes().flatten() {
         let key = attr.key.as_ref();
@@ -1549,15 +2063,17 @@ fn report_disallowed_content_attrs(
         }
         let ns = attr_namespace(key, scopes);
         let attr_local = local_name(key);
-        let is_xml_lang = ns.as_deref() == Some(XML_NS) && attr_local == b"lang";
-        let never_declared = ns.as_deref() == Some(OPS_NS)
-            || (ns.is_none()
-                && (attr_local.starts_with(b"data-")
-                    || attr_local.starts_with(b"aria-")
-                    || attr_local == b"hidden"
-                    || attr_local == b"role"));
-        let disallowed = never_declared
-            || allowed.is_some_and(|allowed| !is_xml_lang && !allowed.contains(&key));
+        // The grammar spells the two XML-namespace attributes it declares with
+        // their `xml:` prefix; every other declared attribute is in no namespace.
+        let judged: Option<Vec<u8>> = match ns.as_deref() {
+            None => Some(attr_local.to_vec()),
+            Some(XML_NS) if matches!(attr_local, b"lang" | b"space") => {
+                Some([b"xml:", attr_local].concat())
+            }
+            _ => None,
+        };
+        let disallowed =
+            ns.as_deref() == Some(OPS_NS) || judged.is_some_and(|k| !xhtml11_allows(attlist, &k));
         if disallowed {
             report.push(Violation::new(
                 Rule::DisallowedContentAttribute,
@@ -1605,6 +2121,19 @@ fn check_opf_structure(
                 opf_path,
                 format!("unique-identifier {uid:?} matches no <dc:identifier id=…>"),
             ));
+            // `package-30.sch`'s `opf.uid` asserts the same thing, so epubcheck
+            // reports the schema channel alongside OPF-030. EPUB 2 instead types
+            // the attribute as `xsd:IDREF` in `opf20.rng`, whose failure Jing
+            // words differently — hence the EPUB 3 gate.
+            if epub3 {
+                report.push(Violation::new(
+                    Rule::UnresolvedUniqueIdentifier,
+                    opf_path,
+                    format!(
+                        "package element unique-identifier attribute does not resolve to a dc:identifier element (given reference was {uid:?})"
+                    ),
+                ));
+            }
         }
         _ => {}
     }
@@ -1750,6 +2279,21 @@ fn check_fallback_chain_and_spine(
 ) {
     let by_id: HashMap<&str, &opf::ManifestItem> =
         pkg.manifest.iter().map(|m| (m.id.as_str(), m)).collect();
+
+    // OPF-041: an EPUB 2 `fallback-style` must name a declared item (epubcheck's
+    // `FallbackChainResolver` reads the attribute for version 2 only — the EPUB 3
+    // manifest grammar has no `fallback-style`).
+    for item in pkg.manifest.iter().filter(|_| epub2) {
+        if let Some(style) = item.fallback_style.as_deref()
+            && !by_id.contains_key(style)
+        {
+            report.push(Violation::new(
+                Rule::FallbackStyleNotFound,
+                opf_path,
+                format!("fallback-style item with id {style:?} could not be found"),
+            ));
+        }
+    }
 
     // OPF-045: first cycle in the fallback graph (edges to existing ids only —
     // a dangling fallback is OPF-040). Reported once, like epubcheck.
@@ -2023,11 +2567,11 @@ fn check_opf_url_validity(pkg: &opf::Package, opf_path: &str, report: &mut Repor
         .chain(pkg.guide_hrefs.iter().map(String::as_str))
         .chain(pkg.links.iter().map(|l| l.href.as_str()));
     for href in hrefs {
-        if url_has_illegal_space(href) {
+        if let Some(why) = invalid_url_reason(href) {
             report.push(Violation::new(
                 Rule::InvalidUrl,
                 opf_path.to_string(),
-                format!("{href:?} is not a valid URL (a space must be percent-encoded as %20)"),
+                format!("{href:?} is not a valid URL ({why})"),
             ));
         }
     }
@@ -2635,6 +3179,7 @@ fn walk_foreign_resources(
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(false);
     let mut stack: Vec<ForeignFrame> = Vec::new();
+    let mut base = BaseUrl::default();
     loop {
         match reader.read_event() {
             Ok(ev @ (Event::Start(_) | Event::Empty(_))) => {
@@ -2643,6 +3188,7 @@ fn walk_foreign_resources(
                     Event::Start(e) | Event::Empty(e) => e.clone(),
                     _ => unreachable!(),
                 };
+                base.visit(&e);
                 let in_picture = stack.iter().any(|f| matches!(f.role, ForeignRole::Picture));
                 // A media `<source>`'s parent is the immediately enclosing frame.
                 let in_media = matches!(
@@ -2652,13 +3198,16 @@ fn walk_foreign_resources(
                 let name = e.name();
                 let local = local_name(name.as_ref()).to_vec();
                 let attr = |k: &[u8]| attr_by_local(&e, k);
+                // A reference attribute is resolved against the base URL in scope
+                // before it is matched against the manifest.
+                let href_attr = |k: &[u8]| attr(k).map(|v| base.resolve(&v));
                 let hidden = attr(b"hidden").is_some();
                 // Emit this element's own references / picture checks.
                 let mut role = ForeignRole::Plain;
                 match local.as_slice() {
                     b"picture" => role = ForeignRole::Picture,
                     b"img" => {
-                        if let Some(src) = attr(b"src") {
+                        if let Some(src) = href_attr(b"src") {
                             if in_picture {
                                 // MED-003: a picture <img> must be a core image type.
                                 if let Some(t) = foreign_target(path, &src, by_path)
@@ -2680,12 +3229,12 @@ fn walk_foreign_resources(
                     }
                     b"image" => {
                         // SVG <image> (href or xlink:href).
-                        if let Some(src) = attr(b"href").or_else(|| attr(b"src")) {
+                        if let Some(src) = href_attr(b"href").or_else(|| href_attr(b"src")) {
                             check_foreign_ref(path, &src, in_picture, by_path, by_id, report);
                         }
                     }
                     b"math" => {
-                        if let Some(alt) = attr(b"altimg") {
+                        if let Some(alt) = href_attr(b"altimg") {
                             check_foreign_ref(path, &alt, false, by_path, by_id, report);
                         }
                     }
@@ -2694,7 +3243,7 @@ fn walk_foreign_resources(
                         // end-of-media fallback decision; a picture source is not
                         // subject to RSC-032 (an <img> sibling carries MED-003).
                         if in_media
-                            && let Some(src) = attr(b"src")
+                            && let Some(src) = href_attr(b"src")
                             && let Some(ForeignFrame {
                                 role: ForeignRole::Media { sources },
                                 ..
@@ -2706,11 +3255,11 @@ fn walk_foreign_resources(
                     b"audio" | b"video" => {
                         // The media element's own `src` is registered with no
                         // intrinsic fallback; a <video> `poster` is an image.
-                        if let Some(src) = attr(b"src") {
+                        if let Some(src) = href_attr(b"src") {
                             check_foreign_ref(path, &src, false, by_path, by_id, report);
                         }
                         if local.as_slice() == b"video"
-                            && let Some(poster) = attr(b"poster")
+                            && let Some(poster) = href_attr(b"poster")
                         {
                             check_foreign_ref(path, &poster, false, by_path, by_id, report);
                         }
@@ -2720,9 +3269,9 @@ fn walk_foreign_resources(
                     }
                     b"object" | b"embed" => {
                         let href = if local.as_slice() == b"object" {
-                            attr(b"data")
+                            href_attr(b"data")
                         } else {
-                            attr(b"src")
+                            href_attr(b"src")
                         };
                         if is_empty {
                             // A void element can carry no fallback content.
@@ -2734,7 +3283,7 @@ fn walk_foreign_resources(
                         }
                     }
                     b"input" | b"iframe" => {
-                        if let Some(src) = attr(b"src") {
+                        if let Some(src) = href_attr(b"src") {
                             check_foreign_ref(path, &src, false, by_path, by_id, report);
                         }
                     }
@@ -2854,6 +3403,43 @@ fn url_has_illegal_space(href: &str) -> bool {
         .next()
         .unwrap_or(&cleaned)
         .contains(' ')
+}
+
+/// RSC-020, second corpus class: a *special*-scheme URL with an empty host.
+/// The WHATWG URL parser requires a non-empty host for `http`/`https`/`ws`/
+/// `wss`/`ftp` and fails with "host is missing", so `href="http://"` and
+/// `http:///path` are invalid — while `file:///path` (whose host may legally be
+/// empty) is not. The same emptiness makes the value fail XSD `anyURI` in the
+/// EPUB 2 content grammar, which is why it also feeds the schema channel.
+fn url_has_empty_host(href: &str) -> bool {
+    let href = href.trim_matches(|c: char| c <= ' ');
+    let Some(scheme) = url_scheme(href) else {
+        return false;
+    };
+    if !matches!(scheme.as_str(), "http" | "https" | "ws" | "wss" | "ftp") {
+        return false;
+    }
+    let Some(after) = href[scheme.len() + 1..].strip_prefix("//") else {
+        return false; // no authority component at all — a different failure
+    };
+    after
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after)
+        .is_empty()
+}
+
+/// Why a referenced URL is invalid (RSC-020), or `None` when it parses. The two
+/// classes the corpus exhibits, both of which galimatias (epubcheck's strict URL
+/// parser) always rejects: [`url_has_illegal_space`] and [`url_has_empty_host`].
+fn invalid_url_reason(href: &str) -> Option<&'static str> {
+    if url_has_illegal_space(href) {
+        Some("a space must be percent-encoded as %20")
+    } else if url_has_empty_host(href) {
+        Some("host is missing")
+    } else {
+        None
+    }
 }
 
 /// A remote reference: an absolute URL to another origin. `data:` is inline (its
@@ -3239,13 +3825,69 @@ fn check_content_conformance(
                 ));
             }
         }
-        // HTM-046: a fixed-layout content document must carry a viewport meta.
-        if fxl_ids.contains(item.id.as_str()) && !features.has_viewport {
+        // HTM-046: a fixed-layout content document must carry a viewport meta;
+        // HTM-047/056/057/059 judge the first one's content. A reflowable
+        // document's viewport is only USAGE (HTM-060b), so it is not parsed.
+        if fxl_ids.contains(item.id.as_str()) {
+            match features.viewport_content.as_deref() {
+                Some(content) => check_viewport_meta(content, &path, report),
+                None => report.push(Violation::new(
+                    Rule::FixedLayoutNoViewport,
+                    path.clone(),
+                    "fixed-layout content document has no <meta name=\"viewport\"> element",
+                )),
+            }
+        }
+        // CSS-015: an alternate stylesheet must be named, so a reading system can
+        // offer the choice.
+        if features.untitled_alternate_stylesheet {
             report.push(Violation::new(
-                Rule::FixedLayoutNoViewport,
+                Rule::AlternateStylesheetNoTitle,
                 path.clone(),
-                "fixed-layout content document has no <meta name=\"viewport\"> element",
+                "alternative style sheets must have a title",
             ));
+        }
+    }
+    // SVG content documents (EPUB 3 only — EPUB 2 has no SVG content document)
+    // go through the same schema walk, plus the fixed-layout `viewBox` rule.
+    for item in pkg.manifest.iter().filter(|_| epub3) {
+        if !item.media_type.trim().eq_ignore_ascii_case("image/svg+xml") {
+            continue;
+        }
+        let path = join_opf(opf_dir, &item.href);
+        if encrypted.contains(&path) {
+            continue;
+        }
+        let Ok(text) = read_text(zip, &path) else {
+            continue;
+        };
+        check_content_schema(&text, &path, epub2, epub3, report);
+        // HTM-048: a fixed-layout SVG needs a `viewBox` on its outermost `<svg>`
+        // for the reading system to know its intrinsic dimensions.
+        if fxl_ids.contains(item.id.as_str()) && !outermost_svg_has_viewbox(&text) {
+            report.push(Violation::new(
+                Rule::SvgFixedLayoutNoViewBox,
+                path.clone(),
+                "fixed-layout SVG document has no \"viewBox\" attribute on its outermost <svg>",
+            ));
+        }
+    }
+}
+
+/// Whether the first `<svg>` element of a document carries a `viewBox`. `None`
+/// of the document parses is treated as "has one" — a malformed SVG is
+/// [`check_xml_well_formedness`]'s finding, not this rule's.
+fn outermost_svg_has_viewbox(text: &str) -> bool {
+    let mut reader = Reader::from_str(text);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e))
+                if local_name(e.name().as_ref()) == b"svg" =>
+            {
+                return attr_by_local(&e, b"viewBox").is_some();
+            }
+            Err(_) | Ok(Event::Eof) => return true,
+            _ => {}
         }
     }
 }
@@ -3588,6 +4230,15 @@ fn check_ncx_schema(
     let mut visit =
         |e: &quick_xml::events::BytesStart, open: &mut Vec<Option<usize>>, report: &mut Report| {
             ids.visit(e, true, &path, report);
+            // `ncx.rng`: `navPoint` declares `id` as a required `xsd:ID`
+            // attribute (unlike `navLabel`/`content`, which take none).
+            if local_name(e.name().as_ref()) == b"navPoint" && attr_by_local(e, b"id").is_none() {
+                report.push(Violation::new(
+                    Rule::MissingRequiredAttribute,
+                    path.clone(),
+                    "element \"navPoint\" missing required attribute \"id\"",
+                ));
+            }
             if local_name(e.name().as_ref()) == b"content"
                 && let Some(Some(idx)) = open.last().copied()
                 && let Some(src) = attr_by_local(e, b"src")
@@ -4386,14 +5037,20 @@ fn check_css_references(
         let Ok(text) = read_text(zip, &css_path) else {
             continue;
         };
+        // CSS-002: `url()` with nothing inside references nothing.
+        for _ in 0..css_url_tokens_with_empties(&text).1 {
+            report.push(Violation::new(
+                Rule::EmptyCssReference,
+                css_path.clone(),
+                "empty or NULL reference found in a url() value",
+            ));
+        }
         for href in extract_css_urls(&text) {
-            if url_has_illegal_space(&href) {
+            if let Some(why) = invalid_url_reason(&href) {
                 report.push(Violation::new(
                     Rule::InvalidUrl,
                     css_path.clone(),
-                    format!(
-                        "CSS reference {href:?} is not a valid URL (a space must be percent-encoded as %20)"
-                    ),
+                    format!("CSS reference {href:?} is not a valid URL ({why})"),
                 ));
             }
             if href
@@ -4414,7 +5071,12 @@ fn check_css_references(
                     css_path.clone(),
                     format!("CSS reference {href:?} leaks outside the container"),
                 ));
-                continue;
+                // A path-absolute URL resolves against the container root, which
+                // this pass cannot express; a `..`-leak clamps at the root (which
+                // [`resolve_href`] already does), so it still gets existence-checked.
+                if href.split('#').next().unwrap_or(&href).starts_with('/') {
+                    continue;
+                }
             }
             if let Some(resolved) = resolve_href(&css_path, &href) {
                 if url_scheme(&href).is_none()
@@ -4573,8 +5235,15 @@ fn check_xhtml_hrefs_and_reachability(
     // Element `id` set per XHTML document, for fragment (RSC-012) resolution.
     // Built across all docs first: a link may target a document not yet visited.
     let mut doc_ids: HashMap<String, HashSet<String>> = HashMap::new();
-    // (source_path, raw_href) for every reference carrying a `#fragment`.
-    let mut fragment_refs: Vec<(String, String)> = Vec::new();
+    // (source_path, raw_href) for every reference carrying a `#fragment`. The
+    // package document's own `<guide>` references are among them: epubcheck
+    // resolves them like any other reference and reports RSC-012 against the OPF.
+    let mut fragment_refs: Vec<(String, String)> = pkg
+        .guide_hrefs
+        .iter()
+        .filter(|href| href.contains('#'))
+        .map(|href| (opf_path.to_string(), href.clone()))
+        .collect();
     // Manifest-declared resource paths, for RSC-008 (a reference resolving to a
     // file that is in the container but undeclared). Reported once per target.
     let manifest_paths: HashSet<String> = pkg
@@ -4622,14 +5291,14 @@ fn check_xhtml_hrefs_and_reachability(
         }
         doc_ids.insert(path.clone(), collect_element_ids(&text));
         for (kind, href) in collect_references(&text) {
-            // RSC-020: a raw space in the URL's path/host is invalid (see
-            // [`url_has_illegal_space`]). Reported alongside the other checks; it
-            // does not stop resolution (epubcheck also continues via lenient parse).
-            if url_has_illegal_space(&href) {
+            // RSC-020: the URL is rejected by the WHATWG parser (see
+            // [`invalid_url_reason`]). Reported alongside the other checks; it does
+            // not stop resolution (epubcheck also continues via lenient parse).
+            if let Some(why) = invalid_url_reason(&href) {
                 report.push(Violation::new(
                     Rule::InvalidUrl,
                     path.clone(),
-                    format!("reference {href:?} is not a valid URL (a space must be percent-encoded as %20)"),
+                    format!("reference {href:?} is not a valid URL ({why})"),
                 ));
             }
             if href.contains('#') {
@@ -4663,10 +5332,8 @@ fn check_xhtml_hrefs_and_reachability(
             // RSC-026: a reference that is not a valid relative OCF URL leaks
             // outside the container — either path-absolute ("/foo") / scheme-
             // relative ("//host/foo"), or rising above the container root via too
-            // many `..`. A leaking URL cannot be resolved to a container path, so
-            // skip the existence/escape checks below (epubcheck reports only
-            // RSC-026, never also RSC-007). Fully-absolute URLs with a scheme are
-            // external and filtered by resolve_href returning None.
+            // many `..`. Fully-absolute URLs with a scheme are external and
+            // filtered by resolve_href returning None.
             if href.split('#').next().unwrap_or(&href).starts_with('/')
                 || href_leaks_container(&path, &href)
             {
@@ -4675,7 +5342,15 @@ fn check_xhtml_hrefs_and_reachability(
                     path.clone(),
                     format!("reference {href:?} leaks outside the container"),
                 ));
-                continue;
+                // The WHATWG parser clamps surplus `..` at the container root and
+                // the reference is then existence-checked like any other (so a
+                // leaking href that names a missing file is RSC-026 *and* RSC-007)
+                // — [`resolve_href`] clamps the same way. A path-absolute URL
+                // instead resolves against the container root, which this pass
+                // cannot express, so it stops here.
+                if href.split('#').next().unwrap_or(&href).starts_with('/') {
+                    continue;
+                }
             }
             if let Some(resolved) = resolve_href(&path, &href) {
                 // RSC-033: a *relative* URL must not carry a query component. The
@@ -4920,10 +5595,12 @@ fn typed_content_refs(content: &str) -> Vec<(RefType, String)> {
     let mut out = Vec::new();
     // Media context of each open ancestor: "audio" / "video" / "picture" / "".
     let mut stack: Vec<&'static str> = Vec::new();
+    let mut base = BaseUrl::default();
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
-                classify_element_refs(&e, stack.last().copied().unwrap_or(""), &mut out);
+                base.visit(&e);
+                classify_element_refs(&e, stack.last().copied().unwrap_or(""), &base, &mut out);
                 let name = e.name();
                 stack.push(match local_name(name.as_ref()) {
                     b"audio" => "audio",
@@ -4933,7 +5610,8 @@ fn typed_content_refs(content: &str) -> Vec<(RefType, String)> {
                 });
             }
             Ok(Event::Empty(e)) => {
-                classify_element_refs(&e, stack.last().copied().unwrap_or(""), &mut out);
+                base.visit(&e);
+                classify_element_refs(&e, stack.last().copied().unwrap_or(""), &base, &mut out);
             }
             Ok(Event::End(_)) => {
                 stack.pop();
@@ -4947,10 +5625,11 @@ fn typed_content_refs(content: &str) -> Vec<(RefType, String)> {
 }
 
 /// Emit `(RefType, href)` for each reference-bearing attribute of one element,
-/// given the media context (`parent`) for a `<source>`.
+/// given the media context (`parent`) for a `<source>` and the base URL in scope.
 fn classify_element_refs(
     e: &quick_xml::events::BytesStart<'_>,
     parent: &str,
+    base: &BaseUrl,
     out: &mut Vec<(RefType, String)>,
 ) {
     let name = e.name();
@@ -4990,7 +5669,7 @@ fn classify_element_refs(
         };
         let val = String::from_utf8_lossy(&attr.value).to_string();
         if !val.is_empty() {
-            out.push((ty, val));
+            out.push((ty, base.resolve(&val)));
         }
     }
 }
@@ -5006,9 +5685,11 @@ fn collect_references(content: &str) -> Vec<(RefKind, String)> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(false);
     let mut out = Vec::new();
+    let mut base = BaseUrl::default();
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                base.visit(&e);
                 let name = e.name();
                 let local = local_name(name.as_ref());
                 let kind = match local {
@@ -5028,7 +5709,7 @@ fn collect_references(content: &str) -> Vec<(RefKind, String)> {
                     if is_ref {
                         let val = String::from_utf8_lossy(&attr.value).to_string();
                         if !val.is_empty() {
-                            out.push((kind, val));
+                            out.push((kind, base.resolve(&val)));
                         }
                     }
                 }
@@ -5086,8 +5767,16 @@ fn extract_css_urls(css_raw: &str) -> Vec<String> {
 /// by kind: [`css_url_target`] keeps the container-relative ones (existence/leak
 /// checks), while the RSC-008 pass keeps the opaque-scheme ones.
 fn css_url_tokens(css_raw: &str) -> Vec<String> {
+    css_url_tokens_with_empties(css_raw).0
+}
+
+/// The `url()`/`@import` targets of a stylesheet plus the number of *empty*
+/// ones — `url()` with nothing inside is CSS-002 ("empty or NULL reference"),
+/// which the reference passes cannot see once the token is dropped.
+fn css_url_tokens_with_empties(css_raw: &str) -> (Vec<String>, usize) {
     let css = strip_css_comments(css_raw);
     let mut out = Vec::new();
+    let mut empties = 0;
     // url( … ) — also covers `@import url(…)`.
     let mut from = 0;
     while let Some(rel) = find_ascii_ci(&css[from..], b"url(") {
@@ -5096,7 +5785,9 @@ fn css_url_tokens(css_raw: &str) -> Vec<String> {
             break;
         };
         let tok = unquote(css[open..open + close_rel].trim()).trim();
-        if !tok.is_empty() {
+        if tok.is_empty() {
+            empties += 1;
+        } else {
             out.push(tok.to_string());
         }
         from = open + close_rel + 1;
@@ -5116,7 +5807,7 @@ fn css_url_tokens(css_raw: &str) -> Vec<String> {
         }
         from = from + rel + 7;
     }
-    out
+    (out, empties)
 }
 
 /// The `url(...)` targets that appear inside `@font-face` rules — the CSS
@@ -5209,6 +5900,12 @@ struct ContentFeatures {
     remote_resources: bool,
     /// A `<meta name="viewport">` element is present (satisfies HTM-046).
     has_viewport: bool,
+    /// The `content` of the *first* `<meta name="viewport">`, which is the only
+    /// one epubcheck parses (later ones are the USAGE-level HTM-060 cases).
+    viewport_content: Option<String>,
+    /// A `<link rel>` naming both `alternate` and `stylesheet` with no non-empty
+    /// `title` — CSS-015.
+    untitled_alternate_stylesheet: bool,
 }
 
 fn detect_content_features(content: &str) -> ContentFeatures {
@@ -5225,7 +5922,25 @@ fn detect_content_features(content: &str) -> ContentFeatures {
                     b"math" => f.mathml = true,
                     b"form" => f.scripted = true,
                     b"script" if script_element_is_javascript(&e) => f.scripted = true,
-                    b"meta" if attr_local_eq(&e, b"name", "viewport") => f.has_viewport = true,
+                    b"meta" if attr_local_eq(&e, b"name", "viewport") => {
+                        if !f.has_viewport {
+                            f.viewport_content =
+                                Some(attr_by_local(&e, b"content").unwrap_or_default());
+                        }
+                        f.has_viewport = true;
+                    }
+                    b"link" => {
+                        let rel = attr_by_local(&e, b"rel")
+                            .unwrap_or_default()
+                            .to_ascii_lowercase();
+                        let types: Vec<&str> = rel.split_whitespace().collect();
+                        if types.contains(&"alternate")
+                            && types.contains(&"stylesheet")
+                            && attr_by_local(&e, b"title").unwrap_or_default().is_empty()
+                        {
+                            f.untitled_alternate_stylesheet = true;
+                        }
+                    }
                     _ => {}
                 }
                 if !f.remote_resources && element_loads_remote_resource(local, &e) {
@@ -5238,6 +5953,184 @@ fn detect_content_features(content: &str) -> ContentFeatures {
         }
     }
     f
+}
+
+/// The `<meta name="viewport">` microsyntax, a faithful port of epubcheck's
+/// `org.w3c.epubcheck.util.microsyntax.ViewportMeta`: a `name=value` list
+/// separated by `,`/`;`/whitespace. Returns `Err` on the first parse error (the
+/// parser bails there, exactly as the Java one does) and otherwise the
+/// properties in document order, duplicates kept — HTM-059 needs to count them.
+///
+/// The state machine is transcribed rather than re-derived, including the
+/// deliberate Java fall-through from the space-or-separator state into the
+/// separator state.
+fn parse_viewport_meta(s: &str) -> Result<Vec<(String, String)>, ()> {
+    #[derive(PartialEq)]
+    enum State {
+        Name,
+        Assign,
+        Value,
+        Separator,
+        SpaceOrSeparator,
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    if s.is_empty() {
+        return Err(());
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let (mut name, mut value) = (String::new(), String::new());
+    let mut state = State::Name;
+    let mut i = 0;
+    let mut consume = true;
+    let mut c = ' ';
+    let ws = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0C');
+    while !consume || i < chars.len() {
+        if consume {
+            c = chars[i];
+            i += 1;
+        } else {
+            consume = true;
+        }
+        match state {
+            State::Name => {
+                if ws(c) && name.is_empty() {
+                    // skip leading whitespace
+                } else if c == '=' || ws(c) {
+                    state = State::Assign;
+                    consume = false;
+                } else if c == ',' || c == ';' {
+                    state = State::Separator;
+                    consume = false;
+                } else {
+                    name.push(c);
+                }
+            }
+            State::Assign => {
+                if name.is_empty() {
+                    return Err(()); // NAME_EMPTY
+                } else if ws(c) {
+                    // skip whitespace
+                } else if c == '=' {
+                    state = State::Value;
+                } else if c == ',' || c == ';' {
+                    state = State::Separator;
+                    consume = false;
+                } else {
+                    return Err(()); // VALUE_EMPTY — no '=' matched
+                }
+            }
+            State::Value => {
+                if ws(c) && value.is_empty() {
+                    // skip whitespace, the value hasn't started
+                } else if c == ',' || c == ';' || ws(c) {
+                    if value.is_empty() {
+                        return Err(()); // VALUE_EMPTY
+                    }
+                    state = State::SpaceOrSeparator;
+                    consume = false;
+                } else if c == '=' {
+                    return Err(()); // ASSIGN_UNEXPECTED
+                } else {
+                    value.push(c);
+                }
+            }
+            // Java falls through from SPACE_OR_SEPARATOR into SEPARATOR.
+            State::SpaceOrSeparator | State::Separator => {
+                if state == State::SpaceOrSeparator {
+                    if ws(c) {
+                        continue; // skip whitespace
+                    }
+                    state = State::Separator;
+                    consume = false;
+                }
+                if name.is_empty() {
+                    return Err(()); // LEADING_SEPARATOR
+                }
+                if c == ',' || c == ';' || ws(c) {
+                    // skip repeating separators
+                } else {
+                    out.push((std::mem::take(&mut name), std::mem::take(&mut value)));
+                    state = State::Name;
+                    consume = false;
+                }
+            }
+        }
+    }
+    if state == State::Value && value.is_empty() {
+        return Err(()); // VALUE_EMPTY
+    }
+    out.push((name, value));
+    if state == State::Separator {
+        return Err(()); // TRAILING_SEPARATOR
+    }
+    Ok(out)
+}
+
+/// `ViewportMeta.isValidProperty` — `width`/`height` take a number or the
+/// matching `device-*` keyword; any other property name is unconstrained.
+fn viewport_value_is_valid(property: &str, value: &str) -> bool {
+    let numeric = || {
+        let (int, frac) = match value.split_once('.') {
+            Some((i, f)) => (i, Some(f)),
+            None => (value, None),
+        };
+        !int.is_empty()
+            && int.bytes().all(|b| b.is_ascii_digit())
+            && frac.is_none_or(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))
+    };
+    match property {
+        "width" => value == "device-width" || numeric(),
+        "height" => value == "device-height" || numeric(),
+        _ => true,
+    }
+}
+
+/// The fixed-layout viewport rules over one content document's first viewport
+/// meta (epubcheck `OPSHandler30::processMeta`): a syntax error is **HTM-047**;
+/// otherwise `width` and `height` must each be present (**HTM-056**), declared
+/// once (**HTM-059**) and valid (**HTM-057**).
+fn check_viewport_meta(content: &str, path: &str, report: &mut Report) {
+    let Ok(props) = parse_viewport_meta(content) else {
+        report.push(Violation::new(
+            Rule::ViewportSyntax,
+            path.to_string(),
+            format!("viewport metadata {content:?} has a syntax error"),
+        ));
+        return;
+    };
+    for property in ["width", "height"] {
+        let values: Vec<&str> = props
+            .iter()
+            .filter(|(n, _)| n == property)
+            .map(|(_, v)| v.as_str())
+            .collect();
+        let Some(first) = values.first() else {
+            report.push(Violation::new(
+                Rule::ViewportDimensionMissing,
+                path.to_string(),
+                format!(
+                    "viewport metadata has no {property:?} dimension (both \"width\" and \"height\" are required)"
+                ),
+            ));
+            continue;
+        };
+        if values.len() > 1 {
+            report.push(Violation::new(
+                Rule::ViewportPropertyRepeated,
+                path.to_string(),
+                format!("viewport {property:?} property is defined more than once: {values:?}"),
+            ));
+        }
+        if !viewport_value_is_valid(property, first) {
+            report.push(Violation::new(
+                Rule::ViewportValueInvalid,
+                path.to_string(),
+                format!(
+                    "viewport {property:?} value must be a positive number or the keyword \"device-{property}\", not {first:?}"
+                ),
+            ));
+        }
+    }
 }
 
 /// True if a `<script>` element's `type` makes it executable JavaScript — a
@@ -5310,16 +6203,19 @@ fn collect_ncx_content_srcs(content: &str) -> Vec<String> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(false);
     let mut out = Vec::new();
+    let mut base = BaseUrl::default();
     loop {
         match reader.read_event() {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e))
-                if local_name(e.name().as_ref()) == b"content" =>
-            {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                base.visit(&e);
+                if local_name(e.name().as_ref()) != b"content" {
+                    continue;
+                }
                 for attr in e.attributes().flatten() {
                     if local_name(attr.key.as_ref()) == b"src" {
                         let val = String::from_utf8_lossy(&attr.value).to_string();
                         if !val.is_empty() {
-                            out.push(val);
+                            out.push(base.resolve(&val));
                         }
                     }
                 }
@@ -5472,6 +6368,115 @@ fn nfc(s: &str) -> String {
     s.nfc().collect()
 }
 
+/// The in-scope base URL of a document, tracked exactly as epubcheck's
+/// `BaseURLHandler` tracks it: a single value, updated in document order by an
+/// HTML `<base href>` element or by any element's `xml:base` attribute, and
+/// *never restored* when that element ends. Every reference is resolved against
+/// it before any other check runs, so once the base is remote every relative
+/// reference in the rest of the document is a remote reference (RSC-006's
+/// jurisdiction) rather than a container path.
+///
+/// `None` — the common case — means the base is still the document's own URL,
+/// and [`BaseUrl::resolve`] hands hrefs back untouched.
+#[derive(Default)]
+struct BaseUrl(Option<String>);
+
+impl BaseUrl {
+    /// Apply one element's base declaration, if it carries one. An HTML `<base>`
+    /// takes its value from `href`; any other element from `xml:base` (epubcheck
+    /// reads only one or the other, never both from the same element).
+    fn visit(&mut self, e: &quick_xml::events::BytesStart) {
+        let name = e.name();
+        let key: &[u8] = if local_name(name.as_ref()) == b"base" {
+            b"href"
+        } else {
+            b"xml:base"
+        };
+        let Some(new) = e
+            .attributes()
+            .flatten()
+            .find(|a| a.key.as_ref() == key)
+            .map(|a| String::from_utf8_lossy(&a.value).into_owned())
+        else {
+            return;
+        };
+        // A new base is itself resolved against the base already in scope.
+        self.0 = Some(match &self.0 {
+            Some(base) => resolve_against_base(base, &new),
+            None => new,
+        });
+    }
+
+    /// The effective value of one reference under the base in scope.
+    fn resolve(&self, href: &str) -> String {
+        match &self.0 {
+            Some(base) => resolve_against_base(base, href),
+            None => href.to_string(),
+        }
+    }
+}
+
+/// Split a URL into `(origin, path)` — everything up to and including the
+/// authority, and the rest. A URL with no authority has an empty origin, so a
+/// document-relative base flows through the same merge path as an absolute one.
+fn split_url_authority(url: &str) -> (&str, &str) {
+    let after_marker = |start: usize| {
+        let rest = &url[start..];
+        let end = start + rest.find('/').unwrap_or(rest.len());
+        (&url[..end], &url[end..])
+    };
+    if let Some(i) = url.find("://") {
+        after_marker(i + 3)
+    } else if url.starts_with("//") {
+        after_marker(2)
+    } else {
+        ("", url)
+    }
+}
+
+/// Resolve a reference against a base URL (RFC 3986 §5.2, minus dot-segment
+/// removal — the container resolvers collapse `.`/`..` downstream, and a remote
+/// result is never turned into a path). `base` may itself be relative, in which
+/// case the result stays relative to the document and the ordinary container
+/// resolution still applies.
+fn resolve_against_base(base: &str, href: &str) -> String {
+    let href = href.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0C'));
+    if href.is_empty() {
+        return base.to_string();
+    }
+    if url_scheme(href).is_some() {
+        return href.to_string();
+    }
+    if let Some(frag) = href.strip_prefix('#') {
+        let b = base.split('#').next().unwrap_or(base);
+        return format!("{b}#{frag}");
+    }
+    let base = base.split('#').next().unwrap_or(base);
+    if href.starts_with("//") {
+        // Scheme-relative: inherits only the base's scheme.
+        return match url_scheme(base) {
+            Some(scheme) => format!("{scheme}:{href}"),
+            None => href.to_string(),
+        };
+    }
+    let base_no_query = base.split('?').next().unwrap_or(base);
+    if let Some(rest) = href.strip_prefix('?') {
+        return format!("{base_no_query}?{rest}");
+    }
+    let (origin, path) = split_url_authority(base_no_query);
+    if href.starts_with('/') {
+        return format!("{origin}{href}");
+    }
+    let merged = match path.rsplit_once('/') {
+        Some((dir, _)) => format!("{dir}/{href}"),
+        // A base with an authority but no path merges as if its path were "/";
+        // a relative base with no slash makes the reference its sibling.
+        None if !origin.is_empty() => format!("/{href}"),
+        None => href.to_string(),
+    };
+    format!("{origin}{merged}")
+}
+
 /// Resolve `href` against the directory of `source_path`. Returns `None`
 /// for external URLs (`http:`, `mailto:`, …), pure fragments, and empty
 /// hrefs. The result is the zip-relative path of the link target with the
@@ -5603,7 +6608,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 89, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 103, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -5685,9 +6690,12 @@ mod tests {
         // OPF-029 (image header vs declared media-type); recall-gap batch OPF-014
         // (undeclared manifest property) + OPF-028 (undeclared vocab prefix) +
         // HTM-046 (fixed-layout doc without a viewport meta) + PKG-021 (undecodable
-        // raster image) + RSC-020 (invalid reference URL).
+        // raster image) + RSC-020 (invalid reference URL); fixed-layout/stylesheet
+        // batch HTM-047/056/057/059 (viewport metadata) + HTM-048 (SVG viewBox) +
+        // CSS-015 (untitled alternate stylesheet) + CSS-002 (empty url()) +
+        // RSC-015 (svg use without a fragment) + OPF-041 (missing fallback-style).
         assert_eq!(
-            covered, 67,
+            covered, 76,
             "epubcheck error coverage changed: {covered}/{total}"
         );
     }
@@ -5872,6 +6880,85 @@ mod tests {
             .filter(|v| v.rule == Rule::FragmentNotDefined)
             .count();
         assert_eq!(n, 2, "expected 2 dangling fragments, got:\n{report}");
+    }
+
+    #[test]
+    fn base_url_resolution_follows_the_declared_base() {
+        // RFC 3986 §5.2 merge, over both absolute and document-relative bases.
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "http://example.org/",
+                "style.css",
+                "http://example.org/style.css",
+            ),
+            (
+                "http://example.org",
+                "style.css",
+                "http://example.org/style.css",
+            ),
+            (
+                "http://example.org/a/b.html",
+                "c.png",
+                "http://example.org/a/c.png",
+            ),
+            (
+                "http://example.org/a/b.html",
+                "/c.png",
+                "http://example.org/c.png",
+            ),
+            (
+                "http://example.org/a/b.html",
+                "#frag",
+                "http://example.org/a/b.html#frag",
+            ),
+            ("http://example.org/a/?q=1", "//other/x", "http://other/x"),
+            ("http://example.org/a/b.html", "https://x/y", "https://x/y"),
+            // A relative base keeps the reference relative to the document.
+            ("css/", "style.css", "css/style.css"),
+            ("./", "style.css", "./style.css"),
+            ("other.html", "x.png", "x.png"),
+            ("other.html", "#frag", "other.html#frag"),
+            ("../a/b.html", "c.png", "../a/c.png"),
+        ];
+        for (base, href, want) in cases {
+            assert_eq!(&resolve_against_base(base, href), want, "{base} + {href}");
+        }
+    }
+
+    #[test]
+    fn references_resolve_against_an_html_base_or_xml_base() {
+        // An HTML <base href> applies from where it appears, in document order.
+        let refs = collect_references(
+            r##"<html><head>
+                <link rel="stylesheet" href="before.css"/>
+                <base href="http://example.org/"/>
+                <link rel="stylesheet" href="after.css"/>
+                </head><body><a href="#frag">x</a></body></html>"##,
+        );
+        let hrefs: Vec<&str> = refs.iter().map(|(_, h)| h.as_str()).collect();
+        assert_eq!(
+            hrefs,
+            [
+                "before.css",
+                "http://example.org/after.css",
+                "http://example.org/#frag"
+            ]
+        );
+        // `xml:base` on an ancestor does the same, and is never restored on the
+        // element's end (epubcheck's BaseURLHandler keeps one non-scoped value).
+        let refs = typed_content_refs(
+            r##"<html xml:base="http://example.org/"><body>
+                <p><a href="file.html"/></p><img src="pic.png"/>
+                </body></html>"##,
+        );
+        let hrefs: Vec<&str> = refs.iter().map(|(_, h)| h.as_str()).collect();
+        assert_eq!(
+            hrefs,
+            ["http://example.org/file.html", "http://example.org/pic.png"]
+        );
+        // No base declaration → hrefs are handed back untouched.
+        let refs = collect_references(r#"<html><body><img src="a/b.png"/></body></html>"#);
+        assert_eq!(refs[0].1, "a/b.png");
     }
 
     #[test]
@@ -6998,6 +8085,257 @@ mod tests {
     }
 
     #[test]
+    fn viewport_microsyntax_matches_the_java_parser() {
+        // Well-formed lists, including the whitespace/keyword/float forms the
+        // epubcheck fixtures cover.
+        let props = |s: &str| parse_viewport_meta(s).unwrap();
+        assert_eq!(
+            props("width=1200,height=1600"),
+            [
+                ("width".into(), "1200".into()),
+                ("height".into(), "1600".into())
+            ]
+        );
+        assert_eq!(
+            props("  width = device-width ;  height=device-height  "),
+            [
+                ("width".into(), "device-width".into()),
+                ("height".into(), "device-height".into())
+            ]
+        );
+        assert_eq!(props("width=1200.5")[0].1, "1200.5");
+        // Duplicates are kept in order — HTM-059 counts them.
+        assert_eq!(props("width=100,width=200").len(), 2);
+        // Parse errors: empty, a trailing separator, an empty value, a stray '='.
+        for bad in ["", "width=", "width=1,", ",width=1", "width=1=2"] {
+            assert!(parse_viewport_meta(bad).is_err(), "{bad:?} must not parse");
+        }
+        // A bare name is *not* a parse error — the Java parser finalizes it with an
+        // empty value, which then fails the value check (HTM-057, not HTM-047).
+        assert_eq!(props("width"), [("width".into(), String::new())]);
+        assert!(!viewport_value_is_valid("width", ""));
+        // Value validity: a number or the matching device-* keyword.
+        for (p, v, ok) in [
+            ("width", "1200", true),
+            ("width", "1200.5", true),
+            ("width", "device-width", true),
+            ("width", "device-height", false),
+            ("width", "1200px", false),
+            ("height", "100%", false),
+            ("height", "device-height", true),
+            ("initial-scale", "1.0", true), // other properties are unconstrained
+        ] {
+            assert_eq!(viewport_value_is_valid(p, v), ok, "{p}={v}");
+        }
+    }
+
+    #[test]
+    fn fixed_layout_viewport_rules_report_each_defect() {
+        let run = |content: &str| {
+            let mut r = Report::default();
+            check_viewport_meta(content, "c.xhtml", &mut r);
+            r
+        };
+        assert!(run("width=,height=1").has_rule(Rule::ViewportSyntax));
+        assert!(run("height=1600").has_rule(Rule::ViewportDimensionMissing));
+        assert!(run("width=100px,height=200px").has_rule(Rule::ViewportValueInvalid));
+        assert!(
+            run("width=100,width=200,height=100").has_rule(Rule::ViewportPropertyRepeated),
+            "a repeated dimension is HTM-059"
+        );
+        assert!(run("width=1200,height=1600").is_clean());
+    }
+
+    #[test]
+    fn svg_rules_cover_use_fragments_and_the_fixed_layout_viewbox() {
+        let mut r = Report::default();
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+            <use xlink:href="sprite.svg"/><use xlink:href="other.svg#sym"/><use href="#local"/>
+            </svg>"##;
+        check_content_schema(svg, "a.svg", false, true, &mut r);
+        assert_eq!(
+            r.violations
+                .iter()
+                .filter(|v| v.rule == Rule::SvgReferenceNoFragment)
+                .count(),
+            1,
+            "only the fragment-less <use> fires, got:\n{r}"
+        );
+        // HTM-048 reads the *outermost* svg only.
+        assert!(!outermost_svg_has_viewbox(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"/>"#
+        ));
+        assert!(outermost_svg_has_viewbox(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><svg/></svg>"#
+        ));
+        assert!(
+            outermost_svg_has_viewbox("<svg"),
+            "a malformed document is the well-formedness pass's finding, not this one's"
+        );
+    }
+
+    #[test]
+    fn empty_css_url_is_reported() {
+        let (urls, empties) =
+            css_url_tokens_with_empties("a{background:url()}b{src:url( )}c{d:url(x.png)}");
+        assert_eq!(urls, ["x.png"]);
+        assert_eq!(empties, 2);
+    }
+
+    #[test]
+    fn opf_elements_that_require_children_must_have_them() {
+        let run = |xml: &str| {
+            let mut r = Report::default();
+            check_opf_schema(xml, "content.opf", true, false, &mut r);
+            r
+        };
+        let pkg = |body: &str| {
+            format!(
+                r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata/>{body}</package>"#
+            )
+        };
+        // `element guide { reference+ }`, `tours { tour+ }`, `tour { site+ }`.
+        for empty in [
+            "<guide></guide>",
+            "<guide/>",
+            "<tours></tours>",
+            r#"<tours><tour title="t"></tour></tours>"#,
+        ] {
+            assert!(
+                run(&pkg(empty)).has_rule(Rule::PackageIncomplete),
+                "{empty} must fire RSC-005"
+            );
+        }
+        let full = r#"<guide><reference type="cover" href="c.xhtml"/></guide><tours><tour title="t"><site title="s" href="a.xhtml"/></tour></tours>"#;
+        assert!(
+            run(&pkg(full)).is_clean(),
+            "populated guide/tours are clean, got:\n{}",
+            run(&pkg(full))
+        );
+        // A missing `<guide>` is not an incomplete one.
+        assert!(run(&pkg("")).is_clean());
+    }
+
+    #[test]
+    fn epub2_content_grammar_reads_the_xhtml11_attlists() {
+        let run = |body: &str, epub2: bool| {
+            let mut r = Report::default();
+            let xml =
+                format!(r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>{body}</body></html>"#);
+            check_content_schema(&xml, "c.xhtml", epub2, !epub2, &mut r);
+            r
+        };
+        // Attributes no XHTML 1.1 attlist declares, each seen in the corpus.
+        for bad in [
+            r#"<div xmlU0003Alang="en">x</div>"#,
+            r#"<li value="3">x</li>"#,
+            r#"<table><tr><td width="50%">x</td></tr></table>"#,
+            r#"<p onclick="f()">x</p>"#,
+            r#"<div data-x="1">x</div>"#,
+        ] {
+            assert!(
+                run(bad, true).has_rule(Rule::DisallowedContentAttribute),
+                "{bad} must fire RSC-005"
+            );
+            assert!(
+                !run(bad, false).has_rule(Rule::DisallowedContentAttribute),
+                "{bad} is EPUB 3's business, not this rule's"
+            );
+        }
+        // The attlists these elements really do have.
+        let ok = r#"<div class="c" style="s" xml:lang="en" title="t">
+            <table summary="s" border="1"><tr align="left"><td style="p" colspan="2">x</td></tr></table>
+            <pre xml:space="preserve">x</pre><a href="a" charset="utf-8">l</a>
+            <blockquote cite="u">q</blockquote><img alt="" src="i.png" longdesc="d"/></div>"#;
+        assert!(
+            run(ok, true).is_clean(),
+            "the declared attlists are legal, got:\n{}",
+            run(ok, true)
+        );
+        // An element the schema declares nowhere — the forms, legacy and HTML5
+        // vocabularies are all absent from `content.rng`.
+        for absent in ["<u>x</u>", "<center>x</center>", "<section>x</section>"] {
+            assert!(
+                run(absent, true).has_rule(Rule::UndeclaredContentElement),
+                "{absent} must fire RSC-005"
+            );
+            assert!(run(absent, false).is_clean(), "{absent} is legal in EPUB 3");
+        }
+    }
+
+    #[test]
+    fn epub3_content_rules_cover_meta_encoding_and_body_role() {
+        let run = |body: &str| {
+            let mut r = Report::default();
+            check_content_schema(body, "c.xhtml", false, true, &mut r);
+            r
+        };
+        let doc = |head: &str, body_attrs: &str| {
+            format!(
+                r#"<html xmlns="http://www.w3.org/1999/xhtml"><head>{head}</head><body{body_attrs}/></html>"#
+            )
+        };
+        let meta =
+            |content: &str| format!(r#"<meta http-equiv="Content-Type" content="{content}"/>"#);
+        // `normalize-space` collapses only XML whitespace, so an ideographic
+        // space between the parameters fails the assertion (the corpus case).
+        for bad in ["text/html;\u{3000}charset=utf-8", "text/html", "text/plain"] {
+            assert!(
+                run(&doc(&meta(bad), "")).has_rule(Rule::MetaEncodingDeclaration),
+                "content={bad:?} must fire RSC-005"
+            );
+        }
+        for good in [
+            "text/html; charset=utf-8",
+            "text/html;charset=utf-8",
+            "TEXT/HTML;  CHARSET=UTF-8",
+            "  text/html;\n charset=utf-8 ",
+        ] {
+            assert!(
+                run(&doc(&meta(good), "")).is_clean(),
+                "content={good:?} is valid, got:\n{}",
+                run(&doc(&meta(good), ""))
+            );
+        }
+        // `<meta>` without http-equiv is untouched.
+        assert!(run(&doc(r#"<meta charset="utf-8"/>"#, "")).is_clean());
+        // `body.attrs` accepts four ARIA roles and no others.
+        assert!(
+            run(&doc("", r#" role="doc-cover""#)).has_rule(Rule::BodyRoleNotAllowed),
+            "a DPUB role on <body> must fire"
+        );
+        for role in ["application", "document", "none", "presentation"] {
+            assert!(
+                run(&doc("", &format!(r#" role="{role}""#))).is_clean(),
+                "role={role} is allowed on <body>"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_host_urls_are_invalid() {
+        for bad in ["http://", "http:///a/b", "https://?q=1", "ftp://#f"] {
+            assert!(url_has_empty_host(bad), "{bad:?} has no host");
+            assert_eq!(invalid_url_reason(bad), Some("host is missing"));
+        }
+        for ok in [
+            "http://x/",
+            "file:///a/b", // a file: URL may legally have an empty host
+            "../a.xhtml",
+            "data:text/plain,x",
+            "mailto:a@b",
+            "kindle:embed:0007?mime=image/jpeg",
+        ] {
+            assert!(!url_has_empty_host(ok), "{ok:?} must not be flagged");
+        }
+        // The same emptiness fails XSD anyURI in the EPUB 2 content grammar.
+        let mut r = Report::default();
+        let xml = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><a href="http://">x</a></body></html>"#;
+        check_content_schema(xml, "c.xhtml", true, false, &mut r);
+        assert!(r.has_rule(Rule::UriAttributeInvalid), "got:\n{r}");
+    }
+
+    #[test]
     fn ncname_test_rejects_only_certainly_invalid_values() {
         // The corpus class (a leading digit), plus the colon the message names,
         // whitespace, and an empty value.
@@ -7044,7 +8382,10 @@ mod tests {
         let e2 = r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><meta charset="UTF-8"/></head>
 <body id="0-4358"><p><img src="i.jpg"/></p><a href="x"><a id="in">t</a></a></body></html>"#;
         let r = run(e2, true, false);
-        assert!(r.has_rule(Rule::ImgMissingAttribute), "img needs alt:\n{r}");
+        assert!(
+            r.has_rule(Rule::MissingRequiredAttribute),
+            "img needs alt:\n{r}"
+        );
         assert!(
             r.has_rule(Rule::DisallowedContentAttribute),
             "meta charset:\n{r}"
@@ -7645,6 +8986,7 @@ mod tests {
             media_type: mt.to_string(),
             properties: vec![],
             fallback: fb.map(str::to_string),
+            fallback_style: None,
         };
         let xhtml_spine = mk("c", "application/xhtml+xml", None);
         let xhtml_aside = mk("aside", "application/xhtml+xml", None);
@@ -8148,8 +9490,12 @@ mod tests {
             // `OEBPS/text/title.xhtml`, `../../../escape.xhtml` rises above the zip
             // root (three `..` from a depth-2 directory) — must flag. A reference
             // resolving to a sibling in-container path (e.g. `../../escape.xhtml`
-            // → `escape.xhtml` at the zip root) is legal and reported, if missing,
-            // as RSC-007 instead — never RSC-026.
+            // → `escape.xhtml` at the zip root) is legal and never RSC-026.
+            //
+            // The leak does not end the reference's life: the WHATWG parser clamps
+            // the surplus `..` at the container root, so the reference is still
+            // existence-checked and a missing target is *also* RSC-007. Verified
+            // against epubcheck 5.3.0 on this exact document — it reports both.
             let bytes = sample_aozora_epub();
             let mutated = rewrite_zip_entry(&bytes, "OEBPS/text/title.xhtml", |xhtml| {
                 xhtml.replace(
@@ -8164,8 +9510,8 @@ mod tests {
                 report
             );
             assert!(
-                !report.has_rule(Rule::BrokenHref),
-                "a leaking URL is RSC-026 only, not also RSC-007:\n{}",
+                report.has_rule(Rule::BrokenHref),
+                "the clamped target is missing, so RSC-007 fires too:\n{}",
                 report
             );
         }
@@ -8198,6 +9544,41 @@ mod tests {
                     && f.rule == "RSC-001"
                     && f.severity == crate::validate::Severity::Error),
                 "expected an epub/RSC-001 (manifest file missing) error, got:\n{report}"
+            );
+        }
+
+        #[test]
+        fn added_errors_reports_only_what_an_edit_introduced() {
+            use crate::validate::source::added_errors;
+            let clean = sample_aozora_epub();
+            // A wild book that is already invalid: two manifest items point at
+            // files the container does not hold.
+            let before = rewrite_zip_entry(&clean, "OEBPS/content.opf", |opf| {
+                opf.replace(
+                    r#"<item id="style" href="style.css" media-type="text/css"/>"#,
+                    r#"<item id="style" href="nope.css" media-type="text/css"/><item id="x" href="gone.css" media-type="text/css"/>"#,
+                )
+            });
+            assert!(
+                added_errors(&before, &before).is_empty(),
+                "a no-op edit adds nothing, however invalid the book already is"
+            );
+            // An edit that introduces one *more* broken reference is reported
+            // once — the pre-existing ones are not re-reported.
+            let after = rewrite_zip_entry(&before, "OEBPS/content.opf", |opf| {
+                opf.replace(
+                    r#"<item id="x" href="gone.css" media-type="text/css"/>"#,
+                    r#"<item id="x" href="gone.css" media-type="text/css"/><item id="y" href="also-gone.css" media-type="text/css"/>"#,
+                )
+            });
+            let added = added_errors(&before, &after);
+            assert_eq!(added.len(), 1, "expected exactly one new error: {added:?}");
+            assert_eq!(added[0].rule, "RSC-001");
+            assert!(added[0].message.contains("also-gone.css"));
+            // A repair removes findings and adds none.
+            assert!(
+                added_errors(&before, &clean).is_empty(),
+                "fixing a book must not read as adding defects"
             );
         }
 

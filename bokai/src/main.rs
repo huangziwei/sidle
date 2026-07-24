@@ -174,6 +174,7 @@ fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
                 bokai::formats::epub::toc_repair::repair_toc(&bytes).map_err(|e| e.to_string())?;
             std::fs::write(out, &repaired).map_err(|e| format!("write {out}: {e}"))?;
             println!("wrote repaired EPUB → {out} ({} bytes)", repaired.len());
+            report_edit_regressions(&bytes, &repaired, "EPUB TOC repair");
         }
         return Ok(());
     }
@@ -1431,6 +1432,28 @@ fn report_epub_validation(bytes: &[u8], validate: bool, quiet: bool) {
         if warnings > 0 {
             eprintln!("EPUB validation: {warnings} warning(s) (non-blocking).");
         }
+    }
+}
+
+/// Report the error-level findings a book-mutating edit *introduced* (the
+/// differential gate: a wild book stays wild, but an edit must not add a
+/// defect). Non-blocking, like every other validation seam — the edited file is
+/// already written by the time this runs.
+fn report_edit_regressions(before: &[u8], after: &[u8], what: &str) {
+    let added = bokai::validate::source::added_errors(before, after);
+    if added.is_empty() {
+        return;
+    }
+    eprintln!("{what}: introduced {} new error finding(s):", added.len());
+    for finding in &added {
+        eprintln!(
+            "  [{}] {}/{} @ {}: {}",
+            finding.severity.as_str(),
+            finding.check,
+            finding.rule,
+            finding.location,
+            finding.message
+        );
     }
 }
 

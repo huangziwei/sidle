@@ -98,6 +98,9 @@ pub struct ManifestItem {
     pub properties: Vec<String>,
     /// The `fallback` attribute (a manifest id), if present.
     pub fallback: Option<String>,
+    /// The EPUB 2 `fallback-style` attribute (a manifest id), if present. The
+    /// EPUB 3 manifest grammar has no such attribute.
+    pub fallback_style: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -249,6 +252,7 @@ pub fn parse(content: &str) -> io::Result<Package> {
                             Vec::new(),
                             None,
                         );
+                        let mut fallback_style = None;
                         for a in e.attributes().flatten() {
                             let val = String::from_utf8_lossy(&a.value).to_string();
                             match a.key.as_ref() {
@@ -262,6 +266,7 @@ pub fn parse(content: &str) -> io::Result<Package> {
                                     props = val.split_whitespace().map(str::to_string).collect()
                                 }
                                 b"fallback" => fallback = Some(val.trim().to_string()),
+                                b"fallback-style" => fallback_style = Some(val.trim().to_string()),
                                 _ => {}
                             }
                         }
@@ -273,6 +278,7 @@ pub fn parse(content: &str) -> io::Result<Package> {
                                 media_type: mt,
                                 properties: props,
                                 fallback,
+                                fallback_style,
                             });
                         }
                     }
