@@ -128,8 +128,10 @@ fn kfx_declares_cover(kfx_bytes: &[u8]) -> bool {
 }
 
 /// Insert a cover into an EPUB that declares none: write the image next to the
-/// OPF and add a `properties="cover-image"` manifest item (bokai's top-priority
-/// cover signal) plus a legacy `<meta name="cover">` for EPUB-2 readers. Unlike
+/// OPF and add a manifest item for it plus a `<meta name="cover">` pointing at
+/// that item. In an EPUB 3 package the item also carries
+/// `properties="cover-image"` (bokai's top-priority cover signal); see
+/// [`inject_cover_into_opf`] for why an EPUB 2 package must not. Unlike
 /// [`replace_cover`], this *adds* the designation rather than overwriting an
 /// existing one — used by [`ensure_cover`] for books whose source had no cover.
 ///
@@ -187,14 +189,25 @@ pub fn insert_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Result
     Ok(())
 }
 
-/// Add a `properties="cover-image"` manifest item (+ legacy `<meta name="cover">`)
-/// to an OPF that declares no cover. `cover_basename` is the cover file's name
-/// relative to the OPF. If the expected `</manifest>`/`</metadata>` closers are
-/// missing the corresponding insert is skipped; the manifest item alone is
-/// enough for bokai to resolve the cover.
+/// Add a cover manifest item (+ legacy `<meta name="cover">`) to an OPF that
+/// declares no cover. `cover_basename` is the cover file's name relative to the
+/// OPF. If the expected `</manifest>`/`</metadata>` closers are missing the
+/// corresponding insert is skipped; the `<meta>` alone is enough for bokai to
+/// resolve the cover.
+///
+/// The `properties="cover-image"` designation is EPUB 3 only — the EPUB 2
+/// manifest grammar has no `properties` attribute, so writing it into a 2.0
+/// package turns a valid book invalid (epubcheck RSC-005). There the legacy
+/// `<meta name="cover">` is the designation, which bokai's parser reads for
+/// either version.
 fn inject_cover_into_opf(opf: &str, cover_basename: &str, media_type: &str) -> String {
+    let properties = if package_is_epub3(opf) {
+        " properties=\"cover-image\""
+    } else {
+        ""
+    };
     let item = format!(
-        "<item id=\"sidle-cover\" href=\"{cover_basename}\" media-type=\"{media_type}\" properties=\"cover-image\"/>"
+        "<item id=\"sidle-cover\" href=\"{cover_basename}\" media-type=\"{media_type}\"{properties}/>"
     );
     let meta = "<meta name=\"cover\" content=\"sidle-cover\"/>";
     let mut out = opf.to_string();
@@ -205,6 +218,27 @@ fn inject_cover_into_opf(opf: &str, cover_basename: &str, media_type: &str) -> S
         out = out.replacen("</metadata>", &format!("  {meta}\n</metadata>"), 1);
     }
     out
+}
+
+/// Whether the package declares EPUB 3 (`<package version="3…">`). Read straight
+/// off the `<package>` start tag: an absent or 2.x version means the EPUB 3-only
+/// manifest `properties` attribute must not be written.
+fn package_is_epub3(opf: &str) -> bool {
+    let Some(open) = opf.find("<package") else {
+        return false;
+    };
+    let tag = match opf[open..].find('>') {
+        Some(end) => &opf[open..open + end],
+        None => &opf[open..],
+    };
+    let Some(at) = tag.find("version") else {
+        return false;
+    };
+    tag[at + "version".len()..]
+        .trim_start()
+        .strip_prefix('=')
+        .map(|v| v.trim_start().trim_start_matches(['"', '\'']))
+        .is_some_and(|v| v.starts_with('3'))
 }
 
 /// Walks the source EPUB and writes a fresh zip to `out`. The cover entry's
@@ -379,7 +413,7 @@ mod tests {
 
     #[test]
     fn inject_cover_adds_cover_image_item_and_meta() {
-        let opf = "<package>\n  <metadata>\n    <dc:title>T</dc:title>\n  </metadata>\n  <manifest>\n    <item id=\"toc\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n  </manifest>\n</package>\n";
+        let opf = "<package version=\"3.0\">\n  <metadata>\n    <dc:title>T</dc:title>\n  </metadata>\n  <manifest>\n    <item id=\"toc\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n  </manifest>\n</package>\n";
         let out = inject_cover_into_opf(opf, "sidle_cover.jpg", "image/jpeg");
         // A properties="cover-image" manifest item (bokai's top-priority signal).
         assert!(out.contains(r#"href="sidle_cover.jpg""#));
@@ -390,6 +424,39 @@ mod tests {
         // Existing content preserved.
         assert!(out.contains("href=\"toc.ncx\""));
         assert!(out.contains("<dc:title>T</dc:title>"));
+    }
+
+    #[test]
+    fn inject_cover_omits_epub3_properties_in_an_epub2_package() {
+        // `properties` does not exist in the EPUB 2 manifest grammar: writing it
+        // makes an otherwise valid 2.0 book fail epubcheck (RSC-005). The legacy
+        // <meta name="cover"> carries the designation instead.
+        let manifest = "<manifest>\n    <item id=\"toc\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n  </manifest>";
+        for version in ["<package version=\"2.0\">", "<package>"] {
+            let opf = format!("{version}\n  <metadata>\n  </metadata>\n  {manifest}\n</package>\n");
+            let out = inject_cover_into_opf(&opf, "sidle_cover.jpg", "image/jpeg");
+            assert!(
+                !out.contains("properties="),
+                "EPUB 2 package must not gain a properties attribute: {out}"
+            );
+            assert!(out.contains(r#"href="sidle_cover.jpg""#));
+            assert!(out.contains(r#"<meta name="cover" content="sidle-cover"/>"#));
+        }
+    }
+
+    #[test]
+    fn package_version_detection_reads_the_package_tag() {
+        assert!(package_is_epub3(
+            r#"<?xml version="1.0"?><package version="3.0">"#
+        ));
+        assert!(package_is_epub3(r#"<package  version = '3.1' xmlns="x">"#));
+        assert!(!package_is_epub3(r#"<package version="2.0">"#));
+        assert!(!package_is_epub3("<package>"));
+        // The XML declaration's own `version="1.0"` must not be mistaken for the
+        // package version.
+        assert!(!package_is_epub3(
+            r#"<?xml version="1.0"?><package unique-identifier="u">"#
+        ));
     }
 
     #[test]
