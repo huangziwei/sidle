@@ -48,6 +48,7 @@
 
 pub mod messages;
 pub mod opf;
+pub mod xml;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
