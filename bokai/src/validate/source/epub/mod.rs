@@ -284,6 +284,8 @@ pub enum Rule {
     CorruptImage,
     // Reference URL not valid per the WHATWG URL standard (epubcheck RSC-020).
     InvalidUrl,
+    // XML document is not well-formed / namespace-well-formed (epubcheck RSC-016).
+    MalformedXml,
 }
 
 impl Rule {
@@ -367,6 +369,7 @@ impl Rule {
         Rule::FixedLayoutNoViewport,
         Rule::CorruptImage,
         Rule::InvalidUrl,
+        Rule::MalformedXml,
     ];
 
     /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
@@ -456,6 +459,7 @@ impl Rule {
             Rule::FixedLayoutNoViewport => "HTM-046",
             Rule::CorruptImage => "PKG-021",
             Rule::InvalidUrl => "RSC-020",
+            Rule::MalformedXml => "RSC-016",
         }
     }
 
@@ -653,6 +657,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         epub3,
         &mut report,
     );
+    check_xml_well_formedness(&opf_text, &opf_path, &mut report);
     check_xml_resources(&pkg, &opf_dir, epub3, &mut zip, &mut report);
     check_ncx_identifier(&pkg, &opf_dir, &mut zip, &mut report);
     check_obfuscated_fonts(&pkg, &opf_dir, &mut zip, &mut report);
@@ -685,11 +690,21 @@ fn check_xml_resources(
             continue;
         };
         check_xml_encoding(&bytes, &path, &item.media_type, report);
-        let Ok(text) = String::from_utf8(bytes) else {
-            continue;
-        };
-        check_xml_conformance(&text, &path, report);
-        check_doctype_rules(&text, &path, &item.media_type, epub3, report);
+        // The text-based conformance/doctype checks need a clean UTF-8 decode
+        // (they simply skip a resource that isn't UTF-8).
+        if let Ok(text) = std::str::from_utf8(&bytes) {
+            check_xml_conformance(text, &path, report);
+            check_doctype_rules(text, &path, &item.media_type, epub3, report);
+        }
+        // Well-formedness runs on the lossy decode when the resource is (or
+        // defaults to) UTF-8: a UTF-8-declared resource with invalid bytes is a
+        // fatal parse error in epubcheck too, and keeping the bytes as U+FFFD
+        // preserves trailing/embedded garbage that Xerces stops on. A resource
+        // that *declares* a non-UTF-8 charset is the RSC-028 case, not RSC-016.
+        let declares_utf8 = sniff_xml_encoding(&bytes).is_none_or(|enc| enc == "UTF-8");
+        if declares_utf8 {
+            check_xml_well_formedness(&String::from_utf8_lossy(&bytes), &path, report);
+        }
     }
 }
 
@@ -794,6 +809,163 @@ fn check_xml_conformance(text: &str, path: &str, report: &mut Report) {
             "external entity declaration is not allowed in EPUB 3 documents",
         ));
     }
+}
+
+/// RSC-016 (FATAL): the document is not well-formed, or not namespace-well-formed.
+///
+/// A faithful *subset* of what epubcheck's XML parser (Xerces, namespace-aware)
+/// rejects fatally: a syntax error (mismatched end tag, stray `<`, malformed
+/// attribute), an element left unclosed at end of file, an unbound namespace
+/// prefix on an element or attribute, a duplicate attribute, and content after
+/// the root element. The undeclared/unterminated *general entity* class is not
+/// covered here — quick-xml surfaces entity references as [`Event::GeneralRef`]
+/// without resolving them, and epubcheck resolves named entities against the
+/// DTD its DOCTYPE points at (the XHTML entity sets are catalogued), so a plain
+/// "not one of the five predefined" check false-positives on every book that
+/// uses `&nbsp;`/`&mdash;`/… under an XHTML DOCTYPE. Detecting it zero-FP needs
+/// that DTD-catalog entity model; left as a recall gap until then.
+///
+/// Under-detection is a recall gap, never a false positive: every construct
+/// flagged is one Xerces also fatals on. Namespace binding is tracked with a
+/// scope stack of the prefixes declared (`xmlns` / `xmlns:p`) on each open
+/// element; `xml` is always bound. Reports the first problem only, matching
+/// epubcheck, which stops at the first fatal parse error.
+fn check_xml_well_formedness(text: &str, path: &str, report: &mut Report) {
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().check_end_names = true;
+    // Prefixes declared on each currently-open element (a frame per open depth).
+    let mut scopes: Vec<Vec<Vec<u8>>> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut root_closed = false;
+    loop {
+        match reader.read_event() {
+            Err(e) => {
+                report.push(malformed_xml(path, format!("XML is not well-formed: {e}")));
+                return;
+            }
+            Ok(Event::Eof) => {
+                if depth > 0 {
+                    report.push(malformed_xml(
+                        path,
+                        "XML is not well-formed: an element is not closed before end of file"
+                            .to_string(),
+                    ));
+                }
+                return;
+            }
+            Ok(Event::Start(e)) => {
+                if depth == 0 && root_closed {
+                    report.push(trailing_content_xml(path));
+                    return;
+                }
+                if let Some(v) = open_element_well_formed(&e, &mut scopes, path) {
+                    report.push(v);
+                    return;
+                }
+                depth += 1;
+            }
+            Ok(Event::Empty(e)) => {
+                if depth == 0 && root_closed {
+                    report.push(trailing_content_xml(path));
+                    return;
+                }
+                if let Some(v) = open_element_well_formed(&e, &mut scopes, path) {
+                    report.push(v);
+                    return;
+                }
+                scopes.pop(); // an empty element closes immediately
+                if depth == 0 {
+                    root_closed = true;
+                }
+            }
+            Ok(Event::End(_)) => {
+                scopes.pop();
+                depth -= 1;
+                if depth <= 0 {
+                    depth = 0;
+                    root_closed = true;
+                }
+            }
+            Ok(Event::Text(t)) => {
+                let bytes: &[u8] = t.as_ref();
+                if depth == 0 && root_closed && !bytes.iter().all(u8::is_ascii_whitespace) {
+                    report.push(trailing_content_xml(path));
+                    return;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn malformed_xml(path: &str, message: String) -> Violation {
+    Violation::new(Rule::MalformedXml, path.to_string(), message)
+}
+
+fn trailing_content_xml(path: &str) -> Violation {
+    malformed_xml(
+        path,
+        "XML is not well-formed: content is not allowed after the root element".to_string(),
+    )
+}
+
+/// Push a namespace scope for `e`, checking its attributes for duplicates and
+/// its element/attribute prefixes for binding. Returns the first RSC-016
+/// violation, if any (leaving the scope pushed is harmless — the caller stops).
+fn open_element_well_formed(
+    e: &quick_xml::events::BytesStart,
+    scopes: &mut Vec<Vec<Vec<u8>>>,
+    path: &str,
+) -> Option<Violation> {
+    let mut declared: Vec<Vec<u8>> = Vec::new();
+    let mut used: Vec<Vec<u8>> = Vec::new();
+    for attr in e.attributes() {
+        // A duplicate attribute (checks are on by default) or malformed
+        // attribute syntax — both are fatal parse errors in Xerces.
+        let attr = match attr {
+            Ok(a) => a,
+            Err(err) => {
+                return Some(malformed_xml(
+                    path,
+                    format!("XML is not well-formed: {err}"),
+                ));
+            }
+        };
+        let key = attr.key.as_ref();
+        if key == b"xmlns" {
+            declared.push(Vec::new()); // the default namespace = empty prefix
+        } else if let Some(p) = key.strip_prefix(b"xmlns:") {
+            declared.push(p.to_vec());
+        } else if let Some(i) = key.iter().position(|&c| c == b':')
+            && &key[..i] != b"xml"
+        {
+            used.push(key[..i].to_vec());
+        }
+    }
+    // The element's own prefix.
+    let name = e.name();
+    if let Some(i) = name.as_ref().iter().position(|&c| c == b':')
+        && &name.as_ref()[..i] != b"xml"
+    {
+        used.push(name.as_ref()[..i].to_vec());
+    }
+    scopes.push(declared);
+    for prefix in used {
+        if !scopes
+            .iter()
+            .flatten()
+            .any(|d| d.as_slice() == prefix.as_slice())
+        {
+            return Some(malformed_xml(
+                path,
+                format!(
+                    "XML is not namespace-well-formed: the prefix {:?} is not bound to a namespace",
+                    String::from_utf8_lossy(&prefix)
+                ),
+            ));
+        }
+    }
+    None
 }
 
 /// `version="…"` from the leading `<?xml …?>` declaration, if any. Find-based
@@ -4271,7 +4443,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 76, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 77, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -4355,7 +4527,7 @@ mod tests {
         // HTM-046 (fixed-layout doc without a viewport meta) + PKG-021 (undecodable
         // raster image) + RSC-020 (invalid reference URL).
         assert_eq!(
-            covered, 66,
+            covered, 67,
             "epubcheck error coverage changed: {covered}/{total}"
         );
     }
@@ -5434,6 +5606,110 @@ mod tests {
         assert!(!url_has_illegal_space("http://www.ylib.com "));
         assert!(!url_has_illegal_space("  ../style.css\n"));
         assert!(!url_has_illegal_space("a\tb.xhtml"));
+    }
+
+    #[test]
+    fn well_formed_xml_passes_cleanly() {
+        let mut r = Report::default();
+        check_xml_well_formedness(
+            r#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title></head><body><p>hi &amp; bye</p></body></html>"#,
+            "x.xhtml",
+            &mut r,
+        );
+        assert!(r.is_clean(), "well-formed XHTML should pass, got:\n{r}");
+        // Comments/PIs/whitespace after the root element are allowed.
+        let mut r = Report::default();
+        check_xml_well_formedness("<r/>\n  <!-- ok -->\n", "x.xml", &mut r);
+        assert!(
+            r.is_clean(),
+            "trailing whitespace/comment is allowed, got:\n{r}"
+        );
+    }
+
+    #[test]
+    fn malformed_xml_structural_classes_fire_rsc016() {
+        // Each construct is a fatal parse error in epubcheck's XML parser; the
+        // labels track the six corpus RSC-016 failure modes we detect.
+        let cases: &[(&str, &str)] = &[
+            ("mismatched end tag", "<a><b>x</a></b>"),
+            ("unterminated element", "<html><body><p>x</p></body>"),
+            ("content after root", "<r>x</r>trailing"),
+            (
+                "duplicate attribute",
+                r#"<html lang="en" lang="fr">x</html>"#,
+            ),
+            (
+                "unbound element prefix",
+                r#"<opf:package xmlns="urn:x"><a/></opf:package>"#,
+            ),
+            (
+                "unbound attribute prefix",
+                r#"<package xmlns="urn:x"><id opf:scheme="ASIN">x</id></package>"#,
+            ),
+        ];
+        for (label, xml) in cases {
+            let mut r = Report::default();
+            check_xml_well_formedness(xml, "x.xml", &mut r);
+            assert!(
+                r.has_rule(Rule::MalformedXml),
+                "{label}: expected RSC-016 on {xml:?}, got:\n{r}"
+            );
+        }
+    }
+
+    #[test]
+    fn well_formedness_namespace_and_entity_edges() {
+        // A prefix declared on the element or an ancestor is bound; `xml` is
+        // always bound without a declaration.
+        for xml in [
+            r#"<package xmlns="urn:x" xmlns:opf="urn:opf"><id opf:scheme="ASIN">x</id></package>"#,
+            r#"<r xmlns:opf="urn:opf"><child><id opf:scheme="ASIN">x</id></child></r>"#,
+            r#"<r xml:lang="en" xml:space="preserve">x</r>"#,
+        ] {
+            let mut r = Report::default();
+            check_xml_well_formedness(xml, "x.xml", &mut r);
+            assert!(
+                r.is_clean(),
+                "bound prefixes should pass: {xml:?}, got:\n{r}"
+            );
+        }
+        // The general-entity class is out of scope (epubcheck resolves named
+        // entities via the DTD its DOCTYPE catalogues, so a plain predefined-only
+        // check would false-positive on `&nbsp;` under an XHTML DOCTYPE). These
+        // must NOT be flagged, whether predefined, numeric, or named.
+        for xml in [
+            "<r>&amp; &lt; &gt; &#160; &#x20;</r>",
+            "<r>&nbsp;&atilde;&dagger;</r>",
+        ] {
+            let mut r = Report::default();
+            check_xml_well_formedness(xml, "x.xml", &mut r);
+            assert!(
+                r.is_clean(),
+                "entity references are out of scope (no false positive): {xml:?}, got:\n{r}"
+            );
+        }
+    }
+
+    #[test]
+    fn unbound_opf_prefix_in_package_document_flags_rsc016_end_to_end() {
+        // The real corpus class (books 2087/2088): <dc:identifier opf:scheme=…>
+        // with no xmlns:opf on the package. RSC-016 must fire via the OPF path.
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="u" version="3.0">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <dc:title>t</dc:title>
+            <dc:language>en</dc:language>
+            <dc:identifier id="u" opf:scheme="ASIN">X</dc:identifier>
+          </metadata>
+          <manifest><item id="c" href="c.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest>
+          <spine><itemref idref="c"/></spine>
+        </package>"#;
+        let doc = "<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><head><title>t</title></head><body><nav epub:type=\"toc\"><ol><li><a href=\"c.xhtml\">c</a></li></ol></nav></body></html>";
+        let epub = zip_epub(opf, &[("c.xhtml", doc)]);
+        let report = validate(&epub);
+        assert!(
+            report.has_rule(Rule::MalformedXml),
+            "unbound opf: prefix in the OPF should flag RSC-016, got:\n{report}"
+        );
     }
 
     #[test]
