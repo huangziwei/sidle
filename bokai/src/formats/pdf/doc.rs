@@ -6,7 +6,7 @@
 //! than being duplicated. In particular [`load_pdf`] is the *only* correct way
 //! to open a PDF in this codebase: a bare `Document::load_mem` silently loses
 //! the catalog and page tree on a whole class of real files (see
-//! [`recover_nul_object_streams`]).
+//! `recover_nul_object_streams`).
 
 use std::collections::{BTreeMap, HashSet};
 use std::io;

@@ -1302,19 +1302,38 @@ fn atom_equal(a: &Item, b: &Item, doc: &Document) -> bool {
 /// Compile and cache a regular expression. The same handful of patterns are
 /// evaluated once per matching element in a book, so compiling each time would
 /// dominate the cost of validating a large content document.
-fn regex_for(pattern: &str) -> Result<&'static Regex, XPathError> {
+///
+/// `flags` is XPath 2.0's optional flags argument (`i` case-insensitive, `m`
+/// multi-line, `s` dot-matches-all, `x` ignore whitespace), spelled as the
+/// inline group the regex crate takes. Dropping it would make
+/// `matches(…, 'text/html;\s*charset=utf-8', 'i')` — a real rule in the EPUB 3
+/// content-document assertions — reject the uppercase spelling every second
+/// book uses.
+fn regex_for(pattern: &str, flags: &str) -> Result<&'static Regex, XPathError> {
     use std::sync::Mutex;
     static CACHE: OnceLock<Mutex<HashMap<String, &'static Regex>>> = OnceLock::new();
+    // `q` (literal) has no inline spelling, so it is applied by escaping the
+    // pattern instead. A flag outside the five is an XPath error; ignoring it
+    // would silently change what the rule means, so it is left to fail below.
+    let body = match flags.contains('q') {
+        true => regex::escape(pattern),
+        false => pattern.to_string(),
+    };
+    let inline: String = flags.chars().filter(|c| "imsx".contains(*c)).collect();
+    let source = match inline.is_empty() {
+        true => body,
+        false => format!("(?{inline}:{body})"),
+    };
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().expect("regex cache");
-    if let Some(re) = cache.get(pattern) {
+    if let Some(re) = cache.get(&source) {
         return Ok(re);
     }
     let compiled: &'static Regex =
-        Box::leak(Box::new(Regex::new(pattern).map_err(|e| {
+        Box::leak(Box::new(Regex::new(&source).map_err(|e| {
             XPathError(format!("bad pattern {pattern:?}: {e}"))
         })?));
-    cache.insert(pattern.to_string(), compiled);
+    cache.insert(source, compiled);
     Ok(compiled)
 }
 
@@ -1329,6 +1348,15 @@ fn call(name: &str, args: &[Expr], ctx: &Context) -> Result<Sequence, XPathError
                 .map(|it| string_value(it, ctx.doc))
                 .collect::<Vec<_>>()
                 .join(""),
+        }
+    };
+    // `str_arg` falls back to the context item, which is what the one-argument
+    // forms of `string`/`normalize-space`/`local-name` mean. A genuinely
+    // optional argument means *nothing* when absent, not the context item.
+    let opt_str_arg = |i: usize| -> String {
+        match args.get(i) {
+            None => String::new(),
+            Some(_) => str_arg(i),
         }
     };
     let num_arg = |i: usize| -> f64 {
@@ -1436,13 +1464,15 @@ fn call(name: &str, args: &[Expr], ctx: &Context) -> Result<Sequence, XPathError
                     .unwrap_or_default(),
             )])
         }
-        "matches" => one(regex_for(&str_arg(1))?.is_match(&str_arg(0))),
+        // The trailing `flags` argument is optional in all three (XPath 2.0
+        // §7.6); absent means no flags.
+        "matches" => one(regex_for(&str_arg(1), &opt_str_arg(2))?.is_match(&str_arg(0))),
         "replace" => Ok(vec![Item::Str(
-            regex_for(&str_arg(1))?
+            regex_for(&str_arg(1), &opt_str_arg(3))?
                 .replace_all(&str_arg(0), str_arg(2).as_str())
                 .into_owned(),
         )]),
-        "tokenize" => Ok(regex_for(&str_arg(1))?
+        "tokenize" => Ok(regex_for(&str_arg(1), &opt_str_arg(2))?
             .split(&str_arg(0))
             .filter(|t| !t.is_empty())
             .map(|t| Item::Str(t.to_string()))
@@ -1625,6 +1655,31 @@ mod tests {
         assert!(truth("not(exists(//h:nosuch))"));
         assert_eq!(text("local-name(//h:p[1])"), "p");
         assert_eq!(text("number('3') + 1"), "4");
+    }
+
+    /// The optional flags argument of the three regular-expression functions.
+    /// Dropping it turns the EPUB 3 content-document rule
+    /// `matches(…,'text/html;\s*charset=utf-8','i')` into a case-sensitive
+    /// test, which rejects the uppercase `charset=UTF-8` half the world writes.
+    #[test]
+    fn regular_expression_flags_are_honoured() {
+        assert!(truth(
+            r#"matches(normalize-space('text/html; charset=UTF-8'),'text/html;\s*charset=utf-8','i')"#
+        ));
+        assert!(
+            !truth(
+                r#"matches(normalize-space('text/html; charset=UTF-8'),'text/html;\s*charset=utf-8')"#
+            ),
+            "without the flag the same value must not match"
+        );
+        // The flags argument must not be read as the context item when absent.
+        assert!(truth("matches('ABC', 'abc', 'i')"));
+        assert!(!truth("matches('ABC', 'abc')"));
+        assert_eq!(text("replace('A1b2', '[a-z]', 'x', 'i')"), "x1x2");
+        assert_eq!(eval_on(DOC, "tokenize('aXbxc', 'x', 'i')").len(), 3);
+        // `q` takes the pattern literally rather than as a regular expression.
+        assert!(truth("matches('a.c', 'a.c', 'q')"));
+        assert!(!truth("matches('abc', 'a.c', 'q')"));
     }
 
     #[test]

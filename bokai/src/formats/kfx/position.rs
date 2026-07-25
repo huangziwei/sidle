@@ -171,7 +171,7 @@ impl<'a> PositionFragments<'a> {
     /// reading positions to report.
     ///
     /// A book with positions but no location map gets evenly spaced boundaries
-    /// at the device's own [`KFX_POSITIONS_PER_LOCATION`] interval, so its
+    /// at the device's own `KFX_POSITIONS_PER_LOCATION` interval, so its
     /// Location numbers land on the same scale as a book that ships them.
     pub fn build(&self) -> Option<PositionMap> {
         let pid_of = self.pid_map();

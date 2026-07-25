@@ -9,7 +9,7 @@
 //!
 //! Two departures from the paper, both deliberate:
 //!
-//! - `applyAfter` takes a function in the paper. Here it takes a [`Cont`], an
+//! - `applyAfter` takes a function in the paper. Here it takes a `Cont`, an
 //!   enum of the four continuations the algorithm actually builds, which keeps
 //!   the recursion allocation-free.
 //! - Every derivative step is **memoised** on `(pattern, input)`. Real grammars
@@ -102,7 +102,11 @@ impl<'a> Validator<'a> {
 
                 let after_open = self.start_tag_open_deriv(p, ns.as_deref(), &local);
                 if self.arena.is(after_open, &Pattern::NotAllowed) {
-                    self.fail(node, format!("element {local:?} is not allowed here"), p);
+                    self.fail(
+                        node,
+                        format!("element {local:?} is not allowed here"),
+                        Some(p),
+                    );
                     return after_open;
                 }
 
@@ -111,11 +115,26 @@ impl<'a> Validator<'a> {
                     let (ans, alocal) = doc.expanded(&attr.name);
                     let next = self.att_deriv(current, ans, alocal, &attr.value);
                     if self.arena.is(next, &Pattern::NotAllowed) {
-                        self.fail(
-                            node,
-                            format!("attribute {alocal:?} is not allowed on element {local:?}"),
-                            current,
-                        );
+                        // An attribute the grammar declares here but whose value
+                        // its datatype rejects is a different defect from one
+                        // that is not permitted at all, and listing the accepted
+                        // attribute *names* would be no help for the former.
+                        let by_name = self.att_name_deriv(current, ans, alocal);
+                        match self.arena.is(by_name, &Pattern::NotAllowed) {
+                            true => self.fail(
+                                node,
+                                format!("attribute {alocal:?} is not allowed on element {local:?}"),
+                                Some(current),
+                            ),
+                            false => self.fail(
+                                node,
+                                format!(
+                                    "value of attribute {alocal:?} is invalid: {}",
+                                    self.attribute_datatype(current, ans, alocal, &attr.value)
+                                ),
+                                None,
+                            ),
+                        }
                         return next;
                     }
                     current = next;
@@ -126,7 +145,7 @@ impl<'a> Validator<'a> {
                     self.fail(
                         node,
                         format!("element {local:?} is missing a required attribute"),
-                        current,
+                        Some(current),
                     );
                     return closed;
                 }
@@ -140,7 +159,7 @@ impl<'a> Validator<'a> {
                     self.fail(
                         node,
                         format!("element {local:?} is incomplete — required content is missing"),
-                        after_children,
+                        Some(after_children),
                     );
                 }
                 ended
@@ -149,15 +168,19 @@ impl<'a> Validator<'a> {
         }
     }
 
-    /// Record a violation, unless one is already pending for this subtree. The
-    /// message names what the grammar would have accepted where it can, which is
-    /// the difference between a usable diagnostic and "invalid".
-    fn fail(&mut self, node: NodeId, message: String, context: PatternId) {
+    /// Record a violation, unless one is already pending for this subtree. Given
+    /// a `context` pattern the message names what the grammar would have
+    /// accepted there, which is the difference between a usable diagnostic and
+    /// "invalid"; `None` is for the failures where a list of names would not
+    /// describe what went wrong.
+    fn fail(&mut self, node: NodeId, message: String, context: Option<PatternId>) {
         if !self.violations.is_empty() {
             return; // the first failure explains the rest
         }
         let mut expected = Vec::new();
-        self.collect_expected(context, &mut expected);
+        if let Some(context) = context {
+            self.collect_expected(context, &mut expected);
+        }
         expected.sort();
         expected.dedup();
         let message = if expected.is_empty() {
@@ -213,7 +236,11 @@ impl<'a> Validator<'a> {
             }
             if self.arena.is(derived, &Pattern::NotAllowed) {
                 let shown: String = text.chars().take(30).collect();
-                self.fail(parent, format!("text {shown:?} is not allowed here"), p);
+                self.fail(
+                    parent,
+                    format!("text {shown:?} is not allowed here"),
+                    Some(p),
+                );
             }
             return derived;
         }
@@ -229,7 +256,7 @@ impl<'a> Validator<'a> {
             current = self.child_deriv(doc, current, child);
             if self.arena.is(current, &Pattern::NotAllowed) {
                 if let NodeKind::Text(_) = &doc.node(child).kind {
-                    self.fail(child, "text is not allowed here".into(), p);
+                    self.fail(child, "text is not allowed here".into(), Some(p));
                 }
                 return current;
             }
@@ -355,6 +382,115 @@ impl<'a> Validator<'a> {
                 }
             }
             _ => self.arena.not_allowed(),
+        }
+    }
+
+    /// `att_deriv` with the value check removed: would this attribute *name* be
+    /// accepted here at all? A name the grammar knows and a name it does not are
+    /// two different defects, and only the second is worth listing the permitted
+    /// names for.
+    fn att_name_deriv(&mut self, p: PatternId, ns: Option<&str>, local: &str) -> PatternId {
+        match self.arena.pattern(p).clone() {
+            Pattern::After(a, b) => {
+                let da = self.att_name_deriv(a, ns, local);
+                self.arena.after(da, b)
+            }
+            Pattern::Choice(a, b) => {
+                let x = self.att_name_deriv(a, ns, local);
+                let y = self.att_name_deriv(b, ns, local);
+                self.arena.choice(x, y)
+            }
+            Pattern::Group(a, b) => {
+                let da = self.att_name_deriv(a, ns, local);
+                let left = self.arena.group(da, b);
+                let db = self.att_name_deriv(b, ns, local);
+                let right = self.arena.group(a, db);
+                self.arena.choice(left, right)
+            }
+            Pattern::Interleave(a, b) => {
+                let da = self.att_name_deriv(a, ns, local);
+                let left = self.arena.interleave(da, b);
+                let db = self.att_name_deriv(b, ns, local);
+                let right = self.arena.interleave(a, db);
+                self.arena.choice(left, right)
+            }
+            Pattern::OneOrMore(a) => {
+                let da = self.att_name_deriv(a, ns, local);
+                let more = self.arena.zero_or_more(a);
+                self.arena.group(da, more)
+            }
+            Pattern::Attribute(nc, _) => match self.arena.name_matches(nc, ns, local) {
+                true => self.arena.empty(),
+                false => self.arena.not_allowed(),
+            },
+            _ => self.arena.not_allowed(),
+        }
+    }
+
+    /// What the grammar wanted the attribute's value to be, worded from the
+    /// declared datatype (`must be an xsd:ID`) or, for an enumeration, the
+    /// permitted literals. Falls back to quoting the value when the content
+    /// pattern is neither — the diagnostic still says which value was rejected.
+    fn attribute_datatype(
+        &self,
+        p: PatternId,
+        ns: Option<&str>,
+        local: &str,
+        value: &str,
+    ) -> String {
+        let mut kinds = Vec::new();
+        self.collect_attribute_content(p, ns, local, &mut kinds);
+        kinds.sort();
+        kinds.dedup();
+        match kinds.is_empty() {
+            true => format!("{value:?}"),
+            false => format!("{value:?} — expected {}", kinds.join(", ")),
+        }
+    }
+
+    /// The content patterns declared for one attribute name, rendered as the
+    /// datatype names and literals a reader can act on.
+    fn collect_attribute_content(
+        &self,
+        p: PatternId,
+        ns: Option<&str>,
+        local: &str,
+        out: &mut Vec<String>,
+    ) {
+        if out.len() > 16 {
+            return; // a long list stops informing
+        }
+        match self.arena.pattern(p).clone() {
+            Pattern::Choice(a, b) | Pattern::Group(a, b) | Pattern::Interleave(a, b) => {
+                self.collect_attribute_content(a, ns, local, out);
+                self.collect_attribute_content(b, ns, local, out);
+            }
+            Pattern::OneOrMore(a) | Pattern::After(a, _) => {
+                self.collect_attribute_content(a, ns, local, out)
+            }
+            Pattern::Attribute(nc, content) if self.arena.name_matches(nc, ns, local) => {
+                self.describe_value(content, out)
+            }
+            _ => {}
+        }
+    }
+
+    /// One attribute content pattern as human-readable expectations.
+    fn describe_value(&self, p: PatternId, out: &mut Vec<String>) {
+        if out.len() > 16 {
+            return;
+        }
+        match self.arena.pattern(p).clone() {
+            Pattern::Choice(a, b) | Pattern::Group(a, b) | Pattern::Interleave(a, b) => {
+                self.describe_value(a, out);
+                self.describe_value(b, out);
+            }
+            Pattern::OneOrMore(a) | Pattern::List(a) => self.describe_value(a, out),
+            Pattern::Data { datatype, .. } | Pattern::DataExcept { datatype, .. } => {
+                out.push(datatype.name.clone())
+            }
+            Pattern::Value { value, .. } => out.push(format!("{value:?}")),
+            _ => {}
         }
     }
 

@@ -96,7 +96,7 @@ pub struct OpfMetadata {
     /// `properties="cover-image"` — the caller sets that).
     pub cover_manifest_id: Option<String>,
     /// Kindle `primary-writing-mode` hint, already resolved (see
-    /// [`primary_writing_mode`]); `horizontal-lr` is the default and should
+    /// `primary_writing_mode`); `horizontal-lr` is the default and should
     /// be passed as `None`.
     pub primary_writing_mode: Option<String>,
     /// Spine `page-progression-direction`. `ltr` (the EPUB default) is

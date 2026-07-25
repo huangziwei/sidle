@@ -1,7 +1,7 @@
 //! Running the right schemas over the right resource.
 //!
 //! The pieces beneath this module each do one thing — [`preprocess`] rewrites,
-//! [`nvdl`] decomposes, [`relaxng`] judges structure, [`schematron`] judges
+//! [`nvdl`] decomposes, [`super::relaxng`] judges structure, [`schematron`] judges
 //! assertions. This is the map epubcheck's `ValidatorMap` encodes: which of them
 //! apply to a package document, an XHTML content document, an NCX, a navigation
 //! document, a media overlay, and in which EPUB version.
@@ -82,25 +82,40 @@ impl ResourceKind {
             (ResourceKind::Metadata, false) => &[],
             (ResourceKind::Metadata, true) => &["30/ocf-metadata-30.rnc", "30/ocf-metadata-30.sch"],
             (ResourceKind::Package, false) => &["20/rng/opf.rng", "20/sch/opf.sch"],
-            (ResourceKind::Package, true) => &["30/package-30.rnc", "30/package-30.sch"],
+            // The five collection assertion sets are unconditional in EPUB 3:
+            // each keys on a `<collection>` role, so a package without
+            // collections simply matches no rule.
+            (ResourceKind::Package, true) => &[
+                "30/package-30.rnc",
+                "30/package-30.sch",
+                "30/collection-do-30.sch",
+                "30/dict/dict-collection.sch",
+                "30/idx/idx-collection.sch",
+                "30/collection-manifest-30.sch",
+                "30/previews/preview-collection.sch",
+            ],
             (ResourceKind::Xhtml, false) => &[
                 "20/rng/ops20.nvdl",
                 "20/sch/xhtml.sch",
                 "20/sch/id-unique.sch",
             ],
             (ResourceKind::Xhtml, true) => &["30/epub-xhtml-30.nvdl"],
-            // A navigation document is an XHTML content document first, then
-            // held to the navigation grammar as well.
-            (ResourceKind::Nav, false) => &[
-                "20/rng/ops20.nvdl",
-                "20/sch/xhtml.sch",
-                "20/sch/id-unique.sch",
+            // A navigation document takes the navigation grammar in place of
+            // the XHTML one — `epub-nav-30.rnc` includes the XHTML modules and
+            // narrows them — and it takes both assertion sets. The version does
+            // not gate it: a `nav` item in an EPUB 2 package is held to the
+            // same schemas (and separately reported as NAV-001).
+            (ResourceKind::Nav, _) => &[
+                "30/epub-nav-30.rnc",
+                "30/epub-xhtml-30.sch",
+                "30/epub-nav-30.sch",
             ],
-            (ResourceKind::Nav, true) => &["30/epub-nav-30.nvdl"],
             (ResourceKind::Svg, false) => &["20/rng/ops20-svg.nvdl", "20/sch/id-unique.sch"],
             (ResourceKind::Svg, true) => &["30/epub-svg-30.nvdl"],
             (ResourceKind::Ncx, _) => &["20/rng/ncx.rng", "20/sch/ncx.sch"],
-            (ResourceKind::MediaOverlay, _) => {
+            // Media overlays are an EPUB 3 feature; there is no EPUB 2 schema.
+            (ResourceKind::MediaOverlay, false) => &[],
+            (ResourceKind::MediaOverlay, true) => {
                 &["30/media-overlay-30.rnc", "30/media-overlay-30.sch"]
             }
         }
@@ -299,6 +314,282 @@ mod tests {
     <div><h1>Heading</h1><p>Text with <a href="#a">a link</a>.</p><p id="a">Target.</p></div>
   </body>
 </html>"##;
+
+    const OPF3: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">u</dc:identifier>
+    <dc:title>T</dc:title>
+    <dc:language>en</dc:language>
+    <meta property="dcterms:modified">2020-01-01T00:00:00Z</meta>
+  </metadata>
+  <manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest>
+  <spine><itemref idref="nav"/></spine>
+</package>"##;
+
+    const OPF2: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:identifier id="uid">u</dc:identifier>
+    <dc:title>T</dc:title>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="c" href="c.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="c"/></spine>
+</package>"##;
+
+    const NAV: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+  <head><title>t</title></head>
+  <body>
+    <nav epub:type="toc"><ol><li><a href="c.xhtml">One</a></li></ol></nav>
+  </body>
+</html>"##;
+
+    const NCX: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="u"/></head>
+  <docTitle><text>T</text></docTitle>
+  <navMap>
+    <navPoint id="n1" playOrder="1"><navLabel><text>One</text></navLabel><content src="c.xhtml"/></navPoint>
+    <navPoint id="n2" playOrder="2"><navLabel><text>Two</text></navLabel><content src="d.xhtml"/></navPoint>
+  </navMap>
+</ncx>"##;
+
+    /// Every defect the EPUB validator used to detect with a hand-written check
+    /// on the `RSC-005` channel, now the schemas' job. Each case names a
+    /// substring the reported message must contain, so a rule that silently
+    /// stops matching — the way a schema port loses recall — fails here.
+    ///
+    /// The base documents are asserted clean first: a case that "passes" only
+    /// because its base already errors would prove nothing.
+    #[test]
+    fn the_schemas_cover_what_the_hand_written_checks_replaced() {
+        for (label, kind, epub3, base) in [
+            ("xhtml3", ResourceKind::Xhtml, true, XHTML3),
+            ("xhtml2", ResourceKind::Xhtml, false, XHTML2),
+            ("opf3", ResourceKind::Package, true, OPF3),
+            ("opf2", ResourceKind::Package, false, OPF2),
+            ("nav", ResourceKind::Nav, true, NAV),
+            ("ncx", ResourceKind::Ncx, false, NCX),
+        ] {
+            let found = errors(kind, epub3, base);
+            assert!(found.is_empty(), "base {label} is not clean: {found:?}");
+        }
+
+        // (what it replaces, kind, epub3, base, needle → replacement, expected
+        // substring of the message).
+        let cases: &[(&str, ResourceKind, bool, &str, &str, &str, &str)] = &[
+            // Package structure and metadata.
+            (
+                "MissingTitle",
+                ResourceKind::Package,
+                true,
+                OPF3,
+                "<dc:title>T</dc:title>",
+                "",
+                r#""metadata" is incomplete"#,
+            ),
+            (
+                "MissingLanguage",
+                ResourceKind::Package,
+                true,
+                OPF3,
+                "<dc:language>en</dc:language>",
+                "",
+                r#""metadata" is incomplete"#,
+            ),
+            (
+                "MissingIdentifier",
+                ResourceKind::Package,
+                true,
+                OPF3,
+                r#"<dc:identifier id="uid">u</dc:identifier>"#,
+                "",
+                r#""metadata" is incomplete"#,
+            ),
+            (
+                "EmptyDcContent",
+                ResourceKind::Package,
+                true,
+                OPF3,
+                "<dc:title>T</dc:title>",
+                "<dc:title></dc:title>",
+                r#""title" is incomplete"#,
+            ),
+            (
+                "UnresolvedUniqueIdentifier",
+                ResourceKind::Package,
+                true,
+                OPF3,
+                r#"unique-identifier="uid""#,
+                r#"unique-identifier="nothing""#,
+                "unique-identifier attribute does not resolve",
+            ),
+            (
+                "PackageIncomplete (manifest)",
+                ResourceKind::Package,
+                true,
+                OPF3,
+                r#"<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#,
+                "",
+                r#""manifest" is incomplete"#,
+            ),
+            (
+                "PackageIncomplete (spine)",
+                ResourceKind::Package,
+                true,
+                OPF3,
+                r#"<itemref idref="nav"/>"#,
+                "",
+                r#""spine" is incomplete"#,
+            ),
+            (
+                "SpineTocMissing",
+                ResourceKind::Package,
+                false,
+                OPF2,
+                r#"<spine toc="ncx">"#,
+                "<spine>",
+                r#""spine" is missing a required attribute"#,
+            ),
+            (
+                "DisallowedOpfAttribute (EPUB 3 opf:role)",
+                ResourceKind::Package,
+                true,
+                OPF3,
+                "<dc:title>T</dc:title>",
+                r#"<dc:title opf:role="aut" xmlns:opf="http://www.idpf.org/2007/opf">T</dc:title>"#,
+                r#"attribute "role" is not allowed"#,
+            ),
+            (
+                "DisallowedOpfAttribute (EPUB 2 spine page-map)",
+                ResourceKind::Package,
+                false,
+                OPF2,
+                r#"<spine toc="ncx">"#,
+                r#"<spine toc="ncx" page-map="pm">"#,
+                r#"attribute "page-map" is not allowed"#,
+            ),
+            (
+                "IdNotNcName",
+                ResourceKind::Package,
+                true,
+                OPF3,
+                r#"id="uid""#,
+                r#"id="1 bad""#,
+                r#"value of attribute "id" is invalid"#,
+            ),
+            (
+                "DuplicateId",
+                ResourceKind::Package,
+                true,
+                OPF3,
+                r#"<item id="nav""#,
+                r#"<item id="uid""#,
+                r#"Duplicate "uid""#,
+            ),
+            // Content documents.
+            (
+                "EmptyTitle",
+                ResourceKind::Xhtml,
+                true,
+                XHTML3,
+                "<title>t</title>",
+                "<title></title>",
+                r#"Element "title" must not be empty"#,
+            ),
+            (
+                "MissingRequiredAttribute (img)",
+                ResourceKind::Xhtml,
+                false,
+                XHTML2,
+                "<h1>Heading</h1>",
+                r#"<h1>Heading</h1><img src="x.png"/>"#,
+                r#""img" is missing a required attribute"#,
+            ),
+            (
+                "DisallowedContentAttribute",
+                ResourceKind::Xhtml,
+                false,
+                XHTML2,
+                r#"<p id="a">"#,
+                r#"<p id="a" onclick="f()">"#,
+                r#"attribute "onclick" is not allowed"#,
+            ),
+            (
+                "UndeclaredContentElement",
+                ResourceKind::Xhtml,
+                false,
+                XHTML2,
+                "<h1>Heading</h1>",
+                "<h1>Heading</h1><u>underlined</u>",
+                r#"element "u" is not allowed here"#,
+            ),
+            (
+                "MetaEncodingDeclaration",
+                ResourceKind::Xhtml,
+                true,
+                XHTML3,
+                "<title>t</title>",
+                r#"<meta http-equiv="content-type" content="text/html; charset=iso-8859-1"/><title>t</title>"#,
+                "encoding declaration state",
+            ),
+            (
+                "BodyRoleNotAllowed",
+                ResourceKind::Xhtml,
+                true,
+                XHTML3,
+                "<body>",
+                r#"<body role="doc-cover">"#,
+                r#"value of attribute "role" is invalid"#,
+            ),
+            (
+                "NestedHyperlink",
+                ResourceKind::Xhtml,
+                false,
+                XHTML2,
+                r##"<a href="#a">a link</a>"##,
+                r##"<a href="#a"><a href="#b">nested</a></a>"##,
+                "cannot contain any nested",
+            ),
+            // Navigation document and NCX.
+            (
+                "NavTocOccurrence",
+                ResourceKind::Nav,
+                true,
+                NAV,
+                r#"epub:type="toc""#,
+                r#"epub:type="landmarks""#,
+                r#"Exactly one "toc" nav element"#,
+            ),
+            (
+                "NcxPlayOrder",
+                ResourceKind::Ncx,
+                false,
+                NCX,
+                r#"playOrder="2""#,
+                r#"playOrder="7""#,
+                "playOrder sequence has gaps",
+            ),
+        ];
+
+        for (label, kind, epub3, base, needle, replacement, expected) in cases {
+            assert!(
+                base.contains(needle),
+                "{label}: the fixture does not contain {needle:?}"
+            );
+            let mutated = base.replace(needle, replacement);
+            let found = errors(*kind, *epub3, &mutated);
+            assert!(
+                found.iter().any(|m| m.contains(expected)),
+                "{label}: expected a message naming {expected:?}, got {found:?}"
+            );
+        }
+    }
 
     /// The whole stack over a realistic document, in both versions: NVDL picks
     /// the grammar, the grammar and the assertions both run, and a clean

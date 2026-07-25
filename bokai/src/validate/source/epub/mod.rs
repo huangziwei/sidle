@@ -32,22 +32,30 @@
 //!   `../style.css` from a chapter is legal); escapes above the OPF root
 //!   are not — Apple Books rejects them silently.
 //! - Every content document declares `<!DOCTYPE html>` (not a legacy XHTML DTD)
-//!   and carries a non-empty `<title>` — the two content-conformance rules
-//!   (epubcheck HTM-004 / RSC-005) real books trip most often.
+//!   — epubcheck HTM-004, the content-conformance rule real books trip most.
+//! - **Every document is validated against the schemas epubcheck ships**:
+//!   [`xml`] holds a RELAX NG validator, a Schematron engine and the NVDL
+//!   dispatch layer, run over the package document, the content documents, the
+//!   navigation document, the NCX, the media overlays and the OCF metadata
+//!   files. Every violation reports on the RSC-005 channel, as epubcheck's do.
+//!   This is the bulk of what the validator knows, and the part that covers
+//!   defects no one here has seen yet: a grammar admits what the format admits,
+//!   not what some past book happened to get wrong.
 //!
 //! Each rule is keyed to its **epubcheck message id** ([`Rule::message_id`] —
 //! `RSC-007`, `HTM-004`, …), drawn from the full [`messages::CATALOG`] (every
-//! id epubcheck defines, with its default severity), so a [`Finding`] is
-//! directly comparable with W3C epubcheck output. Three checks are bokai-native
-//! (kebab ids) where epubcheck has no dedicated code. Port coverage is tracked
-//! by [`epubcheck_error_coverage`].
+//! id epubcheck defines, with its default severity), so a
+//! [`crate::validate::Finding`] is directly comparable with W3C epubcheck
+//! output. Three checks are bokai-native (kebab ids) where epubcheck has no
+//! dedicated code. Port coverage is tracked by [`epubcheck_error_coverage`].
 //!
-//! Out of scope (deferred): full XSD/RNG/Schematron validation, CSS
-//! validation, content document well-formedness, and fragments into SVG
-//! targets. Shell out to W3C's `epubcheck` Java tool for those.
+//! Out of scope (deferred): CSS validation and fragments into SVG targets.
 
+pub mod css;
 pub mod messages;
 pub mod opf;
+pub mod overlay;
+pub mod vocab;
 pub mod xml;
 
 use std::collections::{HashMap, HashSet};
@@ -88,7 +96,7 @@ impl Report {
             .count()
     }
 
-    /// A [`Display`] view of only the error-level violations, for the
+    /// A [`fmt::Display`] view of only the error-level violations, for the
     /// conversion/repair flags (which key on errors, not warnings — see
     /// [`has_errors`](Self::has_errors)). Renders the same per-violation lines
     /// as the full report, so a diagnostic shows exactly what makes the EPUB
@@ -106,7 +114,7 @@ impl Report {
     }
 
     /// Lower these EPUB violations into the unified
-    /// [`Finding`](crate::validate::Finding) model the book
+    /// [`crate::validate::Finding`] model the book
     /// editor consumes (via [`crate::validate::source::validate`]). The rich
     /// [`Violation`]/[`Rule`] internals stay; this is just the projection.
     pub fn into_findings(self) -> Vec<crate::validate::Finding> {
@@ -136,7 +144,7 @@ impl fmt::Display for Report {
     }
 }
 
-/// A [`Display`] wrapper over a [`Report`] that prints only its error-level
+/// A [`fmt::Display`] wrapper over a [`Report`] that prints only its error-level
 /// violations. Built by [`Report::errors_display`].
 pub struct ErrorsDisplay<'a>(&'a Report);
 
@@ -207,7 +215,6 @@ pub enum Rule {
     FragmentNotDefined,
     HrefEscapesOpfRoot,
     IrregularDoctype,
-    EmptyTitle,
     // OPF package/manifest/spine structure (epubcheck OPF-*).
     SpineNoLinear,
     SpineDuplicateIdref,
@@ -247,9 +254,7 @@ pub enum Rule {
     SpineItemNoFallback,
     SpineItemFallbackNotContentDoc,
     FallbackChainCircular,
-    // Dublin Core metadata values (epubcheck OPF-* / RSC-005 schema channel).
-    MissingTitle,
-    MissingLanguage,
+    // Dublin Core metadata values (epubcheck OPF-*).
     IdentifierInvalidUuid,
     DateSyntaxNotRecommended,
     DateNotValid,
@@ -287,13 +292,18 @@ pub enum Rule {
     InvalidUrl,
     // XML document is not well-formed / namespace-well-formed (epubcheck RSC-016).
     MalformedXml,
-    // An attribute the package RelaxNG grammar forbids (epubcheck RSC-005 schema
-    // channel): an OPF-namespaced attribute in EPUB 3, or a non-`id`/`toc`
-    // attribute on `<spine>` in EPUB 2.
-    DisallowedOpfAttribute,
-    // The rest of the RSC-005 schema channel that needs no grammar engine:
-    // `id` lexical form and uniqueness, the EPUB 2 content-document grammar,
-    // the NCX schematron, the nav schematron, and package metadata content.
+    /// The schema channel: a RELAX NG grammar or a Schematron assertion
+    /// rejected the document ([`xml::engine`]). epubcheck funnels every such
+    /// verdict through one id, `RSC-005`, with `RSC-017` for the assertions
+    /// whose message marks itself a warning.
+    SchemaViolation,
+    SchemaWarning,
+    /// The two defects epubcheck reports while rewriting a document for its
+    /// schemas rather than from a schema: a `data-` attribute whose name is not
+    /// a valid custom-data name (`HTM-061`), and a custom-element namespace
+    /// reserved to the format's own authorities (`HTM-054`).
+    InvalidDataAttribute,
+    ReservedCustomNamespace,
     /// Fixed-layout viewport metadata (`HTM-047/056/057/059`) and the SVG
     /// fixed-layout `viewBox` (`HTM-048`).
     ViewportSyntax,
@@ -302,30 +312,93 @@ pub enum Rule {
     ViewportPropertyRepeated,
     SvgFixedLayoutNoViewBox,
     /// Stylesheet-facing content rules: an untitled alternate stylesheet
-    /// (`CSS-015`) and an empty CSS `url()` (`CSS-002`).
+    /// (`CSS-015`), an empty CSS `url()` (`CSS-002`), a property an EPUB style
+    /// sheet may not carry (`CSS-001`), a stylesheet that stops making sense
+    /// (`CSS-008`), and a stylesheet that is not UTF-8 (`CSS-004`, with
+    /// `CSS-003` for the UTF-16 case epubcheck rates a warning).
     AlternateStylesheetNoTitle,
     EmptyCssReference,
+    ForbiddenCssProperty,
+    CssSyntaxError,
+    CssEncodingNotUtf8,
+    CssEncodingUtf16,
+    /// A narrated content document with no stylesheet, in a publication that
+    /// declares a media-overlay styling class (`CSS-030`).
+    OverlayStylingWithoutCss,
+    /// Package-document property rules ([`vocab`]): a list where one value is
+    /// required (`OPF-025`), a malformed `prefix:name` (`OPF-026`), a name the
+    /// vocabulary does not define (`OPF-027`), and an `<item>` property that is
+    /// defined but not for that item's media type (`OPF-012`).
+    PropertyListNotAllowed,
+    PropertyMalformed,
+    PropertyUndefined,
+    PropertyWrongMediaType,
+    /// A cycle in the package metadata `refines` graph (`OPF-065`).
+    RefinesCycle,
+    /// A manifest property declared that the content does not use (`OPF-015`).
+    PropertyNotNeeded,
+    /// The package `prefix` attribute's syntax: a prefix with no URI after it
+    /// (`OPF-005`) and a URI that is not one (`OPF-006`).
+    PrefixWithoutUri,
+    PrefixUriInvalid,
+    /// A `<link>` without the `media-type` its context requires — a resource in
+    /// the container (`OPF-093`) or a format-dependent `rel` (`OPF-094`).
+    LinkMediaTypeRequired,
+    LinkMediaTypeRequiredForRel,
+    /// A spine item whose media type no fallback can rescue (`OPF-042`).
+    SpineMediaTypeNotPermitted,
+    /// A navigation document in an EPUB 2 package (`NAV-001`).
+    NavInEpub2,
+    /// More OPS renditions than EPUB 2 defines (`PKG-013`).
+    MultipleRenditions,
+    /// A `<dc:creator opf:role>` outside the MARC relator scheme (`OPF-052`).
+    RoleNotValid,
+    /// `<collection>` membership: what an index (`OPF-071`), a preview
+    /// (`OPF-075`, `OPF-076`) and a dictionary (`OPF-081`…`OPF-084`) may hold.
+    IndexCollectionNotXhtml,
+    PreviewCollectionNotContentDoc,
+    PreviewCollectionHasCfi,
+    DictionaryResourceNotFound,
+    DictionaryMultipleSearchKeyMaps,
+    DictionaryNoSearchKeyMap,
+    DictionaryResourceNotAllowed,
+    /// A search key map entry pointing outside the spine (`RSC-021`).
+    SearchKeyTargetNotInSpine,
+    /// A dictionary collection with no dictionary content (`OPF-078`).
+    DictionaryNoDictionaryContent,
+    /// An EPUB 2 package document carrying an obsolete DOCTYPE (`HTM-009`).
+    ObsoleteDoctype,
+    /// An image file too short to have a header (`MED-004`).
+    ImageHeaderUnreadable,
+    /// A `<picture>` `<source>` on a foreign resource with no `type` (`MED-007`).
+    PictureSourceNeedsType,
+    /// Region-based navigation: the property outside a data navigation
+    /// document (`HTM-052`), and a link out of one to a reflowable document
+    /// (`NAV-009`).
+    RegionBasedNotInDataNav,
+    RegionBasedLinkNotFixedLayout,
+    /// Pagination in an EduPub publication: no page list in the navigation
+    /// document (`NAV-003`), and no identified pagination source (`OPF-066`).
+    NavNoPageList,
+    PaginationSourceMissing,
+    /// Media overlay (SMIL) rules. An `<audio src>` naming a resource that is
+    /// not a core audio type (`MED-005`) or carrying a fragment (`MED-014`); a
+    /// clip whose `clipBegin` is after (`MED-008`) or equal to (`MED-009`) its
+    /// `clipEnd`; and the four ways an overlay and the content document it
+    /// narrates can disagree about each other (`MED-010`…`MED-013`).
+    OverlayAudioNotCoreType,
+    OverlayAudioSrcHasFragment,
+    ClipBeginAfterEnd,
+    ClipBeginEqualsEnd,
+    NarratedDocumentMissingOverlay,
+    DocumentNarratedTwice,
+    NarratedDocumentWrongOverlay,
+    OverlayDoesNotNarrateDocument,
     /// An SVG `<use>`/paint/clip-path reference without the fragment it needs
     /// to name a target (`RSC-015`).
     SvgReferenceNoFragment,
     /// A manifest `fallback-style` that names no declared item (`OPF-041`).
     FallbackStyleNotFound,
-    IdNotNcName,
-    DuplicateId,
-    MissingRequiredAttribute,
-    DisallowedContentAttribute,
-    UndeclaredContentElement,
-    UriAttributeInvalid,
-    MetaEncodingDeclaration,
-    BodyRoleNotAllowed,
-    NestedHyperlink,
-    NcxPlayOrder,
-    NavTocOccurrence,
-    EmptyDcContent,
-    MissingIdentifier,
-    UnresolvedUniqueIdentifier,
-    SpineTocMissing,
-    PackageIncomplete,
 }
 
 impl Rule {
@@ -350,7 +423,6 @@ impl Rule {
         Rule::FragmentNotDefined,
         Rule::HrefEscapesOpfRoot,
         Rule::IrregularDoctype,
-        Rule::EmptyTitle,
         Rule::SpineNoLinear,
         Rule::SpineDuplicateIdref,
         Rule::DuplicateManifestResource,
@@ -384,8 +456,6 @@ impl Rule {
         Rule::SpineItemNoFallback,
         Rule::SpineItemFallbackNotContentDoc,
         Rule::FallbackChainCircular,
-        Rule::MissingTitle,
-        Rule::MissingLanguage,
         Rule::IdentifierInvalidUuid,
         Rule::DateSyntaxNotRecommended,
         Rule::DateNotValid,
@@ -410,7 +480,6 @@ impl Rule {
         Rule::CorruptImage,
         Rule::InvalidUrl,
         Rule::MalformedXml,
-        Rule::DisallowedOpfAttribute,
         Rule::ViewportSyntax,
         Rule::ViewportDimensionMissing,
         Rule::ViewportValueInvalid,
@@ -418,24 +487,55 @@ impl Rule {
         Rule::SvgFixedLayoutNoViewBox,
         Rule::AlternateStylesheetNoTitle,
         Rule::EmptyCssReference,
+        Rule::ForbiddenCssProperty,
+        Rule::CssSyntaxError,
+        Rule::CssEncodingNotUtf8,
+        Rule::CssEncodingUtf16,
+        Rule::OverlayStylingWithoutCss,
+        Rule::PropertyListNotAllowed,
+        Rule::PropertyMalformed,
+        Rule::PropertyUndefined,
+        Rule::PropertyWrongMediaType,
+        Rule::RefinesCycle,
+        Rule::PropertyNotNeeded,
+        Rule::PrefixWithoutUri,
+        Rule::PrefixUriInvalid,
+        Rule::LinkMediaTypeRequired,
+        Rule::LinkMediaTypeRequiredForRel,
+        Rule::SpineMediaTypeNotPermitted,
+        Rule::NavInEpub2,
+        Rule::MultipleRenditions,
+        Rule::RoleNotValid,
+        Rule::IndexCollectionNotXhtml,
+        Rule::PreviewCollectionNotContentDoc,
+        Rule::PreviewCollectionHasCfi,
+        Rule::DictionaryResourceNotFound,
+        Rule::DictionaryMultipleSearchKeyMaps,
+        Rule::DictionaryNoSearchKeyMap,
+        Rule::DictionaryResourceNotAllowed,
+        Rule::SearchKeyTargetNotInSpine,
+        Rule::DictionaryNoDictionaryContent,
+        Rule::ObsoleteDoctype,
+        Rule::ImageHeaderUnreadable,
+        Rule::PictureSourceNeedsType,
+        Rule::RegionBasedNotInDataNav,
+        Rule::RegionBasedLinkNotFixedLayout,
+        Rule::NavNoPageList,
+        Rule::PaginationSourceMissing,
+        Rule::OverlayAudioNotCoreType,
+        Rule::OverlayAudioSrcHasFragment,
+        Rule::ClipBeginAfterEnd,
+        Rule::ClipBeginEqualsEnd,
+        Rule::NarratedDocumentMissingOverlay,
+        Rule::DocumentNarratedTwice,
+        Rule::NarratedDocumentWrongOverlay,
+        Rule::OverlayDoesNotNarrateDocument,
         Rule::SvgReferenceNoFragment,
         Rule::FallbackStyleNotFound,
-        Rule::IdNotNcName,
-        Rule::DuplicateId,
-        Rule::MissingRequiredAttribute,
-        Rule::DisallowedContentAttribute,
-        Rule::UndeclaredContentElement,
-        Rule::UriAttributeInvalid,
-        Rule::MetaEncodingDeclaration,
-        Rule::BodyRoleNotAllowed,
-        Rule::NestedHyperlink,
-        Rule::NcxPlayOrder,
-        Rule::NavTocOccurrence,
-        Rule::EmptyDcContent,
-        Rule::MissingIdentifier,
-        Rule::UnresolvedUniqueIdentifier,
-        Rule::SpineTocMissing,
-        Rule::PackageIncomplete,
+        Rule::SchemaViolation,
+        Rule::SchemaWarning,
+        Rule::InvalidDataAttribute,
+        Rule::ReservedCustomNamespace,
     ];
 
     /// This rule's epubcheck message id (e.g. `"RSC-007"`) — the identity a
@@ -464,7 +564,6 @@ impl Rule {
             Rule::FragmentNotDefined => "RSC-012",
             Rule::HrefEscapesOpfRoot => "RSC-026",
             Rule::IrregularDoctype => "HTM-004",
-            Rule::EmptyTitle => "RSC-005",
             Rule::SpineNoLinear => "OPF-033",
             Rule::SpineDuplicateIdref => "OPF-034",
             Rule::DuplicateManifestResource => "OPF-074",
@@ -498,10 +597,6 @@ impl Rule {
             Rule::SpineItemNoFallback => "OPF-043",
             Rule::SpineItemFallbackNotContentDoc => "OPF-044",
             Rule::FallbackChainCircular => "OPF-045",
-            // Missing required Dublin Core metadata is enforced by epubcheck's
-            // package schema, which reports through the RSC-005 channel.
-            Rule::MissingTitle => "RSC-005",
-            Rule::MissingLanguage => "RSC-005",
             Rule::IdentifierInvalidUuid => "OPF-085",
             Rule::DateSyntaxNotRecommended => "OPF-053",
             Rule::DateNotValid => "OPF-054",
@@ -526,7 +621,6 @@ impl Rule {
             Rule::CorruptImage => "PKG-021",
             Rule::InvalidUrl => "RSC-020",
             Rule::MalformedXml => "RSC-016",
-            Rule::DisallowedOpfAttribute => "RSC-005",
             Rule::ViewportSyntax => "HTM-047",
             Rule::ViewportDimensionMissing => "HTM-056",
             Rule::ViewportValueInvalid => "HTM-057",
@@ -534,24 +628,55 @@ impl Rule {
             Rule::SvgFixedLayoutNoViewBox => "HTM-048",
             Rule::AlternateStylesheetNoTitle => "CSS-015",
             Rule::EmptyCssReference => "CSS-002",
+            Rule::ForbiddenCssProperty => "CSS-001",
+            Rule::CssSyntaxError => "CSS-008",
+            Rule::CssEncodingNotUtf8 => "CSS-004",
+            Rule::CssEncodingUtf16 => "CSS-003",
+            Rule::OverlayStylingWithoutCss => "CSS-030",
+            Rule::PropertyListNotAllowed => "OPF-025",
+            Rule::PropertyMalformed => "OPF-026",
+            Rule::PropertyUndefined => "OPF-027",
+            Rule::PropertyWrongMediaType => "OPF-012",
+            Rule::RefinesCycle => "OPF-065",
+            Rule::PropertyNotNeeded => "OPF-015",
+            Rule::PrefixWithoutUri => "OPF-005",
+            Rule::PrefixUriInvalid => "OPF-006",
+            Rule::LinkMediaTypeRequired => "OPF-093",
+            Rule::LinkMediaTypeRequiredForRel => "OPF-094",
+            Rule::SpineMediaTypeNotPermitted => "OPF-042",
+            Rule::NavInEpub2 => "NAV-001",
+            Rule::MultipleRenditions => "PKG-013",
+            Rule::RoleNotValid => "OPF-052",
+            Rule::IndexCollectionNotXhtml => "OPF-071",
+            Rule::PreviewCollectionNotContentDoc => "OPF-075",
+            Rule::PreviewCollectionHasCfi => "OPF-076",
+            Rule::DictionaryResourceNotFound => "OPF-081",
+            Rule::DictionaryMultipleSearchKeyMaps => "OPF-082",
+            Rule::DictionaryNoSearchKeyMap => "OPF-083",
+            Rule::DictionaryResourceNotAllowed => "OPF-084",
+            Rule::SearchKeyTargetNotInSpine => "RSC-021",
+            Rule::DictionaryNoDictionaryContent => "OPF-078",
+            Rule::ObsoleteDoctype => "HTM-009",
+            Rule::ImageHeaderUnreadable => "MED-004",
+            Rule::PictureSourceNeedsType => "MED-007",
+            Rule::RegionBasedNotInDataNav => "HTM-052",
+            Rule::RegionBasedLinkNotFixedLayout => "NAV-009",
+            Rule::NavNoPageList => "NAV-003",
+            Rule::PaginationSourceMissing => "OPF-066",
+            Rule::OverlayAudioNotCoreType => "MED-005",
+            Rule::OverlayAudioSrcHasFragment => "MED-014",
+            Rule::ClipBeginAfterEnd => "MED-008",
+            Rule::ClipBeginEqualsEnd => "MED-009",
+            Rule::NarratedDocumentMissingOverlay => "MED-010",
+            Rule::DocumentNarratedTwice => "MED-011",
+            Rule::NarratedDocumentWrongOverlay => "MED-012",
+            Rule::OverlayDoesNotNarrateDocument => "MED-013",
             Rule::SvgReferenceNoFragment => "RSC-015",
             Rule::FallbackStyleNotFound => "OPF-041",
-            Rule::IdNotNcName => "RSC-005",
-            Rule::DuplicateId => "RSC-005",
-            Rule::MissingRequiredAttribute => "RSC-005",
-            Rule::DisallowedContentAttribute => "RSC-005",
-            Rule::UndeclaredContentElement => "RSC-005",
-            Rule::UriAttributeInvalid => "RSC-005",
-            Rule::MetaEncodingDeclaration => "RSC-005",
-            Rule::BodyRoleNotAllowed => "RSC-005",
-            Rule::NestedHyperlink => "RSC-005",
-            Rule::NcxPlayOrder => "RSC-005",
-            Rule::NavTocOccurrence => "RSC-005",
-            Rule::EmptyDcContent => "RSC-005",
-            Rule::MissingIdentifier => "RSC-005",
-            Rule::UnresolvedUniqueIdentifier => "RSC-005",
-            Rule::SpineTocMissing => "RSC-005",
-            Rule::PackageIncomplete => "RSC-005",
+            Rule::SchemaViolation => "RSC-005",
+            Rule::SchemaWarning => "RSC-017",
+            Rule::InvalidDataAttribute => "HTM-061",
+            Rule::ReservedCustomNamespace => "HTM-054",
         }
     }
 
@@ -563,12 +688,16 @@ impl Rule {
         match self {
             // The rules epubcheck rates below Error: undeclared extra resources
             // (OPF-003), UTF-16 in a non-XHTML resource (RSC-027), an invalid
-            // UUID identifier (OPF-085), and a non-recommended date syntax in
-            // EPUB 3 (OPF-053).
+            // UUID identifier (OPF-085), a non-recommended date syntax in
+            // EPUB 3 (OPF-053), a schema assertion that marks its own message a
+            // warning (RSC-017), and a UTF-16 stylesheet (CSS-003 — the same
+            // split as RSC-027 for a UTF-16 XML resource).
             Rule::FileNotInManifest
             | Rule::XmlEncodingUtf16
             | Rule::IdentifierInvalidUuid
-            | Rule::DateSyntaxNotRecommended => Severity::Warning,
+            | Rule::DateSyntaxNotRecommended
+            | Rule::SchemaWarning
+            | Rule::CssEncodingUtf16 => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -589,10 +718,6 @@ impl Rule {
             Rule::IrregularDoctype => Some(FixHint::new(
                 "use-html5-doctype",
                 "replace the document type declaration with `<!DOCTYPE html>`",
-            )),
-            Rule::EmptyTitle => Some(FixHint::new(
-                "fill-title",
-                "give the content document's <title> element non-empty text",
             )),
             _ => None,
         }
@@ -633,7 +758,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         }
     };
 
-    let opf_path = match read_container_opf_path(&mut zip, &mut report) {
+    let (opf_path, renditions) = match read_container_opf_path(&mut zip, &mut report) {
         Ok(p) => p,
         Err(v) => {
             report.push(v);
@@ -696,6 +821,16 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
 
     let epub2 = is_epub2(&pkg);
     let epub3 = is_epub3(&pkg);
+    // PKG-013: EPUB 2 defines one OPS rendition per container. (EPUB 3 allows
+    // several — the Multiple Renditions extension — and holds them to their own
+    // rules instead.)
+    if epub2 && renditions > 1 {
+        report.push(Violation::new(
+            Rule::MultipleRenditions,
+            "META-INF/container.xml",
+            format!("the EPUB file includes {renditions} OPS renditions; EPUB 2 defines one"),
+        ));
+    }
     // Resources `META-INF/encryption.xml` encrypts (font obfuscation included):
     // their stored bytes are not the real content, and epubcheck can decrypt
     // none of them, so it skips every content check on them (RSC-004).
@@ -710,10 +845,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
     check_opf_url_validity(&pkg, &opf_path, &mut report);
     check_opf_structure(&pkg, &opf_dir, &opf_path, epub2, epub3, &mut report);
     check_fallback_chain_and_spine(&pkg, epub2, epub3, &opf_path, &mut report);
-    // RSC-005 schema channel over the package metadata and structure (both
-    // versions).
-    check_dc_content(&pkg, epub2, epub3, &opf_path, &mut report);
-    check_package_schema_structure(&pkg, epub2, epub3, &opf_path, &mut report);
+    check_creator_roles(&pkg, &opf_path, &mut report);
     // Dublin Core metadata value rules key on bokai's EPUB 3 understanding of
     // `<dc:*>`; a version-less/legacy package (OEB 1.x) uses a different
     // structure epubcheck rejects with OPF-001, so gate to EPUB 3.
@@ -722,14 +854,23 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         // OPF-028: EPUB 3 vocabulary-prefix declarations (the prefix mechanism is
         // EPUB 3's; a version-less/legacy package is rejected via OPF-001).
         check_prefix_declarations(&pkg, &opf_path, &mut report);
+        check_prefix_syntax(&pkg, &opf_path, &mut report);
+        check_property_vocabularies(&pkg, &opf_path, &mut report);
+        check_refines_graph(&pkg, &opf_path, &mut report);
         // RSC-006/029 and the package <link> rules are EPUB 3 (epubcheck's
         // OPFChecker30 / OPFHandler30).
         check_remote_and_data_urls(&pkg, &opf_path, &mut report);
         check_remote_references(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
         check_foreign_resources(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
         check_opf_links(&pkg, &opf_dir, &opf_path, &mut report);
-        // RSC-005 schema channel: the EPUB 3 nav schematron.
-        check_nav_occurrence(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
+        check_collections(&pkg, &opf_dir, &opf_path, &mut report);
+        check_search_key_maps(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
+        check_dictionary_content(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
+        check_region_based_navs(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
+        check_pagination(&pkg, &opf_dir, &mut zip, &encrypted, &opf_path, &mut report);
+        // Media overlays are an EPUB 3 feature (`CheckerFactory` builds an
+        // `OverlayChecker` only for VERSION_3).
+        check_media_overlays(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
     }
     check_xhtml_hrefs_and_reachability(
         &pkg,
@@ -742,15 +883,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         &opf_path,
         &mut report,
     );
-    check_content_conformance(
-        &pkg,
-        &opf_dir,
-        epub2,
-        epub3,
-        &mut zip,
-        &encrypted,
-        &mut report,
-    );
+    check_content_conformance(&pkg, &opf_dir, epub3, &mut zip, &encrypted, &mut report);
     check_css_references(
         &pkg,
         &opf_dir,
@@ -780,10 +913,6 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         &mut report,
     );
     check_xml_well_formedness(&opf_text, &opf_path, &mut report);
-    // RSC-005 schema channel: OPF attribute-grammar violations (opf:-namespaced
-    // attributes in EPUB 3; non-id/toc spine attributes in EPUB 2) and the
-    // package document's `id` attributes.
-    check_opf_schema(&opf_text, &opf_path, epub2, epub3, &mut report);
     check_xml_resources(
         &pkg,
         &opf_dir,
@@ -793,10 +922,22 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         &encrypted,
         &mut report,
     );
-    check_ncx_identifier(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
+    // The RSC-005 channel: every grammar and assertion set epubcheck runs, over
+    // every resource it runs them on. A version-less/legacy package is rejected
+    // with OPF-001 and never schema-validated.
     if epub2 || epub3 {
-        check_ncx_schema(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
+        check_schemas(
+            &pkg,
+            &opf_text,
+            &opf_dir,
+            &opf_path,
+            epub3,
+            &mut zip,
+            &encrypted,
+            &mut report,
+        );
     }
+    check_ncx_identifier(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
     check_obfuscated_fonts(&pkg, &opf_dir, &mut zip, &mut report);
     check_image_headers(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
     if epub3 {
@@ -850,6 +991,123 @@ fn check_xml_resources(
         if declares_utf8 {
             check_xml_well_formedness(&String::from_utf8_lossy(&bytes), &path, report);
         }
+    }
+}
+
+/// **RSC-005 / RSC-017** — the schema channel, over every resource epubcheck
+/// schema-validates: the two OCF metadata files, the package document, and each
+/// manifest item whose media type a schema covers. [`xml::engine`] owns which
+/// schemas apply; this owns which resources reach it.
+///
+/// One [`xml::engine::Engine`] serves the whole book, so the HTML5 module set
+/// (which `epub-xhtml-30.rnc` pulls in wholesale) is compiled once rather than
+/// per chapter.
+#[allow(clippy::too_many_arguments)]
+fn check_schemas(
+    pkg: &opf::Package,
+    opf_text: &str,
+    opf_dir: &str,
+    opf_path: &str,
+    epub3: bool,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    encrypted: &HashSet<String>,
+    report: &mut Report,
+) {
+    use xml::engine::{Engine, ResourceKind};
+
+    let mut engine = Engine::new();
+    // `META-INF/container.xml` is always present (the caller returns early
+    // otherwise); `encryption.xml` only when the book encrypts something.
+    for (kind, path) in [
+        (ResourceKind::Container, "META-INF/container.xml"),
+        (ResourceKind::Encryption, "META-INF/encryption.xml"),
+    ] {
+        if let Ok(text) = read_text(zip, path) {
+            run_schemas(&mut engine, kind, epub3, &text, path, report);
+        }
+    }
+    run_schemas(
+        &mut engine,
+        ResourceKind::Package,
+        epub3,
+        opf_text,
+        opf_path,
+        report,
+    );
+    for item in &pkg.manifest {
+        // A navigation document takes the navigation grammar rather than the
+        // plain XHTML one, whatever its media type says.
+        let kind = match item.properties.iter().any(|p| p == "nav") {
+            true => Some(ResourceKind::Nav),
+            false => ResourceKind::of(item.media_type.trim()),
+        };
+        let Some(kind) = kind else { continue };
+        let path = join_opf(opf_dir, &item.href);
+        // The package document is judged once, above — a manifest item pointing
+        // at it is a defect in its own right (OPF-099), not a second document.
+        if path == opf_path {
+            continue;
+        }
+        // A resource listed in `META-INF/encryption.xml` is never content-checked
+        // (epubcheck reports RSC-004 and skips it): its stored bytes are
+        // encrypted/obfuscated, so parsing them judges ciphertext.
+        if encrypted.contains(&path) {
+            continue;
+        }
+        let Ok(text) = read_text(zip, &path) else {
+            continue;
+        };
+        run_schemas(&mut engine, kind, epub3, &text, &path, report);
+    }
+}
+
+/// One resource through the engine, with the notes preprocessing makes on its
+/// way past (HTM-054 / HTM-061 — defects epubcheck reports while rewriting a
+/// document for its schemas, not from a schema).
+fn run_schemas(
+    engine: &mut xml::engine::Engine,
+    kind: xml::engine::ResourceKind,
+    epub3: bool,
+    text: &str,
+    path: &str,
+    report: &mut Report,
+) {
+    use xml::preprocess::Note;
+    use xml::schematron::Severity;
+
+    for note in xml::engine::Engine::preprocess_notes(kind, epub3, text) {
+        let (rule, line, message) = match note {
+            Note::InvalidDataAttribute { line, name } => (
+                Rule::InvalidDataAttribute,
+                line,
+                format!(
+                    "attribute {name:?} is not serializable as XML 1.0; a custom data attribute name must not contain an uppercase letter or a colon"
+                ),
+            ),
+            Note::ReservedCustomNamespace {
+                line,
+                namespace,
+                reserved,
+            } => (
+                Rule::ReservedCustomNamespace,
+                line,
+                format!(
+                    "custom element namespace {namespace:?} is reserved ({reserved} namespaces must not be used for custom elements)"
+                ),
+            ),
+        };
+        report.push(Violation::new(rule, format!("{path}:{line}"), message));
+    }
+    for message in engine.validate(kind, epub3, text) {
+        let rule = match message.severity {
+            Severity::Error => Rule::SchemaViolation,
+            Severity::Warning => Rule::SchemaWarning,
+        };
+        report.push(Violation::new(
+            rule,
+            format!("{path}:{}", message.line),
+            message.text,
+        ));
     }
 }
 
@@ -1153,134 +1411,8 @@ fn is_xml_based(media_type: &str) -> bool {
             .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("xml"))
 }
 
-/// The OPF (package) namespace. Attributes bound to it are never permitted in an
-/// EPUB 3 package document — `package-30.rnc` declares every attribute in no
-/// namespace (only `xml:lang` is namespaced) — whereas in EPUB 2 they are the
-/// legacy `opf:role`/`opf:file-as`/`opf:scheme`/… metadata refinements.
-const OPF_NS: &[u8] = b"http://www.idpf.org/2007/opf";
-
-/// The XHTML namespace. EPUB 2 content documents are routed through
-/// `ops20.nvdl`, which validates only elements bound to it (everything else is
-/// `allow`ed unvalidated), so the content-document schema rules below are scoped
-/// to it — both faithfully and conservatively.
-const XHTML_NS: &[u8] = b"http://www.w3.org/1999/xhtml";
-
-/// The EPUB 3 structural-semantics namespace, which `epub:type` belongs to. The
-/// nav schematron resolves `epub:type` through it, so a nav document that binds
-/// the `epub` prefix to any other URI declares no typed navs at all — which is
-/// precisely the defect [`check_nav_occurrence`] reports.
-const OPS_NS: &[u8] = b"http://www.idpf.org/2007/ops";
-
 /// The SVG namespace, for the SVG-specific content rules.
 const SVG_NS: &[u8] = b"http://www.w3.org/2000/svg";
-
-/// **RSC-005** (schema channel) — OPF attribute grammar. A namespace-resolved,
-/// faithful *subset* of the package RelaxNG grammars (`package-30.rnc` /
-/// `opf20.rng`), covering the two attribute-grammar violations that dominate the
-/// RSC-005 recall gap on the corpus, each keyed to the version where it applies:
-///
-/// - **EPUB 3** — any attribute resolving to the OPF namespace. The EPUB 3
-///   package grammar permits no OPF-namespaced attribute anywhere, so
-///   `opf:role`/`opf:file-as`/`opf:scheme` on `<dc:*>` (and any other
-///   OPF-namespaced attribute) is a schema violation. Legal in EPUB 2, hence the
-///   gate.
-/// - **EPUB 2** — an attribute other than (no-namespace) `id`/`toc` on
-///   `<spine>`. The EPUB 2 spine attlist is exactly `{id?, toc}`, so the EPUB-3
-///   `page-progression-direction` and the Adobe `page-map` extension (both legal
-///   or ignorable in EPUB 3) are schema violations here.
-///
-/// Both package grammars additionally type `id` as `xsd:ID`, so the package
-/// document's `id` attributes go through the shared [`IdScan`] (lexical NCName +
-/// per-document uniqueness) on the same walk.
-///
-/// Namespaces are resolved through an explicit prefix→URI scope stack (an
-/// unprefixed attribute has *no* namespace, per XML — the element's default
-/// namespace never applies to its attributes). Under-detection is a recall gap,
-/// never a false positive: every attribute flagged is one the corresponding
-/// vendored grammar rejects. Reported once per offending attribute (the
-/// granularity epubcheck's RelaxNG channel uses). Well-formedness is checked
-/// separately, so a parse error here just ends the scan.
-fn check_opf_schema(text: &str, path: &str, epub2: bool, epub3: bool, report: &mut Report) {
-    if !epub2 && !epub3 {
-        return; // version-less/legacy packages are OPF-001, not schema-validated
-    }
-    let mut reader = Reader::from_str(text);
-    // In-scope namespace bindings: a frame of (prefix, uri) per open element.
-    // The default namespace binds the empty prefix; `xml` is implicitly bound.
-    let mut scopes: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
-    let mut ids = IdScan::default();
-    // One frame per open element that requires children: (element, child it
-    // requires, seen). Both grammars spell these as `element X { Y+ }`, so an
-    // `<X>` that closes without a `<Y>` is a schema error.
-    let mut required_children: Vec<(Vec<u8>, &'static [u8], bool)> = Vec::new();
-    let requires = |local: &[u8]| -> Option<&'static [u8]> {
-        match local {
-            b"guide" => Some(b"reference"),
-            b"tours" => Some(b"tour"),
-            b"tour" => Some(b"site"),
-            _ => None,
-        }
-    };
-    let open = |e: &quick_xml::events::BytesStart,
-                required_children: &mut Vec<(Vec<u8>, &'static [u8], bool)>| {
-        let name = e.name();
-        let local = local_name(name.as_ref()).to_vec();
-        if let Some((_, child, seen)) = required_children.last_mut()
-            && *child == local
-        {
-            *seen = true;
-        }
-        requires(&local).map(|child| (local, child))
-    };
-    loop {
-        match reader.read_event() {
-            Err(_) | Ok(Event::Eof) => return,
-            Ok(Event::Start(e)) => {
-                scopes.push(xmlns_frame(&e));
-                report_disallowed_opf_attrs(&e, &scopes, epub2, epub3, path, report);
-                ids.visit(&e, true, path, report);
-                let entered = open(&e, &mut required_children);
-                required_children.push(match entered {
-                    Some((local, child)) => (local, child, false),
-                    None => (Vec::new(), b"", true),
-                });
-            }
-            Ok(Event::Empty(e)) => {
-                scopes.push(xmlns_frame(&e));
-                report_disallowed_opf_attrs(&e, &scopes, epub2, epub3, path, report);
-                ids.visit(&e, true, path, report);
-                if let Some((local, child)) = open(&e, &mut required_children) {
-                    report_incomplete_element(&local, child, path, report);
-                }
-                scopes.pop();
-            }
-            Ok(Event::End(_)) => {
-                scopes.pop();
-                if let Some((local, child, seen)) = required_children.pop()
-                    && !seen
-                {
-                    report_incomplete_element(&local, child, path, report);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// `element X { Y+ }` violated — an OPF element that closed without the child
-/// its grammar requires (`<guide>` without a `<reference>`, `<tours>` without a
-/// `<tour>`, `<tour>` without a `<site>`).
-fn report_incomplete_element(local: &[u8], child: &[u8], path: &str, report: &mut Report) {
-    report.push(Violation::new(
-        Rule::PackageIncomplete,
-        path.to_string(),
-        format!(
-            "element {:?} incomplete; missing required element {:?}",
-            String::from_utf8_lossy(local),
-            String::from_utf8_lossy(child)
-        ),
-    ));
-}
 
 /// The (prefix, uri) namespace declarations on one element: `xmlns="…"` binds the
 /// empty prefix, `xmlns:p="…"` binds `p`.
@@ -1295,16 +1427,6 @@ fn xmlns_frame(e: &quick_xml::events::BytesStart) -> Vec<(Vec<u8>, Vec<u8>)> {
         }
     }
     frame
-}
-
-/// Resolve an attribute name's namespace URI. An unprefixed attribute has no
-/// namespace (the default namespace never applies to attributes); `xml:` is
-/// always the XML namespace; any other prefix is looked up innermost-first in the
-/// scope stack (unbound → `None`, which the well-formedness pass reports as
-/// RSC-016).
-fn attr_namespace(key: &[u8], scopes: &[Vec<(Vec<u8>, Vec<u8>)>]) -> Option<Vec<u8>> {
-    let colon = key.iter().position(|&c| c == b':')?;
-    resolve_prefix(&key[..colon], scopes)
 }
 
 /// Resolve an *element* name's namespace URI: the binding for its prefix, or the
@@ -1332,597 +1454,30 @@ fn resolve_prefix(prefix: &[u8], scopes: &[Vec<(Vec<u8>, Vec<u8>)>]) -> Option<V
         .map(|(_, uri)| uri.clone())
 }
 
-/// **RSC-005** (schema channel) — the two `id`-attribute rules every EPUB schema
-/// shares, accumulated over one document:
-///
-/// - **Lexical.** The package (`package-30.rnc` / `opf20.rng`), NCX (`ncx.rng`)
-///   and *EPUB 2* XHTML (`content.rng`) grammars all type `id` as `xsd:ID`, whose
-///   lexical space is `xsd:NCName` — Jing reports a violation as "value of
-///   attribute "id" is invalid; must be an XML name without colons". EPUB 3
-///   content documents instead use the HTML5 `token` type, which allows anything
-///   non-empty and whitespace-free, hence the per-document `ncname` flag.
-/// - **Uniqueness.** `id-unique.sch` (EPUB 2 and EPUB 3 content documents, the
-///   EPUB 3 package document) and the `*_idAttrUnique` patterns (the EPUB 2
-///   package document, the NCX) all require an `id` value to occur once per
-///   document.
-///
-/// Reported once per offending value so a document that repeats one id hundreds
-/// of times yields one finding.
-#[derive(Default)]
-struct IdScan {
-    seen: HashSet<String>,
-    reported: HashSet<String>,
-}
-
-impl IdScan {
-    fn visit(
-        &mut self,
-        e: &quick_xml::events::BytesStart,
-        ncname: bool,
-        path: &str,
-        report: &mut Report,
-    ) {
-        let Some(attr) = e.attributes().flatten().find(|a| a.key.as_ref() == b"id") else {
-            return;
-        };
-        let value = String::from_utf8_lossy(&attr.value).into_owned();
-        if ncname && !may_be_ncname(&value) {
-            report.push(Violation::new(
-                Rule::IdNotNcName,
-                path.to_string(),
-                format!(
-                    "value of attribute id ({value:?}) is invalid; must be an XML name without colons"
-                ),
-            ));
-        }
-        if !self.seen.insert(value.clone()) && self.reported.insert(value.clone()) {
-            report.push(Violation::new(
-                Rule::DuplicateId,
-                path.to_string(),
-                format!("duplicate id {value:?}"),
-            ));
-        }
-    }
-}
-
-/// Whether `s` *may* be an `xsd:NCName` — deliberately one-sided. XML's `Name`
-/// production admits a large set of Unicode letters whose exact membership varies
-/// by XML edition, so only ASCII is judged: a value is rejected when it is empty,
-/// starts with an ASCII character other than a letter or `_`, or contains an
-/// ASCII character outside `[A-Za-z0-9._-]` (a colon, an interior space, `/`, …).
-/// A value carrying non-ASCII characters is accepted. Every rejection is
-/// therefore one the NCName production rejects in every edition —
-/// under-detection is a recall gap, never a false positive.
-///
-/// `xsd:NCName` derives from `xsd:token`, whose `whiteSpace` facet is *collapse*,
-/// so surrounding whitespace is stripped before the lexical space is checked:
-/// `id=" x "` is valid (epubcheck's own
-/// `conformance-xml-id-leading-trailing-spaces-valid` fixture).
-fn may_be_ncname(s: &str) -> bool {
-    let s = s.trim();
-    let Some(first) = s.chars().next() else {
-        return false; // xsd:NCName has no empty value
-    };
-    if first.is_ascii() && !(first.is_ascii_alphabetic() || first == '_') {
-        return false;
-    }
-    !s.chars()
-        .any(|c| c.is_ascii() && !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')))
-}
-
-/// The Dublin Core element namespace, and the XML Schema instance namespace that
-/// carries `xsi:type` in EPUB 2 metadata.
-const DC_NS: &[u8] = b"http://purl.org/dc/elements/1.1/";
-const XSI_NS: &[u8] = b"http://www.w3.org/2001/XMLSchema-instance";
-const XML_NS: &[u8] = b"http://www.w3.org/XML/1998/namespace";
-
-fn report_disallowed_opf_attrs(
-    e: &quick_xml::events::BytesStart,
-    scopes: &[Vec<(Vec<u8>, Vec<u8>)>],
-    epub2: bool,
-    epub3: bool,
-    path: &str,
-    report: &mut Report,
-) {
-    let name = e.name();
-    let local = local_name(name.as_ref());
-    // The EPUB 2 element attlists this check knows, as the *union* of what any
-    // one of them permits (`opf20.rng`) — an attribute outside the union is one
-    // every relevant attlist rejects, so a union is zero-false-positive:
-    //
-    // - `<spine>`: `{id?, toc}`.
-    // - `<item>`: `{id, href, media-type, fallback?, fallback-style?,
-    //   required-namespace?, required-modules?}` — no EPUB 3 `properties`.
-    // - `<dc:*>`: `{id?, xml:lang?, opf:role?, opf:file-as?, opf:scheme?,
-    //   opf:event?, xsi:type?}` — the OPF refinements are *namespaced*, so an
-    //   unprefixed `role`/`file-as`/`scheme` is a violation.
-    let is_dc = elem_namespace(name.as_ref(), scopes).as_deref() == Some(DC_NS);
-    let epub2_allowed: Option<(&str, &[&[u8]])> = match local {
-        b"spine" => Some(("<spine>", &[b"id", b"toc"])),
-        b"item" => Some((
-            "<item>",
-            &[
-                b"id",
-                b"href",
-                b"media-type",
-                b"fallback",
-                b"fallback-style",
-                b"required-namespace",
-                b"required-modules",
-            ],
-        )),
-        _ if is_dc => Some(("a <dc:*> element", &[b"id"])),
-        _ => None,
-    };
-    for attr in e.attributes().flatten() {
-        let key = attr.key.as_ref();
-        if key == b"xmlns" || key.starts_with(b"xmlns:") {
-            continue; // namespace declarations are not schema attributes
-        }
-        let ns = attr_namespace(key, scopes);
-        if epub3 {
-            // `package-30.rnc`: `opf.spine.attlist &= opf.id.attr? &
-            // opf.spine.toc.attr? & opf.ppd.attr?` — nothing else, so the Adobe
-            // `page-map` extension is a violation here as it is in EPUB 2.
-            let bad_spine = local == b"spine"
-                && ns.is_none()
-                && !matches!(key, b"id" | b"toc" | b"page-progression-direction");
-            if ns.as_deref() == Some(OPF_NS) || bad_spine {
-                report.push(Violation::new(
-                    Rule::DisallowedOpfAttribute,
-                    path.to_string(),
-                    format!(
-                        "attribute {:?} is not permitted by the EPUB 3 package grammar",
-                        String::from_utf8_lossy(key)
-                    ),
-                ));
-            }
-            continue;
-        }
-        let Some((element, allowed)) = epub2_allowed else {
-            continue;
-        };
-        if !epub2 {
-            continue;
-        }
-        let permitted = match ns.as_deref() {
-            None => allowed.contains(&key),
-            // A `<dc:*>` element takes the namespaced OPF refinements plus
-            // `xml:lang` / `xsi:type`; no other element here takes a namespaced
-            // attribute at all.
-            Some(OPF_NS) => {
-                is_dc && matches!(local_name(key), b"role" | b"file-as" | b"scheme" | b"event")
-            }
-            Some(XML_NS) => is_dc && local_name(key) == b"lang",
-            Some(XSI_NS) => is_dc && local_name(key) == b"type",
-            Some(_) => false,
-        };
-        if !permitted {
-            report.push(Violation::new(
-                Rule::DisallowedOpfAttribute,
-                path.to_string(),
-                format!(
-                    "attribute {:?} is not permitted on {element} in an EPUB 2 package",
-                    String::from_utf8_lossy(key)
-                ),
-            ));
-        }
-    }
-}
-
-/// **RSC-005** (schema channel) — the content-document schema rules that need no
-/// grammar engine, over one XHTML content document:
-///
-/// - **`id` attributes** (both versions) — [`IdScan`]. The NCName constraint is
-///   EPUB 2 only (EPUB 3 types `id` as an HTML5 token); uniqueness holds in both.
-/// - **`<img>` required attributes** (EPUB 2) — XHTML 1.1's `img.attlist` makes
-///   `alt` and `src` mandatory. EPUB 3's HTML5 grammar does not, so this is
-///   version-gated (a missing `alt` there is an accessibility warning instead).
-/// - **`<meta>` attributes** (EPUB 2) — XHTML 1.1's `meta.attlist` is exactly
-///   `{http-equiv?, name?, content?, scheme?}` plus the i18n attributes, so the
-///   HTML5 `charset` (and vendor extensions like Adobe's `value`) are violations.
-/// - **Nested hyperlinks** (EPUB 2) — `20/sch/xhtml.sch` reports an `<a>` with an
-///   `<a>` descendant.
-///
-/// Every rule is scoped to elements resolving to the XHTML namespace, matching
-/// what `ops20.nvdl` routes into the grammar (other namespaces are allowed
-/// through unvalidated). A parse error just ends the scan — well-formedness is
-/// [`check_xml_well_formedness`]'s job.
-fn check_content_schema(text: &str, path: &str, epub2: bool, epub3: bool, report: &mut Report) {
-    if !epub2 && !epub3 {
-        return; // version-less/legacy packages are OPF-001, not schema-validated
-    }
+/// **RSC-015** over one document. SVG reaches a publication two ways — as a
+/// content document of its own and inline in XHTML — so this walks either,
+/// keying on the namespace rather than the file's media type.
+fn check_svg_references(text: &str, path: &str, report: &mut Report) {
     let mut reader = Reader::from_str(text);
     let mut scopes: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
-    // One frame per open element: whether it is an XHTML `<a>`, so a nested
-    // hyperlink is "an `<a>` opened while another is still open".
-    let mut anchors: Vec<bool> = Vec::new();
-    let mut ids = IdScan::default();
     loop {
         match reader.read_event() {
             Err(_) | Ok(Event::Eof) => return,
             Ok(Event::Start(e)) => {
                 scopes.push(xmlns_frame(&e));
-                let in_anchor = anchors.iter().any(|a| *a);
-                let is_anchor =
-                    content_element_rules(&e, &scopes, epub2, in_anchor, &mut ids, path, report);
-                anchors.push(is_anchor);
+                check_svg_element(&e, &scopes, path, report);
             }
             Ok(Event::Empty(e)) => {
                 scopes.push(xmlns_frame(&e));
-                let in_anchor = anchors.iter().any(|a| *a);
-                content_element_rules(&e, &scopes, epub2, in_anchor, &mut ids, path, report);
+                check_svg_element(&e, &scopes, path, report);
                 scopes.pop();
             }
             Ok(Event::End(_)) => {
                 scopes.pop();
-                anchors.pop();
             }
             _ => {}
         }
     }
-}
-
-/// `Common.attrib` of the vendored `20/rng/xhtml/attribs.rng` — `Core.attrib`
-/// (`id`, `class`, `title`, `style`) plus `I18n.attrib` (`lang`, `xml:lang`,
-/// `dir`). Almost every XHTML 1.1 element's attlist is this set plus a few of
-/// its own. The event-handler module is not among `content.rng`'s includes, so
-/// `onclick` and friends are declared nowhere.
-const XHTML11_COMMON_ATTRS: &[&[u8]] = &[
-    b"class",
-    b"dir",
-    b"id",
-    b"lang",
-    b"style",
-    b"title",
-    b"xml:lang",
-];
-
-/// The element and attribute grammar of an EPUB 2 XHTML content document,
-/// derived from the vendored `20/rng/content-xhtml.rng` and the XHTML 1.1
-/// modules it includes. Each entry is `(element, inherits_common, own)`:
-/// `true` means the attlist is [`XHTML11_COMMON_ATTRS`] plus `own`, `false`
-/// that `own` *is* the whole attlist (a dozen elements take only part of
-/// `Common`).
-///
-/// The element list is exhaustive, which makes it two checks in one: an
-/// XHTML-namespace element absent from it is declared nowhere in the schema.
-/// The forms, ruby, frames, legacy and name-identification modules are not
-/// included, so `<u>`, `<font>`, `<center>`, `<input>`, `<name>` and every
-/// HTML5 element are errors in an EPUB 2 content document.
-const XHTML11_ELEMENTS: &[Xhtml11Attlist] = &[
-    (
-        b"a",
-        true,
-        &[
-            b"accesskey",
-            b"charset",
-            b"coords",
-            b"href",
-            b"hreflang",
-            b"rel",
-            b"rev",
-            b"shape",
-            b"tabindex",
-            b"target",
-            b"type",
-        ],
-    ),
-    (b"abbr", true, &[]),
-    (b"acronym", true, &[]),
-    (b"address", true, &[]),
-    (
-        b"area",
-        true,
-        &[
-            b"accesskey",
-            b"alt",
-            b"coords",
-            b"href",
-            b"nohref",
-            b"shape",
-            b"tabindex",
-            b"target",
-        ],
-    ),
-    (b"b", true, &[]),
-    (b"bdo", true, &[]),
-    (b"big", true, &[]),
-    (b"blockquote", true, &[b"cite"]),
-    (b"body", true, &[]),
-    (b"caption", true, &[]),
-    (b"cite", true, &[]),
-    (b"code", true, &[]),
-    (
-        b"col",
-        true,
-        &[b"align", b"char", b"charoff", b"span", b"valign", b"width"],
-    ),
-    (
-        b"colgroup",
-        true,
-        &[b"align", b"char", b"charoff", b"span", b"valign", b"width"],
-    ),
-    (b"dd", true, &[]),
-    (b"del", true, &[b"cite", b"datetime"]),
-    (b"dfn", true, &[]),
-    (b"div", true, &[]),
-    (b"dl", true, &[]),
-    (b"dt", true, &[]),
-    (b"em", true, &[]),
-    (b"h1", true, &[]),
-    (b"h2", true, &[]),
-    (b"h3", true, &[]),
-    (b"h4", true, &[]),
-    (b"h5", true, &[]),
-    (b"h6", true, &[]),
-    (b"hr", true, &[]),
-    (b"i", true, &[]),
-    (
-        b"img",
-        true,
-        &[
-            b"alt",
-            b"height",
-            b"ismap",
-            b"longdesc",
-            b"src",
-            b"usemap",
-            b"width",
-        ],
-    ),
-    (b"ins", true, &[b"cite", b"datetime"]),
-    (b"kbd", true, &[]),
-    (b"li", true, &[]),
-    (
-        b"link",
-        true,
-        &[
-            b"charset",
-            b"href",
-            b"hreflang",
-            b"media",
-            b"rel",
-            b"rev",
-            b"type",
-        ],
-    ),
-    (b"noscript", true, &[]),
-    (
-        b"object",
-        true,
-        &[
-            b"archive",
-            b"classid",
-            b"codebase",
-            b"codetype",
-            b"data",
-            b"declare",
-            b"height",
-            b"name",
-            b"standby",
-            b"tabindex",
-            b"type",
-            b"usemap",
-            b"width",
-        ],
-    ),
-    (b"ol", true, &[]),
-    (b"p", true, &[]),
-    (b"pre", true, &[b"xml:space"]),
-    (b"q", true, &[b"cite"]),
-    (b"samp", true, &[]),
-    (b"small", true, &[]),
-    (b"span", true, &[]),
-    (b"strong", true, &[]),
-    (b"sub", true, &[]),
-    (b"sup", true, &[]),
-    (
-        b"table",
-        true,
-        &[
-            b"border",
-            b"cellpadding",
-            b"cellspacing",
-            b"frame",
-            b"rules",
-            b"summary",
-            b"width",
-        ],
-    ),
-    (b"tbody", true, &[b"align", b"char", b"charoff", b"valign"]),
-    (
-        b"td",
-        true,
-        &[
-            b"abbr", b"align", b"axis", b"char", b"charoff", b"colspan", b"headers", b"rowspan",
-            b"scope", b"valign",
-        ],
-    ),
-    (b"tfoot", true, &[b"align", b"char", b"charoff", b"valign"]),
-    (
-        b"th",
-        true,
-        &[
-            b"abbr", b"align", b"axis", b"char", b"charoff", b"colspan", b"headers", b"rowspan",
-            b"scope", b"valign",
-        ],
-    ),
-    (b"thead", true, &[b"align", b"char", b"charoff", b"valign"]),
-    (b"tr", true, &[b"align", b"char", b"charoff", b"valign"]),
-    (b"tt", true, &[]),
-    (b"ul", true, &[]),
-    (b"var", true, &[]),
-    (
-        b"applet",
-        false,
-        &[
-            b"alt",
-            b"archive",
-            b"class",
-            b"code",
-            b"codebase",
-            b"height",
-            b"id",
-            b"object",
-            b"style",
-            b"title",
-            b"width",
-        ],
-    ),
-    (b"base", false, &[b"href", b"target"]),
-    (b"br", false, &[b"class", b"id", b"style", b"title"]),
-    (b"head", false, &[b"dir", b"lang", b"profile", b"xml:lang"]),
-    (b"html", false, &[b"dir", b"lang", b"version", b"xml:lang"]),
-    (
-        b"iframe",
-        false,
-        &[
-            b"class",
-            b"frameborder",
-            b"height",
-            b"id",
-            b"longdesc",
-            b"marginheight",
-            b"marginwidth",
-            b"scrolling",
-            b"src",
-            b"style",
-            b"title",
-            b"width",
-        ],
-    ),
-    (
-        b"map",
-        false,
-        &[b"class", b"dir", b"id", b"lang", b"title", b"xml:lang"],
-    ),
-    (
-        b"meta",
-        false,
-        &[
-            b"content",
-            b"dir",
-            b"http-equiv",
-            b"lang",
-            b"name",
-            b"scheme",
-            b"xml:lang",
-        ],
-    ),
-    (
-        b"param",
-        false,
-        &[b"id", b"name", b"type", b"value", b"valuetype"],
-    ),
-    (
-        b"script",
-        false,
-        &[b"charset", b"defer", b"src", b"type", b"xml:space"],
-    ),
-    (
-        b"style",
-        false,
-        &[
-            b"dir",
-            b"lang",
-            b"media",
-            b"title",
-            b"type",
-            b"xml:lang",
-            b"xml:space",
-        ],
-    ),
-    (b"title", false, &[b"dir", b"lang", b"xml:lang"]),
-];
-
-/// One row of [`XHTML11_ELEMENTS`]: `(element, inherits_common, own_attributes)`.
-type Xhtml11Attlist = (&'static [u8], bool, &'static [&'static [u8]]);
-
-/// The XHTML 1.1 attlist of one element: `(inherits_common, own_attributes)`,
-/// or `None` when the schema declares no such element.
-fn xhtml11_attlist(local: &[u8]) -> Option<(bool, &'static [&'static [u8]])> {
-    XHTML11_ELEMENTS
-        .iter()
-        .find(|(name, _, _)| *name == local)
-        .map(|(_, common, own)| (*common, *own))
-}
-
-/// True when `attr` is permitted on an element with this attlist.
-fn xhtml11_allows(attlist: (bool, &[&[u8]]), attr: &[u8]) -> bool {
-    let (inherits_common, own) = attlist;
-    own.contains(&attr) || (inherits_common && XHTML11_COMMON_ATTRS.contains(&attr))
-}
-
-/// One element of [`check_content_schema`]'s walk. Returns whether the element is
-/// an XHTML `<a>`, which the caller stacks to detect nested hyperlinks.
-fn content_element_rules(
-    e: &quick_xml::events::BytesStart,
-    scopes: &[Vec<(Vec<u8>, Vec<u8>)>],
-    epub2: bool,
-    in_anchor: bool,
-    ids: &mut IdScan,
-    path: &str,
-    report: &mut Report,
-) -> bool {
-    let ns = elem_namespace(e.name().as_ref(), scopes);
-    if ns.as_deref() == Some(SVG_NS) {
-        check_svg_element(e, path, report);
-        return false;
-    }
-    if ns.as_deref() != Some(XHTML_NS) {
-        return false;
-    }
-    ids.visit(e, epub2, path, report);
-    let name = e.name();
-    let local = local_name(name.as_ref());
-    if !epub2 {
-        check_epub3_content_element(e, local, path, report);
-        return local == b"a";
-    }
-    report_disallowed_content_attrs(e, scopes, local, path, report);
-    // XHTML 1.1 types `href`/`src` as `xsd:anyURI`, whose lexical space Jing
-    // rejects for the same empty-host URLs the WHATWG parser does (RSC-020's
-    // second class). EPUB 3's HTML5 grammar types them as plain strings.
-    for attr in e.attributes().flatten() {
-        if matches!(local_name(attr.key.as_ref()), b"href" | b"src")
-            && url_has_empty_host(&String::from_utf8_lossy(&attr.value))
-        {
-            report.push(Violation::new(
-                Rule::UriAttributeInvalid,
-                path.to_string(),
-                format!(
-                    "value of attribute {:?} is invalid; must be a URI",
-                    String::from_utf8_lossy(attr.key.as_ref())
-                ),
-            ));
-        }
-    }
-    match local {
-        b"img" => {
-            for required in [b"alt".as_slice(), b"src".as_slice()] {
-                if !e.attributes().flatten().any(|a| a.key.as_ref() == required) {
-                    report.push(Violation::new(
-                        Rule::MissingRequiredAttribute,
-                        path.to_string(),
-                        format!(
-                            "element img missing required attribute {:?}",
-                            String::from_utf8_lossy(required)
-                        ),
-                    ));
-                }
-            }
-        }
-        b"a" if in_anchor => {
-            report.push(Violation::new(
-                Rule::NestedHyperlink,
-                path.to_string(),
-                "the \"a\" element cannot contain any nested \"a\" elements",
-            ));
-        }
-        _ => {}
-    }
-    local == b"a"
 }
 
 /// **RSC-015** — an SVG `<use>` instantiates the element its fragment names, so
@@ -1931,8 +1486,15 @@ fn content_element_rules(
 /// href is meaningless without a fragment in every SVG version; the paint and
 /// clip-path reference types epubcheck also covers need the SVG reference-typing
 /// model that RSC-014 waits on, so missing them is a recall gap, not an FP.
-fn check_svg_element(e: &quick_xml::events::BytesStart, path: &str, report: &mut Report) {
-    if local_name(e.name().as_ref()) != b"use" {
+fn check_svg_element(
+    e: &quick_xml::events::BytesStart,
+    scopes: &[Vec<(Vec<u8>, Vec<u8>)>],
+    path: &str,
+    report: &mut Report,
+) {
+    if elem_namespace(e.name().as_ref(), scopes).as_deref() != Some(SVG_NS)
+        || local_name(e.name().as_ref()) != b"use"
+    {
         return;
     }
     // `href` (SVG 2) or `xlink:href` (SVG 1.1), by local name.
@@ -1946,146 +1508,6 @@ fn check_svg_element(e: &quick_xml::events::BytesStart, path: &str, report: &mut
             path.to_string(),
             format!("a fragment identifier is required for the svg use reference {href:?}"),
         ));
-    }
-}
-
-/// The two EPUB 3 content-document rules that are one element wide:
-///
-/// - `epub-xhtml-30.sch`'s `encoding.decl.state` — a `<meta>` whose `http-equiv`
-///   is (case-insensitively) `content-type` must carry a `content` matching
-///   `text/html;\s*charset=utf-8`. The Schematron uses an unanchored `matches()`
-///   over `normalize-space(@content)`, and XSD's `\s` is ASCII-only, so a book
-///   separating the parameters with an ideographic space fails it.
-/// - `body.attrs` of the vendored `mod/html5/meta.rnc` — `<body>` accepts only
-///   the four ARIA roles `application`, `document`, `none` and `presentation`
-///   (a DPUB role such as `doc-cover` belongs on a descendant, not the body).
-fn check_epub3_content_element(
-    e: &quick_xml::events::BytesStart,
-    local: &[u8],
-    path: &str,
-    report: &mut Report,
-) {
-    match local {
-        b"meta" => {
-            let Some(equiv) = attr_by_local(e, b"http-equiv") else {
-                return;
-            };
-            if !equiv.trim().eq_ignore_ascii_case("content-type") {
-                return;
-            }
-            let content = attr_by_local(e, b"content").unwrap_or_default();
-            if !content_type_declares_utf8_html(&content) {
-                report.push(Violation::new(
-                    Rule::MetaEncodingDeclaration,
-                    path.to_string(),
-                    format!(
-                        "the meta element in encoding declaration state (http-equiv=\"content-type\") must have the value \"text/html; charset=utf-8\", not {content:?}"
-                    ),
-                ));
-            }
-        }
-        b"body" => {
-            let Some(role) = attr_by_local(e, b"role") else {
-                return;
-            };
-            const BODY_ROLES: [&str; 4] = ["application", "document", "none", "presentation"];
-            if !BODY_ROLES.contains(&role.trim()) {
-                report.push(Violation::new(
-                    Rule::BodyRoleNotAllowed,
-                    path.to_string(),
-                    format!(
-                        "value of attribute \"role\" is invalid on <body>; must be equal to \"application\", \"document\", \"none\" or \"presentation\", not {role:?}"
-                    ),
-                ));
-            }
-        }
-        _ => {}
-    }
-}
-
-/// The Schematron's `matches(normalize-space(@content),'text/html;\s*charset=utf-8','i')`
-/// — an unanchored, ASCII-case-insensitive search whose only flexible part is a
-/// run of ASCII whitespace after the semicolon.
-fn content_type_declares_utf8_html(content: &str) -> bool {
-    // `normalize-space` collapses only the four XML whitespace characters — an
-    // ideographic space stays put and breaks the match, which is exactly the
-    // corpus case.
-    const XML_WS: [char; 4] = [' ', '\t', '\r', '\n'];
-    let collapsed: String = content
-        .split(XML_WS)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let hay = collapsed.to_ascii_lowercase();
-    let Some(head) = hay.find("text/html;") else {
-        return false;
-    };
-    let rest = hay[head + "text/html;".len()..].trim_start_matches([' ', '\t', '\n', '\r']);
-    rest.starts_with("charset=utf-8")
-}
-
-/// The EPUB 2 content-document element and attribute grammar for one XHTML
-/// element, read off [`XHTML11_ELEMENTS`]:
-///
-/// - An element the schema declares nowhere (`<u>`, `<center>`, `<input>`, any
-///   HTML5 element) is an error in its own right, and its attributes are not
-///   judged — epubcheck reports the element, not each attribute.
-/// - Otherwise every no-namespace attribute must appear in the element's
-///   attlist, as must `xml:lang` and `xml:space` (the only two the grammar
-///   names in the XML namespace).
-/// - An attribute in the EPUB 3 structural-semantics namespace (`epub:type`) is
-///   declared nowhere, on any element.
-///
-/// Attributes in any *other* namespace are left alone, so this stays a subset of
-/// what the grammar rejects: under-detection is a recall gap, never a false
-/// positive.
-fn report_disallowed_content_attrs(
-    e: &quick_xml::events::BytesStart,
-    scopes: &[Vec<(Vec<u8>, Vec<u8>)>],
-    local: &[u8],
-    path: &str,
-    report: &mut Report,
-) {
-    let Some(attlist) = xhtml11_attlist(local) else {
-        report.push(Violation::new(
-            Rule::UndeclaredContentElement,
-            path.to_string(),
-            format!(
-                "element {:?} is not allowed anywhere in an EPUB 2 content document",
-                String::from_utf8_lossy(local)
-            ),
-        ));
-        return;
-    };
-    for attr in e.attributes().flatten() {
-        let key = attr.key.as_ref();
-        if key == b"xmlns" || key.starts_with(b"xmlns:") {
-            continue; // namespace declarations are not schema attributes
-        }
-        let ns = attr_namespace(key, scopes);
-        let attr_local = local_name(key);
-        // The grammar spells the two XML-namespace attributes it declares with
-        // their `xml:` prefix; every other declared attribute is in no namespace.
-        let judged: Option<Vec<u8>> = match ns.as_deref() {
-            None => Some(attr_local.to_vec()),
-            Some(XML_NS) if matches!(attr_local, b"lang" | b"space") => {
-                Some([b"xml:", attr_local].concat())
-            }
-            _ => None,
-        };
-        let disallowed =
-            ns.as_deref() == Some(OPS_NS) || judged.is_some_and(|k| !xhtml11_allows(attlist, &k));
-        if disallowed {
-            report.push(Violation::new(
-                Rule::DisallowedContentAttribute,
-                path.to_string(),
-                format!(
-                    "attribute {:?} is not permitted on <{}> in an EPUB 2 content document",
-                    String::from_utf8_lossy(key),
-                    String::from_utf8_lossy(local)
-                ),
-            ));
-        }
     }
 }
 
@@ -2122,19 +1544,6 @@ fn check_opf_structure(
                 opf_path,
                 format!("unique-identifier {uid:?} matches no <dc:identifier id=…>"),
             ));
-            // `package-30.sch`'s `opf.uid` asserts the same thing, so epubcheck
-            // reports the schema channel alongside OPF-030. EPUB 2 instead types
-            // the attribute as `xsd:IDREF` in `opf20.rng`, whose failure Jing
-            // words differently — hence the EPUB 3 gate.
-            if epub3 {
-                report.push(Violation::new(
-                    Rule::UnresolvedUniqueIdentifier,
-                    opf_path,
-                    format!(
-                        "package element unique-identifier attribute does not resolve to a dc:identifier element (given reference was {uid:?})"
-                    ),
-                ));
-            }
         }
         _ => {}
     }
@@ -2326,6 +1735,22 @@ fn check_fallback_chain_and_spine(
             continue; // unknown idref is OPF-049
         };
         if is_blessed_spine_type(&item.media_type, epub2) {
+            continue;
+        }
+        // OPF-042: a stylesheet or an image is not merely un-blessed, it is
+        // *impermissible* in the spine — no fallback can make it a document to
+        // read, so epubcheck reports the media type instead of asking for one.
+        if is_blessed_image_type(&item.media_type)
+            || item.media_type.trim().eq_ignore_ascii_case("text/css")
+        {
+            report.push(Violation::new(
+                Rule::SpineMediaTypeNotPermitted,
+                opf_path,
+                format!(
+                    "{:?} is not a permissible spine media-type",
+                    item.media_type
+                ),
+            ));
             continue;
         }
         if item.fallback.is_none() {
@@ -2525,9 +1950,9 @@ fn parse_declared_prefixes(decl: &str) -> HashSet<String> {
 /// (epubcheck runs it from `OPFHandler30`).
 ///
 /// A bare/unprefixed token uses the default vocabulary (never OPF-028); a
-/// malformed `:name`/`prefix:` token is OPF-026 (not ported); a token whose
-/// prefix *is* known but whose local name is undefined is OPF-027 (not ported —
-/// it needs the per-vocab name tables). Reported once per distinct prefix.
+/// malformed `:name`/`prefix:` token is OPF-026 and a known prefix with an
+/// undefined local name is OPF-027, both [`check_property_vocabularies`]'s.
+/// Reported once per distinct prefix.
 fn check_prefix_declarations(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
     let declared = parse_declared_prefixes(pkg.prefix_decl.as_deref().unwrap_or(""));
     let mut reported: HashSet<String> = HashSet::new();
@@ -2578,41 +2003,67 @@ fn check_opf_url_validity(pkg: &opf::Package, opf_path: &str, report: &mut Repor
     }
 }
 
-/// Dublin Core metadata-value checks:
+/// The MARC Relator codes epubcheck accepts in an EPUB 2 `opf:role`, verbatim
+/// from `OPFHandler`'s table. A code outside it — other than the `oth.`
+/// prefix, which the spec reserves for a role outside the scheme — is OPF-052.
+const MARC_RELATORS: &[&str] = &[
+    "abr", "acp", "act", "adi", "adp", "aft", "anl", "anm", "ann", "ant", "ape", "apl", "app",
+    "aqt", "arc", "ard", "arr", "art", "asg", "asn", "ato", "att", "auc", "aud", "aui", "aus",
+    "aut", "bdd", "bjd", "bkd", "bkp", "blw", "bnd", "bpd", "brd", "brl", "bsl", "cas", "ccp",
+    "chr", "clb", "cli", "cll", "clr", "clt", "cmm", "cmp", "cmt", "cnd", "cng", "cns", "coe",
+    "col", "com", "con", "cor", "cos", "cot", "cou", "cov", "cpc", "cpe", "cph", "cpl", "cpt",
+    "cre", "crp", "crr", "crt", "csl", "csp", "cst", "ctb", "cte", "ctg", "ctr", "cts", "ctt",
+    "cur", "cwt", "dbp", "dfd", "dfe", "dft", "dgc", "dgg", "dgs", "dis", "dln", "dnc", "dnr",
+    "dpc", "dpt", "drm", "drt", "dsr", "dst", "dtc", "dte", "dtm", "dto", "dub", "edc", "edm",
+    "edt", "egr", "elg", "elt", "eng", "enj", "etr", "evp", "exp", "fac", "fds", "fld", "flm",
+    "fmd", "fmk", "fmo", "fmp", "fnd", "fpy", "frg", "gis", "grt", "his", "hnr", "hst", "ill",
+    "ilu", "ins", "inv", "isb", "itr", "ive", "ivr", "jud", "jug", "lbr", "lbt", "ldr", "led",
+    "lee", "lel", "len", "let", "lgd", "lie", "lil", "lit", "lsa", "lse", "lso", "ltg", "lyr",
+    "mcp", "mdc", "med", "mfp", "mfr", "mod", "mon", "mrb", "mrk", "msd", "mte", "mtk", "mus",
+    "nrt", "opn", "org", "orm", "osp", "oth", "own", "pad", "pan", "pat", "pbd", "pbl", "pdr",
+    "pfr", "pht", "plt", "pma", "pmn", "pop", "ppm", "ppt", "pra", "prc", "prd", "pre", "prf",
+    "prg", "prm", "prn", "pro", "prp", "prs", "prt", "prv", "pta", "pte", "ptf", "pth", "ptt",
+    "pup", "rbr", "rcd", "rce", "rcp", "rdd", "red", "ren", "res", "rev", "rpc", "rps", "rpt",
+    "rpy", "rse", "rsg", "rsp", "rsr", "rst", "rth", "rtm", "sad", "sce", "scl", "scr", "sds",
+    "sec", "sgd", "sgn", "sht", "sll", "sng", "spk", "spn", "spy", "srv", "std", "stg", "stl",
+    "stm", "stn", "str", "tcd", "tch", "ths", "tld", "tlp", "trc", "trl", "tyd", "tyg", "uvp",
+    "vac", "vdg", "voc", "wac", "wal", "wam", "wat", "wdc", "wde", "win", "wit", "wpr", "wst",
+];
+
+/// **OPF-052** — a `<dc:creator opf:role>` must be a MARC relator code. Both
+/// versions: `OPFHandler` is the base checker, so `OPFHandler30` inherits it
+/// (where an `opf:`-namespaced attribute is *also* an RSC-005, since the EPUB 3
+/// package grammar declares none).
+fn check_creator_roles(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
+    for m in pkg.metadata.iter().filter(|m| m.name == "creator") {
+        // `oth.` prefixes a role outside the MARC scheme, which the spec allows.
+        let Some(role) = m.role.as_deref().map(str::trim).filter(|r| !r.is_empty()) else {
+            continue;
+        };
+        if !role.starts_with("oth.") && !MARC_RELATORS.contains(&role) {
+            report.push(Violation::new(
+                Rule::RoleNotValid,
+                opf_path.to_string(),
+                format!("role value {role:?} is not a MARC relator code"),
+            ));
+        }
+    }
+}
+
+/// Dublin Core metadata-value checks. (Which elements must be *present*, and
+/// with what content, is the package grammar's job — the schema channel.)
 ///
-/// - **RSC-005** — the publication must declare at least one non-empty
-///   `<dc:title>` and one `<dc:language>` (epubcheck enforces these through the
-///   package schema; missing-required is version-independent).
 /// - **OPF-053 / OPF-054** — every `<dc:date>` must be a valid W3C-DTF date
 ///   (warning in EPUB 3, error in EPUB 2).
 /// - **OPF-085** — a `<dc:identifier>` marked as a UUID (a `urn:uuid:` value or
 ///   `opf:scheme="uuid"`) must be a syntactically valid UUID.
+/// - **OPF-092** — every `<dc:language>` must be a well-formed BCP 47 tag.
 fn check_metadata(pkg: &opf::Package, epub2: bool, opf_path: &str, report: &mut Report) {
-    let has = |name: &str| {
-        pkg.metadata
-            .iter()
-            .any(|m| m.name == name && !m.value.is_empty())
-    };
-    if !has("title") {
-        report.push(Violation::new(
-            Rule::MissingTitle,
-            opf_path.to_string(),
-            "the package metadata must declare at least one non-empty <dc:title>",
-        ));
-    }
-    if !has("language") {
-        report.push(Violation::new(
-            Rule::MissingLanguage,
-            opf_path.to_string(),
-            "the package metadata must declare at least one <dc:language>",
-        ));
-    }
-
     for m in &pkg.metadata {
         match m.name.as_str() {
             "language" => {
                 // epubcheck checks only non-empty (trimmed) language tags; an
-                // absent/empty dc:language is the schema's job (handled above).
+                // absent/empty dc:language is the schema's job.
                 let tag = m.value.trim();
                 if !tag.is_empty()
                     && let Err(detail) = language_tag_wellformed(tag)
@@ -2660,113 +2111,6 @@ fn check_metadata(pkg: &opf::Package, epub2: bool, opf_path: &str, report: &mut 
             }
             _ => {}
         }
-    }
-}
-
-/// The fifteen Dublin Core elements the EPUB 3 package grammar declares. Every
-/// one of them is typed `datatype.string.nonempty`, so an empty element is a
-/// schema violation; the EPUB 2 grammar requires non-empty content only for
-/// `<dc:identifier>` (`DC.metadata-required-content`).
-const DC_ELEMENTS: &[&str] = &[
-    "identifier",
-    "title",
-    "language",
-    "date",
-    "source",
-    "type",
-    "format",
-    "creator",
-    "subject",
-    "description",
-    "publisher",
-    "contributor",
-    "relation",
-    "coverage",
-    "rights",
-];
-
-/// **RSC-005** (schema channel) — Dublin Core element *content* requirements from
-/// the package grammars: every EPUB 3 `<dc:*>` element (and an EPUB 2
-/// `<dc:identifier>`) must have non-empty content, and the metadata must declare
-/// at least one `<dc:identifier>`.
-///
-/// The missing-element half is gated to EPUB 3 like the sibling title/language
-/// rules in [`check_metadata`]: a version-less OEB-1.x package nests its metadata
-/// in `<dc-metadata>` and is rejected with OPF-001 instead.
-fn check_dc_content(
-    pkg: &opf::Package,
-    epub2: bool,
-    epub3: bool,
-    opf_path: &str,
-    report: &mut Report,
-) {
-    for m in &pkg.metadata {
-        let required_nonempty = if epub3 {
-            DC_ELEMENTS.contains(&m.name.as_str())
-        } else {
-            epub2 && m.name == "identifier"
-        };
-        if required_nonempty && m.value.trim().is_empty() {
-            report.push(Violation::new(
-                Rule::EmptyDcContent,
-                opf_path.to_string(),
-                format!(
-                    "character content of element dc:{} is invalid; must be a string with length at least 1",
-                    m.name
-                ),
-            ));
-        }
-    }
-    if epub3 && !pkg.metadata.iter().any(|m| m.name == "identifier") {
-        report.push(Violation::new(
-            Rule::MissingIdentifier,
-            opf_path.to_string(),
-            "element metadata incomplete; missing required element dc:identifier",
-        ));
-    }
-}
-
-/// **RSC-005** (schema channel) — the package document's required structure,
-/// where the two grammars agree that something must be present:
-///
-/// - `<manifest>` holds `opf.item+` / `oneOrMore item`, and `<spine>` holds
-///   `opf.itemref+` / `oneOrMore itemref`, in both versions — so an absent or
-///   empty manifest/spine is a violation either way.
-/// - `<spine toc>` is **required** by the EPUB 2 grammar, and required by
-///   `package-30.sch`'s `opf.toc.ncx.2` in EPUB 3 whenever an NCX is declared.
-///   (Whether the pointer resolves to the NCX is OPF-050, checked separately.)
-fn check_package_schema_structure(
-    pkg: &opf::Package,
-    epub2: bool,
-    epub3: bool,
-    opf_path: &str,
-    report: &mut Report,
-) {
-    if !epub2 && !epub3 {
-        return; // version-less/legacy packages are OPF-001, not schema-validated
-    }
-    for (empty, element, child) in [
-        (pkg.manifest.is_empty(), "manifest", "item"),
-        (pkg.spine.is_empty(), "spine", "itemref"),
-    ] {
-        if empty {
-            report.push(Violation::new(
-                Rule::PackageIncomplete,
-                opf_path.to_string(),
-                format!("element {element} incomplete; missing required element {child}"),
-            ));
-        }
-    }
-    let has_ncx = pkg.manifest.iter().any(|m| {
-        m.media_type
-            .eq_ignore_ascii_case("application/x-dtbncx+xml")
-    });
-    if pkg.spine_toc.is_none() && !pkg.spine.is_empty() && (epub2 || has_ncx) {
-        report.push(Violation::new(
-            Rule::SpineTocMissing,
-            opf_path.to_string(),
-            "spine element toc attribute must be set when an NCX is included in the publication",
-        ));
     }
 }
 
@@ -3240,6 +2584,29 @@ fn walk_foreign_resources(
                         }
                     }
                     b"source" => {
+                        // MED-007: a `<picture>` `<source>` offers an
+                        // alternative rendering, so a reading system has to know
+                        // the format before fetching it — either because the
+                        // format is a core one, or because `type` says so.
+                        if in_picture
+                            && attr(b"type").is_none_or(|t| t.trim().is_empty())
+                            && let Some(src) = href_attr(b"srcset").or_else(|| href_attr(b"src"))
+                            && let Some(t) = foreign_target(
+                                path,
+                                src.split_whitespace().next().unwrap_or(&src),
+                                by_path,
+                            )
+                            && !is_blessed_image_type(&t.media_type)
+                        {
+                            report.push(Violation::new(
+                                Rule::PictureSourceNeedsType,
+                                path.to_string(),
+                                format!(
+                                    "<picture> <source> {src:?} references a foreign resource (media-type {}) and must define a \"type\" attribute",
+                                    t.media_type
+                                ),
+                            ));
+                        }
                         // A media source is collected on its parent for the
                         // end-of-media fallback decision; a picture source is not
                         // subject to RSC-032 (an <img> sibling carries MED-003).
@@ -3508,6 +2875,28 @@ fn check_opf_links(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report: &m
                 continue;
             }
         }
+        // OPF-093 / OPF-094: a `<link>` without a media-type. A metadata link
+        // to a resource *in the container* always needs one (093); a link with
+        // no media type at all needs one when its `rel` is a keyword whose
+        // meaning depends on the format (094).
+        if link.media_type.is_none() {
+            let remote = is_remote_href(href);
+            if !remote && link.in_metadata {
+                report.push(Violation::new(
+                    Rule::LinkMediaTypeRequired,
+                    opf_path.to_string(),
+                    format!(
+                        "<link href={href:?}> is a resource in the container, so the media-type attribute is required"
+                    ),
+                ));
+            } else if let Some(rel) = link.rel.iter().find(|r| *r == "record" || *r == "voicing") {
+                report.push(Violation::new(
+                    Rule::LinkMediaTypeRequiredForRel,
+                    opf_path.to_string(),
+                    format!("the media-type attribute is required for {rel:?} links"),
+                ));
+            }
+        }
         // OPF-089: 'alternate' paired with other rel keywords.
         if link.rel.iter().any(|r| r == "alternate") && link.rel.len() > 1 {
             report.push(Violation::new(
@@ -3763,13 +3152,17 @@ fn check_ocf_filenames(zip_names: &[String], report: &mut Report) {
 fn check_content_conformance(
     pkg: &opf::Package,
     opf_dir: &str,
-    epub2: bool,
     epub3: bool,
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     encrypted: &HashSet<String>,
     report: &mut Report,
 ) {
     let fxl_ids = fixed_layout_spine_ids(pkg);
+    // CSS-030's package-side half: a media-overlay styling class declared at
+    // publication level makes every narrated document need a stylesheet.
+    let declares_overlay_class = ["media:active-class", "media:playback-active-class"]
+        .iter()
+        .any(|p| pkg.publication_properties.contains(*p));
     for item in &pkg.manifest {
         if !is_xhtml(&item.media_type) {
             continue;
@@ -3784,25 +3177,12 @@ fn check_content_conformance(
         let Ok(text) = read_text(zip, &path) else {
             continue;
         };
-        // The schema-channel rules that hold in both versions (and the EPUB 2
-        // content grammar) run first; everything below is EPUB 3 only.
-        check_content_schema(&text, &path, epub2, epub3, report);
-        // The non-empty-<title> requirement is EPUB 3 only — epubcheck enforces
-        // it through the EPUB 3 XHTML content-document schema. An EPUB 2 book
-        // (XHTML 1.1, DTD-validated, which can't require element text) is not
-        // held to it, so firing there is a false positive.
+        // Inline SVG references (RSC-015) and the CSS written into the document
+        // hold in both versions; everything below is EPUB 3 only.
+        check_svg_references(&text, &path, report);
+        check_inline_css(&text, &path, epub3, report);
         if !epub3 {
             continue;
-        }
-        // The DOCTYPE rule (HTM-004) is applied to every XML resource by
-        // [`check_doctype_rules`] (via [`check_xml_resources`]); here we only
-        // check the non-empty-<title> requirement (RSC-005).
-        if has_empty_title(&text) {
-            report.push(Violation::new(
-                Rule::EmptyTitle,
-                path.clone(),
-                "content document has an empty <title>; EPUB 3 requires non-empty title text",
-            ));
         }
 
         let features = detect_content_features(&text);
@@ -3822,6 +3202,25 @@ fn check_content_conformance(
                     path.clone(),
                     format!(
                         "content document requires the {property:?} manifest property, not declared on its <item>"
+                    ),
+                ));
+            }
+        }
+        // OPF-015 is OPF-014 read backwards: a property declared that the
+        // content does not require. That inverts what detection errors cost —
+        // under-detecting is a recall gap for OPF-014 but a *false positive*
+        // here — so it is asked only of the two properties bokai detects
+        // exhaustively. `scripted` is not one of them (epubcheck also counts
+        // event-handler attributes and `javascript:` URLs), and `nav`,
+        // `data-nav`, `cover-image` and `remote-resources` are excluded by
+        // epubcheck itself.
+        for (required, property) in [(features.inline_svg, "svg"), (features.mathml, "mathml")] {
+            if !required && item.properties.iter().any(|p| p == property) {
+                report.push(Violation::new(
+                    Rule::PropertyNotNeeded,
+                    path.clone(),
+                    format!(
+                        "the {property:?} property should not be declared in the package document; this content document does not use it"
                     ),
                 ));
             }
@@ -3848,9 +3247,19 @@ fn check_content_conformance(
                 "alternative style sheets must have a title",
             ));
         }
+        // CSS-030: the package names a class for a reading system to put on the
+        // element being narrated, and this narrated document has no stylesheet
+        // that could give the class any effect.
+        if item.media_overlay.is_some() && !features.has_css && declares_overlay_class {
+            report.push(Violation::new(
+                Rule::OverlayStylingWithoutCss,
+                path.clone(),
+                "the package document declares media overlay styling class names but no CSS was found in this content document",
+            ));
+        }
     }
     // SVG content documents (EPUB 3 only — EPUB 2 has no SVG content document)
-    // go through the same schema walk, plus the fixed-layout `viewBox` rule.
+    // go through the same reference walk, plus the fixed-layout `viewBox` rule.
     for item in pkg.manifest.iter().filter(|_| epub3) {
         if !item.media_type.trim().eq_ignore_ascii_case("image/svg+xml") {
             continue;
@@ -3862,7 +3271,7 @@ fn check_content_conformance(
         let Ok(text) = read_text(zip, &path) else {
             continue;
         };
-        check_content_schema(&text, &path, epub2, epub3, report);
+        check_svg_references(&text, &path, report);
         // HTM-048: a fixed-layout SVG needs a `viewBox` on its outermost `<svg>`
         // for the reading system to know its intrinsic dimensions.
         if fxl_ids.contains(item.id.as_str()) && !outermost_svg_has_viewbox(&text) {
@@ -3997,6 +3406,32 @@ fn check_doctype_rules(
                 path.to_string(),
                 format!(
                     "irregular DOCTYPE {:?}; EPUB 2 requires the {pub_id:?} DTD",
+                    dt.raw
+                ),
+            ));
+        }
+        // HTM-009: an EPUB 2 *package document* carrying a DOCTYPE at all. The
+        // OEB 1.2 package DTD is tolerated (heritage collections ship it and
+        // the spec does not forbid it); anything else can simply be deleted.
+        if media_type
+            .trim()
+            .eq_ignore_ascii_case("application/oebps-package+xml")
+            && (dt.public_id.is_some() || dt.system_id.is_some())
+            && !(dt.root == "package"
+                && dt
+                    .public_id
+                    .as_deref()
+                    .is_none_or(|p| p == "+//ISBN 0-9673008-1-9//DTD OEB 1.2 Package//EN")
+                && dt
+                    .system_id
+                    .as_deref()
+                    .is_none_or(|s| s == "http://openebook.org/dtds/oeb-1.2/oebpkg12.dtd"))
+        {
+            report.push(Violation::new(
+                Rule::ObsoleteDoctype,
+                path.to_string(),
+                format!(
+                    "the DOCTYPE {:?} is obsolete or irregular and can be removed",
                     dt.raw
                 ),
             ));
@@ -4179,259 +3614,6 @@ fn check_ncx_identifier(
     }
 }
 
-/// **RSC-005** (schema channel) — the NCX rules that need no grammar engine, from
-/// `20/sch/ncx.sch` and `ncx.rng` (both applied to the NCX of an EPUB 2 *and* an
-/// EPUB 3 publication — `OPFChecker.checkItemContent` builds an `NCXChecker`
-/// regardless of version):
-///
-/// - **`id` attributes** — `ncx.rng` types them `xsd:ID` and `ncx_idAttrUnique`
-///   requires uniqueness ([`IdScan`]).
-/// - **`ncx_playOrderOrigin`** — if anything carries `playOrder`, some node must
-///   carry `playOrder="1"` (a string comparison in the schematron, so `"01"` does
-///   not satisfy it).
-/// - **`ncx_playOrderNoGaps`** — for every `playOrder` value above 1, its
-///   predecessor must exist.
-/// - **`ncx_playOrderMatch2`** — nodes sharing a `playOrder` value must point at
-///   the same target (`<content src>`); a node without a `<content>` child never
-///   triggers it, matching the empty-node-set semantics of the XPath assertion.
-///
-/// Each violation is reported once per offending value rather than once per node,
-/// so a mis-numbered NCX yields findings proportional to the defect.
-fn check_ncx_schema(
-    pkg: &opf::Package,
-    opf_dir: &str,
-    zip: &mut ZipArchive<Cursor<&[u8]>>,
-    encrypted: &HashSet<String>,
-    report: &mut Report,
-) {
-    let Some(ncx) = pkg.manifest.iter().find(|m| {
-        m.media_type
-            .eq_ignore_ascii_case("application/x-dtbncx+xml")
-    }) else {
-        return;
-    };
-    let path = join_opf(opf_dir, &ncx.href);
-    // An encrypted/obfuscated resource is never content-checked (epubcheck
-    // reports RSC-004 and skips it).
-    if encrypted.contains(&path) {
-        return;
-    }
-    let Ok(text) = read_text(zip, &path) else {
-        return;
-    };
-
-    let mut reader = Reader::from_str(&text);
-    let mut ids = IdScan::default();
-    // One frame per open element, holding the index of the node it opened when
-    // that element carries `playOrder` — so a `<content src>` can be attributed
-    // to its *parent* node, as the schematron's `current()/ncx:content` requires.
-    let mut open: Vec<Option<usize>> = Vec::new();
-    // (playOrder attribute value, target of the node's `<content src>` child).
-    let mut nodes: Vec<(String, Option<String>)> = Vec::new();
-    let mut visit =
-        |e: &quick_xml::events::BytesStart, open: &mut Vec<Option<usize>>, report: &mut Report| {
-            ids.visit(e, true, &path, report);
-            // `ncx.rng`: `navPoint` declares `id` as a required `xsd:ID`
-            // attribute (unlike `navLabel`/`content`, which take none).
-            if local_name(e.name().as_ref()) == b"navPoint" && attr_by_local(e, b"id").is_none() {
-                report.push(Violation::new(
-                    Rule::MissingRequiredAttribute,
-                    path.clone(),
-                    "element \"navPoint\" missing required attribute \"id\"",
-                ));
-            }
-            if local_name(e.name().as_ref()) == b"content"
-                && let Some(Some(idx)) = open.last().copied()
-                && let Some(src) = attr_by_local(e, b"src")
-            {
-                nodes[idx].1 = Some(src);
-            }
-            match attr_by_local(e, b"playOrder") {
-                Some(order) => {
-                    nodes.push((order, None));
-                    Some(nodes.len() - 1)
-                }
-                None => None,
-            }
-        };
-    loop {
-        match reader.read_event() {
-            Err(_) | Ok(Event::Eof) => break,
-            Ok(Event::Start(e)) => {
-                let idx = visit(&e, &mut open, report);
-                open.push(idx);
-            }
-            Ok(Event::Empty(e)) => {
-                visit(&e, &mut open, report);
-            }
-            Ok(Event::End(_)) => {
-                open.pop();
-            }
-            _ => {}
-        }
-    }
-    check_ncx_play_order(&nodes, &path, report);
-}
-
-/// The three `playOrder` schematron assertions over one NCX's nodes, each node
-/// given as its raw `playOrder` value and the `src` of its `<content>` child.
-/// `number()` semantics: a non-numeric value is NaN, which never equals anything,
-/// so such a node takes part in no comparison.
-fn check_ncx_play_order(nodes: &[(String, Option<String>)], path: &str, report: &mut Report) {
-    if nodes.is_empty() {
-        return;
-    }
-    if !nodes.iter().any(|(order, _)| order == "1") {
-        report.push(Violation::new(
-            Rule::NcxPlayOrder,
-            path.to_string(),
-            "the first playOrder value is not 1",
-        ));
-    }
-    let numeric: Vec<(f64, Option<&str>)> = nodes
-        .iter()
-        .filter_map(|(order, src)| {
-            let n = order.trim().parse::<f64>().ok().filter(|n| n.is_finite())?;
-            Some((n, src.as_deref()))
-        })
-        .collect();
-    let mut reported_gap: HashSet<String> = HashSet::new();
-    let mut reported_split: HashSet<String> = HashSet::new();
-    for (order, src) in &numeric {
-        if *order > 1.0 && !numeric.iter().any(|(other, _)| *other == *order - 1.0) {
-            let key = format!("{order}");
-            if reported_gap.insert(key) {
-                report.push(Violation::new(
-                    Rule::NcxPlayOrder,
-                    path.to_string(),
-                    format!("playOrder sequence has gaps (no node precedes playOrder {order})"),
-                ));
-            }
-        }
-        if let Some(src) = src
-            && numeric
-                .iter()
-                .any(|(other, other_src)| *other == *order && other_src.is_some_and(|s| s != *src))
-        {
-            let key = format!("{order}");
-            if reported_split.insert(key) {
-                report.push(Violation::new(
-                    Rule::NcxPlayOrder,
-                    path.to_string(),
-                    format!(
-                        "identical playOrder values ({order}) for navPoint/navTarget/pageTarget that do not refer to same target"
-                    ),
-                ));
-            }
-        }
-    }
-}
-
-/// **RSC-005** (schema channel) — `epub-nav-30.sch`'s `nav-ocurrence` pattern:
-/// the navigation document's `<body>` must contain exactly one `toc` nav, and at
-/// most one each of `page-list` and `landmarks`. The nav type is read from
-/// `epub:type` **resolved through the namespace**, so a document that binds the
-/// `epub` prefix to anything but the EPUB 3 structural-semantics namespace has no
-/// typed navs at all — the real-world defect this catches most often.
-fn check_nav_occurrence(
-    pkg: &opf::Package,
-    opf_dir: &str,
-    zip: &mut ZipArchive<Cursor<&[u8]>>,
-    encrypted: &HashSet<String>,
-    report: &mut Report,
-) {
-    let Some(nav) = pkg
-        .manifest
-        .iter()
-        .find(|m| m.properties.iter().any(|p| p == "nav"))
-    else {
-        return;
-    };
-    let path = join_opf(opf_dir, &nav.href);
-    // An encrypted/obfuscated resource is never content-checked (epubcheck
-    // reports RSC-004 and skips it).
-    if encrypted.contains(&path) {
-        return;
-    }
-    let Ok(text) = read_text(zip, &path) else {
-        return;
-    };
-
-    let mut reader = Reader::from_str(&text);
-    let mut scopes: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
-    let mut has_body = false;
-    let mut body_depth: Option<usize> = None;
-    let mut counts = HashMap::new();
-    let count_nav = |e: &quick_xml::events::BytesStart,
-                     scopes: &[Vec<(Vec<u8>, Vec<u8>)>],
-                     counts: &mut HashMap<String, usize>| {
-        if elem_namespace(e.name().as_ref(), scopes).as_deref() != Some(XHTML_NS)
-            || local_name(e.name().as_ref()) != b"nav"
-        {
-            return;
-        }
-        let Some(types) = e.attributes().flatten().find(|a| {
-            local_name(a.key.as_ref()) == b"type"
-                && attr_namespace(a.key.as_ref(), scopes).as_deref() == Some(OPS_NS)
-        }) else {
-            return;
-        };
-        for token in String::from_utf8_lossy(&types.value).split_whitespace() {
-            *counts.entry(token.to_string()).or_insert(0) += 1;
-        }
-    };
-    loop {
-        match reader.read_event() {
-            Err(_) | Ok(Event::Eof) => break,
-            Ok(Event::Start(e)) => {
-                scopes.push(xmlns_frame(&e));
-                if elem_namespace(e.name().as_ref(), &scopes).as_deref() == Some(XHTML_NS)
-                    && local_name(e.name().as_ref()) == b"body"
-                {
-                    has_body = true;
-                    body_depth.get_or_insert(scopes.len());
-                }
-                if body_depth.is_some() {
-                    count_nav(&e, &scopes, &mut counts);
-                }
-            }
-            Ok(Event::Empty(e)) => {
-                scopes.push(xmlns_frame(&e));
-                if body_depth.is_some() {
-                    count_nav(&e, &scopes, &mut counts);
-                }
-                scopes.pop();
-            }
-            Ok(Event::End(_)) => {
-                if body_depth == Some(scopes.len()) {
-                    body_depth = None;
-                }
-                scopes.pop();
-            }
-            _ => {}
-        }
-    }
-    if !has_body {
-        return; // the schematron rule is scoped to <body>; no body, no rule
-    }
-    if counts.get("toc").copied().unwrap_or(0) != 1 {
-        report.push(Violation::new(
-            Rule::NavTocOccurrence,
-            path.clone(),
-            "exactly one \"toc\" nav element must be present in the navigation document",
-        ));
-    }
-    for kind in ["page-list", "landmarks"] {
-        if counts.get(kind).copied().unwrap_or(0) > 1 {
-            report.push(Violation::new(
-                Rule::NavTocOccurrence,
-                path.clone(),
-                format!("multiple occurrences of the {kind:?} nav element"),
-            ));
-        }
-    }
-}
-
 /// The `content` of the NCX's `<meta name="dtb:uid">`, if present.
 fn ncx_dtb_uid(text: &str) -> Option<String> {
     let mut reader = Reader::from_str(text);
@@ -4456,24 +3638,6 @@ fn ncx_dtb_uid(text: &str) -> Option<String> {
             Ok(Event::Eof) | Err(_) => return None,
             _ => {}
         }
-    }
-}
-
-/// True when the first `<title>` element is empty or self-closing.
-fn has_empty_title(s: &str) -> bool {
-    let Some(open) = s.find("<title") else {
-        return false;
-    };
-    let Some(rel) = s[open..].find('>') else {
-        return false;
-    };
-    let gt = open + rel;
-    if s.as_bytes()[gt - 1] == b'/' {
-        return true; // <title/>
-    }
-    match s[gt + 1..].find("</title>") {
-        Some(r) => s[gt + 1..gt + 1 + r].trim().is_empty(),
-        None => false,
     }
 }
 
@@ -4577,10 +3741,14 @@ fn check_mimetype_header(bytes: &[u8], report: &mut Report) {
 // Container.xml → OPF path
 // =========================================================================
 
+/// The package document `META-INF/container.xml` points at, and how many
+/// `<rootfile>` elements declare the OPS media type — a publication with more
+/// than one is a *multiple-rendition* publication, which EPUB 2 does not allow
+/// (PKG-013) and EPUB 3 holds to extra rules.
 fn read_container_opf_path(
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     report: &mut Report,
-) -> Result<String, Violation> {
+) -> Result<(String, usize), Violation> {
     let text = read_text(zip, "META-INF/container.xml").map_err(|_| {
         Violation::new(
             Rule::MissingContainerXml,
@@ -4640,11 +3808,15 @@ fn read_container_opf_path(
 
     // RSC-003: a rootfile with the OPS package media-type is required.
     const OPS: &str = "application/oebps-package+xml";
+    let renditions = rootfiles
+        .iter()
+        .filter(|(_, mt)| mt.eq_ignore_ascii_case(OPS))
+        .count();
     if let Some((fp, _)) = rootfiles
         .iter()
         .find(|(_, mt)| mt.eq_ignore_ascii_case(OPS))
     {
-        return Ok(fp.clone());
+        return Ok((fp.clone(), renditions));
     }
     if let Some((fp, _)) = rootfiles.first() {
         // A rootfile exists but none declares the OPS media-type: flag RSC-003
@@ -4654,7 +3826,7 @@ fn read_container_opf_path(
             "META-INF/container.xml",
             format!("no <rootfile> declares media-type {OPS:?}"),
         ));
-        return Ok(fp.clone());
+        return Ok((fp.clone(), renditions));
     }
     Err(Violation::new(
         Rule::NoOpsRootfile,
@@ -4980,6 +4152,20 @@ fn check_image_headers(
         let Ok(bytes) = read_bytes(zip, &path) else {
             continue; // remote/data/missing — handled by RSC-006/007 elsewhere
         };
+        // MED-004: fewer than four bytes is not a truncated image, it is a file
+        // whose header does not exist — epubcheck reports it before it looks at
+        // the magic at all, and every check below reads those four bytes.
+        if bytes.len() < 4 {
+            report.push(Violation::new(
+                Rule::ImageHeaderUnreadable,
+                path.clone(),
+                format!(
+                    "resource {path:?} is {} byte(s) long; its image file header may be corrupted",
+                    bytes.len()
+                ),
+            ));
+            continue;
+        }
         if image_header_mismatches(&item.media_type, &bytes) {
             report.push(Violation::new(
                 Rule::ResourceMediaTypeMismatch,
@@ -5001,6 +4187,814 @@ fn check_image_headers(
             ));
         }
     }
+}
+
+/// **CSS-001 / CSS-008** — the two rules that judge a stylesheet's own text
+/// rather than what it refers to. See [`css`] for why this reads the lexical
+/// layer instead of running [`crate::style`]'s parser.
+fn check_css_syntax(text: &str, css_path: &str, epub3: bool, report: &mut Report) {
+    for error in css::syntax_errors(text) {
+        report.push(Violation::new(
+            Rule::CssSyntaxError,
+            format!("{css_path}:{}", error.line),
+            format!("an error occurred while parsing the CSS: {}", error.message),
+        ));
+    }
+    // CSS-001 is an EPUB 3 rule: `CSSHandler` gates it on VERSION_3.
+    if epub3 {
+        for property in css::forbidden_properties(text) {
+            report.push(Violation::new(
+                Rule::ForbiddenCssProperty,
+                format!("{css_path}:{}", property.line),
+                format!(
+                    "the {:?} property must not be included in an EPUB style sheet",
+                    property.name
+                ),
+            ));
+        }
+    }
+}
+
+/// **OPF-071 / OPF-075 / OPF-076 / OPF-081…OPF-084** — what each kind of
+/// `<collection>` may contain.
+///
+/// A collection groups manifest resources under a *role*, and each role means
+/// something specific about what belongs in it: an index is XHTML, a preview
+/// points at content documents without a canonical fragment, and a dictionary
+/// is exactly one Search Key Map plus its XHTML entries.
+fn check_collections(pkg: &opf::Package, opf_dir: &str, opf_path: &str, report: &mut Report) {
+    const SKM: &str = "application/vnd.epub.search-key-map+xml";
+    let by_path: HashMap<String, &opf::ManifestItem> = pkg
+        .manifest
+        .iter()
+        .map(|m| (join_opf(opf_dir, &m.href), m))
+        .collect();
+    // A collection link's href resolves against the package document, and its
+    // fragment is not part of the resource it names.
+    let resolve = |href: &str| {
+        let path = href.split('#').next().unwrap_or(href);
+        by_path.get(&join_opf(opf_dir, path)).copied()
+    };
+    let media_type_is = |item: Option<&opf::ManifestItem>, mt: &str| {
+        item.is_some_and(|i| i.media_type.trim().eq_ignore_ascii_case(mt))
+    };
+
+    for collection in &pkg.collections {
+        // OPF-071. The index role nests (`index-group` inside `index`), and the
+        // flattened list means the same test reaches every depth.
+        if collection.has_role("index") || collection.has_role("index-group") {
+            for href in &collection.hrefs {
+                if !media_type_is(resolve(href), "application/xhtml+xml") {
+                    report.push(Violation::new(
+                        Rule::IndexCollectionNotXhtml,
+                        opf_path.to_string(),
+                        format!(
+                            "index collections must only contain XHTML content documents; {href:?} is not one"
+                        ),
+                    ));
+                }
+            }
+        }
+        if collection.has_role("preview") {
+            for href in &collection.hrefs {
+                let item = resolve(href);
+                if !media_type_is(item, "application/xhtml+xml")
+                    && !media_type_is(item, "image/svg+xml")
+                {
+                    report.push(Violation::new(
+                        Rule::PreviewCollectionNotContentDoc,
+                        opf_path.to_string(),
+                        format!(
+                            "preview collections must only point to EPUB content documents; {href:?} is not one"
+                        ),
+                    ));
+                } else if href
+                    .split_once('#')
+                    .is_some_and(|(_, fragment)| fragment.starts_with("epubcfi("))
+                {
+                    // OPF-076: a preview points at a *document*, so a canonical
+                    // fragment identifier (which names a place inside one) is
+                    // not what the link is for.
+                    report.push(Violation::new(
+                        Rule::PreviewCollectionHasCfi,
+                        opf_path.to_string(),
+                        format!(
+                            "the URI of a preview collection link must not include an EPUB canonical fragment identifier: {href:?}"
+                        ),
+                    ));
+                }
+            }
+        }
+        if !collection.has_role("dictionary") {
+            continue;
+        }
+        let mut search_key_maps = 0;
+        for href in &collection.hrefs {
+            let Some(item) = resolve(href) else {
+                report.push(Violation::new(
+                    Rule::DictionaryResourceNotFound,
+                    opf_path.to_string(),
+                    format!(
+                        "resource {href:?} (referenced from an EPUB dictionary collection) was not found"
+                    ),
+                ));
+                continue;
+            };
+            if item.media_type.trim().eq_ignore_ascii_case(SKM) {
+                search_key_maps += 1;
+                if search_key_maps > 1 {
+                    report.push(Violation::new(
+                        Rule::DictionaryMultipleSearchKeyMaps,
+                        opf_path.to_string(),
+                        "an EPUB dictionary collection contains more than one search key map document",
+                    ));
+                }
+            } else if !item
+                .media_type
+                .trim()
+                .eq_ignore_ascii_case("application/xhtml+xml")
+            {
+                report.push(Violation::new(
+                    Rule::DictionaryResourceNotAllowed,
+                    opf_path.to_string(),
+                    format!(
+                        "an EPUB dictionary collection contains {href:?}, which is neither a search key map document nor an XHTML content document"
+                    ),
+                ));
+            }
+        }
+        if search_key_maps == 0 {
+            report.push(Violation::new(
+                Rule::DictionaryNoSearchKeyMap,
+                opf_path.to_string(),
+                "an EPUB dictionary collection contains no search key map document",
+            ));
+        }
+    }
+}
+
+/// **NAV-003 / OPF-066** — pagination. When the content carries page-break
+/// markers, a reader must be able to *use* them: the navigation document needs
+/// a page list to jump by, and the metadata must say which edition the page
+/// numbers come from (`<dc:source>` refined by `source-of="pagination"`).
+///
+/// Both are gated on the EduPub profile, as epubcheck's `checkPagination` is —
+/// the profile is what makes pagination mandatory rather than optional. bokai
+/// reads the profile off `<dc:type>edupub</dc:type>`, the same signal
+/// epubcheck's `PackageDocumentData` uses.
+fn check_pagination(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    encrypted: &HashSet<String>,
+    opf_path: &str,
+    report: &mut Report,
+) {
+    let is_edupub = pkg
+        .metadata
+        .iter()
+        .any(|m| m.name == "type" && m.value.trim().eq_ignore_ascii_case("edupub"));
+    if !is_edupub {
+        return;
+    }
+    let content_of = |item: &opf::ManifestItem, zip: &mut ZipArchive<Cursor<&[u8]>>| {
+        let path = join_opf(opf_dir, &item.href);
+        match encrypted.contains(&path) {
+            true => None,
+            false => read_text(zip, &path).ok(),
+        }
+    };
+    let mut has_page_break = false;
+    let mut has_page_list = false;
+    for item in pkg.manifest.iter().filter(|m| is_xhtml(&m.media_type)) {
+        let Some(text) = content_of(item, zip) else {
+            continue;
+        };
+        let is_nav = item.properties.iter().any(|p| p == "nav");
+        let mut reader = Reader::from_str(&text);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                    let types = epub_type_tokens(&e);
+                    has_page_break |= types.iter().any(|t| t == "pagebreak");
+                    if is_nav && local_name(e.name().as_ref()) == b"nav" {
+                        has_page_list |= types.iter().any(|t| t == "page-list");
+                    }
+                }
+                Ok(Event::Eof) | Err(_) => break,
+                _ => {}
+            }
+        }
+    }
+    if !has_page_break {
+        return;
+    }
+    if !has_page_list {
+        report.push(Violation::new(
+            Rule::NavNoPageList,
+            opf_path.to_string(),
+            "the navigation document must have a page list when content documents contain page breaks",
+        ));
+    }
+    // The pagination source: a `<dc:source>` refined by `source-of="pagination"`.
+    let paginated = pkg.metadata.iter().any(|m| {
+        m.name == "source"
+            && m.id.as_deref().is_some_and(|id| {
+                pkg.metas.iter().any(|meta| {
+                    meta.property == "source-of"
+                        && meta.value.trim() == "pagination"
+                        && meta.refines.as_deref() == Some(id)
+                })
+            })
+    });
+    if !paginated {
+        report.push(Violation::new(
+            Rule::PaginationSourceMissing,
+            opf_path.to_string(),
+            "missing \"dc:source\" or \"source-of\" pagination metadata; the pagination source must be identified when the content includes page break markers",
+        ));
+    }
+}
+
+/// **HTM-052 / NAV-009** — region-based navigation, which maps areas of a
+/// fixed-layout page to destinations.
+///
+/// `epub:type="region-based"` only means anything on a `<nav>` in a *data
+/// navigation document* (a manifest item with the `data-nav` property), and the
+/// links inside such a nav must point at fixed-layout documents — a region of a
+/// reflowable page is not a place.
+fn check_region_based_navs(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    encrypted: &HashSet<String>,
+    report: &mut Report,
+) {
+    let fxl_ids = fixed_layout_spine_ids(pkg);
+    let fxl_paths: HashSet<String> = pkg
+        .manifest
+        .iter()
+        .filter(|m| fxl_ids.contains(m.id.as_str()))
+        .map(|m| join_opf(opf_dir, &m.href))
+        .collect();
+    for item in &pkg.manifest {
+        if !is_xhtml(&item.media_type) {
+            continue;
+        }
+        let path = join_opf(opf_dir, &item.href);
+        if encrypted.contains(&path) {
+            continue;
+        }
+        let Ok(text) = read_text(zip, &path) else {
+            continue;
+        };
+        let is_data_nav = item.properties.iter().any(|p| p == "data-nav");
+        let mut reader = Reader::from_str(&text);
+        // Element depth, and the depth a region-based `<nav>` opened at while
+        // one is open — which is what scopes NAV-009 to its own subtree.
+        let (mut depth, mut region_nav) = (0usize, None::<usize>);
+        loop {
+            let event = reader.read_event();
+            let (start, closes) = match &event {
+                Ok(Event::Start(e)) => (Some(e.clone()), false),
+                Ok(Event::Empty(e)) => (Some(e.clone()), true),
+                Ok(Event::End(_)) => {
+                    depth = depth.saturating_sub(1);
+                    if region_nav == Some(depth) {
+                        region_nav = None;
+                    }
+                    continue;
+                }
+                Ok(Event::Eof) | Err(_) => break,
+                _ => continue,
+            };
+            let Some(e) = start else { continue };
+            let local = local_name(e.name().as_ref()).to_vec();
+            let types = epub_type_tokens(&e);
+            if types.iter().any(|t| t == "region-based") {
+                if local != b"nav" || !is_data_nav {
+                    report.push(Violation::new(
+                        Rule::RegionBasedNotInDataNav,
+                        path.clone(),
+                        "the \"region-based\" property is only allowed on nav elements in data navigation documents",
+                    ));
+                } else if !closes {
+                    region_nav = Some(depth);
+                }
+            }
+            // NAV-009: inside a region-based nav, every link must reach a
+            // fixed-layout document.
+            if region_nav.is_some()
+                && local == b"a"
+                && let Some(href) = attr_by_local(&e, b"href")
+                && !is_remote_href(&href)
+                && let Some(target) = resolve_href(&path, &href)
+                && !fxl_paths.contains(&target)
+            {
+                report.push(Violation::new(
+                    Rule::RegionBasedLinkNotFixedLayout,
+                    path.clone(),
+                    format!("region-based navigation link {href:?} does not point to a fixed-layout document"),
+                ));
+            }
+            if !closes {
+                depth += 1;
+            }
+        }
+    }
+}
+
+/// The `epub:type` tokens on an element. A *prefixed* `type` is required: a
+/// bare one means a media type.
+fn epub_type_tokens(e: &quick_xml::events::BytesStart) -> Vec<String> {
+    e.attributes()
+        .flatten()
+        .find(|a| a.key.as_ref().contains(&b':') && local_name(a.key.as_ref()) == b"type")
+        .map(|a| {
+            String::from_utf8_lossy(&a.value)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// **OPF-078** — a dictionary collection groups the documents of a dictionary,
+/// so at least one of them must actually *be* dictionary content: an XHTML
+/// resource carrying `epub:type="dictionary"`.
+fn check_dictionary_content(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    encrypted: &HashSet<String>,
+    report: &mut Report,
+) {
+    for collection in pkg.collections.iter().filter(|c| c.has_role("dictionary")) {
+        let found = collection.hrefs.iter().any(|href| {
+            let path = join_opf(opf_dir, href.split('#').next().unwrap_or(href));
+            if encrypted.contains(&path) {
+                // Ciphertext cannot be read, so it cannot be ruled out either.
+                return true;
+            }
+            let is_xhtml = pkg
+                .manifest
+                .iter()
+                .any(|m| join_opf(opf_dir, &m.href) == path && is_xhtml(&m.media_type));
+            is_xhtml
+                && read_text(zip, &path)
+                    .is_ok_and(|text| detect_content_features(&text).dictionary_content)
+        });
+        if !found {
+            report.push(Violation::new(
+                Rule::DictionaryNoDictionaryContent,
+                opf_dir.to_string(),
+                "an EPUB dictionary must contain at least one content document with dictionary content (epub:type=\"dictionary\")",
+            ));
+        }
+    }
+}
+
+/// **RSC-021** — a Search Key Map document indexes the words of a dictionary,
+/// so every `href` in it must name a document a reader can actually turn to:
+/// one in the spine.
+///
+/// An `epubcfi(…)` fragment is exempt — a canonical fragment identifier can
+/// address a place in a document that is not itself a spine item.
+fn check_search_key_maps(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    encrypted: &HashSet<String>,
+    report: &mut Report,
+) {
+    let spine_paths: HashSet<String> = pkg
+        .spine
+        .iter()
+        .filter_map(|s| pkg.manifest_by_id(&s.idref))
+        .map(|item| join_opf(opf_dir, &item.href))
+        .collect();
+    for item in &pkg.manifest {
+        if !item
+            .media_type
+            .trim()
+            .eq_ignore_ascii_case("application/vnd.epub.search-key-map+xml")
+        {
+            continue;
+        }
+        let path = join_opf(opf_dir, &item.href);
+        if encrypted.contains(&path) {
+            continue;
+        }
+        let Ok(text) = read_text(zip, &path) else {
+            continue;
+        };
+        let dir = dir_of(&path);
+        let mut reader = Reader::from_str(&text);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                    let Some(href) = attr_by_local(&e, b"href") else {
+                        continue;
+                    };
+                    if href
+                        .split_once('#')
+                        .is_some_and(|(_, fragment)| fragment.starts_with("epubcfi("))
+                    {
+                        continue;
+                    }
+                    let target = join_opf(&dir, href.split('#').next().unwrap_or(&href));
+                    if !spine_paths.contains(&target) {
+                        report.push(Violation::new(
+                            Rule::SearchKeyTargetNotInSpine,
+                            path.clone(),
+                            format!(
+                                "a search key map document must point to content documents ({href:?} was not found in the spine)"
+                            ),
+                        ));
+                    }
+                }
+                Ok(Event::Eof) | Err(_) => break,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// **OPF-005 / OPF-006** — the syntax of the package `prefix` attribute, which
+/// is a whitespace-separated sequence of `prefix: URI` pairs.
+///
+/// `OPF-005` is a trailing `prefix:` with no URI after it; `OPF-006` is a URI
+/// that is not one. Only characters no URI may contain unescaped are judged
+/// (RFC 3986's excluded set), so a URI this rejects is one Java's `URI`
+/// constructor rejects too.
+fn check_prefix_syntax(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
+    let Some(decl) = pkg.prefix_decl.as_deref() else {
+        return;
+    };
+    // The declaration alternates `prefix:` and URI tokens. A `prefix:` with no
+    // token after it declares nothing.
+    let tokens: Vec<&str> = decl.split_whitespace().collect();
+    let mut at = 0;
+    while at < tokens.len() {
+        let token = tokens[at];
+        let Some(prefix) = token.strip_suffix(':') else {
+            // `prefix:URI` written without the space: the URI is attached.
+            match token.split_once(':') {
+                Some((prefix, uri)) if !prefix.is_empty() && !uri.is_empty() => {
+                    report_bad_uri(uri, prefix, opf_path, report)
+                }
+                _ => {}
+            }
+            at += 1;
+            continue;
+        };
+        match tokens.get(at + 1) {
+            None => report.push(Violation::new(
+                Rule::PrefixWithoutUri,
+                opf_path.to_string(),
+                format!("invalid prefix declaration: no URI for prefix {prefix:?}"),
+            )),
+            Some(uri) => report_bad_uri(uri, prefix, opf_path, report),
+        }
+        at += 2;
+    }
+}
+
+/// The characters RFC 3986 excludes from a URI outright. A value carrying one
+/// unescaped is not a URI in any reading, which is what keeps `OPF-006` a
+/// strict subset of what epubcheck rejects.
+fn report_bad_uri(uri: &str, prefix: &str, opf_path: &str, report: &mut Report) {
+    const EXCLUDED: &[char] = &['<', '>', '"', '{', '}', '|', '\\', '^', '`'];
+    if uri.contains(EXCLUDED) || uri.chars().any(|c| c.is_control()) {
+        report.push(Violation::new(
+            Rule::PrefixUriInvalid,
+            opf_path.to_string(),
+            format!(
+                "invalid prefix declaration: {uri:?} (for prefix {prefix:?}) is not a valid URI"
+            ),
+        ));
+    }
+}
+
+/// **OPF-065** — the `refines` graph must be a DAG. A metadata expression
+/// refines another to say something about it; a cycle says nothing about
+/// anything, and epubcheck's metadata builder cannot resolve one.
+///
+/// Reported once per package, as epubcheck does: the cycle is a property of the
+/// `<metadata>` element, and naming every member of it would repeat one defect.
+fn check_refines_graph(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
+    let edges: HashMap<&str, &str> = pkg
+        .refines_edges
+        .iter()
+        .map(|(from, to)| (from.as_str(), to.as_str()))
+        .collect();
+    // Walking each id to its end finds a cycle in a graph this small without a
+    // colouring pass; the step budget is what stops the walk inside one.
+    for start in edges.keys() {
+        let mut at = *start;
+        for _ in 0..=edges.len() {
+            let Some(next) = edges.get(at) else { break };
+            at = next;
+            if at == *start {
+                report.push(Violation::new(
+                    Rule::RefinesCycle,
+                    opf_path.to_string(),
+                    format!(
+                        "invalid metadata declaration: the \"refines\" graph has a cycle through {start:?}"
+                    ),
+                ));
+                return;
+            }
+        }
+    }
+}
+
+/// **OPF-012 / OPF-025 / OPF-026 / OPF-027** — every property-bearing
+/// attribute in the package document, judged against the vocabulary its
+/// context draws from. [`vocab`] owns the vocabularies and the rules; this
+/// walks what the parser kept.
+fn check_property_vocabularies(pkg: &opf::Package, opf_path: &str, report: &mut Report) {
+    for attr in &pkg.property_attrs {
+        let defects = match vocab::check(attr.context, &attr.value, attr.media_type.as_deref()) {
+            Err(value) => {
+                report.push(Violation::new(
+                    Rule::PropertyListNotAllowed,
+                    opf_path.to_string(),
+                    format!(
+                        "property value list {value:?} is not allowed on {:?}; only one value must be specified",
+                        attr.context.attribute()
+                    ),
+                ));
+                continue;
+            }
+            Ok(defects) => defects,
+        };
+        for defect in defects {
+            let (rule, message) = match defect {
+                vocab::Defect::Malformed { property } => (
+                    Rule::PropertyMalformed,
+                    format!("found malformed property value: {property:?}"),
+                ),
+                vocab::Defect::Undefined { property } => (
+                    Rule::PropertyUndefined,
+                    format!("undefined property: {property:?}"),
+                ),
+                vocab::Defect::WrongMediaType {
+                    property,
+                    media_type,
+                } => (
+                    Rule::PropertyWrongMediaType,
+                    format!(
+                        "item property {property:?} is not defined for media type {media_type:?}"
+                    ),
+                ),
+            };
+            report.push(Violation::new(rule, opf_path.to_string(), message));
+        }
+    }
+}
+
+/// **MED-005 / MED-008…MED-014** — the media-overlay rules that judge what an
+/// overlay says rather than its structure (which the schema engine judges).
+///
+/// The four MED-010…013 rules are one question asked from both sides: an
+/// overlay and the content document it narrates must agree that they are a
+/// pair. epubcheck builds a document → overlay map while reading the overlays,
+/// then compares it with the manifest's `media-overlay` attributes; this does
+/// the same in one pass over the manifest.
+fn check_media_overlays(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    zip: &mut ZipArchive<Cursor<&[u8]>>,
+    encrypted: &HashSet<String>,
+    report: &mut Report,
+) {
+    // The document → overlay-id map, built in manifest order like epubcheck's
+    // `OverlayTextChecker`: the *first* overlay to name a document owns it, and
+    // a second one naming it is MED-011.
+    let mut narrated_by: HashMap<String, String> = HashMap::new();
+    for item in &pkg.manifest {
+        if !item
+            .media_type
+            .trim()
+            .eq_ignore_ascii_case("application/smil+xml")
+        {
+            continue;
+        }
+        let path = join_opf(opf_dir, &item.href);
+        if encrypted.contains(&path) {
+            continue;
+        }
+        let Ok(text) = read_text(zip, &path) else {
+            continue;
+        };
+        let parsed = overlay::parse(&text);
+        for href in &parsed.text_refs {
+            let target = join_opf(&dir_of(&path), href.split('#').next().unwrap_or(href));
+            match narrated_by.entry(target) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(item.id.clone());
+                }
+                std::collections::hash_map::Entry::Occupied(slot) => {
+                    if slot.get() != &item.id {
+                        report.push(Violation::new(
+                            Rule::DocumentNarratedTwice,
+                            path.clone(),
+                            format!(
+                                "content document {href:?} is referenced from more than one media overlay"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        for clip in &parsed.audio {
+            check_audio_clip(pkg, opf_dir, clip, &path, report);
+        }
+    }
+    // The manifest side: each content document's `media-overlay` attribute
+    // against the map the overlays built.
+    for item in &pkg.manifest {
+        if !is_content_document(&item.media_type, false) {
+            continue;
+        }
+        let path = join_opf(opf_dir, &item.href);
+        let declared = item.media_overlay.as_deref().filter(|id| !id.is_empty());
+        match (narrated_by.get(&path), declared) {
+            (Some(_), None) => report.push(Violation::new(
+                Rule::NarratedDocumentMissingOverlay,
+                path,
+                "content document referenced from a media overlay must declare the media-overlay attribute",
+            )),
+            (Some(owner), Some(declared)) if owner != declared => {
+                report.push(Violation::new(
+                    Rule::NarratedDocumentWrongOverlay,
+                    path,
+                    format!(
+                        "the media-overlay attribute ({declared:?}) does not match the id of the media overlay that refers to this document ({owner:?})"
+                    ),
+                ));
+            }
+            (None, Some(declared)) => report.push(Violation::new(
+                Rule::OverlayDoesNotNarrateDocument,
+                path,
+                format!(
+                    "media overlay {declared:?} contains no reference back to this content document"
+                ),
+            )),
+            _ => {}
+        }
+    }
+}
+
+/// One `<audio>` element of an overlay: its `src` (MED-005 / MED-014) and its
+/// clip bounds (MED-008 / MED-009).
+fn check_audio_clip(
+    pkg: &opf::Package,
+    opf_dir: &str,
+    clip: &overlay::AudioClip,
+    path: &str,
+    report: &mut Report,
+) {
+    // MED-014: an audio recording is a whole resource; a fragment names
+    // nothing in it (the clip bounds are what select a span).
+    if let Some((_, fragment)) = clip.src.split_once('#') {
+        report.push(Violation::new(
+            Rule::OverlayAudioSrcHasFragment,
+            path.to_string(),
+            format!(
+                "media overlay audio file URLs must not have a fragment, but found '#{fragment}'"
+            ),
+        ));
+    }
+    // MED-005: the recording must be a core audio type, read off the manifest
+    // (a resource outside the manifest is RSC-008's finding, not this one's).
+    let src = clip.src.split('#').next().unwrap_or(&clip.src);
+    if !is_remote_href(src) {
+        let target = join_opf(&dir_of(path), src);
+        if let Some(item) = pkg
+            .manifest
+            .iter()
+            .find(|m| join_opf(opf_dir, &m.href) == target)
+            && !is_blessed_audio_type(&item.media_type)
+        {
+            report.push(Violation::new(
+                Rule::OverlayAudioNotCoreType,
+                path.to_string(),
+                format!(
+                    "media overlay audio reference {src:?} is of non-standard audio type {:?}",
+                    item.media_type
+                ),
+            ));
+        }
+    }
+    // MED-008 / MED-009. An absent `clipEnd` means "play to the end", so there
+    // is nothing to compare; an absent `clipBegin` is zero. A value the clock
+    // grammar rejects is already an RSC-005, so it is not compared.
+    let Some(end) = clip.clip_end.as_deref().and_then(overlay::clock) else {
+        return;
+    };
+    let begin = match clip.clip_begin.as_deref() {
+        None => Some(0.0),
+        Some(value) => overlay::clock(value),
+    };
+    let Some(begin) = begin else { return };
+    if begin > end {
+        report.push(Violation::new(
+            Rule::ClipBeginAfterEnd,
+            path.to_string(),
+            "the time specified in the clipBegin attribute must not be after clipEnd",
+        ));
+    } else if begin == end {
+        report.push(Violation::new(
+            Rule::ClipBeginEqualsEnd,
+            path.to_string(),
+            "the time specified in the clipBegin attribute must not be the same as clipEnd",
+        ));
+    }
+}
+
+/// The directory part of a container path (`""` for a path at the root).
+fn dir_of(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(d, _)| d.to_string())
+        .unwrap_or_default()
+}
+
+/// **CSS-001 / CSS-008** over the CSS written *inside* a content document —
+/// every `<style>` element's text (a stylesheet) and every `style=""`
+/// attribute (a declaration list). epubcheck runs the same checker over both;
+/// only its `Mode` differs.
+fn check_inline_css(text: &str, path: &str, epub3: bool, report: &mut Report) {
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(false);
+    let mut in_style = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) == b"style" {
+                    in_style = true;
+                }
+                let Some(style) = attr_by_local(&e, b"style") else {
+                    continue;
+                };
+                let (syntax, forbidden) = css::declaration_list_errors(&style);
+                for error in syntax {
+                    report.push(Violation::new(
+                        Rule::CssSyntaxError,
+                        path.to_string(),
+                        format!(
+                            "an error occurred while parsing the style attribute: {}",
+                            error.message
+                        ),
+                    ));
+                }
+                if epub3 {
+                    for property in forbidden {
+                        report.push(Violation::new(
+                            Rule::ForbiddenCssProperty,
+                            path.to_string(),
+                            format!(
+                                "the {:?} property must not be included in an EPUB style sheet",
+                                property.name
+                            ),
+                        ));
+                    }
+                }
+            }
+            // A `<style>` element's text is a stylesheet, judged as one.
+            Ok(Event::Text(t)) if in_style => {
+                check_css_syntax(&String::from_utf8_lossy(t.as_ref()), path, epub3, report);
+            }
+            Ok(Event::End(e)) if local_name(e.name().as_ref()) == b"style" => in_style = false,
+            Ok(Event::Eof) | Err(_) => break, // well-formedness is checked elsewhere
+            _ => {}
+        }
+    }
+}
+
+/// **CSS-003 / CSS-004** — a stylesheet must be UTF-8. UTF-16 is a warning
+/// (CSS-003), any other declared encoding an error (CSS-004). Only a byte-order
+/// mark or a leading `@charset` declares anything; a file that declares nothing
+/// is UTF-8 by definition.
+fn check_css_encoding(bytes: &[u8], css_path: &str, report: &mut Report) {
+    let Some(charset) = css::declared_charset(bytes) else {
+        return;
+    };
+    if charset == "utf-8" {
+        return;
+    }
+    let (rule, message) = match charset.starts_with("utf-16") {
+        true => (
+            Rule::CssEncodingUtf16,
+            format!("CSS document is encoded in {charset}; it should be UTF-8 instead"),
+        ),
+        false => (
+            Rule::CssEncodingNotUtf8,
+            format!("CSS documents must be encoded in UTF-8, detected {charset}"),
+        ),
+    };
+    report.push(Violation::new(rule, css_path.to_string(), message));
 }
 
 /// RSC-007 / RSC-026 for the references *inside* CSS resources — `url(...)` and
@@ -5035,11 +5029,17 @@ fn check_css_references(
         if encrypted.contains(&css_path) {
             continue;
         }
+        // CSS-003/CSS-004 read the raw bytes: the encoding is a property of the
+        // file, not of the decoded text.
+        if let Ok(bytes) = read_bytes(zip, &css_path) {
+            check_css_encoding(&bytes, &css_path, report);
+        }
         let Ok(text) = read_text(zip, &css_path) else {
             continue;
         };
+        check_css_syntax(&text, &css_path, epub3, report);
         // CSS-002: `url()` with nothing inside references nothing.
-        for _ in 0..css_url_tokens_with_empties(&text).1 {
+        for _ in 0..css::url_tokens_with_empties(&text).1 {
             report.push(Violation::new(
                 Rule::EmptyCssReference,
                 css_path.clone(),
@@ -5112,8 +5112,8 @@ fn check_css_references(
         //     allowed → **RSC-006**.
         // `http`/`https` (declared remote resources are a real EPUB 3 feature —
         // FP-risky), `data:` (inline), and `file:` (RSC-030) are left alone.
-        let font_face_targets = css_font_face_url_tokens(&text);
-        for tok in css_url_tokens(&text) {
+        let font_face_targets = css::font_face_url_tokens(&text);
+        for tok in css::url_tokens(&text) {
             let Some(scheme) = url_scheme(&tok) else {
                 continue;
             };
@@ -5187,14 +5187,27 @@ fn is_blessed_font_type(media_type: &str) -> bool {
 }
 
 fn check_nav_present(pkg: &opf::Package, epub3: bool, opf_path: &str, report: &mut Report) {
-    if !epub3 {
-        return; // the EPUB 3 nav document is defined only for EPUB 3
-    }
     let nav_items: Vec<&opf::ManifestItem> = pkg
         .manifest
         .iter()
         .filter(|m| m.properties.iter().any(|p| p == "nav"))
         .collect();
+    if !epub3 {
+        // NAV-001: the navigation document is an EPUB 3 construct. An EPUB 2
+        // package carrying one is reported per nav item, as epubcheck does from
+        // `NavChecker`'s constructor.
+        for item in &nav_items {
+            report.push(Violation::new(
+                Rule::NavInEpub2,
+                opf_path,
+                format!(
+                    "manifest item {:?} declares properties=\"nav\", which EPUB 2 does not support",
+                    item.id
+                ),
+            ));
+        }
+        return; // the EPUB 3 nav document is defined only for EPUB 3
+    }
     match nav_items.len() {
         0 => report.push(Violation::new(
             Rule::NavMissing,
@@ -5723,125 +5736,13 @@ fn collect_references(content: &str) -> Vec<(RefKind, String)> {
     out
 }
 
-/// Remove CSS `/* … */` comments so a commented-out `url()`/`@import` never
-/// counts as a reference (an unterminated comment swallows the rest, as a CSS
-/// parser would). Comments do not nest in CSS.
-fn strip_css_comments(css: &str) -> String {
-    let mut out = String::with_capacity(css.len());
-    let mut rest = css;
-    while let Some(start) = rest.find("/*") {
-        out.push_str(&rest[..start]);
-        match rest[start + 2..].find("*/") {
-            Some(end) => rest = &rest[start + 2 + end + 2..],
-            None => return out, // unterminated comment → rest is all comment
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Case-insensitive byte search for the ASCII keyword `kw` in `hay`, returning
-/// its byte offset. `kw` is ASCII, so the returned offset is a char boundary.
-fn find_ascii_ci(hay: &str, kw: &[u8]) -> Option<usize> {
-    let hb = hay.as_bytes();
-    if kw.is_empty() || hb.len() < kw.len() {
-        return None;
-    }
-    (0..=hb.len() - kw.len()).find(|&i| hb[i..i + kw.len()].eq_ignore_ascii_case(kw))
-}
-
-/// The container-relative resource targets referenced from a CSS resource, via
-/// `url(...)` functions and `@import` rules (comments stripped first). Quotes
-/// are removed and the `url`/`@import` keywords matched case-insensitively (CSS
-/// is ASCII-case-insensitive there). Absolute-URL, `data:`, and pure-`#fragment`
-/// targets are dropped — only references that resolve to a container path feed
-/// the existence/leak checks (a remote CSS resource is a separate concern).
+/// The container-relative resource targets referenced from a CSS resource —
+/// [`css::url_tokens`] filtered to the ones that name a path in the container.
 fn extract_css_urls(css_raw: &str) -> Vec<String> {
-    css_url_tokens(css_raw)
+    css::url_tokens(css_raw)
         .iter()
         .filter_map(|t| css_url_target(t))
         .collect()
-}
-
-/// Every raw `url(...)` / `@import` target in a CSS resource (comments stripped,
-/// one layer of quotes removed, empties dropped) — *unclassified*. Callers filter
-/// by kind: [`css_url_target`] keeps the container-relative ones (existence/leak
-/// checks), while the RSC-008 pass keeps the opaque-scheme ones.
-fn css_url_tokens(css_raw: &str) -> Vec<String> {
-    css_url_tokens_with_empties(css_raw).0
-}
-
-/// The `url()`/`@import` targets of a stylesheet plus the number of *empty*
-/// ones — `url()` with nothing inside is CSS-002 ("empty or NULL reference"),
-/// which the reference passes cannot see once the token is dropped.
-fn css_url_tokens_with_empties(css_raw: &str) -> (Vec<String>, usize) {
-    let css = strip_css_comments(css_raw);
-    let mut out = Vec::new();
-    let mut empties = 0;
-    // url( … ) — also covers `@import url(…)`.
-    let mut from = 0;
-    while let Some(rel) = find_ascii_ci(&css[from..], b"url(") {
-        let open = from + rel + 4;
-        let Some(close_rel) = css[open..].find(')') else {
-            break;
-        };
-        let tok = unquote(css[open..open + close_rel].trim()).trim();
-        if tok.is_empty() {
-            empties += 1;
-        } else {
-            out.push(tok.to_string());
-        }
-        from = open + close_rel + 1;
-    }
-    // @import "…" (the string form; the `@import url(…)` form is caught above).
-    let mut from = 0;
-    while let Some(rel) = find_ascii_ci(&css[from..], b"@import") {
-        let after = &css[from + rel + 7..];
-        let seg = after.trim_start();
-        if let Some(quote @ ('"' | '\'')) = seg.chars().next()
-            && let Some(end) = seg[1..].find(quote)
-        {
-            let tok = seg[1..1 + end].trim();
-            if !tok.is_empty() {
-                out.push(tok.to_string());
-            }
-        }
-        from = from + rel + 7;
-    }
-    (out, empties)
-}
-
-/// The `url(...)` targets that appear inside `@font-face` rules — the CSS
-/// contexts epubcheck types as FONT references (remote-exempt in EPUB 3, so an
-/// undeclared remote font there is RSC-008 rather than RSC-006). `@font-face`
-/// rules do not nest, so each is the run from its `{` to the next `}`.
-fn css_font_face_url_tokens(css_raw: &str) -> HashSet<String> {
-    let css = strip_css_comments(css_raw);
-    let mut out = HashSet::new();
-    let mut from = 0;
-    while let Some(rel) = find_ascii_ci(&css[from..], b"@font-face") {
-        let after = from + rel + "@font-face".len();
-        let Some(open_rel) = css[after..].find('{') else {
-            break;
-        };
-        let open = after + open_rel + 1;
-        let close = css[open..].find('}').map_or(css.len(), |c| open + c);
-        for tok in css_url_tokens(&css[open..close]) {
-            out.insert(tok);
-        }
-        from = close;
-    }
-    out
-}
-
-/// Strip one layer of matching `"`/`'` quotes from a CSS token, if present.
-fn unquote(s: &str) -> &str {
-    let b = s.as_bytes();
-    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
-        &s[1..s.len() - 1]
-    } else {
-        s
-    }
 }
 
 /// Normalize a raw CSS `url()`/`@import` value into a container-relative target,
@@ -5907,10 +5808,19 @@ struct ContentFeatures {
     /// A `<link rel>` naming both `alternate` and `stylesheet` with no non-empty
     /// `title` — CSS-015.
     untitled_alternate_stylesheet: bool,
+    /// The document carries CSS at all: a `<link rel="…stylesheet…" href>`, a
+    /// non-empty `<style>`, or an `<?xml-stylesheet?>` instruction. This is
+    /// `OPSHandler.hasCSS`, and CSS-030 is what reads it.
+    has_css: bool,
+    /// An `epub:type` token `dictionary` somewhere in the document — what makes
+    /// it *dictionary content*, which OPF-078 requires a dictionary collection
+    /// to contain at least one of.
+    dictionary_content: bool,
 }
 
 fn detect_content_features(content: &str) -> ContentFeatures {
     let mut f = ContentFeatures::default();
+    let mut in_style = false;
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(false);
     loop {
@@ -5941,11 +5851,44 @@ fn detect_content_features(content: &str) -> ContentFeatures {
                         {
                             f.untitled_alternate_stylesheet = true;
                         }
+                        // `OPSHandler.handleLinkElement`: a `rel` *containing*
+                        // "stylesheet", with an href.
+                        if rel.contains("stylesheet") && attr_by_local(&e, b"href").is_some() {
+                            f.has_css = true;
+                        }
                     }
+                    b"style" => in_style = true,
                     _ => {}
                 }
                 if !f.remote_resources && element_loads_remote_resource(local, &e) {
                     f.remote_resources = true;
+                }
+                // `epub:type` is a whitespace-separated token list. A *prefixed*
+                // `type` is required: a bare one is `<link type>`/`<script
+                // type>` and means a media type, not a structural semantic.
+                if !f.dictionary_content
+                    && let Some(types) = e.attributes().flatten().find(|a| {
+                        a.key.as_ref().contains(&b':') && local_name(a.key.as_ref()) == b"type"
+                    })
+                {
+                    f.dictionary_content = String::from_utf8_lossy(&types.value)
+                        .split_whitespace()
+                        .any(|t| t == "dictionary");
+                }
+            }
+            // A `<style>` counts only when it has content, matching
+            // `OPSHandler.endElement`'s `style.length() > 0` guard.
+            Ok(Event::Text(t)) if in_style && !t.is_empty() => f.has_css = true,
+            Ok(Event::End(e)) if local_name(e.name().as_ref()) == b"style" => in_style = false,
+            // `<?xml-stylesheet href="…"?>` with a CSS (or absent) type.
+            Ok(Event::PI(pi)) => {
+                let text = String::from_utf8_lossy(pi.as_ref());
+                if text.trim_start().starts_with("xml-stylesheet") && text.contains("href") {
+                    let css_typed = pi_pseudo_attribute(&text, "type")
+                        .is_none_or(|t| t.trim().eq_ignore_ascii_case("text/css"));
+                    if css_typed {
+                        f.has_css = true;
+                    }
                 }
             }
             Ok(Event::Eof) => break,
@@ -5954,6 +5897,18 @@ fn detect_content_features(content: &str) -> ContentFeatures {
         }
     }
     f
+}
+
+/// The value of a pseudo-attribute in a processing instruction's data —
+/// `<?xml-stylesheet type="text/css" href="s.css"?>` is a pseudo-attribute list,
+/// not XML attributes, so it is read by hand.
+fn pi_pseudo_attribute(data: &str, name: &str) -> Option<String> {
+    let at = css::find_ascii_ci(data, name.as_bytes())?;
+    let rest = data[at + name.len()..].trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let end = rest[1..].find(quote)?;
+    Some(rest[1..1 + end].to_string())
 }
 
 /// The `<meta name="viewport">` microsyntax, a faithful port of epubcheck's
@@ -6609,7 +6564,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 103, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 130, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -6637,15 +6592,15 @@ mod tests {
         // Add an error → the predicate flips and the error view shows only the
         // error line (the warning is filtered out).
         report.push(Violation::new(
-            Rule::EmptyTitle,
-            "ch1.xhtml",
-            "empty <title>",
+            Rule::SchemaViolation,
+            "ch1.xhtml:7",
+            "Element \"title\" must not be empty.",
         ));
         assert!(report.has_errors());
         assert_eq!(report.count(Severity::Error), 1);
         let shown = report.errors_display().to_string();
         assert!(
-            shown.contains(Rule::EmptyTitle.message_id()),
+            shown.contains(Rule::SchemaViolation.message_id()),
             "error line present: {shown:?}"
         );
         assert!(
@@ -6694,9 +6649,35 @@ mod tests {
         // raster image) + RSC-020 (invalid reference URL); fixed-layout/stylesheet
         // batch HTM-047/056/057/059 (viewport metadata) + HTM-048 (SVG viewBox) +
         // CSS-015 (untitled alternate stylesheet) + CSS-002 (empty url()) +
-        // RSC-015 (svg use without a fragment) + OPF-041 (missing fallback-style).
+        // RSC-015 (svg use without a fragment) + OPF-041 (missing fallback-style);
+        // schema-engine batch HTM-054 + HTM-061 (the two defects preprocessing
+        // reports on its way past); CSS batch CSS-001 (a forbidden property) +
+        // CSS-004 (a non-UTF-8 stylesheet) + CSS-008 (a syntax error) —
+        // CSS-030 (overlay styling with no CSS); CSS-003 is the UTF-16 warning,
+        // not counted here.
+        // Media-overlay batch MED-005 + MED-008 + MED-009 + MED-010 + MED-011 +
+        // MED-012 + MED-013 + MED-014.
+        // Property-vocabulary batch OPF-012 + OPF-025 + OPF-026 + OPF-027.
+        // Refines-graph batch OPF-065.
+        // Declared-but-unused manifest property OPF-015.
+        // Singles batch OPF-005 + OPF-006 (prefix declaration syntax) + OPF-042
+        // (impermissible spine media type) + OPF-093 + OPF-094 (link media-type)
+        // + NAV-001 (nav document in EPUB 2) + PKG-013 (multiple renditions).
+        // + OPF-052 (a dc:creator role outside the MARC relator scheme).
+        // Collection batch OPF-071 + OPF-075 + OPF-076 + OPF-081 + OPF-082 +
+        // OPF-083 + OPF-084.
+        // + RSC-021 (a search key map entry outside the spine).
+        // + OPF-078 (a dictionary collection with no dictionary content).
+        // + HTM-009 (an obsolete package DOCTYPE) + MED-004 (an image with no
+        // header) + MED-007 (a picture source with no type).
+        // + HTM-052 + NAV-009 (region-based navigation).
+        // + NAV-003 + OPF-066 (EduPub pagination).
+        //
+        // This counts *ids*, so it understates the schema engine badly: every
+        // grammar and every assertion reports through RSC-005, one id that was
+        // already counted when a handful of hand-written checks emitted it.
         assert_eq!(
-            covered, 76,
+            covered, 120,
             "epubcheck error coverage changed: {covered}/{total}"
         );
     }
@@ -6753,17 +6734,23 @@ mod tests {
 
     #[test]
     fn content_conformance_rules_lower_to_findings() {
+        use crate::validate::Severity;
         let report = Report {
             violations: vec![
                 Violation::new(Rule::IrregularDoctype, "OEBPS/c1.xhtml", "xhtml 1.1"),
-                Violation::new(Rule::EmptyTitle, "OEBPS/c1.xhtml", "empty"),
+                Violation::new(Rule::SchemaViolation, "OEBPS/c1.xhtml:4", "empty title"),
+                Violation::new(Rule::SchemaWarning, "OEBPS/c1.xhtml:4", "no title"),
             ],
         };
         let f = report.into_findings();
         assert_eq!(f[0].rule, "HTM-004"); // IrregularDoctype
         assert_eq!(f[0].fix.as_ref().unwrap().action, "use-html5-doctype");
-        assert_eq!(f[1].rule, "RSC-005"); // EmptyTitle (schema-error channel)
-        assert_eq!(f[1].fix.as_ref().unwrap().action, "fill-title");
+        // The schema channel keeps its two severities apart: a Schematron
+        // assertion that marks itself a warning is RSC-017, not RSC-005.
+        assert_eq!(f[1].rule, "RSC-005");
+        assert_eq!(f[1].severity, Severity::Error);
+        assert_eq!(f[2].rule, "RSC-017");
+        assert_eq!(f[2].severity, Severity::Warning);
     }
 
     #[test]
@@ -6780,15 +6767,6 @@ mod tests {
         // A DOCTYPE past a run of multi-byte chars must be found, not panic.
         let s = format!("{}\n<!DOCTYPE html>", "字".repeat(1000));
         assert_eq!(find_doctype(&s), Some("<!DOCTYPE html>"));
-    }
-
-    #[test]
-    fn has_empty_title_detects_empty_and_self_closing() {
-        assert!(has_empty_title("<head><title></title></head>"));
-        assert!(has_empty_title("<head><title/></head>"));
-        assert!(has_empty_title("<head><title>   </title></head>"));
-        assert!(!has_empty_title("<head><title>第一章</title></head>"));
-        assert!(!has_empty_title("<head></head>")); // absent title is a different rule
     }
 
     #[test]
@@ -7646,13 +7624,12 @@ mod tests {
         let mut r = Report::default();
         check_metadata(&pkg, false, "content.opf", &mut r);
         assert!(r.has_rule(Rule::LanguageTagNotWellFormed));
-        // The tag is present, so the missing-language rule must NOT also fire.
-        assert!(!r.has_rule(Rule::MissingLanguage));
     }
 
     #[test]
-    fn metadata_check_flags_missing_title_language_and_bad_values() {
-        // Missing dc:title and dc:language, an invalid date, and a bogus UUID.
+    fn metadata_check_flags_bad_values() {
+        // An invalid date and a bogus UUID. (Missing `dc:title`/`dc:language` is
+        // the package grammar's job — the schema channel, not this check.)
         let opf = r##"<package version="3.0" unique-identifier="uid">
           <metadata xmlns:opf="http://www.idpf.org/2007/opf">
             <dc:identifier id="uid" opf:scheme="uuid">urn:uuid:not-a-uuid</dc:identifier>
@@ -7664,8 +7641,6 @@ mod tests {
         let pkg = opf::parse(opf).unwrap();
         let mut r = Report::default();
         check_metadata(&pkg, false, "content.opf", &mut r);
-        assert!(r.has_rule(Rule::MissingTitle));
-        assert!(r.has_rule(Rule::MissingLanguage));
         assert!(r.has_rule(Rule::IdentifierInvalidUuid));
         assert!(r.has_rule(Rule::DateSyntaxNotRecommended)); // EPUB 3 → OPF-053 warning
     }
@@ -7960,132 +7935,6 @@ mod tests {
     }
 
     #[test]
-    fn opf_schema_attrs_flag_disallowed_attributes_by_version() {
-        // Helper: run the check under an explicit (epub2, epub3) pair.
-        let run = |xml: &str, epub2: bool, epub3: bool| {
-            let mut r = Report::default();
-            check_opf_schema(xml, "content.opf", epub2, epub3, &mut r);
-            r
-        };
-
-        // EPUB 3: an OPF-namespaced attribute (`opf:role`/`opf:file-as`/
-        // `opf:scheme`) on a `<dc:*>` element is a schema violation (RSC-005) —
-        // whatever prefix the OPF namespace is bound to.
-        let e3_role = r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:opf="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata><dc:creator opf:role="aut" opf:file-as="Doe, J">J. Doe</dc:creator><dc:identifier opf:scheme="uuid">u</dc:identifier></metadata></package>"#;
-        assert!(
-            run(e3_role, false, true).has_rule(Rule::DisallowedOpfAttribute),
-            "EPUB 3 opf: metadata attribute must fire RSC-005"
-        );
-        // The same OPF namespace bound to a non-`opf` prefix is still caught
-        // (resolution is by namespace URI, not prefix spelling).
-        let e3_ns1 = r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:ns1="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata><dc:creator ns1:role="aut">x</dc:creator></metadata></package>"#;
-        assert!(
-            run(e3_ns1, false, true).has_rule(Rule::DisallowedOpfAttribute),
-            "OPF namespace under a foreign prefix must still fire"
-        );
-
-        // EPUB 3 clean: no OPF-namespaced attributes. `xml:lang`, unprefixed
-        // `id`, and `page-progression-direction` on the spine are all legal.
-        let e3_clean = r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata><dc:creator id="c" xml:lang="en">x</dc:creator></metadata><spine toc="ncx" page-progression-direction="rtl"><itemref idref="a"/></spine></package>"#;
-        assert!(
-            run(e3_clean, false, true).is_clean(),
-            "clean EPUB 3 OPF must not fire, got:\n{}",
-            run(e3_clean, false, true)
-        );
-
-        // EPUB 2: the very same `opf:role`/`opf:file-as` are LEGAL — no finding.
-        let e2_role = r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:opf="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0"><metadata><dc:creator opf:role="aut" opf:file-as="Doe, J">J. Doe</dc:creator></metadata></package>"#;
-        assert!(
-            run(e2_role, true, false).is_clean(),
-            "EPUB 2 opf: metadata attributes are legal, got:\n{}",
-            run(e2_role, true, false)
-        );
-
-        // EPUB 2: `page-progression-direction` and `page-map` on `<spine>` are
-        // EPUB-3/Adobe attributes the EPUB 2 spine attlist (`id`/`toc`) forbids.
-        for spine in [
-            r#"<spine toc="ncx" page-progression-direction="rtl"><itemref idref="a"/></spine>"#,
-            r#"<spine toc="ncx" page-map="pm"><itemref idref="a"/></spine>"#,
-        ] {
-            let xml = format!(
-                r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata/>{spine}</package>"#
-            );
-            assert!(
-                run(&xml, true, false).has_rule(Rule::DisallowedOpfAttribute),
-                "EPUB 2 disallowed spine attribute must fire on {spine:?}"
-            );
-        }
-        // EPUB 2 clean spine (only id/toc).
-        let e2_spine_ok = r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata/><spine id="s" toc="ncx"><itemref idref="a"/></spine></package>"#;
-        assert!(
-            run(e2_spine_ok, true, false).is_clean(),
-            "EPUB 2 spine with only id/toc is clean, got:\n{}",
-            run(e2_spine_ok, true, false)
-        );
-
-        // Version-less/legacy package: not schema-validated here (OPF-001 covers
-        // it), so even an opf: attribute produces nothing.
-        assert!(
-            run(e3_role, false, false).is_clean(),
-            "version-less package must not be schema-attr-checked"
-        );
-
-        // EPUB 2 `<item>`: the EPUB 3 `properties` attribute does not exist in
-        // the 2.0 manifest grammar (the rest of the attlist is legal).
-        let e2_item = |extra: &str| {
-            format!(
-                r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata/><manifest><item id="c" href="c.jpg" media-type="image/jpeg"{extra}/></manifest></package>"#
-            )
-        };
-        assert!(
-            run(&e2_item(r#" properties="cover-image""#), true, false)
-                .has_rule(Rule::DisallowedOpfAttribute),
-            "EPUB 2 <item properties> must fire"
-        );
-        assert!(
-            run(
-                &e2_item(r#" fallback="x" required-namespace="urn:y""#),
-                true,
-                false
-            )
-            .is_clean(),
-            "the EPUB 2 item attlist is legal"
-        );
-
-        // EPUB 2 `<dc:*>`: the OPF refinements are namespaced, so an unprefixed
-        // `role` is a violation while `opf:role`/`xml:lang`/`xsi:type` are not.
-        let e2_dc = |attrs: &str| {
-            format!(
-                r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:opf="http://www.idpf.org/2007/opf" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0"><metadata><dc:creator {attrs}>A</dc:creator></metadata></package>"#
-            )
-        };
-        assert!(
-            run(&e2_dc(r#"role="aut""#), true, false).has_rule(Rule::DisallowedOpfAttribute),
-            "an unprefixed role on <dc:creator> must fire"
-        );
-        assert!(
-            run(
-                &e2_dc(r#"id="c" xml:lang="en" opf:role="aut" opf:file-as="A" xsi:type="x""#),
-                true,
-                false
-            )
-            .is_clean(),
-            "the EPUB 2 dc attlist union is legal, got:\n{}",
-            run(&e2_dc(r#"id="c" opf:role="aut""#), true, false)
-        );
-
-        // The package document's `id` attributes go through the same walk: the
-        // NCName lexical form (both versions) and per-document uniqueness.
-        let bad_ids = r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata/><manifest><item id="1first" href="a.xhtml" media-type="application/xhtml+xml"/><item id="dup" href="b.xhtml" media-type="application/xhtml+xml"/><item id="dup" href="c.xhtml" media-type="application/xhtml+xml"/></manifest></package>"#;
-        let r = run(bad_ids, true, false);
-        assert!(
-            r.has_rule(Rule::IdNotNcName),
-            "leading digit is not an NCName"
-        );
-        assert!(r.has_rule(Rule::DuplicateId), "repeated id must fire");
-    }
-
-    #[test]
     fn viewport_microsyntax_matches_the_java_parser() {
         // Well-formed lists, including the whitespace/keyword/float forms the
         // epubcheck fixtures cover.
@@ -8153,7 +8002,7 @@ mod tests {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
             <use xlink:href="sprite.svg"/><use xlink:href="other.svg#sym"/><use href="#local"/>
             </svg>"##;
-        check_content_schema(svg, "a.svg", false, true, &mut r);
+        check_svg_references(svg, "a.svg", &mut r);
         assert_eq!(
             r.violations
                 .iter()
@@ -8178,139 +8027,108 @@ mod tests {
     #[test]
     fn empty_css_url_is_reported() {
         let (urls, empties) =
-            css_url_tokens_with_empties("a{background:url()}b{src:url( )}c{d:url(x.png)}");
+            css::url_tokens_with_empties("a{background:url()}b{src:url( )}c{d:url(x.png)}");
         assert_eq!(urls, ["x.png"]);
         assert_eq!(empties, 2);
     }
 
     #[test]
-    fn opf_elements_that_require_children_must_have_them() {
-        let run = |xml: &str| {
+    fn stylesheet_rules_report_syntax_property_and_encoding() {
+        let run = |css: &str, epub3: bool| {
             let mut r = Report::default();
-            check_opf_schema(xml, "content.opf", true, false, &mut r);
+            check_css_syntax(css, "s.css", epub3, &mut r);
             r
         };
-        let pkg = |body: &str| {
-            format!(
-                r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata/>{body}</package>"#
-            )
-        };
-        // `element guide { reference+ }`, `tours { tour+ }`, `tour { site+ }`.
-        for empty in [
-            "<guide></guide>",
-            "<guide/>",
-            "<tours></tours>",
-            r#"<tours><tour title="t"></tour></tours>"#,
-        ] {
-            assert!(
-                run(&pkg(empty)).has_rule(Rule::PackageIncomplete),
-                "{empty} must fire RSC-005"
-            );
-        }
-        let full = r#"<guide><reference type="cover" href="c.xhtml"/></guide><tours><tour title="t"><site title="s" href="a.xhtml"/></tour></tours>"#;
+        // CSS-008 names the line the unclosed block opened on.
+        let broken = run("p {\n  color: red;\n", true);
+        assert!(broken.has_rule(Rule::CssSyntaxError), "got:\n{broken}");
         assert!(
-            run(&pkg(full)).is_clean(),
-            "populated guide/tours are clean, got:\n{}",
-            run(&pkg(full))
+            broken.violations[0].location.ends_with(":1"),
+            "{:?}",
+            broken.violations[0].location
         );
-        // A missing `<guide>` is not an incomplete one.
-        assert!(run(&pkg("")).is_clean());
+        assert!(run("p { color: red }", true).is_clean());
+
+        // CSS-001 is EPUB 3 only — EPUB 2 stylesheets may set direction.
+        let bidi = "p { direction: rtl }";
+        assert!(run(bidi, true).has_rule(Rule::ForbiddenCssProperty));
+        assert!(run(bidi, false).is_clean(), "EPUB 2 is not held to CSS-001");
+
+        // CSS-003 / CSS-004 split on UTF-16, like RSC-027 / RSC-028 do for XML.
+        let encoding = |bytes: &[u8]| {
+            let mut r = Report::default();
+            check_css_encoding(bytes, "s.css", &mut r);
+            r
+        };
+        assert!(encoding(b"p{}").is_clean(), "no declaration is UTF-8");
+        assert!(encoding(b"@charset \"utf-8\";").is_clean());
+        assert!(
+            encoding(b"@charset \"iso-8859-1\";").has_rule(Rule::CssEncodingNotUtf8),
+            "a legacy charset is an error"
+        );
+        assert!(encoding(b"\xFE\xFFp").has_rule(Rule::CssEncodingUtf16));
+        assert_eq!(
+            encoding(b"\xFE\xFFp").count(crate::validate::Severity::Error),
+            0,
+            "UTF-16 is CSS-003, a warning"
+        );
     }
 
     #[test]
-    fn epub2_content_grammar_reads_the_xhtml11_attlists() {
-        let run = |body: &str, epub2: bool| {
-            let mut r = Report::default();
-            let xml =
-                format!(r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>{body}</body></html>"#);
-            check_content_schema(&xml, "c.xhtml", epub2, !epub2, &mut r);
-            r
-        };
-        // Attributes no XHTML 1.1 attlist declares, each seen in the corpus.
-        for bad in [
-            r#"<div xmlU0003Alang="en">x</div>"#,
-            r#"<li value="3">x</li>"#,
-            r#"<table><tr><td width="50%">x</td></tr></table>"#,
-            r#"<p onclick="f()">x</p>"#,
-            r#"<div data-x="1">x</div>"#,
-        ] {
-            assert!(
-                run(bad, true).has_rule(Rule::DisallowedContentAttribute),
-                "{bad} must fire RSC-005"
-            );
-            assert!(
-                !run(bad, false).has_rule(Rule::DisallowedContentAttribute),
-                "{bad} is EPUB 3's business, not this rule's"
-            );
-        }
-        // The attlists these elements really do have.
-        let ok = r#"<div class="c" style="s" xml:lang="en" title="t">
-            <table summary="s" border="1"><tr align="left"><td style="p" colspan="2">x</td></tr></table>
-            <pre xml:space="preserve">x</pre><a href="a" charset="utf-8">l</a>
-            <blockquote cite="u">q</blockquote><img alt="" src="i.png" longdesc="d"/></div>"#;
-        assert!(
-            run(ok, true).is_clean(),
-            "the declared attlists are legal, got:\n{}",
-            run(ok, true)
-        );
-        // An element the schema declares nowhere — the forms, legacy and HTML5
-        // vocabularies are all absent from `content.rng`.
-        for absent in ["<u>x</u>", "<center>x</center>", "<section>x</section>"] {
-            assert!(
-                run(absent, true).has_rule(Rule::UndeclaredContentElement),
-                "{absent} must fire RSC-005"
-            );
-            assert!(run(absent, false).is_clean(), "{absent} is legal in EPUB 3");
-        }
-    }
-
-    #[test]
-    fn epub3_content_rules_cover_meta_encoding_and_body_role() {
-        let run = |body: &str| {
-            let mut r = Report::default();
-            check_content_schema(body, "c.xhtml", false, true, &mut r);
-            r
-        };
-        let doc = |head: &str, body_attrs: &str| {
+    fn overlay_styling_needs_css_in_the_narrated_document() {
+        // `has_css` is the whole question: epubcheck counts a stylesheet link,
+        // a non-empty <style>, or an xml-stylesheet instruction.
+        let with = |head: &str| {
             format!(
-                r#"<html xmlns="http://www.w3.org/1999/xhtml"><head>{head}</head><body{body_attrs}/></html>"#
+                r#"<html xmlns="http://www.w3.org/1999/xhtml"><head>{head}</head><body/></html>"#
             )
         };
-        let meta =
-            |content: &str| format!(r#"<meta http-equiv="Content-Type" content="{content}"/>"#);
-        // `normalize-space` collapses only XML whitespace, so an ideographic
-        // space between the parameters fails the assertion (the corpus case).
-        for bad in ["text/html;\u{3000}charset=utf-8", "text/html", "text/plain"] {
-            assert!(
-                run(&doc(&meta(bad), "")).has_rule(Rule::MetaEncodingDeclaration),
-                "content={bad:?} must fire RSC-005"
-            );
-        }
-        for good in [
-            "text/html; charset=utf-8",
-            "text/html;charset=utf-8",
-            "TEXT/HTML;  CHARSET=UTF-8",
-            "  text/html;\n charset=utf-8 ",
+        for head in [
+            r#"<link rel="stylesheet" href="s.css"/>"#,
+            r#"<link rel="alternate stylesheet" href="s.css" title="Big"/>"#,
+            "<style>p{color:red}</style>",
         ] {
             assert!(
-                run(&doc(&meta(good), "")).is_clean(),
-                "content={good:?} is valid, got:\n{}",
-                run(&doc(&meta(good), ""))
+                detect_content_features(&with(head)).has_css,
+                "{head} is CSS"
             );
         }
-        // `<meta>` without http-equiv is untouched.
-        assert!(run(&doc(r#"<meta charset="utf-8"/>"#, "")).is_clean());
-        // `body.attrs` accepts four ARIA roles and no others.
-        assert!(
-            run(&doc("", r#" role="doc-cover""#)).has_rule(Rule::BodyRoleNotAllowed),
-            "a DPUB role on <body> must fire"
-        );
-        for role in ["application", "document", "none", "presentation"] {
+        for head in [
+            "",
+            r#"<link rel="stylesheet"/>"#, // no href
+            "<style></style>",             // no content
+            r#"<link rel="icon" href="i.png"/>"#,
+        ] {
             assert!(
-                run(&doc("", &format!(r#" role="{role}""#))).is_clean(),
-                "role={role} is allowed on <body>"
+                !detect_content_features(&with(head)).has_css,
+                "{head} is not CSS"
             );
         }
+        let pi = r#"<?xml-stylesheet type="text/css" href="s.css"?><html xmlns="http://www.w3.org/1999/xhtml"><head/><body/></html>"#;
+        assert!(detect_content_features(pi).has_css, "the PI form counts");
+
+        // The package half: only a publication-level (non-refines) declaration.
+        let opf = |meta: &str| {
+            format!(
+                r#"<package version="3.0"><metadata>{meta}</metadata><manifest/><spine/></package>"#
+            )
+        };
+        let declared =
+            opf(r#"<meta property="media:active-class">-epub-media-overlay-active</meta>"#);
+        assert!(
+            opf::parse(&declared)
+                .unwrap()
+                .publication_properties
+                .contains("media:active-class")
+        );
+        let refined = opf(r##"<meta refines="#x" property="media:active-class">active</meta>"##);
+        assert!(
+            !opf::parse(&refined)
+                .unwrap()
+                .publication_properties
+                .contains("media:active-class"),
+            "a refines-scoped meta states nothing about the publication"
+        );
     }
 
     #[test]
@@ -8329,264 +8147,6 @@ mod tests {
         ] {
             assert!(!url_has_empty_host(ok), "{ok:?} must not be flagged");
         }
-        // The same emptiness fails XSD anyURI in the EPUB 2 content grammar.
-        let mut r = Report::default();
-        let xml = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><a href="http://">x</a></body></html>"#;
-        check_content_schema(xml, "c.xhtml", true, false, &mut r);
-        assert!(r.has_rule(Rule::UriAttributeInvalid), "got:\n{r}");
-    }
-
-    #[test]
-    fn ncname_test_rejects_only_certainly_invalid_values() {
-        // The corpus class (a leading digit), plus the colon the message names,
-        // whitespace, and an empty value.
-        for bad in [
-            "1T142-50c5",
-            "0-4358",
-            "8ddbbe-65a9",
-            "a:b",
-            "a b",
-            "a/b",
-            "-lead",
-            ".lead",
-            "",
-        ] {
-            assert!(!may_be_ncname(bad), "{bad:?} is not an NCName");
-        }
-        // Valid NCNames, the deliberately-conservative non-ASCII cases (XML's
-        // Letter production varies by edition, so they are never flagged), and
-        // the whitespace-collapse cases the xsd:token base makes valid.
-        for ok in [
-            "a",
-            "_x",
-            "chapter-1",
-            "p.1_2",
-            "日本語",
-            "é1",
-            "_1",
-            " x ",
-            "nav ",
-        ] {
-            assert!(may_be_ncname(ok), "{ok:?} must not be flagged");
-        }
-    }
-
-    #[test]
-    fn content_schema_rules_are_version_gated() {
-        let run = |xml: &str, epub2: bool, epub3: bool| {
-            let mut r = Report::default();
-            check_content_schema(xml, "c.xhtml", epub2, epub3, &mut r);
-            r
-        };
-        // EPUB 2: XHTML 1.1 requires img/@alt, forbids `charset` on <meta>, types
-        // `id` as xsd:ID (NCName), and its schematron rejects nested anchors.
-        let e2 = r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><meta charset="UTF-8"/></head>
-<body id="0-4358"><p><img src="i.jpg"/></p><a href="x"><a id="in">t</a></a></body></html>"#;
-        let r = run(e2, true, false);
-        assert!(
-            r.has_rule(Rule::MissingRequiredAttribute),
-            "img needs alt:\n{r}"
-        );
-        assert!(
-            r.has_rule(Rule::DisallowedContentAttribute),
-            "meta charset:\n{r}"
-        );
-        assert!(r.has_rule(Rule::IdNotNcName), "id must be an NCName:\n{r}");
-        assert!(r.has_rule(Rule::NestedHyperlink), "nested anchors:\n{r}");
-
-        // EPUB 3: every one of those is legal (HTML5 grammar, `id` is a token),
-        // so the same document is clean.
-        assert!(
-            run(e2, false, true).is_clean(),
-            "EPUB 3 content grammar allows all of it, got:\n{}",
-            run(e2, false, true)
-        );
-
-        // Duplicate ids hold in both versions (id-unique.sch).
-        let dup = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p id="a">1</p><p id="a">2</p></body></html>"#;
-        for (e2, e3) in [(true, false), (false, true)] {
-            assert!(
-                run(dup, e2, e3).has_rule(Rule::DuplicateId),
-                "duplicate id must fire (epub2={e2})"
-            );
-        }
-
-        // Elements outside the XHTML namespace are routed past the grammar, so a
-        // foreign `<img>`/`<meta>` is never judged.
-        let foreign = r#"<r xmlns="urn:x"><img src="i.jpg"/><meta charset="UTF-8"/></r>"#;
-        assert!(run(foreign, true, false).is_clean(), "foreign namespace");
-
-        // Attributes XHTML 1.1 declares nowhere — HTML5's `data-*`/`hidden`,
-        // ARIA's `role`/`aria-*`, and EPUB 3's `epub:type` — plus `<html>`'s
-        // short attlist (`style`/`class`/`id` are not in it).
-        for body in [
-            r#"<body data-cfi="/4">x</body>"#,
-            r#"<body hidden="hidden">x</body>"#,
-            r#"<p role="doc-chapter">x</p>"#,
-            r#"<p aria-label="x">y</p>"#,
-            r#"<body epub:type="toc">x</body>"#,
-        ] {
-            let xml = format!(
-                r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">{body}</html>"#
-            );
-            assert!(
-                run(&xml, true, false).has_rule(Rule::DisallowedContentAttribute),
-                "EPUB 2 must reject {body:?}"
-            );
-            assert!(
-                run(&xml, false, true).is_clean(),
-                "EPUB 3 allows {body:?}, got:\n{}",
-                run(&xml, false, true)
-            );
-        }
-        let styled_html = r#"<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" style="font-size:1rem"><body>x</body></html>"#;
-        assert!(
-            run(styled_html, true, false).has_rule(Rule::DisallowedContentAttribute),
-            "style is not in the EPUB 2 <html> attlist"
-        );
-        let plain_html = r#"<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en" dir="ltr" version="-//W3C//DTD XHTML 1.1//EN"><body class="c" id="b">x</body></html>"#;
-        assert!(
-            run(plain_html, true, false).is_clean(),
-            "the EPUB 2 <html> attlist (and ordinary body attributes) are legal, got:\n{}",
-            run(plain_html, true, false)
-        );
-    }
-
-    #[test]
-    fn ncx_play_order_ports_the_schematron_assertions() {
-        let nodes = |v: &[(&str, Option<&str>)]| -> Vec<(String, Option<String>)> {
-            v.iter()
-                .map(|(o, s)| (o.to_string(), s.map(str::to_string)))
-                .collect()
-        };
-        let run = |v: Vec<(String, Option<String>)>| {
-            let mut r = Report::default();
-            check_ncx_play_order(&v, "toc.ncx", &mut r);
-            r
-        };
-        // A well-formed sequence: 1,2,3 with distinct targets.
-        assert!(
-            run(nodes(&[
-                ("1", Some("a.xhtml")),
-                ("2", Some("b.xhtml")),
-                ("3", Some("c.xhtml")),
-            ]))
-            .is_clean(),
-            "a gapless sequence starting at 1 is clean"
-        );
-        // Same playOrder, different targets.
-        assert!(
-            run(nodes(&[("1", Some("a.xhtml")), ("1", Some("b.xhtml"))]))
-                .has_rule(Rule::NcxPlayOrder),
-            "identical playOrder with different targets must fire"
-        );
-        // Same playOrder, same target — legal (that is what the assertion allows).
-        assert!(
-            run(nodes(&[("1", Some("a.xhtml")), ("1", Some("a.xhtml"))])).is_clean(),
-            "identical playOrder pointing at the same target is legal"
-        );
-        // A gap (3 has no 2) and a sequence that never starts at 1.
-        assert!(
-            run(nodes(&[("1", Some("a")), ("3", Some("c"))])).has_rule(Rule::NcxPlayOrder),
-            "a gap must fire"
-        );
-        assert!(
-            run(nodes(&[("2", Some("a")), ("3", Some("c"))])).has_rule(Rule::NcxPlayOrder),
-            "a sequence not starting at 1 must fire"
-        );
-        // A node without a `<content src>` child takes part in no target
-        // comparison (the XPath compares against an empty node-set).
-        assert!(
-            run(nodes(&[("1", None), ("1", Some("a"))])).is_clean(),
-            "a targetless node never triggers the same-target assertion"
-        );
-    }
-
-    #[test]
-    fn dc_content_requirements_are_version_gated() {
-        let run = |opf: &str, epub2: bool, epub3: bool| {
-            let pkg = opf::parse(opf).unwrap();
-            let mut r = Report::default();
-            check_dc_content(&pkg, epub2, epub3, "content.opf", &mut r);
-            r
-        };
-        // EPUB 3: every dc element must have content; EPUB 2 requires it only of
-        // dc:identifier.
-        let empty_source = r#"<package version="3.0"><metadata><dc:identifier id="u">urn:uuid:1</dc:identifier><dc:title>T</dc:title><dc:source/></metadata></package>"#;
-        assert!(
-            run(empty_source, false, true).has_rule(Rule::EmptyDcContent),
-            "empty dc:source is an EPUB 3 schema violation"
-        );
-        assert!(
-            run(empty_source, true, false).is_clean(),
-            "EPUB 2 requires non-empty content only of dc:identifier"
-        );
-        let empty_id = r#"<package version="2.0"><metadata><dc:identifier id="isbn_"/><dc:title>T</dc:title></metadata></package>"#;
-        assert!(
-            run(empty_id, true, false).has_rule(Rule::EmptyDcContent),
-            "empty dc:identifier fires in EPUB 2 too"
-        );
-        // At least one dc:identifier is required (EPUB 3 gate, like the sibling
-        // title/language rules).
-        let no_id =
-            r#"<package version="3.0"><metadata><dc:title>T</dc:title></metadata></package>"#;
-        assert!(
-            run(no_id, false, true).has_rule(Rule::MissingIdentifier),
-            "missing dc:identifier must fire"
-        );
-        assert!(run(no_id, true, false).is_clean(), "EPUB 2 gate");
-    }
-
-    #[test]
-    fn spine_toc_must_be_declared_when_an_ncx_is_present() {
-        let run = |opf: &str| {
-            let pkg = opf::parse(opf).unwrap();
-            let mut r = Report::default();
-            check_package_schema_structure(&pkg, false, true, "content.opf", &mut r);
-            r
-        };
-        let ncx_item =
-            r#"<item id="toc.ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>"#;
-        let missing = format!(
-            r#"<package version="3.0"><manifest>{ncx_item}</manifest><spine><itemref idref="a"/></spine></package>"#
-        );
-        assert!(
-            run(&missing).has_rule(Rule::SpineTocMissing),
-            "an NCX in the manifest requires <spine toc>"
-        );
-        let declared = format!(
-            r#"<package version="3.0"><manifest>{ncx_item}</manifest><spine toc="toc.ncx"><itemref idref="a"/></spine></package>"#
-        );
-        assert!(run(&declared).is_clean(), "declared toc is clean");
-        // No NCX at all: the EPUB 3 rule has no context to fire in — but the
-        // EPUB 2 grammar requires `toc` on `<spine>` unconditionally.
-        let no_ncx = r#"<package version="3.0"><manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="a"/></spine></package>"#;
-        assert!(run(no_ncx).is_clean(), "no NCX, no EPUB 3 requirement");
-        let mut r = Report::default();
-        check_package_schema_structure(
-            &opf::parse(no_ncx).unwrap(),
-            true,
-            false,
-            "content.opf",
-            &mut r,
-        );
-        assert!(
-            r.has_rule(Rule::SpineTocMissing),
-            "the EPUB 2 spine attlist makes `toc` mandatory"
-        );
-
-        // An absent (or empty) manifest/spine is incomplete in both grammars.
-        let no_spine = r#"<package version="3.0"><manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest></package>"#;
-        assert!(
-            run(no_spine).has_rule(Rule::PackageIncomplete),
-            "a package without a spine is incomplete"
-        );
-        let no_manifest =
-            r#"<package version="3.0"><spine toc="x"><itemref idref="a"/></spine></package>"#;
-        assert!(
-            run(no_manifest).has_rule(Rule::PackageIncomplete),
-            "a package without manifest items is incomplete"
-        );
     }
 
     #[test]
@@ -8743,7 +8303,7 @@ mod tests {
         // `css_url_tokens` surfaces every raw target; the relative-only extractor
         // drops scheme'd ones, so they route through the RSC-008 pass instead.
         let src = "@font-face{src:url(kindle:embed:0001);} .x{background:url(bg.png)}";
-        let toks = css_url_tokens(src);
+        let toks = css::url_tokens(src);
         assert!(toks.iter().any(|t| t == "kindle:embed:0001"));
         assert!(toks.iter().any(|t| t == "bg.png"));
         let rel = extract_css_urls(src);
@@ -8835,6 +8395,537 @@ mod tests {
     /// Assemble a minimal EPUB zip: `mimetype` (stored), `container.xml`, an OPF
     /// at `OEBPS/content.opf`, and the given `OEBPS/<name>` documents. For the
     /// content-conformance / property checks that read content documents.
+    /// Region-based navigation and EduPub pagination, both of which key on
+    /// `epub:type` tokens in the content and a manifest property beside them.
+    #[test]
+    fn region_based_navigation_and_pagination_key_on_epub_type() {
+        let doc = |body: &str| {
+            format!(
+                r#"<?xml version="1.0"?><!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><title>t</title></head><body>{body}</body></html>"#
+            )
+        };
+        // HTM-052 / NAV-009. `c1` is fixed-layout, `c2` is not.
+        let region_epub = |data_nav: &str, nav_body: &str| {
+            let opf = format!(
+                r##"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">u</dc:identifier><dc:title>T</dc:title><dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c2" href="c2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="d" href="d.xhtml" media-type="application/xhtml+xml"{data_nav}/>
+  </manifest>
+  <spine>
+    <itemref idref="c1" properties="rendition:layout-pre-paginated"/>
+    <itemref idref="c2"/><itemref idref="d"/>
+  </spine></package>"##
+            );
+            let pkg = opf::parse(&opf).unwrap();
+            let bytes = zip_epub(
+                &opf,
+                &[
+                    ("c1.xhtml", &doc("<p>x</p>")),
+                    ("c2.xhtml", &doc("<p>y</p>")),
+                    ("d.xhtml", &doc(nav_body)),
+                ],
+            );
+            let mut zip = ZipArchive::new(Cursor::new(&bytes[..])).unwrap();
+            let mut r = Report::default();
+            check_region_based_navs(&pkg, "OEBPS", &mut zip, &HashSet::new(), &mut r);
+            r
+        };
+        let region_nav =
+            r#"<nav epub:type="region-based"><ol><li><a href="c1.xhtml">One</a></li></ol></nav>"#;
+        assert!(
+            region_epub(r#" properties="data-nav""#, region_nav).is_clean(),
+            "a region-based nav in a data navigation document, linking a fixed-layout page"
+        );
+        assert!(
+            region_epub("", region_nav).has_rule(Rule::RegionBasedNotInDataNav),
+            "without the data-nav property the property means nothing"
+        );
+        assert!(
+            region_epub(
+                r#" properties="data-nav""#,
+                r#"<section epub:type="region-based"><p>x</p></section>"#
+            )
+            .has_rule(Rule::RegionBasedNotInDataNav),
+            "the property belongs on a <nav>, not any element"
+        );
+        assert!(
+            region_epub(
+                r#" properties="data-nav""#,
+                r#"<nav epub:type="region-based"><ol><li><a href="c2.xhtml">Two</a></li></ol></nav>"#
+            )
+            .has_rule(Rule::RegionBasedLinkNotFixedLayout),
+            "a region of a reflowable page is not a place"
+        );
+
+        // NAV-003 / OPF-066: EduPub only, and only when the content paginates.
+        let paged = |dc_type: &str, source: &str, nav: &str, page_break: bool| {
+            let opf = format!(
+                r##"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">u</dc:identifier><dc:title>T</dc:title><dc:language>en</dc:language>
+    {dc_type}{source}
+  </metadata>
+  <manifest>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="n" href="n.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+  </manifest>
+  <spine><itemref idref="c1"/><itemref idref="n"/></spine></package>"##
+            );
+            let pkg = opf::parse(&opf).unwrap();
+            let content = match page_break {
+                true => doc(r#"<span epub:type="pagebreak" id="p1"/>"#),
+                false => doc("<p>x</p>"),
+            };
+            let bytes = zip_epub(&opf, &[("c1.xhtml", &content), ("n.xhtml", &doc(nav))]);
+            let mut zip = ZipArchive::new(Cursor::new(&bytes[..])).unwrap();
+            let mut r = Report::default();
+            check_pagination(
+                &pkg,
+                "OEBPS",
+                &mut zip,
+                &HashSet::new(),
+                "content.opf",
+                &mut r,
+            );
+            r
+        };
+        let edupub = "<dc:type>edupub</dc:type>";
+        let page_list =
+            r#"<nav epub:type="page-list"><ol><li><a href="c1.xhtml#p1">1</a></li></ol></nav>"#;
+        let toc = r#"<nav epub:type="toc"><ol><li><a href="c1.xhtml">One</a></li></ol></nav>"#;
+        let source = r##"<dc:source id="src">Print</dc:source>
+                         <meta refines="#src" property="source-of">pagination</meta>"##;
+        assert!(paged(edupub, source, page_list, true).is_clean());
+        assert!(
+            paged(edupub, source, toc, true).has_rule(Rule::NavNoPageList),
+            "page breaks without a page list"
+        );
+        assert!(
+            paged(edupub, "", page_list, true).has_rule(Rule::PaginationSourceMissing),
+            "page numbers must say which edition they come from"
+        );
+        assert!(
+            paged(edupub, source, toc, false).is_clean(),
+            "no page breaks, no pagination requirement"
+        );
+        assert!(
+            paged("", "", toc, true).is_clean(),
+            "outside EduPub, pagination metadata is optional"
+        );
+    }
+
+    #[test]
+    fn each_collection_role_admits_its_own_resources() {
+        let run = |collection: &str| {
+            let pkg = opf::parse(&format!(
+                r#"<package version="3.0"><metadata/><manifest>
+                     <item id="x" href="x.xhtml" media-type="application/xhtml+xml"/>
+                     <item id="s" href="s.svg" media-type="image/svg+xml"/>
+                     <item id="k" href="k.xml" media-type="application/vnd.epub.search-key-map+xml"/>
+                     <item id="k2" href="k2.xml" media-type="application/vnd.epub.search-key-map+xml"/>
+                     <item id="i" href="i.png" media-type="image/png"/>
+                   </manifest><spine><itemref idref="x"/></spine>{collection}</package>"#
+            ))
+            .unwrap();
+            let mut r = Report::default();
+            check_collections(&pkg, "", "content.opf", &mut r);
+            r
+        };
+        let link = |href: &str| format!(r#"<link href="{href}"/>"#);
+
+        // Index: XHTML only, at any nesting depth.
+        assert!(
+            run(&format!(
+                r#"<collection role="index">{}</collection>"#,
+                link("x.xhtml")
+            ))
+            .is_clean()
+        );
+        assert!(
+            run(&format!(
+                r#"<collection role="index">{}</collection>"#,
+                link("i.png")
+            ))
+            .has_rule(Rule::IndexCollectionNotXhtml)
+        );
+        assert!(
+            run(&format!(
+                r#"<collection role="index"><collection role="index-group">{}</collection></collection>"#,
+                link("i.png")
+            ))
+            .has_rule(Rule::IndexCollectionNotXhtml),
+            "a nested index group is held to the same rule"
+        );
+
+        // Preview: a content document, and no canonical fragment identifier.
+        assert!(
+            run(&format!(
+                r#"<collection role="preview">{}{}</collection>"#,
+                link("x.xhtml"),
+                link("s.svg")
+            ))
+            .is_clean()
+        );
+        assert!(
+            run(&format!(
+                r#"<collection role="preview">{}</collection>"#,
+                link("i.png")
+            ))
+            .has_rule(Rule::PreviewCollectionNotContentDoc)
+        );
+        assert!(
+            run(&format!(
+                r#"<collection role="preview">{}</collection>"#,
+                link("x.xhtml#epubcfi(/6/4!)")
+            ))
+            .has_rule(Rule::PreviewCollectionHasCfi)
+        );
+        assert!(
+            run(&format!(
+                r#"<collection role="preview">{}</collection>"#,
+                link("x.xhtml#section1")
+            ))
+            .is_clean(),
+            "an ordinary fragment is fine; only a CFI is not"
+        );
+
+        // Dictionary: exactly one search key map, plus XHTML entries.
+        let dict = |links: String| format!(r#"<collection role="dictionary">{links}</collection>"#);
+        assert!(run(&dict(format!("{}{}", link("k.xml"), link("x.xhtml")))).is_clean());
+        assert!(run(&dict(link("x.xhtml"))).has_rule(Rule::DictionaryNoSearchKeyMap));
+        assert!(
+            run(&dict(format!("{}{}", link("k.xml"), link("k2.xml"))))
+                .has_rule(Rule::DictionaryMultipleSearchKeyMaps)
+        );
+        assert!(
+            run(&dict(format!("{}{}", link("k.xml"), link("i.png"))))
+                .has_rule(Rule::DictionaryResourceNotAllowed)
+        );
+        assert!(
+            run(&dict(format!("{}{}", link("k.xml"), link("gone.xhtml"))))
+                .has_rule(Rule::DictionaryResourceNotFound)
+        );
+        // A collection with no role bokai knows is not judged at all.
+        assert!(
+            run(&format!(
+                r#"<collection role="mine:own">{}</collection>"#,
+                link("i.png")
+            ))
+            .is_clean()
+        );
+    }
+
+    #[test]
+    fn the_package_prefix_attribute_needs_a_uri_per_prefix() {
+        let run = |decl: &str| {
+            let pkg = opf::parse(&format!(
+                r#"<package version="3.0" prefix="{decl}"><metadata/></package>"#
+            ))
+            .unwrap();
+            let mut r = Report::default();
+            check_prefix_syntax(&pkg, "content.opf", &mut r);
+            r
+        };
+        assert!(run("foaf: http://xmlns.com/foaf/spec/").is_clean());
+        assert!(run("a: http://x/ b: http://y/").is_clean());
+        // OPF-005: a prefix with nothing after it.
+        assert!(
+            run("foaf: http://xmlns.com/foaf/spec/ dangling:").has_rule(Rule::PrefixWithoutUri)
+        );
+        // OPF-006: only characters no URI may carry unescaped.
+        assert!(run("a: http://x/<bad>").has_rule(Rule::PrefixUriInvalid));
+        assert!(
+            run("a: http://x/~ok?q=1#f").is_clean(),
+            "an unusual but legal URI must not fire"
+        );
+    }
+
+    #[test]
+    fn the_remaining_package_singles_report_each_defect() {
+        let pkg = |body: &str| opf::parse(body).unwrap();
+        // OPF-052: a MARC relator code, or an `oth.`-prefixed role.
+        let roles = |role: &str| {
+            let p = pkg(&format!(
+                r#"<package version="2.0" xmlns:opf="http://www.idpf.org/2007/opf"><metadata><dc:creator opf:role="{role}">A</dc:creator></metadata></package>"#
+            ));
+            let mut r = Report::default();
+            check_creator_roles(&p, "content.opf", &mut r);
+            r
+        };
+        assert!(roles("aut").is_clean());
+        assert!(roles("oth.illustrator").is_clean());
+        assert!(roles("author").has_rule(Rule::RoleNotValid));
+
+        // NAV-001: a nav document in an EPUB 2 package.
+        let nav_pkg = pkg(
+            r#"<package version="2.0"><metadata/><manifest><item id="n" href="n.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine/></package>"#,
+        );
+        let mut r = Report::default();
+        check_nav_present(&nav_pkg, false, "content.opf", &mut r);
+        assert!(r.has_rule(Rule::NavInEpub2));
+
+        // OPF-042: a stylesheet or an image in the spine is impermissible —
+        // no fallback makes it a document to read, so OPF-043 is not the rule.
+        let spine_pkg = pkg(r#"<package version="3.0"><metadata/><manifest>
+               <item id="css" href="s.css" media-type="text/css"/>
+               <item id="img" href="i.png" media-type="image/png"/>
+               <item id="wav" href="a.wav" media-type="audio/wav"/>
+             </manifest><spine><itemref idref="css"/><itemref idref="img"/><itemref idref="wav"/></spine></package>"#);
+        let mut r = Report::default();
+        check_fallback_chain_and_spine(&spine_pkg, false, true, "content.opf", &mut r);
+        assert_eq!(
+            r.violations
+                .iter()
+                .filter(|v| v.rule == Rule::SpineMediaTypeNotPermitted)
+                .count(),
+            2,
+            "the stylesheet and the image, not the audio:\n{r}"
+        );
+        assert!(
+            r.has_rule(Rule::SpineItemNoFallback),
+            "the audio item still asks for a fallback"
+        );
+
+        // OPF-093 / OPF-094: a `<link>` without the media-type its context needs.
+        let links = |link: &str| {
+            let p = pkg(&format!(
+                r#"<package version="3.0"><metadata>{link}</metadata><manifest/><spine/></package>"#
+            ));
+            let mut r = Report::default();
+            check_opf_links(&p, "", "content.opf", &mut r);
+            r
+        };
+        assert!(
+            links(r#"<link rel="record" href="meta.xml"/>"#).has_rule(Rule::LinkMediaTypeRequired),
+            "a container resource always needs a media-type"
+        );
+        assert!(
+            links(r#"<link rel="record" href="https://example.org/rec"/>"#)
+                .has_rule(Rule::LinkMediaTypeRequiredForRel),
+            "a remote `record` link needs one because the rel demands it"
+        );
+        assert!(
+            links(r#"<link rel="alternate" href="https://example.org/x"/>"#).is_clean(),
+            "a remote link whose rel does not demand a format is fine"
+        );
+        assert!(
+            links(r#"<link rel="record" href="meta.xml" media-type="application/marcxml+xml"/>"#)
+                .is_clean()
+        );
+    }
+
+    #[test]
+    fn property_attributes_are_judged_against_their_own_vocabulary() {
+        let run = |body: &str| {
+            let pkg = opf::parse(&format!(
+                r#"<package version="3.0" unique-identifier="uid">{body}</package>"#
+            ))
+            .unwrap();
+            let mut r = Report::default();
+            check_property_vocabularies(&pkg, "content.opf", &mut r);
+            r
+        };
+        // A property list on `<meta property>`, which takes one value.
+        assert!(
+            run(r#"<metadata><meta property="role file-as">x</meta></metadata>"#)
+                .has_rule(Rule::PropertyListNotAllowed)
+        );
+        // The same two tokens are legal on `<item properties>`.
+        assert!(
+            run(
+                r#"<metadata/><manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml" properties="nav scripted"/></manifest>"#
+            )
+            .is_clean()
+        );
+        // A malformed property, and one the vocabulary does not define.
+        assert!(
+            run(r#"<metadata><meta property="nosuch">x</meta></metadata>"#)
+                .has_rule(Rule::PropertyUndefined)
+        );
+        assert!(
+            run(r#"<metadata><meta property=":empty">x</meta></metadata>"#)
+                .has_rule(Rule::PropertyMalformed)
+        );
+        // OPF-012: `nav` is defined, but only for an XHTML item.
+        assert!(
+            run(
+                r#"<metadata/><manifest><item id="a" href="a.svg" media-type="image/svg+xml" properties="nav"/></manifest>"#
+            )
+            .has_rule(Rule::PropertyWrongMediaType)
+        );
+        // A vocabulary bokai does not carry in full is never judged, so a
+        // declared author prefix produces nothing here (OPF-028 covers the
+        // undeclared case).
+        assert!(
+            run(r#"<metadata><meta property="a11y:certifiedBy">x</meta></metadata>"#).is_clean()
+        );
+    }
+
+    #[test]
+    fn a_refines_cycle_is_reported_once() {
+        let run = |metadata: &str| {
+            let pkg = opf::parse(&format!(
+                r#"<package version="3.0"><metadata>{metadata}</metadata></package>"#
+            ))
+            .unwrap();
+            let mut r = Report::default();
+            check_refines_graph(&pkg, "content.opf", &mut r);
+            r
+        };
+        // A chain is fine; only a cycle is not.
+        assert!(
+            run(r##"<dc:creator id="a">A</dc:creator>
+                    <meta id="b" refines="#a" property="role">aut</meta>
+                    <meta id="c" refines="#b" property="scheme">marc</meta>"##)
+            .is_clean()
+        );
+        let cycle = run(r##"<meta id="a" refines="#b" property="role">x</meta>
+                <meta id="b" refines="#a" property="role">y</meta>"##);
+        assert!(cycle.has_rule(Rule::RefinesCycle));
+        assert_eq!(cycle.violations.len(), 1, "one cycle, one finding");
+        // A self-refining expression is a cycle of length one.
+        assert!(
+            run(r##"<meta id="a" refines="#a" property="role">x</meta>"##)
+                .has_rule(Rule::RefinesCycle)
+        );
+        // A `refines` naming no element is the schema's finding, not this one's.
+        assert!(run(r##"<meta id="a" refines="#nothing" property="role">x</meta>"##).is_clean());
+    }
+
+    /// The four ways an overlay and the document it narrates can disagree —
+    /// each is the same question asked from one side or the other, so a table
+    /// over the same book with one thing changed is the honest shape.
+    #[test]
+    fn an_overlay_and_its_content_document_must_agree() {
+        let opf = |item: &str| {
+            format!(
+                r##"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid"
+         prefix="media: http://www.idpf.org/epub/vocab/overlays/#">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">u</dc:identifier><dc:title>T</dc:title><dc:language>en</dc:language>
+    <meta property="dcterms:modified">2020-01-01T00:00:00Z</meta>
+    <meta property="media:duration">0:00:05</meta>
+    <meta property="media:duration" refines="#mo">0:00:05</meta>
+    <meta property="media:duration" refines="#other">0:00:05</meta>
+  </metadata>
+  <manifest>
+    {item}
+    <item id="c2" href="c2.xhtml" media-type="application/xhtml+xml" media-overlay="other"/>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="mo" href="c1.smil" media-type="application/smil+xml"/>
+    <item id="other" href="other.smil" media-type="application/smil+xml"/>
+    <item id="a" href="a.mp3" media-type="audio/mpeg"/>
+  </manifest>
+  <spine><itemref idref="c1"/><itemref idref="c2"/><itemref idref="nav"/></spine>
+</package>"##
+            )
+        };
+        let smil = |text: &str| {
+            format!(
+                r#"<?xml version="1.0"?>
+<smil xmlns="http://www.w3.org/ns/SMIL" version="3.0"><body><par>
+  <text src="{text}"/><audio src="a.mp3" clipBegin="0s" clipEnd="5s"/>
+</par></body></smil>"#
+            )
+        };
+        let doc = r#"<?xml version="1.0"?><!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title></head><body><p id="s1">x</p></body></html>"#;
+        let nav = r#"<?xml version="1.0"?><!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>t</title></head>
+<body><nav epub:type="toc"><ol><li><a href="c1.xhtml">One</a></li><li><a href="c2.xhtml">Two</a></li></ol></nav></body></html>"#;
+        let run = |item: &str, mo_text: &str, other_text: &str| {
+            let bytes = zip_epub(
+                &opf(item),
+                &[
+                    ("c1.xhtml", doc),
+                    ("c2.xhtml", doc),
+                    ("nav.xhtml", nav),
+                    ("c1.smil", &smil(mo_text)),
+                    ("other.smil", &smil(other_text)),
+                    ("a.mp3", "\0"),
+                ],
+            );
+            validate(&bytes)
+        };
+        let narrated = r#"<item id="c1" href="c1.xhtml" media-type="application/xhtml+xml" media-overlay="mo"/>"#;
+        let bare = r#"<item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>"#;
+        let wrong = r#"<item id="c1" href="c1.xhtml" media-type="application/xhtml+xml" media-overlay="other"/>"#;
+
+        // Agreeing: the overlay names the document and the document names it.
+        let clean = run(narrated, "c1.xhtml#s1", "c2.xhtml#s1");
+        for rule in [
+            Rule::NarratedDocumentMissingOverlay,
+            Rule::DocumentNarratedTwice,
+            Rule::NarratedDocumentWrongOverlay,
+            Rule::OverlayDoesNotNarrateDocument,
+        ] {
+            assert!(
+                !clean.has_rule(rule),
+                "{rule:?} on an agreeing pair:\n{clean}"
+            );
+        }
+        // MED-010: narrated, but the item does not say so.
+        assert!(
+            run(bare, "c1.xhtml#s1", "c2.xhtml#s1").has_rule(Rule::NarratedDocumentMissingOverlay)
+        );
+        // MED-011: two overlays name the same document.
+        assert!(run(narrated, "c1.xhtml#s1", "c1.xhtml#s1").has_rule(Rule::DocumentNarratedTwice));
+        // MED-012: the item names an overlay other than the one narrating it.
+        assert!(
+            run(wrong, "c1.xhtml#s1", "c2.xhtml#s1").has_rule(Rule::NarratedDocumentWrongOverlay)
+        );
+        // MED-013: the item names an overlay that never mentions it.
+        assert!(
+            run(narrated, "c2.xhtml#s1", "c2.xhtml#s1")
+                .has_rule(Rule::OverlayDoesNotNarrateDocument)
+        );
+    }
+
+    #[test]
+    fn overlay_audio_and_clip_rules_report_each_defect() {
+        let pkg = opf::parse(
+            r#"<package version="3.0"><metadata/><manifest>
+              <item id="a" href="a.mp3" media-type="audio/mpeg"/>
+              <item id="w" href="w.wav" media-type="audio/wav"/>
+            </manifest><spine/></package>"#,
+        )
+        .unwrap();
+        let run = |clip: overlay::AudioClip| {
+            let mut r = Report::default();
+            check_audio_clip(&pkg, "", &clip, "c1.smil", &mut r);
+            r
+        };
+        let clip = |src: &str, begin: Option<&str>, end: Option<&str>| overlay::AudioClip {
+            src: src.to_string(),
+            clip_begin: begin.map(str::to_string),
+            clip_end: end.map(str::to_string),
+        };
+        assert!(run(clip("a.mp3", Some("0s"), Some("5s"))).is_clean());
+        // MED-005: wav is not a core audio type; mp3 is.
+        assert!(run(clip("w.wav", None, None)).has_rule(Rule::OverlayAudioNotCoreType));
+        // MED-014: a recording is a whole resource.
+        assert!(run(clip("a.mp3#t=0,5", None, None)).has_rule(Rule::OverlayAudioSrcHasFragment));
+        // MED-008 / MED-009 across the clock formats.
+        assert!(run(clip("a.mp3", Some("10s"), Some("0:00:05"))).has_rule(Rule::ClipBeginAfterEnd));
+        assert!(
+            run(clip("a.mp3", Some("5s"), Some("00:05.000"))).has_rule(Rule::ClipBeginEqualsEnd)
+        );
+        // An absent clipEnd means "to the end", so there is nothing to compare;
+        // an absent clipBegin is zero.
+        assert!(run(clip("a.mp3", Some("10s"), None)).is_clean());
+        assert!(run(clip("a.mp3", None, Some("0s"))).has_rule(Rule::ClipBeginEqualsEnd));
+        // A clock value the grammar rejects is RSC-005's finding, not this one's.
+        assert!(run(clip("a.mp3", Some("later"), Some("5s"))).is_clean());
+    }
+
     fn zip_epub(opf: &str, docs: &[(&str, &str)]) -> Vec<u8> {
         use zip::write::{SimpleFileOptions, ZipWriter};
         let mut out = Vec::new();
@@ -8988,6 +9079,7 @@ mod tests {
             properties: vec![],
             fallback: fb.map(str::to_string),
             fallback_style: None,
+            media_overlay: None,
         };
         let xhtml_spine = mk("c", "application/xhtml+xml", None);
         let xhtml_aside = mk("aside", "application/xhtml+xml", None);

@@ -60,7 +60,7 @@ pub struct ChapterEmit<'a> {
     pub source_elements: SourceElements,
     /// The assets the source actually holds, when the importer can enumerate
     /// them. An `<img>` whose `src` is not in this set degrades to a `<span>`
-    /// carrying its alt text — see [`Builder::emit_image`].
+    /// carrying its alt text — see `Builder::emit_image`.
     ///
     /// `None` disables the check, which is what a caller that cannot name the
     /// container's contents should pass; guessing would drop real images.

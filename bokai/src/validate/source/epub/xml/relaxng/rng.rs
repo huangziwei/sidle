@@ -7,16 +7,16 @@
 //!
 //! | § | transformation | done by |
 //! |---|---|---|
-//! | 4.1 | drop foreign-namespace annotations | [`children`] skips them |
+//! | 4.1 | drop foreign-namespace annotations | `children` skips them |
 //! | 4.2 | `name`/`type`/`combine` whitespace | trimmed at each use |
-//! | 4.3 | `datatypeLibrary` is inherited | carried in [`Ctx`] |
-//! | 4.5–4.6 | `include` / `externalRef` | [`Resolver`] + [`Compiler::grammar`] |
-//! | 4.7–4.8 | `name` attribute → name class, `ns` inheritance | [`Compiler::name_class`] |
-//! | 4.9 | `div` is transparent | [`children`] flattens it |
-//! | 4.10 | *n*-ary elements become binary | [`Compiler::fold`] |
+//! | 4.3 | `datatypeLibrary` is inherited | carried in `Ctx` |
+//! | 4.5–4.6 | `include` / `externalRef` | [`Resolver`] + `Compiler::grammar` |
+//! | 4.7–4.8 | `name` attribute → name class, `ns` inheritance | `Compiler::name_class` |
+//! | 4.9 | `div` is transparent | `children` flattens it |
+//! | 4.10 | *n*-ary elements become binary | `Compiler::fold` |
 //! | 4.11–4.13 | `mixed`/`optional`/`zeroOrMore` sugar | the arena's constructors |
-//! | 4.15 | `combine` on repeated `define`s | [`Scope::add_define`] |
-//! | 4.16 | nested `grammar`/`parentRef` | a [`Scope`] stack |
+//! | 4.15 | `combine` on repeated `define`s | `Scope::add_define` |
+//! | 4.16 | nested `grammar`/`parentRef` | a `Scope` stack |
 //! | 4.17–4.18 | `notAllowed`/`empty` absorption | the arena's constructors |
 //!
 //! A `ref` may point forward or into a cycle, so every `define` gets a reserved

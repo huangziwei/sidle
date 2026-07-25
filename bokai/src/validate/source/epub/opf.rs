@@ -8,6 +8,7 @@
 //! `unique-identifier`, `<dc:identifier>` ids, the `<spine toc>` NCX pointer,
 //! and `<guide>` references.
 
+use std::collections::HashSet;
 use std::io;
 
 use quick_xml::Reader;
@@ -50,13 +51,51 @@ pub struct Package {
     /// `<link rel>`/`properties`), in document order. Drives the undeclared-prefix
     /// check (OPF-028); a set-membership signal, so duplicates are harmless.
     pub property_tokens: Vec<String>,
+    /// The `property` of every publication-level `<meta>` — one directly under
+    /// `<metadata>` with no `refines`, which is what states a fact about the
+    /// publication rather than refining another element. epubcheck keys its
+    /// publication-wide features (the media-overlay styling classes among them)
+    /// on exactly this set.
+    pub publication_properties: HashSet<String>,
+    /// Every property-bearing attribute in the package document, with the
+    /// context that decides its vocabulary. Drives the property rules
+    /// (OPF-012/025/026/027), which need to know *where* a token appeared —
+    /// unlike [`Self::property_tokens`], which only needs its prefix.
+    pub property_attrs: Vec<PropertyAttr>,
+    /// `(id, refined-id)` for every metadata expression that both carries an
+    /// `id` and refines another one. The refines graph must be acyclic
+    /// (OPF-065); only an expression with an `id` can take part in a cycle,
+    /// which is why an edge needs both halves.
+    pub refines_edges: Vec<(String, String)>,
+    /// Every `<meta property=…>` expression under `<metadata>`, with its text.
+    /// The `<dc:*>` elements are [`Self::metadata`]; this is the other half of
+    /// the metadata vocabulary.
+    pub metas: Vec<MetaExpr>,
     /// Every `<reference href>` inside `<guide>` (raw, fragment kept).
     pub guide_hrefs: Vec<String>,
     /// Every `<link>` element in the package document (EPUB 3 metadata/collection
     /// links). Drives the OPF link rules (OPF-089/093/094/095/098/067, RSC-029).
     pub links: Vec<OpfLink>,
+    /// Every `<collection>` in the package document, flattened. A collection
+    /// groups resources under a *role* — index, preview, dictionary — and each
+    /// role has its own membership rules (OPF-071/075/076/078/081…084). Nesting
+    /// is flattened because every rule that recurses (only the index one does)
+    /// applies the same test at every depth.
+    pub collections: Vec<Collection>,
     pub manifest: Vec<ManifestItem>,
     pub spine: Vec<SpineItem>,
+}
+
+/// One property-bearing attribute, kept whole so the property rules can judge
+/// it against the right vocabulary.
+#[derive(Debug, Clone)]
+pub struct PropertyAttr {
+    pub context: super::vocab::Context,
+    /// The attribute's raw value.
+    pub value: String,
+    /// The `<item media-type>` this attribute sits on, for OPF-012. `None`
+    /// outside [`super::vocab::Context::Item`].
+    pub media_type: Option<String>,
 }
 
 /// An EPUB 3 `<link>` element in the package document.
@@ -76,6 +115,33 @@ pub struct OpfLink {
     pub in_metadata: bool,
 }
 
+/// An EPUB 3 `<meta property=…>` metadata expression.
+#[derive(Debug, Clone, Default)]
+pub struct MetaExpr {
+    pub property: String,
+    /// The element's trimmed text.
+    pub value: String,
+    /// The `refines` target, with any leading `#` stripped. `None` for a
+    /// publication-level expression.
+    pub refines: Option<String>,
+}
+
+/// An EPUB 3 `<collection>`: a group of resources under a role.
+#[derive(Debug, Clone, Default)]
+pub struct Collection {
+    /// The `role` attribute's whitespace-separated tokens. Empty if absent.
+    pub roles: Vec<String>,
+    /// The `href` of every `<link>` directly inside this collection (raw,
+    /// fragment kept — the preview rule judges the fragment).
+    pub hrefs: Vec<String>,
+}
+
+impl Collection {
+    pub fn has_role(&self, role: &str) -> bool {
+        self.roles.iter().any(|r| r == role)
+    }
+}
+
 /// A Dublin Core metadata element (`<dc:title>`, `<dc:identifier>`, …).
 #[derive(Debug, Clone)]
 pub struct DcMeta {
@@ -87,6 +153,9 @@ pub struct DcMeta {
     pub id: Option<String>,
     /// The `opf:scheme` / `scheme` attribute, if present.
     pub scheme: Option<String>,
+    /// The `opf:role` attribute, if present — the EPUB 2 MARC relator code on
+    /// a `<dc:creator>`, which OPF-052 judges.
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +170,10 @@ pub struct ManifestItem {
     /// The EPUB 2 `fallback-style` attribute (a manifest id), if present. The
     /// EPUB 3 manifest grammar has no such attribute.
     pub fallback_style: Option<String>,
+    /// The `media-overlay` attribute (a manifest id naming the SMIL document
+    /// that narrates this item), if present. Its presence is what makes this
+    /// item the *text* of an overlay, which the overlay-styling rule keys on.
+    pub media_overlay: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,9 +208,11 @@ pub fn parse(content: &str) -> io::Result<Package> {
     // In-progress Dublin Core element: opened on a `<dc:*>` Start, its text
     // accumulated over `Text` events, finalized into `pkg.metadata` on `End`.
     let mut dc: Option<DcMeta> = None;
-    // In-progress publication-level `<meta property="rendition:layout">` value,
-    // accumulated the same way, finalized into `pkg.rendition_layout` on `End`.
-    let mut pending_layout: Option<String> = None;
+    // In-progress `<meta property=…>` expression, accumulated the same way and
+    // finalized into `pkg.metas` on `End`.
+    let mut pending_meta: Option<MetaExpr> = None;
+    // Open `<collection>` elements, innermost last — they nest.
+    let mut collections: Vec<Collection> = Vec::new();
 
     loop {
         match reader.read_event() {
@@ -149,6 +224,7 @@ pub fn parse(content: &str) -> io::Result<Package> {
                     name: String::from_utf8_lossy(local_name(e.name().as_ref())).into_owned(),
                     id: attr(&e, b"id"),
                     scheme: scheme_attr(&e),
+                    role: role_attr(&e),
                     value: String::new(),
                 });
             }
@@ -157,24 +233,10 @@ pub fn parse(content: &str) -> io::Result<Package> {
                     m.value.push_str(&String::from_utf8_lossy(t.as_ref()));
                 }
             }
-            Ok(Event::Text(t)) if pending_layout.is_some() => {
-                if let Some(v) = pending_layout.as_mut() {
-                    v.push_str(&String::from_utf8_lossy(t.as_ref()));
+            Ok(Event::Text(t)) if pending_meta.is_some() => {
+                if let Some(m) = pending_meta.as_mut() {
+                    m.value.push_str(&String::from_utf8_lossy(t.as_ref()));
                 }
-            }
-            // Publication-level (non-`refines`) `<meta property="rendition:layout">`:
-            // start accumulating its element text (finalized on `End`). Its
-            // property token is captured here too (the shared arm below is skipped
-            // for this event). A `refines`-scoped layout meta is a per-item
-            // override epubcheck does not use for the FXL viewport gate, so ignore it.
-            Ok(Event::Start(e))
-                if in_metadata
-                    && local_name(e.name().as_ref()) == b"meta"
-                    && attr(&e, b"property").as_deref() == Some("rendition:layout")
-                    && attr(&e, b"refines").is_none() =>
-            {
-                pkg.property_tokens.push("rendition:layout".to_string());
-                pending_layout = Some(String::new());
             }
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 let name = e.name();
@@ -185,8 +247,20 @@ pub fn parse(content: &str) -> io::Result<Package> {
                         name: String::from_utf8_lossy(local).into_owned(),
                         id: attr(&e, b"id"),
                         scheme: scheme_attr(&e),
+                        role: role_attr(&e),
                         value: String::new(),
                     });
+                }
+                // A metadata expression that refines another and can itself be
+                // refined is an edge in the refines graph (OPF-065). A leading
+                // `#` makes the value a same-document reference; epubcheck
+                // strips it and compares ids.
+                if in_metadata
+                    && let (Some(id), Some(refines)) = (attr(&e, b"id"), attr(&e, b"refines"))
+                {
+                    let target = refines.trim().strip_prefix('#').unwrap_or(refines.trim());
+                    pkg.refines_edges
+                        .push((id.trim().to_string(), target.to_string()));
                 }
                 match local {
                     b"package" => {
@@ -200,16 +274,51 @@ pub fn parse(content: &str) -> io::Result<Package> {
                         pkg.spine_toc = attr(&e, b"toc");
                     }
                     b"metadata" => in_metadata = true,
+                    // A `<collection>` may nest, so the open ones form a stack;
+                    // a `<link>` belongs to the innermost.
+                    b"collection" => collections.push(Collection {
+                        roles: attr(&e, b"role")
+                            .map(|r| r.split_whitespace().map(str::to_string).collect())
+                            .unwrap_or_default(),
+                        hrefs: Vec::new(),
+                    }),
                     // Capture `<meta>` property/scheme tokens for the undeclared-
-                    // prefix check (OPF-028). The publication-level rendition:layout
-                    // meta is consumed by its own Start arm above; every other meta
-                    // (including a `refines`-scoped one) lands here.
+                    // prefix check (OPF-028), and open the expression so its text
+                    // accumulates until `End`. A self-closed `<meta/>` emits no
+                    // `End`, so it is closed by whatever `End` comes next — with
+                    // the empty value it correctly has, since the arms that
+                    // consume text run before this one only when a `<dc:*>` is
+                    // open.
                     b"meta" if in_metadata => {
-                        for key in [b"property".as_slice(), b"scheme".as_slice()] {
+                        for (key, context) in [
+                            (b"property".as_slice(), super::vocab::Context::Meta),
+                            (b"scheme".as_slice(), super::vocab::Context::Scheme),
+                        ] {
                             if let Some(val) = attr(&e, key) {
                                 pkg.property_tokens
                                     .extend(val.split_whitespace().map(str::to_string));
+                                pkg.property_attrs.push(PropertyAttr {
+                                    context,
+                                    value: val,
+                                    media_type: None,
+                                });
                             }
+                        }
+                        if attr(&e, b"refines").is_none()
+                            && let Some(val) = attr(&e, b"property")
+                        {
+                            pkg.publication_properties
+                                .extend(val.split_whitespace().map(str::to_string));
+                        }
+                        if let Some(property) = attr(&e, b"property") {
+                            pending_meta = Some(MetaExpr {
+                                property: property.trim().to_string(),
+                                value: String::new(),
+                                refines: attr(&e, b"refines").map(|r| {
+                                    let r = r.trim();
+                                    r.strip_prefix('#').unwrap_or(r).to_string()
+                                }),
+                            });
                         }
                     }
                     b"guide" => in_guide = true,
@@ -236,8 +345,27 @@ pub fn parse(content: &str) -> io::Result<Package> {
                         // undeclared-prefix check (OPF-028).
                         pkg.property_tokens.extend(rel.iter().cloned());
                         pkg.property_tokens.extend(properties.iter().cloned());
+                        for (key, context) in [
+                            (b"rel".as_slice(), super::vocab::Context::LinkRel),
+                            (
+                                b"properties".as_slice(),
+                                super::vocab::Context::LinkProperties,
+                            ),
+                        ] {
+                            if let Some(value) = attr(&e, key) {
+                                pkg.property_attrs.push(PropertyAttr {
+                                    context,
+                                    value,
+                                    media_type: None,
+                                });
+                            }
+                        }
+                        let href = attr(&e, b"href").unwrap_or_default();
+                        if let Some(open) = collections.last_mut() {
+                            open.hrefs.push(href.clone());
+                        }
                         pkg.links.push(OpfLink {
-                            href: attr(&e, b"href").unwrap_or_default(),
+                            href,
                             rel,
                             properties,
                             media_type: attr(&e, b"media-type"),
@@ -253,6 +381,7 @@ pub fn parse(content: &str) -> io::Result<Package> {
                             None,
                         );
                         let mut fallback_style = None;
+                        let mut media_overlay = None;
                         for a in e.attributes().flatten() {
                             let val = String::from_utf8_lossy(&a.value).to_string();
                             match a.key.as_ref() {
@@ -267,11 +396,19 @@ pub fn parse(content: &str) -> io::Result<Package> {
                                 }
                                 b"fallback" => fallback = Some(val.trim().to_string()),
                                 b"fallback-style" => fallback_style = Some(val.trim().to_string()),
+                                b"media-overlay" => media_overlay = Some(val.trim().to_string()),
                                 _ => {}
                             }
                         }
                         if !id.is_empty() {
                             pkg.property_tokens.extend(props.iter().cloned());
+                            if !props.is_empty() {
+                                pkg.property_attrs.push(PropertyAttr {
+                                    context: super::vocab::Context::Item,
+                                    value: props.join(" "),
+                                    media_type: Some(mt.clone()),
+                                });
+                            }
                             pkg.manifest.push(ManifestItem {
                                 id,
                                 href,
@@ -279,6 +416,7 @@ pub fn parse(content: &str) -> io::Result<Package> {
                                 properties: props,
                                 fallback,
                                 fallback_style,
+                                media_overlay,
                             });
                         }
                     }
@@ -301,6 +439,13 @@ pub fn parse(content: &str) -> io::Result<Package> {
                         }
                         if !idref.is_empty() {
                             pkg.property_tokens.extend(properties.iter().cloned());
+                            if !properties.is_empty() {
+                                pkg.property_attrs.push(PropertyAttr {
+                                    context: super::vocab::Context::Itemref,
+                                    value: properties.join(" "),
+                                    media_type: None,
+                                });
+                            }
                             pkg.spine.push(SpineItem {
                                 idref,
                                 linear,
@@ -319,16 +464,21 @@ pub fn parse(content: &str) -> io::Result<Package> {
                     m.value = m.value.trim().to_string();
                     pkg.metadata.push(m);
                 }
-                // Finalize the publication-level rendition:layout meta (only this
-                // element opens `pending_layout`, and its `End` is the next one).
-                if let Some(v) = pending_layout.take() {
-                    pkg.rendition_layout = Some(v.trim().to_string());
+                // Finalize an in-progress `<meta>` expression.
+                if let Some(mut m) = pending_meta.take() {
+                    m.value = m.value.trim().to_string();
+                    pkg.metas.push(m);
                 }
                 match local_name(e.name().as_ref()) {
                     b"manifest" => in_manifest = false,
                     b"spine" => in_spine = false,
                     b"metadata" => in_metadata = false,
                     b"guide" => in_guide = false,
+                    b"collection" => {
+                        if let Some(finished) = collections.pop() {
+                            pkg.collections.push(finished);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -351,6 +501,13 @@ pub fn parse(content: &str) -> io::Result<Package> {
             .find(|m| m.name == "identifier" && m.id.as_deref() == Some(uid))
             .map(|m| m.value.clone())
     });
+    // The publication-level layout default. A `refines`-scoped one is a per-item
+    // override, which epubcheck does not use for the fixed-layout viewport gate.
+    pkg.rendition_layout = pkg
+        .metas
+        .iter()
+        .find(|m| m.property == "rendition:layout" && m.refines.is_none())
+        .map(|m| m.value.clone());
 
     Ok(pkg)
 }
@@ -369,6 +526,13 @@ fn scheme_attr(e: &BytesStart) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| local_name(a.key.as_ref()) == b"scheme")
+        .map(|a| String::from_utf8_lossy(&a.value).to_string())
+}
+
+fn role_attr(e: &BytesStart) -> Option<String> {
+    e.attributes()
+        .flatten()
+        .find(|a| local_name(a.key.as_ref()) == b"role")
         .map(|a| String::from_utf8_lossy(&a.value).to_string())
 }
 

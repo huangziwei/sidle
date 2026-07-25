@@ -8,7 +8,7 @@
 //!
 //! - [`pattern`] — the simplified pattern model, hash-consed into an arena.
 //! - [`datatype`] — the built-in and XSD datatype libraries the grammars use.
-//! - [`derive`] — validation itself, by pattern derivative.
+//! - [`derive`](mod@derive) — validation itself, by pattern derivative.
 //! - [`rng`] — compiling a grammar written in the XML syntax (`.rng`).
 //! - [`rnc`] — translating the compact syntax (`.rnc`) into the XML one.
 
