@@ -558,7 +558,7 @@ impl<'a, R: Resolver> Compiler<'a, R> {
         ctx: &Ctx,
     ) -> Result<NameClassId, CompileError> {
         if let Some(name) = attr(doc, node, "name") {
-            return Ok(self.qname(&name, ctx, is_attribute(doc, node)));
+            return Ok(self.qname(doc, node, &name, &unprefixed_ns(doc, node, ctx)));
         }
         let child = children(doc, node)
             .next()
@@ -577,7 +577,7 @@ impl<'a, R: Resolver> Compiler<'a, R> {
         match local_name(doc, node) {
             Some("name") => {
                 let text = doc.string_value(node);
-                Ok(self.qname(text.trim(), &ctx, false))
+                Ok(self.qname(doc, node, text.trim(), &unprefixed_ns(doc, node, &ctx)))
             }
             Some("anyName") => {
                 let except = children(doc, node).find(|c| local_name(doc, *c) == Some("except"));
@@ -625,20 +625,28 @@ impl<'a, R: Resolver> Compiler<'a, R> {
         acc.ok_or_else(|| CompileError("empty name class".into()))
     }
 
-    /// §4.8: a `QName` resolves its prefix through the grammar's own namespace
-    /// declarations; an unprefixed name takes the inherited `ns`, except on an
-    /// attribute, where an unprefixed name is in no namespace.
-    fn qname(&mut self, name: &str, ctx: &Ctx, attribute: bool) -> NameClassId {
+    /// §4.8: a `QName` resolves its prefix through the namespace declarations in
+    /// scope *in the schema document* — the name is written in an attribute
+    /// value, so the XML parser never expanded it. Without a prefix it takes
+    /// `unprefixed`, which [`unprefixed_ns`] decides.
+    ///
+    /// An unbound prefix leaves the name in no namespace, which simply matches
+    /// nothing: a schema that quotes a prefix it never declared is broken, and
+    /// that is the grammar author's defect, not a document's.
+    fn qname(
+        &mut self,
+        doc: &Document,
+        node: NodeId,
+        name: &str,
+        unprefixed: &Option<String>,
+    ) -> NameClassId {
         let (prefix, local) = match name.split_once(':') {
             Some((p, l)) => (Some(p), l),
             None => (None, name),
         };
         let ns = match prefix {
-            // Prefixes in the grammar's own syntax are already resolved by the
-            // tree, so a prefixed name here can only come from `ns` inheritance.
-            Some(_) => ctx.ns.clone(),
-            None if attribute => None,
-            None => ctx.ns.clone(),
+            Some(prefix) => doc.in_scope_namespace(node, prefix).map(str::to_string),
+            None => unprefixed.clone(),
         };
         let ns = ns.filter(|u| !u.is_empty());
         self.arena.intern_name(NameClass::Name {
@@ -712,6 +720,27 @@ fn attr(doc: &Document, node: NodeId, name: &str) -> Option<String> {
 
 fn is_attribute(doc: &Document, node: NodeId) -> bool {
     local_name(doc, node) == Some("attribute")
+}
+
+/// The namespace an *unprefixed* name at `node` belongs to.
+///
+/// For an element name it is the inherited `ns` (§4.11). For an attribute name
+/// it is no namespace — an unprefixed attribute never takes the default
+/// namespace — *unless* the grammar says otherwise with an `ns` written on the
+/// name class itself or on the `<attribute>` that encloses it, which is how
+/// every real schema spells `xml:lang` without using a prefix.
+fn unprefixed_ns(doc: &Document, node: NodeId, ctx: &Ctx) -> Option<String> {
+    let mut current = Some(node);
+    while let Some(id) = current {
+        if let Some(ns) = attr(doc, id, "ns") {
+            return Some(ns);
+        }
+        if is_attribute(doc, id) {
+            return None; // reached the attribute pattern with nothing explicit
+        }
+        current = doc.node(id).parent;
+    }
+    ctx.ns.clone()
 }
 
 fn is_name_class(doc: &Document, node: NodeId) -> bool {
@@ -868,6 +897,79 @@ mod tests {
             &mut arena,
             start,
             r#"<a xmlns="urn:x" xmlns:p="urn:x" p:id="1"/>"#
+        ));
+    }
+
+    /// A prefixed `name="…"` is written in an *attribute value*, so the XML
+    /// parser never expanded it: its prefix resolves against the declarations in
+    /// scope in the grammar file, not against the inherited `ns`. `xml` is bound
+    /// everywhere without a declaration.
+    #[test]
+    fn a_prefixed_name_resolves_through_the_grammars_own_declarations() {
+        let (mut arena, start) = compile(&[(
+            "g.rng",
+            r#"<grammar xmlns="http://relaxng.org/ns/structure/1.0" ns="urn:x"
+                        xmlns:xlink="urn:xlink">
+                 <start>
+                   <element name="a">
+                     <optional><attribute name="xml:lang"/></optional>
+                     <optional><attribute name="xlink:href"/></optional>
+                     <optional><attribute name="lang"/></optional>
+                   </element>
+                 </start>
+               </grammar>"#,
+        )]);
+        assert!(valid(
+            &mut arena,
+            start,
+            r#"<a xmlns="urn:x" xml:lang="en" lang="en"/>"#
+        ));
+        assert!(valid(
+            &mut arena,
+            start,
+            r#"<a xmlns="urn:x" xmlns:l="urn:xlink" l:href="x"/>"#
+        ));
+        // The grammar's `ns` is not what a prefix resolves to.
+        assert!(!valid(
+            &mut arena,
+            start,
+            r#"<a xmlns="urn:x" xmlns:p="urn:x" p:lang="en"/>"#
+        ));
+    }
+
+    /// An unprefixed attribute name is in no namespace — unless the grammar
+    /// writes an `ns` of its own, which is the other way real schemas spell
+    /// `xml:lang`.
+    #[test]
+    fn an_explicit_ns_puts_an_unprefixed_attribute_in_a_namespace() {
+        let (mut arena, start) = compile(&[(
+            "g.rng",
+            r#"<grammar xmlns="http://relaxng.org/ns/structure/1.0" ns="urn:x">
+                 <start>
+                   <element name="a">
+                     <optional>
+                       <attribute name="lang" ns="http://www.w3.org/XML/1998/namespace"/>
+                     </optional>
+                     <optional>
+                       <attribute><name ns="urn:y">via-name-class</name></attribute>
+                     </optional>
+                   </element>
+                 </start>
+               </grammar>"#,
+        )]);
+        assert!(valid(
+            &mut arena,
+            start,
+            r#"<a xmlns="urn:x" xml:lang="en"/>"#
+        ));
+        assert!(
+            !valid(&mut arena, start, r#"<a xmlns="urn:x" lang="en"/>"#),
+            "the explicit ns means the no-namespace spelling no longer matches"
+        );
+        assert!(valid(
+            &mut arena,
+            start,
+            r#"<a xmlns="urn:x" xmlns:y="urn:y" y:via-name-class="1"/>"#
         ));
     }
 

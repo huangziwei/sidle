@@ -61,6 +61,14 @@ pub struct Element {
     pub attrs: Vec<Attr>,
     /// The prefix as written, kept only for diagnostics — nothing matches on it.
     pub prefix: Option<String>,
+    /// The `xmlns`/`xmlns:p` declarations written on this element, as
+    /// `(prefix, uri)` with an empty prefix for the default namespace.
+    ///
+    /// They are not part of the data model — every name in the tree is already
+    /// expanded — but a schema document *quotes* names in attribute values
+    /// (`<attribute name="xml:lang">`), and those prefixes resolve against the
+    /// schema's own declarations. See [`in_scope_namespace`].
+    pub namespaces: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -209,6 +217,29 @@ impl Document {
             .map(|a| a.value.as_str())
     }
 
+    /// The namespace URI a prefix is bound to at `id`, per the declarations on
+    /// it and its ancestors — the innermost binding wins.
+    ///
+    /// The `xml` prefix is bound everywhere without a declaration, and an empty
+    /// prefix asks for the default namespace. Used for the prefixed names a
+    /// schema document quotes in its own attribute values; the tree's own names
+    /// are expanded at parse time and never need this.
+    pub fn in_scope_namespace(&self, id: NodeId, prefix: &str) -> Option<&str> {
+        if prefix == "xml" {
+            return Some("http://www.w3.org/XML/1998/namespace");
+        }
+        let mut node = Some(id);
+        while let Some(current) = node {
+            if let Some(element) = self.element(current)
+                && let Some((_, uri)) = element.namespaces.iter().find(|(p, _)| p == prefix)
+            {
+                return Some(uri);
+            }
+            node = self.node(current).parent;
+        }
+        None
+    }
+
     /// This document's line map, to hand to a [`Builder`] so a section built
     /// from it reports lines in the original source rather than in itself.
     pub fn line_map(&self) -> Vec<usize> {
@@ -311,6 +342,7 @@ impl Builder {
                 name,
                 attrs,
                 prefix,
+                namespaces: Vec::new(),
             }),
             parent,
             offset,
@@ -589,14 +621,23 @@ impl Parser {
         };
 
         let mut attrs = Vec::new();
+        let mut namespaces = Vec::new();
         for attr in e.attributes() {
             let attr = attr.map_err(|err| ParseError {
                 message: err.to_string(),
                 offset,
             })?;
             let key = attr.key.as_ref();
+            // A declaration is not an attribute of the data model, but it is
+            // kept: a schema document quotes prefixed names in its own attribute
+            // values, and they resolve against these.
             if key == b"xmlns" || key.starts_with(b"xmlns:") {
-                continue; // a declaration, not an attribute of the data model
+                let prefix = String::from_utf8_lossy(&key[b"xmlns".len()..]);
+                namespaces.push((
+                    prefix.trim_start_matches(':').to_string(),
+                    String::from_utf8_lossy(&attr.value).into_owned(),
+                ));
+                continue;
             }
             let (aprefix, alocal) = split_qname(key);
             let aprefix = String::from_utf8_lossy(aprefix).into_owned();
@@ -640,6 +681,7 @@ impl Parser {
                 name: Name { ns, local },
                 attrs,
                 prefix: (!prefix.is_empty()).then_some(prefix),
+                namespaces,
             }),
             parent,
             offset,
@@ -651,11 +693,11 @@ impl Parser {
 ///
 /// XML predefines exactly five entities and always resolves numeric character
 /// references. Anything else is *declared* — by the internal subset or, for the
-/// XHTML entity sets, by the DTD the DOCTYPE names. epubcheck resolves those
-/// through its catalogue, so a document using `&nbsp;` under an XHTML DOCTYPE is
-/// valid and must not be rejected here; until that catalogue is modelled (the
-/// parked HTM-011 / RSC-016 entity work) an unknown name is kept literally,
-/// which preserves the character data's length and never fails.
+/// XHTML entity sets, by the DTD the DOCTYPE names. Whether a name is declared
+/// is [`super::dtd`]'s question, and an undeclared one is a fatal parse error
+/// reported there; here an unknown name is kept literally, which preserves the
+/// character data's length and never fails. A grammar or assertion that keyed on
+/// the *character* `&nbsp;` stands for would need the catalogue threaded in.
 fn expand_entity(name: &str) -> String {
     match name {
         "amp" => return "&".to_string(),

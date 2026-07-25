@@ -399,6 +399,9 @@ pub enum Rule {
     SvgReferenceNoFragment,
     /// A manifest `fallback-style` that names no declared item (`OPF-041`).
     FallbackStyleNotFound,
+    /// A reference whose target element is the wrong kind of thing for it
+    /// (`RSC-014`).
+    FragmentWrongElementType,
 }
 
 impl Rule {
@@ -532,6 +535,7 @@ impl Rule {
         Rule::OverlayDoesNotNarrateDocument,
         Rule::SvgReferenceNoFragment,
         Rule::FallbackStyleNotFound,
+        Rule::FragmentWrongElementType,
         Rule::SchemaViolation,
         Rule::SchemaWarning,
         Rule::InvalidDataAttribute,
@@ -673,6 +677,7 @@ impl Rule {
             Rule::OverlayDoesNotNarrateDocument => "MED-013",
             Rule::SvgReferenceNoFragment => "RSC-015",
             Rule::FallbackStyleNotFound => "OPF-041",
+            Rule::FragmentWrongElementType => "RSC-014",
             Rule::SchemaViolation => "RSC-005",
             Rule::SchemaWarning => "RSC-017",
             Rule::InvalidDataAttribute => "HTM-061",
@@ -912,7 +917,7 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         epub3,
         &mut report,
     );
-    check_xml_well_formedness(&opf_text, &opf_path, &mut report);
+    check_xml_well_formedness(&opf_text, &opf_path, epub3, &mut report);
     check_xml_resources(
         &pkg,
         &opf_dir,
@@ -989,7 +994,7 @@ fn check_xml_resources(
         // that *declares* a non-UTF-8 charset is the RSC-028 case, not RSC-016.
         let declares_utf8 = sniff_xml_encoding(&bytes).is_none_or(|enc| enc == "UTF-8");
         if declares_utf8 {
-            check_xml_well_formedness(&String::from_utf8_lossy(&bytes), &path, report);
+            check_xml_well_formedness(&String::from_utf8_lossy(&bytes), &path, epub3, report);
         }
     }
 }
@@ -1219,27 +1224,25 @@ fn check_xml_conformance(text: &str, path: &str, report: &mut Report) {
 /// A faithful *subset* of what epubcheck's XML parser (Xerces, namespace-aware)
 /// rejects fatally: a syntax error (mismatched end tag, stray `<`, malformed
 /// attribute), an element left unclosed at end of file, an unbound namespace
-/// prefix on an element or attribute, a duplicate attribute, and content after
-/// the root element. The undeclared/unterminated *general entity* class is not
-/// covered here — quick-xml surfaces entity references as [`Event::GeneralRef`]
-/// without resolving them, and epubcheck resolves named entities against the
-/// DTD its DOCTYPE points at (the XHTML entity sets are catalogued), so a plain
-/// "not one of the five predefined" check false-positives on every book that
-/// uses `&nbsp;`/`&mdash;`/… under an XHTML DOCTYPE. Detecting it zero-FP needs
-/// that DTD-catalog entity model; left as a recall gap until then.
+/// prefix on an element or attribute, a duplicate attribute, content after the
+/// root element, and a reference to an entity nothing declares.
 ///
 /// Under-detection is a recall gap, never a false positive: every construct
 /// flagged is one Xerces also fatals on. Namespace binding is tracked with a
 /// scope stack of the prefixes declared (`xmlns` / `xmlns:p`) on each open
 /// element; `xml` is always bound. Reports the first problem only, matching
 /// epubcheck, which stops at the first fatal parse error.
-fn check_xml_well_formedness(text: &str, path: &str, report: &mut Report) {
+fn check_xml_well_formedness(text: &str, path: &str, epub3: bool, report: &mut Report) {
     let mut reader = Reader::from_str(text);
     reader.config_mut().check_end_names = true;
     // Prefixes declared on each currently-open element (a frame per open depth).
     let mut scopes: Vec<Vec<Vec<u8>>> = Vec::new();
     let mut depth: i32 = 0;
     let mut root_closed = false;
+    // The entity names this document may reference, or `None` when they cannot
+    // be known (see [`declared_entities`]) and so must not be judged. A document
+    // with no DOCTYPE declares nothing, and can reference only the predefines.
+    let mut entities = Some(xml::dtd::no_external_subset().clone());
     loop {
         match reader.read_event() {
             Err(e) => {
@@ -1261,7 +1264,8 @@ fn check_xml_well_formedness(text: &str, path: &str, report: &mut Report) {
                     report.push(trailing_content_xml(path));
                     return;
                 }
-                if let Some(v) = open_element_well_formed(&e, &mut scopes, path) {
+                if let Some(v) = open_element_well_formed(&e, &mut scopes, entities.as_ref(), path)
+                {
                     report.push(v);
                     return;
                 }
@@ -1272,7 +1276,8 @@ fn check_xml_well_formedness(text: &str, path: &str, report: &mut Report) {
                     report.push(trailing_content_xml(path));
                     return;
                 }
-                if let Some(v) = open_element_well_formed(&e, &mut scopes, path) {
+                if let Some(v) = open_element_well_formed(&e, &mut scopes, entities.as_ref(), path)
+                {
                     report.push(v);
                     return;
                 }
@@ -1296,9 +1301,135 @@ fn check_xml_well_formedness(text: &str, path: &str, report: &mut Report) {
                     return;
                 }
             }
+            // quick-xml surfaces each `&name;` in character data as its own
+            // event, already stripped of its delimiters.
+            Ok(Event::GeneralRef(r)) => {
+                let name = String::from_utf8_lossy(r.as_ref()).into_owned();
+                if let Some(known) = entities.as_ref()
+                    && !entity_is_declared(&name, known)
+                {
+                    report.push(undeclared_entity_xml(path, &name));
+                    return;
+                }
+            }
+            // The DOCTYPE precedes every element and every reference, so reading
+            // it as an event — rather than scanning the text for `<!DOCTYPE`,
+            // which a comment can also contain — settles the entity set before
+            // anything can use it.
+            Ok(Event::DocType(d)) => {
+                entities = declared_entities(&String::from_utf8_lossy(d.as_ref()), epub3);
+            }
             _ => {}
         }
     }
+}
+
+/// The entity names a document may reference, or `None` when they cannot be
+/// known — in which case nothing about its entities may be reported.
+///
+/// An EPUB 3 document resolves no external identifier at all (epubcheck hands
+/// its parser an empty source for every one), so only the internal subset can
+/// declare anything. Otherwise the DOCTYPE's system identifier decides, through
+/// [`xml::dtd`]; one that catalogue cannot resolve completely yields `None`.
+/// `doctype` is the declaration's inner text — everything between `<!DOCTYPE`
+/// and its closing `>`, which is what quick-xml hands over and the only reading
+/// that sees a whole internal subset (the subset contains `>` of its own).
+///
+/// A subset that *references* a parameter entity yields `None`: what that entity
+/// expands to may itself be a run of declarations. So does an external
+/// identifier that does not parse into a system id — `PUBLIC`/`SYSTEM` says
+/// something is being pulled in, and not knowing what it is means not knowing
+/// the document's entities.
+fn declared_entities(doctype: &str, epub3: bool) -> Option<HashSet<String>> {
+    // The internal subset is bracketed and always comes last; the external
+    // identifier, if any, is in front of it.
+    let (external_id, subset) = match doctype.split_once('[') {
+        Some((head, subset)) => (head, Some(subset)),
+        None => (doctype, None),
+    };
+    let upper = external_id.to_ascii_uppercase();
+    let declares_external = upper.contains("PUBLIC") || upper.contains("SYSTEM");
+    let mut entities = match (epub3, declares_external) {
+        // EPUB 3 resolves no external identifier, and a DOCTYPE that names none
+        // has nothing to resolve; either way only the subset can declare.
+        (true, _) | (false, false) => xml::dtd::no_external_subset().clone(),
+        (false, true) => {
+            let (_, system_id) = external_identifiers(external_id);
+            xml::dtd::entities(system_id.as_deref()?)?.clone()
+        }
+    };
+    let Some(subset) = subset else {
+        return Some(entities);
+    };
+    if subset.contains('%') {
+        return None;
+    }
+    let mut rest = subset;
+    while let Some(at) = rest.find("<!ENTITY") {
+        rest = &rest[at + "<!ENTITY".len()..];
+        let name = rest.split_whitespace().next().unwrap_or_default();
+        if !name.is_empty() && name != "%" {
+            entities.insert(name.to_string());
+        }
+    }
+    Some(entities)
+}
+
+/// The `(public, system)` identifiers of a DOCTYPE's inner text — everything
+/// between `<!DOCTYPE` and its closing `>`, with any internal subset removed.
+/// `PUBLIC` is followed by both; `SYSTEM` by the system identifier alone.
+fn external_identifiers(inner: &str) -> (Option<String>, Option<String>) {
+    // `to_ascii_uppercase` preserves byte length, so keyword offsets map 1:1
+    // back onto `inner` (the keyword itself is ASCII → a char boundary).
+    let upper = inner.to_ascii_uppercase();
+    if let Some(pos) = upper.find("PUBLIC") {
+        let (public_id, rest) = take_quoted(&inner[pos + "PUBLIC".len()..]);
+        return (public_id, take_quoted(rest).0);
+    }
+    match upper.find("SYSTEM") {
+        Some(pos) => (None, take_quoted(&inner[pos + "SYSTEM".len()..]).0),
+        None => (None, None),
+    }
+}
+
+/// Whether `name` resolves: a numeric character reference, one of the five XML
+/// predefines, or a declared entity.
+fn entity_is_declared(name: &str, declared: &HashSet<String>) -> bool {
+    name.starts_with('#')
+        || matches!(name, "amp" | "lt" | "gt" | "quot" | "apos")
+        || declared.contains(name)
+}
+
+/// The first entity reference in an attribute value that nothing declares.
+///
+/// quick-xml hands attribute values over raw, so this reads the `&…;` runs
+/// itself. A `&` that opens no reference at all — no `;`, or a name with a
+/// character no XML name may contain — is left alone: that is a *different*
+/// fatal error, and one this walk would have to re-implement Xerces' name rules
+/// to name correctly.
+fn undeclared_entity_in(value: &str, declared: &HashSet<String>) -> Option<String> {
+    let mut rest = value;
+    while let Some(amp) = rest.find('&') {
+        let after = &rest[amp + 1..];
+        let end = after.find(';')?;
+        let name = &after[..end];
+        let plain = name.strip_prefix('#').unwrap_or(name);
+        if !plain.is_empty()
+            && !plain.contains(|c: char| c.is_whitespace() || c == '&' || c == '<')
+            && !entity_is_declared(name, declared)
+        {
+            return Some(name.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+    None
+}
+
+fn undeclared_entity_xml(path: &str, name: &str) -> Violation {
+    malformed_xml(
+        path,
+        format!("XML is not well-formed: the entity \"{name}\" was referenced, but not declared"),
+    )
 }
 
 fn malformed_xml(path: &str, message: String) -> Violation {
@@ -1318,6 +1449,7 @@ fn trailing_content_xml(path: &str) -> Violation {
 fn open_element_well_formed(
     e: &quick_xml::events::BytesStart,
     scopes: &mut Vec<Vec<Vec<u8>>>,
+    entities: Option<&HashSet<String>>,
     path: &str,
 ) -> Option<Violation> {
     let mut declared: Vec<Vec<u8>> = Vec::new();
@@ -1334,6 +1466,13 @@ fn open_element_well_formed(
                 ));
             }
         };
+        // An attribute value is not split into reference events, so its `&…;`
+        // are read here.
+        if let Some(known) = entities
+            && let Some(name) = undeclared_entity_in(&String::from_utf8_lossy(&attr.value), known)
+        {
+            return Some(undeclared_entity_xml(path, &name));
+        }
         let key = attr.key.as_ref();
         if key == b"xmlns" {
             declared.push(Vec::new()); // the default namespace = empty prefix
@@ -1454,22 +1593,115 @@ fn resolve_prefix(prefix: &[u8], scopes: &[Vec<(Vec<u8>, Vec<u8>)>]) -> Option<V
         .map(|(_, uri)| uri.clone())
 }
 
-/// **RSC-015** over one document. SVG reaches a publication two ways — as a
-/// content document of its own and inline in XHTML — so this walks either,
-/// keying on the namespace rather than the file's media type.
-fn check_svg_references(text: &str, path: &str, report: &mut Report) {
+/// What kind of thing an element `id` names — epubcheck's `ResourceRegistry` id
+/// types, which is what lets `RSC-014` judge whether a reference suits its
+/// target. Only the SVG elements that can serve *one* kind of reference are
+/// distinguished; every other element, in any namespace, is [`IdKind::Generic`]
+/// and satisfies any reference that accepts a generic target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdKind {
+    /// Anything not below — the overwhelming majority of elements.
+    Generic,
+    /// A paint server: `<linearGradient>`, `<radialGradient>`, `<pattern>`.
+    Paint,
+    /// `<clipPath>`.
+    ClipPath,
+    /// `<symbol>`.
+    Symbol,
+}
+
+impl IdKind {
+    /// The kind an element in the SVG namespace registers its `id` under.
+    /// Names are compared case-insensitively, as epubcheck lowercases them.
+    fn of_svg_element(local: &[u8]) -> IdKind {
+        let lower = local.to_ascii_lowercase();
+        match lower.as_slice() {
+            b"lineargradient" | b"radialgradient" | b"pattern" => IdKind::Paint,
+            b"clippath" => IdKind::ClipPath,
+            b"symbol" => IdKind::Symbol,
+            _ => IdKind::Generic,
+        }
+    }
+
+    /// How to name this in a message.
+    fn describe(self) -> &'static str {
+        match self {
+            IdKind::Generic => "a generic element",
+            IdKind::Paint => "a paint server",
+            IdKind::ClipPath => "a clip path",
+            IdKind::Symbol => "a symbol",
+        }
+    }
+}
+
+/// What a reference expects of the element its fragment names — epubcheck's
+/// `Reference.Type` reduced to the distinctions `RSC-014` makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefUse {
+    /// A hyperlink (`<a>`, `<area>`, an NCX `<content src>`): it may land on any
+    /// ordinary element, but not on an SVG construct that only exists to be
+    /// referenced by paint, clip-path or `<use>`.
+    Hyperlink,
+    /// `fill`/`stroke`: the target must be a paint server, and nothing else.
+    Paint,
+    /// `<use>`: a symbol, or any ordinary element (`<use>` may instantiate one).
+    Symbol,
+    /// A reference `RSC-014` does not type-check — an image, a stylesheet, the
+    /// package document's `<guide>` (epubcheck registers it `GENERIC`), …
+    Untyped,
+}
+
+impl RefUse {
+    /// Whether an element of `kind` is an acceptable target. A reference whose
+    /// target is out of scope for the rule accepts everything.
+    fn accepts(self, kind: IdKind) -> bool {
+        match self {
+            RefUse::Untyped => true,
+            RefUse::Paint => kind == IdKind::Paint,
+            RefUse::Symbol => matches!(kind, IdKind::Symbol | IdKind::Generic),
+            RefUse::Hyperlink => kind == IdKind::Generic,
+        }
+    }
+
+    /// How to name this in a message.
+    fn describe(self) -> &'static str {
+        match self {
+            RefUse::Untyped => "reference",
+            RefUse::Paint => "paint reference",
+            RefUse::Symbol => "svg use reference",
+            RefUse::Hyperlink => "hyperlink",
+        }
+    }
+}
+
+/// **RSC-015** and the SVG half of **RSC-014** over one document. SVG reaches a
+/// publication two ways — as a content document of its own and inline in XHTML —
+/// so this walks either, keying on the namespace rather than the file's media
+/// type.
+///
+/// Both rules need the same two things: which references are SVG-typed, and what
+/// kind of element each `id` in the document names. Paint and `<use>` references
+/// into *another* document are left unjudged — they resolve across the
+/// publication, which this per-document walk cannot see, so missing them is a
+/// recall gap rather than a false positive.
+fn check_svg_references(text: &str, path: &str, svg_document: bool, report: &mut Report) {
     let mut reader = Reader::from_str(text);
     let mut scopes: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
+    let mut ids: HashMap<String, IdKind> = HashMap::new();
+    // (reference kind, raw value) for every SVG-typed reference, judged against
+    // `ids` once the whole document has been read: a paint server may be
+    // declared after the shape that paints with it.
+    let mut refs: Vec<(RefUse, String)> = Vec::new();
     loop {
         match reader.read_event() {
-            Err(_) | Ok(Event::Eof) => return,
+            Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
                 scopes.push(xmlns_frame(&e));
-                check_svg_element(&e, &scopes, path, report);
+                collect_svg_element(&e, &scopes, &mut ids, &mut refs);
             }
             Ok(Event::Empty(e)) => {
                 scopes.push(xmlns_frame(&e));
-                check_svg_element(&e, &scopes, path, report);
+                collect_svg_element(&e, &scopes, &mut ids, &mut refs);
                 scopes.pop();
             }
             Ok(Event::End(_)) => {
@@ -1478,36 +1710,89 @@ fn check_svg_references(text: &str, path: &str, report: &mut Report) {
             _ => {}
         }
     }
+    for (usage, raw) in refs {
+        // RSC-015: the reference names an element, so it is meaningless without
+        // a fragment to name it with.
+        let Some((file, fragment)) = raw.split_once('#') else {
+            if !is_remote_href(&raw) {
+                report.push(Violation::new(
+                    Rule::SvgReferenceNoFragment,
+                    path.to_string(),
+                    format!(
+                        "a fragment identifier is required for the {} {raw:?}",
+                        usage.describe()
+                    ),
+                ));
+            }
+            continue;
+        };
+        // RSC-014, for the same-document case only.
+        if !file.is_empty() {
+            continue;
+        }
+        let Some(id) = fragment_id(fragment, svg_document) else {
+            continue;
+        };
+        if let Some(kind) = ids.get(id)
+            && !usage.accepts(*kind)
+        {
+            report.push(Violation::new(
+                Rule::FragmentWrongElementType,
+                path.to_string(),
+                format!(
+                    "the {} {raw:?} points at {}, which cannot be used that way",
+                    usage.describe(),
+                    kind.describe()
+                ),
+            ));
+        }
+    }
 }
 
-/// **RSC-015** — an SVG `<use>` instantiates the element its fragment names, so
-/// a reference without one names nothing (epubcheck types it `SVG_SYMBOL` and
-/// reports RSC-015 when the fragment is absent). Restricted to `<use>`, whose
-/// href is meaningless without a fragment in every SVG version; the paint and
-/// clip-path reference types epubcheck also covers need the SVG reference-typing
-/// model that RSC-014 waits on, so missing them is a recall gap, not an FP.
-fn check_svg_element(
+/// One element's contribution to the SVG reference model: the `id` it declares
+/// (with the kind of thing it is) and the SVG-typed references it makes.
+///
+/// A `<use>` instantiates the element its fragment names; `fill`/`stroke` name a
+/// paint server through the CSS `url(…)` form. Both are SVG-namespace-only —
+/// `fill` on an HTML element is not a reference — which is why this keys on the
+/// resolved namespace rather than the local name alone.
+fn collect_svg_element(
     e: &quick_xml::events::BytesStart,
     scopes: &[Vec<(Vec<u8>, Vec<u8>)>],
-    path: &str,
-    report: &mut Report,
+    ids: &mut HashMap<String, IdKind>,
+    refs: &mut Vec<(RefUse, String)>,
 ) {
-    if elem_namespace(e.name().as_ref(), scopes).as_deref() != Some(SVG_NS)
-        || local_name(e.name().as_ref()) != b"use"
-    {
+    let name = e.name();
+    let local = local_name(name.as_ref());
+    let svg = elem_namespace(name.as_ref(), scopes).as_deref() == Some(SVG_NS);
+    if let Some(id) = attr_by_local(e, b"id") {
+        let kind = match svg {
+            true => IdKind::of_svg_element(local),
+            false => IdKind::Generic,
+        };
+        ids.insert(id, kind);
+    }
+    if !svg {
         return;
     }
     // `href` (SVG 2) or `xlink:href` (SVG 1.1), by local name.
-    let Some(href) = attr_by_local(e, b"href") else {
-        return;
-    };
-    let href = href.trim();
-    if !href.is_empty() && !href.contains('#') && !is_remote_href(href) {
-        report.push(Violation::new(
-            Rule::SvgReferenceNoFragment,
-            path.to_string(),
-            format!("a fragment identifier is required for the svg use reference {href:?}"),
-        ));
+    if local == b"use"
+        && let Some(href) = attr_by_local(e, b"href")
+        && !href.trim().is_empty()
+    {
+        refs.push((RefUse::Symbol, href.trim().to_string()));
+    }
+    for attribute in [b"fill".as_slice(), b"stroke".as_slice()] {
+        // Only the `url(…)` form is a reference; a colour keyword or `none` is
+        // not. A paint value may carry a fallback after the `url(…)`, which
+        // epubcheck does not accept — so neither does this.
+        if let Some(paint) = attr_by_local(e, attribute)
+            && let Some(rest) = paint.trim().strip_prefix("url(")
+            && let Some(target) = rest.strip_suffix(')')
+            && !target.trim().is_empty()
+        {
+            refs.push((RefUse::Paint, css::unquote(target.trim()).to_string()));
+        }
     }
 }
 
@@ -3179,7 +3464,7 @@ fn check_content_conformance(
         };
         // Inline SVG references (RSC-015) and the CSS written into the document
         // hold in both versions; everything below is EPUB 3 only.
-        check_svg_references(&text, &path, report);
+        check_svg_references(&text, &path, false, report);
         check_inline_css(&text, &path, epub3, report);
         if !epub3 {
             continue;
@@ -3271,7 +3556,7 @@ fn check_content_conformance(
         let Ok(text) = read_text(zip, &path) else {
             continue;
         };
-        check_svg_references(&text, &path, report);
+        check_svg_references(&text, &path, true, report);
         // HTM-048: a fixed-layout SVG needs a `viewBox` on its outermost `<svg>`
         // for the reading system to know its intrinsic dimensions.
         if fxl_ids.contains(item.id.as_str()) && !outermost_svg_has_viewbox(&text) {
@@ -3496,17 +3781,7 @@ fn parse_doctype(s: &str) -> Option<Doctype> {
     let raw = find_doctype(s)?;
     // Inner text, between `<!DOCTYPE` (9 ASCII bytes) and the trailing `>`.
     let inner = raw.get(9..raw.len().saturating_sub(1)).unwrap_or("").trim();
-    // `to_ascii_uppercase` preserves byte length, so keyword offsets map 1:1
-    // back onto `inner` (the keyword itself is ASCII → a char boundary).
-    let upper = inner.to_ascii_uppercase();
-    let (mut public_id, mut system_id) = (None, None);
-    if let Some(pos) = upper.find("PUBLIC") {
-        let (first, rest) = take_quoted(&inner[pos + "PUBLIC".len()..]);
-        public_id = first;
-        system_id = take_quoted(rest).0;
-    } else if let Some(pos) = upper.find("SYSTEM") {
-        system_id = take_quoted(&inner[pos + "SYSTEM".len()..]).0;
-    }
+    let (public_id, system_id) = external_identifiers(inner);
     let root = inner
         .split(|c: char| c.is_whitespace() || c == '[' || c == '>')
         .next()
@@ -5246,17 +5521,20 @@ fn check_xhtml_hrefs_and_reachability(
     // reachability check; every reference feeds RSC-007 (present in the zip) and
     // the OPF-root-escape check.
     let mut hyperlink_targets: HashSet<String> = HashSet::new();
-    // Element `id` set per XHTML document, for fragment (RSC-012) resolution.
-    // Built across all docs first: a link may target a document not yet visited.
-    let mut doc_ids: HashMap<String, HashSet<String>> = HashMap::new();
-    // (source_path, raw_href) for every reference carrying a `#fragment`. The
-    // package document's own `<guide>` references are among them: epubcheck
-    // resolves them like any other reference and reports RSC-012 against the OPF.
-    let mut fragment_refs: Vec<(String, String)> = pkg
+    // Element `id` set per content document, for fragment (RSC-012 / RSC-014)
+    // resolution. Built across all docs first: a link may target a document not
+    // yet visited.
+    let mut doc_ids: HashMap<String, DocumentIds> = HashMap::new();
+    // (source_path, raw_href, what the reference expects) for every reference
+    // carrying a `#fragment`. The package document's own `<guide>` references are
+    // among them: epubcheck resolves them like any other reference and reports
+    // RSC-012 against the OPF. It types them `GENERIC`, so they are not
+    // RSC-014-judged.
+    let mut fragment_refs: Vec<(String, String, RefUse)> = pkg
         .guide_hrefs
         .iter()
         .filter(|href| href.contains('#'))
-        .map(|href| (opf_path.to_string(), href.clone()))
+        .map(|href| (opf_path.to_string(), href.clone(), RefUse::Untyped))
         .collect();
     // Manifest-declared resource paths, for RSC-008 (a reference resolving to a
     // file that is in the container but undeclared). Reported once per target.
@@ -5303,7 +5581,13 @@ fn check_xhtml_hrefs_and_reachability(
         if text.contains("<script") {
             has_scripts = true;
         }
-        doc_ids.insert(path.clone(), collect_element_ids(&text));
+        doc_ids.insert(
+            path.clone(),
+            DocumentIds {
+                svg: false,
+                ids: collect_element_ids(&text),
+            },
+        );
         for (kind, href) in collect_references(&text) {
             // RSC-020: the URL is rejected by the WHATWG parser (see
             // [`invalid_url_reason`]). Reported alongside the other checks; it does
@@ -5316,7 +5600,14 @@ fn check_xhtml_hrefs_and_reachability(
                 ));
             }
             if href.contains('#') {
-                fragment_refs.push((path.clone(), href.clone()));
+                // Only a hyperlink is RSC-014-judged here: epubcheck's other
+                // typed references (paint, `<use>`) are SVG-local and handled by
+                // [`check_svg_references`], and the rest are `GENERIC`.
+                let usage = match kind {
+                    RefKind::Hyperlink => RefUse::Hyperlink,
+                    RefKind::Resource => RefUse::Untyped,
+                };
+                fragment_refs.push((path.clone(), href.clone(), usage));
                 // RSC-013: a stylesheet reference must not carry a fragment.
                 if let Some((file, frag)) = href.split_once('#')
                     && !frag.is_empty()
@@ -5499,9 +5790,33 @@ fn check_xhtml_hrefs_and_reachability(
                     hyperlink_targets.insert(target);
                 }
                 if src.contains('#') {
-                    fragment_refs.push((ncx_path.clone(), src));
+                    fragment_refs.push((ncx_path.clone(), src, RefUse::Hyperlink));
                 }
             }
+        }
+    }
+
+    // SVG content documents are indexed for their ids only: a fragment into one
+    // resolves like any other (epubcheck reports RSC-012 for an SVG target too),
+    // and the kind of element each id names is what RSC-014 judges a `<use>` or
+    // a hyperlink against. Their own references are walked by
+    // [`check_svg_references`], not here.
+    for item in &pkg.manifest {
+        if !item.media_type.trim().eq_ignore_ascii_case("image/svg+xml") {
+            continue;
+        }
+        let path = join_opf(opf_dir, &item.href);
+        if encrypted.contains(&path) {
+            continue;
+        }
+        if let Ok(text) = read_text(zip, &path) {
+            doc_ids.insert(
+                path,
+                DocumentIds {
+                    svg: true,
+                    ids: collect_element_ids(&text),
+                },
+            );
         }
     }
 
@@ -5756,28 +6071,105 @@ fn css_url_target(raw: &str) -> Option<String> {
     Some(raw.to_string())
 }
 
-/// Every `id` attribute value in the document — the fragment-target namespace.
-/// Per HTML5 (and epubcheck's ID registry, which reads `getAttribute("id")`),
-/// legacy `name=` anchors are *not* counted.
-fn collect_element_ids(content: &str) -> HashSet<String> {
+/// One document's fragment-target namespace.
+struct DocumentIds {
+    /// Whether this is an SVG document, which has its own fragment syntax (see
+    /// [`fragment_id`]).
+    svg: bool,
+    ids: HashMap<String, IdKind>,
+}
+
+/// Every `id` attribute value in the document, with the kind of element it names
+/// — the fragment-target namespace, plus what `RSC-014` needs to judge whether a
+/// reference suits its target. Per HTML5 (and epubcheck's ID registry, which
+/// reads `getAttribute("id")`), legacy `name=` anchors are *not* counted.
+fn collect_element_ids(content: &str) -> HashMap<String, IdKind> {
     let mut reader = Reader::from_str(content);
     reader.config_mut().trim_text(false);
-    let mut out = HashSet::new();
+    let mut out = HashMap::new();
+    let mut scopes: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
     loop {
-        match reader.read_event() {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                for attr in e.attributes().flatten() {
-                    if attr.key.as_ref() == b"id" {
-                        out.insert(String::from_utf8_lossy(&attr.value).to_string());
-                    }
-                }
+        let (e, empty) = match reader.read_event() {
+            Ok(Event::Start(e)) => (e, false),
+            Ok(Event::Empty(e)) => (e, true),
+            Ok(Event::End(_)) => {
+                scopes.pop();
+                continue;
             }
             Ok(Event::Eof) => break,
             Err(_) => break, // well-formedness is out of scope here
-            _ => {}
+            _ => continue,
+        };
+        scopes.push(xmlns_frame(&e));
+        if let Some(id) = e
+            .attributes()
+            .flatten()
+            .find(|a| a.key.as_ref() == b"id")
+            .map(|a| String::from_utf8_lossy(&a.value).to_string())
+        {
+            let name = e.name();
+            let kind = match elem_namespace(name.as_ref(), &scopes).as_deref() == Some(SVG_NS) {
+                true => IdKind::of_svg_element(local_name(name.as_ref())),
+                false => IdKind::Generic,
+            };
+            out.insert(id, kind);
+        }
+        if empty {
+            scopes.pop();
         }
     }
     out
+}
+
+/// The element id a URL fragment names, or `None` when the fragment is not an id
+/// reference at all.
+///
+/// A transcription of epubcheck's `URLFragment` parser, which is the reason
+/// `#svgView(viewBox(0,0,9,9))`, `#xywh=0,0,9,9` and `#chapter:~:text=foo` do not
+/// resolve as ids: they are a scheme-based fragment, a media fragment and a
+/// fragment directive. `svg` selects the SVG micro-syntax, where an `&` splits
+/// the shorthand bare name from trailing time segments.
+///
+/// A percent-encoded fragment yields `None`: comparing it byte-for-byte against
+/// an `id` would be wrong, and decoding it to compare properly is more than the
+/// two rules that consume this need.
+fn fragment_id(fragment: &str, svg: bool) -> Option<&str> {
+    if fragment.is_empty() || fragment.contains('%') {
+        return None;
+    }
+    if svg {
+        let first = fragment.split('&').next().unwrap_or(fragment);
+        // `svgView(…)` is a view specification, and any `name=value` component
+        // is a media fragment (spatial or temporal); neither names an id.
+        return match first.starts_with("svgView(") || first.contains('=') {
+            true => None,
+            false => Some(first),
+        };
+    }
+    // A fragment directive is appended to the id, not part of it.
+    let fragment = fragment.split(":~:").next().unwrap_or(fragment);
+    if fragment.is_empty() {
+        return None;
+    }
+    // Scheme-based, `name(…)` — `epubcfi(…)` is the one EPUB uses.
+    if let Some((scheme, rest)) = fragment.split_once('(')
+        && rest.ends_with(')')
+        && !scheme.is_empty()
+        && scheme
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return None;
+    }
+    // A media fragment, `name=value` with one of the six defined names. Region-
+    // based navigation uses `#xywh=…`.
+    if let Some((name, value)) = fragment.split_once('=')
+        && !value.is_empty()
+        && ["t", "xywh", "track", "id", "xyn", "xyr"].contains(&name)
+    {
+        return None;
+    }
+    Some(fragment)
 }
 
 /// Content-document features epubcheck's `OPSHandler30` derives to decide the
@@ -6184,33 +6576,24 @@ fn collect_ncx_content_srcs(content: &str) -> Vec<String> {
     out
 }
 
-/// RSC-012: every `#fragment` must name an element `id` in its target
-/// document. Scoped to the local XHTML documents we index; a fragment into an
-/// image, stylesheet, SVG, or an entirely missing file (already reported as a
-/// broken href / RSC-007) is left alone. A same-document `#frag` resolves
-/// against the source document itself.
+/// **RSC-012** — every `#fragment` must name an element `id` in its target
+/// document — and the cross-document half of **RSC-014**: a hyperlink may not
+/// land on an SVG paint server, clip path or symbol, which exist only to be
+/// referenced by paint, `clip-path` or `<use>`.
+///
+/// Scoped to the local documents we index; a fragment into an image, stylesheet,
+/// or an entirely missing file (already reported as a broken href / RSC-007) is
+/// left alone. A same-document `#frag` resolves against the source document
+/// itself.
 fn check_fragments(
-    doc_ids: &HashMap<String, HashSet<String>>,
-    fragment_refs: &[(String, String)],
+    doc_ids: &HashMap<String, DocumentIds>,
+    fragment_refs: &[(String, String, RefUse)],
     report: &mut Report,
 ) {
-    for (source_path, href) in fragment_refs {
+    for (source_path, href, usage) in fragment_refs {
         let Some((file, frag)) = href.split_once('#') else {
             continue;
         };
-        // An empty fragment (`foo.xhtml#`) is not an id reference; `epubcfi(…)`
-        // is a different scheme epubcheck doesn't resolve by id; a
-        // percent-encoded fragment we can't compare byte-for-byte without
-        // decoding, so we leave it rather than risk a false positive. A media
-        // fragment (`#xywh=…`, `#t=…` — used by region-based navigation) contains
-        // `=`, which no XML id does, so it is not an id reference either.
-        if frag.is_empty()
-            || frag.starts_with("epubcfi(")
-            || frag.contains('%')
-            || frag.contains('=')
-        {
-            continue;
-        }
         let target = if file.is_empty() {
             source_path.clone() // same-document reference
         } else {
@@ -6219,15 +6602,30 @@ fn check_fragments(
                 None => continue, // external URL — not ours to resolve
             }
         };
-        // Only a document we actually indexed (a local XHTML) can be judged.
-        let Some(ids) = doc_ids.get(&target) else {
+        // Only a document we actually indexed can be judged.
+        let Some(document) = doc_ids.get(&target) else {
             continue;
         };
-        if !ids.contains(frag) {
+        let Some(id) = fragment_id(frag, document.svg) else {
+            continue;
+        };
+        let Some(kind) = document.ids.get(id) else {
             report.push(Violation::new(
                 Rule::FragmentNotDefined,
                 source_path.clone(),
                 format!("href={href:?} points at fragment #{frag}, not defined in {target:?}"),
+            ));
+            continue;
+        };
+        if !usage.accepts(*kind) {
+            report.push(Violation::new(
+                Rule::FragmentWrongElementType,
+                source_path.clone(),
+                format!(
+                    "the {} {href:?} points at {}, which cannot be used that way",
+                    usage.describe(),
+                    kind.describe()
+                ),
             ));
         }
     }
@@ -6564,7 +6962,7 @@ mod tests {
 
     #[test]
     fn all_rules_list_is_complete() {
-        assert_eq!(Rule::ALL.len(), 130, "update Rule::ALL when adding a Rule");
+        assert_eq!(Rule::ALL.len(), 131, "update Rule::ALL when adding a Rule");
     }
 
     #[test]
@@ -6672,12 +7070,14 @@ mod tests {
         // header) + MED-007 (a picture source with no type).
         // + HTM-052 + NAV-009 (region-based navigation).
         // + NAV-003 + OPF-066 (EduPub pagination).
+        // SVG reference model: RSC-014 (a reference landing on an element that
+        // cannot be used that way).
         //
         // This counts *ids*, so it understates the schema engine badly: every
         // grammar and every assertion reports through RSC-005, one id that was
         // already counted when a handful of hand-written checks emitted it.
         assert_eq!(
-            covered, 120,
+            covered, 121,
             "epubcheck error coverage changed: {covered}/{total}"
         );
     }
@@ -6772,11 +7172,52 @@ mod tests {
     #[test]
     fn collect_element_ids_reads_id_not_name() {
         let ids = collect_element_ids(
-            r#"<html><body><h1 id="top">t</h1><a name="legacy">x</a><p id="第一"/></body></html>"#,
+            r#"<html><body><h1 id="top">t</h1><a name="legacy">x</a><p id="第一"/>
+               <svg xmlns="http://www.w3.org/2000/svg">
+                 <linearGradient id="grad"/><clipPath id="clip"/><symbol id="sym"/>
+                 <rect id="shape"/>
+               </svg>
+               <foo:symbol xmlns:foo="urn:x" id="not-svg"/>
+            </body></html>"#,
         );
-        assert!(ids.contains("top"));
-        assert!(ids.contains("第一")); // multi-byte id round-trips
-        assert!(!ids.contains("legacy")); // name= is not a fragment target (HTML5)
+        assert_eq!(ids.get("top"), Some(&IdKind::Generic));
+        assert_eq!(ids.get("第一"), Some(&IdKind::Generic)); // multi-byte id round-trips
+        assert_eq!(ids.get("legacy"), None); // name= is not a fragment target (HTML5)
+        // Only the SVG constructs that exist to be referenced get their own kind
+        // — and only in the SVG namespace.
+        assert_eq!(ids.get("grad"), Some(&IdKind::Paint));
+        assert_eq!(ids.get("clip"), Some(&IdKind::ClipPath));
+        assert_eq!(ids.get("sym"), Some(&IdKind::Symbol));
+        assert_eq!(ids.get("shape"), Some(&IdKind::Generic));
+        assert_eq!(ids.get("not-svg"), Some(&IdKind::Generic));
+    }
+
+    /// The fragment micro-syntaxes epubcheck's `URLFragment` parses, which is
+    /// what keeps a view specification or a media fragment from being looked up
+    /// as an element id.
+    #[test]
+    fn a_fragment_names_an_id_only_when_it_is_one() {
+        for (fragment, svg, expected) in [
+            ("sec1", false, Some("sec1")),
+            ("", false, None),
+            ("epubcfi(/6/4!)", false, None),
+            ("svgView(viewBox(0,0,9,9))", true, None),
+            ("xywh=0,0,9,9", false, None),
+            ("xywh=percent:0,0,9,9", true, None),
+            ("t=10,20", false, None),
+            // Not one of the six media-fragment names, so still an id.
+            ("width=10", false, Some("width=10")),
+            // A fragment directive is appended to the id, not part of it.
+            ("chapter:~:text=foo", false, Some("chapter")),
+            (":~:text=foo", false, None),
+            // An SVG shorthand bare name may carry trailing time segments.
+            ("icon&t=10", true, Some("icon")),
+            ("icon", true, Some("icon")),
+            // Percent-encoding is left alone rather than compared raw.
+            ("a%20b", false, None),
+        ] {
+            assert_eq!(fragment_id(fragment, svg), expected, "{fragment:?}");
+        }
     }
 
     #[test]
@@ -6834,22 +7275,42 @@ mod tests {
 
     #[test]
     fn check_fragments_flags_dangling_only() {
-        let mut doc_ids: HashMap<String, HashSet<String>> = HashMap::new();
-        doc_ids.insert("OEBPS/a.xhtml".into(), HashSet::from(["sec1".to_string()]));
-        doc_ids.insert("OEBPS/b.xhtml".into(), HashSet::from(["real".to_string()]));
-        let refs = vec![
-            ("OEBPS/a.xhtml".to_string(), "b.xhtml#real".to_string()), // ok — cross-doc
-            ("OEBPS/a.xhtml".to_string(), "#sec1".to_string()),        // ok — same-doc
-            ("OEBPS/a.xhtml".to_string(), "b.xhtml#ghost".to_string()), // RSC-012
-            ("OEBPS/a.xhtml".to_string(), "#missing".to_string()),     // RSC-012 (same-doc)
-            ("OEBPS/a.xhtml".to_string(), "img.svg#x".to_string()),    // target unindexed → skip
-            ("OEBPS/a.xhtml".to_string(), "b.xhtml#".to_string()),     // empty fragment → skip
-            ("OEBPS/a.xhtml".to_string(), "http://x/y#z".to_string()), // external → skip
-            ("OEBPS/a.xhtml".to_string(), "b.xhtml#foo%20bar".to_string()), // percent → skip
+        let document = |svg, ids: &[(&str, IdKind)]| DocumentIds {
+            svg,
+            ids: ids.iter().map(|(i, k)| (i.to_string(), *k)).collect(),
+        };
+        let mut doc_ids: HashMap<String, DocumentIds> = HashMap::new();
+        doc_ids.insert(
+            "OEBPS/a.xhtml".into(),
+            document(false, &[("sec1", IdKind::Generic)]),
+        );
+        doc_ids.insert(
+            "OEBPS/b.xhtml".into(),
+            document(false, &[("real", IdKind::Generic)]),
+        );
+        doc_ids.insert(
+            "OEBPS/art.svg".into(),
+            document(true, &[("sym", IdKind::Symbol), ("shape", IdKind::Generic)]),
+        );
+        let link = |href: &str| {
             (
                 "OEBPS/a.xhtml".to_string(),
-                "b.xhtml#epubcfi(/6)".to_string(),
-            ), // cfi → skip
+                href.to_string(),
+                RefUse::Hyperlink,
+            )
+        };
+        let refs = vec![
+            link("b.xhtml#real"),                      // ok — cross-doc
+            link("#sec1"),                             // ok — same-doc
+            link("b.xhtml#ghost"),                     // RSC-012
+            link("#missing"),                          // RSC-012 (same-doc)
+            link("art.svg#gone"),                      // RSC-012 — an SVG target resolves too
+            link("img.png#x"),                         // target unindexed → skip
+            link("b.xhtml#"),                          // empty fragment → skip
+            link("http://x/y#z"),                      // external → skip
+            link("b.xhtml#foo%20bar"),                 // percent → skip
+            link("b.xhtml#epubcfi(/6)"),               // cfi → skip
+            link("art.svg#svgView(viewBox(0,0,9,9))"), // a view spec → skip
         ];
         let mut report = Report::default();
         check_fragments(&doc_ids, &refs, &mut report);
@@ -6858,7 +7319,27 @@ mod tests {
             .iter()
             .filter(|v| v.rule == Rule::FragmentNotDefined)
             .count();
-        assert_eq!(n, 2, "expected 2 dangling fragments, got:\n{report}");
+        assert_eq!(n, 3, "expected 3 dangling fragments, got:\n{report}");
+        // RSC-014's hyperlink half: a link may land on any ordinary element, but
+        // not on an SVG construct that only exists to be instantiated.
+        let mut r = Report::default();
+        check_fragments(&doc_ids, &[link("art.svg#shape")], &mut r);
+        assert!(r.violations.is_empty(), "{r}");
+        let mut r = Report::default();
+        check_fragments(&doc_ids, &[link("art.svg#sym")], &mut r);
+        assert!(r.has_rule(Rule::FragmentWrongElementType), "{r}");
+        // An untyped reference (an `<img>`, the package `<guide>`) is not judged.
+        let mut r = Report::default();
+        check_fragments(
+            &doc_ids,
+            &[(
+                "OEBPS/a.xhtml".to_string(),
+                "art.svg#sym".to_string(),
+                RefUse::Untyped,
+            )],
+            &mut r,
+        );
+        assert!(r.violations.is_empty(), "{r}");
     }
 
     #[test]
@@ -7337,8 +7818,8 @@ mod tests {
             &mut r2,
         );
         assert!(r2.has_rule(Rule::DoctypeExternalIdentifier));
-        // ...but not for a version-less package (rejected via OPF-001 instead);
-        // an OPF DTD in EPUB 2 is HTM-009, which is not ported (so also silent).
+        // ...but not for a version-less package (rejected via OPF-001 instead).
+        // An OPF DTD in EPUB 2 is HTM-009, a different rule.
         let mut r3 = Report::default();
         check_doctype_rules(
             r#"<!DOCTYPE package SYSTEM "oeb.dtd"><package/>"#,
@@ -7891,12 +8372,13 @@ mod tests {
         check_xml_well_formedness(
             r#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title></head><body><p>hi &amp; bye</p></body></html>"#,
             "x.xhtml",
+            true,
             &mut r,
         );
         assert!(r.is_clean(), "well-formed XHTML should pass, got:\n{r}");
         // Comments/PIs/whitespace after the root element are allowed.
         let mut r = Report::default();
-        check_xml_well_formedness("<r/>\n  <!-- ok -->\n", "x.xml", &mut r);
+        check_xml_well_formedness("<r/>\n  <!-- ok -->\n", "x.xml", true, &mut r);
         assert!(
             r.is_clean(),
             "trailing whitespace/comment is allowed, got:\n{r}"
@@ -7926,7 +8408,7 @@ mod tests {
         ];
         for (label, xml) in cases {
             let mut r = Report::default();
-            check_xml_well_formedness(xml, "x.xml", &mut r);
+            check_xml_well_formedness(xml, "x.xml", true, &mut r);
             assert!(
                 r.has_rule(Rule::MalformedXml),
                 "{label}: expected RSC-016 on {xml:?}, got:\n{r}"
@@ -8002,7 +8484,7 @@ mod tests {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
             <use xlink:href="sprite.svg"/><use xlink:href="other.svg#sym"/><use href="#local"/>
             </svg>"##;
-        check_svg_references(svg, "a.svg", &mut r);
+        check_svg_references(svg, "a.svg", true, &mut r);
         assert_eq!(
             r.violations
                 .iter()
@@ -8011,6 +8493,56 @@ mod tests {
             1,
             "only the fragment-less <use> fires, got:\n{r}"
         );
+        // RSC-015's paint half: `fill`/`stroke` name a paint server through
+        // `url(…)`, which is meaningless without a fragment.
+        let mut r = Report::default();
+        check_svg_references(
+            r##"<svg xmlns="http://www.w3.org/2000/svg">
+                <linearGradient id="g"/>
+                <rect fill="url(paints.svg)" stroke="url(#g)"/>
+                <rect fill="none" stroke="#336699"/>
+                <rect fill="url(http://example.org/p.svg)"/>
+                </svg>"##,
+            "a.svg",
+            true,
+            &mut r,
+        );
+        assert_eq!(
+            r.violations
+                .iter()
+                .filter(|v| v.rule == Rule::SvgReferenceNoFragment)
+                .count(),
+            1,
+            "only the fragment-less local paint fires, got:\n{r}"
+        );
+        // RSC-014: a reference must land on an element that can serve it. The
+        // paint server is declared *after* its use, which must still resolve.
+        let mut r = Report::default();
+        check_svg_references(
+            r##"<html xmlns="http://www.w3.org/1999/xhtml">
+                <body><p id="text">hi</p>
+                <svg xmlns="http://www.w3.org/2000/svg">
+                  <rect fill="url(#grad)" stroke="url(#clip)"/>
+                  <use href="#sym"/><use href="#grad"/><use href="#text"/>
+                  <linearGradient id="grad"/><clipPath id="clip"/><symbol id="sym"/>
+                </svg></body></html>"##,
+            "a.xhtml",
+            false,
+            &mut r,
+        );
+        let wrong: Vec<&str> = r
+            .violations
+            .iter()
+            .filter(|v| v.rule == Rule::FragmentWrongElementType)
+            .map(|v| v.message.as_str())
+            .collect();
+        assert_eq!(
+            wrong.len(),
+            2,
+            "the stroke onto a clip path and the <use> onto a gradient, got:\n{r}"
+        );
+        assert!(wrong.iter().any(|d| d.contains("#clip")), "{r}");
+        assert!(wrong.iter().any(|d| d.contains("#grad\"")), "{r}");
         // HTM-048 reads the *outermost* svg only.
         assert!(!outermost_svg_has_viewbox(
             r#"<svg xmlns="http://www.w3.org/2000/svg"/>"#
@@ -8159,27 +8691,87 @@ mod tests {
             r#"<r xml:lang="en" xml:space="preserve">x</r>"#,
         ] {
             let mut r = Report::default();
-            check_xml_well_formedness(xml, "x.xml", &mut r);
+            check_xml_well_formedness(xml, "x.xml", true, &mut r);
             assert!(
                 r.is_clean(),
                 "bound prefixes should pass: {xml:?}, got:\n{r}"
             );
         }
-        // The general-entity class is out of scope (epubcheck resolves named
-        // entities via the DTD its DOCTYPE catalogues, so a plain predefined-only
-        // check would false-positive on `&nbsp;` under an XHTML DOCTYPE). These
-        // must NOT be flagged, whether predefined, numeric, or named.
-        for xml in [
-            "<r>&amp; &lt; &gt; &#160; &#x20;</r>",
-            "<r>&nbsp;&atilde;&dagger;</r>",
-        ] {
+    }
+
+    /// An entity reference resolves only if something declares it, and what
+    /// declares it is the DOCTYPE — which resolves nothing at all in EPUB 3.
+    #[test]
+    fn an_undeclared_entity_is_fatal_where_nothing_declares_it() {
+        let run = |xml: &str, epub3: bool| {
             let mut r = Report::default();
-            check_xml_well_formedness(xml, "x.xml", &mut r);
+            check_xml_well_formedness(xml, "x.xml", epub3, &mut r);
+            r
+        };
+        // The predefines and numeric character references always resolve.
+        assert!(
+            run("<r a=\"&amp;\">&amp; &lt; &gt; &#160; &#x20;</r>", true).is_clean(),
+            "the five predefines and numeric references need no declaration"
+        );
+        // EPUB 3 resolves no external identifier, so `&nbsp;` is undeclared
+        // whatever the DOCTYPE says.
+        for xml in [
+            "<r>&nbsp;</r>",
+            "<!DOCTYPE html><r>&nbsp;</r>",
+            "<r a=\"&nbsp;\"/>",
+        ] {
             assert!(
-                r.is_clean(),
-                "entity references are out of scope (no false positive): {xml:?}, got:\n{r}"
+                run(xml, true).has_rule(Rule::MalformedXml),
+                "expected a fatal undeclared entity in {xml:?}"
             );
         }
+        // …unless the internal subset declares it. Every declaration counts,
+        // not just the first — the DOCTYPE's own `>` is not its end.
+        assert!(
+            run(
+                r#"<!DOCTYPE r [ <!ENTITY nbsp "&#160;"> <!ENTITY co "&#169;"> ]>
+                   <r a="&nbsp;">&nbsp;&co;</r>"#,
+                true
+            )
+            .is_clean()
+        );
+        // In EPUB 2 the DOCTYPE's DTD is resolved, and the XHTML entity sets
+        // declare all 253 characters — the false positive this catalogue exists
+        // to prevent.
+        let xhtml = concat!(
+            r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "#,
+            r#""http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">"#,
+            "<r>&nbsp;&atilde;&dagger;</r>",
+        );
+        assert!(run(xhtml, false).is_clean(), "{}", run(xhtml, false));
+        assert!(
+            run(xhtml, true).has_rule(Rule::MalformedXml),
+            "the same document is fatal as EPUB 3, where the DTD is not read"
+        );
+        // A name the XHTML sets do not define is still undeclared.
+        let unknown = xhtml.replace("&atilde;", "&nosuch;");
+        assert!(run(&unknown, false).has_rule(Rule::MalformedXml));
+        // A DOCTYPE the catalogue cannot resolve completely is not judged at
+        // all: SVG 1.1 is modular and its modules are not vendored.
+        let svg = concat!(
+            r#"<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "#,
+            r#""http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">"#,
+            "<svg>&nbsp;</svg>",
+        );
+        assert!(run(svg, false).is_clean());
+        // Nor is a document whose internal subset expands a parameter entity:
+        // what it expands to may itself declare entities.
+        assert!(run(r#"<!DOCTYPE r [ %ents; ]><r>&nbsp;</r>"#, true).is_clean());
+        // Nor one whose external identifier does not parse: something is being
+        // pulled in and we cannot say what.
+        assert!(run(r#"<!DOCTYPE r PUBLIC><r>&nbsp;</r>"#, false).is_clean());
+        // The DOCTYPE is read as an event, so one written inside a comment
+        // cannot stand in for the real one.
+        assert!(
+            run("<!-- <!DOCTYPE r SYSTEM \"x\"> --><r>&nbsp;</r>", false)
+                .has_rule(Rule::MalformedXml),
+            "a commented-out DOCTYPE declares nothing"
+        );
     }
 
     #[test]

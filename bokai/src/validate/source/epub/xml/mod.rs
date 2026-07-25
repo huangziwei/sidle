@@ -28,6 +28,7 @@
 //! - [`schema`] — epubcheck's own schemas, vendored and compiled in.
 //! - [`engine`] — the map from a resource to the schemas that judge it.
 
+pub mod dtd;
 pub mod engine;
 pub mod nvdl;
 pub mod preprocess;

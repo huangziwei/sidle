@@ -7,10 +7,9 @@
 //! are the ones the schemas use to reference each other (`20/rng/content.rng`,
 //! `30/mod/html5/meta.rnc`, …), so [`FILES`] doubles as the resolver's map.
 //!
-//! The `20/dtd` tree is vendored alongside but deliberately *not* compiled in:
-//! nothing reads a DTD yet. It is what the parked entity-catalogue work
-//! (`HTM-011`, the `RSC-016` entity class) will need to know which public
-//! identifier defines `&nbsp;`.
+//! The `20/dtd` tree is vendored alongside but is not part of [`FILES`]: no
+//! schema references a DTD. It is read by [`super::dtd`], which answers which
+//! public identifier defines `&nbsp;`.
 //!
 //! Regenerate this list after re-vendoring:
 //!
