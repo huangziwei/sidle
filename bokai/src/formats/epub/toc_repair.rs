@@ -22,7 +22,9 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 
 use crate::formats::epub::edit::{EpubPackage, attr_value, escape_attr};
-use crate::formats::epub::nav_doc::{depth, render_nav_doc, render_navmap, render_ncx, render_toc_nav};
+use crate::formats::epub::nav_doc::{
+    depth, render_nav_doc, render_navmap, render_ncx, render_toc_nav,
+};
 use crate::formats::epub::structure::{
     MIN_SECTION_CONTENTS_LINKS, basename, dir_of, internal_links, relativize, resolve_href,
     spine_documents, split_fragment, strip_fragment,

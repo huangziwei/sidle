@@ -137,7 +137,6 @@ fn volume(
     let taken = |name: &str| kept.contains(name) || resources.contains(name) || name == opf_path;
     let nav_path = free_path(&taken, opf_base, "nav.xhtml");
     let ncx_path = free_path(&taken, opf_base, "toc.ncx");
-    let entries = carve(toc, &kept);
     let uid = format!(
         "urn:uuid:{}",
         uuid_v5(&format!("{}#{}", opf.metadata.identifier, cut.number))
@@ -163,6 +162,26 @@ fn volume(
             volume.replace(doc, rewritten);
         }
     }
+    volume.replace(
+        opf_path,
+        volume_opf(
+            opf,
+            opf_base,
+            &uid,
+            cut,
+            series,
+            &documents,
+            &resources,
+            &nav_path,
+            &ncx_path,
+            cover_image(pkg, cut),
+        )
+        .into_bytes(),
+    );
+
+    // The volume is a complete book by this point, so its chapter list is read
+    // the same way any book's is.
+    let entries = volume_toc(&volume, opf_path, carve(toc, &kept));
     volume.set(
         &nav_path,
         render_nav_doc(
@@ -182,23 +201,45 @@ fn volume(
         )
         .into_bytes(),
     );
-    volume.replace(
-        opf_path,
-        volume_opf(
-            opf,
-            opf_base,
-            &uid,
-            cut,
-            series,
-            &documents,
-            &resources,
-            &nav_path,
-            &ncx_path,
-            cover_image(pkg, cut),
-        )
-        .into_bytes(),
-    );
     volume.into_bytes()
+}
+
+/// The volume's chapter list: what the collection's own navigation said about
+/// this volume, plus what the volume evidences about itself.
+///
+/// The collection's list is almost never enough on its own. A collection that
+/// names its volumes and nothing else — the common shape — leaves each volume a
+/// chapter list of exactly one row, its own title, which is no more use to a
+/// reader than none. The volume's pages know better: its own Contents page, or
+/// its headings, name its chapters, and that is the same derivation
+/// [`super::toc_repair::propose_toc`] performs for a book with a deficient TOC.
+/// Neither source is dropped — a chapter the collection named survives even if
+/// the volume's own pages never mention it.
+fn volume_toc(volume: &EpubPackage, opf_path: &str, carved: Vec<TocEntry>) -> Vec<TocEntry> {
+    let Ok(bytes) = volume.opf_bytes() else {
+        return carved;
+    };
+    let opf_str = decode_text(bytes, extract_xml_encoding(bytes));
+    let Ok(opf) = parse_opf(&opf_str) else {
+        return carved;
+    };
+    let opf_base = dir_of(opf_path);
+    // Reads only the volume's own pages: the nav doc and NCX its package
+    // declares are the ones about to be written from this, and are not there
+    // yet.
+    let derived = toc_repair::propose_from_pkg(volume, &opf, &opf_base, &opf_str);
+    if derived.is_empty() {
+        return carved;
+    }
+    let spine = spine_documents(&opf, &opf_base);
+    let at: std::collections::HashMap<&str, usize> = spine
+        .iter()
+        .enumerate()
+        .map(|(i, (abs, _))| (abs.as_str(), i))
+        .collect();
+    crate::model::toc_shape::merge_by_document_order(carved, derived, |e| {
+        at.get(strip_fragment(&e.href)).copied()
+    })
 }
 
 /// A zip path under `dir` that `taken` does not already claim.
@@ -247,7 +288,9 @@ fn reachable_resources(
     let mut found = BTreeSet::new();
     let mut queue: Vec<String> = documents.to_vec();
     while let Some(from) = queue.pop() {
-        let Some(bytes) = pkg.get(&from) else { continue };
+        let Some(bytes) = pkg.get(&from) else {
+            continue;
+        };
         let text = decode_text(bytes, extract_xml_encoding(bytes));
         for href in references(&text) {
             let abs = resolve_href(&dir_of(&from), &href);
@@ -381,7 +424,10 @@ fn volume_opf(
         escape_text(&cut.label)
     );
     for author in &meta.authors {
-        metadata.push_str(&format!("<dc:creator>{}</dc:creator>\n", escape_text(author)));
+        metadata.push_str(&format!(
+            "<dc:creator>{}</dc:creator>\n",
+            escape_text(author)
+        ));
     }
     if let Some(publisher) = &meta.publisher {
         metadata.push_str(&format!(
