@@ -9,6 +9,7 @@ pub mod edit;
 pub mod image_extract;
 pub mod metadata_edit;
 pub(crate) mod opf_meta;
+pub(crate) mod page_shape;
 pub(crate) mod parser;
 pub mod toc_repair;
 mod zip_repair;

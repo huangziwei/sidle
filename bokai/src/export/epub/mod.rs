@@ -28,6 +28,7 @@ use zip::CompressionMethod;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
+use crate::formats::epub::page_shape;
 use crate::model::{AnchorTarget, Book, TocEntry};
 
 use self::nav::NavPoint;
@@ -1224,50 +1225,12 @@ fn find_cover_manifest_id(
 /// KFX natively and sizes the image itself) — a third resolution, correct for
 /// its renderer.
 pub(crate) fn is_cover_only_document(html: &str, cover_href: &str) -> bool {
-    // Body only — the <head><title> text must not count against "no visible
-    // text".
-    let body = match (html.find("<body"), html.rfind("</body>")) {
-        (Some(s), Some(e)) if e > s => {
-            let open_end = html[s..e].find('>').map(|i| s + i + 1).unwrap_or(s);
-            &html[open_end..e]
-        }
-        _ => html,
-    };
-    // Exactly one image, counting both shapes. `<img` is not a prefix of
-    // `<image`, so the two counts never overlap.
-    let raster = body.matches("<img").count();
-    let vector = body.matches("<image").count();
-    if raster + vector != 1 {
-        return false;
+    // A full-bleed image page (the shape predicate is shared with TOC repair,
+    // which uses it to find volume starts) whose image is *the* cover.
+    match page_shape::single_image_source(html) {
+        Some(src) => page_shape::basename(src) == page_shape::basename(cover_href),
+        None => false,
     }
-    // Its href basename must be the cover image. Searching bare `href="`
-    // also finds the `xlink:href="` an SVG wrapper uses.
-    let (tag, attr) = if raster == 1 {
-        ("<img", "src=\"")
-    } else {
-        ("<image", "href=\"")
-    };
-    let src = body
-        .split_once(tag)
-        .and_then(|(_, rest)| rest.split_once(attr))
-        .and_then(|(_, rest)| rest.split_once('"'))
-        .map(|(src, _)| src);
-    let Some(src) = src else { return false };
-    let base = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
-    if base(src) != base(cover_href) {
-        return false;
-    }
-    // No visible text: with all tags stripped, nothing but whitespace remains.
-    let mut depth = 0i32;
-    for c in body.chars() {
-        match c {
-            '<' => depth += 1,
-            '>' => depth = (depth - 1).max(0),
-            c if depth == 0 && !c.is_whitespace() => return false,
-            _ => {}
-        }
-    }
-    true
 }
 
 /// Normalize a passthrough content document to EPUB 3 conformance without

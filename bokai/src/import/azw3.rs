@@ -86,6 +86,12 @@ pub struct Azw3Importer {
     /// Discovered asset paths.
     assets: Vec<PathBuf>,
 
+    /// Resource index → extracted asset path, built from `assets` once the
+    /// discovery/prune pass has settled. Both `kindle:embed:` rewrites (HTML
+    /// and CSS) resolve through it so a reference always names the file that
+    /// was actually written.
+    embed_paths: HashMap<usize, String>,
+
     /// Cached parsed stylesheets.
     css_cache: HashMap<String, Stylesheet>,
 
@@ -213,7 +219,7 @@ impl Importer for Azw3Importer {
             // rewritten to the extracted assets; any `@font-face` rule whose
             // ref did NOT resolve is dropped so it can't dangle.
             let css = transform::rewrite_kindle_flow_in_css(&text[start..end]);
-            let css = transform::rewrite_kindle_embed_in_css(&css, &self.embed_asset_paths());
+            let css = transform::rewrite_kindle_embed_in_css(&css, &self.embed_paths);
             return Ok(transform::strip_kindle_embed_font_faces(&css));
         }
 
@@ -619,6 +625,7 @@ impl Azw3Importer {
             linked_aids: None,
             chapter_cache: HashMap::new(),
             assets: Vec::new(),
+            embed_paths: HashMap::new(),
             css_cache: HashMap::new(),
             element_id_map: HashMap::new(),
             toc_positions,
@@ -630,6 +637,7 @@ impl Azw3Importer {
         // are dead weight (plus they leak `kindle:embed:` URLs) when
         // emitted as `.css` assets.
         importer.prune_svg_flow_assets();
+        importer.embed_paths = importer.embed_asset_paths();
 
         // Cover fallback: older Japanese-Amazon kindlegen output omits
         // EXTH 201 and only carries the cover ref in EXTH 129's KF8
@@ -809,6 +817,7 @@ impl Azw3Importer {
             &self.kf8.elems,
             &flow.concat,
             &flow.file_starts,
+            &self.embed_paths,
         );
 
         // kindlegen's in-book TOC "Cover" rows can link straight at the

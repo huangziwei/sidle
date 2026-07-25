@@ -2,6 +2,8 @@
 //!
 //! Handles kindle: reference transformation and attribute stripping.
 
+use std::collections::HashMap;
+
 use bstr::ByteSlice;
 use memchr::memmem;
 
@@ -35,11 +37,18 @@ enum RefKind {
 /// - `kindle:flow:XXXX` → `styles/styleNNNN.css`
 /// - `kindle:pos:fid:XXXX:off:YYYY` → `partNNNN.html#id` or `partNNNN.html`
 /// - `kindle:embed:XXXX` → `images/image_NNNN.ext`
+///
+/// `embed_paths` maps a resource index to the asset path the importer
+/// actually extracted (extension from the record's magic bytes). An embed
+/// URL's own `?mime=` is the publisher's claim about that record and can
+/// disagree with the bytes, so the map wins where it has an entry — same
+/// resolution [`rewrite_kindle_embed_in_css`] uses on the CSS side.
 pub fn transform_kindle_refs(
     html: &[u8],
     elems: &[DivElement],
     raw_text: &[u8],
     file_starts: &[(u32, u32)],
+    embed_paths: &HashMap<usize, String>,
 ) -> Vec<u8> {
     let mut output = Vec::with_capacity(html.len());
     let mut pos = 0;
@@ -51,7 +60,8 @@ pub fn transform_kindle_refs(
         output.extend_from_slice(&html[pos..start]);
 
         if let Some(kindle_ref) = parse_kindle_ref(&html[start..]) {
-            let replacement = generate_replacement(&kindle_ref, elems, raw_text, file_starts);
+            let replacement =
+                generate_replacement(&kindle_ref, elems, raw_text, file_starts, embed_paths);
             output.extend_from_slice(&replacement);
             pos = start + kindle_ref.end;
         } else {
@@ -125,6 +135,7 @@ fn generate_replacement(
     elems: &[DivElement],
     raw_text: &[u8],
     file_starts: &[(u32, u32)],
+    embed_paths: &HashMap<usize, String>,
 ) -> Vec<u8> {
     match &kindle_ref.kind {
         RefKind::Flow { flow_num } => {
@@ -149,6 +160,12 @@ fn generate_replacement(
             format!("part{:04}.html", file_num).into_bytes()
         }
         RefKind::Embed { img_idx, ext } => {
+            // The extracted asset's name is authoritative — its extension comes
+            // from the record's magic bytes. Fall back to the URL's `?mime=`
+            // only for an index that was never extracted (no asset to name).
+            if let Some(path) = embed_paths.get(img_idx) {
+                return path.clone().into_bytes();
+            }
             format!("images/image_{:04}.{}", img_idx, ext).into_bytes()
         }
         RefKind::Malformed => Vec::new(),
@@ -1576,6 +1593,31 @@ mod tests {
         assert!(
             !s2.contains("font-family:\"B\""),
             "dangling font dropped: {s2}"
+        );
+    }
+
+    #[test]
+    fn embed_ref_extension_comes_from_the_extracted_asset_not_the_mime_query() {
+        // A real Amazon 合本版 declares `mime=image/png` on a record whose
+        // bytes are JPEG; naming the href from the query left it pointing at
+        // an `images/image_0200.png` the exporter never wrote (RSC-007).
+        // `0069` is base32 201 — the 1-based id of resource index 200.
+        let html = b"<image xlink:href=\"kindle:embed:0069?mime=image/png\"/>\
+<img src=\"kindle:embed:0002?mime=image/jpeg\"/>";
+        let paths: HashMap<usize, String> =
+            [(200usize, "images/image_0200.jpg".to_string())].into();
+        let out = transform_kindle_refs(html, &[], b"", &[], &paths);
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains("xlink:href=\"images/image_0200.jpg\""),
+            "extracted asset wins over the mime query: {s}"
+        );
+        // An index with no extracted asset keeps the mime-derived name — the
+        // reference is unresolvable either way, and this is what the older
+        // books rely on.
+        assert!(
+            s.contains("src=\"images/image_0001.jpg\""),
+            "unmapped index falls back to the mime query: {s}"
         );
     }
 

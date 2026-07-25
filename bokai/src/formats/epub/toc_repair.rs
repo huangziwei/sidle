@@ -18,7 +18,7 @@
 //! two is richer, so one repair fixes both the EPUB's own nav and the KFX
 //! derived from it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 
 use crate::formats::epub::edit::{EpubPackage, attr_value, escape_attr, escape_text};
@@ -31,6 +31,13 @@ use crate::util::{decode_text, extract_xml_encoding, percent_decode};
 /// noise. A shade lower than the validator's evidence gate because repair is
 /// opt-in — the user asked for a TOC and reviews the proposal.
 const MIN_CHAPTER_LINKS: usize = 3;
+
+/// Minimum links for the Contents page *inside an already-evidenced volume
+/// span* ([`volume_groups`]). Lower than [`MIN_CHAPTER_LINKS`], which has to
+/// tell a Contents page from noise across a whole book: here the span is
+/// already attested by its own cover page and by the volumes around it, and a
+/// two-chapter volume (one story plus あとがき) is ordinary.
+const MIN_VOLUME_CONTENTS_LINKS: usize = 2;
 
 // ---------------------------------------------------------------------------
 // Proposer
@@ -84,7 +91,7 @@ fn propose_from_pkg(
     let contents_ok = contents.len() >= MIN_CHAPTER_LINKS;
 
     // Prefer whichever qualifying source is richer.
-    match (declared_ok, contents_ok) {
+    let entries = match (declared_ok, contents_ok) {
         (true, true) => {
             if flat_count(&declared) >= contents.len() {
                 declared
@@ -103,7 +110,132 @@ fn propose_from_pkg(
                 Vec::new()
             }
         }
+    };
+
+    // 4. Restore the levels a flattened TOC lost — a 合本版 whose volumes and
+    //    their chapters all sit at one depth. A no-op unless the book itself
+    //    evidences the grouping.
+    let targets: HashSet<&str> = entries.iter().map(|e| strip_fragment(&e.href)).collect();
+    let groups = volume_groups(pkg, opf, opf_base, &targets);
+    nest_by_volume_groups(entries, &groups)
+}
+
+/// One volume/part of a multi-work book, as the book itself evidences it: a
+/// full-bleed image page (the volume's own cover) opens it, and a Contents page
+/// inside its span enumerates its chapters.
+struct VolumeGroup {
+    /// Absolute zip path of the volume's opening page.
+    start: String,
+    /// Absolute zip paths belonging to this volume — its Contents page and
+    /// everything that page links to.
+    members: HashSet<String>,
+}
+
+/// The volume groupings a book declares about itself, in spine order.
+///
+/// Deliberately narrow, because the signals are individually weak. A volume
+/// start must be all three of: a full-bleed image page, a page the TOC actually
+/// points at (`targets` — an illustration plate is an image page too, and a
+/// light novel carries hundreds), and not the first spine document (the book's
+/// own cover starts no volume). A start then only forms a group if a Contents
+/// page within its span names its chapters. A book with fewer than two such
+/// starts, or a volume whose span has no Contents page, yields nothing — so a
+/// book with no volume structure is never invented one, and back matter that no
+/// volume's Contents page lists is never swallowed by the volume in front of it.
+fn volume_groups(
+    pkg: &EpubPackage,
+    opf: &OpfData,
+    opf_base: &str,
+    targets: &HashSet<&str>,
+) -> Vec<VolumeGroup> {
+    let spine = spine_docs(opf, opf_base);
+    let spine_files: HashSet<&str> = spine.iter().map(|(_, b)| b.as_str()).collect();
+
+    let read = |abs: &str| -> Option<String> {
+        let bytes = pkg.get(abs)?;
+        Some(decode_text(bytes, extract_xml_encoding(bytes)).into_owned())
+    };
+
+    let starts: Vec<usize> = spine
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, (abs, _))| {
+            targets.contains(abs.as_str())
+                && read(abs).is_some_and(|x| super::page_shape::is_single_image_page(&x))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if starts.len() < 2 {
+        return Vec::new();
     }
+
+    let mut groups = Vec::new();
+    for (n, &start) in starts.iter().enumerate() {
+        let end = starts.get(n + 1).copied().unwrap_or(spine.len());
+        for (abs, base) in &spine[start..end] {
+            let Some(xhtml) = read(abs) else { continue };
+            let links = dedup_entries(collect_internal_links(
+                &xhtml,
+                &dir_of(abs),
+                &spine_files,
+                base,
+            ));
+            if links.len() < MIN_VOLUME_CONTENTS_LINKS {
+                continue;
+            }
+            // The volume's own Contents page — the first one in its span.
+            let mut members: HashSet<String> = links
+                .into_iter()
+                .map(|e| strip_fragment(&e.href).to_string())
+                .collect();
+            members.insert(abs.clone());
+            groups.push(VolumeGroup {
+                start: spine[start].0.clone(),
+                members,
+            });
+            break;
+        }
+    }
+    groups
+}
+
+/// Re-parent a flat entry list into the volumes [`volume_groups`] found: an
+/// entry that opens a volume becomes a parent, and the entries after it that
+/// its own Contents page names become its children.
+///
+/// A TOC that already declares nesting is left alone, an entry no volume claims
+/// stays top-level (and closes the volume before it), and a book whose groups
+/// adopt nothing comes back unchanged — this pass only ever restores structure
+/// the book states about itself.
+fn nest_by_volume_groups(entries: Vec<TocEntry>, groups: &[VolumeGroup]) -> Vec<TocEntry> {
+    if groups.is_empty() || entries.iter().any(|e| !e.children.is_empty()) {
+        return entries;
+    }
+    let mut out: Vec<TocEntry> = Vec::with_capacity(entries.len());
+    // (index in `out` of the open volume, its group).
+    let mut open: Option<(usize, &VolumeGroup)> = None;
+    for entry in entries {
+        let doc = strip_fragment(&entry.href);
+        if let Some(group) = groups.iter().find(|g| g.start == doc) {
+            open = Some((out.len(), group));
+            out.push(entry);
+            continue;
+        }
+        match open {
+            Some((idx, group)) if group.members.contains(doc) => out[idx].children.push(entry),
+            _ => {
+                open = None;
+                out.push(entry);
+            }
+        }
+    }
+    out
+}
+
+/// The href without its `#fragment`.
+fn strip_fragment(href: &str) -> &str {
+    href.split_once('#').map(|(p, _)| p).unwrap_or(href)
 }
 
 /// The densest cluster of internal chapter links across the spine — a Contents
@@ -447,23 +579,52 @@ fn render_nav_doc(toc_nav: &str, lang: &str, title: &str) -> String {
     )
 }
 
-/// Render `<navMap>…</navMap>` with sequential `playOrder`, hrefs rebased to
-/// `base_dir`.
+/// Render `<navMap>…</navMap>` in reading order, hrefs rebased to `base_dir`.
 fn render_navmap(entries: &[TocEntry], base_dir: &str) -> String {
     let mut s = String::from("<navMap>\n");
-    let mut order = 0usize;
+    let mut order = NavOrder::default();
     render_navpoints(entries, base_dir, &mut order, &mut s);
     s.push_str("</navMap>");
     s
 }
 
-fn render_navpoints(entries: &[TocEntry], base_dir: &str, order: &mut usize, out: &mut String) {
+/// Numbering state for the NCX: element ids are unique per navPoint, while
+/// `playOrder` is assigned per unique content target, so two navPoints on the
+/// same target share one playOrder — the NCX 2005-1 rule epubcheck enforces as
+/// RSC-005 ("different playOrder values … that refer to the same target"). A
+/// book that lists one piece twice (a repeated 目次 row, or a parent whose
+/// first child starts at the same document) is ordinary, so this is not an edge
+/// case. The EPUB exporter's own NCX emitter carries the same rule.
+#[derive(Default)]
+struct NavOrder {
+    next_id: usize,
+    next_play_order: usize,
+    play_order_by_target: HashMap<String, usize>,
+}
+
+impl NavOrder {
+    /// `(element id, playOrder)` for the next navPoint on `src`.
+    fn next(&mut self, src: &str) -> (usize, usize) {
+        self.next_id += 1;
+        let play_order = match self.play_order_by_target.get(src) {
+            Some(&existing) => existing,
+            None => {
+                self.next_play_order += 1;
+                self.play_order_by_target
+                    .insert(src.to_string(), self.next_play_order);
+                self.next_play_order
+            }
+        };
+        (self.next_id, play_order)
+    }
+}
+
+fn render_navpoints(entries: &[TocEntry], base_dir: &str, order: &mut NavOrder, out: &mut String) {
     for e in entries {
-        *order += 1;
-        let n = *order;
         let src = relativize(base_dir, &e.href);
+        let (id, play_order) = order.next(&src);
         out.push_str(&format!(
-            "<navPoint id=\"navPoint-{n}\" playOrder=\"{n}\">\n\
+            "<navPoint id=\"navPoint-{id}\" playOrder=\"{play_order}\">\n\
 <navLabel><text>{}</text></navLabel>\n\
 <content src=\"{}\"/>\n",
             escape_text(crate::util::trim_markup_space(&e.title)),
@@ -1016,6 +1177,172 @@ mod tests {
             zip.finish().unwrap();
         }
         buf
+    }
+
+    /// A 合本版 whose NCX flattens two volumes and their chapters to one depth.
+    /// Each volume opens with its own full-bleed cover page (which the TOC
+    /// points at) and carries its own Contents page; the colophon at the end
+    /// belongs to no volume.
+    fn flat_omnibus_epub(volumes: usize) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let stored = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            let mut add = |name: &str, body: &str| {
+                zip.start_file(name, stored).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            };
+            add("mimetype", "application/epub+zip");
+            add(
+                "META-INF/container.xml",
+                r#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            );
+            let page = |title: &str, body: &str| {
+                format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>{title}</title></head><body>{body}</body></html>"#
+                )
+            };
+            let mut manifest = String::new();
+            let mut spine = String::new();
+            let mut navpoints = String::new();
+            let mut order = 0;
+            let mut declare = |id: &str, file: &str, label: Option<&str>| {
+                manifest.push_str(&format!(
+                    r#"<item id="{id}" href="{file}" media-type="application/xhtml+xml"/>"#
+                ));
+                spine.push_str(&format!(r#"<itemref idref="{id}"/>"#));
+                if let Some(label) = label {
+                    order += 1;
+                    navpoints.push_str(&format!(
+                        r#"<navPoint id="np{order}" playOrder="{order}"><navLabel><text>{label}</text></navLabel><content src="{file}"/></navPoint>"#
+                    ));
+                }
+            };
+
+            // The book's own cover — a full-bleed image page that starts no
+            // volume, and is never in the TOC.
+            add(
+                "OEBPS/cover.xhtml",
+                &page("Cover", r#"<div><img src="cover.jpg" alt=""/></div>"#),
+            );
+            declare("cover", "cover.xhtml", None);
+
+            // Book-level Contents page, linking each volume's cover.
+            let vol_links: String = (1..=volumes)
+                .map(|v| format!(r#"<a href="v{v}cover.xhtml">Volume {v}</a>"#))
+                .collect();
+            add("OEBPS/contents.xhtml", &page("Contents", &vol_links));
+            declare("contents", "contents.xhtml", Some("Contents"));
+
+            for v in 1..=volumes {
+                add(
+                    &format!("OEBPS/v{v}cover.xhtml"),
+                    &page("", &format!(r#"<div><img src="v{v}.jpg" alt=""/></div>"#)),
+                );
+                declare(
+                    &format!("v{v}cover"),
+                    &format!("v{v}cover.xhtml"),
+                    Some(&format!("Volume {v}")),
+                );
+                let chapter_links: String = (1..=3)
+                    .map(|c| format!(r#"<a href="v{v}c{c}.xhtml">Chapter {c}</a>"#))
+                    .collect();
+                add(&format!("OEBPS/v{v}toc.xhtml"), &page("", &chapter_links));
+                declare(
+                    &format!("v{v}toc"),
+                    &format!("v{v}toc.xhtml"),
+                    Some("Contents"),
+                );
+                for c in 1..=3 {
+                    add(
+                        &format!("OEBPS/v{v}c{c}.xhtml"),
+                        &page("", &format!("<p>Volume {v}, chapter {c} prose.</p>")),
+                    );
+                    declare(
+                        &format!("v{v}c{c}"),
+                        &format!("v{v}c{c}.xhtml"),
+                        Some(&format!("Chapter {c}")),
+                    );
+                }
+            }
+
+            // Back matter: no volume's Contents page lists it.
+            add(
+                "OEBPS/colophon.xhtml",
+                &page("", "<p>Published by Someone.</p>"),
+            );
+            declare("colophon", "colophon.xhtml", Some("Colophon"));
+
+            add(
+                "OEBPS/content.opf",
+                &format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Omnibus</dc:title><dc:language>en</dc:language><dc:identifier id="uid">urn:uuid:omnibus</dc:identifier></metadata><manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>{manifest}</manifest><spine toc="ncx">{spine}</spine></package>"#
+                ),
+            );
+            add(
+                "OEBPS/toc.ncx",
+                &format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="urn:uuid:omnibus"/></head><docTitle><text>Omnibus</text></docTitle><navMap>{navpoints}</navMap></ncx>"#
+                ),
+            );
+            zip.finish().unwrap();
+        }
+        buf
+    }
+
+    /// A flattened multi-volume TOC is re-parented into its volumes: each
+    /// volume adopts the entries its own Contents page names, nothing is lost,
+    /// and back matter no volume claims stays at the top level.
+    #[test]
+    fn a_flattened_omnibus_toc_is_nested_back_into_its_volumes() {
+        let proposed = propose_toc(&flat_omnibus_epub(2)).unwrap();
+
+        let top: Vec<&str> = proposed.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(top, ["Contents", "Volume 1", "Volume 2", "Colophon"]);
+        // Each volume adopts its own Contents page + its three chapters.
+        assert_eq!(proposed[1].children.len(), 4);
+        assert_eq!(proposed[2].children.len(), 4);
+        assert_eq!(proposed[1].children[1].title, "Chapter 1");
+        // Nothing is lost — 1 + 2×(1 + 4) + 1 declared entries come back.
+        assert_eq!(flat_count(&proposed), 12);
+        // The colophon belongs to no volume and is not swallowed by the last.
+        assert!(proposed[3].children.is_empty());
+    }
+
+    /// Two entries on one target keep distinct navPoint ids but share a
+    /// playOrder — the NCX rule epubcheck fails as RSC-005. Real books repeat a
+    /// target (a duplicated 目次 row; a volume whose first chapter starts on the
+    /// volume's own page).
+    #[test]
+    fn repeated_ncx_targets_share_one_play_order() {
+        let entries = vec![
+            TocEntry::new("One", "OEBPS/c1.xhtml"),
+            TocEntry::new("One again", "OEBPS/c1.xhtml"),
+            TocEntry::new("Two", "OEBPS/c2.xhtml"),
+        ];
+        let ncx = render_navmap(&entries, "OEBPS/");
+        assert!(
+            ncx.contains(r#"<navPoint id="navPoint-1" playOrder="1">"#),
+            "{ncx}"
+        );
+        assert!(
+            ncx.contains(r#"<navPoint id="navPoint-2" playOrder="1">"#),
+            "{ncx}"
+        );
+        assert!(
+            ncx.contains(r#"<navPoint id="navPoint-3" playOrder="2">"#),
+            "{ncx}"
+        );
+    }
+
+    /// One volume is not a volume structure: a book with a single full-bleed
+    /// cover page keeps the TOC it declared, flat.
+    #[test]
+    fn a_single_volume_book_is_left_flat() {
+        let proposed = propose_toc(&flat_omnibus_epub(1)).unwrap();
+        assert_eq!(flat_count(&proposed), proposed.len());
+        assert!(proposed.iter().all(|e| e.children.is_empty()));
     }
 
     /// The regression: a book with an image 目次 and image chapter headings (no
