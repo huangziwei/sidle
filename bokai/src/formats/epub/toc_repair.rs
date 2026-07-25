@@ -23,6 +23,7 @@ use std::io;
 
 use crate::formats::epub::edit::{EpubPackage, attr_value, escape_attr, escape_text};
 use crate::formats::epub::{OpfData, parse_nav_landmarks, parse_opf, parse_opf_guide};
+use crate::model::toc_shape::{TocTree, merge_by_document_order, nest_by_label_indent};
 use crate::model::{LandmarkType, TocEntry};
 use crate::util::{decode_text, extract_xml_encoding, percent_decode};
 
@@ -115,40 +116,42 @@ fn propose_from_pkg(
     opf_base: &str,
     opf_str: &str,
 ) -> Vec<TocEntry> {
-    // 1. The book's own authored TOC (NCX / nav doc). When it lists real
-    //    chapters it's the most reliable source — and often the *only* one:
-    //    image-heavy books (JP light novels) render both the 目次 and the chapter
-    //    headings as images, so there are no links or heading text to derive from,
-    //    yet the NCX carries the full chapter list. A deficient (chapterless)
-    //    declared TOC has too few real chapters to qualify and is skipped.
+    // 1. The book's own authored TOC (NCX / nav doc). Whatever else is found, it
+    //    is never discarded: it is the only source that knows the entries no
+    //    Contents page links (the cover, the Contents page itself, the colophon),
+    //    and dropping one would make a "repair" a regression for the reader.
     let declared = existing_declared_toc(pkg, opf, opf_base);
-    let declared_ok = count_chapters(&declared) >= MIN_CHAPTER_LINKS;
 
-    // 2. The densest in-body Contents-page link cluster.
+    // 2. The densest in-body Contents-page link cluster, else — only when
+    //    neither it nor the declared TOC knows any chapters — one entry per spine
+    //    doc that opens with a text heading. Image-heavy books render both the
+    //    Contents page and the chapter headings as images, so there is nothing to
+    //    derive from and the declared TOC is all there is.
+    let spine = spine_docs(opf, opf_base);
     let contents = contents_page_links(pkg, opf, opf_base, opf_str);
-    let contents_ok = contents.len() >= MIN_CHAPTER_LINKS;
-
-    // Prefer whichever qualifying source is richer.
-    let entries = match (declared_ok, contents_ok) {
-        (true, true) => {
-            if flat_count(&declared) >= contents.len() {
-                declared
-            } else {
-                contents
-            }
-        }
-        (true, false) => declared,
-        (false, true) => contents,
-        // 3. Last resort: one entry per spine doc that opens with a text heading.
-        (false, false) => {
-            let headings = propose_from_headings(pkg, &spine_docs(opf, opf_base));
-            if headings.len() >= MIN_CHAPTER_LINKS {
-                headings
-            } else {
-                Vec::new()
-            }
+    let derived = if contents.len() >= MIN_CHAPTER_LINKS {
+        contents
+    } else if count_chapters(&declared) >= MIN_CHAPTER_LINKS {
+        Vec::new()
+    } else {
+        let headings = propose_from_headings(pkg, &spine);
+        if headings.len() >= MIN_CHAPTER_LINKS {
+            headings
+        } else {
+            Vec::new()
         }
     };
+
+    // 3. Merge, in spine order: every declared entry survives, and a derived one
+    //    joins it wherever the declared TOC doesn't already reach.
+    let positions: HashMap<&str, usize> = spine
+        .iter()
+        .enumerate()
+        .map(|(i, (abs, _))| (abs.as_str(), i))
+        .collect();
+    let entries = merge_by_document_order(declared, derived, |e| {
+        positions.get(strip_fragment(&e.href)).copied()
+    });
 
     // 4. Restore the levels a flattened TOC lost — to whatever depth the book
     //    evidences. A no-op unless it evidences any.
@@ -295,106 +298,6 @@ fn nest_by_volume_groups(entries: Vec<TocEntry>, groups: &[VolumeGroup]) -> Vec<
     tree.build()
 }
 
-/// How many levels of leading whitespace a label carries. One IDEOGRAPHIC SPACE
-/// (U+3000) per level is the common JP convention; ASCII spaces and tabs count
-/// the same.
-fn label_indent(title: &str) -> usize {
-    title.chars().take_while(|c| c.is_whitespace()).count()
-}
-
-/// How many entries must carry a deeper indent than the run's shallowest
-/// before the indentation counts as evidence of structure at all. One or two
-/// stray leading spaces are a typo; a whole level is not.
-///
-/// This is a threshold on *evidence*, not on depth — nothing here bounds how
-/// many levels are derived.
-const MIN_INDENT_EVIDENCE: usize = 3;
-
-/// Re-parent a flat run by the levels its labels keep as leading indentation.
-///
-/// A publisher whose NCX lost its nesting often still ships it visibly, one
-/// IDEOGRAPHIC SPACE per level: a part label flush left, its chapters indented
-/// once, their sections twice. Each entry attaches under the nearest preceding
-/// entry with a strictly shallower indent, so the depth is whatever the labels
-/// encode; the indentation is then trimmed, because the nesting now says what
-/// it said.
-///
-/// A run with no deeper-indented entries (or fewer than
-/// [`MIN_INDENT_EVIDENCE`]) comes back untouched, as does one that already
-/// declares nesting.
-fn nest_by_label_indent(entries: Vec<TocEntry>) -> Vec<TocEntry> {
-    if entries.iter().any(|e| !e.children.is_empty()) {
-        return entries;
-    }
-    let indents: Vec<usize> = entries.iter().map(|e| label_indent(&e.title)).collect();
-    let Some(&base) = indents.iter().min() else {
-        return entries;
-    };
-    if indents.iter().filter(|&&i| i > base).count() < MIN_INDENT_EVIDENCE {
-        return entries;
-    }
-    let mut tree = TocTree::with_capacity(entries.len());
-    // The ancestors currently open, outermost first: `(node, its indent)`.
-    let mut open: Vec<(usize, usize)> = Vec::new();
-    for (mut entry, indent) in entries.into_iter().zip(indents) {
-        while open.last().is_some_and(|&(_, d)| d >= indent) {
-            open.pop();
-        }
-        entry.title = entry.title.trim_start().to_string();
-        let node = tree.push(entry, open.last().map(|&(parent, _)| parent));
-        open.push((node, indent));
-    }
-    tree.build()
-}
-
-/// A [`TocEntry`] tree under construction, built in document order by naming
-/// each entry's parent. Flat while it is built (an entry's children arrive
-/// after it), materialized into the nested [`TocEntry`]s at the end.
-struct TocTree {
-    nodes: Vec<(TocEntry, Vec<usize>)>,
-    roots: Vec<usize>,
-}
-
-impl TocTree {
-    fn with_capacity(n: usize) -> Self {
-        Self {
-            nodes: Vec::with_capacity(n),
-            roots: Vec::new(),
-        }
-    }
-
-    /// Add `entry` under `parent` (or at the top level), returning its node.
-    fn push(&mut self, entry: TocEntry, parent: Option<usize>) -> usize {
-        let node = self.nodes.len();
-        self.nodes.push((entry, Vec::new()));
-        match parent {
-            Some(parent) => self.nodes[parent].1.push(node),
-            None => self.roots.push(node),
-        }
-        node
-    }
-
-    fn build(self) -> Vec<TocEntry> {
-        // A node's children always come after it, so filling in reverse order
-        // means every child is finished before its parent asks for it.
-        let mut arena: Vec<Option<(TocEntry, Vec<usize>)>> =
-            self.nodes.into_iter().map(Some).collect();
-        let mut done: Vec<Option<TocEntry>> = vec![None; arena.len()];
-        for i in (0..arena.len()).rev() {
-            let (mut entry, children) = arena[i].take().expect("each node is built once");
-            entry.children = children
-                .into_iter()
-                .map(|c| done[c].take().expect("a child is built before its parent"))
-                .collect();
-            done[i] = Some(entry);
-        }
-        self.roots
-            .into_iter()
-            .map(|r| done[r].take().expect("each root is built once"))
-            .collect()
-    }
-}
-
 /// The href without its `#fragment`.
 fn strip_fragment(href: &str) -> &str {
     href.split_once('#').map(|(p, _)| p).unwrap_or(href)
@@ -434,9 +337,15 @@ fn contents_page_links(
     landmark_hit.unwrap_or(best)
 }
 
-/// The book's declared TOC (the richer of its NCX and EPUB-3 nav doc), with every
-/// href resolved to an absolute zip path so it can be re-emitted by [`set_toc`].
-fn existing_declared_toc(pkg: &EpubPackage, opf: &OpfData, opf_base: &str) -> Vec<TocEntry> {
+/// The book's declared TOC as each of the two documents a reader may consult has
+/// it — `(NCX, EPUB-3 nav doc)` — with every href resolved to an absolute zip
+/// path so it can be re-emitted by [`set_toc`]. Either may be empty; they can
+/// also disagree, which is itself something [`repair_toc`] fixes.
+fn declared_toc_documents(
+    pkg: &EpubPackage,
+    opf: &OpfData,
+    opf_base: &str,
+) -> (Vec<TocEntry>, Vec<TocEntry>) {
     let read = |href: &str, parse: fn(&str) -> io::Result<Vec<TocEntry>>| -> Vec<TocEntry> {
         let abs = format!("{opf_base}{}", percent_decode(href));
         let Some(bytes) = pkg.get(&abs) else {
@@ -457,6 +366,12 @@ fn existing_declared_toc(pkg: &EpubPackage, opf: &OpfData, opf_base: &str) -> Ve
         .as_deref()
         .map(|h| read(h, crate::formats::epub::parse_nav_toc))
         .unwrap_or_default();
+    (ncx, nav)
+}
+
+/// The book's declared TOC: the richer of its two nav documents.
+fn existing_declared_toc(pkg: &EpubPackage, opf: &OpfData, opf_base: &str) -> Vec<TocEntry> {
+    let (ncx, nav) = declared_toc_documents(pkg, opf, opf_base);
     if flat_count(&ncx) >= flat_count(&nav) {
         ncx
     } else {
@@ -597,9 +512,105 @@ fn toc_landmark_basename(
 // Writer
 // ---------------------------------------------------------------------------
 
+/// Drop every `#fragment` its target document doesn't actually define.
+///
+/// A book's own Contents page can link anchors that a conversion lost. A
+/// proposal mined from that page would otherwise write the dead fragments into
+/// the nav doc *and* the NCX, turning one broken page into three. The entry
+/// itself survives — the document is still the right place to land — it just
+/// points at the document instead of at an anchor that isn't there.
+///
+/// A fragment whose document isn't in the container is left alone: the entry is
+/// broken either way, and that is a different defect with its own report.
+fn resolve_fragments(pkg: &EpubPackage, entries: &[TocEntry]) -> Vec<TocEntry> {
+    let mut wanted: HashMap<&str, HashSet<&str>> = HashMap::new();
+    collect_fragments(entries, &mut wanted);
+    if wanted.is_empty() {
+        return entries.to_vec();
+    }
+    // One read per document, however many entries land in it.
+    let mut defined: HashSet<(&str, &str)> = HashSet::new();
+    for (doc, fragments) in &wanted {
+        let Some(bytes) = pkg.get(&percent_decode(doc)) else {
+            defined.extend(fragments.iter().map(|f| (*doc, *f)));
+            continue;
+        };
+        let xhtml = decode_text(bytes, extract_xml_encoding(bytes));
+        for fragment in fragments {
+            if defines_fragment(&xhtml, &percent_decode(fragment)) {
+                defined.insert((doc, fragment));
+            }
+        }
+    }
+    strip_undefined_fragments(entries, &defined)
+}
+
+/// The fragment an href names, without its `#` — the form that has to match an
+/// `id` attribute. Empty when the href carries none.
+fn fragment_id(href: &str) -> &str {
+    split_fragment(href).1.trim_start_matches('#')
+}
+
+fn collect_fragments<'a>(entries: &'a [TocEntry], out: &mut HashMap<&'a str, HashSet<&'a str>>) {
+    for entry in entries {
+        let doc = split_fragment(&entry.href).0;
+        let id = fragment_id(&entry.href);
+        if !id.is_empty() && !doc.is_empty() {
+            out.entry(doc).or_default().insert(id);
+        }
+        collect_fragments(&entry.children, out);
+    }
+}
+
+fn strip_undefined_fragments(
+    entries: &[TocEntry],
+    defined: &HashSet<(&str, &str)>,
+) -> Vec<TocEntry> {
+    entries
+        .iter()
+        .map(|entry| {
+            let doc = split_fragment(&entry.href).0;
+            let id = fragment_id(&entry.href);
+            let href = if id.is_empty() || defined.contains(&(doc, id)) {
+                entry.href.clone()
+            } else {
+                doc.to_string()
+            };
+            let mut out = TocEntry::new(entry.title.clone(), href);
+            out.children = strip_undefined_fragments(&entry.children, defined);
+            out
+        })
+        .collect()
+}
+
+/// True if `xhtml` defines `id` as a fragment target: an `id` attribute with
+/// that value, or the older `<a name>` form.
+///
+/// Deliberately permissive — a scan, not a parse. Guessing "defined" leaves a
+/// working target alone, while guessing "not defined" would demote a good anchor
+/// to its document, so anything that reads like the attribute counts.
+fn defines_fragment(xhtml: &str, id: &str) -> bool {
+    for attr in ["id=", "name="] {
+        let mut rest: &str = xhtml;
+        while let Some(at) = rest.find(attr) {
+            rest = &rest[at + attr.len()..];
+            let quote = rest.chars().next();
+            let value = match quote {
+                Some(q @ ('"' | '\'')) => rest[1..].split(q).next().unwrap_or(""),
+                _ => continue,
+            };
+            if value == id {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Write `entries` into the EPUB's nav doc and NCX, in place — splicing over an
 /// existing toc / navMap, or synthesizing (and registering in the OPF) when the
-/// book has none. `entries` hrefs are absolute zip paths.
+/// book has none. `entries` hrefs are absolute zip paths, and any `#fragment`
+/// the target document doesn't define is dropped ([`resolve_fragments`]).
 ///
 /// Errors if `entries` is empty or the bytes aren't a readable EPUB.
 pub fn set_toc(epub_bytes: &[u8], entries: &[TocEntry]) -> io::Result<Vec<u8>> {
@@ -616,6 +627,8 @@ pub fn set_toc(epub_bytes: &[u8], entries: &[TocEntry]) -> io::Result<Vec<u8>> {
         decode_text(pkg.opf_bytes()?, extract_xml_encoding(pkg.opf_bytes()?)).into_owned();
     let opf = parse_opf(&opf_raw).map_err(io::Error::other)?;
 
+    let entries = &resolve_fragments(&pkg, entries);
+
     let title = if opf.metadata.title.is_empty() {
         "Contents"
     } else {
@@ -626,14 +639,24 @@ pub fn set_toc(epub_bytes: &[u8], entries: &[TocEntry]) -> io::Result<Vec<u8>> {
     } else {
         &opf.metadata.language
     };
-    let uid = if opf.metadata.identifier.is_empty() {
-        "urn:uuid:bokai-repaired-toc"
-    } else {
-        &opf.metadata.identifier
-    };
+    // An NCX's `dtb:uid` must be the identifier the OPF designates as unique —
+    // not merely one of the book's identifiers, which is a different question
+    // when a book carries an ASIN and a calibre id beside its UUID.
+    let uid = opf
+        .unique_identifier
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("urn:uuid:bokai-repaired-toc");
 
     let mut opf_str = opf_raw;
     let mut opf_dirty = false;
+
+    // Whichever nav document the book already has is rewritten. A *missing* one
+    // is only synthesized when the package's own version asks for it: an EPUB 3
+    // must carry a nav doc, an EPUB 2 must carry an NCX, and adding the other is
+    // a version change nobody requested — one that, in an EPUB 2 package, an
+    // `properties="nav"` manifest item doesn't even validate as.
+    let epub2 = opf.version.starts_with('2');
 
     // --- nav doc (EPUB 3) ---
     let nav_abs = opf
@@ -643,18 +666,22 @@ pub fn set_toc(epub_bytes: &[u8], entries: &[TocEntry]) -> io::Result<Vec<u8>> {
         .unwrap_or_else(|| format!("{opf_base}nav.xhtml"));
     let nav_dir = dir_of(&nav_abs);
     let toc_nav = render_toc_nav(entries, &nav_dir);
-    let new_nav = match pkg.get(&nav_abs) {
-        Some(bytes) => splice_toc_nav(&decode_text(bytes, extract_xml_encoding(bytes)), &toc_nav),
-        None => {
+    match pkg.get(&nav_abs) {
+        Some(bytes) => {
+            let spliced =
+                splice_toc_nav(&decode_text(bytes, extract_xml_encoding(bytes)), &toc_nav);
+            pkg.set(&nav_abs, spliced.into_bytes());
+        }
+        None if !epub2 => {
             // Synthesize and register in the OPF manifest.
             let id = free_id(&opf, "nav");
             let rel = relativize(&opf_base, &nav_abs);
             opf_str = add_manifest_item(&opf_str, &id, &rel, "application/xhtml+xml", Some("nav"));
             opf_dirty = true;
-            render_nav_doc(&toc_nav, lang, title)
+            pkg.set(&nav_abs, render_nav_doc(&toc_nav, lang, title).into_bytes());
         }
-    };
-    pkg.set(&nav_abs, new_nav.into_bytes());
+        None => {}
+    }
 
     // --- NCX (EPUB 2) ---
     let ncx_abs = opf
@@ -664,18 +691,24 @@ pub fn set_toc(epub_bytes: &[u8], entries: &[TocEntry]) -> io::Result<Vec<u8>> {
         .unwrap_or_else(|| format!("{opf_base}toc.ncx"));
     let ncx_dir = dir_of(&ncx_abs);
     let navmap = render_navmap(entries, &ncx_dir);
-    let new_ncx = match pkg.get(&ncx_abs) {
-        Some(bytes) => splice_navmap(&decode_text(bytes, extract_xml_encoding(bytes)), &navmap),
-        None => {
+    match pkg.get(&ncx_abs) {
+        Some(bytes) => {
+            let spliced = splice_navmap(&decode_text(bytes, extract_xml_encoding(bytes)), &navmap);
+            pkg.set(&ncx_abs, spliced.into_bytes());
+        }
+        None if epub2 => {
             let id = free_id(&opf, "ncx");
             let rel = relativize(&opf_base, &ncx_abs);
             opf_str = add_manifest_item(&opf_str, &id, &rel, "application/x-dtbncx+xml", None);
             opf_str = ensure_spine_toc(&opf_str, &id);
             opf_dirty = true;
-            render_ncx(&navmap, uid, title, depth(entries))
+            pkg.set(
+                &ncx_abs,
+                render_ncx(&navmap, uid, title, depth(entries)).into_bytes(),
+            );
         }
-    };
-    pkg.set(&ncx_abs, new_ncx.into_bytes());
+        None => {}
+    }
 
     if opf_dirty {
         pkg.replace(&opf_path, opf_str.into_bytes());
@@ -686,11 +719,33 @@ pub fn set_toc(epub_bytes: &[u8], entries: &[TocEntry]) -> io::Result<Vec<u8>> {
 /// One-call repair: [`propose_toc`] then [`set_toc`]. Errors if no chapter list
 /// can be derived, or the bytes aren't a readable EPUB.
 pub fn repair_toc(epub_bytes: &[u8]) -> io::Result<Vec<u8>> {
-    let entries = propose_toc(epub_bytes)?;
+    let pkg = EpubPackage::parse(epub_bytes)?;
+    let opf_path = pkg.opf_path()?;
+    let opf_base = dir_of(&opf_path);
+    let opf_str = decode_text(pkg.opf_bytes()?, extract_xml_encoding(pkg.opf_bytes()?));
+    let opf = parse_opf(&opf_str).map_err(io::Error::other)?;
+
+    let entries = propose_from_pkg(&pkg, &opf, &opf_base, &opf_str);
     if entries.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "no in-book chapter list found to rebuild the TOC from",
+            "no declared TOC and no in-book chapter list to rebuild one from",
+        ));
+    }
+    // Since the proposal starts from the declared TOC, a book with nothing to
+    // add and no structure to restore proposes exactly what it already has.
+    // Writing that back is not a repair — say so, rather than report a fix that
+    // changed nothing.
+    //
+    // What has to already be right is the EPUB 3 nav doc, plus the NCX *if the
+    // book has one*: a missing or disagreeing nav doc is a real defect this
+    // write fixes, while a missing NCX is not — EPUB 3 does not ask for one, and
+    // synthesizing it would be a change nobody requested.
+    let (ncx, nav) = declared_toc_documents(&pkg, &opf, &opf_base);
+    if entries == nav && (ncx.is_empty() || entries == ncx) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the declared TOC already lists everything the book evidences",
         ));
     }
     set_toc(epub_bytes, &entries)
@@ -1113,6 +1168,148 @@ mod tests {
 
     const FIXTURE: &str = "tests/fixtures/[太宰 治] 人間失格.epub";
 
+    /// Build an EPUB whose Contents page links chapters by `#fragment`, some of
+    /// which the chapter documents don't define — what a conversion that dropped
+    /// anchors leaves behind. `version` and the identifier list are caller-set so
+    /// one builder covers the writer's version and `dtb:uid` rules too.
+    fn epub_with_broken_anchors(version: &str, identifiers: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let stored = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            let mut add = |name: &str, body: &str| {
+                zip.start_file(name, stored).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            };
+            add("mimetype", "application/epub+zip");
+            add(
+                "META-INF/container.xml",
+                r#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            );
+            let mut manifest = String::from(
+                r#"<item id="toc-page" href="toc.xhtml" media-type="application/xhtml+xml"/>"#,
+            );
+            let mut spine = String::from(r#"<itemref idref="toc-page"/>"#);
+            let mut toc_links = String::new();
+            for n in 1..=6 {
+                manifest.push_str(&format!(
+                    r#"<item id="c{n}" href="c{n}.xhtml" media-type="application/xhtml+xml"/>"#
+                ));
+                spine.push_str(&format!(r#"<itemref idref="c{n}"/>"#));
+                // Odd chapters define the anchor the Contents page names; even
+                // ones don't.
+                let anchor = if n % 2 == 1 {
+                    format!(r#"<h1 id="a{n}">Chapter {n}</h1>"#)
+                } else {
+                    format!("<h1>Chapter {n}</h1>")
+                };
+                toc_links.push_str(&format!(
+                    r#"<li><a href="c{n}.xhtml#a{n}">Chapter {n}</a></li>"#
+                ));
+                add(
+                    &format!("OEBPS/c{n}.xhtml"),
+                    &format!(
+                        r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>C{n}</title></head><body>{anchor}<p>body {n}</p></body></html>"#
+                    ),
+                );
+            }
+            add(
+                "OEBPS/content.opf",
+                &format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="{version}" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Anchored Book</dc:title><dc:language>en</dc:language>{identifiers}</metadata><manifest>{manifest}</manifest><spine>{spine}</spine></package>"#
+                ),
+            );
+            add(
+                "OEBPS/toc.xhtml",
+                &format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Contents</title></head><body><h1>Contents</h1><ul>{toc_links}</ul></body></html>"#
+                ),
+            );
+            zip.finish().unwrap();
+        }
+        buf
+    }
+
+    /// A TOC entry pointing at an anchor its document doesn't define would be a
+    /// broken link in the nav doc *and* in the NCX — one broken Contents page
+    /// turned into three. The entry survives, aimed at the document.
+    #[test]
+    fn a_fragment_the_target_doesnt_define_is_dropped() {
+        let epub = epub_with_broken_anchors(
+            "3.0",
+            r#"<dc:identifier id="uid">urn:uuid:anchored</dc:identifier>"#,
+        );
+        let out = repair_toc(&epub).expect("repair");
+        let pkg = EpubPackage::parse(&out).expect("parse");
+        let nav = String::from_utf8(pkg.get("OEBPS/nav.xhtml").expect("nav doc").to_vec()).unwrap();
+
+        assert!(
+            nav.contains(r#"href="c1.xhtml#a1""#),
+            "kept a real anchor: {nav}"
+        );
+        assert!(
+            nav.contains(r#"href="c2.xhtml""#) && !nav.contains("#a2"),
+            "dropped the undefined anchor but kept the entry: {nav}"
+        );
+        // Every chapter is still listed — dropping a dead fragment must not drop
+        // the entry with it.
+        for n in 1..=6 {
+            assert!(
+                nav.contains(&format!("Chapter {n}")),
+                "lost Chapter {n}: {nav}"
+            );
+        }
+    }
+
+    /// `dtb:uid` must be the identifier `<package unique-identifier>` names —
+    /// not merely the first one, which for a book carrying an ASIN and a calibre
+    /// id beside its UUID is the wrong one (epubcheck NCX-001).
+    #[test]
+    fn the_ncx_uid_is_the_opfs_unique_identifier() {
+        let epub = epub_with_broken_anchors(
+            "2.0",
+            r#"<dc:identifier>mobi-asin:B000000000</dc:identifier><dc:identifier>calibre:99</dc:identifier><dc:identifier id="uid">urn:uuid:the-real-one</dc:identifier>"#,
+        );
+        let out = repair_toc(&epub).expect("repair");
+        let pkg = EpubPackage::parse(&out).expect("parse");
+        let ncx = String::from_utf8(pkg.get("OEBPS/toc.ncx").expect("ncx").to_vec()).unwrap();
+
+        assert!(
+            ncx.contains(r#"content="urn:uuid:the-real-one""#),
+            "dtb:uid must match the OPF unique identifier: {}",
+            &ncx[..ncx.len().min(400)]
+        );
+    }
+
+    /// Repair fixes a book's TOC; it does not change which EPUB version the book
+    /// is. An EPUB 2 gets its NCX and no nav document (a `properties="nav"`
+    /// manifest item doesn't even validate there); an EPUB 3 gets its nav
+    /// document and no NCX, which EPUB 3 never required.
+    #[test]
+    fn repair_does_not_change_the_books_epub_version() {
+        let ids = r#"<dc:identifier id="uid">urn:uuid:versioned</dc:identifier>"#;
+
+        let out2 = repair_toc(&epub_with_broken_anchors("2.0", ids)).expect("repair epub2");
+        let pkg2 = EpubPackage::parse(&out2).expect("parse");
+        assert!(pkg2.get("OEBPS/toc.ncx").is_some(), "EPUB 2 gets its NCX");
+        assert!(
+            pkg2.get("OEBPS/nav.xhtml").is_none(),
+            "EPUB 2 must not gain an EPUB 3 nav document"
+        );
+
+        let out3 = repair_toc(&epub_with_broken_anchors("3.0", ids)).expect("repair epub3");
+        let pkg3 = EpubPackage::parse(&out3).expect("parse");
+        assert!(
+            pkg3.get("OEBPS/nav.xhtml").is_some(),
+            "EPUB 3 gets its nav doc"
+        );
+        assert!(
+            pkg3.get("OEBPS/toc.ncx").is_none(),
+            "EPUB 3 must not gain an NCX it never required"
+        );
+    }
+
     /// Build a no-TOC EPUB: a Contents page links to 6 chapters, but the OPF
     /// declares no nav doc and no NCX. This is the "no toc epub" repair case.
     fn no_toc_epub() -> Vec<u8> {
@@ -1213,15 +1410,29 @@ mod tests {
         assert_eq!(after.verdict, crate::validate::source::toc::Verdict::Ok);
     }
 
-    /// The synthesized OPF registers both docs so a reader finds them.
+    /// A synthesized nav document is registered in the OPF manifest, so a reader
+    /// finds it. `no_toc_epub` declares version 3.0, which is entitled to a nav
+    /// document and to no NCX.
     #[test]
-    fn synthesized_docs_are_registered_in_opf() {
+    fn a_synthesized_nav_doc_is_registered_in_the_opf() {
         let out = repair_toc(&no_toc_epub()).expect("repair");
         let pkg = EpubPackage::parse(&out).expect("parse");
         assert!(pkg.contains("OEBPS/nav.xhtml"), "nav doc created");
-        assert!(pkg.contains("OEBPS/toc.ncx"), "NCX created");
         let opf = String::from_utf8(pkg.opf_bytes().unwrap().to_vec()).unwrap();
         assert!(opf.contains("properties=\"nav\""), "nav registered");
+    }
+
+    /// The NCX branch of the same registration, on the version that asks for one.
+    #[test]
+    fn a_synthesized_ncx_is_registered_in_the_opf_and_spine() {
+        let out = repair_toc(&epub_with_broken_anchors(
+            "2.0",
+            r#"<dc:identifier id="uid">urn:uuid:registered</dc:identifier>"#,
+        ))
+        .expect("repair");
+        let pkg = EpubPackage::parse(&out).expect("parse");
+        assert!(pkg.contains("OEBPS/toc.ncx"), "NCX created");
+        let opf = String::from_utf8(pkg.opf_bytes().unwrap().to_vec()).unwrap();
         assert!(opf.contains("application/x-dtbncx+xml"), "NCX registered");
         assert!(opf.contains("<spine toc=\""), "spine points at the NCX");
     }
@@ -1507,7 +1718,7 @@ mod tests {
         let mut entries = Vec::new();
         for level in 0..DEPTH {
             // Enough entries per level to clear the evidence threshold.
-            for n in 0..MIN_INDENT_EVIDENCE {
+            for n in 0..crate::model::toc_shape::MIN_INDENT_EVIDENCE {
                 entries.push(TocEntry::new(
                     format!("{}L{level}#{n}", "\u{3000}".repeat(level)),
                     format!("OEBPS/l{level}_{n}.xhtml"),

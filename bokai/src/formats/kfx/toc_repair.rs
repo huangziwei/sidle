@@ -28,7 +28,7 @@
 //! `book_navigation` at all, and the fixed-layout referenced-container shape, are
 //! not yet handled.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::formats::kfx::anchor_table::AnchorTable;
 use crate::formats::kfx::container::get_field;
@@ -36,15 +36,20 @@ use crate::formats::kfx::container_edit::{EntityEdit, edit_container};
 use crate::formats::kfx::error::KfxError;
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::loader::{self, BookData};
-use crate::formats::kfx::navigation::{extract_anchors, resolve_nav_container};
-use crate::formats::kfx::structure::resolve_content_text;
+use crate::formats::kfx::navigation::{
+    extract_anchors, for_each_nav_container, nav_unit_label, resolve_nav_container,
+};
+use crate::formats::kfx::structure::{
+    collect_element_ids, lookup_fragment, reading_orders, resolve_content_text,
+};
 use crate::formats::kfx::symbols::KfxSymbol;
+use crate::model::toc_shape::{TocNode, merge_by_document_order, nest_by_label_indent};
 
 /// One chapter in an edited TOC. `eid` is the target element's `$155 id`; the
 /// target offset is always written as 0 — the Kindle TOC convention (a jump
 /// lands on the chapter-start element, and a non-zero offset can wedge the
 /// firmware). Nesting is supported for sub-chapters.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TocEntry {
     pub label: String,
     pub eid: i64,
@@ -59,6 +64,26 @@ impl TocEntry {
             eid,
             children: Vec::new(),
         }
+    }
+}
+
+impl TocNode for TocEntry {
+    fn label(&self) -> &str {
+        &self.label
+    }
+    fn set_label(&mut self, label: String) {
+        self.label = label;
+    }
+    fn children(&self) -> &[Self] {
+        &self.children
+    }
+    fn set_children(&mut self, children: Vec<Self>) {
+        self.children = children;
+    }
+    /// Every entry is written at offset 0, so two entries land on the same place
+    /// exactly when they target the same element.
+    fn target_key(&self) -> String {
+        self.eid.to_string()
     }
 }
 
@@ -241,7 +266,7 @@ enum TocMode {
 fn detect_toc_mode(book: &BookData) -> Option<TocMode> {
     let nav = book.by_type.get(&(KfxSymbol::BookNavigation as u64))?;
     for value in nav.values() {
-        for ro in reading_orders(value) {
+        for ro in nav_reading_orders(value) {
             let Some(ro_fields) = ro.as_struct() else {
                 continue;
             };
@@ -271,7 +296,7 @@ fn detect_toc_mode(book: &BookData) -> Option<TocMode> {
 
 /// The `book_navigation` fragment is either a single reading-order struct or a
 /// list of them. Normalize to a vec (mirrors the reader).
-fn reading_orders(value: &IonValue) -> Vec<IonValue> {
+fn nav_reading_orders(value: &IonValue) -> Vec<IonValue> {
     match value.unwrap_annotated() {
         IonValue::List(items) => items.clone(),
         s @ IonValue::Struct(_) => vec![s.clone()],
@@ -415,99 +440,309 @@ fn replace_container_entries(container: &IonValue, new_entries: &[IonValue]) -> 
 // Proposer: derive the chapter list from the book's own in-book Contents page.
 // ---------------------------------------------------------------------------
 
-/// Minimum distinct chapter links for a storyline to count as a real Contents
-/// page (below this, a stray forward link or two is just noise). Mirrors the TOC
+/// Minimum distinct chapter links for a storyline to open a Contents page
+/// (below this, a stray forward link or two is just noise). Mirrors the TOC
 /// validator's evidence gate, so the proposer only fires on the pages the
 /// detector reads as ground truth.
 const MIN_CONTENTS_LINKS: usize = 5;
 
-/// Derive a chapter list for [`set_toc`] from the book's own in-book Contents
-/// page — the densest cluster of internal chapter links (the page a `toc`
-/// landmark marks, when present). Each `link_to` run's display text becomes a
-/// [`TocEntry`] label and its resolved anchor's element id the target eid;
-/// entries come back in document order, deduped by target. Empty when no page
-/// carries enough links to trust (the caller then has nothing to write).
+/// Minimum links for a storyline *continuing* an already-found Contents page
+/// ([`contents_page_entries`]). Lower than [`MIN_CONTENTS_LINKS`], which has to
+/// tell a Contents page from noise across a whole book: here the run is already
+/// attested by the storyline before it, and a page's last fragment holding two
+/// remaining chapters is ordinary.
+const MIN_CONTINUATION_LINKS: usize = 2;
+
+/// Derive a chapter list for [`set_toc`] from the book's own structure: the TOC
+/// it already declares, plus whatever its in-book Contents page knows that the
+/// declaration doesn't, nested to the depth its labels evidence.
+///
+/// Every declared entry survives — a proposal is something the user is offered
+/// in place of what they have, so it may add chapters and add structure but may
+/// never drop an entry the reader can navigate by today. Empty only when the
+/// book declares no TOC *and* no page carries enough links to trust.
 pub fn propose_toc(kfx_bytes: &[u8]) -> Result<Vec<TocEntry>, KfxError> {
     let book = loader::load(kfx_bytes)?;
     Ok(propose_from_book(&book))
 }
 
-/// One-call TOC repair: derive the chapter list from the in-book Contents page
-/// ([`propose_toc`]) and write it with [`set_toc`] (overwriting a deficient toc
-/// container, or synthesizing one when the book has none). Errors if no usable
-/// Contents page is found, or if the book has no `book_navigation` to attach to.
+/// One-call TOC repair: derive the chapter list ([`propose_toc`]) and write it
+/// with [`set_toc`] (overwriting a deficient toc container, or synthesizing one
+/// when the book has none). Errors if nothing could be derived, or if the book
+/// has no `book_navigation` to attach to.
 pub fn repair_toc(kfx_bytes: &[u8]) -> Result<Vec<u8>, KfxError> {
     let book = loader::load(kfx_bytes)?;
     let entries = propose_from_book(&book);
     if entries.is_empty() {
         return Err(KfxError::InvalidKfx(
-            "no in-book Contents page found to rebuild the TOC from".into(),
+            "no declared TOC and no in-book Contents page to rebuild one from".into(),
+        ));
+    }
+    // Since the proposal starts from the declared TOC, a book with nothing to
+    // add and no structure to restore proposes exactly what it already has.
+    // Writing that back is not a repair — say so, rather than report a fix that
+    // changed nothing.
+    if entries == declared_entries(&book) {
+        return Err(KfxError::InvalidKfx(
+            "the declared TOC already lists everything the book evidences".into(),
         ));
     }
     set_toc(kfx_bytes, &entries)
 }
 
-/// Pick the book's Contents storyline and return its chapter list. Chooses the
-/// storyline with the most distinct chapter-link targets, preferring the one a
-/// `toc` landmark points into (guards against a footnote-dense chapter that
-/// out-links the real Contents page). Returns empty when even the best page has
-/// fewer than [`MIN_CONTENTS_LINKS`] links.
+/// Build the proposal from a loaded container: merge the declared TOC with the
+/// in-book Contents page in reading order, then restore the levels the labels
+/// evidence.
 fn propose_from_book(book: &BookData) -> Vec<TocEntry> {
+    let order = document_order(book);
+    let declared = declared_entries(book);
+    let contents = contents_page_entries(book, &order);
+    let merged = merge_by_document_order(declared, contents, |e| order.at.get(&e.eid).copied());
+    nest_by_label_indent(merged)
+}
+
+/// Where every element sits in the book, walked from the first reading order's
+/// sections and each section's page templates (which follow `story_name` into
+/// the storylines they render), so the scale covers exactly what a reader
+/// scrolls through.
+///
+/// The first placement wins for an id reachable from more than one template —
+/// portrait and landscape variants render the same storyline.
+#[derive(Default)]
+struct DocumentOrder {
+    /// `eid →` its ordinal across the whole book.
+    at: HashMap<i64, usize>,
+    /// `eid →` the index, in reading order, of the section that renders it.
+    section: HashMap<i64, usize>,
+}
+
+fn document_order(book: &BookData) -> DocumentOrder {
+    let mut order = DocumentOrder::default();
+    let Some(sections) = reading_orders(book).into_iter().next() else {
+        return order;
+    };
+    for (index, name) in sections.iter().enumerate() {
+        let Some(section) = lookup_fragment(book, KfxSymbol::Section, name) else {
+            continue;
+        };
+        let Some(templates) = section
+            .unwrap_annotated()
+            .as_struct()
+            .and_then(|f| get_field(f, KfxSymbol::PageTemplates as u64))
+            .and_then(|v| v.as_list())
+        else {
+            continue;
+        };
+        for template in templates {
+            let mut ids = Vec::new();
+            collect_element_ids(template, book, &mut ids);
+            for id in ids {
+                let next = order.at.len();
+                order.at.entry(id).or_insert(next);
+                order.section.entry(id).or_insert(index);
+            }
+        }
+    }
+    order
+}
+
+/// The TOC the book declares today, as editable entries — the inverse of what
+/// [`set_toc`] writes, so a round trip through the editor is lossless. Nesting
+/// is preserved. Empty when the book declares no toc container.
+fn declared_entries(book: &BookData) -> Vec<TocEntry> {
+    let mut out = Vec::new();
+    for_each_nav_container(book, |nav_type, entries| {
+        if nav_type != "toc" {
+            return;
+        }
+        out.extend(entries.iter().filter_map(declared_nav_unit));
+    });
+    out
+}
+
+/// One `nav_unit` → [`TocEntry`], recursively. Reads the label through the same
+/// rule the reader's chapter list uses, so the declared TOC an editor offers back
+/// is entry-for-entry the one the reader sees.
+fn declared_nav_unit(entry: &IonValue) -> Option<TocEntry> {
+    let fields = entry.unwrap_annotated().as_struct()?;
+    let label = nav_unit_label(fields)?;
+    let eid = get_field(fields, KfxSymbol::TargetPosition as u64)
+        .and_then(|v| v.as_struct())
+        .and_then(|pos| get_field(pos, KfxSymbol::Id as u64)?.as_int())
+        .unwrap_or(0);
+    let children = get_field(fields, KfxSymbol::Entries as u64)
+        .and_then(|v| v.as_list())
+        .map(|list| list.iter().filter_map(declared_nav_unit).collect())
+        .unwrap_or_default();
+    Some(TocEntry {
+        label,
+        eid,
+        children,
+    })
+}
+
+/// The chapter list on the book's own in-book Contents page.
+///
+/// A Contents page is a *run* of storylines, not one storyline: a long list is
+/// split across several, and taking only the densest returns whichever fragment
+/// happens to be biggest — the middle of the list, missing both ends. So the
+/// densest qualifying storyline seeds the run (the one a `toc` landmark marks,
+/// when present) and the run grows through its neighbours in reading order for
+/// as long as they keep looking like a Contents page.
+///
+/// "Looking like a Contents page" is link *density* plus nearness in the book,
+/// not link count. Nearly every line of a Contents page is a link, while a
+/// chapter with footnotes has a handful among its prose; and the fragments of
+/// one page share a section, while another work's own Contents page — which
+/// looks exactly as link-dense — sits many sections away. Together they keep the
+/// run from swallowing either the chapter that follows the page or the rest of
+/// an anthology's per-work Contents pages, which are a level of structure this
+/// has no way to place.
+///
+/// Entries come back in document order, deduped by target.
+fn contents_page_entries(book: &BookData, order: &DocumentOrder) -> Vec<TocEntry> {
     let anchors = extract_anchors(book);
     let Some(storylines) = book.by_type.get(&(KfxSymbol::Storyline as u64)) else {
         return Vec::new();
     };
     let landmark_eid = toc_landmark_eid(book);
 
-    let mut best: Vec<TocEntry> = Vec::new();
-    let mut landmark_hit: Option<Vec<TocEntry>> = None;
-
+    // Every storyline that carries links at all, in reading order.
+    let mut pages: Vec<ContentsPage> = Vec::new();
     for storyline in storylines.values() {
-        let mut links: Vec<(String, i64)> = Vec::new();
-        collect_chapter_links(storyline, book, &anchors, &mut links);
-        let entries = dedup_entries(links);
-        if entries.len() > best.len() {
-            best = entries.clone();
+        let mut page = ContentsPage::read(storyline, book, &anchors);
+        if page.links.is_empty() {
+            continue;
         }
-        // Prefer the storyline the toc landmark points into (only one storyline
-        // holds a given eid, so this fixes on the true Contents page even if a
-        // link-dense chapter has more raw links).
-        if landmark_hit.is_none()
-            && let Some(le) = landmark_eid
-            && entries.len() >= MIN_CONTENTS_LINKS
-        {
-            let mut ids = HashSet::new();
-            collect_ids(storyline, &mut ids);
-            if ids.contains(&le) {
-                landmark_hit = Some(entries);
-            }
-        }
+        // Where the storyline *is*, not where it points: a Contents page links
+        // forward into the chapters, so its targets' positions would sort it
+        // among them and make every page in the book look adjacent to the
+        // Contents page.
+        let mut ids = HashSet::new();
+        collect_ids(storyline, &mut ids);
+        page.at = ids
+            .iter()
+            .filter_map(|eid| order.at.get(eid))
+            .min()
+            .copied();
+        page.section = ids
+            .iter()
+            .filter_map(|eid| order.section.get(eid))
+            .min()
+            .copied();
+        page.holds_landmark = landmark_eid.is_some_and(|le| ids.contains(&le));
+        pages.push(page);
+    }
+    // A storyline the reading order never reaches sorts last; it can still join
+    // a run, but it can't claim to start one.
+    pages.sort_by_key(|p| p.at.unwrap_or(usize::MAX));
+
+    let Some(seed) = seed_page(&pages) else {
+        return Vec::new();
+    };
+    // Grow outwards while the neighbours still read as part of the same page.
+    // Only link-carrying storylines are in `pages`, so adjacency here is not
+    // adjacency in the book — each step is checked against the page it extends.
+    let mut first = seed;
+    while first > 0 && pages[first - 1].continues(&pages[first]) {
+        first -= 1;
+    }
+    let mut last = seed;
+    while last + 1 < pages.len() && pages[last + 1].continues(&pages[last]) {
+        last += 1;
     }
 
-    let chosen = landmark_hit.unwrap_or(best);
-    if chosen.len() < MIN_CONTENTS_LINKS {
-        return Vec::new();
-    }
-    chosen
+    let links = pages[first..=last]
+        .iter()
+        .flat_map(|p| p.links.iter().cloned())
+        .collect();
+    dedup_entries(links)
 }
 
-/// Walk a storyline tree in document order, emitting `(display_text, target_eid)`
-/// for every internal `link_to`: both element-level links (`$179` on the element)
-/// and inline style-event runs (`$142` events each carrying `$179`). A run's text
-/// is the char-slice `[offset, offset+length)` of the element's `$145` text; an
-/// element-level link uses the element's full text. Links whose anchor resolves
-/// to no internal position (external URIs) are skipped.
+/// Which storyline opens the Contents page: the one the `toc` landmark marks,
+/// else the one with the most chapter links. `None` when none qualifies.
+fn seed_page(pages: &[ContentsPage]) -> Option<usize> {
+    let qualifying = |p: &ContentsPage| p.links.len() >= MIN_CONTENTS_LINKS && p.is_link_dense();
+    if let Some(i) = pages.iter().position(|p| p.holds_landmark && qualifying(p)) {
+        return Some(i);
+    }
+    pages
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| qualifying(p))
+        .max_by_key(|(_, p)| p.links.len())
+        .map(|(i, _)| i)
+}
+
+/// One storyline weighed as a candidate Contents page.
+#[derive(Default)]
+struct ContentsPage {
+    /// `(label, target eid)` for every internal link it makes, in reading order.
+    links: Vec<(String, i64)>,
+    /// Elements carrying at least one internal link.
+    linked: usize,
+    /// Elements carrying any text at all.
+    texty: usize,
+    /// Where the storyline itself starts, as an ordinal in [`DocumentOrder`].
+    /// `None` when the reading order never reaches it.
+    at: Option<usize>,
+    /// The reading-order index of the section it starts in.
+    section: Option<usize>,
+    /// The book's `toc` landmark points into this storyline.
+    holds_landmark: bool,
+}
+
+impl ContentsPage {
+    fn read(storyline: &IonValue, book: &BookData, anchors: &AnchorTable) -> Self {
+        let mut page = ContentsPage::default();
+        collect_chapter_links(storyline, book, anchors, &mut page);
+        page
+    }
+
+    /// Most of what this storyline says is a link — a Contents page, not a
+    /// chapter that happens to cross-reference a few others.
+    fn is_link_dense(&self) -> bool {
+        self.linked * 2 >= self.texty
+    }
+
+    /// Enough of a Contents page to continue `page`, and near enough in the book
+    /// to be the same page. The fragments of one page share a section or spill
+    /// into the next; a per-work Contents page deeper in an anthology is just as
+    /// link-dense but sections away.
+    fn continues(&self, page: &ContentsPage) -> bool {
+        self.links.len() >= MIN_CONTINUATION_LINKS
+            && self.is_link_dense()
+            && matches!(
+                (self.section, page.section),
+                (Some(a), Some(b)) if a.abs_diff(b) <= 1
+            )
+    }
+}
+
+/// Walk a storyline tree in document order, recording `(display_text,
+/// target_eid)` for every internal `link_to` — both element-level links (`$179`
+/// on the element) and inline style-event runs (`$142` events each carrying
+/// `$179`) — and, alongside them, how many elements carry text and how many
+/// carry a link, which is what tells a Contents page from a chapter.
+///
+/// A run's text is the char-slice `[offset, offset+length)` of the element's
+/// `$145` text; an element-level link uses the element's full text. Links whose
+/// anchor resolves to no internal position (external URIs) are skipped.
 fn collect_chapter_links(
     value: &IonValue,
     book: &BookData,
     anchors: &AnchorTable,
-    out: &mut Vec<(String, i64)>,
+    out: &mut ContentsPage,
 ) {
     match value.unwrap_annotated() {
         IonValue::Struct(fields) => {
             let direct_text = get_field(fields, KfxSymbol::Content as u64)
                 .map(|c| resolve_content_text(c, book))
                 .unwrap_or_default();
+            if !direct_text.trim().is_empty() {
+                out.texty += 1;
+            }
+            let before = out.links.len();
 
             // Inline style-event links: a run of the element's text is the link.
             let mut handled_inline = false;
@@ -539,7 +774,7 @@ fn collect_chapter_links(
                     } else {
                         String::new()
                     };
-                    push_link(out, anchors, name, &label);
+                    push_link(&mut out.links, anchors, name, &label);
                 }
             }
 
@@ -549,7 +784,11 @@ fn collect_chapter_links(
                     .and_then(|v| book.symbols.text_of(v))
             {
                 let label = element_text(fields, book);
-                push_link(out, anchors, name, &label);
+                push_link(&mut out.links, anchors, name, &label);
+            }
+
+            if out.links.len() > before {
+                out.linked += 1;
             }
 
             // Recurse into children; skip the style-events list (handled above —
@@ -648,7 +887,7 @@ fn dedup_entries(links: Vec<(String, i64)>) -> Vec<TocEntry> {
 fn toc_landmark_eid(book: &BookData) -> Option<i64> {
     let nav = book.by_type.get(&(KfxSymbol::BookNavigation as u64))?;
     for value in nav.values() {
-        for ro in reading_orders(value) {
+        for ro in nav_reading_orders(value) {
             let Some(containers) = ro
                 .as_struct()
                 .and_then(|f| get_field(f, KfxSymbol::NavContainers as u64))
@@ -727,7 +966,7 @@ mod tests {
     fn a_real_toc_eid(book: &BookData) -> Option<i64> {
         let nav = book.by_type.get(&(KfxSymbol::BookNavigation as u64))?;
         for value in nav.values() {
-            for ro in reading_orders(value) {
+            for ro in nav_reading_orders(value) {
                 let containers = ro
                     .as_struct()
                     .and_then(|f| get_field(f, KfxSymbol::NavContainers as u64))
@@ -882,16 +1121,19 @@ mod tests {
         }
     }
 
-    /// End-to-end when the fixture carries an in-book Contents page: `repair_toc`
-    /// derives it, and the rewritten container is no longer SUSPECT and still
-    /// converts to EPUB. A no-op if this fixture ships no Contents page.
+    /// End-to-end on a book that genuinely needs the repair: strip the declared
+    /// TOC, and `repair_toc` rebuilds it from the in-book Contents page. The
+    /// result re-loads, is no longer SUSPECT, and still converts to EPUB. A
+    /// no-op if this fixture ships no Contents page to rebuild from.
     #[test]
-    fn repair_roundtrips_when_contents_page_present() {
+    fn repair_rebuilds_a_stripped_toc_from_the_contents_page() {
         let kfx = std::fs::read(FIXTURE).expect("read fixture");
-        if propose_toc(&kfx).expect("propose").is_empty() {
+        let book = loader::load(&kfx).expect("load");
+        let stripped = strip_toc_containers(&kfx, &book).expect("strip");
+        if propose_toc(&stripped).expect("propose").is_empty() {
             return; // no in-book Contents page to rebuild from
         }
-        let out = repair_toc(&kfx).expect("repair");
+        let out = repair_toc(&stripped).expect("repair");
         loader::load(&out).expect("repaired container must re-load");
         let audit = crate::validate::source::toc::validate(&out).expect("validate");
         assert_ne!(
@@ -903,6 +1145,57 @@ mod tests {
             crate::formats::kfx::converts_to_epub(&out),
             "repaired KFX must still convert to EPUB"
         );
+    }
+
+    /// A repair that would write back exactly what the book already declares is
+    /// refused, so no caller reports a fix that changed nothing.
+    #[test]
+    fn repair_refuses_when_the_declared_toc_already_says_everything() {
+        let kfx = std::fs::read(FIXTURE).expect("read fixture");
+        let book = loader::load(&kfx).expect("load");
+        if propose_from_book(&book) != declared_entries(&book) {
+            return; // this fixture has something to add; nothing to assert here
+        }
+        let err = repair_toc(&kfx).expect_err("a no-op repair must be refused");
+        assert!(
+            err.to_string().contains("already lists"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The invariant every caller leans on: whatever else the proposal does, it
+    /// never drops an entry the book already declares. A proposal is offered in
+    /// place of what the reader has today, so losing one would make the "repair"
+    /// a regression.
+    #[test]
+    fn a_proposal_never_loses_a_declared_entry() {
+        let kfx = std::fs::read(FIXTURE).expect("read fixture");
+        let book = loader::load(&kfx).expect("load");
+
+        let mut proposed = HashSet::new();
+        collect_targets(&propose_from_book(&book), &mut proposed);
+        for entry in flatten(&declared_entries(&book)) {
+            assert!(
+                proposed.contains(&entry.eid),
+                "the proposal dropped declared entry {:?} (eid {})",
+                entry.label,
+                entry.eid
+            );
+        }
+    }
+
+    fn collect_targets(entries: &[TocEntry], out: &mut HashSet<i64>) {
+        for e in entries {
+            out.insert(e.eid);
+            collect_targets(&e.children, out);
+        }
+    }
+
+    fn flatten(entries: &[TocEntry]) -> Vec<TocEntry> {
+        entries
+            .iter()
+            .flat_map(|e| std::iter::once(e.clone()).chain(flatten(&e.children)))
+            .collect()
     }
 
     /// The synthesize path's core: given a `book_navigation` holding only a

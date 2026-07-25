@@ -15,7 +15,6 @@ use crate::formats::kfx::navigation::{extract_anchors, extract_toc, resolve_nav_
 use crate::formats::kfx::structure::{resolve_content_text, style_layout_hints_for};
 use crate::formats::kfx::symbols::KfxSymbol;
 use crate::formats::kfx::yj_properties as properties;
-use crate::model::TocEntry;
 
 use super::{MIN_EVIDENCE, TocEvidence, is_chapter_marker};
 
@@ -24,12 +23,9 @@ pub(super) fn evidence(book: &BookData) -> TocEvidence {
     let empty_files = HashMap::new();
     let toc = extract_toc(book, &empty_files, &AnchorTable::default());
 
-    let mut nav_labels = Vec::new();
-    flatten_labels(&toc, &mut nav_labels);
-
     let (contents_links, contents_sample) = in_book_contents(book, &anchors);
     TocEvidence {
-        nav_labels,
+        nav_tree: toc,
         contents_links,
         contents_sample,
         headings: count_headings(book),
@@ -38,13 +34,6 @@ pub(super) fn evidence(book: &BookData) -> TocEvidence {
         // Flattened-volume detection is EPUB-only so far; a KFX 合本版 reads as
         // unflattened until the KFX proposer learns the same grouping.
         flattened: Default::default(),
-    }
-}
-
-fn flatten_labels(points: &[TocEntry], out: &mut Vec<String>) {
-    for p in points {
-        out.push(p.title.clone());
-        flatten_labels(&p.children, out);
     }
 }
 

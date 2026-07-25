@@ -125,6 +125,26 @@ pub fn extract_toc(
     toc
 }
 
+/// The display label of a `$393 nav_unit`'s fields — `representation.label`,
+/// else a direct `label`, else `"Untitled"`. `None` for the entries calibre
+/// drops: a blank label and the `heading-nav-unit` placeholder.
+///
+/// The one place that rule lives: an editor reading the declared TOC to offer it
+/// back must see exactly the entries a reader's chapter list shows, or the two
+/// views disagree about what the book declares.
+pub fn nav_unit_label(fields: &[(u64, IonValue)]) -> Option<String> {
+    let label = get_field(fields, KfxSymbol::Representation as u64)
+        .and_then(|v| v.as_struct())
+        .and_then(|s| get_field(s, KfxSymbol::Label as u64))
+        .and_then(|v| v.as_string())
+        .or_else(|| get_field(fields, KfxSymbol::Label as u64).and_then(|v| v.as_string()))
+        .unwrap_or("Untitled");
+    if label.is_empty() || label == "heading-nav-unit" {
+        return None;
+    }
+    Some(label.to_string())
+}
+
 /// One `$393 nav_unit` → [`TocEntry`], recursively. `None` for the entries
 /// calibre drops: blank labels and the `heading-nav-unit` placeholder.
 fn nav_unit_to_entry(
@@ -134,18 +154,7 @@ fn nav_unit_to_entry(
 ) -> Option<TocEntry> {
     let inner = entry.unwrap_annotated();
     let fields = inner.as_struct()?;
-
-    // Label: prefer representation.label, then direct label.
-    let title = get_field(fields, KfxSymbol::Representation as u64)
-        .and_then(|v| v.as_struct())
-        .and_then(|s| get_field(s, KfxSymbol::Label as u64))
-        .and_then(|v| v.as_string())
-        .or_else(|| get_field(fields, KfxSymbol::Label as u64).and_then(|v| v.as_string()))
-        .unwrap_or("Untitled")
-        .to_string();
-    if title.is_empty() || title == "heading-nav-unit" {
-        return None;
-    }
+    let title = nav_unit_label(fields)?;
 
     // Target position gives (id, offset); the id resolves to a file through
     // `element_id_to_filename`, and a registered anchor at that exact position

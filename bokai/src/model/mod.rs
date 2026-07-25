@@ -19,6 +19,7 @@ pub mod role_map;
 pub mod section_tree;
 mod semantic;
 mod text;
+pub mod toc_shape;
 
 // Re-export book types
 pub use book::{
@@ -50,3 +51,6 @@ pub use font::FontFace;
 
 // Re-export section tree
 pub use section_tree::{ContentBlock, SectionNode, SectionTree, extract_section_tree};
+
+// Re-export the format-agnostic TOC shaping rules
+pub use toc_shape::{TocNode, TocTree, merge_by_document_order, nest_by_label_indent};

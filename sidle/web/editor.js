@@ -864,12 +864,10 @@ function paintTocPanel(detail) {
   head.append(el("p", "editor-muted", summary));
   panel.append(head);
 
-  // Current declared TOC.
+  // Current declared TOC, with the levels the book declares.
   panel.append(el("div", "field-group-title", "Currently declared"));
   if (detail.current.length) {
-    const ul = el("ul", "toc-current");
-    for (const label of detail.current) ul.append(el("li", null, label || "(untitled)"));
-    panel.append(ul);
+    panel.append(declaredList(detail.current));
   } else {
     panel.append(el("p", "editor-muted", "No table of contents is declared."));
   }
@@ -884,6 +882,9 @@ function paintTocPanel(detail) {
         : `Proposed${total ? ` (${total})` : ""}`,
     ),
   );
+  if (!pdf && total) {
+    panel.append(el("p", "editor-muted", proposalSummary(detail, session.tocTree)));
+  }
 
   // PDF always gets the editable surface (that's how an absent TOC gets
   // authored); KFX/EPUB only when there's a proposal to review.
@@ -944,33 +945,124 @@ function chipText(verdict) {
   return "TOC sparse";
 }
 
-// Render #toc-tree from session.tocTree, indenting by depth so the book's Part→
-// chapter structure is visible. A full re-render after each removal keeps every
-// row's splice closure bound to the right (array, index). `pageCount > 0` puts
-// rows in PDF mode, adding a page-number input.
-function renderProposedTree(pageCount = 0) {
+// The declared TOC as a nested list, so a book that declares Part → chapter →
+// section reads as one. Read-only: this is what the book has today.
+function declaredList(nodes) {
+  const ul = el("ul", "toc-current");
+  for (const node of nodes) {
+    const li = el("li", null, node.label || "(untitled)");
+    if (node.children && node.children.length) li.append(declaredList(node.children));
+    ul.append(li);
+  }
+  return ul;
+}
+
+// What the proposal would change, in one line. The proposal always keeps every
+// declared entry, so the only things it can do are add entries and add levels —
+// and a user deciding whether to apply it needs to see which.
+function proposalSummary(detail, tree) {
+  const added = countEntries(tree) - detail.nav_count;
+  const levels = treeDepth(tree);
+  const declaredLevels = treeDepth(detail.current);
+  const parts = [];
+  if (added > 0) parts.push(`adds ${added} entr${added === 1 ? "y" : "ies"} the book links but doesn't declare`);
+  if (levels > declaredLevels) parts.push(`nests them ${levels} levels deep`);
+  if (!parts.length) return "Identical to what the book declares — nothing to change.";
+  return `Keeps every declared entry and ${parts.join(", ")}.`;
+}
+
+function treeDepth(nodes) {
+  return (nodes || []).reduce((d, n) => Math.max(d, 1 + treeDepth(n.children)), 0);
+}
+
+// The tree as a flat run of `{node, depth}` in reading order. Indent/outdent and
+// removal all work in this shape: each moves a whole subtree, and rebuilding the
+// tree from depths is the one rule that can't leave a parent and its children
+// disagreeing about where they are.
+function flattenTree(nodes, depth = 0, out = []) {
+  for (const node of nodes) {
+    out.push({ node, depth });
+    flattenTree(node.children || [], depth + 1, out);
+  }
+  return out;
+}
+
+// Rebuild a tree from `{node, depth}` rows. Each row attaches under the nearest
+// preceding row with a shallower depth; a depth deeper than one below its
+// predecessor clamps, so no rebuild can invent a level that isn't reachable.
+function rebuildTree(rows) {
+  const roots = [];
+  const open = []; // ancestors of the current row, outermost first
+  for (const { node, depth } of rows) {
+    node.children = [];
+    while (open.length > depth) open.pop();
+    if (open.length) open[open.length - 1].children.push(node);
+    else roots.push(node);
+    open.push(node);
+  }
+  return roots;
+}
+
+// The rows of `index`'s subtree: itself plus everything after it that is deeper.
+function subtreeEnd(rows, index) {
+  let end = index + 1;
+  while (end < rows.length && rows[end].depth > rows[index].depth) end++;
+  return end;
+}
+
+// Move entry `index` (and its sub-entries) one level in or out. Indenting makes
+// it a child of the entry above; outdenting lifts it out, and the siblings that
+// followed it become its children — standard outline behaviour, and what falls
+// out of rebuilding from depths.
+function shiftTocDepth(index, delta, pageCount) {
+  const rows = flattenTree(session.tocTree);
+  const row = rows[index];
+  if (!row || !canShift(rows, index, delta)) return;
+  const end = subtreeEnd(rows, index);
+  for (let i = index; i < end; i++) rows[i].depth += delta;
+  session.tocTree = rebuildTree(rows);
+  renderProposedTree(pageCount, index);
+}
+
+// An entry can only indent under something, and can only outdent while it has a
+// level to give up.
+function canShift(rows, index, delta) {
+  if (delta < 0) return rows[index].depth > 0;
+  return index > 0 && rows[index].depth <= rows[index - 1].depth;
+}
+
+// Render #toc-tree from session.tocTree, indenting by depth so the book's
+// Part → chapter structure is visible. A full re-render after every edit keeps
+// each row's closure bound to the right flat index. `pageCount > 0` puts rows in
+// PDF mode, adding a page-number input; `focusIndex` restores the caret to a row
+// after a re-render, so indenting from the keyboard doesn't lose it.
+function renderProposedTree(pageCount = 0, focusIndex = -1) {
   const tree = $("#toc-tree");
   if (!tree) return;
-  tree.replaceChildren();
-  const walk = (nodes, depth) => {
-    nodes.forEach((node, i) => {
-      tree.append(
-        tocRow(node, depth, pageCount, () => {
-          nodes.splice(i, 1);
+  const rows = flattenTree(session.tocTree);
+  tree.replaceChildren(
+    ...rows.map(({ node, depth }, i) =>
+      tocRow(node, depth, pageCount, {
+        canIndent: canShift(rows, i, +1),
+        canOutdent: canShift(rows, i, -1),
+        onIndent: () => shiftTocDepth(i, +1, pageCount),
+        onOutdent: () => shiftTocDepth(i, -1, pageCount),
+        onRemove: () => {
+          rows.splice(i, subtreeEnd(rows, i) - i);
+          session.tocTree = rebuildTree(rows);
           renderProposedTree(pageCount);
-        }),
-      );
-      if (node.children && node.children.length) walk(node.children, depth + 1);
-    });
-  };
-  walk(session.tocTree, 0);
+        },
+      }),
+    ),
+  );
+  if (focusIndex >= 0) tree.querySelectorAll(".toc-label")[focusIndex]?.focus();
 }
 
 // One editable row bound to its model node: a label input (writes back to the
 // node), a page input for PDF (the only user-editable target — KFX eids and EPUB
-// hrefs round-trip opaquely), and a remove button (splices the node — and its
-// sub-entries — out).
-function tocRow(node, depth, pageCount, onRemove) {
+// hrefs round-trip opaquely), indent/outdent buttons, and a remove button
+// (drops the node and its sub-entries).
+function tocRow(node, depth, pageCount, ops) {
   const row = el("div", "toc-row");
   if (depth) {
     row.style.marginLeft = `${depth * 20}px`;
@@ -981,6 +1073,16 @@ function tocRow(node, depth, pageCount, onRemove) {
   input.placeholder = "Chapter title";
   input.addEventListener("input", () => {
     node.label = input.value;
+  });
+  // Tab / Shift+Tab are how an outline is re-shaped; the buttons beside the row
+  // do the same thing for anyone who'd rather click.
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Tab") return;
+    const shift = e.shiftKey ? ops.onOutdent : ops.onIndent;
+    const allowed = e.shiftKey ? ops.canOutdent : ops.canIndent;
+    if (!allowed) return; // fall through to normal focus movement
+    e.preventDefault();
+    shift();
   });
   row.append(input);
 
@@ -1003,13 +1105,25 @@ function tocRow(node, depth, pageCount, onRemove) {
     row.append(el("span", "toc-page-label", "p."), page);
   }
 
+  const outdent = el("button", "toc-nudge", "⇤");
+  outdent.type = "button";
+  outdent.title = "Move out one level (Shift+Tab)";
+  outdent.disabled = !ops.canOutdent;
+  outdent.addEventListener("click", ops.onOutdent);
+
+  const indent = el("button", "toc-nudge", "⇥");
+  indent.type = "button";
+  indent.title = "Make this a sub-entry of the one above (Tab)";
+  indent.disabled = !ops.canIndent;
+  indent.addEventListener("click", ops.onIndent);
+
   const remove = el("button", "toc-remove", "×");
   remove.type = "button";
   remove.title = node.children && node.children.length
     ? "Remove this entry and its sub-entries"
     : "Remove this entry";
-  remove.addEventListener("click", onRemove);
-  row.append(remove);
+  remove.addEventListener("click", ops.onRemove);
+  row.append(outdent, indent, remove);
   return row;
 }
 

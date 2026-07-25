@@ -166,6 +166,26 @@ pub struct TocEntry {
     pub target: Option<AnchorTarget>,
 }
 
+impl crate::model::toc_shape::TocNode for TocEntry {
+    fn label(&self) -> &str {
+        &self.title
+    }
+    fn set_label(&mut self, label: String) {
+        self.title = label;
+    }
+    fn children(&self) -> &[Self] {
+        &self.children
+    }
+    fn set_children(&mut self, children: Vec<Self>) {
+        self.children = children;
+    }
+    /// Two entries land on the same place when they name the same href — the
+    /// fragment included, since two anchors in one document are two chapters.
+    fn target_key(&self) -> String {
+        self.href.clone()
+    }
+}
+
 impl Ord for TocEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.play_order.cmp(&other.play_order)

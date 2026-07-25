@@ -57,9 +57,6 @@ pub(super) fn evidence(epub_bytes: &[u8]) -> Result<TocEvidence, String> {
         (Some(a), None) | (None, Some(a)) => a,
         (None, None) => Vec::new(),
     };
-    let mut nav_labels = Vec::new();
-    flatten(&toc, &mut nav_labels);
-
     // Spine files (basename → present), and the toc-landmark target if any.
     let spine_files: HashSet<String> = opf
         .spine_ids
@@ -106,7 +103,7 @@ pub(super) fn evidence(epub_bytes: &[u8]) -> Result<TocEvidence, String> {
     let (contents_links, contents_sample) = landmark_cluster.unwrap_or((best_cluster, best_sample));
 
     Ok(TocEvidence {
-        nav_labels,
+        nav_tree: toc,
         contents_links,
         contents_sample,
         headings,
@@ -137,13 +134,6 @@ fn load_toc<R: Read + Seek>(
     let bytes = read_entry(a, &format!("{base}{href}"))?;
     let entries = f(&decode_text(&bytes, extract_xml_encoding(&bytes))).ok()?;
     (!entries.is_empty()).then_some(entries)
-}
-
-fn flatten(entries: &[TocEntry], out: &mut Vec<String>) {
-    for e in entries {
-        out.push(e.title.clone());
-        flatten(&e.children, out);
-    }
 }
 
 fn flat_len(entries: &[TocEntry]) -> usize {

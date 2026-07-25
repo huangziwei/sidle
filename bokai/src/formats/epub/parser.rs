@@ -11,6 +11,11 @@ use crate::model::{CollectionInfo, Contributor, Landmark, LandmarkType, Metadata
 /// Parsed OPF package data.
 pub struct OpfData {
     pub metadata: Metadata,
+    /// The `<package version>` string as declared (`"3.0"`, `"2.0"`, …); empty
+    /// when the package declares none. Callers that must not change a book's
+    /// version — a TOC repair synthesizing a missing nav document, say — read it
+    /// to know which document the book is entitled to.
+    pub version: String,
     /// Maps manifest id -> (href, media_type)
     pub manifest: HashMap<String, (String, String)>,
     pub spine_ids: Vec<String>,
@@ -21,6 +26,12 @@ pub struct OpfData {
     pub ncx_href: Option<String>,
     /// EPUB 3 nav document href (has properties="nav")
     pub nav_href: Option<String>,
+    /// The `<dc:identifier>` that `<package unique-identifier>` designates as
+    /// *the* book identifier — not necessarily the first one, and the value an
+    /// NCX's `dtb:uid` has to match. `Metadata::identifier` is a different
+    /// question ("an identifier for this book"), and books that carry an ASIN
+    /// and a calibre id beside their UUID answer the two differently.
+    pub unique_identifier: Option<String>,
 }
 
 /// Parse META-INF/container.xml to find the OPF path.
@@ -112,6 +123,13 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     let mut in_metadata = false;
     let mut current_element: Option<String> = None;
     let mut current_element_id: Option<String> = None;
+    // `<package unique-identifier="…">` names which `<dc:identifier>` is the
+    // book's, and every identifier seen by its own `id`, so the two can be
+    // resolved against each other once the metadata block closes.
+    // `<package version>` — which EPUB version the package declares itself to be.
+    let mut version = String::new();
+    let mut unique_identifier_ref: Option<String> = None;
+    let mut identifiers_by_id: HashMap<String, String> = HashMap::new();
     // Tracks the `opf:scheme` attribute on the currently-open `<dc:identifier>`
     // so we can route `scheme="ASIN"` separately from the generic identifier.
     let mut current_identifier_scheme: Option<String> = None;
@@ -137,6 +155,20 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                 let local = local_name(name.as_ref());
 
                 match local {
+                    b"package" => {
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"unique-identifier" => {
+                                    unique_identifier_ref =
+                                        Some(String::from_utf8_lossy(&attr.value).to_string());
+                                }
+                                b"version" => {
+                                    version = String::from_utf8_lossy(&attr.value).to_string();
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     b"metadata" => in_metadata = true,
                     b"title" | b"creator" | b"language" | b"identifier" | b"publisher"
                     | b"description" | b"subject" | b"date" | b"rights" | b"contributor"
@@ -520,6 +552,9 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
                             }) || current_element_id
                                 .as_deref()
                                 .is_some_and(|id| id.eq_ignore_ascii_case("asin"));
+                            if let Some(ref id) = current_element_id {
+                                identifiers_by_id.insert(id.clone(), text.clone());
+                            }
                             if is_asin {
                                 if metadata.asin.is_none() && !text.is_empty() {
                                     metadata.asin = Some(text);
@@ -608,13 +643,21 @@ pub fn parse_opf(content: &str) -> io::Result<OpfData> {
     // Resolve NCX href
     let ncx_href = toc_id.and_then(|id| manifest_simple.get(&id).map(|(href, _)| href.clone()));
 
+    // The identifier `<package unique-identifier>` names. Falls back to the
+    // generic one when the reference dangles, which is malformed but common.
+    let unique_identifier = unique_identifier_ref
+        .and_then(|id| identifiers_by_id.get(&id).cloned())
+        .or_else(|| Some(metadata.identifier.clone()).filter(|s| !s.is_empty()));
+
     Ok(OpfData {
         metadata,
+        version,
         manifest: manifest_simple,
         spine_ids,
         spine_properties,
         ncx_href,
         nav_href,
+        unique_identifier,
     })
 }
 

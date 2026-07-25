@@ -21,8 +21,11 @@ mod kfx;
 /// *declared* TOC vs the *in-book* chapter list.
 #[derive(Debug, Clone, Default)]
 pub struct TocEvidence {
-    /// The declared TOC entry labels (KFX `nav_container` toc / EPUB nav or NCX).
-    pub nav_labels: Vec<String>,
+    /// The declared TOC (KFX `nav_container` toc / EPUB nav or NCX) as the tree
+    /// the book declares it, nesting intact. `nav_labels` is this flattened, and
+    /// is derived from it rather than filled separately, so the two can never
+    /// disagree about what the book declares.
+    pub nav_tree: Vec<crate::model::TocEntry>,
     /// Distinct internal chapter links on the in-book Contents page (densest
     /// cluster; the marked toc page when present).
     pub contents_links: usize,
@@ -53,6 +56,8 @@ pub type Flattening = crate::formats::epub::toc_repair::Flattening;
 pub struct TocAudit {
     /// Total declared-TOC entries (recursive, incl. nested).
     pub nav_count: usize,
+    /// The declared TOC as the book declares it, nesting intact.
+    pub nav_tree: Vec<crate::model::TocEntry>,
     /// Flattened declared-TOC entry labels.
     pub nav_labels: Vec<String>,
     /// Declared entries whose label is not front-matter/boilerplate — the real
@@ -103,6 +108,15 @@ impl Verdict {
     }
 }
 
+/// Every label in a declared TOC tree, in reading order — the flat view most
+/// consumers want, and the only one the verdict rule reads.
+fn flatten_labels(entries: &[crate::model::TocEntry], out: &mut Vec<String>) {
+    for entry in entries {
+        out.push(entry.title.clone());
+        flatten_labels(&entry.children, out);
+    }
+}
+
 /// Minimum in-book chapter signals for the evidence to count as a real chapter
 /// list (below this, a stray forward link or two is just noise).
 const MIN_EVIDENCE: usize = 5;
@@ -132,8 +146,10 @@ pub fn validate(bytes: &[u8]) -> Result<TocAudit, String> {
 /// defect a chapter-rich TOC can still have. SUSPECT is the chapterless case:
 /// the TOC omits ≥`MIN_EVIDENCE` chapters the book itself carries; else SPARSE.
 pub fn classify(ev: TocEvidence) -> TocAudit {
-    let nav_count = ev.nav_labels.len();
-    let nav_chapters = ev.nav_labels.iter().filter(|l| !is_front_matter(l)).count();
+    let mut nav_labels = Vec::new();
+    flatten_labels(&ev.nav_tree, &mut nav_labels);
+    let nav_count = nav_labels.len();
+    let nav_chapters = nav_labels.iter().filter(|l| !is_front_matter(l)).count();
     let fm_only = nav_count > 0 && nav_chapters == 0;
 
     // Ground-truth chapter count = the strongest of the three in-book signals.
@@ -150,7 +166,8 @@ pub fn classify(ev: TocEvidence) -> TocAudit {
 
     TocAudit {
         nav_count,
-        nav_labels: ev.nav_labels,
+        nav_tree: ev.nav_tree,
+        nav_labels,
         nav_chapters,
         fm_only,
         contents_links: ev.contents_links,
@@ -393,11 +410,20 @@ mod tests {
         }
     }
 
+    /// A declared TOC of `labels`, no nesting — what most books have, and all
+    /// the verdict rule reads.
+    fn flat_toc(labels: &[String]) -> Vec<crate::model::TocEntry> {
+        labels
+            .iter()
+            .map(|l| crate::model::TocEntry::new(l.clone(), String::new()))
+            .collect()
+    }
+
     #[test]
     fn classify_gate_and_flag() {
         // A rich declared TOC is never flagged, however many body links exist.
         let ok = classify(TocEvidence {
-            nav_labels: (0..30).map(|i| format!("Chapter {i}")).collect(),
+            nav_tree: flat_toc(&(0..30).map(|i| format!("Chapter {i}")).collect::<Vec<_>>()),
             contents_links: 5000,
             ..Default::default()
         });
@@ -405,7 +431,7 @@ mod tests {
 
         // Chapterless declared TOC + a real in-book chapter list = deficient.
         let bad = classify(TocEvidence {
-            nav_labels: vec!["表紙".into(), "奥付".into()],
+            nav_tree: flat_toc(&["表紙".into(), "奥付".into()]),
             headings: 20,
             ..Default::default()
         });
@@ -413,7 +439,7 @@ mod tests {
 
         // Chapterless TOC, no evidence = inconclusive, not a failure.
         let flat = classify(TocEvidence {
-            nav_labels: vec!["Cover".into(), "Copyright".into()],
+            nav_tree: flat_toc(&["Cover".into(), "Copyright".into()]),
             ..Default::default()
         });
         assert_eq!(flat.verdict, Verdict::Sparse);
@@ -425,7 +451,7 @@ mod tests {
     #[test]
     fn a_chapter_rich_but_flattened_toc_is_not_clean() {
         let audit = classify(TocEvidence {
-            nav_labels: (0..152).map(|i| format!("Entry {i}")).collect(),
+            nav_tree: flat_toc(&(0..152).map(|i| format!("Entry {i}")).collect::<Vec<_>>()),
             flattened: Flattening {
                 volumes: 12,
                 misplaced: 137,
@@ -442,10 +468,34 @@ mod tests {
 
         // Nothing to re-parent ⇒ the same TOC is healthy.
         let ok = classify(TocEvidence {
-            nav_labels: (0..152).map(|i| format!("Entry {i}")).collect(),
+            nav_tree: flat_toc(&(0..152).map(|i| format!("Entry {i}")).collect::<Vec<_>>()),
             ..Default::default()
         });
         assert_eq!(ok.verdict, Verdict::Ok);
+    }
+
+    /// The audit reports the declared TOC as the tree the book declares, not
+    /// only as a flat label list — an editor showing a reader "what your book
+    /// declares today" has to be able to show its levels.
+    #[test]
+    fn the_audit_keeps_the_declared_toc_nested() {
+        let mut part = crate::model::TocEntry::new("Part One", "p1.xhtml");
+        part.children = vec![
+            crate::model::TocEntry::new("Chapter 1", "c1.xhtml"),
+            crate::model::TocEntry::new("Chapter 2", "c2.xhtml"),
+        ];
+        let audit = classify(TocEvidence {
+            nav_tree: vec![part, crate::model::TocEntry::new("Part Two", "p2.xhtml")],
+            ..Default::default()
+        });
+
+        assert_eq!(audit.nav_count, 4, "counted through the nesting");
+        assert_eq!(
+            audit.nav_labels,
+            ["Part One", "Chapter 1", "Chapter 2", "Part Two"]
+        );
+        assert_eq!(audit.nav_tree.len(), 2, "two top-level entries");
+        assert_eq!(audit.nav_tree[0].children.len(), 2, "nesting survived");
     }
 
     #[test]
@@ -454,7 +504,7 @@ mod tests {
 
         // OK verdict -> no finding.
         let ok = classify(TocEvidence {
-            nav_labels: (0..30).map(|i| format!("Chapter {i}")).collect(),
+            nav_tree: flat_toc(&(0..30).map(|i| format!("Chapter {i}")).collect::<Vec<_>>()),
             contents_links: 5000,
             ..Default::default()
         });
@@ -462,14 +512,14 @@ mod tests {
 
         // SPARSE verdict -> no finding (inconclusive, not a defect).
         let sparse = classify(TocEvidence {
-            nav_labels: vec!["Cover".into(), "Copyright".into()],
+            nav_tree: flat_toc(&["Cover".into(), "Copyright".into()]),
             ..Default::default()
         });
         assert!(sparse.into_findings().is_empty());
 
         // SUSPECT verdict -> exactly one Warning carrying a rebuild-toc fix.
         let suspect = classify(TocEvidence {
-            nav_labels: vec!["表紙".into(), "奥付".into()],
+            nav_tree: flat_toc(&["表紙".into(), "奥付".into()]),
             headings: 20,
             ..Default::default()
         });

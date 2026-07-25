@@ -507,6 +507,32 @@ impl TocEntryDto {
         }
     }
 
+    /// A PDF outline item → the read-only "currently declared" DTO. The page it
+    /// jumps to goes in the label: this side is not editable, so there is no page
+    /// input to put it in.
+    fn declared_pdf(e: &PdfOutlineItem) -> Self {
+        Self {
+            label: format!("{} — p.{}", e.title, e.page_index + 1),
+            eid: 0,
+            href: String::new(),
+            page: 0,
+            children: e.children.iter().map(Self::declared_pdf).collect(),
+        }
+    }
+
+    /// A declared-TOC entry → wire DTO for the read-only "currently declared"
+    /// side: its label and its shape, no target. The editable tree carries the
+    /// targets; this one exists to show the user the levels their book declares.
+    fn label_only(e: &EpubTocEntry) -> Self {
+        Self {
+            label: e.title.clone(),
+            eid: 0,
+            href: String::new(),
+            page: 0,
+            children: e.children.iter().map(Self::label_only).collect(),
+        }
+    }
+
     /// EPUB proposer `TocEntry` (title + href) → wire DTO, recursively.
     fn from_epub(e: &EpubTocEntry) -> Self {
         Self {
@@ -569,15 +595,18 @@ pub struct EditorTocDetail {
     /// entries the rebuild would nest under them. Both 0 otherwise.
     pub flattened_volumes: usize,
     pub flattened_entries: usize,
-    /// The currently-declared TOC entry labels (flattened) — what's wrong (or
-    /// right) today.
-    pub current: Vec<String>,
-    /// The editable tree the panel starts from. For KFX/EPUB it's a *proposal*
-    /// derived from the densest in-book Contents-page link cluster, in document
-    /// order with the book's own nesting preserved. For PDF there is no proposer,
-    /// so it's the book's **existing** outline (empty when it has none — the
-    /// "PDF lacks a TOC" case, where the panel starts blank and the user adds
-    /// rows). Empty otherwise means none could be derived (see `note`).
+    /// The TOC the book declares today — what's wrong (or right) about it — as
+    /// the tree it declares, so the panel can show its levels. Labels only: this
+    /// side is read-only, and the targets belong to the editable tree below.
+    pub current: Vec<TocEntryDto>,
+    /// The editable tree the panel starts from. For KFX/EPUB it's a *proposal*:
+    /// the declared TOC with whatever the book's in-book Contents page knows that
+    /// it doesn't, in document order, nested to the depth the book evidences.
+    /// Every declared entry is in it — a proposal adds, never drops. For PDF
+    /// there is no proposer, so it's the book's **existing** outline (empty when
+    /// it has none — the "PDF lacks a TOC" case, where the panel starts blank and
+    /// the user adds rows). Empty otherwise means none could be derived (see
+    /// `note`).
     pub proposed: Vec<TocEntryDto>,
     /// Set when no proposal could be derived, explaining why.
     pub note: Option<String>,
@@ -1209,20 +1238,6 @@ fn count_outline(items: &[PdfOutlineItem]) -> usize {
     items.iter().map(|i| 1 + count_outline(&i.children)).sum()
 }
 
-/// Flattened outline labels, indented by depth, for the "Currently declared"
-/// list — so a nested PDF outline reads as a tree rather than a flat run.
-fn flatten_outline_labels(items: &[PdfOutlineItem], depth: usize, out: &mut Vec<String>) {
-    for i in items {
-        out.push(format!(
-            "{}{} — p.{}",
-            "  ".repeat(depth),
-            i.title,
-            i.page_index + 1
-        ));
-        flatten_outline_labels(&i.children, depth + 1, out);
-    }
-}
-
 /// Full TOC panel state — verdict + current labels + the proposal (nesting
 /// preserved). Format-sniffed (EPUB zip vs KFX container). Sync (reads + parses
 /// the source); call inside `spawn_blocking`.
@@ -1234,8 +1249,6 @@ fn read_toc_detail(source_path: &str, kind: SourceKind) -> Result<EditorTocDetai
     if kind == SourceKind::Pdf {
         let (summary, outline, page_count) =
             pdf_toc_summary(&bytes).ok_or_else(|| "couldn't read the PDF".to_string())?;
-        let mut current = Vec::new();
-        flatten_outline_labels(&outline, 0, &mut current);
         let note = outline.is_empty().then(|| {
             "This PDF has no table of contents. Add entries below — each one \
              needs a title and the page it jumps to."
@@ -1247,7 +1260,7 @@ fn read_toc_detail(source_path: &str, kind: SourceKind) -> Result<EditorTocDetai
             nav_chapters: summary.nav_chapters,
             flattened_volumes: 0,
             flattened_entries: 0,
-            current,
+            current: outline.iter().map(TocEntryDto::declared_pdf).collect(),
             proposed: outline.iter().map(TocEntryDto::from_pdf).collect(),
             note,
             page_count: Some(page_count),
@@ -1256,7 +1269,8 @@ fn read_toc_detail(source_path: &str, kind: SourceKind) -> Result<EditorTocDetai
     }
 
     let audit = toc_validate::validate(&bytes)?;
-    let no_contents = "No chapter list found in the book's Contents page or headings.";
+    let no_contents = "This book declares no table of contents, and no chapter \
+                       list could be found in its Contents page or headings.";
     let (proposed, note): (Vec<TocEntryDto>, Option<String>) = if bytes.starts_with(b"PK") {
         match epub_toc::propose_toc(&bytes) {
             Ok(entries) if !entries.is_empty() => {
@@ -1286,7 +1300,7 @@ fn read_toc_detail(source_path: &str, kind: SourceKind) -> Result<EditorTocDetai
         nav_chapters: audit.nav_chapters,
         flattened_volumes: audit.flattened.volumes,
         flattened_entries: audit.flattened.misplaced,
-        current: audit.nav_labels,
+        current: audit.nav_tree.iter().map(TocEntryDto::label_only).collect(),
         proposed,
         note,
         page_count: None,
@@ -1532,9 +1546,10 @@ mod tests {
         assert_eq!(toc_verdict(99), "OK", "no ceiling above OK for a PDF");
     }
 
-    /// The panel's "Currently declared" list shows nesting and page numbers.
+    /// The panel's "Currently declared" side keeps the outline's nesting and
+    /// names the page each entry jumps to.
     #[test]
-    fn outline_labels_flatten_with_depth_and_page() {
+    fn the_declared_pdf_outline_keeps_its_nesting_and_pages() {
         let outline = [PdfOutlineItem {
             title: "Part I".into(),
             page_index: 0,
@@ -1544,9 +1559,11 @@ mod tests {
                 children: vec![],
             }],
         }];
-        let mut out = Vec::new();
-        flatten_outline_labels(&outline, 0, &mut out);
-        assert_eq!(out, vec!["Part I — p.1", "  Chapter 1 — p.5"]);
+        let declared: Vec<TocEntryDto> = outline.iter().map(TocEntryDto::declared_pdf).collect();
+
+        assert_eq!(declared.len(), 1, "one top-level entry, not a flat run");
+        assert_eq!(declared[0].label, "Part I — p.1");
+        assert_eq!(declared[0].children[0].label, "Chapter 1 — p.5");
         assert_eq!(count_outline(&outline), 2);
     }
 

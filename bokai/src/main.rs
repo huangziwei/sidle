@@ -165,10 +165,11 @@ fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
     if bytes.starts_with(b"PK") {
         let proposed =
             bokai::formats::epub::toc_repair::propose_toc(&bytes).map_err(|e| e.to_string())?;
-        println!("proposed {} chapter(s) from the EPUB:", proposed.len());
-        for (i, entry) in proposed.iter().enumerate() {
-            println!("  {:>3}. {:<44} {}", i + 1, entry.title, entry.href);
-        }
+        println!(
+            "proposed {} chapter(s) from the EPUB:",
+            count_toc_entries(&proposed, |e| &e.children)
+        );
+        print_epub_toc(&proposed, 0, &mut 0);
         if let Some(out) = output {
             let repaired =
                 bokai::formats::epub::toc_repair::repair_toc(&bytes).map_err(|e| e.to_string())?;
@@ -181,10 +182,11 @@ fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
 
     let proposed =
         bokai::formats::kfx::toc_repair::propose_toc(&bytes).map_err(|e| e.to_string())?;
-    println!("proposed {} chapter(s) from the KFX:", proposed.len());
-    for (i, entry) in proposed.iter().enumerate() {
-        println!("  {:>3}. eid {:<8} {}", i + 1, entry.eid, entry.label);
-    }
+    println!(
+        "proposed {} chapter(s) from the KFX:",
+        count_toc_entries(&proposed, |e| &e.children)
+    );
+    print_kfx_toc(&proposed, 0, &mut 0);
     if let Some(out) = output {
         let repaired =
             bokai::formats::kfx::toc_repair::repair_toc(&bytes).map_err(|e| e.to_string())?;
@@ -192,6 +194,52 @@ fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
         println!("wrote repaired KFX → {out} ({} bytes)", repaired.len());
     }
     Ok(())
+}
+
+/// How many levels deep a TOC tree goes; 0 when there is none.
+fn toc_depth(entries: &[bokai::model::TocEntry]) -> usize {
+    entries
+        .iter()
+        .map(|e| 1 + toc_depth(&e.children))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Total entries in a TOC tree, nested children included.
+fn count_toc_entries<T>(entries: &[T], children: fn(&T) -> &Vec<T>) -> usize {
+    entries
+        .iter()
+        .map(|e| 1 + count_toc_entries(children(e), children))
+        .sum()
+}
+
+/// Print a proposed EPUB TOC as the tree it is, indenting one level per depth —
+/// a nested proposal printed flat reads as a much shorter one.
+fn print_epub_toc(entries: &[bokai::model::TocEntry], depth: usize, n: &mut usize) {
+    for entry in entries {
+        *n += 1;
+        let pad = "  ".repeat(depth);
+        println!("  {:>3}. {pad}{:<44} {}", *n, entry.title, entry.href);
+        print_epub_toc(&entry.children, depth + 1, n);
+    }
+}
+
+fn print_kfx_toc(
+    entries: &[bokai::formats::kfx::toc_repair::TocEntry],
+    depth: usize,
+    n: &mut usize,
+) {
+    for entry in entries {
+        *n += 1;
+        println!(
+            "  {:>3}. eid {:<8} {}{}",
+            *n,
+            entry.eid,
+            "  ".repeat(depth),
+            entry.label
+        );
+        print_kfx_toc(&entry.children, depth + 1, n);
+    }
 }
 
 #[derive(Subcommand)]
@@ -1049,6 +1097,10 @@ fn validate_toc(path: &str, json: bool) -> Result<(), String> {
             "has_toc_landmark": audit.has_toc_landmark,
             "flattened_volumes": audit.flattened.volumes,
             "flattened_entries": audit.flattened.misplaced,
+            // How many levels the declared TOC itself has: 1 is a flat list, 0
+            // no TOC at all. Distinct from `flattened_*`, which is how many it
+            // *should* have.
+            "nav_depth": toc_depth(&audit.nav_tree),
             "nav_labels": audit.nav_labels,
             "contents_sample": audit.contents_sample,
         });

@@ -3728,6 +3728,18 @@ kbd {
 .toc-current li {
   list-style: disc;
 }
+/* Nested levels of the declared TOC — the shape the book itself declares. */
+.toc-current ul {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.toc-current ul li {
+  list-style: circle;
+  color: var(--muted);
+}
 /* Editable proposed chapters. */
 .toc-proposed {
   display: flex;
@@ -3781,7 +3793,8 @@ kbd {
 .toc-page:focus {
   border-color: var(--accent);
 }
-.toc-remove {
+.toc-remove,
+.toc-nudge {
   flex: 0 0 auto;
   width: 28px;
   height: 28px;
@@ -3793,9 +3806,19 @@ kbd {
   line-height: 1;
   cursor: pointer;
 }
-.toc-remove:hover {
+.toc-remove:hover,
+.toc-nudge:not(:disabled):hover {
   color: var(--accent);
   border-color: var(--accent);
+}
+/* Re-parenting an entry. Disabled means the move has nowhere to go: the first
+   entry has nothing to nest under, a top-level one nothing to nest out of. */
+.toc-nudge {
+  font-size: 13px;
+}
+.toc-nudge:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 .toc-actions {
   display: flex;
