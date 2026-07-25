@@ -12,6 +12,7 @@ pub mod config;
 pub mod cover_cache;
 pub mod dedrm;
 pub mod device_state;
+pub mod font;
 pub mod selfupdate;
 pub mod series;
 pub mod updates;

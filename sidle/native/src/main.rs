@@ -21,6 +21,7 @@ mod cover_cache;
 mod dedrm;
 mod device_state;
 mod eink;
+mod font;
 mod orientation;
 mod search;
 mod selfupdate;
@@ -319,6 +320,10 @@ fn run() -> anyhow::Result<()> {
     // repaint) — no cvm freeze, no chrome poking. The old `Pillow` guard is
     // gone for that reason.
     let mut renderer = TextRenderer::load(FONT_PX)?;
+    // Which faces this firmware turned out to have. A device missing one drops
+    // it silently from the chain, and the only other symptom is a character
+    // that doesn't draw.
+    log(format!("fonts: {}", renderer.chain_description()));
 
     let orient = orientation::Orientation::detect();
     log(format!("orientation: {orient:?}"));

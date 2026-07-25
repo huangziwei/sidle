@@ -1,52 +1,63 @@
 //! Text rasterization onto the framebuffer.
 //!
-//! We load the Kindle's bundled Japanese sans-serif (TBGothicMed) and
-//! rasterize each glyph at a fixed size via fontdue. fontdue returns an
-//! 8-bit coverage bitmap; we threshold it to 1-bit because eink's DU
-//! waveform is B/W and antialiased gray smears on the panel. Coverage
+//! Glyphs come from a fallback chain over the faces the device already ships
+//! (see [`crate::font`]), rasterized at a fixed size via fontdue. fontdue
+//! returns an 8-bit coverage bitmap; we threshold it to 1-bit because eink's
+//! DU waveform is B/W and antialiased gray smears on the panel. Coverage
 //! above 96/255 becomes a black pixel, below stays white. Crisp at small
 //! sizes; would need GC16 + dithering for true grayscale text.
 //!
-//! Glyphs are cached per (codepoint, px) because rasterization isn't free
-//! and CJK titles repeat characters often.
+//! A character no face in the chain has draws a deliberate hollow box.
+//! Handing it to the rasterizer instead blits the font's own `.notdef`,
+//! whose hairline outline mostly falls *under* the coverage threshold — what
+//! reaches the panel is a bar and two stray dots, which reads as data
+//! corruption rather than as a missing glyph.
+//!
+//! Glyphs are cached per (codepoint, px, face) because rasterization isn't
+//! free and CJK titles repeat characters often. The face belongs in the key:
+//! two faces rasterize the same codepoint to different shapes.
 
 use std::collections::HashMap;
-use std::path::Path;
 
-use anyhow::{Context, Result};
-use fontdue::{Font, FontSettings, Metrics};
+use anyhow::Result;
+use fontdue::Metrics;
 
 use crate::eink::fb::Framebuffer;
-
-/// Path on KOA2 firmware 5.16. If absent on newer firmware, font probe
-/// (M5 setup) lists alternatives — switch the constant here.
-pub const JP_FONT_PATH: &str = "/usr/java/lib/fonts/TBGothicMed_213.ttf";
+use crate::font::{self, FontChain};
 
 const COVERAGE_THRESHOLD: u8 = 96;
 
 pub struct TextRenderer {
-    font: Font,
+    chain: FontChain,
     px: f32,
-    cache: HashMap<(char, u32), (Metrics, Vec<u8>)>,
+    cache: HashMap<(char, u32, usize), (Metrics, Vec<u8>)>,
 }
 
 impl TextRenderer {
     pub fn load(px: f32) -> Result<Self> {
-        let path = Path::new(JP_FONT_PATH);
-        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        let font = Font::from_bytes(bytes, FontSettings::default())
-            .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
         Ok(Self {
-            font,
+            chain: FontChain::load(font::CANDIDATES)?,
             px,
             cache: HashMap::new(),
         })
     }
 
+    /// The fallback chain this device ended up with, primary first, for the
+    /// startup log — see [`FontChain::paths`].
+    pub fn chain_description(&self) -> String {
+        self.chain
+            .paths()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    }
+
     pub fn line_height(&self) -> u32 {
         // fontdue's `horizontal_line_metrics` is the canonical value; round
-        // up so adjacent rows don't tear into each other.
-        self.font
+        // up so adjacent rows don't tear into each other. Always the primary
+        // face's, so a row keeps its height whichever face draws the text.
+        self.chain
+            .primary()
             .horizontal_line_metrics(self.px)
             .map(|m| (m.ascent - m.descent + m.line_gap).ceil() as u32)
             .unwrap_or((self.px * 1.4) as u32)
@@ -54,15 +65,29 @@ impl TextRenderer {
 
     /// Total advance width of `s` at the current px. Used by the overlay
     /// to center text inside the banner.
+    ///
+    /// Resolves faces exactly the way [`TextRenderer::draw`] does, over the
+    /// same string, so a measured width is the width that gets drawn.
     pub fn measure_width(&mut self, s: &str) -> u32 {
-        let px_key = self.px.to_bits();
+        let selection = self.chain.select(s);
+        let px = self.px;
+        let px_key = px.to_bits();
         let mut w = 0u32;
         for ch in s.chars() {
-            let entry = self
-                .cache
-                .entry((ch, px_key))
-                .or_insert_with(|| self.font.rasterize(ch, self.px));
-            w = w.saturating_add(entry.0.advance_width.round().max(0.0) as u32);
+            if font::is_invisible(ch) {
+                continue;
+            }
+            let advance = match self.chain.glyph_source(selection, ch) {
+                Some((face, font)) => {
+                    let entry = self
+                        .cache
+                        .entry((ch, px_key, face))
+                        .or_insert_with(|| font.rasterize(ch, px));
+                    entry.0.advance_width.round().max(0.0) as u32
+                }
+                None => missing_advance(px),
+            };
+            w = w.saturating_add(advance);
         }
         w
     }
@@ -92,21 +117,63 @@ impl TextRenderer {
         inverted: bool,
     ) -> i32 {
         let fg = if inverted { 0xFF } else { 0x00 };
-        let px_key = self.px.to_bits();
+        let selection = self.chain.select(s);
+        let px = self.px;
+        let px_key = px.to_bits();
         let mut cur_x = x;
         for ch in s.chars() {
-            // Cache key uses bit pattern of f32 — same px always keys the same.
-            let entry = self
-                .cache
-                .entry((ch, px_key))
-                .or_insert_with(|| self.font.rasterize(ch, self.px));
-            let (metrics, bitmap) = entry;
-            let gx0 = cur_x + metrics.xmin;
-            let gy0 = y_baseline - metrics.height as i32 - metrics.ymin;
-            blit_threshold(fb, gx0, gy0, metrics.width, metrics.height, bitmap, fg);
-            cur_x += metrics.advance_width.round() as i32;
+            if font::is_invisible(ch) {
+                continue;
+            }
+            match self.chain.glyph_source(selection, ch) {
+                // Cache key uses bit pattern of f32 — same px always keys the same.
+                Some((face, font)) => {
+                    let entry = self
+                        .cache
+                        .entry((ch, px_key, face))
+                        .or_insert_with(|| font.rasterize(ch, px));
+                    let (metrics, bitmap) = entry;
+                    let gx0 = cur_x + metrics.xmin;
+                    let gy0 = y_baseline - metrics.height as i32 - metrics.ymin;
+                    blit_threshold(fb, gx0, gy0, metrics.width, metrics.height, bitmap, fg);
+                    cur_x += metrics.advance_width.round() as i32;
+                }
+                None => {
+                    draw_missing(fb, cur_x, y_baseline, px, fg);
+                    cur_x += missing_advance(px) as i32;
+                }
+            }
         }
         cur_x
+    }
+}
+
+/// Advance of the missing-glyph mark: an ideograph's share of the line, so a
+/// run of unmappable characters keeps the text's rhythm. Shared by
+/// [`TextRenderer::measure_width`] and [`TextRenderer::draw`] so a line is
+/// measured at the width it will be drawn at.
+fn missing_advance(px: f32) -> u32 {
+    (px * 0.72).round().max(6.0) as u32
+}
+
+/// A hollow box standing on the baseline, for a character no face in the
+/// chain has. Stroked 2px on purpose: a hairline outline is exactly what
+/// makes a font's own `.notdef` fall apart under [`COVERAGE_THRESHOLD`].
+fn draw_missing(fb: &mut Framebuffer, x: i32, y_baseline: i32, px: f32, fg: u8) {
+    const STROKE: i32 = 2;
+    let (left, right) = (x + STROKE, x + missing_advance(px) as i32 - STROKE * 2);
+    let (top, bottom) = (y_baseline - (px * 0.66).round() as i32, y_baseline - STROKE);
+    if right - left < STROKE * 2 || bottom - top < STROKE * 2 {
+        return;
+    }
+    for row in top..=bottom {
+        let horizontal_edge = row < top + STROKE || row > bottom - STROKE;
+        for col in left..=right {
+            let vertical_edge = col < left + STROKE || col > right - STROKE;
+            if horizontal_edge || vertical_edge {
+                fb.put_pixel(col, row, fg);
+            }
+        }
     }
 }
 

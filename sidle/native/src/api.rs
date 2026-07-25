@@ -11,7 +11,7 @@
 //! Book shape mirrors `sidle_core::library::db::BookRow`. The core display +
 //! download fields are `id`/`title` (display), `kfx_sha256` (on-device dedupe),
 //! and `device_filename` (the save name — `/get/{id}`'s Content-Disposition is
-//! unusable here, see [`device_filename`]). The remaining metadata fields
+//! unusable here, see the `device_filename` field). The remaining metadata fields
 //! (`author`, `language`, `publisher`, …) feed the picker's filter + sort
 //! (`ui::sort`); the server already flattens them into `/list.json`, so reading
 //! them is a client-only change. serde silently drops unknown JSON fields, so
@@ -140,7 +140,7 @@ pub struct Book {
     /// server-side with the same rule sidle-tauri's USB push uses — so a LAN
     /// download lands under a byte-identical name and isn't flagged
     /// `NotOurs` by the USB-side delete. This is the name we save the
-    /// download as; see [`device_filename`]. `#[serde(default)]` so an older
+    /// download as. `#[serde(default)]` so an older
     /// server without the field still parses (download then fails loudly
     /// rather than guessing a divergent name).
     #[serde(default)]
@@ -195,7 +195,7 @@ pub struct Book {
     /// series/publisher/tags + raw fields (`sidle_core::library::romaji::search_key`).
     /// The picker substring-matches the typed (also-`canon`'d) query against this —
     /// the on-screen Latin keyboard's whole reason for being. `#[serde(default)]`
-    /// → `""` against an older server that doesn't ship it; [`crate::search`] then
+    /// → `""` against an older server that doesn't ship it; the `search` module then
     /// falls back to canon'ing the raw title/author on-device (Latin-only match).
     #[serde(default)]
     pub search_key: String,
@@ -241,26 +241,16 @@ fn sanitize(book: &mut Book) {
     }
 }
 
-/// Drop [`is_ignorable`] characters anywhere in `s`, then trim surrounding
-/// whitespace.
+/// Drop [`crate::font::is_invisible`] characters anywhere in `s`, then trim
+/// surrounding whitespace. The set is the renderer's, because the two
+/// questions have the same answer: a code point that carries no glyph is the
+/// one collation also ignores.
 fn clean(s: &str) -> String {
     s.chars()
-        .filter(|c| !is_ignorable(*c))
+        .filter(|c| !crate::font::is_invisible(*c))
         .collect::<String>()
         .trim()
         .to_string()
-}
-
-/// Zero-width / formatting code points that carry no visible glyph and that
-/// locale collation treats as ignorable: BOM / zero-width space family, bidi
-/// marks, word joiner + invisible operators, and the soft hyphen.
-fn is_ignorable(c: char) -> bool {
-    matches!(c,
-        '\u{00AD}'                  // soft hyphen
-        | '\u{200B}'..='\u{200F}'   // ZWSP, ZWNJ, ZWJ, LRM, RLM
-        | '\u{2060}'..='\u{2064}'   // word joiner + invisible operators
-        | '\u{FEFF}'                // BOM / zero-width no-break space
-    )
 }
 
 pub fn fetch_cover(agent: &ureq::Agent, cfg: &ServerConfig, id: i64) -> Result<Vec<u8>> {

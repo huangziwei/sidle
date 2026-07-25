@@ -17,7 +17,7 @@
 //! (`web/library.js`). One deliberate divergence: members are sorted **eagerly**
 //! here (the desktop sorts lazily at render). Collation matches the desktop —
 //! [`crate::collate::natural_compare`], the port of `naturalCompare`, shared
-//! with [`crate::ui::sort`].
+//! with `ui::sort`.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;

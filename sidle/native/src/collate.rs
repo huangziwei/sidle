@@ -9,7 +9,7 @@
 //!
 //! `numeric` is the *only* override. The non-digit segments stay code-point
 //! order — the same `str::cmp` collation the picker already used (see
-//! [`crate::ui::sort`]) — so case / accent / CJK ordering is unchanged; this
+//! `ui::sort`) — so case / accent / CJK ordering is unchanged; this
 //! purely adds the numeric-run handling.
 
 use std::cmp::Ordering;
