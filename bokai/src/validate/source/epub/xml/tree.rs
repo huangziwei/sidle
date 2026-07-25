@@ -67,7 +67,7 @@ pub struct Element {
     /// They are not part of the data model — every name in the tree is already
     /// expanded — but a schema document *quotes* names in attribute values
     /// (`<attribute name="xml:lang">`), and those prefixes resolve against the
-    /// schema's own declarations. See [`in_scope_namespace`].
+    /// schema's own declarations. See [`Document::in_scope_namespace`].
     pub namespaces: Vec<(String, String)>,
 }
 

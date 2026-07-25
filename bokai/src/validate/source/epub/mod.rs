@@ -869,7 +869,14 @@ pub fn validate(epub_bytes: &[u8]) -> Report {
         check_foreign_resources(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
         check_opf_links(&pkg, &opf_dir, &opf_path, &mut report);
         check_collections(&pkg, &opf_dir, &opf_path, &mut report);
-        check_search_key_maps(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
+        check_search_key_maps(
+            &pkg,
+            &opf_dir,
+            &zip_paths,
+            &mut zip,
+            &encrypted,
+            &mut report,
+        );
         check_dictionary_content(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
         check_region_based_navs(&pkg, &opf_dir, &mut zip, &encrypted, &mut report);
         check_pagination(&pkg, &opf_dir, &mut zip, &encrypted, &opf_path, &mut report);
@@ -4838,6 +4845,7 @@ fn check_dictionary_content(
 fn check_search_key_maps(
     pkg: &opf::Package,
     opf_dir: &str,
+    zip_paths: &HashSet<String>,
     zip: &mut ZipArchive<Cursor<&[u8]>>,
     encrypted: &HashSet<String>,
     report: &mut Report,
@@ -4847,6 +4855,11 @@ fn check_search_key_maps(
         .iter()
         .filter_map(|s| pkg.manifest_by_id(&s.idref))
         .map(|item| join_opf(opf_dir, &item.href))
+        .collect();
+    let manifest_paths: HashSet<String> = pkg
+        .manifest
+        .iter()
+        .map(|m| join_opf(opf_dir, &m.href))
         .collect();
     for item in &pkg.manifest {
         if !item
@@ -4878,7 +4891,20 @@ fn check_search_key_maps(
                         continue;
                     }
                     let target = join_opf(&dir, href.split('#').next().unwrap_or(&href));
-                    if !spine_paths.contains(&target) {
+                    // A target that is not a publication resource at all never
+                    // reaches the spine question: epubcheck reports it as a
+                    // broken reference and stops there.
+                    if !manifest_paths.contains(&target) {
+                        let rule = match zip_paths.contains(&target) {
+                            true => Rule::ReferenceNotInManifest,
+                            false => Rule::BrokenHref,
+                        };
+                        report.push(Violation::new(
+                            rule,
+                            path.clone(),
+                            format!("search key map reference {href:?} -> {target:?} is not a declared publication resource"),
+                        ));
+                    } else if !spine_paths.contains(&target) {
                         report.push(Violation::new(
                             Rule::SearchKeyTargetNotInSpine,
                             path.clone(),
@@ -5740,10 +5766,20 @@ fn check_xhtml_hrefs_and_reachability(
     // registers `<content src>` as `Reference.Type.HYPERLINK`, so it satisfies
     // OPF-096 (non-linear reachable) just like an `<a href>` — a cover reached
     // only from the NCX toc is reachable, not an error.
-    if let Some(ncx) = pkg.manifest.iter().find(|m| {
-        m.media_type
-            .eq_ignore_ascii_case("application/x-dtbncx+xml")
-    }) {
+    //
+    // Which item *is* the NCX is decided by `<spine toc="…">`, not by media
+    // type: epubcheck marks an item as the NCX only when the spine names it, and
+    // an item it never marks is never read. A book whose manifest carries an NCX
+    // no spine points at therefore gets no NCX findings from either tool.
+    if let Some(ncx) = pkg
+        .spine_toc
+        .as_deref()
+        .and_then(|toc| pkg.manifest.iter().find(|m| m.id == toc))
+        .filter(|m| {
+            m.media_type
+                .eq_ignore_ascii_case("application/x-dtbncx+xml")
+        })
+    {
         let ncx_path = join_opf(opf_dir, &ncx.href);
         if let Ok(text) = read_text(zip, &ncx_path) {
             let mut ncx_broken_reported: HashSet<String> = HashSet::new();
@@ -9545,6 +9581,56 @@ mod tests {
         out
     }
 
+    /// **RSC-021** asks whether a Search Key Map's target is a *spine* document
+    /// — a question that only arises for a target that is a publication resource
+    /// at all. One that is not is a broken reference, and epubcheck stops there.
+    #[test]
+    fn a_search_key_map_target_is_judged_only_once_it_resolves() {
+        let run = |href: &str, spine: &str| {
+            let opf = format!(
+                r#"<?xml version="1.0"?>
+                <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="u">
+                  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+                    <dc:title>t</dc:title><dc:language>en</dc:language>
+                    <dc:identifier id="u">u</dc:identifier>
+                  </metadata>
+                  <manifest>
+                    <item id="k" href="k.xml" media-type="application/vnd.epub.search-key-map+xml"/>
+                    <item id="c" href="c.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="o" href="o.xhtml" media-type="application/xhtml+xml"/>
+                  </manifest>
+                  <spine>{spine}</spine>
+                </package>"#
+            );
+            let skm = format!(
+                r#"<?xml version="1.0"?><search-key-map xmlns="http://www.idpf.org/2007/ops"><search-key-group href="{href}"/></search-key-map>"#
+            );
+            let page = r#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title></head><body><p>x</p></body></html>"#;
+            let bytes = zip_epub(
+                &opf,
+                &[("k.xml", &skm), ("c.xhtml", page), ("o.xhtml", page)],
+            );
+            let pkg = opf::parse(&opf).unwrap();
+            let mut zip = ZipArchive::new(Cursor::new(bytes.as_slice())).unwrap();
+            let zip_paths: HashSet<String> = zip.file_names().map(str::to_string).collect();
+            let mut r = Report::default();
+            check_search_key_maps(&pkg, "OEBPS", &zip_paths, &mut zip, &HashSet::new(), &mut r);
+            r
+        };
+        let in_spine = r#"<itemref idref="c"/>"#;
+        assert!(run("c.xhtml#w", in_spine).is_clean());
+        // Declared and present, but not a spine document: RSC-021.
+        assert!(run("o.xhtml#w", in_spine).has_rule(Rule::SearchKeyTargetNotInSpine));
+        // Not a publication resource at all: the broken reference, and *not*
+        // RSC-021 on top of it.
+        let missing = run("gone.xhtml#w", in_spine);
+        assert!(missing.has_rule(Rule::BrokenHref), "{missing}");
+        assert!(
+            !missing.has_rule(Rule::SearchKeyTargetNotInSpine),
+            "{missing}"
+        );
+    }
+
     #[test]
     fn url_scheme_classification() {
         assert_eq!(
@@ -10052,6 +10138,20 @@ mod tests {
             assert!(
                 report.has_rule(Rule::FragmentNotDefined),
                 "expected RSC-012 from the NCX, got:\n{report}"
+            );
+            // …but only because the spine names it. Which manifest item *is* the
+            // NCX is decided by `<spine toc="…">`, not by media type, so an NCX
+            // the spine does not point at is never read — and epubcheck reports
+            // nothing about it either.
+            let orphaned = rewrite_zip_entry(&mutated, "OEBPS/content.opf", |opf| {
+                let stripped = opf.replace(" toc=\"ncx\"", "");
+                assert_ne!(stripped, opf, "the sample spine should name the NCX");
+                stripped
+            });
+            let report = validate(&orphaned);
+            assert!(
+                !report.has_rule(Rule::FragmentNotDefined),
+                "an NCX no spine points at must not be read, got:\n{report}"
             );
         }
 
