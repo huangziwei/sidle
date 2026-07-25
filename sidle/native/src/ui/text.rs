@@ -69,7 +69,13 @@ impl TextRenderer {
     /// Resolves faces exactly the way [`TextRenderer::draw`] does, over the
     /// same string, so a measured width is the width that gets drawn.
     pub fn measure_width(&mut self, s: &str) -> u32 {
-        let selection = self.chain.select(s);
+        self.measure_width_in(font::Script::Unknown, s)
+    }
+
+    /// [`TextRenderer::measure_width`] for text whose language is known — see
+    /// [`TextRenderer::draw_in`].
+    pub fn measure_width_in(&mut self, script: font::Script, s: &str) -> u32 {
+        let selection = self.chain.select(s, script);
         let px = self.px;
         let px_key = px.to_bits();
         let mut w = 0u32;
@@ -99,7 +105,21 @@ impl TextRenderer {
     /// wrapper over [`crate::wrap::wrap_and_clamp`]; shared by the cover
     /// placeholder and the diagnostics panel.
     pub fn wrap_and_clamp(&mut self, text: &str, max_width: u32, max_lines: usize) -> Vec<String> {
-        crate::wrap::wrap_and_clamp(text, max_width, max_lines, |s| self.measure_width(s))
+        self.wrap_and_clamp_in(font::Script::Unknown, text, max_width, max_lines)
+    }
+
+    /// [`TextRenderer::wrap_and_clamp`] for text whose language is known — see
+    /// [`TextRenderer::draw_in`].
+    pub fn wrap_and_clamp_in(
+        &mut self,
+        script: font::Script,
+        text: &str,
+        max_width: u32,
+        max_lines: usize,
+    ) -> Vec<String> {
+        crate::wrap::wrap_and_clamp(text, max_width, max_lines, |s| {
+            self.measure_width_in(script, s)
+        })
     }
 }
 
@@ -116,8 +136,28 @@ impl TextRenderer {
         s: &str,
         inverted: bool,
     ) -> i32 {
+        self.draw_in(font::Script::Unknown, fb, x, y_baseline, s, inverted)
+    }
+
+    /// [`TextRenderer::draw`] for text whose language is known — a book title
+    /// from a tagged book, rather than the picker's own chrome.
+    ///
+    /// The hint decides which face is *tried* first, not which one draws:
+    /// coverage still has the last word, so a book tagged with the wrong
+    /// language gets the wrong regional shapes but never a missing glyph.
+    /// Without it, a Traditional Chinese title silently keeps the Japanese
+    /// face — which covers it, so nothing looks broken enough to notice.
+    pub fn draw_in(
+        &mut self,
+        script: font::Script,
+        fb: &mut Framebuffer,
+        x: i32,
+        y_baseline: i32,
+        s: &str,
+        inverted: bool,
+    ) -> i32 {
         let fg = if inverted { 0xFF } else { 0x00 };
-        let selection = self.chain.select(s);
+        let selection = self.chain.select(s, script);
         let px = self.px;
         let px_key = px.to_bits();
         let mut cur_x = x;

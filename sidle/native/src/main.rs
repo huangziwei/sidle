@@ -1545,16 +1545,19 @@ fn draw_gallery_page(
         if cx < 0 || cy < 0 {
             continue;
         }
+        // A series tile carries its lead member's language: the collection
+        // name is that shelf's language too.
+        let script = font::Script::of_language(&cells[idx].cover_book.language);
         match &cells[idx].kind {
-            CellKind::Book => grid::draw_book_cell(
-                fb,
-                renderer,
-                cx,
-                cy,
-                covers[idx].as_ref(),
-                &cells[idx].cover_book.title,
-            ),
+            CellKind::Book => {
+                let title = grid::Label {
+                    text: &cells[idx].cover_book.title,
+                    script,
+                };
+                grid::draw_book_cell(fb, renderer, cx, cy, covers[idx].as_ref(), title);
+            }
             CellKind::Series { name, count } => {
+                let name = grid::Label { text: name, script };
                 grid::draw_series_cell(fb, renderer, cx, cy, covers[idx].as_ref(), *count, name);
             }
         }
@@ -1676,17 +1679,18 @@ fn fetch_and_paint_page(
         if let Some(img) = img.as_ref() {
             let (cx, cy) = grid::cell_xy(grid_left, grid_top, idx - start);
             if cx >= 0 && cy >= 0 {
+                let script = font::Script::of_language(&cells[idx].cover_book.language);
                 match &cells[idx].kind {
-                    CellKind::Book => grid::draw_book_cell(
-                        fb,
-                        renderer,
-                        cx,
-                        cy,
-                        Some(img),
-                        &cells[idx].cover_book.title,
-                    ),
+                    CellKind::Book => {
+                        let title = grid::Label {
+                            text: &cells[idx].cover_book.title,
+                            script,
+                        };
+                        grid::draw_book_cell(fb, renderer, cx, cy, Some(img), title);
+                    }
                     CellKind::Series { name, count } => {
-                        grid::draw_series_cell(fb, renderer, cx, cy, Some(img), *count, name)
+                        let name = grid::Label { text: name, script };
+                        grid::draw_series_cell(fb, renderer, cx, cy, Some(img), *count, name);
                     }
                 }
                 fb.send_update(

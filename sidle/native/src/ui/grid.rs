@@ -11,7 +11,18 @@ use image::{DynamicImage, ImageReader, imageops::FilterType};
 use std::io::Cursor;
 
 use crate::eink::fb::Framebuffer;
+use crate::font::Script;
 use crate::ui::text::TextRenderer;
+
+/// The text in a tile's name band, together with the convention it should be
+/// set in. The two always travel as a pair: a title handed over without its
+/// language is exactly the case that draws Chinese in Japanese shapes (see
+/// [`crate::font`]).
+#[derive(Clone, Copy)]
+pub struct Label<'a> {
+    pub text: &'a str,
+    pub script: Script,
+}
 
 pub const COLS: usize = 3;
 pub const CELL_W: u32 = 360;
@@ -417,7 +428,7 @@ fn draw_cover_tile(
     cell_y: i32,
     top_inset: u32,
     cover: Option<&DynamicImage>,
-    label: &str,
+    label: Label,
 ) -> (i32, i32, u32, u32) {
     if cell_x < 0 || cell_y < 0 {
         return (cell_x, cell_y, 0, 0);
@@ -443,12 +454,13 @@ fn draw_cover_tile(
     let band_top = cell_y as u32 + (CELL_H - NAME_BAND_H);
     fb.fill_rect(band_top, cell_x as u32, CELL_W, 2, 0x00);
     const PAD: u32 = 16;
-    let lines = renderer.wrap_and_clamp(label, CELL_W.saturating_sub(PAD * 2), 1);
+    let width = CELL_W.saturating_sub(PAD * 2);
+    let lines = renderer.wrap_and_clamp_in(label.script, label.text, width, 1);
     if let Some(line) = lines.first() {
-        let lw = renderer.measure_width(line);
+        let lw = renderer.measure_width_in(label.script, line);
         let lx = cell_x + ((CELL_W as i32 - lw as i32) / 2).max(0);
         let baseline = band_top as i32 + (NAME_BAND_H * 62 / 100) as i32;
-        renderer.draw(fb, lx, baseline, line, false);
+        renderer.draw_in(label.script, fb, lx, baseline, line, false);
     }
     rect
 }
@@ -465,7 +477,7 @@ pub fn draw_book_cell(
     cell_x: i32,
     cell_y: i32,
     cover: Option<&DynamicImage>,
-    title: &str,
+    title: Label,
 ) {
     draw_cover_tile(fb, renderer, cell_x, cell_y, 0, cover, title);
 }
@@ -483,7 +495,7 @@ pub fn draw_series_cell(
     cell_y: i32,
     cover: Option<&DynamicImage>,
     count: usize,
-    name: &str,
+    name: Label,
 ) {
     // Series reserve BAR_STRIP_H above the cover for the stack bars; the cover
     // is otherwise identical to a book's, so the two line up in the grid.

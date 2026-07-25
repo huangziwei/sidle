@@ -16,6 +16,15 @@
 //! convention for the book. Whole-string selection keeps one convention per
 //! title and drops to per-character only when no single face covers the run.
 //!
+//! Coverage alone can't get this right, because it only ever sees what a face
+//! *lacks*. A Traditional Chinese title is covered by the Japanese face
+//! almost completely — so coverage keeps it there, in Japanese shapes, and
+//! nothing looks broken enough to notice. The book's own language tag is the
+//! better evidence, so a caller that knows it ([`Script::of_language`]) passes
+//! it in and the chain is tried in that order. The hint only *reorders*:
+//! coverage still decides which face actually draws, so a missing or wrong
+//! tag costs regional shapes, never glyphs.
+//!
 //! Fallback faces are parsed on first miss, never at startup: fontdue
 //! outlines every glyph in a face's cmap when it reads the file, and the
 //! Chinese faces are ~10 MB against the Japanese face's 3.8 MB. A shelf of
@@ -29,21 +38,83 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow};
 use fontdue::{Font, FontSettings};
 
+/// The regional convention a run of text should be set in. A face sets one;
+/// a book asks for one through its language tag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Script {
+    /// No preference — either the text's language is unknown or it doesn't
+    /// pick out a CJK convention. Also what a pan-Unicode face sets, so
+    /// `Unknown` deliberately promotes nothing.
+    #[default]
+    Unknown,
+    Japanese,
+    SimplifiedChinese,
+    TraditionalChinese,
+}
+
+impl Script {
+    /// Read a language tag as a preference. Accepts the BCP-47 shapes that
+    /// turn up in ebook metadata, `_` or `-` separated and in any case.
+    pub fn of_language(tag: &str) -> Script {
+        let mut subtags = tag.split(['-', '_']).map(str::trim);
+        let primary = subtags.next().unwrap_or_default().to_ascii_lowercase();
+        match primary.as_str() {
+            // `jp` is a country code rather than a language, but it is what
+            // some imported metadata carries.
+            "ja" | "jp" => Script::Japanese,
+            // Written Cantonese is set in traditional characters — CLDR
+            // resolves `yue` to `yue-Hant-HK`.
+            "yue" => Script::TraditionalChinese,
+            "zh" => {
+                for subtag in subtags {
+                    match subtag.to_ascii_lowercase().as_str() {
+                        "hant" | "tw" | "hk" | "mo" => return Script::TraditionalChinese,
+                        "hans" | "cn" | "sg" => return Script::SimplifiedChinese,
+                        _ => {}
+                    }
+                }
+                // Bare `zh` is Simplified: CLDR resolves it to `zh-Hans-CN`.
+                Script::SimplifiedChinese
+            }
+            _ => Script::Unknown,
+        }
+    }
+}
+
+/// One face the device might have, and the convention it sets.
+pub struct Candidate {
+    pub path: &'static str,
+    pub script: Script,
+}
+
 /// Faces to draw with, best first, at their paths on KOA2 firmware 5.16
 /// (`/usr/java/lib/fonts`). Absent entries are skipped when the chain loads,
 /// so the list is safe to extend for firmware that ships more.
 ///
-/// Japanese leads: it is the bulk of the library, and a Chinese face would
-/// hand Japanese text Chinese shapes. `STHeitiMedium` (Simplified) and
-/// `STHeitiTC` (Traditional) are Heiti sans at the same *Medium* weight as
-/// `TBGothicMed` — weight matters because the renderer thresholds coverage to
-/// one bit and a Regular face thins out under the cut. `code2000` is a
-/// pan-Unicode catch-all and the last resort before the missing-glyph mark.
-pub const CANDIDATES: &[&str] = &[
-    "/usr/java/lib/fonts/TBGothicMed_213.ttf",
-    "/usr/java/lib/fonts/STHeitiMedium.ttf",
-    "/usr/java/lib/fonts/STHeitiTC.ttf",
-    "/usr/java/lib/fonts/code2000.ttf",
+/// Japanese leads because it is the bulk of the library and the best default
+/// for an untagged book; a language hint reorders from there.
+/// `STHeitiMedium` (Simplified) and `STHeitiTC` (Traditional) are Heiti sans
+/// at the same *Medium* weight as `TBGothicMed` — weight matters because the
+/// renderer thresholds coverage to one bit and a Regular face thins out under
+/// the cut. `code2000` is a pan-Unicode catch-all and the last resort before
+/// the missing-glyph mark, which is why it claims no script of its own.
+pub const CANDIDATES: &[Candidate] = &[
+    Candidate {
+        path: "/usr/java/lib/fonts/TBGothicMed_213.ttf",
+        script: Script::Japanese,
+    },
+    Candidate {
+        path: "/usr/java/lib/fonts/STHeitiMedium.ttf",
+        script: Script::SimplifiedChinese,
+    },
+    Candidate {
+        path: "/usr/java/lib/fonts/STHeitiTC.ttf",
+        script: Script::TraditionalChinese,
+    },
+    Candidate {
+        path: "/usr/java/lib/fonts/code2000.ttf",
+        script: Script::Unknown,
+    },
 ];
 
 /// Which face draws a run of text. Made once per string and then consulted
@@ -54,50 +125,46 @@ pub enum Selection {
     /// This face has every character in the run — draw it all with that one.
     Whole(usize),
     /// No single face covers the run; resolve per character and accept the
-    /// mixed shapes, which still beats a hole in the text.
-    PerChar,
+    /// mixed shapes, which still beats a hole in the text. Carries the run's
+    /// preference so each character is still resolved in the wanted order.
+    PerChar(Script),
 }
 
-/// First of `faces` that has every visible character of `text`, else
-/// [`Selection::PerChar`].
+/// Order to try faces in: the one that sets the wanted convention first, then
+/// the rest of the chain as declared.
 ///
-/// `has_glyph(face, ch)` answers coverage; it is called in chain order and
-/// only until a face misses, so a face that no string needs is never
-/// consulted (and, in the renderer, never read from disk).
-pub fn select<F>(text: &str, faces: usize, mut has_glyph: F) -> Selection
+/// `promoted` is a chain position, not an index into [`CANDIDATES`] — a
+/// firmware missing a face shortens the chain.
+pub fn visiting_order(faces: usize, promoted: Option<usize>) -> impl Iterator<Item = usize> {
+    promoted
+        .into_iter()
+        .chain((0..faces).filter(move |face| Some(*face) != promoted))
+}
+
+/// First face in `order` that has every visible character of `text`.
+///
+/// `has_glyph(face, ch)` answers coverage; it is asked only until a face
+/// misses, so a face that no string needs is never consulted (and, in the
+/// renderer, never read from disk).
+pub fn covering_face<I, F>(text: &str, order: I, mut has_glyph: F) -> Option<usize>
 where
+    I: IntoIterator<Item = usize>,
     F: FnMut(usize, char) -> bool,
 {
-    for face in 0..faces {
-        if text
-            .chars()
+    order.into_iter().find(|&face| {
+        text.chars()
             .filter(|c| !is_invisible(*c))
             .all(|c| has_glyph(face, c))
-        {
-            return Selection::Whole(face);
-        }
-    }
-    Selection::PerChar
+    })
 }
 
-/// Face that draws `ch`, or `None` when no face in the chain has it.
-///
-/// `selection` must be the one [`select`] made for a string containing `ch`:
-/// under [`Selection::Whole`] that face is already known to cover the run, so
-/// the oracle is not consulted again.
-pub fn face_for_char<F>(
-    selection: Selection,
-    ch: char,
-    faces: usize,
-    mut has_glyph: F,
-) -> Option<usize>
+/// First face in `order` that has `ch`, or `None` when none does.
+pub fn face_with<I, F>(ch: char, order: I, mut has_glyph: F) -> Option<usize>
 where
+    I: IntoIterator<Item = usize>,
     F: FnMut(usize, char) -> bool,
 {
-    match selection {
-        Selection::Whole(face) => Some(face),
-        Selection::PerChar => (0..faces).find(|&face| has_glyph(face, ch)),
-    }
+    order.into_iter().find(|&face| has_glyph(face, ch))
 }
 
 /// Zero-width / formatting code points that carry no glyph: the BOM and
@@ -123,6 +190,7 @@ pub fn is_invisible(c: char) -> bool {
 pub struct FontChain {
     primary: Font,
     primary_path: PathBuf,
+    primary_script: Script,
     rest: Vec<Face>,
 }
 
@@ -132,6 +200,7 @@ pub struct FontChain {
 /// [`FontChain::paths`] reports.
 struct Face {
     path: PathBuf,
+    script: Script,
     state: State,
 }
 
@@ -154,32 +223,34 @@ impl FontChain {
     /// Fails only when none of them loads. A firmware that has moved or
     /// dropped one face is not a reason to refuse to start — the picker draws
     /// with whatever it finds, and only an empty chain has nothing to say.
-    pub fn load(candidates: &[&str]) -> Result<Self> {
+    pub fn load(candidates: &[Candidate]) -> Result<Self> {
         // Existence is settled here, parsing is not: a stat per candidate is
         // free, and it keeps `paths` an honest account of this device.
         let mut present = candidates
             .iter()
-            .map(Path::new)
-            .filter(|path| path.is_file());
+            .filter(|candidate| Path::new(candidate.path).is_file());
         let mut primary = None;
-        for path in present.by_ref() {
-            if let Some(font) = read_face(path) {
-                primary = Some((font, path.to_path_buf()));
+        for candidate in present.by_ref() {
+            if let Some(font) = read_face(Path::new(candidate.path)) {
+                primary = Some((font, candidate));
                 break;
             }
         }
-        let Some((primary, primary_path)) = primary else {
-            return Err(anyhow!("no usable font among {candidates:?}"));
+        let Some((primary, first)) = primary else {
+            let tried: Vec<&str> = candidates.iter().map(|c| c.path).collect();
+            return Err(anyhow!("no usable font among {tried:?}"));
         };
         let rest = present
-            .map(|path| Face {
-                path: path.to_path_buf(),
+            .map(|candidate| Face {
+                path: PathBuf::from(candidate.path),
+                script: candidate.script,
                 state: State::Pending,
             })
             .collect();
         Ok(Self {
             primary,
-            primary_path,
+            primary_path: PathBuf::from(first.path),
+            primary_script: first.script,
             rest,
         })
     }
@@ -204,23 +275,46 @@ impl FontChain {
         &self.primary
     }
 
-    /// Face for the whole of `text` — see [`select`].
-    pub fn select(&mut self, text: &str) -> Selection {
-        let faces = self.faces();
-        select(text, faces, |face, ch| {
+    /// Face for the whole of `text`, preferring the one that sets `script` —
+    /// see [`covering_face`].
+    pub fn select(&mut self, text: &str, script: Script) -> Selection {
+        let order = visiting_order(self.faces(), self.promoted(script));
+        match covering_face(text, order, |face, ch| {
             self.ensure(face).is_some_and(|font| font.has_glyph(ch))
-        })
+        }) {
+            Some(face) => Selection::Whole(face),
+            None => Selection::PerChar(script),
+        }
     }
 
     /// The face index and the face itself for `ch` under `selection`, or
     /// `None` when nothing in the chain has the character. The index is the
     /// glyph cache's key: two faces rasterize the same codepoint differently.
     pub fn glyph_source(&mut self, selection: Selection, ch: char) -> Option<(usize, &Font)> {
-        let faces = self.faces();
-        let face = face_for_char(selection, ch, faces, |face, c| {
-            self.ensure(face).is_some_and(|font| font.has_glyph(c))
-        })?;
+        let face = match selection {
+            Selection::Whole(face) => face,
+            Selection::PerChar(script) => {
+                let order = visiting_order(self.faces(), self.promoted(script));
+                face_with(ch, order, |face, c| {
+                    self.ensure(face).is_some_and(|font| font.has_glyph(c))
+                })?
+            }
+        };
         self.ensure(face).map(|font| (face, font))
+    }
+
+    /// Chain position of the face that sets `script`, if this device has it.
+    ///
+    /// [`Script::Unknown`] promotes nothing: it means "no preference", and it
+    /// is also what the pan-Unicode catch-all sets — matching on it would put
+    /// the chain's weakest face first.
+    fn promoted(&self, script: Script) -> Option<usize> {
+        if script == Script::Unknown {
+            return None;
+        }
+        std::iter::once(self.primary_script)
+            .chain(self.rest.iter().map(|face| face.script))
+            .position(|candidate| candidate == script)
     }
 
     /// Face `index`, reading it from disk on first use.
@@ -261,13 +355,19 @@ mod tests {
         move |face, ch| faces[face].contains(ch)
     }
 
+    /// The chain tried in declared order — what a caller that knows nothing
+    /// about the text's language gets.
+    fn unhinted(faces: &[&str]) -> impl Iterator<Item = usize> {
+        visiting_order(faces.len(), None)
+    }
+
     #[test]
     fn a_run_one_face_covers_is_drawn_entirely_by_it() {
         // Every character is in face 0, so the fallback is never consulted —
         // a Japanese title keeps Japanese shapes throughout.
         let faces = ["あいう漢字", "汉字"];
-        let sel = select("漢字あい", faces.len(), repertoires(&faces));
-        assert_eq!(sel, Selection::Whole(0));
+        let face = covering_face("漢字あい", unhinted(&faces), repertoires(&faces));
+        assert_eq!(face, Some(0));
     }
 
     #[test]
@@ -275,10 +375,8 @@ mod tests {
         // 楼 is in both faces, 红 only in face 1. Selection is per string, so
         // 楼 is drawn by face 1 too rather than picking up face 0's shapes.
         let faces = ["楼梦", "红楼梦魇"];
-        let sel = select("红楼梦魇", faces.len(), repertoires(&faces));
-        assert_eq!(sel, Selection::Whole(1));
         assert_eq!(
-            face_for_char(sel, '楼', faces.len(), repertoires(&faces)),
+            covering_face("红楼梦魇", unhinted(&faces), repertoires(&faces)),
             Some(1)
         );
     }
@@ -286,14 +384,16 @@ mod tests {
     #[test]
     fn a_run_no_single_face_covers_resolves_per_character() {
         let faces = ["あ", "汉"];
-        let sel = select("あ汉", faces.len(), repertoires(&faces));
-        assert_eq!(sel, Selection::PerChar);
         assert_eq!(
-            face_for_char(sel, 'あ', faces.len(), repertoires(&faces)),
+            covering_face("あ汉", unhinted(&faces), repertoires(&faces)),
+            None
+        );
+        assert_eq!(
+            face_with('あ', unhinted(&faces), repertoires(&faces)),
             Some(0)
         );
         assert_eq!(
-            face_for_char(sel, '汉', faces.len(), repertoires(&faces)),
+            face_with('汉', unhinted(&faces), repertoires(&faces)),
             Some(1)
         );
     }
@@ -301,12 +401,7 @@ mod tests {
     #[test]
     fn a_character_no_face_has_resolves_to_nothing() {
         let faces = ["あ", "汉"];
-        let sel = select("あ𐀀", faces.len(), repertoires(&faces));
-        assert_eq!(sel, Selection::PerChar);
-        assert_eq!(
-            face_for_char(sel, '𐀀', faces.len(), repertoires(&faces)),
-            None
-        );
+        assert_eq!(face_with('𐀀', unhinted(&faces), repertoires(&faces)), None);
     }
 
     #[test]
@@ -314,19 +409,93 @@ mod tests {
         // A title carrying a stray BOM must not be pushed off the face that
         // covers its visible text — no face has a glyph for U+FEFF.
         let faces = ["あいう", "汉字"];
-        let sel = select("あ\u{FEFF}い", faces.len(), repertoires(&faces));
-        assert_eq!(sel, Selection::Whole(0));
+        assert_eq!(
+            covering_face("あ\u{FEFF}い", unhinted(&faces), repertoires(&faces)),
+            Some(0)
+        );
         assert!(is_invisible('\u{FEFF}'));
         assert!(!is_invisible('あ'));
     }
 
     #[test]
-    fn an_empty_run_selects_the_primary() {
+    fn an_empty_run_selects_the_first_face() {
         let faces = ["あ"];
         assert_eq!(
-            select("", faces.len(), repertoires(&faces)),
-            Selection::Whole(0)
+            covering_face("", unhinted(&faces), repertoires(&faces)),
+            Some(0)
         );
+    }
+
+    #[test]
+    fn a_hint_moves_its_face_to_the_front_and_keeps_the_rest_in_order() {
+        assert_eq!(visiting_order(4, Some(2)).collect::<Vec<_>>(), [2, 0, 1, 3]);
+        assert_eq!(visiting_order(4, None).collect::<Vec<_>>(), [0, 1, 2, 3]);
+        assert_eq!(visiting_order(4, Some(0)).collect::<Vec<_>>(), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_hint_wins_over_a_face_that_would_also_have_covered_the_run() {
+        // The whole point of the hint: face 0 (Japanese) has every character
+        // of this Traditional title, so coverage alone would leave it there
+        // in Japanese shapes. The Traditional face is face 2.
+        let faces = ["粵語語法講義", "粤语语法讲义", "粵語語法講義"];
+        assert_eq!(
+            covering_face("粵語語法講義", visiting_order(3, None), repertoires(&faces)),
+            Some(0)
+        );
+        assert_eq!(
+            covering_face(
+                "粵語語法講義",
+                visiting_order(3, Some(2)),
+                repertoires(&faces)
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn a_hinted_face_that_misses_still_loses_to_coverage() {
+        // A wrong language tag costs regional shapes, never glyphs.
+        let faces = ["紅樓夢魘", "红楼梦魇"];
+        assert_eq!(
+            covering_face("红楼梦魇", visiting_order(2, Some(0)), repertoires(&faces)),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn language_tags_name_the_convention_they_are_set_in() {
+        assert_eq!(Script::of_language("ja"), Script::Japanese);
+        // A country code where a language belongs — real imported metadata.
+        assert_eq!(Script::of_language("jp"), Script::Japanese);
+        assert_eq!(Script::of_language("zh-Hant"), Script::TraditionalChinese);
+        assert_eq!(Script::of_language("zh_TW"), Script::TraditionalChinese);
+        assert_eq!(Script::of_language("ZH-HK"), Script::TraditionalChinese);
+        assert_eq!(Script::of_language("yue"), Script::TraditionalChinese);
+        assert_eq!(Script::of_language("zh-Hans"), Script::SimplifiedChinese);
+        assert_eq!(Script::of_language("zh-CN"), Script::SimplifiedChinese);
+        // Bare `zh` is Simplified, per CLDR's likely subtags.
+        assert_eq!(Script::of_language("zh"), Script::SimplifiedChinese);
+        // Nothing in the chain sets these, so they express no preference.
+        assert_eq!(Script::of_language("en"), Script::Unknown);
+        assert_eq!(Script::of_language("ko"), Script::Unknown);
+        assert_eq!(Script::of_language(""), Script::Unknown);
+    }
+
+    #[test]
+    fn every_script_a_tag_can_name_is_set_by_some_candidate() {
+        // A hint nothing in the chain can honour is a silent no-op, so the
+        // two tables have to stay in step.
+        for script in [
+            Script::Japanese,
+            Script::SimplifiedChinese,
+            Script::TraditionalChinese,
+        ] {
+            assert!(
+                CANDIDATES.iter().any(|c| c.script == script),
+                "no candidate sets {script:?}"
+            );
+        }
     }
 
     #[test]
@@ -334,7 +503,11 @@ mod tests {
         // The one case that is fatal. Individually missing candidates are not
         // (they are simply skipped), but that path needs a real font file and
         // so is only exercised on the device.
-        let Err(err) = FontChain::load(&["/nonexistent/font.ttf"]) else {
+        let nowhere = [Candidate {
+            path: "/nonexistent/font.ttf",
+            script: Script::Japanese,
+        }];
+        let Err(err) = FontChain::load(&nowhere) else {
             panic!("a chain over a path that isn't there has nothing to draw with");
         };
         assert!(err.to_string().contains("no usable font"));
