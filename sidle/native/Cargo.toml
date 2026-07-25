@@ -44,11 +44,20 @@ base64 = "0.22"
 # Versions match the desktop side so device and Mac hashes are byte-identical.
 sha2 = "0.10"
 hex = "0.4"
-# fontdue: TTF rasterizer. Pure Rust, no system deps. We load the Kindle's
-# bundled Japanese font (TBGothic) at /usr/java/lib/fonts/ — no need to
-# ship our own CJK font. Coverage bitmap gets thresholded for crisp eink
-# rendering (DU waveform is B/W; antialiased gray turns muddy).
-fontdue = { version = "0.9", default-features = false, features = ["std"] }
+# ab_glyph: TTF rasterizer over the Kindle's own bundled faces in
+# /usr/java/lib/fonts/ — no need to ship a font. Coverage gets thresholded for
+# crisp eink rendering (DU waveform is B/W; antialiased gray turns muddy).
+#
+# Chosen over fontdue for one reason: it outlines a glyph when asked, where
+# fontdue outlines every glyph in a face's cmap at parse time and keeps the
+# geometry. Measured on one 23.5 MB CJK face: fontdue 308 MB resident and 0.5s
+# to parse, ab_glyph 24 MB (the file itself) and no measurable parse. The
+# device has 512 MB shared with the framework, so the difference is whether a
+# second CJK face can be loaded at all.
+#
+# Pure Rust all the way down (ab_glyph_rasterizer has no deps;
+# owned_ttf_parser wraps ttf-parser), so the static musl cross-link holds.
+ab_glyph = "0.2"
 # image: cover JPG/PNG decode + resize. Feature-gated to just the two
 # formats the server returns (.jpg from EPUB / Amazon, occasional .png).
 # All sub-deps (jpeg-decoder, png) are pure Rust.

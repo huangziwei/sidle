@@ -1,11 +1,11 @@
 //! Text rasterization onto the framebuffer.
 //!
 //! Glyphs come from a fallback chain over the faces the device already ships
-//! (see [`crate::font`]), rasterized at a fixed size via fontdue. fontdue
-//! returns an 8-bit coverage bitmap; we threshold it to 1-bit because eink's
-//! DU waveform is B/W and antialiased gray smears on the panel. Coverage
-//! above 96/255 becomes a black pixel, below stays white. Crisp at small
-//! sizes; would need GC16 + dithering for true grayscale text.
+//! (see [`crate::font`]), outlined one at a time at a fixed size via
+//! ab_glyph. The rasterizer reports per-pixel coverage; we threshold it to
+//! 1-bit because eink's DU waveform is B/W and antialiased gray smears on the
+//! panel. Coverage above 96/255 becomes a black pixel, below stays white.
+//! Crisp at small sizes; would need GC16 + dithering for true grayscale text.
 //!
 //! A character no face in the chain has draws a deliberate hollow box.
 //! Handing it to the rasterizer instead blits the font's own `.notdef`,
@@ -19,18 +19,33 @@
 
 use std::collections::HashMap;
 
+use ab_glyph::{Font as _, FontVec, ScaleFont as _};
 use anyhow::Result;
-use fontdue::Metrics;
 
 use crate::eink::fb::Framebuffer;
 use crate::font::{self, FontChain};
 
 const COVERAGE_THRESHOLD: u8 = 96;
 
+/// One rasterized glyph: where it sits relative to the pen, and its coverage.
+///
+/// Offsets are what the blit needs and nothing more — `left` from the pen's x,
+/// `top` from the baseline and growing *downward*, matching the rasterizer's
+/// screen-space convention. A glyph with no outline (a space) keeps its
+/// advance and carries an empty bitmap.
+struct Raster {
+    advance: f32,
+    left: i32,
+    top: i32,
+    width: usize,
+    height: usize,
+    coverage: Vec<u8>,
+}
+
 pub struct TextRenderer {
     chain: FontChain,
     px: f32,
-    cache: HashMap<(char, u32, usize), (Metrics, Vec<u8>)>,
+    cache: HashMap<(char, u32, usize), Raster>,
 }
 
 impl TextRenderer {
@@ -53,14 +68,11 @@ impl TextRenderer {
     }
 
     pub fn line_height(&self) -> u32 {
-        // fontdue's `horizontal_line_metrics` is the canonical value; round
-        // up so adjacent rows don't tear into each other. Always the primary
-        // face's, so a row keeps its height whichever face draws the text.
-        self.chain
-            .primary()
-            .horizontal_line_metrics(self.px)
-            .map(|m| (m.ascent - m.descent + m.line_gap).ceil() as u32)
-            .unwrap_or((self.px * 1.4) as u32)
+        // The face's own vertical metrics; round up so adjacent rows don't
+        // tear into each other. Always the primary face's, so a row keeps its
+        // height whichever face draws the text.
+        let face = self.chain.primary().as_scaled(self.px);
+        (face.height() + face.line_gap()).ceil().max(1.0) as u32
     }
 
     /// Total advance width of `s` at the current px. Used by the overlay
@@ -88,8 +100,8 @@ impl TextRenderer {
                     let entry = self
                         .cache
                         .entry((ch, px_key, face))
-                        .or_insert_with(|| font.rasterize(ch, px));
-                    entry.0.advance_width.round().max(0.0) as u32
+                        .or_insert_with(|| rasterize(font, ch, px));
+                    entry.advance.round().max(0.0) as u32
                 }
                 None => missing_advance(px),
             };
@@ -168,15 +180,20 @@ impl TextRenderer {
             match self.chain.glyph_source(selection, ch) {
                 // Cache key uses bit pattern of f32 — same px always keys the same.
                 Some((face, font)) => {
-                    let entry = self
+                    let glyph = self
                         .cache
                         .entry((ch, px_key, face))
-                        .or_insert_with(|| font.rasterize(ch, px));
-                    let (metrics, bitmap) = entry;
-                    let gx0 = cur_x + metrics.xmin;
-                    let gy0 = y_baseline - metrics.height as i32 - metrics.ymin;
-                    blit_threshold(fb, gx0, gy0, metrics.width, metrics.height, bitmap, fg);
-                    cur_x += metrics.advance_width.round() as i32;
+                        .or_insert_with(|| rasterize(font, ch, px));
+                    blit_threshold(
+                        fb,
+                        cur_x + glyph.left,
+                        y_baseline + glyph.top,
+                        glyph.width,
+                        glyph.height,
+                        &glyph.coverage,
+                        fg,
+                    );
+                    cur_x += glyph.advance.round() as i32;
                 }
                 None => {
                     draw_missing(fb, cur_x, y_baseline, px, fg);
@@ -185,6 +202,47 @@ impl TextRenderer {
             }
         }
         cur_x
+    }
+}
+
+/// Outline `ch` from `font` at `px` and collect its coverage.
+///
+/// The rasterizer works in screen space — y grows downward from the baseline —
+/// so the bounds it reports are already the offsets the blit wants. A
+/// character with no outline at all (a space, or a glyph defined as blank)
+/// still has an advance, and returns an empty bitmap rather than nothing.
+fn rasterize(font: &FontVec, ch: char, px: f32) -> Raster {
+    let id = font.glyph_id(ch);
+    let advance = font.as_scaled(px).h_advance(id);
+    let Some(outline) = font.outline_glyph(id.with_scale(px)) else {
+        return Raster {
+            advance,
+            left: 0,
+            top: 0,
+            width: 0,
+            height: 0,
+            coverage: Vec::new(),
+        };
+    };
+    // Bounds are already whole pixels (floored/ceiled), and the rasterizer
+    // sizes its grid with this same expression — matching it keeps the buffer
+    // exactly the extent `draw` emits into.
+    let bounds = outline.px_bounds();
+    let (width, height) = (bounds.width() as usize, bounds.height() as usize);
+    let mut coverage = vec![0u8; width * height];
+    outline.draw(|x, y, c| {
+        let (x, y) = (x as usize, y as usize);
+        if x < width && y < height {
+            coverage[y * width + x] = (c * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    });
+    Raster {
+        advance,
+        left: bounds.min.x.round() as i32,
+        top: bounds.min.y.round() as i32,
+        width,
+        height,
+        coverage,
     }
 }
 

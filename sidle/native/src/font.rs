@@ -25,18 +25,21 @@
 //! coverage still decides which face actually draws, so a missing or wrong
 //! tag costs regional shapes, never glyphs.
 //!
-//! Fallback faces are parsed on first miss, never at startup: fontdue
-//! outlines every glyph in a face's cmap when it reads the file, and the
-//! Chinese faces are ~10 MB against the Japanese face's 3.8 MB. A shelf of
-//! Japanese and Latin titles never touches them.
+//! Fallback faces are read on first miss, never at startup. A loaded face
+//! costs its file size in resident bytes — the Chinese faces are ~10 MB each
+//! against the Japanese face's 3.8 MB — and a shelf of Japanese and Latin
+//! titles never needs them. (The rasterizer outlines a glyph when asked
+//! rather than the whole cmap up front, so reading the file is the entire
+//! cost; a rasterizer that front-loads the glyph geometry cannot fit a
+//! second CJK face on this device at all.)
 //!
 //! The selection policy is a free function over a coverage oracle so it can
 //! be exercised on the host, where none of these faces exist.
 
 use std::path::{Path, PathBuf};
 
+use ab_glyph::{Font as _, FontVec};
 use anyhow::{Result, anyhow};
-use fontdue::{Font, FontSettings};
 
 /// The regional convention a run of text should be set in. A face sets one;
 /// a book asks for one through its language tag.
@@ -188,7 +191,7 @@ pub fn is_invisible(c: char) -> bool {
 /// An ordered set of faces: the first usable candidate, read up front, plus
 /// the rest of the chain waiting on disk.
 pub struct FontChain {
-    primary: Font,
+    primary: FontVec,
     primary_path: PathBuf,
     primary_script: Script,
     rest: Vec<Face>,
@@ -207,9 +210,7 @@ struct Face {
 enum State {
     /// On disk, not parsed yet.
     Pending,
-    /// Boxed so an unparsed slot stays a word wide — a parsed face is 200-odd
-    /// bytes and most of the chain never loads.
-    Loaded(Box<Font>),
+    Loaded(FontVec),
     /// Could not be read or parsed after all. Skipped from here on, so a bad
     /// candidate costs one failed attempt per session.
     Absent,
@@ -271,7 +272,7 @@ impl FontChain {
 
     /// The face line metrics come from, so every row is the same height
     /// whichever face ends up drawing it.
-    pub fn primary(&self) -> &Font {
+    pub fn primary(&self) -> &FontVec {
         &self.primary
     }
 
@@ -280,7 +281,7 @@ impl FontChain {
     pub fn select(&mut self, text: &str, script: Script) -> Selection {
         let order = visiting_order(self.faces(), self.promoted(script));
         match covering_face(text, order, |face, ch| {
-            self.ensure(face).is_some_and(|font| font.has_glyph(ch))
+            self.ensure(face).is_some_and(|font| has_glyph(font, ch))
         }) {
             Some(face) => Selection::Whole(face),
             None => Selection::PerChar(script),
@@ -290,13 +291,13 @@ impl FontChain {
     /// The face index and the face itself for `ch` under `selection`, or
     /// `None` when nothing in the chain has the character. The index is the
     /// glyph cache's key: two faces rasterize the same codepoint differently.
-    pub fn glyph_source(&mut self, selection: Selection, ch: char) -> Option<(usize, &Font)> {
+    pub fn glyph_source(&mut self, selection: Selection, ch: char) -> Option<(usize, &FontVec)> {
         let face = match selection {
             Selection::Whole(face) => face,
             Selection::PerChar(script) => {
                 let order = visiting_order(self.faces(), self.promoted(script));
                 face_with(ch, order, |face, c| {
-                    self.ensure(face).is_some_and(|font| font.has_glyph(c))
+                    self.ensure(face).is_some_and(|font| has_glyph(font, c))
                 })?
             }
         };
@@ -318,30 +319,37 @@ impl FontChain {
     }
 
     /// Face `index`, reading it from disk on first use.
-    fn ensure(&mut self, index: usize) -> Option<&Font> {
+    fn ensure(&mut self, index: usize) -> Option<&FontVec> {
         if index == 0 {
             return Some(&self.primary);
         }
         let face = self.rest.get_mut(index - 1)?;
         if matches!(face.state, State::Pending) {
             face.state = match read_face(&face.path) {
-                Some(font) => State::Loaded(Box::new(font)),
+                Some(font) => State::Loaded(font),
                 None => State::Absent,
             };
         }
         match &face.state {
-            State::Loaded(font) => Some(font.as_ref()),
+            State::Loaded(font) => Some(font),
             State::Pending | State::Absent => None,
         }
     }
 }
 
+/// Whether `font` can draw `ch` at all. Glyph 0 is `.notdef`, which is what a
+/// face hands back for a character it doesn't have — asking for it is how the
+/// tofu got drawn in the first place.
+pub fn has_glyph(font: &FontVec, ch: char) -> bool {
+    font.glyph_id(ch).0 != 0
+}
+
 /// Read and parse one candidate. `None` covers both a path this firmware
-/// doesn't have and a file fontdue can't parse: either way the answer is
-/// "skip this face", not "fail" — the chain only has to keep one.
-fn read_face(path: &Path) -> Option<Font> {
+/// doesn't have and a file that won't parse: either way the answer is "skip
+/// this face", not "fail" — the chain only has to keep one.
+fn read_face(path: &Path) -> Option<FontVec> {
     let bytes = std::fs::read(path).ok()?;
-    Font::from_bytes(bytes, FontSettings::default()).ok()
+    FontVec::try_from_vec(bytes).ok()
 }
 
 #[cfg(test)]
