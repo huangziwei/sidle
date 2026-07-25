@@ -18,8 +18,9 @@
 pub mod xpath;
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
-use xpath::{Context, Item, NodeRef, XPath, XPathError};
+use xpath::{Bindings, Context, Item, NodeRef, XPath, XPathError};
 
 use crate::validate::source::epub::xml::tree::{Document, NodeId, NodeKind};
 
@@ -382,12 +383,12 @@ impl Schema {
         let all: Vec<NodeId> = doc.descendants(doc.root());
 
         // Global `<let>`s are evaluated once, against the document node.
-        let mut globals: HashMap<String, Vec<Item>> = HashMap::new();
+        let mut globals: Bindings = HashMap::new();
         for (name, expr) in &self.lets {
             let mut ctx = Context::new(doc, NodeRef::element(doc.root()));
             ctx.vars = globals.clone();
             if let Ok(value) = expr.eval(&ctx) {
-                globals.insert(name.clone(), value);
+                globals.insert(name.clone(), Rc::new(value));
             }
         }
 
@@ -397,7 +398,7 @@ impl Schema {
                 let mut ctx = Context::new(doc, NodeRef::element(doc.root()));
                 ctx.vars = vars.clone();
                 if let Ok(value) = expr.eval(&ctx) {
-                    vars.insert(name.clone(), value);
+                    vars.insert(name.clone(), Rc::new(value));
                 }
             }
 
@@ -405,25 +406,32 @@ impl Schema {
             // the results intersected with what earlier rules already claimed —
             // far cheaper than re-testing every rule at every node, and it is
             // what "the first matching rule wins" means.
-            let mut claimed: Vec<NodeId> = Vec::new();
+            //
+            // Both memberships are sets, one slot per node: a chapter-sized
+            // document has as many nodes as a rule can select, so testing them
+            // by scanning made the walk quadratic in document size — 800 KB of
+            // XHTML took eighteen minutes, all of it here.
+            let mut claimed = vec![false; doc.len()];
             for rule in &pattern.rules {
                 let mut ctx = Context::new(doc, NodeRef::element(doc.root()));
                 ctx.vars = vars.clone();
                 let Ok(selected) = rule.context.eval(&ctx) else {
                     continue;
                 };
-                let selected: Vec<NodeId> = selected
-                    .iter()
-                    .filter_map(|i| match i {
-                        Item::Node(n) if n.attr.is_none() => Some(n.node),
-                        _ => None,
-                    })
-                    .collect();
+                let mut is_selected = vec![false; doc.len()];
+                for item in &selected {
+                    if let Item::Node(n) = item
+                        && n.attr.is_none()
+                    {
+                        is_selected[n.node.index()] = true;
+                    }
+                }
                 for node in all.iter().copied() {
-                    if !selected.contains(&node) || claimed.contains(&node) {
+                    let slot = node.index();
+                    if !is_selected[slot] || claimed[slot] {
                         continue;
                     }
-                    claimed.push(node);
+                    claimed[slot] = true;
                     self.fire(doc, rule, node, &vars, &mut out);
                 }
             }
@@ -436,7 +444,7 @@ impl Schema {
         doc: &Document,
         rule: &Rule,
         node: NodeId,
-        vars: &HashMap<String, Vec<Item>>,
+        vars: &Bindings,
         out: &mut Vec<Violation>,
     ) {
         let mut ctx = Context::new(doc, NodeRef::element(node));
@@ -444,7 +452,7 @@ impl Schema {
         for (name, expr) in &rule.lets {
             match expr.eval(&ctx) {
                 Ok(value) => {
-                    ctx.vars.insert(name.clone(), value);
+                    ctx.vars.insert(name.clone(), Rc::new(value));
                 }
                 // A `let` that fails here leaves the assertions below unable to
                 // mean anything; say nothing rather than something wrong.

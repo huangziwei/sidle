@@ -3908,8 +3908,8 @@ fn ncx_dtb_uid(text: &str) -> Option<String> {
                 let (mut name, mut content) = (None, None);
                 for a in e.attributes().flatten() {
                     match a.key.as_ref() {
-                        b"name" => name = Some(String::from_utf8_lossy(&a.value).to_string()),
-                        b"content" => content = Some(String::from_utf8_lossy(&a.value).to_string()),
+                        b"name" => name = Some(attr_value(&a)),
+                        b"content" => content = Some(attr_value(&a)),
                         _ => {}
                     }
                 }
@@ -4051,12 +4051,10 @@ fn read_container_opf_path(
                         b"full-path" => {
                             // The rootfile path is an OCF URL: percent-decode and
                             // NFC-normalize so it matches the zip entry names.
-                            let raw = String::from_utf8_lossy(&attr.value);
+                            let raw = attr_value(&attr);
                             full_path = Some(nfc(&percent_decode(&raw)))
                         }
-                        b"media-type" => {
-                            media_type = String::from_utf8_lossy(&attr.value).to_string()
-                        }
+                        b"media-type" => media_type = attr_value(&attr),
                         _ => {}
                     }
                 }
@@ -4258,9 +4256,9 @@ fn nav_remote_links(text: &str) -> Vec<(String, String)> {
         };
         for attr in e.attributes().flatten() {
             if local_name(attr.key.as_ref()) == b"href" {
-                let href = String::from_utf8_lossy(&attr.value);
+                let href = attr_value(&attr);
                 if is_remote_href(&href) {
-                    out.push((kind.to_string(), href.into_owned()));
+                    out.push((kind.to_string(), href));
                 }
             }
         }
@@ -4292,10 +4290,23 @@ fn epub_type_attr(e: &quick_xml::events::BytesStart) -> String {
     for attr in e.attributes().flatten() {
         let key = attr.key.as_ref();
         if key == b"epub:type" || local_name(key) == b"type" {
-            return String::from_utf8_lossy(&attr.value).trim().to_string();
+            return attr_value(&attr).trim().to_string();
         }
     }
     String::new()
+}
+
+/// An attribute's value as the document *means* it: quick-xml hands back the
+/// bytes between the quotes, and character references are still markup at that
+/// point. Every check that interprets a value therefore reads it through here —
+/// `href="a&amp;b.xhtml"` names the file `a&b.xhtml`, and a `style` attribute
+/// whose font stack is quoted with `&quot;` is one declaration, not three (the
+/// `;` ending each reference otherwise reads as a declaration separator, which
+/// is exactly how a valid inline style once produced a CSS-008 finding no
+/// epubcheck run agrees with). The lone exception is the RSC-016 entity scan,
+/// whose subject is the undecoded reference itself.
+fn attr_value(a: &quick_xml::events::attributes::Attribute) -> String {
+    xml::tree::expand_entities_in(&String::from_utf8_lossy(&a.value))
 }
 
 /// An element attribute's value, selected by its local name (namespace prefix
@@ -4304,7 +4315,7 @@ fn attr_by_local(e: &quick_xml::events::BytesStart, local: &[u8]) -> Option<Stri
     e.attributes()
         .flatten()
         .find(|a| local_name(a.key.as_ref()) == local)
-        .map(|a| String::from_utf8_lossy(&a.value).into_owned())
+        .map(|a| attr_value(&a))
 }
 
 /// PKG-026: a resource obfuscated with the IDPF Font Obfuscation algorithm must be
@@ -4793,7 +4804,7 @@ fn epub_type_tokens(e: &quick_xml::events::BytesStart) -> Vec<String> {
         .flatten()
         .find(|a| a.key.as_ref().contains(&b':') && local_name(a.key.as_ref()) == b"type")
         .map(|a| {
-            String::from_utf8_lossy(&a.value)
+            attr_value(&a)
                 .split_whitespace()
                 .map(str::to_string)
                 .collect()
@@ -6003,7 +6014,7 @@ fn classify_element_refs(
     if local == b"link" {
         for attr in e.attributes().flatten() {
             if local_name(attr.key.as_ref()) == b"rel" {
-                rel = String::from_utf8_lossy(&attr.value).to_ascii_lowercase();
+                rel = attr_value(&attr).to_ascii_lowercase();
             }
         }
     }
@@ -6032,7 +6043,7 @@ fn classify_element_refs(
             (b"embed" | b"iframe" | b"script", b"src") => RefType::Other,
             _ => continue,
         };
-        let val = String::from_utf8_lossy(&attr.value).to_string();
+        let val = attr_value(&attr);
         if !val.is_empty() {
             out.push((ty, base.resolve(&val)));
         }
@@ -6072,7 +6083,7 @@ fn collect_references(content: &str) -> Vec<(RefKind, String)> {
                         _ => akey == b"src",
                     };
                     if is_ref {
-                        let val = String::from_utf8_lossy(&attr.value).to_string();
+                        let val = attr_value(&attr);
                         if !val.is_empty() {
                             out.push((kind, base.resolve(&val)));
                         }
@@ -6141,7 +6152,7 @@ fn collect_element_ids(content: &str) -> HashMap<String, IdKind> {
             .attributes()
             .flatten()
             .find(|a| a.key.as_ref() == b"id")
-            .map(|a| String::from_utf8_lossy(&a.value).to_string())
+            .map(|a| attr_value(&a))
         {
             let name = e.name();
             let kind = match elem_namespace(name.as_ref(), &scopes).as_deref() == Some(SVG_NS) {
@@ -6299,7 +6310,7 @@ fn detect_content_features(content: &str) -> ContentFeatures {
                         a.key.as_ref().contains(&b':') && local_name(a.key.as_ref()) == b"type"
                     })
                 {
-                    f.dictionary_content = String::from_utf8_lossy(&types.value)
+                    f.dictionary_content = attr_value(&types)
                         .split_whitespace()
                         .any(|t| t == "dictionary");
                 }
@@ -6530,10 +6541,7 @@ fn script_element_is_javascript(e: &quick_xml::events::BytesStart<'_>) -> bool {
         return true; // no type → JavaScript
     };
     matches!(
-        String::from_utf8_lossy(&ty.value)
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
+        attr_value(&ty).trim().to_ascii_lowercase().as_str(),
         "application/javascript"
             | "text/javascript"
             | "application/ecmascript"
@@ -6555,9 +6563,9 @@ fn script_element_is_javascript(e: &quick_xml::events::BytesStart<'_>) -> bool {
 
 /// True if any attribute of `e` with local name `key` has the trimmed value `val`.
 fn attr_local_eq(e: &quick_xml::events::BytesStart<'_>, key: &[u8], val: &str) -> bool {
-    e.attributes().flatten().any(|a| {
-        local_name(a.key.as_ref()) == key && String::from_utf8_lossy(&a.value).trim() == val
-    })
+    e.attributes()
+        .flatten()
+        .any(|a| local_name(a.key.as_ref()) == key && attr_value(&a).trim() == val)
 }
 
 /// True when `e` loads a resource from a remote origin through one of the
@@ -6575,8 +6583,7 @@ fn element_loads_remote_resource(local: &[u8], e: &quick_xml::events::BytesStart
         _ => return false,
     };
     e.attributes().flatten().any(|a| {
-        attrs.contains(&local_name(a.key.as_ref()))
-            && is_remote_href(String::from_utf8_lossy(&a.value).trim())
+        attrs.contains(&local_name(a.key.as_ref())) && is_remote_href(attr_value(&a).trim())
     })
 }
 
@@ -6597,7 +6604,7 @@ fn collect_ncx_content_srcs(content: &str) -> Vec<String> {
                 }
                 for attr in e.attributes().flatten() {
                     if local_name(attr.key.as_ref()) == b"src" {
-                        let val = String::from_utf8_lossy(&attr.value).to_string();
+                        let val = attr_value(&attr);
                         if !val.is_empty() {
                             out.push(base.resolve(&val));
                         }
@@ -6786,7 +6793,7 @@ impl BaseUrl {
             .attributes()
             .flatten()
             .find(|a| a.key.as_ref() == key)
-            .map(|a| String::from_utf8_lossy(&a.value).into_owned())
+            .map(|a| attr_value(&a))
         else {
             return;
         };
@@ -8598,6 +8605,50 @@ mod tests {
             css::url_tokens_with_empties("a{background:url()}b{src:url( )}c{d:url(x.png)}");
         assert_eq!(urls, ["x.png"]);
         assert_eq!(empties, 2);
+    }
+
+    /// An attribute value is markup until it is decoded, and the checks that
+    /// read one must see what it *means*. A font stack quoted with `&quot;` —
+    /// which is how the KFX→EPUB exporter writes one — used to reach the CSS
+    /// scanner undecoded, where the `;` closing each reference read as a
+    /// declaration separator and split one valid declaration into components
+    /// with no `name: value`: two CSS-008 errors on a document epubcheck calls
+    /// clean (library book 1458).
+    #[test]
+    fn a_character_reference_in_an_attribute_is_decoded_before_it_is_judged() {
+        let doc = |style: &str| {
+            format!(
+                "<?xml version='1.0' encoding='utf-8'?>\n\
+                 <html xmlns='http://www.w3.org/1999/xhtml'><head><title>t</title></head>\
+                 <body><p style=\"{style}\">x</p></body></html>"
+            )
+        };
+        let run = |text: &str| {
+            let mut r = Report::default();
+            check_inline_css(text, "c1.xhtml", true, &mut r);
+            r
+        };
+        let quoted =
+            doc("font-family: &quot;090_next-reads-shift light&quot;, palatino, georgia, serif");
+        assert!(run(&quoted).is_clean(), "got:\n{}", run(&quoted));
+        // The same stack written with literal quotes was always fine, and a
+        // genuine defect still reports.
+        assert!(run(&doc("font-family: 'a b', serif")).is_clean());
+        assert!(run(&doc("blue")).has_rule(Rule::CssSyntaxError));
+
+        // A reference is decoded wherever a value is read, so `href="a&amp;b"`
+        // names the file `a&b`; one no decoder here can resolve stays verbatim
+        // rather than vanishing (an entity a DTD declares is RSC-016's subject,
+        // not this check's). Built from raw bytes: the `(&str, &str)`
+        // constructor escapes on the way in, which is the opposite direction.
+        let raw = |value: &'static [u8]| {
+            attr_value(&quick_xml::events::attributes::Attribute::from((
+                &b"href"[..],
+                value,
+            )))
+        };
+        assert_eq!(raw(b"a&amp;b.xhtml"), "a&b.xhtml");
+        assert_eq!(raw(b"a&nbsp;b"), "a&nbsp;b");
     }
 
     #[test]

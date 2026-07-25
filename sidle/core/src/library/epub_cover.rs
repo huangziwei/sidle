@@ -87,29 +87,21 @@ pub fn replace_cover(epub_path: &Path, new_bytes: &[u8], new_ext: &str) -> Resul
 /// non-destructive insert of case 3. `kfx_path` is the KFX to regenerate from.
 /// Best-effort by contract: callers treat any `Err` as a non-fatal, logged skip.
 ///
-/// Returns the error-level validator findings the edit **introduced** (the
-/// differential gate — a directly-imported EPUB is usually invalid before we
-/// touch it, so the checkable obligation is that editing it must not *add* a
-/// defect; injecting an EPUB-3-only `properties="cover-image"` into an EPUB 2
-/// package was exactly this bug). Empty is the expected result. This crate has
-/// no logging, so the findings are returned for the caller to surface; they are
-/// never a reason to fail — the cover is written either way.
+/// Injecting an EPUB-3-only `properties="cover-image"` into an EPUB 2 package
+/// once made a valid book invalid here, so [`insert_cover`] is version-aware and
+/// `a_cover_edit_introduces_no_validator_finding` holds the edit to the
+/// validator's verdict. That obligation is checked there and not in this call
+/// path: it is a claim about the code, provable once, where running it per cover
+/// write would validate the whole book twice to produce a finding no user sees.
 pub fn ensure_cover(
     epub_path: &Path,
     kfx_path: Option<&Path>,
     new_bytes: &[u8],
     new_ext: &str,
     epub_is_derived: bool,
-) -> Result<Vec<bokai::validate::Finding>> {
-    let before = std::fs::read(epub_path).ok();
-    let added = |epub_path: &Path| -> Vec<bokai::validate::Finding> {
-        let (Some(before), Ok(after)) = (before.as_deref(), std::fs::read(epub_path)) else {
-            return Vec::new();
-        };
-        bokai::validate::source::added_errors(before, &after)
-    };
+) -> Result<()> {
     if replace_cover(epub_path, new_bytes, new_ext)? {
-        return Ok(added(epub_path));
+        return Ok(());
     }
     // Case 2: regenerate — but only from a KFX that is the source (EPUB derived)
     // and actually has a cover to carry over.
@@ -125,13 +117,12 @@ pub fn ensure_cover(
             let epub_bytes = buf.into_inner();
             write_bytes_atomic(epub_path, &epub_bytes)?;
             replace_cover(epub_path, new_bytes, new_ext)?;
-            return Ok(added(epub_path));
+            return Ok(());
         }
     }
     // Case 3: the EPUB is the source (or has no covered KFX to derive from) —
     // insert a cover in place rather than regenerating it.
-    insert_cover(epub_path, new_bytes, new_ext)?;
-    Ok(added(epub_path))
+    insert_cover(epub_path, new_bytes, new_ext)
 }
 
 /// True if the KFX declares a resolvable cover. Used by [`ensure_cover`] to
@@ -396,6 +387,111 @@ fn replace_attr_value(line: &str, attr: &str, new_value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal EPUB 2 book: the version whose manifest grammar has no
+    /// `properties` attribute, which is what makes it the interesting case for
+    /// a cover edit.
+    fn epub2_book(path: &Path) {
+        let opf = "<?xml version='1.0' encoding='utf-8'?>\n\
+             <package xmlns=\"http://www.idpf.org/2007/opf\" version=\"2.0\" \
+             unique-identifier=\"bookid\">\n\
+             <metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\
+             <dc:title>t</dc:title><dc:language>en</dc:language>\
+             <dc:identifier id=\"bookid\">urn:uuid:1</dc:identifier></metadata>\n\
+             <manifest><item id=\"ncx\" href=\"toc.ncx\" \
+             media-type=\"application/x-dtbncx+xml\"/>\
+             <item id=\"c1\" href=\"c1.xhtml\" media-type=\"application/xhtml+xml\"/>\
+             </manifest>\n<spine toc=\"ncx\"><itemref idref=\"c1\"/></spine>\n</package>\n";
+        let ncx = "<?xml version='1.0' encoding='utf-8'?>\n\
+             <!DOCTYPE ncx PUBLIC \"-//NISO//DTD ncx 2005-1//EN\" \
+             \"http://www.daisy.org/z3986/2005/ncx-2005-1.dtd\">\n\
+             <ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\" version=\"2005-1\">\
+             <head><meta name=\"dtb:uid\" content=\"urn:uuid:1\"/></head>\
+             <docTitle><text>t</text></docTitle><navMap>\
+             <navPoint id=\"n1\" playOrder=\"1\"><navLabel><text>c1</text></navLabel>\
+             <content src=\"c1.xhtml\"/></navPoint></navMap></ncx>\n";
+        let chapter = "<?xml version='1.0' encoding='utf-8'?>\n\
+             <!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \
+             \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">\n\
+             <html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>c1</title></head>\
+             <body><p>text</p></body></html>\n";
+        let container = "<?xml version='1.0' encoding='UTF-8'?>\n\
+             <container version=\"1.0\" \
+             xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">\
+             <rootfiles><rootfile full-path=\"OEBPS/content.opf\" \
+             media-type=\"application/oebps-package+xml\"/></rootfiles></container>\n";
+        let file = std::fs::File::create(path).expect("create epub");
+        let mut zip = zip::ZipWriter::new(file);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("mimetype", stored).unwrap();
+        std::io::Write::write_all(&mut zip, b"application/epub+zip").unwrap();
+        for (name, body) in [
+            ("META-INF/container.xml", container),
+            ("OEBPS/content.opf", opf),
+            ("OEBPS/toc.ncx", ncx),
+            ("OEBPS/c1.xhtml", chapter),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut zip, body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// Editing a book must not make it *less* valid than it was — the one
+    /// obligation a cover write owes the file it rewrites. An EPUB-3-only
+    /// `properties="cover-image"` injected into an EPUB 2 manifest broke exactly
+    /// this, and the sibling unit test above pins the OPF text; this one asks
+    /// the validator, which is the question that actually matters and the only
+    /// way a *new* defect in any other part of the archive would be caught.
+    ///
+    /// It lives here rather than in the product: sidle runs no validator (a
+    /// finding on a user's machine reaches a stderr nobody reads, having cost a
+    /// full validation pass to produce), so the differential belongs where a
+    /// failure is read — a test.
+    #[test]
+    fn a_cover_edit_introduces_no_validator_finding() {
+        // A real 1×1 PNG: the validator decodes every declared raster resource
+        // (PKG-021), so a hand-waved header would fail the assertion on the
+        // fixture rather than on the edit — as it did when this test was
+        // written with a stub JPEG.
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let epub = dir.path().join("book.epub");
+        epub2_book(&epub);
+
+        let before = std::fs::read(&epub).expect("read before");
+        // The book has no cover slot, so this takes the `insert_cover` path —
+        // the one that writes a manifest item.
+        ensure_cover(&epub, None, png, "png", false).expect("cover edit");
+        let after = std::fs::read(&epub).expect("read after");
+        assert_ne!(before, after, "the edit must have written something");
+
+        let added = bokai::validate::source::added_errors(&before, &after);
+        assert!(
+            added.is_empty(),
+            "cover edit introduced {} finding(s): {}",
+            added.len(),
+            added
+                .iter()
+                .map(|f| format!(
+                    "[{}] {} @ {}: {}",
+                    f.severity.as_str(),
+                    f.rule,
+                    f.location,
+                    f.message
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
 
     #[test]
     fn replace_attr_value_basic() {

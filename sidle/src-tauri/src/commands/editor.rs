@@ -1286,53 +1286,11 @@ async fn commit_edited_source(
     path: &str,
     new_bytes: Vec<u8>,
 ) -> Result<(), String> {
-    report_edit_regressions(kind, path, &new_bytes).await;
     match kind {
         SourceKind::Kfx => commit_edited_kfx(state, book_id, path, new_bytes).await,
         // EPUB and PDF are both "source file that derives a KFX", so they share
         // one seam: replace the source, let reconvert rebuild the KFX.
         SourceKind::Epub | SourceKind::Pdf => commit_replaced_source(path, new_bytes).await,
-    }
-}
-
-/// The differential validation gate for every editor save: log the error-level
-/// findings this edit *introduced*. A directly-imported EPUB is usually invalid
-/// before we touch it and no single edit can fix that, so "clean" is the wrong
-/// bar — the checkable obligation is that an edit must not *add* a defect. (An
-/// EPUB-3-only `properties="cover-image"` injected into an EPUB 2 package was
-/// exactly this class of bug.) Non-blocking, like every other validation seam:
-/// it reports and the save proceeds.
-///
-/// EPUB only — `bokai::validate::source::added_errors` sniffs the format and
-/// would run the KFX checks for a KFX, which is a separate obligation with its
-/// own (much slower) pass.
-async fn report_edit_regressions(kind: SourceKind, path: &str, new_bytes: &[u8]) {
-    if kind != SourceKind::Epub {
-        return;
-    }
-    let (src, after) = (path.to_string(), new_bytes.to_vec());
-    let added = tokio::task::spawn_blocking(move || {
-        let before = std::fs::read(&src).ok()?;
-        Some(bokai::validate::source::added_errors(&before, &after))
-    })
-    .await;
-    let Ok(Some(added)) = added else { return };
-    if added.is_empty() {
-        return;
-    }
-    eprintln!(
-        "[sidle/editor] edit of {path} introduced {} new error finding(s) — saved anyway:",
-        added.len()
-    );
-    for finding in &added {
-        eprintln!(
-            "  [{}] {}/{} @ {}: {}",
-            finding.severity.as_str(),
-            finding.check,
-            finding.rule,
-            finding.location,
-            finding.message
-        );
     }
 }
 

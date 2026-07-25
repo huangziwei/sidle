@@ -813,7 +813,7 @@ async fn recrawl_one(state: &AppState, book: &BookRow) -> RecrawlOutcome {
             "jpg",
             book.kind.as_deref() == Some("kfx_to_epub"),
         ) {
-            Ok(added) => report_cover_regressions(book.id, "recrawl", &added),
+            Ok(()) => {}
             Err(e) => eprintln!(
                 "[sidle/recrawl] book {} epub cover swap failed: {e:#}",
                 book.id
@@ -1012,7 +1012,7 @@ pub async fn library_set_cover(
             ext,
             book.kind.as_deref() == Some("kfx_to_epub"),
         ) {
-            Ok(added) => report_cover_regressions(book_id, "set-cover", &added),
+            Ok(()) => {}
             Err(e) => {
                 eprintln!("[sidle/set-cover] book {book_id} epub cover swap failed: {e:#}")
             }
@@ -1488,31 +1488,6 @@ fn dir_has_entries(dir: &Path) -> bool {
     std::fs::read_dir(dir)
         .map(|mut it| it.next().is_some())
         .unwrap_or(false)
-}
-
-/// Surface the error-level findings a cover edit introduced into a stored EPUB.
-/// The differential gate is diagnostic only — the cover is already written — but
-/// a non-empty list means the edit made a book *less* valid than it was, which
-/// is always a bug in the editing code (an EPUB-3-only manifest property
-/// injected into an EPUB 2 package was the first one this caught).
-fn report_cover_regressions(book_id: i64, what: &str, added: &[bokai::validate::Finding]) {
-    if added.is_empty() {
-        return;
-    }
-    eprintln!(
-        "[sidle/{what}] book {book_id} epub cover edit introduced {} new error finding(s):",
-        added.len()
-    );
-    for finding in added {
-        eprintln!(
-            "  [{}] {}/{} @ {}: {}",
-            finding.severity.as_str(),
-            finding.check,
-            finding.rule,
-            finding.location,
-            finding.message
-        );
-    }
 }
 
 #[cfg(test)]

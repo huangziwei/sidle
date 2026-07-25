@@ -40,6 +40,14 @@ pub struct NsId(u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(u32);
 
+impl NodeId {
+    /// The arena slot this id names, for a caller keeping one value per node
+    /// (a set membership, a mark) in a flat vector of [`Document::len`].
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// An expanded name: a namespace (or none) plus a local name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Name {
@@ -99,6 +107,9 @@ pub struct Document {
     /// Byte offset of each line's first character, so [`Document::line`] is a
     /// binary search rather than a scan of the whole source per finding.
     line_starts: Vec<usize>,
+    /// Every node in document order — the answer to `//`, which an assertion
+    /// may ask once per node it fires on. Filled on first use.
+    all: std::cell::OnceCell<Vec<NodeId>>,
 }
 
 impl Document {
@@ -185,6 +196,9 @@ impl Document {
 
     /// Every node of the subtree rooted at `id`, in document order, `id` first.
     pub fn descendants(&self, id: NodeId) -> Vec<NodeId> {
+        if id == self.root() {
+            return self.all_nodes().to_vec();
+        }
         let mut out = Vec::new();
         let mut stack = vec![id];
         while let Some(n) = stack.pop() {
@@ -192,6 +206,26 @@ impl Document {
             stack.extend(self.node(n).children.iter().rev().copied());
         }
         out
+    }
+
+    /// Every node in document order, walked once per document.
+    ///
+    /// `//x` is `descendant-or-self::node()` from the document node, and
+    /// `id-unique.sch` asks a question of that shape once per element carrying
+    /// an `id` — so the walk happens as many times as the document has ids.
+    /// Reusing it removes the walk and its allocation, not the repetition:
+    /// that assertion is a self-join and stays quadratic until the evaluator
+    /// can answer it from an index (see the plan's note on `*[@id]`).
+    pub fn all_nodes(&self) -> &[NodeId] {
+        self.all.get_or_init(|| {
+            let mut out = Vec::with_capacity(self.nodes.len());
+            let mut stack = vec![self.root()];
+            while let Some(n) = stack.pop() {
+                out.push(n);
+                stack.extend(self.node(n).children.iter().rev().copied());
+            }
+            out
+        })
     }
 
     /// The concatenated text of the subtree rooted at `id` — XPath's
@@ -370,6 +404,7 @@ impl Builder {
             nodes: self.nodes,
             namespaces: self.namespaces,
             line_starts: self.line_starts,
+            all: std::cell::OnceCell::new(),
         }
     }
 }
@@ -529,6 +564,7 @@ impl Parser {
             line_starts: std::iter::once(0)
                 .chain(xml.match_indices('\n').map(|(i, _)| i + 1))
                 .collect(),
+            all: std::cell::OnceCell::new(),
         };
         if root.root_element().is_none() {
             return Err(ParseError {
@@ -722,7 +758,12 @@ fn expand_entity(name: &str) -> String {
 /// Expand every `&…;` in a string, for the contexts quick-xml hands over raw
 /// (attribute values). Text content arrives pre-split into `GeneralRef` events
 /// and goes through [`expand_entity`] directly.
-fn expand_entities_in(s: &str) -> String {
+///
+/// Also the decoder for the streaming checks outside this module, which read
+/// attribute values through the same parser and need the same answer: what an
+/// attribute *means* is its expanded value, and a reference this cannot resolve
+/// (an entity a DTD declares) stays verbatim rather than being dropped.
+pub(crate) fn expand_entities_in(s: &str) -> String {
     if !s.contains('&') {
         return s.to_string();
     }

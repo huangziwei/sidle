@@ -383,7 +383,7 @@ pub fn parse(content: &str) -> io::Result<Package> {
                         let mut fallback_style = None;
                         let mut media_overlay = None;
                         for a in e.attributes().flatten() {
-                            let val = String::from_utf8_lossy(&a.value).to_string();
+                            let val = super::attr_value(&a);
                             match a.key.as_ref() {
                                 // id / fallback are XML ID/IDREF-typed: normalize
                                 // by trimming (epubcheck matches on the normalized
@@ -425,7 +425,7 @@ pub fn parse(content: &str) -> io::Result<Package> {
                         let mut linear: Option<bool> = None;
                         let mut properties: Vec<String> = Vec::new();
                         for a in e.attributes().flatten() {
-                            let val = String::from_utf8_lossy(&a.value).to_string();
+                            let val = super::attr_value(&a);
                             match a.key.as_ref() {
                                 // idref is IDREF-typed — normalize like id above.
                                 b"idref" => idref = val.trim().to_string(),
@@ -517,7 +517,7 @@ fn attr(e: &BytesStart, key: &[u8]) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| a.key.as_ref() == key)
-        .map(|a| String::from_utf8_lossy(&a.value).to_string())
+        .map(|a| super::attr_value(&a))
 }
 
 /// The `opf:scheme` (or bare `scheme`) attribute value, matched by attribute
@@ -526,14 +526,14 @@ fn scheme_attr(e: &BytesStart) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| local_name(a.key.as_ref()) == b"scheme")
-        .map(|a| String::from_utf8_lossy(&a.value).to_string())
+        .map(|a| super::attr_value(&a))
 }
 
 fn role_attr(e: &BytesStart) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| local_name(a.key.as_ref()) == b"role")
-        .map(|a| String::from_utf8_lossy(&a.value).to_string())
+        .map(|a| super::attr_value(&a))
 }
 
 fn local_name(name: &[u8]) -> &[u8] {

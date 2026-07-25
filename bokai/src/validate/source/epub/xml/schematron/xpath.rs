@@ -13,6 +13,7 @@
 //! guessed verdict on a book is worse than a missing one.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -54,6 +55,9 @@ pub enum Item {
 }
 
 pub type Sequence = Vec<Item>;
+
+/// The variables in scope, sharing their values. See [`Context::vars`].
+pub type Bindings = HashMap<String, Rc<Sequence>>;
 
 // ---------------------------------------------------------------- syntax
 
@@ -800,7 +804,13 @@ pub struct Context<'a> {
     pub position: usize,
     pub size: usize,
     /// `<let>` bindings and quantified variables.
-    pub vars: HashMap<String, Sequence>,
+    ///
+    /// Each value is shared, not owned: a context is copied for every item a
+    /// step visits, and `epub-xhtml-30.sch` binds `$id-set` to `//*[@id]` —
+    /// every id in the document. Copying *that* per visited node is how one
+    /// chapter came to take seven minutes to validate. A binding is only
+    /// materialized where an expression actually reads it.
+    pub vars: Bindings,
     /// Schematron's `current()` — the node the enclosing rule matched, which a
     /// predicate's `.` no longer refers to.
     pub current: Option<NodeRef>,
@@ -865,7 +875,7 @@ fn eval(expr: &Expr, ctx: &Context) -> Result<Sequence, XPathError> {
         Expr::Var(name) => ctx
             .vars
             .get(name)
-            .cloned()
+            .map(|value| (**value).clone())
             .ok_or_else(|| XPathError(format!("undefined variable ${name}"))),
         Expr::Or(a, b) => Ok(vec![Item::Bool(
             effective_boolean(&eval(a, ctx)?, ctx.doc)?
@@ -922,7 +932,7 @@ fn eval(expr: &Expr, ctx: &Context) -> Result<Sequence, XPathError> {
             let mut result = *every;
             for item in items {
                 let mut inner = ctx.with_item(ctx.item.clone(), ctx.position, ctx.size);
-                inner.vars.insert(var.clone(), vec![item]);
+                inner.vars.insert(var.clone(), Rc::new(vec![item]));
                 let holds = effective_boolean(&eval(satisfies, &inner)?, ctx.doc)?;
                 if *every && !holds {
                     result = false;
