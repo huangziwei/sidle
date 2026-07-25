@@ -64,7 +64,7 @@ pub(crate) const MIN_INDENT_EVIDENCE: usize = 3;
 /// encode; the indentation is then trimmed, because the nesting now says what it
 /// said.
 ///
-/// A run with no deeper-indented entries (or fewer than [`MIN_INDENT_EVIDENCE`])
+/// A run with no deeper-indented entries (or fewer than `MIN_INDENT_EVIDENCE`)
 /// comes back untouched, as does one that already declares nesting.
 pub fn nest_by_label_indent<T: TocNode>(entries: Vec<T>) -> Vec<T> {
     if already_nested(&entries) {

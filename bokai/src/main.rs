@@ -142,6 +142,14 @@ enum Command {
         /// Output path. Omit to only print the proposed chapters (dry run).
         output: Option<String>,
     },
+
+    /// Find where a collection (合本版 / 全集 / boxed set) divides into the
+    /// volumes it collects, and print the proposed cuts. Detection only — no
+    /// volume is written.
+    Split {
+        /// Input EPUB file.
+        input: String,
+    },
 }
 
 fn parse_direction(s: &str) -> Result<bokai::validate::Direction, String> {
@@ -193,6 +201,41 @@ fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
         std::fs::write(out, &repaired).map_err(|e| format!("write {out}: {e}"))?;
         println!("wrote repaired KFX → {out} ({} bytes)", repaired.len());
     }
+    Ok(())
+}
+
+/// `bokai split <input>` — print where a collection divides into volumes, one
+/// line per proposed cut. A dry run by construction: detection has no output
+/// side, and the numbers it proposes are meant to be reviewed before use.
+fn split_cmd(input: &str) -> Result<(), String> {
+    let bytes = std::fs::read(input).map_err(|e| format!("read {input}: {e}"))?;
+    let cuts = bokai::formats::epub::split::propose_cuts(&bytes).map_err(|e| e.to_string())?;
+    if cuts.is_empty() {
+        println!("no volumes: this book evidences no collection to split");
+        return Ok(());
+    }
+    println!("proposed {} volume(s):", cuts.len());
+    let docs: usize = cuts.iter().map(|c| c.documents).sum();
+    for cut in &cuts {
+        let number = match cut.numbering {
+            bokai::formats::epub::split::Numbering::Label => format!("{}", cut.number),
+            bokai::formats::epub::split::Numbering::Sequence => format!("({})", cut.number),
+        };
+        println!(
+            "  {:>6}  spine {:>5}  {:>4} docs  {:<44}  {}",
+            number,
+            cut.spine_index,
+            cut.documents,
+            cut.label,
+            cut.cover.as_deref().unwrap_or("-")
+        );
+    }
+    println!(
+        "  covering spine {}..{} ({docs} of the book's documents); a number in \
+         parentheses was counted, not read from the label",
+        cuts[0].spine_index,
+        cuts[0].spine_index + docs
+    );
     Ok(())
 }
 
@@ -485,6 +528,7 @@ fn main() -> ExitCode {
             },
         },
         Command::RepairToc { input, output } => repair_toc_cmd(&input, output.as_deref()),
+        Command::Split { input } => split_cmd(&input),
     };
 
     match result {

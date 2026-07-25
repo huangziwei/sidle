@@ -247,21 +247,7 @@ fn extract_heading_text(body: &str, level: u8) -> Option<String> {
     let open_end = body[open_start..].find('>')? + open_start + 1;
     let close_idx = body[open_end..].find(&close)? + open_end;
     let inner = &body[open_end..close_idx];
-    Some(strip_tags(inner))
-}
-
-fn strip_tags(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out
+    Some(crate::util::strip_tags(inner))
 }
 
 // =========================================================================

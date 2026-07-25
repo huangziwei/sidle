@@ -232,7 +232,9 @@ fn internal_link_targets(
                 if is_new && labels.len() < 6 {
                     // link text = up to the closing </a>
                     if let Some(close) = rest[end..].find("</a>") {
-                        let text = strip_tags(&rest[end + 1..end + close]);
+                        let text = crate::util::strip_tags(&rest[end + 1..end + close])
+                            .trim()
+                            .to_string();
                         if !text.is_empty() {
                             labels.push(text);
                         }
@@ -256,20 +258,6 @@ fn attr(tag: &str, name: &str) -> Option<String> {
     } else {
         Some(after.split_whitespace().next()?.to_string())
     }
-}
-
-fn strip_tags(s: &str) -> String {
-    let mut out = String::new();
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out.trim().to_string()
 }
 
 /// File component of an href: drop `#fragment` / `?query`, take the last path

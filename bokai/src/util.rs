@@ -456,6 +456,27 @@ pub fn strip_ebook_chars(s: &str) -> String {
     out
 }
 
+/// The text of a markup fragment, with every tag removed and nothing else
+/// changed.
+///
+/// For reading a label out of a snippet that is known to be small and
+/// well-formed — a nav `<a>`'s content, a heading's inner markup. Anything that
+/// has to survive malformed input, entities or scripts goes through the HTML
+/// parser instead.
+pub fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Trim the whitespace markup layout introduces, keeping the whitespace that
 /// is typographic content.
 ///

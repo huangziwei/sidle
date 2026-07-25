@@ -22,6 +22,10 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 
 use crate::formats::epub::edit::{EpubPackage, attr_value, escape_attr, escape_text};
+use crate::formats::epub::structure::{
+    basename, dir_of, internal_links, relativize, resolve_href, spine_documents, split_fragment,
+    strip_fragment,
+};
 use crate::formats::epub::{OpfData, parse_nav_landmarks, parse_opf, parse_opf_guide};
 use crate::model::toc_shape::{TocTree, merge_by_document_order, nest_by_label_indent};
 use crate::model::{LandmarkType, TocEntry};
@@ -96,21 +100,10 @@ pub fn declared_toc_flattening(epub_bytes: &[u8]) -> io::Result<Flattening> {
     })
 }
 
-/// The spine documents, as `(absolute zip path, lowercase basename)` in reading
-/// order.
-fn spine_docs(opf: &OpfData, opf_base: &str) -> Vec<(String, String)> {
-    opf.spine_ids
-        .iter()
-        .filter_map(|id| opf.manifest.get(id))
-        .map(|(href, _)| {
-            let abs = format!("{opf_base}{}", percent_decode(href));
-            let base = basename(&abs);
-            (abs, base)
-        })
-        .collect()
-}
-
-fn propose_from_pkg(
+/// The proposal for an already-parsed package — see [`propose_toc`], which is
+/// this plus the parsing. Split detection reads the same proposal without
+/// paying for a second pass over the zip.
+pub(super) fn propose_from_pkg(
     pkg: &EpubPackage,
     opf: &OpfData,
     opf_base: &str,
@@ -127,7 +120,7 @@ fn propose_from_pkg(
     //    doc that opens with a text heading. Image-heavy books render both the
     //    Contents page and the chapter headings as images, so there is nothing to
     //    derive from and the declared TOC is all there is.
-    let spine = spine_docs(opf, opf_base);
+    let spine = spine_documents(opf, opf_base);
     let contents = contents_page_links(pkg, opf, opf_base, opf_str);
     let derived = if contents.len() >= MIN_CHAPTER_LINKS {
         contents
@@ -216,7 +209,7 @@ fn volume_groups(
     opf_base: &str,
     targets: &HashSet<&str>,
 ) -> Vec<VolumeGroup> {
-    let spine = spine_docs(opf, opf_base);
+    let spine = spine_documents(opf, opf_base);
     let spine_files: HashSet<&str> = spine.iter().map(|(_, b)| b.as_str()).collect();
 
     let read = |abs: &str| -> Option<String> {
@@ -243,12 +236,7 @@ fn volume_groups(
         let end = starts.get(n + 1).copied().unwrap_or(spine.len());
         for (abs, base) in &spine[start..end] {
             let Some(xhtml) = read(abs) else { continue };
-            let links = dedup_entries(collect_internal_links(
-                &xhtml,
-                &dir_of(abs),
-                &spine_files,
-                base,
-            ));
+            let links = dedup_entries(internal_links(&xhtml, &dir_of(abs), &spine_files, base));
             if links.len() < MIN_VOLUME_CONTENTS_LINKS {
                 continue;
             }
@@ -302,11 +290,6 @@ fn nest_by_volume_groups(entries: Vec<TocEntry>, groups: &[VolumeGroup]) -> Vec<
     tree.build()
 }
 
-/// The href without its `#fragment`.
-fn strip_fragment(href: &str) -> &str {
-    href.split_once('#').map(|(p, _)| p).unwrap_or(href)
-}
-
 /// The densest cluster of internal chapter links across the spine — a Contents
 /// page. Prefers the page a `toc` landmark marks (guards against a link-dense
 /// chapter out-linking the real Contents page). Empty if none carries links.
@@ -316,7 +299,7 @@ fn contents_page_links(
     opf_base: &str,
     opf_str: &str,
 ) -> Vec<TocEntry> {
-    let spine = spine_docs(opf, opf_base);
+    let spine = spine_documents(opf, opf_base);
     let spine_files: HashSet<&str> = spine.iter().map(|(_, b)| b.as_str()).collect();
     let landmark_file = toc_landmark_basename(pkg, opf, opf_base, opf_str);
 
@@ -326,7 +309,7 @@ fn contents_page_links(
         let Some(bytes) = pkg.get(abs) else { continue };
         let xhtml = decode_text(bytes, extract_xml_encoding(bytes));
         let doc_dir = dir_of(abs);
-        let links = collect_internal_links(&xhtml, &doc_dir, &spine_files, base);
+        let links = internal_links(&xhtml, &doc_dir, &spine_files, base);
         let entries = dedup_entries(links);
         if entries.len() > best.len() {
             best = entries.clone();
@@ -415,36 +398,6 @@ fn count_chapters(entries: &[TocEntry]) -> usize {
 /// Total entries in a tree, counting nested children.
 fn flat_count(entries: &[TocEntry]) -> usize {
     entries.iter().map(|e| 1 + flat_count(&e.children)).sum()
-}
-
-/// `(label, absolute-href)` for every link this doc makes to *another* spine doc
-/// — a Contents page's chapter links. Hrefs are resolved against `doc_dir` to an
-/// absolute zip path (fragment preserved).
-fn collect_internal_links(
-    xhtml: &str,
-    doc_dir: &str,
-    spine_files: &HashSet<&str>,
-    self_file: &str,
-) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let mut rest = xhtml;
-    while let Some(p) = rest.find("<a ") {
-        rest = &rest[p + 3..];
-        let Some(end) = rest.find('>') else { break };
-        let tag = &rest[..end];
-        if let Some(href) = attr_value(tag, "href") {
-            let file = basename(&href);
-            if file != self_file && spine_files.contains(file.as_str()) {
-                let label = rest[end + 1..]
-                    .find("</a>")
-                    .map(|c| strip_tags(&rest[end + 1..end + 1 + c]))
-                    .unwrap_or_default();
-                out.push((label, resolve_href(doc_dir, &href)));
-            }
-        }
-        rest = &rest[end..];
-    }
-    out
 }
 
 /// One entry per spine doc whose first heading (`<h1>`..`<h6>`) carries text: the
@@ -637,7 +590,7 @@ fn defines_fragment(xhtml: &str, id: &str) -> bool {
 /// Write `entries` into the EPUB's nav doc and NCX, in place — splicing over an
 /// existing toc / navMap, or synthesizing (and registering in the OPF) when the
 /// book has none. `entries` hrefs are absolute zip paths, and any `#fragment`
-/// the target document doesn't define is dropped ([`resolve_fragments`]).
+/// the target document doesn't define is dropped (`resolve_fragments`).
 ///
 /// Errors if `entries` is empty or the bytes aren't a readable EPUB.
 pub fn set_toc(epub_bytes: &[u8], entries: &[TocEntry]) -> io::Result<Vec<u8>> {
@@ -1044,71 +997,6 @@ fn ensure_spine_toc(opf: &str, ncx_id: &str) -> String {
 // Small helpers
 // ---------------------------------------------------------------------------
 
-/// The directory portion of a zip path, with a trailing `/` (empty at root).
-fn dir_of(path: &str) -> String {
-    match path.rsplit_once('/') {
-        Some((dir, _)) => format!("{dir}/"),
-        None => String::new(),
-    }
-}
-
-/// Lowercased filename of an href: `#fragment`/`?query` dropped, last path
-/// segment, `%20`→space. Matches the TOC detector, for spine-membership tests.
-fn basename(href: &str) -> String {
-    let no_frag = href.split(['#', '?']).next().unwrap_or(href);
-    let file = no_frag.rsplit('/').next().unwrap_or(no_frag);
-    file.replace("%20", " ").to_ascii_lowercase()
-}
-
-/// Split an href into `(path, fragment)` where the fragment keeps its leading
-/// `#` (empty when there is none).
-fn split_fragment(href: &str) -> (&str, &str) {
-    match href.find('#') {
-        Some(i) => (&href[..i], &href[i..]),
-        None => (href, ""),
-    }
-}
-
-/// Resolve `href` (relative to `base_dir`) to an absolute zip path, collapsing
-/// `.`/`..` and percent-decoding. A pure-fragment href resolves to itself.
-fn resolve_href(base_dir: &str, href: &str) -> String {
-    let (path, frag) = split_fragment(href);
-    if path.is_empty() {
-        return href.to_string();
-    }
-    let path = percent_decode(path);
-    let mut stack: Vec<&str> = base_dir.split('/').filter(|s| !s.is_empty()).collect();
-    for seg in path.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                stack.pop();
-            }
-            s => stack.push(s),
-        }
-    }
-    format!("{}{frag}", stack.join("/"))
-}
-
-/// Rewrite an absolute zip path as an href relative to `from_dir`.
-fn relativize(from_dir: &str, abs_target: &str) -> String {
-    let (path, frag) = split_fragment(abs_target);
-    let from: Vec<&str> = from_dir.split('/').filter(|s| !s.is_empty()).collect();
-    let to: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    let (name, to_dirs) = match to.split_last() {
-        Some((n, d)) => (*n, d),
-        None => return format!("{path}{frag}"),
-    };
-    let mut i = 0;
-    while i < from.len() && i < to_dirs.len() && from[i] == to_dirs[i] {
-        i += 1;
-    }
-    let mut parts: Vec<&str> = std::iter::repeat_n("..", from.len() - i).collect();
-    parts.extend_from_slice(&to_dirs[i..]);
-    parts.push(name);
-    format!("{}{frag}", parts.join("/"))
-}
-
 /// Collapse a raw link text to a nav label: ASCII whitespace runs → one space
 /// (full-width spacing in JP titles preserved), then trim.
 fn clean_label(raw: &str) -> String {
@@ -1152,7 +1040,9 @@ fn first_heading(xhtml: &str) -> Option<(String, Option<String>)> {
                 let close = body[content_start..]
                     .to_ascii_lowercase()
                     .find(&close_lower)?;
-                let text = clean_label(&strip_tags(&body[content_start..content_start + close]));
+                let text = clean_label(&crate::util::strip_tags(
+                    &body[content_start..content_start + close],
+                ));
                 if !text.is_empty() {
                     return Some((text, id));
                 }
@@ -1161,20 +1051,6 @@ fn first_heading(xhtml: &str) -> Option<(String, Option<String>)> {
         i += 1;
     }
     None
-}
-
-fn strip_tags(s: &str) -> String {
-    let mut out = String::new();
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out
 }
 
 /// Max nesting depth of the tree (a flat list is depth 1).
@@ -1869,15 +1745,6 @@ mod tests {
     fn non_epub_bytes_error() {
         assert!(propose_toc(b"not an epub").is_err());
         assert!(repair_toc(b"not an epub").is_err());
-    }
-
-    #[test]
-    fn relativize_and_resolve_are_inverse() {
-        assert_eq!(relativize("OEBPS/", "OEBPS/c1.xhtml#h1"), "c1.xhtml#h1");
-        assert_eq!(relativize("", "OEBPS/c1.xhtml"), "OEBPS/c1.xhtml");
-        assert_eq!(relativize("OEBPS/xhtml/", "OEBPS/c1.xhtml"), "../c1.xhtml");
-        assert_eq!(resolve_href("OEBPS/", "c1.xhtml#h1"), "OEBPS/c1.xhtml#h1");
-        assert_eq!(resolve_href("OEBPS/text/", "../c1.xhtml"), "OEBPS/c1.xhtml");
     }
 
     #[test]
