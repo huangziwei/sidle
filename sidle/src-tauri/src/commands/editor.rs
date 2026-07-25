@@ -136,13 +136,17 @@ fn source_format(kind: Option<&str>) -> String {
 /// (later) the TOC panel header. Mirrors `validate::source::toc::TocAudit`.
 #[derive(Serialize)]
 pub struct EditorToc {
-    /// `"OK"` | `"SUSPECT"` | `"SPARSE"`.
+    /// `"OK"` | `"SUSPECT"` | `"FLATTENED"` | `"SPARSE"`.
     pub verdict: String,
     pub nav_count: usize,
     pub nav_chapters: usize,
     pub contents_links: usize,
     pub headings: usize,
     pub section_heads: usize,
+    /// On a `"FLATTENED"` verdict: the volumes the TOC lists at one depth, and
+    /// how many entries belong under them. Both 0 otherwise.
+    pub flattened_volumes: usize,
+    pub flattened_entries: usize,
 }
 
 /// Current metadata for the metadata panel. `author` is the display string
@@ -557,10 +561,14 @@ fn any_blank_label(entries: &[TocEntryDto]) -> bool {
 /// proposed chapter list derived from the book's own in-book Contents page.
 #[derive(Serialize)]
 pub struct EditorTocDetail {
-    /// `"OK"` | `"SUSPECT"` | `"SPARSE"`.
+    /// `"OK"` | `"SUSPECT"` | `"FLATTENED"` | `"SPARSE"`.
     pub verdict: String,
     pub nav_count: usize,
     pub nav_chapters: usize,
+    /// On a `"FLATTENED"` verdict: the volumes listed at one depth, and how many
+    /// entries the rebuild would nest under them. Both 0 otherwise.
+    pub flattened_volumes: usize,
+    pub flattened_entries: usize,
     /// The currently-declared TOC entry labels (flattened) — what's wrong (or
     /// right) today.
     pub current: Vec<String>,
@@ -1154,6 +1162,8 @@ fn compute_toc(source_path: &str, kind: SourceKind) -> Option<EditorToc> {
         contents_links: audit.contents_links,
         headings: audit.headings,
         section_heads: audit.section_heads,
+        flattened_volumes: audit.flattened.volumes,
+        flattened_entries: audit.flattened.misplaced,
     })
 }
 
@@ -1178,6 +1188,8 @@ fn pdf_toc_summary(bytes: &[u8]) -> Option<(EditorToc, Vec<PdfOutlineItem>, usiz
             contents_links: 0,
             headings: 0,
             section_heads: 0,
+            flattened_volumes: 0,
+            flattened_entries: 0,
         },
         doc.outline,
         doc.pages.len(),
@@ -1233,6 +1245,8 @@ fn read_toc_detail(source_path: &str, kind: SourceKind) -> Result<EditorTocDetai
             verdict: summary.verdict,
             nav_count: summary.nav_count,
             nav_chapters: summary.nav_chapters,
+            flattened_volumes: 0,
+            flattened_entries: 0,
             current,
             proposed: outline.iter().map(TocEntryDto::from_pdf).collect(),
             note,
@@ -1270,6 +1284,8 @@ fn read_toc_detail(source_path: &str, kind: SourceKind) -> Result<EditorTocDetai
         verdict: audit.verdict.as_str().to_string(),
         nav_count: audit.nav_count,
         nav_chapters: audit.nav_chapters,
+        flattened_volumes: audit.flattened.volumes,
+        flattened_entries: audit.flattened.misplaced,
         current: audit.nav_labels,
         proposed,
         note,

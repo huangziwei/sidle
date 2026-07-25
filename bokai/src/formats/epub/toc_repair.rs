@@ -57,6 +57,44 @@ pub fn propose_toc(epub_bytes: &[u8]) -> io::Result<Vec<TocEntry>> {
     Ok(propose_from_pkg(&pkg, &opf, &opf_base, &opf_str))
 }
 
+/// How much structure a book's declared TOC has lost — see
+/// [`declared_toc_flattening`]. All zeros means nothing to restore.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Flattening {
+    /// Volumes the book evidences about itself but the TOC lists at the same
+    /// depth as their own chapters.
+    pub volumes: usize,
+    /// Declared top-level entries that belong under one of those volumes.
+    pub misplaced: usize,
+}
+
+/// Measure what [`repair_toc`] would re-parent: a multi-work book whose
+/// declared TOC lists every volume and every chapter at one depth.
+///
+/// The measurement is the repair's own rule, so a diagnosis and the fix can
+/// never disagree. A book that declares its structure, or that has no volume
+/// structure to declare, measures zero — the common case, and the early exit.
+pub fn declared_toc_flattening(epub_bytes: &[u8]) -> io::Result<Flattening> {
+    let pkg = EpubPackage::parse(epub_bytes)?;
+    let opf_path = pkg.opf_path()?;
+    let opf_base = dir_of(&opf_path);
+    let opf_str = decode_text(pkg.opf_bytes()?, extract_xml_encoding(pkg.opf_bytes()?));
+    let opf = parse_opf(&opf_str).map_err(io::Error::other)?;
+
+    let declared = existing_declared_toc(&pkg, &opf, &opf_base);
+    if declared.len() < 2 || declared.iter().any(|e| !e.children.is_empty()) {
+        return Ok(Flattening::default());
+    }
+    let declared_top = declared.len();
+    let targets: HashSet<&str> = declared.iter().map(|e| strip_fragment(&e.href)).collect();
+    let groups = volume_groups(&pkg, &opf, &opf_base, &targets);
+    let nested = nest_by_volume_groups(declared.clone(), &groups);
+    Ok(Flattening {
+        volumes: nested.iter().filter(|e| !e.children.is_empty()).count(),
+        misplaced: declared_top - nested.len(),
+    })
+}
+
 /// The spine documents, as `(absolute zip path, lowercase basename)` in reading
 /// order.
 fn spine_docs(opf: &OpfData, opf_base: &str) -> Vec<(String, String)> {
@@ -1334,6 +1372,28 @@ mod tests {
             ncx.contains(r#"<navPoint id="navPoint-3" playOrder="2">"#),
             "{ncx}"
         );
+    }
+
+    /// The audit's measurement is the repair's own rule: what
+    /// `declared_toc_flattening` counts is exactly what `propose_toc`
+    /// re-parents, so a diagnosis and its fix can't disagree.
+    #[test]
+    fn flattening_measures_what_the_repair_would_re_parent() {
+        let epub = flat_omnibus_epub(2);
+        let measured = declared_toc_flattening(&epub).unwrap();
+        assert_eq!(measured.volumes, 2);
+        assert_eq!(measured.misplaced, 8);
+
+        let proposed = propose_toc(&epub).unwrap();
+        assert_eq!(flat_count(&proposed) - proposed.len(), measured.misplaced);
+        assert_eq!(
+            proposed.iter().filter(|e| !e.children.is_empty()).count(),
+            measured.volumes
+        );
+
+        // A repaired book measures zero — the loop closes.
+        let repaired = repair_toc(&epub).unwrap();
+        assert_eq!(declared_toc_flattening(&repaired).unwrap().misplaced, 0);
     }
 
     /// One volume is not a volume structure: a book with a single full-bleed

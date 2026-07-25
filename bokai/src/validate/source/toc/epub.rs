@@ -112,6 +112,12 @@ pub(super) fn evidence(epub_bytes: &[u8]) -> Result<TocEvidence, String> {
         headings,
         section_heads,
         has_toc_landmark,
+        // Whether the declared TOC flattened a multi-work book's levels. The
+        // repair module owns the rule (and answers zero straight away for a
+        // book that declares its structure), so a diagnosis here and the fix
+        // there can never disagree.
+        flattened: crate::formats::epub::toc_repair::declared_toc_flattening(epub_bytes)
+            .unwrap_or_default(),
     })
 }
 

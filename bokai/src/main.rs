@@ -1047,6 +1047,8 @@ fn validate_toc(path: &str, json: bool) -> Result<(), String> {
             "headings": audit.headings,
             "section_heads": audit.section_heads,
             "has_toc_landmark": audit.has_toc_landmark,
+            "flattened_volumes": audit.flattened.volumes,
+            "flattened_entries": audit.flattened.misplaced,
             "nav_labels": audit.nav_labels,
             "contents_sample": audit.contents_sample,
         });
@@ -1057,11 +1059,17 @@ fn validate_toc(path: &str, json: bool) -> Result<(), String> {
     } else {
         audit.print_summary();
     }
-    // A deficient (chapterless-but-should-have-chapters) TOC fails validation.
-    // SPARSE is inconclusive, not a failure. In --json mode the verdict is in the
-    // payload, so don't also emit a process-level error (batch tools read stdout).
+    // A deficient TOC fails validation — chapterless, or flattened (a
+    // multi-work book listed at one depth). SPARSE is inconclusive, not a
+    // failure. In --json mode the verdict is in the payload, so don't also emit
+    // a process-level error (batch tools read stdout).
     if json || audit.is_clean() {
         Ok(())
+    } else if audit.verdict == bokai::validate::source::toc::Verdict::Flattened {
+        Err(format!(
+            "TOC flattened: {} volumes and their chapters are listed at one depth ({} entries belong under a volume)",
+            audit.flattened.volumes, audit.flattened.misplaced,
+        ))
     } else {
         Err(format!(
             "TOC deficient: declared {} chapter entries, but the book has {} in-book chapters",

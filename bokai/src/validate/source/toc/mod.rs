@@ -36,7 +36,17 @@ pub struct TocEvidence {
     /// The book marks a Contents page as the TOC (KFX `toc` landmark / EPUB
     /// guide-or-nav `toc` landmark).
     pub has_toc_landmark: bool,
+    /// Volumes of a multi-work book (合本版) that the declared TOC lists at the
+    /// same depth as their own chapters, and how many entries belong under one.
+    /// Both zero for a book that declares its structure or has none. EPUB only
+    /// so far — the KFX extractor leaves them zero.
+    pub flattened: Flattening,
 }
+
+/// The structure a flat declared TOC is hiding — see
+/// [`crate::formats::epub::toc_repair::declared_toc_flattening`], whose rule
+/// this is, so the diagnosis and the repair can never disagree.
+pub type Flattening = crate::formats::epub::toc_repair::Flattening;
 
 /// The validation report for one book's TOC.
 #[derive(Debug, Clone)]
@@ -60,6 +70,8 @@ pub struct TocAudit {
     pub section_heads: usize,
     /// The book marks a Contents page as the TOC.
     pub has_toc_landmark: bool,
+    /// The volume structure the declared TOC flattened away, if any.
+    pub flattened: Flattening,
     pub verdict: Verdict,
 }
 
@@ -70,6 +82,10 @@ pub enum Verdict {
     /// Declared TOC is chapterless but the book's own content lists many chapters
     /// — the TOC is deficient / malformed. Candidate for confirm-then-fix.
     Suspect,
+    /// Declared TOC lists a multi-work book's volumes and their chapters at one
+    /// depth, though the book itself evidences the levels. Not chapterless —
+    /// deficient in *shape* — and the same confirm-then-fix repair restores it.
+    Flattened,
     /// Declared TOC is chapterless and there's no machine-readable in-book chapter
     /// list either. May be a genuinely flat book, or chapters that no signal
     /// caught. Left alone until a human looks.
@@ -81,6 +97,7 @@ impl Verdict {
         match self {
             Verdict::Ok => "OK",
             Verdict::Suspect => "SUSPECT",
+            Verdict::Flattened => "FLATTENED",
             Verdict::Sparse => "SPARSE",
         }
     }
@@ -109,10 +126,11 @@ pub fn validate(bytes: &[u8]) -> Result<TocAudit, String> {
 }
 
 /// Turn format-neutral evidence into a verdict. The one rule both formats share:
-/// a declared TOC with >2 real chapter entries is always OK (footnote / index /
-/// cross-reference links never flag it); SUSPECT only when the TOC is chapterless
-/// AND the book itself carries ≥`MIN_EVIDENCE` chapters the TOC omits; else
-/// SPARSE.
+/// a declared TOC with >2 real chapter entries lists chapters (footnote / index /
+/// cross-reference links never flag it) — but it can still be FLATTENED, a
+/// multi-work book at one depth, which is judged first because it is the one
+/// defect a chapter-rich TOC can still have. SUSPECT is the chapterless case:
+/// the TOC omits ≥`MIN_EVIDENCE` chapters the book itself carries; else SPARSE.
 pub fn classify(ev: TocEvidence) -> TocAudit {
     let nav_count = ev.nav_labels.len();
     let nav_chapters = ev.nav_labels.iter().filter(|l| !is_front_matter(l)).count();
@@ -120,7 +138,9 @@ pub fn classify(ev: TocEvidence) -> TocAudit {
 
     // Ground-truth chapter count = the strongest of the three in-book signals.
     let evidence = ev.contents_links.max(ev.headings).max(ev.section_heads);
-    let verdict = if nav_chapters > MAX_NAV_CHAPTERS_TO_FLAG {
+    let verdict = if ev.flattened.misplaced > 0 {
+        Verdict::Flattened
+    } else if nav_chapters > MAX_NAV_CHAPTERS_TO_FLAG {
         Verdict::Ok
     } else if evidence >= MIN_EVIDENCE && evidence > nav_count {
         Verdict::Suspect
@@ -138,15 +158,17 @@ pub fn classify(ev: TocEvidence) -> TocAudit {
         headings: ev.headings,
         section_heads: ev.section_heads,
         has_toc_landmark: ev.has_toc_landmark,
+        flattened: ev.flattened,
         verdict,
     }
 }
 
 impl TocAudit {
-    /// A validation pass = the declared TOC is not deficient. SPARSE (no chapter
+    /// A validation pass = the declared TOC is not deficient, in either sense:
+    /// chapterless (SUSPECT) or shapeless (FLATTENED). SPARSE (no chapter
     /// evidence found) is inconclusive, not a failure.
     pub fn is_clean(&self) -> bool {
-        self.verdict != Verdict::Suspect
+        !matches!(self.verdict, Verdict::Suspect | Verdict::Flattened)
     }
 
     pub fn print_summary(&self) {
@@ -161,6 +183,12 @@ impl TocAudit {
             self.section_heads,
             self.has_toc_landmark,
         );
+        if self.flattened.misplaced > 0 {
+            println!(
+                "  flattened: {} volumes the TOC lists at one depth, {} entries belong under them",
+                self.flattened.volumes, self.flattened.misplaced,
+            );
+        }
         if !self.nav_labels.is_empty() {
             let shown: Vec<&str> = self
                 .nav_labels
@@ -173,13 +201,32 @@ impl TocAudit {
     }
 
     /// Lower this TOC audit into the unified
-    /// [`Finding`](crate::validate::Finding) model. A `Suspect`
-    /// verdict — declared TOC chapterless while the book itself lists chapters —
-    /// is the one defect this check reports; `Ok` and `Sparse` are clean /
-    /// inconclusive and yield nothing. Consumed by
+    /// [`Finding`](crate::validate::Finding) model. Two defects are reported,
+    /// each fixed by the same confirm-then-rebuild repair: `Suspect` (the
+    /// declared TOC is chapterless while the book itself lists chapters) and
+    /// `Flattened` (a multi-work book listed at one depth). `Ok` and `Sparse`
+    /// are clean / inconclusive and yield nothing. Consumed by
     /// [`crate::validate::source::validate`].
     pub fn into_findings(self) -> Vec<crate::validate::Finding> {
         use crate::validate::{Finding, FixHint, Severity};
+        if self.verdict == Verdict::Flattened {
+            return vec![Finding {
+                check: "toc",
+                rule: "toc-flattened".to_string(),
+                severity: Severity::Warning,
+                location: "<toc>".to_string(),
+                message: format!(
+                    "declared TOC lists {} volume{} and their chapters at one depth ({} entries belong under a volume)",
+                    self.flattened.volumes,
+                    if self.flattened.volumes == 1 { "" } else { "s" },
+                    self.flattened.misplaced,
+                ),
+                fix: Some(FixHint::new(
+                    "rebuild-toc",
+                    "re-nest the declared TOC under the volumes the book evidences",
+                )),
+            }];
+        }
         if self.verdict != Verdict::Suspect {
             return Vec::new();
         }
@@ -370,6 +417,35 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(flat.verdict, Verdict::Sparse);
+    }
+
+    /// A chapter-rich TOC still fails when it lists a multi-work book's volumes
+    /// and their chapters at one depth — the defect the chapterless gate can't
+    /// see, and the one a 合本版 actually has.
+    #[test]
+    fn a_chapter_rich_but_flattened_toc_is_not_clean() {
+        let audit = classify(TocEvidence {
+            nav_labels: (0..152).map(|i| format!("Entry {i}")).collect(),
+            flattened: Flattening {
+                volumes: 12,
+                misplaced: 137,
+            },
+            ..Default::default()
+        });
+        assert_eq!(audit.verdict, Verdict::Flattened);
+        assert!(!audit.is_clean());
+
+        let findings = audit.into_findings();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "toc-flattened");
+        assert_eq!(findings[0].fix.as_ref().unwrap().action, "rebuild-toc");
+
+        // Nothing to re-parent ⇒ the same TOC is healthy.
+        let ok = classify(TocEvidence {
+            nav_labels: (0..152).map(|i| format!("Entry {i}")).collect(),
+            ..Default::default()
+        });
+        assert_eq!(ok.verdict, Verdict::Ok);
     }
 
     #[test]

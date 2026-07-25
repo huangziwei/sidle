@@ -3626,7 +3626,8 @@ kbd {
   border-color: #a5d6a7;
   background: rgba(76, 175, 80, 0.1);
 }
-.editor-chip[data-verdict="SUSPECT"] {
+.editor-chip[data-verdict="SUSPECT"],
+.editor-chip[data-verdict="FLATTENED"] {
   color: #b26a00;
   border-color: #ffcc80;
   background: rgba(255, 152, 0, 0.12);

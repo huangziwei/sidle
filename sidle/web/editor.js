@@ -147,12 +147,7 @@ function renderTocChip(toc) {
   }
   chip.hidden = false;
   chip.dataset.verdict = toc.verdict;
-  chip.textContent =
-    toc.verdict === "OK"
-      ? "TOC OK"
-      : toc.verdict === "SUSPECT"
-        ? "TOC deficient"
-        : "TOC sparse";
+  chip.textContent = chipText(toc.verdict);
   let title = `Declared TOC: ${toc.nav_chapters} chapter entr${
     toc.nav_chapters === 1 ? "y" : "ies"
   } of ${toc.nav_count}.`;
@@ -858,7 +853,11 @@ function paintTocPanel(detail) {
         ? `The declared table of contents looks deficient — ${detail.nav_count} entr${
             detail.nav_count === 1 ? "y" : "ies"
           }, none of them chapters, though the book itself carries a chapter list.`
-        : "No machine-readable chapter list was found in the book.";
+        : detail.verdict === "FLATTENED"
+          ? `This book's ${detail.flattened_volumes} volumes and their chapters are all listed at one depth. Rebuilding nests ${detail.flattened_entries} entr${
+              detail.flattened_entries === 1 ? "y" : "ies"
+            } under the volume each belongs to.`
+          : "No machine-readable chapter list was found in the book.";
   const head = el("div", "toc-summary");
   head.append(el("span", "editor-chip", chipText(detail.verdict)));
   head.querySelector(".editor-chip").dataset.verdict = detail.verdict;
@@ -937,7 +936,12 @@ function paintTocPanel(detail) {
 }
 
 function chipText(verdict) {
-  return verdict === "OK" ? "TOC OK" : verdict === "SUSPECT" ? "TOC deficient" : "TOC sparse";
+  if (verdict === "OK") return "TOC OK";
+  if (verdict === "SUSPECT") return "TOC deficient";
+  // A multi-work book (合本版) whose volumes and their chapters are all listed
+  // at one depth — the TOC lists everything, just without its levels.
+  if (verdict === "FLATTENED") return "TOC flattened";
+  return "TOC sparse";
 }
 
 // Render #toc-tree from session.tocTree, indenting by depth so the book's Part→
