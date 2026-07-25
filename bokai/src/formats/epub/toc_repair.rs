@@ -150,12 +150,35 @@ fn propose_from_pkg(
         }
     };
 
-    // 4. Restore the levels a flattened TOC lost — a 合本版 whose volumes and
-    //    their chapters all sit at one depth. A no-op unless the book itself
-    //    evidences the grouping.
+    // 4. Restore the levels a flattened TOC lost — to whatever depth the book
+    //    evidences. A no-op unless it evidences any.
     let targets: HashSet<&str> = entries.iter().map(|e| strip_fragment(&e.href)).collect();
     let groups = volume_groups(pkg, opf, opf_base, &targets);
-    nest_by_volume_groups(entries, &groups)
+    nest_levels(entries, &groups)
+}
+
+/// Restore every level a flattened TOC lost, to the depth the book itself
+/// evidences — **not** to a fixed number of levels.
+///
+/// Two signals compose, and each is re-applied inside whatever the other
+/// produced, so a 部 that contains 巻 that contain 章 that contain 節 comes out
+/// four deep without anything here counting levels:
+///
+/// 1. **Volume grouping** ([`nest_by_volume_groups`]) — a section that opens
+///    with its own cover page and names its contents. Nests to any depth by
+///    containment: a start a enclosing volume's Contents page lists is that
+///    volume's child, not its sibling.
+/// 2. **Label indentation** ([`nest_by_label_indent`]) — the levels a publisher
+///    kept as leading whitespace when the NCX lost them. Arbitrary depth by
+///    construction.
+fn nest_levels(entries: Vec<TocEntry>, groups: &[VolumeGroup]) -> Vec<TocEntry> {
+    let mut out = nest_by_label_indent(nest_by_volume_groups(entries, groups));
+    for entry in &mut out {
+        if !entry.children.is_empty() {
+            entry.children = nest_levels(std::mem::take(&mut entry.children), groups);
+        }
+    }
+    out
 }
 
 /// One volume/part of a multi-work book, as the book itself evidences it: a
@@ -242,33 +265,134 @@ fn volume_groups(
 /// entry that opens a volume becomes a parent, and the entries after it that
 /// its own Contents page names become its children.
 ///
-/// A TOC that already declares nesting is left alone, an entry no volume claims
-/// stays top-level (and closes the volume before it), and a book whose groups
-/// adopt nothing comes back unchanged — this pass only ever restores structure
-/// the book states about itself.
+/// **Volumes nest inside volumes** — the open volumes form a stack, and a
+/// volume start that an enclosing volume's Contents page lists becomes that
+/// volume's child rather than its sibling. Nothing here fixes a depth: a book
+/// that stacks 部 → 巻 → 篇 comes out that deep.
+///
+/// A TOC that already declares nesting is left alone, an entry no open volume
+/// claims closes them until one does (or lands at the top level), and a book
+/// whose groups adopt nothing comes back unchanged — this pass only ever
+/// restores structure the book states about itself.
 fn nest_by_volume_groups(entries: Vec<TocEntry>, groups: &[VolumeGroup]) -> Vec<TocEntry> {
     if groups.is_empty() || entries.iter().any(|e| !e.children.is_empty()) {
         return entries;
     }
-    let mut out: Vec<TocEntry> = Vec::with_capacity(entries.len());
-    // (index in `out` of the open volume, its group).
-    let mut open: Option<(usize, &VolumeGroup)> = None;
+    let mut tree = TocTree::with_capacity(entries.len());
+    // The volumes currently open, outermost first: `(node, its group)`.
+    let mut open: Vec<(usize, &VolumeGroup)> = Vec::new();
     for entry in entries {
-        let doc = strip_fragment(&entry.href);
-        if let Some(group) = groups.iter().find(|g| g.start == doc) {
-            open = Some((out.len(), group));
-            out.push(entry);
-            continue;
+        let doc = strip_fragment(&entry.href).to_string();
+        // Close every open volume that does not claim this entry.
+        while open.last().is_some_and(|(_, g)| !g.members.contains(&doc)) {
+            open.pop();
         }
-        match open {
-            Some((idx, group)) if group.members.contains(doc) => out[idx].children.push(entry),
-            _ => {
-                open = None;
-                out.push(entry);
-            }
+        let node = tree.push(entry, open.last().map(|&(parent, _)| parent));
+        if let Some(group) = groups.iter().find(|g| g.start == doc) {
+            open.push((node, group));
         }
     }
-    out
+    tree.build()
+}
+
+/// How many levels of leading whitespace a label carries. One IDEOGRAPHIC SPACE
+/// (U+3000) per level is the common JP convention; ASCII spaces and tabs count
+/// the same.
+fn label_indent(title: &str) -> usize {
+    title.chars().take_while(|c| c.is_whitespace()).count()
+}
+
+/// How many entries must carry a deeper indent than the run's shallowest
+/// before the indentation counts as evidence of structure at all. One or two
+/// stray leading spaces are a typo; a whole level is not.
+///
+/// This is a threshold on *evidence*, not on depth — nothing here bounds how
+/// many levels are derived.
+const MIN_INDENT_EVIDENCE: usize = 3;
+
+/// Re-parent a flat run by the levels its labels keep as leading indentation.
+///
+/// A publisher whose NCX lost its nesting often still ships it visibly, one
+/// IDEOGRAPHIC SPACE per level: a part label flush left, its chapters indented
+/// once, their sections twice. Each entry attaches under the nearest preceding
+/// entry with a strictly shallower indent, so the depth is whatever the labels
+/// encode; the indentation is then trimmed, because the nesting now says what
+/// it said.
+///
+/// A run with no deeper-indented entries (or fewer than
+/// [`MIN_INDENT_EVIDENCE`]) comes back untouched, as does one that already
+/// declares nesting.
+fn nest_by_label_indent(entries: Vec<TocEntry>) -> Vec<TocEntry> {
+    if entries.iter().any(|e| !e.children.is_empty()) {
+        return entries;
+    }
+    let indents: Vec<usize> = entries.iter().map(|e| label_indent(&e.title)).collect();
+    let Some(&base) = indents.iter().min() else {
+        return entries;
+    };
+    if indents.iter().filter(|&&i| i > base).count() < MIN_INDENT_EVIDENCE {
+        return entries;
+    }
+    let mut tree = TocTree::with_capacity(entries.len());
+    // The ancestors currently open, outermost first: `(node, its indent)`.
+    let mut open: Vec<(usize, usize)> = Vec::new();
+    for (mut entry, indent) in entries.into_iter().zip(indents) {
+        while open.last().is_some_and(|&(_, d)| d >= indent) {
+            open.pop();
+        }
+        entry.title = entry.title.trim_start().to_string();
+        let node = tree.push(entry, open.last().map(|&(parent, _)| parent));
+        open.push((node, indent));
+    }
+    tree.build()
+}
+
+/// A [`TocEntry`] tree under construction, built in document order by naming
+/// each entry's parent. Flat while it is built (an entry's children arrive
+/// after it), materialized into the nested [`TocEntry`]s at the end.
+struct TocTree {
+    nodes: Vec<(TocEntry, Vec<usize>)>,
+    roots: Vec<usize>,
+}
+
+impl TocTree {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            nodes: Vec::with_capacity(n),
+            roots: Vec::new(),
+        }
+    }
+
+    /// Add `entry` under `parent` (or at the top level), returning its node.
+    fn push(&mut self, entry: TocEntry, parent: Option<usize>) -> usize {
+        let node = self.nodes.len();
+        self.nodes.push((entry, Vec::new()));
+        match parent {
+            Some(parent) => self.nodes[parent].1.push(node),
+            None => self.roots.push(node),
+        }
+        node
+    }
+
+    fn build(self) -> Vec<TocEntry> {
+        // A node's children always come after it, so filling in reverse order
+        // means every child is finished before its parent asks for it.
+        let mut arena: Vec<Option<(TocEntry, Vec<usize>)>> =
+            self.nodes.into_iter().map(Some).collect();
+        let mut done: Vec<Option<TocEntry>> = vec![None; arena.len()];
+        for i in (0..arena.len()).rev() {
+            let (mut entry, children) = arena[i].take().expect("each node is built once");
+            entry.children = children
+                .into_iter()
+                .map(|c| done[c].take().expect("a child is built before its parent"))
+                .collect();
+            done[i] = Some(entry);
+        }
+        self.roots
+            .into_iter()
+            .map(|r| done[r].take().expect("each root is built once"))
+            .collect()
+    }
 }
 
 /// The href without its `#fragment`.
@@ -1372,6 +1496,52 @@ mod tests {
             ncx.contains(r#"<navPoint id="navPoint-3" playOrder="2">"#),
             "{ncx}"
         );
+    }
+
+    /// Depth is whatever the book encodes — there is no level ceiling. Six
+    /// levels of label indentation come back six deep, and the levels survive
+    /// the nav/NCX round-trip.
+    #[test]
+    fn indentation_nests_to_any_depth() {
+        const DEPTH: usize = 6;
+        let mut entries = Vec::new();
+        for level in 0..DEPTH {
+            // Enough entries per level to clear the evidence threshold.
+            for n in 0..MIN_INDENT_EVIDENCE {
+                entries.push(TocEntry::new(
+                    format!("{}L{level}#{n}", "\u{3000}".repeat(level)),
+                    format!("OEBPS/l{level}_{n}.xhtml"),
+                ));
+            }
+        }
+        let total = entries.len();
+        let nested = nest_levels(entries, &[]);
+
+        // Every level is one deeper than the last, and nothing was dropped.
+        assert_eq!(depth(&nested), DEPTH);
+        assert_eq!(flat_count(&nested), total);
+        // The indentation is gone from the labels — the nesting now says it.
+        assert!(!nested[0].title.starts_with('\u{3000}'));
+        // Each level opens under the last entry of the one above it, so the
+        // deepest chain is `last()` all the way down.
+        let mut node = nested.last().expect("a root");
+        for level in 1..DEPTH {
+            node = node.children.last().expect("each level has children");
+            assert!(
+                node.title.starts_with(&format!("L{level}")),
+                "{}",
+                node.title
+            );
+        }
+
+        // Writing and re-reading keeps the depth (the NCX carries it too).
+        let epub = set_toc(&no_toc_epub(), &nested).unwrap();
+        let pkg = EpubPackage::parse(&epub).unwrap();
+        let opf_path = pkg.opf_path().unwrap();
+        let opf_str = decode_text(pkg.opf_bytes().unwrap(), None);
+        let opf = parse_opf(&opf_str).unwrap();
+        let reread = existing_declared_toc(&pkg, &opf, &dir_of(&opf_path));
+        assert_eq!(depth(&reread), DEPTH);
     }
 
     /// The audit's measurement is the repair's own rule: what

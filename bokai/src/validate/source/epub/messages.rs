@@ -1,6 +1,6 @@
 //! The epubcheck message catalog — every check W3C epubcheck defines, ported so
 //! bokai keys its rules to epubcheck message IDs and can measure coverage
-//! against the full spec (see `.claude/plans/epubcheck-port.md`).
+//! against the full spec.
 //!
 //! Generated from epubcheck 5.3.1's `DefaultSeverities.java` (the authoritative
 //! id→severity map). IDs are printed as epubcheck prints them (`RSC-007`).
