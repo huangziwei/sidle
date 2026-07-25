@@ -128,3 +128,48 @@ fn every_toc_entry_names_a_document_the_package_holds() {
         );
     }
 }
+
+/// A renderer's chapter list reaches the cover exactly once.
+///
+/// Plenty of books leave the cover out of their own chapter list and record the
+/// page only in the landmarks, and a list rebuilt from a book's Contents page
+/// never has one (a Contents page links neither the cover nor itself). A Kindle
+/// composes the two and shows a Cover row either way; the package does the same
+/// for a renderer — without giving a second row to the books whose publisher
+/// already put one there.
+#[test]
+fn a_renderers_toc_reaches_the_cover_exactly_once() {
+    let Ok(kfx) = std::fs::read(REFLOWABLE) else {
+        return; // fixture not present in this checkout
+    };
+
+    let mut book = Book::from_bytes(&kfx, Format::Kfx).expect("import the fixture");
+    let package = build_package(&mut book, PackageOptions::rendered(), &|_, _, _, _| {})
+        .expect("build the package");
+    let cover = package
+        .documents
+        .get(
+            package
+                .redundant_cover
+                .expect("fixture no longer has a cover page to reach"),
+        )
+        .expect("the package keeps the cover document")
+        .href
+        .clone();
+
+    let rows = package
+        .toc
+        .iter()
+        .filter(|p| p.href.split('#').next() == Some(cover.as_str()))
+        .count();
+    assert_eq!(rows, 1, "the cover page needs exactly one row: {rows}");
+    assert_eq!(
+        package.toc.first().map(|p| p.href.as_str()),
+        Some(cover.as_str()),
+        "the cover row opens the list"
+    );
+    assert!(
+        !package.toc[0].label.trim().is_empty(),
+        "the cover row needs a label a reader can read"
+    );
+}

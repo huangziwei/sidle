@@ -15,6 +15,8 @@
 use std::collections::HashMap;
 
 use super::opf::OpfGuideRef;
+use crate::formats::epub::parser::epub_type_to_landmark;
+use crate::model::LandmarkType;
 
 /// One navigation entry: a TOC node (nested) or a page-list entry (flat).
 /// `href` is relative to `OEBPS/` (`chapter.xhtml`, `chapter.xhtml#frag`),
@@ -325,21 +327,15 @@ fn guide_type_to_epub3(guide_type: &str) -> &str {
 /// Human-readable fallback label for a landmark whose source carried no
 /// text. EPUB 3 rejects an empty `<nav>` anchor (RSC-005 "Anchors within nav
 /// elements must contain text"), so every landmark link needs a label.
+///
+/// The names come from [`LandmarkType::default_label`], so this nav doc, the
+/// guide, and a TOC completed from a book's landmarks all call the same place by
+/// the same name. An `epub:type` outside the landmark vocabulary falls back to
+/// the reading-start marker's name.
 fn landmark_default_label(epub_type: &str) -> &'static str {
-    match epub_type {
-        "cover" => "Cover",
-        "toc" => "Table of Contents",
-        "frontmatter" => "Front Matter",
-        "backmatter" => "Back Matter",
-        "loi" => "List of Illustrations",
-        "lot" => "List of Tables",
-        "preface" => "Preface",
-        "bibliography" => "Bibliography",
-        "index" => "Index",
-        "glossary" => "Glossary",
-        // "bodymatter" and anything unrecognized: the reading-start marker.
-        _ => "Start of Content",
-    }
+    epub_type_to_landmark(epub_type)
+        .unwrap_or(LandmarkType::BodyMatter)
+        .default_label()
 }
 
 /// Full five-entity escape, for the document shell and landmark entries.

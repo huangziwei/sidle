@@ -9,8 +9,9 @@ use crate::formats::kfx::anchor_table::AnchorTable;
 use crate::formats::kfx::container::get_field;
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::loader::BookData;
+use crate::formats::kfx::schema::schema;
 use crate::formats::kfx::symbols::KfxSymbol;
-use crate::model::TocEntry;
+use crate::model::{LandmarkType, TocEntry};
 
 /// Resolve one `book_navigation.nav_containers` entry to its `nav_container`
 /// ($391) struct. Two forms occur: the reflowable path inlines the container
@@ -143,6 +144,60 @@ pub fn nav_unit_label(fields: &[(u64, IonValue)]) -> Option<String> {
         return None;
     }
     Some(label.to_string())
+}
+
+/// The `$155 id` a `$393 nav_unit`'s `target_position` points at.
+pub fn nav_unit_target(fields: &[(u64, IonValue)]) -> Option<i64> {
+    get_field(fields, KfxSymbol::TargetPosition as u64)
+        .and_then(|v| v.as_struct())
+        .and_then(|pos| get_field(pos, KfxSymbol::Id as u64)?.as_int())
+}
+
+/// One landmark: what part of the book it names, what to call it, and where it
+/// points.
+pub struct Landmark {
+    pub landmark_type: LandmarkType,
+    /// The landmark's own label, or the type's name when it carried none —
+    /// `cover-nav-unit` is the KPF pipeline's placeholder, not a display label
+    /// (calibre's `add_guide_entry` strips it too), and the reading-start
+    /// markers routinely carry nothing at all.
+    pub label: String,
+    /// The element the landmark targets, when it names one.
+    pub eid: Option<i64>,
+}
+
+/// Every entry of the book's `landmarks` nav container, in the order it lists
+/// them. Entries whose `landmark_type` is outside the vocabulary are skipped —
+/// there is nothing to say about a landmark whose kind is unknown.
+pub fn landmarks(book: &BookData) -> Vec<Landmark> {
+    let mut out = Vec::new();
+    for_each_nav_container(book, |nav_type, entries| {
+        if nav_type != "landmarks" {
+            return;
+        }
+        for entry in entries {
+            let Some(fields) = entry.unwrap_annotated().as_struct() else {
+                continue;
+            };
+            let Some(landmark_type) =
+                get_field(fields, KfxSymbol::LandmarkType as u64).and_then(|v| match v {
+                    IonValue::Symbol(id) => schema().landmark_from_kfx(*id),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            let label = nav_unit_label(fields)
+                .filter(|l| l != "cover-nav-unit" && l != "Untitled")
+                .unwrap_or_else(|| landmark_type.default_label().to_string());
+            out.push(Landmark {
+                landmark_type,
+                label,
+                eid: nav_unit_target(fields),
+            });
+        }
+    });
+    out
 }
 
 /// One `$393 nav_unit` → [`TocEntry`], recursively. `None` for the entries

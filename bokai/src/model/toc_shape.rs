@@ -332,6 +332,18 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_toc_that_repeats_a_target_keeps_both_copies() {
+        // Two entries pointing at one place is the publisher's own business; only
+        // the derived side is held to what the declaration already reached.
+        let declared = vec![Node::new("Prologue", "p1"), Node::new("Chapter One", "p1")];
+        let derived = vec![Node::new("1", "p1")];
+        let pos = |n: &Node| n.target[1..].parse::<usize>().ok();
+
+        let merged = merge_by_document_order(declared, derived, pos);
+        assert_eq!(shape(&merged), ["Prologue", "Chapter One"]);
+    }
+
+    #[test]
     fn unplaceable_entries_stay_with_the_neighbour_they_arrived_next_to() {
         let declared = vec![
             Node::new("One", "p1"),

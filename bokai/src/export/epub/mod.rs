@@ -29,7 +29,7 @@ use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
 use crate::formats::epub::page_shape;
-use crate::model::{AnchorTarget, Book, TocEntry};
+use crate::model::{AnchorTarget, Book, LandmarkType, TocEntry};
 
 use self::nav::NavPoint;
 use self::opf::{
@@ -1092,7 +1092,7 @@ pub fn build_package(
         // it a TOC row that navigates nowhere. Fragments come back here too:
         // they were dropped because the SVG wrapper carries no ids, which is
         // not true of the page the renderer actually shows.
-        let package_toc = match cover_section_idx {
+        let mut package_toc = match cover_section_idx {
             None => toc_points.clone(),
             Some(_) => {
                 let mut points = toc_to_navpoints(book.toc(), &|href| {
@@ -1107,6 +1107,10 @@ pub fn build_package(
                 points
             }
         };
+        if let Some(cover) = cover_nav_point(book, cover_section_idx, &document_files, &package_toc)
+        {
+            package_toc.insert(0, cover);
+        }
 
         // Every spine document the source produced, under its own name. The
         // titlepage stays separate (spine position 0, but written last). When a
@@ -1401,6 +1405,65 @@ fn toc_to_navpoints(
         .collect()
 }
 
+/// The cover row a renderer's chapter list needs, or `None` when it already has
+/// one.
+///
+/// A publisher's chapter list often opens with a "Cover" entry, but plenty of
+/// books leave the cover out of it and record the page only in the landmarks —
+/// and a chapter list mined from a book's own Contents page never has one at
+/// all, because a Contents page links neither the cover nor itself. A Kindle
+/// composes the two views and shows a Cover row either way; a renderer reading
+/// this package should reach the same page, so the row is synthesized here when
+/// the list doesn't already reach the cover document.
+///
+/// This is deliberately the *renderer's* view only. The nav doc and NCX describe
+/// a container, which ships its own `cover.xhtml` and whose landmarks already
+/// name it; and the source's own TOC is left as the publisher wrote it, so
+/// nothing here can put a second Cover row in front of a reader.
+fn cover_nav_point(
+    book: &Book,
+    cover_section_idx: Option<usize>,
+    document_files: &[String],
+    toc: &[NavPoint],
+) -> Option<NavPoint> {
+    // The renderer keeps the section the container drops (`redundant_cover`);
+    // with no such section there is no cover page to send it to.
+    let href = document_files.get(cover_section_idx?)?;
+    cover_row(cover_label(book), href, toc)
+}
+
+/// What the book calls its cover, falling back to the landmark type's own name —
+/// some containers mark the page with a placeholder label instead of a real one.
+fn cover_label(book: &Book) -> String {
+    book.landmarks()
+        .iter()
+        .find(|l| l.landmark_type == LandmarkType::Cover)
+        .map(|l| l.label.trim())
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| LandmarkType::Cover.default_label())
+        .to_string()
+}
+
+/// The row to put in front of `toc`, or `None` when it already reaches `href`.
+fn cover_row(label: String, href: &str, toc: &[NavPoint]) -> Option<NavPoint> {
+    if toc_reaches(toc, href) {
+        return None;
+    }
+    Some(NavPoint {
+        label,
+        href: href.to_string(),
+        children: Vec::new(),
+    })
+}
+
+/// Whether any entry in the tree already sends the reader into `document`.
+/// Compared without fragments: a row aimed at an anchor inside the cover page is
+/// still a row that opens the cover page.
+fn toc_reaches(toc: &[NavPoint], document: &str) -> bool {
+    toc.iter()
+        .any(|p| p.href.split('#').next() == Some(document) || toc_reaches(&p.children, document))
+}
+
 // `cover.xhtml` comes from the shared calibre-shaped builder
 // (`export::titlepage`), the same one calibre ships.
 use self::titlepage::build_titlepage;
@@ -1649,6 +1712,39 @@ mod tests {
             remap_dropped_cover_links("<p>x</p>", "c0.xhtml"),
             "<p>x</p>"
         );
+    }
+
+    #[test]
+    fn a_renderers_toc_gains_a_cover_row_only_when_it_lacks_one() {
+        let row = |label: &str, href: &str| NavPoint {
+            label: label.into(),
+            href: href.into(),
+            children: Vec::new(),
+        };
+
+        // A chapter list that never reaches the cover page gains a row for it —
+        // the case a list mined from a book's own Contents page always hits.
+        let chapters = vec![row("Epigraph", "c0.xhtml"), row("1", "c1.xhtml")];
+        assert_eq!(
+            cover_row("Cover".into(), "cover-page.xhtml", &chapters).map(|p| p.href),
+            Some("cover-page.xhtml".to_string())
+        );
+
+        // A publisher who already listed it gets nothing added — the row would
+        // be the same page twice.
+        let with_cover = vec![row("表紙", "cover-page.xhtml"), row("1", "c1.xhtml")];
+        assert!(cover_row("Cover".into(), "cover-page.xhtml", &with_cover).is_none());
+
+        // Including when the entry aims at an anchor inside the cover page, or
+        // sits nested under another entry.
+        let by_anchor = vec![row("Cover", "cover-page.xhtml#top")];
+        assert!(cover_row("Cover".into(), "cover-page.xhtml", &by_anchor).is_none());
+        let nested = vec![NavPoint {
+            label: "Front Matter".into(),
+            href: "fm.xhtml".into(),
+            children: vec![row("Cover", "cover-page.xhtml")],
+        }];
+        assert!(cover_row("Cover".into(), "cover-page.xhtml", &nested).is_none());
     }
 
     #[test]

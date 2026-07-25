@@ -36,6 +36,7 @@ use crate::formats::kfx::container_edit::{EntityEdit, edit_container};
 use crate::formats::kfx::error::KfxError;
 use crate::formats::kfx::ion::IonValue;
 use crate::formats::kfx::loader::{self, BookData};
+use crate::formats::kfx::navigation;
 use crate::formats::kfx::navigation::{
     extract_anchors, for_each_nav_container, nav_unit_label, resolve_nav_container,
 };
@@ -43,6 +44,7 @@ use crate::formats::kfx::structure::{
     collect_element_ids, lookup_fragment, reading_orders, resolve_content_text,
 };
 use crate::formats::kfx::symbols::KfxSymbol;
+use crate::model::LandmarkType;
 use crate::model::toc_shape::{TocNode, merge_by_document_order, nest_by_label_indent};
 
 /// One chapter in an edited TOC. `eid` is the target element's `$155 id`; the
@@ -493,6 +495,12 @@ pub fn repair_toc(kfx_bytes: &[u8]) -> Result<Vec<u8>, KfxError> {
 /// Build the proposal from a loaded container: merge the declared TOC with the
 /// in-book Contents page in reading order, then restore the levels the labels
 /// evidence.
+///
+/// The cover and the Contents page itself are deliberately *not* added from the
+/// book's landmarks. A reader's chapter list reaches them because the renderer
+/// composes the landmarks into its own view (see `bokai::export::build_package`),
+/// exactly as a Kindle does — writing them into the toc container as well would
+/// list them twice for every book whose publisher already put them there.
 fn propose_from_book(book: &BookData) -> Vec<TocEntry> {
     let order = document_order(book);
     let declared = declared_entries(book);
@@ -885,51 +893,10 @@ fn dedup_entries(links: Vec<(String, i64)>) -> Vec<TocEntry> {
 /// The eid a `toc`-type landmark targets, if the book has one — used to prefer
 /// the true Contents storyline over a merely link-dense one.
 fn toc_landmark_eid(book: &BookData) -> Option<i64> {
-    let nav = book.by_type.get(&(KfxSymbol::BookNavigation as u64))?;
-    for value in nav.values() {
-        for ro in nav_reading_orders(value) {
-            let Some(containers) = ro
-                .as_struct()
-                .and_then(|f| get_field(f, KfxSymbol::NavContainers as u64))
-                .and_then(|v| v.as_list())
-            else {
-                continue;
-            };
-            for container in containers {
-                let Some(resolved) = resolve_nav_container(book, container) else {
-                    continue;
-                };
-                if nav_type_of(&resolved, book) != Some("landmarks") {
-                    continue;
-                }
-                let Some(entries) = resolved
-                    .as_struct()
-                    .and_then(|f| get_field(f, KfxSymbol::Entries as u64))
-                    .and_then(|v| v.as_list())
-                else {
-                    continue;
-                };
-                for entry in entries {
-                    if let Some(eid) = landmark_toc_target(entry) {
-                        return Some(eid);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// If this landmark entry is the `toc` type, its target eid.
-fn landmark_toc_target(entry: &IonValue) -> Option<i64> {
-    let fields = entry.unwrap_annotated().as_struct()?;
-    let lt = get_field(fields, KfxSymbol::LandmarkType as u64)?.as_symbol()?;
-    if lt != KfxSymbol::Toc as u64 {
-        return None;
-    }
-    get_field(fields, KfxSymbol::TargetPosition as u64)
-        .and_then(|v| v.as_struct())
-        .and_then(|pos| get_field(pos, KfxSymbol::Id as u64)?.as_int())
+    navigation::landmarks(book)
+        .into_iter()
+        .find(|l| l.landmark_type == LandmarkType::Toc)
+        .and_then(|l| l.eid)
 }
 
 /// Every `$155 id` in a value tree — used to find which storyline a landmark eid

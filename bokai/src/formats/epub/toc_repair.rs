@@ -143,7 +143,11 @@ fn propose_from_pkg(
     };
 
     // 3. Merge, in spine order: every declared entry survives, and a derived one
-    //    joins it wherever the declared TOC doesn't already reach.
+    //    joins it wherever the declared TOC doesn't already reach. The cover and
+    //    the Contents page itself are deliberately not added from the book's
+    //    landmarks — a reader reaches those because the renderer composes the
+    //    landmarks into its own view, and writing them in here would list them
+    //    twice for every book whose publisher already declared them.
     let positions: HashMap<&str, usize> = spine
         .iter()
         .enumerate()
@@ -482,30 +486,53 @@ fn dedup_entries(links: Vec<(String, String)>) -> Vec<TocEntry> {
     out
 }
 
-/// The spine-doc basename a `toc`-type landmark points at (EPUB 3 nav landmarks
-/// preferred, EPUB 2 OPF `<guide>` fallback).
+/// Every landmark the book declares, hrefs resolved to absolute zip paths: the
+/// EPUB 3 nav doc's `landmarks` first, then the EPUB 2 `<guide>` — which older
+/// readers still consult, and which is all an EPUB 2 has. A book carrying both
+/// usually says the same thing twice; callers keep the first of each target.
+fn book_landmarks(
+    pkg: &EpubPackage,
+    opf: &OpfData,
+    opf_base: &str,
+    opf_str: &str,
+) -> Vec<crate::model::Landmark> {
+    let rebase = |lms: Vec<crate::model::Landmark>, dir: &str| -> Vec<crate::model::Landmark> {
+        lms.into_iter()
+            .map(|l| crate::model::Landmark {
+                href: resolve_href(dir, &l.href),
+                ..l
+            })
+            .collect()
+    };
+    let mut out = Vec::new();
+    if let Some(nav_href) = &opf.nav_href {
+        let abs = format!("{opf_base}{}", percent_decode(nav_href));
+        if let Some(bytes) = pkg.get(&abs) {
+            let nav = decode_text(bytes, extract_xml_encoding(bytes));
+            out.extend(rebase(
+                parse_nav_landmarks(&nav).unwrap_or_default(),
+                &dir_of(&abs),
+            ));
+        }
+    }
+    out.extend(rebase(
+        parse_opf_guide(opf_str).unwrap_or_default(),
+        opf_base,
+    ));
+    out
+}
+
+/// The spine-doc basename a `toc`-type landmark points at.
 fn toc_landmark_basename(
     pkg: &EpubPackage,
     opf: &OpfData,
     opf_base: &str,
     opf_str: &str,
 ) -> Option<String> {
-    let find = |lms: &[crate::model::Landmark]| {
-        lms.iter()
-            .find(|l| l.landmark_type == LandmarkType::Toc)
-            .map(|l| basename(&l.href))
-    };
-    if let Some(nav_href) = &opf.nav_href
-        && let Some(bytes) = pkg.get(&format!("{opf_base}{}", percent_decode(nav_href)))
-    {
-        let nav = decode_text(bytes, extract_xml_encoding(bytes));
-        if let Ok(lms) = parse_nav_landmarks(&nav)
-            && let Some(h) = find(&lms)
-        {
-            return Some(h);
-        }
-    }
-    parse_opf_guide(opf_str).ok().as_deref().and_then(find)
+    book_landmarks(pkg, opf, opf_base, opf_str)
+        .iter()
+        .find(|l| l.landmark_type == LandmarkType::Toc)
+        .map(|l| basename(&l.href))
 }
 
 // ---------------------------------------------------------------------------

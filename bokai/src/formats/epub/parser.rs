@@ -1338,7 +1338,7 @@ fn guide_type_to_landmark(guide_type: &str) -> Option<LandmarkType> {
 }
 
 /// Map EPUB epub:type value to LandmarkType.
-fn epub_type_to_landmark(epub_type: &str) -> Option<LandmarkType> {
+pub(crate) fn epub_type_to_landmark(epub_type: &str) -> Option<LandmarkType> {
     // epub:type can have multiple space-separated values; check each
     for value in epub_type.split_ascii_whitespace() {
         match value {
