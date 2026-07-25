@@ -143,12 +143,20 @@ enum Command {
         output: Option<String>,
     },
 
-    /// Find where a collection (合本版 / 全集 / boxed set) divides into the
-    /// volumes it collects, and print the proposed cuts. Detection only — no
-    /// volume is written.
+    /// Split a collection (合本版 / 全集 / boxed set) into the volumes it
+    /// collects. Prints the proposed cuts; with `--out`, writes one EPUB per
+    /// volume into that directory.
     Split {
         /// Input EPUB file.
         input: String,
+
+        /// Directory to write the volume EPUBs into. Omit for a dry run.
+        #[arg(long = "out")]
+        out: Option<String>,
+
+        /// Series name to write into every volume's `belongs-to-collection`.
+        #[arg(long = "series")]
+        series: Option<String>,
     },
 }
 
@@ -204,12 +212,15 @@ fn repair_toc_cmd(input: &str, output: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// `bokai split <input>` — print where a collection divides into volumes, one
-/// line per proposed cut. A dry run by construction: detection has no output
-/// side, and the numbers it proposes are meant to be reviewed before use.
-fn split_cmd(input: &str) -> Result<(), String> {
+/// `bokai split <input> [--out DIR] [--series NAME]` — print where a collection
+/// divides into volumes, one line per proposed cut, and with `--out` write the
+/// volumes. The dry run has no output side, and the numbers it proposes are
+/// meant to be reviewed before use.
+fn split_cmd(input: &str, out: Option<&str>, series: Option<&str>) -> Result<(), String> {
+    use bokai::formats::epub::split::{Numbering, propose_cuts, split};
+
     let bytes = std::fs::read(input).map_err(|e| format!("read {input}: {e}"))?;
-    let cuts = bokai::formats::epub::split::propose_cuts(&bytes).map_err(|e| e.to_string())?;
+    let cuts = propose_cuts(&bytes).map_err(|e| e.to_string())?;
     if cuts.is_empty() {
         println!("no volumes: this book evidences no collection to split");
         return Ok(());
@@ -218,8 +229,8 @@ fn split_cmd(input: &str) -> Result<(), String> {
     let docs: usize = cuts.iter().map(|c| c.documents).sum();
     for cut in &cuts {
         let number = match cut.numbering {
-            bokai::formats::epub::split::Numbering::Label => format!("{}", cut.number),
-            bokai::formats::epub::split::Numbering::Sequence => format!("({})", cut.number),
+            Numbering::Label => format!("{}", cut.number),
+            Numbering::Sequence => format!("({})", cut.number),
         };
         println!(
             "  {:>6}  spine {:>5}  {:>4} docs  {:<44}  {}",
@@ -236,7 +247,37 @@ fn split_cmd(input: &str) -> Result<(), String> {
         cuts[0].spine_index,
         cuts[0].spine_index + docs
     );
+
+    let Some(dir) = out else { return Ok(()) };
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {dir}: {e}"))?;
+    let volumes = split(&bytes, &cuts, series).map_err(|e| e.to_string())?;
+    println!("\nwrote {} volume(s) to {dir}:", volumes.len());
+    for (cut, epub) in cuts.iter().zip(&volumes) {
+        let name = format!(
+            "{:0>2} {}.epub",
+            cut.number,
+            cut.label.replace(['/', '\\', ':'], "-")
+        );
+        let path = format!("{dir}/{name}");
+        std::fs::write(&path, epub).map_err(|e| format!("write {path}: {e}"))?;
+        let report = bokai::validate::source::epub::validate(epub);
+        let errors = report.count(bokai::validate::Severity::Error);
+        let verdict = if errors == 0 {
+            "valid".to_string()
+        } else {
+            format!("{errors} ERROR(s):\n{}", report.errors_display())
+        };
+        println!("  {:>10}  {name}  ({verdict})", human_size(epub.len()));
+    }
     Ok(())
+}
+
+fn human_size(bytes: usize) -> String {
+    match bytes {
+        n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1 << 20) as f64),
+        n if n >= 1 << 10 => format!("{:.1} KB", n as f64 / (1 << 10) as f64),
+        n => format!("{n} B"),
+    }
 }
 
 /// How many levels deep a TOC tree goes; 0 when there is none.
@@ -528,7 +569,9 @@ fn main() -> ExitCode {
             },
         },
         Command::RepairToc { input, output } => repair_toc_cmd(&input, output.as_deref()),
-        Command::Split { input } => split_cmd(&input),
+        Command::Split { input, out, series } => {
+            split_cmd(&input, out.as_deref(), series.as_deref())
+        }
     };
 
     match result {

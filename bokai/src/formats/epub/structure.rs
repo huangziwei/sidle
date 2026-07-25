@@ -31,6 +31,17 @@ pub(crate) fn spine_documents(opf: &OpfData, opf_base: &str) -> Vec<(String, Str
         .collect()
 }
 
+/// How many distinct spine documents a page must link to before it reads as a
+/// Contents page **for a section already known to be one** — a volume of a
+/// collection, a work inside an anthology.
+///
+/// Two, because at that point the section's extent is attested by something else
+/// (its own cover page, the entries around it) and the only question left is
+/// whether this page enumerates it; a volume of one story plus an afterword is
+/// ordinary. Finding a Contents page with no such attestation is a harder
+/// question and carries its own, higher, threshold.
+pub(crate) const MIN_SECTION_CONTENTS_LINKS: usize = 2;
+
 /// `(label, absolute href)` for every link this document makes to *another*
 /// spine document — what a Contents page's chapter links look like. Hrefs are
 /// resolved against `doc_dir`, fragment preserved.

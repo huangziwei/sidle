@@ -13,23 +13,28 @@
 //! shared front and back matter listed beside them, which is what the evidence
 //! below does. A proposal is never written anywhere — the caller confirms the
 //! cuts, and renames and renumbers them, first.
+//!
+//! [`split`] then writes the volumes. It works at the zip layer rather than
+//! through the IR: content documents are copied across byte for byte, and only
+//! the three documents that describe the book — the OPF, the nav doc, the NCX —
+//! are written fresh for each volume. Nothing is re-rendered, so a volume reads
+//! exactly as its pages did inside the collection.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io;
 
-use crate::formats::epub::edit::EpubPackage;
+use crate::formats::epub::edit::{EpubPackage, escape_attr, escape_text};
+use crate::formats::epub::nav_doc::{
+    depth, render_nav_doc, render_navmap, render_ncx, render_toc_nav,
+};
 use crate::formats::epub::page_shape::single_image_source;
-use crate::formats::epub::structure::{dir_of, internal_links, spine_documents, strip_fragment};
+use crate::formats::epub::structure::{
+    MIN_SECTION_CONTENTS_LINKS, basename, dir_of, internal_links, relativize, resolve_href,
+    spine_documents, strip_fragment,
+};
 use crate::formats::epub::{OpfData, parse_opf, toc_repair};
 use crate::model::TocEntry;
-use crate::util::{decode_text, extract_xml_encoding};
-
-/// Minimum distinct forward links for a document to read as a volume's own
-/// Contents page. Two is enough because the page is only consulted once the
-/// book's navigation has already named the entry: a volume of one story plus an
-/// afterword is ordinary, and this is not being asked to find Contents pages in
-/// a book that has said nothing about where its volumes are.
-const MIN_VOLUME_CONTENTS_LINKS: usize = 2;
+use crate::util::{decode_text, detect_mime_type, extract_xml_encoding, uuid_v5};
 
 /// Where one volume of a collection begins.
 ///
@@ -77,6 +82,405 @@ pub fn propose_cuts(epub_bytes: &[u8]) -> io::Result<Vec<Cut>> {
     let opf = parse_opf(&opf_str).map_err(io::Error::other)?;
     let toc = toc_repair::propose_from_pkg(&pkg, &opf, &opf_base, &opf_str);
     Ok(cuts(&pkg, &opf, &opf_base, &toc))
+}
+
+/// Write one EPUB per cut, in the same order.
+///
+/// `series`, when given, is the collection's name and goes into every volume
+/// identically — a library groups by that string, so it is decided once here
+/// rather than re-derived per volume. Each volume's position in it is
+/// [`Cut::number`].
+///
+/// Every volume is self-contained: its own spine range, the resources those
+/// documents reach and no others, a chapter list carved from the collection's,
+/// and its own identifier. A link into a document that ended up in a different
+/// volume keeps its text and loses its target — a dangling one would be a
+/// broken reference in every reader that checks.
+pub fn split(epub_bytes: &[u8], cuts: &[Cut], series: Option<&str>) -> io::Result<Vec<Vec<u8>>> {
+    let pkg = EpubPackage::parse(epub_bytes)?;
+    let opf_path = pkg.opf_path()?;
+    let opf_base = dir_of(&opf_path);
+    let opf_str = decode_text(pkg.opf_bytes()?, extract_xml_encoding(pkg.opf_bytes()?));
+    let opf = parse_opf(&opf_str).map_err(io::Error::other)?;
+    let spine = spine_documents(&opf, &opf_base);
+    let toc = toc_repair::propose_from_pkg(&pkg, &opf, &opf_base, &opf_str);
+
+    let mut out = Vec::with_capacity(cuts.len());
+    for cut in cuts {
+        let range = cut.spine_index..(cut.spine_index + cut.documents).min(spine.len());
+        out.push(volume(
+            &pkg, &opf, &opf_path, &opf_base, &spine, &toc, cut, range, series,
+        )?);
+    }
+    Ok(out)
+}
+
+/// One volume as EPUB bytes.
+#[allow(clippy::too_many_arguments)]
+fn volume(
+    pkg: &EpubPackage,
+    opf: &OpfData,
+    opf_path: &str,
+    opf_base: &str,
+    spine: &[(String, String)],
+    toc: &[TocEntry],
+    cut: &Cut,
+    range: std::ops::Range<usize>,
+    series: Option<&str>,
+) -> io::Result<Vec<u8>> {
+    let documents: Vec<String> = spine[range].iter().map(|(abs, _)| abs.clone()).collect();
+    let kept: HashSet<&str> = documents.iter().map(String::as_str).collect();
+    let resources = reachable_resources(pkg, &documents, &kept);
+
+    // Only what the volume actually carries can collide with the two documents
+    // written for it; the collection's own nav and NCX are not among them.
+    let taken = |name: &str| kept.contains(name) || resources.contains(name) || name == opf_path;
+    let nav_path = free_path(&taken, opf_base, "nav.xhtml");
+    let ncx_path = free_path(&taken, opf_base, "toc.ncx");
+    let entries = carve(toc, &kept);
+    let uid = format!(
+        "urn:uuid:{}",
+        uuid_v5(&format!("{}#{}", opf.metadata.identifier, cut.number))
+    );
+    let lang = if opf.metadata.language.is_empty() {
+        "en"
+    } else {
+        &opf.metadata.language
+    };
+
+    let mut volume = pkg.subset(|name| {
+        name == "mimetype"
+            || name == "META-INF/container.xml"
+            || name == opf_path
+            || kept.contains(name)
+            || resources.contains(name)
+    });
+    // A cross-volume link would dangle, so it keeps its text and loses its href.
+    for doc in &documents {
+        if let Some(bytes) = volume.get(doc)
+            && let Some(rewritten) = unlink_outside(bytes, &dir_of(doc), &kept)
+        {
+            volume.replace(doc, rewritten);
+        }
+    }
+    volume.set(
+        &nav_path,
+        render_nav_doc(
+            &render_toc_nav(&entries, &dir_of(&nav_path)),
+            lang,
+            &cut.label,
+        )
+        .into_bytes(),
+    );
+    volume.set(
+        &ncx_path,
+        render_ncx(
+            &render_navmap(&entries, &dir_of(&ncx_path)),
+            &uid,
+            &cut.label,
+            depth(&entries).max(1),
+        )
+        .into_bytes(),
+    );
+    volume.replace(
+        opf_path,
+        volume_opf(
+            opf,
+            opf_base,
+            &uid,
+            cut,
+            series,
+            &documents,
+            &resources,
+            &nav_path,
+            &ncx_path,
+            cover_image(pkg, cut),
+        )
+        .into_bytes(),
+    );
+    volume.into_bytes()
+}
+
+/// A zip path under `dir` that `taken` does not already claim.
+fn free_path(taken: &impl Fn(&str) -> bool, dir: &str, preferred: &str) -> String {
+    let candidate = format!("{dir}{preferred}");
+    if !taken(&candidate) {
+        return candidate;
+    }
+    let (stem, ext) = preferred.rsplit_once('.').unwrap_or((preferred, ""));
+    (2..)
+        .map(|n| format!("{dir}{stem}-{n}.{ext}"))
+        .find(|p| !taken(p))
+        .unwrap_or(candidate)
+}
+
+/// The chapter list restricted to the documents this volume holds, nesting kept.
+/// An entry whose own target fell outside but whose children did not is dropped
+/// down to its children, so a volume never loses a chapter to a heading that
+/// belongs to its neighbour.
+fn carve(entries: &[TocEntry], kept: &HashSet<&str>) -> Vec<TocEntry> {
+    let mut out = Vec::new();
+    for entry in entries {
+        let children = carve(&entry.children, kept);
+        if kept.contains(strip_fragment(&entry.href)) {
+            out.push(TocEntry {
+                children,
+                ..entry.clone()
+            });
+        } else {
+            out.extend(children);
+        }
+    }
+    out
+}
+
+/// Every resource the volume's documents reach — images, stylesheets, and
+/// whatever those stylesheets reach in turn — as absolute zip paths.
+///
+/// Scoping this is load-bearing rather than tidy: unscoped, every volume of a
+/// collection carries the whole collection's artwork.
+fn reachable_resources(
+    pkg: &EpubPackage,
+    documents: &[String],
+    kept: &HashSet<&str>,
+) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut queue: Vec<String> = documents.to_vec();
+    while let Some(from) = queue.pop() {
+        let Some(bytes) = pkg.get(&from) else { continue };
+        let text = decode_text(bytes, extract_xml_encoding(bytes));
+        for href in references(&text) {
+            let abs = resolve_href(&dir_of(&from), &href);
+            let abs = strip_fragment(&abs).to_string();
+            // Another spine document is a link, not a resource: which documents
+            // the volume holds is the cut's business, not the markup's.
+            if abs.is_empty() || kept.contains(abs.as_str()) || !pkg.contains(&abs) {
+                continue;
+            }
+            if found.insert(abs.clone()) {
+                queue.push(abs);
+            }
+        }
+    }
+    found
+}
+
+/// Every in-package reference a document or stylesheet makes: `src`, `href` and
+/// `xlink:href` attributes, plus CSS `url(…)` and `@import`. External and
+/// inline (`http:`, `data:`, `mailto:`) references are skipped.
+fn references(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut push = |raw: &str| {
+        let value = raw.trim().trim_matches(['\'', '"']);
+        if !value.is_empty() && !value.starts_with('#') && !value.contains(':') {
+            out.push(value.to_string());
+        }
+    };
+    for (attr, mut rest) in [("src=\"", text), ("href=\"", text)] {
+        while let Some(p) = rest.find(attr) {
+            rest = &rest[p + attr.len()..];
+            match rest.find('"') {
+                Some(end) => push(&rest[..end]),
+                None => break,
+            }
+        }
+    }
+    let mut rest = text;
+    while let Some(p) = rest.find("url(") {
+        rest = &rest[p + 4..];
+        match rest.find(')') {
+            Some(end) => push(&rest[..end]),
+            None => break,
+        }
+    }
+    let mut rest = text;
+    while let Some(p) = rest.find("@import") {
+        rest = &rest[p + 7..];
+        let line = rest.split(';').next().unwrap_or("");
+        if !line.contains("url(") {
+            push(line);
+        }
+    }
+    out
+}
+
+/// Strip the `href` from links that leave this volume, keeping the `<a>` and
+/// its text. `None` when the document has none — the common case, and the one
+/// where its bytes stay exactly as the collection shipped them.
+fn unlink_outside(content: &[u8], doc_dir: &str, kept: &HashSet<&str>) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(content).ok()?;
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut changed = false;
+    while let Some(p) = rest.find("href=\"") {
+        let (before, after) = rest.split_at(p);
+        let value = &after[6..];
+        let Some(end) = value.find('"') else { break };
+        let href = &value[..end];
+        let resolved = resolve_href(doc_dir, href);
+        let target = strip_fragment(&resolved);
+        // A pure `#fragment` stays inside the document; anything the volume does
+        // not hold, and that is a document rather than a resource, has to go.
+        let leaves = !href.starts_with('#')
+            && !href.contains(':')
+            && !target.is_empty()
+            && !kept.contains(target)
+            && target.ends_with("html");
+        out.push_str(before);
+        if leaves {
+            changed = true;
+        } else {
+            out.push_str(&after[..6 + end + 1]);
+        }
+        rest = &after[6 + end + 1..];
+    }
+    if !changed {
+        return None;
+    }
+    out.push_str(rest);
+    Some(out.into_bytes())
+}
+
+/// The image a volume's cover page shows, as an absolute zip path.
+fn cover_image(pkg: &EpubPackage, cut: &Cut) -> Option<String> {
+    let page = cut.cover.as_deref()?;
+    let bytes = pkg.get(page)?;
+    let xhtml = decode_text(bytes, extract_xml_encoding(bytes));
+    let src = single_image_source(&xhtml)?;
+    let abs = resolve_href(&dir_of(page), src);
+    pkg.contains(&abs).then_some(abs)
+}
+
+/// The volume's package document: the collection's metadata with this volume's
+/// title, identifier and place in the series, and a manifest and spine holding
+/// only what the volume has.
+#[allow(clippy::too_many_arguments)]
+fn volume_opf(
+    opf: &OpfData,
+    opf_base: &str,
+    uid: &str,
+    cut: &Cut,
+    series: Option<&str>,
+    documents: &[String],
+    resources: &BTreeSet<String>,
+    nav_path: &str,
+    ncx_path: &str,
+    cover: Option<String>,
+) -> String {
+    let meta = &opf.metadata;
+    let lang = if meta.language.is_empty() {
+        "en"
+    } else {
+        &meta.language
+    };
+
+    let mut metadata = format!(
+        "<dc:identifier id=\"uid\">{uid}</dc:identifier>\n\
+         <dc:title>{}</dc:title>\n\
+         <dc:language>{lang}</dc:language>\n",
+        escape_text(&cut.label)
+    );
+    for author in &meta.authors {
+        metadata.push_str(&format!("<dc:creator>{}</dc:creator>\n", escape_text(author)));
+    }
+    if let Some(publisher) = &meta.publisher {
+        metadata.push_str(&format!(
+            "<dc:publisher>{}</dc:publisher>\n",
+            escape_text(publisher)
+        ));
+    }
+    if let Some(date) = &meta.date {
+        metadata.push_str(&format!("<dc:date>{}</dc:date>\n", escape_text(date)));
+    }
+    metadata.push_str(&format!(
+        "<meta property=\"dcterms:modified\">{}</meta>\n",
+        crate::util::time_now_iso8601_utc()
+    ));
+    if let Some(series) = series {
+        metadata.push_str(&format!(
+            "<meta property=\"belongs-to-collection\" id=\"series\">{}</meta>\n\
+             <meta refines=\"#series\" property=\"collection-type\">series</meta>\n\
+             <meta refines=\"#series\" property=\"group-position\">{}</meta>\n",
+            escape_text(series),
+            trim_number(cut.number)
+        ));
+    }
+    if let Some(mode) = &meta.primary_writing_mode {
+        metadata.push_str(&format!(
+            "<meta name=\"primary-writing-mode\" content=\"{}\"/>\n",
+            escape_attr(mode)
+        ));
+    }
+
+    // The manifest names the nav doc, the NCX, the volume's documents and the
+    // resources they reach — nothing else, so no manifest entry points at a
+    // file the volume does not carry.
+    let mut manifest = format!(
+        "<item id=\"nav\" href=\"{}\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>\n\
+         <item id=\"ncx\" href=\"{}\" media-type=\"application/x-dtbncx+xml\"/>\n",
+        escape_attr(&relativize(opf_base, nav_path)),
+        escape_attr(&relativize(opf_base, ncx_path))
+    );
+    let mut spine = String::new();
+    for (n, abs) in documents.iter().enumerate() {
+        manifest.push_str(&format!(
+            "<item id=\"d{n}\" href=\"{}\" media-type=\"application/xhtml+xml\"/>\n",
+            escape_attr(&relativize(opf_base, abs))
+        ));
+        spine.push_str(&format!("<itemref idref=\"d{n}\"/>\n"));
+    }
+    for (n, abs) in resources.iter().enumerate() {
+        let cover_property = match cover.as_deref() {
+            Some(c) if c == abs => " properties=\"cover-image\"",
+            _ => "",
+        };
+        manifest.push_str(&format!(
+            "<item id=\"r{n}\" href=\"{}\" media-type=\"{}\"{cover_property}/>\n",
+            escape_attr(&relativize(opf_base, abs)),
+            media_type(abs)
+        ));
+    }
+
+    let ppd = meta
+        .page_progression_direction
+        .as_deref()
+        .map(|d| format!(" page-progression-direction=\"{}\"", escape_attr(d)))
+        .unwrap_or_default();
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"uid\" xml:lang=\"{lang}\">\n\
+<metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n{metadata}</metadata>\n\
+<manifest>\n{manifest}</manifest>\n\
+<spine toc=\"ncx\"{ppd}>\n{spine}</spine>\n\
+</package>\n"
+    )
+}
+
+/// A volume number as a series position: `3` rather than `3`, `5.5` intact.
+fn trim_number(n: f64) -> String {
+    if n.fract() == 0.0 {
+        format!("{n:.0}")
+    } else {
+        format!("{n}")
+    }
+}
+
+/// The media type a manifest has to declare for a resource, from its name and
+/// nothing else — the bytes are being copied across unread.
+fn media_type(abs: &str) -> &'static str {
+    let name = basename(abs);
+    match name.rsplit_once('.').map(|(_, ext)| ext) {
+        Some("css") => "text/css",
+        Some("xhtml" | "html" | "htm") => "application/xhtml+xml",
+        Some("ncx") => "application/x-dtbncx+xml",
+        Some("js") => "text/javascript",
+        Some("svg") => "image/svg+xml",
+        Some("otf") => "font/otf",
+        Some("ttf") => "font/ttf",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        _ => detect_mime_type(&name, &[]).unwrap_or("application/octet-stream"),
+    }
 }
 
 /// A candidate volume start: a top-level entry of the repaired chapter list,
@@ -209,7 +613,7 @@ fn reads_as_a_collection(
     let owning = (0..starts.len())
         .filter(|&n| {
             span(spine.len(), candidates, starts, n).any(|i| {
-                linked_documents(pkg, spine, spine_files, i).len() >= MIN_VOLUME_CONTENTS_LINKS
+                linked_documents(pkg, spine, spine_files, i).len() >= MIN_SECTION_CONTENTS_LINKS
             })
         })
         .count();
@@ -245,7 +649,7 @@ fn contents_page_starts(
                 .map(|(abs, _)| abs.as_str())
                 .collect();
             let targets = linked_documents(pkg, spine, spine_files, c.spine_index);
-            targets.len() >= MIN_VOLUME_CONTENTS_LINKS
+            targets.len() >= MIN_SECTION_CONTENTS_LINKS
                 && targets.iter().all(|doc| own.contains(doc.as_str()))
         })
         .map(|(n, _)| n)

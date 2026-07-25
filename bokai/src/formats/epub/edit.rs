@@ -38,6 +38,7 @@ const CONTAINER_PATH: &str = "META-INF/container.xml";
 
 /// One EPUB zip member, decompressed, carrying the storage method it had on disk
 /// so an untouched member re-serializes with the same compression choice.
+#[derive(Clone)]
 struct Entry {
     name: String,
     data: Vec<u8>,
@@ -128,6 +129,23 @@ impl EpubPackage {
                 data,
                 method: CompressionMethod::Deflated,
             });
+        }
+    }
+
+    /// A new package holding only the members `keep` accepts, each with its
+    /// original bytes, order and storage method.
+    ///
+    /// For carving a smaller book out of a larger one without decompressing
+    /// anything twice: the members that survive are the ones the source shipped,
+    /// unchanged.
+    pub fn subset(&self, keep: impl Fn(&str) -> bool) -> Self {
+        Self {
+            entries: self
+                .entries
+                .iter()
+                .filter(|e| keep(&e.name))
+                .cloned()
+                .collect(),
         }
     }
 
